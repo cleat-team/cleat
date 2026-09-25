@@ -135,7 +135,7 @@ func TestAPluginStatementIsScopedToTheWorkflowsTenant(t *testing.T) {
 		func(c context.Context, inputJSON string) (string, error) {
 			seenErr = adapter.QueryRow(c, `SELECT count(*) FROM `+table).Scan(&seen)
 			return `{}`, nil
-		}, ReplayPolicy{})
+		}, ReplayPolicy{}, nil)
 
 	s := newTestExecSession()
 	s.engine.pluginRegistry = pr

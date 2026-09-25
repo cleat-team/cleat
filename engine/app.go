@@ -188,5 +188,5 @@ func (s *appFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFunc
 	// silently, because the registry would then read SameValueOnReplay as
 	// false and simply stop re-invoking, which looks exactly like the fix
 	// working.
-	return s.registry.RegisterWithPolicy(s.pluginName, opts.Name, fn, ReplayPolicy{Idempotent: opts.Idempotent, SameValueOnReplay: opts.SameValueOnReplay})
+	return s.registry.RegisterWithPolicy(s.pluginName, opts.Name, fn, ReplayPolicy{Idempotent: opts.Idempotent, SameValueOnReplay: opts.SameValueOnReplay}, opts.SecretOnlyFields)
 }

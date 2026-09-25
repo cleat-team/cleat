@@ -103,7 +103,7 @@ func TestPluginCall_ReplayReinvokesWhenBothPropertiesHold(t *testing.T) {
 	pr.RegisterWithPolicy("test-plugin", "my-func", func(ctx context.Context, inputJSON string) (string, error) {
 		callCount++
 		return `{"reinvoked":true}`, nil
-	}, ReplayPolicy{Idempotent: true, SameValueOnReplay: true})
+	}, ReplayPolicy{Idempotent: true, SameValueOnReplay: true}, nil)
 
 	s := newTestExecSession()
 	s.engine.pluginRegistry = pr
@@ -145,7 +145,7 @@ func TestPluginCall_ReplayFallsBackToTheRegistryForBothProperties(t *testing.T) 
 	pr.RegisterWithPolicy("test-plugin", "my-func", func(ctx context.Context, inputJSON string) (string, error) {
 		callCount++
 		return `{"reinvoked":true}`, nil
-	}, ReplayPolicy{Idempotent: true, SameValueOnReplay: true})
+	}, ReplayPolicy{Idempotent: true, SameValueOnReplay: true}, nil)
 
 	s := newTestExecSession()
 	s.engine.pluginRegistry = pr
@@ -354,7 +354,7 @@ func TestPluginCall_ReInvokingOnReplayDoesNotAppendToHistory(t *testing.T) {
 	pr.RegisterWithPolicy("test-plugin", "my-func", func(ctx context.Context, inputJSON string) (string, error) {
 		callCount++
 		return `{"live":true}`, nil
-	}, ReplayPolicy{Idempotent: true, SameValueOnReplay: true})
+	}, ReplayPolicy{Idempotent: true, SameValueOnReplay: true}, nil)
 
 	s := newTestExecSession()
 	s.engine.pluginRegistry = pr

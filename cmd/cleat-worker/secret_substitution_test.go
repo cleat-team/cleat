@@ -232,7 +232,7 @@ func TestRegisterStreamActuallyResolvesSecrets(t *testing.T) {
 		t.Fatalf("RegisterStream: %v", err)
 	}
 
-	registered, ok := a.streamRegistry.Lookup("test-plugin", "chat_stream")
+	registered, _, ok := a.streamRegistry.Lookup("test-plugin", "chat_stream")
 	if !ok {
 		t.Fatalf("RegisterStream reported success but the function is not in the registry")
 	}

@@ -536,6 +536,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   query mixing a literal `?` with `$N` placeholders, and an argument no `$N` in the query
   references.
 
+- **A literal secret in a plugin's secret-only field (e.g. `llm.chat`'s `api_key`) is now refused
+  before the plugin runs, instead of reaching `event_history` in plain text.** (cleat#2043)
+
+  `${secret:NAME}` substitution (cleat#1987) only ever *resolved* a reference — nothing stopped a
+  workflow writing the literal credential directly, and the plugin itself only ever saw the
+  post-resolution string, so it had no way to tell a literal from a resolved reference either
+  (cleat#1988/#2023 added the `api_key` field to `llm.chatRequest` but explicitly could not close
+  this half). `plugin.FuncOptions.SecretOnlyFields` now lets a registration name which top-level
+  JSON fields must hold exactly a `${secret:NAME}` reference; `llm`'s `chat` and `chat_stream`
+  declare `["api_key"]`. A call whose declared field holds a literal, an ambiguous case-variant
+  duplicate (`api_key` and `API_KEY` present together), or malformed (non-JSON) input is refused
+  before the plugin function is invoked, and the `event_history` row records the refusal with the
+  field's value replaced by a fixed marker rather than the caller's input.
+
+  **Who is affected:** any workflow passing a literal instead of `${secret:NAME}` for `llm.chat`'s
+  or `llm.chat_stream`'s `api_key` now gets a refusal instead of the call proceeding. The failure
+  is classified the same as a plugin call the service itself failed (retryable by classification),
+  but retrying with the same literal input refuses identically every time — the fix is to switch
+  to `${secret:NAME}`. See [SecretOnlyFields](docs/contributor/plugins/plugin-developer-guide.md#hashostfunctions--workflow-callable-functions)
+  for plugin authors declaring their own credential fields.
+
+  **To upgrade:** this closes the leak going forward; it does not repair history already written.
+  A literal `api_key` recorded to `event_history` before this fix is still there in plain text,
+  for the same reason a plaintext row from before cleat#1988/#2023 still is. There is no tool in
+  this release that finds or redacts these rows. **Treat any credential ever passed as a literal
+  to `llm.chat`'s or `llm.chat_stream`'s `api_key` field as compromised and rotate it.**
+
 ### Added
 
 - **`--encryption-key-file-previous`: `cmd/cleat-worker` can hold a previous payload-encryption key alongside the current one, for rolling key rotation.** (cleat#1992, #2308)

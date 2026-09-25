@@ -16,11 +16,22 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	if scope == nil {
 		return fmt.Errorf("llm: nil function registry")
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "chat"}, p.chat); err != nil {
+	if err := scope.Register(plugin.FuncOptions{
+		Name: "chat",
+		// cleat#2043: api_key's raw value must be exactly a ${secret:NAME}
+		// reference when present, never a literal -- a literal reaches
+		// event_history otherwise (cleat#1988/#2023). Neither Idempotent nor
+		// SameValueOnReplay is set, so this is not combined with a
+		// re-invoke-on-replay policy; see FuncOptions.SecretOnlyFields.
+		SecretOnlyFields: []string{"api_key"},
+	}, p.chat); err != nil {
 		return err
 	}
 	if streamScope, ok := scope.(plugin.StreamFuncRegistry); ok {
-		if err := streamScope.RegisterStream(plugin.FuncOptions{Name: "chat_stream"}, p.chatStream); err != nil {
+		if err := streamScope.RegisterStream(plugin.FuncOptions{
+			Name:             "chat_stream",
+			SecretOnlyFields: []string{"api_key"},
+		}, p.chatStream); err != nil {
 			return err
 		}
 	}

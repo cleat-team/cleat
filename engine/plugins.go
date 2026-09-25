@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/tetratelabs/wazero/api"
@@ -39,10 +42,11 @@ func (p ReplayPolicy) MayReInvokeOnReplay() bool {
 }
 
 // pluginFuncEntry stores a registered plugin function along with its replay
-// policy.
+// policy and any declared secret-only fields (cleat#2043).
 type pluginFuncEntry struct {
-	fn     plugin.PluginFunc
-	policy ReplayPolicy
+	fn               plugin.PluginFunc
+	policy           ReplayPolicy
+	secretOnlyFields []string
 }
 
 // PluginRegistry maps plugin function names to implementations.
@@ -73,13 +77,7 @@ func (pr *PluginRegistry) SetHealthTracker(t *plugin.PluginHealthTracker) {
 // is already registered for this plugin. The function is wrapped with
 // panic recovery so a plugin crash does not take down the worker.
 func (pr *PluginRegistry) Register(pluginName, funcName string, fn plugin.PluginFunc) error {
-	key := lookupKey(pluginName, funcName)
-	if _, exists := pr.funcs[key]; exists {
-		return fmt.Errorf("plugin function %q already registered", key)
-	}
-	wrapped := plugin.RecoverPluginFunc(pluginName, pr.healthTracker, fn)
-	pr.funcs[key] = pluginFuncEntry{fn: wrapped}
-	return nil
+	return pr.RegisterWithPolicy(pluginName, funcName, fn, ReplayPolicy{}, nil)
 }
 
 // RegisterIdempotent registers a plugin function whose repeat invocation has no
@@ -94,18 +92,32 @@ func (pr *PluginRegistry) Register(pluginName, funcName string, fn plugin.Plugin
 // Kept because it is exported and because "idempotent" remains a true and
 // useful thing to record. The function is wrapped with panic recovery.
 func (pr *PluginRegistry) RegisterIdempotent(pluginName, funcName string, fn plugin.PluginFunc) error {
-	return pr.RegisterWithPolicy(pluginName, funcName, fn, ReplayPolicy{Idempotent: true})
+	return pr.RegisterWithPolicy(pluginName, funcName, fn, ReplayPolicy{Idempotent: true}, nil)
 }
 
 // RegisterWithPolicy registers a plugin function with an explicit replay
-// policy. The function is wrapped with panic recovery.
-func (pr *PluginRegistry) RegisterWithPolicy(pluginName, funcName string, fn plugin.PluginFunc, policy ReplayPolicy) error {
+// policy and, optionally, declared secret-only fields (cleat#2043). The
+// function is wrapped with panic recovery.
+//
+// secretOnlyFields and a policy where MayReInvokeOnReplay() is true are
+// refused together. Without the exclusion, a call the secret-only check
+// refuses would stay refused forever once recorded -- including on replay of
+// history recorded before the field was declared, where the same call may
+// have genuinely succeeded with a literal. Re-invoking it live during replay
+// would flip a run that finished "done" into one that fails on replay: a
+// determinism break in the opposite direction from the leak this field
+// closes. See plugin.FuncOptions.SecretOnlyFields's doc comment.
+func (pr *PluginRegistry) RegisterWithPolicy(pluginName, funcName string, fn plugin.PluginFunc, policy ReplayPolicy, secretOnlyFields []string) error {
 	key := lookupKey(pluginName, funcName)
+	if len(secretOnlyFields) > 0 && policy.MayReInvokeOnReplay() {
+		return fmt.Errorf("plugin function %q: SecretOnlyFields cannot be combined with a replay "+
+			"policy that may re-invoke on replay (Idempotent && SameValueOnReplay) -- cleat#2043", key)
+	}
 	if _, exists := pr.funcs[key]; exists {
 		return fmt.Errorf("plugin function %q already registered", key)
 	}
 	wrapped := plugin.RecoverPluginFunc(pluginName, pr.healthTracker, fn)
-	pr.funcs[key] = pluginFuncEntry{fn: wrapped, policy: policy}
+	pr.funcs[key] = pluginFuncEntry{fn: wrapped, policy: policy, secretOnlyFields: secretOnlyFields}
 	return nil
 }
 
@@ -115,14 +127,15 @@ func (pr *PluginRegistry) Has(pluginName, funcName string) bool {
 	return ok
 }
 
-// Lookup returns the function and its replay policy.
+// Lookup returns the function, its replay policy, and its declared
+// secret-only fields (cleat#2043; nil if none were declared).
 //
 // The middle value is a ReplayPolicy rather than a bool so that a caller has to
 // say WHICH property it means. It used to be `idempotent`, and the whole of
 // cleat#1318 is what that ambiguity cost.
-func (pr *PluginRegistry) Lookup(pluginName, funcName string) (plugin.PluginFunc, ReplayPolicy, bool) {
+func (pr *PluginRegistry) Lookup(pluginName, funcName string) (plugin.PluginFunc, ReplayPolicy, []string, bool) {
 	entry, ok := pr.funcs[lookupKey(pluginName, funcName)]
-	return entry.fn, entry.policy, ok
+	return entry.fn, entry.policy, entry.secretOnlyFields, ok
 }
 
 // IsPluginHealthy reports whether the given plugin has not panicked.
@@ -148,15 +161,25 @@ func (pr *PluginRegistry) UnhealthyError(pluginName string) error {
 	return pr.healthTracker.UnhealthyError(pluginName)
 }
 
+// pluginStreamFuncEntry stores a registered streaming plugin function along
+// with its declared secret-only fields (cleat#2043). Streaming has no
+// re-invoke-on-replay mechanism -- replay always serves recorded chunks, never
+// calls a streaming function live -- so there is no ReplayPolicy here and no
+// exclusivity check to make against one.
+type pluginStreamFuncEntry struct {
+	fn               plugin.PluginStreamFunc
+	secretOnlyFields []string
+}
+
 // PluginStreamRegistry maps plugin function names to streaming implementations.
 type PluginStreamRegistry struct {
-	funcs         map[string]plugin.PluginStreamFunc
+	funcs         map[string]pluginStreamFuncEntry
 	healthTracker *plugin.PluginHealthTracker
 }
 
 func NewPluginStreamRegistry() *PluginStreamRegistry {
 	return &PluginStreamRegistry{
-		funcs:         make(map[string]plugin.PluginStreamFunc),
+		funcs:         make(map[string]pluginStreamFuncEntry),
 		healthTracker: plugin.NewPluginHealthTracker(),
 	}
 }
@@ -169,18 +192,24 @@ func (psr *PluginStreamRegistry) SetHealthTracker(t *plugin.PluginHealthTracker)
 }
 
 func (psr *PluginStreamRegistry) Register(pluginName, funcName string, fn plugin.PluginStreamFunc) error {
+	return psr.registerWithSecretOnlyFields(pluginName, funcName, fn, nil)
+}
+
+func (psr *PluginStreamRegistry) registerWithSecretOnlyFields(pluginName, funcName string, fn plugin.PluginStreamFunc, secretOnlyFields []string) error {
 	key := lookupKey(pluginName, funcName)
 	if _, exists := psr.funcs[key]; exists {
 		return fmt.Errorf("plugin stream function %q already registered", key)
 	}
 	wrapped := plugin.RecoverPluginStreamFunc(pluginName, psr.healthTracker, fn)
-	psr.funcs[key] = wrapped
+	psr.funcs[key] = pluginStreamFuncEntry{fn: wrapped, secretOnlyFields: secretOnlyFields}
 	return nil
 }
 
-func (psr *PluginStreamRegistry) Lookup(pluginName, funcName string) (plugin.PluginStreamFunc, bool) {
-	fn, ok := psr.funcs[lookupKey(pluginName, funcName)]
-	return fn, ok
+// Lookup returns the function and its declared secret-only fields (cleat#2043;
+// nil if none were declared).
+func (psr *PluginStreamRegistry) Lookup(pluginName, funcName string) (plugin.PluginStreamFunc, []string, bool) {
+	entry, ok := psr.funcs[lookupKey(pluginName, funcName)]
+	return entry.fn, entry.secretOnlyFields, ok
 }
 
 // Has reports whether a streaming plugin function is registered.
@@ -191,7 +220,7 @@ func (psr *PluginStreamRegistry) Has(pluginName, funcName string) bool {
 
 // RegisterStream implements plugin.StreamFuncRegistry.
 func (psr *PluginStreamRegistry) RegisterStream(pluginName string, opts plugin.FuncOptions, fn plugin.PluginStreamFunc) error {
-	return psr.Register(pluginName, opts.Name, fn)
+	return psr.registerWithSecretOnlyFields(pluginName, opts.Name, fn, opts.SecretOnlyFields)
 }
 
 // IsPluginHealthy reports whether the given streaming plugin has not panicked.
@@ -216,6 +245,117 @@ func (psr *PluginStreamRegistry) UnhealthyError(pluginName string) error {
 	return psr.healthTracker.UnhealthyError(pluginName)
 }
 
+// secretOnlyFieldRef is the anchored form of secretRef (tenant_secrets.go):
+// a secret-only field's raw value must be EXACTLY one reference, not merely
+// contain one somewhere inside a larger string. Same character class, so a
+// name this rejects is also a name ResolveSecretRefs would never have
+// resolved.
+var secretOnlyFieldRef = regexp.MustCompile(`^\$\{secret:[A-Za-z0-9_.-]{1,128}\}$`)
+
+// secretOnlyFieldRedactionMarker replaces a declared secret-only field's
+// value -- literal or reference alike -- wherever a call is refused and still
+// has to be recorded (cleat#2043). It is applied to every declared field on a
+// refused call, not just the one that violated, because once a call is being
+// refused there is no reason for anything near a secret-only field to reach
+// storage from it.
+const secretOnlyFieldRedactionMarker = "[secret-only field, literal value refused]"
+
+// checkSecretOnlyFields reports the first violation found in inputJSON
+// against secretOnlyFields (top-level JSON field names, plugin.FuncOptions'
+// declaration), or "" if there is none.
+//
+// A declared field absent from inputJSON is fine -- it falls back to
+// whatever the plugin does when the field is unset. A field present exactly
+// once, as a JSON string matching secretOnlyFieldRef, is fine. Everything
+// else is a violation: a literal value, a non-string value, or more than one
+// top-level key that case-fold-matches the declared name.
+//
+// The fold-match is deliberate, not a nicety: encoding/json's own struct
+// decode matches field names case-insensitively as a fallback (including a
+// few non-ASCII folds, e.g. the Kelvin sign folding to 'k'), so
+// {"api_key":"${secret:x}","API_KEY":"sk-literal"} would pass an exact-key
+// check here while still reaching the plugin's own decode as the literal.
+// Rather than replicate encoding/json's exact/fold precedence to decide which
+// one "would have won", any input with more than one fold-matching key for a
+// declared field is refused outright -- the ambiguity itself is the problem.
+//
+// inputJSON that isn't a JSON object at all is ALSO a violation whenever
+// secretOnlyFields is non-empty: a function that opted into this check gets
+// no free pass for malformed input reaching its own decode unchecked.
+func checkSecretOnlyFields(secretOnlyFields []string, inputJSON string) string {
+	if len(secretOnlyFields) == 0 {
+		return ""
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(inputJSON), &top); err != nil {
+		return "input is not a JSON object, and this function declares secret-only fields"
+	}
+	for _, declared := range secretOnlyFields {
+		var matches []string
+		for k := range top {
+			if strings.EqualFold(k, declared) {
+				matches = append(matches, k)
+			}
+		}
+		if len(matches) == 0 {
+			continue
+		}
+		if len(matches) > 1 {
+			sort.Strings(matches)
+			return fmt.Sprintf("field %q is declared secret-only and matched more than one top-level "+
+				"key (%s); refusing the ambiguity rather than guessing which one a decoder would use",
+				declared, strings.Join(matches, ", "))
+		}
+		var val string
+		if err := json.Unmarshal(top[matches[0]], &val); err != nil || !secretOnlyFieldRef.MatchString(val) {
+			return fmt.Sprintf("field %q is declared secret-only and must be exactly a "+
+				"${secret:NAME} reference; a literal value is refused", declared)
+		}
+	}
+	return ""
+}
+
+// redactSecretOnlyFields returns inputJSON with every declared top-level
+// secret-only field's value replaced by secretOnlyFieldRedactionMarker, for
+// recording to event_history or embedding in an error message in place of a
+// refused call's raw input.
+//
+// Called for every declared field on a refused call, whether or not that
+// particular field was the one that violated -- see the marker's own doc
+// comment. If inputJSON doesn't parse as a JSON object, there is nothing to
+// redact field-by-field, so the whole payload becomes the marker.
+func redactSecretOnlyFields(secretOnlyFields []string, inputJSON string) string {
+	if len(secretOnlyFields) == 0 {
+		return inputJSON
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(inputJSON), &top); err != nil {
+		return secretOnlyFieldRedactionMarker
+	}
+	redacted, err := json.Marshal(secretOnlyFieldRedactionMarker)
+	if err != nil {
+		return secretOnlyFieldRedactionMarker
+	}
+	changed := false
+	for k := range top {
+		for _, declared := range secretOnlyFields {
+			if strings.EqualFold(k, declared) {
+				top[k] = redacted
+				changed = true
+				break
+			}
+		}
+	}
+	if !changed {
+		return inputJSON
+	}
+	out, err := json.Marshal(top)
+	if err != nil {
+		return secretOnlyFieldRedactionMarker
+	}
+	return string(out)
+}
+
 func (s *execSession) PluginCall(ctx context.Context, m api.Module,
 	pluginName, functionName, inputJSON string,
 	responsePtr, responseMaxLen uint32) int64 {
@@ -226,6 +366,28 @@ func (s *execSession) PluginCall(ctx context.Context, m api.Module,
 		return callSuspendSentinel
 	}
 	return s.freshPluginCall(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
+}
+
+// redactedLiveInput redacts pluginName/functionName's declared secret-only
+// fields out of a LIVE (not-yet-recorded) inputJSON, for embedding in a
+// replay-divergence message. `rec.PluginInput` in the same message needs no
+// such treatment: it is either from a successful call (a secret-only field
+// there, if any, already holds only a resolved reference's text, never a
+// literal -- the same structural guarantee ResolveSecretRefs relies on) or
+// from a refused call recorded by freshPluginCallInternal, which already
+// redacted it at record time.
+//
+// A lookup miss (pluginName/functionName unregistered) just means nothing is
+// redacted, which is correct: an unregistered function declared nothing.
+func (s *execSession) redactedLiveInput(pluginName, functionName, inputJSON string) string {
+	if s.engine.pluginRegistry == nil {
+		return inputJSON
+	}
+	_, _, secretOnlyFields, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
+	if !ok {
+		return inputJSON
+	}
+	return redactSecretOnlyFields(secretOnlyFields, inputJSON)
 }
 
 func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
@@ -244,7 +406,7 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 			}
 			errMsg := fmt.Sprintf("replay divergence at step %d: expected plugin_call event, got %s.\n  actual input: %s\n  expected (cached) input: %s\n  expected (cached) output: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, rec.EventType,
-				truncateWithHash(inputJSON, maxPayloadLen),
+				truncateWithHash(s.redactedLiveInput(pluginName, functionName, inputJSON), maxPayloadLen),
 				truncateWithHash(rec.PluginInput, maxPayloadLen),
 				truncateWithHash(rec.PluginOutput, maxPayloadLen))
 			// Not retryable: a divergence is a bug in the workflow code.
@@ -258,7 +420,7 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 			}
 			errMsg := fmt.Sprintf("replay divergence at step %d: workflow called %s/%s but history has %s/%s.\n  actual input: %s\n  expected (cached) input: %s\n  expected (cached) output: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
 				rec.Step, pluginName, functionName, rec.PluginName, rec.PluginFunc,
-				truncateWithHash(inputJSON, maxPayloadLen),
+				truncateWithHash(s.redactedLiveInput(pluginName, functionName, inputJSON), maxPayloadLen),
 				truncateWithHash(rec.PluginInput, maxPayloadLen),
 				truncateWithHash(rec.PluginOutput, maxPayloadLen))
 			// Not retryable: a divergence is a bug in the workflow code.
@@ -287,7 +449,7 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 		}
 
 		if s.engine.pluginRegistry != nil {
-			_, policy, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
+			_, policy, _, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
 			if ok && policy.MayReInvokeOnReplay() {
 				return s.freshPluginCallWithHistory(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
 			}
@@ -338,10 +500,14 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 		written, _ := s.writeResult(ctx, m, responsePtr, errMsg, responseMaxLen)
 		return packDurableCallResult(int(written), callErrorUnknown, 1)
 	}
-	fn, policy, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
+	fn, policy, secretOnlyFields, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
 
 	var outputJSON string
 	var fnErr error
+	// recordedInput is what goes into event_history, distinct from inputJSON
+	// (what fn is called with) only on the secret-only-field violation path
+	// below, where fn is never called at all.
+	recordedInput := inputJSON
 	if !ok {
 		fnErr = fmt.Errorf("plugin function %s/%s not registered. Check that the plugin is deployed and its version satisfies the workflow's plugin_deps.", pluginName, functionName)
 	} else {
@@ -349,6 +515,21 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 		if s.engine.pluginCallGuard != nil && s.callerPluginName != "" {
 			if err := s.engine.pluginCallGuard.Check(s.callerPluginName, pluginName); err != nil {
 				fnErr = err
+			}
+		}
+		// Secret-only field check (cleat#2043), before fn is ever invoked and
+		// before anything is recorded: a declared field holding a literal, an
+		// ambiguous case-variant duplicate, or malformed input on a function
+		// that declared fields is refused here. fn does not run. The refusal
+		// IS recorded below like any other failed call -- skipping the record
+		// entirely would leave a hole at this step that a later recorded call
+		// (should the guest catch this error and continue) would misalign
+		// replay against; see checkSecretOnlyFields and
+		// secretOnlyFieldRedactionMarker's doc comments.
+		if fnErr == nil {
+			if violation := checkSecretOnlyFields(secretOnlyFields, inputJSON); violation != "" {
+				fnErr = fmt.Errorf("plugin function %s/%s: %s", pluginName, functionName, violation)
+				recordedInput = redactSecretOnlyFields(secretOnlyFields, inputJSON)
 			}
 		}
 		if fnErr == nil {
@@ -380,7 +561,7 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 			EventType:         EventTypePluginCall,
 			PluginName:        pluginName,
 			PluginFunc:        functionName,
-			PluginInput:       inputJSON,
+			PluginInput:       recordedInput,
 			PluginOutput:      outputJSON,
 			PluginError:       errStr,
 			Idempotent:        policy.Idempotent,
@@ -478,7 +659,7 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 			callErrorUnknown, responsePtr, responseMaxLen)
 	}
 
-	fn, ok := s.engine.pluginStreamRegistry.Lookup(pluginName, functionName)
+	fn, secretOnlyFields, ok := s.engine.pluginStreamRegistry.Lookup(pluginName, functionName)
 	if !ok {
 		errMsg := fmt.Sprintf("plugin stream function %s/%s not registered. Check that the plugin is deployed and its version satisfies the workflow's plugin_deps.", pluginName, functionName)
 		// callFailureCode, which is what freshPluginCallInternal reports for an
@@ -500,6 +681,18 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 			return s.streamFailure(ctx, m, pluginName, functionName, inputJSON, errMsg,
 				callFailureCode, responsePtr, responseMaxLen)
 		}
+	}
+
+	// Secret-only field check (cleat#2043) -- see freshPluginCallInternal's
+	// identical check for the reasoning. streamFailure records via
+	// recordStreamError, which takes inputJSON as a plain argument, so
+	// passing the REDACTED string through it is enough: no new no-record path
+	// needed here, unlike what an earlier draft of this fix assumed.
+	if violation := checkSecretOnlyFields(secretOnlyFields, inputJSON); violation != "" {
+		errMsg := fmt.Sprintf("plugin stream function %s/%s: %s", pluginName, functionName, violation)
+		redactedInput := redactSecretOnlyFields(secretOnlyFields, inputJSON)
+		return s.streamFailure(ctx, m, pluginName, functionName, redactedInput, errMsg,
+			callFailureCode, responsePtr, responseMaxLen)
 	}
 
 	callCtx := s.pluginCallContext(ctx)

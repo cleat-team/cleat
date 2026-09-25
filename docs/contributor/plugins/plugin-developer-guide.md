@@ -201,6 +201,39 @@ Rules:
 - Output MUST be valid JSON — the WASM boundary expects it
 - Keep output small for non-idempotent functions (it's stored in event_history)
 - Return errors as `(string, error)` — the engine records the error in history
+- **If a field only makes sense as a credential, declare it with
+  `SecretOnlyFields`** (cleat#2043):
+
+  ```go
+  scope.Register(plugin.FuncOptions{
+      Name:             "chat",
+      SecretOnlyFields: []string{"api_key"},
+  }, p.chat)
+  ```
+
+  `${secret:NAME}` substitution only ever *resolves* a reference — nothing
+  stops a caller writing the literal credential directly, and without this a
+  literal reaches your function (and `event_history`) in plain text exactly
+  as typed. `SecretOnlyFields` names top-level JSON field names (the wire
+  tag, e.g. `"api_key"`, not the Go struct field `APIKey`) whose raw value
+  the engine requires to be **exactly** one `${secret:NAME}` reference before
+  your function is ever called. A literal, a case-variant duplicate of the
+  field (`api_key` and `API_KEY` together — refused as an ambiguity, not
+  resolved one way or the other), or input that isn't even JSON is refused
+  before dispatch, and the recorded `event_history` row has the field
+  redacted rather than holding the offending value.
+
+  **Top-level fields only — there is no dot-path support**, so a credential
+  nested inside a sub-object is not covered; keep secret fields at the top
+  level of your input schema.
+
+  **Do not combine this with `Idempotent: true, SameValueOnReplay: true`
+  together** — registration refuses the combination outright. A call this
+  check refuses stays refused in history forever; re-invoking it live on
+  replay (which is what that policy pair licenses) would either repeat the
+  refusal for no reason or, for history recorded before your function
+  declared this field, risk sending a credential your workflow already
+  proved is a literal to a live call a second time.
 
 ### HasMiddleware — request wrapping
 
