@@ -1593,11 +1593,14 @@ func TestPDCreateConfig_BodyReadError(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 for body read error, got %d: %s", rec.Code, rec.Body.String())
+	// cleat#2232: plugin.ReadJSONBody, not a hand-rolled ReadAll, now serves
+	// this route -- a generic read failure is a 400, matching
+	// cmd/cleat-worker's own decodeBody/readBody precedent.
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for body read error, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "read body") {
-		t.Errorf("expected 'read body' error, got: %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "failed to read request body") {
+		t.Errorf("expected a 'failed to read request body' error, got: %s", rec.Body.String())
 	}
 }
 

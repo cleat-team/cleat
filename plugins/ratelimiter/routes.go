@@ -59,7 +59,7 @@ type rateLimitEntry struct {
 //	GET    /rate-limits        — list rate limits for the tenant
 //	PUT    /rate-limits/{key}  — create or update a rate limit
 //	DELETE /rate-limits/{key}  — remove a rate limit
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return nil
 	}
@@ -137,8 +137,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req rateLimitPut
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		p.writeError(w, http.StatusBadRequest, "invalid JSON body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 	if req.MaxRequests <= 0 {

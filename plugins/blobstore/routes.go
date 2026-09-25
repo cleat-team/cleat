@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,11 +15,19 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("blobstore: nil mux")
 	}
-	mux.HandleFunc("PUT /blobs/{key...}", p.handlePut)
+	// cleat#2232 / cleat#2273: PUT's ceiling is the operator's own
+	// max_blob_size setting (default 10 MiB, Init in plugin.go), not a value
+	// that participates in min() with --plugin-max-body-size -- the host's
+	// default flag (1 MiB) is far too small for a blob upload, and an
+	// operator who explicitly configured a larger max_blob_size did not mean
+	// for an unrelated global flag to silently override it. MaxBodyFromConfig
+	// is the constructor for exactly this: an unconditional ceiling owned by
+	// the plugin's own config, reported under its own name on a 413.
+	mux.Handle("PUT /blobs/{key...}", plugin.MaxBodyFromConfig(p.config.MaxBlobSize, "max_blob_size in --plugin-config", p.handlePut))
 	mux.HandleFunc("GET /blobs/{key...}", p.handleGet)
 	mux.HandleFunc("HEAD /blobs/{key...}", p.handleHead)
 	mux.HandleFunc("DELETE /blobs/{key...}", p.handleDelete)
@@ -56,13 +63,10 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read the entire body.
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("blobstore: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
+	body, ok := plugin.ReadBody(w, r)
+	if !ok {
 		return
 	}
-	defer r.Body.Close()
 
 	if len(body) == 0 {
 		p.writeError(w, 400, "empty body")
@@ -112,7 +116,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 	if storageBackend == "s3" {
 		s3Key = &sha256Hex
 	}
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(upsertBlobContent.For(p.dialect), p.dialect),
+	_, err := p.db.Exec(r.Context(), plugin.Rebind(upsertBlobContent.For(p.dialect), p.dialect),
 		hash[:], len(body), storageBackend, s3Key)
 	if err != nil {
 		p.logger.Error("blobstore: store content", "key", key, "error", err)

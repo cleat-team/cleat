@@ -3,10 +3,12 @@ package llm
 import (
 	"encoding/json"
 	"net/http"
+
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // RegisterRoutes registers HTTP endpoints for the LLM plugin.
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	mux.HandleFunc("GET /api/llm/health", func(w http.ResponseWriter, r *http.Request) {
 		providers := map[string]any{}
 		for name, cfg := range p.config.Providers {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"math/rand/v2"
 	"net/http"
 	"strconv"
@@ -17,7 +16,7 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("eventstore: nil mux")
 	}
@@ -71,13 +70,10 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read body.
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("eventstore: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
+	body, ok := plugin.ReadBody(w, r)
+	if !ok {
 		return
 	}
-	defer r.Body.Close()
 
 	if len(body) == 0 {
 		p.writeError(w, 400, "empty body")
@@ -110,6 +106,7 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 	// re-colliding together) clears n=20 reliably; see that test for the
 	// measurement this is tuned against.
 	var sequence int64
+	var err error
 	const maxAppendAttempts = 32
 	backoff := 5 * time.Millisecond
 	const maxBackoff = 100 * time.Millisecond

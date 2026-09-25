@@ -244,7 +244,7 @@ type routesPlugin struct {
 	noopPlugin
 }
 
-func (p *routesPlugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *routesPlugin) RegisterRoutes(mux Router) error {
 	return nil
 }
 

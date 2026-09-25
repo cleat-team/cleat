@@ -128,7 +128,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 }
 
 // RegisterRoutes registers HTTP routes for querying audit events.
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("audit-log: nil mux")
 	}

@@ -205,7 +205,10 @@ var (
 			"any Down SQL.")
 	createTenantDisplayName = flag.String("tenant-display-name", "", "Display name for --create-tenant (defaults to the name)")
 	maxBodySize             = flag.Int64("max-body-size", 1048576, "Maximum request body size in bytes (default 1 MiB)")
-	maxPriorityMagnitude    = flag.Int("max-priority-magnitude", engine.DefaultMaxPriorityMagnitude,
+	pluginMaxBodySize       = flag.Int64("plugin-max-body-size", 1048576, "Maximum request body size in bytes for plugin HTTP routes, unless a route "+
+		"declares a larger ceiling of its own (e.g. blobstore's PUT, sized by max_blob_size). Separate from --max-body-size, which "+
+		"bounds only the core API. cleat#2232 (default 1 MiB)")
+	maxPriorityMagnitude = flag.Int("max-priority-magnitude", engine.DefaultMaxPriorityMagnitude,
 		"Bound on a caller-supplied workflow `priority`, in either direction: a start request outside "+
 			"-N..N is refused with 400. SYMMETRIC because a negative priority is a supported way to put "+
 			"work ahead of the default 0 without renumbering (cleat#1051), so a floor of zero would remove "+

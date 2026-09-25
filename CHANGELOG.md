@@ -375,6 +375,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     line-oriented count reports them as input-less, which inflates the
     omission count in the alarming direction.
 
+- **`plugin.HasRoutes.RegisterRoutes` now takes a `plugin.Router`, not `*http.ServeMux`.**
+  (cleat#2232)
+
+  Twenty-six plugin HTTP handlers across 17 plugins read a request body with no size ceiling at
+  all, reachable anonymously through `POST /ingest/{source_id}` and `POST /slack/interactive` —
+  both exempt from tenant auth by design. A plugin cannot be handed a body-size limit through a
+  mux it registers *on*, only through one it registers *with*, so `RegisterRoutes`'s parameter
+  changed from `*http.ServeMux` to the new `plugin.Router` interface (`Handle`/`HandleFunc`,
+  structurally satisfied by `*http.ServeMux` and by the host's own body-limiting adapter alike).
+
+  Every `RegisterRoutes` implementation in this tree took the one-line signature update in the
+  same change. A plugin built outside this tree against the old signature silently stops
+  satisfying `plugin.HasRoutes` — its routes never register, and previously nothing said why; the
+  worker now logs an ERROR at boot naming the plugin and the fix (`RegisterRoutes(mux
+  plugin.Router) error`).
+
+  New request-body ceiling: `--plugin-max-body-size` (default 1 MiB) bounds every plugin route
+  that does not declare its own. A route declares a tighter cap with `plugin.MaxBody(n, h)`
+  (effective limit is `min(n, --plugin-max-body-size)`, so the flag can always tighten it
+  further), or an unconditional, operator-config-owned ceiling with
+  `plugin.MaxBodyFromConfig(n, knob, h)` (ignores the flag entirely, and PANICS at registration --
+  refusing to boot -- if used on `POST /ingest/{source_id}`, `GET /oauth/{provider}/callback` or
+  `POST /slack/interactive`, since the flag must always bound a route no credential guards).
+  `blobstore`'s `PUT /blobs/{key...}` uses
+  `MaxBodyFromConfig` against its own `max_blob_size` setting (default 10 MiB);
+  `slacknotify`'s `POST /slack/interactive` uses `MaxBody` against its fixed 1 MiB callback size.
+
 ### Added
 
 - **`/livez`, `/readyz`, database-reachability metrics and alert rules: a database incident now looks different from a worker incident.** (cleat#2007)

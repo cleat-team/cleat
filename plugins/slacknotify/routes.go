@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -14,7 +13,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("slack-notify: nil mux")
 	}
@@ -23,7 +22,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 	mux.HandleFunc("GET /slack/configs/{id}", p.handleGetConfig)
 	mux.HandleFunc("PUT /slack/configs/{id}", p.handleUpdateConfig)
 	mux.HandleFunc("DELETE /slack/configs/{id}", p.handleDeleteConfig)
-	mux.HandleFunc("POST /slack/interactive", p.handleInteractiveCallback)
+	mux.Handle("POST /slack/interactive", plugin.MaxBody(interactiveMaxBodySize, p.handleInteractiveCallback))
 	return nil
 }
 
@@ -74,17 +73,8 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("slack-notify: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req createConfigRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
@@ -99,7 +89,7 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New()
 	now := time.Now()
 
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO slack_config (tenant_id, id, name, webhook_url, default_channel, enabled, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, true, $6, $6)
 		`, p.dialect), tid, id, req.Name, req.WebhookURL.Reveal(), req.DefaultChannel, now)
@@ -215,17 +205,8 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("slack-notify: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req updateConfigRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 

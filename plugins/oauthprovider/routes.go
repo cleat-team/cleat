@@ -127,7 +127,7 @@ type oauthConfigRow struct {
 
 // RegisterRoutes registers HTTP handlers for the OAuth flow and session
 // management.
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("oauth-provider: nil mux")
 	}

@@ -17,7 +17,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("scheduledbackup: nil mux")
 	}
@@ -107,8 +107,7 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req createConfigRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		p.writeError(w, 400, "invalid JSON body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 
@@ -268,8 +267,7 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req updateConfigRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		p.writeError(w, 400, "invalid JSON body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 	if (req.S3Bucket != nil && *req.S3Bucket != "") || (req.S3Prefix != nil && *req.S3Prefix != "") {

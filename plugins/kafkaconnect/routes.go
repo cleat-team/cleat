@@ -3,7 +3,6 @@ package kafkaconnect
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -12,7 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("kafka-connect: nil mux")
 	}
@@ -66,17 +65,8 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("kafka-connect: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req createConfigRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
@@ -104,7 +94,7 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New()
 	now := time.Now()
 
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO kafka_config (tenant_id, id, name, brokers, topic, consumer_group, event_type, enabled, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $8)
 		`, p.dialect), tid, id, req.Name, req.Brokers, req.Topic, consumerGroup, eventType, now)

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -16,7 +15,7 @@ import (
 )
 
 // RegisterRoutes registers the job queue HTTP handlers on the given mux.
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("jobqueue: nil mux")
 	}
@@ -125,20 +124,14 @@ func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("jobqueue: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
+	// An empty body is a valid enqueue -- a bare job with no def_name,
+	// payload, or input, exactly as develop's pre-cleat#2232 hand-rolled
+	// `if len(body) > 0 { json.Unmarshal(...) }` allowed. Every other
+	// ReadJSONBody call site in this tree wants the opposite (a required
+	// body, empty is 400) -- see plugin.ReadOptionalJSONBody's doc comment.
 	var req enqueueRequest
-	if len(body) > 0 {
-		if err := json.Unmarshal(body, &req); err != nil {
-			p.writeError(w, 400, "invalid JSON payload")
-			return
-		}
+	if !plugin.ReadOptionalJSONBody(w, r, &req) {
+		return
 	}
 
 	jobID := uuid.New()
@@ -153,7 +146,7 @@ func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 	// payload/input columns on write -- a 200 with an empty body on the next
 	// read, because encoding/json fails part-way through writing the
 	// response. See plugin.JSONColumn. cleat#2206.
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO task_queue (tenant_id, queue_name, job_id, payload, def_name, input)
 			VALUES ($1, $2, $3, $4, $5, $6)
 		`, p.dialect), tid, queueName, jobID, plugin.JSONColumn{Raw: req.Payload}, defName, plugin.JSONColumn{Raw: req.Input})

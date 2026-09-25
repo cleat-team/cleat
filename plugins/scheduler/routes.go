@@ -13,7 +13,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("scheduler: nil mux")
 	}
@@ -80,8 +80,7 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req createScheduleRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		p.writeError(w, 400, "invalid JSON body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 
@@ -235,8 +234,7 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req updateScheduleRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		p.writeError(w, 400, "invalid JSON body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 

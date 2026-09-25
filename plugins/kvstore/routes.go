@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -14,7 +13,7 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("kvstore: nil mux")
 	}
@@ -99,13 +98,10 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("kvstore: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
+	body, ok := plugin.ReadBody(w, r)
+	if !ok {
 		return
 	}
-	defer r.Body.Close()
 
 	if len(body) == 0 {
 		p.writeError(w, 400, "empty body")
@@ -172,6 +168,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 
 	// No If-Match header: upsert (insert or overwrite unconditionally).
 	var newVersion int
+	var err error
 	if p.dialect == plugin.DialectMySQL {
 		// MySQL: upsert without RETURNING, then select version
 		_, execErr := p.db.Exec(r.Context(), plugin.Rebind(upsertKV.For(p.dialect), p.dialect),

@@ -6,13 +6,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // interactiveMaxBodySize bounds POST /slack/interactive, whose payloads are a
@@ -21,6 +22,14 @@ import (
 // replaced, BEFORE the signature check that would have refused it -- and the
 // route being newly public (cleat#2172's auth-middleware exemption, this
 // same PR) is what makes that reachable without authentication at all.
+//
+// cleat#2232: declared at REGISTRATION via plugin.MaxBody(interactiveMaxBodySize,
+// ...) in RegisterRoutes (routes.go), rather than applied inline here with a
+// hand-rolled http.MaxBytesReader -- this route's own ceiling happens to equal
+// the host adapter's 1 MiB default, but pinning it here means it stays 1 MiB
+// even if an operator raises --plugin-max-body-size for some other route's
+// sake. The handler below just calls plugin.ReadBody, which reads whatever
+// ceiling the registration-time wrap already applied.
 const interactiveMaxBodySize = 1 << 20 // 1 MiB
 
 // slackInteractivePayload represents a Slack interactive message callback.
@@ -210,23 +219,15 @@ func (p *Plugin) signingSecret(ctx context.Context) (string, error) {
 // tenant-refusal block below), so every click refuses with 404 until
 // cleat#2230(b) lands the slack_workspace lookup.
 func (p *Plugin) handleInteractiveCallback(w http.ResponseWriter, r *http.Request) {
-	// Bound the body before reading any of it. This route lost its auth
-	// middleware gate in this same change (cleat#2172's exemption, so the
-	// signature check below is reachable at all), so an unbounded ReadAll
-	// here is unbounded for anyone, not just an authenticated caller --
-	// cleat-review measured a 256 MiB anonymous POST allocating 828 MiB
-	// before the signature check ever ran. A Slack interactive payload is a
-	// few KB of URL-encoded JSON; interactiveMaxBodySize gives it headroom
-	// without giving an anonymous request the run of the heap.
-	r.Body = http.MaxBytesReader(w, r.Body, interactiveMaxBodySize)
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			p.writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
-			return
-		}
-		p.writeError(w, http.StatusBadRequest, "cannot read body")
+	// The body is already bounded to interactiveMaxBodySize by the
+	// plugin.MaxBody wrap RegisterRoutes registered this handler under --
+	// this route lost its auth middleware gate in this same change
+	// (cleat#2172's exemption, so the signature check below is reachable at
+	// all), so an unbounded read here would be unbounded for anyone, not
+	// just an authenticated caller. cleat-review measured a 256 MiB
+	// anonymous POST allocating 828 MiB before the signature check ever ran.
+	bodyBytes, ok := plugin.ReadBody(w, r)
+	if !ok {
 		return
 	}
 	r.Body = io.NopCloser(strings.NewReader(string(bodyBytes)))

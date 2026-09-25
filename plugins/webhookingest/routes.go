@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -19,7 +18,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("webhook-ingest: nil mux")
 	}
@@ -174,13 +173,10 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	tenantCtx := plugin.ForTenant(r.Context(), source.TenantID)
 
 	// Read the request body.
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("webhook-ingest: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
+	body, ok := plugin.ReadBody(w, r)
+	if !ok {
 		return
 	}
-	defer r.Body.Close()
 
 	// Verify HMAC-SHA256 signature. cleat#1992/#2172, owner decision (b): a
 	// signing secret is now REQUIRED on every source -- handleCreateSource
@@ -492,17 +488,8 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("webhook-ingest: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req createSourceRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
@@ -558,7 +545,7 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	// INSERT against real MySQL for the first time (cleat#1992's dialect
 	// coverage) -- the in-memory fake driver binds by Ordinal and cannot see
 	// this class of defect.
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
 		INSERT INTO webhook_sources (tenant_id, id, name, source_type, secret_configured, enabled, created_at, updated_at, signal_workflow_id, signal_name)
 		VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9)
 	`, p.dialect), tid, id, req.Name, req.SourceType, secretConfigured, now, now, signalWorkflowID, signalName)
