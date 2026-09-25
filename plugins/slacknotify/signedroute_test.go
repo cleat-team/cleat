@@ -398,6 +398,62 @@ func TestStampBlocksWithRoutes_SiblingButtonsShareInjectedBlockID(t *testing.T) 
 	}
 }
 
+// TestStampBlocksWithRoutes_DistinctBlocksGetDistinctInjectedBlockIDs is
+// cleat-review's uniqueness question on the block_id injection fix: Slack
+// rejects a message whose blocks carry duplicate block_ids, so two SEPARATE
+// blocks that both need an injected id -- here, deliberately identical in
+// every other respect, since a content-derived id is the shape of bug that
+// would collide on exactly this input -- must not end up sharing one.
+// generateBlockID is "cleat_" + uuid.New().String(), not derived from the
+// block's content, so this is pinning that property rather than discovering
+// it; TestStampBlocksWithRoutes_SiblingButtonsShareInjectedBlockID pins the
+// opposite requirement (siblings UNDER ONE block converge), and the two
+// together are the whole of what the injection fix must get right.
+func TestStampBlocksWithRoutes_DistinctBlocksGetDistinctInjectedBlockIDs(t *testing.T) {
+	tenantID := uuid.New().String()
+	raw := json.RawMessage(`{"blocks":[
+		{"type":"actions","elements":[{"type":"button","action_id":"wf:wf-1:sig:approve","value":"yes"}]},
+		{"type":"actions","elements":[{"type":"button","action_id":"wf:wf-1:sig:approve","value":"yes"}]}
+	]}`)
+
+	stamped, err := stampBlocksWithRoutes(raw, []byte(testSignedRouteKey), tenantID, time.Now())
+	if err != nil {
+		t.Fatalf("stampBlocksWithRoutes: %v", err)
+	}
+
+	var tree map[string]any
+	if err := json.Unmarshal(stamped, &tree); err != nil {
+		t.Fatal(err)
+	}
+	blocks := tree["blocks"].([]any)
+	block0 := blocks[0].(map[string]any)
+	block1 := blocks[1].(map[string]any)
+	blockID0, _ := block0["block_id"].(string)
+	blockID1, _ := block1["block_id"].(string)
+	if blockID0 == "" || blockID1 == "" {
+		t.Fatalf("expected both blocks to get an injected block_id, got %q and %q", blockID0, blockID1)
+	}
+	if blockID0 == blockID1 {
+		t.Fatalf("two distinct, content-identical blocks were injected with the SAME block_id %q -- Slack rejects a message with duplicate block_ids", blockID0)
+	}
+
+	elem0 := block0["elements"].([]any)[0].(map[string]any)
+	signed0 := elem0["action_id"].(string)
+	unsigned0, issuedAtHex0, mac0, ok := parseSignedRoute(signed0)
+	if !ok {
+		t.Fatalf("parseSignedRoute(%q) ok=false", signed0)
+	}
+	// block0's route must verify under its OWN block_id...
+	if _, ok := verifyRouteSignature([]byte(testSignedRouteKey), nil, tenantID, unsigned0, issuedAtHex0, blockID0, "yes", mac0, defaultRouteMaxAge, time.Now()); !ok {
+		t.Error("block0's action_id did not verify under block0's own injected block_id")
+	}
+	// ...and must NOT verify under block1's, since real Slack would never
+	// echo block1's block_id alongside block0's action_id/value together.
+	if _, ok := verifyRouteSignature([]byte(testSignedRouteKey), nil, tenantID, unsigned0, issuedAtHex0, blockID1, "yes", mac0, defaultRouteMaxAge, time.Now()); ok {
+		t.Error("block0's action_id unexpectedly verified under block1's injected block_id -- the two blocks are cross-verifiable")
+	}
+}
+
 // TestStampNode_RefusesGuestSuppliedSignedShapedActionID is the nit
 // coordinator asked for: an action_id that ALREADY has the structural shape
 // of a signed route (parseSignedRoute succeeds) but was not produced by
