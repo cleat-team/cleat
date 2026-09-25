@@ -39,7 +39,7 @@ func TestHostBindingRefusesAHostTheTenantDoesNotOwn(t *testing.T) {
 		"a.example.com": tenantA,
 		"b.example.com": tenantB,
 	}}
-	h := HostBindingMiddleware(res)(okHandler())
+	h := HostBindingMiddlewareWithMux(res, nil)(okHandler())
 
 	for _, tc := range []struct {
 		name string
@@ -78,7 +78,7 @@ func TestHostBindingIsNotAnOracle(t *testing.T) {
 	tenantA := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	tenantB := uuid.MustParse("22222222-2222-2222-2222-222222222222")
 	res := &fakeDomains{owner: map[string]uuid.UUID{"taken.example.com": tenantB}}
-	h := HostBindingMiddleware(res)(okHandler())
+	h := HostBindingMiddlewareWithMux(res, nil)(okHandler())
 
 	get := func(host string) (int, string) {
 		r := httptest.NewRequest(http.MethodGet, "/api/workflows", nil)
@@ -110,7 +110,7 @@ func TestHostBindingIsNotAnOracle(t *testing.T) {
 func TestHostBindingFailsClosedWhenTheLookupErrors(t *testing.T) {
 	tenantA := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	res := &fakeDomains{err: errors.New("database is down")}
-	h := HostBindingMiddleware(res)(okHandler())
+	h := HostBindingMiddlewareWithMux(res, nil)(okHandler())
 
 	r := httptest.NewRequest(http.MethodGet, "/api/workflows", nil)
 	r.Host = "a.example.com"
@@ -129,7 +129,7 @@ func TestHostBindingFailsClosedWhenTheLookupErrors(t *testing.T) {
 func TestHostBindingSkipsPathsWithNoTenantUrlToPresent(t *testing.T) {
 	tenantA := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	res := &fakeDomains{owner: map[string]uuid.UUID{}}
-	h := HostBindingMiddleware(res, "POST /ingest/{source_id}")(okHandler())
+	h := HostBindingMiddlewareWithMux(res, nil, "POST /ingest/{source_id}")(okHandler())
 
 	for _, tc := range []struct{ name, method, path string }{
 		{"healthz", http.MethodGet, "/healthz"},
@@ -159,7 +159,7 @@ func TestHostBindingSkipsPathsWithNoTenantUrlToPresent(t *testing.T) {
 // change behaviour for --require-auth=false deployments.
 func TestHostBindingPassesThroughWhenThereIsNoTenant(t *testing.T) {
 	res := &fakeDomains{owner: map[string]uuid.UUID{}}
-	h := HostBindingMiddleware(res)(okHandler())
+	h := HostBindingMiddlewareWithMux(res, nil)(okHandler())
 
 	r := httptest.NewRequest(http.MethodGet, "/api/workflows", nil)
 	r.Host = "unregistered.example.com"

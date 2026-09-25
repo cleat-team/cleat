@@ -15,7 +15,7 @@ import (
 //
 // "POST /ingest/{source_id}" and "POST /slack/interactive" are the two plugin
 // routes reachable with no cleat credential at all -- both are listed in
-// auth.Middleware's and auth.HostBindingMiddleware's publicPatterns in
+// auth.MiddlewareWithMux's and auth.HostBindingMiddlewareWithMux's publicPatterns in
 // main.go, by design, because an inbound webhook or a Slack callback cannot
 // present a cleat API key. That is exactly the shape #2232 was filed
 // against: a request needing no credential can reach a plugin handler with
@@ -26,7 +26,7 @@ import (
 // a_slack_interactive_route_is_exempt_test.go's doc comment: --require-auth
 // and --require-host-match are wired into a closure chain nothing outside
 // main() can reach), so this builds the same three-layer composition
-// independently -- the real auth.Middleware and auth.HostBindingMiddleware
+// independently -- the real auth.MiddlewareWithMux and auth.HostBindingMiddlewareWithMux
 // constructors, the production exempt-path list copied verbatim from
 // main.go, wrapped around the real pluginBodyLimitRouter
 // (plugin_body_limit.go) -- rather than trusting that main()'s comments
@@ -72,11 +72,14 @@ func TestPluginRouteBodyLimitAppliesOnBothAuthExemptRoutes(t *testing.T) {
 			// plugin_exempt_routes.go -- cleat#2273 replaced the hand-copied
 			// literal this test used to carry, so a drift between this test
 			// and main.go is no longer possible by construction), same
-			// nesting order as main.go (auth.Middleware wraps
-			// HostBindingMiddleware wraps the mux).
+			// nesting order as main.go (auth.MiddlewareWithMux wraps
+			// HostBindingMiddlewareWithMux wraps the mux), and the SAME real
+			// mux passed to both -- main.go passes its serving mux, not nil,
+			// to both constructors (cleat#2274), so this must too or it stops
+			// exercising the real-mux matching path #2274 fixed.
 			var handler http.Handler = plugMux
-			handler = auth.HostBindingMiddleware(nil, pluginAuthExemptPatterns...)(handler)
-			handler = auth.Middleware(nil, true, pluginAuthExemptPatterns...)(handler)
+			handler = auth.HostBindingMiddlewareWithMux(nil, plugMux, pluginAuthExemptPatterns...)(handler)
+			handler = auth.MiddlewareWithMux(nil, true, plugMux, pluginAuthExemptPatterns...)(handler)
 
 			// THE CONTROL COMES FIRST. Without it, "the oversized one got
 			// 413" would pass just as well against a chain that 401s or
@@ -90,8 +93,8 @@ func TestPluginRouteBodyLimitAppliesOnBothAuthExemptRoutes(t *testing.T) {
 			handler.ServeHTTP(w, req)
 			if w.Code != http.StatusOK {
 				t.Fatalf("control: anonymous %s got %d, want 200 (body: %s) -- either the "+
-					"exempt-path list here no longer matches main.go's, or auth.Middleware/"+
-					"HostBindingMiddleware rejected an anonymous request this route must accept",
+					"exempt-path list here no longer matches main.go's, or auth.MiddlewareWithMux/"+
+					"HostBindingMiddlewareWithMux rejected an anonymous request this route must accept",
 					route.path, w.Code, w.Body.String())
 			}
 			if !bodyProcessed {
