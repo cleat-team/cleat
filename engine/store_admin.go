@@ -460,7 +460,43 @@ func (s *PostgresStore) adminResolveMiss(ctx context.Context, tx *sql.Tx, workfl
 	return adminGenerationMismatch(action, workflowID, stored, requested)
 }
 
+// assertHistoryReadable refuses to let an admin operation append to a history
+// this worker cannot decrypt. It runs inside the transaction that holds the
+// operation's status change, so returning an error rolls that change back too:
+// nothing is written.
+//
+// Why it lives HERE and not in each operation: every admin verb that appends an
+// event does it through adminAppendAudit, so a check at the one shared point
+// covers force-complete, force-fail, re-replay and retry, and covers the next
+// verb somebody adds without their having to remember it. The audit event is
+// sealed under THIS worker's key, and on a worker with the wrong key that
+// leaves a history sealed under two keys, which no single worker can read
+// again -- every single-key worker then refuses to re-replay, retry or resolve
+// the run. The first version of cleat#2311 checked only the three verbs that
+// happened to load the history already, and force-fail and force-complete
+// (which do not) answered 200 and did exactly that.
+// TestEveryAdminAppendGoesThroughTheReadabilityCheck keeps it structural.
+//
+// Only meaningful where a payload key ring is configured: with none, nothing is
+// decrypted on read and nothing can fail, so the read is skipped rather than
+// spent on every admin call.
+func (s *PostgresStore) assertHistoryReadable(ctx context.Context, tx *sql.Tx, workflowID, op string) error {
+	if s.encryption == nil || !s.encryptSensitivePayloads {
+		return nil
+	}
+	if _, err := s.readEventHistoryTx(ctx, tx, workflowID); err != nil {
+		if errors.Is(err, ErrPayloadDecryption) {
+			return adminHistoryUnreadable("admin "+op, workflowID)
+		}
+		return fmt.Errorf("admin %s: check the history is readable: %w", op, err)
+	}
+	return nil
+}
+
 func (s *PostgresStore) adminAppendAudit(ctx context.Context, tx *sql.Tx, workflowID string, a adminForce) error {
+	if err := s.assertHistoryReadable(ctx, tx, workflowID, a.action); err != nil {
+		return err
+	}
 	var step int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COALESCE(MAX(step), -1) + 1 FROM event_history WHERE workflow_id = $1 AND tenant_id = $2`,

@@ -154,7 +154,7 @@ func (s *PostgresStore) LoadStreamChunksAfter(ctx context.Context, workflowID st
 	}
 	defer rows.Close()
 
-	out, err := scanStreamChunkRows(rows, workflowID, s.decryptAndRedactEventRecord, s.decryptPayloadJSON)
+	out, err := scanStreamChunkRows(rows, workflowID, s.decryptEventRecordForDisplay, s.decryptPayloadForDisplay)
 	if err != nil {
 		return nil, err
 	}

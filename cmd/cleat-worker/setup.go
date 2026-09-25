@@ -1617,6 +1617,15 @@ type Worker struct {
 	// defaultUnservableBackoff. cleat#1710.
 	unservableBackoff time.Duration
 
+	// unservableWarned remembers when releaseForAnotherWorker last logged at
+	// WARN for a (workflow, check) pair, so a run nobody can serve is reported
+	// once per unservableWarnEvery instead of once per backoff. At the default
+	// 5s backoff a single stuck run wrote ~17,000 identical WARN lines a day
+	// (~23 MB). The counter cleat_workflow_releases_total still counts every
+	// release. Keyed by workflow id + check; entries for runs that stop being
+	// released are dropped when the map is swept in releaseForAnotherWorker.
+	unservableWarned sync.Map
+
 	// bgPlugins are the plugins implementing plugin.HasBackground, started by
 	// Run once the health tracker and metrics exist. cleat#1347.
 	bgPlugins []plugin.HasBackground
@@ -2853,6 +2862,17 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		if isConnectionError(err) {
 			w.logger.WarnContext(context.Background(), "DB down loading history", "worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID)
 			w.releaseWorkflow(wf)
+			return
+		}
+		// WORKER-LOCAL, not run-intrinsic: this worker's key ring cannot open
+		// the history, and one that holds the right key can. Failing the run
+		// here destroyed it (checksums on) and, with the store swallowing the
+		// error, completing it on "[DECRYPTION_FAILED]" corrupted it
+		// (--disable-checksum-verification). See releaseForAnotherWorker for
+		// the backoff and why an unserved run is a quiescent state rather
+		// than a livelock. cleat#2311.
+		if errors.Is(err, engine.ErrPayloadDecryption) {
+			w.releaseForAnotherWorker(wf, fmt.Sprintf("history load: %v", err), "history_decrypt")
 			return
 		}
 		w.recordTerminalFailure(wf, workflowStartTime, fmt.Sprintf("workflow %s: history load: %v", wf.ID, err), engine.ErrUnknown.String(), "")
@@ -6007,7 +6027,14 @@ const defaultUnservableBackoff = 5 * time.Second
 // the second place it gets designed.
 func (w *Worker) releaseForAnotherWorker(wf *engine.WorkflowInstance, reason, op string) {
 	ctx := context.Background()
-	w.logger.WarnContext(ctx,
+	if w.Metrics != nil {
+		w.Metrics.RecordWorkflowRelease(ctx, op)
+	}
+	level := slog.LevelDebug
+	if w.shouldWarnUnservable(wf.ID, op, time.Now()) {
+		level = slog.LevelWarn
+	}
+	w.logger.Log(ctx, level,
 		"this worker cannot serve this workflow; returning it to the queue for one that can",
 		"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID,
 		"def_name", wf.DefName, "def_version", wf.DefVersion,
@@ -6035,6 +6062,31 @@ func (w *Worker) releaseForAnotherWorker(wf *engine.WorkflowInstance, reason, op
 			"could not return this workflow to the queue; it stays claimed until its lease expires",
 			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
 	}
+}
+
+// unservableWarnEvery is how often one (workflow, check) pair is logged at WARN
+// by releaseForAnotherWorker; the releases in between log at DEBUG.
+const unservableWarnEvery = 5 * time.Minute
+
+// shouldWarnUnservable reports whether this release should log at WARN: true
+// the first time a (workflow, check) pair is seen and again once
+// unservableWarnEvery has passed. Stale entries are swept opportunistically so
+// the map does not outlive the runs it describes.
+func (w *Worker) shouldWarnUnservable(workflowID, check string, now time.Time) bool {
+	key := workflowID + "\x00" + check
+	if v, ok := w.unservableWarned.Load(key); ok {
+		if last, _ := v.(time.Time); now.Sub(last) < unservableWarnEvery {
+			return false
+		}
+	}
+	w.unservableWarned.Store(key, now)
+	w.unservableWarned.Range(func(k, v any) bool {
+		if last, _ := v.(time.Time); now.Sub(last) > 4*unservableWarnEvery {
+			w.unservableWarned.Delete(k)
+		}
+		return true
+	})
+	return true
 }
 
 // recordTerminalFailure is the no-history form, for the failure paths that run

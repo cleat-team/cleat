@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/monitoring/prometheus"
 )
 
 // shardedStoreFactory opens a tenant-scoped store that spans every shard.
@@ -93,4 +94,30 @@ func (f *shardedStoreFactory) Dialect() engine.Dialect {
 		return engine.DialectPostgres
 	}
 	return f.factories[0].Dialect()
+}
+
+// wireStoreMetrics gives the metrics instance to every store and store factory
+// the worker built before it had one: the process-wide store (a single
+// PostgresStore, or a ShardedStore of them) and the factory that opens the
+// per-tenant stores (a PostgresStoreFactory, or a shardedStoreFactory of them).
+// Stores a factory opens later inherit it from the factory.
+func wireStoreMetrics(store engine.WorkflowStore, factory engine.StoreFactory, m *prometheus.Metrics) {
+	switch st := store.(type) {
+	case *engine.PostgresStore:
+		if st.Metrics == nil {
+			st.Metrics = m
+		}
+	case *engine.ShardedStore:
+		st.SetMetrics(m)
+	}
+	switch f := factory.(type) {
+	case *engine.PostgresStoreFactory:
+		f.WithMetrics(m)
+	case *shardedStoreFactory:
+		for _, sf := range f.factories {
+			if pf, ok := sf.(*engine.PostgresStoreFactory); ok {
+				pf.WithMetrics(m)
+			}
+		}
+	}
 }

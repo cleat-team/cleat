@@ -72,6 +72,7 @@ type Metrics struct {
 	workflowsDeadLettered   metric.Int64Counter
 	workflowsClaimed        metric.Int64Counter
 	executionsFencedOut     metric.Int64Counter
+	workflowReleases        metric.Int64Counter
 	wasmCacheHits           metric.Int64Counter
 	wasmCacheMisses         metric.Int64Counter
 	eventsDeleted           metric.Int64Counter
@@ -348,6 +349,14 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_executions_fenced_out_total: %w", err)
+	}
+
+	m.workflowReleases, err = meter.Int64Counter(
+		"cleat_workflow_releases_total",
+		metric.WithDescription("Workflows a worker handed back unserved because of a condition local to it, by check (cleat#2311)"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_workflow_releases_total: %w", err)
 	}
 
 	m.wasmCacheHits, err = meter.Int64Counter(
@@ -1103,6 +1112,19 @@ func (m *Metrics) RecordExecutionFencedOut(ctx context.Context, workflowName str
 		attribute.String("workflow_name", workflowName),
 	}, extraAttrs...)...)
 	m.executionsFencedOut.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordWorkflowRelease increments the counter of workflows a worker released
+// because THIS worker could not serve them (a version or plugin mismatch, a
+// history it cannot decrypt), labelled by which check refused. A run that no
+// live worker can serve is released again on every backoff interval and stays
+// 'ready', so without this the only sign of it is a log line; a rate on
+// check="history_decrypt" is the alert. cleat#2311.
+func (m *Metrics) RecordWorkflowRelease(ctx context.Context, check string, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(append([]attribute.KeyValue{
+		attribute.String("check", check),
+	}, extraAttrs...)...)
+	m.workflowReleases.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordWasmCacheHit increments the wasm-cache-hits counter.

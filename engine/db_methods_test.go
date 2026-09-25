@@ -2481,9 +2481,15 @@ func TestPostgresStore_DecryptField_DecryptError(t *testing.T) {
 	if terr != nil {
 		t.Fatalf("forTenant: %v", terr)
 	}
-	result := store.decryptField(tc, "not-valid-ciphertext", "Request", "wf-1", 0, false)
+	// Ciphertext-SHAPED (valid base64 of 40 bytes) but not sealed by this key.
+	// A value that is not sealed-shaped is plaintext, not a failure: see
+	// TestAPlaintextFieldIsNotADecryptionFailure.
+	result, derr := store.decryptField(tc, garbageSealedString(), "Request", "wf-1", 0, false)
 	if result != "[DECRYPTION_FAILED]" {
 		t.Errorf("expected [DECRYPTION_FAILED], got %q", result)
+	}
+	if !errors.Is(derr, ErrPayloadDecryption) {
+		t.Errorf("a field that will not decrypt must say so, not only carry a placeholder (cleat#2311); err = %v", derr)
 	}
 }
 
@@ -4591,7 +4597,10 @@ func TestPostgresStore_DeliverSignal_CommitError(t *testing.T) {
 
 func TestDecryptPayloadJSON_NoEncryption(t *testing.T) {
 	store := NewPostgresStore(nil)
-	result := store.decryptPayloadJSON(`{"plain":"text"}`)
+	result, err := store.decryptPayloadJSON(`{"plain":"text"}`)
+	if err != nil {
+		t.Errorf("no encryption configured is not a failure: %v", err)
+	}
 	if result != `{"plain":"text"}` {
 		t.Errorf("expected original payload, got %q", result)
 	}
@@ -4600,7 +4609,10 @@ func TestDecryptPayloadJSON_NoEncryption(t *testing.T) {
 func TestDecryptPayloadJSON_EmptyPayload(t *testing.T) {
 	enc := newTestPayloadEncryption(t)
 	store := NewPostgresStore(nil).WithEncryption(enc, true)
-	result := store.decryptPayloadJSON("")
+	result, err := store.decryptPayloadJSON("")
+	if err != nil {
+		t.Errorf("an empty payload is not a failure: %v", err)
+	}
 	if result != "" {
 		t.Errorf("expected empty string, got %q", result)
 	}
@@ -4609,9 +4621,12 @@ func TestDecryptPayloadJSON_EmptyPayload(t *testing.T) {
 func TestDecryptPayloadJSON_DecryptionFailure(t *testing.T) {
 	enc := newTestPayloadEncryption(t)
 	store := NewPostgresStore(nil).WithEncryption(enc, true)
-	result := store.decryptPayloadJSON(`"corrupted-base64-data"`)
+	result, err := store.decryptPayloadJSON(`"corrupted-base64-data"`)
 	if result != `"corrupted-base64-data"` {
 		t.Errorf("expected original payload on decryption failure, got %q", result)
+	}
+	if !errors.Is(err, ErrPayloadDecryption) {
+		t.Errorf("a sealed-shaped payload that will not open must report it (cleat#2311); err = %v", err)
 	}
 }
 
@@ -4622,7 +4637,10 @@ func TestDecryptPayloadJSON_Success(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncryptJSON: %v", err)
 	}
-	result := store.decryptPayloadJSON(string(encrypted))
+	result, err := store.decryptPayloadJSON(string(encrypted))
+	if err != nil {
+		t.Fatalf("decryptPayloadJSON: %v", err)
+	}
 	if result != `{"secret":"data"}` {
 		t.Errorf("expected decrypted payload, got %q", result)
 	}
@@ -4658,8 +4676,8 @@ func TestDecryptAndRedactEventRecord_InvalidEncryptedData(t *testing.T) {
 	enc := newTestPayloadEncryption(t)
 	store := NewPostgresStore(nil).WithEncryption(enc, true)
 	rec := &EventRecord{
-		Step: 0, Request: "tampered-data", Response: "bad-data",
-		Err: "invalid-ciphertext",
+		Step: 0, Request: garbageSealedRaw(), Response: garbageSealedRaw(),
+		Err: garbageSealedString(),
 	}
 	store.decryptAndRedactEventRecord(rec, "wf-1")
 	if rec.Request != "[DECRYPTION_FAILED]" {
@@ -4671,6 +4689,16 @@ func TestDecryptAndRedactEventRecord_InvalidEncryptedData(t *testing.T) {
 	if rec.Err != "[DECRYPTION_FAILED]" {
 		t.Errorf("expected [DECRYPTION_FAILED] for Err, got %q", rec.Err)
 	}
+}
+
+// garbageSealedRaw and garbageSealedString are values shaped like sealed ones (40
+// bytes that are not UTF-8, and their base64) that no key opens.
+func garbageSealedRaw() string {
+	return strings.Repeat("\xff", 40)
+}
+
+func garbageSealedString() string {
+	return base64.StdEncoding.EncodeToString([]byte(garbageSealedRaw()))
 }
 
 // ---------------------------------------------------------------------------
