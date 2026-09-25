@@ -156,6 +156,39 @@ func TestRunDownMigrationsReversesNewestFirst(t *testing.T) {
 	}
 }
 
+// A declaration-only migration (TenantScoped, no Up/Down -- kvstore v2's shape,
+// cleat#1277) un-scopes its tables on reversal just like a DDL migration does,
+// and those tables must be recorded in the result the same way. The first
+// version of RunDownMigrations untracked the migration and called
+// unregisterTenantScopedTables/unapplyTenantScoping but never appended
+// m.TenantScoped to res.TenantScopedTables, so a caller reading
+// TenantScopedTables (--uninstall-plugin's un-scope report) under-reported every
+// declaration-only plugin.
+func TestRunDownMigrationsRecordsDeclarationOnlyTenantScopedTables(t *testing.T) {
+	db := downTestDB(t, "cleat_down_declonly")
+	defer db.Close()
+	ctx := context.Background()
+
+	p := loaded("decl-only",
+		Migration{Version: 1, Up: `CREATE TABLE decl_tbl (id INT, tenant_id UUID)`, Down: `DROP TABLE decl_tbl`},
+		Migration{Version: 2, TenantScoped: []string{"decl_tbl"}},
+	)
+
+	if err := RunMigrations(ctx, db, DialectPostgres, nil, []*LoadedPlugin{p}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	res, err := RunDownMigrations(ctx, db, DialectPostgres, p, []*LoadedPlugin{p})
+	if err != nil {
+		t.Fatalf("reverse: %v", err)
+	}
+
+	if len(res.TenantScopedTables) != 1 || res.TenantScopedTables[0] != "decl_tbl" {
+		t.Errorf("TenantScopedTables = %v, want [decl_tbl]: a declaration-only "+
+			"migration's tables are dropped from the un-scope report", res.TenantScopedTables)
+	}
+}
+
 // TestRunDownMigrationsDropsMSSQLSecurityPolicyBeforeTheTable is cleat#2342: a
 // SQL Server SECURITY POLICY is a separate object holding a dependency on the
 // table it filters, so RunDownMigrations' old order -- run the Down SQL, which

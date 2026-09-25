@@ -706,6 +706,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reclassified `outcomeUnrecoverable` before landing, rather than advertised as recoverable via
   `--migrate-only`.
 
+- **`--uninstall-plugin` on SQL Server: 11 more plugins move from refused to verified.** (cleat#2342, cleat#2343, cleat#2367)
+
+  The ten plugins the phase-2 sweep had found clean on MySQL (`audit-log`, `datadog-export`,
+  `eventstore`, `feature-flags`, `kvstore`, `notifications`, `pagerduty-alert`, `rate-limiter`,
+  `slack-notify`, `tenant-quota`) plus `jobqueue` now join `scheduled-backup` in
+  `plugin.provenPluginDialects` for SQL Server. One shared defect had held all eleven back:
+  `RunDownMigrations` ran the Down SQL — which drops the table — before dropping the SECURITY POLICY
+  that referenced it, so every plugin with a tenant-scoped table failed with Msg 3729 before it ever
+  reached a policy drop. `unapplyTenantScoping` now drops the policy first (cleat#2342), and the
+  reversal also unregisters the tables from `admin.plugin_tables` (cleat#2343) so
+  `admin.drop_tenant` and `admin.grant_plugin_to_tenant` no longer read a stale row naming a table
+  the uninstall just dropped.
+
 - **API keys can expire and carry an `oauth_identity`: `admin.tenant_api_keys` gains `expires_at` and `oauth_identity` columns on all three dialects, and an expired key stops authenticating.** (cleat#2352)
 
   `expires_at` is nullable and `NULL` means "no expiry", so every key created before this migration
@@ -805,6 +818,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The fix is to supply a database or to say `mode: "memory"` and mean it.
 
 ### Fixed
+
+- **`RunDownMigrations` now reports every table it un-scoped, including declaration-only migrations.** (cleat#2367 follow-up)
+
+  A declaration-only migration (a `TenantScoped` list with no `Up`/`Down` — `kvstore` v2's shape,
+  cleat#1277) still un-scopes its tables on reversal, but the code path that untracked it never
+  appended `m.TenantScoped` to the result's `TenantScopedTables`, so `--uninstall-plugin`'s
+  un-scope report under-counted for every plugin with such a migration. It now records them the
+  same way a DDL migration's tables are.
 
 - **A busy MySQL or SQL Server worker no longer drops events: adaptive batch flushing is PostgreSQL-only.** (cleat#2348)
 

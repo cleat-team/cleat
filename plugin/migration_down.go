@@ -233,6 +233,12 @@ func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target 
 				return res, err
 			}
 			res.Reversed = append(res.Reversed, m.Version)
+			// A no-DDL migration that declared TenantScoped tables still
+			// un-scoped those tables above, so they belong in the result
+			// exactly as a DDL migration's do. Dropping them here under-reports
+			// what --uninstall-plugin un-scoped for every declaration-only
+			// plugin (cleat#1277 kvstore v2 is the shape).
+			res.TenantScopedTables = append(res.TenantScopedTables, m.TenantScoped...)
 			continue
 		}
 		// Down and its untracking go through the SESSION, not a fresh
