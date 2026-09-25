@@ -19,6 +19,7 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"github.com/google/uuid"
 )
 
@@ -37,13 +38,33 @@ type fakeSession struct {
 	TokenHash    driver.Value // nil or string (sha256 hex of session token)
 	CreatedAt    time.Time
 	ExpiresAt    driver.Value // nil or time.Time
+
+	// SessionTokenAtRest/AccessTokenAtRest/RefreshTokenAtRest mirror the
+	// session_token/access_token/refresh_token columns finishLogin writes.
+	// As of cleat#2295/#2296 finishLogin always writes NULL to all three
+	// (nothing reads them back, and an earlier version that sealed them via
+	// plugin.Payloads broke every login on a deployment with no
+	// --encryption-key-file set) -- these stay nil after every real login.
+	SessionTokenAtRest driver.Value
+	AccessTokenAtRest  driver.Value
+	RefreshTokenAtRest driver.Value
 }
 
 type fakeDBStore struct {
 	mu       sync.RWMutex
 	sessions map[uuid.UUID]*fakeSession
-	configs  map[string]*oauthConfigRow // key: "tenantID:provider"
+	configs  map[string]*oauthConfigRow // key: "tenantID:provider"; ClientSecret unused, see AddOAuthConfig
 	now      func() time.Time
+
+	// secrets backs AddOAuthConfig's client secret and must be the SAME
+	// instance wired into the Plugin under test as p.secrets -- setupTestPlugin
+	// does that. Owned by the store rather than created separately in each
+	// test, so the existing AddOAuthConfig(tenantID, provider, ..., clientSecret,
+	// ...) call sites (all seven of them, predating cleat#1992) need no change:
+	// this seeds both the DB-shaped row and the tenant secret in one call, the
+	// same way production's two stores (oauth_config, tenant_secrets) are two
+	// separate writes only at the SQL layer.
+	secrets *plugintest.FakeSecrets
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -51,6 +72,7 @@ func newFakeDBStore() *fakeDBStore {
 		sessions: make(map[uuid.UUID]*fakeSession),
 		configs:  make(map[string]*oauthConfigRow),
 		now:      time.Now,
+		secrets:  plugintest.NewFakeSecrets(),
 	}
 }
 
@@ -376,9 +398,10 @@ func setupTestPlugin(t *testing.T, store *fakeDBStore) (*Plugin, http.Handler) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		mux:    http.NewServeMux(),
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		mux:     http.NewServeMux(),
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: store.secrets,
 	}
 
 	if err := p.RegisterRoutes(p.mux); err != nil {
@@ -821,14 +844,17 @@ func (s *fakeDBStore) AddOAuthConfig(tenantID uuid.UUID, provider, clientID, cli
 	defer s.mu.Unlock()
 	key := tenantID.String() + ":" + provider
 	s.configs[key] = &oauthConfigRow{
-		TenantID:     tenantID,
-		Provider:     provider,
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		RedirectURL:  redirectURL,
-		Domain:       domain,
-		Enabled:      enabled,
+		TenantID:    tenantID,
+		Provider:    provider,
+		ClientID:    clientID,
+		RedirectURL: redirectURL,
+		Domain:      domain,
+		Enabled:     enabled,
 	}
+	// client_secret lives in tenant secrets, not the oauth_config row, from
+	// cleat#1992 onward -- Seed bypasses ctx/tenant resolution the way this
+	// whole fake bypasses SQL, so no ForTenant-marked context is needed here.
+	s.secrets.Seed(tenantID.String(), OAuthClientSecretName(provider), clientSecret)
 }
 
 func (c *fakeConn) execInsertSession(args []driver.NamedValue) (driver.Result, error) {
@@ -882,8 +908,39 @@ func (c *fakeConn) execInsertSession(args []driver.NamedValue) (driver.Result, e
 	return &fakeResult{rowsAffected: 1}, nil
 }
 
+// execUpdateSession backs finishLogin's UPDATE. It supports two argument
+// shapes so a wholesale regression back to binding session_token/
+// access_token/refresh_token as their OWN parameters is visible to a test
+// here, rather than tripping an unrelated id-parse error: the current shape
+// (4 named args -- token_hash, user_email, expires_at, id) and the
+// pre-cleat#2295 shape (7 named args, with the three bound as parameters 1,
+// 4 and 5).
+//
+// "4 args arrived" is NOT proof the three columns are NULL, and this
+// comment claimed otherwise until cleat-review's should-fix on 705e1fcd: a
+// statement can reuse an EXISTING placeholder -- `session_token = $1,
+// access_token = $2, refresh_token = $2` alongside `token_hash = $1,
+// user_email = $2` -- and still bind exactly 4 args while writing real
+// values into all three. This fake cannot see that; it only counts. What
+// closes the loophole is
+// a_real_dialect_login_stores_no_tokens_test.go's
+// TestARealLoginStoresNoTokensOnAnyDialect, which reads the columns back
+// with a real SELECT against real Postgres/MySQL/SQL Server rather than
+// inferring their state from an argument count. Falsified by reintroducing
+// exactly that placeholder-reuse shape in finishLogin: this fake stayed
+// green, the real-dialect test failed naming all three columns, on all
+// three dialects.
 func (c *fakeConn) execUpdateSession(args []driver.NamedValue) (driver.Result, error) {
-	idStr, err := argString(args, 7)
+	var idPos int
+	switch len(args) {
+	case 4:
+		idPos = 4
+	case 7:
+		idPos = 7
+	default:
+		return nil, fmt.Errorf("execUpdateSession: unexpected arg count %d", len(args))
+	}
+	idStr, err := argString(args, idPos)
 	if err != nil {
 		return nil, err
 	}
@@ -897,14 +954,43 @@ func (c *fakeConn) execUpdateSession(args []driver.NamedValue) (driver.Result, e
 		return &fakeResult{rowsAffected: 0}, nil
 	}
 
-	if tokenHash, err := argString(args, 2); err == nil {
-		s.TokenHash = tokenHash
-	}
-	if userEmail, err := argAny(args, 3); err == nil {
-		s.UserEmail = userEmail
-	}
-	if expiresAt, err := argAny(args, 6); err == nil {
-		s.ExpiresAt = expiresAt
+	if idPos == 7 {
+		// The shape finishLogin used before cleat#2295/#2296: session_token,
+		// access_token and refresh_token are bound as real parameters, so
+		// whatever the caller passed lands at rest exactly like a real DB
+		// row would show it -- this is what lets a falsification of the fix
+		// actually be CAUGHT by the "at rest" assertions, not just error out.
+		if sessionToken, err := argString(args, 1); err == nil {
+			s.SessionTokenAtRest = sessionToken
+		}
+		if tokenHash, err := argString(args, 2); err == nil {
+			s.TokenHash = tokenHash
+		}
+		if userEmail, err := argAny(args, 3); err == nil {
+			s.UserEmail = userEmail
+		}
+		if accessToken, err := argString(args, 4); err == nil {
+			s.AccessTokenAtRest = accessToken
+		}
+		if refreshToken, err := argString(args, 5); err == nil {
+			s.RefreshTokenAtRest = refreshToken
+		}
+		if expiresAt, err := argAny(args, 6); err == nil {
+			s.ExpiresAt = expiresAt
+		}
+	} else {
+		if tokenHash, err := argString(args, 1); err == nil {
+			s.TokenHash = tokenHash
+		}
+		if userEmail, err := argAny(args, 2); err == nil {
+			s.UserEmail = userEmail
+		}
+		if expiresAt, err := argAny(args, 3); err == nil {
+			s.ExpiresAt = expiresAt
+		}
+		s.SessionTokenAtRest = nil
+		s.AccessTokenAtRest = nil
+		s.RefreshTokenAtRest = nil
 	}
 	s.State = nil
 	s.CodeVerifier = nil
@@ -926,17 +1012,16 @@ func (c *fakeConn) queryOAuthConfig(args []driver.NamedValue) (driver.Rows, erro
 	cfg, ok := c.store.configs[key]
 	if !ok || !cfg.Enabled {
 		return &fakeRows{
-			columns: []string{"tenant_id", "provider", "client_id", "client_secret", "redirect_url", "domain", "issuer", "enabled"},
+			columns: []string{"tenant_id", "provider", "client_id", "redirect_url", "domain", "issuer", "enabled"},
 		}, nil
 	}
 
 	return &fakeRows{
-		columns: []string{"tenant_id", "provider", "client_id", "client_secret", "redirect_url", "domain", "issuer", "enabled"},
+		columns: []string{"tenant_id", "provider", "client_id", "redirect_url", "domain", "issuer", "enabled"},
 		data: [][]driver.Value{{
 			cfg.TenantID.String(),
 			cfg.Provider,
 			cfg.ClientID,
-			cfg.ClientSecret,
 			cfg.RedirectURL,
 			cfg.Domain,
 			cfg.Issuer,

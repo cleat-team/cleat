@@ -213,6 +213,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conversion and does not block startup — it still logs a WARN at boot naming the replacement
   commands, but is not treated as an upgrade hazard.
 
+- **`oauth_config.client_secret` moves into tenant secrets; the plaintext column is dropped.
+  `oauth_sessions.session_token`/`access_token`/`refresh_token` are no longer stored in any
+  form, plaintext or sealed.** (cleat#1992, cleat#2295, cleat#2296)
+
+  `client_secret` follows the same `plugin.Secrets` envelope-encryption move as `dd_config`/
+  `pd_config` above, under `oauthprovider.client_secret.<provider>` (one secret per provider per
+  tenant — `oauth_config`'s own primary key is already `(tenant_id, provider)`, so no
+  per-config-id scheme is needed the way `dd_config`/`pd_config` require). No migration procedure
+  is needed for the same reason as those: **0.3.0 requires a fresh database, with no upgrade path
+  from v0.2.0** (cleat#2058, owner decision 3).
+
+  The three session-table columns took a different path than an ordinary `plugin.Secrets` move.
+  An earlier version of this change sealed them via `plugin.Payloads` instead (cleat#1992);
+  cleat-review found that broke every login on a deployment with no `--encryption-key-file`
+  set — which was every deployment shipped so far, since a nil `Payloads` fails closed rather
+  than falling back to plaintext. Since nothing reads these three columns back (session lookup
+  is by `token_hash`, a separate column, unaffected by any of this), the fix is to stop storing
+  them at all rather than to fix the seal. A config row that has no matching secret is now
+  distinguished from every other lookup failure internally (`plugin.ErrSecretNotFound`), logged
+  server-side as `secret_not_found=true` — but `/login` and `/callback` still return the same
+  generic "oauth config not found" to the caller either way. `/login` is unauthenticated, so a
+  response naming `cleatctl set-secret` or cleat's internal secret-naming scheme would hand an
+  anonymous caller both an existence oracle and detail about the deployment's own tooling
+  (cleat-review, cleat#2295). Check the worker log for `secret_not_found` when diagnosing.
+
+  **Who is affected:** anyone who queried `oauth_config.client_secret` directly, or who relied on
+  `oauth_sessions.session_token`/`access_token`/`refresh_token` holding a value (sealed or
+  plaintext) after a login — no shipped code path ever read the latter three back, so this is
+  not expected to affect a real integration. Set the client secret with
+  `cleatctl set-secret <tenant> --name oauthprovider.client_secret.<provider>` before inserting
+  or updating an `oauth_config` row. See `docs/how-to/connect-any-identity-provider.md`.
+
 - **A `cleatctl quota set` that creates a new tenant-quota row now enforces it by default.**
   (cleat#2046)
 

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -113,16 +114,33 @@ func (p *Plugin) resolveEndpoints(ctx context.Context, provider string, cfg *oau
 	}, nil
 }
 
-// oauthConfigRow represents a row from the oauth_config table.
+// oauthConfigRow represents a row from the oauth_config table, plus the
+// tenant secret that used to be one of its columns.
 type oauthConfigRow struct {
 	TenantID     uuid.UUID
 	Provider     string
 	ClientID     string
-	ClientSecret string
+	ClientSecret plugin.Secret
 	RedirectURL  string
 	Domain       string
 	Issuer       string
 	Enabled      bool
+}
+
+// OAuthClientSecretName is the tenant-secret name an oauth_config row's
+// client secret is stored under. cleat#1992.
+//
+// ONE NAME PER (TENANT, PROVIDER), not per config id like
+// datadogexport.DatadogAPIKeySecretName: oauth_config's own primary key is
+// (tenant_id, provider), so a tenant already has at most one row per
+// provider. Keying by provider alone preserves that -- there is no second
+// config of the same provider a fixed name could collide with.
+//
+// EXPORTED for the same reason DatadogAPIKeySecretName is: a caller seeding
+// or verifying an oauth_config secret (a test, tests/plugin-harness)
+// computes the name the same way rather than reimplementing the scheme.
+func OAuthClientSecretName(provider string) string {
+	return "oauthprovider.client_secret." + provider
 }
 
 // RegisterRoutes registers HTTP handlers for the OAuth flow and session
@@ -172,17 +190,32 @@ func (p *Plugin) getConfig(ctx context.Context, tenantID uuid.UUID, provider str
 	// the value in hand is the only reliable one.
 	ctx = plugin.ForTenant(ctx, tenantID)
 	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
-			SELECT tenant_id, provider, client_id, client_secret, redirect_url,
+			SELECT tenant_id, provider, client_id, redirect_url,
 			       COALESCE(domain, '') AS domain, COALESCE(issuer, '') AS issuer, enabled
 			FROM oauth_config
 			WHERE tenant_id = $1 AND provider = $2 AND enabled = true
 		`, p.dialect), tenantID, provider),
-		&cfg.TenantID, &cfg.Provider, &cfg.ClientID, &cfg.ClientSecret,
+		&cfg.TenantID, &cfg.Provider, &cfg.ClientID,
 		&cfg.RedirectURL, &cfg.Domain, &cfg.Issuer, &cfg.Enabled,
 	)
 	if err != nil {
 		return nil, err
 	}
+
+	// client_secret moved into tenant secrets, cleat#1992. Same ctx: it is
+	// already ForTenant-marked above, and plugin.Secrets reads the tenant
+	// from ctx the identical way plugin.ForTenant marks it for SQL.
+	secret, err := p.secrets.Get(ctx, OAuthClientSecretName(provider))
+	if err != nil {
+		// errors.Is(err, plugin.ErrSecretNotFound) survives this wrap, so a
+		// caller can still tell "this provider has no client secret set" (an
+		// operator misconfiguration) apart from "the secret lookup itself
+		// failed" (an infrastructure problem) -- see handleLogin/
+		// handleCallback, cleat-review's item (4) on cleat#2295.
+		return nil, fmt.Errorf("oauth-provider: client secret for %s/%s: %w", tenantID, provider, err)
+	}
+	cfg.ClientSecret = plugin.Secret(secret)
+
 	return &cfg, nil
 }
 
@@ -285,7 +318,18 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	cfg, err := p.getConfig(r.Context(), tid, provider)
 	if err != nil {
-		p.logger.Error("oauth: config lookup", "provider", provider, "error", err)
+		// errors.Is(err, plugin.ErrSecretNotFound) distinguishes "this
+		// provider has no client secret set" (an operator setup step was
+		// skipped) from every other lookup failure, and that distinction is
+		// worth the operator's attention -- but only in the log, not the
+		// response: this handler is UNAUTHENTICATED (handleLogin accepts
+		// ?tenant_id= from anyone), so an operator-actionable message
+		// naming cleat's internal secret scheme and the cleatctl command
+		// that fixes it would hand an anonymous caller both an enumeration
+		// oracle ("this provider IS configured") and detail about cleat's
+		// own tooling (cleat-review's item (4) on cleat#2295).
+		p.logger.Error("oauth: config lookup", "provider", provider, "error", err,
+			"secret_not_found", errors.Is(err, plugin.ErrSecretNotFound))
 		p.writeError(w, http.StatusInternalServerError, "oauth config not found")
 		return
 	}
@@ -426,7 +470,18 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	cfg, err := p.getConfig(r.Context(), tid, provider)
 	if err != nil {
-		p.logger.Error("oauth: config lookup", "provider", provider, "error", err)
+		// errors.Is(err, plugin.ErrSecretNotFound) distinguishes "this
+		// provider has no client secret set" (an operator setup step was
+		// skipped) from every other lookup failure, and that distinction is
+		// worth the operator's attention -- but only in the log, not the
+		// response: this handler is UNAUTHENTICATED (handleLogin accepts
+		// ?tenant_id= from anyone), so an operator-actionable message
+		// naming cleat's internal secret scheme and the cleatctl command
+		// that fixes it would hand an anonymous caller both an enumeration
+		// oracle ("this provider IS configured") and detail about cleat's
+		// own tooling (cleat-review's item (4) on cleat#2295).
+		p.logger.Error("oauth: config lookup", "provider", provider, "error", err,
+			"secret_not_found", errors.Is(err, plugin.ErrSecretNotFound))
 		p.writeError(w, http.StatusInternalServerError, "oauth config not found")
 		return
 	}
@@ -443,7 +498,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	data := url.Values{}
 	data.Set("code", code)
 	data.Set("client_id", cfg.ClientID)
-	data.Set("client_secret", cfg.ClientSecret)
+	data.Set("client_secret", cfg.ClientSecret.Reveal())
 	data.Set("redirect_uri", cfg.RedirectURL)
 	data.Set("grant_type", "authorization_code")
 	data.Set("code_verifier", codeVerifier.String)
@@ -519,7 +574,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 			p.writeError(w, http.StatusBadGateway, "issuer publishes no userinfo endpoint and returned no usable id_token")
 			return
 		}
-		p.finishLogin(w, r, tid, provider, sessionID, cfg, idTokenEmail, tokenResult.AccessToken, tokenResult.RefreshToken, tokenResult.ExpiresIn)
+		p.finishLogin(w, r, tid, provider, sessionID, cfg, idTokenEmail, tokenResult.ExpiresIn)
 		return
 	}
 	userReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, userinfoURL, nil)
@@ -556,8 +611,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		email = idTokenEmail
 	}
 
-	p.finishLogin(w, r, tid, provider, sessionID, cfg, email,
-		tokenResult.AccessToken, tokenResult.RefreshToken, tokenResult.ExpiresIn)
+	p.finishLogin(w, r, tid, provider, sessionID, cfg, email, tokenResult.ExpiresIn)
 }
 
 // finishLogin turns a verified identity into a session row and a response.
@@ -569,8 +623,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 func (p *Plugin) finishLogin(
 	w http.ResponseWriter, r *http.Request,
 	tid uuid.UUID, provider string, sessionID uuid.UUID,
-	cfg *oauthConfigRow, email string,
-	accessToken, refreshToken string, expiresIn int,
+	cfg *oauthConfigRow, email string, expiresIn int,
 ) {
 	if email == "" {
 		p.logger.Error("oauth: no email resolved", "provider", provider, "tenant", tid)
@@ -585,7 +638,9 @@ func (p *Plugin) finishLogin(
 		return
 	}
 
-	// Hash the session token for at-rest storage.
+	// Hash the session token for at-rest storage. token_hash is what
+	// middleware/extractSession actually looks a caller up by; session_token
+	// itself is not stored at all (see the comment below the ctx line).
 	tokenHash := sha256Hex(sessionToken)
 
 	var expiresAt *time.Time
@@ -594,21 +649,39 @@ func (p *Plugin) finishLogin(
 		expiresAt = &t
 	}
 
+	// ForTenant with the tid the state lookup above derived. The UPDATE below
+	// addresses the row BY ID with no tenant predicate, so the policy is what
+	// keeps a state collision from writing another tenant's session.
+	ctx := plugin.ForTenant(r.Context(), tid)
+
+	// session_token/access_token/refresh_token are NOT persisted, cleat#2295
+	// (closes cleat#2156's ask for these three; client_secret, the fourth
+	// field #2156 named, is handled in getConfig via plugin.Secrets and is
+	// unaffected by this).
+	//
+	// cleat-review found that sealing them via plugin.Payloads (the design
+	// this replaced) broke every login on any deployment that had not set
+	// --encryption-key-file -- which is every deployment shipped so far --
+	// because a nil Payloads makes Seal fail closed. The owner's fix (#2295,
+	// #2296): since nothing reads these three back (session lookup is by
+	// token_hash, below, not by session_token; access_token/refresh_token
+	// have no read path at all), storing them in any form -- plaintext or
+	// sealed -- protects nothing and only grows the blast radius of a table
+	// dump. Write NULL. A future caller that needs to read a provider access
+	// or refresh token back must add real storage for it, not resurrect
+	// these columns.
+	//
 	// Update the pre-inserted state row with the actual session data and clear
 	// the PKCE fields. The nonce is cleared with them: it is single-use by
 	// definition, and a spent nonce left in the row is a replay waiting for a
 	// state collision.
-	// ForTenant with the tid the state lookup above derived. The UPDATE
-	// addresses the row BY ID with no tenant predicate, so the policy is what
-	// keeps a state collision from writing another tenant's session.
-	_, err = p.db.Exec(plugin.ForTenant(r.Context(), tid), plugin.Rebind(`
+	_, err = p.db.Exec(ctx, plugin.Rebind(`
 			UPDATE oauth_sessions
-			SET session_token = $1, token_hash = $2, user_email = $3,
-			    access_token = $4, refresh_token = $5, expires_at = $6,
+			SET session_token = NULL, token_hash = $1, user_email = $2,
+			    access_token = NULL, refresh_token = NULL, expires_at = $3,
 			    state = NULL, code_verifier = NULL, nonce = NULL
-			WHERE id = $7
-		`, p.dialect), sessionToken, tokenHash, email, accessToken,
-		refreshToken, expiresAt, sessionID)
+			WHERE id = $4
+		`, p.dialect), tokenHash, email, expiresAt, sessionID)
 	if err != nil {
 		p.logger.Error("oauth: create session", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to create session")

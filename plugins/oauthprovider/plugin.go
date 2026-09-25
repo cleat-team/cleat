@@ -35,6 +35,7 @@ type Plugin struct {
 	logger     *slog.Logger
 	httpClient *http.Client
 	dialect    plugin.Dialect
+	secrets    plugin.Secrets
 
 	// OIDC discovery + JWKS cache for the generic `oidc` provider (cleat#1582).
 	// Reached through p.cache() rather than directly: several tests construct a
@@ -76,6 +77,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.db = env.DB
 	p.mux = env.Mux
 	p.dialect = env.Dialect
+	p.secrets = env.Secrets
 	p.httpClient = &http.Client{
 		// cleat#1565: every outbound request goes through the egress guard.
 		// Nil in tests that build an Environment directly, which falls back to
