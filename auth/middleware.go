@@ -142,8 +142,9 @@ func IsInfrastructurePath(path string) bool {
 // publicPatterns is a hand-maintained allowlist, not a generic plugin-declared
 // mechanism. It exists for endpoints that are meant to be called by parties who cannot
 // present a cleat API key -- an inbound webhook receiver with its own HMAC check
-// (plugins/webhookingest), a third-party IdP's OAuth redirect target
-// (plugins/oauthprovider) -- and would otherwise 401 before that endpoint's own
+// (plugins/webhookingest), an anonymous browser starting an OAuth login and the
+// third-party IdP's redirect back that completes it (plugins/oauthprovider,
+// cleat#2319) -- and would otherwise 401 before that endpoint's own
 // verification ever runs. Each entry is a Go 1.22+ http.ServeMux pattern
 // ("POST /ingest/{source_id}"), matched with the exact same method+wildcard semantics
 // the real mux uses.
