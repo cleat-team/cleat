@@ -521,6 +521,34 @@ func main() {
 			os.Exit(1)
 		}
 
+		// cleat#2306. Measured 2026-09-25: 7 of 18 plugins' uninstall broken on
+		// MySQL, 17 of 18 on SQL Server, and a failed reversal is not a no-op --
+		// it can leave the schema in neither shape, and on SQL Server that has
+		// already left a database PERMANENTLY unmigratable (notifications:
+		// "Cannot find the object webhook_delivery (4902)"). Refuse before the
+		// dry-run report too: a dry run that reads clean says nothing about
+		// whether the real Down SQL does, and printing it first would read as
+		// reassurance this plugin has not earned on this dialect.
+		if proven := plugin.UninstallProvenOnDialect(*uninstallPlugin, plugin.Dialect(*driver)); !proven {
+			verified := plugin.ProvenPluginNamesForDialect(plugin.Dialect(*driver))
+			verifiedDesc := "none yet"
+			if len(verified) > 0 {
+				verifiedDesc = strings.Join(verified, ", ")
+			}
+			logger.ErrorContext(context.Background(), "uninstall not verified on this dialect", "worker_id", workerID,
+				"plugin", *uninstallPlugin, "dialect", *driver, "verified_on_this_dialect", verified)
+			fmt.Fprintf(os.Stderr, "\nuninstall is supported on PostgreSQL; on %s it's verified only for: %s\n\n"+
+				"%q has no end-to-end test proving its Down chain reverses cleanly on %s (cleat#2306), "+
+				"and a broken reversal here is not a no-op -- it can leave the schema in neither shape, "+
+				"and on SQL Server that has already left a database permanently unmigratable. Nothing "+
+				"has been changed. Add a test in the shape of "+
+				"plugins/scheduledbackup/a_v4_down_keeps_uninstall_working_test.go "+
+				"(TestUninstallSchedulerBackupOnEveryDialect) and list the plugin in "+
+				"plugin.provenPluginDialects to lift this refusal.\n\n",
+				*driver, verifiedDesc, *uninstallPlugin, *driver)
+			os.Exit(1)
+		}
+
 		if *uninstallDryRun {
 			// Reports the DECISION without executing, which is the whole point:
 			// RunDownMigrations refuses before touching anything, so a dry run
