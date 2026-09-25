@@ -124,8 +124,13 @@ func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An empty body is a valid enqueue -- a bare job with no def_name,
+	// payload, or input, exactly as develop's pre-cleat#2232 hand-rolled
+	// `if len(body) > 0 { json.Unmarshal(...) }` allowed. Every other
+	// ReadJSONBody call site in this tree wants the opposite (a required
+	// body, empty is 400) -- see plugin.ReadOptionalJSONBody's doc comment.
 	var req enqueueRequest
-	if !plugin.ReadJSONBody(w, r, &req) {
+	if !plugin.ReadOptionalJSONBody(w, r, &req) {
 		return
 	}
 

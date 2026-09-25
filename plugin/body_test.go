@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,21 +13,27 @@ import (
 // TestMaxBodyRoundTripsTheLimit is cleat#2232: a route declares its own
 // ceiling by wrapping its handler in MaxBody, and the host's plugin-route
 // adapter (cmd/cleat-worker/plugin_body_limit.go) reads it back with
-// MaxBodyLimit before falling back to --plugin-max-body-size. If either side
-// of that round trip broke, every route would silently get the default
-// ceiling regardless of what it declared -- blobstore's 10 MiB PUT would be
-// capped at 1 MiB, or slacknotify's fixed interactive-callback size would
-// inherit whatever the operator set the default to.
+// MaxBodyLimit before applying it against --plugin-max-body-size. If either
+// side of that round trip broke, every route would silently get the default
+// ceiling regardless of what it declared -- slacknotify's fixed
+// interactive-callback size would inherit whatever the operator set the
+// default to.
 func TestMaxBodyRoundTripsTheLimit(t *testing.T) {
 	var called bool
 	h := MaxBody(4096, func(w http.ResponseWriter, r *http.Request) { called = true })
 
-	limit, ok := MaxBodyLimit(h)
+	limit, fromConfig, knob, ok := MaxBodyLimit(h)
 	if !ok {
 		t.Fatal("MaxBodyLimit reported false for a value MaxBody produced")
 	}
 	if limit != 4096 {
-		t.Errorf("MaxBodyLimit returned %d, want 4096", limit)
+		t.Errorf("MaxBodyLimit returned limit %d, want 4096", limit)
+	}
+	if fromConfig {
+		t.Error("MaxBodyLimit reported fromConfig=true for a value MaxBody (not MaxBodyFromConfig) produced")
+	}
+	if knob != "" {
+		t.Errorf("MaxBodyLimit reported knob %q for a plain MaxBody value, want empty", knob)
 	}
 
 	// MaxBody must still be a working http.Handler, not just a limit carrier
@@ -37,14 +44,45 @@ func TestMaxBodyRoundTripsTheLimit(t *testing.T) {
 	}
 }
 
+// TestMaxBodyFromConfigRoundTripsTheLimitAndKnob is cleat#2273: unlike
+// MaxBody, this ceiling is unconditional and carries its own operator-facing
+// name, which the host's adapter must read back verbatim to report in a 413
+// -- blobstore's max_blob_size is meaningless to an operator staring at a
+// message that instead names --plugin-max-body-size.
+func TestMaxBodyFromConfigRoundTripsTheLimitAndKnob(t *testing.T) {
+	var called bool
+	h := MaxBodyFromConfig(10*1024*1024, "max_blob_size in --plugin-config", func(w http.ResponseWriter, r *http.Request) { called = true })
+
+	limit, fromConfig, knob, ok := MaxBodyLimit(h)
+	if !ok {
+		t.Fatal("MaxBodyLimit reported false for a value MaxBodyFromConfig produced")
+	}
+	if limit != 10*1024*1024 {
+		t.Errorf("MaxBodyLimit returned limit %d, want 10485760", limit)
+	}
+	if !fromConfig {
+		t.Error("MaxBodyLimit reported fromConfig=false for a value MaxBodyFromConfig produced")
+	}
+	if knob != "max_blob_size in --plugin-config" {
+		t.Errorf("MaxBodyLimit returned knob %q, want %q", knob, "max_blob_size in --plugin-config")
+	}
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/", nil))
+	if !called {
+		t.Error("MaxBodyFromConfig's Handler did not invoke the wrapped HandlerFunc")
+	}
+}
+
 // TestMaxBodyLimitIsFalseForAnUndeclaredRoute is the other half: a route that
-// never called MaxBody must report ok=false, not a zero limit that could be
-// mistaken for "this route wants a zero-byte body". The host's adapter relies
-// on exactly this to fall back to its own default only when ok is false.
+// never called MaxBody or MaxBodyFromConfig must report ok=false, not a zero
+// limit that could be mistaken for "this route wants a zero-byte body". The
+// host's adapter relies on exactly this to fall back to its own default only
+// when ok is false.
 func TestMaxBodyLimitIsFalseForAnUndeclaredRoute(t *testing.T) {
 	plain := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
-	if limit, ok := MaxBodyLimit(plain); ok {
-		t.Errorf("MaxBodyLimit reported ok=true (limit=%d) for a plain http.HandlerFunc", limit)
+	if limit, fromConfig, knob, ok := MaxBodyLimit(plain); ok {
+		t.Errorf("MaxBodyLimit reported ok=true (limit=%d, fromConfig=%v, knob=%q) for a plain http.HandlerFunc",
+			limit, fromConfig, knob)
 	}
 }
 
@@ -87,6 +125,9 @@ func TestReadBodyNilBody(t *testing.T) {
 // http.MaxBytesReader before a plugin handler ever runs -- see
 // plugin_body_limit.go) comes back as 413 naming the exact limit, not a
 // generic read failure and not a hang trying to buffer an unbounded body.
+// With no knob attached to the request context, the message falls back to
+// naming --plugin-max-body-size -- see TestReadBodyOverTheLimitNamesTheKnob
+// for the case where a knob is attached.
 func TestReadBodyOverTheLimit(t *testing.T) {
 	const limit = 8
 	oversized := strings.Repeat("x", limit+1)
@@ -110,6 +151,32 @@ func TestReadBodyOverTheLimit(t *testing.T) {
 	}
 	if !strings.Contains(decoded["error"], "--plugin-max-body-size") {
 		t.Errorf("413 message %q does not name the knob that moves the limit", decoded["error"])
+	}
+}
+
+// TestReadBodyOverTheLimitNamesTheKnob is cleat#2273: when the host's adapter
+// attaches a knob via WithBodyLimitKnob (MaxBodyFromConfig's case, on a
+// non-exempt route), ReadBody's 413 must name THAT setting, not the global
+// flag -- an operator staring at "the limit is set by max_blob_size in
+// --plugin-config" knows exactly which knob to turn; one naming
+// --plugin-max-body-size would send them to the wrong flag entirely.
+func TestReadBodyOverTheLimitNamesTheKnob(t *testing.T) {
+	const limit = 8
+	oversized := strings.Repeat("x", limit+1)
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(oversized))
+	req = req.WithContext(WithBodyLimitKnob(context.Background(), "max_blob_size in --plugin-config"))
+	w := httptest.NewRecorder()
+	req.Body = http.MaxBytesReader(w, req.Body, limit)
+
+	if _, ok := ReadBody(w, req); ok {
+		t.Fatal("ok=true for a body over the limit")
+	}
+	msg := bodyError(t, w)
+	if !strings.Contains(msg, "max_blob_size in --plugin-config") {
+		t.Errorf("413 message %q does not name the attached knob", msg)
+	}
+	if strings.Contains(msg, "--plugin-max-body-size") {
+		t.Errorf("413 message %q names --plugin-max-body-size even though a different knob was attached", msg)
 	}
 }
 
@@ -148,23 +215,68 @@ func TestReadJSONBodyDecodesIntoDst(t *testing.T) {
 	}
 }
 
-// TestReadJSONBodyEmptyBodyIsNotAnError documents the optional-body
-// convention several plugins rely on (e.g. jobqueue's optional JSON):
-// zero bytes is treated as "nothing to decode", not as invalid JSON, and dst
-// is left untouched rather than zeroed.
-func TestReadJSONBodyEmptyBodyIsNotAnError(t *testing.T) {
+// TestReadJSONBodyEmptyBodyIsA400 pins ReadJSONBody to develop's pre-cleat#2232
+// behavior: an empty body is invalid JSON like any other, and reported as
+// 400. This is the coordinator's #2273 nit -- ReadJSONBody briefly treated an
+// empty body as "nothing to decode" universally, which silently changed
+// behavior at roughly 25 create/update call sites whose bodies are required.
+// A route that genuinely wants an optional body (jobqueue's enqueue) opts in
+// via ReadOptionalJSONBody instead; see
+// TestReadOptionalJSONBodyEmptyBodyIsNotAnError.
+func TestReadJSONBodyEmptyBodyIsA400(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(""))
 	w := httptest.NewRecorder()
 
 	dst := struct{ Name string }{Name: "unchanged"}
-	if !ReadJSONBody(w, req, &dst) {
+	if ReadJSONBody(w, req, &dst) {
+		t.Fatalf("ok=true for an empty body; want a 400, matching every non-opt-in call site's "+
+			"pre-cleat#2232 behavior. dst=%+v", dst)
+	}
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status %d, want 400 (body: %s)", w.Code, w.Body.String())
+	}
+	if dst.Name != "unchanged" {
+		t.Errorf("ReadJSONBody touched dst on a rejected empty body: %+v", dst)
+	}
+}
+
+// TestReadOptionalJSONBodyEmptyBodyIsNotAnError documents the optional-body
+// convention jobqueue's enqueue route relies on (cleat#2273): zero bytes is
+// treated as "nothing to decode", not as invalid JSON, and dst is left
+// untouched rather than zeroed. Only a caller that explicitly calls this
+// function gets that behavior -- see TestReadJSONBodyEmptyBodyIsA400 for the
+// default every other route keeps.
+func TestReadOptionalJSONBodyEmptyBodyIsNotAnError(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(""))
+	w := httptest.NewRecorder()
+
+	dst := struct{ Name string }{Name: "unchanged"}
+	if !ReadOptionalJSONBody(w, req, &dst) {
 		t.Fatalf("ok=false for an empty body; response: %s", w.Body.String())
 	}
 	if dst.Name != "unchanged" {
-		t.Errorf("ReadJSONBody touched dst on an empty body: %+v", dst)
+		t.Errorf("ReadOptionalJSONBody touched dst on an empty body: %+v", dst)
 	}
 	if w.Code != http.StatusOK {
-		t.Errorf("ReadJSONBody wrote status %d for an empty body; it must write nothing", w.Code)
+		t.Errorf("ReadOptionalJSONBody wrote status %d for an empty body; it must write nothing", w.Code)
+	}
+}
+
+// TestReadOptionalJSONBodyDecodesANonEmptyBody is the other half: a caller
+// that opts into the optional-body convention must still decode a body that
+// IS present, exactly as ReadJSONBody does.
+func TestReadOptionalJSONBodyDecodesANonEmptyBody(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"a"}`))
+	w := httptest.NewRecorder()
+
+	var dst struct {
+		Name string `json:"name"`
+	}
+	if !ReadOptionalJSONBody(w, req, &dst) {
+		t.Fatalf("ok=false for valid JSON; response: %s", w.Body.String())
+	}
+	if dst.Name != "a" {
+		t.Errorf("decoded %+v, want {a}", dst)
 	}
 }
 
