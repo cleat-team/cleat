@@ -435,6 +435,21 @@ are encrypted using AES-256-GCM before being written to the database.
 
 ---
 
+### --encryption-key-file-previous
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | Path to a file containing a PREVIOUS base64-encoded AES-256-GCM key, for rolling key rotation |
+
+Read-only: a payload sealed under this key still opens, but every new seal
+uses `--encryption-key-file`. Requires `--encryption-key-file` to also be
+set — a worker started with this flag alone refuses to start. There is no
+`admin.workers`-style gate for this the way tenant-secret rotation has; see
+[`docs/how-to/rotate-payload-encryption-key.md`](../how-to/rotate-payload-encryption-key.md)
+for the rollout sequence a rolling rotation needs to stay safe.
+
+---
+
 ### --encrypt-sensitive-payloads
 
 | Type | Default | Description |

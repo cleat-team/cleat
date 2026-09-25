@@ -623,6 +623,15 @@ func (w *worker) kill() {
 	_, _ = w.cmd.Process.Wait()
 }
 
+// hup sends SIGHUP to the worker. Unlike term(), it returns nothing to wait on: SIGHUP is not
+// supposed to end the process (cleat#1992), so there is no exit to await.
+func (w *worker) hup() {
+	if w.cmd == nil || w.cmd.Process == nil {
+		return
+	}
+	_ = syscall.Kill(-w.cmd.Process.Pid, syscall.SIGHUP)
+}
+
 // term sends SIGTERM to the worker, the signal an orchestrator sends first, and returns a channel that
 // receives the process's exit error (nil for exit status 0) once it has gone. kill() afterwards is harmless.
 func (w *worker) term() <-chan error {

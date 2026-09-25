@@ -12,6 +12,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **Security: a sharded worker (`--shards-file`) with `--encrypt-sensitive-payloads` and
+  `--encryption-key-file` set wrote `event_history` in plain text, with no error, and the
+  affected workflows still ended `done`.** (cleat#2305)
+
+  `cmd/cleat-worker/main.go`'s sharded branch declared its own `payloadEncryption` variable that
+  shadowed the one `loadPayloadEncryption` populated from the flags, so every shard's store
+  factory was built with `WithEncryption(nil, true)` — encryption silently off — regardless of
+  what `--encryption-key-file` pointed at. The non-sharded path was unaffected; this was specific
+  to `--shards-file`. Found by cleat-review reviewing #2308; a real sharded worker with a real
+  crash test now asserts against it
+  (`tests/crash/payload_encryption_rotation_test.go`,
+  `TestPayloadEncryptionShardedWorkerDoesNotWritePlaintext`).
+
+  **To upgrade:** a sharded deployment that ran with `--encrypt-sensitive-payloads` before this
+  fix has `event_history` rows written in plain text that believed they were encrypted.
+  `cleatctl reseal-payloads` does **not** repair them: it converts ciphertext sealed under a
+  previous key, and classifies a plain-text row as `unreadable` rather than as something to
+  reseal, since nothing distinguishes "plaintext" from "ciphertext under a key I don't have" at
+  that layer. There is no tool in this release that finds or reseals these rows; treat any
+  sharded deployment that ran with encryption on before this fix as having unencrypted sensitive
+  data in `event_history` for that period.
+
+- **`cmd/cleat-worker` now catches `SIGHUP` and logs it rather than exiting.** (cleat#1992)
+
+  Previously `SIGHUP` had no handler installed, so it fell through to the default action and
+  terminated the process — the same as an unhandled `SIGTERM`, but without draining in-flight
+  work first. It is now caught alongside `SIGINT`/`SIGTERM` and logged as "config/key hot-reload
+  is not implemented yet (cleat#1992), ignoring"; the process keeps running. **Who is affected:**
+  any deployment or process supervisor that sent `SIGHUP` to reload configuration, or relied on it
+  to restart the worker, now gets neither — send `SIGTERM` for a graceful drain-and-exit instead.
+
 - **cleat now requires Go 1.27 (`go 1.27.0`, `toolchain go1.27.1`), and CI, the images and the linter are pinned to it.** (cleat#2216)
 
   All eight `go.mod`/`go.work` files moved from `go 1.26.0` to `go 1.27.0` with `toolchain go1.27.1`, so the
@@ -506,6 +537,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   references.
 
 ### Added
+
+- **`--encryption-key-file-previous`: `cmd/cleat-worker` can hold a previous payload-encryption key alongside the current one, for rolling key rotation.** (cleat#1992, #2308)
+
+  `engine.PayloadEncryption` has supported a two-key ring since before this flag existed
+  (`cleatctl reseal-payloads` was already built on it); the worker never exposed it, so rotating
+  the key set by `--encryption-key-file` required stopping every worker first. `--encryption-key-file-previous`
+  is read-only — every new seal still uses `--encryption-key-file` — and requires
+  `--encryption-key-file` to also be set; a worker started with only the previous-key flag now
+  refuses to start rather than silently ignoring it. See
+  [`docs/how-to/rotate-payload-encryption-key.md`](docs/how-to/rotate-payload-encryption-key.md)
+  for the rollout sequence a rolling rotation needs to stay safe, and cleat#2311 for a
+  pre-existing gap the sequencing works around rather than closes.
 
 - **`/livez`, `/readyz`, database-reachability metrics and alert rules: a database incident now looks different from a worker incident.** (cleat#2007)
 

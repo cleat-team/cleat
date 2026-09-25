@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -1292,6 +1293,68 @@ func loadShardConfigs(path string) ([]engine.ShardConfig, error) {
 		}
 	}
 	return configs, nil
+}
+
+// ---------------------------------------------------------------------------
+// Payload encryption key loading
+// ---------------------------------------------------------------------------
+
+// loadPayloadEncryption builds a *engine.PayloadEncryption from
+// --encryption-key-file and, optionally, --encryption-key-file-previous
+// (cleat#1992). With no previous key it is the single-key ring
+// engine.NewPayloadEncryption always was. With one, the current key seals
+// every new write and the previous key is read-only -- a value already
+// sealed under it still opens (via engine.PayloadFormPreviousKey), letting a
+// worker roll onto a new key while a sibling still on the old one keeps
+// writing readable rows. The version numbers (current=2, previous=1) match
+// cmd/cleatctl/resealpayloads.go's ring, which is the only other place a
+// PayloadEncryption ring is built -- a previous key's version is never
+// persisted anywhere (see engine.PayloadEncryption's doc comment), so this
+// is a convention, not a compatibility requirement.
+//
+// Returns (nil, nil) when currentKeyFile is empty: encryption is off.
+func loadPayloadEncryption(currentKeyFile, previousKeyFile string) (*engine.PayloadEncryption, error) {
+	if currentKeyFile == "" {
+		if previousKeyFile != "" {
+			return nil, fmt.Errorf("--encryption-key-file-previous requires --encryption-key-file")
+		}
+		return nil, nil
+	}
+	currentData, err := os.ReadFile(currentKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("read encryption key file %q: %w", currentKeyFile, err)
+	}
+	currentKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(currentData)))
+	if err != nil {
+		return nil, fmt.Errorf("decode encryption key: %w", err)
+	}
+	if previousKeyFile == "" {
+		pe, err := engine.NewPayloadEncryption(strings.TrimSpace(string(currentData)))
+		if err != nil {
+			return nil, fmt.Errorf("invalid encryption key — expected a base64-encoded 256-bit AES key: %w", err)
+		}
+		return pe, nil
+	}
+	previousData, err := os.ReadFile(previousKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("read previous encryption key file %q: %w", previousKeyFile, err)
+	}
+	previousKey, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(previousData)))
+	if err != nil {
+		return nil, fmt.Errorf("decode previous encryption key: %w", err)
+	}
+	ring, err := engine.NewKeyRing(
+		engine.VersionedKey{Version: 2, Key: currentKey},
+		engine.VersionedKey{Version: 1, Key: previousKey},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("build encryption key ring: %w", err)
+	}
+	pe, err := engine.NewPayloadEncryptionWithRing(ring)
+	if err != nil {
+		return nil, fmt.Errorf("invalid encryption key ring: %w", err)
+	}
+	return pe, nil
 }
 
 // ---------------------------------------------------------------------------

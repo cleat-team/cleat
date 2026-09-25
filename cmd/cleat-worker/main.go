@@ -821,28 +821,37 @@ func main() {
 			}
 		}
 
-		// Load encryption key if configured (sharded path).
-		var payloadEncryption *engine.PayloadEncryption
+		// Load encryption key if configured (sharded path). payloadEncryption
+		// here is the OUTER variable declared above -- cleat#2305 found that
+		// this block used to shadow it with its own `var payloadEncryption
+		// *engine.PayloadEncryption`, so the sharded path's assignment below
+		// never reached the shared registry/flusher/plugin.Payloads wiring
+		// further down, which all read the outer one. Fixed by removing the
+		// shadow, not by adding a second variable to thread through.
 		if *encryptSensitivePayloads {
 			if *encryptionKeyFile == "" {
 				logger.ErrorContext(context.Background(), "--encrypt-sensitive-payloads requires --encryption-key-file", "worker_id", workerID)
 				os.Exit(1)
 			}
 		}
-		if *encryptionKeyFile != "" {
-			keyData, kerr := os.ReadFile(*encryptionKeyFile)
-			if kerr != nil {
-				logger.ErrorContext(context.Background(), "failed to read encryption key file — check that the file exists and is readable", "worker_id", workerID, "file", *encryptionKeyFile, "error", kerr)
-				os.Exit(1)
+		// loadPayloadEncryption is called unconditionally rather than only
+		// when --encryption-key-file is set: it already refuses
+		// --encryption-key-file-previous with no --encryption-key-file, and
+		// gating the call on *encryptionKeyFile != "" meant that refusal
+		// never fired -- the previous-only flag was silently ignored
+		// (cleat-review, #2308).
+		pe, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
+		if perr != nil {
+			logger.ErrorContext(context.Background(), "failed to load encryption key", "worker_id", workerID, "error", perr)
+			os.Exit(1)
+		}
+		payloadEncryption = pe
+		if payloadEncryption != nil {
+			if *encryptionKeyFilePrevious != "" {
+				logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
+			} else {
+				logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
 			}
-			keyStr := strings.TrimSpace(string(keyData))
-			pe, perr := engine.NewPayloadEncryption(keyStr)
-			if perr != nil {
-				logger.ErrorContext(context.Background(), "invalid encryption key — expected a base64-encoded 256-bit AES key", "worker_id", workerID, "error", perr)
-				os.Exit(1)
-			}
-			payloadEncryption = pe
-			logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
 		}
 		// Build stores, DB connections, and closers for each shard.
 		stores := make([]engine.WorkflowStore, len(configs))
@@ -1181,20 +1190,25 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		if *encryptionKeyFile != "" {
-			keyData, kerr := os.ReadFile(*encryptionKeyFile)
-			if kerr != nil {
-				logger.ErrorContext(context.Background(), "failed to read encryption key file", "worker_id", workerID, "error", kerr)
-				os.Exit(1)
-			}
-			keyStr := strings.TrimSpace(string(keyData))
-			pe, perr := engine.NewPayloadEncryption(keyStr)
+		// loadPayloadEncryption is called unconditionally: it already refuses
+		// --encryption-key-file-previous with no --encryption-key-file, and
+		// gating the call on *encryptionKeyFile != "" meant that refusal
+		// never fired -- the previous-only flag was silently ignored
+		// (cleat-review, #2308).
+		{
+			pe, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
 			if perr != nil {
-				logger.ErrorContext(context.Background(), "invalid encryption key", "worker_id", workerID, "error", perr)
+				logger.ErrorContext(context.Background(), "failed to load encryption key", "worker_id", workerID, "error", perr)
 				os.Exit(1)
 			}
 			payloadEncryption = pe
-			logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
+			if payloadEncryption != nil {
+				if *encryptionKeyFilePrevious != "" {
+					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
+				} else {
+					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
+				}
+			}
 		}
 
 		// Propagate encryption to the store factory.
@@ -1202,7 +1216,11 @@ func main() {
 			pgFactory.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
 		}
 
-		// Load encryption key if configured.
+		// This second load-and-propagate is a pre-existing duplicate of the
+		// block just above (same flags, same result, run unconditionally
+		// right after it) -- not introduced or removed here to keep this
+		// change to the rotation flag. Cheap and idempotent: loadPayloadEncryption
+		// re-reads the same files and builds an equivalent ring.
 		if *encryptSensitivePayloads {
 			if *driver != "postgres" {
 				log.Fatalf("[worker %s] --encrypt-sensitive-payloads requires --driver=postgres (MySQL and MSSQL are not yet supported for encryption at rest)", workerID)
@@ -1211,18 +1229,22 @@ func main() {
 				log.Fatalf("[worker %s] --encrypt-sensitive-payloads requires --encryption-key-file", workerID)
 			}
 		}
-		if *encryptionKeyFile != "" {
-			keyData, kerr := os.ReadFile(*encryptionKeyFile)
-			if kerr != nil {
-				log.Fatalf("[worker %s] Failed to read encryption key file %s: %v", workerID, *encryptionKeyFile, kerr)
-			}
-			keyStr := strings.TrimSpace(string(keyData))
-			pe, perr := engine.NewPayloadEncryption(keyStr)
+		// loadPayloadEncryption is called unconditionally, for the same
+		// reason as the block above: gating on *encryptionKeyFile != ""
+		// silently ignored a previous-only flag (cleat-review, #2308).
+		{
+			pe, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
 			if perr != nil {
-				log.Fatalf("[worker %s] Invalid encryption key — expected a base64-encoded 256-bit AES key: %v", workerID, perr)
+				log.Fatalf("[worker %s] failed to load encryption key: %v", workerID, perr)
 			}
 			payloadEncryption = pe
-			logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
+			if payloadEncryption != nil {
+				if *encryptionKeyFilePrevious != "" {
+					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
+				} else {
+					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
+				}
+			}
 		}
 
 		// Propagate encryption to the store factory.
@@ -2403,6 +2425,23 @@ func main() {
 		}
 		if tenantLim != nil {
 			tenantLim.stop()
+		}
+	}()
+
+	// SIGHUP is reserved for a future config/key reload (cleat#1992 part 2,
+	// the ReloadableKeyRing work, tracked separately as cleat#2298) -- not
+	// implemented yet. Log and ignore rather than leaving Go's default
+	// action in place, which for SIGHUP is TERMINATE: an operator sending
+	// `kill -HUP` to roll a worker onto a new key, before that reload
+	// exists, would kill the worker instead of doing nothing. A SEPARATE
+	// channel from sigCh above: SIGHUP must never enter the drain-then-
+	// cancel shutdown path SIGINT/SIGTERM do.
+	sighupCh := make(chan os.Signal, 1)
+	signal.Notify(sighupCh, syscall.SIGHUP)
+	go func() {
+		defer recoverBackgroundGoroutine(logger, workerID, "sighup-handler")
+		for range sighupCh {
+			logger.InfoContext(context.Background(), "received SIGHUP: config/key hot-reload is not implemented yet (cleat#1992), ignoring", "worker_id", workerID)
 		}
 	}()
 
