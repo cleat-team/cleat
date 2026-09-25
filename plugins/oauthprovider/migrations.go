@@ -266,5 +266,141 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE oauth_config ADD client_secret NVARCHAR(MAX);
 			`,
 		},
+		{
+			// The identity allowlist. cleat#2340 item 2, implementing
+			// docs/enterprise-identity-decision.md.
+			//
+			// ONE thing: the list itself. There was briefly a second -- an
+			// oauth_config.allowlist_enabled column deciding whether the list was
+			// consulted at all, defaulting false so an upgraded deployment kept
+			// admitting whoever it admitted before. cleat#2371 removed it, on the
+			// owner's decision that the check fails closed. It never shipped, so
+			// nothing here is a compatibility concern: v6 adds the table and no
+			// column.
+			//
+			// Why the switch was proposed, recorded because it is the argument
+			// that lost and someone will make it again: the obvious alternative --
+			// treat "no rows for this tenant+provider" as "no allowlist
+			// configured", so an empty table admits everyone -- is fail-OPEN, and
+			// it fails open in the direction that is hardest to notice. An
+			// operator who means to restrict logins to three addresses, and
+			// mistypes the tenant id on the INSERT, gets a deployment that admits
+			// anyone, with no error anywhere. The switch was one fail-closed
+			// answer to that; making the check unconditional is the other. Both
+			// refuse the mistyped INSERT, which is the property that matters. What
+			// the switch added on top was a second place for the truth to live --
+			// a table full of rows that meant nothing at all while it was false,
+			// and no way to tell that from the table by reading it.
+			//
+			// The consequence is deliberate, and stated here because a migration
+			// is where a reader looks for one: the check is unconditional and this
+			// table's only writer is still an operator's hand-written INSERT, so a
+			// tenant that has just configured OAuth denies every sign-in until a
+			// row exists for the person signing in. cleat#2340 design v1 section 2
+			// calls that "no escape hatch" and asks for it; what it costs a
+			// default install is tracked in that issue rather than here.
+			//
+			// identity_type exists because a provider's stable identifier and a
+			// person's email are different things with different failure modes.
+			// An email can be reassigned by whoever controls the domain; an OIDC
+			// `sub` and GitHub's numeric id cannot be reassigned at all. Both
+			// kinds may be present for one (tenant, provider) and EITHER
+			// matching admits, so a tenant can migrate from emails to subjects
+			// without a flag day.
+			//
+			// The value column is identity_value rather than the obvious
+			// `identity`, and that is not a style choice. IDENTITY is a T-SQL
+			// reserved word (the IDENTITY(1,1) column property), so SQL Server
+			// rejects a bare `identity` column with "Incorrect syntax near the
+			// keyword 'identity'". Measured 2026-09-25 against this migration,
+			// which failed at CREATE TABLE -- and RunMigrations is FATAL
+			// (cmd/cleat-worker/main.go), so a v6 that does not parse stops the
+			// worker booting on SQL Server at all. Note where the defect was
+			// found: the SQL Server leg of TestPluginMigrations_AllDialects was
+			// SKIPping for want of a bootable container, so the DDL had never
+			// executed anywhere, while its 900-byte width arithmetic below had
+			// been checked by hand and was correct.
+			//
+			// Quoting would fix the DDL and not the readers. This table's only
+			// writer today is an operator hand-writing an INSERT (see
+			// identityAllowed's doc comment), and each of those would have to
+			// remember the brackets on one dialect and not the others. Renamed
+			// once, here, the trap does not exist. It is named in exactly two
+			// places -- this DDL and the SELECT in identity.go.
+			//
+			// The PRIMARY KEY is all four columns, so a re-inserted row is a
+			// no-op rather than a duplicate. On PostgreSQL and MySQL the widths
+			// follow their neighbours above; SQL Server's are narrower for a
+			// reason that is not cosmetic -- see DownMSSQL's sibling comment
+			// below.
+			Version:      6,
+			TenantScoped: []string{"oauth_allowed_identities"},
+			Up: `
+				CREATE TABLE IF NOT EXISTS oauth_allowed_identities (
+					tenant_id      UUID NOT NULL,
+					provider       TEXT NOT NULL,
+					identity_type  TEXT NOT NULL DEFAULT 'email',
+					identity_value TEXT NOT NULL,
+					created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+					PRIMARY KEY (tenant_id, provider, identity_type, identity_value)
+				);
+			`,
+			UpMySQL: `
+				CREATE TABLE IF NOT EXISTS oauth_allowed_identities (
+					tenant_id      CHAR(36) NOT NULL,
+					provider       VARCHAR(64) NOT NULL,
+					identity_type  VARCHAR(16) NOT NULL DEFAULT 'email',
+					identity_value VARCHAR(255) NOT NULL,
+					created_at     TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
+					PRIMARY KEY (tenant_id, provider, identity_type, identity_value)
+				);
+			`,
+			// The widths here are the narrowest of the three dialects ON PURPOSE.
+			// A SQL Server PRIMARY KEY is clustered unless told otherwise, and a
+			// clustered index key is capped at 900 bytes. NVARCHAR(255) for both
+			// provider and identity_value plus the other two columns is
+			// 16 + 510 + 64 + 510 = 1100 bytes, which SQL Server refuses when the
+			// table is created, with "exceeds the maximum key length". 64 and 255
+			// for provider and identity_value give 16 + 128 + 32 + 510 = 686.
+			//
+			// Wording note, and please leave it: the line above used to name
+			// `CREATE TABLE` and then the word `time` in one phrase. cleat#2373 --
+			// check-plugin-table-namespace.py scans comments, so that pair parses
+			// as a DECLARATION of a table called `time`, and tenantquota's comment
+			// carries the same pair, so two plugins appeared to declare one table
+			// and Lint failed on a tree with no collision in it. Nothing was
+			// renamed; this is the same sentence about the same 900-byte cap.
+			//
+			// The note deliberately does not write the pair out. Prose ABOUT the
+			// hazard contains the hazard, and the guard cannot tell the two apart
+			// -- which is the defect, not the fix.
+			//
+			// provider fits in 64 because the value is one of the four entries in
+			// validProviders (routes.go) -- the longest, "github", is six
+			// characters. It is narrower than oauth_config.provider's 255, which
+			// is fine: this table is only ever written for a provider that
+			// parsed as valid.
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'oauth_allowed_identities')
+				CREATE TABLE oauth_allowed_identities (
+					tenant_id      UNIQUEIDENTIFIER NOT NULL,
+					provider       NVARCHAR(64) NOT NULL,
+					identity_type  NVARCHAR(16) NOT NULL DEFAULT 'email',
+					identity_value NVARCHAR(255) NOT NULL,
+					created_at     DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
+					PRIMARY KEY (tenant_id, provider, identity_type, identity_value)
+				);
+			`,
+			Down: `
+				DROP TABLE IF EXISTS oauth_allowed_identities;
+			`,
+			DownMySQL: `
+				DROP TABLE IF EXISTS oauth_allowed_identities;
+			`,
+			DownMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'oauth_allowed_identities')
+				DROP TABLE oauth_allowed_identities;
+			`,
+		},
 	}
 }

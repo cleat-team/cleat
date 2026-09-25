@@ -33,7 +33,7 @@ func TestClientSecretFlowsFromTenantSecretsIntoTheTokenExchange(t *testing.T) {
 	})
 	mockMux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"email":"user@example.com"}`))
+		w.Write([]byte(`{"email":"user@example.com","email_verified":true}`))
 	})
 	mockSrv := httptest.NewServer(mockMux)
 	defer mockSrv.Close()
@@ -55,6 +55,10 @@ func TestClientSecretFlowsFromTenantSecretsIntoTheTokenExchange(t *testing.T) {
 	}
 	store.mu.Unlock()
 	store.AddOAuthConfig(testTenantID, "google", "cid", wantSecret, "http://localhost/cb", "", true)
+	// The login has to be admitted by the allowlist before this test can observe
+	// the client_secret at all: since cleat#2371 the check is unconditional, so
+	// an empty allowlist refuses with 403 and the token exchange never runs.
+	store.AddAllowedIdentity(testTenantID, "google", identityTypeEmail, "user@example.com")
 
 	req := httptest.NewRequest("GET", "/oauth/google/callback?code=x&state=secret-flow-state", nil)
 	rec := httptest.NewRecorder()
@@ -182,7 +186,7 @@ func TestSessionAccessRefreshTokensAreNotPersisted(t *testing.T) {
 	})
 	mockMux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"email":"user@example.com"}`))
+		w.Write([]byte(`{"email":"user@example.com","email_verified":true}`))
 	})
 	mockSrv := httptest.NewServer(mockMux)
 	defer mockSrv.Close()
@@ -203,6 +207,9 @@ func TestSessionAccessRefreshTokensAreNotPersisted(t *testing.T) {
 	}
 	store.mu.Unlock()
 	store.AddOAuthConfig(testTenantID, "google", "cid", "cs", "http://localhost/cb", "", true)
+	// Same precondition as the sibling above: cleat#2371 made the allowlist check
+	// unconditional, so a callback that expects 200 has to name who is admitted.
+	store.AddAllowedIdentity(testTenantID, "google", identityTypeEmail, "user@example.com")
 
 	req := httptest.NewRequest("GET", "/oauth/google/callback?code=x&state=not-persisted-state", nil)
 	rec := httptest.NewRecorder()

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"testing"
 
 	"github.com/google/uuid"
@@ -70,14 +71,14 @@ func TestARealLoginStoresNoTokensOnAnyDialect(t *testing.T) {
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
 				t.Fatalf("oauthprovider migrations on %s: %v", be.Name, err)
 			}
-			// RunMigrations creates oauth_config and oauth_sessions (and, on
-			// MSSQL, their tenant_isolation security policies) directly in
-			// be.DB, which PluginTestBackend reuses across runs rather than
-			// recreating -- and be.Cleanup only closes the pool, it never
-			// runs this plugin's Down SQL. Left behind, the next
+			// RunMigrations creates oauth_config, oauth_sessions and
+			// oauth_allowed_identities (and, on MSSQL, their tenant_isolation
+			// security policies) directly in be.DB, which PluginTestBackend
+			// reuses across runs rather than recreating -- and be.Cleanup only
+			// closes the pool, it never runs this plugin's Down SQL. Left behind, the next
 			// `go test ./...` against this same shared test database fails
-			// engine.TestEveryTenantOwnedTableIsEmptiedByDropTenant on both
-			// tables (cleat-review, #2295 at 831a66fb) -- the same shape
+			// engine.TestEveryTenantOwnedTableIsEmptiedByDropTenant on every
+			// one of them (cleat-review, #2295 at 831a66fb) -- the same shape
 			// #2271 found and fixed for slacknotify's slack_config.
 			// Registered after RunMigrations but before be.Cleanup so it
 			// always runs first (defers unwind LIFO), whether this subtest
@@ -121,7 +122,7 @@ func TestARealLoginStoresNoTokensOnAnyDialect(t *testing.T) {
 			// would be refused by the policy's BLOCK predicate. tenant_secrets
 			// cleanup below needs the same connection for the same reason.
 			fixtureDB := be.CrossTenantConn(t, ctx,
-				"oauthprovider real-dialect login fixture: seeds the config row a real /login reads")
+				"oauthprovider real-dialect login fixture: seeds the config and allowlist rows a real /login reads")
 			const redirectURL = "http://localhost/oauth/google/callback"
 
 			// cleat#2340: OAuth login is Postgres-only in this release, so on
@@ -216,6 +217,27 @@ func TestARealLoginStoresNoTokensOnAnyDialect(t *testing.T) {
 				t.Fatalf("seed oauth_config: %v", err)
 			}
 
+			// The allowlist is a PRECONDITION of the 200 below, not an
+			// incidental fixture: since cleat#2371 the check runs on every
+			// deployment, so a (tenant, provider) pair with no rows here is
+			// refused 403 before the token exchange and none of the at-rest
+			// assertions further down can be observed. Written through
+			// fixtureDB for the same reason oauth_config is -- the table is
+			// TenantScoped (migration 6) and be.DB carries no tenant context.
+			//
+			// An `email` row, against a mock IdP that now publishes
+			// email_verified: an unverified address is carried but cannot
+			// match an email row (identity.go's resolvedIdentity), so the
+			// mock's claim and this row's type are one decision between them.
+			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
+				`INSERT INTO oauth_allowed_identities
+					   (tenant_id, provider, identity_type, identity_value)
+					 VALUES ($1, $2, $3, $4)`,
+				tenantID.String(), "google", identityTypeEmail, "real-dialect-user@example.com",
+			); err != nil {
+				t.Fatalf("seed oauth_allowed_identities: %v", err)
+			}
+
 			// A mock IdP -- real HTTP, fake identity, the same technique
 			// TestSessionAccessRefreshTokensAreNotPersisted uses, so /login's
 			// redirect and /callback's token exchange both complete without
@@ -230,7 +252,10 @@ func TestARealLoginStoresNoTokensOnAnyDialect(t *testing.T) {
 			})
 			mockMux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				w.Write([]byte(`{"email":"real-dialect-user@example.com"}`))
+				// email_verified is what makes the address eligible to match the
+				// `email` allowlist row seeded above; the sibling mock in
+				// oauthprovider_behavioral_test.go carries it for the same reason.
+				w.Write([]byte(`{"email":"real-dialect-user@example.com","email_verified":true}`))
 			})
 			mockSrv := httptest.NewServer(mockMux)
 			defer mockSrv.Close()
@@ -333,7 +358,7 @@ func cleanupOauthproviderSchema(t *testing.T, conn *sql.DB, dialect testutil.Dia
 	t.Helper()
 	ctx := context.Background()
 	const pluginName = "oauth-provider"
-	tables := []string{"oauth_sessions", "oauth_config"}
+	tables := createdTables()
 
 	exec := func(query string) {
 		if _, err := conn.ExecContext(ctx, query); err != nil {
@@ -370,4 +395,55 @@ func cleanupOauthproviderSchema(t *testing.T, conn *sql.DB, dialect testutil.Dia
 	if dialect == testutil.DialectPostgres {
 		exec(`DELETE FROM admin.plugin_tables WHERE plugin_name = '` + pluginName + `'`)
 	}
+}
+
+// createdTables names every table this plugin's migrations create, read out of
+// the migration DDL rather than listed by hand.
+//
+// THE LIST USED TO BE THE LITERAL []string{"oauth_sessions", "oauth_config"},
+// and the two halves of this cleanup disagreed from the moment a migration
+// added a third table. The ledger row is deleted so that a re-run applies the
+// migrations "fresh rather than finding them already recorded against tables
+// that are gone" -- but each CREATE TABLE IF NOT EXISTS is then a no-op against
+// the table the PREVIOUS run left standing, and the migration never runs again.
+// PostgreSQL is the backend that reuses a database across runs, so it is the
+// one where that is reachable.
+//
+// That is what happened here: oauth_allowed_identities survived a run with a
+// later-revised column name, migration v6 re-ran as a no-op, and a real
+// /callback answered 500 {"error":"failed to evaluate the identity allowlist"}
+// -- `column "identity_value" does not exist`, against a table whose primary
+// key still said `identity`. Reproduced directly:
+//
+//	docker exec <pg> psql -U test -d test -c \
+//	  "SELECT identity_type, identity_value FROM oauth_allowed_identities ..."
+//	ERROR:  column "identity_value" does not exist
+//
+// The fake driver in oauthprovider_behavioral_test.go had been answering that
+// same SELECT happily, because a fake matches the Go string it is handed rather
+// than a real schema; only a real dialect can disagree with the DDL, which is
+// the whole reason this file exists.
+//
+// The scan over-matches deliberately: a CREATE TABLE inside a comment, or one
+// this plugin only ever drops, both land in the result, and both are harmless
+// because every drop below is DROP TABLE IF EXISTS. Missing a table is the
+// direction that costs, and it is the direction a hand-written list cannot
+// detect in itself.
+func createdTables() []string {
+	re := regexp.MustCompile(
+		`(?i)CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-z_][a-z0-9_]*)`)
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range (&Plugin{}).Migrations() {
+		for _, up := range []string{m.Up, m.UpMySQL, m.UpMSSQL} {
+			for _, match := range re.FindAllStringSubmatch(up, -1) {
+				if seen[match[1]] {
+					continue
+				}
+				seen[match[1]] = true
+				out = append(out, match[1])
+			}
+		}
+	}
+	return out
 }
