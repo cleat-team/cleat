@@ -117,7 +117,7 @@ func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, er
 	if input.EventType != "" {
 		query += fmt.Sprintf(" AND e.event_type = $%d", argIdx)
 		args = append(args, input.EventType)
-		argIdx++ //nolint:ineffassign // Deliberate: keeps the placeholder counter correct so the next clause added below cannot silently reuse this one's $N. Deleting it is a latent SQL bug, not a cleanup.
+		argIdx++ //nolint:ineffassign,staticcheck // Deliberate: keeps the placeholder counter correct so the next clause added below cannot silently reuse this one's $N. Deleting it is a latent SQL bug, not a cleanup.
 	}
 
 	// plugin.LimitClause, not a literal "LIMIT 1": SQL Server has no LIMIT,

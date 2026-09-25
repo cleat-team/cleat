@@ -16,7 +16,9 @@
 // working-directory instead.
 module github.com/cleat-team/cleat/tests/plugin-harness
 
-go 1.26.0
+go 1.27.0
+
+toolchain go1.27.1
 
 require (
 	github.com/cleat-team/cleat v0.2.0

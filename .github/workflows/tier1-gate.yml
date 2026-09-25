@@ -195,7 +195,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
       - name: Sharding self-test (offline)
         run: scripts/tier-gate.sh --self-test
       - name: Verify the 2 engine shards union to the full test list
@@ -386,7 +386,7 @@ jobs:
         uses: actions/setup-go@v7
         if: github.event_name != 'merge_group'
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -592,7 +592,7 @@ jobs:
         uses: actions/setup-go@v7
         if: github.event_name != 'merge_group'
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - name: Setup Python
         uses: actions/setup-python@v7

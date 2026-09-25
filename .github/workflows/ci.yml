@@ -5,12 +5,11 @@
 #
 # Jobs:
 #   lint              — go vet, ruff, shellcheck, clippy
-#   lint-go           — gofmt, then golangci-lint. As of 2026-08-08 that is
-#                       six linters — govet, misspell, ineffassign, gosimple,
-#                       staticcheck, unconvert — over every .go file in the
-#                       repo, test files included. errcheck, gosec, gocyclo
-#                       and unused stay disabled, with their measured backlogs
-#                       and the reasoning in .golangci.yml.
+#   lint-go           — gofmt, then golangci-lint v2 over every .go file in
+#                       every first-party module, test files included. Which
+#                       linters run, which are off with their measured
+#                       backlogs, and every exclusion with its reason are in
+#                       .golangci.yml.
 #
 #                       Do not restate that list here when it changes; say
 #                       where it lives. This line has been wrong twice. It
@@ -125,9 +124,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action == 'edited' && !github.event.changes.base && github.run_id || github.ref) || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  GO_VERSION_STABLE: "1.26"
-
 # ---------------------------------------------------------------------------
 # Permissions
 # ---------------------------------------------------------------------------
@@ -215,6 +211,16 @@ jobs:
         run: |
           scripts/check-onboarding-go-version.sh --self-test
           scripts/check-onboarding-go-version.sh
+
+      # ONE source for the Go toolchain: go.mod's `toolchain` line (cleat#2216). CI floated on
+      # `go-version: stable` (which resolved to 1.27.1 the day #2215's panic appeared) and one workflow sat
+      # on a hard-coded 1.26. Every go.mod/go.work carries the same go+toolchain pair, every setup-go step
+      # reads go-version-file, and every `FROM golang:` is the exact toolchain. Exit 2 (UNMEASURED) is a
+      # failure of the check and fails the job just the same.
+      - name: Go toolchain pins guard
+        run: |
+          python3 scripts/check-go-toolchain-pins.py --self-test
+          python3 scripts/check-go-toolchain-pins.py
 
       # Secret scanning. Nothing in this repo looked for credentials until
       # 2026-09-05: gosec's G101 is not that tool (it fired 3 times here and was
@@ -596,7 +602,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       # Must run after Setup Go (it shells out to `go mod tidy -diff`), unlike
       # the package-coverage guard above, which is pure bash.
@@ -1104,7 +1110,9 @@ jobs:
       - name: golangci-lint (all first-party modules)
         run: |
           set -uo pipefail
-          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.7
+          # v2, built for the Go 1.27 toolchain this job runs (cleat#2216). v1.64.7 could not read 1.27's
+          # export data and reported nothing, so the gate was silent on the code it existed to check.
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
           cfg="$PWD/.golangci.yml"
           mods="$(find . -name go.mod \
                     -not -path './node_modules/*' -not -path '*/node_modules/*' \
@@ -1121,6 +1129,36 @@ jobs:
             ( cd "$m" && golangci-lint run --timeout=5m -c "$cfg" ./... ) || rc=1
             echo "::endgroup::"
           done
+
+          # A known-positive, every run. A lint that cannot fail reports the same green as one that passed, and
+          # this one already did once: under a toolchain it could not read, v1 reported nothing at all. A
+          # scratch module with a hard-coded credential (G101), an ineffectual assignment and a misspelling
+          # must be REPORTED under this exact config, by all three linters. If it is not, the job fails as
+          # UNMEASURED: a failure of the gate, not a finding about the tree.
+          echo "::group::golangci-lint known-positive"
+          canary="$(mktemp -d)"
+          printf 'module canary\n\ngo 1.27.0\n' > "$canary/go.mod"
+          cat > "$canary/canary.go" <<'GO'
+          package canary
+
+          // recieve is deliberately misspelled.
+          const dbPassword = "xQ9vLm2ZpR7kN4wY8tB3fH6jC1"
+
+          func F() int {
+          	x := 1
+          	x = 2
+          	return x
+          }
+          GO
+          out="$( cd "$canary" && golangci-lint run --timeout=2m -c "$cfg" ./... 2>&1 )" && crc=0 || crc=$?
+          printf '%s\n' "$out"
+          for want in '(gosec)' '(ineffassign)' '(misspell)'; do
+            if ! printf '%s' "$out" | grep -qF "$want"; then
+              echo "::error title=UNMEASURED::the planted known-positive was not reported by $want (exit $crc): this lint cannot fail, whatever it says about the tree -- a failure of the gate, not a finding about the tree" >&2
+              rc=2
+            fi
+          done
+          echo "::endgroup::"
           exit $rc
 
   # -------------------------------------------------------------------------
@@ -1151,7 +1189,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: ${{ env.GO_VERSION_STABLE }}
+          go-version-file: go.mod
           cache: true
 
       - uses: actions/setup-python@v7
@@ -1180,7 +1218,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       # CGO on, as above. A vulnerability scan that excludes the CGo path is
       # scanning something other than what ships -- and wasmtime is reached
@@ -1207,7 +1245,7 @@ jobs:
       # above is. Running it against the two uncovered modules on 2026-08-08
       # found only GO-2026-5856 (crypto/tls, fixed in go1.26.5), which is a
       # standard-library finding the root module reports too and which CI's
-      # `go-version: stable` toolchain does not have. No module-specific
+      # toolchain (go.mod's, via go-version-file) did not have at the time. No module-specific
       # vulnerability was hiding here today. What was missing was the coverage.
       #
       # The loop fails if it finds no modules at all, because a scan that
@@ -1289,6 +1327,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # A LABEL, NOT A TOOLCHAIN. It is only here because the job name below renders it, and the job
+        # names are required status checks ("Test Go (core) on 1.26", .github/required-checks.txt):
+        # renaming them needs a branch-protection change, not a workflow edit. The toolchain every job
+        # runs is go.mod's (`go-version-file: go.mod`), which is 1.27.1 -- see
+        # scripts/check-go-toolchain-pins.py, which allows exactly this one literal and nothing else.
         go-version: ["1.26"]
         package:
           # cleat/ is a SEPARATE Go module (see the replace directive in
@@ -1429,7 +1472,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: ${{ matrix.go-version }}
+          go-version-file: go.mod
 
       - name: Setup Rust + wasm32-wasip1 (Rust WASM tests)
         if: matrix.package.name == 'internal'
@@ -1871,7 +1914,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - name: Run fuzz tests
         run: |
@@ -1911,7 +1954,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - name: Run benchmarks
         run: go test -bench=. -benchmem -benchtime=30s ./benchmarks/ | tee bench-output.txt
@@ -1984,7 +2027,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       # Must match the CC template in .goreleaser.yml's cleat-worker build. If
       # they drift, the arm64 link fails here rather than at the tag.
@@ -2222,7 +2265,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -2310,7 +2353,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -2388,7 +2431,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       # The third job that sweeps ./engine/... unfiltered -- see "Run
       # integration tests" below -- and therefore the third that builds a Java

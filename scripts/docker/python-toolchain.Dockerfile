@@ -101,7 +101,7 @@
 # Why this is worth the lines: these are the only tests that exercise
 # componentCallRun and the Component Model callback path (engine/component_cgo.go).
 # Editing that file with them skipping means editing code nothing local covers.
-FROM golang:1.26-bookworm
+FROM golang:1.27.1-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3 python3-pip python3-venv ca-certificates curl \

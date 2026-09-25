@@ -1,6 +1,8 @@
 module github.com/cleat-team/cleat/examples
 
-go 1.26.0
+go 1.27.0
+
+toolchain go1.27.1
 
 require (
 	github.com/cleat-team/cleat/cleat v0.0.0
@@ -12,6 +14,11 @@ require (
 	github.com/bytecodealliance/wasmtime-go/v48 v48.0.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	// cleat/'s own packages (cleat/dagrun, cleat/cleattest, ...) transitively
+	// import the root module (plugins/dag for dagrun, engine for cleattest),
+	// so examples needs both replaces, not just cleat/'s -- a replace directive
+	// is not transitive across module boundaries.
+	github.com/cleat-team/cleat v0.2.0 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-sql-driver/mysql v1.10.1 // indirect
@@ -45,12 +52,6 @@ require (
 	google.golang.org/protobuf v1.36.12 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-// cleat/'s own packages (cleat/dagrun, cleat/cleattest, ...) transitively
-// import the root module (plugins/dag for dagrun, engine for cleattest),
-// so examples needs both replaces, not just cleat/'s -- a replace directive
-// is not transitive across module boundaries.
-require github.com/cleat-team/cleat v0.2.0 // indirect
 
 replace (
 	github.com/cleat-team/cleat => ../

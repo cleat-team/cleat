@@ -12,6 +12,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **cleat now requires Go 1.27 (`go 1.27.0`, `toolchain go1.27.1`), and CI, the images and the linter are pinned to it.** (cleat#2216)
+
+  All eight `go.mod`/`go.work` files moved from `go 1.26.0` to `go 1.27.0` with `toolchain go1.27.1`, so the
+  release is built, tested and linted on the toolchain users will run. **To upgrade:** building from source
+  needs Go 1.27; with `GOTOOLCHAIN=auto` (the default) an older `go` downloads 1.27.1 itself. The container
+  images build on `golang:1.27.1-bookworm`, pinned by digest. Nothing about the runtime, the WASM ABI or the
+  wire format changed.
+
+  For contributors: every `actions/setup-go` step now reads `go-version-file: go.mod` (go.work for the
+  lint job); `go-version: stable` and hard-coded versions are gone, and `scripts/check-go-toolchain-pins.py`
+  fails a PR that brings one back (it also checks that every module carries the same `toolchain` line and
+  that every `FROM golang:` is that exact version). The job names `Test Go (... ) on 1.26` are unchanged
+  because they are required status checks; the `1.26` in them is a label, not the toolchain. golangci-lint
+  moved from v1.64.7, which could not read Go 1.27's export data and reported nothing, to v2.14.0, with
+  the same set of checks (`.golangci.yml` is now the v2 format) and a planted known-positive that must be
+  reported on every run.
+
 - **Every `/api/admin/*` route is off until `--enable-admin-api` is set, and answers 404 while it is off.** (cleat#2267)
 
   `POST`/`GET /api/admin/drain` answered 202 to any tenant's ordinary API key, so any tenant could take

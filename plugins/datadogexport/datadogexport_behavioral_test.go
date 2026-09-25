@@ -284,7 +284,7 @@ func (c *fakeConn) execUpdateConfig(query string, args []driver.NamedValue) (dri
 				// Ineffectual only because this is the last SET clause. It
 				// keeps the positional counter correct so the next clause
 				// added below cannot silently reuse this one's $N.
-				argIdx++ //nolint:ineffassign // trailing counter; see above
+				argIdx++ //nolint:ineffassign,staticcheck // trailing counter; see above
 			}
 
 			cfg.updatedAt = time.Now()

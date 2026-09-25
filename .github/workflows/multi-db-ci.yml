@@ -209,7 +209,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       # Java and Gradle, in a job about databases, because `./engine/...`
       # below is unfiltered and TestJavaWorkflowExecute lives in ./engine.
@@ -346,7 +346,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       # The second of the two jobs that sweep ./engine/... unfiltered, so the
       # same Java toolchain and the same Gradle cache. See the long note in
@@ -475,7 +475,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - name: Create cleat database on MSSQL
         run: |

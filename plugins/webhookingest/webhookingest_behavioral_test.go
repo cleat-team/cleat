@@ -723,7 +723,7 @@ func (c *fakeConn) queryAwaitEvents(query string, args []driver.NamedValue) (dri
 		// makes the next filter added below read the right $N instead of
 		// silently reusing this one's. Same reasoning as the //nolint'd
 		// increments in this plugin's own host_functions.go.
-		nextArg++ //nolint:ineffassign // trailing counter; see above
+		nextArg++ //nolint:ineffassign,staticcheck // trailing counter; see above
 	}
 
 	// Sort by received_at DESC, take first

@@ -116,7 +116,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
       - name: Check tools
         run: make tools-go
       # tests/plugin-harness is its own Go module since the
@@ -167,7 +167,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
       # wasm32-unknown-unknown, not wasm32-wasip1: `cleat build --target rust`
       # compiles for the former (cmd/cleat/build_rust.go). Without it
       # TestPluginCalls_Wasm_Rust skips, and it is the only test anywhere that
@@ -419,7 +419,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
       # This job WAS vacuous, and the budget below is what said so.
       #
       # It provisions PostgreSQL, MySQL and SQL Server, sets all three DSNs, and
@@ -551,7 +551,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
       # tests/plugin-harness is its own Go module since the
       # root<->cleat/ module cycle was broken (it imports cleat/cleattest and
       # cleat/wasmtest; the root module must not). `go test
