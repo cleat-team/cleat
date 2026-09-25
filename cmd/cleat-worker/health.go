@@ -115,8 +115,12 @@ var dbRecoveryGrace = 30 * time.Second
 //     heartbeat interval plus the call deadline). Otherwise nothing is watching the database, "it has not
 //     answered" is only the absence of asking, and the loop is wedged. Without this an unwatched verdict
 //     never expires.
-//  3. Or the database answered again within dbRecoveryGrace: the loops it was holding resume only when the
-//     driver returns.
+//  3. Or the database answered again within dbRecoveryGrace AND the loop went quiet during the outage that
+//     just ended (no earlier than one interval before it began): the loops it was holding resume only when
+//     the driver returns. The second condition matters: a single missed deadline is an "outage", and
+//     without it every such miss opened a grace that excused EVERY stale loop, so a loop wedged while the
+//     database was healthy stayed live for as long as the misses kept coming (cleat-review probe: one miss
+//     every ~26s kept /livez 200 for 17 minutes).
 //
 // Before anything has been observed there is nothing to explain a loop with.
 func (w *Worker) databaseExplainsStaleLoop(db dbSnapshot, l staleLoop) bool {
@@ -124,7 +128,8 @@ func (w *Worker) databaseExplainsStaleLoop(db dbSnapshot, l staleLoop) bool {
 		return false
 	}
 	now := w.dbReach.now()
-	if !db.RecoveredAt.IsZero() && db.Reachable && now.Sub(db.RecoveredAt) < dbRecoveryGrace {
+	if !db.RecoveredAt.IsZero() && db.Reachable && now.Sub(db.RecoveredAt) < dbRecoveryGrace &&
+		!l.Since.Before(db.OutageStart.Add(-l.Interval)) {
 		return true
 	}
 	if db.LastSuccessStart.After(l.Since.Add(l.Interval)) {

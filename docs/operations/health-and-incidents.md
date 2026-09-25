@@ -11,7 +11,7 @@ outage and a worker fault look different to a load balancer, to Kubernetes, and 
 | `GET /api/admin/health` | the same facts with the detail (needs an API key) | always 200 | (401 without a key) |
 
 **`/livez` does not look at the database.** A database outage must not restart workers: restarting cannot
-fix it, and every restart strands the worker's in-flight runs. That includes the loops it causes to stall: a background loop whose database call is hanging goes stale after a few of its intervals, and while the database is known to be unreachable such a loop does not fail `/livez` (it is listed under `stale_loops` on `/api/admin/health`, with `loops_blocked_on_database`). A loop that is stuck while the database answers still does. Measured against a real `docker pause`: without this, `/livez` answered 503 six seconds in and a kubelet would have restarted every worker. `/readyz` does look at it, so a worker that
+fix it, and every restart strands the worker's in-flight runs. That includes the loops it causes to stall: a background loop whose database call is hanging goes stale after a few of its intervals, and a loop the database is holding does not fail `/livez` (it is listed under `stale_loops` on `/api/admin/health`, with `loops_blocked_on_database`; how that is decided is under [How the database is measured](#how-the-database-is-measured)). A loop that is stuck while the database answers still does. Measured against a real `docker pause`: without this, `/livez` answered 503 six seconds in and a kubelet would have restarted every worker. `/readyz` does look at it, so a worker that
 cannot reach its database stops receiving traffic it cannot serve, and is left running.
 
 ## What the bodies say
@@ -61,8 +61,12 @@ review measurement showed the simpler version wrong:
   "it has not answered" is only the absence of asking, and `/livez` stops excusing stale loops. When a hung
   call finally returns, that counts as an observation, or the verdict would look abandoned half a second
   before the next probe.
-- **A grace after recovery.** For 30 seconds after the database answers again, stale loops are still put
-  down to the outage: the loops that were stuck in a call resume only when the driver returns.
+- **A grace after recovery, for the loops that outage held.** For 30 seconds after the database answers
+  again, a stale loop that went quiet during the outage that just ended is still put down to it: the loops
+  that were stuck in a call resume only when the driver returns. A loop that went quiet BEFORE the outage
+  began gets no grace. Without that, one missed deadline (which is an "outage" of a few seconds) excused
+  every stale loop for 30 seconds, and a loop wedged while the database was healthy stayed live for
+  17 minutes under a miss every 26 seconds.
 
 Measured against a real 50-second `docker pause`, sampling every second: `/livez` 200 throughout the pause
 and for 25 seconds after unpausing, `/readyz` 503 with `database_unreachable` during and 200 one second after.

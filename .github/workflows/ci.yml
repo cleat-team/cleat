@@ -2647,8 +2647,11 @@ jobs:
               exit 2
             fi
             printf '%s\n' "$body" > "/tmp/scrape-$port.txt"
-            out="$(docker run --rm -i --entrypoint promtool prom/prometheus:v3.14.0 check metrics < "/tmp/scrape-$port.txt" 2>&1)"
-            rc=$?
+            # `&& rc=0 || rc=$?`, not `out=$(...); rc=$?`: Actions runs this under `bash -e -o pipefail`, so a
+            # bare assignment from a command that exits 3 ends the step before rc is read. A healthy worker
+            # always exits 3 here (style findings), which failed this job on every run and stopped the
+            # integration tests from ever executing (cleat-review, #2263).
+            out="$(docker run --rm -i --entrypoint promtool prom/prometheus:v3.14.0 check metrics < "/tmp/scrape-$port.txt" 2>&1)" && rc=0 || rc=$?
             case "$rc" in
               0) ;;
               # Exit 3 is promtool's STYLE lint (a counter's HELP name without _total, a gauge named *_count),

@@ -39,8 +39,10 @@ type dbReachability struct {
 	// has expired.
 	lastObserved time.Time
 	inFlight     int
-	// recoveredAt is when the database last went from unreachable to reachable, for the recovery grace.
+	// recoveredAt is when the database last went from unreachable to reachable, and outageStart is when that
+	// outage began, for the recovery grace: it excuses only loops that went quiet DURING that outage.
 	recoveredAt time.Time
+	outageStart time.Time
 
 	// clock is time.Now in production; tests replace it.
 	clock func() time.Time
@@ -64,6 +66,7 @@ type dbSnapshot struct {
 	LastElapsed  time.Duration
 	LastObserved time.Time
 	RecoveredAt  time.Time
+	OutageStart  time.Time
 	InFlight     int
 	Superseded   int64
 	// LastSuccessStart is when the latest successful bounded call BEGAN.
@@ -128,6 +131,7 @@ func (r *dbReachability) observe(started, now time.Time, elapsed time.Duration, 
 		if wasKnown && !wasReachable {
 			t, outage = dbBecameReachable, now.Sub(r.failingSince)
 			r.recoveredAt = now
+			r.outageStart = r.failingSince
 		}
 		r.failingSince = time.Time{}
 	} else {
@@ -153,7 +157,7 @@ func (r *dbReachability) snapshotLocked() dbSnapshot {
 		Known: r.known, Reachable: r.reachable, Failures: r.failures,
 		LastSuccess: r.lastSuccess, FailingSince: r.failingSince,
 		LastError: r.lastErr, LastElapsed: r.lastElapsed,
-		LastObserved: r.lastObserved, RecoveredAt: r.recoveredAt, InFlight: r.inFlight, Superseded: r.superseded,
+		LastObserved: r.lastObserved, RecoveredAt: r.recoveredAt, OutageStart: r.outageStart, InFlight: r.inFlight, Superseded: r.superseded,
 		LastSuccessStart: r.lastSuccessStart,
 	}
 }

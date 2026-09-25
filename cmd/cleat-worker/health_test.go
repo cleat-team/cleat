@@ -520,3 +520,46 @@ func TestAHungCallsReturnRefreshesTheVerdictWithoutChangingIt(t *testing.T) {
 		t.Errorf("a returned call is still counted in flight: %d", after.InFlight)
 	}
 }
+
+// cleat-review's probe on 9a4132fc: a loop wedged while the database is healthy, plus one missed
+// deadline every ~26s, kept /livez at 200 for 17 minutes. Each miss is an "outage" of a few seconds, and
+// its recovery opened a grace that excused EVERY stale loop. The grace is for the loops THAT outage held.
+func TestTheRecoveryGraceExcusesOnlyLoopsThatWentQuietDuringTheOutage(t *testing.T) {
+	api := newTestAPIServer(&mockStore{})
+	w := api.worker
+	clk := sharedClock(w)
+	w.healthTracker.setInterval("held", time.Second)
+	w.healthTracker.setInterval("wedged", time.Second)
+
+	// "wedged" stops ticking now, for a reason that is not the database. Both loops are registered and tick.
+	w.healthTracker.registerLoop("held")
+	w.healthTracker.registerLoop("wedged")
+	w.healthTracker.recordRun("held")
+	w.healthTracker.recordRun("wedged")
+	probeOK(w)
+	clk.advance(time.Minute)
+	// "held" keeps ticking until the outage begins (the database then holds its call).
+	w.healthTracker.recordRun("held")
+	clk.advance(200 * time.Millisecond)
+	probeFail(w) // one missed deadline: the outage begins
+	clk.advance(10 * time.Second)
+	probeOK(w) // and ends; the grace opens
+	livez := func() (int, map[string]any) { c, b, _ := healthGet(t, api.handleLivez, "/livez"); return c, b }
+
+	// Both are stale. Only "held" went quiet during the outage, so only it is excused: "wedged" fails /livez.
+	c, b := livez()
+	if c != 503 || b["reason"] != "background_loop_stuck" {
+		t.Fatalf("[a loop wedged a minute BEFORE a 10s outage, just after recovery] /livez = %d %v, want 503: the grace excused a loop the outage did not hold", c, b)
+	}
+	// Remove the wedged loop from the picture: the held one alone is excused inside the grace.
+	w.healthTracker.recordRun("wedged") // ticks again, so only the held loop is stale now
+	if c, b := livez(); c != 200 {
+		t.Fatalf("[only the loop the outage held is stale, inside the grace] /livez = %d %v, want 200", c, b)
+	}
+	// And once the grace runs out, the held loop that still has not resumed is wedged as well.
+	clk.advance(dbRecoveryGrace + time.Second)
+	probeOK(w)
+	if c, b := livez(); c != 503 {
+		t.Fatalf("[grace over, the loop never resumed] /livez = %d %v, want 503", c, b)
+	}
+}
