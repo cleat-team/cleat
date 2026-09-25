@@ -867,6 +867,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Tier 1 Gate ran 8 of `tiers.yaml`'s 12 declared packages; `./monitoring/...`, `./tests/integrity/...`,
+  `./tests/upgrade/...` and `./tests/crash/...` ran under no tier-1 gate at all.** (cleat#2085)
+
+  `scripts/tier-gate.sh` read each `tier1.*` list with its own hand-rolled `awk`, and four of those
+  patterns ended their block at the first line that was not a `- ` entry — which is what a comment
+  line is. `tier1.packages` carries a five-line comment immediately before `./monitoring/...`
+  (`tiers.yaml` says those four were added 2026-09-05), so the extraction stopped there and
+  returned 8 of 12. The two counters that existed to catch exactly this, `NPKG` and `NDECL`, were
+  the same pattern written twice, so they agreed at 8 == 8 and the sanity check confirmed the short
+  read it was there to detect.
+
+  The whole of §2a2 was dead as a consequence: it guards on `./tests/crash/...` being listed, using
+  that same truncated extraction, so the `CLEAT_CRASH_DB` precondition never fired. Measured on one
+  machine in one shell with `CLEAT_CRASH_DB` unset — the old extraction reports "does not fire" and
+  the new one fails the gate, which is what that block has always said it does.
+
+  Every `tier1.*` read now comes from one PyYAML parse, the same parser and the same key
+  `scripts/check-required-contexts.py` already read — that script returned 12 while the gate
+  returned 8, and nothing compared them. The parse fails closed with its own exit status `2` (it
+  could not establish what was being measured, which is not a finding about the tree), and the
+  package count is cross-checked against a deliberately different line-range scan that *can*
+  disagree with it. `pip install pyyaml` is added to both tier-1 jobs for the same reason: a gate
+  that cannot read its own manifest must not report a green.
+
 - **`RunDownMigrations` now reports every table it un-scoped, including declaration-only migrations.** (cleat#2367 follow-up)
 
   A declaration-only migration (a `TenantScoped` list with no `Up`/`Down` — `kvstore` v2's shape,

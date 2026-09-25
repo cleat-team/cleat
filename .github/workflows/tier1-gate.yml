@@ -403,12 +403,20 @@ jobs:
       # without it TestPythonWasmEndToEnd and TestPythonComponentExecutionFence
       # skip, and the gate fails on the skip rather than letting the run go
       # quietly green.
-      - name: Install componentize-py and the Python SDK
+      - name: Install componentize-py, PyYAML and the Python SDK
         if: github.event_name != 'merge_group'
         run: |
           pip install --upgrade pip
           pip install componentize-py
           pip install -e python-sdk
+          # scripts/tier-gate.sh reads tiers.yaml with a YAML parser (cleat#2085).
+          # That makes this a gate PRECONDITION, not a convenience: without it the
+          # gate exits 2 rather than running on a package list it cannot verify.
+          # Same one-liner as ci.yml's "Workflow files parse" step, which installs
+          # pyyaml explicitly for exactly the same reason -- it is preinstalled on
+          # ubuntu-latest, but relying on that is how a guard comes to pass on one
+          # machine and not another.
+          pip install pyyaml
 
       # The prebuilt binary, not `cargo install wasm-tools`.
       #
@@ -604,12 +612,20 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install componentize-py and the Python SDK
+      - name: Install componentize-py, PyYAML and the Python SDK
         if: github.event_name != 'merge_group'
         run: |
           pip install --upgrade pip
           pip install componentize-py
           pip install -e python-sdk
+          # scripts/tier-gate.sh reads tiers.yaml with a YAML parser (cleat#2085).
+          # That makes this a gate PRECONDITION, not a convenience: without it the
+          # gate exits 2 rather than running on a package list it cannot verify.
+          # Same one-liner as ci.yml's "Workflow files parse" step, which installs
+          # pyyaml explicitly for exactly the same reason -- it is preinstalled on
+          # ubuntu-latest, but relying on that is how a guard comes to pass on one
+          # machine and not another.
+          pip install pyyaml
 
       - name: Install wasm-tools
         if: github.event_name != 'merge_group'
