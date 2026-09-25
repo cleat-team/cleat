@@ -201,7 +201,14 @@ func TestRunDueBackupsOneConfigsUpdateFailureDoesNotAbortItsSiblingsOnPostgres(t
 
 	failingID := uuid.New()
 	healthyID := uuid.New()
-	past := time.Now().Add(-time.Hour)
+	// Truncated to microseconds: PostgreSQL's timestamp columns store
+	// microsecond precision, but time.Now() carries nanoseconds on Linux (not
+	// on macOS, whose clock is already microsecond-resolution) -- an
+	// untruncated past round-trips through Postgres losing its low-order
+	// digits, so the exact .Equal(past) check below on the failing config
+	// (which must come back completely unchanged) fails in CI while passing
+	// on a macOS laptop.
+	past := time.Now().Add(-time.Hour).Truncate(time.Microsecond)
 	mustInsertDueConfig(t, db, dialect, failingID, "cleat-2291-savepoint-failing", past)
 	mustInsertDueConfig(t, db, dialect, healthyID, "cleat-2291-savepoint-healthy", past)
 
