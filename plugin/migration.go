@@ -626,7 +626,10 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 			//	git grep -n 'TenantScoped:' -- plugins/
 			//
 			// and check each hit's Migration literal for UpMySQL and UpMSSQL.
-			declarationOnly := m.Up == "" && m.UpMySQL == "" && m.UpMSSQL == ""
+			// Trim-consistent with declaresDDL (migration_down.go): a
+			// whitespace-only Up is still declaration-only, not a dialect
+			// that chose to do nothing here.
+			declarationOnly := !declaresDDL(m)
 
 			// Select dialect-appropriate SQL.
 			sql := m.Up

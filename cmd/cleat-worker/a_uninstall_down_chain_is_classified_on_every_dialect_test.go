@@ -59,9 +59,16 @@ const (
 	// database succeeds -- the --migrate-only equivalent recovers the schema even though
 	// uninstall did not.
 	outcomeRecoverable
-	// outcomeUnrecoverable: Down fails AND the follow-up Up also fails. The database is left
-	// in a shape neither RunDownMigrations nor RunMigrations can move. cleat#2342
-	// (notifications/MSSQL) is the only instance measured so far.
+	// outcomeUnrecoverable: Down fails AND the database is left in a shape
+	// neither RunDownMigrations nor a follow-up RunMigrations can move --
+	// either the follow-up Up fails outright, or it returns no error while
+	// the recovered schema is missing an object the failed Down destroyed
+	// (plugin_migrations still records that migration as applied, so the
+	// recovery Up skips re-creating it). Measured 2026-09-25, all three
+	// remaining instances are the second shape: blobstore/mysql,
+	// oauth-provider/mssql, webhook-ingest/mssql. notifications/MSSQL --
+	// cleat#2342's one pair whose follow-up Up failed outright -- is now
+	// proven and gone from the map.
 	outcomeUnrecoverable
 )
 
@@ -93,7 +100,7 @@ func (o downOutcome) String() string {
 var knownBrokenPluginDown = map[string]map[plugin.Dialect]downOutcome{
 	// Broken on both MySQL and SQL Server.
 	"event-triggers": {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeRecoverable},
-	"jobqueue":       {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeRecoverable},
+	"jobqueue":       {plugin.DialectMySQL: outcomeRecoverable},
 	"scheduler":      {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeRecoverable},
 	"kafka-connect":  {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeRecoverable},
 	// blobstore/mysql, oauth-provider/mssql and webhook-ingest/mssql are split
@@ -102,16 +109,6 @@ var knownBrokenPluginDown = map[string]map[plugin.Dialect]downOutcome{
 	"blobstore":      {plugin.DialectMySQL: outcomeUnrecoverable, plugin.DialectMSSQL: outcomeRecoverable},
 	"oauth-provider": {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeUnrecoverable},
 	"webhook-ingest": {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeUnrecoverable},
-	// SQL Server only -- clean on MySQL.
-	"audit-log":       {plugin.DialectMSSQL: outcomeRecoverable},
-	"datadog-export":  {plugin.DialectMSSQL: outcomeRecoverable},
-	"eventstore":      {plugin.DialectMSSQL: outcomeRecoverable},
-	"feature-flags":   {plugin.DialectMSSQL: outcomeRecoverable},
-	"kvstore":         {plugin.DialectMSSQL: outcomeRecoverable},
-	"pagerduty-alert": {plugin.DialectMSSQL: outcomeRecoverable},
-	"rate-limiter":    {plugin.DialectMSSQL: outcomeRecoverable},
-	"slack-notify":    {plugin.DialectMSSQL: outcomeRecoverable},
-	"tenant-quota":    {plugin.DialectMSSQL: outcomeRecoverable},
 	// Unrecoverable: the follow-up Up returns no error, but cleat#2306 phase
 	// 2's schema-equality check (migration/catalogdiff, added after
 	// cleat-review's GAP verdict on #2346) proves the recovered database is
@@ -121,9 +118,6 @@ var knownBrokenPluginDown = map[string]map[plugin.Dialect]downOutcome{
 	//   blobstore/mysql:      the entire workflow_blob_refs TABLE is gone
 	//   oauth-provider/mssql: oauth_sessions.nonce COLUMN is gone
 	//   webhook-ingest/mssql: webhook_events.error_msg COLUMN is gone
-	// notifications/mssql (cleat#2342) is the one pair whose follow-up Up
-	// itself fails outright, rather than succeeding over missing objects.
-	"notifications": {plugin.DialectMSSQL: outcomeUnrecoverable},
 }
 
 func TestUninstallDownChainIsClassifiedOnEveryDialect(t *testing.T) {
