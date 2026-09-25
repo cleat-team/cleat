@@ -206,9 +206,16 @@ func (p *Plugin) githubVerifiedEmail(ctx context.Context, accessToken, emailsURL
 // keeps the comparison rule in one place, in Go, where it is unit-tested.
 //
 // An empty result is NOT "admit" -- it is "no row matches", and the caller
-// decides what that means. The caller only asks at all when the operator
-// enabled the allowlist (oauth_config.allowlist_enabled, migration v6), which
-// is what makes "enabled and empty" deny rather than admit.
+// decides what that means. finishLogin asks UNCONDITIONALLY: cleat#2371 removed
+// the oauth_config.allowlist_enabled opt-in that used to gate the call, so
+// "no rows" denies rather than admits, on every deployment.
+//
+// Read that together with the paragraph above. The table still has no writer in
+// cleat -- every row is hand-written -- so a tenant that has just configured
+// OAuth cannot sign anyone in until an operator inserts a row for them. That is
+// the intended fail-closed behaviour (cleat#2340 design v1 section 2, "no escape
+// hatch"), not an oversight; what it implies for a default install is a
+// separate question from what the gate should do, and is tracked in cleat#2340.
 func (p *Plugin) identityAllowed(ctx context.Context, tid uuid.UUID, provider string, id resolvedIdentity) (bool, error) {
 	// The tenant is the one the state row named, exactly as in finishLogin's
 	// UPDATE: this runs on an unauthenticated callback, so the value in hand is

@@ -270,28 +270,35 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// The identity allowlist. cleat#2340 item 2, implementing
 			// docs/enterprise-identity-decision.md.
 			//
-			// TWO things, one concern: the list itself, and the switch that
-			// decides whether it is consulted.
+			// ONE thing: the list itself. There was briefly a second -- an
+			// oauth_config.allowlist_enabled column deciding whether the list was
+			// consulted at all, defaulting false so an upgraded deployment kept
+			// admitting whoever it admitted before. cleat#2371 removed it, on the
+			// owner's decision that the check fails closed. It never shipped, so
+			// nothing here is a compatibility concern: v6 adds the table and no
+			// column.
 			//
-			// WHY THE SWITCH IS A COLUMN AND NOT AN ABSENCE. The obvious
-			// alternative -- treat "no rows for this tenant+provider" as "no
-			// allowlist configured", so an empty table means everyone is
-			// admitted -- is fail-OPEN, and it fails open in the direction that
-			// is hardest to notice: an operator who means to restrict logins to
-			// three addresses, and mistypes the tenant id on the INSERT, gets a
-			// deployment that admits anyone, with no error anywhere. A column an
-			// operator deliberately sets has no such failure; the mode is a fact
-			// they wrote, not a fact they failed to write. It also gives them a
-			// way to turn the check off that an empty table cannot express.
+			// Why the switch was proposed, recorded because it is the argument
+			// that lost and someone will make it again: the obvious alternative --
+			// treat "no rows for this tenant+provider" as "no allowlist
+			// configured", so an empty table admits everyone -- is fail-OPEN, and
+			// it fails open in the direction that is hardest to notice. An
+			// operator who means to restrict logins to three addresses, and
+			// mistypes the tenant id on the INSERT, gets a deployment that admits
+			// anyone, with no error anywhere. The switch was one fail-closed
+			// answer to that; making the check unconditional is the other. Both
+			// refuse the mistyped INSERT, which is the property that matters. What
+			// the switch added on top was a second place for the truth to live --
+			// a table full of rows that meant nothing at all while it was false,
+			// and no way to tell that from the table by reading it.
 			//
-			// DEFAULT false, so this migration changes no existing deployment's
-			// behaviour on its own: an upgraded cleat still admits whoever it
-			// admitted before until an operator opts in. That is deliberate and
-			// it is the reason the check in finishLogin is gated rather than
-			// unconditional -- with no management surface for this table yet
-			// (cleat#2340 asks for one; see that issue), an unconditional check
-			// against an empty table would deny every login on every deployment
-			// that took this release.
+			// The consequence is deliberate, and stated here because a migration
+			// is where a reader looks for one: the check is unconditional and this
+			// table's only writer is still an operator's hand-written INSERT, so a
+			// tenant that has just configured OAuth denies every sign-in until a
+			// row exists for the person signing in. cleat#2340 design v1 section 2
+			// calls that "no escape hatch" and asks for it; what it costs a
+			// default install is tracked in that issue rather than here.
 			//
 			// identity_type exists because a provider's stable identifier and a
 			// person's email are different things with different failure modes.
@@ -337,8 +344,6 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
 					PRIMARY KEY (tenant_id, provider, identity_type, identity_value)
 				);
-
-				ALTER TABLE oauth_config ADD COLUMN IF NOT EXISTS allowlist_enabled BOOLEAN NOT NULL DEFAULT false;
 			`,
 			UpMySQL: `
 				CREATE TABLE IF NOT EXISTS oauth_allowed_identities (
@@ -349,7 +354,6 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					created_at     TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
 					PRIMARY KEY (tenant_id, provider, identity_type, identity_value)
 				);
-				ALTER TABLE oauth_config ADD COLUMN allowlist_enabled TINYINT(1) NOT NULL DEFAULT 0;
 			`,
 			// The widths here are the narrowest of the three dialects ON PURPOSE.
 			// A SQL Server PRIMARY KEY is clustered unless told otherwise, and a
@@ -386,20 +390,14 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					created_at     DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
 					PRIMARY KEY (tenant_id, provider, identity_type, identity_value)
 				);
-				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('oauth_config') AND name = 'allowlist_enabled')
-				ALTER TABLE oauth_config ADD allowlist_enabled BIT NOT NULL DEFAULT 0;
 			`,
 			Down: `
-				ALTER TABLE oauth_config DROP COLUMN IF EXISTS allowlist_enabled;
 				DROP TABLE IF EXISTS oauth_allowed_identities;
 			`,
 			DownMySQL: `
-				ALTER TABLE oauth_config DROP COLUMN allowlist_enabled;
 				DROP TABLE IF EXISTS oauth_allowed_identities;
 			`,
 			DownMSSQL: `
-				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('oauth_config') AND name = 'allowlist_enabled')
-				ALTER TABLE oauth_config DROP COLUMN allowlist_enabled;
 				IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'oauth_allowed_identities')
 				DROP TABLE oauth_allowed_identities;
 			`,

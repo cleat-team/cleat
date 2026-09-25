@@ -141,12 +141,6 @@ type oauthConfigRow struct {
 	Domain       string
 	Issuer       string
 	Enabled      bool
-	// AllowlistEnabled is the operator's switch for the identity allowlist
-	// (migration v6). False means finishLogin does not consult
-	// oauth_allowed_identities AT ALL -- not "the table is empty", which would
-	// be an unreliable way to say the same thing, since an empty table is also
-	// what a mistyped tenant id produces. cleat#2340.
-	AllowlistEnabled bool
 }
 
 // OAuthClientSecretName is the tenant-secret name an oauth_config row's
@@ -213,14 +207,12 @@ func (p *Plugin) getConfig(ctx context.Context, tenantID uuid.UUID, provider str
 	ctx = plugin.ForTenant(ctx, tenantID)
 	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
 			SELECT tenant_id, provider, client_id, redirect_url,
-			       COALESCE(domain, '') AS domain, COALESCE(issuer, '') AS issuer, enabled,
-			       allowlist_enabled
+			       COALESCE(domain, '') AS domain, COALESCE(issuer, '') AS issuer, enabled
 			FROM oauth_config
 			WHERE tenant_id = $1 AND provider = $2 AND enabled = true
 		`, p.dialect), tenantID, provider),
 		&cfg.TenantID, &cfg.Provider, &cfg.ClientID,
 		&cfg.RedirectURL, &cfg.Domain, &cfg.Issuer, &cfg.Enabled,
-		&cfg.AllowlistEnabled,
 	)
 	if err != nil {
 		return nil, err
@@ -662,7 +654,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 			p.writeError(w, http.StatusBadGateway, "issuer publishes no userinfo endpoint and returned no usable id_token")
 			return
 		}
-		p.finishLogin(w, r, tid, provider, sessionID, cfg, identity, tokenResult.ExpiresIn)
+		p.finishLogin(w, r, tid, provider, sessionID, identity, tokenResult.ExpiresIn)
 		return
 	}
 	userReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, userinfoURL, nil)
@@ -753,7 +745,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		identity.Subject = normalizeSubject(userInfo.Sub)
 	}
 
-	p.finishLogin(w, r, tid, provider, sessionID, cfg, identity, tokenResult.ExpiresIn)
+	p.finishLogin(w, r, tid, provider, sessionID, identity, tokenResult.ExpiresIn)
 }
 
 // finishLogin turns a verified identity into a session row and a response.
@@ -768,7 +760,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 func (p *Plugin) finishLogin(
 	w http.ResponseWriter, r *http.Request,
 	tid uuid.UUID, provider string, sessionID uuid.UUID,
-	cfg *oauthConfigRow, id resolvedIdentity, expiresIn int,
+	id resolvedIdentity, expiresIn int,
 ) {
 	// The guard is on the ADDRESS and stays on the address. An identity with a
 	// subject but no address is still refused here, exactly as it was before
@@ -790,7 +782,7 @@ func (p *Plugin) finishLogin(
 	// allowlist read below is scoped the same way for the same reason.
 	ctx := plugin.ForTenant(r.Context(), tid)
 
-	// The allowlist gate. cleat#2340 item 2.
+	// The allowlist gate. cleat#2340 item 2, unconditional since cleat#2371.
 	//
 	// BEFORE the token is minted and before the UPDATE, so a refused login
 	// leaves no trace on the session row: the row keeps its state and its
@@ -799,39 +791,38 @@ func (p *Plugin) finishLogin(
 	// usable token_hash, which is the failure mode this ordering exists to
 	// make impossible.
 	//
-	// It runs ONLY when the operator turned it on. With the switch off --
-	// which is every deployment until someone sets it, the column defaults
-	// false -- nothing here consults the table at all, and a login proceeds
-	// exactly as it did before this migration. That default is what makes the
-	// check safe to ship while the table has no writer in cleat: a
-	// fail-closed check against a table nobody can populate would deny every
-	// login on every upgraded deployment.
-	if cfg.AllowlistEnabled {
-		allowed, aerr := p.identityAllowed(ctx, tid, provider, id)
-		if aerr != nil {
-			p.logger.Error("oauth: allowlist lookup", "provider", provider, "tenant", tid, "error", aerr)
-			p.writeError(w, http.StatusInternalServerError, "failed to evaluate the identity allowlist")
-			return
-		}
-		if !allowed {
-			// Operator-actionable in the LOG, not the response. The caller may
-			// be anyone who reached this callback -- handleLogin accepts
-			// ?tenant_id= -- so the response names neither the table nor the
-			// row that would fix it (the same reasoning as handleCallback's
-			// secret_not_found branch, cleat#2295). The log carries exactly
-			// what an operator needs to write the INSERT: the identity, its
-			// kind, and whether the address was even eligible to match.
-			p.logger.Warn("oauth: identity refused by the tenant's allowlist",
-				"provider", provider, "tenant", tid,
-				"email", id.Email, "email_verified", id.EmailVerified,
-				"subject", id.Subject)
-			p.writeJSON(w, http.StatusForbidden, map[string]any{
-				"error":   "identity not authorized",
-				"code":    "identity_not_allowlisted",
-				"message": "this tenant restricts which identities may sign in with " + provider + "; contact your cleat administrator",
-			})
-			return
-		}
+	// It FAILS CLOSED, with no opt-in. An oauth_config.allowlist_enabled column
+	// used to gate this block, defaulting false; cleat#2371 removed it on the
+	// owner's decision, so a (tenant, provider) pair with no rows in
+	// oauth_allowed_identities denies every login for that pair until an
+	// operator writes one. "There is no list" and "this person is not on the
+	// list" are deliberately the same answer: a second column saying which of
+	// the two it is can only disagree with the table it is meant to describe,
+	// and nothing reading that table could tell the difference either.
+	allowed, aerr := p.identityAllowed(ctx, tid, provider, id)
+	if aerr != nil {
+		p.logger.Error("oauth: allowlist lookup", "provider", provider, "tenant", tid, "error", aerr)
+		p.writeError(w, http.StatusInternalServerError, "failed to evaluate the identity allowlist")
+		return
+	}
+	if !allowed {
+		// Operator-actionable in the LOG, not the response. The caller may
+		// be anyone who reached this callback -- handleLogin accepts
+		// ?tenant_id= -- so the response names neither the table nor the
+		// row that would fix it (the same reasoning as handleCallback's
+		// secret_not_found branch, cleat#2295). The log carries exactly
+		// what an operator needs to write the INSERT: the identity, its
+		// kind, and whether the address was even eligible to match.
+		p.logger.Warn("oauth: identity refused by the tenant's allowlist",
+			"provider", provider, "tenant", tid,
+			"email", id.Email, "email_verified", id.EmailVerified,
+			"subject", id.Subject)
+		p.writeJSON(w, http.StatusForbidden, map[string]any{
+			"error":   "identity not authorized",
+			"code":    "identity_not_allowlisted",
+			"message": "this tenant restricts which identities may sign in with " + provider + "; contact your cleat administrator",
+		})
+		return
 	}
 
 	// Generate a 32-byte hex session token.
@@ -886,15 +877,16 @@ func (p *Plugin) finishLogin(
 		return
 	}
 
-	// allowlist_enabled belongs in this line. It is the precondition that
-	// separates "the operator's list admitted this person" from "there was no
-	// list", and those want different follow-ups when someone asks why a
-	// deprovisioned account could still sign in.
+	// Reaching this line now means the allowlist admitted this identity: the
+	// gate above is unconditional since cleat#2371, and it returns before here
+	// on both a lookup error and a refusal. So this line needs no "was there a
+	// list" key -- there always was one, and it said yes. The refusal case has
+	// its own Warn, which is where the identity an operator must add is
+	// recorded.
 	p.logger.Info("oauth: session created",
 		"provider", provider,
 		"tenant", tid,
 		"email", id.Email,
-		"allowlist_enabled", cfg.AllowlistEnabled,
 	)
 
 	p.writeJSON(w, http.StatusOK, map[string]any{

@@ -679,22 +679,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **An identity allowlist for the OAuth provider, off by default.** (cleat#2340)
+- **An identity allowlist for the OAuth provider, enforced by default.** (cleat#2340)
 
-  `oauth_config.allowlist_enabled` plus an `oauth_allowed_identities` table (plugin migration v6,
-  on all three dialects) let a tenant restrict which identities may sign in through a given
-  provider — the half of cleat#2340 that a deployment needs before it can expose OAuth login to
-  more than a hand-picked set of people. The column defaults to `false`, so an upgraded cleat
-  admits exactly whoever it admitted before until an operator opts in; enabling it with no rows
-  denies every login, deliberately, because the obvious alternative — treating "no rows for this
-  tenant+provider" as "no allowlist configured" — fails **open**, and fails open in the direction
-  hardest to notice: an operator who means to allow three addresses and mistypes the tenant id on
-  the `INSERT` gets a deployment that admits anyone, with no error anywhere. A mode an operator
-  explicitly set is a fact they wrote, not a fact they failed to write.
+  An `oauth_allowed_identities` table (plugin migration v6, on all three dialects) lets a tenant
+  restrict which identities may sign in through a given provider — the half of cleat#2340 that a
+  deployment needs before it can expose OAuth login to more than a hand-picked set of people.
+
+  **The check is unconditional: there is no flag to turn it on.** A `(tenant, provider)` pair with
+  no rows denies every login for that pair until an operator writes one, so a deployment that
+  configures OAuth admits nobody until it says who. That is deliberate, and it is the whole reason
+  there is no switch. The obvious alternative — treating "no rows for this tenant+provider" as "no
+  allowlist configured, admit everyone" — fails **open**, and fails open in the direction hardest
+  to notice: an operator who means to allow three addresses and mistypes the tenant id on the
+  `INSERT` gets a deployment that admits anyone, with no error anywhere. "There is no list" and
+  "this person is not on the list" are deliberately the same answer, because nothing reading that
+  table could tell the two apart either. A refusal is a 403 with code `identity_not_allowlisted`
+  and a `Warn` log line naming the identity that was refused, so the operator's next step is
+  written down where they will look for it.
+
+  An earlier revision of this branch gated the check on an `oauth_config.allowlist_enabled` column
+  defaulting `false`, so an upgraded cleat admitted exactly whoever it admitted before until an
+  operator opted in. **The column was removed before release** (cleat#2371, on the owner's
+  decision): it never shipped, so nothing has to migrate off it, and the opt-in was itself the
+  failure mode — a deployment configured for OAuth, with nobody able to sign in, presenting a
+  symptom indistinguishable from a misconfigured allowlist. What remains awkward is real and is
+  not hidden by removing the column: cleat has no writer for `oauth_allowed_identities` yet, so
+  every row is hand-written, and a fresh OAuth deployment must hand-write one before anyone can
+  sign in. That cost is part of the work still open in cleat#2340.
 
   A row carries an `identity_type` of `email` or `subject`, and either kind matching admits, so a
-  tenant can migrate from email addresses to OIDC `sub` (or GitHub's numeric id) without a flag
-  day. An `email` row matches only a **verified** address — GitHub's `/user/emails` is consulted
+  tenant can migrate from email addresses to OIDC `sub` (or GitHub's numeric id) without a cutover.
+  An `email` row matches only a **verified** address — GitHub's `/user/emails` is consulted
   for `primary AND verified`, and an unverified address is treated as a label, never as a key —
   because an email can be reassigned by whoever controls the domain while a `sub` cannot. The
   comparison runs in Go rather than in SQL so the normalization rule (case-folded email,
