@@ -1,7 +1,9 @@
 # Playbook 3 — Order and subscription lifecycle
 
-**Status:** engineering reference. Drafted 2026-09-14 against `develop` at `654d6f84`.
-Nothing here has been built end to end; see [What was verified](#what-was-verified) at the end.
+**Status:** engineering reference. Drafted 2026-09-14 against `develop` at `654d6f84`; corrected
+2026-09-25 against `develop` at `656aced4` (cleat#2051) — see
+[What was verified](#what-was-verified) at the end for what changed. Nothing here has been built end
+to end.
 
 **Who this is for:** you take money and ship something. An order touches inventory, payment,
 fulfilment and notification; a subscription renews, dunns, upgrades and cancels. Each of those is a
@@ -11,6 +13,12 @@ customer charged and unshipped — or shipped and uncharged.
 This is the oldest use case for durable execution and the one an evaluator will recognise fastest.
 Its distinctive win is not novelty. It is that **the code you do not write is the code that is
 hardest to get right.**
+
+**This playbook is deliberately the vendor's own flow** — you write the order pipeline. If your
+product instead lets *customers* supply the logic, the primitives are the same but the framing is
+not: read [`integration-hub.md`](integration-hub.md) for tenant-uploaded WASM steps via
+`POST /api/definitions`, and [`b2b-saas-control-plane.md`](b2b-saas-control-plane.md) for the
+multi-tenant control plane around them.
 
 ---
 
@@ -73,9 +81,12 @@ Worked examples already in the tree: `examples/subscription/billing.go`,
 
 ## Compensation you declare rather than orchestrate
 
-The Go SDK has a first-class saga helper (`cleat/runtime_workflow.go:400-441`): `cleat.NewSaga()`,
-`AddStep` taking a forward action and a `Compensate func(HostCalls) error`, and `AddParallel` for
-steps that fan out.
+The Go SDK has a first-class saga helper (`NewSaga` / `Saga` / `SagaStep`, `cleat/runtime_workflow.go`):
+`AddStep` takes a forward action and a `Compensate func(HostCalls) error`, and `AddParallel` covers
+steps that fan out. **There is a generic form too** — `NewSagaTyped[T]` returns a `SagaTyped[T]`
+whose steps carry a typed result (`SagaStepTyped[T]`) — which this page did not mention until
+2026-09-25, and which is the one you want when your step results are not all `any`. It is worth
+knowing about before you write the untyped version and cast at every step.
 
 You declare each step with its undo. If a later step fails, the completed steps' compensations run
 in reverse. You do not write the unwinding, the ordering, the bookkeeping of which steps completed,
@@ -99,13 +110,18 @@ A customer double-clicks. A mobile client retries on a flaky network. Your load 
 request. Each of those is a second charge if the write path is not idempotent, and idempotency is
 the thing every team intends to add and adds unevenly.
 
-Cleat honours the conventional `Idempotency-Key` header on the start path
-(`cmd/cleat-worker/server.go:815`), on dead-letter reprocess, and on schedule creation
-(`server.go:2246`). Keys are stored per tenant in `idempotency_keys`, and a duplicate start
-**reports that it was a duplicate** rather than silently returning the original — the response
-carries a replay flag alongside the original run id, so a client can tell "I created this" from "this
-already existed". That distinction is usually the first casualty of a homegrown implementation, and
-it is the one that makes retries safe to automate.
+Cleat honours the conventional `Idempotency-Key` header on the start path, on dead-letter reprocess,
+and on schedule creation (`cmd/cleat-worker/server.go`). Keys are stored per tenant in
+`idempotency_keys`, and a duplicate start **returns the original response plus a replay flag**:
+`idempotent_replay: true` on the replay, and `false` on the original — present on both, deliberately,
+so a caller reads it unconditionally rather than inferring "original" from an absent field. That is
+how a client tells "I created this" from "this already existed", and it is usually the first
+casualty of a homegrown implementation and the one that makes retries safe to automate.
+
+**A key reused with a different payload is refused** (`409 idempotency_key_input_mismatch`), not
+answered with the first result — replaying means "you already did this", and a changed payload means
+you did something else. A request with *no* key keeps its old behaviour: no header means no token,
+so two callers who both send nothing do not collide.
 
 The key is client-supplied, deliberately. The comment on the reprocess path spells out the reasoning
 and it generalises: deriving a key from the entity id would protect callers that send nothing, but
@@ -125,18 +141,28 @@ disaster area: you must verify a signature, respond in milliseconds, tolerate du
 out-of-order delivery, and not lose anything.
 
 `webhookingest` provides the ingest route and the `await_webhook` host function. The ingest path is
-one of the worker's **public patterns** — routes auth lets through without a cleat API key,
-precisely so a third party that has no key can reach an endpoint with its own HMAC verification
-(`cmd/cleat-worker/main.go:1447-1450`, and the reasoning in `auth/middleware.go:55-73`).
+one of the worker's **auth-exempt routes** — routes auth lets through without a cleat API key,
+precisely so a third party that has no key can reach an endpoint with its own HMAC verification. The
+production list is `pluginAuthExemptPatterns` (`cmd/cleat-worker/plugin_exempt_routes.go`), handed to
+`auth.MiddlewareWithMux`; the middleware's own reasoning is on `isPublicRoute`
+(`auth/middleware.go`).
 
 `await_webhook` is the piece that makes this pleasant: a workflow *waits* for the webhook as a step,
 rather than you writing a handler that has to find the right in-flight order and poke it. The
 correlation is the workflow's, not yours.
 
-**Read the design-doc caveat before exposing this**: those public patterns are also where a
-client-supplied tenant header is not overwritten by auth. Whether `webhookingest` consults the
-context tenant or derives it from `source_id` was not traced — see
-[`docs/multi-tenant-serving-design.md`](../multi-tenant-serving-design.md), open question 1.
+**The tenant question is answered, and the answer is the safe direction.** This used to be an open
+item carried forward from the design doc. `POST /ingest/{source_id}` is auth-exempt, so
+`r.Context()` carries no tenant; the handler resolves it **from the row rather than the request**,
+reading `webhook_sources` for `source_id` and taking `tenant_id` from it, through a *named*
+cross-tenant read bound to its own context variable (`plugins/webhookingest/routes.go`, cleat#1538).
+A caller cannot name a tenant, and `an_auth_exempt_route_cannot_assume_a_tenant_test.go` is what
+keeps a future auth-exempt route from assuming one.
+
+The design doc's open question 1 is still worth reading, for the general shape rather than for this
+plugin: on those routes a client-supplied tenant header is not overwritten by auth, which is a trap
+for the *next* auth-exempt route you add. See
+[`docs/multi-tenant-serving-design.md`](../multi-tenant-serving-design.md).
 
 ---
 
@@ -163,11 +189,27 @@ pay for the wait.
 steps with no compensation and no waiting, the event-history write cost buys you nothing. Do not
 route high-volume, low-value, stateless work through a durable engine because it is there.
 
-*Event history grows with order volume.* Every step of every order is retained. For a high-volume
-commerce business this is the term to size first, and the retention defaults deserve a deliberate
-decision — `--dead-letter-retention-days` defaults to 0, meaning off, so failed orders accumulate
-indefinitely unless you set it. That default is arguably right (a dead-lettered order is the one you
-most want to inspect) but it is a growth curve someone must own.
+*Event history grows with order volume — but not the way you would guess, and the guess is the
+expensive part.* **"Every step of every order is retained" is backwards**, which is what this
+paragraph said until 2026-09-25. The three outcomes differ:
+
+| the order ends | its event history |
+|---|---|
+| `done` | **deleted at finalize** — there is no success trail unless you build one |
+| `failed` | kept, then removed by `--retention-days` (default 30 days) |
+| `dead_lettered` | kept until `--dead-letter-retention-days` (default 0, meaning off) |
+
+So the growth curve you size first is *failed and dead-lettered* history, not successful-order
+history — the opposite of the intuition, because successful orders are the ones you have most of.
+And because a `done` order's history is already gone before any retention flag runs, **an operator
+who wants a success trail must publish it as query state, or into their own store**; no flag keeps
+it. Decide that deliberately rather than discovering it during an audit.
+
+The two flags are not two names for one thing, and each governs only its own kind:
+`--retention-days` bounds a **failed** order's history, `--dead-letter-retention-days` bounds a
+**dead-lettered** one's, and neither touches the other. Setting one and not the other leaves the
+other accumulating indefinitely. The dead-letter default of 0 is arguably right — a dead-lettered
+order is the one you most want to inspect afterwards — but it is still a curve someone must own.
 
 *Your PSP's own idempotency still matters.* Cleat's idempotency protects the start of your workflow.
 It does not make Stripe's charge endpoint idempotent — you still pass an idempotency key downstream.
@@ -192,6 +234,25 @@ inspectable, with its full history, and can be reprocessed — honouring an idem
 re-drive is deliberate rather than accidental. Terminate carries a reason. This is materially better
 than a poison-message queue holding a JSON blob and no context.
 
+**But not every failure lands there, and the difference decides what you can do with it.** Only a
+run whose last durable call *exhausted its retry policy* is dead-lettered. An order that fails
+plainly — your compensation returned an error, a trap, a schema-drift parse — is `failed`: absent
+from the dead-letter listing, not retryable, not reprocessable, still re-replayable, and still
+holding its history for `--retention-days`. Query both surfaces, or half your failures are invisible
+to the dashboard you built for failures.
+
+**"This tenant's open orders" is a query, not a projection you build.** `GET /api/workflows` is
+tenant-scoped and takes `status`, `def_name`, `id_prefix`, `concurrency_key`, `error_code` and
+paging, so the read model a commerce team would otherwise hand-write — a side table maintained by
+triggers, drifting from the truth it mirrors — is a query against the instance table itself:
+`?def_name=PlaceOrder&status=running` is the whole of it.
+
+**Content search over payloads shipped too, and it is priced honestly.** `input_contains`,
+`result_contains` and `error_contains` scan the payload columns; the endpoint's own comment calls
+them "unindexed payload scans", deliberately kept separate from `search` so the expensive question
+is asked explicitly rather than hidden inside the cheap one. Reach for them during an incident, not
+to drive a listing page. (cleat#1571 and cleat#1945, the read model these used to be missing.)
+
 **Fewer systems to be on call for.** No queue broker, no scheduler host, no reconciliation job.
 
 ---
@@ -201,6 +262,12 @@ than a poison-message queue holding a JSON blob and no context.
 The event history answers, per order, without instrumentation: what step it is on, how long each
 step took, what each external call returned, how many times a step retried and why, and where a
 compensation ran.
+
+**For an order that is running or one that failed — not for a successful one.** A `done` order's
+history is deleted at finalize (see *Where this loses* above), so "what happened to order 12345?" is
+answerable in full for the orders you are worried about, and only as far as your own query state
+goes for the ones you are not. That asymmetry is easy to miss and lands on the day someone asks you
+to reconstruct a successful order for a dispute.
 
 The question this makes cheap is the one support teams ask constantly — "what happened to order
 12345?" — and which conventionally requires correlating application logs, queue metrics and payment
@@ -236,14 +303,24 @@ reaches in-flight orders only if you migrate them deliberately.
 **Webhook replay and ordering.** Providers resend. `await_webhook` correlates, but your handler
 still has to tolerate duplicates and out-of-order arrival.
 
-**The public-pattern tenant question** above.
+**A run you can see but cannot redrive.** Two redrive guards landed on 2026-09-23 (cleat#2038,
+cleat#2039) and the consequence is the part to design around: **re-replay is only as good as what
+retention has left.** A failed order whose history `--retention-days` has already swept can no
+longer be re-replayed *at all* — the guard refuses, correctly, rather than resuming from a partial
+history. So a retention window shorter than your incident-response window silently turns "we can
+redrive that order" into "we cannot", at exactly the moment somebody is trying. `RetryWorkflow`
+refuses a run with a pending durable intent for the same reason: resetting it would race a call that
+may already be in flight. Size `--retention-days` against how long you actually take to act, not
+against storage cost.
+
+**The public-pattern tenant question** above — now resolved, and safely.
 
 ---
 
 ## What was verified
 
 **Read from the tree at `654d6f84`:** the `Saga`, `SagaStep` and `Compensate` API
-(`cleat/runtime_workflow.go:400-441`); `examples/saga-temporal-port/README.md` and the example
+(`cleat/runtime_workflow.go`); `examples/saga-temporal-port/README.md` and the example
 directories cited; the `Idempotency-Key` handling sites on start, reprocess and schedule creation,
 and the duplicate-reports-outcome behaviour with its stated reasoning; the public-pattern list and
 the auth middleware's early return; `webhookingest`'s `await_webhook` registration; the
@@ -253,5 +330,12 @@ the auth middleware's early return; `webhookingest`'s `await_webhook` registrati
 argument is an argument about what durability makes unnecessary, not a measurement of a team that
 removed one.
 
-**Not verified:** whether `webhookingest` consults the context tenant on its public ingest route.
-Carried forward from the design doc as an open question rather than restated as a property.
+**Resolved since drafting:** whether `webhookingest` consults the context tenant on its public ingest
+route. It does not — it derives the tenant from the `webhook_sources` row (cleat#1538), which is the
+safe direction. See *Inbound webhooks*.
+
+**Corrected since drafting (2026-09-25, cleat#2051):** the retention statement, which was backwards
+("every step of every order is retained"); the redrive guards cleat#2038/cleat#2039, now closed and
+written up as an operational consequence rather than as open gaps; the open-orders listing, which is
+a first-class query and now includes payload-content search; and `NewSagaTyped`, which was shipped
+and unmentioned.
