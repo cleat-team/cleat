@@ -263,6 +263,8 @@ tests/cluster	replayStoreDB	3
 tests/cluster	requireDB	3
 tests/cluster	scaleStore	3
 tests/cluster	testStore	3
+tests/crash	mssqlTarget	1
+tests/crash	mysqlTarget	1
 tests/cross-language	buildRustWasm	1
 tests/cross-language	requireCargo	1
 tests/exhaustion	clusterDB	1

@@ -66,72 +66,15 @@ func requireDone(t *testing.T, db *sql.DB, id string, budget time.Duration, w *w
 	}
 }
 
+// The bodies live in shutdown_dialects_test.go, because cleat#2288 runs the
+// same two scenarios on MySQL and SQL Server and three copies of one scenario
+// is three things that drift.
 func TestSIGTERM_a_LetsAnInFlightRunFinishInsideTheGrace(t *testing.T) {
-	db := ownerDB(t)
-	defer db.Close()
-	suffix := uniqueSuffix()
-	taskQueue, wfID := "queue-term-a-"+suffix, "term-a-wf-"+suffix
-
-	deployFixture(t, db, taskQueue)
-	bin := buildWorker(t)
-	svc := newChargeService(t)
-	release := svc.holdOperation("Ship")
-	defer release()
-
-	w := startWorker(t, bin, taskQueue, svc.srv.URL, "--shutdown-grace", "30s")
-	startWorkflow(t, db, wfID, "order-"+suffix, taskQueue)
-	svc.awaitHeldCall(t, w, startBudget)
-
-	exited := w.term()
-	select {
-	case err := <-exited:
-		t.Fatalf("worker exited (%v) while a run was in flight and 30s of grace remained\n--- worker log ---\n%s", err, w.output())
-	case <-time.After(2 * time.Second):
-	}
-	release()
-	awaitExit(t, exited, 30*time.Second, w)
-
-	requireDone(t, db, wfID, 10*time.Second, w)
-	if r, c, s := svc.allCounts(); r != 1 || c != 1 || s != 1 {
-		t.Errorf("Reserve=%d Charge=%d Ship=%d, want 1/1/1: a graceful shutdown must not repeat a side effect", r, c, s)
-	}
+	shutdownScenarioA(t, postgresTarget(t))
 }
 
 func TestSIGTERM_b_ReleasesARunThatOutlastsTheGraceInsteadOfFailingIt(t *testing.T) {
-	db := ownerDB(t)
-	defer db.Close()
-	suffix := uniqueSuffix()
-	taskQueue, wfID := "queue-term-b-"+suffix, "term-b-wf-"+suffix
-
-	deployFixture(t, db, taskQueue)
-	bin := buildWorker(t)
-	svc := newChargeService(t)
-	release := svc.holdOperation("Ship")
-	defer release()
-
-	first := startWorker(t, bin, taskQueue, svc.srv.URL, "--shutdown-grace", "2s")
-	startWorkflow(t, db, wfID, "order-"+suffix, taskQueue)
-	svc.awaitHeldCall(t, first, startBudget)
-
-	exited := first.term()
-	// Let the 2s grace expire with the call still in flight, then let the call return to a worker that has by
-	// now been cancelled. That is the moment the old code wrote the run FAILED.
-	time.Sleep(4 * time.Second)
-	release()
-	awaitExit(t, exited, 30*time.Second, first)
-
-	requireReleased(t, db, wfID, first)
-
-	second := startWorker(t, bin, taskQueue, svc.srv.URL)
-	requireDone(t, db, wfID, completeBudget, second)
-	r, c, s := svc.allCounts()
-	t.Logf("Reserve=%d Charge=%d Ship=%d", r, c, s)
-	if r != 1 || c != 1 {
-		t.Errorf("Reserve=%d Charge=%d, want 1/1: the calls that had finished must not be repeated", r, c)
-	}
-	if s < 1 || s > 2 {
-		t.Errorf("Ship=%d, want 1 or 2: at-least-once, the interrupted call may replay once", s)
-	}
+	shutdownScenarioB(t, postgresTarget(t))
 }
 
 // (b2) The discriminating case cleat#2287 closes: a guest that CATCHES the

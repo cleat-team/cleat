@@ -481,8 +481,10 @@ func buildWorker(t *testing.T) string {
 	return bin
 }
 
-// deployFixture compiles testdata/crashcall and registers it as a definition.
-func deployFixture(t *testing.T, db *sql.DB, taskQueue string) {
+// buildFixtureWASM compiles testdata/crashcall and returns the module. Split
+// out of deployFixture so the dialect targets can register the same module
+// without a second copy of the build.
+func buildFixtureWASM(t *testing.T) []byte {
 	t.Helper()
 	root := repoRoot(t)
 	outDir := t.TempDir()
@@ -511,6 +513,13 @@ func deployFixture(t *testing.T, db *sql.DB, taskQueue string) {
 	if err != nil {
 		t.Fatalf("reading %s: %v", wasmPath, err)
 	}
+	return wasm
+}
+
+// deployFixture compiles testdata/crashcall and registers it as a definition.
+func deployFixture(t *testing.T, db *sql.DB, taskQueue string) {
+	t.Helper()
+	wasm := buildFixtureWASM(t)
 
 	// tenant_id must be set explicitly. workflow_defs' RLS policy is
 	// `tenant_id = assert_tenant_set()`, and NULL does not satisfy it, so a
@@ -531,13 +540,34 @@ func deployFixture(t *testing.T, db *sql.DB, taskQueue string) {
 	// fixture deliberately sets columns DeployWorkflowDef does not expose
 	// (entry_points, task_queue, dag_spec), but it is worth knowing that this
 	// is the second copy and it broke when the first one changed.
+	//
+	// The DO UPDATE lists EVERY column the INSERT sets, and that is not
+	// thoroughness -- it is a repair. This clause used to refresh wasm_bytes
+	// and task_queue only, so an entry point ADDED to the fixture never reached
+	// a database that already had the definition: cleat#2287 added
+	// `catches_abort` here, and because cleat_crash outlives the checkout, its
+	// workflow_defs row kept `{three_charges}` and TestSIGTERM_b2 failed with
+	// "unknown entry point: catches_abort" on a tree where nothing was wrong.
+	// CI never saw it -- the service container is fresh every run -- which is
+	// exactly what makes it worth writing down: a long-lived local database is
+	// the only place it appears, and the failure names neither the fixture nor
+	// the column. Same family as "when a schema migration lands, recreate your
+	// test databases": CREATE TABLE IF NOT EXISTS never adds a column, and an
+	// upsert that omits one never updates it.
 	if _, err := db.Exec(`
 		INSERT INTO workflow_defs
 			(name, version, wasm_bytes, entry_points, min_version,
 			 max_history_length, dag_spec, task_queue, abi_version, plugin_deps, tenant_id)
 		VALUES ('crashcall', 1, $1, ARRAY['three_charges','compensating','with_cleanup','continues_as_new','cleanup_with_backoff','parent_with_child','child_echo','catches_abort'], 1, 10000, '{}'::jsonb, $2, 1, '{}'::jsonb, $3)
-		ON CONFLICT (tenant_id, name, version) DO UPDATE SET wasm_bytes = EXCLUDED.wasm_bytes,
-			task_queue = EXCLUDED.task_queue, tenant_id = EXCLUDED.tenant_id`,
+		ON CONFLICT (tenant_id, name, version) DO UPDATE SET
+			wasm_bytes = EXCLUDED.wasm_bytes,
+			entry_points = EXCLUDED.entry_points,
+			min_version = EXCLUDED.min_version,
+			max_history_length = EXCLUDED.max_history_length,
+			dag_spec = EXCLUDED.dag_spec,
+			task_queue = EXCLUDED.task_queue,
+			abi_version = EXCLUDED.abi_version,
+			plugin_deps = EXCLUDED.plugin_deps`,
 		wasm, taskQueue, defaultTenant); err != nil {
 		t.Fatalf("deploying the crashcall definition: %v", err)
 	}
@@ -564,6 +594,19 @@ func startWorker(t *testing.T, bin, taskQueue, svcURL string, extraFlags ...stri
 // startWorkerOn is startWorker against a named database. See appDSNFor.
 func startWorkerOn(t *testing.T, dbName, bin, taskQueue, svcURL string, extraFlags ...string) *worker {
 	t.Helper()
+	return startWorkerProcess(t, bin, taskQueue, svcURL,
+		appDSNFor(t, dbName), ensureDatabaseNamed(t, dbName), extraFlags...)
+}
+
+// startWorkerWith starts a worker against a dialect target's connections. See
+// startWorkerProcess for the flag set.
+func startWorkerWith(t *testing.T, tg *crashTarget, bin, taskQueue, svcURL string, extraFlags ...string) *worker {
+	t.Helper()
+	return startWorkerProcess(t, bin, taskQueue, svcURL, tg.workerDB, tg.migrateDB, extraFlags...)
+}
+
+func startWorkerProcess(t *testing.T, bin, taskQueue, svcURL, workerDB, migrateDB string, extraFlags ...string) *worker {
+	t.Helper()
 
 	w := &worker{log: &strings.Builder{}}
 	// --migrate-db is the owner connection to the database this worker serves
@@ -581,8 +624,8 @@ func startWorkerOn(t *testing.T, dbName, bin, taskQueue, svcURL string, extraFla
 	// step, the one cmd/cleat-worker runs at boot, was being exercised against
 	// a database no assertion in this suite ever looks at.
 	args := []string{
-		"--db", appDSNFor(t, dbName),
-		"--migrate-db", ensureDatabaseNamed(t, dbName),
+		"--db", workerDB,
+		"--migrate-db", migrateDB,
 		"--task-queue", taskQueue,
 		"--bench-svc-url", svcURL,
 		"--poll", "200ms",

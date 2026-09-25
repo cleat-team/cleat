@@ -506,3 +506,86 @@ jobs:
       # That serialisation is part of the 31s above, not an addition to it.
       - name: Run plugin behavioral tests (all backends)
         run: go test -count=1 -p 1 -timeout=900s ./plugins/...
+
+  # -------------------------------------------------------------------------
+  # Crash shutdown scenarios on MySQL and SQL Server (cleat#2288)
+  #
+  # tests/crash is the only suite in this repo that runs the real cleat-worker
+  # binary and signals it, and it ran on PostgreSQL only: the crash matrix entry
+  # in ci.yml sets CLEAT_CRASH_DB and nothing else, and `grep '"--driver"'`
+  # matched nothing anywhere in the tree before this job. So the shutdown path
+  # cleat#2285 fixed -- drain, then release the run rather than fail it -- was
+  # measured on one dialect, while the code it exercises (fenced finalize,
+  # ContinueAsNew, fail, release) is per-dialect.
+  #
+  # Two scenarios, (a) and (b): a run that finishes inside the grace and repeats
+  # no side effect, and a call that outlives the grace and is released for
+  # another worker. The suite's other scenarios stay PostgreSQL-only -- they are
+  # not what cleat#2288 asked for, and each would be its own dialect port.
+  #
+  # NOT A REQUIRED STATUS CHECK, by owner decision on 2026-09-25. It runs and it
+  # reports; it does not gate a merge. Promoting it is three changes that have
+  # to land together: this job's `name:` into .github/required-checks.txt,
+  # tiers.yaml's required_contexts block, and branch protection.
+  #
+  # Unlike its siblings above, this job has no "Create cleat database" step for
+  # SQL Server and does not need one: the harness connects to `master` to create
+  # its own database beside the one the DSN names, exactly as the PostgreSQL
+  # side creates cleat_crash. MySQL's service below still needs MYSQL_DATABASE,
+  # because that harness connection does use the database named in the DSN.
+  #
+  # The service containers mirror test-mysql and test-mssql above, digests
+  # included. Bump them together with the other sites or `Lint` fails the PR.
+  crash-shutdown-dialects:
+    name: Crash Shutdown Scenarios (MySQL, SQL Server)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+        env:
+          MYSQL_ROOT_PASSWORD: cleat
+          MYSQL_DATABASE: cleat
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pcleat"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --publish 3306:3306
+      mssql:
+        image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: CleatTest123!
+          MSSQL_MEMORY_LIMIT_MB: "2048"
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 30s
+          --publish 1433:1433
+    env:
+      # 127.0.0.1, not localhost: a service container publishes its port on IPv4
+      # only, and localhost resolves to ::1 first on GitHub runners. The same
+      # note, and the green-that-measured-nothing it was written after, are in
+      # ci.yml's test-go job.
+      CLEAT_CRASH_MYSQL: "root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true&multiStatements=true"
+      CLEAT_CRASH_MSSQL: "sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=cleat"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # CGO stays at its default (on). The harness builds cleat-worker itself,
+      # and CGO_ENABLED=0 would replace NewWasmtimeBackend with the stub and
+      # leave no WASM backend to run the fixture on -- a crash-recovery result
+      # obtained that way would not be about the engine that ships.
+      #
+      # The -run filter is load-bearing: every other test in this package needs
+      # CLEAT_CRASH_DB and Fatals without it, deliberately. It selects the
+      # parent and its four dialect subtests; re-derive with -list.
+      - name: Run the shutdown scenarios on MySQL and SQL Server
+        run: go test -count=1 -timeout=900s ./tests/crash/ -run TestShutdownScenariosOnMySQLAndMSSQL
