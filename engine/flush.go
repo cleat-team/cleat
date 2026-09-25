@@ -598,6 +598,7 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 	}
 
 	// Untenanted path: single INSERT auto-commits. No explicit BEGIN/COMMIT.
+	// rls-by-design: untenanted-flush-event-insert
 	res, err := e.db.ExecContext(ctx, insertEventSQL, workflowID, rec.Step, rec.EventType,
 		nullStr(rec.Service), nullStr(rec.Op), nullStr(stored.Request), nullStr(stored.Response), nullStr(stored.Err),
 		nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),

@@ -131,10 +131,7 @@ func TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet(t *testing.T) {
 	for k, v := range knownRLSFaults {
 		remaining[k] = v
 	}
-	byDesign := map[string]string{}
-	for k, v := range statementsWithoutATenantByDesign {
-		byDesign[k] = v
-	}
+	byDesign, byDesignFoundNames := resolveByDesignMarkers(t, files)
 	var unexpected []string
 	for _, f := range found {
 		key := shortPos(f.pos)
@@ -166,6 +163,18 @@ func TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet(t *testing.T) {
 		t.Errorf("the by-design entry for %s no longer matches any statement (%s). The gate it "+
 			"describes has moved or gone -- re-read it rather than leaving a standing "+
 			"allowance for a line that may no longer have one", key, reason)
+	}
+
+	// Same liveness rule one level up: a name in statementsWithoutATenantByDesign
+	// whose marker comment resolveByDesignMarkers never found in any file is a
+	// grant covering a marker that no longer exists -- deleted, renamed, or
+	// never written after the map entry was added.
+	for name := range statementsWithoutATenantByDesign {
+		if !byDesignFoundNames[name] {
+			t.Errorf("the by-design entry %q has no matching \"rls-by-design: %s\" marker "+
+				"comment in any file -- it was deleted, renamed, or never written; delete "+
+				"the entry or restore the marker", name, name)
+		}
 	}
 
 	// An unreadable statement is NOT evidence of safety, so it fails unless
@@ -258,25 +267,82 @@ var knownRLSFaults = map[string]string{
 //
 // Each entry still has to name the gate, and the gate has to be checkable by
 // reading one `if`. "It is fine" is not a reason.
+//
+// KEYED BY MARKER NAME, NOT BY "file:line" (cleat#2363). The line this entry
+// used to name -- the untenanted `e.db.ExecContext` call inside flushEvent --
+// drifted 453 -> 539 -> 581 -> 601, every single time from an unrelated doc
+// comment landing ABOVE it, never from a real behavior change. A hardcoded
+// line number cannot tell those two causes apart; a reader has to re-derive
+// it and edit this file every time, and did, three times.
+//
+// resolveByDesignMarkers below re-derives the position from the CURRENT
+// source on every run, by finding the literal comment
+// "// rls-by-design: <name>" in the tree and taking the line directly below
+// it as the statement being exempted. An unrelated doc comment inserted
+// above the marker shifts the marker and the statement by the same amount,
+// so their one-line relationship never breaks -- only an edit BETWEEN the
+// marker and the statement it names can desync them, which is exactly the
+// case this guard exists to catch (the liveness check below still fires if
+// that happens: the derived position stops matching any found fault).
 var statementsWithoutATenantByDesign = map[string]string{
-	// cleat#2333 added a large doc comment above insertEventSQL and inside
-	// flushEvent, which pushed this line down twice more as the fix grew --
-	// 453 -> 539 -> 581, the last when the event_type-transition doc comment
-	// (and its SET-list addition) landed above this call. Re-derived with
-	// `grep -n "res, err := e.db.ExecContext(ctx, insertEventSQL, workflowID" engine/flush.go`
-	// rather than guessed, per this map's own instruction two lines up: a
-	// stale line number here is indistinguishable from "the gate moved or
-	// went away" until someone re-reads it, which is exactly what this guard
-	// forced, three times now, when the key stopped matching (453 -> 539 ->
-	// 581 -> 601, each from a doc-comment addition above this call, not a
-	// behavior change).
-	"flush.go:601": "the UNTENANTED path of Engine.flushEvent, guarded by `if e.tenantID != \"\"` " +
-		"immediately above it -- the tenanted branch opens a transaction, calls " +
-		"setRLSOnFlushTx and returns, so this line runs only when there is no tenant to set. " +
-		"Not reached by a worker: cmd/cleat-worker/setup.go:2260 always passes " +
-		"engine.WithTenantID(wf.TenantID), and workflow_instances.tenant_id is NOT NULL with " +
-		"a default, so wf.TenantID is never empty there. It serves the embedded and test " +
-		"engines, against databases where no policy is installed",
+	"untenanted-flush-event-insert": "the UNTENANTED path of Engine.flushEvent, guarded by " +
+		"`if e.tenantID != \"\"` immediately above it -- the tenanted branch opens a " +
+		"transaction, calls setRLSOnFlushTx and returns, so this line runs only when there is " +
+		"no tenant to set. Not reached by a worker: cmd/cleat-worker/setup.go:2260 always " +
+		"passes engine.WithTenantID(wf.TenantID), and workflow_instances.tenant_id is NOT " +
+		"NULL with a default, so wf.TenantID is never empty there. It serves the embedded and " +
+		"test engines, against databases where no policy is installed",
+}
+
+// byDesignMarkerRE matches the marker comment statementsWithoutATenantByDesign
+// entries are keyed by: a line reading exactly "// rls-by-design: <name>",
+// with any leading indentation. Anchored on the field name ("rls-by-design:")
+// rather than a bare name so a comment merely mentioning one of these names
+// in prose cannot be mistaken for the marker itself -- the same anchoring
+// discipline CLAUDE.md's Claude-Session-trailer section describes for a
+// different marker with the identical failure mode.
+var byDesignMarkerRE = regexp.MustCompile(`^\s*//\s*rls-by-design:\s*(\S+)\s*$`)
+
+// resolveByDesignMarkers scans files for byDesignMarkerRE and returns the
+// by-design allowlist re-expressed as "basefile:line" -> reason (byPos, what
+// the matching loop below already knows how to consume) plus which of
+// statementsWithoutATenantByDesign's names were actually found in the tree
+// (foundNames, so a deleted or renamed marker is reported exactly like a
+// stale "file:line" entry used to be). The statement a marker exempts is
+// the line immediately below it -- this file's own convention (see
+// engine/flush.go) keeps the marker hugging the statement with no blank
+// line between them, the same way a Go doc comment attaches to what follows.
+func resolveByDesignMarkers(t *testing.T, files []string) (byPos map[string]string, foundNames map[string]bool) {
+	t.Helper()
+	byPos = map[string]string{}
+	foundNames = map[string]bool{}
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		base := filepath.Base(path)
+		lines := strings.Split(string(data), "\n")
+		for i, line := range lines {
+			m := byDesignMarkerRE.FindStringSubmatch(line)
+			if m == nil {
+				continue
+			}
+			name := m[1]
+			reason, ok := statementsWithoutATenantByDesign[name]
+			if !ok {
+				t.Errorf("%s:%d: marker \"rls-by-design: %s\" does not match any entry in "+
+					"statementsWithoutATenantByDesign -- add one, or remove the marker if it "+
+					"is a leftover from a rename", base, i+1, name)
+				continue
+			}
+			// i is the marker's own 0-based line index; the statement is the
+			// next line, i.e. 1-based line i+2.
+			byPos[base+":"+strconv.Itoa(i+2)] = reason
+			foundNames[name] = true
+		}
+	}
+	return byPos, foundNames
 }
 
 // knownUnreadableStatements are the statements whose query this guard cannot
