@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
 	"strings"
@@ -268,7 +269,7 @@ const secretOnlyFieldRedactionMarker = "[secret-only field, literal value refuse
 // whatever the plugin does when the field is unset. A field present exactly
 // once, as a JSON string matching secretOnlyFieldRef, is fine. Everything
 // else is a violation: a literal value, a non-string value, or more than one
-// top-level key that case-fold-matches the declared name.
+// top-level key occurrence that case-fold-matches the declared name.
 //
 // The fold-match is deliberate, not a nicety: encoding/json's own struct
 // decode matches field names case-insensitively as a fallback (including a
@@ -279,35 +280,83 @@ const secretOnlyFieldRedactionMarker = "[secret-only field, literal value refuse
 // one "would have won", any input with more than one fold-matching key for a
 // declared field is refused outright -- the ambiguity itself is the problem.
 //
-// inputJSON that isn't a JSON object at all is ALSO a violation whenever
-// secretOnlyFields is non-empty: a function that opted into this check gets
-// no free pass for malformed input reaching its own decode unchecked.
+// This walks inputJSON's top-level keys with a json.Decoder's own token
+// stream rather than unmarshaling into a map[string]json.RawMessage. That
+// used to be the whole check, and it had a hole a case-fold check alone does
+// not: encoding/json's map decode silently keeps only the LAST value for an
+// EXACT duplicate key, so {"api_key":"LIT","api_key":"${secret:x}"} collapsed
+// to a one-entry map before this function ever ran, and the surviving
+// (well-formed) value was the only thing checked -- the literal was still in
+// the raw inputJSON that went on to be recorded. Reported in review of
+// cleat#2043 (cleat#2329, commit 7a94d970), verified on all three dialects.
+// Reading tokens one pair at a time sees every occurrence, spelled identically
+// or not, before anything collapses them.
+//
+// inputJSON that isn't a JSON object at all, or that carries trailing data
+// after the closing brace, is ALSO a violation whenever secretOnlyFields is
+// non-empty: a function that opted into this check gets no free pass for
+// malformed input reaching its own decode unchecked.
 func checkSecretOnlyFields(secretOnlyFields []string, inputJSON string) string {
 	if len(secretOnlyFields) == 0 {
 		return ""
 	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(inputJSON), &top); err != nil {
-		return "input is not a JSON object, and this function declares secret-only fields"
+	const malformed = "input is not a JSON object, and this function declares secret-only fields"
+
+	dec := json.NewDecoder(strings.NewReader(inputJSON))
+	tok, err := dec.Token()
+	if err != nil {
+		return malformed
 	}
-	for _, declared := range secretOnlyFields {
-		var matches []string
-		for k := range top {
-			if strings.EqualFold(k, declared) {
-				matches = append(matches, k)
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return malformed
+	}
+
+	// occurrences[declared] holds every top-level key spelling that
+	// case-folds to that declared field, in encounter order; rawValues holds
+	// the matching JSON value for each occurrence, same order, same index.
+	occurrences := map[string][]string{}
+	rawValues := map[string][]json.RawMessage{}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return malformed
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return malformed
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return malformed
+		}
+		for _, declared := range secretOnlyFields {
+			if strings.EqualFold(key, declared) {
+				occurrences[declared] = append(occurrences[declared], key)
+				rawValues[declared] = append(rawValues[declared], raw)
 			}
 		}
-		if len(matches) == 0 {
+	}
+	if _, err := dec.Token(); err != nil { // the closing '}'
+		return malformed
+	}
+	if _, err := dec.Token(); err != io.EOF { // trailing data after the object
+		return malformed
+	}
+
+	for _, declared := range secretOnlyFields {
+		ks := occurrences[declared]
+		if len(ks) == 0 {
 			continue
 		}
-		if len(matches) > 1 {
-			sort.Strings(matches)
+		if len(ks) > 1 {
+			sorted := append([]string(nil), ks...)
+			sort.Strings(sorted)
 			return fmt.Sprintf("field %q is declared secret-only and matched more than one top-level "+
-				"key (%s); refusing the ambiguity rather than guessing which one a decoder would use",
-				declared, strings.Join(matches, ", "))
+				"key occurrence (%s); refusing the ambiguity rather than guessing which one a decoder would use",
+				declared, strings.Join(sorted, ", "))
 		}
 		var val string
-		if err := json.Unmarshal(top[matches[0]], &val); err != nil || !secretOnlyFieldRef.MatchString(val) {
+		if err := json.Unmarshal(rawValues[declared][0], &val); err != nil || !secretOnlyFieldRef.MatchString(val) {
 			return fmt.Sprintf("field %q is declared secret-only and must be exactly a "+
 				"${secret:NAME} reference; a literal value is refused", declared)
 		}
@@ -322,38 +371,84 @@ func checkSecretOnlyFields(secretOnlyFields []string, inputJSON string) string {
 //
 // Called for every declared field on a refused call, whether or not that
 // particular field was the one that violated -- see the marker's own doc
-// comment. If inputJSON doesn't parse as a JSON object, there is nothing to
-// redact field-by-field, so the whole payload becomes the marker.
+// comment. If inputJSON doesn't parse as a JSON object (or carries trailing
+// data after one), there is nothing to redact field-by-field, so the whole
+// payload becomes the marker.
+//
+// Like checkSecretOnlyFields, this walks inputJSON's top-level keys with a
+// json.Decoder's token stream instead of unmarshaling into a
+// map[string]json.RawMessage and re-marshaling it -- a map collapses an exact
+// duplicate key to its last value before this function would ever see the
+// other one, which would silently drop a redaction target rather than merely
+// lose a display fidelity. Rebuilding the object key-by-key redacts every
+// occurrence, duplicate spellings included, and never collapses anything.
 func redactSecretOnlyFields(secretOnlyFields []string, inputJSON string) string {
 	if len(secretOnlyFields) == 0 {
 		return inputJSON
 	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(inputJSON), &top); err != nil {
-		return secretOnlyFieldRedactionMarker
-	}
-	redacted, err := json.Marshal(secretOnlyFieldRedactionMarker)
+	redactedVal, err := json.Marshal(secretOnlyFieldRedactionMarker)
 	if err != nil {
 		return secretOnlyFieldRedactionMarker
 	}
+
+	dec := json.NewDecoder(strings.NewReader(inputJSON))
+	tok, err := dec.Token()
+	if err != nil {
+		return secretOnlyFieldRedactionMarker
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
+		return secretOnlyFieldRedactionMarker
+	}
+
+	var b strings.Builder
+	b.WriteByte('{')
 	changed := false
-	for k := range top {
+	first := true
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return secretOnlyFieldRedactionMarker
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return secretOnlyFieldRedactionMarker
+		}
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return secretOnlyFieldRedactionMarker
+		}
+		keyJSON, err := json.Marshal(key)
+		if err != nil {
+			return secretOnlyFieldRedactionMarker
+		}
+		value := raw
 		for _, declared := range secretOnlyFields {
-			if strings.EqualFold(k, declared) {
-				top[k] = redacted
+			if strings.EqualFold(key, declared) {
+				value = redactedVal
 				changed = true
 				break
 			}
 		}
+		if !first {
+			b.WriteByte(',')
+		}
+		first = false
+		b.Write(keyJSON)
+		b.WriteByte(':')
+		b.Write(value)
 	}
+	if _, err := dec.Token(); err != nil { // the closing '}'
+		return secretOnlyFieldRedactionMarker
+	}
+	if _, err := dec.Token(); err != io.EOF { // trailing data after the object
+		return secretOnlyFieldRedactionMarker
+	}
+	b.WriteByte('}')
+
 	if !changed {
 		return inputJSON
 	}
-	out, err := json.Marshal(top)
-	if err != nil {
-		return secretOnlyFieldRedactionMarker
-	}
-	return string(out)
+	return b.String()
 }
 
 func (s *execSession) PluginCall(ctx context.Context, m api.Module,
@@ -440,17 +535,41 @@ func (s *execSession) replayPluginCall(ctx context.Context, m api.Module,
 		// require only "idempotent", which seven functions claimed -- including
 		// reads of state an operator can change between the original run and
 		// the replay.
-		if rec.Idempotent {
-			policy := ReplayPolicy{Idempotent: true, SameValueOnReplay: rec.SameValueOnReplay}
-			if policy.MayReInvokeOnReplay() {
-				// Do NOT append to newEvents (the event is already in history).
-				return s.freshPluginCallWithHistory(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
-			}
+		//
+		// A function whose CURRENT registration declares secret-only fields
+		// (cleat#2043) never re-invokes on replay, full stop -- regardless of
+		// what rec itself says. RegisterWithPolicy already refuses to combine
+		// SecretOnlyFields with MayReInvokeOnReplay()==true for a NEW
+		// registration, but rec.Idempotent below reads the OLD record's own
+		// flags without consulting the registry at all, so history written
+		// under a permissive pre-#2043 registration -- one that genuinely
+		// succeeded with a literal, because the check did not exist yet --
+		// would still take this branch today and call freshPluginCallWithHistory,
+		// which runs checkSecretOnlyFields against the CURRENT declaration and
+		// refuses it live: a run that finished successfully turns into a
+		// replay failure. Reported in review of cleat#2043 (cleat#2329): the
+		// correct behaviour for a declared function is to fall through and
+		// serve rec's own recorded output/error below, exactly as if neither
+		// branch applied -- never re-invoke, and never flip a done run to
+		// failing either. Look the registry up once, ahead of both branches,
+		// so it decides before rec's flags are consulted, not after.
+		var secretOnlyFields []string
+		var regPolicy ReplayPolicy
+		var regOK bool
+		if s.engine.pluginRegistry != nil {
+			_, regPolicy, secretOnlyFields, regOK = s.engine.pluginRegistry.Lookup(pluginName, functionName)
 		}
 
-		if s.engine.pluginRegistry != nil {
-			_, policy, _, ok := s.engine.pluginRegistry.Lookup(pluginName, functionName)
-			if ok && policy.MayReInvokeOnReplay() {
+		if len(secretOnlyFields) == 0 {
+			if rec.Idempotent {
+				policy := ReplayPolicy{Idempotent: true, SameValueOnReplay: rec.SameValueOnReplay}
+				if policy.MayReInvokeOnReplay() {
+					// Do NOT append to newEvents (the event is already in history).
+					return s.freshPluginCallWithHistory(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
+				}
+			}
+
+			if regOK && regPolicy.MayReInvokeOnReplay() {
 				return s.freshPluginCallWithHistory(ctx, m, pluginName, functionName, inputJSON, responsePtr, responseMaxLen)
 			}
 		}
@@ -504,10 +623,6 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 
 	var outputJSON string
 	var fnErr error
-	// recordedInput is what goes into event_history, distinct from inputJSON
-	// (what fn is called with) only on the secret-only-field violation path
-	// below, where fn is never called at all.
-	recordedInput := inputJSON
 	if !ok {
 		fnErr = fmt.Errorf("plugin function %s/%s not registered. Check that the plugin is deployed and its version satisfies the workflow's plugin_deps.", pluginName, functionName)
 	} else {
@@ -529,7 +644,6 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 		if fnErr == nil {
 			if violation := checkSecretOnlyFields(secretOnlyFields, inputJSON); violation != "" {
 				fnErr = fmt.Errorf("plugin function %s/%s: %s", pluginName, functionName, violation)
-				recordedInput = redactSecretOnlyFields(secretOnlyFields, inputJSON)
 			}
 		}
 		if fnErr == nil {
@@ -550,6 +664,23 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 	var errStr string
 	if fnErr != nil {
 		errStr = fnErr.Error()
+	}
+
+	// recordedInput is what goes into event_history, distinct from inputJSON
+	// (what fn is called with) on ANY failed call for a function that
+	// declares secret-only fields -- not only a checkSecretOnlyFields
+	// violation. A call-guard rejection (s.engine.pluginCallGuard.Check,
+	// above) sets fnErr and short-circuits BEFORE checkSecretOnlyFields ever
+	// runs, so inputJSON at that point has not been validated and may still
+	// hold a literal; recording it unredacted defeats the whole point of
+	// declaring the field. Reported in review of cleat#2043 (cleat#2329):
+	// every recorded failure for a declared function is redacted, regardless
+	// of which check produced it, and only a SUCCESS -- which is only
+	// reachable once checkSecretOnlyFields has already passed -- records
+	// inputJSON as-is.
+	recordedInput := inputJSON
+	if fnErr != nil {
+		recordedInput = redactSecretOnlyFields(secretOnlyFields, inputJSON)
 	}
 
 	// Record in event history BEFORE checking for errors, so that all
@@ -673,12 +804,22 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 	}
 
 	// Check plugin call guard for streaming calls too.
+	//
+	// Redact with the ALREADY-LOOKED-UP secretOnlyFields before recording,
+	// not raw inputJSON: this rejection short-circuits BEFORE
+	// checkSecretOnlyFields runs below, so inputJSON has not been validated
+	// yet and may still hold a literal in a declared field. Recording it
+	// unredacted here was reported in review of cleat#2043 (cleat#2329) --
+	// same defect as freshPluginCallInternal's call-guard branch, same fix:
+	// redact on every recorded failure for a function that declares
+	// secret-only fields, not only on the secret-only check's own failure.
 	if s.engine.pluginCallGuard != nil && s.callerPluginName != "" {
 		if err := s.engine.pluginCallGuard.Check(s.callerPluginName, pluginName); err != nil {
 			errMsg := err.Error()
 			// callFailureCode, as above: the guard rejection becomes fnErr on
 			// the non-streaming path and packs callFailureCode there.
-			return s.streamFailure(ctx, m, pluginName, functionName, inputJSON, errMsg,
+			redactedInput := redactSecretOnlyFields(secretOnlyFields, inputJSON)
+			return s.streamFailure(ctx, m, pluginName, functionName, redactedInput, errMsg,
 				callFailureCode, responsePtr, responseMaxLen)
 		}
 	}
@@ -704,8 +845,14 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 		// The stream function itself failed. This is the direct analogue of a
 		// non-streaming plugin call returning an error, which packs
 		// callFailureCode -- so the identical failure was retryable through
-		// PluginCall and non-retryable through PluginCallStreaming.
-		return s.streamFailure(ctx, m, pluginName, functionName, inputJSON, errMsg,
+		// PluginCall and non-retryable through PluginCallStreaming. inputJSON
+		// has already passed checkSecretOnlyFields at this point (structurally
+		// safe to record as-is), but redact anyway for the same
+		// belt-and-braces reason freshPluginCallInternal now does on its
+		// fn()-error path: nothing downstream should have to re-derive that
+		// this call was already validated to record it safely.
+		redactedInput := redactSecretOnlyFields(secretOnlyFields, inputJSON)
+		return s.streamFailure(ctx, m, pluginName, functionName, redactedInput, errMsg,
 			callFailureCode, responsePtr, responseMaxLen)
 	}
 

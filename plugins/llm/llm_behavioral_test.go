@@ -526,6 +526,42 @@ func TestLLM_RegisterHostFunctions_StreamRegistration(t *testing.T) {
 	}
 }
 
+// chat and chat_stream must both declare SecretOnlyFields: []string{"api_key"}
+// (cleat#2043) -- a literal api_key reaches event_history in plaintext
+// otherwise (cleat#1988/#2023). Nothing else in this repo asserts against
+// the REAL llm registration: engine/a_secret_only_plugin_field_test.go
+// exercises the engine-side mechanism through a synthetic "llmtest" plugin
+// registered with RegisterWithPolicy directly, which proves the mechanism
+// works but not that llm actually wires into it -- exactly the "a mechanism
+// that exists and is wired to nothing reads as done" gap CLAUDE.md warns
+// about. Reported in review of cleat#2043 (cleat#2329, should-fix-2):
+// removing SecretOnlyFields from either registration left every existing
+// test green.
+func TestLLM_ChatAndChatStreamDeclareAPIKeyAsSecretOnly(t *testing.T) {
+	p := &Plugin{}
+	reg := newTestStreamRegistry()
+	if err := p.RegisterHostFunctions(reg); err != nil {
+		t.Fatalf("RegisterHostFunctions: %v", err)
+	}
+
+	for _, name := range []string{"chat", "chat_stream"} {
+		opts, ok := reg.funcs[name]
+		if !ok {
+			t.Fatalf("expected function %q to be registered", name)
+		}
+		found := false
+		for _, f := range opts.SecretOnlyFields {
+			if f == "api_key" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: SecretOnlyFields = %v, want it to contain \"api_key\" -- a literal "+
+				"api_key would reach event_history in plaintext (cleat#2043)", name, opts.SecretOnlyFields)
+		}
+	}
+}
+
 func TestLLM_RegisterHostFunctions_NilRegistry(t *testing.T) {
 	p := &Plugin{}
 	err := p.RegisterHostFunctions(nil)

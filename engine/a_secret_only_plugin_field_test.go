@@ -397,18 +397,31 @@ func TestWorkerRestartServesARecordedSecretOnlyRefusalWithoutReinvokingLive(t *t
 
 // ---------------------------------------------------------------------------
 // 6. The WithHistory re-invoke path (replayPluginCall's `if rec.Idempotent`
-// branch) re-runs the secret-only check rather than trusting the old
-// record's success. cleat-review's second-round finding: this branch is
-// driven by the STORED record's Idempotent/SameValueOnReplay flags, not by
-// the CURRENT registration -- so history written before a function declared
-// SecretOnlyFields (when it may have been registered Idempotent +
-// SameValueOnReplay, before RegisterWithPolicy's mutual-exclusion check
-// existed to forbid that combination) can still reach this branch today.
-// RegisterWithPolicy's exclusion stops any NEW registration from creating
-// this combination; it cannot rewrite old rows. The runtime check is the
-// backstop cleat-review asked to keep regardless, and this is what it is
-// for: proving a re-invocation this branch would otherwise make is blocked
-// before the plugin function runs.
+// branch) never re-invokes -- and never refuses live either -- for a
+// function whose CURRENT registration declares secret-only fields. It falls
+// through and serves the OLD record's own recorded output, exactly as if
+// this branch did not exist at all.
+//
+// This test's own first version asserted the OPPOSITE (a live refusal), and
+// that was wrong: cleat-review's second-round finding on #2329 is that
+// refusing live has the same determinism problem re-invoking live does, just
+// in the other direction. This branch used to decide purely from the STORED
+// record's Idempotent/SameValueOnReplay flags, without consulting the
+// registry first, so history written under a permissive pre-#2043
+// registration -- one that genuinely succeeded with a literal, because the
+// check did not exist yet -- would still take the branch today and call
+// freshPluginCallWithHistory, which runs checkSecretOnlyFields against the
+// CURRENT declaration and refuses it live: a run that finished successfully
+// turns into a replay failure. That is exactly the "flip a run that finished
+// done into one that fails on replay" determinism break
+// RegisterWithPolicy's own doc comment warns SecretOnlyFields +
+// MayReInvokeOnReplay's registration-time exclusion exists to prevent -- and
+// a live refusal here recreates it just as surely as a live re-invocation
+// would, from history the exclusion never got a chance to reject. The fix is
+// to gate the branch itself on the CURRENT registration's secret-only
+// declaration, ahead of consulting rec.Idempotent at all, and let a declared
+// function fall through to the ordinary "serve rec.PluginOutput /
+// rec.PluginError" logic below like any other non-reinvoke-eligible replay.
 //
 // A synthetic registration, not RegisterWithPolicy, builds the old-shaped
 // history: RegisterWithPolicy would itself refuse to create a function
@@ -417,7 +430,7 @@ func TestWorkerRestartServesARecordedSecretOnlyRefusalWithoutReinvokingLive(t *t
 // refusal shipped.
 // ---------------------------------------------------------------------------
 
-func TestWithHistoryReplayRerunsTheSecretOnlyCheckOnOldPermissiveHistory(t *testing.T) {
+func TestWithHistoryReplaySkipsReinvocationAndServesRecordedOutputForADeclaredFunction(t *testing.T) {
 	s := newTestExecSession()
 	probe := &secretOnlyProbeFn{}
 
@@ -435,12 +448,13 @@ func TestWithHistoryReplayRerunsTheSecretOnlyCheckOnOldPermissiveHistory(t *test
 	// and the call genuinely succeeded with a literal -- exactly the
 	// suspicious-in-hindsight row #2043 is about.
 	const literal = "sk-old-data-from-before-the-fix"
+	const recordedOutput = `{"ok":true,"from":"history"}`
 	s.isReplay = true
 	s.history = []EventRecord{{
 		Step: 0, EventType: EventTypePluginCall,
 		PluginName: "llmtest", PluginFunc: "chat",
 		PluginInput:       `{"api_key":"` + literal + `"}`,
-		PluginOutput:      `{"ok":true}`,
+		PluginOutput:      recordedOutput,
 		PluginError:       "",
 		Idempotent:        true,
 		SameValueOnReplay: true,
@@ -452,19 +466,26 @@ func TestWithHistoryReplayRerunsTheSecretOnlyCheckOnOldPermissiveHistory(t *test
 
 	if probe.calls != 0 {
 		t.Fatalf("the WithHistory re-invoke path called the live plugin with the old literal; "+
-			"the secret-only check must block re-invocation here too: saw %v", probe.saw)
+			"a declared function must never re-invoke here, live or otherwise: saw %v", probe.saw)
 	}
-	_, callErrorCode := unpackCallResult(res)
-	if callErrorCode != callFailureCode {
-		t.Fatalf("callErrorCode = %d, want callFailureCode -- re-invocation must be refused, "+
-			"not silently fall through to the old recorded success", callErrorCode)
+	errCode, callErrorCode := unpackCallResult(res)
+	if callErrorCode != 0 {
+		t.Fatalf("callErrorCode = %d, want 0 (success) -- a declared function must serve the OLD "+
+			"recorded output rather than refuse live and flip a done run into a replay failure; errCode=%d",
+			callErrorCode, errCode)
+	}
+	written := int64(uint64(res) >> 40)
+	if got := string(b.mem[:written]); got != recordedOutput {
+		t.Fatalf("served output = %q, want the OLD recorded output %q -- success alone is not enough "+
+			"evidence without probe.calls==0 ruling out a fresh call, and without this ruling out a "+
+			"coincidentally-successful fresh call with a different body", got, recordedOutput)
 	}
 
-	// CONTROL: without a secret-only violation, the very same old-shaped
+	// CONTROL: without secret-only fields declared, the very same old-shaped
 	// record (Idempotent+SameValueOnReplay) DOES take the WithHistory branch
-	// and calls the live function -- proving the refusal above comes from
-	// checkSecretOnlyFields, not from some other reason this branch never
-	// runs at all (e.g. a nil registry, a lookup miss).
+	// and calls the live function -- proving the skip above comes from the
+	// current registration's SecretOnlyFields, not from some other reason
+	// this branch never runs at all (e.g. a nil registry, a lookup miss).
 	probeControl := &secretOnlyProbeFn{}
 	regControl := NewPluginRegistry()
 	if err := regControl.RegisterWithPolicy("llmtest", "chat", probeControl.fn,
@@ -477,7 +498,7 @@ func TestWithHistoryReplayRerunsTheSecretOnlyCheckOnOldPermissiveHistory(t *test
 	sControl.history = []EventRecord{{
 		Step: 0, EventType: EventTypePluginCall,
 		PluginName: "llmtest", PluginFunc: "chat",
-		PluginInput: `{"api_key":"` + literal + `"}`, PluginOutput: `{"ok":true}`,
+		PluginInput: `{"api_key":"` + literal + `"}`, PluginOutput: recordedOutput,
 		Idempotent: true, SameValueOnReplay: true,
 	}}
 	bControl := &buf256{}
@@ -486,7 +507,7 @@ func TestWithHistoryReplayRerunsTheSecretOnlyCheckOnOldPermissiveHistory(t *test
 	if probeControl.calls != 1 {
 		t.Fatalf("CONTROL: an old Idempotent+SameValueOnReplay record with NO secret-only fields "+
 			"declared did not re-invoke live (calls=%d); the WithHistory branch may not be reachable "+
-			"in this harness, which would make the refusal above unproven", probeControl.calls)
+			"in this harness, which would make the skip above unproven", probeControl.calls)
 	}
 }
 
@@ -540,5 +561,268 @@ func TestASecretOnlyFieldRefusesALiteralOnTheStreamingPath(t *testing.T) {
 	}
 	if streamCalls != 1 {
 		t.Fatalf("CONTROL: the streaming plugin never ran for a reference-only input; calls=%d", streamCalls)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 8. An EXACT duplicate key -- not a case-variant, the identical spelling
+// twice -- is refused too, and the literal never reaches recordedInput.
+// cleat-review's MUST-FIX on #2329 (commit 7a94d970): checkSecretOnlyFields
+// used to unmarshal inputJSON into a map[string]json.RawMessage, and
+// encoding/json's map decode silently keeps only the LAST value for an
+// EXACT-duplicate key -- so {"api_key":"LIT5","api_key":"${secret:X}"}
+// decoded to a ONE-entry map holding just the well-formed reference, and the
+// literal was still in the raw inputJSON that went on to be recorded to
+// event_history on all three dialects. Test 2 above does not cover this: it
+// is a DIFFERENT-spelling duplicate (api_key/API_KEY), and both spellings
+// survive map unmarshaling as two distinct map keys -- only an EXACT
+// spelling match collapses. The fix walks inputJSON's top-level keys with a
+// json.Decoder token stream instead of unmarshaling into a map, so every
+// occurrence is seen before anything can collapse them.
+// ---------------------------------------------------------------------------
+
+func TestASecretOnlyFieldRefusesAnExactDuplicateKey(t *testing.T) {
+	const literal = "LIT5"
+
+	t.Run("literal first, reference second", func(t *testing.T) {
+		s := newTestExecSession()
+		probe := &secretOnlyProbeFn{}
+		reg := NewPluginRegistry()
+		if err := reg.RegisterWithPolicy("llmtest", "chat", probe.fn,
+			ReplayPolicy{}, []string{"api_key"}); err != nil {
+			t.Fatalf("RegisterWithPolicy: %v", err)
+		}
+		s.engine.pluginRegistry = reg
+
+		b := &buf256{}
+		// Exactly cleat-review's reported input: a last-value-wins map decode
+		// would have kept only the (harmless-looking) reference here.
+		input := `{"api_key":"` + literal + `","api_key":"${secret:X}"}`
+		res := s.PluginCall(b.ctx(context.Background()), nil, "llmtest", "chat", input, 0, 200)
+
+		errCode, callErrorCode := unpackCallResult(res)
+		if callErrorCode != callFailureCode {
+			t.Fatalf("callErrorCode = %d, want callFailureCode (%d); errCode=%d -- an exact-duplicate "+
+				"key was accepted, and the literal may have reached storage", callErrorCode, callFailureCode, errCode)
+		}
+		if probe.calls != 0 {
+			t.Fatalf("the plugin function ran despite an exact-duplicate api_key: saw %v", probe.saw)
+		}
+		if len(s.history) != 1 {
+			t.Fatalf("s.history has %d records, want 1: %+v", len(s.history), s.history)
+		}
+		if strings.Contains(s.history[0].PluginInput, literal) {
+			t.Fatalf("event_history.plugin_input contains the literal from the duplicate key: %s",
+				s.history[0].PluginInput)
+		}
+		if !strings.Contains(s.history[0].PluginInput, secretOnlyFieldRedactionMarker) {
+			t.Errorf("recorded plugin_input does not carry the redaction marker: %s", s.history[0].PluginInput)
+		}
+	})
+
+	t.Run("reference first, literal second", func(t *testing.T) {
+		// The reverse ordering: a last-value-wins map decode would have kept
+		// the LITERAL here, not the reference -- included so the fix is
+		// proven order-independent, not merely lucky on the order above.
+		s := newTestExecSession()
+		probe := &secretOnlyProbeFn{}
+		reg := NewPluginRegistry()
+		if err := reg.RegisterWithPolicy("llmtest", "chat", probe.fn,
+			ReplayPolicy{}, []string{"api_key"}); err != nil {
+			t.Fatalf("RegisterWithPolicy: %v", err)
+		}
+		s.engine.pluginRegistry = reg
+
+		b := &buf256{}
+		input := `{"api_key":"${secret:X}","api_key":"` + literal + `"}`
+		res := s.PluginCall(b.ctx(context.Background()), nil, "llmtest", "chat", input, 0, 200)
+
+		if _, callErrorCode := unpackCallResult(res); callErrorCode != callFailureCode {
+			t.Fatalf("callErrorCode = %d, want callFailureCode", callErrorCode)
+		}
+		if probe.calls != 0 {
+			t.Fatalf("the plugin function ran despite an exact-duplicate api_key")
+		}
+		if strings.Contains(s.history[0].PluginInput, literal) {
+			t.Fatalf("event_history.plugin_input contains the literal from the duplicate key: %s",
+				s.history[0].PluginInput)
+		}
+	})
+
+	// CONTROL: the same registration, a single well-formed key (no
+	// duplicate), is reachable -- proves the refusals above are about the
+	// duplicate, not about this harness failing to dispatch at all.
+	t.Run("CONTROL: a single well-formed key is not affected", func(t *testing.T) {
+		s := newTestExecSession()
+		probe := &secretOnlyProbeFn{}
+		reg := NewPluginRegistry()
+		if err := reg.RegisterWithPolicy("llmtest", "chat", probe.fn,
+			ReplayPolicy{}, []string{"api_key"}); err != nil {
+			t.Fatalf("RegisterWithPolicy: %v", err)
+		}
+		s.engine.pluginRegistry = reg
+
+		b := &buf256{}
+		res := s.PluginCall(b.ctx(context.Background()), nil, "llmtest", "chat",
+			`{"api_key":"${secret:X}"}`, 0, 200)
+		if _, callErrorCode := unpackCallResult(res); callErrorCode != 0 {
+			t.Fatalf("CONTROL: a single well-formed api_key was refused too (callErrorCode=%d)", callErrorCode)
+		}
+		if probe.calls != 1 {
+			t.Fatalf("CONTROL: the plugin never ran for a single well-formed key; probe.calls=%d", probe.calls)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// 9. A call-guard rejection (no call_plugin capability) redacts a declared
+// function's secret-only fields before recording, on both the non-streaming
+// and the streaming paths. cleat-review's should-fix-1 on #2329: the call
+// guard is checked BEFORE checkSecretOnlyFields on both paths, so a rejected
+// call short-circuits with inputJSON never having been validated -- and
+// until this fix, the recorded PluginInput stayed the raw, unvalidated
+// inputJSON on that branch, which could still hold a literal in a declared
+// field.
+// ---------------------------------------------------------------------------
+
+func TestACallGuardRefusalRedactsSecretOnlyFieldsOnBothPaths(t *testing.T) {
+	const literal = "sk-should-never-be-recorded-via-the-guard-path"
+
+	t.Run("non-streaming", func(t *testing.T) {
+		s := newTestExecSession()
+		probe := &secretOnlyProbeFn{}
+		reg := NewPluginRegistry()
+		if err := reg.RegisterWithPolicy("llmtest", "chat", probe.fn,
+			ReplayPolicy{}, []string{"api_key"}); err != nil {
+			t.Fatalf("RegisterWithPolicy: %v", err)
+		}
+		s.engine.pluginRegistry = reg
+
+		guard := NewPluginCallGuard()
+		guard.Allow("caller-plugin", []string{"someone-else"}) // NOT llmtest
+		s.engine.pluginCallGuard = guard
+		s.callerPluginName = "caller-plugin"
+
+		b := &buf256{}
+		input := `{"api_key":"` + literal + `"}`
+		res := s.PluginCall(b.ctx(context.Background()), nil, "llmtest", "chat", input, 0, 200)
+
+		if _, callErrorCode := unpackCallResult(res); callErrorCode != callFailureCode {
+			t.Fatalf("callErrorCode = %d, want callFailureCode (the guard rejection)", callErrorCode)
+		}
+		if probe.calls != 0 {
+			t.Fatalf("the plugin function ran despite the call-guard rejection: saw %v", probe.saw)
+		}
+		if len(s.history) != 1 {
+			t.Fatalf("s.history has %d records, want 1: %+v", len(s.history), s.history)
+		}
+		if strings.Contains(s.history[0].PluginInput, literal) {
+			t.Fatalf("a call-guard-refused call recorded the literal: %s", s.history[0].PluginInput)
+		}
+		if !strings.Contains(s.history[0].PluginInput, secretOnlyFieldRedactionMarker) {
+			t.Errorf("recorded plugin_input does not carry the redaction marker: %s", s.history[0].PluginInput)
+		}
+
+		// CONTROL: a caller the guard DOES allow reaches the plugin, on the
+		// same registration -- proves the rejection above is about the
+		// guard, not about this harness never dispatching.
+		s.callerPluginName = "" // callerPluginName == "" bypasses the guard check entirely
+		res2 := s.PluginCall(b.ctx(context.Background()), nil, "llmtest", "chat",
+			`{"api_key":"${secret:openai}"}`, 0, 200)
+		if _, ec2 := unpackCallResult(res2); ec2 != 0 {
+			t.Fatalf("CONTROL: an unrestricted caller was refused too (callErrorCode=%d)", ec2)
+		}
+		if probe.calls != 1 {
+			t.Fatalf("CONTROL: the plugin never ran for an unrestricted caller; probe.calls=%d", probe.calls)
+		}
+	})
+
+	t.Run("streaming", func(t *testing.T) {
+		s := newTestExecSession()
+		var streamCalls int
+		psr := NewPluginStreamRegistry()
+		if err := psr.RegisterStream("llmtest", plugin.FuncOptions{
+			Name:             "chat_stream",
+			SecretOnlyFields: []string{"api_key"},
+		}, func(_ context.Context, _ string) (<-chan plugin.StreamEvent, error) {
+			streamCalls++
+			ch := make(chan plugin.StreamEvent, 1)
+			close(ch)
+			return ch, nil
+		}); err != nil {
+			t.Fatalf("RegisterStream: %v", err)
+		}
+		s.engine.pluginStreamRegistry = psr
+
+		guard := NewPluginCallGuard()
+		guard.Allow("caller-plugin", []string{"someone-else"})
+		s.engine.pluginCallGuard = guard
+		s.callerPluginName = "caller-plugin"
+
+		buf := make([]byte, 256)
+		ctx := contextWithRawMemBuf(context.Background(), buf)
+		input := `{"api_key":"` + literal + `"}`
+		res := s.PluginCallStreaming(ctx, nil, "llmtest", "chat_stream", input, 0, 200)
+
+		if _, callErrorCode := unpackCallResult(res); callErrorCode != callFailureCode {
+			t.Fatalf("callErrorCode = %d, want callFailureCode (the guard rejection)", callErrorCode)
+		}
+		if streamCalls != 0 {
+			t.Fatalf("the streaming plugin function ran despite the call-guard rejection")
+		}
+		if len(s.history) != 1 {
+			t.Fatalf("s.history has %d records, want 1: %+v", len(s.history), s.history)
+		}
+		if strings.Contains(s.history[0].PluginInput, literal) {
+			t.Fatalf("a call-guard-refused streaming call recorded the literal: %s", s.history[0].PluginInput)
+		}
+
+		// CONTROL: an unrestricted caller reaches the streaming plugin.
+		s.callerPluginName = ""
+		res2 := s.PluginCallStreaming(ctx, nil, "llmtest", "chat_stream", `{"api_key":"${secret:openai}"}`, 0, 200)
+		if _, ec2 := unpackCallResult(res2); ec2 != 0 {
+			t.Fatalf("CONTROL: an unrestricted caller was refused too (callErrorCode=%d)", ec2)
+		}
+		if streamCalls != 1 {
+			t.Fatalf("CONTROL: the streaming plugin never ran for an unrestricted caller; calls=%d", streamCalls)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// 10. RegisterWithPolicy's mutual-exclusion assert, pinned directly.
+// cleat-review's should-fix-2 on #2329: nothing failed if this check were
+// removed -- every test above registers a NON-reinvoke-eligible policy
+// alongside SecretOnlyFields, so none of them would notice its absence.
+// Without it, a NEW registration could combine SecretOnlyFields with
+// MayReInvokeOnReplay()==true, which is exactly the combination test 6
+// above depends on never being possible to create going forward (only to
+// have existed in OLD history, from before this check shipped).
+// ---------------------------------------------------------------------------
+
+func TestRegisterWithPolicyRefusesSecretOnlyFieldsWithReinvokeEligiblePolicy(t *testing.T) {
+	reg := NewPluginRegistry()
+	err := reg.RegisterWithPolicy("llmtest", "chat",
+		func(context.Context, string) (string, error) { return "", nil },
+		ReplayPolicy{Idempotent: true, SameValueOnReplay: true}, // MayReInvokeOnReplay() == true
+		[]string{"api_key"})
+	if err == nil {
+		t.Fatal("RegisterWithPolicy allowed SecretOnlyFields combined with a reinvoke-eligible " +
+			"policy; a function like this could reach checkSecretOnlyFields's refusal live during " +
+			"replay re-invocation, which is the exact determinism break the exclusion exists to " +
+			"prevent (see test 6's WithHistory test, and RegisterWithPolicy's own doc comment)")
+	}
+	if reg.Has("llmtest", "chat") {
+		t.Error("the refused registration was still recorded in the registry")
+	}
+
+	// CONTROL: the same declaration, non-reinvoke-eligible, is accepted --
+	// proves the error above is about the combination, not about
+	// SecretOnlyFields or this policy shape individually.
+	if err := reg.RegisterWithPolicy("llmtest", "chat",
+		func(context.Context, string) (string, error) { return "", nil },
+		ReplayPolicy{}, []string{"api_key"}); err != nil {
+		t.Fatalf("CONTROL: RegisterWithPolicy refused SecretOnlyFields with a non-reinvoke-eligible "+
+			"policy, which must be allowed: %v", err)
 	}
 }
