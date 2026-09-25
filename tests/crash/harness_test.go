@@ -481,8 +481,10 @@ func buildWorker(t *testing.T) string {
 	return bin
 }
 
-// deployFixture compiles testdata/crashcall and registers it as a definition.
-func deployFixture(t *testing.T, db *sql.DB, taskQueue string) {
+// buildFixtureWASM compiles testdata/crashcall and returns the module. Split
+// out of deployFixture so the dialect targets can register the same module
+// without a second copy of the build.
+func buildFixtureWASM(t *testing.T) []byte {
 	t.Helper()
 	root := repoRoot(t)
 	outDir := t.TempDir()
@@ -511,6 +513,13 @@ func deployFixture(t *testing.T, db *sql.DB, taskQueue string) {
 	if err != nil {
 		t.Fatalf("reading %s: %v", wasmPath, err)
 	}
+	return wasm
+}
+
+// deployFixture compiles testdata/crashcall and registers it as a definition.
+func deployFixture(t *testing.T, db *sql.DB, taskQueue string) {
+	t.Helper()
+	wasm := buildFixtureWASM(t)
 
 	// tenant_id must be set explicitly. workflow_defs' RLS policy is
 	// `tenant_id = assert_tenant_set()`, and NULL does not satisfy it, so a
@@ -564,6 +573,19 @@ func startWorker(t *testing.T, bin, taskQueue, svcURL string, extraFlags ...stri
 // startWorkerOn is startWorker against a named database. See appDSNFor.
 func startWorkerOn(t *testing.T, dbName, bin, taskQueue, svcURL string, extraFlags ...string) *worker {
 	t.Helper()
+	return startWorkerProcess(t, bin, taskQueue, svcURL,
+		appDSNFor(t, dbName), ensureDatabaseNamed(t, dbName), extraFlags...)
+}
+
+// startWorkerWith starts a worker against a dialect target's connections. See
+// startWorkerProcess for the flag set.
+func startWorkerWith(t *testing.T, tg *crashTarget, bin, taskQueue, svcURL string, extraFlags ...string) *worker {
+	t.Helper()
+	return startWorkerProcess(t, bin, taskQueue, svcURL, tg.workerDB, tg.migrateDB, extraFlags...)
+}
+
+func startWorkerProcess(t *testing.T, bin, taskQueue, svcURL, workerDB, migrateDB string, extraFlags ...string) *worker {
+	t.Helper()
 
 	w := &worker{log: &strings.Builder{}}
 	// --migrate-db is the owner connection to the database this worker serves
@@ -581,8 +603,8 @@ func startWorkerOn(t *testing.T, dbName, bin, taskQueue, svcURL string, extraFla
 	// step, the one cmd/cleat-worker runs at boot, was being exercised against
 	// a database no assertion in this suite ever looks at.
 	args := []string{
-		"--db", appDSNFor(t, dbName),
-		"--migrate-db", ensureDatabaseNamed(t, dbName),
+		"--db", workerDB,
+		"--migrate-db", migrateDB,
 		"--task-queue", taskQueue,
 		"--bench-svc-url", svcURL,
 		"--poll", "200ms",
