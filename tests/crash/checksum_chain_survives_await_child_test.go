@@ -2,6 +2,7 @@ package crash
 
 import (
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 )
@@ -27,8 +28,31 @@ import (
 // path once the observed steps/sec crosses --batch-flush-enter-rate
 // (default 500/sec) -- a single test workflow never gets there, so every
 // other case in this table exercises flush.go's insertEventSQL exclusively,
-// never adaptive_flush.go's flushAndNotify/retryBatchFlush. Setting the
-// enter/exit rates to 0 forces batch mode from the worker's first event.
+// never adaptive_flush.go's flushAndNotify/retryBatchFlush.
+//
+// THIS COMMENT USED TO SAY "setting the enter/exit rates to 0 forces batch
+// mode from the worker's first event", and that was false: cleat-review
+// measured it directly. NewAdaptiveFlusher treats <= 0 as "not configured"
+// and silently substitutes its own default (500 for enter, 250 for exit),
+// so --batch-flush-enter-rate 0 asks for the DEFAULT threshold under a
+// different name -- with only flush.go's guard reverted, this case failed
+// (proving it never touched adaptive_flush.go's path); with only
+// adaptive_flush.go's guards reverted, it still passed. A case that cannot
+// fail on the thing it names is worse than no case: it reads as coverage.
+//
+// Fixed two ways. First, the threshold itself: 1 is not <= 0, so it is not
+// substituted, and any real workflow activity's rate easily clears it on
+// the very first 100ms sample (updateRate's own minimum interval). exit=1
+// too, not 0 -- the same substitution trap on the other threshold, and
+// --batch-flush-exit-rate's own doc string ("must be < enter-rate") is
+// unenforced in code, so entering and never exiting (rather than flapping
+// against a defaulted 250 our test workflow's throughput never approaches)
+// is a deliberate choice, not an oversight. Second, an assertion that does
+// not just trust the flag: AdaptiveFlusher logs "adaptive flusher entered
+// batch mode" (slog.Info, on by default) the moment updateRate's threshold
+// check trips, so runChecksumChainCase greps the first worker's captured
+// output for that line when forceAdaptive is set -- proving the batch path
+// actually ran, rather than assuming a flag that looked right did.
 func TestChecksumChainSurvivesAwaitChild(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -66,10 +90,13 @@ func runChecksumChainCase(t *testing.T, encrypt, sigkill, forceAdaptive bool) {
 		encFlags = []string{"--encrypt-sensitive-payloads", "--encryption-key-file", key}
 	}
 	if forceAdaptive {
-		// 0 crosses on the very first observed rate sample, so the parent's
-		// await_child suspend AND its completing re-flush both go through
+		// 1, not 0: NewAdaptiveFlusher substitutes its own default (500/250)
+		// for any threshold <= 0, so 0 silently asks for the default rather
+		// than forcing batch mode -- see the file doc comment. 1 crosses on
+		// the very first observed rate sample, so the parent's await_child
+		// suspend AND its completing re-flush both go through
 		// AdaptiveFlusher.flushAndNotify rather than flushEvent.
-		encFlags = append(encFlags, "--batch-flush-enter-rate", "0", "--batch-flush-exit-rate", "0")
+		encFlags = append(encFlags, "--batch-flush-enter-rate", "1", "--batch-flush-exit-rate", "1")
 	}
 
 	first := startWorker(t, bin, taskQueue, svc.srv.URL,
@@ -82,6 +109,15 @@ func runChecksumChainCase(t *testing.T, encrypt, sigkill, forceAdaptive bool) {
 	// checksum chaining is in question -- before the crash.
 	time.Sleep(2 * time.Second)
 	logEventHistory(t, db, wfID, "BEFORE crash")
+
+	if forceAdaptive && !strings.Contains(first.output(), "adaptive flusher entered batch mode") {
+		t.Fatalf("forceAdaptive is set but the first worker's log never shows "+
+			"\"adaptive flusher entered batch mode\" -- the completing re-flush "+
+			"this case exists to route through adaptive_flush.go instead went "+
+			"through flush.go's direct path, same as every other case in this "+
+			"table, and this case is not testing what its name says\n--- first worker log ---\n%s",
+			first.output())
+	}
 
 	if sigkill {
 		first.kill()

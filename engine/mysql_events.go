@@ -220,6 +220,13 @@ func (s *MySQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 			created_at, checksum, tenant_id, payload_encoding)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
+			-- MUST STAY FIRST: this is the only assignment on the LEFT of the
+			-- := that computes @cleat_pending; every other line below only
+			-- READS it. Move this line down (e.g. to re-sort the column list)
+			-- and every line above it in evaluation order reads an UNSET
+			-- session variable instead of the guard -- see this file's
+			-- "THE GUARD IS FROZEN INTO A SESSION VARIABLE" doc comment above
+			-- appendEventsInTxOpts for why no other ordering works.
 			checksum = IF(@cleat_pending := (event_type IN ('await_child','await_promise','await_all_children') AND response IS NULL AND error IS NULL AND promise_result IS NULL AND promise_error IS NULL), VALUES(checksum), checksum),
 			payload = IF(@cleat_pending, VALUES(payload), payload),
 			payload_encoding = IF(@cleat_pending, VALUES(payload_encoding), payload_encoding),
