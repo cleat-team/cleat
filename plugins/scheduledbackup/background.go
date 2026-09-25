@@ -199,11 +199,24 @@ func (p *Plugin) runDueBackups(ctx context.Context) {
 	// driver refuses a second query on the same connection while one is
 	// already in flight, so the config stays due and a second worker can
 	// dispatch it again).
+	//
+	// Its error is no longer just logged (cleat#2291 follow-up): a config
+	// whose advance fails is dropped from toDispatch rather than fired
+	// blind. On a fatal, connection-level failure every remaining Exec on
+	// this tx fails the same way and Commit below fails too, so nothing in
+	// this batch dispatches -- the existing safety net. On an isolated,
+	// per-row failure (this tx and connection otherwise healthy) the rest of
+	// the batch is unaffected, and only the failed config is left due to be
+	// retried on the next poll, rather than dispatched without a durable
+	// advance behind it.
+	toDispatch := due[:0]
 	for _, b := range due {
-		// Advance next_run_at under the transaction lock so other
-		// workers skip this config even if this worker crashes
-		// before completing the backup.
-		p.updateNextRunTx(ctx, tx, b.id, b.cronExpr)
+		if err := p.updateNextRunTx(ctx, tx, b.id, b.cronExpr); err != nil {
+			p.logger.Error("scheduledbackup: update next_run_at (tx)",
+				"config_id", b.id, "error", err)
+			continue
+		}
+		toDispatch = append(toDispatch, b)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -211,7 +224,7 @@ func (p *Plugin) runDueBackups(ctx context.Context) {
 		return
 	}
 
-	for _, b := range due {
+	for _, b := range toDispatch {
 		b := b
 		p.logger.Info("scheduledbackup: dispatching scheduled backup",
 			"config_id", b.id, "name", b.name)
@@ -268,17 +281,17 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID uuid.UUID,
 	// (plugin.go) and Run's, above, for why this can no longer be a
 	// precondition checked once at Run's start.
 	//
-	// No call to p.updateNextRun here, deliberately: runDueBackups already
-	// stamped last_run_at/next_run_at for this config inside its claim
-	// transaction, via updateNextRunTx, before this goroutine was even
-	// dispatched -- so the schedule has already advanced and will retry on
-	// its own. Calling updateNextRun a second time here would not just be
-	// redundant: nextRun always searches forward from the NEXT full minute
-	// after the time it's given (cron.go), so a second call using this
-	// (later) failure-time now() can compute a LATER slot than the one
-	// already committed if the two calls straddle a minute boundary --
-	// silently skipping one legitimate run rather than merely repeating the
-	// same computation.
+	// Nothing in this function touches next_run_at/last_run_at, deliberately
+	// (cleat#2291 follow-up): runDueBackups already stamped both for this
+	// config inside its claim transaction, via updateNextRunTx, before this
+	// goroutine was even dispatched, so the schedule has already advanced
+	// and will retry on its own. A second, completion-time recompute here
+	// used to run regardless of outcome -- and cleat-review measured it
+	// clobbering a manual "run now" trigger (cleatctl backup-run, which sets
+	// next_run_at = now() to be picked up by the next poll): if that trigger
+	// landed while this backup was still in flight, this call would
+	// overwrite it with a value computed from cronExpr, silently discarding
+	// the manual request.
 	dsn, err := p.backupDSN(bookkeepCtx)
 	if err != nil {
 		p.logger.Error("scheduledbackup: refusing scheduled backup",
@@ -331,9 +344,6 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID uuid.UUID,
 			UPDATE backup_history SET status = 'failed', error_message = $1, completed_at = now()
 			WHERE id = $2
 		`, p.dialect), backupErrPgDumpFailed, historyID)
-
-		// Still update next_run_at so the schedule can try again later.
-		p.updateNextRun(bookkeepCtx, configID, cronExpr, now)
 		return
 	}
 
@@ -355,8 +365,6 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID uuid.UUID,
 		UPDATE backup_history SET status = 'completed', size_bytes = $1, completed_at = now()
 		WHERE id = $2
 	`, p.dialect), sizeBytes, historyID)
-
-	p.updateNextRun(bookkeepCtx, configID, cronExpr, time.Now())
 }
 
 // markBackupFailed records a failed backup attempt in backup_history, under
@@ -369,12 +377,12 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID uuid.UUID,
 // operator would escalate.
 //
 // Takes ctx rather than building its own context.Background(), matching
-// every other bookkeeping write in this file (updateNextRun, the completion
-// path above): both call sites already hold bookkeepCtx, and building a
-// second, unrelated background context here would be a second thing that
-// could silently diverge from the first. There is nothing here for
-// plugin.AcrossAllTenants/plugin.ForTenant to bypass or re-scope -- see
-// runDueBackups' doc comment -- so plain ctx is correct, not a shortcut.
+// every other bookkeeping write in this file: the call site already holds
+// bookkeepCtx, and building a second, unrelated background context here
+// would be a second thing that could silently diverge from the first. There
+// is nothing here for plugin.AcrossAllTenants/plugin.ForTenant to bypass or
+// re-scope -- see runDueBackups' doc comment -- so plain ctx is correct, not
+// a shortcut.
 func (p *Plugin) markBackupFailed(ctx context.Context, historyID uuid.UUID, errCode string) {
 	if _, err := p.db.Exec(ctx, plugin.Rebind(`
 		UPDATE backup_history SET status = 'failed', error_message = $1, completed_at = now()
@@ -384,28 +392,14 @@ func (p *Plugin) markBackupFailed(ctx context.Context, historyID uuid.UUID, errC
 	}
 }
 
-// updateNextRun calculates and updates the next_run_at and last_run_at for a
-// backup config after a backup attempt (successful or failed).
-func (p *Plugin) updateNextRun(ctx context.Context, configID uuid.UUID, cronExpr string, now time.Time) {
-	next := nextRun(cronExpr, now)
-	var nextRunAt *time.Time
-	if !next.IsZero() {
-		nextRunAt = &next
-	}
-
-	_, err := p.db.Exec(ctx, plugin.Rebind(`
-		UPDATE backup_config
-		SET last_run_at = $1, next_run_at = $2, updated_at = now()
-		WHERE id = $3
-	`, p.dialect), now, nextRunAt, configID)
-	if err != nil {
-		p.logger.Error("scheduledbackup: update next_run_at",
-			"config_id", configID, "error", err)
-	}
-}
-
-// updateNextRunTx is like updateNextRun but runs on an existing transaction.
-func (p *Plugin) updateNextRunTx(ctx context.Context, tx plugin.PluginTx, configID uuid.UUID, cronExpr string) {
+// updateNextRunTx calculates and advances the next_run_at/last_run_at for a
+// due backup config, on the claim transaction runDueBackups already holds.
+// It is the ONLY place either column is written (cleat#2291 follow-up):
+// executeScheduledBackup used to recompute and overwrite them again after
+// the backup finished, which could clobber a manual "run now" trigger
+// (cleatctl backup-run) issued while that backup was still in flight -- see
+// executeScheduledBackup's doc comment.
+func (p *Plugin) updateNextRunTx(ctx context.Context, tx plugin.PluginTx, configID uuid.UUID, cronExpr string) error {
 	now := time.Now()
 	next := nextRun(cronExpr, now)
 	var nextRunAt *time.Time
@@ -418,8 +412,5 @@ func (p *Plugin) updateNextRunTx(ctx context.Context, tx plugin.PluginTx, config
 		SET last_run_at = $1, next_run_at = $2, updated_at = now()
 		WHERE id = $3
 	`, p.dialect), now, nextRunAt, configID)
-	if err != nil {
-		p.logger.Error("scheduledbackup: update next_run_at (tx)",
-			"config_id", configID, "error", err)
-	}
+	return err
 }

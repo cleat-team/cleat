@@ -3,11 +3,8 @@ package scheduledbackup
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"io"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -26,41 +23,35 @@ import (
 // still open.
 //
 // On PostgreSQL that Exec fails outright ("there is already a query being
-// processed on this connection"): the claim transaction still commits, but
-// next_run_at is never advanced by it, so the config is still due and a
-// second, later poll -- before the in-flight backup finishes and its own
-// completion-time updateNextRun call papers over the gap -- claims and
-// dispatches it again. On MySQL the failed Exec leaves the connection
-// unusable ("driver: bad connection"), so the transaction's own Commit
-// fails and runDueBackups returns before ever reaching the dispatch loop --
-// nothing is dispatched at all on that poll.
+// processed on this connection"). On MySQL the failed Exec leaves the
+// connection unusable ("driver: bad connection"). Both failures are now
+// treated the same way (cleat#2291's should-fix on #2327): a config whose
+// advance fails is dropped from this poll's dispatch rather than fired
+// blind, so reintroducing the ordering bug alone no longer causes a double
+// dispatch -- it causes the affected config to never advance and never
+// dispatch at all, on every poll, on both dialects. Either way the config
+// never gets the ONE dispatch it should.
 //
-// SQL Server is included here too, and is asserted NOT to fail: this test
-// used to justify that with the shape of dueBackupsQuery's MSSQL text (no
-// FOR UPDATE cursor clause, only WITH (UPDLOCK, READPAST, ROWLOCK) locking
-// hints) -- a claim about the SQL, not about the actual mechanism, which is
+// SQL Server is included here too, and is asserted NOT to fail: this claim
+// used to rest on the shape of dueBackupsQuery's MSSQL text (no FOR UPDATE
+// cursor clause, only WITH (UPDLOCK, READPAST, ROWLOCK) locking hints) --
+// which is a claim about the SQL, not about the actual mechanism, which is
 // whatever go-mssqldb's TDS-level result-set handling does with a second
 // statement on the same *sql.Tx while a previous SELECT's rows aren't fully
 // drained. cleat-review measured this independently with the real worker
-// against SQL Server 2022 and found no failure; falsifying this test against
-// a real MSSQL container (reintroducing the bug) confirms the same thing --
-// the mssql subtest stays green while postgres and mysql both go red with
-// their documented symptoms. Driving it here, rather than resting on the
-// SQL-text inference, is what actually backs the claim.
+// against SQL Server 2022 and found no failure; falsifying this test
+// against a real MSSQL container (reintroducing the ordering bug alone)
+// confirms the same thing -- the mssql subtest stays green while postgres
+// and mysql both go red.
 //
-// A fake, blocking pg_dump is load-bearing here, not incidental. Without
-// one, pg_dump is simply absent from this machine and every CI runner (ci.yml
-// installs no postgresql-client), so executeScheduledBackup's own failure
-// path runs -- and it, too, calls updateNextRun (see its comment), which
-// silently repairs next_run_at regardless of whether the claim transaction's
-// own advance ever took effect. That fallback made the very first version of
-// this test pass on PostgreSQL even with the bug reintroduced: a first poll
-// dispatched fine, and by the time a *second* poll ran (after waiting for
-// the first backup to finish), the fallback had already fixed next_run_at.
-// Blocking pg_dump until this test says so removes that race: the second
-// poll runs while the first backup's completion-time fixup provably cannot
-// have happened yet, because the fake process is still parked on a file that
-// does not exist until the test creates it.
+// No fake pg_dump is needed (unlike an earlier version of this test):
+// executeScheduledBackup no longer touches next_run_at/last_run_at at all
+// (cleat#2291's other should-fix on #2327, which also fixed a real bug of
+// its own -- see background.go's doc comments), so next_run_at correctness
+// no longer depends on when, or whether, the dispatched backup finishes.
+// The two immediately-consecutive polls below are sufficient on their own:
+// the second one can only find a config due again if the first poll's claim
+// transaction failed to durably advance it.
 //
 // This drives the real dialect driver end to end -- a fake/mock DB has no
 // notion of "a statement on the same connection while a result set is
@@ -92,10 +83,6 @@ func TestRunDueBackupsDispatchesExactlyOnceAndAdvancesNextRunAt(t *testing.T) {
 			p.deploymentSecrets = &fakeBackupDeploymentSecrets{dsn: testBackupDSN}
 			p.config.DumpDir = t.TempDir()
 
-			release := filepath.Join(t.TempDir(), "release")
-			installFakePgDump(t, fmt.Sprintf(
-				"while [ ! -f %q ]; do sleep 0.02; done\ntouch \"$2\"\n", release))
-
 			// TWO due configs, not one: with a single row, lib/pq can finish
 			// delivering it (and know there are no more) before the loop
 			// body ever runs, so the connection is already idle by the time
@@ -107,30 +94,19 @@ func TestRunDueBackupsDispatchesExactlyOnceAndAdvancesNextRunAt(t *testing.T) {
 			mustInsertDueConfig(t, db, dialect, configID, "cleat-2291-once", past)
 			mustInsertDueConfig(t, db, dialect, configID2, "cleat-2291-once-2", past)
 
-			// Poll 1: claims both configs, commits (whether or not it
-			// advanced next_run_at), and dispatches two goroutines that
-			// each block inside the fake pg_dump.
+			// Poll 1: claims and (if the advance succeeds) dispatches both
+			// configs. Poll 2, immediately: can only find either config due
+			// again if poll 1's claim transaction failed to advance it.
 			p.runDueBackups(ctx)
-
-			// Poll 2, immediately, with no wait: the fake pg_dump cannot
-			// have completed (the release file does not exist yet), so
-			// neither config's completion-time updateNextRun can have run.
-			// This can only find either config due again if poll 1's claim
-			// transaction failed to advance next_run_at under its own lock.
 			p.runDueBackups(ctx)
-
-			// Now let both polls' backups actually finish.
-			if err := os.WriteFile(release, nil, 0o644); err != nil {
-				t.Fatalf("releasing fake pg_dump: %v", err)
-			}
 			waitForBgBackups(t, p)
 
 			for _, id := range []uuid.UUID{configID, configID2} {
 				if got := countBackupHistory(t, db, dialect, id); got != 1 {
 					t.Fatalf("after two immediately-consecutive runDueBackups polls: %d backup_history "+
-						"rows for config %s, want exactly 1 -- the second poll re-claimed and "+
-						"re-dispatched a config the first poll's transaction should already have "+
-						"advanced past due", got, id)
+						"rows for config %s, want exactly 1 -- either poll 1's claim transaction did not "+
+						"durably advance next_run_at (a second poll then re-dispatches), or poll 1's claim "+
+						"failed outright and neither poll ever dispatched it", got, id)
 				}
 			}
 		})
