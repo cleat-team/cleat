@@ -239,6 +239,15 @@ func Middleware(db *sql.DB) func(http.Handler) http.Handler {
 - **Secrets in workflow state**: Workflow input and event history are stored as
   `JSONB` columns in PostgreSQL. If secrets are passed as workflow input, they
   are stored in plaintext in the database.
+- **Partial event-history encryption (PostgreSQL only)**: `--encrypt-sensitive-payloads`
+  (with `--encryption-key-file`) encrypts 11 `event_history` columns with
+  per-tenant AES-256-GCM. It does not cover `workflow_instances` (`input`,
+  `result`, `error_msg`, `query_state`), `workflow_signals.payload`,
+  `workflow_promises.result`, `workflow_update_requests.payload`/`result`,
+  `workflow_schedules.input`, `idempotency_keys.error_msg`, or a
+  `child_workflow` event's `child_input`/`payload` (a separate write path that
+  does not encrypt). See cleat#2312 for the full per-column measurement and
+  `worker-config.md`'s "Encryption at Rest" section for the flag reference.
 - **No built-in secrets manager**: There is no integration with external secrets
   managers (HashiCorp Vault, AWS Secrets Manager, etc.).
 - **Plugin-level secrets**: Plugins can read secrets from the environment or
@@ -259,7 +268,9 @@ func Middleware(db *sql.DB) func(http.Handler) http.Handler {
 
 - Secrets API (`h.Secret(key string) string`) on the `HostCalls` interface
   that reads from a configurable secrets backend.
-- Transparent encryption of sensitive event history records.
+- Encryption covering the columns `--encrypt-sensitive-payloads` currently
+  misses (owner decision pending on cleat#2312, at minimum for
+  `workflow_instances.result`).
 
 ## Input Validation
 
@@ -312,6 +323,6 @@ func Middleware(db *sql.DB) func(http.Handler) http.Handler {
 | PostgreSQL / SQL Server RLS | Database-enforced, FORCEd/FILTER PREDICATE on 8 tables, fail-closed | Per-tenant connection pooling / sharding |
 | MySQL tenancy | Single-tenant only (no RLS feature; documented product boundary, not a gap) | — |
 | API auth | Bearer token / header-based, SHA-256 hashed | Scoped keys, rotation, rate limiting |
-| Secrets | Plaintext in DB, no built-in secrets manager | Secrets API on HostCalls, encryption |
+| Secrets | Plaintext in DB, no built-in secrets manager; 11 `event_history` columns optionally encrypted (PG only, cleat#2312 lists the gaps) | Secrets API on HostCalls, encryption of the remaining columns |
 | Input validation | Minimal (length, JSON parseability) | JSON Schema, stricter enforcement |
 | Worker network | Optional API listener, DB connection only | Managed worker fleet with mTLS |

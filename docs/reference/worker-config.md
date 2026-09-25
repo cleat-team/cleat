@@ -454,11 +454,26 @@ for the rollout sequence a rolling rotation needs to stay safe.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| bool | `false` | Enable encryption of sensitive event payload fields |
+| bool | `false` | Encrypt select `event_history` payload columns with AES-256-GCM |
 
-When enabled, the worker encrypts sensitive fields (e.g., signal payloads,
-activity results) using the key from `--encryption-key-file`. Requires
-`--encryption-key-file` to also be set.
+PostgreSQL only -- refused at startup on any other `--driver`. When enabled, the
+worker encrypts these `event_history` columns before writing them: `request`,
+`response`, `error`, `signal_payload`, `child_input`, `new_input`,
+`plugin_input`, `plugin_output`, `promise_result`, `promise_error`, and
+`payload`. Encryption is per-tenant (AES-256-GCM, HKDF-derived key, tenant ID
+as AAD), using the key from `--encryption-key-file`, which must also be set.
+
+One event type is an exception: `child_workflow` events are written by a
+separate code path that does not encrypt `child_input` or `payload`, so a
+child workflow's input is plaintext in the parent's `event_history` regardless
+of this flag (cleat#2312).
+
+This flag does **not** cover most other places workflow data is stored --
+`workflow_instances.input`, `.result`, `.error_msg`, and `.query_state`;
+`workflow_signals.payload`; `workflow_promises.result`;
+`workflow_update_requests.payload` and `.result`; `workflow_schedules.input`;
+and `idempotency_keys.error_msg` are all plaintext whether or not this flag is
+set. See cleat#2312 for the full per-column measurement.
 
 ---
 
