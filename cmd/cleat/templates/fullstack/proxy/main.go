@@ -265,10 +265,15 @@ func forward(w http.ResponseWriter, r *http.Request, cfg config, rt route, id st
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		log.Printf("upstream answered %d: the API key this proxy holds was refused", resp.StatusCode)
 	}
-	// Status, Content-Type and the body. Not Set-Cookie, not anything else.
-	if ct := resp.Header.Get("Content-Type"); ct != "" {
-		w.Header().Set("Content-Type", ct)
+	// Status, a Content-Type and the body. Not Set-Cookie, not anything else. The Content-Type is narrowed to two
+	// values: a worker (or anything answering as it) that returned text/html would otherwise have its markup run on
+	// the proxy's own origin, from which a script could call this proxy same-origin with the key attached.
+	ct := "text/plain; charset=utf-8"
+	if mt, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err == nil && mt == "application/json" {
+		ct = "application/json"
 	}
+	w.Header().Set("Content-Type", ct)
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
 	w.WriteHeader(resp.StatusCode)
 	_, _ = io.Copy(w, io.LimitReader(resp.Body, maxResponseBody))
 	log.Printf("%s %s -> %d", r.Method, r.URL.Path, resp.StatusCode)

@@ -138,6 +138,32 @@ func TestTheResponseCarriesNoUpstreamHeadersButContentTypeAndNeverTheKey(t *test
 }
 
 // Published state is read through the proxy, for the one key the page uses.
+// Whatever the worker answers is served as JSON or as plain text, never as HTML: markup reflected from upstream would
+// run on the proxy's own origin, and a script there can call the proxy same-origin.
+func TestAnUpstreamHTMLResponseIsServedAsPlainTextUnderASandbox(t *testing.T) {
+	up := newUpstream(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte("<script>fetch('/api/workflows/my-fullstack-app/start',{method:'POST'})</script>"))
+	})
+	h, _ := testProxy(t, up, home)
+	w := do(h, http.MethodGet, "/api/workflows/run-1/query?key=status", home, nil, "")
+	if ct := w.Header().Get("Content-Type"); ct != "text/plain; charset=utf-8" {
+		t.Errorf("Content-Type = %q, want text/plain for an upstream text/html", ct)
+	}
+	if csp := w.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "sandbox") || strings.Contains(csp, "script-src") {
+		t.Errorf("Content-Security-Policy = %q, want default-src 'none'; sandbox", csp)
+	}
+	if w.Header().Get("X-Content-Type-Options") != "nosniff" {
+		t.Error("nosniff missing")
+	}
+	// And JSON stays JSON, which is what the page reads.
+	up2 := newUpstream(t, ok)
+	h2, _ := testProxy(t, up2, home)
+	if ct := do(h2, http.MethodGet, "/api/workflows/run-1/query?key=status", home, nil, "").Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+}
+
 func TestQueryForwardsOnlyKeyStatus(t *testing.T) {
 	up := newUpstream(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"value":"complete"}`)) })
 	h, _ := testProxy(t, up, home)
