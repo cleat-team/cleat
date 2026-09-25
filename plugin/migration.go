@@ -562,6 +562,13 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 			if err != nil {
 				return fmt.Errorf("plugin %s migration v%d begin: %w", name, m.Version, err)
 			}
+			// A safety net, not the mechanism: every path below rolls back or commits explicitly, and
+			// Rollback after Commit is a no-op (sql.ErrTxDone). It is here because pinnedtx.Begin starts
+			// this transaction on a context that outlives ctx, so a path that forgets to end it no longer
+			// gets cleaned up by cancellation -- it leaves an open transaction on the pinned connection and
+			// the next statement waits behind it. Measured by removing one explicit Rollback: the plugin
+			// suite hung to its timeout (cleat#2215 review).
+			defer func() { _ = tx.Rollback() }()
 
 			// A migration may carry NO SQL AT ALL and exist only to declare
 			// something -- TenantScoped, SweepTables. cleat#1512 established
