@@ -812,12 +812,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The migration runners no longer race database/sql over their pinned connection.** (cleat#2215)
 
-  A migration whose context ended mid-transaction (a `--migrate-only` cut off by its deadline, or a lock wait
-  that outlasted it) could panic with a nil pointer dereference in `Runner.session`'s release: database/sql
-  starts a goroutine for every transaction begun on a cancellable context and, when the context ends, closes the
-  pinned `*sql.Conn` from that goroutine while the runner is still using it to `RESET` its session settings and
-  unlock. It is a nanosecond window (`Conn.grabConn` checks `done`, then takes the lock), so it showed up in CI
-  under load and twice ejected a PR from the merge queue. Migration transactions are now begun on a context the
+  A migration whose context ended mid-transaction (a test or a library caller that passes a deadline or
+  cancellable context to the runner, or a lock wait that outlasted it) could panic with a nil pointer
+  dereference in `Runner.session`'s release: database/sql starts a goroutine for every transaction begun on a
+  cancellable context and, when the context ends, closes the pinned `*sql.Conn` from that goroutine while the
+  runner is still using it to `RESET` its session settings and unlock. It is a nanosecond window
+  (`Conn.grabConn` checks `done`, then takes the lock), so it showed up in CI under load and twice ejected a PR
+  from the merge queue. The worker's own `--migrate-only` is not a trigger: its context has no deadline and the
+  signal handler is installed after that mode exits, so SIGTERM ends the process outright (exit 143).
+
+  The cancellation does not need a driver without session-reset hooks: with lib/pq 1.12.3, which has them, the
+  cancel watcher marks the connection bad, so the async `Rollback` returns `driver.ErrBadConn` and database/sql
+  closes the pinned connection from that goroutine all the same. A fake driver copying that behaviour panicked
+  10, 6 and 6 times per 4.8M iterations on the old pattern and never on the new one. Migration transactions are now begun on a context the
   run's context cannot cancel (`internal/pinnedtx`); statements inside them still take that context, so a
   blocked statement is cancelled as before and the runner's own `Rollback` ends the transaction. The wait for a
   lock is still bounded by `lock_timeout` on PostgreSQL and by `GET_LOCK`/`sp_getapplock` (15 minutes) on MySQL
