@@ -40,9 +40,11 @@ import (
 )
 
 const (
-	envBootRefusalSubprocess  = "CLEAT_2277_BOOT_REFUSAL_SUBPROCESS"
-	envBootRefusalInjectStale = "CLEAT_2277_BOOT_REFUSAL_INJECT_STALE_PLUGIN"
-	staleRouteFixtureName     = "cleat-2277-boot-refusal-stale-route-fixture"
+	envBootRefusalSubprocess     = "CLEAT_2277_BOOT_REFUSAL_SUBPROCESS"
+	envBootRefusalInjectStale    = "CLEAT_2277_BOOT_REFUSAL_INJECT_STALE_PLUGIN"
+	envBootRefusalInjectRouteErr = "CLEAT_2277_BOOT_REFUSAL_INJECT_ROUTE_ERR_PLUGIN"
+	staleRouteFixtureName        = "cleat-2277-boot-refusal-stale-route-fixture"
+	routeErrFixtureName          = "cleat-2277-boot-refusal-route-err-fixture"
 )
 
 // staleRouteSignatureFixturePlugin has a method literally named
@@ -60,7 +62,28 @@ func (staleRouteSignatureFixturePlugin) Init(ctx context.Context, env *plugin.En
 }
 func (staleRouteSignatureFixturePlugin) RegisterRoutes(mux *http.ServeMux) error { return nil }
 
-// Registration is gated on an env var so this fixture is never present in an
+// routeErrFixturePlugin satisfies plugin.HasRoutes with the CURRENT
+// signature -- checkPluginRouteSignatures has nothing to flag -- but its
+// RegisterRoutes itself fails. cleat-review's should-fix on #2318: main.go's
+// other os.Exit(1), the one after `p.RegisterRoutes(pluginRouter)` fails
+// (main.go:1666-ish, right below checkPluginRouteSignatures's), was
+// untested. TestMainRefusesToStartOnAStaleRouteSignature only ever drove the
+// signature-mismatch refusal, so removing this second os.Exit(1) would leave
+// every test in this package green while the worker started and served with
+// that plugin's routes silently absent.
+type routeErrFixturePlugin struct{}
+
+func (routeErrFixturePlugin) Info() plugin.PluginInfo {
+	return plugin.PluginInfo{Name: routeErrFixtureName}
+}
+func (routeErrFixturePlugin) Init(ctx context.Context, env *plugin.Environment) error {
+	return nil
+}
+func (routeErrFixturePlugin) RegisterRoutes(mux plugin.Router) error {
+	return fmt.Errorf("%s: deliberate RegisterRoutes failure, injected for TestMainRefusesToStartWhenRegisterRoutesFails", routeErrFixtureName)
+}
+
+// Registration is gated on an env var so neither fixture is present in an
 // ordinary test run of this package (it would otherwise make EVERY test that
 // calls plugin.Discover() -- including TestPluginAuthExemptPatternsAreRealRoutes
 // above -- see a plugin that does not really exist).
@@ -68,6 +91,10 @@ func init() {
 	if os.Getenv(envBootRefusalInjectStale) == "1" {
 		plugin.Register(plugin.PluginInfo{Name: staleRouteFixtureName},
 			func() plugin.Plugin { return staleRouteSignatureFixturePlugin{} })
+	}
+	if os.Getenv(envBootRefusalInjectRouteErr) == "1" {
+		plugin.Register(plugin.PluginInfo{Name: routeErrFixtureName},
+			func() plugin.Plugin { return routeErrFixturePlugin{} })
 	}
 }
 
@@ -125,7 +152,7 @@ func TestMainRefusesToStartOnAStaleRouteSignature(t *testing.T) {
 	// on start, so the schema has to be applied first or every subprocess
 	// below refuses on "the database has no schema_migrations table" before
 	// ever reaching checkPluginRouteSignatures.
-	if code, out := runBootSubprocess(t, []string{"--driver=postgres", "--db=" + ownerDSN, "--migrate-only"}, false); code != 0 {
+	if code, out := runBootSubprocess(t, []string{"--driver=postgres", "--db=" + ownerDSN, "--migrate-only"}, ""); code != 0 {
 		t.Fatalf("--migrate-only exited %d:\n%s", code, out)
 	}
 
@@ -148,7 +175,7 @@ func TestMainRefusesToStartOnAStaleRouteSignature(t *testing.T) {
 	// could just as well be this test's own setup being broken, not the
 	// boot-refusal check actually firing.
 	t.Run("control: no stale plugin registered, worker starts serving", func(t *testing.T) {
-		code, out := runBootRefusalSubprocess(t, dsn, ownerDSN, false)
+		code, out := runBootRefusalSubprocess(t, dsn, ownerDSN, "")
 		if code != -1 {
 			t.Fatalf("worker with no stale plugin registered exited %d instead of being killed while "+
 				"serving -- something else refused to start, which means the assertion below would not "+
@@ -157,7 +184,7 @@ func TestMainRefusesToStartOnAStaleRouteSignature(t *testing.T) {
 	})
 
 	t.Run("worker refuses to start with the stale-signature plugin registered", func(t *testing.T) {
-		code, out := runBootRefusalSubprocess(t, dsn, ownerDSN, true)
+		code, out := runBootRefusalSubprocess(t, dsn, ownerDSN, envBootRefusalInjectStale)
 		if code == -1 {
 			t.Fatal("worker with the stale-signature plugin registered started serving instead of " +
 				"refusing -- removing the os.Exit(1) after checkPluginRouteSignatures in main.go would " +
@@ -177,16 +204,44 @@ func TestMainRefusesToStartOnAStaleRouteSignature(t *testing.T) {
 			t.Errorf("refusal message does not mention RegisterRoutes, so a reader would not know what to fix:\n%s", out)
 		}
 	})
+
+	// cleat-review's should-fix: this is main.go's OTHER refusal on this
+	// path -- the plugin's RegisterRoutes signature is current (so
+	// checkPluginRouteSignatures above has nothing to flag), but the CALL
+	// itself returns an error. That is a separate os.Exit(1) a few lines
+	// below the one the subtest above pins; nothing else in this package
+	// drives it, so removing it silently kept ./cmd/cleat-worker green.
+	t.Run("worker refuses to start when a plugin's RegisterRoutes returns an error", func(t *testing.T) {
+		code, out := runBootRefusalSubprocess(t, dsn, ownerDSN, envBootRefusalInjectRouteErr)
+		if code == -1 {
+			t.Fatal("worker with the route-err plugin registered started serving instead of refusing -- " +
+				"removing the os.Exit(1) after a failed RegisterRoutes in main.go would produce exactly this")
+		}
+		if code == 42 {
+			t.Fatalf("main() returned instead of exiting -- a failed RegisterRoutes must reach an "+
+				"os.Exit(1), not merely be logged:\n%s", out)
+		}
+		if code == 0 {
+			t.Fatalf("worker exited 0 with the route-err plugin registered, want a fatal refusal (non-zero):\n%s", out)
+		}
+		if !strings.Contains(out, routeErrFixtureName) {
+			t.Errorf("refusal message does not name the offending plugin %q:\n%s", routeErrFixtureName, out)
+		}
+		if !strings.Contains(out, "RegisterRoutes") {
+			t.Errorf("refusal message does not mention RegisterRoutes, so a reader would not know what to fix:\n%s", out)
+		}
+	})
 }
 
 // runBootRefusalSubprocess re-executes this test binary as a worker (via
 // TestMain's interception) against dsn (the app-role connection --db serves
 // requests through) and ownerDSN (the schema-owning connection --migrate-db
-// uses for its startup catch-up check), optionally with the stale-signature
-// fixture plugin registered. Returns -1 if the worker was still running (and
-// was killed) when the deadline elapsed -- i.e. it started serving rather
-// than exiting either way.
-func runBootRefusalSubprocess(t *testing.T, dsn, ownerDSN string, injectStale bool) (code int, output string) {
+// uses for its startup catch-up check). inject is "" for no fixture plugin,
+// or one of envBootRefusalInjectStale/envBootRefusalInjectRouteErr to
+// register the matching fixture. Returns -1 if the worker was still running
+// (and was killed) when the deadline elapsed -- i.e. it started serving
+// rather than exiting either way.
+func runBootRefusalSubprocess(t *testing.T, dsn, ownerDSN, inject string) (code int, output string) {
 	t.Helper()
 	args := []string{
 		"--driver=postgres",
@@ -194,14 +249,15 @@ func runBootRefusalSubprocess(t *testing.T, dsn, ownerDSN string, injectStale bo
 		"--migrate-db=" + ownerDSN,
 		fmt.Sprintf("--api-addr=127.0.0.1:%d", freePort(t)),
 	}
-	return runBootSubprocess(t, args, injectStale)
+	return runBootSubprocess(t, args, inject)
 }
 
 // runBootSubprocess re-executes this test binary as the worker (via
-// TestMain's interception) with args, optionally with the stale-signature
-// fixture plugin registered. Returns -1 if the process was still running
-// (and was killed) when the deadline elapsed.
-func runBootSubprocess(t *testing.T, args []string, injectStale bool) (code int, output string) {
+// TestMain's interception) with args. inject is "" for no fixture plugin, or
+// one of envBootRefusalInjectStale/envBootRefusalInjectRouteErr to register
+// the matching fixture. Returns -1 if the process was still running (and was
+// killed) when the deadline elapsed.
+func runBootSubprocess(t *testing.T, args []string, inject string) (code int, output string) {
 	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
@@ -209,8 +265,8 @@ func runBootSubprocess(t *testing.T, args []string, injectStale bool) (code int,
 	}
 	env := os.Environ()
 	env = append(env, envBootRefusalSubprocess+"=1")
-	if injectStale {
-		env = append(env, envBootRefusalInjectStale+"=1")
+	if inject != "" {
+		env = append(env, inject+"=1")
 	}
 
 	const bound = 30 * time.Second
