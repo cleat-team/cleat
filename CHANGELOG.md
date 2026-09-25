@@ -1530,6 +1530,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to just under a second apart. Now millisecond-precise (microsecond on
   MySQL) on all three, matching `StaleSetShape`. cleat#2189.
 
+- **A crash or rolling deploy between AwaitChild's (or AwaitPromise's, or
+  AwaitAllChildren's) pending write and its completing write could
+  permanently FAIL the parent with a step-N checksum mismatch on replay.**
+  (cleat#2333)
+
+  All three suspend on a step with a "pending" event holding nothing, then
+  write a second, completing event to the SAME step once the real outcome
+  is known. Every dialect's completing write was an unconditional
+  INSERT/UPSERT with no guard distinguishing "complete this still-pending
+  row" from "silently re-accept a stray duplicate" — so a retried pending
+  write, replayed after the real completion had already landed and been
+  checksummed, would overwrite it and desync the chain `VerifyWorkflowEvents`
+  recomputes on every replay-with-history.
+
+  Each dialect's completing write is now restricted to rows that are still
+  genuinely pending (`event_type IN ('await_child','await_promise',
+  'await_all_children')` and `response`/`error`/`promise_result`/
+  `promise_error` all `NULL`): a `WHERE` clause on Postgres's
+  `DO UPDATE`, per-column `IF()` guards on MySQL's
+  `ON DUPLICATE KEY UPDATE` (which has no `WHERE`), and MSSQL's
+  `INSERT ... SELECT` rewritten as a `MERGE` with a `WHEN MATCHED` guard.
+
+  Two related gaps surfaced while fixing this and are fixed alongside it:
+  MySQL's INSERT was missing `payload_encoding` from its column list
+  outright, and none of the six completing-write sites ever transitioned
+  `event_type` from `'await_promise'` to `'promise_resolved'`/
+  `'promise_rejected'` — a pre-existing bug independent of the crash
+  scenario, since `AwaitPromise`'s own replay branches on that column to
+  decide whether to trust history or re-check the promise store. Fixing the
+  transition also closes a residual raised in review: `PromiseResult`/
+  `PromiseError` have no non-empty guarantee the way `AwaitChild`'s
+  `Response` does, so a promise resolved or rejected with the empty string
+  is column-for-column identical to a still-pending row — but once
+  `event_type` correctly leaves the pending set, the row is immutable
+  regardless of what those columns hold.
+
 ## [0.2.0] - 2026-08-10
 
 ### UPGRADE NOTES — breaking
