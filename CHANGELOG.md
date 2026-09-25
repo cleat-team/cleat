@@ -563,6 +563,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this release that finds or redacts these rows. **Treat any credential ever passed as a literal
   to `llm.chat`'s or `llm.chat_stream`'s `api_key` field as compromised and rotate it.**
 
+  **Finding rows to confirm the scope before rotating.** These are read-only surveys, not a
+  repair tool — they tell you whether any row exists, not how to fix it. Run as a role that can
+  read across tenants (a plain `psql`/`mysql`/`sqlcmd` connection as an admin, not through a
+  tenant-scoped RLS pool — on MSSQL that means a session with `sp_set_session_context` set, or
+  `cleat_admin` role membership, or the query returns nothing regardless of what's in the table),
+  and exclude the redaction marker this fix itself now writes (`[secret-only field, literal
+  value refused]`) so a POST-fix refusal doesn't read as a PRE-fix leak. Each query below was run
+  2026-09-25 against a row seeded with a literal, one with a resolved `${secret:...}` reference,
+  one already redacted by this fix, and one on an unrelated plugin — only the literal row
+  matched, on all three dialects:
+
+  ```sql
+  -- PostgreSQL. If this deployment ever ran --encrypt-sensitive-payloads, plugin_input on
+  -- encrypted rows is ciphertext and this regex will not match them -- it can only clear rows,
+  -- never rule a deployment in or out, once encryption has been in use.
+  SELECT tenant_id, workflow_id, step, created_at
+  FROM event_history
+  WHERE plugin_name = 'llm' AND plugin_func IN ('chat', 'chat_stream')
+    AND plugin_input ~* '"api_key"\s*:\s*"(?!\$\{secret:)'
+    AND plugin_input NOT LIKE '%secret-only field, literal value refused%';
+
+  -- MySQL. Payload encryption is not implemented on this dialect (see
+  -- engine/event_storage_encoding.go), so plugin_input is always plain text here.
+  SELECT tenant_id, workflow_id, step, created_at
+  FROM event_history
+  WHERE plugin_name = 'llm' AND plugin_func IN ('chat', 'chat_stream')
+    AND plugin_input REGEXP '"api_key"[[:space:]]*:[[:space:]]*"(\\$\\{secret:)?'
+    AND plugin_input NOT REGEXP '\\$\\{secret:'
+    AND plugin_input NOT LIKE '%secret-only field, literal value refused%';
+
+  -- SQL Server. No regex operator; LIKE with the literal quote-colon shape, same caveats.
+  SELECT tenant_id, workflow_id, step, created_at
+  FROM event_history
+  WHERE plugin_name = 'llm' AND plugin_func IN ('chat', 'chat_stream')
+    AND plugin_input LIKE '%"api_key"%'
+    AND plugin_input NOT LIKE '%${secret:%'
+    AND plugin_input NOT LIKE '%secret-only field, literal value refused%';
+  ```
+
+  A hit means a literal reached this row; a JSON field is unordered and can hold escaped
+  characters these patterns do not account for, so treat a clean result as inconclusive rather
+  than as proof nothing was ever recorded, and a row with the field spelled `API_KEY` or another
+  case variant as a hit too (case-insensitive match on PostgreSQL and MySQL above; add a second
+  `LIKE '%"API_KEY"%'` clause on SQL Server if auditing for that).
+
 ### Added
 
 - **`--encryption-key-file-previous`: `cmd/cleat-worker` can hold a previous payload-encryption key alongside the current one, for rolling key rotation.** (cleat#1992, #2308)
