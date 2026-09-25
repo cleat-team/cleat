@@ -244,6 +244,29 @@ also declare `Flush()`, delegating to the inner `http.Flusher` when there is one
 written first, if it tracks the status), and `Unwrap() http.ResponseWriter`, which is how
 `http.ResponseController` reaches the real writer.
 
+### C19 — a plugin route reads its request body through `plugin.ReadBody` / `plugin.ReadJSONBody`
+
+**Guard:** `TestEveryPluginReadsItsRequestBodyThroughTheHelper`
+(`plugins/every_plugin_reads_its_body_through_the_helper_test.go`)
+
+The host bounds every plugin route's request body before a plugin's handler runs
+(`pluginBodyLimitRouter`, `cmd/cleat-worker/plugin_body_limit.go`) —
+`--plugin-max-body-size` by default, or a larger ceiling the route declared with
+`plugin.MaxBody`. That bound does nothing on its own: `http.MaxBytesReader` only
+makes the *next* read past the limit fail, and a handler that calls
+`io.ReadAll(r.Body)` or `json.NewDecoder(r.Body)` directly gets a bare
+`*http.MaxBytesError`, which reads to a caller as a malformed-body 400 or a
+hung connection, not as a 413 naming the limit (cleat#1338 first paid for this
+on the core API; cleat#2232 is the same defect on plugin routes). `ReadBody` and
+`ReadJSONBody` (`plugin/body.go`) are the only two places that translation is
+written.
+
+The guard is AST-based: it collects every identifier bound to an `*http.Request`
+parameter in a file and flags `io.ReadAll`/`json.NewDecoder` only when the
+argument is `<that name>.Body` — several plugins legitimately call `io.ReadAll`
+on an *outbound* response body (`resp.Body`, `tokenResp.Body`, ...), which a
+plain substring ban on `.Body` cannot tell apart from a route's own request.
+
 ---
 
 ## Two obligations with no clause of their own
