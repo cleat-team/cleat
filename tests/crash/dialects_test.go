@@ -448,8 +448,14 @@ func (tg *crashTarget) deployFixture(t *testing.T, taskQueue string) {
 		return
 	}
 
+	// entry_points is in this SET for the reason harness_test.go's DO UPDATE
+	// lists it: without it an entry point ADDED to the fixture never reaches a
+	// database that already has the definition, and the test that uses it fails
+	// with "unknown entry point" on a tree where nothing is wrong. See the long
+	// note there -- it was found on PostgreSQL, where cleat_crash outlived the
+	// addition of `catches_abort`.
 	q := `UPDATE workflow_defs SET wasm_bytes = ` + tg.placeholder(1) + `, task_queue = ` + tg.placeholder(2) +
-		` WHERE name = 'crashcall' AND version = 1`
+		`, entry_points = ` + tg.entryPointsLiteral() + ` WHERE name = 'crashcall' AND version = 1`
 	if _, err := tg.db.Exec(tg.stmt(q), wasm, taskQueue); err != nil {
 		t.Fatalf("updating the crashcall definition on %s: %v", tg.name, err)
 	}
