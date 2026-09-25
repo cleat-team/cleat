@@ -2064,8 +2064,12 @@ func (w *Worker) gracefulShutdown(grace time.Duration, force <-chan struct{}) st
 				deadline.Reset(shutdownTailDuration)
 				continue
 			}
-			// Tail elapsed: release whatever still has not unwound, then cancel.
-			w.releaseInFlight()
+			// Tail elapsed: cancel. The runs the hard-stop aborted have by now
+			// suspended and requeued themselves; a run that did not unwind stays
+			// fenced, and a finalize still in flight comes back context-cancelled
+			// and is released by the writeTerminalFailure path -- so there is
+			// nothing here to release, and a bespoke release would race those
+			// writes (cleat#2287, measured as scenario d ending "done").
 			w.cancel()
 			return fmt.Sprintf("the %v grace period ended with runs still in flight", grace)
 		case <-force:
@@ -2075,34 +2079,6 @@ func (w *Worker) gracefulShutdown(grace time.Duration, force <-chan struct{}) st
 			return "the worker was already stopping"
 		}
 	}
-}
-
-// releaseInFlight releases every run still in w.inflight with nextWakeAt=now so
-// another worker reclaims it on its next poll (cleat#2287). It is the
-// tail-expiry backstop: by now the hard-stop has aborted the in-flight calls,
-// and the runs that could unwind have already suspended and left w.inflight;
-// whatever remains never got a chance to unwind, and a fenced release
-// (assigned_to=NULL) is what hands it to worker B. The release is itself a
-// fenced write, so it needs the heartbeat alive -- which is why it runs before
-// w.cancel(), not after.
-func (w *Worker) releaseInFlight() {
-	w.inflight.Range(func(_, value any) bool {
-		wf := value.(*engine.WorkflowInstance)
-		ctx := context.Background()
-		st, release := w.storeFor(wf)
-		err := st.ReleaseWorkflow(ctx, wf.ID, w.id, wf.Generation, time.Now())
-		release()
-		if errors.Is(err, engine.ErrFenceLost) {
-			// Already suspended or claimed by another worker -- the outcome this
-			// function exists to produce. Not a failure.
-			return true
-		}
-		if err != nil {
-			w.logger.WarnContext(ctx, "hard-stop release failed",
-				"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", err)
-		}
-		return true
-	})
 }
 
 // getLoopCtx returns the per-loop context for the named background loop.
