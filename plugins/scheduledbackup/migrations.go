@@ -276,5 +276,256 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					FOREIGN KEY (config_id) REFERENCES backup_config(id);
 			`,
 		},
+		{
+			// Backups become operator-only. cleat#2247.
+			//
+			// A tenant request triggered a full-DEPLOYMENT pg_dump -- the
+			// dump has no filter and runs against the deployment-wide DSN
+			// (pgdump.go), so any tenant creating a backup_config caused
+			// every tenant's data to be dumped to disk on that tenant's
+			// own schedule. The owner decision: backup configuration
+			// moves to an operator surface (cleatctl), and these two
+			// tables stop being tenant-owned data.
+			//
+			// FRESH-DATABASE-ONLY, per #2058 decision 3 (0.3.0 has no
+			// upgrade path from 0.2.0): no data migration, and no
+			// attempt to preserve rows across the tenant_id drop below.
+			//
+			// A NEW VERSION, NEVER AN EDIT TO v1/v2: both are recorded on
+			// every database that has ever run this plugin, and editing
+			// them protects only a database created after this lands.
+			// v2's own comment gives the identical reasoning for why IT
+			// is a new version rather than a TenantScoped edit to v1.
+			//
+			// THIS ACTIVELY UNDOES v2, on Postgres, rather than merely
+			// omitting TenantScoped going forward: registerTenantScopedTables
+			// (plugin/migration.go) only ever sets tenant_scoped = true, so
+			// nothing but this migration's own UPDATE can flip the
+			// admin.plugin_tables rows v2 created back to false.
+			//
+			// THE UPDATE IS KEYED ON schema_name AND table_name, NOT
+			// plugin_name. plugin.PluginInfo.Name for this plugin is
+			// "scheduled-backup" (plugin.go), not "scheduledbackup" --
+			// and admin.plugin_tables' primary key is
+			// (plugin_name, schema_name, table_name), so a WHERE clause
+			// naming the wrong plugin_name matches nothing at all.
+			// Measured directly by cleat-review against PostgreSQL
+			// 16.14, applying an earlier draft keyed on
+			// WHERE plugin_name = 'scheduledbackup': the UPDATE affected
+			// 0 rows, both rows stayed tenant_scoped = true, and the
+			// NEXT admin.drop_tenant -- for ANY tenant, not one with
+			// backup rows -- failed outright:
+			//
+			//   column "tenant_id" does not exist
+			//   DELETE FROM public.backup_config WHERE tenant_id = $1
+			//
+			// That is a TOTAL admin.drop_tenant outage, not a scoped
+			// one: 066_...sql's sweep loop reads every tenant_scoped row
+			// unconditionally and would hit this DELETE for every tenant
+			// dropped from then on, before touching anything of theirs.
+			// Keying on schema_name/table_name instead needs no plugin
+			// name at all and cannot go stale the same way a second
+			// time.
+			//
+			// NO DO BLOCK HERE, though a runtime RAISE guarding the
+			// UPDATE looks like the obvious belt-and-braces: this file's
+			// migrations run through plugin.splitStatements
+			// (migration.go), which shreds SQL on every literal ';' with
+			// no awareness of $$-quoting -- confirmed by feeding a
+			// `DO $$ ... END $$;` block through it directly, which comes
+			// back as four invalid fragments, none a valid statement on
+			// their own. No migration in this tree uses a DO block for
+			// exactly that reason. The regression this would have
+			// caught is covered instead by
+			// TestSchedulerBackupV4RegistryFlipDoesNotBreakLaterDropTenant
+			// (a_v4_migration_leaves_drop_tenant_working_test.go), which
+			// reproduces cleat-review's exact scenario end to end, and
+			// by plugin's own
+			// TestEveryTenantScopedRegistryRowNamesATableWithATenantIDColumn,
+			// a general invariant over admin.plugin_tables that is not
+			// specific to this plugin.
+			//
+			// ORDER, on Postgres: policies before ROW LEVEL SECURITY
+			// before the indexes before the column before the registry
+			// flip. Reversing "policies before RLS" is harmless (a
+			// FORCE/ENABLE table with no policy simply denies
+			// everything to non-owners, and the migration runs as the
+			// table's owner), but dropping the COLUMN before the
+			// POLICY is not: the policy's USING/CHECK expression
+			// references tenant_id, and PostgreSQL refuses to drop a
+			// column a policy depends on.
+			Version: 4,
+			Up: `
+				DROP POLICY IF EXISTS backup_config_tenant_isolation ON backup_config;
+				DROP POLICY IF EXISTS backup_config_cross_tenant ON backup_config;
+				ALTER TABLE backup_config NO FORCE ROW LEVEL SECURITY;
+				ALTER TABLE backup_config DISABLE ROW LEVEL SECURITY;
+
+				DROP POLICY IF EXISTS backup_history_tenant_isolation ON backup_history;
+				DROP POLICY IF EXISTS backup_history_cross_tenant ON backup_history;
+				ALTER TABLE backup_history NO FORCE ROW LEVEL SECURITY;
+				ALTER TABLE backup_history DISABLE ROW LEVEL SECURITY;
+
+				DROP INDEX IF EXISTS idx_backup_config_tenant_enabled_next;
+				DROP INDEX IF EXISTS idx_backup_history_tenant_config;
+
+				ALTER TABLE backup_config DROP COLUMN tenant_id;
+				ALTER TABLE backup_history DROP COLUMN tenant_id;
+
+				CREATE INDEX IF NOT EXISTS idx_backup_config_enabled_next
+					ON backup_config (enabled, next_run_at);
+				CREATE INDEX IF NOT EXISTS idx_backup_history_config
+					ON backup_history (config_id);
+
+				UPDATE admin.plugin_tables SET tenant_scoped = false
+					WHERE schema_name = current_schema()
+					  AND table_name IN ('backup_config', 'backup_history');
+			`,
+			// MySQL has no row-level security and no registry -- the
+			// column and its composite indexes are dead weight once
+			// nothing scopes by tenant, kept only for a fresh database
+			// creating them from scratch under CLEAT_DB_DIALECT=mysql. No
+			// IF EXISTS clause covers DROP COLUMN or DROP INDEX on this
+			// dialect (unlike Postgres): a re-run raises 1091 "check that
+			// column/key exists" rather than no-op-ing, which is "the v8
+			// lesson" #2233/#2247 both name -- so both are guarded
+			// through information_schema, matching v3's UpMySQL FK guard
+			// immediately above.
+			UpMySQL: `
+				SET @idx := (
+					SELECT COUNT(*) FROM information_schema.statistics
+					WHERE table_schema = DATABASE() AND table_name = 'backup_config'
+					  AND index_name = 'idx_backup_config_tenant_enabled_next'
+				);
+				SET @ddl := IF(@idx > 0,
+					'DROP INDEX idx_backup_config_tenant_enabled_next ON backup_config',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @idx := (
+					SELECT COUNT(*) FROM information_schema.statistics
+					WHERE table_schema = DATABASE() AND table_name = 'backup_history'
+					  AND index_name = 'idx_backup_history_tenant_config'
+				);
+				SET @ddl := IF(@idx > 0,
+					'DROP INDEX idx_backup_history_tenant_config ON backup_history',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'backup_config'
+					  AND column_name = 'tenant_id'
+				);
+				SET @ddl := IF(@col > 0,
+					'ALTER TABLE backup_config DROP COLUMN tenant_id',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @col := (
+					SELECT COUNT(*) FROM information_schema.columns
+					WHERE table_schema = DATABASE() AND table_name = 'backup_history'
+					  AND column_name = 'tenant_id'
+				);
+				SET @ddl := IF(@col > 0,
+					'ALTER TABLE backup_history DROP COLUMN tenant_id',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @idx := (
+					SELECT COUNT(*) FROM information_schema.statistics
+					WHERE table_schema = DATABASE() AND table_name = 'backup_config'
+					  AND index_name = 'idx_backup_config_enabled_next'
+				);
+				SET @ddl := IF(@idx = 0,
+					'CREATE INDEX idx_backup_config_enabled_next ON backup_config (enabled, next_run_at)',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				SET @idx := (
+					SELECT COUNT(*) FROM information_schema.statistics
+					WHERE table_schema = DATABASE() AND table_name = 'backup_history'
+					  AND index_name = 'idx_backup_history_config'
+				);
+				SET @ddl := IF(@idx = 0,
+					'CREATE INDEX idx_backup_history_config ON backup_history (config_id)',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+			`,
+			// SQL Server: the SECURITY POLICY must go before the COLUMN
+			// it filters on, exactly as on Postgres and for the same
+			// underlying reason -- measured directly by cleat-review,
+			// dropping the column first fails with
+			//
+			//   Msg 5074: The object 'backup_config_tenant_isolation'
+			//   is dependent on column 'tenant_id'
+			//   Msg 4922: ALTER TABLE DROP COLUMN tenant_id failed
+			//   because ... is dependent on it
+			//
+			// dbo.fn_plugin_tenant_filter is NOT dropped: it is the
+			// predicate function every plugin's tenant policy binds to
+			// (migration.go's mssqlPluginTenantFilter doc comment), and
+			// 72 other security-policy predicates in this database
+			// depend on it surviving.
+			//
+			// Once the policy is gone, migrations/mssql/074's
+			// sys.columns sweep stops finding these two tables on its
+			// own -- it derives the tenant-owned set live rather than
+			// from a registry, so dropping the column IS the whole of
+			// the PostgreSQL-registry-equivalent fix here, and no
+			// analogue of the UPDATE above exists or is needed on this
+			// dialect.
+			//
+			// No BEGIN/END anywhere in this arm, for the same
+			// splitStatements reason v3's UpMSSQL gives: a block
+			// straddling a ';' this runner treats as a statement
+			// boundary produces two invalid batches.
+			UpMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'backup_config_tenant_isolation')
+				DROP SECURITY POLICY backup_config_tenant_isolation;
+
+				IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'backup_history_tenant_isolation')
+				DROP SECURITY POLICY backup_history_tenant_isolation;
+
+				DROP INDEX IF EXISTS idx_backup_config_tenant_enabled_next ON backup_config;
+				DROP INDEX IF EXISTS idx_backup_history_tenant_config ON backup_history;
+
+				IF COL_LENGTH('backup_config', 'tenant_id') IS NOT NULL
+				ALTER TABLE backup_config DROP COLUMN tenant_id;
+
+				IF COL_LENGTH('backup_history', 'tenant_id') IS NOT NULL
+				ALTER TABLE backup_history DROP COLUMN tenant_id;
+
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_backup_config_enabled_next' AND object_id = OBJECT_ID('backup_config'))
+				CREATE INDEX idx_backup_config_enabled_next
+					ON backup_config (enabled, next_run_at);
+
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_backup_history_config' AND object_id = OBJECT_ID('backup_history'))
+				CREATE INDEX idx_backup_history_config
+					ON backup_history (config_id);
+			`,
+			// DialectSpecific rather than a Down: reversing "backups are
+			// operator-only" would need to reinstate a tenant_id column
+			// with no source of truth for what value each existing row
+			// should get (the whole point of this migration is that the
+			// column is gone), which is a data-recovery decision, not a
+			// mechanical schema reversal like v1-v3's Down arms.
+			DialectSpecific: "cleat#2247: dialect arms differ because Postgres reverses a " +
+				"registry entry and a row-level-security policy that MySQL and SQL Server " +
+				"do not have; SQL Server reverses a SECURITY POLICY that Postgres expresses " +
+				"as two POLICY objects instead. No Down: see the comment above this field.",
+		},
 	}
 }
