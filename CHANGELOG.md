@@ -766,6 +766,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A busy MySQL or SQL Server worker no longer drops events: adaptive batch flushing is PostgreSQL-only.** (cleat#2348)
+
+  The batch writer's fence check and INSERT are PostgreSQL SQL (`set_config`, `$1::jsonb`, `jsonb_populate_recordset`,
+  `ON CONFLICT`). Batch mode is on by default and is entered on the step rate alone (above `--batch-flush-enter-rate`,
+  default 500 steps/sec), on every driver. Measured against the real worker on MySQL 8.4 and SQL Server 2022: every event
+  routed through it failed (`Error 1305 ... set_config does not exist`; `'set_config' is not a recognized built-in function
+  name`), was retried for the whole flush retry window (750 ms by default) and then dropped, and the run carried on, so
+  history came up short with only an `adaptive flush failed` ERROR line to say so. On MySQL under default settings and
+  1,500 fast workflows it entered batch mode at ~1,180 steps/sec and logged ~4,400 failed flushes for ~4,500 steps; on SQL
+  Server it also flapped in and out of batch mode (55 transitions in one 200-workflow run). Runs held open mid-flight showed
+  11 of 40 events missing on SQL Server and every event after entry missing on MySQL. Earlier builds did this on those two
+  drivers whenever a worker crossed the rate.
+
+  Those two drivers now always flush each step directly (`Engine.getAdaptiveFlusher` refuses the batch path for a MySQL or
+  SQL Server store, and the worker does not build the flusher registry or open its connection pool for them, so the
+  connection census drops by `--batch-flush-max-connections` on those drivers). The worker logs one INFO line at startup,
+  `adaptive batch flushing is PostgreSQL-only: ...`, unless batching was already disabled. `--batch-flush-*` flags have
+  no effect on those drivers. PostgreSQL is unchanged. Real-database tests on all three dialects
+  (`TestAWorkerAboveTheEnterRateKeepsPersistingEveryEvent`, with PostgreSQL as the control that must use the batch writer)
+  and a source scan that fails when a store implementing `perStepEventFlusher` is not named in the gate.
+
 - **The fullstack template's page works: `make web` serves it through a same-origin proxy that holds the API key.** (cleat#2307)
 
   The page called the worker directly, which cannot work: the worker sends no CORS headers, so a browser refuses

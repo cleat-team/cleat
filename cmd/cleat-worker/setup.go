@@ -835,6 +835,33 @@ func sqlDriverName(driver string) string {
 	}
 }
 
+// batchFlushEnabled reports whether this worker builds the adaptive batch flusher.
+//
+// POSTGRESQL ONLY. The batch writer's fence check and INSERT are PostgreSQL
+// dialect (set_config, `$1::jsonb`, jsonb_populate_recordset, ON CONFLICT), and
+// it enters batch mode on the step rate alone, so on MySQL and SQL Server a busy
+// worker switched into a writer that could not succeed: every event through it
+// was retried for the whole retry window and then dropped (cleat#2348). Those
+// two dialects flush per step through their store (engine/flush_dialect.go).
+// engine.Engine refuses the batch path for them as well, so a worker that
+// somehow built a registry would still not use it.
+func batchFlushEnabled(driver string, disabled, noPerStepFlush bool) bool {
+	return driver == "postgres" && !disabled && !noPerStepFlush
+}
+
+// batchFlushIgnoredNotice is the one startup line for a worker on a driver that
+// has no batch mode, or "" when there is nothing to say: the operator turned
+// batching off, or per-step flushing off, or the driver is PostgreSQL. It is
+// said even without a --batch-flush-* flag, because batch mode used to be on
+// by default on every driver and a deployment reading its own log should not
+// have to know that.
+func batchFlushIgnoredNotice(driver string, disabled, noPerStepFlush bool) string {
+	if driver == "postgres" || disabled || noPerStepFlush {
+		return ""
+	}
+	return "adaptive batch flushing is PostgreSQL-only: this worker flushes each step directly, and --batch-flush-* settings have no effect on this driver"
+}
+
 // mysqlBaseDSN strips the database name from a MySQL DSN, producing a base DSN
 // suitable for NewMySQLStoreFactory (which expects a template without a database).
 // "root:pass@tcp(host:3306)/mydb?parseTime=true" → "root:pass@tcp(host:3306)/?parseTime=true"

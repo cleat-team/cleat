@@ -1887,9 +1887,13 @@ func main() {
 	}
 
 	// Set up per-tenant adaptive flusher registry if batch flushing is not disabled.
+	// PostgreSQL only: see batchFlushEnabled.
 	var flusherRegistry *engine.TenantFlusherRegistry
 	var flusherDB *sql.DB
-	if !*batchFlushDisabled && !*noPerStepFlush {
+	if notice := batchFlushIgnoredNotice(*driver, *batchFlushDisabled, *noPerStepFlush); notice != "" {
+		logger.InfoContext(ctx, notice, "worker_id", workerID, "driver", *driver)
+	}
+	if batchFlushEnabled(*driver, *batchFlushDisabled, *noPerStepFlush) {
 		// Open a dedicated DB pool for the adaptive flusher so batch flushes
 		// never queue behind workflow claims, history loads, or finalizations.
 		flusherDB, err = sql.Open(sqlDriverName(*driver), dsnWithSchema(*dbURL, *schemaName, *driver))
@@ -1940,7 +1944,7 @@ func main() {
 	if *maxPluginConnections > 0 {
 		budget.Plugin = *maxPluginConnections
 	}
-	if !*batchFlushDisabled && !*noPerStepFlush {
+	if batchFlushEnabled(*driver, *batchFlushDisabled, *noPerStepFlush) {
 		budget.Flusher = *batchFlushMaxConns
 	}
 	budget.Shards = shardPoolCount * shardPoolMaxConns
