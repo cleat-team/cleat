@@ -35,6 +35,19 @@ import (
 // fails and runDueBackups returns before ever reaching the dispatch loop --
 // nothing is dispatched at all on that poll.
 //
+// SQL Server is included here too, and is asserted NOT to fail: this test
+// used to justify that with the shape of dueBackupsQuery's MSSQL text (no
+// FOR UPDATE cursor clause, only WITH (UPDLOCK, READPAST, ROWLOCK) locking
+// hints) -- a claim about the SQL, not about the actual mechanism, which is
+// whatever go-mssqldb's TDS-level result-set handling does with a second
+// statement on the same *sql.Tx while a previous SELECT's rows aren't fully
+// drained. cleat-review measured this independently with the real worker
+// against SQL Server 2022 and found no failure; falsifying this test against
+// a real MSSQL container (reintroducing the bug) confirms the same thing --
+// the mssql subtest stays green while postgres and mysql both go red with
+// their documented symptoms. Driving it here, rather than resting on the
+// SQL-text inference, is what actually backs the claim.
+//
 // A fake, blocking pg_dump is load-bearing here, not incidental. Without
 // one, pg_dump is simply absent from this machine and every CI runner (ci.yml
 // installs no postgresql-client), so executeScheduledBackup's own failure
@@ -60,6 +73,7 @@ func TestRunDueBackupsDispatchesExactlyOnceAndAdvancesNextRunAt(t *testing.T) {
 	}{
 		{"postgres", testutil.DialectPostgres},
 		{"mysql", testutil.DialectMySQL},
+		{"mssql", testutil.DialectMSSQL},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := testutil.TestDB(t, tc.td)
