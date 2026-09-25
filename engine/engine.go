@@ -88,6 +88,18 @@ type Engine struct {
 	// behaviour.
 	shutdownRequested <-chan struct{}
 
+	// hardStopCtx, when non-nil, is cancelled at grace expiry (cleat#2287): a
+	// request that an in-flight durable call abort and its run suspend, so
+	// another worker reclaims the run without overlapping the aborted call.
+	// Distinct from shutdownRequested above, which fires at the FINAL cancel --
+	// the hard-stop must precede the release of the run's fence, so the call's
+	// outcome is written back before w.cancel() (see gracefulShutdown).
+	//
+	// nil means "never hard-stopped", the same fail-open default as
+	// shutdownRequested: callers of NewEngine with no worker have no hard-stop
+	// to observe.
+	hardStopCtx context.Context
+
 	wasmInstanceTimeout    time.Duration
 	wasmWallClockCeiling   time.Duration
 	hostRetryBudgetCeiling time.Duration
@@ -398,12 +410,38 @@ func WithShutdownSignal(ch <-chan struct{}) EngineOption {
 	return func(e *Engine) { e.shutdownRequested = ch }
 }
 
+// WithHardStopSignal wires a worker's hard-stop context into the engine so an
+// in-flight durable call aborts and its run suspends rather than riding out its
+// own timeout (cleat#2287). Fired at grace expiry, before the final w.cancel();
+// see hardStopCtx. ctx is typically the worker's own hard-stop context, which
+// the worker cancels at grace expiry.
+func WithHardStopSignal(ctx context.Context) EngineOption {
+	return func(e *Engine) { e.hardStopCtx = ctx }
+}
+
 // shutdownObserved reports whether the worker's shutdown signal has fired. It is what makes every host call
 // that would start fresh work refuse (stopBeforeNewWork): a run being cut off by shutdown must not go on to
 // do new work, above all not the compensation a guest runs when it is told a call failed (cleat#2285).
 func (e *Engine) shutdownObserved() bool {
 	select {
 	case <-e.shutdownRequested:
+		return true
+	default:
+		return false
+	}
+}
+
+// hardStopObserved reports whether the worker's hard-stop has fired. It is what
+// turns an aborted call into a suspend rather than a FAIL or a COMPLETE
+// (cleat#2287): after the call is aborted, the run must suspend and requeue, not
+// finalize, or the aborted call's outcome (unknown, mid-flight) becomes a
+// workflow result.
+func (e *Engine) hardStopObserved() bool {
+	if e.hardStopCtx == nil {
+		return false
+	}
+	select {
+	case <-e.hardStopCtx.Done():
 		return true
 	default:
 		return false

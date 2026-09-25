@@ -38,6 +38,23 @@ func ThreeCharges(h cleat.HostCalls, orderID string) (string, error) {
 	return `{"status":"completed"}`, nil
 }
 
+// CatchesAbort is cleat#2287's discriminating guest: it catches the error a
+// hard-stopped durable call returns and carries on to a success result instead
+// of propagating it. Before the hard-stop set suspendErr, that swallow made the
+// run end COMPLETED on a call that was cut off mid-flight -- the workflow
+// "succeeded" without its last side effect. The suspend must win over the
+// swallowed error.
+func CatchesAbort(h cleat.HostCalls, orderID string) (string, error) {
+	for _, op := range []string{"Reserve", "Charge", "Ship"} {
+		if _, err := h.DurableCall("payments", op, mustReq(orderID, op)); err != nil {
+			// Swallow it and carry on: this is exactly the shape that used to
+			// reach a COMPLETED run on a call that never happened.
+			_ = err
+		}
+	}
+	return `{"status":"completed"}`, nil
+}
+
 // Compensating is cleat#2285's saga: Reserve, Charge, then Ship under a retry policy, and a Refund if Ship
 // fails. A shutdown that interrupts Ship's backoff and reaches the guest as a failed call makes this run its
 // Refund and finish COMPLETED on a fault that never happened.

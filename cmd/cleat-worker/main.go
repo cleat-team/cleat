@@ -783,6 +783,14 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// hardStopCtx is cancelled at grace expiry (cleat#2287), before cancel(),
+	// to abort in-flight durable calls and suspend their runs so another worker
+	// reclaims them without overlap. It outlives the call-abort long enough for
+	// the suspend to be written back, but fires before ctx so the heartbeat and
+	// flusher are still alive while that write happens.
+	hardStopCtx, hardStopCancel := context.WithCancel(context.Background())
+	defer hardStopCancel()
+
 	shutdownTelemetry := setupTelemetry(ctx, *otelEndpoint, *otelDisabled, workerID)
 	defer shutdownTelemetry()
 
@@ -2106,6 +2114,8 @@ func main() {
 		pollInterval:                     *pollInterval,
 		ctx:                              ctx,
 		cancel:                           cancel,
+		hardStopCtx:                      hardStopCtx,
+		hardStopCancel:                   hardStopCancel,
 		wasmCache:                        newWasmLRUCache(*wasmCacheMaxEntries, *wasmCacheMaxMB),
 		scheduleInterval:                 15 * time.Second,
 		compactionThreshold:              *compactionThreshold,

@@ -157,6 +157,21 @@ const eventCapCallError = "event cap reached; workflow continuing as new"
 // there is no side effect to worry about repeating.
 const heartbeatPresumedLostCallError = "worker heartbeat presumed lost; refusing to start new work until it recovers"
 
+// shutdownCallError is the message a durable call reports when the worker
+// hard-stopped mid-call at grace expiry (cleat#2287). The call WAS dispatched
+// but its outcome is unknown, so the run must suspend, not fail and not
+// complete: freshCall sets suspendErr before returning this, and executor.go's
+// suspend path requeues the run for another worker, which replays from before
+// the call under the same idempotency key. Non-retryable in the guest's eyes
+// for the same reason as cancelledCallError -- the guest unwinds, it does not
+// re-dispatch.
+const shutdownCallError = "worker shutting down; this call was interrupted"
+
+// shutdownSuspendReason is the SuspendError.Reason a hard-stopped call records,
+// so the suspend is distinguishable in the event history and in the /readyz
+// drain reason from a guest-requested suspension.
+const shutdownSuspendReason = "worker shutdown"
+
 // recordedFailureCode maps a recorded call failure to the code the guest sees.
 //
 // Both the fresh path and the replay path must go through this function. A

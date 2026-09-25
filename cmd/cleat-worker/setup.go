@@ -1735,9 +1735,15 @@ type Worker struct {
 	clusterConnectionBudget   int
 	perWorkerConnectionBudget int
 
-	ctx      context.Context
-	cancel   context.CancelFunc
-	draining atomic.Bool
+	ctx    context.Context
+	cancel context.CancelFunc
+	// hardStopCtx is cancelled at grace expiry (cleat#2287), before cancel() --
+	// it aborts in-flight durable calls and suspends their runs so another
+	// worker reclaims them without overlap, while the heartbeat and flusher
+	// stay alive on ctx long enough to write the suspend back.
+	hardStopCtx    context.Context
+	hardStopCancel context.CancelFunc
+	draining       atomic.Bool
 
 	// pluginHealth is what /healthz reports about plugins, refreshed off the request path by
 	// pluginHealthLoop. pluginHealthRunning holds the names whose Health() call is still running.
@@ -2004,6 +2010,14 @@ func (w *Worker) shuttingDown() bool {
 	return w.ctx.Err() != nil
 }
 
+// shutdownTailDuration is how long gracefulShutdown waits after the hard-stop
+// for the aborted runs to unwind and write their suspend back, before it
+// releases whatever did not unwind and cancels (cleat#2287). It is short on
+// purpose: the suspend write is one DB round-trip once the guest's error path
+// has drained its defers, and the whole point is to hand the run to worker B
+// promptly rather than to wait out a guest that is not coming back.
+const shutdownTailDuration = 2 * time.Second
+
 // gracefulShutdown is what SIGTERM and SIGINT run (cleat#2285). It stops claiming, then waits for the runs
 // already in flight to finish, and only cancels the worker when that is done, when the grace has elapsed, or
 // when force is closed (a second signal: the operator who presses ^C twice means it). It returns why.
@@ -2012,12 +2026,21 @@ func (w *Worker) shuttingDown() bool {
 // keep the runs' fences valid, the API keeps answering /readyz (503 draining), and a run that completes does
 // so on a live worker and finalizes normally. The kubelet's own grace period is the backstop for a guest
 // that never returns: SIGKILL at the end of it, the same as any crash.
+//
+// At grace expiry it hard-stops rather than cancelling outright (cleat#2287):
+// it cancels hardStopCtx, which aborts the in-flight durable calls and makes
+// their runs suspend instead of failing or completing, then waits a short tail
+// for the suspend writes to land while the heartbeat and flusher are still
+// alive, releases whatever did not unwind, and only then cancels. That is what
+// keeps worker B's reclaim of an aborted run from overlapping A's still-running
+// call.
 func (w *Worker) gracefulShutdown(grace time.Duration, force <-chan struct{}) string {
 	w.draining.Store(true)
 	deadline := time.NewTimer(grace)
 	defer deadline.Stop()
 	tick := time.NewTicker(50 * time.Millisecond)
 	defer tick.Stop()
+	hardStopped := false
 	for {
 		if w.inflightCount() == 0 {
 			w.completeDrain()
@@ -2026,6 +2049,27 @@ func (w *Worker) gracefulShutdown(grace time.Duration, force <-chan struct{}) st
 		select {
 		case <-tick.C:
 		case <-deadline.C:
+			if w.hardStopCancel == nil {
+				// No hard-stop wired (a test worker, or a caller that never
+				// set one): the pre-cleat#2287 cancel-immediately behaviour.
+				w.cancel()
+				return fmt.Sprintf("the %v grace period ended with runs still in flight", grace)
+			}
+			if !hardStopped {
+				// Grace elapsed: hard-stop the in-flight calls (abort + suspend),
+				// then give the aborted runs a short tail to write their suspend
+				// back before the fences are torn down.
+				w.hardStopCancel()
+				hardStopped = true
+				deadline.Reset(shutdownTailDuration)
+				continue
+			}
+			// Tail elapsed: cancel. The runs the hard-stop aborted have by now
+			// suspended and requeued themselves; a run that did not unwind stays
+			// fenced, and a finalize still in flight comes back context-cancelled
+			// and is released by the writeTerminalFailure path -- so there is
+			// nothing here to release, and a bespoke release would race those
+			// writes (cleat#2287, measured as scenario d ending "done").
 			w.cancel()
 			return fmt.Sprintf("the %v grace period ended with runs still in flight", grace)
 		case <-force:
@@ -3066,6 +3110,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		// call; this lets a call already WAITING (a backoff, a scheduled
 		// send's delay) abort instead of riding out its own timeout.
 		engine.WithShutdownSignal(w.ctx.Done()),
+		engine.WithHardStopSignal(w.hardStopCtx),
 		engine.WithTraceID(traceID),
 		engine.WithTenantID(wf.TenantID),
 		engine.WithBackends(wasmtimeLanguages, w.wasmtimeBackend),
