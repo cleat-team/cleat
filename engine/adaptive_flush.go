@@ -137,8 +137,15 @@ func (af *AdaptiveFlusher) setRetryWindow(d time.Duration) {
 // setRetryWindow writes it under the lock and retryBatchFlush runs on the
 // flushing goroutine. In practice it is set once at construction, which is
 // exactly the argument that would leave a race here until somebody made it a
-// per-tenant setting. flushAndNotify does not hold af.mu, so this cannot
-// deadlock -- see its body, which reads af.db and af.tenantID the same way.
+// per-tenant setting. flushAndNotify never calls this while holding af.mu, so
+// it cannot deadlock -- see its body, which reads af.db and af.tenantID the
+// same way, and takes the lock only for the scalar capture in its closing
+// stats block, after every call to this.
+//
+// (That was written as "flushAndNotify does not hold af.mu" until cleat#2382,
+// which is the same claim about the callers but no longer describes the
+// callee: the stats report now takes the lock. The deadlock argument depends
+// on where the call is made, not on whether the function locks at all.)
 func (af *AdaptiveFlusher) retryWindowOf() time.Duration {
 	af.mu.Lock()
 	defer af.mu.Unlock()
@@ -477,9 +484,32 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 	}
 
 	// Periodic report every ~5 seconds.
+	//
+	// lastReportTime, batchMode and rateEWMA live under af.mu: updateRate and
+	// Flush take it to read or write them. flushAndNotify runs on its own
+	// goroutine with the lock RELEASED -- every dispatch of it (onTimer at
+	// af.onTimer, Flush's full-batch branch, Run and Shutdown) unlocks first --
+	// so this report has to take it, or it reads state a concurrent updateRate
+	// is rewriting.
+	//
+	// That read was the one the detector reported, not the write beside it: an
+	// unlocked read here against updateRate's locked write of batchMode is a
+	// race in production, and it only looked like a test-harness problem
+	// because the counterpart that tripped the detector was the test's own
+	// write of batchMode under the lock (cleat#2382). Capture the two guarded
+	// scalars under the lock and log after dropping it -- every counter below
+	// is an atomic and needs no lock.
 	now := time.Now()
-	if now.Sub(af.lastReportTime) >= 5*time.Second {
+	af.mu.Lock()
+	due := now.Sub(af.lastReportTime) >= 5*time.Second
+	if due {
 		af.lastReportTime = now
+	}
+	reportBatchMode := af.batchMode
+	reportRate := af.rateEWMA
+	af.mu.Unlock()
+
+	if due {
 		bc := af.batchCount.Load()
 		bs := af.batchSizeTotal.Load()
 		bf := af.batchFlushes.Load()
@@ -506,8 +536,8 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 			avgPrepare = float64(af.totalPrepareUs.Load()) / float64(be)
 		}
 		slog.Debug("ADAPTIVE-STATS",
-			"batchMode", af.batchMode,
-			"rate", af.rateEWMA,
+			"batchMode", reportBatchMode,
+			"rate", reportRate,
 			"directFlushes", df,
 			"batchFlushes", bf,
 			"batchedEvents", be,
