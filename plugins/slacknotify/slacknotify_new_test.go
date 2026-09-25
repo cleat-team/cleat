@@ -821,6 +821,57 @@ func TestSN_InteractiveCallback_ValidSignedRouteDelivers(t *testing.T) {
 	}
 }
 
+// TestSN_InteractiveCallback_WorkflowNotFoundMapsTo404 pins cleat#2239's
+// plugin.ErrWorkflowNotFound wired through to a 404, the same status a
+// resolvable-but-unmapped click gets -- the 1B spec item this satisfies at
+// exactly the granularity engine.DeliverSignal's existence-oracle-avoidance
+// design allows: "no such workflow", "purged", and "belongs to a different
+// tenant" are still collapsed into ONE case (that collapse is deliberate,
+// see plugin.ErrWorkflowNotFound's doc comment), but that ONE case is now
+// distinguishable from a genuine delivery failure, which 500s instead.
+func TestSN_InteractiveCallback_WorkflowNotFoundMapsTo404(t *testing.T) {
+	unsignedRoute := "wf:wf-gone:sig:approve"
+	signed := signTestRoute(unsignedRoute, testTenantStr, "", "")
+	rawBody := fmt.Sprintf(`{"type":"block_actions","callback_id":%q,"team":{"id":"T123"}}`, signed)
+	body := "payload=" + url.QueryEscape(rawBody)
+
+	p, mux := interactiveServer(t)
+	withSlackWorkspace(t, p, "T123", testTenantStr)
+	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
+		return plugin.ErrWorkflowNotFound
+	}
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, signedInteractiveRequest(body))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for plugin.ErrWorkflowNotFound, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestSN_InteractiveCallback_OtherSignalErrorMapsTo500 is the negative
+// control for the 404 mapping above: a genuine delivery error -- anything
+// that is NOT plugin.ErrWorkflowNotFound -- must still 500, not 404. Without
+// this, a mapping keyed on "any error from signalWorkflow" would silently
+// widen to treat every failure as a routine not-found.
+func TestSN_InteractiveCallback_OtherSignalErrorMapsTo500(t *testing.T) {
+	unsignedRoute := "wf:wf-1:sig:approve"
+	signed := signTestRoute(unsignedRoute, testTenantStr, "", "")
+	rawBody := fmt.Sprintf(`{"type":"block_actions","callback_id":%q,"team":{"id":"T123"}}`, signed)
+	body := "payload=" + url.QueryEscape(rawBody)
+
+	p, mux := interactiveServer(t)
+	withSlackWorkspace(t, p, "T123", testTenantStr)
+	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
+		return fmt.Errorf("connection reset")
+	}
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, signedInteractiveRequest(body))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("expected 500 for a non-ErrWorkflowNotFound delivery error, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestSN_InteractiveCallback_WrongTenantSignatureRefuses is the core
 // cross-tenant property cleat#2230 exists for: a route signed for tenant A
 // does not verify against tenant B, even when team T's workspace maps to B

@@ -441,16 +441,6 @@ func (p *Plugin) handleInteractiveCallback(w http.ResponseWriter, r *http.Reques
 	// cmd/cleat-worker/main.go) scopes its statement to whatever tenant ctx
 	// carries, and this is the ONLY point in this handler that ever sets
 	// one -- resolved above, fresh, from slack_workspace.
-	//
-	// A signal to a workflow that does not exist, or belongs to a
-	// DIFFERENT tenant than tenantID, is not distinguished from success:
-	// deliverSignalTx (engine/store_signals.go) deliberately writes nothing
-	// and returns nil for both cases, by design (cleat#2218) -- returning a
-	// different status for "no such workflow" would be an existence oracle
-	// over this same public, auth-exempt route. So there is no "missing
-	// workflow -> 404" case to build here; a click naming a workflow that
-	// does not exist (or is not this tenant's) gets the same 200 OK a
-	// successful delivery does, which is what Slack expects either way.
 	tid, err := uuid.Parse(tenantID)
 	if err != nil {
 		p.logger.Error("slack-notify: resolved tenant is not a UUID", "error", err)
@@ -459,6 +449,22 @@ func (p *Plugin) handleInteractiveCallback(w http.ResponseWriter, r *http.Reques
 	}
 	ctx := plugin.ForTenant(r.Context(), tid)
 	if err := p.signalWorkflow(ctx, wfID, sigName, string(scopedPayload)); err != nil {
+		// plugin.ErrWorkflowNotFound (cleat#2239) collapses "no such
+		// workflow", "purged", and "belongs to a different tenant" into one
+		// error deliberately -- telling those three apart would reopen the
+		// existence oracle DeliverSignal was changed to avoid (cleat#2218).
+		// But that one collapsed case IS now distinguishable from a genuine
+		// delivery failure, which it was not before #2239 (both returned
+		// nil), so the 1B spec's "map missing workflow to 404, not 500" is
+		// satisfiable at exactly the granularity the store allows: 404 for
+		// the collapsed not-found/wrong-tenant case, 500 for anything else.
+		if errors.Is(err, plugin.ErrWorkflowNotFound) {
+			p.interactiveNoTenantRefusals.Add(1)
+			p.logger.Warn("slack-notify: interactive callback refused -- workflow not visible under the resolved tenant",
+				"team_id", slackObjectID(payload.Team))
+			p.writeError(w, http.StatusNotFound, "workflow not found")
+			return
+		}
 		p.logger.Error("slack-notify: delivering signal", "workflow_id", wfID, "signal", sigName, "error", err)
 		p.writeError(w, http.StatusInternalServerError, "internal error")
 		return
