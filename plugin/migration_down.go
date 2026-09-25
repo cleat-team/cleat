@@ -226,6 +226,12 @@ func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target 
 			if _, err := session.ExecContext(ctx, deletePluginMigrationSQL(dialect), name, m.Version); err != nil {
 				return res, fmt.Errorf("plugin %s: untracking %d: %w", name, m.Version, err)
 			}
+			if err := unregisterTenantScopedTables(ctx, session.ExecContext, dialect, cfg.schema, name, m.TenantScoped); err != nil {
+				return res, err
+			}
+			if err := unapplyTenantScoping(ctx, session.ExecContext, dialect, m.TenantScoped); err != nil {
+				return res, err
+			}
 			res.Reversed = append(res.Reversed, m.Version)
 			continue
 		}
@@ -252,12 +258,18 @@ func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target 
 		// time. cleat-review's own CI, not a local run, is what caught it:
 		// CI's CLEAT_TEST_MYSQL carries no multiStatements=true and a local
 		// DSN typed by hand easily does.
+		if err := unapplyTenantScoping(ctx, session.ExecContext, dialect, m.TenantScoped); err != nil {
+			return res, err
+		}
 		if err := execSQLStatements(ctx, session.ExecContext, downFor(m, dialect)); err != nil {
 			return res, fmt.Errorf("plugin %s: reversing %d: %w\n\nVersions already reversed: %v",
 				name, m.Version, err, res.Reversed)
 		}
 		if _, err := session.ExecContext(ctx, deletePluginMigrationSQL(dialect), name, m.Version); err != nil {
 			return res, fmt.Errorf("plugin %s: untracking %d: %w", name, m.Version, err)
+		}
+		if err := unregisterTenantScopedTables(ctx, session.ExecContext, dialect, cfg.schema, name, m.TenantScoped); err != nil {
+			return res, err
 		}
 		res.Reversed = append(res.Reversed, m.Version)
 		res.TenantScopedTables = append(res.TenantScopedTables, m.TenantScoped...)

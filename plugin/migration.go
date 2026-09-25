@@ -626,7 +626,10 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 			//	git grep -n 'TenantScoped:' -- plugins/
 			//
 			// and check each hit's Migration literal for UpMySQL and UpMSSQL.
-			declarationOnly := m.Up == "" && m.UpMySQL == "" && m.UpMSSQL == ""
+			// Trim-consistent with declaresDDL (migration_down.go): a
+			// whitespace-only Up is still declaration-only, not a dialect
+			// that chose to do nothing here.
+			declarationOnly := !declaresDDL(m)
 
 			// Select dialect-appropriate SQL.
 			sql := m.Up
@@ -825,6 +828,34 @@ func applyTenantScoping(ctx context.Context, exec func(ctx context.Context, quer
 			if _, err := exec(ctx, stmt); err != nil {
 				return fmt.Errorf("%s: %w", stmt, err)
 			}
+		}
+	}
+	return nil
+}
+
+// unapplyTenantScoping reverses applyTenantScoping before a migration's Down
+// SQL runs. Only SQL Server needs it: there a SECURITY POLICY is a separate
+// object holding a dependency on the table, so DROP TABLE fails (3729) while
+// the policy still exists. PostgreSQL's RLS policies attach to the table and
+// go with it on DROP TABLE, and MySQL has no scoping. cleat#2342.
+//
+// Idempotent, like every Down this feeds: IF EXISTS makes re-running a no-op,
+// and a plugin whose own DownMSSQL already dropped the policy
+// (scheduledbackup, which drops a column the policy filters) simply finds
+// nothing to drop here.
+func unapplyTenantScoping(ctx context.Context, exec func(ctx context.Context, query string, args ...any) (sql.Result, error), dialect Dialect, tables []string) error {
+	if len(tables) == 0 || dialect != DialectMSSQL {
+		return nil
+	}
+	for _, table := range tables {
+		if !isPlainIdentifier(table) {
+			return fmt.Errorf("tenant-scoped table %q is not a plain identifier", table)
+		}
+		policy := table + "_tenant_isolation"
+		stmt := fmt.Sprintf(`IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'%[1]s')
+DROP SECURITY POLICY %[1]s`, policy)
+		if _, err := exec(ctx, stmt); err != nil {
+			return fmt.Errorf("drop security policy %s: %w", policy, err)
 		}
 	}
 	return nil
@@ -1030,6 +1061,33 @@ func registerTenantScopedTables(ctx context.Context, exec func(ctx context.Conte
 			ON CONFLICT (plugin_name, schema_name, table_name) DO UPDATE SET tenant_scoped = true`,
 			pluginName, schema, table); err != nil {
 			return fmt.Errorf("register %s.%s: %w", schema, table, err)
+		}
+	}
+	return nil
+}
+
+// unregisterTenantScopedTables removes the rows registerTenantScopedTables
+// wrote when the plugin's migrations were applied, so a full uninstall leaves
+// admin.plugin_tables without a stale row naming a table that no longer
+// exists. PostgreSQL only, mirroring registerTenantScopedTables: MySQL and
+// SQL Server never populate the table (see that function's own comment).
+//
+// cleat#2343: RunDownMigrations never touched admin.plugin_tables, so the
+// registry survived a full uninstall unchanged, and admin.drop_tenant /
+// admin.grant_plugin_to_tenant -- which read plugin_tables to find
+// tenant-owned rows per table -- would see a stale row naming a dropped table.
+func unregisterTenantScopedTables(ctx context.Context, exec func(ctx context.Context, query string, args ...any) (sql.Result, error), dialect Dialect, schema, pluginName string, tables []string) error {
+	if len(tables) == 0 || dialect != DialectPostgres {
+		return nil
+	}
+	for _, table := range tables {
+		if !isPlainIdentifier(table) {
+			return fmt.Errorf("tenant-scoped table %q is not a plain identifier", table)
+		}
+		if _, err := exec(ctx, `DELETE FROM admin.plugin_tables
+			WHERE plugin_name = $1 AND schema_name = $2 AND table_name = $3`,
+			pluginName, schema, table); err != nil {
+			return fmt.Errorf("unregister %s.%s: %w", schema, table, err)
 		}
 	}
 	return nil

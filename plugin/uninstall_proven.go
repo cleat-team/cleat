@@ -53,23 +53,29 @@ import "sort"
 // its own dedicated file (scheduled-backup's predates the harness and stays
 // as belt-and-suspenders); it needs a passing subtest in that one.
 //
-// The ten MySQL entries below beyond scheduled-backup were added
-// 2026-09-25, moved out of that harness's own knownBrokenPluginDown map: the
-// phase-2 sweep (cleat#2306) found their Down chains already clean on
-// MySQL, matching cleat-review's #2290 measurement, and the harness itself
-// is what proves it now.
+// Every MySQL entry below beyond scheduled-backup was moved here 2026-09-25
+// out of the harness's own knownBrokenPluginDown map: the phase-2 sweep
+// (cleat#2306) found those Down chains already clean on MySQL, matching
+// cleat-review's #2290 measurement, and the harness itself is what proves it
+// now. The MSSQL entries (the same ten, plus notifications and jobqueue)
+// arrived the same day for a different reason: cleat#2342 -- drop the
+// SECURITY POLICY before the table it filters -- fixed the shared defect that
+// had broken every one of them on SQL Server, so one fix cleared many Down
+// chains at once. jobqueue stays MySQL-broken and carries only an MSSQL entry
+// here; its MySQL half remains in knownBrokenPluginDown.
 var provenPluginDialects = map[string]map[Dialect]bool{
 	"scheduled-backup": {DialectMySQL: true, DialectMSSQL: true},
-	"audit-log":        {DialectMySQL: true},
-	"datadog-export":   {DialectMySQL: true},
-	"eventstore":       {DialectMySQL: true},
-	"feature-flags":    {DialectMySQL: true},
-	"kvstore":          {DialectMySQL: true},
-	"notifications":    {DialectMySQL: true},
-	"pagerduty-alert":  {DialectMySQL: true},
-	"rate-limiter":     {DialectMySQL: true},
-	"slack-notify":     {DialectMySQL: true},
-	"tenant-quota":     {DialectMySQL: true},
+	"audit-log":        {DialectMySQL: true, DialectMSSQL: true},
+	"datadog-export":   {DialectMySQL: true, DialectMSSQL: true},
+	"eventstore":       {DialectMySQL: true, DialectMSSQL: true},
+	"feature-flags":    {DialectMySQL: true, DialectMSSQL: true},
+	"jobqueue":         {DialectMSSQL: true},
+	"kvstore":          {DialectMySQL: true, DialectMSSQL: true},
+	"notifications":    {DialectMySQL: true, DialectMSSQL: true},
+	"pagerduty-alert":  {DialectMySQL: true, DialectMSSQL: true},
+	"rate-limiter":     {DialectMySQL: true, DialectMSSQL: true},
+	"slack-notify":     {DialectMySQL: true, DialectMSSQL: true},
+	"tenant-quota":     {DialectMySQL: true, DialectMSSQL: true},
 }
 
 // UninstallProvenOnDialect reports whether pluginName's Down chain is

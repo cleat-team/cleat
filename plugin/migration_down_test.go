@@ -143,6 +143,48 @@ func TestRunDownMigrationsReversesNewestFirst(t *testing.T) {
 	if tracked != 0 {
 		t.Errorf("%d tracking rows survive; the migration cannot be re-applied", tracked)
 	}
+	// cleat#2343: the registry rows registerTenantScopedTables wrote must go
+	// with the tables, or admin.drop_tenant and admin.grant_plugin_to_tenant
+	// would read a stale row naming a table the reversal just dropped.
+	var regRows int
+	if err := db.QueryRow(`SELECT count(*) FROM admin.plugin_tables WHERE plugin_name = $1`,
+		"down-order").Scan(&regRows); err != nil {
+		t.Fatalf("count plugin_tables rows: %v", err)
+	}
+	if regRows != 0 {
+		t.Errorf("%d plugin_tables rows survive the uninstall; the registry names dropped tables", regRows)
+	}
+}
+
+// TestRunDownMigrationsDropsMSSQLSecurityPolicyBeforeTheTable is cleat#2342: a
+// SQL Server SECURITY POLICY is a separate object holding a dependency on the
+// table it filters, so RunDownMigrations' old order -- run the Down SQL, which
+// DROPs the table -- failed with Msg 3729 before it ever reached a policy drop,
+// because there was none. unapplyTenantScoping drops the policy first.
+func TestRunDownMigrationsDropsMSSQLSecurityPolicyBeforeTheTable(t *testing.T) {
+	db := testutil.TestDB(t, testutil.DialectMSSQL)
+	ctx := context.Background()
+	testutil.SetupFullSchema(t, db, testutil.DialectMSSQL)
+
+	p := loaded("mssql-scoping",
+		Migration{Version: 1,
+			UpMSSQL:      `CREATE TABLE scoped_one (id INT, tenant_id UNIQUEIDENTIFIER)`,
+			DownMSSQL:    `DROP TABLE scoped_one`,
+			TenantScoped: []string{"scoped_one"},
+		},
+	)
+
+	if err := RunMigrations(ctx, db, DialectMSSQL, nil, []*LoadedPlugin{p}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	res, err := RunDownMigrations(ctx, db, DialectMSSQL, p, []*LoadedPlugin{p})
+	if err != nil {
+		t.Fatalf("reverse: %v", err)
+	}
+	if len(res.Reversed) != 1 {
+		t.Fatalf("Reversed = %v, want [1]", res.Reversed)
+	}
 }
 
 // A GAP IS A REFUSAL, and nothing is touched.
