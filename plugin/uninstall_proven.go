@@ -29,11 +29,32 @@ import "sort"
 // provenPluginDialects is therefore a claim about TEST COVERAGE, not about
 // the SQL -- add a plugin's name here in the SAME PR as the test that proves
 // it, never ahead of that test landing. cleat#2306's phase 2 is the
-// table-driven version of this across every plugin; as each one passes, its
-// name moves here (or, once phase 2's own test subsumes this file, this map
-// is replaced by that test's own record of what it proved).
+// table-driven version of this across every plugin;
+// TestUninstallDownChainIsClassifiedOnEveryDialect
+// (cmd/cleat-worker/a_uninstall_down_chain_is_classified_on_every_dialect_test.go)
+// IS that proving test -- it drives RunMigrations, RunDownMigrations and a
+// re-Up for every plugin listed here, on every dialect, against a real
+// database, and fails if any of them stops passing. A plugin no longer needs
+// its own dedicated file (scheduled-backup's predates the harness and stays
+// as belt-and-suspenders); it needs a passing subtest in that one.
+//
+// The ten MySQL entries below beyond scheduled-backup were added
+// 2026-09-25, moved out of that harness's own knownBrokenPluginDown map: the
+// phase-2 sweep (cleat#2306) found their Down chains already clean on
+// MySQL, matching cleat-review's #2290 measurement, and the harness itself
+// is what proves it now.
 var provenPluginDialects = map[string]map[Dialect]bool{
 	"scheduled-backup": {DialectMySQL: true, DialectMSSQL: true},
+	"audit-log":        {DialectMySQL: true},
+	"datadog-export":   {DialectMySQL: true},
+	"eventstore":       {DialectMySQL: true},
+	"feature-flags":    {DialectMySQL: true},
+	"kvstore":          {DialectMySQL: true},
+	"notifications":    {DialectMySQL: true},
+	"pagerduty-alert":  {DialectMySQL: true},
+	"rate-limiter":     {DialectMySQL: true},
+	"slack-notify":     {DialectMySQL: true},
+	"tenant-quota":     {DialectMySQL: true},
 }
 
 // UninstallProvenOnDialect reports whether pluginName's Down chain is

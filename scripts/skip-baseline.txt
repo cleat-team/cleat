@@ -72,6 +72,7 @@ cmd/cleat-worker	TestTenantIsolationOverHTTP_MSSQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_MySQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_Postgres	1
 cmd/cleat-worker	TestTheWorkerRunsADeferPhaseRatherThanReschedulingIt	1
+cmd/cleat-worker	TestUninstallDownChainIsClassifiedOnEveryDialect	2
 cmd/cleat-worker	TestUninstallPluginRefusesAnUnprovenPluginOnEveryDialect	2
 cmd/cleat-worker	TestWorkerMigratesFromOutsideTheRepo	2
 cmd/cleat-worker	newSignalAuthStore	1
