@@ -20,11 +20,15 @@ import (
 // test over captured stdout is the only thing that fails when the tri-state
 // regresses, in the same style as TestResolveAPIKeyStmt_ExcludesExpired.
 //
-// The three fixtures are the three states design v2 §(8) asked the CLI to
-// distinguish: a live key (neither disabled nor expired), a revoked key
+// The first three fixtures are the three states design v2 §(8) asked the CLI
+// to distinguish: a live key (neither disabled nor expired), a revoked key
 // (disabled_at set -- an operator or the OAuth sweep acted), and an expired
 // key (expires_at passed with no disabled_at -- nobody acted, the key's own
-// lifetime ran out).
+// lifetime ran out). The fourth is a key whose expiry is still in the future:
+// it must read "active", and it is the one fixture that separates the correct
+// predicate expires_at < now from a buggy "any non-NULL expires_at is expired"
+// -- the first three cannot, because their expires_at is either NULL or
+// already in the past.
 func TestPrintAPIKeyRowsShowsExpiryAndTriState(t *testing.T) {
 	now := time.Now()
 	rows := []apiKeyRow{
@@ -33,6 +37,8 @@ func TestPrintAPIKeyRowsShowsExpiryAndTriState(t *testing.T) {
 			disabledAt: sql.NullTime{Time: now.Add(-24 * time.Hour), Valid: true}},
 		{keyID: uuid.MustParse("10000000-0000-0000-0000-000000000003"), tenantID: uuid.Nil, description: "ran out",
 			expiresAt: sql.NullTime{Time: now.Add(-time.Hour), Valid: true}},
+		{keyID: uuid.MustParse("10000000-0000-0000-0000-000000000004"), tenantID: uuid.Nil, description: "not yet",
+			expiresAt: sql.NullTime{Time: now.Add(24 * time.Hour), Valid: true}},
 	}
 
 	old := os.Stdout
@@ -63,7 +69,11 @@ func TestPrintAPIKeyRowsShowsExpiryAndTriState(t *testing.T) {
 	if !strings.Contains(out, "expired ") {
 		t.Errorf("past-expiry key not reported expired:\n%s", out)
 	}
-	if !strings.Contains(out, "active") {
-		t.Errorf("live key not reported active:\n%s", out)
+	// "active" must appear exactly twice: the always-on key AND the not-yet
+	// key. One occurrence is the regression the fourth fixture exists to catch
+	// -- a buggy "any non-NULL expires_at is expired" reads the future-expiry
+	// key as expired and leaves only the always-on key active.
+	if got := strings.Count(out, "active"); got != 2 {
+		t.Errorf("active count = %d, want 2 (always-on and not-yet-expired):\n%s", got, out)
 	}
 }
