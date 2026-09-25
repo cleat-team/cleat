@@ -122,6 +122,7 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if attempt < maxAppendAttempts {
+			//nolint:gosec // G404: retry-backoff jitter, not a security context -- spreads concurrent losers apart so they don't retry in lockstep. No secret or token derives from it.
 			jitter := time.Duration(rand.Int64N(int64(backoff)))
 			time.Sleep(backoff/2 + jitter)
 			backoff *= 2
