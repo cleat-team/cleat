@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"bytes"
 	"fmt"
 	"go/parser"
 	"go/token"
@@ -140,7 +141,7 @@ func TestEveryOutboundCallJoinsTheTrace(t *testing.T) {
 	var undeclared []string
 	var stale []string
 	seen := map[string]bool{}
-	sites := 0
+	sites, ignored := 0, 0
 
 	for _, f := range strings.Fields(string(out)) {
 		if strings.HasSuffix(f, "_test.go") {
@@ -149,6 +150,14 @@ func TestEveryOutboundCallJoinsTheTrace(t *testing.T) {
 		src, err := os.ReadFile(filepath.Join("..", f))
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
+		}
+		// A file excluded from the build (`//go:build ignore`) is not part of what cleat runs, so it cannot
+		// be one of cleat's outbound hops. Today that is the scaffold templates (cmd/cleat/templates/..., which
+		// are written into a customer's own project, where the trace is theirs to propagate) and the
+		// scripts/ tools. cleat#2307: the fullstack template's proxy is the first of them to build a request.
+		if bytes.HasPrefix(src, []byte("//go:build ignore")) {
+			ignored++
+			continue
 		}
 		blanked, err := withoutComments(f, src)
 		if err != nil {
@@ -205,8 +214,8 @@ func TestEveryOutboundCallJoinsTheTrace(t *testing.T) {
 		t.Fatal("UNMEASURED: no outbound request construction found anywhere in the tree. " +
 			"That is not plausible -- it is the pattern no longer matching.")
 	}
-	t.Logf("outbound request sites: %d checked, %d declared as not yet propagating",
-		sites, len(notYetPropagating))
+	t.Logf("outbound request sites: %d checked, %d declared as not yet propagating, %d build-ignored files not scanned",
+		sites, len(notYetPropagating), ignored)
 
 	sort.Strings(undeclared)
 	if len(undeclared) > 0 {

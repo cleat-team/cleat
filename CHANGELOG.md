@@ -776,7 +776,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CLEAT_API_KEY_FILE` (the file wins; with neither it refuses to start). Every other path is a 404 and every
   other method a 405; the browser's `Authorization` and `Cookie` are dropped, upstream `Set-Cookie` and every
   response header but `Content-Type` are dropped (and that is served as JSON or plain text, never HTML, under a sandbox CSP), redirects are not followed, and the key is never logged. It
-  listens on loopback by default, and while it does it refuses a foreign `Origin` (403), a non-JSON `POST` (415)
+  listens on loopback by default (any other address needs `-allow-remote`), serves the page's script as its own
+  file so the page needs no inline script, refuses an oversized body before calling the worker, and while it
+  listens on loopback it refuses a foreign `Origin` (403), a non-JSON `POST` (415)
   and a non-loopback `Host` (421, the DNS-rebinding case). The template's CI test now runs `make web` and drives
   the page's calls through it to `complete`, and asserts each of those refusals and that the key appears in no
   response and no log line. Worker-side CORS is not added.

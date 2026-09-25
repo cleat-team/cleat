@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const testKey = "cleat_sk_0123456789abcdef"
+const testKey = "fake-proxy-key-for-tests"
 
 // upstreamRecorder is a stand-in for the cleat worker. It records what reached it, so the tests can say what the
 // proxy forwarded and, as importantly, what it did not.
@@ -39,13 +39,18 @@ func newUpstream(t *testing.T, respond func(w http.ResponseWriter, r *http.Reque
 
 func testProxy(t *testing.T, up *upstreamRecorder, listen string) (http.Handler, string) {
 	t.Helper()
-	page := filepath.Join(t.TempDir(), "index.html")
+	dir := t.TempDir()
+	page := filepath.Join(dir, "index.html")
 	if err := os.WriteFile(page, []byte("<h1>page</h1>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "app.js"), []byte("console.log('app')"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	u, _ := url.Parse(up.srv.URL)
 	return newHandler(config{
-		upstream: u, workflow: "my-fullstack-app", apiKey: testKey, page: page, listen: listen,
+		upstream: u, workflow: "my-fullstack-app", apiKey: testKey, page: page,
+		script: filepath.Join(filepath.Dir(page), "app.js"), listen: listen,
 		client: &http.Client{Timeout: 5 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 	}), page
@@ -271,8 +276,20 @@ func TestThePageIsServedWithHardeningHeaders(t *testing.T) {
 			t.Errorf("%s = %q, want %q", hdr, w.Header().Get(hdr), want)
 		}
 	}
-	if csp := w.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "connect-src 'self'") {
-		t.Errorf("Content-Security-Policy = %q", csp)
+	csp := w.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "connect-src 'self'") || !strings.Contains(csp, "script-src 'self'") || strings.Contains(csp, "script-src 'unsafe-inline'") {
+		t.Errorf("Content-Security-Policy = %q, want scripts from 'self' only and no inline script", csp)
+	}
+	// The script is its own file, served with its own type, so the page needs no inline script.
+	sw := do(h, http.MethodGet, "/app.js", home, nil, "")
+	if sw.Code != 200 || sw.Body.String() != "console.log('app')" || !strings.HasPrefix(sw.Header().Get("Content-Type"), "text/javascript") {
+		t.Errorf("/app.js = %d %q %q", sw.Code, sw.Body, sw.Header().Get("Content-Type"))
+	}
+	if c := do(h, http.MethodPost, "/app.js", home, nil, "").Code; c != 405 {
+		t.Errorf("POST /app.js = %d, want 405", c)
+	}
+	if c := do(h, http.MethodGet, "/app.js/x", home, nil, "").Code; c != 404 {
+		t.Errorf("GET /app.js/x = %d, want 404", c)
 	}
 }
 
@@ -296,8 +313,15 @@ func TestAnOversizedBodyIsRefused(t *testing.T) {
 	up := newUpstream(t, ok)
 	h, _ := testProxy(t, up, home)
 	w := do(h, http.MethodPost, "/api/workflows/my-fullstack-app/start", home, jsonHdr, strings.Repeat("x", maxRequestBody+10))
-	if w.Code == 200 {
-		t.Errorf("a %d byte body was accepted", maxRequestBody+10)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("a %d byte body = %d, want 413", maxRequestBody+10, w.Code)
+	}
+	if len(up.got) != 0 {
+		t.Errorf("an oversized body reached the worker (%d call(s)); it must be refused before any upstream call", len(up.got))
+	}
+	// A body exactly at the limit is fine.
+	if w := do(h, http.MethodPost, "/api/workflows/my-fullstack-app/start", home, jsonHdr, strings.Repeat("x", maxRequestBody)); w.Code != 200 {
+		t.Errorf("a body at the limit = %d, want 200", w.Code)
 	}
 }
 
@@ -332,6 +356,29 @@ func TestTheKeyComesFromTheFileOrTheEnvironmentAndItsAbsenceIsAnError(t *testing
 	}
 	if err := run([]string{"-listen", "127.0.0.1:0"}, env(nil), os.ReadFile); err == nil || !strings.Contains(err.Error(), "no API key") {
 		t.Errorf("run without a key = %v, want it to refuse to start", err)
+	}
+}
+
+// A non-loopback address needs an explicit flag, so a stray -listen 0.0.0.0 cannot hand the tenant to the network.
+func TestANonLoopbackListenAddressNeedsAnExplicitFlag(t *testing.T) {
+	env := func(k string) string {
+		if k == "CLEAT_API_KEY" {
+			return testKey
+		}
+		return ""
+	}
+	for _, addr := range []string{"0.0.0.0:0", ":0", "192.168.1.5:0"} {
+		// In a goroutine: if the refusal were missing, run would start listening and never return.
+		done := make(chan error, 1)
+		go func() { done <- run([]string{"-listen", addr}, env, os.ReadFile) }()
+		select {
+		case err := <-done:
+			if err == nil || !strings.Contains(err.Error(), "-allow-remote") {
+				t.Errorf("-listen %s = %v, want a refusal naming -allow-remote", addr, err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Errorf("-listen %s: run did not refuse; it is serving on a non-loopback address", addr)
+		}
 	}
 }
 

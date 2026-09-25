@@ -11,6 +11,7 @@
 // WHAT IT WILL DO. Exactly these, and nothing else:
 //
 //	GET  /                                    the page (web/index.html)
+//	GET  /app.js                              the page's script (web/app.js), so the page needs no inline script
 //	POST /api/workflows/<workflow>/start      start a run          (JSON body, Content-Type: application/json)
 //	GET  /api/workflows/<id>/query?key=status the run's published state
 //
@@ -23,8 +24,8 @@
 // every response header other than Content-Type are dropped. Redirects are not followed, so the key cannot be sent to a
 // host the worker names. The key is never logged, and neither is a request body.
 //
-// WHO CAN CALL IT. It listens on 127.0.0.1 by default. Anything that can reach this port acts as your tenant, so put it
-// somewhere else only knowing that. A page on another origin cannot use it from your browser either: a POST needs
+// WHO CAN CALL IT. It listens on 127.0.0.1 by default and refuses any other address unless you pass -allow-remote.
+// Anything that can reach this port acts as your tenant, so put it somewhere else only knowing that.
 // Content-Type: application/json (which forces a preflight the proxy does not answer), an Origin that is not this
 // proxy's own is refused, and, while it is bound to loopback, so is a Host header that is not a loopback name (which is
 // what a DNS-rebinding page sends).
@@ -34,6 +35,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
@@ -44,6 +46,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -62,6 +65,7 @@ type config struct {
 	workflow string
 	apiKey   string
 	page     string
+	script   string
 	listen   string
 	client   *http.Client
 }
@@ -131,7 +135,10 @@ func newHandler(cfg config) http.Handler {
 		}
 		switch route {
 		case routePage:
-			servePage(w, cfg.page)
+			servePage(w, cfg.page, "text/html; charset=utf-8", pageCSP)
+			return
+		case routeScript:
+			servePage(w, cfg.script, "text/javascript; charset=utf-8", "default-src 'none'")
 			return
 		case routeQuery:
 			if r.URL.RawQuery != "key=status" {
@@ -166,6 +173,7 @@ type route int
 const (
 	routeNone route = iota
 	routePage
+	routeScript
 	routeStart
 	routeQuery
 )
@@ -174,6 +182,9 @@ const (
 func matchRoute(p, workflow string) (route, string, bool) {
 	if p == "/" || p == "/index.html" {
 		return routePage, "", true
+	}
+	if p == "/app.js" {
+		return routeScript, "", true
 	}
 	parts := strings.Split(strings.TrimPrefix(p, "/"), "/")
 	if len(parts) == 4 && parts[0] == "api" && parts[1] == "workflows" && idPattern.MatchString(parts[2]) {
@@ -189,7 +200,7 @@ func matchRoute(p, workflow string) (route, string, bool) {
 
 func methodAllowed(rt route, m string) bool {
 	switch rt {
-	case routePage:
+	case routePage, routeScript:
 		return m == http.MethodGet || m == http.MethodHead
 	case routeQuery:
 		return m == http.MethodGet
@@ -206,22 +217,27 @@ func allowFor(rt route) string {
 	return http.MethodGet
 }
 
+// pageCSP: scripts only from this origin (the page's script is /app.js, so there is no inline script to allow), and
+// the only thing a page on this origin may connect to is this origin.
+const pageCSP = "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'"
+
 func setSecurityHeaders(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Cache-Control", "no-store")
 	h.Set("Referrer-Policy", "no-referrer")
-	h.Set("Content-Security-Policy",
-		"default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'")
+	h.Set("Content-Security-Policy", pageCSP)
 }
 
-func servePage(w http.ResponseWriter, page string) {
-	b, err := os.ReadFile(page)
+// servePage serves one fixed file from the configured path -- never a path taken from the request.
+func servePage(w http.ResponseWriter, file, contentType, csp string) {
+	b, err := os.ReadFile(file)
 	if err != nil {
-		http.Error(w, "page unavailable", http.StatusInternalServerError)
+		http.Error(w, "file unavailable", http.StatusInternalServerError)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Security-Policy", csp)
 	_, _ = w.Write(b)
 }
 
@@ -231,7 +247,19 @@ func forward(w http.ResponseWriter, r *http.Request, cfg config, rt route, id st
 	switch rt {
 	case routeStart:
 		target.Path = "/api/workflows/" + id + "/start"
-		body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+		// Read the whole body, up to the limit, BEFORE calling the worker: a body over the limit must be refused
+		// outright, not forwarded truncated and answered with whatever the worker makes of half a document.
+		b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
+		if err != nil {
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
+			} else {
+				http.Error(w, "could not read the request body", http.StatusBadRequest)
+			}
+			return
+		}
+		body = bytes.NewReader(b)
 	case routeQuery:
 		target.Path = "/api/workflows/" + id + "/query"
 		target.RawQuery = "key=status"
@@ -252,11 +280,6 @@ func forward(w http.ResponseWriter, r *http.Request, cfg config, rt route, id st
 
 	resp, err := cfg.client.Do(req)
 	if err != nil {
-		var mbe *http.MaxBytesError
-		if errors.As(err, &mbe) {
-			http.Error(w, "request too large", http.StatusRequestEntityTooLarge)
-			return
-		}
 		log.Printf("%s %s -> upstream unreachable", r.Method, r.URL.Path)
 		http.Error(w, "the cleat worker is not reachable", http.StatusBadGateway)
 		return
@@ -284,7 +307,8 @@ func run(args []string, getenv func(string) string, readFile func(string) ([]byt
 	listen := fs.String("listen", "127.0.0.1:3000", "address to listen on; anything that can reach it acts as your tenant")
 	upstream := fs.String("upstream", "http://localhost:8080", "the cleat worker's API address")
 	workflow := fs.String("workflow", "my-fullstack-app", "the one workflow name the page may start")
-	page := fs.String("page", "web/index.html", "the page to serve")
+	page := fs.String("page", "web/index.html", "the page to serve (its script is app.js beside it)")
+	allowRemote := fs.Bool("allow-remote", false, "permit a -listen address that is not loopback: anyone who can reach it acts as your tenant")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -299,16 +323,20 @@ func run(args []string, getenv func(string) string, readFile func(string) ([]byt
 	if !idPattern.MatchString(*workflow) {
 		return fmt.Errorf("-workflow %q is not a valid workflow name", *workflow)
 	}
+	if allowedHosts(*listen) == nil && !*allowRemote {
+		return fmt.Errorf("refusing to listen on %s: it is not a loopback address, and anything that can reach it would act as "+
+			"your tenant. Pass -allow-remote if you mean it", *listen)
+	}
 	cfg := config{
-		upstream: u, workflow: *workflow, apiKey: key, page: *page, listen: *listen,
+		upstream: u, workflow: *workflow, apiKey: key, page: *page, script: filepath.Join(filepath.Dir(*page), "app.js"), listen: *listen,
 		client: &http.Client{
 			Timeout:       15 * time.Second,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
 	if allowedHosts(*listen) == nil {
-		log.Printf("WARNING: listening on %s, which is not a loopback address: anyone who can reach it acts as your tenant "+
-			"and the Host check is off", *listen)
+		log.Printf("WARNING: -allow-remote: listening on %s, which is not a loopback address: anyone who can reach it acts as "+
+			"your tenant and the Host check is off", *listen)
 	}
 	srv := &http.Server{
 		Addr:              *listen,

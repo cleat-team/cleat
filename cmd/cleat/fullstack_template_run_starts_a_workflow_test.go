@@ -87,7 +87,7 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 
 	// The routes the README and the page name must be routes the worker has: `/state` never existed and every
 	// poll of it was a 404 (found re-measuring cleat#2067).
-	for _, f := range []string{"README.md", "web/index.html", "main.go"} {
+	for _, f := range []string{"README.md", "web/index.html", "web/app.js", "main.go"} {
 		data, err := os.ReadFile(filepath.Join(proj, f))
 		if err != nil {
 			t.Fatal(err)
@@ -265,11 +265,19 @@ func driveTheProxy(t *testing.T, proj string, env []string, apiKey string) {
 
 	// The page, and the calls it makes: start, then poll published state, to `complete`.
 	code, hdr, page := call(http.MethodGet, "/", nil, "")
-	if code != 200 || !strings.Contains(page, "my-fullstack-app/start") {
-		t.Fatalf("GET / = %d, want the scaffold's page", code)
+	if code != 200 || !strings.Contains(page, `src="/app.js"`) {
+		t.Fatalf("GET / = %d, want the scaffold's page loading /app.js", code)
 	}
 	noKeyIn("the page", hdr, page)
-	if strings.Contains(page, "http://localhost:8080") {
+	if csp := hdr.Get("Content-Security-Policy"); !strings.Contains(csp, "script-src 'self'") || strings.Contains(csp, "script-src 'unsafe-inline'") {
+		t.Errorf("the page is served under %q, want scripts from 'self' only", csp)
+	}
+	code, hdr, script := call(http.MethodGet, "/app.js", nil, "")
+	if code != 200 || !strings.Contains(script, "my-fullstack-app/start") {
+		t.Fatalf("GET /app.js = %d, want the page's script", code)
+	}
+	noKeyIn("the script", hdr, script)
+	if strings.Contains(page+script, "http://localhost:8080") {
 		t.Error("the page still names the worker's own address; it must call the proxy on its own origin")
 	}
 	code, hdr, body := call(http.MethodPost, "/api/workflows/my-fullstack-app/start",

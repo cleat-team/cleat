@@ -104,7 +104,8 @@ reach a browser.
 That is why the page does not call the worker itself. The worker sends no CORS
 headers, so a browser refuses a page served from any other origin; and the worker
 requires a key the page must not hold (cleat#2307). `make web` runs `proxy/main.go`,
-which serves the page and forwards exactly two calls — start a run, and read
+which serves the page (its script is `web/app.js`, so the page needs no inline
+script and the policy it is served under allows none) and forwards exactly two calls — start a run, and read
 `query?key=status` — adding the key from `CLEAT_API_KEY` (or the file named by
 `CLEAT_API_KEY_FILE`, which wins if both are set; use the file form when you
 deploy). Every other path is a 404 and every other method a 405; the browser's own
@@ -114,8 +115,10 @@ back.
 Two things to keep in mind:
 
 - **It listens on 127.0.0.1 by default, and that is the safe setting.** Anything
-  that can reach the proxy's port acts as your tenant. `-listen 0.0.0.0:3000`
-  works and prints a warning; do not do it on a network you do not trust.
+  that can reach the proxy's port acts as your tenant, so any other `-listen`
+  address is refused unless you also pass `-allow-remote` (and it then prints a
+  warning and cannot check the `Host` header). Do not do it on a network you do
+  not trust.
 - **It is a sketch of the boundary, not your application's backend.** It has no
   users. For a real application, serve your page from your own backend, use the
   `oauth-provider` plugin for per-user login, and have that backend call cleat
