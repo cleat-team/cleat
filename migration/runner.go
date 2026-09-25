@@ -21,6 +21,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cleat-team/cleat/internal/pinnedtx"
 )
 
 // Dialect identifies the SQL dialect a Runner applies migrations for.
@@ -803,7 +805,11 @@ func (r *Runner) getAppliedVersions(ctx context.Context, session sqlSession) (ma
 // transaction is committed. On failure the transaction is rolled back
 // and the error is returned.
 func (r *Runner) applyMigration(ctx context.Context, session sqlSession, m migration) error {
-	tx, err := session.BeginTx(ctx, nil)
+	// pinnedtx.Begin, not session.BeginTx(ctx, ...): on the pinned PostgreSQL
+	// connection a ctx that ends mid-migration must not have database/sql close
+	// the connection from another goroutine while release() is still using it
+	// (cleat#2215). Statements below still take ctx.
+	tx, err := pinnedtx.Begin(ctx, session, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}

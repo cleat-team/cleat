@@ -810,6 +810,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cleatctl backup-list`'s output now means when the backup was *dispatched* (claimed), not when
   it *completed* — check `backup-history` for completion status and timing.
 
+- **The migration runners no longer race database/sql over their pinned connection.** (cleat#2215)
+
+  A migration whose context ended mid-transaction (a `--migrate-only` cut off by its deadline, or a lock wait
+  that outlasted it) could panic with a nil pointer dereference in `Runner.session`'s release: database/sql
+  starts a goroutine for every transaction begun on a cancellable context and, when the context ends, closes the
+  pinned `*sql.Conn` from that goroutine while the runner is still using it to `RESET` its session settings and
+  unlock. It is a nanosecond window (`Conn.grabConn` checks `done`, then takes the lock), so it showed up in CI
+  under load and twice ejected a PR from the merge queue. Migration transactions are now begun on a context the
+  run's context cannot cancel (`internal/pinnedtx`); statements inside them still take that context, so a
+  blocked statement is cancelled as before and the runner's own `Rollback` ends the transaction. The wait for a
+  lock is still bounded by `lock_timeout` on PostgreSQL and by `GET_LOCK`/`sp_getapplock` (15 minutes) on MySQL
+  and SQL Server; nothing that was bounded became unbounded. The same change covers plugin migrations.
+
 - **The fullstack template's documented path reaches a `done` run.** (cleat#2067)
 
   Re-measured on `develop` on a stock `postgres:16`: of the six breaks in the issue, the superuser worker, the
