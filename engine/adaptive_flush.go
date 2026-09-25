@@ -402,46 +402,7 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 
 	events := make([]map[string]interface{}, len(batch))
 	for i, entry := range batch {
-		p := entry.params
-		events[i] = map[string]interface{}{
-			"workflow_id":       p[0],
-			"step":              p[1],
-			"event_type":        p[2],
-			"service":           jsonNull(p[3]),
-			"operation":         jsonNull(p[4]),
-			"request":           jsonNull(p[5]),
-			"response":          jsonNull(p[6]),
-			"error":             jsonNull(p[7]),
-			"duration_ms":       jsonNull(p[8]),
-			"signal_names":      jsonNull(p[9]),
-			"timeout_ms":        jsonNull(p[10]),
-			"signal_name":       jsonNull(p[11]),
-			"signal_payload":    jsonNull(p[12]),
-			"defer_description": jsonNull(p[13]),
-			"defer_id":          jsonNull(p[14]),
-			"child_name":        jsonNull(p[15]),
-			"child_input":       jsonNull(p[16]),
-			"run_id":            jsonNull(p[17]),
-			"new_input":         jsonNull(p[18]),
-			"plugin_name":       jsonNull(p[19]),
-			"plugin_func":       jsonNull(p[20]),
-			"plugin_input":      jsonNull(p[21]),
-			"plugin_output":     jsonNull(p[22]),
-			"plugin_error":      jsonNull(p[23]),
-			"promise_name":      jsonNull(p[24]),
-			"promise_id":        jsonNull(p[25]),
-			"promise_result":    jsonNull(p[26]),
-			"promise_error":     jsonNull(p[27]),
-			"payload":           payloadJSONRaw(p[28]),
-			"checksum":          p[29],
-			"tenant_id":         p[30],
-			"created_at":        entry.createdAt,
-			// cleat#1319: what the request/response bytes ARE, rather than a
-			// guess made when they are read back. NULL for an event that
-			// carries neither, so the column never claims something about
-			// bytes that do not exist.
-			"payload_encoding": entry.payloadEncoding,
-		}
+		events[i] = batchEntryJSONRow(entry)
 	}
 
 	t0 := time.Now()
@@ -774,6 +735,56 @@ func (af *AdaptiveFlusher) prepareEntry(workflowID string, rec EventRecord, chec
 		createdAt:       eventCreatedAt(rec),
 		payloadEncoding: stored.Encoding,
 	}, nil
+}
+
+// batchEntryJSONRow turns one prepared batch entry into the map shape the
+// batch INSERT's jsonb_populate_recordset expects for a single row -- one
+// true construction shared by flushAndNotify's primary attempt and a direct
+// call to retryBatchFlush (cleat#2364's engine-level test calls the latter
+// to exercise retryBatchFlush's own guard clause without needing to force a
+// transient DB error), rather than a second hand-written copy of this
+// column list that could silently diverge the next time one is added.
+func batchEntryJSONRow(entry batchEntry) map[string]interface{} {
+	p := entry.params
+	return map[string]interface{}{
+		"workflow_id":       p[0],
+		"step":              p[1],
+		"event_type":        p[2],
+		"service":           jsonNull(p[3]),
+		"operation":         jsonNull(p[4]),
+		"request":           jsonNull(p[5]),
+		"response":          jsonNull(p[6]),
+		"error":             jsonNull(p[7]),
+		"duration_ms":       jsonNull(p[8]),
+		"signal_names":      jsonNull(p[9]),
+		"timeout_ms":        jsonNull(p[10]),
+		"signal_name":       jsonNull(p[11]),
+		"signal_payload":    jsonNull(p[12]),
+		"defer_description": jsonNull(p[13]),
+		"defer_id":          jsonNull(p[14]),
+		"child_name":        jsonNull(p[15]),
+		"child_input":       jsonNull(p[16]),
+		"run_id":            jsonNull(p[17]),
+		"new_input":         jsonNull(p[18]),
+		"plugin_name":       jsonNull(p[19]),
+		"plugin_func":       jsonNull(p[20]),
+		"plugin_input":      jsonNull(p[21]),
+		"plugin_output":     jsonNull(p[22]),
+		"plugin_error":      jsonNull(p[23]),
+		"promise_name":      jsonNull(p[24]),
+		"promise_id":        jsonNull(p[25]),
+		"promise_result":    jsonNull(p[26]),
+		"promise_error":     jsonNull(p[27]),
+		"payload":           payloadJSONRaw(p[28]),
+		"checksum":          p[29],
+		"tenant_id":         p[30],
+		"created_at":        entry.createdAt,
+		// cleat#1319: what the request/response bytes ARE, rather than a
+		// guess made when they are read back. NULL for an event that
+		// carries neither, so the column never claims something about
+		// bytes that do not exist.
+		"payload_encoding": entry.payloadEncoding,
+	}
 }
 
 func (af *AdaptiveFlusher) InBatchMode() bool {
