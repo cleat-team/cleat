@@ -15,8 +15,23 @@ import "sort"
 // chain leaves the schema in neither shape. On SQL Server that has already
 // bricked a database beyond repair -- notifications' partial reversal left
 // "Cannot find the object webhook_delivery (4902)" with no further migration
-// able to run. MySQL at least recovers with --migrate-only; SQL Server does
-// not recover at all.
+// able to run.
+//
+// Most of the rest DO recover with a follow-up --migrate-only, on either
+// dialect, but not all: cleat#2306 phase 2's schema-equality check
+// (cmd/cleat-worker/a_uninstall_down_chain_is_classified_on_every_dialect_test.go,
+// migration/catalogdiff) found three pairs where the follow-up run returns
+// no error yet the recovered schema is missing an object the failed Down
+// destroyed -- plugin_migrations still records that migration as applied, so
+// the recovery run has nothing pending to re-apply. Measured 2026-09-25:
+// blobstore/MySQL (loses the workflow_blob_refs table), oauth-provider/MSSQL
+// (loses oauth_sessions.nonce), webhook-ingest/MSSQL (loses
+// webhook_events.error_msg). Those three are classified
+// outcomeUnrecoverable in knownBrokenPluginDown, same as a pair whose
+// follow-up run fails outright -- "the command exited 0" is not the bar,
+// "the schema matches a clean install" is. Do not tell an operator
+// --migrate-only repairs an uninstall for any (plugin, dialect) pair without
+// checking that file's current classification first.
 //
 // So --uninstall-plugin refuses up front on MySQL and SQL Server for any
 // plugin whose Down chain is not proven, end to end, by its own test against

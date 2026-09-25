@@ -31,11 +31,23 @@ package main
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 
 	"github.com/cleat-team/cleat/engine/testutil"
+	"github.com/cleat-team/cleat/migration"
+	"github.com/cleat-team/cleat/migration/catalogdiff"
 	"github.com/cleat-team/cleat/plugin"
 )
+
+// catalogDialect converts plugin.Dialect to migration.Dialect for
+// catalogdiff.Snapshot. The two are separate types with identical string
+// values ("postgres"/"mysql"/"mssql") rather than one shared enum, because
+// migration/ deliberately imports nothing else in this module (to avoid
+// import cycles) -- see migration/catalogdiff's own package comment.
+func catalogDialect(d plugin.Dialect) migration.Dialect {
+	return migration.Dialect(string(d))
+}
 
 // downOutcome is what a (plugin, dialect) pair's Down chain is expected to do.
 type downOutcome int
@@ -80,13 +92,16 @@ func (o downOutcome) String() string {
 // TestUninstallSchedulerBackupOnEveryDialect.
 var knownBrokenPluginDown = map[string]map[plugin.Dialect]downOutcome{
 	// Broken on both MySQL and SQL Server.
-	"blobstore":      {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeRecoverable},
 	"event-triggers": {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeRecoverable},
 	"jobqueue":       {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeRecoverable},
-	"oauth-provider": {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeRecoverable},
 	"scheduler":      {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeRecoverable},
 	"kafka-connect":  {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeRecoverable},
-	"webhook-ingest": {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeRecoverable},
+	// blobstore/mysql, oauth-provider/mssql and webhook-ingest/mssql are split
+	// below: each is recoverable on one dialect and unrecoverable on the
+	// other, so they cannot share one line with the pairs above.
+	"blobstore":      {plugin.DialectMySQL: outcomeUnrecoverable, plugin.DialectMSSQL: outcomeRecoverable},
+	"oauth-provider": {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeUnrecoverable},
+	"webhook-ingest": {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeUnrecoverable},
 	// SQL Server only -- clean on MySQL.
 	"audit-log":       {plugin.DialectMSSQL: outcomeRecoverable},
 	"datadog-export":  {plugin.DialectMSSQL: outcomeRecoverable},
@@ -97,7 +112,17 @@ var knownBrokenPluginDown = map[string]map[plugin.Dialect]downOutcome{
 	"rate-limiter":    {plugin.DialectMSSQL: outcomeRecoverable},
 	"slack-notify":    {plugin.DialectMSSQL: outcomeRecoverable},
 	"tenant-quota":    {plugin.DialectMSSQL: outcomeRecoverable},
-	// The one unrecoverable pair measured so far. cleat#2342.
+	// Unrecoverable: the follow-up Up returns no error, but cleat#2306 phase
+	// 2's schema-equality check (migration/catalogdiff, added after
+	// cleat-review's GAP verdict on #2346) proves the recovered database is
+	// missing an object the failed Down destroyed -- plugin_migrations still
+	// records that migration as applied, so the recovery Up skips
+	// re-creating it. Measured 2026-09-25:
+	//   blobstore/mysql:      the entire workflow_blob_refs TABLE is gone
+	//   oauth-provider/mssql: oauth_sessions.nonce COLUMN is gone
+	//   webhook-ingest/mssql: webhook_events.error_msg COLUMN is gone
+	// notifications/mssql (cleat#2342) is the one pair whose follow-up Up
+	// itself fails outright, rather than succeeding over missing objects.
 	"notifications": {plugin.DialectMSSQL: outcomeUnrecoverable},
 }
 
@@ -176,6 +201,26 @@ func TestUninstallDownChainIsClassifiedOnEveryDialect(t *testing.T) {
 					}
 					pluginTables := newTableNames(t, ctx, db, dialect, tablesBefore)
 
+					// Both broken-pair outcomes need this, not just outcomeRecoverable:
+					// RunDownMigrations fails, and a follow-up Up returning no error is NOT
+					// proof of a clean recovery either way. cleat-review measured that a failed
+					// Down can drop an object while plugin_migrations still records its
+					// migration as applied, so the recovery Up sees nothing pending, skips
+					// re-creating the object, and returns cleanly anyway -- which is exactly the
+					// shape an outcomeUnrecoverable pair can now also take (blobstore/mysql,
+					// oauth-provider/mssql, webhook-ingest/mssql: recoverErr is nil for all
+					// three). This snapshot, taken while the schema is known-good, is what the
+					// recovered schema is compared against below, whichever outcome is expected.
+					var cleanSchema *catalogdiff.Catalog
+					if want == outcomeRecoverable || want == outcomeUnrecoverable {
+						var err error
+						cleanSchema, err = catalogdiff.Snapshot(ctx, db, catalogDialect(dialect))
+						if err != nil {
+							t.Fatalf("%s/%s: snapshotting the schema after the initial Up: %v",
+								name, dialect, err)
+						}
+					}
+
 					downRes, downErr := plugin.RunDownMigrations(ctx, db, dialect, lp, single)
 
 					switch want {
@@ -237,21 +282,44 @@ func TestUninstallDownChainIsClassifiedOnEveryDialect(t *testing.T) {
 							return
 						}
 						recoverErr := plugin.RunMigrations(ctx, db, dialect, nil, single)
-						switch want {
-						case outcomeRecoverable:
-							if recoverErr != nil {
-								t.Fatalf("%s/%s: marked recoverable, but the follow-up Up on "+
-									"the half-reversed database also failed: %v -- this pair "+
-									"got WORSE, reclassify as outcomeUnrecoverable and check it "+
-									"did not brick a real database along the way",
-									name, dialect, recoverErr)
+						if want == outcomeRecoverable && recoverErr != nil {
+							t.Fatalf("%s/%s: marked recoverable, but the follow-up Up on "+
+								"the half-reversed database also failed: %v -- this pair "+
+								"got WORSE, reclassify as outcomeUnrecoverable and check it "+
+								"did not brick a real database along the way",
+								name, dialect, recoverErr)
+						}
+						if recoverErr == nil {
+							// A nil error here is not proof of a clean recovery by itself:
+							// plugin_migrations can still record a version as applied after the
+							// failed Down destroyed the object that version created, so a plain
+							// RunMigrations sees nothing pending and returns cleanly over a
+							// silently incomplete schema -- true for EITHER expected outcome, since
+							// an outcomeUnrecoverable pair can take this path too (blobstore/mysql,
+							// oauth-provider/mssql, webhook-ingest/mssql all do). Compare against
+							// the clean snapshot taken right after the initial Up, before
+							// RunDownMigrations touched anything.
+							recoveredSchema, err := catalogdiff.Snapshot(ctx, db, catalogDialect(dialect))
+							if err != nil {
+								t.Fatalf("%s/%s: snapshotting the schema after the recovery Up: %v",
+									name, dialect, err)
 							}
-						case outcomeUnrecoverable:
-							if recoverErr == nil {
-								t.Fatalf("%s/%s: marked unrecoverable, but the follow-up Up on "+
-									"the half-reversed database SUCCEEDED -- this pair got "+
-									"BETTER, reclassify as outcomeRecoverable",
-									name, dialect)
+							diff := catalogdiff.Diff(cleanSchema, recoveredSchema)
+							switch {
+							case want == outcomeRecoverable && len(diff) != 0:
+								t.Fatalf("%s/%s: marked recoverable, and the follow-up Up returned no "+
+									"error, but the recovered schema differs from a clean install "+
+									"(%d line(s)):\n%s\nThe failed Down destroyed object(s) that "+
+									"plugin_migrations still records as applied, so the recovery Up "+
+									"skipped re-creating them. This pair is not actually recoverable -- "+
+									"reclassify it as outcomeUnrecoverable and do not advertise "+
+									"--migrate-only as a repair for it",
+									name, dialect, len(diff), strings.Join(diff, "\n"))
+							case want == outcomeUnrecoverable && len(diff) == 0:
+								t.Fatalf("%s/%s: marked unrecoverable, but the follow-up Up "+
+									"SUCCEEDED and the recovered schema is IDENTICAL to a clean "+
+									"install -- this pair got BETTER, reclassify as "+
+									"outcomeRecoverable", name, dialect)
 							}
 						}
 					}

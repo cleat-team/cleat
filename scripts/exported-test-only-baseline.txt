@@ -73,6 +73,9 @@ engine/wasm_cache.go	func NewWASMCache
 engine/wasm_disk_cache.go	func WasmDiskCache.LookupBytes
 engine/worker_registry.go	func WorkerRegistry.ListLive
 internal/telemetry/tracing.go	func InitTracing
+migration/catalogdiff/catalogdiff.go	func AssertNoPluginObjects
+migration/catalogdiff/catalogdiff.go	func Diff
+migration/catalogdiff/catalogdiff.go	func Snapshot
 plugin/capabilities.go	func DefaultLimits
 plugin/capabilities.go	func DeriveCapabilities
 plugin/manifest.go	func DefaultCapabilities
