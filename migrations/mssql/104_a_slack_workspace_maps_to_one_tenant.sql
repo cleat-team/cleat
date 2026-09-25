@@ -38,8 +38,9 @@
 -- This still does not replace cleatctl's Go-level validator -- this table's
 -- writes all come from cleatctl, and the two together are what "every write
 -- goes through the Go validator" upgrades to "every write is provably bound
--- to this shape even from a raw connection", the same reasoning migration
--- 104's mysql sibling gives for REGEXP_LIKE(...,'c') there.
+-- to this shape even from a raw connection", the same reasoning this
+-- migration's mysql sibling (103) gives for its own team_id column carrying
+-- an explicit utf8mb4_bin collation rather than the database default.
 --
 -- GUARDED BY OBJECT EXISTENCE, following 102's own precedent: cleat#2117's
 -- deploy-step test exercises "the newest migration's tracking row is

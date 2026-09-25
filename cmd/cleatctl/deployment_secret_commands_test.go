@@ -159,6 +159,81 @@ func TestSetAndRetireDeploymentSecretCommandsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSetDeploymentSecretEnforcesRouteSigningKeyMinLength is coordinator's
+// small item on cleat#2230: routeSigningKey enforces a 32-byte floor on
+// slacknotify.route_signing_key at READ time
+// (plugins/slacknotify/signedroute_test.go's TestRouteSigningKey covers that
+// half); this is the WRITE half, setdeploymentsecret.go's deploymentSecretMinLen
+// map, which had no test at all before this.
+func TestSetDeploymentSecretEnforcesRouteSigningKeyMinLength(t *testing.T) {
+	setRingEnv(t, ringKeyB64(0x11), "", "", "")
+	db := deploymentSecretCommandFixture(t)
+	ctx := context.Background()
+	const name = "slacknotify.route_signing_key"
+	t.Cleanup(func() {
+		db.Exec(`DELETE FROM deployment_secrets WHERE name IN ($1, $2)`, //nolint:errcheck // best-effort cleanup
+			name, "slacknotify.signing_secret")
+	})
+
+	t.Run("31 bytes refuses and writes nothing", func(t *testing.T) {
+		valueFile := writeValueFile(t, strings.Repeat("x", 31))
+
+		_, stderr, code := runCapturingExit(t, func() {
+			runSetDeploymentSecret(ctx, db, dialectPostgres, []string{"--name", name, "--from-file", valueFile})
+		})
+		if code != 1 {
+			t.Fatalf("exit code: got %d, want 1\nstderr:\n%s", code, stderr)
+		}
+		if !strings.Contains(stderr, "must be at least 32 bytes") {
+			t.Errorf("stderr does not name the reason: %s", stderr)
+		}
+		if _, err := engine.NewDeploymentSecretStore(db, "postgres", nil).GetDeploymentSecret(ctx, name); err != engine.ErrDeploymentSecretNotFound {
+			t.Fatalf("a refused write must leave nothing readable: got %v, want ErrDeploymentSecretNotFound", err)
+		}
+	})
+
+	t.Run("31 bytes on an unrelated name is not refused for length", func(t *testing.T) {
+		// slacknotify.signing_secret carries no entry in deploymentSecretMinLen
+		// -- the floor cleat#2230 added must not leak onto every deployment
+		// secret, only the names coordinator's instruction named.
+		valueFile := writeValueFile(t, strings.Repeat("y", 31))
+
+		stdout, stderr, code := runCapturingExit(t, func() {
+			runSetDeploymentSecret(ctx, db, dialectPostgres, []string{"--name", "slacknotify.signing_secret", "--from-file", valueFile})
+		})
+		if code != 0 {
+			t.Fatalf("exit code: got %d, want 0 (an unrelated name has no length floor)\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if strings.Contains(stderr, "must be at least 32 bytes") {
+			t.Errorf("an unrelated secret name was refused by the route_signing_key floor: %s", stderr)
+		}
+	})
+
+	t.Run("32 bytes is accepted and readable back", func(t *testing.T) {
+		val := strings.Repeat("z", 32)
+		valueFile := writeValueFile(t, val)
+
+		stdout, stderr, code := runCapturingExit(t, func() {
+			runSetDeploymentSecret(ctx, db, dialectPostgres, []string{"--name", name, "--from-file", valueFile})
+		})
+		if code != 0 {
+			t.Fatalf("exit code: got %d, want 0\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+		}
+		if !strings.Contains(stdout, name) {
+			t.Errorf("stdout does not confirm the write: %s", stdout)
+		}
+
+		ring, err := engine.NewKeyRing(engine.VersionedKey{Version: 1, Key: ringKeyRaw(0x11)})
+		if err != nil {
+			t.Fatalf("NewKeyRing: %v", err)
+		}
+		got, err := engine.NewDeploymentSecretStore(db, "postgres", ring).GetDeploymentSecret(ctx, name)
+		if err != nil || got != val {
+			t.Fatalf("GetDeploymentSecret: got (%q, %v), want (%q, nil)", got, err, val)
+		}
+	})
+}
+
 func TestResealDeploymentSecretsCommandDryRunThenLive(t *testing.T) {
 	setRingEnv(t, ringKeyB64(9), "", "", "")
 	db := deploymentSecretCommandFixture(t)

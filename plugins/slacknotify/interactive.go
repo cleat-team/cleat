@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/google/uuid"
 )
 
 // interactiveMaxBodySize bounds POST /slack/interactive, whose payloads are a
@@ -74,10 +76,10 @@ func parseCallbackRoute(s string) (wfID, sigName string, ok bool) {
 	return parts[1], parts[3], true
 }
 
-// extractCallbackRoute finds a wf:<id>:sig:<name> route in a Slack
-// interactive payload: buttons only, first action only, route in
-// actions[0].action_id (Slack bounds action_id to 255 characters) -- and,
-// for backward compatibility with Slack's older "attachment"
+// extractCallbackRoute finds a SIGNED wf:<id>:sig:<name>:<issued_at>:<mac>
+// route in a Slack interactive payload: buttons only, first action only,
+// route in actions[0].action_id (Slack bounds action_id to 255 characters)
+// -- and, for backward compatibility with Slack's older "attachment"
 // interactive_message payloads, the legacy top-level callback_id.
 //
 // The plugin's OWN button-sending path (sendMessage's opaque Blocks
@@ -97,24 +99,31 @@ func parseCallbackRoute(s string) (wfID, sigName string, ok bool) {
 // as a route creates an ambiguous, undocumented second way to route a
 // click. One documented field is simpler to reason about and to audit.
 //
+// Uses parseSignedRoute, not parseCallbackRoute directly: cleat#2230
+// ("signed routes") requires every route reaching the handler to already
+// carry the issued-at/MAC tail. The MAC itself is not checked here -- see
+// parseSignedRoute's doc comment for why that has to wait for tenant
+// resolution.
+//
 // action is returned alongside the route (nil for the legacy callback_id
 // path, which carries no per-action fields) so the caller can build the
-// scoped signal payload without re-parsing payload.Actions itself.
-func extractCallbackRoute(payload slackInteractivePayload) (wfID, sigName string, action *slackBlockAction, ok bool) {
-	if wfID, sigName, ok := parseCallbackRoute(payload.CallbackID); ok {
-		return wfID, sigName, nil, true
+// scoped signal payload, and verify the MAC's block_id/value binding,
+// without re-parsing payload.Actions itself.
+func extractCallbackRoute(payload slackInteractivePayload) (unsignedRoute, issuedAtHex, mac string, action *slackBlockAction, ok bool) {
+	if unsignedRoute, issuedAtHex, mac, ok := parseSignedRoute(payload.CallbackID); ok {
+		return unsignedRoute, issuedAtHex, mac, nil, true
 	}
 	if len(payload.Actions) == 0 {
-		return "", "", nil, false
+		return "", "", "", nil, false
 	}
 	var actions []slackBlockAction
 	if err := json.Unmarshal(payload.Actions, &actions); err != nil || len(actions) == 0 {
-		return "", "", nil, false
+		return "", "", "", nil, false
 	}
-	if wfID, sigName, ok := parseCallbackRoute(actions[0].ActionID); ok {
-		return wfID, sigName, &actions[0], true
+	if unsignedRoute, issuedAtHex, mac, ok := parseSignedRoute(actions[0].ActionID); ok {
+		return unsignedRoute, issuedAtHex, mac, &actions[0], true
 	}
-	return "", "", nil, false
+	return "", "", "", nil, false
 }
 
 // scopedInteractionPayload is what actually gets marshaled into a
@@ -162,19 +171,43 @@ func slackObjectID(raw json.RawMessage) string {
 // buildScopedPayload assembles the narrow payload actually delivered to a
 // workflow's signal (see scopedInteractionPayload's doc comment). action is
 // nil on the legacy callback_id path, which carries no per-action fields.
-func buildScopedPayload(payload slackInteractivePayload, action *slackBlockAction) ([]byte, error) {
+//
+// unsignedRoute, not action.ActionID: a click's real action_id carries the
+// internal signed wire format (wf:<id>:sig:<name>:<issued_at>:<mac>), which
+// is this plugin's implementation detail, not something a workflow should
+// ever see or be able to depend on the shape of.
+func buildScopedPayload(payload slackInteractivePayload, unsignedRoute string, action *slackBlockAction) ([]byte, error) {
 	scoped := scopedInteractionPayload{
+		ActionID:  unsignedRoute,
 		UserID:    slackObjectID(payload.User),
 		TeamID:    slackObjectID(payload.Team),
 		ChannelID: slackObjectID(payload.Channel),
 	}
 	if action != nil {
-		scoped.ActionID = action.ActionID
 		scoped.BlockID = action.BlockID
 		scoped.Value = action.Value
 		scoped.ActionTS = action.ActionTS
 	}
 	return json.Marshal(scoped)
+}
+
+// slackUserTeamID extracts a Slack Connect shared-channel click's
+// user.team_id -- the team the CLICKING user belongs to, which can differ
+// from payload.team.id (the team that owns the CHANNEL) when a message is
+// posted into a Slack Connect shared channel. resolveSlackTenant uses this
+// to refuse a click whose user and channel resolve to different tenants,
+// rather than trusting the channel's workspace alone.
+func slackUserTeamID(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var v struct {
+		TeamID string `json:"team_id"`
+	}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return ""
+	}
+	return v.TeamID
 }
 
 // signingSecret fetches the current Slack request-signing secret. Called at
@@ -215,9 +248,12 @@ func (p *Plugin) signingSecret(ctx context.Context) (string, error) {
 // scopedInteractionPayload's for what of the click actually reaches the
 // workflow.
 //
-// cleat#2230(a)/(b): this route cannot resolve a tenant yet (see the
-// tenant-refusal block below), so every click refuses with 404 until
-// cleat#2230(b) lands the slack_workspace lookup.
+// cleat#2230 ("signed routes"): the route itself must additionally carry a
+// valid signature, minted by sendMessage/stampBlocksWithRoutes for the
+// tenant that sent the message, and is verified here against the tenant
+// resolveSlackTenant resolves from the CLICKING workspace -- so a button
+// only works for the tenant it was minted for, never for whatever tenant
+// happens to map to the workspace it is clicked from. See signedroute.go.
 func (p *Plugin) handleInteractiveCallback(w http.ResponseWriter, r *http.Request) {
 	// The body is already bounded to interactiveMaxBodySize by the
 	// plugin.MaxBody wrap RegisterRoutes registered this handler under --
@@ -303,27 +339,23 @@ func (p *Plugin) handleInteractiveCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Extract workflow signal, trying the legacy top-level callback_id and
-	// then a block_actions payload's actions[0].action_id.
-	// Convention: wf:<workflowID>:sig:<signalName>
-	// action (extractCallbackRoute's 3rd return) is unused here: the
-	// scoped-payload build that consumed it moved out of this handler along
-	// with signal delivery, both dead until cleat#2230(b) resolves a real
-	// tenant. buildScopedPayload itself stays defined and directly
-	// unit-tested (TestBuildScopedPayload) so (b) does not have to
-	// reconstruct it.
-	wfID, sigName, _, ok := extractCallbackRoute(payload)
+	// Extract a SIGNED route, trying the legacy top-level callback_id and
+	// then a block_actions payload's actions[0].action_id. This only
+	// recognises the shape (wf:<id>:sig:<name>:<issued_at>:<mac>) -- the MAC
+	// itself is checked below, after the tenant is resolved, since
+	// verifying it needs the tenant as an input.
+	unsignedRoute, issuedAtHex, routeMACValue, action, ok := extractCallbackRoute(payload)
 	if !ok {
 		// Nothing to route. Return 200 OK per Slack requirements.
 		switch {
 		case payload.CallbackID != "":
 			p.logger.Warn("slack-notify: unrecognized callback_id format", "callback_id", payload.CallbackID)
 		case len(payload.Actions) > 0:
-			// A real block_actions click that just doesn't carry a
-			// wf:...:sig:... route in action_id -- an ordinary button a
-			// workflow author never meant to route, not a malformed
-			// request. Debug rather than Warn: this is the expected shape
-			// for any button that isn't wired to a signal.
+			// A real block_actions click that just doesn't carry a signed
+			// route in action_id -- an ordinary button a workflow author
+			// never meant to route, not a malformed request. Debug rather
+			// than Warn: this is the expected shape for any button that
+			// isn't wired to a signal.
 			p.logger.Debug("slack-notify: block_actions payload has no routable action_id")
 		}
 		w.WriteHeader(http.StatusOK)
@@ -331,11 +363,10 @@ func (p *Plugin) handleInteractiveCallback(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// cleat#2230(a): refuse EVERY click, unconditionally, until cleat#2230(b)
-	// lands. This handler MUST NOT read a tenant from the request or its
-	// context by any means -- not auth.TenantIDFromRequest, not any other
-	// source. cleat-review's second pass on this PR found why: this route is
-	// auth-exempt (cleat#2172), but a deployment running
+	// Resolve the tenant fresh, from slack_workspace, NEVER from ctx by any
+	// means -- not auth.TenantIDFromRequest, not any other source.
+	// cleat-review's second pass on an earlier version of this PR found why:
+	// this route is auth-exempt (cleat#2172), but a deployment running
 	// --tenant-resolver header:X-Tenant-ID resolves a tenant from an
 	// arbitrary request header on EVERY route, including exempt ones -- that
 	// resolver sits outside auth.Middleware's public-pattern short-circuit
@@ -343,20 +374,156 @@ func (p *Plugin) handleInteractiveCallback(w http.ResponseWriter, r *http.Reques
 	// with a tenant in ctx if that resolver is configured. Slack's HMAC
 	// signature (verified above) covers the payload, never headers, so
 	// whoever controls the header -- a gateway in front of the worker, not
-	// Slack -- would pick which tenant every click signals. Measured live:
-	// header mode + X-Tenant-ID: B -> 200, and the signal landed in B's
-	// workflow_signals, for a button that named no tenant at all. The
-	// earlier version of this fix read auth.TenantIDFromRequest and refused
-	// only when THAT returned no tenant, which is exactly the gap: it
-	// trusted whatever the resolver chain had already put in context instead
-	// of establishing its own. cleat#2230(b) adds the only source this
-	// handler will trust -- team_id resolved through slack_workspace, read
-	// fresh in this handler and never taken from ctx. Until then there is no
-	// safe tenant to signal under, so every click refuses. ids only in the
-	// log -- no payload contents, which may carry a user-controlled
-	// value/block_id.
-	p.interactiveNoTenantRefusals.Add(1)
-	p.logger.Warn("slack-notify: interactive callbacks are refused until cleat#2230(b) resolves a workspace mapping",
-		"workflow_id", wfID, "signal", sigName)
-	p.writeError(w, http.StatusNotFound, "workspace not mapped")
+	// Slack -- would pick which tenant every click signals. Measured live
+	// against the pre-cleat#2230(b) handler: header mode + X-Tenant-ID: B ->
+	// 200, and the signal landed in B's workflow_signals, for a button that
+	// named no tenant at all.
+	tenantID, ok := p.resolveSlackTenant(r.Context(), payload)
+	if !ok {
+		p.interactiveNoTenantRefusals.Add(1)
+		p.logger.Warn("slack-notify: interactive callback refused -- unmapped or ambiguous workspace",
+			"team_id", slackObjectID(payload.Team), "user_team_id", slackUserTeamID(payload.User))
+		p.writeError(w, http.StatusNotFound, "workspace not mapped")
+		return
+	}
+
+	// Verify the route's MAC under the RESOLVED tenant -- this is the whole
+	// point of signed routes (cleat#2230, "signed routes (A)"): a button
+	// only works for the tenant that posted it, not for whichever tenant
+	// the clicking workspace happens to map to today. blockID/value come
+	// from the ACTUAL click (action, nil on the legacy callback_id path),
+	// never re-derived from the route string -- they are part of what the
+	// MAC binds.
+	var blockID, value string
+	if action != nil {
+		blockID, value = action.BlockID, action.Value
+	}
+	routeKey, prevRouteKey, err := p.routeSigningKey(r.Context())
+	if err != nil {
+		p.logger.Error("slack-notify: route signing key unavailable, refusing /slack/interactive", "error", err)
+		p.writeError(w, http.StatusNotFound, "workspace not mapped")
+		return
+	}
+	usedPrevious, sigOK := verifyRouteSignature(routeKey, prevRouteKey, tenantID, unsignedRoute, issuedAtHex, blockID, value, routeMACValue,
+		p.config.routeMaxAge(), time.Now())
+	if !sigOK {
+		p.interactiveNoTenantRefusals.Add(1)
+		p.logger.Warn("slack-notify: interactive callback refused -- invalid or expired route signature",
+			"team_id", slackObjectID(payload.Team))
+		p.writeError(w, http.StatusNotFound, "workspace not mapped")
+		return
+	}
+	if usedPrevious {
+		// The operator's own signal that slacknotify.route_signing_key.previous
+		// is now safe to retire -- once this line stops appearing, no
+		// outstanding Slack message still needs the old key (design
+		// addendum, cleat#2230 §3).
+		p.logger.Warn("slack-notify: route validated under the previous signing key", "team_id", slackObjectID(payload.Team))
+	}
+
+	wfID, sigName, ok := parseCallbackRoute(unsignedRoute)
+	if !ok {
+		// Unreachable: extractCallbackRoute already validated unsignedRoute
+		// via this same parser. Kept as a defensive check rather than a
+		// panic -- see signRoute's doc comment for why this package avoids
+		// panicking on a caller invariant instead of a user input.
+		p.writeError(w, http.StatusNotFound, "workspace not mapped")
+		return
+	}
+
+	scopedPayload, err := buildScopedPayload(payload, unsignedRoute, action)
+	if err != nil {
+		p.logger.Error("slack-notify: building scoped signal payload", "error", err)
+		p.writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// ForTenant, not a bare ctx: DeliverSignal (via signalPluginWorkflow,
+	// cmd/cleat-worker/main.go) scopes its statement to whatever tenant ctx
+	// carries, and this is the ONLY point in this handler that ever sets
+	// one -- resolved above, fresh, from slack_workspace.
+	tid, err := uuid.Parse(tenantID)
+	if err != nil {
+		p.logger.Error("slack-notify: resolved tenant is not a UUID", "error", err)
+		p.writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	ctx := plugin.ForTenant(r.Context(), tid)
+	if err := p.signalWorkflow(ctx, wfID, sigName, string(scopedPayload)); err != nil {
+		// plugin.ErrWorkflowNotFound (cleat#2239) collapses "no such
+		// workflow", "purged", and "belongs to a different tenant" into one
+		// error deliberately -- telling those three apart would reopen the
+		// existence oracle DeliverSignal was changed to avoid (cleat#2218).
+		// But that one collapsed case IS now distinguishable from a genuine
+		// delivery failure, which it was not before #2239 (both returned
+		// nil), so the 1B spec's "map missing workflow to 404, not 500" is
+		// satisfiable at exactly the granularity the store allows: 404 for
+		// the collapsed not-found/wrong-tenant case, 500 for anything else.
+		if errors.Is(err, plugin.ErrWorkflowNotFound) {
+			p.interactiveNoTenantRefusals.Add(1)
+			p.logger.Warn("slack-notify: interactive callback refused -- workflow not visible under the resolved tenant",
+				"team_id", slackObjectID(payload.Team))
+			p.writeError(w, http.StatusNotFound, "workflow not found")
+			return
+		}
+		p.logger.Error("slack-notify: delivering signal", "workflow_id", wfID, "signal", sigName, "error", err)
+		p.writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+}
+
+// resolveSlackTenant resolves a Slack interactive payload's team.id (and,
+// for Slack Connect, user.team_id) to the ONE cleat tenant slack_workspace
+// maps it to. Refuses (ok=false) if team.id is missing or null (Enterprise
+// Grid org-wide installs are unsupported and the docs say so), if it maps
+// to no tenant, or if user.team_id is present, different from team.id, and
+// maps to a DIFFERENT tenant -- a Slack Connect click must not be trusted
+// just because the CHANNEL's own workspace happens to be mapped.
+func (p *Plugin) resolveSlackTenant(ctx context.Context, payload slackInteractivePayload) (tenantID string, ok bool) {
+	teamID := slackObjectID(payload.Team)
+	if teamID == "" {
+		return "", false
+	}
+	if err := p.db.QueryRow(ctx, plugin.Rebind(
+		`SELECT CAST(tenant_id AS CHAR(36)) FROM slack_workspace WHERE team_id = $1`, p.dialect,
+	), teamID).Scan(&tenantID); err != nil {
+		return "", false
+	}
+	// Canonicalize before this value is used for anything -- MSSQL's
+	// CAST(... AS CHAR(36)) renders the UUID UPPERCASE where postgres and
+	// mysql return whatever case was written, and this string is exactly
+	// what gets fed into routeMAC on the verify side. Measured on real
+	// MSSQL (cleat-review + coordinator, cleat#2230): a button stamped
+	// under host_functions.go's lowercase-canonicalized tenantID 404'd on
+	// every click here before this line existed, because the two sides
+	// disagreed on case. uuid.Parse accepts either case; .String() always
+	// emits canonical lowercase, so this converges with sendMessage's
+	// canonicalization regardless of which dialect answered.
+	if parsed, parseErr := uuid.Parse(tenantID); parseErr == nil {
+		tenantID = parsed.String()
+	}
+	if userTeamID := slackUserTeamID(payload.User); userTeamID != "" && userTeamID != teamID {
+		var userTenantID string
+		if err := p.db.QueryRow(ctx, plugin.Rebind(
+			`SELECT CAST(tenant_id AS CHAR(36)) FROM slack_workspace WHERE team_id = $1`, p.dialect,
+		), userTeamID).Scan(&userTenantID); err != nil {
+			return "", false
+		}
+		if parsed, parseErr := uuid.Parse(userTenantID); parseErr == nil {
+			userTenantID = parsed.String()
+		}
+		// EqualFold stays as defense-in-depth even though both sides are
+		// now canonicalized to the same case: a value that fails to
+		// uuid.Parse (never observed, but not provably impossible against
+		// a hand-edited row) falls through unchanged, and this still
+		// tolerates a case mismatch in that fallback case rather than
+		// refusing a legitimate Slack Connect click over it.
+		if !strings.EqualFold(userTenantID, tenantID) {
+			return "", false
+		}
+	}
+	return tenantID, true
 }

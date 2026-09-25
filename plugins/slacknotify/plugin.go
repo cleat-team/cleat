@@ -43,12 +43,12 @@ type Plugin struct {
 	deploymentSecrets plugin.DeploymentSecrets
 
 	// interactiveNoTenantRefusals counts /slack/interactive requests that
-	// parsed a valid route but were refused for carrying no resolvable
-	// tenant -- see handleInteractiveCallback (interactive.go), cleat#2230(a).
-	// Until cleat#2230(b) adds the slack_workspace lookup this route has no
-	// way to resolve one at all (the route is auth-exempt, cleat#2172), so
-	// today this counts every click that would otherwise have been
-	// delivered. Observability for that gap, not a limit enforced anywhere.
+	// parsed a valid signed route but were refused, either because
+	// resolveSlackTenant found no slack_workspace mapping for the clicking
+	// team (or a Slack Connect user/channel team mismatch) or because the
+	// route's signature failed to verify against the resolved tenant -- see
+	// handleInteractiveCallback (interactive.go), cleat#2230 ("signed
+	// routes"). Observability, not a limit enforced anywhere.
 	interactiveNoTenantRefusals atomic.Int64
 }
 
@@ -60,7 +60,13 @@ type Plugin struct {
 // worker restart. See handleInteractiveCallback (interactive.go) for the
 // per-request lookup that replaced the cached slackSigningSecret field this
 // struct used to carry.
-type Config struct{}
+type Config struct {
+	// RouteMaxAgeDays bounds how old a signed route's issued-at timestamp
+	// may be before a click is refused (owner decision "2A" on cleat#2230).
+	// <= 0 (including unset, the zero value) means the default, 30 days --
+	// see signedroute.go's defaultRouteMaxAge and Config.routeMaxAge.
+	RouteMaxAgeDays int `json:"route_max_age_days,omitempty"`
+}
 
 // legacySlackConfig catches slack_signing_secret left over in
 // --plugin-config from before cleat#2172. json.Unmarshal ignores fields a

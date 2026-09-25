@@ -8,7 +8,22 @@ import (
 	"os"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugins/slacknotify"
 )
+
+// deploymentSecretMinLen names deployment secrets that carry their own
+// minimum length, beyond the bare non-empty check every secret gets.
+// slacknotify.route_signing_key and its rotation partner are the first:
+// a short or empty MAC key makes cleat#2230's signed-route binding
+// guessable, and this is the write-time half of the check
+// plugins/slacknotify/signedroute.go's routeSigningKey enforces at
+// read/use time -- coordinator's instruction that it be "enforced at use
+// and in cleatctl". Both floors come from slacknotify.RouteSigningKeyMinLen
+// so the two cannot silently drift apart.
+var deploymentSecretMinLen = map[string]int{
+	"slacknotify.route_signing_key":          slacknotify.RouteSigningKeyMinLen,
+	"slacknotify.route_signing_key.previous": slacknotify.RouteSigningKeyMinLen,
+}
 
 // runSetDeploymentSecret writes one deployment-wide credential, encrypted.
 // Mirrors set-secret exactly, minus the tenant argument (cleat#1992 part 1):
@@ -62,6 +77,11 @@ func runSetDeploymentSecret(ctx context.Context, db *sql.DB, d dialect, args []s
 		osExit(1)
 		return
 	}
+	if minLen, named := deploymentSecretMinLen[*name]; named && len(value) < minLen {
+		fmt.Fprintf(os.Stderr, "error: %s must be at least %d bytes (got %d); refusing to store it\n", *name, minLen, len(value))
+		osExit(1)
+		return
+	}
 
 	store := engine.NewDeploymentSecretStore(db, d.name, ring)
 	if err := store.PutDeploymentSecret(ctx, *name, value); err != nil {
@@ -87,7 +107,8 @@ CLEAT_SECRET_MASTER_KEY_VERSION if the current key is not version 1.
 Fixed, documented names (docs/how-to/use-deployment-secrets.md), not chosen
 here: blobstore.access_key_id, blobstore.secret_access_key,
 email.sendgrid_api_key, llm.providers.<provider>.api_key,
-slacknotify.signing_secret, scheduledbackup.dsn.
+slacknotify.signing_secret, slacknotify.route_signing_key (and its rotation
+partner, .previous -- at least 32 bytes, refused below that), scheduledbackup.dsn.
 
   head -c 32 /dev/urandom | base64          # generate a master key, once
   printf %%s "$SENDGRID_KEY" | cleatctl --db "$DSN" set-deployment-secret --name email.sendgrid_api_key
