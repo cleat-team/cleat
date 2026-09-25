@@ -1164,6 +1164,43 @@ func (ht *healthTracker) staleLoops() []string {
 	return stale
 }
 
+// staleLoop is one stale loop with what health needs to decide whether the database explains it.
+type staleLoop struct {
+	Name string
+	// Since is when the loop last ticked, or when it was registered if it never has.
+	Since time.Time
+	// Interval is how often the loop is expected to tick (20s, a sixth of the 120s default maxAge, when none
+	// was set): a database answer that started within one interval of Since cannot be told apart from the
+	// database answering just before the loop got stuck.
+	Interval time.Duration
+}
+
+// staleLoopDetails is staleLoops with the timestamps, for the /livez decision (cleat#2007).
+func (ht *healthTracker) staleLoopDetails() []staleLoop {
+	ht.mu.Lock()
+	defer ht.mu.Unlock()
+	var out []staleLoop
+	now := ht.now()
+	consider := func(name string, since time.Time) {
+		interval := 20 * time.Second
+		if i, ok := ht.intervals[name]; ok && i > 0 {
+			interval = i
+		}
+		if now.Sub(since) > interval*6 {
+			out = append(out, staleLoop{Name: name, Since: since, Interval: interval})
+		}
+	}
+	for name, lastRun := range ht.lastRun {
+		consider(name, lastRun)
+	}
+	for name, regAt := range ht.registeredAt {
+		if _, ok := ht.lastRun[name]; !ok {
+			consider(name, regAt)
+		}
+	}
+	return out
+}
+
 // snapshot returns a copy of the health tracker state for metrics reporting.
 func (ht *healthTracker) snapshot() (map[string]time.Time, map[string]bool, map[string]int) {
 	ht.mu.Lock()
@@ -3525,7 +3562,9 @@ func (w *Worker) recordDBContactOK() {
 func (w *Worker) probeBoundedCall(fn func(ctx context.Context) error) error {
 	deadline := w.dbCallDeadline()
 	ctx, cancel := context.WithTimeout(w.ctx, deadline)
-	start := time.Now()
+	start := w.dbReach.now()
+	w.dbReach.beginCall()
+	defer w.dbReach.endCall()
 
 	// THE DEADLINE IS ENFORCED HERE, NOT ONLY OFFERED TO fn. lib/pq and go-mssqldb ignore a cancelled
 	// context while the database is paused, so fn may not return for as long as the stall lasts, and a
@@ -3534,13 +3573,14 @@ func (w *Worker) probeBoundedCall(fn func(ctx context.Context) error) error {
 	// flipped only at unpause. The timer records the failure at the deadline; the call is left running
 	// (it cannot be stopped) and its eventual return is not reported a second time.
 	late := time.AfterFunc(deadline, func() {
-		w.observeDBProbe(deadline, fmt.Errorf("call has not returned within its %v deadline: %w", deadline, context.DeadlineExceeded))
+		w.observeDBProbe(start, deadline, fmt.Errorf("call has not returned within its %v deadline: %w", deadline, context.DeadlineExceeded))
 	})
 	err := fn(ctx)
 	cancel()
-	elapsed := time.Since(start)
+	elapsed := w.dbReach.now().Sub(start)
 	if !late.Stop() {
 		// The timer fired, so the deadline was already reported for this call.
+		w.dbReach.touch()
 		if err == nil {
 			err = fmt.Errorf("call returned success after %v, past its %v deadline -- not trusted: %w", elapsed, deadline, context.DeadlineExceeded)
 		}
@@ -3549,7 +3589,7 @@ func (w *Worker) probeBoundedCall(fn func(ctx context.Context) error) error {
 	if err == nil && elapsed > deadline {
 		err = fmt.Errorf("call returned success after %v, past its %v deadline -- not trusted: %w", elapsed, deadline, context.DeadlineExceeded)
 	}
-	w.observeDBProbe(elapsed, err)
+	w.observeDBProbe(start, elapsed, err)
 	return err
 }
 

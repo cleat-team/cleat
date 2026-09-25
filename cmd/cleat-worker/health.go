@@ -41,8 +41,8 @@ type healthReport struct {
 
 	// Detail, for the authenticated admin route only.
 	staleLoops []string
-	// blockedOnDatabase: the stale loops are a consequence of an unreachable database, not a fault of
-	// their own, so they do not fail /livez.
+	// blockedOnDatabase: every stale loop is explained by the database (databaseExplainsStaleLoop), so
+	// none of them fails /livez.
 	blockedOnDatabase bool
 	plugins           map[string]string
 	memoryPressure    float64
@@ -52,17 +52,24 @@ type healthReport struct {
 
 func (w *Worker) healthReport() healthReport {
 	var r healthReport
-	r.staleLoops = w.healthTracker.staleLoops()
+	stale := w.healthTracker.staleLoopDetails()
 	r.db = w.dbReach.snapshot()
 	// A loop that is stuck INSIDE a database call is stuck because the database is not answering, and
 	// restarting the worker cannot fix that, which is the one thing /livez must never ask for. Measured
 	// against a real `docker pause` (cleat#2007): the dispatch loop's call hung in the driver, the loop
 	// went stale after six of its intervals, and /livez answered 503, so a kubelet would have restarted
-	// every worker for a database outage. So while the database is known to be unreachable, stale loops
-	// are reported on the admin route only (blockedOnDatabase), and /readyz already says
-	// database_unreachable. A loop that is stuck while the database answers still fails /livez.
-	r.blockedOnDatabase = len(r.staleLoops) > 0 && r.db.Known && !r.db.Reachable
-	if len(r.staleLoops) > 0 && !r.blockedOnDatabase {
+	// every worker for a database outage. So a stale loop the database explains is reported on the admin
+	// route only (blockedOnDatabase), and /readyz says database_unreachable. A loop that is stuck while
+	// the database answers still fails /livez. See databaseExplainsStaleLoop for what "explains" means.
+	wedged := 0
+	for _, l := range stale {
+		r.staleLoops = append(r.staleLoops, l.Name)
+		if !w.databaseExplainsStaleLoop(r.db, l) {
+			wedged++
+		}
+	}
+	r.blockedOnDatabase = len(stale) > 0 && wedged == 0
+	if wedged > 0 {
 		r.notLive = append(r.notLive, reasonLoopStuck)
 		r.notReady = append(r.notReady, reasonLoopStuck)
 	}
@@ -86,6 +93,45 @@ func (w *Worker) healthReport() healthReport {
 		r.degraded = append(r.degraded, reasonPluginUnhealthy)
 	}
 	return r
+}
+
+// dbRecoveryGrace is how long after the database answers again a stale loop is still put down to the
+// outage. The loops that were stuck inside a call resume when the driver returns, and until each has
+// ticked once it still reads stale: measured against a real `docker pause`, /livez answered 503 for up to
+// five seconds after the database came back, which a kubelet counts as a failed probe.
+var dbRecoveryGrace = 30 * time.Second
+
+// databaseExplainsStaleLoop reports whether a stale loop is to be read as "blocked on the database" and
+// not as "wedged". The claim is a causal one, so it is made per loop, from three facts:
+//
+//  1. The database has NOT answered since the loop went quiet: no successful bounded call began later than
+//     one interval after the loop's last tick. If it did, the database was fine while the loop stayed
+//     silent, and the loop is wedged on something else. (This replaced "the database is currently known
+//     to be unreachable": a paused database is not KNOWN unreachable until the first bounded call misses
+//     its deadline, up to a heartbeat interval plus that deadline after the pause, and /livez answered 503
+//     in that window.)
+//  2. The evidence is still being collected: a bounded call is in flight (a paused database holds the
+//     call, which is the only observation there is) or the last observation is recent (twice the
+//     heartbeat interval plus the call deadline). Otherwise nothing is watching the database, "it has not
+//     answered" is only the absence of asking, and the loop is wedged. Without this an unwatched verdict
+//     never expires.
+//  3. Or the database answered again within dbRecoveryGrace: the loops it was holding resume only when the
+//     driver returns.
+//
+// Before anything has been observed there is nothing to explain a loop with.
+func (w *Worker) databaseExplainsStaleLoop(db dbSnapshot, l staleLoop) bool {
+	if !db.Known {
+		return false
+	}
+	now := w.dbReach.now()
+	if !db.RecoveredAt.IsZero() && db.Reachable && now.Sub(db.RecoveredAt) < dbRecoveryGrace {
+		return true
+	}
+	if db.LastSuccessStart.After(l.Since.Add(l.Interval)) {
+		return false
+	}
+	freshness := 2 * (w.heartbeatInterval + w.dbCallDeadline())
+	return db.InFlight > 0 || now.Sub(db.LastObserved) <= freshness
 }
 
 // publicBody is the unauthenticated body: ok, degraded and reason codes, nothing else. `reason` is the

@@ -29,7 +29,7 @@ tests:
           - exp_labels: {dialect: postgres, severity: critical, incident: database}
             exp_annotations:
               summary: "Every cleat worker reports its database unreachable (postgres)"
-              description: "All workers' latest deadline-bounded database call failed or ran past its deadline for at least a minute. This is a database or network incident, not a worker incident: restarting workers will not help (cleat's /livez stays 200 and /readyz returns 503, so no traffic is routed to them). Worker-down and reclaimed-run alerts are suppressed while this fires."
+              description: "All workers' latest deadline-bounded database call failed or ran past its deadline for at least a minute. This is a database or network incident, not a worker incident: restarting workers will not help (cleat's /livez stays 200 and /readyz returns 503, so no traffic is routed to them). CleatRunsReclaimedByTheReaper is suppressed while this fires and for ten minutes after. CleatWorkerDown is not: a database outage leaves /metrics up, so it should not fire."
       - eval_time: 6m
         alertname: CleatWorkerCannotReachDatabase
         exp_alerts: []   # all of them are down, so this is not one worker's problem
@@ -54,7 +54,7 @@ tests:
           - exp_labels: {instance: w2, dialect: postgres, severity: warning, incident: worker}
             exp_annotations:
               summary: "w2 cannot reach the database while its peers can"
-              description: "This worker's database calls are failing or running past their deadline, and at least one other worker's are not: a network path, a connection limit, or credentials for this worker. Check GET /api/admin/health on the worker for the error text (it is not on /readyz)."
+              description: "This worker's database calls are failing or running past their deadline, and at least one other worker's are not: a network path, a connection limit, or credentials for this worker. Read the worker's log for the line \"database unreachable (...)\": it names the class of failure and is written whether or not anything can authenticate. (GET /api/admin/health has the error text, but it authenticates against the same database, so it can hang or answer 401 while the database is down.)"
 
   # ---- the reaper's echo of an outage is not a worker fault ----
   - name: reclaims during and just after a database outage are suppressed, later ones are not

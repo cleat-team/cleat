@@ -25,10 +25,10 @@ func TestInfrastructurePathsAreNotAudited(t *testing.T) {
 
 	// The known-positive: paths that look like them but are not on the list, and the authenticated
 	// health route, ARE recorded, so the zero above is not a handler that records nothing.
-	for _, path := range []string{"/api/admin/health", "/api/workflows", "/healthz/", "/readyz/verbose", "/livezx"} {
+	for _, path := range []string{"/api/admin/health", "/api/workflows", "/healthz/", "/readyz/verbose", "/livezx", "/metrics/x"} {
 		serve(http.MethodGet, path)
 	}
-	if got := p.q.sent.Load(); got != 5 || len(p.buffer) != 5 {
-		t.Errorf("the other paths produced %d audit events (%d queued), want 5", got, len(p.buffer))
+	if got := p.q.sent.Load(); got != 6 || len(p.buffer) != 6 {
+		t.Errorf("the other paths produced %d audit events (%d queued), want 6", got, len(p.buffer))
 	}
 }

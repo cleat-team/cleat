@@ -658,7 +658,7 @@ func TestMiddleware_InfrastructurePathsNeedNoKeyAndTheAdminHealthRouteDoes(t *te
 			t.Errorf("%s without a key: reached=%v code=%d, want the handler and 200", path, reached, rec.Code)
 		}
 	}
-	for _, path := range []string{"/api/admin/health", "/healthz/", "/readyz/verbose"} {
+	for _, path := range []string{"/api/admin/health", "/healthz/", "/readyz/verbose", "/metrics/x"} {
 		reached = false
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))

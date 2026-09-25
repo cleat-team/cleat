@@ -401,8 +401,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   probe; only the database, draining, starting and a stuck loop are 503. `backendkit`'s `Health()` now calls
   `/readyz`.
 
+  `/livez` does not fail because a background loop is stuck in a call the database is holding: a stale loop
+  is put down to the database only while the database has not answered since it went quiet and that is
+  still being observed, with a 30-second grace after recovery. Measured against a real `docker pause`.
+
   **The audit log no longer records the infrastructure probes** (`/healthz`, `/livez`, `/readyz`, `/metrics`): a
   fixed list, not configurable, and the same one that is exempt from authentication.
+
+- **`/metrics` is valid Prometheus text again: histograms had doubled label braces and non-cumulative
+  buckets, so Prometheus dropped every scrape.** (cleat#2266)
+
+  Every histogram line was written `name_bucket{{a="b"},le="1"}`, and the buckets were per-bucket counts
+  with `le="+Inf"` not equal to `_count`. Prometheus rejects a scrape as a whole, so with the bundled
+  stack `up` read 0 (`CleatWorkerDown` fired on healthy workers) and no cleat metric was stored, including
+  `cleat_db_reachable`. The braces are emitted once, buckets are cumulative and `+Inf` is `_count`, so
+  `histogram_quantile` over `cleat_claim_latency_seconds`, `cleat_poll_wait_seconds` and the rest now gives
+  real answers. CI runs `promtool check metrics` against what the three booted cluster workers actually serve.
 
 - **`cleatctl quota get|set|list`, the operator surface for `tenant-quota`.** (cleat#2046)
 

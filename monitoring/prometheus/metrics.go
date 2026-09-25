@@ -1838,6 +1838,15 @@ func writeMetric(w io.Writer, m metricdata.Metrics) error {
 
 // writeHistogramDataPoint writes a single histogram data point in Prometheus
 // exposition format, including _bucket, _count, and _sum lines.
+//
+// Two things about the exposition format that this used to get wrong (cleat#2266), and that made
+// Prometheus reject the whole scrape rather than one series:
+//
+//   - formatLabels already returns its labels wrapped in braces, so a bucket line is built by adding
+//     `le` INSIDE them. Wrapping the result in a second pair produced `{{a="b"},le="1"}`.
+//   - `_bucket` counts are CUMULATIVE: le="x" is the number of observations <= x, and le="+Inf" equals
+//     `_count`. OTel's BucketCounts are per-bucket (len(bounds)+1 of them, the last being everything
+//     above the top bound), so they are summed here.
 func writeHistogramDataPoint(
 	w io.Writer,
 	name string,
@@ -1849,31 +1858,38 @@ func writeHistogramDataPoint(
 ) error {
 	labels := formatLabels(attrs)
 
-	// Write _bucket lines.
+	var cumulative uint64
 	for i, bound := range bounds {
-		le := fmt.Sprintf("%g", bound)
-		if _, err := fmt.Fprintf(w, "%s_bucket{%s,le=%q} %d\n", name, labels, le, bucketCounts[i]); err != nil {
+		if i < len(bucketCounts) {
+			cumulative += bucketCounts[i]
+		}
+		if _, err := fmt.Fprintf(w, "%s_bucket%s %d\n", name, labelsWithLE(labels, fmt.Sprintf("%g", bound)), cumulative); err != nil {
 			return err
 		}
 	}
-	// +Inf bucket
-	tailCount := count
-	if len(bucketCounts) > 0 {
-		tailCount = bucketCounts[len(bucketCounts)-1]
-	}
-	if _, err := fmt.Fprintf(w, "%s_bucket{%s,le=%q} %d\n", name, labels, "+Inf", tailCount); err != nil {
+	// +Inf is every observation, so it is _count by definition, not the last bucket's own tally.
+	if _, err := fmt.Fprintf(w, "%s_bucket%s %d\n", name, labelsWithLE(labels, "+Inf"), count); err != nil {
 		return err
 	}
 
 	// _count and _sum.
-	if _, err := fmt.Fprintf(w, "%s_count{%s} %d\n", name, labels, count); err != nil {
+	if _, err := fmt.Fprintf(w, "%s_count%s %d\n", name, labels, count); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "%s_sum{%s} %g\n", name, labels, sum); err != nil {
+	if _, err := fmt.Fprintf(w, "%s_sum%s %g\n", name, labels, sum); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// labelsWithLE adds the `le` label to a label string produced by formatLabels, which is either empty
+// or `{k="v",...}`.
+func labelsWithLE(labels, le string) string {
+	if labels == "" {
+		return fmt.Sprintf("{le=%q}", le)
+	}
+	return fmt.Sprintf("%s,le=%q}", strings.TrimSuffix(labels, "}"), le)
 }
 
 // formatLabels renders an attribute.Set as a Prometheus label string.

@@ -43,6 +43,35 @@ half is what catches a database that hangs connections instead of refusing them,
 failover, or a saturated proxy looks like: no connection error is ever returned. The worker also makes one
 such call at startup, so `/readyz` has an answer within seconds of boot (until then it says `starting`).
 
+Whether a stale background loop is put down to the database (and so does not fail `/livez`) is decided
+per loop, from what the worker has actually observed. Each rule was added after a real `docker pause` or a
+review measurement showed the simpler version wrong:
+
+- **The database has not answered since the loop went quiet.** If a bounded call that began more than one
+  loop interval after the loop's last tick succeeded, the database was fine while the loop stayed silent, and
+  the loop is wedged on something else: `/livez` is 503. (The first version asked "is the database known to
+  be unreachable?", which is not known until a bounded call misses its deadline, up to a heartbeat interval
+  plus that deadline after the pause. `/livez` answered 503 in that window.)
+- **Newer evidence wins.** A failure from a call that started *before* the latest successful call began is
+  dropped. Otherwise a call that hung, followed by one that succeeded, would let the first call's deadline
+  mark a database that just answered as unreachable.
+- **Evidence expires.** The excuse holds only while a database call is in flight (a paused database holds
+  the call, which is the only observation there is) or the last observation is recent (twice the heartbeat
+  interval plus the call deadline). If nothing has looked at the database for longer than that,
+  "it has not answered" is only the absence of asking, and `/livez` stops excusing stale loops. When a hung
+  call finally returns, that counts as an observation, or the verdict would look abandoned half a second
+  before the next probe.
+- **A grace after recovery.** For 30 seconds after the database answers again, stale loops are still put
+  down to the outage: the loops that were stuck in a call resume only when the driver returns.
+
+Measured against a real 50-second `docker pause`, sampling every second: `/livez` 200 throughout the pause
+and for 25 seconds after unpausing, `/readyz` 503 with `database_unreachable` during and 200 one second after.
+
+One limit remains, and it is inherent: a loop that went quiet *during* an outage cannot be told from one the
+outage is holding, so an unrelated wedge that begins mid-outage is reported live until the outage ends and
+the grace runs out. `/readyz` is already 503 for the outage, and `stale_loops` on the admin route lists the
+loop either way.
+
 Two log lines mark the transitions, once each, not once per probe:
 
 ```
@@ -69,7 +98,10 @@ so it is never ready. There is no runtime re-check of the schema.
 - **Every worker reports `cleat_db_reachable 0`** (`CleatDatabaseUnreachable`): a **database incident**.
   Restarting workers will not help; check the database, the network to it, credentials, connection limits.
 - **One worker reports 0 while a peer reports 1** (`CleatWorkerCannotReachDatabase`): **that worker's**
-  connectivity. `GET /api/admin/health` on it has the error text.
+  connectivity. Read that worker's log for the line `database unreachable (deadline exceeded)`,
+  `(connection error)` or `(error or ran past its deadline)`. `GET /api/admin/health` has the error text
+  too, but it authenticates against the same database, so during an outage it can hang or answer 401;
+  do not rely on it for this.
 - **`up == 0`** (`CleatWorkerDown`): the process or the network to it, not the database (a database outage
   leaves `/metrics` up).
 - **Runs reclaimed by the reaper** (`CleatRunsReclaimedByTheReaper`) read as workers failing. The rule is
