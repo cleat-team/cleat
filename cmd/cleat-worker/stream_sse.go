@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -372,7 +373,15 @@ func (s *apiServer) handleStreamWorkflow(w http.ResponseWriter, r *http.Request,
 	// ---- the durable part ----
 	history, err := st.LoadEventHistory(r.Context(), id)
 	if err != nil {
-		out.event("error", "", map[string]any{"message": err.Error()})
+		msg := err.Error()
+		if errors.Is(err, engine.ErrPayloadDecryption) {
+			// This is the strict load, so an unreadable history is an error
+			// rather than a transcript of "[DECRYPTION_FAILED]" chunks that
+			// reads as an answer. The client gets a sentence it can act on,
+			// not the driver's text (cleat#2311).
+			msg = "this worker cannot read this workflow's history: it does not hold the payload encryption key that sealed it"
+		}
+		out.event("error", "", map[string]any{"message": msg})
 		return
 	}
 

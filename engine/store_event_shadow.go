@@ -124,7 +124,7 @@ func (s *PostgresStore) verifyShadowColumns(ctx context.Context, tx *sql.Tx, wor
 		// column. Anything the payload omits stays equal by construction --
 		// which is why this needs no per-event-type knowledge here.
 		fromPayload := col
-		populateFromPayload(&fromPayload, []byte(s.decryptPayloadJSON(payload.String)))
+		populateFromPayload(&fromPayload, []byte(s.decryptPayloadForDisplay(payload.String)))
 
 		for _, f := range shadowFields {
 			stored, authoritative := f.get(&col), f.get(&fromPayload)

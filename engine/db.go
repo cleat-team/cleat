@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/lib/pq"
 
@@ -48,7 +49,12 @@ type PostgresStore struct {
 	// anything is encrypted. encodeEventForStorage holds that ordering in one
 	// place. See cleat#1306.
 	encryptSensitivePayloads bool
-	metrics                  *prometheus.Metrics
+
+	// quietDecryptLogs suppresses the per-field "decrypt failed" WARN for a
+	// read whose caller returns the failure as an error and reports it itself
+	// (readEventHistoryTx). The counter is unaffected. cleat#2311.
+	quietDecryptLogs bool
+	metrics          *prometheus.Metrics
 
 	// disableReadRedaction when true bypasses RedactOnRead on the read path.
 	// Set to true during replay to avoid the overhead of retroactive redaction.
@@ -138,10 +144,30 @@ func (s *PostgresStore) WithNotifyChannel(channel string) *PostgresStore {
 	return &cp
 }
 
+// ErrPayloadDecryption reports that a stored payload could not be decrypted
+// with the key ring this process holds: a wrong key, a key that was rotated out
+// of the ring, or ciphertext that has been damaged. cleat#2311.
+//
+// It is a fact about the READER, not about the run. A worker that holds the key
+// can read the same row, so a caller that is about to act on the history
+// (replay) must not fail or complete the run on it -- it should hand the run
+// back. Display paths (streaming, the shadow-column check) may still choose to
+// show the "[DECRYPTION_FAILED]" placeholder and carry on; they ignore this
+// error deliberately, and say so where they do.
+var ErrPayloadDecryption = errors.New("payload decryption failed")
+
 // decryptAndRedactEventRecord decrypts sensitive event record fields (when
-// encryption is enabled) and applies retroactive redaction. Decryption errors
-// are logged and the field is set to "[DECRYPTION_FAILED]" so it is clear the
-// data is unreadable rather than silently keeping ciphertext.
+// encryption is enabled) and applies retroactive redaction.
+//
+// A field that cannot be decrypted is logged and set to "[DECRYPTION_FAILED]"
+// so it is clear the data is unreadable rather than silently keeping
+// ciphertext, AND the first such failure is returned wrapped in
+// ErrPayloadDecryption. The placeholder alone is not a report: before #2311 it
+// was the only one, and replay treated it as data -- the run ended FAILED on
+// the checksum chain, or, with checksums off, DONE with the placeholder in its
+// result. Every field is still processed after a failure so the record is
+// fully populated for a caller that ignores the error.
+//
 // decryptField decrypts an encrypted field value, logging on failure.
 // When useBytesDecrypt is true, the value is treated as raw ciphertext
 // (Decrypt); otherwise it is treated as a base64-encoded ciphertext
@@ -150,7 +176,7 @@ func (s *PostgresStore) WithNotifyChannel(channel string) *PostgresStore {
 // derived here because this is called ten times per row, and a derivation costs
 // about what a GCM open costs -- see tenantCipher in encryption.go for the
 // measurement. Deriving per field would double the crypto on every read.
-func (s *PostgresStore) decryptField(tc *tenantCipher, encrypted, fieldName, workflowID string, step int, useBytesDecrypt bool) string {
+func (s *PostgresStore) decryptField(tc *tenantCipher, encrypted, fieldName, workflowID string, step int, useBytesDecrypt bool) (string, error) {
 	// An empty stored value was never produced by the encryptor, so there is
 	// nothing here to decrypt and nothing to report. EncryptString always
 	// returns at least a nonce and a GCM tag, so it cannot return "" --
@@ -163,7 +189,21 @@ func (s *PostgresStore) decryptField(tc *tenantCipher, encrypted, fieldName, wor
 	// empty, so every ordinary event in every history came back carrying
 	// seven false reports of data loss. See cleat#1377.
 	if encrypted == "" {
-		return ""
+		return "", nil
+	}
+
+	// A value that is not shaped like a sealed one was never sealed, so there
+	// is nothing to fail: it is data that was written before encryption was
+	// switched on (an operator turning --encrypt-sensitive-payloads on for an
+	// existing deployment, which is an ordinary upgrade), or by a writer that
+	// did not encrypt it (child_input under cleat#2328, sharded workers before
+	// cleat#2308). Returning it as it is keeps the read agreeing with what
+	// develop did for them, and it keeps the strict replay load from releasing
+	// such a run forever. Only a value that IS sealed-shaped and fails to open
+	// is a decryption failure. See sealedShape for what "shaped" means and
+	// where it can be wrong.
+	if !sealedShape(encrypted, useBytesDecrypt) {
+		return encrypted, nil
 	}
 
 	var decrypted string
@@ -182,39 +222,85 @@ func (s *PostgresStore) decryptField(tc *tenantCipher, encrypted, fieldName, wor
 		}
 	}
 	if err != nil {
-		s.log().WarnContext(context.Background(), "decrypt failed", "field", fieldName, "workflow_id", workflowID, "step", step, "error", err)
+		if !s.quietDecryptLogs {
+			s.log().WarnContext(context.Background(), "decrypt failed", "field", fieldName, "workflow_id", workflowID, "step", step, "error", err)
+		}
 		if s.Metrics != nil {
 			s.Metrics.RecordDecryptionError(context.Background())
 		}
-		return "[DECRYPTION_FAILED]"
+		return "[DECRYPTION_FAILED]", fmt.Errorf("%w: %s at step %d of workflow %s: %v", ErrPayloadDecryption, fieldName, step, workflowID, err)
 	}
-	return decrypted
+	return decrypted, nil
 }
 
-func (s *PostgresStore) decryptAndRedactEventRecord(rec *EventRecord, workflowID string) {
+// minSealedLen is the shortest value the encryptor can produce: a 12-byte AES-GCM
+// nonce and a 16-byte tag around an empty plaintext. EncryptString of "" is
+// still this long (TestAnEmptyFieldIsNotADecryptionFailure asserts it), so
+// anything shorter was never sealed.
+const minSealedLen = 12 + 16
+
+// sealedShape reports whether a stored field value could be the output of the
+// encryptor, as opposed to plaintext that predates it.
+//
+//   - The eight string fields are stored as base64 of the sealed bytes, so a
+//     value is sealed-shaped when it is valid base64 that decodes to at least
+//     minSealedLen bytes. JSON, and anything with a space, a brace or a quote,
+//     is not valid base64.
+//   - Request and Response reach decryptField as the RAW bytes (the read path
+//     has already base64-decoded them), so a sealed one is at least
+//     minSealedLen bytes of what is, in effect, random data, and a plaintext
+//     one is text. A value is sealed-shaped when it is that long and is not
+//     valid UTF-8; random bytes of that length are valid UTF-8 with
+//     probability about 2^-28, JSON never is invalid.
+//
+// It can be wrong in one direction only: a plaintext string field whose text
+// is itself valid base64 of 28 or more bytes (an opaque token in a signal
+// payload, say) is treated as sealed and reported as a decryption failure. That
+// fails closed, on a value nobody wrote as JSON, and is the price of not
+// having an envelope: engine/encryption.go documents why there is no version
+// prefix.
+func sealedShape(v string, raw bool) bool {
+	if raw {
+		return len(v) >= minSealedLen && !utf8.ValidString(v)
+	}
+	b, err := base64.StdEncoding.DecodeString(v)
+	return err == nil && len(b) >= minSealedLen
+}
+
+func (s *PostgresStore) decryptAndRedactEventRecord(rec *EventRecord, workflowID string) error {
+	var firstErr error
 	if s.encryption != nil && s.encryptSensitivePayloads {
 		// ONE DERIVATION FOR THE WHOLE ROW; see decryptField's doc.
 		tc, err := s.encryption.forTenant(tenantForAAD(s.tenantID))
 		if err != nil {
 			s.log().WarnContext(context.Background(), "derive tenant key failed",
 				"workflow_id", workflowID, "step", rec.Step, "error", err)
-			return
+			return fmt.Errorf("%w: deriving the tenant key for step %d of workflow %s: %v", ErrPayloadDecryption, rec.Step, workflowID, err)
+		}
+		// keep records the first failure and lets the rest of the row be
+		// processed, so a caller that ignores the error still gets a record
+		// with every unreadable field marked.
+		keep := func(v string, err error) string {
+			if err != nil && firstErr == nil {
+				firstErr = err
+			}
+			return v
 		}
 		// Request and Response are base64-decoded by tryDecodeBase64,
 		// so they hold raw ciphertext bytes and must be decrypted via Decrypt.
-		rec.Request = s.decryptField(tc, rec.Request, "Request", workflowID, rec.Step, true)
-		rec.Response = s.decryptField(tc, rec.Response, "Response", workflowID, rec.Step, true)
+		rec.Request = keep(s.decryptField(tc, rec.Request, "Request", workflowID, rec.Step, true))
+		rec.Response = keep(s.decryptField(tc, rec.Response, "Response", workflowID, rec.Step, true))
 		// Err, SignalPayload, ChildInput, NewInput, PluginInput, PluginOutput,
 		// PromiseResult, PromiseError are stored as base64-encoded ciphertexts
 		// (no extra base64 layer), so DecryptString is correct.
-		rec.Err = s.decryptField(tc, rec.Err, "Err", workflowID, rec.Step, false)
-		rec.SignalPayload = s.decryptField(tc, rec.SignalPayload, "SignalPayload", workflowID, rec.Step, false)
-		rec.ChildInput = s.decryptField(tc, rec.ChildInput, "ChildInput", workflowID, rec.Step, false)
-		rec.NewInput = s.decryptField(tc, rec.NewInput, "NewInput", workflowID, rec.Step, false)
-		rec.PluginInput = s.decryptField(tc, rec.PluginInput, "PluginInput", workflowID, rec.Step, false)
-		rec.PluginOutput = s.decryptField(tc, rec.PluginOutput, "PluginOutput", workflowID, rec.Step, false)
-		rec.PromiseResult = s.decryptField(tc, rec.PromiseResult, "PromiseResult", workflowID, rec.Step, false)
-		rec.PromiseError = s.decryptField(tc, rec.PromiseError, "PromiseError", workflowID, rec.Step, false)
+		rec.Err = keep(s.decryptField(tc, rec.Err, "Err", workflowID, rec.Step, false))
+		rec.SignalPayload = keep(s.decryptField(tc, rec.SignalPayload, "SignalPayload", workflowID, rec.Step, false))
+		rec.ChildInput = keep(s.decryptField(tc, rec.ChildInput, "ChildInput", workflowID, rec.Step, false))
+		rec.NewInput = keep(s.decryptField(tc, rec.NewInput, "NewInput", workflowID, rec.Step, false))
+		rec.PluginInput = keep(s.decryptField(tc, rec.PluginInput, "PluginInput", workflowID, rec.Step, false))
+		rec.PluginOutput = keep(s.decryptField(tc, rec.PluginOutput, "PluginOutput", workflowID, rec.Step, false))
+		rec.PromiseResult = keep(s.decryptField(tc, rec.PromiseResult, "PromiseResult", workflowID, rec.Step, false))
+		rec.PromiseError = keep(s.decryptField(tc, rec.PromiseError, "PromiseError", workflowID, rec.Step, false))
 	}
 
 	// Retroactive redaction on read path.
@@ -230,22 +316,61 @@ func (s *PostgresStore) decryptAndRedactEventRecord(rec *EventRecord, workflowID
 		rec.PromiseResult = RedactOnRead(rec.PromiseResult)
 		rec.PromiseError = RedactOnRead(rec.PromiseError)
 	}
+	return firstErr
 }
 
 // decryptPayloadJSON decrypts the payload JSONB column if encryption is
 // enabled and returns the decrypted (or original) payload string.
-func (s *PostgresStore) decryptPayloadJSON(payloadStr string) string {
+//
+// A payload that is not a JSON string literal was never sealed -- the sealed
+// form is `"<base64>"` (EncryptJSON), and a plaintext payload is an object --
+// so it is returned as it is with no error. That is the mixed-history case and
+// it is not a failure. A payload that IS in the sealed form and will not open
+// is: it is returned unchanged for a caller that ignores the error, and the
+// error wraps ErrPayloadDecryption (cleat#2311).
+func (s *PostgresStore) decryptPayloadJSON(payloadStr string) (string, error) {
 	if s.encryption != nil && s.encryptSensitivePayloads && payloadStr != "" {
-		if decrypted, err := s.encryption.DecryptJSON(tenantForAAD(s.tenantID), []byte(payloadStr)); err == nil {
-			return string(decrypted)
-		} else {
-			s.log().WarnContext(context.Background(), "decrypt payload JSON failed", "error", err)
-			if s.Metrics != nil {
-				s.Metrics.RecordDecryptionError(context.Background())
-			}
+		decrypted, err := s.encryption.DecryptJSON(tenantForAAD(s.tenantID), []byte(payloadStr))
+		if err == nil {
+			return string(decrypted), nil
 		}
+		if !looksSealed(payloadStr) {
+			return payloadStr, nil
+		}
+		if !s.quietDecryptLogs {
+			s.log().WarnContext(context.Background(), "decrypt payload JSON failed", "error", err)
+		}
+		if s.Metrics != nil {
+			s.Metrics.RecordDecryptionError(context.Background())
+		}
+		return payloadStr, fmt.Errorf("%w: payload column: %v", ErrPayloadDecryption, err)
 	}
-	return payloadStr
+	return payloadStr, nil
+}
+
+// decryptEventRecordForDisplay and decryptPayloadForDisplay are the lenient
+// forms, for the read paths whose output is shown rather than acted on --
+// streaming and the shadow-column comparison. They keep what those paths did
+// before cleat#2311: a field that will not open shows as "[DECRYPTION_FAILED]"
+// and the read carries on. The failure is still logged and counted by the
+// strict form underneath; only the returned error is dropped, here and
+// nowhere else, so that dropping it is a visible choice rather than a bare
+// call whose result nobody read.
+//
+// Replay does NOT use these. See LoadEventHistory.
+func (s *PostgresStore) decryptEventRecordForDisplay(rec *EventRecord, workflowID string) {
+	_ = s.decryptAndRedactEventRecord(rec, workflowID)
+}
+
+func (s *PostgresStore) decryptPayloadForDisplay(payloadStr string) string {
+	out, _ := s.decryptPayloadJSON(payloadStr)
+	return out
+}
+
+// looksSealed reports whether a payload column value has the shape
+// EncryptJSON produces: a JSON string literal.
+func looksSealed(payload string) bool {
+	return len(payload) >= 2 && payload[0] == '"' && payload[len(payload)-1] == '"'
 }
 
 // setRLSOnTx executes SELECT set_config to set the RLS tenant_id

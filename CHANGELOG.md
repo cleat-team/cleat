@@ -683,6 +683,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   It now returns an error that `cleat-worker`'s `main` treats as fatal, refusing to start rather than
   serving with a route table that does not match what a plugin author believes is wired up.
 
+- **A worker that cannot decrypt a run's history now releases the run instead of failing it, or completing it on garbage.** (cleat#2311)
+
+  The store swallowed a payload decryption failure: it put `"[DECRYPTION_FAILED]"` in the field and carried
+  on. A worker holding the wrong key (a mis-ordered key rotation, a mis-deploy) therefore ended the run
+  FAILED permanently on the checksum chain, or, with `--disable-checksum-verification`, ended it DONE having
+  run the guest on the placeholder. A worker holding the right key could have finished it either way.
+  `LoadEventHistory` (the read replay acts on) now returns an error wrapping `engine.ErrPayloadDecryption`
+  for any of the ten encrypted event fields, or for a sealed `payload` column, that will not open; a value
+  that is not shaped like a sealed one is plaintext and is read as it is, so runs whose history was written
+  before `--encrypt-sensitive-payloads` was switched on, by sharded workers before cleat#2308, or as
+  plaintext child events before cleat#2328, still load (one edge: a plaintext string field that happens to be
+  valid base64 of 28 or more bytes is read as sealed and refused, since there is no envelope to tell them
+  apart); the worker
+  treats that like a plugin it lacks (cleat#1710) and releases the run with `--unservable-release-backoff`,
+  so a worker with the key picks it up. The history stream's `error` event says so in one sentence, and the
+  paginated and streaming-chunk reads that display history still show the placeholder for a field they cannot
+  read.
+
+  Also from the same change, because a worker that cannot read a history must not write to it either: every
+  admin verb that appends an event (`POST /api/admin/instances/{id}/force-complete`, `.../force-fail`,
+  `.../re-replay`, the dead-letter retry) checks, inside the transaction that would write it, that the history
+  can be decrypted, and answers 409 (`state_conflict`, "this worker cannot read workflow ... Nothing was
+  changed") otherwise, with the status change rolled back. `.../steps/{n}/resolve` refuses the same way.
+  Before, force-fail and force-complete answered 200 and appended an `admin_action` sealed under the wrong key,
+  after which no single-key worker could re-replay, retry or resolve the run; re-replay did the same when its
+  history load failed, and resolve returned a 500 carrying the decrypt text. A run released this way is counted
+  in the new `cleat_workflow_releases_total{check}` (`check="history_decrypt"` for this case; the version and
+  plugin checks are counted too) and logged at WARN once per five minutes per run (a stuck run wrote about 23 MB
+  of identical lines a day; the store's own per-field decrypt WARN is now silent on the replay read, which
+  returns the failure instead). The worker's own store and the shard stores now carry the metrics instance, so
+  `cleat_decryption_errors_total` moves on the default and the sharded paths (it was a no-op there).
+
+  Not covered (cleat#2324): a worker started WITHOUT `--encrypt-sensitive-payloads` has no key ring to fail
+  against, and nothing in a sealed column marks it as ciphertext (by design, engine/encryption.go has no
+  envelope). Measured: such a worker ends the run FAILED on the checksum chain, or DONE with
+  `--disable-checksum-verification`, exactly as before this change.
+
 - **SIGTERM drains before it cancels, and a run cut off by shutdown is released, never failed.** (cleat#2285)
 
   The signal handler cancelled the worker's context at once. Every in-flight durable wait was aborted and the

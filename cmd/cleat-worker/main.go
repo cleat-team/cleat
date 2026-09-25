@@ -2131,8 +2131,14 @@ func main() {
 
 	// Set metrics on the store factory so stores created during workflow
 	// execution inherit the OTel metrics instance.
+	//
+	// The worker's OWN store is not made by the factory, and neither are the
+	// shard stores, so they need the same wiring: without it every store-level
+	// counter is silently a no-op -- cleat_decryption_errors_total never moved
+	// while a run was being released for a history this worker could not
+	// decrypt (cleat#2311).
+	wireStoreMetrics(store, factory, metricsInstance)
 	if pf, ok := factory.(*engine.PostgresStoreFactory); ok {
-		pf.WithMetrics(metricsInstance)
 		if syncCommitOff != nil && *syncCommitOff {
 			pf.WithSyncCommitOff(true)
 		}

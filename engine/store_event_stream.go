@@ -96,7 +96,7 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 		}
 
 		// Decrypt and redact event record.
-		s.decryptAndRedactEventRecord(&rec, workflowID)
+		s.decryptEventRecordForDisplay(&rec, workflowID)
 
 		// Retroactive redaction on read path.
 		// Redaction runs AFTER decryption (see block above) since redacting
@@ -114,7 +114,7 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 			rec.PromiseError = RedactOnRead(rec.PromiseError)
 		}
 		if payload.Valid {
-			payloadStr := s.decryptPayloadJSON(payload.String)
+			payloadStr := s.decryptPayloadForDisplay(payload.String)
 			populateFromPayload(&rec, []byte(payloadStr))
 		}
 
@@ -251,10 +251,10 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 				rec.PromiseError = promiseError.String
 
 				// Decrypt and redact event record.
-				s.decryptAndRedactEventRecord(&rec, workflowID)
+				s.decryptEventRecordForDisplay(&rec, workflowID)
 
 				if payload.Valid {
-					payloadStr := s.decryptPayloadJSON(payload.String)
+					payloadStr := s.decryptPayloadForDisplay(payload.String)
 					populateFromPayload(&rec, []byte(payloadStr))
 				}
 

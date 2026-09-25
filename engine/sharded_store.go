@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/cleat-team/cleat/monitoring/prometheus"
 )
 
 // ShardConfig is a single database shard configuration loaded from JSON.
@@ -49,6 +51,20 @@ type ShardedStore struct {
 	// order and stop once the budget is spent, so a fixed starting point would
 	// drain shard 0 first and starve the tail under sustained load.
 	claimCursor atomic.Uint64
+}
+
+// SetMetrics hands the metrics instance to every PostgreSQL shard store that
+// does not have one. The shard stores are opened before the worker builds its
+// metrics, so without this every store-level counter (decryption errors among
+// them) is a silent no-op on the sharded path. cleat#2311.
+func (s *ShardedStore) SetMetrics(m *prometheus.Metrics) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, sh := range s.shards {
+		if ps, ok := sh.Store.(*PostgresStore); ok && ps.Metrics == nil {
+			ps.Metrics = m
+		}
+	}
 }
 
 // NewShardedStore creates a ShardedStore from pre-constructed WorkflowStore

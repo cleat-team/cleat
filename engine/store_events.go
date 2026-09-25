@@ -40,6 +40,29 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	history, err := s.readEventHistoryTx(ctx, tx, workflowID)
+	if err != nil {
+		return nil, err
+	}
+	return history, tx.Commit()
+}
+
+// readEventHistoryTx is LoadEventHistory's read, on a transaction the caller
+// owns. It is a function of its own so that the admin operations that are about
+// to append an event can ask, inside the transaction that would write it, "can
+// this worker read this history?" (adminAppendAudit) -- the same strict read
+// replay does, with the same ErrPayloadDecryption, and not a second
+// implementation of it.
+//
+// A decryption failure is returned to the caller, which reports it, so the
+// store's own per-field WARN is suppressed here: on the replay path it fired
+// twice a claim for every stuck run, about 22,000 lines a day. The counter
+// still counts every failed field. cleat#2311.
+func (s *PostgresStore) readEventHistoryTx(ctx context.Context, tx *sql.Tx, workflowID string) ([]EventRecord, error) {
+	quiet := *s
+	quiet.quietDecryptLogs = true
+	s = &quiet
+
 	rows, err := tx.QueryContext(ctx, `
 		SELECT step, event_type, service, operation, request, response, error,
 		       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
@@ -115,7 +138,18 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		rec.PromiseError = promiseError.String
 
 		// Decrypt and redact event record.
-		s.decryptAndRedactEventRecord(&rec, workflowID)
+		//
+		// A field that will not decrypt fails the LOAD. This is the read that
+		// replay acts on, and the placeholder is not data: with it accepted,
+		// a worker holding the wrong key ended the run FAILED (checksums on)
+		// or DONE on "[DECRYPTION_FAILED]" (checksums off), when a worker
+		// with the right key could have finished it. The error wraps
+		// ErrPayloadDecryption so the worker can tell "this worker cannot
+		// read it" from "the database is down" and release the run.
+		// cleat#2311.
+		if err := s.decryptAndRedactEventRecord(&rec, workflowID); err != nil {
+			return nil, fmt.Errorf("load history: %w", err)
+		}
 
 		// Retroactive redaction on read path: ensure sensitive fields are
 		// redacted even if they were stored before redaction was mandatory.
@@ -135,7 +169,10 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		}
 
 		if payload.Valid {
-			payloadStr := s.decryptPayloadJSON(payload.String)
+			payloadStr, err := s.decryptPayloadJSON(payload.String)
+			if err != nil {
+				return nil, fmt.Errorf("load history: step %d of workflow %s: %w", rec.Step, workflowID, err)
+			}
 			populateFromPayload(&rec, []byte(payloadStr))
 		}
 
@@ -144,7 +181,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return history, tx.Commit()
+	return history, nil
 }
 
 // chainOrder returns indices into recs in ascending Step order.

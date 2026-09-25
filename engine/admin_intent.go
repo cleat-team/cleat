@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -65,6 +66,9 @@ func ResolveStep(ctx context.Context, store WorkflowStore, workflowID string, st
 	}
 
 	history, err := store.LoadEventHistory(ctx, workflowID)
+	if errors.Is(err, ErrPayloadDecryption) {
+		return adminHistoryUnreadable("admin "+adminActionResolveStep, workflowID)
+	}
 	if err != nil {
 		return fmt.Errorf("admin %s: load history for workflow %s: %w", adminActionResolveStep, workflowID, err)
 	}

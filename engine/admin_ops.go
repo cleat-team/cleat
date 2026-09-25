@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 )
@@ -82,6 +83,32 @@ func ForceFail(ctx context.Context, store WorkflowStore, workflowID string, gene
 	return nil
 }
 
+// adminHistoryUnreadable is the refusal for an operation that must read a
+// workflow's history and could not decrypt it.
+//
+// It is refused BEFORE any write because the write would be the harm: every one
+// of these operations appends an event (admin_action, or the resolved step)
+// sealed under the key THIS worker holds. On a worker with the wrong key that
+// leaves a history sealed under two keys, which no single worker can read
+// again, so a worker that DID hold the original key would release the run
+// forever (cleat#2311). ReReplay and RetryWorkflow used to treat a failed load
+// as "skip the pending-intent check and carry on", which is exactly the path
+// that wrote.
+//
+// A 409 state_conflict, because the caller's correct response is to send the
+// request to a worker that holds the key. The message says that, and carries no
+// cipher text or driver text. The returned error still satisfies
+// errors.Is(err, ErrPayloadDecryption) and errors.Is(err, ErrAdminStateConflict).
+func adminHistoryUnreadable(op, workflowID string) error {
+	return classifiedError{
+		err: fmt.Errorf("%s: this worker cannot read workflow %s's history because it does not hold the payload "+
+			"encryption key that sealed it. Nothing was changed. Send the request to a worker that holds that key, "+
+			"or check --encryption-key-file and --encryption-key-file-previous on this one",
+			op, workflowID),
+		class: errors.Join(ErrAdminStateConflict, ErrPayloadDecryption),
+	}
+}
+
 // ReReplay resets a workflow to 'ready' state so the dispatcher picks it up
 // for re-execution from its existing event history. The generation counter is
 // checked to prevent stale writes. An audit event is written atomically with
@@ -108,7 +135,11 @@ func ReReplay(ctx context.Context, store WorkflowStore, workflowID string, gener
 	// operator needs, which is *which step* to reconcile -- and phase F now
 	// gives them somewhere to put the answer, so pointing at it is more useful
 	// than reproducing the failure.
-	if history, herr := store.LoadEventHistory(ctx, workflowID); herr == nil {
+	history, herr := store.LoadEventHistory(ctx, workflowID)
+	if errors.Is(herr, ErrPayloadDecryption) {
+		return adminHistoryUnreadable("re-replay", workflowID)
+	}
+	if herr == nil {
 		for _, rec := range history {
 			if rec.isPendingIntent() {
 				return adminErrorf(ErrAdminStateConflict,
@@ -143,7 +174,8 @@ func ReReplay(ctx context.Context, store WorkflowStore, workflowID string, gener
 	}
 	// A failed history load is deliberately not fatal here: it would turn a
 	// read this operation does not otherwise need into a reason the operation
-	// cannot run. The store call below is the one that must succeed.
+	// cannot run. The store call below is the one that must succeed. The one
+	// failure that IS refused is a history this worker cannot decrypt, above.
 
 	if err := store.AdminReReplay(ctx, workflowID, generation, operator); err != nil {
 		return fmt.Errorf("re-replay: %w", err)
@@ -178,7 +210,11 @@ func RetryWorkflow(ctx context.Context, store WorkflowStore, workflowID string) 
 		return adminErrorf(ErrAdminBadRequest, "retry: workflow ID is required")
 	}
 
-	if history, herr := store.LoadEventHistory(ctx, workflowID); herr == nil {
+	history, herr := store.LoadEventHistory(ctx, workflowID)
+	if errors.Is(herr, ErrPayloadDecryption) {
+		return adminHistoryUnreadable("retry", workflowID)
+	}
+	if herr == nil {
 		for _, rec := range history {
 			if rec.isPendingIntent() {
 				return adminErrorf(ErrAdminStateConflict,
