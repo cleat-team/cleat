@@ -20,14 +20,24 @@ package crash
 //     one the worker is told to migrate, and every assertion has to read them
 //     back from there.
 //
-// A second MySQL consequence, and it is the reason the tests below take care
-// about teardown: the per-tenant database name is derived from the tenant UUID
-// ALONE, so it is not per-suite. Two concurrent MySQL crash runs share it.
-// PostgreSQL's harness took its own database (ensureCrashDatabase) precisely to
-// escape engine/testutil's unqualified DELETEs; on MySQL that escape is not
-// available, and per-test task queues plus unique workflow ids are what keep
-// runs apart. Run this suite and a MySQL engine test concurrently and they will
-// delete each other's rows.
+// A second MySQL consequence, and it is a real difference from the PostgreSQL
+// side rather than a tidiness note: the per-tenant database name is derived
+// from the tenant UUID ALONE (MySQLTenantDatabaseName), so it is not per-suite.
+// Every run of this suite against one MySQL server uses the same
+// cleat_00000000_..., and every run reuses the same `crashcall` v1 definition
+// row inside it -- which deployFixture rewrites, task_queue included.
+// PostgreSQL escaped that by taking its own database (ensureCrashDatabase); on
+// MySQL there is no equivalent move, because the name is the worker's rule and
+// not this harness's to choose. Per-run task queues and unique workflow ids are
+// what keep runs apart. Do not run two copies of this suite against one MySQL
+// server at once.
+//
+// That is narrower than what this comment said first -- "run this suite and a
+// MySQL engine test concurrently and they will delete each other's rows" -- and
+// the correction is worth keeping: engine/testutil's MySQLTestDB connects to
+// the database named in CLEAT_TEST_MYSQL (usually `cleat`), and these rows are
+// in the per-tenant database, so the two never meet. The claim was written from
+// the shape of the PostgreSQL hazard rather than from the MySQL code.
 
 import (
 	"context"
@@ -160,7 +170,9 @@ func postgresTarget(t *testing.T) *crashTarget {
 //   - a fresh base database for the worker's GLOBALS. Not optional: pointed at
 //     a shared base database the worker refuses to start outright --
 //     "15 secret(s) are stored and CLEAT_SECRET_MASTER_KEY is not set" -- and
-//     deployment_secrets lives in the base database, not the tenant one.
+//     those secrets are in the BASE database's tenant_secrets (measured:
+//     cleat.tenant_secrets held the 15 the message counts; the per-tenant
+//     database's held 0).
 //   - the per-tenant database the rows actually live in, created and migrated
 //     here rather than by the worker, because this harness has to write the
 //     definition BEFORE it starts a worker and the worker is what would
@@ -209,9 +221,16 @@ func mssqlTarget(t *testing.T) *crashTarget {
 // ensureMySQLDatabase creates a database named `name` beside the one the DSN
 // names, migrates it, and returns a DSN for it.
 //
-// Creates beside rather than reusing, for the same reason
-// ensureCrashDatabase does on PostgreSQL -- this suite writes definitions and
-// queues runs that an engine test's unqualified DELETEs would otherwise reach.
+// Creates beside rather than reusing, because the worker refuses to start
+// against a shared base database: tenant_secrets lives there, and a non-empty
+// table with no CLEAT_SECRET_MASTER_KEY set is a hard refusal ("15 secret(s)
+// are stored and CLEAT_SECRET_MASTER_KEY is not set", measured 2026-09-25).
+// See mysqlTarget.
+//
+// It is NOT for the reason its PostgreSQL counterpart has, and saying so would
+// be the wrong lesson: this harness's rows are in the per-tenant database, not
+// here, and engine/testutil's MySQL tests connect to the database named in
+// CLEAT_TEST_MYSQL rather than to this one.
 func ensureMySQLDatabase(t *testing.T, baseDSN, name string) string {
 	t.Helper()
 	admin := openAdmin(t, "mysql", baseDSN)
