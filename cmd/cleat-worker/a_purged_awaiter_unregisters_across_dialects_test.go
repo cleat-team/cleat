@@ -17,6 +17,7 @@ import (
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/plugins/eventtriggers"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // cleat#2213, on real databases, across all three dialects, with and
@@ -183,25 +184,25 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 
 				defer func() {
 					bg := context.Background()
-					if _, err := fixtureDB.ExecContext(bg, plugin.Rebind(
-						`DELETE FROM event_awaiters WHERE workflow_id = $1`, dialect),
+					if _, err := plugintest.ExecRebound(t, bg, fixtureDB, dialect,
+						`DELETE FROM event_awaiters WHERE workflow_id = $1`,
 						runID); err != nil {
 						t.Errorf("cleanup event_awaiters on %s: %v", be.Name, err)
 					}
-					if _, err := fixtureDB.ExecContext(bg, plugin.Rebind(
-						`DELETE FROM workflow_instances WHERE id = $1`, dialect),
+					if _, err := plugintest.ExecRebound(t, bg, fixtureDB, dialect,
+						`DELETE FROM workflow_instances WHERE id = $1`,
 						runID); err != nil {
 						t.Errorf("cleanup workflow_instances on %s: %v", be.Name, err)
 					}
-					if _, err := fixtureDB.ExecContext(bg, plugin.Rebind(
-						`DELETE FROM workflow_defs WHERE name = $1`, dialect), defName); err != nil {
+					if _, err := plugintest.ExecRebound(t, bg, fixtureDB, dialect,
+						`DELETE FROM workflow_defs WHERE name = $1`, defName); err != nil {
 						t.Errorf("cleanup workflow_defs on %s: %v", be.Name, err)
 					}
 				}()
 
-				if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 					`INSERT INTO workflow_defs (name, version, wasm_bytes, tenant_id) VALUES ($1, $2, $3, $4)`,
-					dialect), defName, 1, []byte{0}, tenant.String()); err != nil {
+					defName, 1, []byte{0}, tenant.String()); err != nil {
 					t.Fatalf("insert workflow_defs on %s: %v", be.Name, err)
 				}
 
@@ -212,16 +213,16 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 				// selects: status IN ('done','failed','terminated','cancelled')
 				// AND completed_at IS NOT NULL AND completed_at < cutoff.
 				completedAt := time.Now().Add(-1 * time.Hour)
-				if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 					`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id, status, completed_at) `+
 						`VALUES ($1, $2, $3, $4, 'terminated', $5)`,
-					dialect), runID, defName, 1, tenant.String(), completedAt); err != nil {
+					runID, defName, 1, tenant.String(), completedAt); err != nil {
 					t.Fatalf("insert workflow_instances on %s: %v", be.Name, err)
 				}
 
-				if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 					`INSERT INTO event_awaiters (workflow_id, tenant_id, event_type) VALUES ($1, $2, $3)`,
-					dialect), runID, tenant.String(), eventType); err != nil {
+					runID, tenant.String(), eventType); err != nil {
 					t.Fatalf("insert event_awaiters on %s: %v", be.Name, err)
 				}
 
@@ -274,9 +275,9 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 				publishOnce("first")
 
 				var awaiterCount int
-				if err := fixtureDB.QueryRowContext(ctx, plugin.Rebind(
+				if err := plugintest.QueryRowRebound(t, ctx, fixtureDB, dialect,
 					`SELECT COUNT(*) FROM event_awaiters WHERE workflow_id = $1 AND event_type = $2`,
-					dialect), runID, eventType).Scan(&awaiterCount); err != nil {
+					runID, eventType).Scan(&awaiterCount); err != nil {
 					t.Fatalf("count event_awaiters on %s: %v", be.Name, err)
 				}
 				if awaiterCount != 0 {

@@ -137,7 +137,7 @@ func TestRateLimitsAreScopedToTheirTenant(t *testing.T) {
 	//    what no policy at all looks like.
 	deleted, err := p.db.Exec(
 		plugin.AcrossAllTenants(ctx, "test: the sweep pruneRateCounters performs"),
-		plugin.Rebind(`DELETE FROM `+schema+`.rate_counter WHERE window_start < $1`, dialect),
+		`DELETE FROM `+schema+`.rate_counter WHERE window_start < $1`,
 		time.Now().UTC().Add(-time.Minute))
 	if err != nil {
 		t.Fatalf("the cross-tenant prune failed: %v\n\n"+

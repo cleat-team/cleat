@@ -39,6 +39,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 func TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave(t *testing.T) {
@@ -82,8 +83,8 @@ func TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave(t *testing.T) {
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 			tenant := uuid.New()
-			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
-				`INSERT INTO admin.tenants (tenant_id, name) VALUES ($1, $2)`, dialect),
+			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
+				`INSERT INTO admin.tenants (tenant_id, name) VALUES ($1, $2)`,
 				tenant.String(), "blobstore-race-"+tenant.String()); err != nil {
 				t.Fatalf("seed admin.tenants on %s: %v", be.Name, err)
 			}
@@ -94,15 +95,15 @@ func TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave(t *testing.T) {
 
 			defer func() {
 				bg := context.Background()
-				fixtureDB.ExecContext(bg, plugin.Rebind(`DELETE FROM workflow_blob_refs WHERE workflow_id = $1`, dialect), raceRunID)
-				fixtureDB.ExecContext(bg, plugin.Rebind(`DELETE FROM workflow_instances WHERE id = $1`, dialect), raceRunID)
-				fixtureDB.ExecContext(bg, plugin.Rebind(`DELETE FROM workflow_defs WHERE name = $1`, dialect), defName)
-				fixtureDB.ExecContext(bg, plugin.Rebind(`DELETE FROM admin.tenants WHERE tenant_id = $1`, dialect), tenant.String())
+				plugintest.ExecRebound(t, bg, fixtureDB, dialect, `DELETE FROM workflow_blob_refs WHERE workflow_id = $1`, raceRunID)
+				plugintest.ExecRebound(t, bg, fixtureDB, dialect, `DELETE FROM workflow_instances WHERE id = $1`, raceRunID)
+				plugintest.ExecRebound(t, bg, fixtureDB, dialect, `DELETE FROM workflow_defs WHERE name = $1`, defName)
+				plugintest.ExecRebound(t, bg, fixtureDB, dialect, `DELETE FROM admin.tenants WHERE tenant_id = $1`, tenant.String())
 			}()
 
-			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 				`INSERT INTO workflow_defs (name, version, wasm_bytes, tenant_id) VALUES ($1, $2, $3, $4)`,
-				dialect), defName, 1, []byte{0}, tenant); err != nil {
+				defName, 1, []byte{0}, tenant); err != nil {
 				t.Fatalf("insert workflow_defs on %s: %v", be.Name, err)
 			}
 
@@ -118,14 +119,14 @@ func TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave(t *testing.T) {
 			hookRan := false
 			sweepStaleWorkflowRefsMSSQLTestHook = func() {
 				hookRan = true
-				if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 					`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id, status) VALUES ($1, $2, $3, $4, 'running')`,
-					dialect), raceRunID, defName, 1, tenant); err != nil {
+					raceRunID, defName, 1, tenant); err != nil {
 					t.Errorf("hook: insert workflow_instances on %s: %v", be.Name, err)
 					return
 				}
-				if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
-					`INSERT INTO workflow_blob_refs (workflow_id, sha256) VALUES ($1, $2)`, dialect),
+				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
+					`INSERT INTO workflow_blob_refs (workflow_id, sha256) VALUES ($1, $2)`,
 					raceRunID, shaRace); err != nil {
 					t.Errorf("hook: insert workflow_blob_refs on %s: %v", be.Name, err)
 				}
@@ -145,8 +146,8 @@ func TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave(t *testing.T) {
 			}
 
 			var survived int
-			if err := fixtureDB.QueryRowContext(ctx, plugin.Rebind(
-				`SELECT COUNT(*) FROM workflow_blob_refs WHERE workflow_id = $1`, dialect),
+			if err := plugintest.QueryRowRebound(t, ctx, fixtureDB, dialect,
+				`SELECT COUNT(*) FROM workflow_blob_refs WHERE workflow_id = $1`,
 				raceRunID).Scan(&survived); err != nil {
 				t.Fatalf("count surviving ref on %s: %v", be.Name, err)
 			}
@@ -208,37 +209,37 @@ func TestSweepStaleWorkflowRefsMSSQL_RealConcurrencyKeepsANewWorkflowsRef(t *tes
 			for i := 0; i < nTenants; i++ {
 				tid := uuid.New()
 				tenants = append(tenants, tid)
-				if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
-					`INSERT INTO admin.tenants (tenant_id, name) VALUES ($1, $2)`, dialect),
+				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
+					`INSERT INTO admin.tenants (tenant_id, name) VALUES ($1, $2)`,
 					tid.String(), prefix+tid.String()); err != nil {
 					t.Fatalf("seed admin.tenants on %s: %v", be.Name, err)
 				}
 			}
 			defName := prefix + "def"
-			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 				`INSERT INTO workflow_defs (name, version, wasm_bytes, tenant_id) VALUES ($1, 1, $2, $3)`,
-				dialect), defName, []byte{0}, tenants[0]); err != nil {
+				defName, []byte{0}, tenants[0]); err != nil {
 				t.Fatalf("insert workflow_defs on %s: %v", be.Name, err)
 			}
 			tA := tenants[0]
 			defer func() {
 				bg := context.Background()
-				fixtureDB.ExecContext(bg, plugin.Rebind(`DELETE FROM workflow_blob_refs WHERE workflow_id LIKE $1`, dialect), prefix+"%")
-				fixtureDB.ExecContext(bg, plugin.Rebind(`DELETE FROM workflow_instances WHERE id LIKE $1`, dialect), prefix+"%")
-				fixtureDB.ExecContext(bg, plugin.Rebind(`DELETE FROM workflow_defs WHERE name = $1`, dialect), defName)
-				fixtureDB.ExecContext(bg, plugin.Rebind(`DELETE FROM admin.tenants WHERE name LIKE $1`, dialect), prefix+"%")
+				plugintest.ExecRebound(t, bg, fixtureDB, dialect, `DELETE FROM workflow_blob_refs WHERE workflow_id LIKE $1`, prefix+"%")
+				plugintest.ExecRebound(t, bg, fixtureDB, dialect, `DELETE FROM workflow_instances WHERE id LIKE $1`, prefix+"%")
+				plugintest.ExecRebound(t, bg, fixtureDB, dialect, `DELETE FROM workflow_defs WHERE name = $1`, defName)
+				plugintest.ExecRebound(t, bg, fixtureDB, dialect, `DELETE FROM admin.tenants WHERE name LIKE $1`, prefix+"%")
 			}()
 
 			live := func(id string, tid uuid.UUID) error {
-				if _, err := writerDB.ExecContext(ctx, plugin.Rebind(
+				if _, err := plugintest.ExecRebound(t, ctx, writerDB, dialect,
 					`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id, status) VALUES ($1, $2, 1, $3, 'running')`,
-					dialect), id, defName, tid); err != nil {
+					id, defName, tid); err != nil {
 					return err
 				}
 				sha := make([]byte, 32)
 				_, _ = rand.Read(sha)
-				_, err := writerDB.ExecContext(ctx, plugin.Rebind(
-					`INSERT INTO workflow_blob_refs (workflow_id, sha256) VALUES ($1, $2)`, dialect), id, sha)
+				_, err := plugintest.ExecRebound(t, ctx, writerDB, dialect,
+					`INSERT INTO workflow_blob_refs (workflow_id, sha256) VALUES ($1, $2)`, id, sha)
 				return err
 			}
 
@@ -278,8 +279,8 @@ func TestSweepStaleWorkflowRefsMSSQL_RealConcurrencyKeepsANewWorkflowsRef(t *tes
 			wg.Wait()
 
 			var survived int
-			if err := fixtureDB.QueryRowContext(ctx, plugin.Rebind(
-				`SELECT COUNT(*) FROM workflow_blob_refs WHERE workflow_id LIKE $1`, dialect),
+			if err := plugintest.QueryRowRebound(t, ctx, fixtureDB, dialect,
+				`SELECT COUNT(*) FROM workflow_blob_refs WHERE workflow_id LIKE $1`,
 				prefix+"race-%").Scan(&survived); err != nil {
 				t.Fatalf("count surviving refs on %s: %v", be.Name, err)
 			}

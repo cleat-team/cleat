@@ -11,11 +11,12 @@ import (
 // ReadOnlyDB wraps *sql.DB and implements plugin.PluginDB by enforcing
 // read-only access. Write operations return an error.
 //
-// Dialect carries the same meaning as on SQLDBAdapter: statements are put
-// through plugin.Rebind on the way to the driver. A read-only plugin has the
-// identical portability problem -- a SELECT with $N placeholders fails on
-// MySQL and SQL Server exactly as an UPDATE does -- so leaving this one out
-// would fix the writes and quietly keep the reads broken.
+// Dialect carries the same meaning as on SQLDBAdapter: statements and args
+// are put through plugin.RebindArgs on the way to the driver. A read-only
+// plugin has the identical portability problem -- a SELECT with $N
+// placeholders fails on MySQL and SQL Server exactly as an UPDATE does -- so
+// leaving this one out would fix the writes and quietly keep the reads
+// broken.
 //
 // WHAT IS ACTUALLY ENFORCED, AND WHERE. Three layers, and they do not cover
 // the same ground:
@@ -125,7 +126,12 @@ func (r *ReadOnlyDB) Query(ctx context.Context, query string, args ...any) (plug
 	if err != nil {
 		return nil, err
 	}
-	rows, err := tx.QueryContext(ctx, plugin.Rebind(query, r.Dialect), args...)
+	rebound, reboundArgs, err := plugin.RebindArgs(query, r.Dialect, args)
+	if err != nil {
+		_ = tx.Rollback()
+		return nil, err
+	}
+	rows, err := tx.QueryContext(ctx, rebound, reboundArgs...)
 	if err != nil {
 		_ = tx.Rollback()
 		return nil, err
@@ -140,7 +146,12 @@ func (r *ReadOnlyDB) QueryRow(ctx context.Context, query string, args ...any) pl
 	if err != nil {
 		return &rowScanner{err: err}
 	}
-	row := tx.QueryRowContext(ctx, plugin.Rebind(query, r.Dialect), args...)
+	rebound, reboundArgs, err := plugin.RebindArgs(query, r.Dialect, args)
+	if err != nil {
+		_ = tx.Rollback()
+		return &rowScanner{err: err}
+	}
+	row := tx.QueryRowContext(ctx, rebound, reboundArgs...)
 	return &rowScanner{row: row, done: tx.Commit}
 }
 
@@ -160,7 +171,11 @@ func (r *readOnlyTx) Exec(ctx context.Context, query string, args ...any) (int64
 }
 
 func (r *readOnlyTx) Query(ctx context.Context, query string, args ...any) (plugin.Rows, error) {
-	rows, err := r.tx.QueryContext(ctx, plugin.Rebind(query, r.dialect), args...)
+	rebound, reboundArgs, err := plugin.RebindArgs(query, r.dialect, args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.tx.QueryContext(ctx, rebound, reboundArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +183,11 @@ func (r *readOnlyTx) Query(ctx context.Context, query string, args ...any) (plug
 }
 
 func (r *readOnlyTx) QueryRow(ctx context.Context, query string, args ...any) plugin.RowScanner {
-	row := r.tx.QueryRowContext(ctx, plugin.Rebind(query, r.dialect), args...)
+	rebound, reboundArgs, err := plugin.RebindArgs(query, r.dialect, args)
+	if err != nil {
+		return &rowScanner{err: err}
+	}
+	row := r.tx.QueryRowContext(ctx, rebound, reboundArgs...)
 	return &rowScanner{row: row}
 }
 

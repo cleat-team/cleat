@@ -171,7 +171,7 @@ func TestBlobIndexRowsAreScopedByAPolicyNotOnlyByTheQuery(t *testing.T) {
 		// (cleat#1528), so an assertion through it would pass for a reason that
 		// has nothing to do with blob_index. A test that fails for the right
 		// verdict and the wrong reason is the one this repo keeps paying for.
-		stmt := plugin.Rebind(deleteChunksReturning.For(plugin.DialectPostgres), plugin.DialectPostgres)
+		stmt := deleteChunksReturning.For(plugin.DialectPostgres)
 
 		_, err := db.Exec(context.Background(), stmt)
 		if err == nil {

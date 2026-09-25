@@ -246,16 +246,17 @@ func runCheckDB(ctx context.Context, db *sql.DB, d dialect, dsn string, args []s
 		// Migrations holds to each dialect's own migration files.
 		schemaName, bareName := d.qualifiedTable(table)
 		var count int
+		var stmt string
+		var stmtArgs []any
 		var err error
 		switch {
 		case schemaName == "":
-			err = db.QueryRowContext(ctx, d.rebind(coreTableExistsSQL.For(d.query)),
-				bareName,
-			).Scan(&count)
+			stmt, stmtArgs, err = d.rebindArgs(coreTableExistsSQL.For(d.query), bareName)
 		default:
-			err = db.QueryRowContext(ctx, d.rebind(coreTableExistsSQL.For(d.query)),
-				schemaName, bareName,
-			).Scan(&count)
+			stmt, stmtArgs, err = d.rebindArgs(coreTableExistsSQL.For(d.query), schemaName, bareName)
+		}
+		if err == nil {
+			err = db.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&count)
 		}
 		if err != nil {
 			// information_schema might not exist on all drivers; try a simple count instead.

@@ -12,6 +12,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // TestADroppedTenantsNotificationsRowsGoWithIt is cleat#2222's own test:
@@ -62,8 +63,8 @@ func TestADroppedTenantsNotificationsRowsGoWithIt(t *testing.T) {
 			webhookIDs := map[uuid.UUID]uuid.UUID{} // tenant -> webhook id
 
 			for _, tn := range []uuid.UUID{victim, bystander} {
-				if _, err := be.DB.ExecContext(ctx, plugin.Rebind(
-					`INSERT INTO admin.tenants (tenant_id, name) VALUES ($1, $2)`, dialect),
+				if _, err := plugintest.ExecRebound(t, ctx, be.DB,
+					dialect, `INSERT INTO admin.tenants (tenant_id, name) VALUES ($1, $2)`,
 					tn, "drop-tenant-notifications-"+tn.String()[:8]); err != nil {
 					t.Fatalf("seed admin.tenants for %s: %v", tn, err)
 				}
@@ -79,16 +80,16 @@ func TestADroppedTenantsNotificationsRowsGoWithIt(t *testing.T) {
 				webhookID := uuid.New()
 				webhookIDs[tn] = webhookID
 				now := time.Now()
-				if _, err := p.db.Exec(seedCtx, plugin.Rebind(`
+				if _, err := p.db.Exec(seedCtx, `
 					INSERT INTO webhook_config (tenant_id, id, url, secret_configured, events, enabled, created_at, updated_at)
 					VALUES ($1, $2, $3, $4, $5, true, $6, $7)
-				`, dialect), tn, webhookID, "https://example.com/hook", true, `["test.event"]`, now, now); err != nil {
+				`, tn, webhookID, "https://example.com/hook", true, `["test.event"]`, now, now); err != nil {
 					t.Fatalf("seed webhook_config for %s: %v", tn, err)
 				}
-				if _, err := p.db.Exec(seedCtx, plugin.Rebind(`
+				if _, err := p.db.Exec(seedCtx, `
 					INSERT INTO webhook_delivery (id, webhook_id, event_type, payload, status, attempt_count, next_attempt_at, created_at)
 					VALUES ($1, $2, 'test.event', '{}', 'pending', 0, $3, $3)
-				`, dialect), uuid.New(), webhookID, now); err != nil {
+				`, uuid.New(), webhookID, now); err != nil {
 					t.Fatalf("seed webhook_delivery for %s: %v", tn, err)
 				}
 			}
@@ -104,8 +105,8 @@ func TestADroppedTenantsNotificationsRowsGoWithIt(t *testing.T) {
 			countWebhookConfig := func(tn uuid.UUID) int {
 				t.Helper()
 				var n int
-				if err := readConn.QueryRowContext(ctx, plugin.Rebind(
-					`SELECT count(*) FROM webhook_config WHERE tenant_id = $1`, dialect),
+				if err := plugintest.QueryRowRebound(t, ctx, readConn,
+					dialect, `SELECT count(*) FROM webhook_config WHERE tenant_id = $1`,
 					tn).Scan(&n); err != nil {
 					t.Fatalf("count webhook_config for %s: %v", tn, err)
 				}
@@ -114,8 +115,8 @@ func TestADroppedTenantsNotificationsRowsGoWithIt(t *testing.T) {
 			countWebhookDelivery := func(webhookID uuid.UUID) int {
 				t.Helper()
 				var n int
-				if err := readConn.QueryRowContext(ctx, plugin.Rebind(
-					`SELECT count(*) FROM webhook_delivery WHERE webhook_id = $1`, dialect),
+				if err := plugintest.QueryRowRebound(t, ctx, readConn,
+					dialect, `SELECT count(*) FROM webhook_delivery WHERE webhook_id = $1`,
 					webhookID).Scan(&n); err != nil {
 					t.Fatalf("count webhook_delivery for %s: %v", webhookID, err)
 				}
@@ -161,8 +162,8 @@ func TestADroppedTenantsNotificationsRowsGoWithIt(t *testing.T) {
 			// drop_tenant that silently did nothing leaves the same surviving
 			// rows and would read as the same bug (cleat#1265).
 			var tenantRow int
-			if err := be.DB.QueryRowContext(ctx, plugin.Rebind(
-				`SELECT count(*) FROM admin.tenants WHERE tenant_id = $1`, dialect),
+			if err := plugintest.QueryRowRebound(t, ctx, be.DB,
+				dialect, `SELECT count(*) FROM admin.tenants WHERE tenant_id = $1`,
 				victim).Scan(&tenantRow); err != nil {
 				t.Fatalf("count admin.tenants: %v", err)
 			}

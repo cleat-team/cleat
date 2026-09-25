@@ -136,7 +136,7 @@ func TestTheAuditInsertWorksOnMySQLsIDColumn(t *testing.T) {
 	// assertion has to be on the ROW rather than on a returned error. That is
 	// also the honest shape: an operator's only signal was an empty table.
 	p := &Plugin{
-		db:      &engine.SQLDBAdapter{DB: db},
+		db:      &engine.SQLDBAdapter{DB: db, Dialect: plugin.DialectMySQL},
 		dialect: plugin.DialectMySQL,
 		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}

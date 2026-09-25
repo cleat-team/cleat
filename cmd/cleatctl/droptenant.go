@@ -301,8 +301,12 @@ func runDropTenant(ctx context.Context, db *sql.DB, d dialect, args []string) {
 	// policy as everything else, so the name is only readable on the connection
 	// whose tenant key was set above.
 	var tenantName string
-	nameSQL := plugin.Rebind(`SELECT name FROM admin.tenants WHERE tenant_id = $1`, d.query)
-	if err := counter.QueryRowContext(ctx, nameSQL, tenantID).Scan(&tenantName); err != nil {
+	nameSQL, nameArgs, err := plugin.RebindArgs(`SELECT name FROM admin.tenants WHERE tenant_id = $1`, d.query, []any{tenantID})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error rebinding tenant name lookup: %v\n", err)
+		osExit(1)
+	}
+	if err := counter.QueryRowContext(ctx, nameSQL, nameArgs...).Scan(&tenantName); err != nil {
 		if err == sql.ErrNoRows {
 			tenantName = "(no admin.tenants row for this ID)"
 		} else {
@@ -354,8 +358,11 @@ func runDropTenant(ctx context.Context, db *sql.DB, d dialect, args []string) {
 			// session the counts were read on -- and because the procedure
 			// restores whatever tenant key it found, which is the one set
 			// above.
-			_, err := mssqlConn.ExecContext(ctx,
-				plugin.Rebind(`EXEC admin.drop_tenant @tenant_id = $1`, d.query), tenantID)
+			dropSQL, dropArgs, err := plugin.RebindArgs(`EXEC admin.drop_tenant @tenant_id = $1`, d.query, []any{tenantID})
+			if err != nil {
+				return err
+			}
+			_, err = mssqlConn.ExecContext(ctx, dropSQL, dropArgs...)
 			return err
 		default:
 			_, err := db.ExecContext(ctx, `SELECT admin.drop_tenant($1, $2)`, tenantID, schema)

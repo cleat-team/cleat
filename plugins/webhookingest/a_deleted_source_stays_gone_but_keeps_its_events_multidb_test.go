@@ -20,6 +20,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // TestADeletedSourceStaysGoneButKeepsItsEvents is cleat#2199's route-level
@@ -155,8 +156,8 @@ func TestADeletedSourceStaysGoneButKeepsItsEvents(t *testing.T) {
 			// assertion exists to resolve.
 			readConn := be.CrossTenantConn(t, ctx, "cleat#2199: confirming a deleted source's row survives")
 			var rowStillThere int
-			if err := readConn.QueryRowContext(ctx, plugin.Rebind(
-				`SELECT count(*) FROM webhook_sources WHERE id = $1`, dialect),
+			if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect,
+				`SELECT count(*) FROM webhook_sources WHERE id = $1`,
 				sourceID).Scan(&rowStillThere); err != nil {
 				t.Fatalf("count webhook_sources row after delete: %v", err)
 			}

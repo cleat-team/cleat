@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -12,15 +14,52 @@ import (
 	"github.com/google/uuid"
 )
 
+// countPlaceholders returns how many distinct $N placeholders q contains, so
+// a test can hand rebindArgs a matching dummy args slice without hand-coding
+// each statement's arity.
+func countPlaceholders(q string) int {
+	max := 0
+	for _, n := range dollarRENumbers(q) {
+		if n > max {
+			max = n
+		}
+	}
+	return max
+}
+
+func dollarRENumbers(q string) []int {
+	var out []int
+	for _, m := range regexp.MustCompile(`\$(\d+)`).FindAllStringSubmatch(q, -1) {
+		n, err := strconv.Atoi(m[1])
+		if err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func dummyArgs(n int) []any {
+	args := make([]any, n)
+	for i := range args {
+		args[i] = i + 1
+	}
+	return args
+}
+
 // TestQuotaStatementsRebindPerDialect asserts quota.go's statements are
-// written in the portable $N form and that d.rebind actually reaches all
-// three placeholder forms -- the same check
+// written in the portable $N form and that d.rebindArgs actually reaches
+// all three placeholder forms -- the same check
 // TestRebindRewritesEveryPlaceholderInThisPackage makes for the rest of the
 // package, applied to this file's own statements rather than assumed of
 // them. A statement that happened to work on postgres because nobody
 // rewrote its placeholders would pass every other test in this file, since
 // TestQuotaCommandWorksOnEveryDialect drives postgres through the same
-// d.rebind call and would not notice a no-op.
+// d.rebindArgs call and would not notice a no-op.
+//
+// This drives rebindArgs, not the bare rebind text-only helper: MySQL's
+// $N -> ? rewrite now happens only inside RebindArgs, alongside the arg
+// reorder, so a text-only check that called rebind here would see $1
+// unchanged and wrongly report every statement as broken (cleat#2259).
 func TestQuotaStatementsRebindPerDialect(t *testing.T) {
 	for _, q := range []string{quotaReadSQL, quotaInsertSQL, quotaUpdateSQL, quotaListTenantSQL, quotaListAllSQL} {
 		// quotaListAllSQL takes no parameters at all -- it lists every tenant --
@@ -28,18 +67,28 @@ func TestQuotaStatementsRebindPerDialect(t *testing.T) {
 		if !strings.Contains(q, "$1") {
 			continue
 		}
-		pg := dialectPostgres.rebind(q)
+		n := countPlaceholders(q)
+		pg, _, err := dialectPostgres.rebindArgs(q, dummyArgs(n)...)
+		if err != nil {
+			t.Fatalf("postgres rebindArgs: %v", err)
+		}
 		if !strings.Contains(pg, "$1") {
 			t.Errorf("postgres arm lost its own $N form: %q", pg)
 		}
-		my := dialectMySQL.rebind(q)
+		my, _, err := dialectMySQL.rebindArgs(q, dummyArgs(n)...)
+		if err != nil {
+			t.Fatalf("mysql rebindArgs: %v", err)
+		}
 		if strings.Contains(my, "$1") {
 			t.Errorf("mysql arm still carries $1: %q", my)
 		}
 		if strings.Contains(q, "$1") && !strings.Contains(my, "?") {
 			t.Errorf("mysql arm has no positional ? placeholder: %q", my)
 		}
-		ms := dialectMSSQL.rebind(q)
+		ms, _, err := dialectMSSQL.rebindArgs(q, dummyArgs(n)...)
+		if err != nil {
+			t.Fatalf("mssql rebindArgs: %v", err)
+		}
 		if strings.Contains(ms, "$1") {
 			t.Errorf("mssql arm still carries $1: %q", ms)
 		}
@@ -57,7 +106,11 @@ func TestQuotaStatementsRebindPerDialect(t *testing.T) {
 	// SYSUTCDATETIME() call, on any dialect, ever again.
 	for _, d := range []dialect{dialectPostgres, dialectMySQL, dialectMSSQL} {
 		for _, q := range []string{quotaInsertSQL, quotaUpdateSQL} {
-			got := strings.ToLower(d.rebind(q))
+			rebound, _, err := d.rebindArgs(q, dummyArgs(countPlaceholders(q))...)
+			if err != nil {
+				t.Fatalf("%s rebindArgs: %v", d.name, err)
+			}
+			got := strings.ToLower(rebound)
 			if strings.Contains(got, "now(") || strings.Contains(got, "sysutcdatetime") {
 				t.Errorf("%s: statement still calls a SQL-side now expression: %q", d.name, got)
 			}

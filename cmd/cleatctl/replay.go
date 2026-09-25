@@ -281,10 +281,14 @@ func loadWorkflowInstance(ctx context.Context, db *sql.DB, d dialect, id string)
 	// property of a workflow DEFINITION, nothing downstream of this function
 	// reads it, and joining workflow_defs to populate a field neither command
 	// prints would be inventing a requirement to justify a column name.
-	row := db.QueryRowContext(ctx, d.rebind(loadWorkflowInstanceSQL().For(d.query)), id)
+	stmt, stmtArgs, err := d.rebindArgs(loadWorkflowInstanceSQL().For(d.query), id)
+	if err != nil {
+		return nil, err
+	}
+	row := db.QueryRowContext(ctx, stmt, stmtArgs...)
 
 	var inst engine.WorkflowInstance
-	err := row.Scan(
+	err = row.Scan(
 		&inst.ID, &inst.DefName, &inst.DefVersion,
 		&inst.Status, &inst.Input, &inst.Result, &inst.Error,
 		&inst.ErrorCode, &inst.ErrorOp, &inst.AssignedTo,

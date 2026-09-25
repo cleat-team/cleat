@@ -79,15 +79,25 @@ func RunEveryArm(t *testing.T, p plugin.Plugin, arms []Arm) {
 
 			for _, a := range arms {
 				t.Run(a.Name, func(t *testing.T) {
-					stmt := plugin.Rebind(a.Q.For(dialect), dialect)
+					// RebindArgs, not Rebind: this hands the rebound statement
+					// straight to a raw *sql.DB, bypassing plugin.PluginDB
+					// entirely, so it is one of the few call sites that must
+					// reorder MySQL's args itself rather than relying on an
+					// adapter to do it. Rebind alone would leave $N untouched
+					// for MySQL (cleat#2259) and every MySQL arm would fail
+					// with a syntax error near "$1".
+					stmt, args, err := plugin.RebindArgs(a.Q.For(dialect), dialect, a.Args)
+					if err != nil {
+						t.Fatalf("%s: RebindArgs on %s: %v", a.Name, be.Name, err)
+					}
 					if a.Exec {
-						if _, err := be.DB.ExecContext(ctx, stmt, a.Args...); err != nil {
+						if _, err := be.DB.ExecContext(ctx, stmt, args...); err != nil {
 							t.Errorf("%s was rejected by a real %s server:\n  %v\n  %s",
 								a.Name, be.Name, err, stmt)
 						}
 						return
 					}
-					rows, err := be.DB.QueryContext(ctx, stmt, a.Args...)
+					rows, err := be.DB.QueryContext(ctx, stmt, args...)
 					if err != nil {
 						t.Errorf("%s was rejected by a real %s server:\n  %v\n  %s",
 							a.Name, be.Name, err, stmt)

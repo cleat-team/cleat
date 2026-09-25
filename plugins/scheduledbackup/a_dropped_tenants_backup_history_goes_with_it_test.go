@@ -12,6 +12,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // TestADroppedTenantsBackupHistoryGoesWithIt is cleat#2234's own test.
@@ -64,8 +65,8 @@ func TestADroppedTenantsBackupHistoryGoesWithIt(t *testing.T) {
 			configIDs := map[uuid.UUID]uuid.UUID{} // tenant -> backup_config id
 
 			for _, tn := range []uuid.UUID{victim, bystander} {
-				if _, err := be.DB.ExecContext(ctx, plugin.Rebind(
-					`INSERT INTO admin.tenants (tenant_id, name) VALUES ($1, $2)`, dialect),
+				if _, err := plugintest.ExecRebound(t, ctx, be.DB, dialect,
+					`INSERT INTO admin.tenants (tenant_id, name) VALUES ($1, $2)`,
 					tn, "drop-tenant-scheduledbackup-"+tn.String()[:8]); err != nil {
 					t.Fatalf("seed admin.tenants for %s: %v", tn, err)
 				}
@@ -79,16 +80,16 @@ func TestADroppedTenantsBackupHistoryGoesWithIt(t *testing.T) {
 				configID := uuid.New()
 				configIDs[tn] = configID
 				now := time.Now()
-				if _, err := p.db.Exec(seedCtx, plugin.Rebind(`
+				if _, err := p.db.Exec(seedCtx, `
 					INSERT INTO backup_config (tenant_id, id, name, cron, s3_bucket, s3_prefix, retention_days, enabled, created_at, updated_at)
 					VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $8)
-				`, dialect), tn, configID, "nightly", "0 2 * * *", "test-bucket", "backups/", 30, now); err != nil {
+				`, tn, configID, "nightly", "0 2 * * *", "test-bucket", "backups/", 30, now); err != nil {
 					t.Fatalf("seed backup_config for %s: %v", tn, err)
 				}
-				if _, err := p.db.Exec(seedCtx, plugin.Rebind(`
+				if _, err := p.db.Exec(seedCtx, `
 					INSERT INTO backup_history (id, config_id, tenant_id, filename, size_bytes, status, started_at, completed_at, created_at)
 					VALUES ($1, $2, $3, $4, $5, 'completed', $6, $6, $6)
-				`, dialect), uuid.New(), configID, tn, "backup-1.dump", int64(1024), now); err != nil {
+				`, uuid.New(), configID, tn, "backup-1.dump", int64(1024), now); err != nil {
 					t.Fatalf("seed backup_history for %s: %v", tn, err)
 				}
 			}
@@ -104,8 +105,8 @@ func TestADroppedTenantsBackupHistoryGoesWithIt(t *testing.T) {
 			countBackupConfig := func(tn uuid.UUID) int {
 				t.Helper()
 				var n int
-				if err := readConn.QueryRowContext(ctx, plugin.Rebind(
-					`SELECT count(*) FROM backup_config WHERE tenant_id = $1`, dialect),
+				if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect,
+					`SELECT count(*) FROM backup_config WHERE tenant_id = $1`,
 					tn).Scan(&n); err != nil {
 					t.Fatalf("count backup_config for %s: %v", tn, err)
 				}
@@ -114,8 +115,8 @@ func TestADroppedTenantsBackupHistoryGoesWithIt(t *testing.T) {
 			countBackupHistory := func(configID uuid.UUID) int {
 				t.Helper()
 				var n int
-				if err := readConn.QueryRowContext(ctx, plugin.Rebind(
-					`SELECT count(*) FROM backup_history WHERE config_id = $1`, dialect),
+				if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect,
+					`SELECT count(*) FROM backup_history WHERE config_id = $1`,
 					configID).Scan(&n); err != nil {
 					t.Fatalf("count backup_history for %s: %v", configID, err)
 				}
@@ -161,8 +162,8 @@ func TestADroppedTenantsBackupHistoryGoesWithIt(t *testing.T) {
 			// drop_tenant that silently did nothing leaves the same surviving
 			// rows and would read as the same bug (cleat#1265).
 			var tenantRow int
-			if err := be.DB.QueryRowContext(ctx, plugin.Rebind(
-				`SELECT count(*) FROM admin.tenants WHERE tenant_id = $1`, dialect),
+			if err := plugintest.QueryRowRebound(t, ctx, be.DB, dialect,
+				`SELECT count(*) FROM admin.tenants WHERE tenant_id = $1`,
 				victim).Scan(&tenantRow); err != nil {
 				t.Fatalf("count admin.tenants: %v", err)
 			}

@@ -43,14 +43,21 @@ var (
 	dialectMSSQL    = dialect{name: "mssql", driver: "sqlserver", query: plugin.DialectMSSQL}
 )
 
-// rebind rewrites a PostgreSQL-shaped statement for this dialect.
+// rebindArgs rewrites a PostgreSQL-shaped statement AND reorders its args
+// for this dialect. Every call site in this package hands its result
+// straight to a raw *sql.DB/*sql.Tx/*sql.Conn -- cleatctl has no
+// plugin.PluginDB adapter to do this centrally -- so this is the one place
+// in the package responsible for it, the same role
+// engine/plugindb_adapter.go's SQLDBAdapter plays for plugins.
 //
-// Statements in this package are written with $N and now(), the PostgreSQL
-// forms, and rewritten here. Where a statement cannot be rewritten -- a cast,
-// an information_schema column that does not exist -- it is a plugin.Query
-// with an explicit arm instead, because a rewrite that silently does nothing
-// is worse than one that is not attempted.
-func (d dialect) rebind(q string) string { return plugin.Rebind(q, d.query) }
+// This is not optional on MySQL (cleat#2259): plugin.Rebind is the identity
+// there, so a caller that used rebind (or plugin.Rebind directly) instead
+// of this would send literal "$1" text to the driver, which is a syntax
+// error, not a silent mis-bind -- loud, but still a break every one of
+// these call sites would have hit the first time it ran against MySQL.
+func (d dialect) rebindArgs(q string, args ...any) (string, []any, error) {
+	return plugin.RebindArgs(q, d.query, args)
+}
 
 // detectDialect infers the dialect from the DSN's shape.
 //
@@ -189,10 +196,11 @@ func (d dialect) tenantRuntimeQualifier(ctx context.Context, db *sql.DB, tenantI
 	// TestEveryInlineStatementParsesOnPostgres instead of needing a pin there.
 	// A pin would have been the easy route and it would have removed the only
 	// check that this statement can run at all.
-	if err := db.QueryRowContext(ctx,
-		d.rebind(`SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = $1`),
-		name,
-	).Scan(&n); err != nil {
+	stmt, stmtArgs, err := d.rebindArgs(`SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = $1`, name)
+	if err != nil {
+		return "", false, fmt.Errorf("rebind tenant database lookup for %s: %w", name, err)
+	}
+	if err := db.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&n); err != nil {
 		return "", false, fmt.Errorf("look for tenant database %s: %w", name, err)
 	}
 	if n == 0 {

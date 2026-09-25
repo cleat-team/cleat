@@ -20,6 +20,7 @@ import (
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/internal/tenantctx"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // TestSendMessageCanonicalizesAnUppercaseCallContextTenant is cleat-review's
@@ -115,8 +116,9 @@ func TestSendMessageCanonicalizesAnUppercaseCallContextTenant(t *testing.T) {
 			// resolveSlackTenant's own canonicalization now always produces,
 			// regardless of what case CAST(tenant_id AS CHAR(36)) rendered.
 			teamID := "T" + strings.ToUpper(strings.ReplaceAll(uuid.New().String(), "-", ""))[:20]
-			insertWorkspace := plugin.Rebind(`INSERT INTO slack_workspace (team_id, tenant_id) VALUES ($1, $2)`, dialect)
-			if _, err := be.DB.ExecContext(ctx, insertWorkspace, teamID, tenantID.String()); err != nil {
+			if _, err := plugintest.ExecRebound(t, ctx, be.DB, dialect,
+				`INSERT INTO slack_workspace (team_id, tenant_id) VALUES ($1, $2)`,
+				teamID, tenantID.String()); err != nil {
 				t.Fatalf("seed slack_workspace: %v", err)
 			}
 

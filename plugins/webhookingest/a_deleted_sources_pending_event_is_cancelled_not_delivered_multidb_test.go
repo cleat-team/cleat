@@ -21,6 +21,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // TestADeletedSourcesPendingEventIsCancelledNotDelivered is cleat-review's
@@ -137,8 +138,8 @@ func TestADeletedSourcesPendingEventIsCancelledNotDelivered(t *testing.T) {
 			// for the wrong reason (there being nothing left to cancel).
 			var processedBefore bool
 			var statusBefore string
-			if err := readConn.QueryRowContext(ctx, plugin.Rebind(
-				`SELECT processed, COALESCE(status, '') FROM webhook_events WHERE id = $1`, dialect),
+			if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect,
+				`SELECT processed, COALESCE(status, '') FROM webhook_events WHERE id = $1`,
 				eventID).Scan(&processedBefore, &statusBefore); err != nil {
 				t.Fatalf("PRECONDITION: read event before delete: %v", err)
 			}
@@ -156,8 +157,8 @@ func TestADeletedSourcesPendingEventIsCancelledNotDelivered(t *testing.T) {
 			// Without this the sweep below would skip the row on its own
 			// recency guard regardless of whether the cancellation fix works,
 			// proving nothing either way.
-			if _, err := readConn.ExecContext(ctx, plugin.Rebind(
-				`UPDATE webhook_events SET received_at = $1 WHERE id = $2`, dialect),
+			if _, err := plugintest.ExecRebound(t, ctx, readConn, dialect,
+				`UPDATE webhook_events SET received_at = $1 WHERE id = $2`,
 				time.Now().Add(-30*time.Second), eventID); err != nil {
 				t.Fatalf("backdate received_at: %v", err)
 			}
@@ -176,8 +177,8 @@ func TestADeletedSourcesPendingEventIsCancelledNotDelivered(t *testing.T) {
 			// soft-delete.
 			var processedAfter bool
 			var statusAfter string
-			if err := readConn.QueryRowContext(ctx, plugin.Rebind(
-				`SELECT processed, status FROM webhook_events WHERE id = $1`, dialect),
+			if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect,
+				`SELECT processed, status FROM webhook_events WHERE id = $1`,
 				eventID).Scan(&processedAfter, &statusAfter); err != nil {
 				t.Fatalf("read event after delete: %v", err)
 			}
@@ -229,11 +230,11 @@ func TestADeletedSourcesPendingEventIsCancelledNotDelivered(t *testing.T) {
 			// equivalent of losing that race every time, with no goroutines
 			// or timing needed.
 			raceEventID := uuid.New()
-			rowsInserted, err := p.db.Exec(tenantCtx, plugin.Rebind(`
+			rowsInserted, err := p.db.Exec(tenantCtx, `
 				INSERT INTO webhook_events (id, source_id, tenant_id, event_type, headers, payload, received_at, processed)
 				SELECT $1, $2, $3, $4, $5, $6, $7, false
 				WHERE EXISTS (SELECT 1 FROM webhook_sources WHERE id = $8 AND deleted_at IS NULL)
-			`, dialect), raceEventID, sourceID, tenantID, "raced.after.delete", "{}", "{}", time.Now(), sourceID)
+			`, raceEventID, sourceID, tenantID, "raced.after.delete", "{}", "{}", time.Now(), sourceID)
 			if err != nil {
 				t.Fatalf("race-guarded INSERT against a deleted source: %v", err)
 			}

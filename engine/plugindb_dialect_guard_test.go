@@ -33,12 +33,20 @@ import (
 // ~235 adapter constructions in the tree and nearly all are single-backend
 // PostgreSQL fixtures, where no rewrite is the right answer. Requiring the
 // field everywhere would be a sweep that teaches people to type `Dialect:
-// DialectPostgres` without meaning it. The guard therefore covers the two
+// DialectPostgres` without meaning it. The guard therefore covers the three
 // places where omitting it is definitely wrong:
 //
 //   - non-test code, which runs against whatever backend the operator has
 //   - test files that use NewPluginTestBackends, which by construction run
 //     against MySQL and SQL Server too
+//   - test files that open a MySQL or SQL Server *sql.DB directly (their own
+//     sql.Open call names the driver), even when they never loop over all
+//     three dialects. cleat#2259/#2280's review found exactly this gap:
+//     plugins/auditlog/audit_insert_dialect_test.go opens its own MySQL
+//     connection and never went near NewPluginTestBackends, so the version
+//     of this guard that only recognised that helper passed it clean while
+//     its SQLDBAdapter{DB: db} -- no Dialect -- silently sent every
+//     statement to MySQL still carrying $N text.
 func TestEveryDialectSensitiveAdapterCarriesItsDialect(t *testing.T) {
 	files := trackedGoFiles(t)
 	if len(files) < 500 {
@@ -54,9 +62,8 @@ func TestEveryDialectSensitiveAdapterCarriesItsDialect(t *testing.T) {
 			continue
 		}
 		isTest := strings.HasSuffix(path, "_test.go")
-		multiBackend := strings.Contains(src, "NewPluginTestBackends")
-		if isTest && !multiBackend {
-			continue // single-backend fixture: a zero Dialect is correct
+		if isTest && !isDialectSensitiveTestFile(src) {
+			continue // single-backend (or non-MySQL/MSSQL) fixture: a zero Dialect is correct
 		}
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, path, src, 0)
@@ -101,6 +108,22 @@ func TestEveryDialectSensitiveAdapterCarriesItsDialect(t *testing.T) {
 		checked, len(files))
 }
 
+// isDialectSensitiveTestFile reports whether path's source is one of the
+// three places TestEveryDialectSensitiveAdapterCarriesItsDialect's doc
+// comment above describes -- a multi-backend loop (NewPluginTestBackends),
+// or a file that opens a MySQL or SQL Server *sql.DB directly.
+func isDialectSensitiveTestFile(src string) bool {
+	if strings.Contains(src, "NewPluginTestBackends") {
+		return true
+	}
+	for _, driver := range []string{`sql.Open("mysql"`, `sql.Open("sqlserver"`, `sql.Open("mssql"`} {
+		if strings.Contains(src, driver) {
+			return true
+		}
+	}
+	return false
+}
+
 // The guard must be able to see a violation. Without this, every broken
 // version of the scan above also passes.
 func TestTheDialectGuardCanSeeAViolation(t *testing.T) {
@@ -141,6 +164,39 @@ func f(db any) { _ = &engine.SQLDBAdapter{DB: db, Dialect: "mssql"} }
 	}
 	if got := count(good); got != 0 {
 		t.Errorf("the guard flags a present Dialect: got %d, want 0", got)
+	}
+}
+
+// TestDialectSensitiveTestFileDetectsDirectMySQLOpen is a known-positive for
+// the exact gap cleat#2259/#2280's review found: a _test.go file that opens
+// its own MySQL (or SQL Server) *sql.DB and never goes near
+// NewPluginTestBackends is just as dialect-sensitive as a multi-backend loop,
+// and the version of isDialectSensitiveTestFile that only recognised
+// NewPluginTestBackends excluded it -- so plugins/auditlog/
+// audit_insert_dialect_test.go's SQLDBAdapter{DB: db} with no Dialect passed
+// this guard clean while silently sending $N-shaped statements straight to
+// MySQL.
+func TestDialectSensitiveTestFileDetectsDirectMySQLOpen(t *testing.T) {
+	directMySQL := `package x
+import "database/sql"
+func f() { db, _ := sql.Open("mysql", "dsn") }
+`
+	directMSSQL := `package x
+import "database/sql"
+func f() { db, _ := sql.Open("sqlserver", "dsn") }
+`
+	postgresOnly := `package x
+import "database/sql"
+func f() { db, _ := sql.Open("postgres", "dsn") }
+`
+	if !isDialectSensitiveTestFile(directMySQL) {
+		t.Error("a direct sql.Open(\"mysql\", ...) test file was not flagged as dialect-sensitive")
+	}
+	if !isDialectSensitiveTestFile(directMSSQL) {
+		t.Error("a direct sql.Open(\"sqlserver\", ...) test file was not flagged as dialect-sensitive")
+	}
+	if isDialectSensitiveTestFile(postgresOnly) {
+		t.Error("a postgres-only fixture, with no NewPluginTestBackends and no MySQL/MSSQL open, was flagged as dialect-sensitive")
 	}
 }
 

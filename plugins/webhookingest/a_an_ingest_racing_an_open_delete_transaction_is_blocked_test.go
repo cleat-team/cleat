@@ -25,6 +25,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // TestAnIngestRacingAnOpenDeleteTransactionIsBlocked pins cleat-review's
@@ -230,11 +231,11 @@ func runIngestRaceTest(t *testing.T, dialect plugin.Dialect, db *sql.DB) {
 	if err != nil {
 		t.Fatalf("begin delete tx: %v", err)
 	}
-	if _, err := deleteTx.Exec(seedCtx, plugin.Rebind(`
+	if _, err := deleteTx.Exec(seedCtx, `
 			UPDATE webhook_sources
 			SET enabled = false, deleted_at = now()
 			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
-		`, dialect), sourceID, tenantID); err != nil {
+		`, sourceID, tenantID); err != nil {
 		t.Fatalf("apply soft-delete inside open tx: %v", err)
 	}
 
@@ -291,8 +292,8 @@ func runIngestRaceTest(t *testing.T, dialect plugin.Dialect, db *sql.DB) {
 	}
 
 	var eventCount int
-	if err := db.QueryRowContext(ctx, plugin.Rebind(
-		`SELECT count(*) FROM webhook_events WHERE source_id = $1`, dialect),
+	if err := plugintest.QueryRowRebound(t, ctx, db, dialect,
+		`SELECT count(*) FROM webhook_events WHERE source_id = $1`,
 		sourceID).Scan(&eventCount); err != nil {
 		t.Fatalf("count webhook_events for source: %v", err)
 	}

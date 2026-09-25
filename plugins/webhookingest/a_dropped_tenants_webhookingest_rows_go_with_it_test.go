@@ -12,6 +12,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // TestADroppedTenantsWebhookIngestRowsGoWithIt pins the thing cleat#2199's
@@ -59,8 +60,8 @@ func TestADroppedTenantsWebhookIngestRowsGoWithIt(t *testing.T) {
 			bystander := uuid.New()
 
 			for _, tn := range []uuid.UUID{victim, bystander} {
-				if _, err := be.DB.ExecContext(ctx, plugin.Rebind(
-					`INSERT INTO admin.tenants (tenant_id, name) VALUES ($1, $2)`, dialect),
+				if _, err := plugintest.ExecRebound(t, ctx, be.DB, dialect,
+					`INSERT INTO admin.tenants (tenant_id, name) VALUES ($1, $2)`,
 					tn, "drop-tenant-webhookingest-"+tn.String()[:8]); err != nil {
 					t.Fatalf("seed admin.tenants for %s: %v", tn, err)
 				}
@@ -73,16 +74,16 @@ func TestADroppedTenantsWebhookIngestRowsGoWithIt(t *testing.T) {
 				// multidb_test.go for the same shape).
 				seedCtx := plugin.ForTenant(ctx, tn)
 				sourceID := uuid.New()
-				if _, err := p.db.Exec(seedCtx, plugin.Rebind(`
+				if _, err := p.db.Exec(seedCtx, `
 					INSERT INTO webhook_sources (tenant_id, id, name, enabled)
 					VALUES ($1, $2, $3, $4)
-				`, dialect), tn, sourceID, "drop-tenant-probe", true); err != nil {
+				`, tn, sourceID, "drop-tenant-probe", true); err != nil {
 					t.Fatalf("seed webhook_sources for %s: %v", tn, err)
 				}
-				if _, err := p.db.Exec(seedCtx, plugin.Rebind(`
+				if _, err := p.db.Exec(seedCtx, `
 					INSERT INTO webhook_events (id, source_id, tenant_id, received_at)
 					VALUES ($1, $2, $3, $4)
-				`, dialect), uuid.New(), sourceID, tn, time.Now()); err != nil {
+				`, uuid.New(), sourceID, tn, time.Now()); err != nil {
 					t.Fatalf("seed webhook_events for %s: %v", tn, err)
 				}
 			}
@@ -98,8 +99,8 @@ func TestADroppedTenantsWebhookIngestRowsGoWithIt(t *testing.T) {
 			countSources := func(tn uuid.UUID) int {
 				t.Helper()
 				var n int
-				if err := readConn.QueryRowContext(ctx, plugin.Rebind(
-					`SELECT count(*) FROM webhook_sources WHERE tenant_id = $1`, dialect),
+				if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect,
+					`SELECT count(*) FROM webhook_sources WHERE tenant_id = $1`,
 					tn).Scan(&n); err != nil {
 					t.Fatalf("count webhook_sources for %s: %v", tn, err)
 				}
@@ -108,8 +109,8 @@ func TestADroppedTenantsWebhookIngestRowsGoWithIt(t *testing.T) {
 			countEvents := func(tn uuid.UUID) int {
 				t.Helper()
 				var n int
-				if err := readConn.QueryRowContext(ctx, plugin.Rebind(
-					`SELECT count(*) FROM webhook_events WHERE tenant_id = $1`, dialect),
+				if err := plugintest.QueryRowRebound(t, ctx, readConn, dialect,
+					`SELECT count(*) FROM webhook_events WHERE tenant_id = $1`,
 					tn).Scan(&n); err != nil {
 					t.Fatalf("count webhook_events for %s: %v", tn, err)
 				}
@@ -157,8 +158,8 @@ func TestADroppedTenantsWebhookIngestRowsGoWithIt(t *testing.T) {
 			// drop_tenant that silently did nothing leaves the same surviving
 			// rows and would read as the same bug (cleat#1265).
 			var tenantRow int
-			if err := be.DB.QueryRowContext(ctx, plugin.Rebind(
-				`SELECT count(*) FROM admin.tenants WHERE tenant_id = $1`, dialect),
+			if err := plugintest.QueryRowRebound(t, ctx, be.DB, dialect,
+				`SELECT count(*) FROM admin.tenants WHERE tenant_id = $1`,
 				victim).Scan(&tenantRow); err != nil {
 				t.Fatalf("count admin.tenants: %v", err)
 			}

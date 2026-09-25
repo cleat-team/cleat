@@ -10,6 +10,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // TestARetryIsStampedWithTheDatabaseClock is cleat#1992/#2172's real-database
@@ -62,16 +63,16 @@ func TestARetryIsStampedWithTheDatabaseClock(t *testing.T) {
 			seedCtx := plugin.ForTenant(ctx, tenantID)
 			webhookID := uuid.New()
 			deliveryID := uuid.New()
-			if _, err := p.db.Exec(seedCtx, plugin.Rebind(`
+			if _, err := p.db.Exec(seedCtx, `
 				INSERT INTO webhook_config (tenant_id, id, url, secret_configured, events, enabled, created_at, updated_at)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			`, dialect), tenantID, webhookID, "http://127.0.0.1:1/unreachable", false, "[]", true, time.Now(), time.Now()); err != nil {
+			`, tenantID, webhookID, "http://127.0.0.1:1/unreachable", false, "[]", true, time.Now(), time.Now()); err != nil {
 				t.Fatalf("seed webhook_config: %v", err)
 			}
-			if _, err := p.db.Exec(seedCtx, plugin.Rebind(`
+			if _, err := p.db.Exec(seedCtx, `
 				INSERT INTO webhook_delivery (id, webhook_id, event_type, payload, status, attempt_count, next_attempt_at, created_at)
 				VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6)
-			`, dialect), deliveryID, webhookID, "test.event", `{}`, time.Now(), time.Now()); err != nil {
+			`, deliveryID, webhookID, "test.event", `{}`, time.Now(), time.Now()); err != nil {
 				t.Fatalf("seed webhook_delivery: %v", err)
 			}
 
@@ -100,11 +101,11 @@ func TestARetryIsStampedWithTheDatabaseClock(t *testing.T) {
 			if diffExpr == "" {
 				diffExpr = "EXTRACT(EPOCH FROM (next_attempt_at - " + nowExpr + "))"
 			}
-			row := be.DB.QueryRowContext(ctx, plugin.Rebind(`
+			row := plugintest.QueryRowRebound(t, ctx, be.DB, dialect, `
 				SELECT status, attempt_count, `+diffExpr+`
 				FROM webhook_delivery
 				WHERE id = $1
-			`, dialect), deliveryID)
+			`, deliveryID)
 			if err := row.Scan(&status, &attemptCount, &secondsUntilDue); err != nil {
 				t.Fatalf("read back delivery: %v", err)
 			}

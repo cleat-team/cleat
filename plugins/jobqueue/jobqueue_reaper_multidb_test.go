@@ -38,6 +38,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 func TestReaperResetsAStuckJob_MultiBackend(t *testing.T) {
@@ -82,16 +83,16 @@ func TestReaperResetsAStuckJob_MultiBackend(t *testing.T) {
 			// 2026-09-10: one run of these tests left 5 rows in task_queue and
 			// 2 in schedules (cleat#1148).
 			defer func() {
-				if _, err := fixtureDB.ExecContext(context.Background(),
-					plugin.Rebind(`DELETE FROM task_queue WHERE tenant_id = $1`, dialect), tenant); err != nil {
+				if _, err := plugintest.ExecRebound(t, context.Background(), fixtureDB, dialect,
+					`DELETE FROM task_queue WHERE tenant_id = $1`, tenant); err != nil {
 					t.Errorf("cleanup task_queue on %s: %v", be.Name, err)
 				}
 			}()
 
 			stuckSince := time.Now().UTC().Add(-30 * time.Minute)
-			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 				`INSERT INTO task_queue (tenant_id, queue_name, job_id, status, started_at)
-				 VALUES ($1, $2, $3, 'running', $4)`, dialect),
+				 VALUES ($1, $2, $3, 'running', $4)`,
 				tenant, "reaper-test", job, stuckSince); err != nil {
 				t.Fatalf("insert stuck job on %s: %v", be.Name, err)
 			}
@@ -105,9 +106,9 @@ func TestReaperResetsAStuckJob_MultiBackend(t *testing.T) {
 			}
 
 			var status string
-			if err := fixtureDB.QueryRowContext(ctx, plugin.Rebind(
+			if err := plugintest.QueryRowRebound(t, ctx, fixtureDB, dialect,
 				`SELECT status FROM task_queue WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3`,
-				dialect), tenant, "reaper-test", job).Scan(&status); err != nil {
+				tenant, "reaper-test", job).Scan(&status); err != nil {
 				t.Fatalf("read back on %s: %v", be.Name, err)
 			}
 			if status != "pending" {
@@ -180,8 +181,8 @@ func TestReaperTouchesNothingItShouldNot_MultiBackend(t *testing.T) {
 			// 2026-09-10: one run of these tests left 5 rows in task_queue and
 			// 2 in schedules (cleat#1148).
 			defer func() {
-				if _, err := fixtureDB.ExecContext(context.Background(),
-					plugin.Rebind(`DELETE FROM task_queue WHERE tenant_id = $1`, dialect), tenant); err != nil {
+				if _, err := plugintest.ExecRebound(t, context.Background(), fixtureDB, dialect,
+					`DELETE FROM task_queue WHERE tenant_id = $1`, tenant); err != nil {
 					t.Errorf("cleanup task_queue on %s: %v", be.Name, err)
 				}
 			}()
@@ -208,9 +209,9 @@ func TestReaperTouchesNothingItShouldNot_MultiBackend(t *testing.T) {
 			for _, r := range rows {
 				id := uuid.New()
 				ids[r.name] = id
-				if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 					`INSERT INTO task_queue (tenant_id, queue_name, job_id, status, started_at)
-					 VALUES ($1, $2, $3, $4, $5)`, dialect),
+					 VALUES ($1, $2, $3, $4, $5)`,
 					tenant, queue, id, r.status, r.startedAt); err != nil {
 					t.Fatalf("insert %s on %s: %v", r.name, be.Name, err)
 				}
@@ -224,9 +225,9 @@ func TestReaperTouchesNothingItShouldNot_MultiBackend(t *testing.T) {
 			for _, r := range rows {
 				var status string
 				var startedAt sql.NullTime
-				if err := fixtureDB.QueryRowContext(ctx, plugin.Rebind(
+				if err := plugintest.QueryRowRebound(t, ctx, fixtureDB, dialect,
 					`SELECT status, started_at FROM task_queue
-					 WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3`, dialect),
+					 WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3`,
 					tenant, queue, ids[r.name]).Scan(&status, &startedAt); err != nil {
 					t.Fatalf("read back %s on %s: %v", r.name, be.Name, err)
 				}

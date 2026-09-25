@@ -185,13 +185,22 @@ func runMapWorkspace(ctx context.Context, db *sql.DB, d dialect, args []string) 
 	}
 
 	var existingTenant string
-	err = db.QueryRowContext(ctx, d.rebind(slackWorkspaceGetSQL), teamID).Scan(&existingTenant)
+	getStmt, getArgs, err := d.rebindArgs(slackWorkspaceGetSQL, teamID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rebind lookup for %s: %v\n", teamID, err)
+		osExit(1)
+		return
+	}
+	err = db.QueryRowContext(ctx, getStmt, getArgs...).Scan(&existingTenant)
 	switch {
 	case err == sql.ErrNoRows:
-		_, err := db.ExecContext(ctx,
-			d.rebind(slackWorkspaceInsertSQL),
-			teamID, tenantID, time.Now().UTC())
-		if err != nil {
+		insertStmt, insertArgs, rerr := d.rebindArgs(slackWorkspaceInsertSQL, teamID, tenantID, time.Now().UTC())
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "rebind mapping %s -> %s: %v\n", teamID, tenantID, rerr)
+			osExit(1)
+			return
+		}
+		if _, err := db.ExecContext(ctx, insertStmt, insertArgs...); err != nil {
 			fmt.Fprintf(os.Stderr, "mapping %s -> %s: %v\n", teamID, tenantID, err)
 			osExit(1)
 			return
@@ -209,8 +218,13 @@ func runMapWorkspace(ctx context.Context, db *sql.DB, d dialect, args []string) 
 		osExit(1)
 		return
 	default:
-		_, err := db.ExecContext(ctx, d.rebind(slackWorkspaceUpdateSQL), tenantID, teamID)
-		if err != nil {
+		updateStmt, updateArgs, rerr := d.rebindArgs(slackWorkspaceUpdateSQL, tenantID, teamID)
+		if rerr != nil {
+			fmt.Fprintf(os.Stderr, "rebind reassigning %s: %v\n", teamID, rerr)
+			osExit(1)
+			return
+		}
+		if _, err := db.ExecContext(ctx, updateStmt, updateArgs...); err != nil {
 			fmt.Fprintf(os.Stderr, "reassigning %s: %v\n", teamID, err)
 			osExit(1)
 			return
@@ -277,7 +291,13 @@ func runUnmapWorkspace(ctx context.Context, db *sql.DB, d dialect, args []string
 		osExit(1)
 		return
 	}
-	res, err := db.ExecContext(ctx, d.rebind(slackWorkspaceDeleteSQL), teamID)
+	deleteStmt, deleteArgs, err := d.rebindArgs(slackWorkspaceDeleteSQL, teamID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rebind unmapping %s: %v\n", teamID, err)
+		osExit(1)
+		return
+	}
+	res, err := db.ExecContext(ctx, deleteStmt, deleteArgs...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "unmapping %s: %v\n", teamID, err)
 		osExit(1)

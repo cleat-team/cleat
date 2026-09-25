@@ -81,9 +81,15 @@ func runSuspendTenant(ctx context.Context, db *sql.DB, d dialect, args []string,
 	// suspended this and when" is the question being asked.
 	var current bool
 	var tenantName string
-	err = db.QueryRowContext(ctx, d.rebind(
-		`SELECT name, suspended FROM admin.tenants WHERE tenant_id = $1`),
-		tenantID).Scan(&tenantName, &current)
+	stmt, stmtArgs, err := d.rebindArgs(
+		`SELECT name, suspended FROM admin.tenants WHERE tenant_id = $1`,
+		tenantID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		osExit(1)
+		return
+	}
+	err = db.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&tenantName, &current)
 	if err == sql.ErrNoRows {
 		fmt.Fprintf(os.Stderr, "error: no tenant %s in admin.tenants\n", tenantID)
 		osExit(1)
@@ -117,9 +123,15 @@ func runSuspendTenant(ctx context.Context, db *sql.DB, d dialect, args []string,
 		}
 	}
 
-	if _, err := db.ExecContext(ctx, d.rebind(
-		`UPDATE admin.tenants SET suspended = $1 WHERE tenant_id = $2`),
-		suspend, tenantID); err != nil {
+	updStmt, updArgs, err := d.rebindArgs(
+		`UPDATE admin.tenants SET suspended = $1 WHERE tenant_id = $2`,
+		suspend, tenantID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		osExit(1)
+		return
+	}
+	if _, err := db.ExecContext(ctx, updStmt, updArgs...); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		osExit(1)
 		return

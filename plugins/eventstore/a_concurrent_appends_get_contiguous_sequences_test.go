@@ -90,9 +90,9 @@ func TestConcurrentAppendsGetContiguousSequences(t *testing.T) {
 			// succeeded -- Postgres's superuser test connection bypasses
 			// RLS by default and MySQL has no RLS at all, so only MSSQL's
 			// raw read was actually filtered to empty.
-			rows, err := p.db.Query(tenantCtx, plugin.Rebind(
+			rows, err := p.db.Query(tenantCtx,
 				`SELECT sequence FROM event_stream WHERE tenant_id = $1 AND stream_id = $2 ORDER BY sequence ASC`,
-				dialect), tenantID, streamID)
+				tenantID, streamID)
 			if err != nil {
 				t.Fatalf("read back on %s: %v", be.Name, err)
 			}

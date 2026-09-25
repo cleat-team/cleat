@@ -16,7 +16,12 @@ import (
 // same check: a statement written in the portable $N form that happened to
 // work on postgres because nobody rewrote its placeholders would pass every
 // other test here, since TestSlackCommandWorksOnEveryDialect drives postgres
-// through the same d.rebind call and would not notice a no-op.
+// through the same d.rebindArgs call and would not notice a no-op.
+//
+// This drives rebindArgs, not the bare rebind text-only helper: MySQL's
+// $N -> ? rewrite now happens only inside rebindArgs, alongside the arg
+// reorder, so a text-only check that called rebind here would see $1
+// unchanged and wrongly report every statement as broken (cleat#2259).
 //
 // slackWorkspaceListSQL is excluded -- it carries no $N, deliberately (it
 // lists every row, unfiltered).
@@ -27,19 +32,57 @@ func TestSlackWorkspaceStatementsRebindPerDialect(t *testing.T) {
 		slackWorkspaceUpdateSQL,
 		slackWorkspaceDeleteSQL,
 	} {
-		pg := dialectPostgres.rebind(q)
+		n := countPlaceholders(q)
+		pg, _, err := dialectPostgres.rebindArgs(q, dummyArgs(n)...)
+		if err != nil {
+			t.Fatalf("postgres rebindArgs: %v", err)
+		}
 		if !strings.Contains(pg, "$1") {
-			t.Errorf("dialectPostgres.rebind(%q) = %q, want it to still contain $1", q, pg)
+			t.Errorf("dialectPostgres.rebindArgs(%q) = %q, want it to still contain $1", q, pg)
 		}
-		my := dialectMySQL.rebind(q)
+		my, _, err := dialectMySQL.rebindArgs(q, dummyArgs(n)...)
+		if err != nil {
+			t.Fatalf("mysql rebindArgs: %v", err)
+		}
 		if strings.Contains(my, "$1") || !strings.Contains(my, "?") {
-			t.Errorf("dialectMySQL.rebind(%q) = %q, want no $1 and a ?", q, my)
+			t.Errorf("dialectMySQL.rebindArgs(%q) = %q, want no $1 and a ?", q, my)
 		}
-		ms := dialectMSSQL.rebind(q)
+		ms, _, err := dialectMSSQL.rebindArgs(q, dummyArgs(n)...)
+		if err != nil {
+			t.Fatalf("mssql rebindArgs: %v", err)
+		}
 		if strings.Contains(ms, "$1") || !strings.Contains(ms, "@p1") {
-			t.Errorf("dialectMSSQL.rebind(%q) = %q, want no $1 and a @p1", q, ms)
+			t.Errorf("dialectMSSQL.rebindArgs(%q) = %q, want no $1 and a @p1", q, ms)
 		}
 	}
+}
+
+// getWorkspaceTenant reads slack_workspace's tenant_id for team on a raw
+// *sql.DB, the same handle shape runMapWorkspace/runUnmapWorkspace use --
+// cleatctl has no plugin.PluginDB adapter, so this goes through
+// d.rebindArgs directly rather than the deleted rebind text-only helper,
+// exactly as production code now must (cleat#2259).
+func getWorkspaceTenant(t *testing.T, ctx context.Context, db *sql.DB, d dialect, team string) (string, error) {
+	t.Helper()
+	stmt, args, err := d.rebindArgs(slackWorkspaceGetSQL, team)
+	if err != nil {
+		t.Fatalf("rebind slackWorkspaceGetSQL: %v", err)
+	}
+	var tenant string
+	err = db.QueryRowContext(ctx, stmt, args...).Scan(&tenant)
+	return tenant, err
+}
+
+// deleteWorkspaceMapping is getWorkspaceTenant's write-side counterpart,
+// used only for this test's own best-effort cleanup.
+func deleteWorkspaceMapping(t *testing.T, ctx context.Context, db *sql.DB, d dialect, team string) error {
+	t.Helper()
+	stmt, args, err := d.rebindArgs(slackWorkspaceDeleteSQL, team)
+	if err != nil {
+		t.Fatalf("rebind slackWorkspaceDeleteSQL: %v", err)
+	}
+	_, err = db.ExecContext(ctx, stmt, args...)
+	return err
 }
 
 func TestValidateSlackTeamID(t *testing.T) {
@@ -197,7 +240,7 @@ func TestSlackCommandWorksOnEveryDialect(t *testing.T) {
 			// through still deletes whichever rows made it in.
 			cleanupTeam := func(team string) {
 				t.Cleanup(func() {
-					db.ExecContext(context.Background(), tc.d.rebind(slackWorkspaceDeleteSQL), team) //nolint:errcheck // best-effort cleanup
+					deleteWorkspaceMapping(t, context.Background(), db, tc.d, team) //nolint:errcheck // best-effort cleanup
 				})
 			}
 
@@ -207,8 +250,7 @@ func TestSlackCommandWorksOnEveryDialect(t *testing.T) {
 
 			// A team with no row: runMapWorkspace's SELECT must read
 			// sql.ErrNoRows, not silently succeed some other way.
-			var existing string
-			err := db.QueryRowContext(ctx, tc.d.rebind(slackWorkspaceGetSQL), team).Scan(&existing)
+			existing, err := getWorkspaceTenant(t, ctx, db, tc.d, team)
 			if err == nil {
 				t.Fatalf("a fresh team already maps to %q", existing)
 			}
@@ -216,7 +258,7 @@ func TestSlackCommandWorksOnEveryDialect(t *testing.T) {
 			runMapWorkspace(ctx, db, tc.d, []string{"--team", team, "--tenant", tenant})
 
 			var gotTenant string
-			if err := db.QueryRowContext(ctx, tc.d.rebind(slackWorkspaceGetSQL), team).Scan(&gotTenant); err != nil {
+			if gotTenant, err = getWorkspaceTenant(t, ctx, db, tc.d, team); err != nil {
 				t.Fatalf("reading after map: %v", err)
 			}
 			if !strings.EqualFold(gotTenant, tenant) {
@@ -248,7 +290,7 @@ func TestSlackCommandWorksOnEveryDialect(t *testing.T) {
 				if !strings.Contains(stderr, "pass --reassign") {
 					t.Errorf("re-mapping without --reassign produced:\n%s", stderr)
 				}
-				if err := db.QueryRowContext(ctx, tc.d.rebind(slackWorkspaceGetSQL), team).Scan(&gotTenant); err != nil {
+				if gotTenant, err = getWorkspaceTenant(t, ctx, db, tc.d, team); err != nil {
 					t.Fatalf("reading after refused reassign: %v", err)
 				}
 				if !strings.EqualFold(gotTenant, tenant) {
@@ -257,7 +299,7 @@ func TestSlackCommandWorksOnEveryDialect(t *testing.T) {
 
 				// With --reassign, it must actually move.
 				runMapWorkspace(ctx, db, tc.d, []string{"--team", team, "--tenant", other, "--reassign"})
-				if err := db.QueryRowContext(ctx, tc.d.rebind(slackWorkspaceGetSQL), team).Scan(&gotTenant); err != nil {
+				if gotTenant, err = getWorkspaceTenant(t, ctx, db, tc.d, team); err != nil {
 					t.Fatalf("reading after reassign: %v", err)
 				}
 				if !strings.EqualFold(gotTenant, other) {
@@ -278,13 +320,13 @@ func TestSlackCommandWorksOnEveryDialect(t *testing.T) {
 			cleanupTeam(team2)
 			runMapWorkspace(ctx, db, tc.d, []string{"--team", team2, "--tenant", other})
 			var team2Tenant string
-			if err := db.QueryRowContext(ctx, tc.d.rebind(slackWorkspaceGetSQL), team2).Scan(&team2Tenant); err != nil {
+			if team2Tenant, err = getWorkspaceTenant(t, ctx, db, tc.d, team2); err != nil {
 				t.Fatalf("reading %s after mapping it alongside %s: %v", team2, team, err)
 			}
 			if !strings.EqualFold(team2Tenant, other) {
 				t.Fatalf("%s maps to %s, want %s", team2, team2Tenant, other)
 			}
-			if err := db.QueryRowContext(ctx, tc.d.rebind(slackWorkspaceGetSQL), team).Scan(&gotTenant); err != nil {
+			if gotTenant, err = getWorkspaceTenant(t, ctx, db, tc.d, team); err != nil {
 				t.Fatalf("reading %s after mapping %s alongside it: %v", team, team2, err)
 			}
 			if !strings.EqualFold(gotTenant, other) {
@@ -323,10 +365,10 @@ func TestSlackCommandWorksOnEveryDialect(t *testing.T) {
 
 			// unmap removes exactly the row named, and only it.
 			runUnmapWorkspace(ctx, db, tc.d, []string{"--team", team})
-			if err := db.QueryRowContext(ctx, tc.d.rebind(slackWorkspaceGetSQL), team).Scan(&gotTenant); err == nil {
+			if gotTenant, err = getWorkspaceTenant(t, ctx, db, tc.d, team); err == nil {
 				t.Fatalf("team %s still maps to %s after unmap", team, gotTenant)
 			}
-			if err := db.QueryRowContext(ctx, tc.d.rebind(slackWorkspaceGetSQL), team2).Scan(&gotTenant); err != nil || !strings.EqualFold(gotTenant, other) {
+			if gotTenant, err = getWorkspaceTenant(t, ctx, db, tc.d, team2); err != nil || !strings.EqualFold(gotTenant, other) {
 				t.Fatalf("unmapping %s disturbed %s's mapping: gotTenant=%q err=%v", team, team2, gotTenant, err)
 			}
 

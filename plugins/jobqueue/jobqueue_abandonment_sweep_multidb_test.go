@@ -33,6 +33,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // defaultTenantID is the one tenant migrations/mysql/002_defaults.sql (and
@@ -143,16 +144,16 @@ func TestSweepAbandonedJobs_MultiBackend(t *testing.T) {
 			tenant = seedTenant(t, fixtureDB, ctx, be.Dialect, dialect, tenant)
 
 			defer func() {
-				if _, err := fixtureDB.ExecContext(context.Background(),
-					plugin.Rebind(`DELETE FROM task_queue WHERE tenant_id = $1`, dialect), tenant); err != nil {
+				if _, err := plugintest.ExecRebound(t, context.Background(), fixtureDB, dialect,
+					`DELETE FROM task_queue WHERE tenant_id = $1`, tenant); err != nil {
 					t.Errorf("cleanup task_queue on %s: %v", be.Name, err)
 				}
 				cleanupTenant(t, fixtureDB, be.Dialect, tenant)
 			}()
 
-			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 				`INSERT INTO task_queue (tenant_id, queue_name, job_id, status, started_at, run_id)
-				 VALUES ($1, $2, $3, 'dispatched', now(), $4)`, dialect),
+				 VALUES ($1, $2, $3, 'dispatched', now(), $4)`,
 				tenant, "sweep-test", job, runID); err != nil {
 				t.Fatalf("insert dispatched job on %s: %v", be.Name, err)
 			}
@@ -171,9 +172,9 @@ func TestSweepAbandonedJobs_MultiBackend(t *testing.T) {
 			}
 
 			var status string
-			if err := fixtureDB.QueryRowContext(ctx, plugin.Rebind(
+			if err := plugintest.QueryRowRebound(t, ctx, fixtureDB, dialect,
 				`SELECT status FROM task_queue WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3`,
-				dialect), tenant, "sweep-test", job).Scan(&status); err != nil {
+				tenant, "sweep-test", job).Scan(&status); err != nil {
 				t.Fatalf("read back on %s: %v", be.Name, err)
 			}
 			if status != "abandoned" {
@@ -238,16 +239,16 @@ func TestSweepAbandonedJobs_SparesAnInFlightRun_MultiBackend(t *testing.T) {
 			tenant = seedTenant(t, fixtureDB, ctx, be.Dialect, dialect, tenant)
 
 			defer func() {
-				if _, err := fixtureDB.ExecContext(context.Background(),
-					plugin.Rebind(`DELETE FROM task_queue WHERE tenant_id = $1`, dialect), tenant); err != nil {
+				if _, err := plugintest.ExecRebound(t, context.Background(), fixtureDB, dialect,
+					`DELETE FROM task_queue WHERE tenant_id = $1`, tenant); err != nil {
 					t.Errorf("cleanup task_queue on %s: %v", be.Name, err)
 				}
-				if _, err := fixtureDB.ExecContext(context.Background(),
-					plugin.Rebind(`DELETE FROM workflow_instances WHERE id = $1`, dialect), runID); err != nil {
+				if _, err := plugintest.ExecRebound(t, context.Background(), fixtureDB, dialect,
+					`DELETE FROM workflow_instances WHERE id = $1`, runID); err != nil {
 					t.Errorf("cleanup workflow_instances on %s: %v", be.Name, err)
 				}
-				if _, err := fixtureDB.ExecContext(context.Background(),
-					plugin.Rebind(`DELETE FROM workflow_defs WHERE name = $1`, dialect), defName); err != nil {
+				if _, err := plugintest.ExecRebound(t, context.Background(), fixtureDB, dialect,
+					`DELETE FROM workflow_defs WHERE name = $1`, defName); err != nil {
 					t.Errorf("cleanup workflow_defs on %s: %v", be.Name, err)
 				}
 				cleanupTenant(t, fixtureDB, be.Dialect, tenant)
@@ -263,21 +264,21 @@ func TestSweepAbandonedJobs_SparesAnInFlightRun_MultiBackend(t *testing.T) {
 			// match, on every dialect, and the earlier version of this fixture
 			// only got away with leaving both at the default because neither
 			// side ever set tenant_id to anything else.
-			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 				`INSERT INTO workflow_defs (name, version, wasm_bytes, tenant_id) VALUES ($1, $2, $3, $4)`,
-				dialect), defName, 1, []byte{0}, tenant); err != nil {
+				defName, 1, []byte{0}, tenant); err != nil {
 				t.Fatalf("insert workflow_defs on %s: %v", be.Name, err)
 			}
 			// status is left to its column default, which is 'ready' on every
 			// dialect -- one of the two values the sweep treats as in flight.
-			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 				`INSERT INTO workflow_instances (id, def_name, def_version, tenant_id) VALUES ($1, $2, $3, $4)`,
-				dialect), runID, defName, 1, tenant); err != nil {
+				runID, defName, 1, tenant); err != nil {
 				t.Fatalf("insert workflow_instances on %s: %v", be.Name, err)
 			}
-			if _, err := fixtureDB.ExecContext(ctx, plugin.Rebind(
+			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 				`INSERT INTO task_queue (tenant_id, queue_name, job_id, status, started_at, run_id)
-				 VALUES ($1, $2, $3, 'dispatched', now(), $4)`, dialect),
+				 VALUES ($1, $2, $3, 'dispatched', now(), $4)`,
 				tenant, "sweep-arm-test", job, runID); err != nil {
 				t.Fatalf("insert dispatched job on %s: %v", be.Name, err)
 			}
@@ -292,9 +293,9 @@ func TestSweepAbandonedJobs_SparesAnInFlightRun_MultiBackend(t *testing.T) {
 			}
 
 			var status string
-			if err := fixtureDB.QueryRowContext(ctx, plugin.Rebind(
+			if err := plugintest.QueryRowRebound(t, ctx, fixtureDB, dialect,
 				`SELECT status FROM task_queue WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3`,
-				dialect), tenant, "sweep-arm-test", job).Scan(&status); err != nil {
+				tenant, "sweep-arm-test", job).Scan(&status); err != nil {
 				t.Fatalf("read back on %s: %v", be.Name, err)
 			}
 			if status != "dispatched" {
@@ -335,15 +336,15 @@ func TestObserveFinalize_MultiBackend(t *testing.T) {
 			runID := "finalize-" + uuid.New().String()
 
 			defer func() {
-				if _, err := fixtureDB.ExecContext(context.Background(),
-					plugin.Rebind(`DELETE FROM task_queue WHERE tenant_id = $1`, dialect), tenant); err != nil {
+				if _, err := plugintest.ExecRebound(t, context.Background(), fixtureDB, dialect,
+					`DELETE FROM task_queue WHERE tenant_id = $1`, tenant); err != nil {
 					t.Errorf("cleanup task_queue on %s: %v", be.Name, err)
 				}
 			}()
 
-			if _, err := fixtureDB.ExecContext(context.Background(), plugin.Rebind(
+			if _, err := plugintest.ExecRebound(t, context.Background(), fixtureDB, dialect,
 				`INSERT INTO task_queue (tenant_id, queue_name, job_id, status, started_at, run_id)
-				 VALUES ($1, $2, $3, 'dispatched', now(), $4)`, dialect),
+				 VALUES ($1, $2, $3, 'dispatched', now(), $4)`,
 				tenant, "finalize-test", job, runID); err != nil {
 				t.Fatalf("insert dispatched job on %s: %v", be.Name, err)
 			}
@@ -353,9 +354,9 @@ func TestObserveFinalize_MultiBackend(t *testing.T) {
 			}
 
 			var status string
-			if err := fixtureDB.QueryRowContext(context.Background(), plugin.Rebind(
+			if err := plugintest.QueryRowRebound(t, context.Background(), fixtureDB, dialect,
 				`SELECT status FROM task_queue WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3`,
-				dialect), tenant, "finalize-test", job).Scan(&status); err != nil {
+				tenant, "finalize-test", job).Scan(&status); err != nil {
 				t.Fatalf("read back on %s: %v", be.Name, err)
 			}
 			if status != "failed" {
