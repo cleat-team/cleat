@@ -657,6 +657,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   case variant as a hit too (case-insensitive match on PostgreSQL and MySQL above; add a second
   `LIKE '%"API_KEY"%'` clause on SQL Server if auditing for that).
 
+- **`--uninstall-plugin` now refuses up front on MySQL and SQL Server for any plugin whose Down
+  chain is not proven by its own end-to-end test.** (cleat#2306)
+
+  Nothing had ever run a plugin's Down SQL against a real database until cleat#1290 gave it a
+  caller; measured 2026-09-25, 7 of 18 plugins' uninstall fails outright on MySQL and 17 of 18 on
+  SQL Server, and a failed reversal is not a no-op — `RunDownMigrations` stops at the first error,
+  and a partial reversal has already left a SQL Server database permanently unmigratable
+  (`notifications`: `Cannot find the object webhook_delivery (4902)`, with no further migration
+  able to run). `--uninstall-plugin` now checks the plugin against a short allow-list before
+  touching anything (including before `--uninstall-dry-run`'s report) and refuses with a message
+  naming what dialect it ran on and which plugins are verified there. `scheduled-backup` is the
+  only plugin listed today — it is the only one with a real end-to-end uninstall test
+  (`plugins/scheduledbackup/a_v4_down_keeps_uninstall_working_test.go`). PostgreSQL is unaffected
+  (cleat-review's measurement found all 18 clean there). **To upgrade:** `--uninstall-plugin` on
+  MySQL or SQL Server for any plugin other than `scheduled-backup` now refuses where it previously
+  would have attempted the reversal — including for a plugin whose Down happens to work today but
+  has never been proven by a test. There is no override; the fix is a test in the shape of
+  `TestUninstallSchedulerBackupOnEveryDialect`, after which the plugin is added to
+  `plugin.provenPluginDialects` (cleat#2306's phase 2 tracks doing this for every plugin).
+
 ### Added
 
 - **`--encryption-key-file-previous`: `cmd/cleat-worker` can hold a previous payload-encryption key alongside the current one, for rolling key rotation.** (cleat#1992, #2308)
