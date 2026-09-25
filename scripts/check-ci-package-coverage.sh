@@ -75,7 +75,7 @@ count=0
 for d in $go_dirs; do
   count=$((count + 1))
   case " $EXEMPT " in *" $d "*) continue ;; esac
-  if ! printf '%s\n' "$matrix_dirs" | grep -qx "$d"; then
+  if ! grep -qx "$d" <<< "$matrix_dirs"; then
     missing="$missing $d"
   fi
 done

@@ -237,20 +237,20 @@ GO
 
     # The known-positive: a defect that is still live must be reported as such.
     # shellcheck disable=SC2016  # the backticks are literal: the guard wraps each declaration name in them
-    if ! printf '%s\n' "$out" | grep -q 'STILL LIVE.*live.go.*`Alpha`'; then
+    if ! grep -q 'STILL LIVE.*live.go.*`Alpha`' <<< "$out"; then
         echo 'SELF-TEST FAILED: the sweep did not report a defect that is still live'
         ok=1
     fi
     # The known-negative, and the one a sweep without pass 2 gets wrong: a
     # defect that was repaired must NOT be reported as live.
-    if printf '%s\n' "$out" | grep -q 'STILL LIVE.*fixed.go'; then
+    if grep -q 'STILL LIVE.*fixed.go' <<< "$out"; then
         echo 'SELF-TEST FAILED: a repaired defect was reported as still live -- pass 2 is not working'
         ok=1
     fi
     # ...but it must still be SEEN, or pass 1 is broken and the sweep would be
     # silent for the wrong reason.
     # shellcheck disable=SC2016  # the backticks are literal: the guard wraps each declaration name in them
-    if ! printf '%s\n' "$out" | grep -q 'repaired.*fixed.go.*`Delta`'; then
+    if ! grep -q 'repaired.*fixed.go.*`Delta`' <<< "$out"; then
         echo 'SELF-TEST FAILED: the sweep did not see the repaired defect at all'
         ok=1
     fi

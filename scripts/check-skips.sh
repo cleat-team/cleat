@@ -223,7 +223,14 @@ stale_entries() {
     # A literal tab terminates the key, so `engine Setup` cannot match
     # `engine SetupForTenant` -- the prefix collision this file already has
     # four live instances of.
-    if ! printf '%s\n' "$current" | grep -qF "$key	"; then
+    # NOT `printf '%s\n' "$current" | grep -qF ...`. Under this script's own
+    # `set -uo pipefail` (line 47) that reports a key it MATCHED as stale: grep -q
+    # exits on the first match and closes its read end, printf dies of SIGPIPE (141),
+    # pipefail takes the pipeline status from that non-zero member, and `if !` reads
+    # the successful match as a failure. It is not even intermittent once $current is
+    # large. A here-string has no producer process, so there is nothing for pipefail
+    # to misread. Same defect and same fix as scripts/tier2-gate.sh.
+    if ! grep -qF "$key	" <<< "$current"; then
       out="${out}${line}"$'\n'
     fi
   done < "$baseline"
@@ -285,14 +292,14 @@ FIXTURE
   out="$(cd "$tmp" && scan)"
 
   _expect() {   # _expect <line> <why>
-    if printf '%s\n' "$out" | grep -qF "$1"; then
+    if grep -qF "$1" <<< "$out"; then
       return 0
     fi
     echo "SELF-TEST FAILED: expected '$1' ($2)" >&2
     ok=1
   }
   _refute() {
-    if printf '%s\n' "$out" | grep -qF "$1"; then
+    if grep -qF "$1" <<< "$out"; then
       echo "SELF-TEST FAILED: did not expect '$1' ($2)" >&2
       ok=1
     fi
@@ -319,21 +326,21 @@ FIXTURE
 
   local got
   got="$(stale_entries "$scan_out" "$fixture")"
-  if ! printf '%s' "$got" | grep -qF 'GoneAway'; then
+  if ! grep -qF 'GoneAway' <<< "$got"; then
     echo "SELF-TEST FAILED: a baseline entry the scan does not produce was not reported stale" >&2
     ok=1
   fi
   # The negative control, and it is the half that catches an over-eager check:
   # keys the scan DOES produce must not be reported, or every run fails and the
   # guard gets switched off.
-  if printf '%s' "$got" | grep -qE 'TestPlainFunction|MySQLBackend'; then
+  if grep -qE 'TestPlainFunction|MySQLBackend' <<< "$got"; then
     echo "SELF-TEST FAILED: a live baseline entry was reported stale" >&2
     ok=1
   fi
   # Prefix safety: `pkg Setup` must not be satisfied by `pkg SetupForTenant`.
   # This file has four live keys with that shape.
   printf 'pkg\tSetup\t1\n' > "$fixture"
-  if ! stale_entries "$(printf 'pkg\tSetupForTenant\t1\n')" "$fixture" | grep -qF 'Setup	1'; then
+  if ! grep -qF 'Setup	1' <<< "$(stale_entries "$(printf 'pkg\tSetupForTenant\t1\n')" "$fixture")"; then
     echo "SELF-TEST FAILED: a key matched a longer key sharing its prefix" >&2
     ok=1
   fi
