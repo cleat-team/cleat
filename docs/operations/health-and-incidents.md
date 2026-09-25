@@ -8,7 +8,7 @@ outage and a worker fault look different to a load balancer, to Kubernetes, and 
 | `/livez` | is the process alive and are its background loops ticking? | yes | a background loop is stuck (`background_loop_stuck`) |
 | `/readyz` | can it serve traffic right now? | `/livez`, and started, and not draining, and its database answered | `starting`, `draining`, `database_unreachable`, or `background_loop_stuck` |
 | `/healthz` | an alias of `/livez`, kept because callers exist | as `/livez` | as `/livez` |
-| `GET /api/admin/health` | the same facts with the detail (needs an API key) | always 200 | (401 without a key) |
+| `GET /api/admin/health` | the same facts with the detail (needs `--enable-admin-api` and an API key) | always 200 | (404 unless `--enable-admin-api`; 401 without a key) |
 
 **`/livez` does not look at the database.** A database outage must not restart workers: restarting cannot
 fix it, and every restart strands the worker's in-flight runs. That includes the loops it causes to stall: a background loop whose database call is hanging goes stale after a few of its intervals, and a loop the database is holding does not fail `/livez` (it is listed under `stale_loops` on `/api/admin/health`, with `loops_blocked_on_database`; how that is decided is under [How the database is measured](#how-the-database-is-measured)). A loop that is stuck while the database answers still does. Measured against a real `docker pause`: without this, `/livez` answered 503 six seconds in and a kubelet would have restarted every worker. `/readyz` does look at it, so a worker that
@@ -30,9 +30,10 @@ a degraded state is reported with a 200 and never fails a probe: a lost audit ev
 combine: memory pressure no longer hides an unhealthy plugin.
 
 Loop names, plugin names and messages, and database error text are **not** in a public body (a host name or a
-DSN fragment can be in an error). They are on `GET /api/admin/health`, which sits behind the same
-authentication as the other `/api/admin/*` routes and is exactly as open as they are: with
-`--require-auth=false` everything is open.
+DSN fragment can be in an error). They are on `GET /api/admin/health`, which is off unless the worker runs with
+`--enable-admin-api` (it answers 404 otherwise) and, when on, is callable by ANY authenticated API key of any
+tenant, plugin messages included, until cleat has an operator credential (cleat#2169). See
+[The admin API](admin-api.md). With `--require-auth=false` it is open to everyone who can reach the port.
 
 ## How the database is measured
 
@@ -104,8 +105,8 @@ so it is never ready. There is no runtime re-check of the schema.
 - **One worker reports 0 while a peer reports 1** (`CleatWorkerCannotReachDatabase`): **that worker's**
   connectivity. Read that worker's log for the line `database unreachable (deadline exceeded)`,
   `(connection error)` or `(error or ran past its deadline)`. `GET /api/admin/health` has the error text
-  too, but it authenticates against the same database, so during an outage it can hang or answer 401;
-  do not rely on it for this.
+  too, when the admin API is enabled, but it authenticates against the same database, so during an outage
+  it can hang or answer 401; do not rely on it for this.
 - **`up == 0`** (`CleatWorkerDown`): the process or the network to it, not the database (a database outage
   leaves `/metrics` up).
 - **Runs reclaimed by the reaper** (`CleatRunsReclaimedByTheReaper`) read as workers failing. The rule is

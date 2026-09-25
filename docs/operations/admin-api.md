@@ -12,6 +12,8 @@ it is**. So while the flag is on:
 
 - **any authenticated API key of any tenant can drain the worker** (`POST /api/admin/drain`), which takes it
   out of rotation (`/readyz` answers 503 `draining`) and, once its in-flight work finishes, stops it;
+- **any authenticated key can read this worker's detailed health** (`GET /api/admin/health`): stale loops,
+  the last database error, and other plugins' health messages;
 - **any authenticated key can trigger a retention sweep** (`POST /api/admin/retention/sweep`), which runs the
   worker's own retention over every tenant's data, with a cutoff the caller chooses (`older_than`). It does
   not enable a retention arm that is switched off, but for an arm that is on, a short `older_than` deletes
@@ -28,6 +30,7 @@ Audited 2026-09-24 from `cmd/cleat-worker/app.go`. The scope column is the prope
 | Route | What it acts on | Scope |
 |---|---|---|
 | `POST`, `GET /api/admin/drain` | this worker's claim loop and lifetime | **worker-level**: any key, any tenant |
+| `GET /api/admin/health` | this worker's loops, database error text and every plugin's health message | **worker-level**: any key, any tenant; unreadable during a database outage (its key lookup needs the database) |
 | `POST /api/admin/retention/sweep` | retention over every tenant's data on this worker's store | **worker-level**: any key, any tenant |
 | `POST /api/admin/instances/{id}/force-complete` | one workflow | tenant-scoped: 404 unless the caller's tenant owns `{id}` |
 | `POST /api/admin/instances/{id}/force-fail` | one workflow | tenant-scoped |
@@ -54,14 +57,30 @@ curl -X POST -H "Authorization: Bearer $CLEAT_API_KEY" http://worker:8080/api/ad
 `adminApi.enabled` (default `false`) is what passes `--enable-admin-api`. It is a separate value on purpose:
 a drain key being configured does not turn on a route that lets any tenant drain workers.
 
-| `adminApi.enabled` | the pod's `preStop` hook | at shutdown |
-|---|---|---|
-| `false` (default) | `sleep` for `worker.preStopSleepSeconds` (5), so the pod leaves Service endpoints before SIGTERM | SIGTERM cancels the worker's context. A run waiting inside a durable call aborts, and another worker picks the run up after the reclaim window (`--reclaim-timeout`). Runs are durable, so nothing is lost, but they resume later than a drain would have let them finish |
-| `true`, with `auth.adminApiKey` or `auth.existingSecret` | `POST /api/admin/drain` with that key: the worker stops claiming and finishes its in-flight runs for as long as `terminationGracePeriodSeconds` allows | as above, for whatever is still running when the grace period ends |
-| `true`, no key | the same `sleep`: the drain call cannot authenticate | as in the first row |
+| `adminApi.enabled` | the pod's `preStop` hook |
+|---|---|
+| `false` (default) | `sleep` for `worker.preStopSleepSeconds` (5), so the pod leaves Service endpoints before SIGTERM arrives |
+| `true`, with `auth.adminApiKey` or `auth.existingSecret` | `POST /api/admin/drain` with that key |
+| `true`, no key | the same `sleep`: the drain call cannot authenticate |
+
+**Neither one lets a run in flight finish, and this is a known defect (cleat#2285).** The kubelet sends SIGTERM
+as soon as the `preStop` command returns. The drain hook returns when the POST is answered (202), not when
+the drain is complete, and the worker's SIGTERM handler cancels its context. cleat-review measured a run in
+flight at SIGTERM being **permanently failed** ("finalize workflow: begin tx: context canceled") instead of
+being left for another worker to reclaim. Until #2285 is fixed, the drain hook does not make a rolling
+deploy safe, and the default `sleep` does not either. It only stops new traffic reaching a pod that is about
+to go. A drain that is meant to complete has to be driven from outside: `POST /api/admin/drain`, then poll
+`GET /api/admin/drain` until it reports `complete`, and only then stop the worker.
 
 Set `adminApi.enabled` only where every API key you have issued is trusted to drain workers and to run the
 all-tenant retention sweep.
+
+## `GET /api/admin/drain` is not read-only
+
+The status call is also what completes a drain: when the worker is draining and nothing is in flight, the
+first `GET` closes the drain channel and cancels the worker, which stops it. A status poll from any
+authenticated key can therefore stop a worker that has been asked to drain (cleat#2285 tracks moving the
+completion out of the `GET`).
 
 ## Adding an admin route
 

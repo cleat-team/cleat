@@ -140,7 +140,7 @@ func TestEveryAdminRouteIsAbsentUntilTheAdminAPIIsEnabled(t *testing.T) {
 	for _, r := range regs {
 		seen[r.pattern] = true
 	}
-	for _, want := range []string{"/api/admin/drain", "/api/admin/retention/sweep", "/api/admin/instances/"} {
+	for _, want := range []string{"/api/admin/drain", "/api/admin/retention/sweep", "/api/admin/instances/", "/api/admin/health"} {
 		if !seen[want] {
 			t.Fatalf("the scan of the registrations did not find %s: it read nothing, or the route moved (found %v)", want, seen)
 		}

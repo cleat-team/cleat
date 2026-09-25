@@ -30,7 +30,7 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	mux.HandleFunc("/livez", api.handleLivez)
 	mux.HandleFunc("/readyz", api.handleReadyz)
 	mux.HandleFunc("/healthz", api.handleHealthz)
-	mux.HandleFunc("/api/admin/health", api.handleAdminHealth)
+	mux.HandleFunc("/api/admin/health", api.adminAPIOnly(api.handleAdminHealth))
 	mux.HandleFunc("/metrics", handleMetrics)
 	// Every /api/admin/ route is registered through adminAPIOnly: they are gated on --enable-admin-api,
 	// which is off by default, and answer 404 while it is off (cleat#2267). See docs/operations/admin-api.md

@@ -101,15 +101,14 @@ api:
 # only where every key you have issued is trusted to that degree. docs/operations/admin-api.md has the
 # list of which routes are worker-level and which are tenant-scoped.
 #
-# What the pod does at shutdown depends on it:
+# What the preStop hook does depends on it:
 #   enabled: true (and auth.adminApiKey or auth.existingSecret set)
-#       the preStop hook POSTs /api/admin/drain, so the worker stops claiming and finishes its in-flight
-#       runs, for as long as terminationGracePeriodSeconds allows.
+#       the hook POSTs /api/admin/drain.
 #   enabled: false (the default)
-#       the preStop hook only sleeps (worker.preStopSleepSeconds), so the pod leaves Service endpoints
-#       before SIGTERM. On SIGTERM the worker cancels its context: a run that is waiting inside a durable
-#       call aborts, and the run is picked up by another worker after the reclaim window (--reclaim-timeout;
-#       runs are durable, so nothing is lost, but they resume later than a drain would have let them finish).
+#       the hook only sleeps (worker.preStopSleepSeconds), so the pod leaves Service endpoints before SIGTERM.
+# NEITHER lets a run in flight finish: the kubelet sends SIGTERM as soon as the hook returns, the drain hook
+# returns when the POST is answered rather than when the drain is complete, and a run in flight at SIGTERM is
+# currently failed rather than reclaimed by another worker (cleat#2285). See docs/operations/admin-api.md.
 adminApi:
   enabled: false
 
