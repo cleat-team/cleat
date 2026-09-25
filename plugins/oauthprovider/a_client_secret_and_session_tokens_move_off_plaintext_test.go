@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,6 +98,55 @@ func TestMissingClientSecretRefusesLogin(t *testing.T) {
 	}
 	if rec.Code < 500 {
 		t.Errorf("expected a server-side failure (secret lookup error), got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestMissingClientSecretDoesNotLeakToAnUnauthenticatedCaller is a negative
+// control on the response BODY, not just the status. handleLogin accepts
+// ?tenant_id= from anyone -- there is no session yet, that is the whole
+// point of a login route -- so an operator-actionable message distinguishing
+// "this provider is configured but has no secret" from "this provider was
+// never configured at all" would hand an anonymous caller an enumeration
+// oracle plus detail about cleat's own tooling (cleatctl, the secret naming
+// scheme). cleat-review flagged this on cleat#2295 before it shipped.
+//
+// Asserts the two cases are byte-identical at the HTTP layer: a config row
+// that exists but has no secret behind it, versus a tenant/provider with no
+// config row at all. If a future change reintroduces
+// writeConfigLookupError-style branching, this fails by construction rather
+// than requiring someone to notice a response body got more specific.
+func TestMissingClientSecretDoesNotLeakToAnUnauthenticatedCaller(t *testing.T) {
+	configuredNoSecret := newFakeDBStore()
+	configuredNoSecret.mu.Lock()
+	configuredNoSecret.configs[testTenantID.String()+":google"] = &oauthConfigRow{
+		TenantID: testTenantID, Provider: "google", ClientID: "cid",
+		RedirectURL: "http://localhost/cb", Enabled: true,
+	}
+	configuredNoSecret.mu.Unlock()
+	_, handlerA := setupTestPlugin(t, configuredNoSecret)
+
+	neverConfigured := newFakeDBStore()
+	_, handlerB := setupTestPlugin(t, neverConfigured)
+
+	req := func() *http.Request {
+		return httptest.NewRequest("GET", "/oauth/google/login?tenant_id="+testTenantID.String(), nil)
+	}
+
+	recA := httptest.NewRecorder()
+	handlerA.ServeHTTP(recA, req())
+	recB := httptest.NewRecorder()
+	handlerB.ServeHTTP(recB, req())
+
+	if recA.Code != recB.Code {
+		t.Errorf("status differs: configured-no-secret=%d, never-configured=%d -- an unauthenticated "+
+			"caller can distinguish the two cases", recA.Code, recB.Code)
+	}
+	if recA.Body.String() != recB.Body.String() {
+		t.Errorf("response body differs:\n  configured-no-secret:  %s\n  never-configured:      %s\n"+
+			"-- an unauthenticated caller can tell these apart", recA.Body.String(), recB.Body.String())
+	}
+	if strings.Contains(recA.Body.String(), "cleatctl") || strings.Contains(recA.Body.String(), OAuthClientSecretName("google")) {
+		t.Errorf("response body names cleat's internal tooling to an unauthenticated caller: %s", recA.Body.String())
 	}
 }
 

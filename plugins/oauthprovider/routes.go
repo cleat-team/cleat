@@ -168,25 +168,6 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// writeConfigLookupError reports a getConfig failure to the caller.
-// errors.Is(err, plugin.ErrSecretNotFound) means the oauth_config row exists
-// (enabled) but this provider has no client secret in tenant secrets -- an
-// operator setup step was skipped, not an infrastructure failure -- so it
-// gets a distinct, actionable message rather than "oauth config not found"
-// (cleat-review's item (4) on cleat#2295). Both still return 500: from a
-// caller with no session yet, neither case can be told apart from "you sent
-// a provider/tenant that was never configured at all" without leaking
-// whether a row exists, so this does not become a 400/404.
-func (p *Plugin) writeConfigLookupError(w http.ResponseWriter, provider string, err error) {
-	if errors.Is(err, plugin.ErrSecretNotFound) {
-		p.writeError(w, http.StatusInternalServerError,
-			"oauth config for provider "+provider+" has no client secret set -- an operator must run "+
-				"`cleatctl set-secret <tenant> --name "+OAuthClientSecretName(provider)+"`")
-		return
-	}
-	p.writeError(w, http.StatusInternalServerError, "oauth config not found")
-}
-
 // tenantID extracts the tenant UUID from the OAuth session in the request
 // context, and whether a session was present. A session's TenantID can
 // legitimately be uuid.Nil -- the seeded default tenant -- so callers must
@@ -337,8 +318,19 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	cfg, err := p.getConfig(r.Context(), tid, provider)
 	if err != nil {
-		p.logger.Error("oauth: config lookup", "provider", provider, "error", err)
-		p.writeConfigLookupError(w, provider, err)
+		// errors.Is(err, plugin.ErrSecretNotFound) distinguishes "this
+		// provider has no client secret set" (an operator setup step was
+		// skipped) from every other lookup failure, and that distinction is
+		// worth the operator's attention -- but only in the log, not the
+		// response: this handler is UNAUTHENTICATED (handleLogin accepts
+		// ?tenant_id= from anyone), so an operator-actionable message
+		// naming cleat's internal secret scheme and the cleatctl command
+		// that fixes it would hand an anonymous caller both an enumeration
+		// oracle ("this provider IS configured") and detail about cleat's
+		// own tooling (cleat-review's item (4) on cleat#2295).
+		p.logger.Error("oauth: config lookup", "provider", provider, "error", err,
+			"secret_not_found", errors.Is(err, plugin.ErrSecretNotFound))
+		p.writeError(w, http.StatusInternalServerError, "oauth config not found")
 		return
 	}
 
@@ -478,8 +470,19 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	cfg, err := p.getConfig(r.Context(), tid, provider)
 	if err != nil {
-		p.logger.Error("oauth: config lookup", "provider", provider, "error", err)
-		p.writeConfigLookupError(w, provider, err)
+		// errors.Is(err, plugin.ErrSecretNotFound) distinguishes "this
+		// provider has no client secret set" (an operator setup step was
+		// skipped) from every other lookup failure, and that distinction is
+		// worth the operator's attention -- but only in the log, not the
+		// response: this handler is UNAUTHENTICATED (handleLogin accepts
+		// ?tenant_id= from anyone), so an operator-actionable message
+		// naming cleat's internal secret scheme and the cleatctl command
+		// that fixes it would hand an anonymous caller both an enumeration
+		// oracle ("this provider IS configured") and detail about cleat's
+		// own tooling (cleat-review's item (4) on cleat#2295).
+		p.logger.Error("oauth: config lookup", "provider", provider, "error", err,
+			"secret_not_found", errors.Is(err, plugin.ErrSecretNotFound))
+		p.writeError(w, http.StatusInternalServerError, "oauth config not found")
 		return
 	}
 
