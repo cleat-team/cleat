@@ -189,7 +189,7 @@ that prose yet — not that the column does not exist.
 | `id` | TEXT | Unique workflow instance ID (UUID) |
 | `def_name` | TEXT | References `workflow_defs.name` |
 | `def_version` | INTEGER | References `workflow_defs.version` |
-| `status` | TEXT | `ready`, `running`, `completed`, `failed`, `suspended` |
+| `status` | TEXT | One of `ready`, `running`, `done`, `failed`, `dead_lettered`, `terminated`, `cancelled`, `terminating`. No `CHECK` constraint; see [Workflow lifecycle](../reference/workflow-lifecycle.md#the-statuses) — note there is no `completed` and no `suspended`. |
 | `input` | JSONB | Workflow input arguments |
 | `assigned_to` | TEXT | Worker ID currently claiming this instance |
 | `heartbeat_at` | TIMESTAMPTZ | Last heartbeat from the claiming worker |

@@ -393,8 +393,15 @@ divergence error includes:
 3. **Inspect the event history** for the failed workflow to compare what was
    recorded vs what was replayed:
    ```bash
-   cleatctl events get --workflow-id <id>
+   cleatctl --db "$CLEAT_DB" replay <workflow-id> --entry-point <entry-point>
    ```
+   `cleatctl replay` loads the recorded history and replays it, printing the events as it goes. The
+   raw history is served as a JSON array at `GET /api/workflows/<id>/history`, and `cleatctl debug`
+   has an interactive `events` command.
+
+   **There is no `cleatctl events` subcommand**, and this step used one until 2026-09-25. It is not
+   in the `switch` in `cmd/cleatctl/main.go`; `events` exists only *inside* the `cleatctl debug`
+   REPL, which is why the command looked plausible.
 
 4. **Verify that all external communication uses `h.DurableCall()`**.
    Direct HTTP, database, or file I/O during execution will not be recorded in
@@ -537,10 +544,11 @@ A long-running workflow with thousands of events takes minutes to replay.
 
 **Diagnosis: How to confirm**
 
-Check the event count for the workflow:
+Check the event count for the workflow. There is no `cleatctl` subcommand for this (see the note in
+the replay step above), but the history is served as a JSON array, so:
 
 ```bash
-cleatctl events count --workflow-id <id>
+curl -s "http://localhost:8080/api/workflows/<id>/history" | jq 'length'
 ```
 
 If the event count exceeds 1000, compaction may help.

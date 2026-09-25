@@ -193,7 +193,7 @@ SELECT
     def_name,
     AVG(EXTRACT(EPOCH FROM (completed_at - created_at))) AS avg_duration_seconds
 FROM workflow_instances
-WHERE status = 'completed'
+WHERE status = 'done'
 GROUP BY def_name;
 ```
 

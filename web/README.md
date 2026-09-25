@@ -282,7 +282,7 @@ Browses registered workflow definitions. Shows for each definition: name, versio
 
 ### DeadLetters (DeadLetters.svelte)
 
-Manages the dead-letter queue -- workflow instances that failed with non-retryable errors. Lists failed instances with their error details and provides actions to reprocess or terminate.
+Manages the dead-letter queue -- workflow instances whose last durable call exhausted its retry policy. Lists failed instances with their error details and provides actions to reprocess or terminate.
 
 ### ScheduleManagement (ScheduleManagement.svelte)
 
