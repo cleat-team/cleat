@@ -354,30 +354,69 @@ the gap cleat#1277 opened and cleat#1278 tracks the remainder of.
 
 ### Tenant deletion
 
-**Deleting a tenant does not delete its plugin data.** This section claimed the
-opposite until cleat#1279, and the claim followed from the same wrong premise
-as the schema diagram above: plugin tables are in `public`, so dropping the
-tenant's schema does not reach them.
+**Deleting a tenant deletes its plugin rows too**, for every table the plugin
+registered. This section said the opposite until cleat#1279, and the claim
+followed from the same wrong premise as the schema diagram above: plugin tables
+are in `public`, so dropping the tenant's `tenant_<uuid>` schema does not reach
+them. That was true when it was written. cleat#1289 closed it —
+`plugin.RunMigrations` records every table a migration declares `TenantScoped`
+in `admin.plugin_tables`, and `admin.drop_tenant` deletes from each of them.
 
-`admin.drop_tenant` drops the `tenant_<uuid>` schema and role and deletes from
-the core tables **by name**. A dropped tenant's `kv_store`, `audit_events`,
-`oauth_sessions`, `webhook_events` and `blob_index` rows survive in `public`
-indefinitely. Re-derive which tables it does cover:
+So a dropped tenant's `kv_store`, `audit_events`, `oauth_sessions`,
+`webhook_events` and `blob_index` rows go with it, along with nine core tables
+and the admin rows that name the tenant. `cmd/cleatctl/droptenant.go`'s
+`dropTenantTables` is the maintained list of what an operator sees counted
+before confirming, and its own comment explains why it is **not** derived from
+the function's `DELETE` statements: several entries go by foreign-key cascade,
+and reading only the `DELETE`s is how `tenant_settings` came to be missing from
+that list for twenty migrations.
+
+**The authoritative definition moves, so find it rather than citing a file.**
+`admin.drop_tenant` is `CREATE OR REPLACE`d by several migrations and the last
+one wins, so a citation to an earlier file describes a function that is no
+longer installed — and the earliest still contains the original unguarded body,
+which makes checking the claim against the file the claim named confirm bugs
+that are already fixed. Find the last one:
 
 ```bash
-sed -n '/FUNCTION admin.drop_tenant/,/\$\$ LANGUAGE/p' \
-  migrations/postgres/059_a_dropped_tenants_definitions_go_with_it.sql | grep 'DELETE FROM'
+python3 - <<'EOF'
+import re, glob, os
+def strip(s):
+    s = re.sub(r'/\*.*?\*/', '', s, flags=re.S)
+    return '\n'.join(re.sub(r'--.*$', '', l) for l in s.split('\n'))
+for f in sorted(glob.glob('migrations/postgres/*.sql')):
+    if re.search(r'CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+\S*drop_tenant', strip(open(f).read()), re.I):
+        print(os.path.basename(f))     # the LAST line is authoritative
+EOF
 ```
 
-Tracked as cleat#1289. **Treat tenant deletion as incomplete for plugin data
-and clean up explicitly** until that lands.
+**`p_schema` is required** (cleat#1363), and passing it is what stops those
+`DELETE`s resolving through the caller's `search_path`. The function refuses a
+NULL or empty schema, refuses a schema that does not exist — *"deleting nothing
+and reporting success is the failure this function was fixed to stop"* — and
+refuses the default tenant, which every single-tenant deployment shares.
 
-Two properties make the gap harder to notice than an ordinary missing
-`DELETE`:
+**What is still outside its reach**, and each of these is a real gap rather
+than a caveat:
 
-- A plugin table with a `TenantScoped` policy (cleat#1280) now holds rows
-  behind a policy keyed on a tenant that no longer exists — so they are
-  **unreadable and undeleted** rather than merely undeleted.
+- **A plugin that declares no `TenantScoped` tables.** Nothing registers them,
+  so nothing deletes them. The registry is exactly the boundary of what
+  `drop_tenant` reaches.
+- **MySQL.** It has no row-level security and no `admin.drop_tenant`; a
+  tenant's data lives in its own `cleat_<uuid>` database. `cleatctl
+  drop-tenant` has no MySQL path at all — it dispatches on `postgres` and
+  `mssql` only.
+- **SQL Server** is covered, by
+  `migrations/mssql/074_a_dropped_tenants_rows_go_with_it.sql`, which deletes
+  the same way. Its plugin tables are always in `dbo`, so `--schema` is
+  PostgreSQL-only.
+
+**A hand-written cleanup still meets the trap this section originally
+described**, which is why it stays here rather than being deleted with the
+rest:
+
+- A plugin table with a `TenantScoped` policy (cleat#1280) holds its rows
+  behind a policy keyed on the tenant.
 - A `DELETE` issued against such a table by a role the policy applies to
   removes nothing **and reports success**. Measured: with a different tenant
   set in the session, `DELETE FROM kv_store WHERE tenant_id = '<dropped>'`
@@ -385,6 +424,10 @@ Two properties make the gap harder to notice than an ordinary missing
   raises instead. So the careless path fails loudly and the careful path fails
   silently, and `DELETE 0` is also the correct result for "this tenant had no
   rows" — no row count can tell the two apart.
+
+  `admin.drop_tenant` is `SECURITY DEFINER` and sets `cleat.tenant_id`
+  explicitly for exactly this reason, so its own `DELETE`s are not subject to
+  it. Yours would be.
 
 ---
 
