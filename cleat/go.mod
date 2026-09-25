@@ -1,6 +1,8 @@
 module github.com/cleat-team/cleat/cleat
 
-go 1.26.0
+go 1.27.0
+
+toolchain go1.27.1
 
 // github.com/cleat-team/cleat is required at the CURRENT published root
 // version, not a placeholder. v0.0.0 was never a real tag: it resolved fine

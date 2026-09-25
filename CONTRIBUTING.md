@@ -124,7 +124,7 @@ To build and test cleat you will need:
 **Minimum (write and run Go workflows):**
 | Tool | Version | Required | Notes |
 |------|---------|----------|-------|
-| Go | 1.25+ | Yes | Standard Go toolchain |
+| Go | 1.27+ | Yes | Standard Go toolchain (go.mod pins `toolchain go1.27.1`; with `GOTOOLCHAIN=auto`, the default, Go downloads it for you) |
 | PostgreSQL | 14+ (16 recommended) | Yes | Or MySQL 8.0+, or SQL Server 2017+ |
 | Docker | Latest | No | Only if using Docker for the database |
 

@@ -70,4 +70,8 @@ regexes = [
   # plugins/slacknotify/slacknotify_new_test.go -- the fake route-signing-key
   # fixture signTestRoute signs with; high enough entropy to match generic-api-key.
   '''test-route-signing-key-0123456789''',
+  # .github/workflows/ci.yml -- the lint job's known-positive: a scratch module with a hard-coded credential that
+  # gosec (G101) MUST report, or the job fails as UNMEASURED (cleat#2216). It exists to be found by a scanner;
+  # allowlisting the exact value keeps the rule live everywhere else.
+  '''xQ9vLm2ZpR7kN4wY8tB3fH6jC1''',
 ]

@@ -7,7 +7,7 @@ end-to-end. Every command is a copy-paste snippet.
 
 ## 1. Prerequisites
 
-- **Go 1.26+** -- [Download](https://go.dev/dl/)
+- **Go 1.27+** -- [Download](https://go.dev/dl/)
 - **Docker** -- for running Postgres locally
 - **cleat CLI** -- install with one command:
 

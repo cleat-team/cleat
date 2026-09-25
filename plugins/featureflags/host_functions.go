@@ -115,7 +115,7 @@ func (p *Plugin) evaluateFlag(ctx context.Context, inputJSON string) (string, er
 	// evaluateFlagOutput and marshal EvaluationResult directly. A conversion
 	// is the worst of the two: it keeps both names, so the wire format still
 	// looks independent, while coupling them so it is not.
-	output := evaluateFlagOutput{ //nolint:gosimple // deliberate: wire contract, see above
+	output := evaluateFlagOutput{ //nolint:staticcheck // deliberate: wire contract, see above
 		Enabled:    result.Enabled,
 		Key:        result.Key,
 		Evaluation: result.Evaluation,

@@ -1,25 +1,52 @@
+# golangci-lint v2 (cleat#2216). This file was v1 until 2026-09-24.
+#
+# v1.64.7 cannot read Go 1.27's export data: it exits 3 having reported nothing, and the notes below spent
+# a paragraph on pinning GOTOOLCHAIN=go1.25.11 to work around it. The project builds, tests and lints on
+# Go 1.27.1 now (go.mod's `toolchain` line is the one source, scripts/check-go-toolchain-pins.py), so the
+# linter had to move to the v2 line, which is built for it.
+#
+# WHAT WAS PRESERVED, and how it was checked. v1's effective set was its default (errcheck, gosimple, govet,
+# ineffassign, staticcheck, unused) plus what is enabled below, minus what was disabled: govet, gosimple,
+# ineffassign, staticcheck, misspell, unconvert, gosec. v2 folds gosimple into staticcheck, so the set is
+# written out with `default: none` instead of inherited. v2's staticcheck also turns on two families v1 never
+# ran, QF (quick fixes) and ST (stylecheck): 79 QF1012, 46 ST1005 and 40 more on this tree, none of them a
+# defect. They are excluded by check family below, so the gate means what it meant. Measure before changing
+# that: `golangci-lint run -c <this file with the checks line removed> ./...`.
+#
+# WHAT THE MOVE COST. A newer gosec (v2.14's) has rules v1's did not: G118, G122 and the taint-analysis
+# family G701-G706. On this tree that was 61 findings across 26 sites, all read, all scoped exclusions with
+# their reasons in `exclusions.rules` below, none of them a bare rule-wide disable. The real fixes that came
+# out of it are in the issue linked there. Plus 12 staticcheck findings: six were the `//nolint:ineffassign`
+# counters (v2 reports the same line as SA4006, so those directives now name staticcheck too), one
+# `//nolint:gosimple` (now staticcheck, S1016), and the rest are listed with reasons at their sites.
+#
+# IT IS NOT VACUOUS. A planted G101 (a hard-coded credential) turns the job red on this file, checked with
+# the exact command CI runs -- see the PR that made this change for the transcript, and re-do it before
+# trusting a green: `printf 'package x\nconst password = "hunter2hunter2"\n' > /tmp/x/x.go` in any module.
+version: "2"
 run:
-  go: "1.25"
+  go: "1.27"
 linters:
+  default: none
   enable:
     # Not on by golangci-lint's default set, so listing it under `disable`
     # below never did anything -- it had to be enabled to run at all.
     - misspell
     # Enabled 2026-08-05 (WS-3). Was 4 findings, not the 8 recorded below.
     - ineffassign
-    # Enabled 2026-08-05 (WS-3). 9 findings, 8 fixed and 1 suppressed.
-    - gosimple
-    # Enabled 2026-08-05 (WS-3). 16 findings, 13 fixed and 3 suppressed.
+    # Enabled 2026-08-05 (WS-3) as gosimple: 9 findings, 8 fixed and 1 suppressed; and as staticcheck:
+    # 16 findings, 13 fixed and 3 suppressed. v2 folded gosimple into staticcheck, so this is the union.
     - staticcheck
     # Enabled 2026-08-05 (WS-3). 32 findings, all fixed with `unconvert -apply`.
     - unconvert
     # Enabled 2026-09-04 (WS-3). See "gosec, 2026-09-04" below: 671 raw, and 0
     # after two scoped exclusions that the notes below argue for individually.
     - gosec
-  disable:
-    - errcheck
-    - unused
-    - gocyclo
+    # govet was on in v1 by DEFAULT (nothing here ever listed it), so it is listed now that nothing is
+    # inherited. Zero findings on this tree.
+    - govet
+  # errcheck, unused and gocyclo are NOT enabled. v1 listed them under `disable:`; with `default: none` there
+  # is nothing to disable, and the backlog note that follows still applies to them.
   # The disables above are a backlog, not a policy. This note used to read
   # "errcheck and other noisy linters are temporarily disabled. The engine
   # refactoring introduced hundreds of pre-existing issues." That was true when
@@ -203,7 +230,25 @@ linters:
   # separated module list runs `cd` on one giant string, every run fails, and
   # every count comes back 0. Loop with `while IFS= read -r m`, and check
   # stderr for `level=error` rather than trusting the count.
-issues:
+  settings:
+    staticcheck:
+      # v1's staticcheck + gosimple: the SA and S families. QF (quick fixes) and ST (stylecheck) are v2-only
+      # in the default set and were never part of this gate; see the header.
+      checks: ["all", "-QF*", "-ST*"]
+  exclusions:
+    # v1's `exclude-use-default: true` behaviour, spelled out: v2's presets are the same four rule sets, and
+    # `generated: lax` skips files with a generated-code header.
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+    # ---- exclusion rules ----------------------------------------------------------------------------
   # gosec, 2026-09-04 (WS-3). ENABLED, with two exclusions and no baseline file.
   #
   # Measured on golangci-lint v1.64.7 under GOTOOLCHAIN=go1.25.11 (the toolchain
@@ -265,56 +310,143 @@ issues:
   #     and edit: `cleat init` scaffolding, generated code, build outputs, a
   #     lock file, the compiled-module disk cache. 0600 would be wrong, not
   #     safer. This one is an exclusion rather than 23 //nolints; see below.
-  exclude-rules:
-    # G115, integer overflow conversion. 213 of the 253 production findings.
-    #
-    # This is a DECISION, not a deferral, and it predates enabling gosec --
-    # see the 2026-08-31 note above. CLAUDE.md: "Four real defects have come
-    # out of the ABI layer's integer-conversion sites and none of them was an
-    # overflow -- in every case the value meant the wrong thing on one side of
-    # the boundary, which a property test over that boundary would find faster
-    # than reading the remaining sites." Those property tests landed in #485.
-    # Reading 213 conversion sites for overflows is precisely the sweep that
-    # guidance exists to prevent.
-    - linters: [gosec]
-      text: "G115"
+    rules:
+      # G115, integer overflow conversion. 213 of the 253 production findings.
+      #
+      # This is a DECISION, not a deferral, and it predates enabling gosec --
+      # see the 2026-08-31 note above. CLAUDE.md: "Four real defects have come
+      # out of the ABI layer's integer-conversion sites and none of them was an
+      # overflow -- in every case the value meant the wrong thing on one side of
+      # the boundary, which a property test over that boundary would find faster
+      # than reading the remaining sites." Those property tests landed in #485.
+      # Reading 213 conversion sites for overflows is precisely the sweep that
+      # guidance exists to prevent.
+      - linters: [gosec]
+        text: "G115"
 
-    # G306, WriteFile permissions. Excluded repo-wide for gosec ONLY.
-    #
-    # Scoped to the linter rather than added back to a global `exclude-files`,
-    # which is the move the note below this block explicitly asks for: "If you
-    # are tempted to re-add the exclusion to make a new linter tractable, scope
-    # it to that linter instead of blinding all of them."
-    #
-    # THE COST, stated because an exclusion that hides a future real finding is
-    # how a linter becomes decoration: cleat has no code path that writes a
-    # secret to disk today, so there is nothing here for 0600 to protect. If one
-    # is added -- a credential cache, a token file -- this exclusion will not
-    # flag it, and the reviewer of that PR is the last line. G306 is the one
-    # rule here excluded on breadth rather than on having read every site.
-    - linters: [gosec]
-      text: "G306"
+      # G306, WriteFile permissions. Excluded repo-wide for gosec ONLY.
+      #
+      # Scoped to the linter rather than added back to a global `exclude-files`,
+      # which is the move the note below this block explicitly asks for: "If you
+      # are tempted to re-add the exclusion to make a new linter tractable, scope
+      # it to that linter instead of blinding all of them."
+      #
+      # THE COST, stated because an exclusion that hides a future real finding is
+      # how a linter becomes decoration: cleat has no code path that writes a
+      # secret to disk today, so there is nothing here for 0600 to protect. If one
+      # is added -- a credential cache, a token file -- this exclusion will not
+      # flag it, and the reviewer of that PR is the last line. G306 is the one
+      # rule here excluded on breadth rather than on having read every site.
+      - linters: [gosec]
+        text: "G306"
 
-    # Test files, for gosec ONLY -- 418 of the 671, and 140 of them survive the
-    # two exclusions above.
-    #
-    # This is the scoped form the note below asks for, not a return to the
-    # global `exclude-files` that note is about. The argument for removing THAT
-    # was "a linter that cannot see test files cannot see a test that does not
-    # test", and it was earned: staticcheck found an unreachable t.Fatal and an
-    # `if !reapCalled {}` with an empty body. gosec cannot find that class of
-    # defect. What it finds in _test.go here is test DSNs with the password in
-    # them (G101), harnesses shelling out to docker/cargo/npx (G204), and
-    # fixtures written 0644 (G306) -- all of them properties of being a test.
-    #
-    # THE COST: a real credential committed in a test file would not be flagged
-    # by this linter. scripts/ and CI have no secret-scanner either, so nothing
-    # else catches it. That is a gap worth closing separately; it is not a
-    # reason to keep 140 findings that are all the test suite being a test
-    # suite.
-    - path: '_test\.go'
-      linters: [gosec]
+      # Test files, for gosec ONLY -- 418 of the 671, and 140 of them survive the
+      # two exclusions above.
+      #
+      # This is the scoped form the note below asks for, not a return to the
+      # global `exclude-files` that note is about. The argument for removing THAT
+      # was "a linter that cannot see test files cannot see a test that does not
+      # test", and it was earned: staticcheck found an unreachable t.Fatal and an
+      # `if !reapCalled {}` with an empty body. gosec cannot find that class of
+      # defect. What it finds in _test.go here is test DSNs with the password in
+      # them (G101), harnesses shelling out to docker/cargo/npx (G204), and
+      # fixtures written 0644 (G306) -- all of them properties of being a test.
+      #
+      # THE COST: a real credential committed in a test file would not be flagged
+      # by this linter. scripts/ and CI have no secret-scanner either, so nothing
+      # else catches it. That is a gap worth closing separately; it is not a
+      # reason to keep 140 findings that are all the test suite being a test
+      # suite.
+      - path: '_test\.go'
+        linters: [gosec]
 
+      # ---- gosec rules v1's gosec did not have (cleat#2216) --------------------------------------------
+      # Each is scoped to the files it was read in. A NEW finding of the same rule anywhere else is reported.
+      #
+      # G702 command injection, G703 path traversal, G122 walk-callback TOCTOU (43 findings): the developer
+      # CLI and build tooling. `cleat build`, `cleat vet` and `wit-rewrite` exist to run the toolchains
+      # (javac, python, cargo, npx) and read and write the paths the person running them names on their own
+      # machine. There is no privilege boundary between "the tainted value" and "the user": it is their
+      # command line. G204 (subprocess) was read the same way, site by site, on 2026-09-04 (above).
+      # THE COST: a path or command that came from somewhere OTHER than the invoker would not be flagged in
+      # these files; nothing in them takes one today, and the reviewer of a PR that adds one is the check.
+      - linters: [gosec]
+        text: "G70[23]|G122"
+        path: '^(cmd/cleat/|cmd/wit-rewrite/|wasm/build\.go)'
+      # The same rules seen from the other module roots: `golangci-lint run` inside cleat/ and examples/ reports
+      # paths relative to that module, so the pattern above does not match them.
+      - linters: [gosec]
+        text: "G70[23]|G122"
+        path: '^build[_a-z]*\.go$'
+
+      # G701 SQL injection (taint), tests/plugin-harness/testdb.go, 4 sites. `USE <schema>` and the like,
+      # built from a schema name the harness generated itself and quoted with quoteIdent for the dialect;
+      # the harness is test scaffolding against throwaway databases, not a path a request can reach.
+      - linters: [gosec]
+        text: "G701"
+        path: 'testdb\.go$'
+
+      # G704 SSRF (taint), plugins/oauthprovider/oidc.go, 2 sites. getJSON is documented as a GUARDED get:
+      # the discovery and JWKS URLs are the tenant's configured identity provider, and p.httpClient is the
+      # plugin's hardened client. Fetching the configured issuer is the feature.
+      - linters: [gosec]
+        text: "G704"
+        path: 'plugins/oauthprovider/oidc\.go$'
+
+      # G101 hard-coded credentials, plugins/oauthprovider/routes.go, 3 sites: the provider endpoint table
+      # (authorize, token and userinfo URLs). The file's own comment records that nothing in the map is read
+      # as a credential; the trigger is the word `token` in a URL key.
+      - linters: [gosec]
+        text: "G101"
+        path: 'plugins/oauthprovider/routes\.go$'
+
+      # G118 goroutine uses context.Background while a request context is available, 4 sites. In each the
+      # goroutine is deliberately detached: it must finish after the request or the run that started it
+      # (engine/children.go says so at the call: "context.Background() rather than ctx, deliberately"; the
+      # memory-sample persist, the adaptive flush notify and the backup runner are the same shape).
+      - linters: [gosec]
+        text: "G118"
+        path: '(cmd/cleat-worker/memory_controller|engine/adaptive_flush|engine/children|plugins/scheduledbackup/routes)\.go$'
+
+      # G202 SQL string concatenation, engine/mssql_schedules.go and plugins/scheduledbackup/commands.go.
+      # Read: the concatenated pieces are a compile-time prefix plus "@idN" / "$N" placeholders built from an
+      # index, never a caller-supplied string (the same finding, and the same reading, as the five G202
+      # sites recorded above).
+      - linters: [gosec]
+        text: "G202"
+        path: '(engine/mssql_schedules|plugins/scheduledbackup/commands)\.go$'
+
+      # G602 slice bounds, cmd/cleatctl/debug.go and replay.go: `args[i]` after `if i >= len(args) { return }`
+      # a line above it. gosec does not follow the early return (the same shape as wasm/component_rewrite.go,
+      # recorded above).
+      - linters: [gosec]
+        text: "G602"
+        path: 'cmd/cleatctl/(debug|replay)\.go$'
+
+      # G706 log injection (taint), examples/widget-store-as: an example program logging its own listen
+      # address. Examples are not production code.
+      - linters: [gosec]
+        text: "G706"
+        path: 'widget-store-as/host/main\.go$'
+
+      # ---- staticcheck, the ones that are not an ineffassign counter (cleat#2216) ----------------------
+      # SA6001, wasm/component_rewrite.go x2: `k := string(key); m[k]` where the string is also used again
+      # below. An allocation micro-optimisation in a one-time module rewrite, not a hot path.
+      - linters: [staticcheck]
+        text: "SA6001"
+        path: 'wasm/component_rewrite\.go$'
+      # SA1019 deprecated API, 3 sites, none of them a behaviour bug today:
+      #   cmd/cleat-gen/main.go: parser.ParseDir does not consider build tags. cleat-gen parses one spec
+      #     directory of plain files with no build constraints.
+      #   plugins/oauthprovider/oidc.go x2: building an ecdsa.PublicKey from a JWK's x and y by setting the
+      #     coordinates directly, then checking IsOnCurve. Go 1.26 deprecates that in favour of
+      #     ecdsa.ParseUncompressedPublicKey. THIS ONE SHOULD BE FIXED, not excluded for good: it is the
+      #     code that decides whether an identity provider's key is valid. Tracked in cleat#2300; the
+      #     exclusion is scoped to the file so the next deprecation in it is still reported.
+      - linters: [staticcheck]
+        text: "SA1019"
+        path: '(cmd/cleat-gen/main|plugins/oauthprovider/oidc)\.go$'
+issues:
   # THERE IS NO `exclude-files` HERE ANY MORE, AND THAT IS THE POINT.
   #
   # This file carried `exclude-files: [".*_test\.go$"]` from the beginning, so

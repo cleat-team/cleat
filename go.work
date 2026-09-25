@@ -30,7 +30,9 @@
 // anywhere but ./cleat, and TestRootModuleDoesNotDependOnSDK fails if a
 // production package starts importing it again. Both were checked against a
 // deliberately broken tree, not just asserted.
-go 1.26.0
+go 1.27.0
+
+toolchain go1.27.1
 
 use (
 	.
