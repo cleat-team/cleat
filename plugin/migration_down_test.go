@@ -143,6 +143,17 @@ func TestRunDownMigrationsReversesNewestFirst(t *testing.T) {
 	if tracked != 0 {
 		t.Errorf("%d tracking rows survive; the migration cannot be re-applied", tracked)
 	}
+	// cleat#2343: the registry rows registerTenantScopedTables wrote must go
+	// with the tables, or admin.drop_tenant and admin.grant_plugin_to_tenant
+	// would read a stale row naming a table the reversal just dropped.
+	var regRows int
+	if err := db.QueryRow(`SELECT count(*) FROM admin.plugin_tables WHERE plugin_name = $1`,
+		"down-order").Scan(&regRows); err != nil {
+		t.Fatalf("count plugin_tables rows: %v", err)
+	}
+	if regRows != 0 {
+		t.Errorf("%d plugin_tables rows survive the uninstall; the registry names dropped tables", regRows)
+	}
 }
 
 // A GAP IS A REFUSAL, and nothing is touched.

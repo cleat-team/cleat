@@ -1035,6 +1035,33 @@ func registerTenantScopedTables(ctx context.Context, exec func(ctx context.Conte
 	return nil
 }
 
+// unregisterTenantScopedTables removes the rows registerTenantScopedTables
+// wrote when the plugin's migrations were applied, so a full uninstall leaves
+// admin.plugin_tables without a stale row naming a table that no longer
+// exists. PostgreSQL only, mirroring registerTenantScopedTables: MySQL and
+// SQL Server never populate the table (see that function's own comment).
+//
+// cleat#2343: RunDownMigrations never touched admin.plugin_tables, so the
+// registry survived a full uninstall unchanged, and admin.drop_tenant /
+// admin.grant_plugin_to_tenant -- which read plugin_tables to find
+// tenant-owned rows per table -- would see a stale row naming a dropped table.
+func unregisterTenantScopedTables(ctx context.Context, exec func(ctx context.Context, query string, args ...any) (sql.Result, error), dialect Dialect, schema, pluginName string, tables []string) error {
+	if len(tables) == 0 || dialect != DialectPostgres {
+		return nil
+	}
+	for _, table := range tables {
+		if !isPlainIdentifier(table) {
+			return fmt.Errorf("tenant-scoped table %q is not a plain identifier", table)
+		}
+		if _, err := exec(ctx, `DELETE FROM admin.plugin_tables
+			WHERE plugin_name = $1 AND schema_name = $2 AND table_name = $3`,
+			pluginName, schema, table); err != nil {
+			return fmt.Errorf("unregister %s.%s: %w", schema, table, err)
+		}
+	}
+	return nil
+}
+
 // isPlainIdentifier reports whether s is safe to interpolate into DDL.
 //
 // The table names come from plugin source rather than from a request, so this

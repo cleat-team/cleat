@@ -226,6 +226,9 @@ func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target 
 			if _, err := session.ExecContext(ctx, deletePluginMigrationSQL(dialect), name, m.Version); err != nil {
 				return res, fmt.Errorf("plugin %s: untracking %d: %w", name, m.Version, err)
 			}
+			if err := unregisterTenantScopedTables(ctx, session.ExecContext, dialect, cfg.schema, name, m.TenantScoped); err != nil {
+				return res, err
+			}
 			res.Reversed = append(res.Reversed, m.Version)
 			continue
 		}
@@ -258,6 +261,9 @@ func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target 
 		}
 		if _, err := session.ExecContext(ctx, deletePluginMigrationSQL(dialect), name, m.Version); err != nil {
 			return res, fmt.Errorf("plugin %s: untracking %d: %w", name, m.Version, err)
+		}
+		if err := unregisterTenantScopedTables(ctx, session.ExecContext, dialect, cfg.schema, name, m.TenantScoped); err != nil {
+			return res, err
 		}
 		res.Reversed = append(res.Reversed, m.Version)
 		res.TenantScopedTables = append(res.TenantScopedTables, m.TenantScoped...)
