@@ -339,7 +339,7 @@ Per pool, with the gate each sits behind (cleat#1470):
 |---|---|---|---|
 | core | `--concurrency + 5` | **15** | always |
 | plugin | `--max-plugin-connections` | **10** | that flag `> 0` |
-| adaptive flusher | `--batch-flush-max-connections` | **50** | unless `--batch-flush-disabled` *or* `--no-per-step-flush` |
+| adaptive flusher | `--batch-flush-max-connections` | **50** | on PostgreSQL only, and unless `--batch-flush-disabled` *or* `--no-per-step-flush`. MySQL and SQL Server workers have no batch writer and open no such pool (cleat#2348) |
 | heartbeat | `--heartbeat-max-connections` | **3** | that flag `> 0`, and not on a sharded deployment |
 | shard | 15 **per shard** | — | only when sharding is configured |
 | migrate | 2 | — | only with `--migrate-db`, and only at boot |
@@ -361,9 +361,10 @@ default single-node worker, no sharding, no --migrate-db:
     15 (core) + 10 (plugin) + 50 (flusher) + 3 (heartbeat) = 78
 ```
 
-**The adaptive flusher's 50 is default-on and is two thirds of that.** Both of
-its gates — `--batch-flush-disabled` and `--no-per-step-flush` — default to
-`false`, so it reads like an opt-in feature and is not one. If you size for
+**The adaptive flusher's 50 is default-on and is two thirds of that — on PostgreSQL.**
+Both of its gates — `--batch-flush-disabled` and `--no-per-step-flush` — default to
+`false`, so it reads like an opt-in feature and is not one. (A MySQL or SQL Server
+worker builds no flusher at all: its SQL is PostgreSQL's, cleat#2348.) If you size for
 `concurrency + 5` you will be short by 63 per worker, and the symptom is
 connection exhaustion under load.
 

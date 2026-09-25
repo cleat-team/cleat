@@ -1046,12 +1046,40 @@ func (e *Engine) DB() *sql.DB { return e.db }
 func (e *Engine) TenantID() string { return e.tenantID }
 
 // getAdaptiveFlusher returns the tenant-specific AdaptiveFlusher from the
-// registry, or nil if no registry is configured.
+// registry, or nil if no registry is configured or the store's database cannot
+// run the batch writer.
+//
+// THE BATCH WRITER IS POSTGRESQL-ONLY. Its fence check and its INSERT are
+// written in PostgreSQL's dialect (set_config, `$1::jsonb`,
+// jsonb_populate_recordset, ON CONFLICT), and the flusher was given whatever
+// *sql.DB the --db DSN produced. Batch mode is on by default and is entered on
+// the step rate alone, so a busy MySQL or SQL Server worker switched into a
+// writer that could not succeed: each event was retried for the whole retry
+// window (750ms by default) and then dropped, with the workflow carrying on
+// (cleat#2348). Returning nil here sends those two dialects down the direct
+// per-step flush (flushEvent -> perStepEventFlusher), which is the path they
+// have always been correct on.
 func (e *Engine) getAdaptiveFlusher() *AdaptiveFlusher {
-	if e.flusherRegistry == nil {
+	if e.flusherRegistry == nil || !batchFlushSupported(e.workflowStore) {
 		return nil
 	}
 	return e.flusherRegistry.For(e.tenantID)
+}
+
+// batchFlushSupported reports whether the store's database speaks the dialect
+// AdaptiveFlusher's SQL is written in, which is PostgreSQL's.
+//
+// A deny list rather than an allow list, because the tests in this package
+// build their engines around fake stores that stand in for PostgreSQL. The
+// list cannot go stale unnoticed: TestEveryStoreThatFlushesPerStepIsRefusedBatchMode
+// fails when any store implements perStepEventFlusher -- which a store on a
+// non-PostgreSQL dialect has to, to flush at all -- without being named here.
+func batchFlushSupported(store WorkflowStore) bool {
+	switch store.(type) {
+	case *MySQLStore, *MSSQLStore:
+		return false
+	}
+	return true
 }
 
 // EncryptSensitivePayloads returns whether sensitive payload encryption is enabled.
