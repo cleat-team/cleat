@@ -17,7 +17,12 @@ import (
 // written in the portable $N form that happened to work on postgres because
 // nobody rewrote its placeholders would pass every other test here, since
 // TestBackupCommandWorksOnEveryDialect drives postgres through the same
-// d.rebind call and would not notice a no-op.
+// d.rebindArgs call and would not notice a no-op.
+//
+// This drives rebindArgs, not the bare rebind text-only helper: MySQL's
+// $N -> ? rewrite now happens only inside RebindArgs, alongside the arg
+// reorder, so a text-only check that called rebind here would see $1
+// unchanged and wrongly report every statement as broken (cleat#2259).
 //
 // backupConfigListSQL carries no $N at all (it lists every row, unfiltered),
 // same as quotaListAllSQL's own exemption, and is not in this list for that
@@ -33,17 +38,27 @@ func TestBackupStatementsRebindPerDialect(t *testing.T) {
 		if !strings.Contains(q, "$1") {
 			continue
 		}
-		pg := dialectPostgres.rebind(q)
+		n := countPlaceholders(q)
+		pg, _, err := dialectPostgres.rebindArgs(q, dummyArgs(n)...)
+		if err != nil {
+			t.Fatalf("postgres rebindArgs(%q): %v", q, err)
+		}
 		if !strings.Contains(pg, "$1") {
-			t.Errorf("dialectPostgres.rebind(%q) = %q, want it to still contain $1", q, pg)
+			t.Errorf("dialectPostgres.rebindArgs(%q) = %q, want it to still contain $1", q, pg)
 		}
-		my := dialectMySQL.rebind(q)
+		my, _, err := dialectMySQL.rebindArgs(q, dummyArgs(n)...)
+		if err != nil {
+			t.Fatalf("mysql rebindArgs(%q): %v", q, err)
+		}
 		if strings.Contains(my, "$1") || !strings.Contains(my, "?") {
-			t.Errorf("dialectMySQL.rebind(%q) = %q, want no $1 and a ?", q, my)
+			t.Errorf("dialectMySQL.rebindArgs(%q) = %q, want no $1 and a ?", q, my)
 		}
-		ms := dialectMSSQL.rebind(q)
+		ms, _, err := dialectMSSQL.rebindArgs(q, dummyArgs(n)...)
+		if err != nil {
+			t.Fatalf("mssql rebindArgs(%q): %v", q, err)
+		}
 		if strings.Contains(ms, "$1") || !strings.Contains(ms, "@p1") {
-			t.Errorf("dialectMSSQL.rebind(%q) = %q, want no $1 and a @p1", q, ms)
+			t.Errorf("dialectMSSQL.rebindArgs(%q) = %q, want no $1 and a @p1", q, ms)
 		}
 	}
 }
@@ -61,18 +76,30 @@ func TestBackupHistoryQueriesRebindPerDialect(t *testing.T) {
 		{"backupHistoryListSQL", backupHistoryListSQL},
 		{"backupHistoryListByConfigSQL", backupHistoryListByConfigSQL},
 	} {
-		pg := dialectPostgres.rebind(q.q.For(dialectPostgres.query))
+		pgQ := q.q.For(dialectPostgres.query)
+		pg, _, err := dialectPostgres.rebindArgs(pgQ, dummyArgs(countPlaceholders(pgQ))...)
+		if err != nil {
+			t.Fatalf("%s: postgres rebindArgs: %v", q.name, err)
+		}
 		if !strings.Contains(pg, "$1") {
 			t.Errorf("%s: postgres arm = %q, want it to still contain $1", q.name, pg)
 		}
 		if !strings.Contains(pg, "LIMIT") {
 			t.Errorf("%s: postgres arm = %q, want LIMIT (the Default arm)", q.name, pg)
 		}
-		my := dialectMySQL.rebind(q.q.For(dialectMySQL.query))
+		myQ := q.q.For(dialectMySQL.query)
+		my, _, err := dialectMySQL.rebindArgs(myQ, dummyArgs(countPlaceholders(myQ))...)
+		if err != nil {
+			t.Fatalf("%s: mysql rebindArgs: %v", q.name, err)
+		}
 		if strings.Contains(my, "$1") || !strings.Contains(my, "?") {
 			t.Errorf("%s: mysql arm = %q, want no $1 and a ?", q.name, my)
 		}
-		ms := dialectMSSQL.rebind(q.q.For(dialectMSSQL.query))
+		msQ := q.q.For(dialectMSSQL.query)
+		ms, _, err := dialectMSSQL.rebindArgs(msQ, dummyArgs(countPlaceholders(msQ))...)
+		if err != nil {
+			t.Fatalf("%s: mssql rebindArgs: %v", q.name, err)
+		}
 		if strings.Contains(ms, "$1") || !strings.Contains(ms, "@p1") {
 			t.Errorf("%s: mssql arm = %q, want no $1 and a @p1", q.name, ms)
 		}
@@ -85,12 +112,24 @@ func TestBackupHistoryQueriesRebindPerDialect(t *testing.T) {
 	}
 }
 
+// mustRebindArgs rebinds q for d's own dialect or fails the test -- for
+// reading back state this test seeded itself, where a rebind error would
+// mean the test's OWN query is malformed rather than anything under test.
+func mustRebindArgs(t *testing.T, d dialect, q string, args ...any) (string, []any) {
+	t.Helper()
+	stmt, stmtArgs, err := d.rebindArgs(q, args...)
+	if err != nil {
+		t.Fatalf("rebindArgs(%q): %v", q, err)
+	}
+	return stmt, stmtArgs
+}
+
 // TestBackupCommandWorksOnEveryDialect is the empirical check behind this
 // command's portedOn entry (cmd/cleatctl/ported.go). backup_config and
 // backup_history carry no admin.-qualified SQL (unlike drop-tenant) and no
 // row-level security to route a connection around as of migration v4
 // (cleat#2247 dropped the column and the policy on every dialect) -- every
-// statement in backup.go is $N-shaped and rewritten through d.rebind, the
+// statement in backup.go is $N-shaped and rewritten through d.rebindArgs, the
 // same convention TestSlackWorkspaceStatementsRebindPerDialect and
 // TestQuotaStatementsRebindPerDialect pin for their own files. This proves
 // the claim end to end rather than by resemblance to those two.
@@ -129,14 +168,16 @@ func TestBackupCommandWorksOnEveryDialect(t *testing.T) {
 
 			// config-list must find it, enabled by default (no --disabled given).
 			var enabled bool
-			if err := db.QueryRowContext(ctx, tc.d.rebind(`SELECT enabled FROM backup_config WHERE id = $1`), id).Scan(&enabled); err != nil {
+			stmt, stmtArgs := mustRebindArgs(t, tc.d, `SELECT enabled FROM backup_config WHERE id = $1`, id)
+			if err := db.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&enabled); err != nil {
 				t.Fatalf("reading enabled after create: %v", err)
 			}
 			if !enabled {
 				t.Fatal("a config created with no --disabled must be enabled")
 			}
 			var retentionDays int
-			if err := db.QueryRowContext(ctx, tc.d.rebind(`SELECT retention_days FROM backup_config WHERE id = $1`), id).Scan(&retentionDays); err != nil {
+			stmt, stmtArgs = mustRebindArgs(t, tc.d, `SELECT retention_days FROM backup_config WHERE id = $1`, id)
+			if err := db.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&retentionDays); err != nil {
 				t.Fatalf("reading retention_days after create: %v", err)
 			}
 			if retentionDays != 7 {
@@ -146,7 +187,8 @@ func TestBackupCommandWorksOnEveryDialect(t *testing.T) {
 			// config-update: disable it and change the cron.
 			runBackupConfigUpdate(ctx, db, tc.d, []string{"--id", id.String(), "--cron", "0 12 * * *", "--disabled"})
 			var cron string
-			if err := db.QueryRowContext(ctx, tc.d.rebind(`SELECT cron, enabled FROM backup_config WHERE id = $1`), id).Scan(&cron, &enabled); err != nil {
+			stmt, stmtArgs = mustRebindArgs(t, tc.d, `SELECT cron, enabled FROM backup_config WHERE id = $1`, id)
+			if err := db.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&cron, &enabled); err != nil {
 				t.Fatalf("reading after update: %v", err)
 			}
 			if cron != "0 12 * * *" || enabled {
@@ -159,7 +201,8 @@ func TestBackupCommandWorksOnEveryDialect(t *testing.T) {
 			before := time.Now().UTC().Add(-time.Minute)
 			runBackupRun(ctx, db, tc.d, []string{"--name", name})
 			var nextRunAt time.Time
-			if err := db.QueryRowContext(ctx, tc.d.rebind(`SELECT next_run_at FROM backup_config WHERE id = $1`), id).Scan(&nextRunAt); err != nil {
+			stmt, stmtArgs = mustRebindArgs(t, tc.d, `SELECT next_run_at FROM backup_config WHERE id = $1`, id)
+			if err := db.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&nextRunAt); err != nil {
 				t.Fatalf("reading next_run_at after run: %v", err)
 			}
 			if nextRunAt.Before(before) {
@@ -172,10 +215,11 @@ func TestBackupCommandWorksOnEveryDialect(t *testing.T) {
 			// wildcard.
 			historyID := uuid.New()
 			started := time.Now().UTC().Add(-time.Hour)
-			if _, err := db.ExecContext(ctx, tc.d.rebind(`
+			stmt, stmtArgs = mustRebindArgs(t, tc.d, `
 				INSERT INTO backup_history (id, config_id, filename, status, started_at)
 				VALUES ($1, $2, $3, $4, $5)
-			`), historyID, id, "backup-"+name+".sql.gz", "completed", started); err != nil {
+			`, historyID, id, "backup-"+name+".sql.gz", "completed", started)
+			if _, err := db.ExecContext(ctx, stmt, stmtArgs...); err != nil {
 				t.Fatalf("seeding backup_history: %v", err)
 			}
 
@@ -197,14 +241,16 @@ func TestBackupCommandWorksOnEveryDialect(t *testing.T) {
 			// unaffected").
 			runBackupConfigDelete(ctx, db, tc.d, []string{"--id", id.String()})
 			var stillThere int
-			if err := db.QueryRowContext(ctx, tc.d.rebind(`SELECT count(*) FROM backup_config WHERE id = $1`), id).Scan(&stillThere); err != nil {
+			stmt, stmtArgs = mustRebindArgs(t, tc.d, `SELECT count(*) FROM backup_config WHERE id = $1`, id)
+			if err := db.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&stillThere); err != nil {
 				t.Fatalf("checking config deletion: %v", err)
 			}
 			if stillThere != 0 {
 				t.Fatal("backup config-delete left the config row behind")
 			}
 			var historyStillThere int
-			if err := db.QueryRowContext(ctx, tc.d.rebind(`SELECT count(*) FROM backup_history WHERE id = $1`), historyID).Scan(&historyStillThere); err != nil {
+			stmt, stmtArgs = mustRebindArgs(t, tc.d, `SELECT count(*) FROM backup_history WHERE id = $1`, historyID)
+			if err := db.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&historyStillThere); err != nil {
 				t.Fatalf("checking history survival: %v", err)
 			}
 			if historyStillThere != 1 {

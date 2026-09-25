@@ -7,6 +7,7 @@ import (
 
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // TestUninstallSchedulerBackupOnEveryDialect is owner decision 1A, 2026-09-24
@@ -101,18 +102,23 @@ func TestUninstallSchedulerBackupOnEveryDialect(t *testing.T) {
 // common syntactically.
 func indexExists(t *testing.T, ctx context.Context, db *sql.DB, dialect plugin.Dialect, table, index string) bool {
 	t.Helper()
+	// Written in the portable $N form on every branch -- only the catalogue
+	// differs by dialect -- so plugintest.QueryRowRebound below can rebind
+	// and reorder for MySQL's positional ? the same way it does for a
+	// production statement; a hand-written ? or @pN here would be rebound a
+	// second time and fail closed (cleat#2259).
 	var q string
 	switch dialect {
 	case plugin.DialectMySQL:
 		q = `SELECT COUNT(*) FROM information_schema.statistics
-			WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?`
+			WHERE table_schema = DATABASE() AND table_name = $1 AND index_name = $2`
 	case plugin.DialectMSSQL:
-		q = `SELECT COUNT(*) FROM sys.indexes WHERE object_id = OBJECT_ID(@p1) AND name = @p2`
+		q = `SELECT COUNT(*) FROM sys.indexes WHERE object_id = OBJECT_ID($1) AND name = $2`
 	default:
 		q = `SELECT COUNT(*) FROM pg_indexes WHERE tablename = $1 AND indexname = $2`
 	}
 	var n int
-	if err := db.QueryRowContext(ctx, plugin.Rebind(q, dialect), table, index).Scan(&n); err != nil {
+	if err := plugintest.QueryRowRebound(t, ctx, db, dialect, q, table, index).Scan(&n); err != nil {
 		t.Fatalf("checking index %s on %s: %v", index, table, err)
 	}
 	return n > 0
@@ -123,17 +129,18 @@ func indexExists(t *testing.T, ctx context.Context, db *sql.DB, dialect plugin.D
 // covers all three dialects, each via its own catalogue.
 func tableExistsSB(t *testing.T, ctx context.Context, db *sql.DB, dialect plugin.Dialect, table string) bool {
 	t.Helper()
+	// Portable $N form on every branch -- see indexExists's comment above.
 	var q string
 	switch dialect {
 	case plugin.DialectMySQL:
-		q = `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?`
+		q = `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = $1`
 	case plugin.DialectMSSQL:
-		q = `SELECT COUNT(*) FROM sys.tables WHERE name = @p1`
+		q = `SELECT COUNT(*) FROM sys.tables WHERE name = $1`
 	default:
 		q = `SELECT COUNT(*) FROM pg_tables WHERE tablename = $1`
 	}
 	var n int
-	if err := db.QueryRowContext(ctx, plugin.Rebind(q, dialect), table).Scan(&n); err != nil {
+	if err := plugintest.QueryRowRebound(t, ctx, db, dialect, q, table).Scan(&n); err != nil {
 		t.Fatalf("checking table %s: %v", table, err)
 	}
 	return n > 0

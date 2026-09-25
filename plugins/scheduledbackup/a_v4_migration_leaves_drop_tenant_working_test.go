@@ -10,6 +10,7 @@ import (
 
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // TestSchedulerBackupV4RegistryFlipDoesNotBreakLaterDropTenant reproduces
@@ -95,8 +96,8 @@ func TestSchedulerBackupV4RegistryFlipDoesNotBreakLaterDropTenant(t *testing.T) 
 	// own stale registry row before it ever gets to anything this tenant
 	// actually owns.
 	bystander := uuid.New()
-	if _, err := db.ExecContext(ctx, plugin.Rebind(
-		`INSERT INTO admin.tenants (tenant_id, name) VALUES ($1, $2)`, dialect),
+	if _, err := plugintest.ExecRebound(t, ctx, db, dialect,
+		`INSERT INTO admin.tenants (tenant_id, name) VALUES ($1, $2)`,
 		bystander, "v4-registry-flip-bystander-"+bystander.String()[:8]); err != nil {
 		t.Fatalf("seed admin.tenants: %v", err)
 	}
@@ -109,8 +110,8 @@ func TestSchedulerBackupV4RegistryFlipDoesNotBreakLaterDropTenant(t *testing.T) 
 
 	// Prove the drop actually ran, not merely that nothing raised.
 	var remaining int
-	if err := db.QueryRowContext(ctx, plugin.Rebind(
-		`SELECT count(*) FROM admin.tenants WHERE tenant_id = $1`, dialect),
+	if err := plugintest.QueryRowRebound(t, ctx, db, dialect,
+		`SELECT count(*) FROM admin.tenants WHERE tenant_id = $1`,
 		bystander).Scan(&remaining); err != nil {
 		t.Fatalf("count admin.tenants: %v", err)
 	}

@@ -207,7 +207,11 @@ func resolveConfigID(ctx context.Context, db *sql.DB, d dialect, idFlag, nameFla
 			return uuid.Nil, fmt.Errorf("not a config UUID: %q: %w", idFlag, err)
 		}
 		var found uuid.UUID
-		row := db.QueryRowContext(ctx, d.rebind(`SELECT id FROM backup_config WHERE id = $1`), id)
+		stmt, stmtArgs, err := d.rebindArgs(`SELECT id FROM backup_config WHERE id = $1`, id)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("rebind config id lookup: %w", err)
+		}
+		row := db.QueryRowContext(ctx, stmt, stmtArgs...)
 		if err := plugin.ScanRow(row, &found); err != nil {
 			if err == sql.ErrNoRows {
 				return uuid.Nil, fmt.Errorf("no backup config with id %s", id)
@@ -218,7 +222,11 @@ func resolveConfigID(ctx context.Context, db *sql.DB, d dialect, idFlag, nameFla
 	}
 
 	var ids []uuid.UUID
-	rows, err := db.QueryContext(ctx, d.rebind(`SELECT id FROM backup_config WHERE name = $1`), nameFlag)
+	stmt, stmtArgs, err := d.rebindArgs(`SELECT id FROM backup_config WHERE name = $1`, nameFlag)
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("rebind config name lookup: %w", err)
+	}
+	rows, err := db.QueryContext(ctx, stmt, stmtArgs...)
 	if err != nil {
 		return uuid.Nil, fmt.Errorf("looking up config %q: %w", nameFlag, err)
 	}
@@ -285,8 +293,14 @@ func runBackupConfigCreate(ctx context.Context, db *sql.DB, d dialect, args []st
 	enabled := !f.disabled
 
 	id := uuid.New()
-	if _, err := db.ExecContext(ctx, d.rebind(backupConfigCreateSQL),
-		id, f.name, f.cron, retentionDays, enabled, next, now, now); err != nil {
+	stmt, stmtArgs, err := d.rebindArgs(backupConfigCreateSQL,
+		id, f.name, f.cron, retentionDays, enabled, next, now, now)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rebinding backup config create: %v\n", err)
+		osExit(1)
+		return
+	}
+	if _, err := db.ExecContext(ctx, stmt, stmtArgs...); err != nil {
 		fmt.Fprintf(os.Stderr, "creating backup config %q: %v\n", f.name, err)
 		osExit(1)
 		return
@@ -301,7 +315,13 @@ func runBackupConfigList(ctx context.Context, db *sql.DB, d dialect, args []stri
 		osExit(1)
 		return
 	}
-	rows, err := db.QueryContext(ctx, d.rebind(backupConfigListSQL))
+	stmt, stmtArgs, err := d.rebindArgs(backupConfigListSQL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rebinding backup config list: %v\n", err)
+		osExit(1)
+		return
+	}
+	rows, err := db.QueryContext(ctx, stmt, stmtArgs...)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "listing backup configs: %v\n", err)
 		osExit(1)
@@ -414,7 +434,13 @@ func runBackupConfigUpdate(ctx context.Context, db *sql.DB, d dialect, args []st
 	vals = append(vals, id)
 	query := fmt.Sprintf("UPDATE backup_config SET %s WHERE id = $%d", strings.Join(sets, ", "), next)
 
-	if _, err := db.ExecContext(ctx, d.rebind(query), vals...); err != nil {
+	stmt, stmtArgs, err := d.rebindArgs(query, vals...)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rebinding backup config update: %v\n", err)
+		osExit(1)
+		return
+	}
+	if _, err := db.ExecContext(ctx, stmt, stmtArgs...); err != nil {
 		fmt.Fprintf(os.Stderr, "updating backup config %s: %v\n", id, err)
 		osExit(1)
 		return
@@ -442,7 +468,13 @@ func runBackupConfigDelete(ctx context.Context, db *sql.DB, d dialect, args []st
 		osExit(1)
 		return
 	}
-	if _, err := db.ExecContext(ctx, d.rebind(backupConfigDeleteSQL), id); err != nil {
+	stmt, stmtArgs, err := d.rebindArgs(backupConfigDeleteSQL, id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rebinding backup config delete: %v\n", err)
+		osExit(1)
+		return
+	}
+	if _, err := db.ExecContext(ctx, stmt, stmtArgs...); err != nil {
 		fmt.Fprintf(os.Stderr, "deleting backup config %s: %v\n", id, err)
 		osExit(1)
 		return
@@ -474,7 +506,13 @@ func runBackupRun(ctx context.Context, db *sql.DB, d dialect, args []string) {
 		return
 	}
 	now := time.Now().UTC()
-	if _, err := db.ExecContext(ctx, d.rebind(backupConfigRequestRunSQL), now, now, id); err != nil {
+	stmt, stmtArgs, err := d.rebindArgs(backupConfigRequestRunSQL, now, now, id)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "rebinding backup run request: %v\n", err)
+		osExit(1)
+		return
+	}
+	if _, err := db.ExecContext(ctx, stmt, stmtArgs...); err != nil {
 		fmt.Fprintf(os.Stderr, "requesting a run for %s: %v\n", id, err)
 		osExit(1)
 		return
@@ -509,9 +547,19 @@ func runBackupHistory(ctx context.Context, db *sql.DB, d dialect, args []string)
 			osExit(1)
 			return
 		}
-		rows, err = db.QueryContext(ctx, d.rebind(backupHistoryListByConfigSQL.For(d.query)), id, limit)
+		var stmt string
+		var stmtArgs []any
+		stmt, stmtArgs, err = d.rebindArgs(backupHistoryListByConfigSQL.For(d.query), id, limit)
+		if err == nil {
+			rows, err = db.QueryContext(ctx, stmt, stmtArgs...)
+		}
 	} else {
-		rows, err = db.QueryContext(ctx, d.rebind(backupHistoryListSQL.For(d.query)), limit)
+		var stmt string
+		var stmtArgs []any
+		stmt, stmtArgs, err = d.rebindArgs(backupHistoryListSQL.For(d.query), limit)
+		if err == nil {
+			rows, err = db.QueryContext(ctx, stmt, stmtArgs...)
+		}
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "listing backup history: %v\n", err)
