@@ -1,5 +1,4 @@
 auth/tenant_store.go	func NewTenantStore
-auth/tenant_store.go	func TenantStore.RevokeAPIKey
 cmd/cleat-worker/memory_controller.go	func MemoryController.WorkflowMemoryEstimate
 cmd/cleat-worker/setup.go	func Worker.DrainComplete
 cmd/cleat/templates/fullstack/main.go	func SubmitOrder

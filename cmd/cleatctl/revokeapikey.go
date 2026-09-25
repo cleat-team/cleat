@@ -13,6 +13,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/cleat-team/cleat/auth"
 	"github.com/google/uuid"
 )
 
@@ -153,20 +154,28 @@ func runRevokeAPIKey(ctx context.Context, db *sql.DB, args []string) {
 		return
 	}
 
-	res, err := db.ExecContext(ctx,
-		`UPDATE admin.tenant_api_keys SET disabled_at = now()
-		 WHERE key_id = $1 AND disabled_at IS NULL`, row.keyID)
+	// Revoke through auth.TenantStore so the CLI and the library share one
+	// implementation and both methods have a production caller: --key-id goes
+	// through RevokeAPIKey, --key-hash / --key-stdin through RevokeAPIKeyByHash
+	// -- the same method the OAuth logout path (#2340) will use. A bare inline
+	// UPDATE here is what left RevokeAPIKey dead since it was written (see the
+	// header comment). The methods are idempotent, so a concurrent revoke reads
+	// as a normal success rather than the "revoked concurrently" note the old
+	// inline RowsAffected check used to print.
+	ts, err := auth.NewTenantStoreForDialect(db, auth.DialectPostgres)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: revoke: %v\n", err)
 		osExit(1)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		// Lost a race with a concurrent revoke. Same end state, so not an
-		// error -- but say so rather than printing a success that implies
-		// this invocation is what did it.
-		fmt.Println("\nKey was revoked concurrently by someone else. End state is correct.")
+	if selector.keyHash != nil {
+		err = ts.RevokeAPIKeyByHash(ctx, selector.keyHash)
+	} else {
+		err = ts.RevokeAPIKey(ctx, selector.keyID)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: revoke: %v\n", err)
+		osExit(1)
 		return
 	}
 

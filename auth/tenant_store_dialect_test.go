@@ -135,12 +135,11 @@ func TestCreateTenantAndRevokeAPIKeyRefuseNonPostgres(t *testing.T) {
 func TestResolveAPIKeyStmt_ExcludesExpired(t *testing.T) {
 	for _, tc := range []struct {
 		dialect string
-		wantNow string
 		wantOr  string
 	}{
-		{DialectPostgres, "now()", "expires_at IS NULL OR expires_at > now()"},
-		{DialectMySQL, "NOW(6)", "expires_at IS NULL OR expires_at > NOW(6)"},
-		{DialectMSSQL, "SYSUTCDATETIME()", "expires_at IS NULL OR expires_at > SYSUTCDATETIME()"},
+		{DialectPostgres, "expires_at IS NULL OR expires_at > now()"},
+		{DialectMySQL, "expires_at IS NULL OR expires_at > NOW(6)"},
+		{DialectMSSQL, "expires_at IS NULL OR expires_at > SYSUTCDATETIME()"},
 	} {
 		t.Run(tc.dialect, func(t *testing.T) {
 			stmt := resolveAPIKeyStmt(tc.dialect)

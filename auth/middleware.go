@@ -88,6 +88,9 @@ func SubjectFromContext(ctx context.Context) (string, bool) {
 // there is one database per tenant, so a tenant-scoped store looks for the key
 // in the tenant's database while every writer puts it in the base one. Both
 // engine.WorkflowStore and auth.TenantStore satisfy this. See cleat#866.
+// cleat#2352: expiry is enforced only by auth.TenantStore's implementation,
+// not by the engine stores' (PostgresStore/MySQLStore/MSSQLStore) -- production
+// builds the enforcing resolver, but this interface does not guarantee it.
 type TenantResolver interface {
 	ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error)
 }
