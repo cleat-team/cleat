@@ -1645,6 +1645,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   child's error would otherwise be empty, closing the gap the same way
   `COALESCE(result, '{}')` already does for a done child's result.
 
+- **`GET /oauth/{provider}/login` accepted any `?tenant_id=` from any host, so with
+  `--require-host-match` set an anonymous caller could start a login against a tenant
+  whose host they were not on.** (cleat#2340)
+
+  cleat#2319 added `/login` to `pluginAuthExemptPatterns` so an anonymous browser could
+  start a login at all: the auth middleware refused it with 401, because a browser
+  arriving at `/login` has no cleat credential to present. That list is shared, and
+  `auth.HostBindingMiddlewareWithMux` is handed it as its `publicPatterns`
+  (`cmd/cleat-worker/main.go`) — where a listed route is a **skip**, not an additional
+  check: host binding returns before it has looked at the request's Host. So exempting
+  the route did not merely let an unauthenticated request through, it removed the host
+  check from the one route that both chooses its own tenant from a request parameter and
+  mints a credential.
+
+  `handleLogin` now performs that comparison itself, against
+  `plugin.Environment.HostResolver`, using the same `auth.NormalizeHost` the middleware
+  uses. A tenant that does not own the request's host is refused with `400`, before any
+  redirect is constructed. A worker with `--require-host-match` set but no resolver
+  refuses with `500` rather than reading "cannot check" as "check passed", as does a
+  resolver that returns an error. The check is conditional on `--require-host-match`,
+  which defaults to off, so a deployment that does not set it behaves exactly as before.
+
+  `/callback` deliberately does not carry this check: its tenant comes from the `state`
+  row it looks up, not from a request parameter, so there is no caller-chosen tenant for
+  a host check to disagree with — the gap was specifically `?tenant_id=`, which only
+  `/login` takes. Binding the callback's `state` to the browser with a CSRF cookie is a
+  separate, later piece of cleat#2340 and is not part of this change.
+
+- **An abandoned OAuth login left its `oauth_sessions` row behind forever.** (cleat#2340)
+
+  `handleLogin` writes a row when a login starts and `handleCallback` completes it. One
+  that is never completed — the tab is closed, the identity provider refuses, the user
+  returns after the 5-minute PKCE window — leaves a row whose `token_hash` is still
+  `NULL`, and nothing in the plugin ever touched that row again. The row count is driven
+  by how many logins are *started*, which no operator controls, so it grew without bound.
+
+  A background sweep now deletes rows that are both `token_hash IS NULL` and past
+  `expires_at`, every 5 minutes. `token_hash IS NULL` is the discriminator rather than
+  `expires_at` alone, because a *completed* session's row also goes past its expiry once
+  the session lapses, and that row must not be swept here: session expiry is enforced by
+  reading `expires_at` on each request, not by deleting the row, which leaves a completed
+  row readable after it expires for anything that later needs it. The sweep runs on all
+  three dialects and is a no-op on MySQL and SQL Server, where `/login` refuses before a
+  row is ever written.
+
+### Changed
+
+- **OAuth login is Postgres-only in this release: `/oauth/{provider}/login` and
+  `/oauth/{provider}/callback` return `501` on MySQL and SQL Server.** (cleat#2340)
+
+  A login mints a credential, and `auth.TenantStore.RevokeAPIKey` already refuses on
+  non-Postgres — there is no revocation path there for a session token issued by a login
+  (`auth.RevokeAPIKeyByHash` does not exist at all), so a credential minted on MySQL or
+  SQL Server could not be withdrawn once issued. Rather than ship a login whose
+  credentials cannot be revoked, both handlers refuse at their first statement and the
+  worker logs the limitation once at startup.
+
+  The refusal is per-request rather than at plugin `Init`: every bundled plugin
+  initializes on every boot against one flat configuration with no reliable "am I
+  configured" signal, so refusing at `Init` would stop every MySQL or SQL Server worker
+  from starting at all, whether or not anyone there uses OAuth — the failure mode
+  cleat#2202 hit with the email plugin.
+
+  **Who is affected:** a MySQL or SQL Server deployment that uses OAuth login. Use API
+  keys on those dialects for this release. Nothing else about such a deployment changes,
+  and no other plugin's routes are affected.
+
 ## [0.2.0] - 2026-08-10
 
 ### UPGRADE NOTES — breaking

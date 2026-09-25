@@ -37,6 +37,13 @@ type Plugin struct {
 	dialect    plugin.Dialect
 	secrets    plugin.Secrets
 
+	// hostResolver and requireHostMatch back handleLogin's Host-bound tenant
+	// check (cleat#2340) -- see plugin.Environment.HostResolver's doc comment
+	// for why both are needed (a nil resolver alone can't distinguish "host
+	// binding is off" from "nothing to check against").
+	hostResolver     plugin.DomainResolver
+	requireHostMatch bool
+
 	// OIDC discovery + JWKS cache for the generic `oidc` provider (cleat#1582).
 	// Reached through p.cache() rather than directly: several tests construct a
 	// Plugin without calling Init, and a nil map there would panic inside a
@@ -78,6 +85,8 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.mux = env.Mux
 	p.dialect = env.Dialect
 	p.secrets = env.Secrets
+	p.hostResolver = env.HostResolver
+	p.requireHostMatch = env.RequireHostMatch
 	p.httpClient = &http.Client{
 		// cleat#1565: every outbound request goes through the egress guard.
 		// Nil in tests that build an Environment directly, which falls back to
@@ -87,6 +96,36 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 		Timeout:   30 * time.Second,
 	}
 
+	// cleat#2340: OAuth login is Postgres-only for 0.3.0 (a minted credential
+	// can't be revoked on mysql/mssql yet -- auth.RevokeAPIKeyByHash doesn't
+	// exist there, same limitation auth.TenantStore.RevokeAPIKey already has).
+	// Logged once here, at the dialect the WORKER is running, not per tenant
+	// config -- oauth_config rows can be added after this without a restart,
+	// so this can only ever say "this deployment can't", never "nobody uses
+	// this yet". handleLogin/handleCallback refuse per-request rather than
+	// failing Init: every bundled plugin initializes on every boot against
+	// one flat --plugin-config with no reliable "am I configured" signal, and
+	// an Init-time refusal would stop every mysql/mssql worker from starting
+	// whether or not anyone uses OAuth (see #2202's email-plugin incident).
+	if p.dialect != plugin.DialectPostgres {
+		p.logger.Info("oauth-provider: OAuth login is Postgres-only in this release; "+
+			"/login and /callback will refuse on this dialect",
+			"dialect", p.dialect)
+	}
+
 	p.logger.Info("oauth-provider: initialized")
 	return nil
+}
+
+// pgOnly refuses the request with 501 if the worker isn't running Postgres,
+// and reports whether it did -- callers return immediately when true. See
+// Init's dialect-log comment for why this refuses per-request instead of at
+// Init.
+func (p *Plugin) pgOnly(w http.ResponseWriter) bool {
+	if p.dialect == plugin.DialectPostgres {
+		return false
+	}
+	p.writeError(w, http.StatusNotImplemented,
+		"OAuth login is only supported on the postgres dialect in this release")
+	return true
 }

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/google/uuid"
 )
@@ -291,6 +292,10 @@ func formatProviderURL(template, domain string) string {
 // ---- GET /oauth/{provider}/login ----
 
 func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if p.pgOnly(w) {
+		return
+	}
+
 	provider := r.PathValue("provider")
 	if !validProviders[provider] {
 		p.writeError(w, http.StatusBadRequest, "invalid provider")
@@ -314,6 +319,37 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		p.writeError(w, http.StatusBadRequest, "tenant_id required")
 		return
+	}
+
+	// cleat#2340: /login is exempt from auth.HostBindingMiddlewareWithMux
+	// (it has to be, cleat#2319 -- an anonymous caller carries no credential
+	// for that middleware to bind a tenant from), so nothing else enforces
+	// Host against the tenant this handler resolves for itself. Without
+	// this, --require-host-match protects every other route but not the one
+	// that starts a login: ?tenant_id=<victim> from an attacker-controlled
+	// host would otherwise mint a credential for a tenant the request's Host
+	// doesn't own. p.hostResolver is built unconditionally by the worker
+	// (see plugin.Environment.HostResolver's doc comment), so nil here only
+	// happens in a test building an Environment by hand -- treated as "can't
+	// check" rather than "check passed", refusing rather than silently
+	// skipping the binding --require-host-match promised.
+	if p.requireHostMatch {
+		if p.hostResolver == nil {
+			p.logger.Error("oauth: --require-host-match is set but no host resolver was provided")
+			p.writeError(w, http.StatusInternalServerError, "host binding is misconfigured")
+			return
+		}
+		host := auth.NormalizeHost(r.Host)
+		bound, err := p.hostResolver.TenantForHost(r.Context(), host, tid)
+		if err != nil {
+			p.logger.Error("oauth: host binding check", "error", err)
+			p.writeError(w, http.StatusInternalServerError, "host binding check failed")
+			return
+		}
+		if !bound {
+			p.writeError(w, http.StatusBadRequest, "tenant_id does not match the requested host")
+			return
+		}
 	}
 
 	cfg, err := p.getConfig(r.Context(), tid, provider)
@@ -413,6 +449,10 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 // ---- GET /oauth/{provider}/callback ----
 
 func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
+	if p.pgOnly(w) {
+		return
+	}
+
 	provider := r.PathValue("provider")
 	if !validProviders[provider] {
 		p.writeError(w, http.StatusBadRequest, "invalid provider")

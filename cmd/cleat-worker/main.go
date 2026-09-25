@@ -1407,15 +1407,32 @@ func main() {
 	pluginPrivateHosts := newPluginPrivateHosts(splitCommaList(*pluginEgressAllowPrivate))
 	pluginPrivateHosts.logStartup(slog.Default())
 
+	// Built here, not down at the auth.HostBindingMiddlewareWithMux call site
+	// where the only prior consumer lived, because pluginEnv (below) needs it
+	// too, and plugin Init -- which reads pluginEnv -- runs long before that
+	// call site does. auth.NewTenantStoreForDialect has no failure mode tied
+	// to --require-host-match, so building it unconditionally changes which
+	// requests are served by nothing. The one difference is timing: a
+	// resolver that cannot be built now fails before any plugin initializes,
+	// where it used to fail after they all had. Strictly earlier, and the
+	// worker exits either way. cleat#2340.
+	authResolver, arErr := auth.NewTenantStoreForDialect(db, *driver)
+	if arErr != nil {
+		logger.ErrorContext(context.Background(), "cannot build the API key resolver, so no request could be authenticated", "worker_id", workerID, "error", arErr)
+		os.Exit(1)
+	}
+
 	pluginEnv := &plugin.Environment{
-		HTTPTransport: pluginEgressTransport(egressAllow, operatorEgress, pluginPrivateHosts),
-		DB:            getPluginDB(db, pluginDB, plugin.Dialect(factory.Dialect())),
-		Mux:           plugMux,
-		Config:        rawPluginConfig,
-		Logger:        slog.Default(),
-		Done:          ctx.Done(),
-		Dialect:       plugin.Dialect(factory.Dialect()),
-		EventsLost:    pluginEventsLostHook(metricsInstance),
+		HTTPTransport:    pluginEgressTransport(egressAllow, operatorEgress, pluginPrivateHosts),
+		DB:               getPluginDB(db, pluginDB, plugin.Dialect(factory.Dialect())),
+		Mux:              plugMux,
+		Config:           rawPluginConfig,
+		Logger:           slog.Default(),
+		HostResolver:     authResolver,
+		RequireHostMatch: *requireHostMatch,
+		Done:             ctx.Done(),
+		Dialect:          plugin.Dialect(factory.Dialect()),
+		EventsLost:       pluginEventsLostHook(metricsInstance),
 		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
 			return startPluginWorkflow(ctx, store, req)
 		},
@@ -2278,8 +2295,8 @@ func main() {
 			// unreadable, or retired secret; missing or bad signature) --
 			// there is no path here that accepts an unsigned request, which
 			// is what makes exempting it from cleat's own auth safe.
-			// The resolver is built on `db` -- the connection the DSN
-			// names -- and NOT on `store`, which is
+			// authResolver is built once, above, on `db` -- the connection
+			// the DSN names -- and NOT on `store`, which is
 			// factory.OpenStore(ctx, defaultTenantID, ...) and therefore
 			// tenant-scoped.
 			//
@@ -2298,6 +2315,7 @@ func main() {
 				logger.ErrorContext(context.Background(), "cannot build the API key resolver, so no request could be authenticated", "worker_id", workerID, "error", arErr)
 				os.Exit(1)
 			}
+			//
 			// HOST BINDING GOES ON FIRST, so that after auth.MiddlewareWithMux wraps
 			// it below the order is auth OUTSIDE, host binding INSIDE.
 			//
