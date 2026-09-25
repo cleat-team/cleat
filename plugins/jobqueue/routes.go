@@ -141,6 +141,26 @@ func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		defName = &req.DefName
 	}
 
+	// payload is NOT NULL DEFAULT '{}' on Postgres and SQL Server (MySQL's
+	// was relaxed to nullable in cleat#1622, but the other two still enforce
+	// it). The DEFAULT only applies when the column is OMITTED from the
+	// INSERT; every write here names it explicitly, so an empty or absent
+	// body -- a legitimate enqueue, per ReadOptionalJSONBody's contract --
+	// reached JSONColumn.Value() with a zero-length Raw, which it turns into
+	// an explicit SQL NULL, not the column default. That is a constraint
+	// violation on Postgres/SQL Server: cleat#2278, a regression from #2261
+	// switching this INSERT from a hand-built NULL-safe form to JSONColumn.
+	//
+	// input has no such column default and no such bug: it has been
+	// nullable on every dialect since it was added (migration v2), and NULL
+	// there means "no input was given", which is a real, distinct value from
+	// "{}" that read handlers and RunID dispatch both depend on -- so it is
+	// deliberately left as JSONColumn{Raw: req.Input} rather than defaulted.
+	payload := req.Payload
+	if len(payload) == 0 {
+		payload = json.RawMessage("{}")
+	}
+
 	// plugin.JSONColumn.Value, not req.Payload/req.Input directly: go-mssqldb
 	// maps a bare []byte arg to VARBINARY, which corrupts the NVARCHAR
 	// payload/input columns on write -- a 200 with an empty body on the next
@@ -149,7 +169,7 @@ func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO task_queue (tenant_id, queue_name, job_id, payload, def_name, input)
 			VALUES ($1, $2, $3, $4, $5, $6)
-		`, p.dialect), tid, queueName, jobID, plugin.JSONColumn{Raw: req.Payload}, defName, plugin.JSONColumn{Raw: req.Input})
+		`, p.dialect), tid, queueName, jobID, plugin.JSONColumn{Raw: payload}, defName, plugin.JSONColumn{Raw: req.Input})
 	if err != nil {
 		p.logger.Error("jobqueue: enqueue", "error", err)
 		p.writeError(w, 500, "failed to enqueue job")
