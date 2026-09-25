@@ -163,6 +163,10 @@ func TestABlockedMigrationFailsInsteadOfWaiting(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 
+		// What the pool holds BEFORE the run: the connection holdAccessExclusive
+		// keeps, and nothing of the runner's.
+		inUseBefore := db.Stats().InUse
+
 		err := runMigrations(t, ctx,
 			migration.NewRunner(db, migration.DialectPostgres, root).
 				WithLockTimeout(0),
@@ -177,6 +181,36 @@ func TestABlockedMigrationFailsInsteadOfWaiting(t *testing.T) {
 				"arm's 55P03 is not evidence that this setting works.", err)
 		}
 		t.Logf("control failed for a different reason, as required: %v", err)
+
+		// This arm is also the one that CANCELS THE CONTEXT MID-TRANSACTION,
+		// which is the case cleat#2215 is about: the migration transaction runs
+		// on a context ctx cannot cancel (internal/pinnedtx), so ending ctx
+		// must not leave the runner's connection, or the migration lock it
+		// took, behind. Polled rather than read once, because the release runs
+		// on the runner's way out and the pool's bookkeeping is asynchronous.
+		//
+		// Measured while reviewing #2331: five cancels in a row, the lock free
+		// within 5s each time and InUse steady at the holder's one connection.
+		var locks, inUse int
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if err := db.QueryRow(`
+				SELECT count(*) FROM pg_locks
+				WHERE locktype = 'advisory' AND granted
+				  AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).
+				Scan(&locks); err != nil {
+				t.Fatalf("read pg_locks for advisory locks: %v", err)
+			}
+			inUse = db.Stats().InUse
+			if locks == 0 && inUse == inUseBefore {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("5s after the runner returned, %d advisory lock(s) are still granted and %d connection(s) are in use (was %d before the run): "+
+					"cancelling the context mid-transaction left the migration lock or its connection behind", locks, inUse, inUseBefore)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
 	})
 }
 
