@@ -12,6 +12,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **Every `/api/admin/*` route is off until `--enable-admin-api` is set, and answers 404 while it is off.** (cleat#2267)
+
+  `POST`/`GET /api/admin/drain` answered 202 to any tenant's ordinary API key, so any tenant could take
+  workers out of rotation. `--enable-admin-api` gated only force-complete, force-fail, re-replay and resolve
+  (the retention sweep checked it inside its own handler), and the drain route was registered bare. All of
+  them are now registered through one gate. **To upgrade:** a script or runbook that calls
+  `/api/admin/drain` must start the worker with `--enable-admin-api`. **Helm:** the chart's `preStop` hook
+  used to drain through this route and now only sleeps, because `adminApi.enabled` defaults to `false`;
+  set it to `true` (with `auth.adminApiKey` or `auth.existingSecret`) to get the drain call back, knowing what
+  that turns on. Neither setting lets a run in flight finish: see cleat#2285, where a run in flight at
+  SIGTERM is failed rather than reclaimed.
+
+  **While the flag is on, any authenticated key of any tenant can drain the worker and trigger a retention
+  sweep**, because cleat has no operator credential yet (cleat#2169). The worker logs a warning at startup
+  that says so. The tenant-scoped operations (force-complete, force-fail, re-replay, resolve) still only act on
+  the caller's own workflows. See [The admin API](docs/operations/admin-api.md) for the audit of which routes
+  are worker-level and which are tenant-scoped.
+
 - **A `--plugin-config` file carrying a leftover `sendgrid_api_key` with no `email_enabled` now
   refuses to start the worker, instead of silently disabling email.** (cleat#1992)
 

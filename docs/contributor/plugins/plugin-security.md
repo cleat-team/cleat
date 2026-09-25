@@ -1127,10 +1127,11 @@ Alert on any plugin-related workflow failures. These are always operator-actiona
 A plugin that implements `plugin.HasHealth` (`Health() error`) is polled every 10 seconds by the worker, off
 the request path, and a plugin that reports an error makes `/livez`, `/readyz` and `/healthz` answer 200
 with `"degraded": true` and the reason code `plugin_unhealthy`. The public bodies never name the plugin or
-quote its message; the authenticated `GET /api/admin/health` does:
+quote its message; `GET /api/admin/health` does, when the worker runs with `--enable-admin-api` (any
+authenticated key can then read it; see docs/operations/admin-api.md):
 
 ```
-GET /api/admin/health          (needs an API key)
+GET /api/admin/health          (needs --enable-admin-api and an API key)
 
 { "live": true, "ready": true, "degraded": ["plugin_unhealthy"],
   "plugins": { "audit-log": "audit-log lost 3 event(s) ..." }, ... }

@@ -42,6 +42,9 @@ worker:
   flushRetryWindow: "0"
   # -- Poll interval when no work is available (--poll).
   pollInterval: "500ms"
+  # -- Seconds the preStop hook sleeps when adminApi.enabled is false, so the pod leaves Service endpoints
+  # before SIGTERM. Keep it well under terminationGracePeriodSeconds (30s unless you set it).
+  preStopSleepSeconds: 5
 
 # -- PostgreSQL connection parameters.
 # Either provide a password here (for the chart to create a Secret), or
@@ -88,6 +91,27 @@ api:
   # -- Port for the HTTP API, health checks, and metrics endpoint.
   port: 8080
 
+# -- The admin API (cleat#2267). OFF by default.
+#
+# Every /api/admin/* route (drain, retention sweep, force-complete, force-fail, re-replay, step resolve)
+# answers 404 unless the worker runs with --enable-admin-api, which is what enabled: true passes.
+#
+# WHILE IT IS ON, ANY AUTHENTICATED API KEY OF ANY TENANT CAN DRAIN A WORKER AND TRIGGER A RETENTION
+# SWEEP over every tenant's data, because cleat has no operator credential yet (cleat#2169). Turn it on
+# only where every key you have issued is trusted to that degree. docs/operations/admin-api.md has the
+# list of which routes are worker-level and which are tenant-scoped.
+#
+# What the preStop hook does depends on it:
+#   enabled: true (and auth.adminApiKey or auth.existingSecret set)
+#       the hook POSTs /api/admin/drain.
+#   enabled: false (the default)
+#       the hook only sleeps (worker.preStopSleepSeconds), so the pod leaves Service endpoints before SIGTERM.
+# NEITHER lets a run in flight finish: the kubelet sends SIGTERM as soon as the hook returns, the drain hook
+# returns when the POST is answered rather than when the drain is complete, and a run in flight at SIGTERM is
+# currently failed rather than reclaimed by another worker (cleat#2285). See docs/operations/admin-api.md.
+adminApi:
+  enabled: false
+
 # -- Auth configuration for the worker's HTTP API.
 #
 # cleat-worker's supported configuration defaults to --require-auth=true
@@ -108,8 +132,8 @@ api:
 # Secret for it) or store it in your own Secret and set existingSecret +
 # existingSecretKey instead.
 auth:
-  # -- An API key with permission to call /api/admin/drain. Ignored if
-  # existingSecret is set.
+  # -- An API key for the preStop drain hook. Used only when adminApi.enabled is true; see below.
+  # Ignored if existingSecret is set.
   adminApiKey: ""
   # -- Name of an existing Secret containing the admin API key. When set,
   # the chart will not create its own auth Secret.

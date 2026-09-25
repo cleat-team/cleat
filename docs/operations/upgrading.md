@@ -513,8 +513,9 @@ your database size (system catalog upgrade is I/O intensive).
 Drain the worker pool before taking the database offline:
 
 ```bash
-# Set all workers to drain mode via the admin API
-curl -X POST http://localhost:8080/api/admin/drain
+# Set all workers to drain mode via the admin API (needs --enable-admin-api and an API key:
+# see admin-api.md)
+curl -X POST -H "Authorization: Bearer $CLEAT_API_KEY" http://localhost:8080/api/admin/drain
 
 # Or send SIGTERM to each worker
 pkill -TERM cleat-worker

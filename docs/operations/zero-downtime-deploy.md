@@ -104,6 +104,11 @@ The admin API provides a `/api/admin/drain` endpoint. When a worker receives a
 `POST` to this endpoint, it immediately stops claiming new instances from the
 database but continues executing its currently claimed in-flight workflows.
 
+The endpoint does not exist unless the worker was started with `--enable-admin-api`
+(it answers 404), and while that flag is on any authenticated API key can call it. The
+calls below need `-H "Authorization: Bearer $CLEAT_API_KEY"` when authentication is on, which it is by
+default. Read [The admin API](admin-api.md) before enabling it.
+
 ```bash
 # Drain a specific worker (by address)
 curl -X POST http://blue-worker-1:8080/api/admin/drain
