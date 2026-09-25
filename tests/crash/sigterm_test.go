@@ -23,6 +23,7 @@ import (
 //	e  a continue-as-new is in flight likewise    exactly one continuation, nothing failed
 //	h  a genuine failure during the drain         still recorded as FAILED: the drain does not swallow real errors
 //	j  the admin drain, then SIGTERM              the drain is a cordon; the run in flight still finishes
+//	m  a defer phase is cut off mid-backoff        released still terminating; the next worker completes the cleanup
 //	   the draining worker keeps heartbeating     the run is not reclaimed and repeated while it drains
 //
 // A call that outlasts the grace still runs to its own timeout on the departing worker, and another worker may
@@ -318,6 +319,11 @@ func TestSIGTERM_d_AFinalizeInFlightWhenTheGraceEndsIsReleasedNotFailed(t *testi
 	defer unlock()
 	release() // the last call returns; the finalize starts and waits behind the lock
 	time.Sleep(5 * time.Second)
+	// Non-vacuity: with the lock held past the grace the finalize could not have landed, so the run is still
+	// the worker's. Without the lock it would be done by now and this test would be measuring nothing.
+	if st, _ := runRow(t, db, wfID); st != "running" {
+		t.Fatalf("with the row locked the run is %q, want running: the finalize was not held in flight, so this scenario proves nothing", st)
+	}
 	unlock()
 	awaitExit(t, exited, 30*time.Second, first)
 
@@ -355,6 +361,15 @@ func TestSIGTERM_e_AContinueAsNewInFlightWhenTheGraceEndsMakesExactlyOneNewRun(t
 	defer unlock()
 	release() // the guest continues as new; the store write waits behind the lock
 	time.Sleep(5 * time.Second)
+	// Non-vacuity: held behind the lock the continue-as-new cannot have committed, so the queue still holds only
+	// the original run. Without the lock there would already be two and this scenario would prove nothing.
+	var held int
+	if err := db.QueryRow(`SELECT count(*) FROM workflow_instances WHERE task_queue = $1`, taskQueue).Scan(&held); err != nil {
+		t.Fatal(err)
+	}
+	if held != 1 {
+		t.Fatalf("%d runs on the queue while the row was locked, want 1: the continue-as-new was not held in flight", held)
+	}
 	unlock()
 	awaitExit(t, exited, 30*time.Second, first)
 
@@ -445,5 +460,89 @@ func TestSIGTERM_j_ADrainThenSIGTERMStillLetsTheRunFinish(t *testing.T) {
 	requireDone(t, db, wfID, 10*time.Second, w)
 	if r, c, s := svc.allCounts(); r != 1 || c != 1 || s != 1 {
 		t.Errorf("Reserve=%d Charge=%d Ship=%d, want 1/1/1", r, c, s)
+	}
+}
+
+// (m) A defer phase cut off by shutdown. A run parked on a sleep owes a cleanup; terminating it marks it
+// `terminating` and the next worker to claim it runs the cleanup. Here the cleanup's call fails with 503 and
+// waits out a 10s backoff, and SIGTERM (grace 1s) lands in the middle of that wait. The engine tells the guest
+// to stop, so the segment comes back with the cleanup NOT done. That must be RELEASED. The defer-phase finish
+// writes on context.Background() and would apply the recorded outcome at once, so without the shutdown check
+// right after Replay the run ends `terminated` with its cleanup never having succeeded (Cleanup=1). Released,
+// the next worker runs the cleanup again and it succeeds (Cleanup=2).
+func TestSIGTERM_m_ADeferPhaseCutOffByShutdownIsReleasedNotTerminatedWithoutItsCleanup(t *testing.T) {
+	db := ownerDB(t)
+	defer db.Close()
+	suffix := uniqueSuffix()
+	taskQueue, wfID := "queue-term-m-"+suffix, "term-m-wf-"+suffix
+
+	deployFixture(t, db, taskQueue)
+	bin := buildWorker(t)
+	svc := newChargeService(t)
+	svc.failFirstN("Cleanup", 1) // the first Cleanup answers 503; the next succeeds
+
+	first := startWorker(t, bin, taskQueue, svc.srv.URL, "--shutdown-grace", "1s")
+	startWorkflowEntry(t, db, wfID, "order-"+suffix, taskQueue, "cleanup_with_backoff")
+
+	// The run registers its defer, calls Reserve and parks on the sleep: ready, unowned, a defer in history.
+	svc.awaitCount(t, first, "Reserve", 1, startBudget)
+	deadline := time.Now().Add(startBudget)
+	for {
+		var n int
+		var assigned sql.NullString
+		if err := db.QueryRow(`SELECT (SELECT count(*) FROM event_history WHERE workflow_id = $1 AND event_type = 'defer'), assigned_to
+			FROM workflow_instances WHERE id = $1`, wfID).Scan(&n, &assigned); err != nil {
+			t.Fatal(err)
+		}
+		if n > 0 && !assigned.Valid {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the run never parked with a defer recorded\n--- worker log ---\n%s", first.output())
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// Terminate it: phase 1 of the two-phase transition, as engine.preemptivelySettle writes it for a run that
+	// owes a defer phase. (The HTTP terminate route is the dead-letter queue's and does not reach this.)
+	if _, err := db.Exec(`UPDATE workflow_instances
+		SET status = 'terminating', pending_terminal_status = 'terminated',
+		    defer_phase_deadline = now() + interval '300 seconds', error_msg = 'test terminate',
+		    next_wake_at = now(), assigned_to = NULL, generation = generation + 1
+		WHERE id = $1`, wfID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The worker claims the defer phase; the cleanup's first call fails and it is now in the 10s backoff.
+	svc.awaitCount(t, first, "Cleanup", 1, startBudget)
+	time.Sleep(300 * time.Millisecond)
+
+	exited := first.term()
+	awaitExit(t, exited, 30*time.Second, first)
+
+	status, msg := runRow(t, db, wfID)
+	if status == "terminated" {
+		t.Fatalf("the run was terminated with its cleanup never done (Cleanup=%d): a defer phase cut off by shutdown was finalized\n--- worker log ---\n%s",
+			svc.count("Cleanup"), first.output())
+	}
+	if status != "terminating" {
+		t.Fatalf("run is %q (%s), want it released still terminating\n--- worker log ---\n%s", status, msg, first.output())
+	}
+
+	second := startWorker(t, bin, taskQueue, svc.srv.URL)
+	// awaitTerminal would return at once: `terminating` is not ready or running. Wait for the outcome itself.
+	settleBy := time.Now().Add(completeBudget)
+	for {
+		st, m := runRow(t, db, wfID)
+		if st == "terminated" {
+			break
+		}
+		if time.Now().After(settleBy) {
+			t.Fatalf("after another worker took it the run is %q (%s), want terminated\n--- worker log ---\n%s", st, m, second.output())
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if n := svc.count("Cleanup"); n != 2 {
+		t.Errorf("Cleanup=%d, want 2: one attempt cut off by the shutdown, then the one that succeeded on the next worker", n)
 	}
 }

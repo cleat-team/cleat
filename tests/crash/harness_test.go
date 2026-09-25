@@ -535,7 +535,7 @@ func deployFixture(t *testing.T, db *sql.DB, taskQueue string) {
 		INSERT INTO workflow_defs
 			(name, version, wasm_bytes, entry_points, min_version,
 			 max_history_length, dag_spec, task_queue, abi_version, plugin_deps, tenant_id)
-		VALUES ('crashcall', 1, $1, ARRAY['three_charges','compensating','with_cleanup','continues_as_new'], 1, 10000, '{}'::jsonb, $2, 1, '{}'::jsonb, $3)
+		VALUES ('crashcall', 1, $1, ARRAY['three_charges','compensating','with_cleanup','continues_as_new','cleanup_with_backoff'], 1, 10000, '{}'::jsonb, $2, 1, '{}'::jsonb, $3)
 		ON CONFLICT (tenant_id, name, version) DO UPDATE SET wasm_bytes = EXCLUDED.wasm_bytes,
 			task_queue = EXCLUDED.task_queue, tenant_id = EXCLUDED.tenant_id`,
 		wasm, taskQueue, defaultTenant); err != nil {

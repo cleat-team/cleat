@@ -5715,9 +5715,11 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 	// another worker to replay from its durable history, which is the at-least-once contract a SIGKILL
 	// already has.
 	//
-	// The wide rule, deliberately, not "recognise the shutdown error": the engine reports a shutdown abort as a
-	// retryable call error that the guest is free to turn into any outcome. A genuine failure that happens to
-	// coincide with shutdown is released too, and fails again, for real, on the worker that picks it up.
+	// The wide rule, deliberately, not "recognise the shutdown error": what a cancelled context turns into is
+	// whatever the layer underneath reports (`context canceled`, or a driver's own wording, `pq: canceling
+	// statement due to user request (57014)` was measured), and a test that matched one spelling would fail the
+	// run on the next. A genuine failure that happens to coincide with shutdown is released too, and fails
+	// again, for real, on the worker that picks it up.
 	if w.shuttingDown() {
 		w.logger.InfoContext(ctx, "worker shutting down: releasing the run for another worker instead of recording a failure",
 			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", errMsg)

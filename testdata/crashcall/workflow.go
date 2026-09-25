@@ -75,6 +75,30 @@ func WithCleanup(h cleat.HostCalls, orderID string) (string, error) {
 	return ThreeCharges(h, orderID)
 }
 
+// CleanupWithBackoff registers a deferred Cleanup whose call retries with a 10s backoff, makes one call, and
+// then parks on a long sleep. It is cleat#2285's defer phase: terminating a run parked here runs the cleanup on
+// whichever worker claims it, and a SIGTERM that lands while the cleanup waits out a backoff must release the
+// run to another worker rather than finalize it as terminated with its cleanup never done.
+func CleanupWithBackoff(h cleat.HostCalls, orderID string) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		_, _ = h.DurableCallWithOptions(cleat.CallOptions{
+			Retry: &cleat.RetryPolicy{
+				MaxAttempts:        3,
+				InitialInterval:    10 * time.Second,
+				BackoffCoefficient: 1.0,
+				MaxInterval:        10 * time.Second,
+			},
+		}, "payments", "Cleanup", mustReq(orderID, "Cleanup"))
+	}); err != nil {
+		return "", err
+	}
+	if _, err := h.DurableCall("payments", "Reserve", mustReq(orderID, "Reserve")); err != nil {
+		return "", err
+	}
+	h.DurableSleepMs(300000)
+	return `{"status":"completed"}`, nil
+}
+
 func mustReq(orderID, op string) string {
 	req, err := json.Marshal(map[string]string{"order_id": orderID, "op": op})
 	if err != nil {
