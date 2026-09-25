@@ -43,8 +43,16 @@ worker:
   # -- Poll interval when no work is available (--poll).
   pollInterval: "500ms"
   # -- Seconds the preStop hook sleeps when adminApi.enabled is false, so the pod leaves Service endpoints
-  # before SIGTERM. Keep it well under terminationGracePeriodSeconds (30s unless you set it).
+  # before SIGTERM. It comes out of terminationGracePeriodSeconds below, ahead of the drain.
   preStopSleepSeconds: 5
+  # -- How long a worker that receives SIGTERM lets its in-flight runs finish before it cancels them
+  # (--shutdown-grace). A run still going when it ends is released for another worker to replay from
+  # its durable history, and a durable call that was mid-flight is EXECUTED AGAIN there (at-least-once).
+  # If your calls run longer than this, raise it, and terminationGracePeriodSeconds with it.
+  shutdownGrace: "20s"
+  # -- The pod's terminationGracePeriodSeconds. Must exceed preStopSleepSeconds + shutdownGrace with room
+  # to spare: the kubelet SIGKILLs the pod when it runs out, drain or no drain. A template test enforces it.
+  terminationGracePeriodSeconds: 60
 
 # -- PostgreSQL connection parameters.
 # Either provide a password here (for the chart to create a Secret), or

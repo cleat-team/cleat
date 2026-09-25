@@ -121,8 +121,10 @@ done
 
 #### Using SIGTERM
 
-SIGTERM triggers the same drain behavior: the worker stops claiming new
-instances and waits for in-flight workflows to complete before exiting.
+SIGTERM stops claiming and waits for in-flight workflows to complete, up to
+`--shutdown-grace` (default 20s), before exiting. See
+[What SIGTERM does](#what-sigterm-does) for what happens to a workflow that is
+still running when the grace ends.
 
 ```bash
 # Send SIGTERM to all blue pool workers
@@ -153,8 +155,46 @@ When a worker enters drain mode (either from the API or SIGTERM):
 4. **Release on completion**: as each in-flight workflow completes, the worker
    releases it by updating the instance status and clearing `assigned_to`.
 5. **Exit after drain**: when using SIGTERM, the worker exits after all
-   in-flight workflows complete or an internal timeout elapses. The admin API
-   drain does not automatically exit the process.
+   in-flight workflows complete or `--shutdown-grace` elapses. The admin API
+   drain is a cordon and never exits the process.
+
+#### What SIGTERM does
+
+1. It stops claiming and starts reporting `/readyz` 503 `draining`.
+2. It waits, for at most `--shutdown-grace` (default 20s; chart
+   `worker.shutdownGrace`), for the workflows already running to finish. The
+   worker stays fully alive during the wait: heartbeats continue, so no other
+   worker reclaims a run this one is still executing, and a run that finishes
+   is finalized normally. A second SIGTERM or SIGINT cancels at once.
+3. When the wait ends the worker cancels what is left. **A run cut off this way
+   is released, never failed.** It goes back to the queue with its durable
+   history, and another worker replays it. The workflow is not told its call
+   failed, so a workflow that compensates on error does not run its
+   compensation, and a `defer` does not run its cleanup on the worker that is
+   leaving.
+
+What that costs, stated plainly:
+
+- **A durable call that was still running when the grace ended can run twice.**
+  The worker does not abort an HTTP call already in flight (it runs to its own
+  timeout, 30s), and another worker may replay the step meanwhile. This is the
+  same at-least-once contract as a crash. Give long-running calls an
+  idempotency key, or raise `--shutdown-grace` (and the orchestrator's kill
+  deadline with it) to cover your longest call. Cleat#2287 tracks releasing
+  and stopping such calls at the grace boundary.
+- **A genuine failure that lands during shutdown is delayed, not lost.** The
+  run is released like any other and fails again, for real, on the worker that
+  picks it up. A failure that happens *before* the grace ends is recorded as
+  usual.
+- **A stalled database defeats the release.** Its writes do not honour a
+  deadline, so the orchestrator's SIGKILL at the end of its kill deadline is the
+  backstop, and the run is then recovered by the reaper as after a crash.
+
+The orchestrator's kill deadline must exceed the grace with room to spare:
+`terminationGracePeriodSeconds` (Kubernetes chart default 60, `k8s/deployment.yaml`
+60), `stop_grace_period` (the compose files here set 60s; Docker's own default is
+10s and would cut the drain off), or `TimeoutStopSec` for systemd (its default is
+90s).
 
 Monitor drain progress:
 

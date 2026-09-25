@@ -534,11 +534,10 @@ func (s *apiServer) handleDrainStatus(w http.ResponseWriter, r *http.Request) {
 		"in_flight": count,
 	}
 
+	// READ-ONLY. This used to close the drain channel and cancel the worker when the drain was done, so a
+	// drain only completed if something polled it, and a monitor polling the status stopped a worker that
+	// had been asked to drain (cleat#2285). The dispatch loop and gracefulShutdown complete the drain now.
 	if draining && count == 0 {
-		s.worker.drainOnce.Do(func() {
-			close(s.worker.drainCh)
-			s.worker.cancel()
-		})
 		resp["complete"] = true
 	}
 

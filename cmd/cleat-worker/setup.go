@@ -1880,6 +1880,64 @@ func (w *Worker) DrainComplete() <-chan struct{} {
 	return w.drainCh
 }
 
+// inflightCount is how many runs this worker is executing right now.
+func (w *Worker) inflightCount() int {
+	n := 0
+	w.inflight.Range(func(_, _ any) bool { n++; return true })
+	return n
+}
+
+// completeDrain finishes a drain: closes DrainComplete and cancels the worker so the process exits. It runs
+// once, from whoever first sees the drain complete (the dispatch loop, or gracefulShutdown), and never from
+// a status request.
+func (w *Worker) completeDrain() {
+	w.drainOnce.Do(func() {
+		if w.drainCh != nil {
+			close(w.drainCh)
+		}
+		w.cancel()
+	})
+}
+
+// shuttingDown reports whether the worker's lifetime has been cancelled. Anything that ends a run because
+// this is true has not FAILED the run: see writeTerminalFailure.
+func (w *Worker) shuttingDown() bool {
+	return w.ctx.Err() != nil
+}
+
+// gracefulShutdown is what SIGTERM and SIGINT run (cleat#2285). It stops claiming, then waits for the runs
+// already in flight to finish, and only cancels the worker when that is done, when the grace has elapsed, or
+// when force is closed (a second signal: the operator who presses ^C twice means it). It returns why.
+//
+// w.ctx stays alive during the wait. That is the whole difference from cancelling on the signal: heartbeats
+// keep the runs' fences valid, the API keeps answering /readyz (503 draining), and a run that completes does
+// so on a live worker and finalizes normally. The kubelet's own grace period is the backstop for a guest
+// that never returns: SIGKILL at the end of it, the same as any crash.
+func (w *Worker) gracefulShutdown(grace time.Duration, force <-chan struct{}) string {
+	w.draining.Store(true)
+	deadline := time.NewTimer(grace)
+	defer deadline.Stop()
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if w.inflightCount() == 0 {
+			w.completeDrain()
+			return "every in-flight run finished"
+		}
+		select {
+		case <-tick.C:
+		case <-deadline.C:
+			w.cancel()
+			return fmt.Sprintf("the %v grace period ended with runs still in flight", grace)
+		case <-force:
+			w.cancel()
+			return "a second signal"
+		case <-w.ctx.Done():
+			return "the worker was already stopping"
+		}
+	}
+}
+
 // getLoopCtx returns the per-loop context for the named background loop.
 // If no per-loop context has been set up yet (initial startup), it falls
 // back to the worker-level context so that shutdown still works.
@@ -2277,6 +2335,10 @@ func (w *Worker) dispatchLoop() {
 			w.inflight.Range(func(_, _ any) bool { inflight++; return true })
 			if inflight == 0 {
 				w.logger.InfoContext(w.ctx, "drain complete", "worker_id", w.id)
+				// A cordon stops here and does NOT exit the process (cleat#2285): POST /api/admin/drain means
+				// "take me out of rotation", and in Kubernetes an exiting POST is a container restart that
+				// resumes claiming. What ends a process is SIGTERM (gracefulShutdown), or an operator acting on
+				// GET /api/admin/drain reporting complete.
 				return
 			}
 			time.Sleep(w.pollInterval)
@@ -3101,6 +3163,18 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		} else {
 			w.Metrics.SetFreshThroughput(context.Background(), eventsPerSec)
 		}
+	}
+	// SHUTDOWN OBSERVED: release, whatever came back (cleat#2285). Once the worker's lifetime is cancelled the
+	// guest has been told to stop (or was refused new work), so nothing it returned describes what the
+	// workflow did: an error may be the shutdown, a "done" may be a compensation that ran on a fault that never
+	// happened. w.ctx is cancelled before the guest can observe anything (the engine's shutdown channel IS
+	// w.ctx.Done()), so a false reading here means the guest saw nothing. The run goes back to the queue and
+	// another worker replays it from its durable history: at-least-once, as after a crash.
+	if w.shuttingDown() {
+		w.logger.InfoContext(context.Background(), "worker shutting down: releasing the run for another worker instead of persisting its outcome",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "errored", err != nil, "suspended", suspended != nil)
+		w.releaseWorkflow(wf)
+		return
 	}
 	if err != nil {
 		if deferPhase {
@@ -5631,6 +5705,25 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 	st, release := w.storeFor(wf)
 	defer release()
 	ctx := context.Background()
+
+	// SHUTDOWN NEVER WRITES A FAILURE (cleat#2285). This is first, ahead of the pending-terminal branch below,
+	// because that branch is a write too: a defer phase cut off by shutdown must be released, not finalized
+	// without its cleanup. If the worker's lifetime is cancelled, whatever ended this
+	// run (an aborted durable call, a flush that lost its context, a finalize that could not begin) is the
+	// worker going away, not the workflow failing. Recording it would make it permanent: the run is terminal,
+	// no other worker reclaims it, and a rolling deploy loses every run in flight. So the run is released for
+	// another worker to replay from its durable history, which is the at-least-once contract a SIGKILL
+	// already has.
+	//
+	// The wide rule, deliberately, not "recognise the shutdown error": the engine reports a shutdown abort as a
+	// retryable call error that the guest is free to turn into any outcome. A genuine failure that happens to
+	// coincide with shutdown is released too, and fails again, for real, on the worker that picks it up.
+	if w.shuttingDown() {
+		w.logger.InfoContext(ctx, "worker shutting down: releasing the run for another worker instead of recording a failure",
+			"worker_id", w.id, "workflow_id", wf.ID, "tenant_id", wf.TenantID, "error", errMsg)
+		w.releaseWorkflow(wf)
+		return false, false
+	}
 
 	// A claim carrying a pending terminal outcome cannot be failed, because
 	// its outcome was decided before it was claimed: this execution is the

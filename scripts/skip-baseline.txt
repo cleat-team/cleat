@@ -72,8 +72,8 @@ cmd/cleat-worker	TestTenantIsolationOverHTTP_MySQL	1
 cmd/cleat-worker	TestTenantIsolationOverHTTP_Postgres	1
 cmd/cleat-worker	TestTheWorkerRunsADeferPhaseRatherThanReschedulingIt	1
 cmd/cleat-worker	TestWorkerMigratesFromOutsideTheRepo	2
-cmd/cleat-worker	TestWorkerShutdownAbortsADurableCallsHostBackoffWait	1
 cmd/cleat-worker	newSignalAuthStore	1
+cmd/cleat-worker	requireShutdownTestDB	1
 cmd/cleatctl	TestAuditVerifyExitStatusesAreDistinct	1
 engine	MSSQLBackend.Setup	1
 engine	MSSQLBackend.SetupForTenant	1

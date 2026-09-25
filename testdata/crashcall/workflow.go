@@ -15,6 +15,7 @@ package crashcall
 
 import (
 	"encoding/json"
+	"time"
 
 	"github.com/cleat-team/cleat/cleat"
 )
@@ -35,4 +36,62 @@ func ThreeCharges(h cleat.HostCalls, orderID string) (string, error) {
 		}
 	}
 	return `{"status":"completed"}`, nil
+}
+
+// Compensating is cleat#2285's saga: Reserve, Charge, then Ship under a retry policy, and a Refund if Ship
+// fails. A shutdown that interrupts Ship's backoff and reaches the guest as a failed call makes this run its
+// Refund and finish COMPLETED on a fault that never happened.
+func Compensating(h cleat.HostCalls, orderID string) (string, error) {
+	for _, op := range []string{"Reserve", "Charge"} {
+		if _, err := h.DurableCall("payments", op, mustReq(orderID, op)); err != nil {
+			return "", err
+		}
+	}
+	_, err := h.DurableCallWithOptions(cleat.CallOptions{
+		Retry: &cleat.RetryPolicy{
+			MaxAttempts:        3,
+			InitialInterval:    10 * time.Second,
+			BackoffCoefficient: 1.0,
+			MaxInterval:        10 * time.Second,
+		},
+	}, "payments", "Ship", mustReq(orderID, "Ship"))
+	if err != nil {
+		if _, cerr := h.DurableCall("payments", "Refund", mustReq(orderID, "Refund")); cerr != nil {
+			return "", cerr
+		}
+		return `{"status":"compensated"}`, nil
+	}
+	return `{"status":"completed"}`, nil
+}
+
+// WithCleanup is ThreeCharges with a deferred Cleanup call: a run cut off by shutdown must not run its cleanup
+// (the run is being handed to another worker, and cleanup is what a run does when it is FINISHED).
+func WithCleanup(h cleat.HostCalls, orderID string) (string, error) {
+	if _, err := h.DurableDeferFunc(func() {
+		_, _ = h.DurableCall("payments", "Cleanup", mustReq(orderID, "Cleanup"))
+	}); err != nil {
+		return "", err
+	}
+	return ThreeCharges(h, orderID)
+}
+
+func mustReq(orderID, op string) string {
+	req, err := json.Marshal(map[string]string{"order_id": orderID, "op": op})
+	if err != nil {
+		return "{}"
+	}
+	return string(req)
+}
+
+// ContinuesAsNew makes one call and then continues as a new run of ThreeCharges: cleat#2285's ContinueAsNew
+// in flight when the grace ends. The new run's input is fixed because a lone string parameter receives the
+// whole input JSON.
+func ContinuesAsNew(h cleat.HostCalls, orderID string) (string, error) {
+	if _, err := h.DurableCall("payments", "Reserve", mustReq(orderID, "Reserve")); err != nil {
+		return "", err
+	}
+	if err := h.ContinueAsNew(`{"__entry_point":"three_charges","orderID":"continued"}`); err != nil {
+		return "", err
+	}
+	return "", nil
 }

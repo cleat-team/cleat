@@ -11,7 +11,7 @@ other route, with an ordinary tenant API key, and **the routes that act on the w
 it is**. So while the flag is on:
 
 - **any authenticated API key of any tenant can drain the worker** (`POST /api/admin/drain`), which takes it
-  out of rotation (`/readyz` answers 503 `draining`) and, once its in-flight work finishes, stops it;
+  out of rotation (`/readyz` answers 503 `draining`); it stops claiming and keeps running until SIGTERM;
 - **any authenticated key can read this worker's detailed health** (`GET /api/admin/health`): stale loops,
   the last database error, and other plugins' health messages;
 - **any authenticated key can trigger a retention sweep** (`POST /api/admin/retention/sweep`), which runs the
@@ -63,24 +63,23 @@ a drain key being configured does not turn on a route that lets any tenant drain
 | `true`, with `auth.adminApiKey` or `auth.existingSecret` | `POST /api/admin/drain` with that key |
 | `true`, no key | the same `sleep`: the drain call cannot authenticate |
 
-**Neither one lets a run in flight finish, and this is a known defect (cleat#2285).** The kubelet sends SIGTERM
-as soon as the `preStop` command returns. The drain hook returns when the POST is answered (202), not when
-the drain is complete, and the worker's SIGTERM handler cancels its context. cleat-review measured a run in
-flight at SIGTERM being **permanently failed** ("finalize workflow: begin tx: context canceled") instead of
-being left for another worker to reclaim. Until #2285 is fixed, the drain hook does not make a rolling
-deploy safe, and the default `sleep` does not either. It only stops new traffic reaching a pod that is about
-to go. A drain that is meant to complete has to be driven from outside: `POST /api/admin/drain`, then poll
-`GET /api/admin/drain` until it reports `complete`, and only then stop the worker.
+The kubelet sends SIGTERM as soon as the `preStop` command returns, and the drain hook returns when the POST is
+answered (202), not when the drain is complete. What lets a run in flight finish is the worker's own SIGTERM
+handling: it drains for `--shutdown-grace` (chart: `worker.shutdownGrace`, 20s) before it cancels anything. The
+pod's `terminationGracePeriodSeconds` (chart: `worker.terminationGracePeriodSeconds`, 60) has to outlast the
+`preStop` command plus that drain, and a template test fails if it does not. See
+[zero-downtime-deploy.md](zero-downtime-deploy.md#what-sigterm-does) for what happens to a run that outlasts the grace.
 
 Set `adminApi.enabled` only where every API key you have issued is trusted to drain workers and to run the
 all-tenant retention sweep.
 
-## `GET /api/admin/drain` is not read-only
+## `GET /api/admin/drain` is read-only, and `POST` is a cordon
 
-The status call is also what completes a drain: when the worker is draining and nothing is in flight, the
-first `GET` closes the drain channel and cancels the worker, which stops it. A status poll from any
-authenticated key can therefore stop a worker that has been asked to drain (cleat#2285 tracks moving the
-completion out of the `GET`).
+`POST` stops the worker claiming and reports `/readyz` 503 `draining`. It does not stop the process, so a
+Kubernetes container is not restarted (and does not resume claiming) because something called it. `GET` reports
+progress, and `complete` once nothing is in flight; it changes nothing. Before cleat#2285 the first `GET` after
+the last run finished also cancelled the worker, so a status poll from any authenticated key stopped a worker
+that had been asked to drain, and a drain nobody polled never finished. What ends a process now is SIGTERM.
 
 ## Adding an admin route
 

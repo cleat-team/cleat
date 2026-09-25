@@ -68,14 +68,16 @@ cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 20
 The worker on SIGTERM will:
 
 1. Stop claiming new workflow instances from the database
-2. Wait for all in-flight workflow executions to complete (with an internal
-   timeout)
-3. Release claimed instances by clearing `assigned_to` and updating
-   `heartbeat_at` to a past timestamp
+2. Wait for all in-flight workflow executions to complete, for at most
+   `--shutdown-grace` (default 20s)
+3. Cancel whatever is still running and **release** it (never fail it) by
+   clearing `assigned_to`, so another worker replays it from its durable history
 4. Exit
 
 Other workers in the pool immediately pick up any instances the shutting-down
-worker releases.
+worker releases. A durable call that was still running when the grace ended can
+run again on the worker that picks the run up (at-least-once); see
+[What SIGTERM does](zero-downtime-deploy.md#what-sigterm-does).
 
 ### Kubernetes rolling update
 
@@ -517,10 +519,11 @@ Drain the worker pool before taking the database offline:
 # see admin-api.md)
 curl -X POST -H "Authorization: Bearer $CLEAT_API_KEY" http://localhost:8080/api/admin/drain
 
-# Or send SIGTERM to each worker
+# Or send SIGTERM to each worker. It waits up to --shutdown-grace for runs to finish, then exits.
 pkill -TERM cleat-worker
 
-# Wait for all workers to exit (check with pgrep)
+# Wait for all workers to exit (check with pgrep). The admin API drain only cordons (stops claiming); it does
+# not exit the process.
 ```
 
 #### 3. Verify no in-flight workflows

@@ -48,7 +48,13 @@ func FreshCallCount() int64 { return atomic.LoadInt64(&freshCallCount) }
 // (runGuestDefersAfterSuspend), so it brackets that call with inDeferDrain.
 // 3.81 assumed a guest-to-host signal was needed here and it is not.
 func (s *execSession) stopBeforeNewWork() bool {
-	return s.engine != nil && s.engine.deferPhase && !s.inDeferDrain
+	if s.engine == nil {
+		return false
+	}
+	if s.engine.deferPhase && !s.inDeferDrain {
+		return true
+	}
+	return s.engine.shutdownObserved()
 }
 
 // setDeferDrain brackets the host's own call to the guest's defer runner. It
@@ -618,13 +624,18 @@ func (s *execSession) freshCallWithRetry(ctx context.Context, m api.Module,
 				// cleat#2020: ctx here is context.Background()-derived (every
 				// wasmtime host function builds its own), so ctx.Done() above
 				// can never fire on a real worker shutdown -- this is the
-				// channel that actually does. Retryable, unlike the ctx.Done()
-				// branch: nothing about this attempt failed, this worker is
-				// just going away before the backoff elapsed, and the
-				// workflow's own retry policy resumes it on whichever worker
-				// reclaims the run.
-				written, _ := s.writeResult(ctx, m, responsePtr, shutdownCallError, responseMaxLen)
-				return packDurableCallResult(int(written), callFailureCode, 1)
+				// channel that actually does.
+				//
+				// The guest is told to STOP, not that the call failed
+				// (cleat#2285). This used to hand it a retryable failure,
+				// which a guest is free to turn into anything: a workflow that
+				// compensates on error ran its compensation, and finished
+				// COMPLETED, on a fault that never happened. Nothing about
+				// this attempt failed; this worker is going away. The worker
+				// releases the run whatever comes back (see executeWorkflow),
+				// so the sentinel only has to make the guest unwind without
+				// doing anything more.
+				return callSuspendSentinel
 			case <-time.After(time.Duration(backoffMs) * time.Millisecond):
 			}
 		}

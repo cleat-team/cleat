@@ -2387,8 +2387,17 @@ func main() {
 		// shutdown: cancel() never fires, so nothing drains. cleat#1769.
 		defer recoverBackgroundGoroutine(logger, workerID, "signal-handler")
 		<-sigCh
-		logger.InfoContext(context.Background(), "shutting down", "worker_id", workerID)
-		cancel()
+		// Drain, then cancel (cleat#2285). Cancelling here, on the signal, aborted every in-flight durable
+		// call and wrote the run FAILED; a rolling deploy lost the runs it interrupted.
+		logger.InfoContext(context.Background(), "shutting down: draining in-flight runs", "worker_id", workerID, "grace", shutdownGrace.String())
+		force := make(chan struct{})
+		go func() {
+			defer recoverBackgroundGoroutine(logger, workerID, "signal-handler-force")
+			<-sigCh
+			close(force)
+		}()
+		why := w.gracefulShutdown(*shutdownGrace, force)
+		logger.InfoContext(context.Background(), "shutdown: cancelling the worker", "worker_id", workerID, "because", why)
 		if ratelim != nil {
 			ratelim.stop()
 		}

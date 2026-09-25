@@ -61,6 +61,9 @@ services:
 
   cleat-worker:
     image: ghcr.io/cleat-team/cleat-worker:latest
+    # A worker drains for --shutdown-grace (default 20s) after SIGTERM before it cancels its runs
+    # (cleat#2285). Docker sends SIGKILL after 10s unless told otherwise, which would cut the drain off.
+    stop_grace_period: 60s
     command:
       # NOT the postgres superuser above. Every tenant-scoped table has row-
       # level security FORCEd, and PostgreSQL never applies RLS to a

@@ -157,18 +157,6 @@ const eventCapCallError = "event cap reached; workflow continuing as new"
 // there is no side effect to worry about repeating.
 const heartbeatPresumedLostCallError = "worker heartbeat presumed lost; refusing to start new work until it recovers"
 
-// shutdownCallError is the message a durable call reports when it was woken
-// from a backoff wait by a worker shutdown (Engine.shutdownRequested,
-// WithShutdownSignal) rather than by the backoff elapsing or the call
-// succeeding. cleat#2020.
-//
-// Retryable, like heartbeatPresumedLostCallError and for the same reason:
-// nothing about this call attempt is known to be wrong, only that this
-// worker is going away before it could finish waiting. packed with
-// callFailureCode so an existing retry policy picks it up on whichever
-// worker replaces this one, with no new branch.
-const shutdownCallError = "worker shutting down; call not completed"
-
 // recordedFailureCode maps a recorded call failure to the code the guest sees.
 //
 // Both the fresh path and the replay path must go through this function. A

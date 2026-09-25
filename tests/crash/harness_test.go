@@ -285,6 +285,29 @@ type chargeService struct {
 	gate     chan struct{}
 
 	hold chan struct{}
+
+	// holdStatus, when non-zero, is the HTTP status the held invocation answers with once released, instead of 200.
+	holdStatus int
+	// failFirst maps an operation to how many of its first invocations answer 503 (retryable), then succeed.
+	failFirst map[string]int
+}
+
+// failFirstN makes the first n invocations of op answer 503, a retryable failure, so a call under a retry
+// policy is left in its backoff wait.
+func (c *chargeService) failFirstN(op string, n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.failFirst == nil {
+		c.failFirst = map[string]int{}
+	}
+	c.failFirst[op] = n
+}
+
+// answerHeldWith makes the held invocation answer with status once released. 400 is not retryable.
+func (c *chargeService) answerHeldWith(status int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.holdStatus = status
 }
 
 func newChargeService(t *testing.T) *chargeService {
@@ -336,11 +359,22 @@ func (c *chargeService) handle(w http.ResponseWriter, r *http.Request) {
 	n := c.counts[op]
 	shouldHold := c.holdOp != "" && op == c.holdOp && n == 1
 	hold := c.hold
+	failing := n <= c.failFirst[op]
+	holdStatus := c.holdStatus
 	c.mu.Unlock()
+
+	if failing {
+		http.Error(w, `{"error":"unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
 
 	if shouldHold && hold != nil {
 		c.gateOnce.Do(func() { close(c.gate) })
 		<-hold
+		if holdStatus != 0 {
+			http.Error(w, `{"error":"rejected"}`, holdStatus)
+			return
+		}
 	}
 
 	body := fmt.Sprintf(`{"charge_id":"chg-%s-%d","status":"ok"}`, op, n)
@@ -385,6 +419,18 @@ func (c *chargeService) awaitHeldCall(t *testing.T, w *worker, budget time.Durat
 		t.Fatalf("the external service was never called within %v; the worker "+
 			"never reached the durable call, so there is no crash window to test"+
 			"\n--- worker log ---\n%s", budget, w.output())
+	}
+}
+
+// awaitCount blocks until op has been invoked at least n times.
+func (c *chargeService) awaitCount(t *testing.T, w *worker, op string, n int, budget time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(budget)
+	for c.count(op) < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s was invoked %d times within %v, want %d\n--- worker log ---\n%s", op, c.count(op), budget, n, w.output())
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -489,7 +535,7 @@ func deployFixture(t *testing.T, db *sql.DB, taskQueue string) {
 		INSERT INTO workflow_defs
 			(name, version, wasm_bytes, entry_points, min_version,
 			 max_history_length, dag_spec, task_queue, abi_version, plugin_deps, tenant_id)
-		VALUES ('crashcall', 1, $1, ARRAY['three_charges'], 1, 10000, '{}'::jsonb, $2, 1, '{}'::jsonb, $3)
+		VALUES ('crashcall', 1, $1, ARRAY['three_charges','compensating','with_cleanup','continues_as_new'], 1, 10000, '{}'::jsonb, $2, 1, '{}'::jsonb, $3)
 		ON CONFLICT (tenant_id, name, version) DO UPDATE SET wasm_bytes = EXCLUDED.wasm_bytes,
 			task_queue = EXCLUDED.task_queue, tenant_id = EXCLUDED.tenant_id`,
 		wasm, taskQueue, defaultTenant); err != nil {
@@ -577,6 +623,19 @@ func (w *worker) kill() {
 	_, _ = w.cmd.Process.Wait()
 }
 
+// term sends SIGTERM to the worker, the signal an orchestrator sends first, and returns a channel that
+// receives the process's exit error (nil for exit status 0) once it has gone. kill() afterwards is harmless.
+func (w *worker) term() <-chan error {
+	done := make(chan error, 1)
+	if w.cmd == nil || w.cmd.Process == nil {
+		done <- fmt.Errorf("worker was never started")
+		return done
+	}
+	_ = syscall.Kill(-w.cmd.Process.Pid, syscall.SIGTERM)
+	go func() { done <- w.cmd.Wait() }()
+	return done
+}
+
 func (w *worker) output() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -597,7 +656,13 @@ func (s *syncWriter) Write(p []byte) (int, error) {
 // startWorkflow queues one crashcall instance.
 func startWorkflow(t *testing.T, db *sql.DB, id, orderID, taskQueue string) {
 	t.Helper()
-	input := fmt.Sprintf(`{"__entry_point":"three_charges","orderID":%q}`, orderID)
+	startWorkflowEntry(t, db, id, orderID, taskQueue, "three_charges")
+}
+
+// startWorkflowEntry queues one crashcall instance running the named entry point.
+func startWorkflowEntry(t *testing.T, db *sql.DB, id, orderID, taskQueue, entry string) {
+	t.Helper()
+	input := fmt.Sprintf(`{"__entry_point":%q,"orderID":%q}`, entry, orderID)
 	if _, err := db.Exec(`
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
 		VALUES ($1, 'crashcall', 1, 'ready', $2::jsonb, $3, $4)`,

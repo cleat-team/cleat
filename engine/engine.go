@@ -398,6 +398,18 @@ func WithShutdownSignal(ch <-chan struct{}) EngineOption {
 	return func(e *Engine) { e.shutdownRequested = ch }
 }
 
+// shutdownObserved reports whether the worker's shutdown signal has fired. It is what makes every host call
+// that would start fresh work refuse (stopBeforeNewWork): a run being cut off by shutdown must not go on to
+// do new work, above all not the compensation a guest runs when it is told a call failed (cleat#2285).
+func (e *Engine) shutdownObserved() bool {
+	select {
+	case <-e.shutdownRequested:
+		return true
+	default:
+		return false
+	}
+}
+
 // WithGeneration sets the generation this workerID claimed the workflow
 // instance under (workflow_instances.generation at claim time).
 //

@@ -3849,11 +3849,11 @@ func TestDispatchLoop_DrainAfterClaim(t *testing.T) {
 	w.wg.Wait()
 }
 
-// TestDrainStatus_ClosesChannelBeforeCancel verifies that handleDrainStatus
-// closes the drainCh and cancels the root context in the correct order
-// (Fix 3). The drainCh is closed first, then cancel is called, ensuring
-// that external callers waiting on DrainComplete() always unblock.
-func TestDrainStatus_ClosesChannelBeforeCancel(t *testing.T) {
+// TestDrainStatus_ReportsCompleteWithoutSideEffects: GET /api/admin/drain reports a finished drain and does
+// NOTHING else. It used to close drainCh and cancel the worker, so a monitor polling the status stopped a worker
+// that had been asked to drain, and a drain nobody polled never finished (cleat#2285). The dispatch loop
+// completes the drain now: see TestDispatchLoop_CompletesADrainByItself.
+func TestDrainStatus_ReportsCompleteWithoutSideEffects(t *testing.T) {
 	ms := &mockStore{}
 	w := newTestWorker(ms)
 	w.drainCh = make(chan struct{})
@@ -3862,8 +3862,6 @@ func TestDrainStatus_ClosesChannelBeforeCancel(t *testing.T) {
 
 	api := &apiServer{store: ms, worker: w, maxBodySize: 1 << 20}
 
-	// Call handleDrainStatus. With draining=true and inflight=0, it should
-	// close drainCh and cancel the context.
 	req := httptest.NewRequest(http.MethodGet, "/api/drain", nil)
 	resp := httptest.NewRecorder()
 	api.handleDrainStatus(resp, req)
@@ -3871,26 +3869,16 @@ func TestDrainStatus_ClosesChannelBeforeCancel(t *testing.T) {
 	if resp.Code != 200 {
 		t.Fatalf("expected 200, got %d", resp.Code)
 	}
-
-	// drainCh must be closed.
+	if !strings.Contains(resp.Body.String(), `"complete":true`) {
+		t.Errorf("a drained worker must report complete=true, got %s", resp.Body.String())
+	}
 	select {
 	case <-w.drainCh:
-		// drainCh closed — correct.
+		t.Error("GET drain status closed drainCh: a status request must not complete the drain")
 	default:
-		t.Error("drainCh should be closed by handleDrainStatus when inflight is empty")
 	}
-
-	// Context must be cancelled AFTER drainCh is closed.
-	if w.ctx.Err() == nil {
-		t.Error("context should be cancelled by handleDrainStatus")
-	}
-
-	// Calling DrainComplete() must not block — it returns the already-closed channel.
-	select {
-	case <-w.DrainComplete():
-		// Not blocking — correct.
-	default:
-		t.Error("DrainComplete() should not block after handleDrainStatus completes")
+	if w.ctx.Err() != nil {
+		t.Error("GET drain status cancelled the worker: a status request must not stop it")
 	}
 }
 
