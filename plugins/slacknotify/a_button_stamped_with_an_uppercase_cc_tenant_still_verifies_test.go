@@ -2,6 +2,7 @@ package slacknotify
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -71,6 +72,19 @@ func TestSendMessageCanonicalizesAnUppercaseCallContextTenant(t *testing.T) {
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
 				t.Fatalf("plugin migrations: %v", err)
 			}
+			// RunMigrations creates slack_config (and, on MSSQL, its
+			// tenant_isolation security policy) directly in be.DB, and
+			// be.Cleanup only closes the pool -- it never runs this plugin's
+			// Down SQL. Left behind, the next `go test ./...` against this
+			// same shared test database fails
+			// engine.TestEveryTenantOwnedTableIsEmptiedByDropTenant on
+			// public.slack_config, exactly the shape cleat-review found in
+			// #2262's vestigial RunMigrations call and #2239's
+			// eventtriggers acceptance test. Registered after RunMigrations
+			// but before be.Cleanup so it always runs first (defers unwind
+			// LIFO), whether this subtest reaches t.Skip, t.Fatalf, or the
+			// end.
+			defer cleanupSlackConfigSchema(t, be.DB, be.Dialect)
 
 			// MySQL is single-tenant by constraint (see the sibling
 			// real-dialect test's own comment), which only ever leaves
@@ -261,4 +275,56 @@ func trueLiteral(d plugin.Dialect) string {
 		return "1"
 	}
 	return "true"
+}
+
+// cleanupSlackConfigSchema undoes slacknotify's Migrations() against this
+// test's shared, persistent test database: RunMigrations has no matching
+// teardown call anywhere in this file, and plugin.RunDownMigrations would not
+// help here even if called -- v2 (TenantScoped, cleat#1512) applies its MSSQL
+// security policy through plugin.RunMigrations' own runtime side effect
+// (applyTenantScoping), not through any Up/Down SQL the migration declares,
+// so a Down pass never drops the policy and DROP TABLE would fail on SQL
+// Server while it still references slack_config. Same shape, same fix, as
+// cmd/cleat-worker/a_purged_awaiter_unregisters_across_dialects_test.go's
+// cleanupEventTriggersSchema (cleat#2239): drop the policy by the
+// "<table>_tenant_isolation" name plugin/migration.go's
+// applyTenantScopingMSSQL constructs, then the table, then the
+// plugin_migrations row so a re-run of this test applies the migration fresh
+// rather than finding it already recorded against a table that is gone.
+func cleanupSlackConfigSchema(t *testing.T, conn *sql.DB, dialect testutil.Dialect) {
+	t.Helper()
+	ctx := context.Background()
+	const pluginName = "slack-notify"
+
+	exec := func(query string) {
+		if _, err := conn.ExecContext(ctx, query); err != nil {
+			t.Errorf("cleanupSlackConfigSchema: %s: %v", query, err)
+		}
+	}
+	exists := func(query string, args ...any) bool {
+		var n int
+		if err := conn.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+			t.Errorf("cleanupSlackConfigSchema: existence check %s: %v", query, err)
+			return false
+		}
+		return n > 0
+	}
+
+	if dialect == testutil.DialectMSSQL {
+		const policy = "slack_config_tenant_isolation"
+		if exists(`SELECT COUNT(*) FROM sys.security_policies WHERE name = @p1`, policy) {
+			exec(`DROP SECURITY POLICY dbo.` + policy)
+		}
+		if exists(`SELECT COUNT(*) FROM sys.tables WHERE name = @p1`, "slack_config") {
+			exec(`DROP TABLE slack_config`)
+		}
+		exec(`DELETE FROM plugin_migrations WHERE plugin_name = '` + pluginName + `'`)
+		return
+	}
+
+	exec(`DROP TABLE IF EXISTS slack_config`)
+	exec(`DELETE FROM plugin_migrations WHERE plugin_name = '` + pluginName + `'`)
+	if dialect == testutil.DialectPostgres {
+		exec(`DELETE FROM admin.plugin_tables WHERE plugin_name = '` + pluginName + `'`)
+	}
 }
