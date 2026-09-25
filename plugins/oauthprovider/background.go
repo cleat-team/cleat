@@ -48,6 +48,25 @@ var sweepExpiredSessionsQuery = plugin.Query{
 // itself.
 const sweepInterval = 5 * time.Minute
 
+// The worker reaches this loop only through a runtime type assertion --
+// cmd/cleat-worker/main.go's `lp.Plugin.(plugin.HasBackground)` -- and a
+// failed one is silent: no error, no log, and no test notices, because the
+// sweep's own test calls sweepExpiredSessions directly rather than going
+// through Run. So the abandoned-login rows would grow unbounded exactly as
+// before, with a green suite.
+//
+// This pins the compile-time half: *Plugin must keep satisfying
+// HasBackground, so removing Run or changing its signature is a build
+// failure rather than a loop that quietly stops being started. (A value
+// receiver on Run would not be such a change -- *Plugin's method set
+// includes value-receiver methods either way -- and a constructor returning
+// a Plugin instead of a *Plugin would not compile at all, since every method
+// here including Info and Init is on the pointer.)
+//
+// What this line cannot see is which type the registry actually hands the
+// worker; that is TestTheWorkerGetsAPluginThatCanRunTheSweep's half.
+var _ plugin.HasBackground = (*Plugin)(nil)
+
 // Run starts the oauth-provider background sweep loop, satisfying
 // plugin.HasBackground. Every sweepInterval it deletes oauth_sessions rows
 // left behind by an abandoned login (see sweepExpiredSessionsQuery). Returns
