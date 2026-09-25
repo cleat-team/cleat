@@ -173,11 +173,34 @@ func TestMigrations(t *testing.T) {
 			t.Errorf("v4 %s does not mention tenant_id at all -- expected it to DROP the column", name)
 		}
 	}
-	if v4.Down != "" || v4.DownMySQL != "" || v4.DownMSSQL != "" {
-		t.Error("v4 has a Down arm; expected none (see the migration's own Irreversible comment)")
+	// Owner decision 1A, 2026-09-24: --uninstall-plugin scheduled-backup
+	// must keep working, so v4 carries a MINIMAL Down (drops the two
+	// indexes IT added) rather than Irreversible -- it does not restore
+	// tenant_id, RLS or the old indexes, see the migration's own comment.
+	if !strings.Contains(v4.Down, "idx_backup_config_enabled_next") || !strings.Contains(v4.Down, "idx_backup_history_config") {
+		t.Error("v4 Down does not drop both indexes v4's Up created")
 	}
-	if v4.Irreversible == "" {
-		t.Error("v4 declares no Down and no Irreversible reason -- plugintest.AssertMigrationsDoSomething would report it as doing nothing")
+	if !strings.Contains(v4.DownMSSQL, "idx_backup_config_enabled_next") || !strings.Contains(v4.DownMSSQL, "idx_backup_history_config") {
+		t.Error("v4 DownMSSQL does not drop both indexes v4's Up created")
+	}
+	// DownMySQL drops only idx_backup_config_enabled_next: MySQL refuses to
+	// drop idx_backup_history_config while backup_history_config_id_fkey
+	// still needs it as its supporting index (Error 1553), measured by
+	// TestUninstallSchedulerBackupOnEveryDialect/mysql -- see the migration's
+	// own comment on DownMySQL.
+	if !strings.Contains(v4.DownMySQL, "idx_backup_config_enabled_next") {
+		t.Error("v4 DownMySQL does not drop idx_backup_config_enabled_next")
+	}
+	if strings.Contains(v4.DownMySQL, "idx_backup_history_config") {
+		t.Error("v4 DownMySQL mentions idx_backup_history_config -- MySQL cannot drop it while the FK needs it as a supporting index")
+	}
+	for name, sql := range map[string]string{"Down": v4.Down, "DownMySQL": v4.DownMySQL, "DownMSSQL": v4.DownMSSQL} {
+		if strings.Contains(sql, "tenant_id") {
+			t.Errorf("v4 %s mentions tenant_id -- this Down is deliberately minimal and must not attempt to restore it (no source of truth for a value)", name)
+		}
+	}
+	if v4.Irreversible != "" {
+		t.Error("v4 declares an Irreversible reason alongside a real Down -- the field is now stale and should be removed")
 	}
 
 	// cleat#2247: v5 removes the ON DELETE CASCADE v3 put on

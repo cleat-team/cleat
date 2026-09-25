@@ -29,6 +29,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same set of checks (`.golangci.yml` is now the v2 format) and a planted known-positive that must be
   reported on every run.
 
+- **The seven tenant-facing `/backups/*` HTTP routes are gone; backup configuration is
+  operator-only, via `cleatctl backup`.** (cleat#2247)
+
+  `POST/GET/PUT/DELETE /backups/configs`, `GET /backups/configs/{id}`, `GET /backups/history` and
+  `POST /backups/configs/{id}/run` are all removed, along with `backup_config`/`backup_history`'s
+  `tenant_id` column and row-level security on every dialect (migration v4). Any tenant could
+  previously schedule an unfiltered `pg_dump` against the whole deployment DSN on a cron of its own
+  choosing. **To upgrade:** replace any caller of those routes with `cleatctl backup
+  config-create`/`config-list`/`config-update`/`config-delete`/`run`/`history`, run by an operator
+  with database access, not a tenant API key. Existing `backup_history` rows are preserved; a
+  config's own `tenant_id` value is dropped along with the column, since nothing reads it once the
+  table is no longer tenant-scoped.
+
 - **Every `/api/admin/*` route is off until `--enable-admin-api` is set, and answers 404 while it is off.** (cleat#2267)
 
   `POST`/`GET /api/admin/drain` answered 202 to any tenant's ordinary API key, so any tenant could take

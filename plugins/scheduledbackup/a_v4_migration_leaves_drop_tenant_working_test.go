@@ -55,9 +55,16 @@ func TestSchedulerBackupV4RegistryFlipDoesNotBreakLaterDropTenant(t *testing.T) 
 	// reference a column that no longer exists -- which is precisely the
 	// bug, so asserting the precondition is what makes the rest of this
 	// test mean anything.
+	// schema_name = 'public', not current_schema(): the registry row v2
+	// creates is always stamped with the literal schema the tables live in,
+	// not whatever schema a later connection's search_path happens to
+	// resolve first. Tier 2 Gate's role has 'cleat' ahead of 'public' in its
+	// search_path (RLS testing needs it there), so current_schema() here
+	// returned 'cleat' and this precondition check found 0 of 2 rows on a
+	// migration that had in fact run correctly -- cleat-review, 2026-09-24.
 	rows, err := db.QueryContext(ctx, `
 		SELECT table_name, tenant_scoped FROM admin.plugin_tables
-		WHERE schema_name = current_schema() AND table_name IN ('backup_config', 'backup_history')
+		WHERE schema_name = 'public' AND table_name IN ('backup_config', 'backup_history')
 	`)
 	if err != nil {
 		t.Fatalf("reading admin.plugin_tables: %v", err)

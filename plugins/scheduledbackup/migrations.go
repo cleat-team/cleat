@@ -123,6 +123,35 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS backup_history;
 				DROP TABLE IF EXISTS backup_config;
 			`,
+			// v1 had no DownMySQL before cleat#2247's uninstall test
+			// (TestUninstallSchedulerBackupOnEveryDialect) actually drove a
+			// full reversal on MySQL for the first time: downFor falls back
+			// to the generic Down above when DownMySQL is empty, and that
+			// Down's `DROP INDEX IF EXISTS <name>` (no ON <table>) is
+			// Postgres/SQL-standard syntax MySQL does not have, failing with
+			// "Error 1064: You have an error in your SQL syntax". Nothing
+			// caught this before because nothing had ever called
+			// RunDownMigrations for this plugin on MySQL -- "uncalled in
+			// testing is not unreachable" (CLAUDE.md, cleat#1673's shape),
+			// found from the other direction: reachable in production
+			// (--uninstall-plugin) and simply never tested. DROP TABLE IF
+			// EXISTS, unlike DROP INDEX, IS valid MySQL syntax and drops its
+			// indexes along with it, so no guarded index drop is needed here
+			// at all.
+			DownMySQL: `
+				DROP TABLE IF EXISTS backup_history;
+				DROP TABLE IF EXISTS backup_config;
+			`,
+			// Same gap as DownMySQL above, same discovery: the generic Down's
+			// bare `DROP INDEX IF EXISTS <name>` has no ON <table> clause,
+			// which SQL Server requires -- "Msg 159: Must specify the table
+			// name and index name for the DROP INDEX statement." DROP TABLE
+			// IF EXISTS needs no such qualifier and takes its indexes with
+			// it, so again no separate index drop is needed.
+			DownMSSQL: `
+				DROP TABLE IF EXISTS backup_history;
+				DROP TABLE IF EXISTS backup_config;
+			`,
 		},
 		{
 			// Tenant isolation for both backup tables. cleat#1512.
@@ -518,19 +547,60 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				CREATE INDEX idx_backup_history_config
 					ON backup_history (config_id);
 			`,
-			// Irreversible (plugin.Migration field, cleat#2247) rather than a
-			// Down: reversing "backups are operator-only" would need to
-			// reinstate a tenant_id column with no source of truth for what
-			// value each existing row should get (the whole point of this
-			// migration is that the column is gone), which is a
-			// data-recovery decision, not a mechanical schema reversal like
-			// v1-v3's Down arms. Not DialectSpecific: that field justifies a
-			// missing Up ARM for one dialect, and this migration has all
-			// three (Up, UpMySQL, UpMSSQL) -- what it lacks is a Down, on
-			// every dialect, for the same reason on each.
-			Irreversible: "cleat#2247: drops backup_config.tenant_id and " +
-				"backup_history.tenant_id with no source of truth for a restored value; " +
-				"see the comment above this migration for the full reasoning",
+			// A MINIMAL Down, not a mirror of Up (owner decision 1A,
+			// 2026-09-24, relayed by the coordinator): `--uninstall-plugin
+			// scheduled-backup` must keep working, but reversing "backups
+			// are operator-only" all the way would mean reinstating
+			// tenant_id with no source of truth for what value each
+			// existing row should get -- a data-recovery decision, not a
+			// mechanical schema reversal. So this Down does NOT restore
+			// tenant_id, RLS, the policies, or the old tenant-qualified
+			// indexes; it drops the two indexes THIS version added
+			// (idx_backup_config_enabled_next, idx_backup_history_config on
+			// Postgres/MSSQL; MySQL's DownMySQL below drops only the first
+			// -- see its own comment for why the second cannot go), which is
+			// enough to satisfy migration_down.go's
+			// declaresDDL/downFor check -- an applied migration with DDL
+			// and no Down refuses the whole reversal (plugin/migration_down.go)
+			// -- without inventing data this migration has no way to know.
+			// A plugin uninstalled this way and reinstalled starts from
+			// v1 with a fresh, non-tenant-scoped backup_config/
+			// backup_history: acceptable, since uninstall on this plugin
+			// was never a reversible-to-the-byte operation even before
+			// v4 (v1-v3's own Down arms do not restore dropped rows
+			// either).
+			Down: `
+				DROP INDEX IF EXISTS idx_backup_config_enabled_next;
+				DROP INDEX IF EXISTS idx_backup_history_config;
+			`,
+			// idx_backup_config_enabled_next only: idx_backup_history_config
+			// is NOT dropped on MySQL. Measured directly by
+			// TestUninstallSchedulerBackupOnEveryDialect/mysql: MySQL
+			// requires an index on the referencing column of an active
+			// foreign key, and backup_history_config_id_fkey (still present
+			// -- v5 changed its ON DELETE action, not its existence) uses
+			// this exact index to satisfy that, so dropping it fails with
+			// "Error 1553: Cannot drop index 'idx_backup_history_config':
+			// needed in a foreign key constraint". Leaving it behind is
+			// consistent with this Down being minimal rather than a mirror
+			// of Up -- see the comment on this migration.
+			DownMySQL: `
+				SET @idx := (
+					SELECT COUNT(*) FROM information_schema.statistics
+					WHERE table_schema = DATABASE() AND table_name = 'backup_config'
+					  AND index_name = 'idx_backup_config_enabled_next'
+				);
+				SET @ddl := IF(@idx > 0,
+					'DROP INDEX idx_backup_config_enabled_next ON backup_config',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+			`,
+			DownMSSQL: `
+				DROP INDEX IF EXISTS idx_backup_config_enabled_next ON backup_config;
+				DROP INDEX IF EXISTS idx_backup_history_config ON backup_history;
+			`,
 		},
 		{
 			// backup_history.config_id loses ON DELETE CASCADE. cleat#2247,
