@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/cleat-team/cleat/internal/pinnedtx"
 )
 
 // Dialect identifies the SQL dialect of the backing database.
@@ -555,7 +557,8 @@ func RunMigrations(ctx context.Context, db *sql.DB, dialect Dialect, coreMigrati
 			}
 
 			// Run migration in a transaction.
-			tx, err := session.BeginTx(ctx, nil)
+			// pinnedtx.Begin: see its package comment (cleat#2215).
+			tx, err := pinnedtx.Begin(ctx, session, nil)
 			if err != nil {
 				return fmt.Errorf("plugin %s migration v%d begin: %w", name, m.Version, err)
 			}
