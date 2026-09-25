@@ -165,6 +165,18 @@ tier2-gate.log
 tier2-gate.json
 .tier2-verdict
 
+# Ad-hoc per-module golangci-lint output (`> .txt 2> .err`, redirected from
+# each module directory -- e.g. `( cd "$m" && golangci-lint run ... > .txt
+# 2> .err )`), NOT written by anything in this repo's CI or Makefile. 14 of
+# these -- one .txt/.err pair in the root and each of 6 module directories --
+# were committed by accident in #2302 (cleat#2216) and removed in the same
+# commit as this rule (cleat#2313); a rule alone would have been a silent
+# no-op against files git was already tracking, per the note below on
+# `git rm --cached`. No leading slash, deliberately: it matches a bare
+# `.txt`/`.err` at any depth, which is what every one of the 14 was.
+.txt
+.err
+
 # ---------------------------------------------------------------------------
 # Untracked 2026-08-09 (hotfix/rotate-committed-credential).
 #
