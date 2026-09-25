@@ -354,11 +354,13 @@ func (c *capturingRouter) HandleFunc(pattern string, handler func(http.ResponseW
 // /ingest/{source_id}, both auth-exempt.
 //
 // What THIS test can and must still assert, entirely within this package: the
-// registration itself pins the ceiling via plugin.MaxBody(interactiveMaxBodySize,
+// registration itself declares a ceiling via plugin.MaxBody(interactiveMaxBodySize,
 // ...) rather than leaving the route at the host's configurable default --
-// see interactiveMaxBodySize's doc comment for why that pinning matters (an
-// operator raising --plugin-max-body-size for another route must not also
-// raise this one's).
+// see interactiveMaxBodySize's doc comment for why that matters (an operator
+// raising --plugin-max-body-size for another route must not also raise this
+// one's; cleat#2273 additionally lets an operator LOWER it further, which is
+// why this must be plugin.MaxBody and not plugin.MaxBodyFromConfig -- the
+// latter would ignore the flag in both directions).
 func TestSN_InteractiveCallback_DeclaresItsOwnBodyLimit(t *testing.T) {
 	p := &Plugin{
 		logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -373,11 +375,16 @@ func TestSN_InteractiveCallback_DeclaresItsOwnBodyLimit(t *testing.T) {
 	if !ok {
 		t.Fatal("POST /slack/interactive was not registered")
 	}
-	limit, ok := plugin.MaxBodyLimit(handler)
+	limit, fromConfig, _, ok := plugin.MaxBodyLimit(handler)
 	if !ok {
 		t.Fatal("POST /slack/interactive was registered with mux.Handle but declares no " +
 			"plugin.MaxBody ceiling -- it would fall through to the host's configurable " +
 			"--plugin-max-body-size default instead of staying pinned at interactiveMaxBodySize")
+	}
+	if fromConfig {
+		t.Error("POST /slack/interactive is registered via plugin.MaxBodyFromConfig, want plugin.MaxBody -- " +
+			"MaxBodyFromConfig ignores --plugin-max-body-size entirely, so an operator could no longer " +
+			"lower this route's ceiling by lowering the flag")
 	}
 	if limit != interactiveMaxBodySize {
 		t.Errorf("POST /slack/interactive declares a %d-byte ceiling, want %d (interactiveMaxBodySize)",

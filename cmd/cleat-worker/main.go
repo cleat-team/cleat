@@ -1647,6 +1647,7 @@ func main() {
 	// separately below via registerRoutes(mux, api), are untouched by this --
 	// see the block comment a few lines down for why plugMux is not a
 	// plugin-only mux and why that reuse means this wrap must not reach them.
+	warnAboutStalePluginRouteSignatures(logger, workerID, plugList)
 	pluginRouter := &pluginBodyLimitRouter{mux: plugMux, defaultLimit: *pluginMaxBodySize}
 	for _, lp := range plugList {
 		if !lp.Healthy {
@@ -2238,18 +2239,10 @@ func main() {
 						"worker_id", workerID, "error", err)
 					os.Exit(1)
 				}
-				handler = auth.HostBindingMiddleware(authResolver,
-					"POST /ingest/{source_id}",
-					"GET /oauth/{provider}/callback",
-					"POST /slack/interactive",
-				)(handler)
+				handler = auth.HostBindingMiddleware(authResolver, pluginAuthExemptPatterns...)(handler)
 			}
 
-			handler = auth.Middleware(authResolver, true,
-				"POST /ingest/{source_id}",
-				"GET /oauth/{provider}/callback",
-				"POST /slack/interactive",
-			)(handler)
+			handler = auth.Middleware(authResolver, true, pluginAuthExemptPatterns...)(handler)
 
 			// If no API keys exist, auto-generate one for the default tenant.
 			//

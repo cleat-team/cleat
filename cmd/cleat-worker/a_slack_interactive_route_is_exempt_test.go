@@ -11,17 +11,21 @@ package main
 // --require-host-match, but when it is, every non-exempt path needs a
 // matching tenant domain, which Slack's request never carries).
 //
+// cleat#2273 replaced the two hand-copied exempt-path literals at these call
+// sites with one shared pluginAuthExemptPatterns var (plugin_exempt_routes.go),
+// so this test now checks two things instead of one: that both middleware
+// call sites still spread THAT variable (rather than a literal list some
+// future edit could drift from it), and that the variable itself still
+// contains "POST /slack/interactive". Either half failing reopens #2172's
+// first problem -- a dropped call site silently, a dropped list entry
+// silently in a different place.
+//
 // This is a source scan, not a live-server test, for the same reason
 // TestMainSwitchesOnClassifyPluginInitError (a_plugin_init_error_severity_test.go)
 // and a_deployment_secrets_wiring_test.go are: main() wires --require-auth
 // and --require-host-match into a chain of closures nothing outside main()
 // can reach, so the wiring itself has no call site a behavioural test could
-// exercise without standing up a real worker process. What this proves is
-// narrower and cheaper: that the string a reviewer can point at with
-// confidence -- "POST /slack/interactive" -- is still an argument to BOTH
-// middleware constructors, not merely present somewhere in the file (a
-// plain substring count of 2 would not tell you which call site lost it if
-// one did).
+// exercise without standing up a real worker process.
 
 import (
 	"os"
@@ -37,32 +41,42 @@ func TestSlackInteractiveIsExemptFromBothAuthMiddlewares(t *testing.T) {
 	body := stripGoComments(string(src))
 
 	for _, tc := range []struct {
-		name  string
-		block *regexp.Regexp
+		name string
+		call *regexp.Regexp
 	}{
 		{
-			name:  "auth.HostBindingMiddleware",
-			block: regexp.MustCompile(`(?s)auth\.HostBindingMiddleware\(authResolver,(.*?)\)\(handler\)`),
+			name: "auth.HostBindingMiddleware",
+			call: regexp.MustCompile(`auth\.HostBindingMiddleware\(authResolver, pluginAuthExemptPatterns\.\.\.\)\(handler\)`),
 		},
 		{
-			name:  "auth.Middleware",
-			block: regexp.MustCompile(`(?s)handler = auth\.Middleware\(authResolver, true,(.*?)\)\(handler\)`),
+			name: "auth.Middleware",
+			call: regexp.MustCompile(`handler = auth\.Middleware\(authResolver, true, pluginAuthExemptPatterns\.\.\.\)\(handler\)`),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			m := tc.block.FindStringSubmatch(body)
-			if m == nil {
-				t.Fatalf("could not find the %s(...) call in main.go -- the exempt-path wiring this test "+
-					"checks may have been restructured; update the pattern above rather than deleting this test", tc.name)
-			}
-			if !regexpContainsSlackInteractive.MatchString(m[1]) {
-				t.Errorf("%s's exempt-path list no longer includes \"POST /slack/interactive\" -- "+
-					"without it, --require-auth (or --require-host-match) 401s Slack's own request before "+
-					"handleInteractiveCallback's signature check ever runs, reopening cleat#2172's first problem.\n"+
-					"block contents: %s", tc.name, m[1])
+			if !tc.call.MatchString(body) {
+				t.Fatalf("could not find %s(authResolver, ..., pluginAuthExemptPatterns...)(handler) in main.go -- "+
+					"either the wiring was restructured (update the pattern above) or this call site stopped "+
+					"spreading the shared exempt-pattern list, which would let it drift from the other call site "+
+					"exactly as the two hand-copied literals this replaced once could", tc.name)
 			}
 		})
 	}
+
+	if !regexpContainsSlackInteractive.MatchString(joinPatterns(pluginAuthExemptPatterns)) {
+		t.Errorf("pluginAuthExemptPatterns no longer includes \"POST /slack/interactive\" -- "+
+			"without it, --require-auth (or --require-host-match) 401s Slack's own request before "+
+			"handleInteractiveCallback's signature check ever runs, reopening cleat#2172's first problem.\n"+
+			"pluginAuthExemptPatterns: %v", pluginAuthExemptPatterns)
+	}
+}
+
+func joinPatterns(patterns []string) string {
+	out := ""
+	for _, p := range patterns {
+		out += `"` + p + `" `
+	}
+	return out
 }
 
 var regexpContainsSlackInteractive = regexp.MustCompile(`"POST /slack/interactive"`)

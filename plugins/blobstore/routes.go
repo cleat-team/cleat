@@ -19,11 +19,15 @@ func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("blobstore: nil mux")
 	}
-	// cleat#2232: PUT declares its own, larger ceiling -- the host's
-	// configurable --plugin-max-body-size default (1 MiB) is far too small
-	// for a blob upload. p.config.MaxBlobSize defaults to 10 MiB (Init, in
-	// plugin.go) when unset in --plugin-config.
-	mux.Handle("PUT /blobs/{key...}", plugin.MaxBody(p.config.MaxBlobSize, p.handlePut))
+	// cleat#2232 / cleat#2273: PUT's ceiling is the operator's own
+	// max_blob_size setting (default 10 MiB, Init in plugin.go), not a value
+	// that participates in min() with --plugin-max-body-size -- the host's
+	// default flag (1 MiB) is far too small for a blob upload, and an
+	// operator who explicitly configured a larger max_blob_size did not mean
+	// for an unrelated global flag to silently override it. MaxBodyFromConfig
+	// is the constructor for exactly this: an unconditional ceiling owned by
+	// the plugin's own config, reported under its own name on a 413.
+	mux.Handle("PUT /blobs/{key...}", plugin.MaxBodyFromConfig(p.config.MaxBlobSize, "max_blob_size in --plugin-config", p.handlePut))
 	mux.HandleFunc("GET /blobs/{key...}", p.handleGet)
 	mux.HandleFunc("HEAD /blobs/{key...}", p.handleHead)
 	mux.HandleFunc("DELETE /blobs/{key...}", p.handleDelete)
