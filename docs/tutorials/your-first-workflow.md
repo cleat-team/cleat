@@ -339,11 +339,20 @@ curl http://localhost:8080/api/workflows/<workflow_id>
 
 The response includes:
 
-- **status**: `completed`, `failed`, or `running`
-- **event_history**: ordered list of every DurableCall, with service, operation,
-  request, response, and timing
-- **result**: the return value of the entry point
-- **error_msg**: the error message if the workflow failed
+- **id**: the run's identifier. The field is `id` -- not `workflow_id`, which no endpoint returns.
+- **status**: one of the eight `workflow_instances.status` values -- `ready`, `running`, `done`,
+  `failed`, `dead_lettered`, `terminated`, `cancelled` or `terminating`. **There is no `completed`,
+  and no `suspended`**: a sleeping run is `ready` with `next_wake_at` set. Branch on
+  terminal-versus-not rather than on `running`, which most outstanding work never reports.
+- **result**: the return value of the entry point, once the run is `done`
+- **error**: the error message if the workflow failed (the JSON field is `error`, not `error_msg`)
+
+**The event history is not in this response.** `GET /api/workflows/<id>` returns the instance row
+verbatim, and that row has no history on it -- read it from
+`GET /api/workflows/<id>/history` instead. That history is still available for a `failed` run
+(`--retention-days`, default 30 days) but a `done` run's is deleted at finalize, so do not build a
+success trail out of it. See
+[Workflow lifecycle](../reference/workflow-lifecycle.md#outcomes).
 
 A successful run will show events like:
 

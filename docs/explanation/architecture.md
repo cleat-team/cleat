@@ -202,7 +202,7 @@ sequenceDiagram
         Note over W: a. Record request<br/>b. Execute call<br/>c. Store response
         W->>PG: d. Persist event
     end
-    W->>PG: 6. UPDATE status='completed'
+    W->>PG: 6. UPDATE status='done'
 ```
 
 ### Execution (Replay)

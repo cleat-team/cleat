@@ -145,21 +145,35 @@ did." There is no undo.
 ## What gets deleted, and in what order
 
 For `--completed-workflow-retention-days`, a workflow is eligible once its
-status is `done`, `failed`, or `terminated` **and** `completed_at` is older
-than the cutoff.
+status is `done`, `failed`, `terminated` **or `cancelled`** -- all three dialects spell the same
+predicate, `engine/retention_predicates.go` -- **and** `completed_at` is older than the cutoff.
+`cancelled` is included deliberately, and it is the member that goes missing when this list is
+written by hand: an operator who opted into collecting terminated runs expects to collect cancelled
+ones too, because both are imposed by a person on a run that did not finish on its own. This
+paragraph and the flag's own `--help` text both omitted `cancelled` until 2026-09-25.
 
 `dead_lettered` is deliberately excluded. It has its own lifecycle (workflows
 land there after exhausting retries, generally because something needs human
-attention) and its own deletion path,
-`DeleteDeadLetteredWorkflows` -- as of this writing that path exists and is
-tested but is not wired into any background loop, so dead-lettered workflows
-are retained indefinitely regardless of either retention flag. That is a
-separate, pre-existing gap outside the scope of this change.
+attention) and its own deletion path, `DeleteDeadLetteredWorkflows`, reached by
+`--dead-letter-retention-days` -- also off by default, on the same reasoning as
+`--completed-workflow-retention-days`: it deletes the record itself, not just the history.
+
+**Until 2026-09-25 this paragraph said `DeleteDeadLetteredWorkflows` "is not wired into any
+background loop, so dead-lettered workflows are retained indefinitely regardless of either
+retention flag", and that had been false since cleat#1023.** The retention loop is registered and
+launched with the flag (`cmd/cleat-worker/setup.go`, `retentionLoop`) and the sweep calls the
+method. The claim was worse than stale: this page contradicted *itself*, because the
+`--dead-letter-retention-days` section further down describes the flag as working. A reader who
+believed the paragraph above would conclude the flag does nothing and stop looking.
 
 **A Go workflow reaches `dead_lettered` only through a SHORT retry policy**, which is worth
-knowing before planning around it. The worker's dead-letter branch is a substring test for
-`retries exhausted` (`cmd/cleat-worker/setup.go`), and the engine mints that phrase only in its
-*host-side* retry loop behind the `cleat_call_retry` import. Which retry policies reach that loop
+knowing before planning around it. The worker's dead-letter branch reads the run's HISTORY
+(`endedOnAnExhaustedCall`, `cmd/cleat-worker/setup.go`) -- it tests whether the last durable act
+was a call that exhausted its retry policy, and never looks at the error text. It *was* a substring
+test for `retries exhausted` until cleat#902, which is why prose describing dead-lettering as "a
+non-retryable error" is wrong in the other direction: a plain failure is not dead-lettered at all.
+The engine mints that phrase only in its *host-side* retry loop behind the `cleat_call_retry`
+import. Which retry policies reach that loop
 is a threshold, not a given:
 
 | policy's worst-case total backoff | path | dead-letterable | backoff survives a worker loss |

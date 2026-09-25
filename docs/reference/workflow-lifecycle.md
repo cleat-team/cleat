@@ -36,6 +36,10 @@ seventh, `terminating`, gained its writer on 2026-09-04 (see the defer phase bel
 | `dead_lettered` | **yes** | Retries exhausted. On the Go SDK this is reachable only through a retry policy short enough to have run on the host — see `IMPROVEMENT-PLAN.md` §3.88. |
 | `terminating` | no | The defer phase's window: a terminal outcome has been decided and the workflow is running its cleanup before it is applied. Claimable, non-terminal. Written by `TerminateWorkflow`, by `enforceParentClosePolicy`'s TERMINATE arm, and since 2026-09-13 by force-complete and force-fail — in each case only when the workflow has registered defers; cleared by `FinalizeDeferPhase` or by the deadline sweep. Schema in `migrations/postgres/038`, `mysql/037`, `mssql/041`. |
 
+**The five `terminal? yes` rows above are a run's outcomes**, and each carries a contract — what it
+keeps and for how long, which redrive verbs apply to it, what a parent awaiting it sees, and which
+counter moves. See [Outcomes](#outcomes) below.
+
 ### Settled is final
 
 **A run leaves the "terminal? yes" rows above only through a documented redrive verb** (re-replay,
@@ -94,9 +98,17 @@ still one of the eight statuses, but as of 101 it reaches `workflow_instances` e
 `FailWorkflow`'s own Go `UPDATE`, never through this procedure.
 
 **Scope the grep to `UPDATE workflow_instances`.** An unscoped
-`grep -rhoE "SET status = '[a-z_]+'"` also sweeps `promises` and `signals`, which have their own
-`status` columns with their own vocabularies (`completed`, `resolved`, `rejected`, `pending`) —
-nine values for what is a six-value column.
+`grep -rhoE "SET status = '[a-z_]+'"` also sweeps `promises`, `signals` and the plugins' own tables,
+which have their own `status` columns with their own vocabularies (`completed`, `resolved`,
+`rejected`, `pending`, `delivered`, `dispatched`, …). What comes back is the union of all of them,
+and nothing in the result says which values belong to *this* column.
+
+**No total is quoted here on purpose.** This sentence gave one until 2026-09-25 ("nine values for
+what is a six-value column") and both halves had rotted: the column is eight-valued, and the
+unscoped command returns 17. A count over a growing set is a census, and this document's own rule is
+to state the question instead — *does this value come from `UPDATE workflow_instances`?* — and keep
+the command, which re-derives either way. Confirm the scoped command is returning 7 and not 6 before
+trusting its output, since the eighth and ninth values are written through a parameter (see below).
 
 ### `suspended` is not a workflow status
 
@@ -231,7 +243,7 @@ the table above can appear, plus one that is not a workflow status at all:
 
 | value | meaning |
 |---|---|
-| any of the seven above | the winner's current lifecycle status |
+| any of the eight in the status table above | the winner's current lifecycle status |
 | `unknown` | the winner could not be read. Stated rather than omitted, so a caller can tell "I cannot tell you" from "I forgot to tell you". |
 
 `unknown` is reachable on a correct tree: a start that is *rejected* records an `idempotency_keys`
@@ -326,6 +338,141 @@ It answers a different question — **did my original request land?** `false` me
 the run, so the earlier attempt never arrived (case **a**). `true` means an earlier one did (cases
 **b** and **c**). That is worth reading for logging, metrics, or deciding whether to warn a user
 that their action was already submitted; it is not worth branching the happy path on.
+
+---
+
+## Outcomes
+
+The five settled statuses are a run's **outcomes**. Everything else in this document says how a run
+gets to one; this section says what each one commits to — what it means, what it keeps, what an
+operator can do with it, and what it costs to store.
+
+This is also the **invariant set of the lifecycle model** (`specs/CleatRunLifecycle.tla`, cleat#1997).
+Keep the two in step: a change here is a change to what the model is supposed to prove.
+
+### What each outcome means
+
+| outcome | means | decided by |
+|---|---|---|
+| `done` | the entry point returned a result | the workflow |
+| `failed` | stopped on an error from the workflow or its own setup, and **not** held for an operator: guest error, trap, timeout, replay divergence, WASM load failure, no entry point, store-rejected result, panic, admin force-fail | the workflow, or cleat on its behalf |
+| `dead_lettered` | a failure whose **last durable act was a call that exhausted its retry policy** — a sub-kind of failure, held for an operator | cleat |
+| `terminated` | stopped by a person or a policy, not because the workflow erred — includes parent-close since cleat#1978 | operator or policy |
+| `cancelled` | stopped by a pre-emptive cancel, and only that | operator |
+
+**Failure is terminal on first occurrence.** There is no workflow-level retry. Retry is per durable
+call only (`--max-retries`, `CleatError.Retryable()`), so a run that fails does not try again on its
+own — redrive is a manual act.
+
+**`failed` and `dead_lettered` are not the same thing, and the difference decides three behaviours**
+(what an operator can do, what it is stored as, and what a parent sees). The predicate is
+`deadLettered = eligibleForDLQ && endedOnAnExhaustedCall(history)`
+(`cmd/cleat-worker/setup.go`, `writeTerminalFailure`). `endedOnAnExhaustedCall` reads the *history*,
+never the error text: it was a `strings.Contains(errMsg, "retries exhausted")` substring test until
+cleat#902, which is why prose elsewhere in this repo that still describes dead-lettering as "a
+non-retryable error" is wrong — a plain failure is not in the dead-letter queue at all.
+
+### What each outcome keeps, and for how long
+
+| outcome | `event_history` | the `workflow_instances` row |
+|---|---|---|
+| `done` | **deleted at finalize** — `finalize_workflow_status` does it | `--completed-workflow-retention-days` (default 0, off) |
+| `failed` | **kept**, then removed by `--retention-days` (default 30) | `--completed-workflow-retention-days` |
+| `terminated` | removed by `--completed-workflow-retention-days` only | `--completed-workflow-retention-days` |
+| `cancelled` | removed by `--completed-workflow-retention-days` only | `--completed-workflow-retention-days` |
+| `dead_lettered` | removed by `--dead-letter-retention-days` (default 0, off) | `--dead-letter-retention-days` |
+
+Three notes, each of which is a place the obvious reading is wrong:
+
+- **A `failed` run keeps its history.** It is not purged at finalize; `--retention-days` removes it
+  later. That is cleat#1973, and it is the correction that makes a failed run inspectable at all.
+- **A `done` run's history is already gone** by the time any retention flag runs, so an operator who
+  wants a success trail must publish it as query state or into their own store. `--retention-days`
+  does first-hand work only for `failed`.
+- **The three flags are not three names for one thing.** `--retention-days` touches history only;
+  the other two delete the workflow *record* (status, result, error, def_name) and are off by
+  default for that reason. `--dead-letter-retention-days` deliberately never touches a run that is
+  not dead-lettered, because the dead-lettered run is the one an operator most wants to inspect
+  afterwards.
+
+`--completed-workflow-retention-days` sweeps four statuses — `done`, `failed`, `terminated` and
+`cancelled` — and the fourth is deliberate rather than incidental:
+
+```
+engine/retention_predicates.go — all three dialects, identical
+    WHERE status IN ('done', 'failed', 'terminated', 'cancelled')
+```
+
+Its own flag help said `(done/failed/terminated)` until 2026-09-25, omitting `cancelled`; the
+implementation includes it on every dialect and a comment beside the predicate explains why (an
+operator collecting terminated runs expects to collect cancelled ones — both are imposed by a person
+on a run that did not finish on its own). The list is authoritative, not the help string.
+
+### What a parent sees
+
+A parent awaiting a settled child **always gets an answer**, whatever the outcome. The mapping is
+`childOutcomeForSettledStatus` (`engine/status_vocabulary.go`), applied identically from all three
+dialects rather than once per dialect:
+
+| child's outcome | what the parent's `AwaitChild` sees |
+|---|---|
+| `done` | `Completed`, with the child's `result` |
+| `failed` | a failed outcome carrying `error_msg` |
+| `dead_lettered` | a failed outcome carrying `error_msg` |
+| `terminated` | an error **prefixed `[TERMINATED] `** |
+| `cancelled` | an error **prefixed `[CANCELLED] `** |
+
+The prefixes are the point. Before cleat#1974 a parent awaiting a terminated or cancelled child never
+got an answer at all, because `GetChildResult` had its own narrower idea of "terminal" than the
+settled set. The kind now travels as a stable message prefix, the way `"[AMBIGUOUS]"` already does,
+so no SDK surface changed. It also guarantees a non-empty error regardless of `error_msg`
+(`nonEmptyChildError`) — see that function's comment for why an empty one would reopen cleat#1379.
+
+Every settled outcome also wakes the parent, fails stranded updates, and notifies finalize
+observers. That was cleat#1976, and it was needed because four code paths can settle a run and only
+one of them did all three.
+
+### Metrics
+
+| outcome | counter |
+|---|---|
+| `done` | `cleat_workflows_completed_total` |
+| `failed` | `cleat_workflows_failed_total` |
+| `dead_lettered` | `cleat_workflows_failed_total` **and** `cleat_workflows_dead_lettered_total` |
+| `terminated`, `cancelled` | neither outcome counter; `cleat_workflows_duration_seconds` carries the status as a label |
+
+**A dead-lettered run counting in both counters is deliberate** (owner decision D6, 2026-09-22) and
+should be read as such rather than as double-counting. It is a failure *and* it is dead-lettered; an
+operator alerting on either question needs it, and the alternative — counting it only once — makes
+one of the two questions unanswerable. The call sites are both in
+`recordTerminalFailureWithHistory` (`cmd/cleat-worker/setup.go`): `RecordWorkflowFailed` fires
+unconditionally on the terminal-failure path, and `RecordWorkflowsDeadLettered` fires beside it
+inside the `if deadLettered` arm.
+
+### Redriving a settled run
+
+Three verbs, and they are not interchangeable. Which one applies is decided by the outcome and by
+what the run's history still holds.
+
+| verb | endpoint | applies to | what it does |
+|---|---|---|---|
+| **re-replay** | `POST /api/admin/instances/{id}/re-replay` | `failed`, `terminated`, `dead_lettered` | the **same run**, resuming from recorded history. Only as good as what retention has left. |
+| **retry** | `POST /api/workflows/{id}/retry` | `dead_lettered` | the same run, in place, back to `ready` |
+| **reprocess** | `POST /api/dead-letters/{id}/reprocess` | `dead_lettered` | a **new** run, from the definition and input — not from history |
+
+The re-replay and retry endpoints are gated by `--enable-admin-api` for the admin routes and by
+tenant ownership for the rest; while the admin API is off, its routes answer 404.
+
+`reReplayableStatuses` is `['failed', 'terminated', 'dead_lettered']` (`engine/store_admin.go`).
+`done` is excluded because replaying a complete history would walk to its end and finalize again,
+writing a second terminal transition for nothing — an operator who wants a finished run to run again
+wants a *new* run, which is what reprocess is for.
+
+**`cancelled` is excluded, and that is a decision rather than an omission** (owner decision D4,
+2026-09-22). `cancelled` is reached only by an explicit pre-emptive cancel from the run's own owner
+(`POST /api/workflows/{id}/cancel` with `preemptive: true`); nothing in the engine writes it.
+Resuming it would override a deliberate choice, and nothing is lost by refusing — the owner can
+start a new run with the same input.
 
 ---
 
@@ -593,4 +740,8 @@ marker the deadline sweep would later act on.
 - `IMPROVEMENT-PLAN.md` §3.75 — the durable record for the defer phase, and why the obvious
   designs are the wrong shape.
 - `docs/explanation/execution-engine.md` — how a segment executes.
-- `docs/reference/error-codes.md` — what a `failed` workflow's `error_code` means.
+- `docs/troubleshooting.md` §6.2, "Engine Error Codes" — the runtime values of `error_code`, and
+  which of them are retried automatically.
+  **Not** `docs/reference/error-codes.md`, which this line pointed at until 2026-09-25: that file is
+  the `cleat vet` *static-analysis* catalog (`E001`–`E021`, determinism violations found before a run
+  exists). The two share a word and nothing else.

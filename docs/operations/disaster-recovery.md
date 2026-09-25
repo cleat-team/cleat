@@ -274,8 +274,9 @@ Result: the workflow hangs until the signal timeout, then fails.
 **Mitigation for Scenario C:**
 
 - Configure alerting on workflows that exceed expected execution duration
-- After recovery, check for workflows in `suspended` or `running` state that
-  are waiting on external signals and verify the external system state matches
+- After recovery, check for workflows waiting on external signals and verify
+  the external system state matches. **Query on `status = 'ready'`, not `suspended`** -- there is no
+  `suspended` status; a run sleeping until a signal arrives is `ready` with `next_wake_at` set
 - If needed, resend signals via the REST API:
 
 ```bash

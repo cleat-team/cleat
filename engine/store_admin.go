@@ -85,6 +85,16 @@ const (
 // history. The two are different operations and this is the one that preserves
 // completed steps.
 //
+// 'cancelled' is excluded for a third reason (owner decision D4, 2026-09-22).
+// It is reached ONLY by an explicit pre-emptive cancel from the run's own
+// owner (POST /api/workflows/:id/cancel with preemptive:true) -- nothing in
+// the engine writes it -- so re-replaying one would override a deliberate
+// choice. Nothing is lost by refusing: the owner can start a new run with the
+// same input. 'terminated' stays re-replayable even though an operator imposes
+// that one too, because it records "stop this run", often with the intent to
+// fix something and redrive it; a pre-emptive cancel records "do not run this",
+// which fixing and redriving would contradict.
+//
 // The non-terminal statuses are excluded because the dispatcher already owns
 // them: re-replaying a 'ready' or 'running' workflow would bump its generation
 // out from under whichever worker holds it.

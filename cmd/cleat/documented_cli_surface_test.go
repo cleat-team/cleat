@@ -65,7 +65,6 @@ var docBaseline = map[string]string{
 	// (`cleat plugin` has validate/install/list/update/uninstall, no status),
 	// and `cleatctl routing set` describes traffic splitting that does not
 	// exist -- the only `routing` in the tree is the WASM backend's.
-	"docs/troubleshooting.md|cleatctl events":                  "no events subcommand; `cleatctl replay` and `cleatctl debug` are the nearest",
 	"docs/troubleshooting.md|cleatctl plugin":                  "wrong binary and wrong subcommand; `cleat plugin` has no status",
 	"docs/explanation/workflow-versioning.md|cleatctl routing": "describes traffic splitting with no implementation",
 }

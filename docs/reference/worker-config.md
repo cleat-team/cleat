@@ -846,7 +846,7 @@ the full story, including `terminated` and `dead_lettered`.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `0` (disabled) | Days to retain `workflow_instances` rows for terminal workflows (done/failed/terminated) before permanently deleting them |
+| int | `0` (disabled) | Days to retain `workflow_instances` rows for terminal workflows (done/failed/terminated/cancelled) before permanently deleting them |
 
 Unlike `--retention-days`, this deletes the workflow's own record, not just
 its step-by-step event history: after this runs, a purged workflow no longer
@@ -866,6 +866,38 @@ dead-letter predicate does not match. See
 Any remaining `event_history` for a purged workflow is deleted in the same
 pass. See `docs/operations/workflow-retention.md` for the full design
 (default rationale, FK/cascade behavior per dialect, batching, metrics).
+
+**`cancelled` is in the list, and that is deliberate.** All three dialects spell the same predicate
+(`engine/retention_predicates.go`) —
+
+```
+WHERE status IN ('done', 'failed', 'terminated', 'cancelled')
+```
+
+— and a comment beside it gives the reason: an operator who has opted into collecting terminated
+runs expects to collect cancelled ones too, since both are imposed by a person on a run that did not
+finish on its own. The description above said `(done/failed/terminated)` until 2026-09-25, omitting
+`cancelled`; the predicate, not the description, is authoritative.
+
+---
+
+### --dead-letter-retention-days
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `0` (disabled) | Days to retain `dead_lettered` `workflow_instances` rows before permanently deleting them, along with their `event_history`, signals and promises |
+
+**A dead-lettered run has its own lifecycle and its own knob, deliberately.** It is the run an
+operator most wants to inspect afterwards, so it is not swept up with completed work:
+`--completed-workflow-retention-days` never touches a dead-lettered run, and this flag never touches
+one that is not dead-lettered. Off by default, on the same reasoning as
+`--completed-workflow-retention-days` above — it deletes the record itself, not just the history.
+
+**Retention here is about the row, not about membership.** A dead-lettered run leaves the dead-letter
+queue through a redrive verb — `POST /api/dead-letters/:id/retry` or `.../reprocess` — or through
+`POST /api/dead-letters/:id/terminate`; this flag is what eventually removes the record of a run
+nobody acted on. See `docs/operations/workflow-retention.md`, and
+`docs/reference/workflow-lifecycle.md` → *Outcomes* for what each exit commits to.
 
 ---
 

@@ -408,6 +408,25 @@ PollChild(runID string) (status string, result string, err error)
 Checks a run's status without blocking. `status` is `running`, `completed` or
 `failed`; `result` carries the run's result on `completed`.
 
+**This is a separate, smaller vocabulary than `workflow_instances.status`**, not a partial
+spelling of it — it is the polling contract, and the two do not map one-to-one. Everything settled
+that is not a success reports `failed` here, with the *kind* of stop carried in the error text:
+
+| the run's outcome | `PollChild` reports | note |
+|---|---|---|
+| still going | `running` | covers `ready` and `terminating` too |
+| `done` | `completed` | `result` is set |
+| `failed` | `failed` | `error` is the run's `error_msg` |
+| `dead_lettered` | `failed` | same, plus dead-letter membership |
+| `terminated` | `failed` | `error` is prefixed `[TERMINATED] ` |
+| `cancelled` | `failed` | `error` is prefixed `[CANCELLED] ` |
+
+The prefixes are how a polling parent distinguishes a stop a person imposed from a real failure
+(`childOutcomeForSettledStatus`, `engine/status_vocabulary.go`). The call is replay-safe by
+construction: it answers from the child's `completed_at` against the parent's durable clock, so it
+returns the same value on every execution — see the note on `PollChild` in `engine/children.go`,
+including the residual clock-skew window it documents rather than hides.
+
 ```go
 status, result, _ := h.PollChild(runID)
 ```

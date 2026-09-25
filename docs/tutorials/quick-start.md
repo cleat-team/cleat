@@ -199,12 +199,12 @@ Expected response (formatted for readability):
 
 ```json
 {
-    "workflow_id": "wf_2a7b9f3e1c8d",
-    "status": "running"
+    "id": "e39ede1b-2a7b-9f3e-1c8d-000000000000",
+    "idempotent_replay": false
 }
 ```
 
-Copy the `workflow_id` value -- you will need it in the next step.
+Copy the `id` value -- you will need it in the next step.
 
 ## 9. See the result
 
@@ -218,11 +218,18 @@ Expected response includes:
 
 ```json
 {
-    "workflow_id": "wf_2a7b9f3e1c8d",
-    "status": "completed",
+    "id": "e39ede1b-2a7b-9f3e-1c8d-000000000000",
+    "status": "done",
     "result": "{\"greeting\":\"hello, world\"}"
 }
 ```
+
+`status` is `workflow_instances.status` copied verbatim, so it is one of `ready`, `running`,
+`done`, `failed`, `dead_lettered`, `terminated`, `cancelled` or `terminating` -- **not**
+`completed`, and **not** the `running` the start call answered with. Branch on terminal-versus-not
+rather than on `running`: anything that sleeps, awaits a child or waits on a signal is `ready` for
+nearly all of its life. See
+[Workflow lifecycle](../reference/workflow-lifecycle.md#outcomes).
 
 ## 10. What just happened?
 
