@@ -370,6 +370,19 @@ func runResealPayloads(ctx context.Context, db *sql.DB, args []string) {
 	fmt.Printf("already current:    %d\n", st.Current)
 	fmt.Printf("not ciphertext:     %d\n", st.NotCipher)
 	fmt.Printf("unreadable:         %d\n", st.Unreadable)
+	if st.Unreadable > 0 {
+		// A non-zero count is not automatically a broken rotation. A value is
+		// reported unreadable and left untouched, and the count includes
+		// plaintext that merely happens to be valid base64 (an opaque token,
+		// say) as well as a row sealed under a key this ring holds neither as
+		// current nor previous. The two are indistinguishable, and the first
+		// is not damage and needs no re-sealing -- read the UNREADABLE lines
+		// to see the rows, and only a row whose key you recognise is a
+		// rotation the sweep genuinely could not finish.
+		fmt.Printf("  (a value reported unreadable is left untouched; the count also includes\n")
+		fmt.Printf("   plaintext that happens to be valid base64 and needs no re-sealing, so a\n")
+		fmt.Printf("   non-zero count is not itself a failed rotation)\n")
+	}
 
 	// Non-zero while anything is left, so this can be looped on and its exit
 	// code trusted. A dry run that found work is also non-zero: it is a report

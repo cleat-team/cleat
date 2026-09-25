@@ -335,3 +335,26 @@ func TestResealRefusesAnRLSRestrictedConnection(t *testing.T) {
 			"and an unconverted database.")
 	}
 }
+
+// TestResealValueReportsBase64ShapedPlaintextAsUnreadable is the sweep-side half
+// of cleat#2337's safe property: a stored value that is plaintext but happens to
+// be valid base64 (an opaque token, say) is classified unreadable and left
+// untouched, never rewritten into a ciphertext it is not.
+func TestResealValueReportsBase64ShapedPlaintextAsUnreadable(t *testing.T) {
+	enc, err := engine.NewPayloadEncryption(resealKey(t))
+	if err != nil {
+		t.Fatalf("NewPayloadEncryption: %v", err)
+	}
+
+	stored := base64.StdEncoding.EncodeToString([]byte("an opaque token that happens to be valid base64 when stored"))
+	next, kind, err := resealValue(enc, resealTenant, stored)
+	if kind != valueUnreadable {
+		t.Errorf("kind = %v, want valueUnreadable", kind)
+	}
+	if next != "" {
+		t.Errorf("replacement = %q, want empty: an unreadable value must not be rewritten", next)
+	}
+	if err == nil {
+		t.Error("expected an error reporting the value as unreadable")
+	}
+}

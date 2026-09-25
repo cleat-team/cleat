@@ -67,6 +67,12 @@ the **stop-the-world** procedure is still the simpler and safer choice:
    (`cmd/cleatctl/resealpayloads.go`'s own doc comment: "Exit status is
    non-zero if anything was left unconverted, so this can be run to
    completion in a loop and its exit code trusted").
+
+   A non-zero `unreadable` count is not automatically a broken rotation: it
+   also counts plaintext that happens to be valid base64, which the sweep
+   leaves untouched and which needs no re-sealing. Only a value sealed under
+   a key this ring holds neither as current nor previous is a rotation the
+   sweep genuinely could not finish.
 5. Restart every worker with `--encryption-key-file` pointing at the new
    key. `--encryption-key-file-previous` (or its equivalent) is not needed
    at this step, because step 3 already moved every row.
