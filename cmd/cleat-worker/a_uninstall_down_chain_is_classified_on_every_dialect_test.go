@@ -19,11 +19,13 @@ package main
 // finding -- a regression there fails loud, the same as any other dialect.
 //
 // The literal ask on cleat#2306 also wants admin.plugin_tables asserted empty for the plugin
-// after uninstall. Measured against the one already-proven plugin (scheduled-backup,
-// PostgreSQL): its rows survive uninstall unchanged (cleat#2343) -- RunDownMigrations never
-// touches that table. That is a real gap, logged here rather than asserted, until #2343 lands;
-// asserting it today would fail the one plugin this test is supposed to hold as the working
-// example.
+// after uninstall, and it is asserted below now. It was not assertable when this file was
+// written: measured against the one plugin then proven (scheduled-backup, PostgreSQL), its rows
+// survived uninstall unchanged, because RunDownMigrations never touched that table. cleat#2343
+// fixed that -- it unregisters the tenant-scoped tables it un-scopes -- and landed in
+// cleat#2367. The gap was worth closing rather than tolerating: a registry that still names a
+// plugin's tables after they are gone makes admin.drop_tenant skip them with a WARNING, so
+// tenant deletion can report success while the plugin's rows survive.
 //
 // deployDialect and deployScratch are shared with a_migration_is_a_deploy_step_test.go, same
 // package.
@@ -247,14 +249,30 @@ func TestUninstallDownChainIsClassifiedOnEveryDialect(t *testing.T) {
 								name, dialect, migRows)
 						}
 						if dialect == plugin.DialectPostgres {
-							// cleat#2343: RunDownMigrations does not clean admin.plugin_tables.
-							// Logged, not asserted, until that lands.
+							// cleat#2306's fourth ask, and cleat#2343 closed the gap that
+							// used to make it unassertable: RunDownMigrations now unregisters
+							// the tenant-scoped tables it un-scopes. Asserted rather than
+							// logged, which is what the Ask wanted.
+							//
+							// A counting ERROR fails rather than falling through. The version
+							// this replaces read `err == nil && ptRows > 0`, so a query that
+							// did not run at all was indistinguishable from a clean registry
+							// -- the failure mode this whole file is built around.
 							var ptRows int
 							if err := db.QueryRowContext(ctx,
 								`SELECT COUNT(*) FROM admin.plugin_tables WHERE plugin_name = $1`,
-								name).Scan(&ptRows); err == nil && ptRows > 0 {
-								t.Logf("%s/postgres: %d admin.plugin_tables row(s) remain after "+
-									"uninstall -- known gap, cleat#2343", name, ptRows)
+								name).Scan(&ptRows); err != nil {
+								t.Fatalf("%s/%s: counting admin.plugin_tables rows: %v",
+									name, dialect, err)
+							}
+							if ptRows != 0 {
+								t.Errorf("%s/%s: %d admin.plugin_tables row(s) remain after "+
+									"uninstall. The registry still names this plugin's tables after "+
+									"the tables are gone, so a later admin.drop_tenant iterates "+
+									"them -- and for a table it can no longer find it raises "+
+									"WARNING and skips, meaning tenant deletion reports success "+
+									"while the plugin's rows in a DIFFERENT schema survive",
+									name, dialect, ptRows)
 							}
 						}
 						if err := plugin.RunMigrations(ctx, db, dialect, nil, single); err != nil {
