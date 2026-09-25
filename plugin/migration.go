@@ -830,6 +830,34 @@ func applyTenantScoping(ctx context.Context, exec func(ctx context.Context, quer
 	return nil
 }
 
+// unapplyTenantScoping reverses applyTenantScoping before a migration's Down
+// SQL runs. Only SQL Server needs it: there a SECURITY POLICY is a separate
+// object holding a dependency on the table, so DROP TABLE fails (3729) while
+// the policy still exists. PostgreSQL's RLS policies attach to the table and
+// go with it on DROP TABLE, and MySQL has no scoping. cleat#2342.
+//
+// Idempotent, like every Down this feeds: IF EXISTS makes re-running a no-op,
+// and a plugin whose own DownMSSQL already dropped the policy
+// (scheduledbackup, which drops a column the policy filters) simply finds
+// nothing to drop here.
+func unapplyTenantScoping(ctx context.Context, exec func(ctx context.Context, query string, args ...any) (sql.Result, error), dialect Dialect, tables []string) error {
+	if len(tables) == 0 || dialect != DialectMSSQL {
+		return nil
+	}
+	for _, table := range tables {
+		if !isPlainIdentifier(table) {
+			return fmt.Errorf("tenant-scoped table %q is not a plain identifier", table)
+		}
+		policy := table + "_tenant_isolation"
+		stmt := fmt.Sprintf(`IF EXISTS (SELECT 1 FROM sys.security_policies WHERE name = N'%[1]s')
+DROP SECURITY POLICY %[1]s`, policy)
+		if _, err := exec(ctx, stmt); err != nil {
+			return fmt.Errorf("drop security policy %s: %w", policy, err)
+		}
+	}
+	return nil
+}
+
 // mssqlPluginTenantFilter is the predicate every plugin policy binds to.
 //
 // A SEPARATE FUNCTION FROM THE ENGINE'S dbo.fn_tenant_filter, and the reason is
