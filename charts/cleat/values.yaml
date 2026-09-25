@@ -42,6 +42,9 @@ worker:
   flushRetryWindow: "0"
   # -- Poll interval when no work is available (--poll).
   pollInterval: "500ms"
+  # -- Seconds the preStop hook sleeps when adminApi.enabled is false, so the pod leaves Service endpoints
+  # before SIGTERM. Keep it well under terminationGracePeriodSeconds (30s unless you set it).
+  preStopSleepSeconds: 5
 
 # -- PostgreSQL connection parameters.
 # Either provide a password here (for the chart to create a Secret), or
@@ -88,6 +91,28 @@ api:
   # -- Port for the HTTP API, health checks, and metrics endpoint.
   port: 8080
 
+# -- The admin API (cleat#2267). OFF by default.
+#
+# Every /api/admin/* route (drain, retention sweep, force-complete, force-fail, re-replay, step resolve)
+# answers 404 unless the worker runs with --enable-admin-api, which is what enabled: true passes.
+#
+# WHILE IT IS ON, ANY AUTHENTICATED API KEY OF ANY TENANT CAN DRAIN A WORKER AND TRIGGER A RETENTION
+# SWEEP over every tenant's data, because cleat has no operator credential yet (cleat#2169). Turn it on
+# only where every key you have issued is trusted to that degree. docs/operations/admin-api.md has the
+# list of which routes are worker-level and which are tenant-scoped.
+#
+# What the pod does at shutdown depends on it:
+#   enabled: true (and auth.adminApiKey or auth.existingSecret set)
+#       the preStop hook POSTs /api/admin/drain, so the worker stops claiming and finishes its in-flight
+#       runs, for as long as terminationGracePeriodSeconds allows.
+#   enabled: false (the default)
+#       the preStop hook only sleeps (worker.preStopSleepSeconds), so the pod leaves Service endpoints
+#       before SIGTERM. On SIGTERM the worker cancels its context: a run that is waiting inside a durable
+#       call aborts, and the run is picked up by another worker after the reclaim window (--reclaim-timeout;
+#       runs are durable, so nothing is lost, but they resume later than a drain would have let them finish).
+adminApi:
+  enabled: false
+
 # -- Auth configuration for the worker's HTTP API.
 #
 # cleat-worker's supported configuration defaults to --require-auth=true
@@ -108,11 +133,8 @@ api:
 # Secret for it) or store it in your own Secret and set existingSecret +
 # existingSecretKey instead.
 auth:
-  # -- An API key for the preStop drain hook. Setting it (or existingSecret) also passes
-  # --enable-admin-api to the worker, because /api/admin/drain answers 404 without it (cleat#2267).
-  # While that flag is on, ANY authenticated key of ANY tenant can drain a worker and trigger a
-  # retention sweep, until cleat has an operator credential (cleat#2169); see
-  # docs/operations/admin-api.md. Ignored if existingSecret is set.
+  # -- An API key for the preStop drain hook. Used only when adminApi.enabled is true; see below.
+  # Ignored if existingSecret is set.
   adminApiKey: ""
   # -- Name of an existing Secret containing the admin API key. When set,
   # the chart will not create its own auth Secret.

@@ -18,9 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   workers out of rotation. `--enable-admin-api` gated only force-complete, force-fail, re-replay and resolve
   (the retention sweep checked it inside its own handler), and the drain route was registered bare. All of
   them are now registered through one gate. **To upgrade:** a script or runbook that calls
-  `/api/admin/drain` must start the worker with `--enable-admin-api`. The Helm chart does this itself when
-  `auth.adminApiKey` or `auth.existingSecret` is set (its `preStop` hook drains through this route); with
-  neither set the hook already could not authenticate.
+  `/api/admin/drain` must start the worker with `--enable-admin-api`. **Helm:** the chart's `preStop` hook
+  used to drain through this route and now only sleeps, because `adminApi.enabled` defaults to `false`;
+  set it to `true` (with `auth.adminApiKey` or `auth.existingSecret`) to get the drain back, knowing what
+  that turns on. Without the drain, SIGTERM cancels the worker's context and another worker resumes its
+  runs after the reclaim window.
 
   **While the flag is on, any authenticated key of any tenant can drain the worker and trigger a retention
   sweep**, because cleat has no operator credential yet (cleat#2169). The worker logs a warning at startup

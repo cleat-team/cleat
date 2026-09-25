@@ -51,10 +51,17 @@ curl -X POST -H "Authorization: Bearer $CLEAT_API_KEY" http://worker:8080/api/ad
 
 ## The Helm chart
 
-The chart's `preStop` hook drains the pod through this route. When `auth.adminApiKey` or `auth.existingSecret`
-is set (the hook cannot authenticate without one), the chart therefore passes `--enable-admin-api`. With
-neither set it does not, the hook's call answers 404, and the pod stops on SIGTERM without a drain, which is
-what already happened when the key was missing. See `charts/cleat/values.yaml`.
+`adminApi.enabled` (default `false`) is what passes `--enable-admin-api`. It is a separate value on purpose:
+a drain key being configured does not turn on a route that lets any tenant drain workers.
+
+| `adminApi.enabled` | the pod's `preStop` hook | at shutdown |
+|---|---|---|
+| `false` (default) | `sleep` for `worker.preStopSleepSeconds` (5), so the pod leaves Service endpoints before SIGTERM | SIGTERM cancels the worker's context. A run waiting inside a durable call aborts, and another worker picks the run up after the reclaim window (`--reclaim-timeout`). Runs are durable, so nothing is lost, but they resume later than a drain would have let them finish |
+| `true`, with `auth.adminApiKey` or `auth.existingSecret` | `POST /api/admin/drain` with that key: the worker stops claiming and finishes its in-flight runs for as long as `terminationGracePeriodSeconds` allows | as above, for whatever is still running when the grace period ends |
+| `true`, no key | the same `sleep`: the drain call cannot authenticate | as in the first row |
+
+Set `adminApi.enabled` only where every API key you have issued is trusted to drain workers and to run the
+all-tenant retention sweep.
 
 ## Adding an admin route
 
