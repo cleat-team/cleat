@@ -21,16 +21,26 @@ a session to find one instance of by hand:
      cap does not fail loudly -- it runs fine alone and contends for memory
      only once the runner is busy.
   6. No `run:` or `actions/github-script` `script:` in a workflow triggered by
-     `workflow_run` or `pull_request_target` splices `github.event.*`,
-     `github.head_ref`, `steps.*.outputs.*` or `needs.*.outputs.*` directly
-     into its text via `${{ }}`.  Both triggers execute in the base
-     repository's trusted context even when a fork's pull request is what
-     triggered them, so a value that traces back to the triggering event,
-     spliced this way, becomes part of the shell or script TEXT itself before
+     one of PRIVILEGED_TRIGGERS (`workflow_run`, `pull_request_target`,
+     `issue_comment`, `issues`, `pull_request_review`,
+     `pull_request_review_comment`, `discussion`, `discussion_comment`)
+     splices ANY `${{ }}` expression directly into its text, unless that
+     expression is one of a short safe list (SAFE_EXPRESSION_BODIES:
+     github.sha/run_id/run_attempt/repository/workflow, runner.*).  Every one
+     of those triggers can execute in the base repository's trusted context on
+     content authored by someone who is not a committer, so a spliced
+     expression becomes part of the shell or script TEXT itself before
      anything parses it -- not data handed to an already-running program.
      cleat#2150 found exactly this shape in review (`workflow_run`'s
      `head_branch`, a fork-controlled string, headed for a `run:` block) and
-     #2309 fixed it by routing everything through `env:` instead. cleat#2310.
+     #2309 fixed it by routing everything through `env:` instead. This is an
+     ALLOWLIST rather than a denylist of dangerous patterns on purpose: this
+     guard's own first version denylisted four named shapes and cleat-review
+     broke it with a fifth on the guard's own PR -- `${{ env.X }}` where X was
+     itself assigned from event data one step earlier, which is still a
+     YAML-level splice into the run: text and not a shell variable read
+     despite looking like the fix. See SAFE_EXPRESSION_BODIES' doc comment for
+     the rest. cleat#2310.
 
 Design note, since it is the whole point of the exercise: this script FAILS on
 anything it cannot analyse rather than passing.  A matrix it cannot expand, an
@@ -366,13 +376,34 @@ def guard_mssql_services_have_memory_cap(errors) -> None:
                     )
 
 
-# cleat#2310. workflow_run and pull_request_target both execute in the base
-# repository's context -- with its secrets and its write token -- even when a
-# fork's pull request is what triggered them. A `pull_request` workflow from a
-# fork gets a read-only token and no secrets, so the same splice there is a
-# much smaller hole; this guard is deliberately scoped to the two triggers
-# where it is a real one.
-PRIVILEGED_TRIGGERS = {"workflow_run", "pull_request_target"}
+# cleat#2310. Every one of these triggers can execute in the base
+# repository's context -- with its secrets and its write token -- on content
+# authored by someone who is not a committer: workflow_run and
+# pull_request_target for a fork's pull request; issue_comment, issues,
+# pull_request_review and pull_request_review_comment for a comment, issue or
+# review body anyone with read access can write; discussion and
+# discussion_comment the same way, if discussions are enabled. A plain
+# `pull_request` workflow from a fork gets a read-only token and no secrets,
+# so the same splice there is a much smaller hole; this guard is deliberately
+# scoped to the triggers where it is a real one.
+#
+# cleat-review found the first version of this set too narrow (workflow_run
+# and pull_request_target only) reviewing cleat#2310's own PR: cla-assistant.yml
+# runs on issue_comment today and was entirely unscanned. discussion,
+# discussion_comment and pull_request_review are not used by anything in this
+# repo yet, added anyway on the same reasoning -- the identical trust shape,
+# at zero cost against the real tree, closes the hole before it needs finding
+# twice.
+PRIVILEGED_TRIGGERS = {
+    "workflow_run",
+    "pull_request_target",
+    "issue_comment",
+    "issues",
+    "pull_request_review",
+    "pull_request_review_comment",
+    "discussion",
+    "discussion_comment",
+}
 
 # Every `${{ ... }}` in a `run:` or `actions/github-script` `script:` body, not
 # anchored to the start -- an untrusted reference wrapped in `fromJSON(...)` or
@@ -381,39 +412,61 @@ PRIVILEGED_TRIGGERS = {"workflow_run", "pull_request_target"}
 # struct literal (CLAUDE.md's "pair first, filter after").
 EXPRESSION_BODY = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
 
-# What makes a `${{ }}` body untrusted: it traces back to the event that
-# triggered this run, which a fork's pull request controls. Matched by
-# substring within the body, not required to start it, for the same reason
-# EXPRESSION_BODY is not anchored.
+# ALLOWLIST, NOT A DENYLIST -- an expression in a privileged run:/script: body
+# is a violation unless its ENTIRE body (after stripping whitespace) is one of
+# these, matched exactly rather than by substring.
 #
-# steps.*.outputs.* and needs.*.outputs.* are flagged WHOLESALE, not only the
-# specific outputs that provably derive from event data -- the issue this
-# guard exists for (cleat#2310, quoting cleat#2150's review of #2309) asks for
-# outputs "that derive from the event", but telling those apart from a step's
-# other, harmless outputs needs real interprocedural analysis: does this
-# specific output's assignment read `context.payload` or `github.event`
-# anywhere upstream. That is the same "condition that never decides anything"
-# risk the tree-scanning guard in
-# engine/every_event_history_write_routes_through_the_encoder_test.go's own
-# doc comment explains for call-graph reachability -- being subtly wrong about
-# which output is safe is worse than flagging one that is not, and the fixed
-# example this guard is modeled on
-# (.github/workflows/tier1-push-failure-notifier.yml's "Quiet on green" step)
-# already routes every step output through `env:` uniformly, including ones
-# that do not themselves derive from the event. This guard enforces that same
-# uniform discipline rather than trying to out-think it per output.
-UNTRUSTED_EXPRESSION_PATTERNS = (
-    re.compile(r"github\.event\."),
-    re.compile(r"github\.head_ref\b"),
-    re.compile(r"steps\.[A-Za-z0-9_-]+\.outputs\."),
-    re.compile(r"needs\.[A-Za-z0-9_-]+\.outputs\."),
-)
+# This file's first version denied four named patterns
+# (github.event.*/github.head_ref/steps.*.outputs.*/needs.*.outputs.*) and let
+# everything else through. cleat-review broke it on cleat#2310's own PR with
+# four cases that pattern could not see, none of them exotic:
+#
+#   - the env: HOP: `env: {B: ${{ github.event.workflow_run.head_branch }}}`
+#     then `run: echo ${{ env.B }}` -- the untrusted value is one indirection
+#     away from the pattern, but `${{ env.B }}` is STILL a YAML-level splice
+#     into the run: TEXT, happening before the shell ever sees it, so it is
+#     exactly the same injection with an extra hop -- and it is the shape
+#     someone reaches for FIRST trying to satisfy a denylisted guard, since it
+#     looks like the fix (env:) without being one (the value must be read as
+#     $B, a real shell/env variable, never as ${{ env.B }}, which is still an
+#     Actions-level substitution);
+#   - `${{ toJSON(github.event) }}` -- no trailing dot after `github.event`,
+#     so `github\.event\.` does not match it, and it dumps the entire event
+#     payload;
+#   - `${{ github['event']['workflow_run']['head_branch'] }}` -- Actions
+#     expressions support index syntax as an alternative to dot notation, and
+#     none of the four patterns matched a bracket;
+#   - `${{ github.event.comment.body }}` on an issue_comment-triggered
+#     workflow WOULD have matched `github\.event\.` -- the miss there was in
+#     PRIVILEGED_TRIGGERS, not the expression pattern, and is fixed above.
+#
+# A denylist has to name every shape an attacker can reach the same value
+# through, and expression languages have more than one grammar for "read a
+# nested field" -- this is the same trap CLAUDE.md's "Build" section names for
+# a text search generally: enumerating what is UNSAFE is an open set; what is
+# SAFE, for what this guard needs, is short and closed. Nothing in either real
+# privileged workflow needs anything beyond this list -- both already route
+# everything else through `env:`.
+SAFE_EXPRESSION_BODIES = {
+    "github.sha",
+    "github.run_id",
+    "github.run_attempt",
+    "github.repository",
+    "github.workflow",
+}
+SAFE_RUNNER_PROPERTY = re.compile(r"^runner\.[A-Za-z_]+$")
+
+
+def is_safe_expression(body: str) -> bool:
+    body = body.strip()
+    return body in SAFE_EXPRESSION_BODIES or bool(SAFE_RUNNER_PROPERTY.match(body))
+
 
 # (workflow path, job id, step index) -> reason a human has read the spliced
-# expression and judged it safe despite matching a pattern above. Empty today:
-# neither privileged workflow in this repo needs one (see the guard's own
-# audit, cleat#2310's acceptance criteria). Add an entry only after reading
-# the specific expression, the same discipline as
+# expression and judged it safe despite not being on the list above. Empty
+# today: neither privileged workflow in this repo needs one (see the guard's
+# own audit, cleat#2310's acceptance criteria). Add an entry only after
+# reading the specific expression, the same discipline as
 # eventHistoryInsertSites in the encoder-routing guard this docstring
 # references -- a name and a reason next to the site, not a blanket waiver.
 EXPRESSION_ALLOWLIST: dict[tuple[str, str, int], str] = {}
@@ -464,8 +517,10 @@ def privileged_scripts(doc: dict):
 
 def find_privileged_expression_violations(path: str, doc: dict) -> list[str]:
     """The testable core of guard 6: given one workflow's parsed YAML, return
-    one violation string per untrusted expression spliced into a run:/script:
-    body of a workflow_run or pull_request_target workflow."""
+    one violation string per `${{ }}` expression spliced into a run:/script:
+    body of a privileged (PRIVILEGED_TRIGGERS) workflow, unless the whole
+    expression is on SAFE_EXPRESSION_BODIES or the site is on
+    EXPRESSION_ALLOWLIST."""
     triggers = workflow_triggers(doc) & PRIVILEGED_TRIGGERS
     if not triggers:
         return []
@@ -473,28 +528,34 @@ def find_privileged_expression_violations(path: str, doc: dict) -> list[str]:
     for job_id, index, kind, text in privileged_scripts(doc):
         for match in EXPRESSION_BODY.finditer(text):
             body = match.group(1).strip()
-            hit = next((p for p in UNTRUSTED_EXPRESSION_PATTERNS if p.search(body)), None)
-            if hit is None:
+            if is_safe_expression(body):
                 continue
             reason = EXPRESSION_ALLOWLIST.get((path, job_id, index))
             if reason is not None:
                 continue
             violations.append(
                 f"{path}: job {job_id!r} step {index} ({kind}) splices "
-                f"`${{{{ {body} }}}}` directly into its {kind} text -- matches "
-                f"{hit.pattern!r}. This workflow is triggered by "
-                f"{'/'.join(sorted(triggers))}, which runs in the base "
-                f"repository's trusted context even for a fork's pull request, "
-                f"so a value from the triggering event spliced here becomes "
-                f"part of the {'shell' if kind == 'run' else 'script'} TEXT "
-                f"itself before anything parses it. Route it through `env:` "
-                f"(or read it from `context`/`process.env` inside a "
-                f"github-script step), quoted as a variable -- see "
-                f".github/workflows/tier1-push-failure-notifier.yml's "
-                f"'Quiet on green' step. If this specific splice has been read "
-                f"and judged safe, add "
-                f"({path!r}, {job_id!r}, {index}) to EXPRESSION_ALLOWLIST with "
-                f"a reason."
+                f"`${{{{ {body} }}}}` directly into its {kind} text. This "
+                f"workflow is triggered by {'/'.join(sorted(triggers))}, "
+                f"which runs in the base repository's trusted context on "
+                f"content someone other than a committer can write, so any "
+                f"expression spliced here becomes part of the "
+                f"{'shell' if kind == 'run' else 'script'} TEXT itself before "
+                f"anything parses it -- not data handed to an already-running "
+                f"program. Only a short list of provably constant-per-run "
+                f"values (SAFE_EXPRESSION_BODIES: github.sha, github.run_id, "
+                f"github.run_attempt, github.repository, github.workflow, "
+                f"runner.*) may appear here directly; everything else, "
+                f"INCLUDING an env: value that itself came from the event "
+                f"(`${{{{ env.X }}}}` is still an Actions-level splice into "
+                f"this text, not a shell variable read), must be assigned to "
+                f"`env:` and read back as a real shell/env variable ($X, or "
+                f"`process.env.X`/`context.*` inside a github-script step) -- "
+                f"see .github/workflows/tier1-push-failure-notifier.yml's "
+                f"'Quiet on green' step. If this specific splice has been "
+                f"read and judged safe, add "
+                f"({path!r}, {job_id!r}, {index}) to EXPRESSION_ALLOWLIST "
+                f"with a reason."
             )
     return violations
 
@@ -520,7 +581,7 @@ def self_test() -> int:
         cases += 1
         doc = yaml.safe_load(yaml_text)
         got = find_privileged_expression_violations("workflow.yml", doc)
-        stripped = [g.split(" -- matches ")[0] for g in got]  # ignore the pattern detail
+        stripped = [g.split(". This workflow is triggered by")[0] for g in got]  # ignore the boilerplate
         if stripped != want:
             failures.append(f"{label}: got {stripped}, want {want}")
 
@@ -548,7 +609,7 @@ def self_test() -> int:
     # This is cleat#2310's other acceptance criterion, and it is the actual
     # shape of tier1-push-failure-notifier.yml's "Quiet on green" step today.
     check(
-        "same value routed through env:, workflow_run trigger",
+        "same value routed through env: and read as a shell variable, workflow_run trigger",
         """
         on:
           workflow_run:
@@ -605,10 +666,9 @@ def self_test() -> int:
          "`${{ needs.build.outputs.summary }}` directly into its script text"],
     )
 
-    # KNOWN-POSITIVE: steps.*.outputs.*, the pattern needs.*.outputs.* above
-    # does not exercise -- the same tier1-push-failure-notifier.yml shape,
-    # unfixed, wrapped in fromJSON() to confirm the body scan is not anchored
-    # to the start of the expression (EXPRESSION_BODY's own doc comment).
+    # KNOWN-POSITIVE: steps.*.outputs.*, wrapped in fromJSON() to confirm the
+    # body scan is not anchored to the start of the expression
+    # (EXPRESSION_BODY's own doc comment).
     check(
         "steps.*.outputs.* wrapped in fromJSON(), workflow_run trigger",
         """
@@ -628,12 +688,99 @@ def self_test() -> int:
          "`${{ fromJSON(steps.resolve.outputs.payload).branch }}` directly into its run text"],
     )
 
-    # KNOWN-NEGATIVE: a trusted expression -- secrets, matrix, github.sha --
-    # is not on the untrusted-pattern list and must not be flagged, or this
-    # guard would fail on ordinary, safe workflows and nobody would keep it
-    # green.
+    # KNOWN-POSITIVE (cleat-review, reviewing this guard's first version on
+    # cleat#2310's own PR): the env: HOP. B is assigned from event data one
+    # step earlier, then read back as `${{ env.B }}` rather than `$B` -- still
+    # an Actions-level splice into the run: text, not a shell variable read,
+    # and it is the shape someone reaches for FIRST trying to satisfy a
+    # denylisted version of this guard, because it looks like the fix.
     check(
-        "trusted expressions (secrets, matrix, github.sha) are not flagged",
+        "env: hop -- env value itself set from event data, then spliced as ${{ env.X }}",
+        """
+        on:
+          workflow_run:
+            workflows: ["Tier 1 Gate"]
+            types: [completed]
+        jobs:
+          notify:
+            runs-on: ubuntu-latest
+            steps:
+              - env:
+                  B: ${{ github.event.workflow_run.head_branch }}
+                run: echo ${{ env.B }}
+        """,
+        ["workflow.yml: job 'notify' step 0 (run) splices `${{ env.B }}` directly into its run text"],
+    )
+
+    # KNOWN-POSITIVE (cleat-review): toJSON(github.event) has no trailing dot
+    # after `github.event`, so a denylist pattern anchored on `github\.event\.`
+    # cannot see it -- and it dumps the entire event payload, comment bodies
+    # and all.
+    check(
+        "toJSON(github.event) -- no trailing dot, dumps the whole payload",
+        """
+        on:
+          pull_request_target:
+            types: [opened]
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - run: echo '${{ toJSON(github.event) }}'
+        """,
+        ["workflow.yml: job 'build' step 0 (run) splices "
+         "`${{ toJSON(github.event) }}` directly into its run text"],
+    )
+
+    # KNOWN-POSITIVE (cleat-review): Actions expressions support index syntax
+    # as an alternative to dot notation for the identical field.
+    check(
+        "bracket/index syntax for the same field a dot-notation denylist would have caught",
+        """
+        on:
+          workflow_run:
+            workflows: ["Tier 1 Gate"]
+            types: [completed]
+        jobs:
+          notify:
+            runs-on: ubuntu-latest
+            steps:
+              - run: echo "${{ github['event']['workflow_run']['head_branch'] }}"
+        """,
+        ["workflow.yml: job 'notify' step 0 (run) splices "
+         "`${{ github['event']['workflow_run']['head_branch'] }}` directly into its run text"],
+    )
+
+    # KNOWN-POSITIVE (cleat-review and coordinator): issue_comment is
+    # privileged too -- a comment body is authored by anyone with read access,
+    # and the workflow runs with the base repo's write token. This is
+    # cla-assistant.yml's own trigger, unscanned by this guard's first
+    # version because PRIVILEGED_TRIGGERS only named workflow_run and
+    # pull_request_target.
+    check(
+        "github.event.comment.body on an issue_comment trigger",
+        """
+        on:
+          issue_comment:
+            types: [created]
+        jobs:
+          react:
+            runs-on: ubuntu-latest
+            steps:
+              - run: echo "${{ github.event.comment.body }}"
+        """,
+        ["workflow.yml: job 'react' step 0 (run) splices "
+         "`${{ github.event.comment.body }}` directly into its run text"],
+    )
+
+    # KNOWN-NEGATIVE: SAFE_EXPRESSION_BODIES and runner.* are the only
+    # expressions this guard allows directly in a privileged run:/script:, and
+    # they must not be flagged or this guard would fail on ordinary, safe
+    # workflows and nobody would keep it green. secrets.* is NOT on that
+    # list -- it goes through env: like everything else, which is also
+    # exercised here.
+    check(
+        "SAFE_EXPRESSION_BODIES, runner.*, and secrets.* via env: are not flagged",
         """
         on:
           workflow_run:
@@ -642,13 +789,33 @@ def self_test() -> int:
         jobs:
           build:
             runs-on: ubuntu-latest
-            strategy:
-              matrix:
-                go: ["1.25"]
             steps:
               - env:
                   TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                run: go build ./... && echo "${{ matrix.go }} ${{ github.sha }}"
+                run: >-
+                  echo "${{ github.sha }} ${{ github.run_id }} ${{ github.run_attempt }}
+                  ${{ github.repository }} ${{ github.workflow }} ${{ runner.os }}"
+        """,
+        [],
+    )
+
+    # KNOWN-NEGATIVE: a trusted expression used OUTSIDE run:/script: -- in an
+    # `if:` condition -- is never spliced into shell or script text at all; it
+    # is evaluated by the Actions runner itself. Proves this guard is scoped
+    # to the two vectors named in cleat#2310, not a blanket ban on
+    # `${{ github.event.* }}` anywhere in a privileged workflow.
+    check(
+        "github.event.* in an if: condition is out of scope, not a run:/script: splice",
+        """
+        on:
+          pull_request_target:
+            types: [opened]
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - if: github.event.pull_request.draft == false
+                run: echo ok
         """,
         [],
     )

@@ -785,12 +785,21 @@ jobs:
       #      Server sizes its buffer pool to 80% of VISIBLE host memory by
       #      default, so a service missing the cap runs fine alone and only
       #      contends once the runner is busy (cleat#2101);
-      #   6. no `run:`/github-script `script:` in a workflow_run or
-      #      pull_request_target workflow splices github.event.*,
-      #      github.head_ref, steps.*.outputs.* or needs.*.outputs.* directly
-      #      via `${{ }}` -- both triggers run in the base repo's trusted
-      #      context even for a fork's PR, and this is the shape cleat#2150
-      #      found in review before #2309 ever ran (cleat#2310).
+      #   6. no `run:`/github-script `script:` in a workflow triggered by
+      #      workflow_run, pull_request_target, issue_comment, issues,
+      #      pull_request_review(_comment) or discussion(_comment) splices any
+      #      `${{ }}` expression directly, unless it is on a short allowlist
+      #      of provably constant values (github.sha/run_id/repository/...,
+      #      runner.*) -- every one of those triggers can run in the base
+      #      repo's trusted context on content someone other than a committer
+      #      wrote, and this is the shape cleat#2150 found in review before
+      #      #2309 ever ran (cleat#2310). An ALLOWLIST, not a denylist of
+      #      dangerous shapes: this guard's first version denylisted four
+      #      named patterns and cleat-review broke it reviewing the guard's
+      #      own PR, with an expression none of the four named -- `${{ env.X
+      #      }}`, where X was itself assigned from event data one step
+      #      earlier. That is still a YAML-level splice into the run: text,
+      #      not a shell variable read, despite looking like the fix.
       #
       # The script fails on anything it cannot analyse -- an unexpandable
       # matrix, an unresolvable expression, an empty context list -- rather
@@ -811,6 +820,9 @@ jobs:
       # coercion, the same trap the "Workflow files parse" step above already
       # works around), which made it pass every real workflow vacuously --
       # caught by this self-test before the guard ever ran against a file.
+      # Its SECOND version, denylisting four named patterns, passed its own
+      # self-test and the real tree and was still wrong -- see guard 6's
+      # comment above. Both defects were found before merge, not after.
       #
       # pyyaml comes from the "Workflow files parse" step above; this step must
       # stay after it.
