@@ -93,16 +93,11 @@ func TestARealLoginStoresNoTokensOnAnyDialect(t *testing.T) {
 			// login leaves at rest.
 			tenantID := uuid.MustParse(engine.DefaultTenantUUID)
 
-			const clientSecret = "real-dialect-test-client-secret"
-			if err := realSecrets.ForTenant(tenantID.String()).Put(ctx,
-				OAuthClientSecretName("google"), clientSecret); err != nil {
-				t.Fatalf("seed client secret: %v", err)
-			}
-
 			// oauth_config is TenantScoped (migration 3), so writing it on
 			// the raw be.DB pool -- which carries no tenant session context
 			// -- needs CrossTenantConn: on SQL Server a plain INSERT here
-			// would be refused by the policy's BLOCK predicate.
+			// would be refused by the policy's BLOCK predicate. tenant_secrets
+			// cleanup below needs the same connection for the same reason.
 			fixtureDB := be.CrossTenantConn(t, ctx,
 				"oauthprovider real-dialect login fixture: seeds the config row a real /login reads")
 			const redirectURL = "http://localhost/oauth/google/callback"
@@ -115,6 +110,19 @@ func TestARealLoginStoresNoTokensOnAnyDialect(t *testing.T) {
 			// key. Delete first, and delete afterward too: leaving a row
 			// behind would make a LATER test in this file (or a rerun of
 			// this one) collide the same way.
+			//
+			// tenant_secrets is the same story with a sharper consequence:
+			// it is scoped by DefaultTenantUUID, which cmd/cleatctl's own
+			// reseal-secrets tests also seed under -- a leftover row here
+			// makes THAT suite's global sweep report an unrelated row as
+			// UNREADABLE and fail on every dialect (found the hard way
+			// against a persistent local SQL Server: the row was invisible
+			// to a plain `DELETE ... WHERE name = ...` because RLS hides it
+			// from a connection with no tenant_id in SESSION_CONTEXT, so it
+			// silently reported zero rows affected -- fixtureDB is already
+			// scoped past that). This delete-first-and-after must run BEFORE
+			// the client secret is seeded below, or the "delete first" half
+			// deletes the row this test just wrote.
 			cleanup := func() {
 				if _, err := plugintest.ExecRebound(t, context.Background(), fixtureDB, dialect,
 					`DELETE FROM oauth_sessions WHERE tenant_id = $1 AND provider = $2`,
@@ -126,9 +134,20 @@ func TestARealLoginStoresNoTokensOnAnyDialect(t *testing.T) {
 					tenantID.String(), "google"); err != nil {
 					t.Errorf("cleanup oauth_config on %s: %v", be.Name, err)
 				}
+				if _, err := plugintest.ExecRebound(t, context.Background(), fixtureDB, dialect,
+					`DELETE FROM tenant_secrets WHERE tenant_id = $1 AND name = $2`,
+					tenantID.String(), OAuthClientSecretName("google")); err != nil {
+					t.Errorf("cleanup tenant_secrets on %s: %v", be.Name, err)
+				}
 			}
 			cleanup()
 			defer cleanup()
+
+			const clientSecret = "real-dialect-test-client-secret"
+			if err := realSecrets.ForTenant(tenantID.String()).Put(ctx,
+				OAuthClientSecretName("google"), clientSecret); err != nil {
+				t.Fatalf("seed client secret: %v", err)
+			}
 
 			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
 				`INSERT INTO oauth_config (tenant_id, provider, client_id, redirect_url, enabled)
