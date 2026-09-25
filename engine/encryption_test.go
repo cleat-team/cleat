@@ -553,13 +553,13 @@ func TestDecryptCannotOpenASealForPluginCiphertext(t *testing.T) {
 	}
 }
 
-// TestBase64ShapedPlaintextOpensInNoForm pins cleat#2337's safe half: a stored
-// value that is plaintext but happens to be valid base64 (an opaque token, say)
-// opens in no form under any key, and is reported unreadable with nil plaintext
-// -- never "decrypted" into a value it is not, and never rewritten. That is the
-// "reported, never touched" property that makes the sealed-shape false positive
-// survivable rather than corrupting: the sweep counts it and leaves it alone.
-func TestBase64ShapedPlaintextOpensInNoForm(t *testing.T) {
+// TestOpenAndClassifyReportsPlaintextAsUnreadable pins cleat#2337's safe half:
+// a plaintext byte slice that is not valid ciphertext under any key -- the
+// decoded form of a stored value that merely happened to be valid base64 -- is
+// reported unreadable with nil plaintext, never "decrypted" into a value it is
+// not, and never rewritten. That is the "reported, never touched" property that
+// makes the sealed-shape false positive survivable rather than corrupting.
+func TestOpenAndClassifyReportsPlaintextAsUnreadable(t *testing.T) {
 	pe, err := NewPayloadEncryption(validKey(t))
 	if err != nil {
 		t.Fatalf("NewPayloadEncryption: %v", err)
@@ -568,7 +568,7 @@ func TestBase64ShapedPlaintextOpensInNoForm(t *testing.T) {
 	raw := []byte("an opaque token that happens to be valid base64 when stored")
 	plain, form, err := pe.OpenAndClassify(DefaultTenantUUID, raw)
 	if err == nil {
-		t.Fatalf("base64-shaped plaintext opened (form=%v), want PayloadFormUnreadable", form)
+		t.Fatalf("plaintext opened (form=%v), want PayloadFormUnreadable", form)
 	}
 	if form != PayloadFormUnreadable {
 		t.Errorf("form = %v, want PayloadFormUnreadable", form)

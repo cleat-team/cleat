@@ -71,8 +71,8 @@ the **stop-the-world** procedure is still the simpler and safer choice:
    A non-zero `unreadable` count is not automatically a broken rotation: it
    also counts plaintext that happens to be valid base64, which the sweep
    leaves untouched and which needs no re-sealing. Only a value sealed under
-   a key this ring holds neither as current nor previous is a rotation the
-   sweep genuinely could not finish.
+   a key this ring holds neither as current nor previous, or a value that is
+   genuinely corrupted, is a rotation the sweep could not finish.
 5. Restart every worker with `--encryption-key-file` pointing at the new
    key. `--encryption-key-file-previous` (or its equivalent) is not needed
    at this step, because step 3 already moved every row.
