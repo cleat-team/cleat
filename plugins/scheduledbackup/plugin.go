@@ -1,9 +1,14 @@
 // Package scheduledbackup provides scheduled PostgreSQL backups with pg_dump.
-// It supports cron-based scheduling and manual backup via HTTP API and CLI
-// commands, and records backup history in PostgreSQL. Dumps are written to
-// local disk (Config.DumpDir) only -- there is no restore path and no
-// off-host upload; see the s3_bucket/s3_prefix doc comments on backupConfig
-// in routes.go before relying on either.
+// It supports cron-based scheduling, and records backup history in
+// PostgreSQL. Dumps are written to local disk (Config.DumpDir) only -- there
+// is no restore path and no off-host upload.
+//
+// Operator-only (cleat#2247): there is no tenant-facing HTTP API and no
+// tenant scoping on backup_config/backup_history as of the v4 migration --
+// an operator manages backup configuration entirely through
+// cmd/cleatctl/backup.go. Before this, a tenant configured and ran its own
+// backups over HTTP; see IMPROVEMENT-PLAN.md's entry for this issue for why
+// that changed.
 package scheduledbackup
 
 import (
@@ -11,7 +16,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -35,10 +39,9 @@ func New() plugin.Plugin {
 	return &Plugin{}
 }
 
-// Plugin implements scheduled PostgreSQL backups with tenant isolation.
+// Plugin implements scheduled, operator-only PostgreSQL backups (cleat#2247).
 type Plugin struct {
 	db      plugin.PluginDB
-	mux     *http.ServeMux
 	logger  *slog.Logger
 	dialect plugin.Dialect
 	config  Config
@@ -106,7 +109,6 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 
 	p.db = env.DB
 	p.dialect = env.Dialect
-	p.mux = env.Mux
 
 	if len(env.Config) > 0 {
 		if err := json.Unmarshal(env.Config, &p.config); err != nil {
@@ -164,19 +166,20 @@ func (p *Plugin) checkDBVersion(ctx context.Context) error {
 	return nil
 }
 
-// backupDSNUnavailableMessage is what a tenant sees in backup_history.error_message
-// when backupDSN fails -- never the underlying error text, which names internal
-// state ("not found", "no secret master key") that means nothing to a tenant and
-// is an operator's business, not theirs. The detailed error still reaches the
-// operator, via p.logger.Error at each call site.
-const backupDSNUnavailableMessage = "backup target credentials unavailable; contact the operator"
-
 // backupDSN fetches the current PostgreSQL connection string pg_dump backs
-// up. Called at the moment of use -- once per scheduled or manually
-// triggered backup attempt (background.go, routes.go) -- rather than cached,
-// so a DSN set or rotated with `cleatctl set-deployment-secret` takes effect
-// on the very next backup attempt without a worker restart (the same
-// "PER-USE, NOT PER-Init" convention as email's sendGridAPIKey).
+// up. Called at the moment of use -- once per scheduled backup attempt
+// (background.go) -- rather than cached, so a DSN set or rotated with
+// `cleatctl set-deployment-secret` takes effect on the very next backup
+// attempt without a worker restart (the same "PER-USE, NOT PER-Init"
+// convention as email's sendGridAPIKey).
+//
+// cleat#2247: backup configuration is operator-only now, but the underlying
+// error text (a secrets-store lookup failure naming internal state like "not
+// found" or "no secret master key") is still not what backup_history.error_message
+// stores -- see background.go's stable error-code constants and their doc
+// comment for why a database row still gets a fixed code rather than
+// arbitrary text, even for an operator-only table. The detailed error
+// always still reaches the operator, via p.logger.Error at each call site.
 //
 // Unlike slacknotify's signingSecret, this is deliberately NOT the only gate
 // on whether backups can run at all: Run's background loop (background.go)

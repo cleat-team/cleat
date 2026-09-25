@@ -106,15 +106,23 @@ func migrationProblems(migrations []plugin.Migration) []string {
 					"SweepTables declaration, so applying it does nothing", i, m.Version))
 		}
 		// A reversal is required for each dialect this migration WRITES on,
-		// and Down/DownMySQL/DownMSSQL are the places to put it.
+		// and Down/DownMySQL/DownMSSQL are the places to put it -- unless the
+		// migration says outright that it cannot be undone (Irreversible),
+		// which is a different claim from TenantScoped/SweepTables: those
+		// describe a migration with no SQL to undo in the first place; this
+		// one DOES write SQL and still has nothing a mechanical Down could
+		// restore (cleat#2247: a dropped column with no source of truth for
+		// the values a rollback would need to put back). The runtime already
+		// refuses to reverse past a no-Down migration on its own
+		// (migration_down.go); this field only lets the author say so was
+		// deliberate, rather than the guard treating it as forgotten.
 		hasDown := m.Down != "" || m.DownMySQL != "" || m.DownMSSQL != ""
-		if writesSQL && !hasDown && !declares {
+		if writesSQL && !hasDown && !declares && m.Irreversible == "" {
 			problems = append(problems, fmt.Sprintf(
 				"migration %d (version %d): has no Down SQL and declares no "+
-					"TenantScoped/SweepTables entries. A migration that writes SQL must "+
-					"be able to undo it; one that only declares scoping or sweep grants "+
-					"has nothing to undo, because the runtime owns the policy and the "+
-					"grant it emits.", i, m.Version))
+					"TenantScoped/SweepTables/Irreversible entry. A migration that writes "+
+					"SQL must be able to undo it, say it cannot (Irreversible) and why, or "+
+					"declare scoping or sweep grants that make Down meaningless.", i, m.Version))
 		}
 	}
 	return problems

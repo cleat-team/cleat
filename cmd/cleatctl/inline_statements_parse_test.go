@@ -153,6 +153,19 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 		"UPDATE tenant_quota SET limit_count = $1, window_seconds = $2, enforce = $3, updated_at = $4 WHERE tenant_id = $5 AND resource = $6 AND updated_at = $7": "tenant_quota is a plugin table, not in this test's core schema; checked live by TestQuotaCommandWorksOnEveryDialect (cleat#2046)",
 		"SELECT tenant_id, resource, limit_count, window_seconds, enforce, updated_at FROM tenant_quota WHERE tenant_id = $1 ORDER BY resource":                   "tenant_quota is a plugin table, not in this test's core schema; checked live by TestQuotaCommandWorksOnEveryDialect (cleat#2046)",
 		"SELECT tenant_id, resource, limit_count, window_seconds, enforce, updated_at FROM tenant_quota ORDER BY tenant_id, resource":                             "tenant_quota is a plugin table, not in this test's core schema; checked live by TestQuotaCommandWorksOnEveryDialect (cleat#2046)",
+
+		// cleat#2247. backup.go's runBackupConfigUpdate builds its SET list
+		// from whichever flags were given (--cron, --retention-days,
+		// --enabled/--disabled), the same shape quota.go and queue.go use
+		// for their own partial updates -- so the statement in source is a
+		// template, not SQL. The coverage is not lost: TestBackupCommand
+		// WorksOnEveryDialect drives config-update, fully assembled, against
+		// real PostgreSQL, MySQL and SQL Server, which is what caught this
+		// file's actual MySQL and SQL Server defects (a $N reused across two
+		// columns, a *uuid.UUID scanned without plugin.ScanRow, and LIMIT on
+		// SQL Server) -- a PREPARE against a template could not have found
+		// any of the three.
+		"UPDATE backup_config SET %s WHERE id = $%d": "cmd/cleatctl/backup.go's runBackupConfigUpdate builds its SET clause from whichever flags were given; checked live by TestBackupCommandWorksOnEveryDialect (cleat#2247)",
 	}
 
 	// A template is not checkable as written, and saying so out loud is the

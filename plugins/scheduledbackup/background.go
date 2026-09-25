@@ -12,6 +12,20 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
+// Stable codes recorded in backup_history.error_message, replacing raw
+// pg_dump stderr / Go error text there. cleat#2247: backup configuration
+// became operator-only, but backup_history is still read through
+// `cleatctl backup-history` -- a less controlled surface than the worker's
+// own structured log -- so the row itself carries a fixed code rather than
+// arbitrary text that might embed a DSN, a hostname, or other detail an
+// operator's log stream is the right place for. The full detail is always
+// still logged via p.logger.Error at the call site that produced it.
+const (
+	backupErrDSNUnavailable = "dsn_unavailable"
+	backupErrUnsafePath     = "unsafe_path"
+	backupErrPgDumpFailed   = "pg_dump_failed"
+)
+
 // cleanupOrphanedHistoryQuery marks running backup_history rows as failed when
 // their started_at is more than 1 hour ago (worker crashed or timed out).
 var cleanupOrphanedHistoryQuery = plugin.Query{
@@ -36,19 +50,24 @@ var cleanupOrphanedHistoryQuery = plugin.Query{
 }
 
 // dueBackupsQuery provides dialect-specific FOR UPDATE SKIP LOCKED equivalents.
+//
+// No tenant_id (cleat#2247): backup_config stopped being a tenant-scoped
+// table in the v4 migration, so this is a single global sweep -- there is
+// exactly one operator, not one per tenant, and nothing here needs to know
+// which tenant a config used to belong to.
 var dueBackupsQuery = plugin.Query{
 	Default: `
-		SELECT id, tenant_id, name, cron
+		SELECT id, name, cron
 		FROM backup_config
 		WHERE enabled = true AND next_run_at <= now()
 		FOR UPDATE SKIP LOCKED`,
 	MySQL: `
-		SELECT id, tenant_id, name, cron
+		SELECT id, name, cron
 		FROM backup_config
 		WHERE enabled = true AND next_run_at <= NOW()
 		FOR UPDATE SKIP LOCKED`,
 	MSSQL: `
-		SELECT id, tenant_id, name, cron
+		SELECT id, name, cron
 		FROM backup_config WITH (UPDLOCK, READPAST, ROWLOCK)
 		WHERE enabled = 1 AND next_run_at <= now()`,
 }
@@ -65,6 +84,11 @@ var dueBackupsQuery = plugin.Query{
 // atomic rename is what makes that safe -- an interrupted backup never
 // produces a file at its final name and is never recorded as completed. So
 // Run returning does not mean every backup it dispatched has finished.
+//
+// A manual "run now" (cleatctl's `backup-run`, cleat#2247) is not a separate
+// code path: it sets next_run_at = now() on the config and lets this same
+// loop pick it up on its next tick (at most 60s later) or the next explicit
+// call to runDueBackups. There is exactly one place pg_dump is invoked from.
 //
 // This used to also exit early -- parking on <-ctx.Done() like the p.db==nil
 // case still does -- when p.config.DSN was empty at boot. cleat#1992 part 1b
@@ -109,7 +133,6 @@ func (p *Plugin) Run(ctx context.Context) error {
 // dueBackup holds a backup config row claimed from the database.
 type dueBackup struct {
 	id       uuid.UUID
-	tenantID uuid.UUID
 	name     string
 	cronExpr string
 }
@@ -132,21 +155,13 @@ func (p *Plugin) cleanupOrphanedHistory(ctx context.Context) {
 // LOCKED inside a transaction, advances their next_run_at immediately, then
 // executes pg_dump outside the transaction so row locks are not held across
 // potentially-long backup operations.
+//
+// No tenant scoping anywhere in this function (cleat#2247): backup_config and
+// backup_history are operator-only tables now, so there is nothing here for
+// plugin.AcrossAllTenants/plugin.ForTenant to bypass or re-scope -- ctx is
+// used as-is throughout, exactly like plugins/scheduler's own equivalent
+// sweep before scheduler ever grew tenant awareness.
 func (p *Plugin) runDueBackups(ctx context.Context) {
-	// CROSS-TENANT, for the same reason as the scheduler's claim (cleat#1512):
-	// the scan and the next_run advance share ONE transaction, deliberately, so
-	// that another worker skips a config even if this one crashes before the
-	// backup completes. Splitting the advance into per-tenant transactions
-	// would release the lock between claiming and advancing.
-	//
-	// cleanupOrphanedHistory is genuinely global too -- it reaps history rows
-	// whose config is gone, which belongs to no tenant by definition.
-	//
-	// The per-config work below the commit is NOT covered by this: it is
-	// re-scoped with ForTenant from the tenant_id the scan read.
-	ctx = plugin.AcrossAllTenants(ctx,
-		"scheduledbackup due-backup claim: one transaction claims and advances every tenant's due configs, and the orphan sweep belongs to no tenant")
-
 	p.cleanupOrphanedHistory(ctx)
 
 	tx, err := p.db.Begin(ctx)
@@ -165,7 +180,7 @@ func (p *Plugin) runDueBackups(ctx context.Context) {
 	var due []dueBackup
 	for rows.Next() {
 		var b dueBackup
-		if err := plugin.ScanRow(rows, &b.id, &b.tenantID, &b.name, &b.cronExpr); err != nil {
+		if err := plugin.ScanRow(rows, &b.id, &b.name, &b.cronExpr); err != nil {
 			p.logger.Error("scheduledbackup: scan due backup", "error", err)
 			continue
 		}
@@ -189,15 +204,9 @@ func (p *Plugin) runDueBackups(ctx context.Context) {
 	for _, b := range due {
 		b := b
 		p.logger.Info("scheduledbackup: dispatching scheduled backup",
-			"config_id", b.id, "tenant", b.tenantID, "name", b.name)
+			"config_id", b.id, "name", b.name)
 		// Use a background context so the backup completes even if the
-		// originating ticker context is cancelled -- and scope it to the
-		// config's own tenant, which the scan above read into b.tenantID.
-		//
-		// Built from context.Background() rather than from ctx for both
-		// reasons: to detach from the ticker, and because ctx now carries the
-		// sweep's bypass, which would silently swallow the ForTenant
-		// (cleat#1515).
+		// originating ticker context is cancelled.
 		//
 		// Run on its own goroutine, not inline, so a due backup can never
 		// hold Run's own goroutine hostage -- Run must return promptly on
@@ -211,34 +220,35 @@ func (p *Plugin) runDueBackups(ctx context.Context) {
 		go func() {
 			defer p.bgBackups.Done()
 			plugin.RecoverGoroutine("scheduled-backup", nil, func() {
-				p.executeScheduledBackup(plugin.ForTenant(context.Background(), b.tenantID),
-					b.id, b.tenantID, b.name, b.cronExpr)
+				p.executeScheduledBackup(context.Background(), b.id, b.name, b.cronExpr)
 			})
 		}()
 	}
 }
 
 // executeScheduledBackup runs pg_dump for a single backup config and records
-// the result in backup_history.
-func (p *Plugin) executeScheduledBackup(ctx context.Context, configID, tenantID uuid.UUID, name, cronExpr string) {
+// the result in backup_history. It is the ONLY place pg_dump is invoked from
+// (cleat#2247): a manual "run now" via cleatctl only sets next_run_at, so it
+// is picked up by the very next call to runDueBackups rather than executing
+// on its own path.
+func (p *Plugin) executeScheduledBackup(ctx context.Context, configID uuid.UUID, name, cronExpr string) {
 	now := time.Now()
 	filename := fmt.Sprintf("scheduled_%s_%s.dump", name, now.Format("20060102150405"))
 
-	// bookkeepCtx carries the tenant scoping ForTenant set on ctx, but not
-	// ctx's cancellation: this goroutine is already detached from Run's ctx
-	// (see runDueBackups) so ctx is never cancelled in production, but a test
-	// exercising the interrupted-backup path directly can cancel it, and a
-	// bookkeeping write must still land regardless -- a write lost to a
-	// cancelled context would leave the row at 'running' until the 1-hour
-	// orphan sweep instead of promptly.
+	// bookkeepCtx strips ctx's cancellation: this goroutine is already
+	// detached from Run's ctx (see runDueBackups) so ctx is never cancelled
+	// in production, but a test exercising the interrupted-backup path
+	// directly can cancel it, and a bookkeeping write must still land
+	// regardless -- a write lost to a cancelled context would leave the row
+	// at 'running' until the 1-hour orphan sweep instead of promptly.
 	bookkeepCtx := context.WithoutCancel(ctx)
 
 	// Create history entry with status "running".
 	historyID := uuid.New()
 	_, err := p.db.Exec(bookkeepCtx, plugin.Rebind(`
-		INSERT INTO backup_history (id, config_id, tenant_id, filename, status, started_at, created_at)
-		VALUES ($1, $2, $3, $4, 'running', $5, $5)
-	`, p.dialect), historyID, configID, tenantID, filename, now)
+		INSERT INTO backup_history (id, config_id, filename, status, started_at, created_at)
+		VALUES ($1, $2, $3, 'running', $4, $4)
+	`, p.dialect), historyID, configID, filename, now)
 	if err != nil {
 		p.logger.Error("scheduledbackup: create history entry", "config_id", configID, "error", err)
 		return
@@ -263,22 +273,23 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID, tenantID 
 	if err != nil {
 		p.logger.Error("scheduledbackup: refusing scheduled backup",
 			"config_id", configID, "history_id", historyID, "error", err)
-		p.markBackupFailed(tenantID, historyID, backupDSNUnavailableMessage)
+		p.markBackupFailed(bookkeepCtx, historyID, backupErrDSNUnavailable)
 		return
 	}
 
 	// Execute pg_dump.
 	//
 	// SafeDumpPath rather than a bare Join (cleat#1305). This path never passes
-	// through an HTTP handler, so the name validation on the create and update
-	// routes does not reach it: a row already in backup_config with a
-	// traversing name is executed from here on a schedule, by the worker, with
-	// nobody watching. This is the guard that covers those rows.
+	// through an HTTP handler, so the name validation on cleatctl's
+	// backup-config-create/update commands does not reach it: a row already
+	// in backup_config with a traversing name is executed from here on a
+	// schedule, by the worker, with nobody watching. This is the guard that
+	// covers those rows.
 	dumpPath, err := SafeDumpPath(p.config.DumpDir, filename)
 	if err != nil {
 		p.logger.Error("scheduledbackup: refusing scheduled backup",
 			"config_id", configID, "history_id", historyID, "error", err)
-		p.markBackupFailed(tenantID, historyID, err.Error())
+		p.markBackupFailed(bookkeepCtx, historyID, backupErrUnsafePath)
 		return
 	}
 
@@ -309,7 +320,7 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID, tenantID 
 		p.db.Exec(bookkeepCtx, plugin.Rebind(`
 			UPDATE backup_history SET status = 'failed', error_message = $1, completed_at = now()
 			WHERE id = $2
-		`, p.dialect), errMsg, historyID)
+		`, p.dialect), backupErrPgDumpFailed, historyID)
 
 		// Still update next_run_at so the schedule can try again later.
 		p.updateNextRun(bookkeepCtx, configID, cronExpr, now)
@@ -336,6 +347,31 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID, tenantID 
 	`, p.dialect), sizeBytes, historyID)
 
 	p.updateNextRun(bookkeepCtx, configID, cronExpr, time.Now())
+}
+
+// markBackupFailed records a failed backup attempt in backup_history, under
+// one of the stable codes above rather than raw error text -- see their doc
+// comment for why. Factored out when SafeDumpPath gained a refusal path
+// (cleat#1305): a refused backup must leave the same trail as a failed one.
+// Recording only the pg_dump failure would leave a history row stuck at
+// 'running' forever for a config whose name the path check rejects -- which
+// reads as a hung backup rather than a refused one, and is the state an
+// operator would escalate.
+//
+// Takes ctx rather than building its own context.Background(), matching
+// every other bookkeeping write in this file (updateNextRun, the completion
+// path above): both call sites already hold bookkeepCtx, and building a
+// second, unrelated background context here would be a second thing that
+// could silently diverge from the first. There is nothing here for
+// plugin.AcrossAllTenants/plugin.ForTenant to bypass or re-scope -- see
+// runDueBackups' doc comment -- so plain ctx is correct, not a shortcut.
+func (p *Plugin) markBackupFailed(ctx context.Context, historyID uuid.UUID, errCode string) {
+	if _, err := p.db.Exec(ctx, plugin.Rebind(`
+		UPDATE backup_history SET status = 'failed', error_message = $1, completed_at = now()
+		WHERE id = $2
+	`, p.dialect), errCode, historyID); err != nil {
+		p.logger.Error("scheduledbackup: recording backup failure", "history_id", historyID, "error", err)
+	}
 }
 
 // updateNextRun calculates and updates the next_run_at and last_run_at for a

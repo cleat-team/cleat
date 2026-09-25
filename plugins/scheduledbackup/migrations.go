@@ -339,11 +339,13 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// caught is covered instead by
 			// TestSchedulerBackupV4RegistryFlipDoesNotBreakLaterDropTenant
 			// (a_v4_migration_leaves_drop_tenant_working_test.go), which
-			// reproduces cleat-review's exact scenario end to end, and
-			// by plugin's own
-			// TestEveryTenantScopedRegistryRowNamesATableWithATenantIDColumn,
-			// a general invariant over admin.plugin_tables that is not
-			// specific to this plugin.
+			// reproduces cleat-review's exact scenario end to end.
+			//
+			// A general invariant over admin.plugin_tables (every
+			// tenant_scoped row names a table that still has a tenant_id
+			// column, across every plugin, not just this one) would catch
+			// the same class for a future plugin. It does not exist yet --
+			// tracked as a follow-up, not claimed here.
 			//
 			// ORDER, on Postgres: policies before ROW LEVEL SECURITY
 			// before the indexes before the column before the registry
@@ -516,16 +518,134 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				CREATE INDEX idx_backup_history_config
 					ON backup_history (config_id);
 			`,
-			// DialectSpecific rather than a Down: reversing "backups are
-			// operator-only" would need to reinstate a tenant_id column
-			// with no source of truth for what value each existing row
-			// should get (the whole point of this migration is that the
-			// column is gone), which is a data-recovery decision, not a
-			// mechanical schema reversal like v1-v3's Down arms.
-			DialectSpecific: "cleat#2247: dialect arms differ because Postgres reverses a " +
-				"registry entry and a row-level-security policy that MySQL and SQL Server " +
-				"do not have; SQL Server reverses a SECURITY POLICY that Postgres expresses " +
-				"as two POLICY objects instead. No Down: see the comment above this field.",
+			// Irreversible (plugin.Migration field, cleat#2247) rather than a
+			// Down: reversing "backups are operator-only" would need to
+			// reinstate a tenant_id column with no source of truth for what
+			// value each existing row should get (the whole point of this
+			// migration is that the column is gone), which is a
+			// data-recovery decision, not a mechanical schema reversal like
+			// v1-v3's Down arms. Not DialectSpecific: that field justifies a
+			// missing Up ARM for one dialect, and this migration has all
+			// three (Up, UpMySQL, UpMSSQL) -- what it lacks is a Down, on
+			// every dialect, for the same reason on each.
+			Irreversible: "cleat#2247: drops backup_config.tenant_id and " +
+				"backup_history.tenant_id with no source of truth for a restored value; " +
+				"see the comment above this migration for the full reasoning",
+		},
+		{
+			// backup_history.config_id loses ON DELETE CASCADE. cleat#2247,
+			// found by TestBackupCommandWorksOnEveryDialect rather than by
+			// reading: `cleatctl backup config-delete` prints "its
+			// backup_history rows are unaffected" (backup.go), and until
+			// this migration that claim was false on every dialect --
+			// deleting a backup_config row silently deleted every
+			// backup_history row that pointed at it.
+			//
+			// v3 ADDED that cascade deliberately, for cleat#2234:
+			// admin.drop_tenant deletes backup_config before backup_history
+			// (alphabetical sweep order), and the FK made a tenant with
+			// backup history un-droppable without it. That reasoning no
+			// longer holds: since v4 flips both tables to
+			// tenant_scoped = false in admin.plugin_tables, drop_tenant's
+			// sweep does not touch either table at all any more --
+			// TestSchedulerBackupV4RegistryFlipDoesNotBreakLaterDropTenant
+			// (a_v4_migration_leaves_drop_tenant_working_test.go) exercises
+			// exactly that. So the cascade outlived the one caller that
+			// needed it, and cleatctl backup config-delete (cleat#2247,
+			// added after v4) inherited a side effect nobody intended for
+			// it: an operator deleting a config to stop it running would
+			// also erase that config's audit trail of past backup attempts.
+			//
+			// SET NULL, not a plain drop of the FK: config_id stays
+			// enforced against backup_config while a config exists (a
+			// history row can still only be created for a real config), and
+			// a deleted config's history rows keep every other column --
+			// filename, status, timestamps, error_message -- with config_id
+			// nulled out rather than the row vanishing. config_id has never
+			// been NOT NULL, on any dialect (v1's Up/UpMySQL/UpMSSQL all
+			// leave it nullable), so no column change is needed here.
+			//
+			// A NEW VERSION, NEVER AN EDIT TO v3: v3 is recorded on every
+			// database that has run this plugin since cleat#2234, and
+			// editing it would only fix a database created after this
+			// lands. Same reasoning v2's and v3's own comments give for why
+			// each is a new version.
+			Version: 5,
+			Up: `
+				ALTER TABLE backup_history DROP CONSTRAINT IF EXISTS backup_history_config_id_fkey;
+				ALTER TABLE backup_history ADD CONSTRAINT backup_history_config_id_fkey
+					FOREIGN KEY (config_id) REFERENCES backup_config(id) ON DELETE SET NULL;
+			`,
+			// Guarded the same way v3's UpMySQL is: MySQL raises
+			// ER_DUP_KEYNAME/ER_FK_DUP_NAME on a re-add rather than
+			// silently no-op-ing, and there is no ADD CONSTRAINT IF NOT
+			// EXISTS to lean on. The DROP has to run unconditionally before
+			// the guarded ADD -- v3's cascade constraint carries the same
+			// name this migration re-adds under, so leaving it in place
+			// would make the ADD's own guard (checking for that name) see
+			// it as already done and skip re-adding it with SET NULL.
+			UpMySQL: `
+				SET @fk := (
+					SELECT COUNT(*) FROM information_schema.table_constraints
+					WHERE constraint_schema = DATABASE() AND table_name = 'backup_history'
+					  AND constraint_name = 'backup_history_config_id_fkey'
+				);
+				SET @ddl := IF(@fk > 0,
+					'ALTER TABLE backup_history DROP FOREIGN KEY backup_history_config_id_fkey',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				ALTER TABLE backup_history ADD CONSTRAINT backup_history_config_id_fkey
+					FOREIGN KEY (config_id) REFERENCES backup_config(id) ON DELETE SET NULL;
+			`,
+			// v3's UpMSSQL named the cascade constraint explicitly
+			// (fk_backup_history_config_id_cascade) rather than relying on
+			// an auto-generated name, specifically so a later migration
+			// could find it by name instead of looking it up the way v3
+			// itself had to for the ORIGINAL auto-named constraint. This is
+			// that later migration.
+			UpMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = 'fk_backup_history_config_id_cascade')
+				ALTER TABLE backup_history DROP CONSTRAINT fk_backup_history_config_id_cascade;
+
+				IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE parent_object_id = OBJECT_ID('backup_history') AND referenced_object_id = OBJECT_ID('backup_config'))
+				ALTER TABLE backup_history
+					ADD CONSTRAINT fk_backup_history_config_id_setnull
+					FOREIGN KEY (config_id) REFERENCES backup_config(id) ON DELETE SET NULL;
+			`,
+			// Down restores v3's cascade exactly, on all three dialects.
+			Down: `
+				ALTER TABLE backup_history DROP CONSTRAINT IF EXISTS backup_history_config_id_fkey;
+				ALTER TABLE backup_history ADD CONSTRAINT backup_history_config_id_fkey
+					FOREIGN KEY (config_id) REFERENCES backup_config(id) ON DELETE CASCADE;
+			`,
+			DownMySQL: `
+				SET @fk := (
+					SELECT COUNT(*) FROM information_schema.table_constraints
+					WHERE constraint_schema = DATABASE() AND table_name = 'backup_history'
+					  AND constraint_name = 'backup_history_config_id_fkey'
+				);
+				SET @ddl := IF(@fk > 0,
+					'ALTER TABLE backup_history DROP FOREIGN KEY backup_history_config_id_fkey',
+					'DO 0');
+				PREPARE stmt FROM @ddl;
+				EXECUTE stmt;
+				DEALLOCATE PREPARE stmt;
+
+				ALTER TABLE backup_history ADD CONSTRAINT backup_history_config_id_fkey
+					FOREIGN KEY (config_id) REFERENCES backup_config(id) ON DELETE CASCADE;
+			`,
+			DownMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = 'fk_backup_history_config_id_setnull')
+				ALTER TABLE backup_history DROP CONSTRAINT fk_backup_history_config_id_setnull;
+
+				IF NOT EXISTS (SELECT 1 FROM sys.foreign_keys WHERE parent_object_id = OBJECT_ID('backup_history') AND referenced_object_id = OBJECT_ID('backup_config'))
+				ALTER TABLE backup_history
+					ADD CONSTRAINT fk_backup_history_config_id_cascade
+					FOREIGN KEY (config_id) REFERENCES backup_config(id) ON DELETE CASCADE;
+			`,
 		},
 	}
 }

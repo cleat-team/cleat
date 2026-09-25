@@ -56,8 +56,10 @@ configuration boots cleanly with no `scheduledbackup.dsn` set at all, and its
 background loop polls unconditionally regardless — see `Run`'s own doc
 comment (`plugins/scheduledbackup/background.go`). An unresolvable DSN then
 surfaces per backup attempt, recorded as a `failed` row in `backup_history`
-with a generic tenant-facing message, exactly like a `pg_dump` failure would
-be.
+with a generic stable error code (`backupErrDSNUnavailable`), exactly like a
+`pg_dump` failure would be. Read via `cleatctl backup history`, by the
+operator — cleat#2247 made `backup_config`/`backup_history` operator-only,
+so there is no tenant to face here at all.
 
 **But if `--plugin-config` still carries the legacy `dsn` field,
 `scheduledbackup.dsn` becomes required at boot, the same as `slack-notify`'s

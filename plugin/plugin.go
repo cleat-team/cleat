@@ -478,6 +478,27 @@ type Migration struct {
 	// PostgreSQL only, for the same reason TenantScoped is: the other two
 	// dialects install no policy and do not switch role.
 	SweepTables []string
+
+	// Irreversible states why this migration, though it writes SQL, has
+	// deliberately no Down (and none of DownMySQL/DownMSSQL): the runtime
+	// (migration_down.go) already refuses to reverse PAST an applied
+	// migration with no Down, for exactly this migration's shape, so nothing
+	// here needs to change at runtime -- this field exists only so
+	// plugintest.AssertMigrationsDoSomething can tell "an author forgot a
+	// Down" from "a Down cannot exist", the same distinction DialectSpecific
+	// draws for a missing Up arm. cleat#2247 needed it first: scheduledbackup's
+	// v4 migration drops backup_config.tenant_id and backup_history.tenant_id
+	// with no source of truth for what value a restored column should get
+	// (the whole point of the migration is that the column is gone), which is
+	// a data-recovery decision rather than a mechanical schema reversal.
+	//
+	// NARROW BY DESIGN, like TenantScoped, SweepTables and DialectSpecific:
+	// the exemption requires this to be NON-EMPTY, so a migration missing a
+	// Down by accident still trips the guard. It is NOT a substitute for
+	// TenantScoped/SweepTables -- those describe a migration with no SQL to
+	// undo in the first place; this describes one that DOES write SQL and
+	// still cannot be undone.
+	Irreversible string
 }
 
 // HasCommands: plugin adds CLI subcommands.

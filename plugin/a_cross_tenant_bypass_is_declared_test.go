@@ -136,14 +136,13 @@ var crossTenantLedger = map[string]bypassKind{
 	"plugins/jobqueue/background.go:(*Plugin).sweepAbandonedJobs": kindClaimAcrossTenants,
 	"plugins/webhookingest/background.go:(*Plugin).Run":           kindClaimAcrossTenants,
 	"plugins/scheduler/background.go:(*Plugin).runDueSchedules":   kindClaimAcrossTenants,
-	// TWO CLAIMS IN ONE REASON, noted rather than tidied: this site's reason
-	// says "one transaction claims and advances every tenant's due configs,
-	// AND the orphan sweep belongs to no tenant" -- a claim and a global
-	// sweep. They are both true and both covered by the one bypass today. If
-	// the two are ever split into separate transactions they need separate
-	// entries, because they are separate kinds and this ledger's whole premise
-	// is that the kinds are not interchangeable.
-	"plugins/scheduledbackup/background.go:(*Plugin).runDueBackups": kindClaimAcrossTenants,
+	// scheduledbackup's runDueBackups USED to be here, with a reason covering
+	// both a per-tenant claim and the orphan sweep. cleat#2247 removed the
+	// tenant dimension from backup_config/backup_history entirely (migration
+	// v4 drops tenant_id and the RLS policy on both), so runDueBackups now
+	// runs on plain ctx throughout -- there is nothing left for
+	// AcrossAllTenants to bypass, and no entry belongs here for it. See its
+	// doc comment in background.go.
 
 	// Config read across tenants; the per-tenant work that follows is scoped.
 	"plugins/datadogexport/background.go:(*Plugin).exportMetrics": kindDiscovery,

@@ -1,7 +1,13 @@
 // Package scheduledbackup provides scheduled PostgreSQL backups with pg_dump.
-// It supports cron-based scheduling and manual backup via HTTP API and CLI
-// commands, and records backup history in PostgreSQL. Dumps are written to
-// local disk only -- there is no restore path and no off-host upload.
+// It supports cron-based scheduling and records backup history in
+// PostgreSQL. Dumps are written to local disk only -- there is no restore
+// path and no off-host upload.
+//
+// Configuration is operator-only, via cmd/cleatctl's `backup` subcommand
+// (cleat#2247): there is no tenant-facing HTTP API and no plugin.HasCommands
+// implementation, since backup_config and backup_history stopped being
+// tenant-scoped tables in migration v4 -- there is exactly one operator, not
+// one per tenant.
 package scheduledbackup
 
 import (
@@ -155,6 +161,17 @@ func (ce *cronExpr) matches(t time.Time) bool {
 		ce.dayOfMonth.matches(t.Day()) &&
 		ce.month.matches(int(t.Month())) &&
 		ce.dayOfWeek.matches(int(t.Weekday()))
+}
+
+// NextRun computes the next time matching cron after from, or the zero time
+// if cron is invalid or no match is found within one year. Exported
+// (cleat#2247) for cmd/cleatctl/backup.go: creating or updating a backup
+// config used to compute this in the HTTP handler (routes.go, deleted with
+// this issue), and cleatctl needs the identical validation -- an operator
+// should hear "invalid cron expression" at `backup config-create` time, not
+// discover it as a config that silently never runs.
+func NextRun(cron string, from time.Time) time.Time {
+	return nextRun(cron, from)
 }
 
 // nextRun computes the next time matching the cron expression after `from`.
