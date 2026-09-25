@@ -10397,3 +10397,64 @@ Files: `engine/store_signals.go`, `engine/mysql_store.go`, `engine/mssql_signals
 `cmd/cleat-worker/signal_not_found_mapping_test.go`,
 `cmd/cleat-worker/a_purged_awaiter_unregisters_across_dialects_test.go`,
 `plugins/eventtriggers/a_not_found_awaiter_unregisters_instead_of_leaking_test.go`.
+
+### 3.342 Two plugin routes with no cleat credential had no body ceiling either — 🟡 **IN PROGRESS 2026-09-24** (cleat#2232)
+
+**"POST /slack/interactive" and "POST /ingest/{source_id}" are both exempt from `auth.Middleware`
+and `auth.HostBindingMiddleware` by design** — Slack's own servers and an inbound webhook sender
+carry no cleat API key to check — and until this issue that exemption was the whole of their
+protection. Every plugin route read its body with a bare `io.ReadAll(r.Body)` or
+`json.NewDecoder(r.Body)`, so an anonymous caller on either route could send an unbounded body and
+the plugin would buffer all of it before ever validating anything.
+
+**Design A, approved before this work started: bound the body at the host, not inside each
+plugin.** `plugin.HasRoutes.RegisterRoutes` now takes a `plugin.Router` (`Handle`/`HandleFunc`,
+matching `*http.ServeMux`'s method set structurally) instead of `*http.ServeMux` directly. The
+host's `pluginBodyLimitRouter` (`cmd/cleat-worker/plugin_body_limit.go`) implements `Router` over
+the same mux every plugin route already shared, wrapping every handler in
+`http.MaxBytesReader(w, r.Body, limit)` at registration time — `--plugin-max-body-size` (default 1
+MiB) unless the route declared its own ceiling via `plugin.MaxBody(limit, h)`
+(`plugin/body.go`), which blobstore's `PUT /blobs/{key...}` now does, sized by its own
+(previously unenforced) `max_blob_size` config field, defaulted to 10 MiB when unset.
+
+**All 26 plugin body-read sites converted to `plugin.ReadBody` / `plugin.ReadJSONBody`**, the
+same division cleat#1332/#1338 established for the core API's `decodeBody`/`readBody`: the host
+sets the ceiling, the helper translates the resulting `*http.MaxBytesError` into a 413 naming the
+limit, and a plugin route can no longer hand-roll that translation (or omit it) the way seven core
+handlers once did. Converting them changed observable behaviour at four sites that were asserting
+the pre-#2232 defaults on purpose — a generic body-read failure going from 500 to 400, and a fixed
+"invalid JSON body" message becoming "invalid JSON: %v" — and those four tests
+(`webhookingest_behavioral_test.go` ×2, `pagerdutyalert_behavioral_test.go`,
+`scheduledbackup_behavioral_test.go`) were updated to match the design's intent rather than left
+pinning the old behaviour.
+
+**Two guards, so a 27th site or a route that forgets to run through the adapter cannot repeat
+this silently.** `plugins/every_plugin_reads_its_body_through_the_helper_test.go` is an AST scan
+— not a grep, since 16 plugin files legitimately call `io.ReadAll` on an *outbound* response body
+(`resp.Body`, `tokenResp.Body`, ...) and a text ban cannot tell that apart from an inbound one —
+that flags any `io.ReadAll`/`json.NewDecoder` call whose argument is `<name>.Body` for a name
+bound to `*http.Request` in that file, discovered per file rather than hardcoded as `r`.
+`cmd/cleat-worker/body_limit_413_names_the_limit_test.go`'s existing
+`TestEveryBoundedBodyGoesThroughTheHelper` gained `boundPluginRequestBody` as a third allowed
+`MaxBytesReader` call site, alongside `decodeBody`/`readBody`.
+`TestPluginRouteBodyLimitAppliesOnBothAuthExemptRoutes`
+(`cmd/cleat-worker/plugin_route_body_limit_exempt_test.go`) rebuilds the real three-layer chain —
+`auth.Middleware` → `auth.HostBindingMiddleware` → `pluginBodyLimitRouter` — with the exempt-path
+list copied verbatim from `main.go`, since main()'s own wiring has no call site a test can reach
+(see `a_slack_interactive_route_is_exempt_test.go`'s doc comment), and asserts an anonymous
+oversized POST to each exempt route gets 413 before `plugin.ReadBody` accepts it, with a control
+proving the same anonymous request is accepted under the limit. `plugin/body_test.go` adds direct
+unit coverage of `MaxBody`/`MaxBodyLimit`'s round trip and `ReadBody`/`ReadJSONBody`'s three
+outcomes (under the limit, over it, and a genuine non-size read error that must stay 400).
+
+**Remaining before this closes:** open the PR for `feature/plugin-request-body-limits` and send it
+to cleat-review, per design review's condition that this and cleat#2247 each go to cleat-review
+before enqueue.
+
+Files: `plugin/body.go`, `plugin/body_test.go`, `plugin/plugin_http.go`, `plugin/capabilities_test.go`,
+`cmd/cleat-worker/plugin_body_limit.go`, `cmd/cleat-worker/plugin_route_body_limit_exempt_test.go`,
+`cmd/cleat-worker/body_limit_413_names_the_limit_test.go`, `cmd/cleat-worker/config.go`,
+`cmd/cleat-worker/main.go`, `docs/reference/worker-config.md`,
+`plugins/every_plugin_reads_its_body_through_the_helper_test.go`,
+`plugins/blobstore/{plugin.go,routes.go}`, `plugins/slacknotify/{interactive.go,routes.go,slacknotify_new_test.go}`,
+and the routes.go of every other plugin listed in cleat#2232.
