@@ -1669,7 +1669,16 @@ func main() {
 	// separately below via registerRoutes(mux, api), are untouched by this --
 	// see the block comment a few lines down for why plugMux is not a
 	// plugin-only mux and why that reuse means this wrap must not reach them.
-	warnAboutStalePluginRouteSignatures(logger, workerID, plugList)
+	// cleat#2277: a plugin whose RegisterRoutes has drifted to the
+	// pre-#2232 signature, or whose RegisterRoutes call itself errors, used
+	// to only log and continue -- silently serving none, or part, of that
+	// plugin's routes while /readyz kept answering 200. Both now refuse to
+	// start, naming the plugin, the same shape checkRequiredDeploymentSecrets
+	// already uses a few lines up.
+	if err := checkPluginRouteSignatures(plugList); err != nil {
+		logger.ErrorContext(context.Background(), "refusing to start: "+err.Error(), "worker_id", workerID)
+		os.Exit(1)
+	}
 	pluginRouter := &pluginBodyLimitRouter{mux: plugMux, defaultLimit: *pluginMaxBodySize}
 	for _, lp := range plugList {
 		if !lp.Healthy {
@@ -1677,7 +1686,8 @@ func main() {
 		}
 		if p, ok := lp.Plugin.(plugin.HasRoutes); ok && plugMux != nil {
 			if rerr := p.RegisterRoutes(pluginRouter); rerr != nil {
-				logger.ErrorContext(context.Background(), "plugin route registration failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", rerr)
+				logger.ErrorContext(context.Background(), "refusing to start: plugin route registration failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", rerr)
+				os.Exit(1)
 			}
 		}
 	}
@@ -2266,10 +2276,10 @@ func main() {
 						"worker_id", workerID, "error", err)
 					os.Exit(1)
 				}
-				handler = auth.HostBindingMiddleware(authResolver, pluginAuthExemptPatterns...)(handler)
+				handler = auth.HostBindingMiddlewareWithMux(authResolver, mux, pluginAuthExemptPatterns...)(handler)
 			}
 
-			handler = auth.Middleware(authResolver, true, pluginAuthExemptPatterns...)(handler)
+			handler = auth.MiddlewareWithMux(authResolver, true, mux, pluginAuthExemptPatterns...)(handler)
 
 			// If no API keys exist, auto-generate one for the default tenant.
 			//

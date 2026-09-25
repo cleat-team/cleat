@@ -174,6 +174,45 @@ func TestHostBindingPassesThroughWhenThereIsNoTenant(t *testing.T) {
 	}
 }
 
+func TestHostBindingMiddlewareWithMux_LiteralSiblingOfPublicWildcardStaysProtected(t *testing.T) {
+	// Same defect as MiddlewareWithMux's sibling test (cleat#2274), one layer
+	// in: HostBindingMiddleware shares buildPublicMatcher, so it independently
+	// treats POST /ingest/sources as exempt from the host check too, even for
+	// a request that already carries a resolved tenant (i.e. one that made it
+	// past a since-fixed auth.Middleware). Given the real mux both patterns
+	// are registered on, it must not.
+	tenantA := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	res := &fakeDomains{owner: map[string]uuid.UUID{"a.example.com": tenantA}}
+
+	mux := http.NewServeMux()
+	mux.Handle("POST /ingest/{source_id}", okHandler())
+	mux.Handle("POST /ingest/sources", okHandler())
+
+	h := HostBindingMiddlewareWithMux(res, mux, "POST /ingest/{source_id}")(mux)
+
+	// A tenant-bound request to the literal sibling, on a host that tenant
+	// does not own, must be refused -- not waved through as "public".
+	r := httptest.NewRequest(http.MethodPost, "/ingest/sources", nil)
+	r.Host = "wrong.example.com"
+	r = r.WithContext(WithTenantID(context.Background(), tenantA))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("POST /ingest/sources on an unowned host: got %d, want 404 (refused)", w.Code)
+	}
+
+	// The actual public wildcard, with no tenant in context (as it would have
+	// if auth.Middleware treated it as public and set none), still passes
+	// through regardless of Host.
+	r = httptest.NewRequest(http.MethodPost, "/ingest/abc-123", nil)
+	r.Host = "wrong.example.com"
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("POST /ingest/{source_id} with no tenant: got %d, want 200 (public)", w.Code)
+	}
+}
+
 func TestNormalizeHost(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"example.com", "example.com"},

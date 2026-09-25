@@ -104,7 +104,20 @@ func NormalizeHost(host string) string {
 // --require-auth=false deployments, which is a separate decision from the one
 // this implements.
 func HostBindingMiddleware(resolver DomainResolver, publicPatterns ...string) func(http.Handler) http.Handler {
+	return HostBindingMiddlewareWithMux(resolver, nil, publicPatterns...)
+}
+
+// HostBindingMiddlewareWithMux is HostBindingMiddleware, but resolves the
+// public-pattern exemption against mux -- the real serving mux -- the same
+// way MiddlewareWithMux does and for the same reason (see its doc comment,
+// and isPublicRoute in public_route.go): a throwaway mux built from only
+// publicPatterns cannot see a literal sibling of a public wildcard, and
+// wrongly exempts it too. cleat#2274.
+//
+// mux may be nil, in which case this behaves exactly like HostBindingMiddleware.
+func HostBindingMiddlewareWithMux(resolver DomainResolver, mux *http.ServeMux, publicPatterns ...string) func(http.Handler) http.Handler {
 	publicMatcher := buildPublicMatcher(publicPatterns)
+	patternSet := publicPatternSet(publicPatterns)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			path := r.URL.Path
@@ -112,11 +125,9 @@ func HostBindingMiddleware(resolver DomainResolver, publicPatterns ...string) fu
 				next.ServeHTTP(w, r)
 				return
 			}
-			if publicMatcher != nil {
-				if _, pattern := publicMatcher.Handler(r); pattern != "" {
-					next.ServeHTTP(w, r)
-					return
-				}
+			if isPublicRoute(mux, publicMatcher, patternSet, r) {
+				next.ServeHTTP(w, r)
+				return
 			}
 
 			tenantID, ok := TenantIDFromContext(r.Context())
