@@ -11,7 +11,9 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
+	"github.com/cleat-team/cleat/auth"
 	"github.com/google/uuid"
 )
 
@@ -152,20 +154,28 @@ func runRevokeAPIKey(ctx context.Context, db *sql.DB, args []string) {
 		return
 	}
 
-	res, err := db.ExecContext(ctx,
-		`UPDATE admin.tenant_api_keys SET disabled_at = now()
-		 WHERE key_id = $1 AND disabled_at IS NULL`, row.keyID)
+	// Revoke through auth.TenantStore so the CLI and the library share one
+	// implementation and both methods have a production caller: --key-id goes
+	// through RevokeAPIKey, --key-hash / --key-stdin through RevokeAPIKeyByHash
+	// -- the same method the OAuth logout path (#2340) will use. A bare inline
+	// UPDATE here is what left RevokeAPIKey dead since it was written (see the
+	// header comment). The methods are idempotent, so a concurrent revoke reads
+	// as a normal success rather than the "revoked concurrently" note the old
+	// inline RowsAffected check used to print.
+	ts, err := auth.NewTenantStoreForDialect(db, auth.DialectPostgres)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: revoke: %v\n", err)
 		osExit(1)
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		// Lost a race with a concurrent revoke. Same end state, so not an
-		// error -- but say so rather than printing a success that implies
-		// this invocation is what did it.
-		fmt.Println("\nKey was revoked concurrently by someone else. End state is correct.")
+	if selector.keyHash != nil {
+		err = ts.RevokeAPIKeyByHash(ctx, selector.keyHash)
+	} else {
+		err = ts.RevokeAPIKey(ctx, selector.keyID)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: revoke: %v\n", err)
+		osExit(1)
 		return
 	}
 
@@ -244,6 +254,7 @@ type apiKeyRow struct {
 	description string
 	createdAt   sql.NullTime
 	disabledAt  sql.NullTime
+	expiresAt   sql.NullTime // cleat#2352
 }
 
 // findAPIKey looks a key up by whichever selector was given. It deliberately
@@ -263,16 +274,16 @@ func findAPIKey(ctx context.Context, db *sql.DB, sel revokeKeySelector) (*apiKey
 	// coverage hole is worth more than a repeated line. cleat#1208.
 	if sel.keyHash != nil {
 		err = db.QueryRowContext(ctx, `
-			SELECT key_id, tenant_id, description, created_at, disabled_at
+			SELECT key_id, tenant_id, description, created_at, disabled_at, expires_at
 			FROM admin.tenant_api_keys WHERE key_hash = $1
 		`, sel.keyHash).
-			Scan(&row.keyID, &row.tenantID, &row.description, &row.createdAt, &row.disabledAt)
+			Scan(&row.keyID, &row.tenantID, &row.description, &row.createdAt, &row.disabledAt, &row.expiresAt)
 	} else {
 		err = db.QueryRowContext(ctx, `
-			SELECT key_id, tenant_id, description, created_at, disabled_at
+			SELECT key_id, tenant_id, description, created_at, disabled_at, expires_at
 			FROM admin.tenant_api_keys WHERE key_id = $1
 		`, sel.keyID).
-			Scan(&row.keyID, &row.tenantID, &row.description, &row.createdAt, &row.disabledAt)
+			Scan(&row.keyID, &row.tenantID, &row.description, &row.createdAt, &row.disabledAt, &row.expiresAt)
 	}
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -289,7 +300,7 @@ func listAPIKeys(ctx context.Context, db *sql.DB, tenant string) error {
 		return fmt.Errorf("--list %q is not a tenant uuid: %w", tenant, err)
 	}
 	rows, err := db.QueryContext(ctx,
-		`SELECT key_id, tenant_id, description, created_at, disabled_at
+		`SELECT key_id, tenant_id, description, created_at, disabled_at, expires_at
 		 FROM admin.tenant_api_keys WHERE tenant_id = $1
 		 ORDER BY created_at DESC`, tid)
 	if err != nil {
@@ -300,7 +311,7 @@ func listAPIKeys(ctx context.Context, db *sql.DB, tenant string) error {
 	var out []apiKeyRow
 	for rows.Next() {
 		var r apiKeyRow
-		if err := rows.Scan(&r.keyID, &r.tenantID, &r.description, &r.createdAt, &r.disabledAt); err != nil {
+		if err := rows.Scan(&r.keyID, &r.tenantID, &r.description, &r.createdAt, &r.disabledAt, &r.expiresAt); err != nil {
 			return fmt.Errorf("scan api key row: %w", err)
 		}
 		out = append(out, r)
@@ -320,23 +331,41 @@ func listAPIKeys(ctx context.Context, db *sql.DB, tenant string) error {
 // not the key, but it is the exact value an attacker needs to match against a
 // stolen key to confirm they have a live one, and there is no operator task
 // that needs it on screen.
+//
+// cleat#2352: STATUS distinguishes "revoked" (disabled_at set -- an operator
+// or the OAuth sweep acted) from "expired" (expires_at passed with no
+// disabled_at -- nobody acted, the key's own lifetime ran out) from "active".
+// Before expires_at existed there was only one way for a key to stop working,
+// so one word covered it; now there are two, and they answer different
+// operator questions -- "did someone revoke this" versus "did this just run
+// out" -- which is exactly the distinction design v2 §(8) asked the CLI to
+// carry. EXPIRES is reported separately from STATUS so an operator can also
+// see an about-to-expire key that is still active today.
 func printAPIKeyRows(rows []apiKeyRow) {
+	now := time.Now()
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "KEY_ID\tTENANT\tSTATUS\tCREATED\tDESCRIPTION")
+	fmt.Fprintln(w, "KEY_ID\tTENANT\tSTATUS\tCREATED\tEXPIRES\tDESCRIPTION")
 	for _, r := range rows {
 		status := "active"
-		if r.disabledAt.Valid {
+		switch {
+		case r.disabledAt.Valid:
 			status = "revoked " + r.disabledAt.Time.Format("2006-01-02")
+		case r.expiresAt.Valid && r.expiresAt.Time.Before(now):
+			status = "expired " + r.expiresAt.Time.Format("2006-01-02")
 		}
 		created := "-"
 		if r.createdAt.Valid {
 			created = r.createdAt.Time.Format("2006-01-02")
 		}
+		expires := "never"
+		if r.expiresAt.Valid {
+			expires = r.expiresAt.Time.Format("2006-01-02 15:04:05 MST")
+		}
 		desc := r.description
 		if desc == "" {
 			desc = "-"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", r.keyID, r.tenantID, status, created, desc)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", r.keyID, r.tenantID, status, created, expires, desc)
 	}
 	_ = w.Flush()
 }

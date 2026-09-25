@@ -200,16 +200,22 @@ func (s *TenantStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byt
 // resolveAPIKeyStmt mirrors createAPIKeyStmt: same table per dialect, same
 // placeholder style. The two must agree about WHERE the row lives, and cleat#866
 // is what happens when the write and the read disagree.
+//
+// cleat#2352: each statement also excludes an expired key, the same way it
+// already excludes a disabled one. expires_at IS NULL means "no expiry" (the
+// default for every key created before migration 105/104/105 landed, and for
+// any manually-provisioned service key since), so that half of the OR is what
+// keeps every existing key authenticating exactly as before this change.
 func resolveAPIKeyStmt(dialect string) string {
 	switch dialect {
 	case DialectMySQL:
 		// No admin schema: schema and database are one namespace in MySQL, and
 		// the keys live in the base database the DSN names.
-		return `SELECT tenant_id FROM tenant_api_keys WHERE key_hash = ? AND disabled_at IS NULL`
+		return `SELECT tenant_id FROM tenant_api_keys WHERE key_hash = ? AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > NOW(6))`
 	case DialectMSSQL:
-		return `SELECT CONVERT(NVARCHAR(36), tenant_id) FROM admin.tenant_api_keys WHERE key_hash = @p1 AND disabled_at IS NULL`
+		return `SELECT CONVERT(NVARCHAR(36), tenant_id) FROM admin.tenant_api_keys WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`
 	default:
-		return `SELECT tenant_id FROM admin.tenant_api_keys WHERE key_hash = $1 AND disabled_at IS NULL`
+		return `SELECT tenant_id FROM admin.tenant_api_keys WHERE key_hash = $1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > now())`
 	}
 }
 
@@ -223,6 +229,27 @@ func (s *TenantStore) RevokeAPIKey(ctx context.Context, keyID uuid.UUID) error {
 	}
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE admin.tenant_api_keys SET disabled_at = now() WHERE key_id = $1 AND disabled_at IS NULL`, keyID)
+	return err
+}
+
+// RevokeAPIKeyByHash revokes an API key by its sha256 hash rather than its
+// key_id.
+//
+// cleat#2352. RevokeAPIKey exists for an operator who has a key_id from
+// --list; this is for a caller that only ever has the hash -- oauthprovider's
+// planned logout path (#2340 design v2 §(1)) computes rawKey's hash at mint
+// time and links it via oauth_sessions.api_key_hash, and never sees the
+// DB-generated key_id (CreateAPIKey does not return it -- see that function's
+// own comment on why). Same Postgres-only scope as RevokeAPIKey, for the same
+// reason: no production caller on another dialect yet, and now() / NOW(6) /
+// SYSUTCDATETIME() differ alongside the placeholders. Refuses rather than
+// guessing.
+func (s *TenantStore) RevokeAPIKeyByHash(ctx context.Context, keyHash []byte) error {
+	if s.dialect != DialectPostgres {
+		return fmt.Errorf("auth: RevokeAPIKeyByHash is not implemented for %s", s.dialect)
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE admin.tenant_api_keys SET disabled_at = now() WHERE key_hash = $1 AND disabled_at IS NULL`, keyHash)
 	return err
 }
 

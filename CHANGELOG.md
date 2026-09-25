@@ -706,6 +706,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reclassified `outcomeUnrecoverable` before landing, rather than advertised as recoverable via
   `--migrate-only`.
 
+- **API keys can expire and carry an `oauth_identity`: `admin.tenant_api_keys` gains `expires_at` and `oauth_identity` columns on all three dialects, and an expired key stops authenticating.** (cleat#2352)
+
+  `expires_at` is nullable and `NULL` means "no expiry", so every key created before this migration
+  keeps authenticating unchanged. `ResolveTenantFromAPIKey` now rejects an expired key exactly as it
+  already rejected a disabled one, on PostgreSQL, MySQL and SQL Server alike. New
+  `TenantStore.RevokeAPIKeyByHash` revokes by sha256 hash (Postgres-only, mirroring `RevokeAPIKey`) for
+  the OAuth logout path in #2340, which holds only the hash and never the DB-generated key id.
+  `cleatctl revoke-api-key` (and `--list`) gain an `EXPIRES` column and distinguish `revoked`/`expired`/
+  `active`; the worker's startup key-count now excludes expired and disabled keys. `oauth_identity` is
+  added on all three dialects for schema-shape parity (matching the `disabled_at` precedent) and left
+  unwired — the #2340 minting path is what populates it. This is the schema/plumbing half of #2340; the
+  oauthprovider plugin logic that mints short-lived keys lands separately.
+
 - **`--encryption-key-file-previous`: `cmd/cleat-worker` can hold a previous payload-encryption key alongside the current one, for rolling key rotation.** (cleat#1992, #2308)
 
   `engine.PayloadEncryption` has supported a two-key ring since before this flag existed

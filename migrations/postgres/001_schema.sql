@@ -227,7 +227,12 @@ CREATE TABLE IF NOT EXISTS admin.tenant_api_keys (
     -- rather than the revoked_at that migration 087 removes -- otherwise
     -- re-applying 001 to an already-migrated database fails on a column
     -- that is gone, which TestShippedSchema_IsIdempotent exists to catch.
-    disabled_at TIMESTAMPTZ
+    disabled_at TIMESTAMPTZ,
+    -- cleat#2352: migration 105's two columns, same reason they are here
+    -- rather than left to apply incrementally. NULL for every key by
+    -- default; see 105's header for what each is for.
+    expires_at     TIMESTAMPTZ,
+    oauth_identity TEXT
 );
 
 -- ── Workflow definition tables ──────────────────────────────────────────────

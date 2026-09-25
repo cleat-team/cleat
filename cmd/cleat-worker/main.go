@@ -2338,10 +2338,7 @@ func main() {
 			// unqualified name resolves to dbo, and dbo is the one nothing
 			// writes. So this counted rows in an always-empty table and
 			// concluded a key needed generating on every start.
-			keyCountQuery := `SELECT COUNT(*) FROM tenant_api_keys`
-			if *driver == "postgres" || *driver == "mssql" {
-				keyCountQuery = `SELECT COUNT(*) FROM admin.tenant_api_keys`
-			}
+			keyCountQuery := liveAPIKeyCountQuery(*driver)
 			var keyCount int
 			if err := db.QueryRowContext(ctx, keyCountQuery).Scan(&keyCount); err != nil {
 				// ERROR, not WARN: if this query fails the auth middleware
