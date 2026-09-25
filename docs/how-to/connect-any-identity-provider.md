@@ -21,11 +21,22 @@ URL is the new part; everything else is what you already supply for a named
 provider.
 
 The client secret does not live in `oauth_config` -- it is a tenant secret,
-sealed the same way every other per-tenant credential is (cleat#1992). Set it
-with `cleatctl`, then insert the rest of the row:
+sealed the same way every other per-tenant credential is (cleat#1992).
+`set-secret` requires the tenant to already exist -- it writes a row with a
+foreign key to `admin.tenants`, and fails on a fresh database if that tenant
+was never created:
+
+```sql
+INSERT INTO admin.tenants (tenant_id, name)
+VALUES ('11111111-1111-1111-1111-111111111111', 'acme');
+```
+
+(Skip this if you already have a tenant -- any existing `tenant_id` works.)
+
+Then set the secret and insert the rest of the row:
 
 ```
-cleatctl set-secret 00000000-0000-0000-0000-000000000001 \
+cleatctl set-secret 11111111-1111-1111-1111-111111111111 \
   --name oauthprovider.client_secret.oidc
 # reads the value from stdin, or pass --from-file <path>
 ```
@@ -33,7 +44,7 @@ cleatctl set-secret 00000000-0000-0000-0000-000000000001 \
 ```sql
 INSERT INTO oauth_config (tenant_id, provider, client_id, redirect_url, issuer, enabled)
 VALUES (
-  '00000000-0000-0000-0000-000000000001',
+  '11111111-1111-1111-1111-111111111111',
   'oidc',
   'cleat',
   'https://cleat.example.com/oauth/oidc/callback',
@@ -43,8 +54,15 @@ VALUES (
 ```
 
 A row with no matching secret is not silently treated as unconfigured: login
-and callback both fail closed, with a message naming the `set-secret` command
-that fixes it.
+and callback both fail closed, with a generic `oauth config not found`
+response. The distinction -- config row present but no secret set, versus no
+config at all -- is logged server-side (`secret_not_found=true`), not
+returned to the caller: `/login` is unauthenticated, so an error naming
+`set-secret` or cleat's internal secret-naming scheme would hand an anonymous
+caller both an existence oracle and detail about the deployment's own tooling
+(cleat-review, cleat#2295). If login fails right after configuring a
+provider, check the worker log for `secret_not_found` before assuming
+anything else is wrong.
 
 `issuer` is the **issuer URL**, not the discovery URL. cleat appends
 `/.well-known/openid-configuration` to it and reads `authorization_endpoint`,

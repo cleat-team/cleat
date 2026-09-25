@@ -909,14 +909,27 @@ func (c *fakeConn) execInsertSession(args []driver.NamedValue) (driver.Result, e
 }
 
 // execUpdateSession backs finishLogin's UPDATE. It supports two argument
-// shapes so a regression back to binding session_token/access_token/
-// refresh_token is actually VISIBLE to a test, rather than tripping an
-// unrelated id-parse error: the current shape (4 named args -- token_hash,
-// user_email, expires_at, id; session_token/access_token/refresh_token are
-// SQL-literal NULL, no bound argument) and the pre-cleat#2295 shape (7 named
-// args, with the three bound as parameters 1, 4 and 5). A literal NULL in
-// the query text binds no argument at all, so "4 args arrived" IS the
-// signal that production wrote NULL -- it is not merely inferred.
+// shapes so a wholesale regression back to binding session_token/
+// access_token/refresh_token as their OWN parameters is visible to a test
+// here, rather than tripping an unrelated id-parse error: the current shape
+// (4 named args -- token_hash, user_email, expires_at, id) and the
+// pre-cleat#2295 shape (7 named args, with the three bound as parameters 1,
+// 4 and 5).
+//
+// "4 args arrived" is NOT proof the three columns are NULL, and this
+// comment claimed otherwise until cleat-review's should-fix on 705e1fcd: a
+// statement can reuse an EXISTING placeholder -- `session_token = $1,
+// access_token = $2, refresh_token = $2` alongside `token_hash = $1,
+// user_email = $2` -- and still bind exactly 4 args while writing real
+// values into all three. This fake cannot see that; it only counts. What
+// closes the loophole is
+// a_real_dialect_login_stores_no_tokens_test.go's
+// TestARealLoginStoresNoTokensOnAnyDialect, which reads the columns back
+// with a real SELECT against real Postgres/MySQL/SQL Server rather than
+// inferring their state from an argument count. Falsified by reintroducing
+// exactly that placeholder-reuse shape in finishLogin: this fake stayed
+// green, the real-dialect test failed naming all three columns, on all
+// three dialects.
 func (c *fakeConn) execUpdateSession(args []driver.NamedValue) (driver.Result, error) {
 	var idPos int
 	switch len(args) {

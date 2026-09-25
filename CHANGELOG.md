@@ -230,10 +230,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set — which was every deployment shipped so far, since a nil `Payloads` fails closed rather
   than falling back to plaintext. Since nothing reads these three columns back (session lookup
   is by `token_hash`, a separate column, unaffected by any of this), the fix is to stop storing
-  them at all rather than to fix the seal. A config row that has no matching secret now gets a
-  distinct, actionable error (`plugin.ErrSecretNotFound`, naming the `cleatctl set-secret`
-  command that fixes it) instead of the generic "oauth config not found" both `getConfig`
-  callers used to return for every failure alike.
+  them at all rather than to fix the seal. A config row that has no matching secret is now
+  distinguished from every other lookup failure internally (`plugin.ErrSecretNotFound`), logged
+  server-side as `secret_not_found=true` — but `/login` and `/callback` still return the same
+  generic "oauth config not found" to the caller either way. `/login` is unauthenticated, so a
+  response naming `cleatctl set-secret` or cleat's internal secret-naming scheme would hand an
+  anonymous caller both an existence oracle and detail about the deployment's own tooling
+  (cleat-review, cleat#2295). Check the worker log for `secret_not_found` when diagnosing.
 
   **Who is affected:** anyone who queried `oauth_config.client_secret` directly, or who relied on
   `oauth_sessions.session_token`/`access_token`/`refresh_token` holding a value (sealed or
