@@ -1069,17 +1069,28 @@ func (e *Engine) getAdaptiveFlusher() *AdaptiveFlusher {
 // batchFlushSupported reports whether the store's database speaks the dialect
 // AdaptiveFlusher's SQL is written in, which is PostgreSQL's.
 //
-// A deny list rather than an allow list, because the tests in this package
-// build their engines around fake stores that stand in for PostgreSQL. The
-// list cannot go stale unnoticed: TestEveryStoreThatFlushesPerStepIsRefusedBatchMode
-// fails when any store implements perStepEventFlusher -- which a store on a
-// non-PostgreSQL dialect has to, to flush at all -- without being named here.
+// KEYED ON perStepEventFlusher, which is the engine's own statement that a
+// store's database is NOT PostgreSQL: it is implemented by exactly the stores
+// whose per-step flush cannot use flush.go's PostgreSQL insert. An interface
+// check follows embedding, which a list of concrete types does not -- a
+// `type w struct{ *MySQLStore }` is not a *MySQLStore but does have its
+// flushEventForStep, and would have been sent to the batch writer (cleat#2350).
+//
+// A store may opt back in with standsInForPostgres, which exists so the tests
+// in this package can build fake stores that stand in for PostgreSQL on the
+// batch path. No non-test type may implement it:
+// TestNoProductionStoreOptsBackIntoBatchMode reads the sources to keep it so.
 func batchFlushSupported(store WorkflowStore) bool {
-	switch store.(type) {
-	case *MySQLStore, *MSSQLStore:
-		return false
+	if _, notPostgres := store.(perStepEventFlusher); !notPostgres {
+		return true
 	}
-	return true
+	standIn, ok := store.(batchWriterStandIn)
+	return ok && standIn.standsInForPostgres()
+}
+
+// batchWriterStandIn is the test-only opt-in described on batchFlushSupported.
+type batchWriterStandIn interface {
+	standsInForPostgres() bool
 }
 
 // EncryptSensitivePayloads returns whether sensitive payload encryption is enabled.

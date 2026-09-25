@@ -31,6 +31,11 @@ type countingStore struct {
 	directFlushes atomic.Int64
 }
 
+// standsInForPostgres opts this fake back into the batch path. It implements
+// perStepEventFlusher, which batchFlushSupported reads as "this store's database
+// is not PostgreSQL", and this harness exists to drive a batch flush that fails.
+func (c *countingStore) standsInForPostgres() bool { return true }
+
 func (c *countingStore) flushEventForStep(_ context.Context, _ string, _ EventRecord) error {
 	c.directFlushes.Add(1)
 	return nil

@@ -1,12 +1,12 @@
 package engine
 
 import (
+	"context"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -102,24 +102,59 @@ func TestAWorkerAboveTheEnterRateKeepsPersistingEveryEvent(t *testing.T) {
 	}
 }
 
-// TestEveryStoreThatFlushesPerStepIsRefusedBatchMode ties the deny list in
-// batchFlushSupported to the interface that says a store's database is not
-// PostgreSQL. A store on a fourth dialect has to implement flushEventForStep to
-// flush at all; when it does, this fails until the gate names it.
-//
-// Read from source, not from the running binary, because a store that is
-// missing from the list is exactly a value nothing else enumerates.
-func TestEveryStoreThatFlushesPerStepIsRefusedBatchMode(t *testing.T) {
-	stores := map[string]WorkflowStore{
-		"MySQLStore": &MySQLStore{},
-		"MSSQLStore": &MSSQLStore{},
-	}
+// wrappedMySQLStore is what a decorator around a MySQL store looks like:
+// not a *MySQLStore, but with its flushEventForStep by embedding. A gate that
+// names concrete types lets it through to the PostgreSQL batch writer.
+type wrappedMySQLStore struct{ *MySQLStore }
 
+type wrappedMSSQLStore struct{ *MSSQLStore }
+
+// aStoreThatIsNotPostgres implements perStepEventFlusher and nothing else.
+type aStoreThatIsNotPostgres struct{ WorkflowStore }
+
+func (aStoreThatIsNotPostgres) flushEventForStep(context.Context, string, EventRecord) error {
+	return nil
+}
+
+type aStoreThatStandsInForPostgres struct{ aStoreThatIsNotPostgres }
+
+func (aStoreThatStandsInForPostgres) standsInForPostgres() bool { return true }
+
+// TestABatchFlushIsRefusedForAnyStoreThatFlushesPerStep pins the gate to the
+// interface rather than to a list of types (cleat#2350). The wrappers are the
+// known-positive: with the gate keyed on *MySQLStore and *MSSQLStore they pass.
+func TestABatchFlushIsRefusedForAnyStoreThatFlushesPerStep(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		store WorkflowStore
+		want  bool
+	}{
+		{"PostgresStore", &PostgresStore{}, true},
+		{"MySQLStore", &MySQLStore{}, false},
+		{"MSSQLStore", &MSSQLStore{}, false},
+		{"a wrapper embedding *MySQLStore", &wrappedMySQLStore{&MySQLStore{}}, false},
+		{"a wrapper embedding *MSSQLStore", &wrappedMSSQLStore{&MSSQLStore{}}, false},
+		{"any store implementing perStepEventFlusher", aStoreThatIsNotPostgres{}, false},
+		{"a test fake that opts back in", aStoreThatStandsInForPostgres{}, true},
+		{"a store with no per-step flush", nil, true},
+	} {
+		if got := batchFlushSupported(tc.store); got != tc.want {
+			t.Errorf("batchFlushSupported(%s) = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestNoProductionStoreOptsBackIntoBatchMode reads the non-test sources for a
+// standsInForPostgres method. The opt-in exists for fakes, and a production
+// store that implemented it would send its database the PostgreSQL batch writer
+// again. Read from source because a store nothing enumerates is exactly what
+// this is about.
+func TestNoProductionStoreOptsBackIntoBatchMode(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var found []string
+	var scanned int
 	for _, f := range files {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
@@ -132,38 +167,15 @@ func TestEveryStoreThatFlushesPerStepIsRefusedBatchMode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("UNMEASURED: %s does not parse: %v", f, err)
 		}
+		scanned++
 		for _, d := range parsed.Decls {
-			fn, ok := d.(*ast.FuncDecl)
-			if !ok || fn.Recv == nil || fn.Name.Name != "flushEventForStep" || len(fn.Recv.List) != 1 {
-				continue
-			}
-			recv := fn.Recv.List[0].Type
-			if star, ok := recv.(*ast.StarExpr); ok {
-				recv = star.X
-			}
-			if id, ok := recv.(*ast.Ident); ok {
-				found = append(found, id.Name)
+			if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv != nil && fn.Name.Name == "standsInForPostgres" {
+				t.Errorf("%s declares standsInForPostgres on a non-test type; only test fakes may opt back into the batch writer", f)
 			}
 		}
 	}
-	sort.Strings(found)
-
-	// The scan has to see something, or an empty set passes every check below.
-	if len(found) < 2 {
-		t.Fatalf("UNMEASURED: found %d non-test flushEventForStep implementations (%v), expected at least MySQLStore and MSSQLStore", len(found), found)
-	}
-	for _, name := range found {
-		store, ok := stores[name]
-		if !ok {
-			t.Errorf("%s implements flushEventForStep, so its database is not PostgreSQL, but batchFlushSupported and this test do not name it. "+
-				"Add it to the deny list in engine/engine.go and to the map above.", name)
-			continue
-		}
-		if batchFlushSupported(store) {
-			t.Errorf("batchFlushSupported(%s) is true; the batch writer is PostgreSQL SQL", name)
-		}
-	}
-	if !batchFlushSupported(&PostgresStore{}) {
-		t.Errorf("batchFlushSupported(*PostgresStore) is false; batch mode is what PostgreSQL uses")
+	// The scan has to have read something, or an empty result passes.
+	if scanned < 50 {
+		t.Fatalf("UNMEASURED: scanned %d non-test files in engine/, expected far more", scanned)
 	}
 }
