@@ -52,18 +52,13 @@ func TestReadAndStreamRoutesWorkOnEveryDialect(t *testing.T) {
 			streamID := "read-test-" + uuid.New().String()
 			eventBody := `{"n":1}`
 
-			// Seeded directly, not through handleAppend: #2257's sweep found
-			// handleAppend's own INSERT (insertEventReturning) broken on
-			// MySQL for an unrelated reason -- "You can't specify target
+			// Through the real route: handleAppend used to 500 on MySQL here
+			// (cleat#2260, fixed by this PR) -- "You can't specify target
 			// table 'event_stream' for update in FROM clause" (error 1093),
-			// from its MAX(sequence) subquery reading the same table it
-			// inserts into, which MySQL disallows. That is a real,
-			// previously-undiscovered bug (filed separately, cleat#2260 --
-			// see WORKSTREAM discussion), but it is a write-path defect and
-			// this test's subject is the read path's scan. Seeding directly
-			// keeps the two independent, the same reasoning #2257 itself
-			// used to scope cleat#2259 out rather than widen this PR.
-			insertTestEvent(t, tenantCtx, p, be.Name, tenantID.String(), streamID, 1, eventBody)
+			// from its old MAX(sequence) subquery reading the same table it
+			// inserted into, which MySQL disallows. Postgres/MSSQL have no
+			// such restriction, which is presumably why it shipped.
+			appendTestEvent(t, tenantCtx, p, be.Name, streamID, eventBody)
 
 			// handleRead, through the real route. cleat#2257's sweep found
 			// this returning an empty list on SQL Server -- unrelated to
@@ -111,7 +106,7 @@ func TestReadAndStreamRoutesWorkOnEveryDialect(t *testing.T) {
 			time.Sleep(200 * time.Millisecond)
 
 			secondBody := `{"n":2}`
-			insertTestEvent(t, tenantCtx, p, be.Name, tenantID.String(), streamID, 2, secondBody)
+			appendTestEvent(t, tenantCtx, p, be.Name, streamID, secondBody)
 
 			<-done // the context timeout stops handleSSE; this waits for that.
 
@@ -170,25 +165,14 @@ func jsonEqual(a, b any) bool {
 	return string(ab) == string(bb)
 }
 
-var insertTestEventQuery = plugin.Query{
-	Default: `INSERT INTO event_stream (tenant_id, stream_id, sequence, event) VALUES ($1, $2, $3, $4::jsonb)`,
-	MySQL:   `INSERT INTO event_stream (tenant_id, stream_id, sequence, event) VALUES ($1, $2, $3, $4)`,
-	MSSQL:   `INSERT INTO event_stream (tenant_id, stream_id, sequence, event) VALUES ($1, $2, $3, $4)`,
-}
-
-// insertTestEvent seeds one event_stream row directly, bypassing handleAppend
-// (and cleat#2260's MySQL INSERT bug) so this file's read-side tests stay
-// independent of the write path's own correctness. It goes through p.db
-// (SQLDBAdapter) under a tenant-bearing context, not be.DB directly, because
-// a bare pool connection carries no cleat.tenant_id -- SQL Server's RLS
-// block predicate rejects the INSERT outright (error 33504) without it. See
-// engine/plugindb_tenant.go and this package's own event_stream_rows_are_
-// scoped_by_a_policy_test.go.
-func insertTestEvent(t *testing.T, tenantCtx context.Context, p *Plugin, backendName,
-	tenantID, streamID string, sequence int64, event string) {
+// appendTestEvent appends one event through the real handleAppend route.
+func appendTestEvent(t *testing.T, tenantCtx context.Context, p *Plugin, backendName, streamID, event string) {
 	t.Helper()
-	if _, err := p.db.Exec(tenantCtx, plugin.Rebind(insertTestEventQuery.For(p.dialect), p.dialect),
-		tenantID, streamID, sequence, event); err != nil {
-		t.Fatalf("insertTestEvent on %s: %v", backendName, err)
+	req := httptest.NewRequest("POST", "/events/"+streamID, strings.NewReader(event)).WithContext(tenantCtx)
+	req.SetPathValue("stream_id", streamID)
+	rec := httptest.NewRecorder()
+	p.handleAppend(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("append on %s: want 201, got %d: %s", backendName, rec.Code, rec.Body.String())
 	}
 }
