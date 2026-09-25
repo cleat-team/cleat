@@ -89,7 +89,7 @@ next_in_block() {
     lo="${range%%-*}"
     hi="${range##*-}"
     for ((n = lo; n <= hi; n++)); do
-      if ! printf '%s\n' "$used" | grep -qx "$n"; then
+      if ! grep -qx "$n" <<< "$used"; then
         echo "$n"
         return 0
       fi

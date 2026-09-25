@@ -142,13 +142,13 @@ GOFIXTURE
 
   # ON THE TEXT, not on a count. A scanner reporting one finding of the wrong
   # kind satisfies "exactly one line" and tells you nothing.
-  if ! printf '%s\n' "$st_out" | grep -q 'TestStartWorkflow_WithIdempotencyKey.*idempotencyKey'; then
+  if ! grep -q 'TestStartWorkflow_WithIdempotencyKey.*idempotencyKey' <<< "$st_out"; then
     echo "SELF-TEST FAIL: the blind double was not reported, or not attributed to" >&2
     echo "  its test and parameter. Scanner output was:" >&2
     printf '%s\n' "$st_out" | sed 's/^/    /' >&2
     ok=1
   fi
-  if printf '%s\n' "$st_out" | grep -q 'WithTenantID'; then
+  if grep -q 'WithTenantID' <<< "$st_out"; then
     echo "SELF-TEST FAIL: a double that READS its parameter was reported." >&2
     printf '%s\n' "$st_out" | sed 's/^/    /' >&2
     ok=1
@@ -160,13 +160,13 @@ GOFIXTURE
   st_base="$fx/baseline.txt"
   printf 'a_test.go\tTestLive\tlimit\nb_test.go\tTestGoneAway\tpayload\n' > "$st_base"
   st_got="$(stale_entries "$(printf 'a_test.go\tTestLive\tlimit\n')" "$st_base")"
-  if ! printf '%s\n' "$st_got" | grep -qF 'TestGoneAway'; then
+  if ! grep -qF 'TestGoneAway' <<< "$st_got"; then
     echo "SELF-TEST FAIL: a baseline entry the scanner does not produce was not reported." >&2
     ok=1
   fi
   # The negative control: report a live entry and every run fails, which gets
   # the guard switched off.
-  if printf '%s\n' "$st_got" | grep -qF 'TestLive'; then
+  if grep -qF 'TestLive' <<< "$st_got"; then
     echo "SELF-TEST FAIL: a baseline entry the scanner DOES produce was reported stale." >&2
     ok=1
   fi

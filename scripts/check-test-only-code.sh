@@ -188,7 +188,7 @@ scan() {
     # -tests=false: tests/cross-language is a single _test.go and nothing
     # else. Said out loud rather than filtered silently, so a module that
     # becomes empty by accident is visible in the log.
-    if printf '%s\n' "$mod_out" | grep -q '^warning: "\./\.\.\." matched no packages$'; then
+    if grep -q '^warning: "\./\.\.\." matched no packages$' <<< "$mod_out"; then
       echo "note: $m has no non-test packages to scan" >&2
       mod_out="$(printf '%s\n' "$mod_out" | grep -v '^warning: "\./\.\.\." matched no packages$' || true)"
     fi
@@ -319,17 +319,17 @@ combine() {
       case "$tag" in
         cgo)
           # Invisible to the CGO-off pass; the CGO-on pass is the only witness.
-          printf '%s\n' "$on" | grep -qxF "$line" && keep=yes
+          grep -qxF "$line" <<< "$on" && keep=yes
           ;;
         nocgo)
-          printf '%s\n' "$off" | grep -qxF "$line" && keep=yes
+          grep -qxF "$line" <<< "$off" && keep=yes
           ;;
         *)
           # Both passes can see this file, so both must agree. One pass alone
           # means the other found a caller behind the opposite constraint --
           # the cgo-caller false positive this rule exists to drop.
-          if printf '%s\n' "$off" | grep -qxF "$line" &&
-             printf '%s\n' "$on" | grep -qxF "$line"; then
+          if grep -qxF "$line" <<< "$off" &&
+             grep -qxF "$line" <<< "$on"; then
             keep=yes
           fi
           ;;
@@ -369,7 +369,7 @@ if [ "${1:-}" = "--self-test" ]; then
   rm -rf "$st_cache"
 
   st_fails=0
-  if ! printf '%s\n' "$st_out" | grep -q "^ERROR: could not install "; then
+  if ! grep -q "^ERROR: could not install " <<< "$st_out"; then
     echo "SELF-TEST FAIL: the run never reached the install path." >&2
     echo "  Without that line the exit status below says nothing." >&2
     printf '%s\n' "$st_out" | tail -5 | sed 's/^/    /' >&2
@@ -392,13 +392,13 @@ if [ "${1:-}" = "--self-test" ]; then
   st_scan="$(printf 'engine\tfunc live\nwasm\tconst live2\n')"
   st_got="$(stale_entries "$st_scan" "$st_base")"
 
-  if ! printf '%s\n' "$st_got" | grep -qF 'GoneAway'; then
+  if ! grep -qF 'GoneAway' <<< "$st_got"; then
     echo "SELF-TEST FAIL: a baseline entry the scan does not produce was not reported." >&2
     st_fails=$((st_fails + 1))
   fi
   # The negative control, and it is the half that catches an over-eager check:
   # report a live entry and every run fails, which gets the guard switched off.
-  if printf '%s\n' "$st_got" | grep -qE 'live'; then
+  if grep -qE 'live' <<< "$st_got"; then
     echo "SELF-TEST FAIL: a baseline entry the scan DOES produce was reported stale." >&2
     st_fails=$((st_fails + 1))
   fi

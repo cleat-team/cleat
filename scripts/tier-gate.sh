@@ -315,7 +315,7 @@ done
 note "checking that each tier-1 dialect accepts a connection"
 PROBE=$(cd "$REPO_ROOT" && go test ./engine/ -run '^TestTenantSelfAccess$' -count=1 -v 2>&1)
 for d in $DIALECTS; do
-  if echo "$PROBE" | grep -q -- "--- PASS: TestTenantSelfAccess/$d"; then
+  if grep -q -- "--- PASS: TestTenantSelfAccess/$d" <<< "$PROBE"; then
     note "  $d: connected"
   else
     fail "$d: no connection was made. TestTenantSelfAccess/$d did not pass, so this dialect
@@ -442,7 +442,7 @@ SHARD_PATTERN=""
 RUN_MOD_DIRS=1
 case "$RUN_MODE" in
   engine-shard)
-    if ! printf '%s\n' "$PKGS" | grep -Fxq './engine/...'; then
+    if ! grep -Fxq './engine/...' <<< "$PKGS"; then
       echo "tier-gate: --shard requested an engine shard but ./engine/... is not in tier1.packages" >&2
       exit 2
     fi
