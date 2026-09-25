@@ -21,7 +21,7 @@ import (
 //
 // Checking the two statements name the same table cannot catch a caller that
 // hands the reader the wrong CONNECTION -- that is what cmd/cleat-worker's
-// comment at the auth.Middleware call site is for, and what the port suite
+// comment at the auth.MiddlewareWithMux call site is for, and what the port suite
 // covers by running against a real MySQL. This covers the half that is
 // checkable here, and it is the half that silently rots when someone adds a
 // dialect or moves a schema.

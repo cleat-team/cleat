@@ -1543,6 +1543,6 @@ func setupSelectiveErrorDB(t *testing.T, failExecPatterns, failQueryPatterns []s
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(errDB), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(errDB), false, mux)(mux)
 	return p, handler, store, clock
 }

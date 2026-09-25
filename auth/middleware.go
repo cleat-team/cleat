@@ -35,7 +35,7 @@ func TenantIDFromContext(ctx context.Context) (uuid.UUID, bool) {
 // *http.Request, so a plugin route handler does not need its own copy of
 // this call.
 //
-// ok is false exactly when Middleware set no tenant -- an unauthenticated
+// ok is false exactly when MiddlewareWithMux set no tenant -- an unauthenticated
 // request on a route with requireAuth false, or a public path. It is true
 // for every authenticated request, INCLUDING one authenticated as the
 // seeded default tenant (00000000-0000-0000-0000-000000000000), whose ID
@@ -117,12 +117,27 @@ func IsInfrastructurePath(path string) bool {
 	return ok
 }
 
-// Middleware authenticates requests using a cleat API key.
+// MiddlewareWithMux authenticates requests using a cleat API key.
 // Supports: Authorization: Bearer cleat_sk_<key>
 // Also supports: X-Cleat-API-Key: <key>
 // When requireAuth is true, requests without a valid API key are rejected with 401,
 // except for public paths (IsInfrastructurePath, and any additional patterns passed via
 // publicPatterns).
+//
+// It decides whether a request is public by asking mux -- the real,
+// fully-registered *http.ServeMux that will go on to serve it -- which
+// pattern it resolves to. Always pass the real serving mux; see
+// isPublicRoute's doc comment (public_route.go) for why that distinction
+// matters: a literal same-method sibling of a public wildcard, registered
+// anywhere on mux ("POST /ingest/sources" beside the public "POST
+// /ingest/{source_id}"), is what makes the difference. A nil mux falls back
+// to a throwaway mux built from only publicPatterns, which has no such
+// sibling to lose to and so wrongly reports the sibling itself as public --
+// cleat#2274. There used to be a mux-less Middleware wrapper that always
+// took this fallback; every plugin test that called it was therefore
+// testing pre-#2274 route matching regardless of what it claimed to cover,
+// and it was removed for exactly that reason -- cleat#2320. The nil path
+// still exists here, for this package's own tests of the fallback itself.
 //
 // publicPatterns is a hand-maintained allowlist, not a generic plugin-declared
 // mechanism. It exists for endpoints that are meant to be called by parties who cannot
@@ -131,12 +146,7 @@ func IsInfrastructurePath(path string) bool {
 // (plugins/oauthprovider) -- and would otherwise 401 before that endpoint's own
 // verification ever runs. Each entry is a Go 1.22+ http.ServeMux pattern
 // ("POST /ingest/{source_id}"), matched with the exact same method+wildcard semantics
-// the real mux uses -- call MiddlewareWithMux, passing the real serving mux, rather
-// than Middleware, wherever a public wildcard might have a literal same-method
-// sibling registered on that mux ("POST /ingest/sources" beside the public "POST
-// /ingest/{source_id}"). Middleware alone matches against a throwaway mux built only
-// from publicPatterns, which has no such sibling to lose to and so wrongly reports
-// the sibling itself as public -- cleat#2274.
+// the real mux uses.
 //
 // A plugin-declared version of this (a PublicRoutes() method plugins implement
 // themselves) would need changes to plugin/plugin.go and to each plugin, which are
@@ -144,18 +154,6 @@ func IsInfrastructurePath(path string) bool {
 // cmd/cleat-worker/main.go is the option available without those changes. Anyone
 // adding a new externally-triggered plugin endpoint must add it here too -- nothing
 // enforces that the two stay in sync.
-func Middleware(store TenantResolver, requireAuth bool, publicPatterns ...string) func(http.Handler) http.Handler {
-	return MiddlewareWithMux(store, requireAuth, nil, publicPatterns...)
-}
-
-// MiddlewareWithMux is Middleware, but decides whether a request is public by
-// asking mux -- the real, fully-registered *http.ServeMux that will go on to
-// serve it -- which pattern it resolves to, instead of a throwaway mux built
-// from only publicPatterns. See isPublicRoute's doc comment (public_route.go)
-// for why that distinction matters: a literal sibling of a public wildcard,
-// registered anywhere on mux, is what makes the difference. cleat#2274.
-//
-// mux may be nil, in which case this behaves exactly like Middleware.
 func MiddlewareWithMux(store TenantResolver, requireAuth bool, mux *http.ServeMux, publicPatterns ...string) func(http.Handler) http.Handler {
 	publicMatcher := buildPublicMatcher(publicPatterns)
 	patternSet := publicPatternSet(publicPatterns)
@@ -201,7 +199,7 @@ func MiddlewareWithMux(store TenantResolver, requireAuth bool, mux *http.ServeMu
 // "POST /ingest/{source_id}" matches only a POST to that exact shape and not, say, a
 // GET to the same path or a request to a same-prefixed but different route such as
 // "/ingest/sources". Returns nil when there is nothing to match, so the hot path in
-// Middleware can skip the check entirely for the common case (no publicPatterns).
+// MiddlewareWithMux can skip the check entirely for the common case (no publicPatterns).
 func buildPublicMatcher(patterns []string) *http.ServeMux {
 	if len(patterns) == 0 {
 		return nil

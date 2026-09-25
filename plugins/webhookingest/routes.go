@@ -111,7 +111,7 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	// A NAMED cross-tenant read, bound to a SEPARATE variable. cleat#1538.
 	//
 	// POST /ingest/{source_id} is one of exactly two routes cmd/cleat-worker
-	// exempts from auth (main.go, the auth.Middleware call), because the caller
+	// exempts from auth (main.go, the auth.MiddlewareWithMux call), because the caller
 	// is the external system sending the webhook and holds no cleat credential.
 	// So r.Context() carries no tenant, and this SELECT -- which has no tenant
 	// predicate because the row is HOW the handler learns the tenant -- cannot

@@ -369,7 +369,7 @@ func (p *Plugin) handleInteractiveCallback(w http.ResponseWriter, r *http.Reques
 	// this route is auth-exempt (cleat#2172), but a deployment running
 	// --tenant-resolver header:X-Tenant-ID resolves a tenant from an
 	// arbitrary request header on EVERY route, including exempt ones -- that
-	// resolver sits outside auth.Middleware's public-pattern short-circuit
+	// resolver sits outside auth.MiddlewareWithMux's public-pattern short-circuit
 	// (cmd/cleat-worker/main.go), so an "auth-exempt" request still ends up
 	// with a tenant in ctx if that resolver is configured. Slack's HMAC
 	// signature (verified above) covers the payload, never headers, so

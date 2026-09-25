@@ -417,11 +417,11 @@ func TestNewTenantStore(t *testing.T) {
 	}
 }
 
-// --- Helper: verify the relationship between TenantStore and Middleware ------
+// --- Helper: verify the relationship between TenantStore and MiddlewareWithMux ------
 
-func TestStoreAndMiddleware_EndToEnd(t *testing.T) {
+func TestStoreAndMiddlewareWithMux_EndToEnd(t *testing.T) {
 	// Full round-trip: create tenant + API key via TenantStore, then
-	// authenticate via Middleware and verify tenant context is set.
+	// authenticate via MiddlewareWithMux and verify tenant context is set.
 	store := newFakeDBStore()
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
@@ -441,7 +441,7 @@ func TestStoreAndMiddleware_EndToEnd(t *testing.T) {
 	// Now use the middleware with the same DB.
 	var gotTenant uuid.UUID
 	var gotOK bool
-	mw := Middleware(engine.NewPostgresStore(db), false)
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), false, nil)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotTenant, gotOK = TenantIDFromContext(r.Context())
 		w.WriteHeader(http.StatusOK)

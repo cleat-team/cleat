@@ -56,7 +56,7 @@ func MaxBody(n int64, h http.HandlerFunc) http.Handler {
 // message needs to know which of possibly several settings to change.
 //
 // REFUSED on every route this codebase exempts from tenant auth
-// (auth.Middleware's and auth.HostBindingMiddleware's publicPatterns in
+// (auth.MiddlewareWithMux's and auth.HostBindingMiddleware's publicPatterns in
 // cmd/cleat-worker/main.go): those routes are reachable with no credential
 // at all, so the operator's global --plugin-max-body-size ceiling must
 // always bound them regardless of what a plugin's own config claims. The

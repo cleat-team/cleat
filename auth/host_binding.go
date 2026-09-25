@@ -76,12 +76,12 @@ func NormalizeHost(host string) string {
 // to the authenticated tenant.
 //
 // THE RULE IT IMPLEMENTS. An API key is proved; a Host header is asserted. The
-// tenant comes from the credential -- which auth.Middleware has already put in
+// tenant comes from the credential -- which auth.MiddlewareWithMux has already put in
 // the context by the time this runs -- and the Host is then checked against it.
 // Without that check, tenant A's valid key works against tenant B's URL, which
 // is a confused deputy and the seed of multi-tenant cache poisoning.
 //
-// MUST BE INSTALLED INSIDE auth.Middleware, so the context tenant is the
+// MUST BE INSTALLED INSIDE auth.MiddlewareWithMux, so the context tenant is the
 // credential-derived one. Installed outside, it would read whatever the
 // tenant-resolver middleware put there -- which on some paths is a value the
 // CLIENT supplied -- and would then be checking a header against a header.
@@ -92,7 +92,7 @@ func NormalizeHost(host string) string {
 //   - the infrastructure paths (IsInfrastructurePath), addressed by infrastructure rather than by a
 //     tenant hostname. A load balancer probing a worker by IP has no tenant
 //     URL to present.
-//   - auth.Middleware's public patterns, which are reached by third parties
+//   - auth.MiddlewareWithMux's public patterns, which are reached by third parties
 //     holding no cleat credential -- an inbound webhook, an IdP's OAuth
 //     redirect. There is no authenticated tenant on those requests, so there
 //     is nothing to compare a Host against.
@@ -106,7 +106,7 @@ func NormalizeHost(host string) string {
 //
 // A request with no tenant in context is PASSED THROUGH rather than refused.
 // That is not a hole: with --require-auth (the default) such a request has
-// already been answered 401 by auth.Middleware and never reaches here. Refusing
+// already been answered 401 by auth.MiddlewareWithMux and never reaches here. Refusing
 // it here instead would make this middleware the thing that breaks
 // --require-auth=false deployments, which is a separate decision from the one
 // this implements.
