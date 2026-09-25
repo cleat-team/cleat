@@ -35,6 +35,13 @@
   // reach a browser -- it identifies the whole tenant. Use a per-user session
   // (the oauth-provider plugin issues one) and have your own endpoint call
   // cleat server-side.
+  //
+  // TWO THINGS STOP THIS PAGE WORKING AS-IS, and neither is a bug in the page
+  // (cleat#2307): the worker sends no CORS headers, so a browser refuses these
+  // calls from a page served anywhere but the worker's own origin (file:// and
+  // another port both count); and with --require-auth on, which docker-compose.yml
+  // leaves at its default, every call needs a key this page must not hold. Serve the
+  // page from your own backend and have that backend call cleat.
   const API = "http://localhost:8080";
   const statusEl = document.getElementById("status");
 
@@ -59,7 +66,7 @@
   // README.md, "Why the browser does not wait".
   async function poll(id) {
     for (let i = 0; i < 60; i++) {
-      const r = await fetch(`${API}/api/workflows/${id}/state?key=status`);
+      const r = await fetch(`${API}/api/workflows/${id}/query?key=status`);
       if (r.ok) {
         const { value } = await r.json();
         statusEl.textContent = `${id}: ${value || "(no state yet)"}`;

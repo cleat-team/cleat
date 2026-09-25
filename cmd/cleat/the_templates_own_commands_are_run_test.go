@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -148,6 +149,10 @@ func documentedCleatCommands(t *testing.T, proj string) []documentedCommand {
 		}
 		inFence := false
 		lines := strings.Split(string(body), "\n")
+		// A Makefile's own defaults (`export NAME ?= value`, `NAME = value`) are what `make` would substitute for
+		// $(NAME) when the reader has set nothing, which is the case this test runs. Expanded here so a template
+		// can parameterize a port without dropping its deploy line out of this test.
+		vars := makeVariableDefaults(string(body))
 		for i := 0; i < len(lines); i++ {
 			line := lines[i]
 			if file == "README.md" {
@@ -170,6 +175,9 @@ func documentedCleatCommands(t *testing.T, proj string) []documentedCommand {
 				joined = strings.TrimSuffix(joined, `\`) + " " + strings.TrimSpace(lines[i])
 			}
 
+			for name, value := range vars {
+				joined = strings.ReplaceAll(joined, "$("+name+")", value)
+			}
 			fields := strings.Fields(joined)
 			if len(fields) < 2 || fields[0] != "cleat" {
 				continue
@@ -211,4 +219,21 @@ func documentedCleatCommands(t *testing.T, proj string) []documentedCommand {
 		}
 	}
 	return cmds
+}
+
+// makeVariableDefaults reads the simple variable assignments a Makefile makes at the top level: NAME = v,
+// NAME := v, NAME ?= v, each optionally prefixed with `export`. It does not evaluate anything, so a value that
+// itself contains $( is left for the caller to report as unexpanded.
+func makeVariableDefaults(makefile string) map[string]string {
+	vars := map[string]string{}
+	assign := regexp.MustCompile(`^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*(?:\?=|:=|=)\s*(.*?)\s*$`)
+	for _, line := range strings.Split(makefile, "\n") {
+		if strings.HasPrefix(line, "\t") || strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue
+		}
+		if m := assign.FindStringSubmatch(line); m != nil {
+			vars[m[1]] = m[2]
+		}
+	}
+	return vars
 }
