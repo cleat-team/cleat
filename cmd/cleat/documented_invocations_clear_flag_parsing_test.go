@@ -110,6 +110,136 @@ func shellFields(s string) []string {
 // PR that closed it for the four sites and what each became.
 var docCommandBaseline = map[string]string{}
 
+// docFlagToken reports whether s is a flag token rather than a value or a
+// positional: one or two leading dashes followed by a letter, digit or
+// underscore. A bare "-" or "--" is not a flag.
+func docFlagToken(s string) bool {
+	if len(s) < 2 || s[0] != '-' {
+		return false
+	}
+	body := strings.TrimLeft(s, "-")
+	if body == "" {
+		return false
+	}
+	c := body[0]
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+}
+
+// docFlagName is the name the flag package prints in its rejection, which is
+// the token without its leading dashes and without any "=value" suffix.
+func docFlagName(s string) string {
+	name := strings.TrimLeft(s, "-")
+	if eq := strings.Index(name, "="); eq >= 0 {
+		name = name[:eq]
+	}
+	return name
+}
+
+// docMoveToken returns fields with the token at index from moved to index to.
+func docMoveToken(fields []string, from, to int) []string {
+	rest := make([]string, 0, len(fields))
+	for i, f := range fields {
+		if i != from {
+			rest = append(rest, f)
+		}
+	}
+	at := to
+	if to > from {
+		at--
+	}
+	if at < 0 {
+		at = 0
+	}
+	if at > len(rest) {
+		at = len(rest)
+	}
+	out := append([]string{}, rest[:at]...)
+	out = append(out, fields[from])
+	return append(out, rest[at:]...)
+}
+
+// probeFindsUndefinedFlag re-runs the invocation with the token at flagIdx
+// moved to a position flag.Parse actually reaches, and reports whether the
+// binary then rejects that flag by name.
+//
+// The insertion point cannot be assumed, which is the whole reason this is a
+// probe rather than a lookup. The dispatcher consumes a variable number of
+// leading words -- `plugin update` and `schedule add` are two tokens, not one
+// -- and inserting after the first of them yields "Unknown plugin subcommand:
+// --show" instead of the flag error, which would hide exactly what this is
+// looking for. So every position in the run of leading non-flag tokens is
+// tried, and only the flag signal counts.
+func probeFindsUndefinedFlag(binary, dir string, fields []string, subIdx, flagIdx int) bool {
+	limit := len(fields)
+	for i := subIdx + 1; i < len(fields); i++ {
+		if docFlagToken(fields[i]) {
+			limit = i
+			break
+		}
+	}
+	want := "flag provided but not defined: -" + docFlagName(fields[flagIdx])
+	for p := subIdx + 1; p <= limit; p++ {
+		if p == flagIdx {
+			continue // already where it is; that position is what the caller ran
+		}
+		cmd := exec.Command(binary, docMoveToken(fields, flagIdx, p)...)
+		cmd.Dir = dir
+		raw, _ := cmd.CombinedOutput()
+		if strings.Contains(string(raw), want) {
+			return true
+		}
+	}
+	return false
+}
+
+// flagsAfterPositionals returns the flag tokens in fields that flag.Parse
+// cannot reach, because it stops at the first non-flag argument.
+//
+// This is cleat#2136. The run this test already made only inspects the prefix
+// flag.Parse consumes, so `cleat plugin update example/hello-world@0.2.0
+// --show` passed every check while `--show` does not exist -- the positional
+// ends parsing and the flag after it is never looked at. That is how the
+// fictional `--show` in cleat#2074 cleared this guard.
+//
+// Deliberately NOT a table of known flag names. The flags are registered
+// inline in each command's own function, so a list here would be a second
+// source of truth, and the drift would be silent in the direction that
+// matters: a flag added to a command and not to the list reads as undefined.
+// Asking the binary keeps the FlagSet itself the only definition.
+func flagsAfterPositionals(binary, dir string, fields []string, subIdx int) []string {
+	if subIdx < 0 || subIdx >= len(fields) {
+		return nil
+	}
+	// Only a token after the first non-flag word can be hidden. Everything
+	// before it is the prefix flag.Parse already consumed.
+	firstBare := -1
+	for i := subIdx + 1; i < len(fields); i++ {
+		if !docFlagToken(fields[i]) {
+			firstBare = i
+			break
+		}
+	}
+	if firstBare < 0 {
+		return nil
+	}
+
+	var found []string
+	afterDoubleDash := false
+	for i := firstBare + 1; i < len(fields); i++ {
+		if fields[i] == "--" {
+			afterDoubleDash = true
+			continue
+		}
+		if afterDoubleDash || !docFlagToken(fields[i]) {
+			continue
+		}
+		if probeFindsUndefinedFlag(binary, dir, fields, subIdx, i) {
+			found = append(found, fields[i])
+		}
+	}
+	return found
+}
+
 func TestEveryDocumentedCleatInvocationClearsFlagParsing(t *testing.T) {
 	if testing.Short() || cleatBinary == "" {
 		t.Skip("needs the cleat binary, which TestMain does not build in short mode")
@@ -162,7 +292,8 @@ func TestEveryDocumentedCleatInvocationClearsFlagParsing(t *testing.T) {
 
 				fields := shellFields(rest)
 				sub := ""
-				for _, f := range fields {
+				subIdx := -1
+				for i, f := range fields {
 					// Skip GLOBAL flags -- and their values, which do not
 					// carry a "-" prefix and would otherwise be mistaken for
 					// the subcommand position. `cleat --db X deploy ...` is
@@ -173,7 +304,15 @@ func TestEveryDocumentedCleatInvocationClearsFlagParsing(t *testing.T) {
 						continue
 					}
 					if knownSubcommands[f] {
-						sub = f
+						// subIdx is the SUBCOMMAND's index, not the first
+						// non-flag token's, and the two come apart whenever a
+						// global flag takes a value: `cleat --db X deploy ...`
+						// has a non-flag token at index 1 that is a value, not
+						// the command. Using that one made the check below
+						// insert a subcommand flag into the GLOBAL flag
+						// region, where it is legitimately undefined -- ten
+						// healthy doc lines reported before this was fixed.
+						sub, subIdx = f, i
 						break
 					}
 				}
@@ -196,6 +335,18 @@ func TestEveryDocumentedCleatInvocationClearsFlagParsing(t *testing.T) {
 						"with a reason if the right fix is not knowable (cleat#1970).",
 						doc, rest, raw)
 				}
+				// The run above stops where flag.Parse stops, so it cannot see
+				// a flag placed after a positional (cleat#2136).
+				for _, tok := range flagsAfterPositionals(cleatBinary, workDir, fields, subIdx) {
+					t.Errorf("%s documents `cleat %s`, where %s sits after a positional argument, "+
+						"so flag.Parse stops before it and nothing on this path inspects it.\n"+
+						"Moving %s to a position the command's own FlagSet parses makes the binary "+
+						"reject it by name: it is not a flag of this command. (A global flag placed "+
+						"after the subcommand lands here too, and globals must come before it -- see "+
+						"cmd/cleat/main.go's usage.) Fix the document, R7. Do not remove this check "+
+						"to accommodate it.",
+						doc, rest, tok, tok)
+				}
 				tested++
 			}
 		}
@@ -212,6 +363,68 @@ func TestEveryDocumentedCleatInvocationClearsFlagParsing(t *testing.T) {
 			t.Errorf("docCommandBaseline has %q (%s) but nothing in the tree matches it. "+
 				"The document was fixed or renamed: delete the entry.", key, why)
 		}
+	}
+}
+
+// TestTheGuardSeesAFlagAfterAPositional is the known-positive for cleat#2136,
+// and it is the acceptance test for the change rather than a formality: the
+// defect was that this guard could not fail on the case it was written for,
+// so a version of it that still cannot would pass everything else here.
+//
+// The pair below is one row measured before and after -- the same command,
+// the same position, one token different -- because a control in a different
+// row cannot say why the first one came out the way it did.
+func TestTheGuardSeesAFlagAfterAPositional(t *testing.T) {
+	if testing.Short() || cleatBinary == "" {
+		t.Skip("needs the cleat binary, which TestMain does not build in short mode")
+	}
+	dir := t.TempDir()
+
+	// Known-positive: `plugin update` registers -all and -index-url, and has
+	// never had a -show. Until cleat#2136 this returned nothing, because
+	// flag.Parse stopped at the positional and never looked past it.
+	bad := []string{"plugin", "update", "example/hello-world@0.2.0", "--show"}
+	got := flagsAfterPositionals(cleatBinary, dir, bad, 0)
+	if len(got) != 1 || got[0] != "--show" {
+		t.Errorf("flagsAfterPositionals(%v) = %v, want exactly [--show].\n"+
+			"This is the cleat#2074 case: the flag sits after a positional, so flag.Parse never "+
+			"reaches it, and nothing else in this file can see that it does not exist.\n"+
+			"Verified by hand against the built binary: `cleat plugin update --show x` prints "+
+			"\"flag provided but not defined: -show\", while the documented order prints nothing "+
+			"about flags at all.", bad, got)
+	}
+
+	// The control. -all IS a flag of `plugin update`, in the same position,
+	// so it must not be reported. Without this, a probe that reported every
+	// flag it was shown would have passed the case above and told us nothing:
+	// a check that cannot disagree with itself is a claim, not a check.
+	good := []string{"plugin", "update", "example/hello-world@0.2.0", "--all"}
+	if got := flagsAfterPositionals(cleatBinary, dir, good, 0); len(got) != 0 {
+		t.Errorf("flagsAfterPositionals(%v) = %v, want none: --all is registered on `plugin update`, "+
+			"so a flag placed after a positional is not by itself the defect.", good, got)
+	}
+
+	// And a token after a literal -- stays positional, per the flag package's
+	// own rule, so it is not a flag to check however flag-shaped it looks.
+	afterSep := []string{"plugin", "update", "example/hello-world@0.2.0", "--", "--show"}
+	if got := flagsAfterPositionals(cleatBinary, dir, afterSep, 0); len(got) != 0 {
+		t.Errorf("flagsAfterPositionals(%v) = %v, want none: everything after a literal -- is a "+
+			"positional, and the flag package does not inspect it either.", afterSep, got)
+	}
+
+	// The shape that produced ten false positives while this was being
+	// written, kept as a control because it is the shape real docs use. A
+	// GLOBAL flag takes a value, so a bare non-flag token appears BEFORE the
+	// subcommand. An earlier version of this check took the first non-flag
+	// token as the subcommand and inserted the token before the real one --
+	// landing it in the global parse region, where a subcommand flag is
+	// genuinely undefined -- and reported `--name` on `deploy`, which is a
+	// flag `deploy` has always had.
+	global := []string{"--db", "postgres://example/cleat", "deploy", "--name", "agent", "./out/agent_loop.wasm"}
+	if got := flagsAfterPositionals(cleatBinary, dir, global, 2); len(got) != 0 {
+		t.Errorf("flagsAfterPositionals(%v) = %v, want none: --name is registered on `deploy`, and "+
+			"the value of the global --db is not the subcommand. Reporting here means the search is "+
+			"reading the wrong token as the command and inserting flags before it.", global, got)
 	}
 }
 
