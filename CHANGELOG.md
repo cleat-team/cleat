@@ -377,6 +377,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`/livez`, `/readyz`, database-reachability metrics and alert rules: a database incident now looks different from a worker incident.** (cleat#2007)
+
+  `/livez` says the process and its background loops are ticking and never looks at the database, so a
+  database outage does not restart workers. `/readyz` is 503 while the worker has not finished starting, is
+  draining, or its database did not answer its last deadline-bounded call, so a load balancer stops sending
+  traffic a worker cannot serve. `/healthz` stays as an alias of `/livez`. The Helm chart and
+  `k8s/deployment.yaml` now use `/livez` for liveness and `/readyz` for readiness (both used `/healthz`, so a
+  worker that could not reach its database stayed "ready"). New metrics: `cleat_db_reachable`,
+  `cleat_db_last_success_timestamp_seconds`, `cleat_db_consecutive_failures`, `cleat_db_probe_duration_seconds`
+  (each with a `dialect` label). A call counts as failed if it errors or runs past its deadline, and the
+  deadline is now enforced by a timer: against a real `docker pause` the gauge used to flip only at unpause.
+  Two log lines mark the transitions: `database unreachable (deadline exceeded)` and `database reachable again
+  after 43s`. `monitoring/prometheus/alerts.yml` tells the two incidents apart (every worker reports 0: the
+  database; one worker reports 0 among healthy peers: that worker), suppresses the reaper's echo of an outage,
+  and is unit-tested with `promtool test rules` in CI.
+
+  **Breaking:** the unauthenticated health bodies contain only `ok`, `degraded` and reason codes
+  (`background_loop_stuck`, `database_unreachable`, `starting`, `draining`, `memory_pressure`,
+  `plugin_unhealthy`). `stale_loops` (loop names) and `pressure` are gone from them, and `reasons` lists every
+  degraded reason (memory pressure no longer hides an unhealthy plugin). The detail is on the new
+  authenticated `GET /api/admin/health`. Degraded states (memory pressure, an unhealthy plugin) are 200 on every
+  probe; only the database, draining, starting and a stuck loop are 503. `backendkit`'s `Health()` now calls
+  `/readyz`.
+
+  `/livez` does not fail because a background loop is stuck in a call the database is holding: a stale loop
+  is put down to the database only while the database has not answered since it went quiet and that is
+  still being observed, with a 30-second grace after recovery. Measured against a real `docker pause`.
+
+  **The audit log no longer records the infrastructure probes** (`/healthz`, `/livez`, `/readyz`, `/metrics`): a
+  fixed list, not configurable, and the same one that is exempt from authentication.
+
+- **`/metrics` is valid Prometheus text again: histograms had doubled label braces and non-cumulative
+  buckets, so Prometheus dropped every scrape.** (cleat#2266)
+
+  Every histogram line was written `name_bucket{{a="b"},le="1"}`, and the buckets were per-bucket counts
+  with `le="+Inf"` not equal to `_count`. Prometheus rejects a scrape as a whole, so with the bundled
+  stack `up` read 0 (`CleatWorkerDown` fired on healthy workers) and no cleat metric was stored, including
+  `cleat_db_reachable`. The braces are emitted once, buckets are cumulative and `+Inf` is `_count`, so
+  `histogram_quantile` over `cleat_claim_latency_seconds`, `cleat_poll_wait_seconds` and the rest now gives
+  real answers. CI runs `promtool check metrics` against what the three booted cluster workers actually serve.
+
 - **`cleatctl quota get|set|list`, the operator surface for `tenant-quota`.** (cleat#2046)
 
   `quota get --tenant X [--resource R]` reads a tenant's quota row(s); `quota set --tenant X

@@ -402,43 +402,6 @@ func (s *apiServer) decodeBody(w http.ResponseWriter, r *http.Request, lim bodyL
 	return false
 }
 
-func (s *apiServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	stale := s.worker.healthTracker.staleLoops()
-	if len(stale) > 0 {
-		s.writeJSON(w, 503, map[string]any{
-			"ok":          false,
-			"stale_loops": stale,
-			"reason":      "background_loop_stuck",
-		})
-		return
-	}
-	if s.worker.memoryController != nil && s.worker.memoryController.Pressure() > 0 {
-		s.writeJSON(w, 200, map[string]any{
-			"ok":       true,
-			"degraded": true,
-			"reason":   "memory_pressure",
-			"pressure": s.worker.memoryController.Pressure(),
-		})
-		return
-	}
-	// A plugin that reports itself unhealthy (plugin.HasHealth) degrades the worker and does not fail it:
-	// a lost audit event is something an operator must see, and a reason for the host to stop serving would
-	// turn the audit log's trouble into the API's outage. 200, like memory_pressure. cleat#2168.
-	//
-	// The body carries the reason CODE only. /healthz is reachable without a credential, so it must not
-	// name the plugin or repeat its message; those are in the plugin's own Error log and in the
-	// plugin label of cleat_plugin_events_lost_total.
-	if len(s.worker.unhealthyPlugins()) > 0 {
-		s.writeJSON(w, 200, map[string]any{
-			"ok":       true,
-			"degraded": true,
-			"reason":   "plugin_unhealthy",
-		})
-		return
-	}
-	s.writeJSON(w, 200, map[string]bool{"ok": true})
-}
-
 // unhealthyPlugins returns, by plugin name, the message of every plugin whose Health() last reported
 // a problem. It reads a cache: /healthz is unauthenticated and polled by every kubelet and load
 // balancer, and Health() is the plugin's own code (pagerdutyalert's runs a cross-tenant SELECT), so

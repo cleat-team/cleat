@@ -635,3 +635,35 @@ func TestWithTenantID_Override(t *testing.T) {
 		t.Errorf("TenantIDFromContext = %v, want %v (the latest)", got, second)
 	}
 }
+
+// The health endpoints are answered without a credential, and the ADMIN health route is not. One list
+// (IsInfrastructurePath) serves this middleware, HostBindingMiddleware and the oauthprovider plugin;
+// cleat#2007 added /livez and /readyz, and the admin route is the known-positive that the list has not
+// simply been widened to everything under /.
+func TestMiddleware_InfrastructurePathsNeedNoKeyAndTheAdminHealthRouteDoes(t *testing.T) {
+	store := newFakeDBStore()
+	db := newTestDB(store)
+	t.Cleanup(func() { db.Close() })
+	mw := Middleware(engine.NewPostgresStore(db), true)
+	reached := false
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	for _, path := range []string{"/healthz", "/livez", "/readyz", "/metrics"} {
+		reached = false
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if !reached || rec.Code != http.StatusOK {
+			t.Errorf("%s without a key: reached=%v code=%d, want the handler and 200", path, reached, rec.Code)
+		}
+	}
+	for _, path := range []string{"/api/admin/health", "/healthz/", "/readyz/verbose", "/metrics/x"} {
+		reached = false
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if reached || rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s without a key: reached=%v code=%d, want 401 and the handler not called", path, reached, rec.Code)
+		}
+	}
+}

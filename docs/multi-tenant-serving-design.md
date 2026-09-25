@@ -183,7 +183,7 @@ That clobber depends on both middlewares writing the same context key, which the
 be whichever `tenantFor` happened to read — so this is the load-bearing detail, not an aside.
 
 It is **not** clobbered on the paths auth lets through without a key. `auth.Middleware` returns
-early via `next.ServeHTTP` for `/healthz`, `/metrics`, and each public pattern —
+early via `next.ServeHTTP` for the infrastructure paths (`auth.IsInfrastructurePath`: `/healthz`, `/livez`, `/readyz`, `/metrics`), and each public pattern —
 `POST /ingest/{source_id}` and `GET /oauth/{provider}/callback`, wired at
 `cmd/cleat-worker/main.go:1447-1450`. On those routes a client-supplied tenant header survives into
 the handler. The same holds with `--require-auth=false`.
@@ -425,7 +425,7 @@ developer experience simultaneously.
 ## Security
 
 **Separate the listeners.** Today `--api-addr` serves the SPA, `/api/admin/*`, `/metrics` and
-`/healthz` through one mux and one middleware chain (`cmd/cleat-worker/app.go:29-70`). Public
+`/healthz` (and `/livez`, `/readyz`) through one mux and one middleware chain (`cmd/cleat-worker/app.go:29-70`). Public
 front-end traffic on that listener puts the internet one authentication bug away from
 `POST /api/admin/instances/{id}/force-complete`. The precedent against path-based separation is in
 that same file's doc comment. Use separate `http.Server` instances, separate ports, separate

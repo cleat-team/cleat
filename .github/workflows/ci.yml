@@ -645,6 +645,20 @@ jobs:
       - name: Dead-export code guard
         run: scripts/check-dead-exports.sh
 
+      # cleat#2007. Two checks, and both are needed: `check` is syntax, and it passes a rule that can
+      # never fire. `test rules` runs alerts_test.yml, which feeds synthetic series through the rules and
+      # asserts that the SAME evidence pages as a database incident when every worker reports
+      # cleat_db_reachable 0 and as a worker incident when only one does, and that a reclaim the outage
+      # explains is suppressed. Removing the suppression, or turning max() into min(), fails it (verified
+      # by hand when it was written). The image is pinned: the rule language moves.
+      - name: Alert rules (promtool check and unit tests)
+        run: |
+          set -euo pipefail
+          p() { docker run --rm --entrypoint promtool -v "$PWD/monitoring/prometheus:/p:ro" prom/prometheus:v3.14.0 "$@"; }
+          p check config /p/prometheus.yml
+          p check rules /p/alerts.yml
+          p test rules /p/alerts_test.yml
+
       # Third sibling, and it closes the one shape the other two structurally
       # cannot see. U1000 skips EXPORTED identifiers -- correct for a library,
       # meaningless for `package main`, where nothing can import the package and
@@ -2606,6 +2620,54 @@ jobs:
               docker logs --tail=60 "$svc" 2>&1 || true
               exit 1
             fi
+          done
+
+      # cleat#2266. `promtool test rules` (the Lint job) feeds the alert rules SYNTHETIC series, so it
+      # cannot say whether a real worker's /metrics can be read at all. It could not: histogram lines
+      # carried doubled label braces and non-cumulative buckets, Prometheus dropped every scrape of every
+      # worker, `up` read 0 (CleatWorkerDown fired on healthy workers) and no cleat metric was ever stored.
+      # This runs promtool's own parser over what the three booted workers actually serve.
+      #
+      # Two preconditions are asserted before the verdict, because "promtool printed nothing" is what a
+      # scrape that never arrived also produces: the body is non-empty, and it CONTAINS a histogram
+      # (cleat_db_probe_duration_seconds is observed at startup). A scrape without one cannot exercise the
+      # defect, so it is reported as unmeasured (exit 2) rather than as a pass.
+      - name: /metrics from every booted worker parses (promtool check metrics)
+        shell: bash
+        run: |
+          set -uo pipefail
+          for port in 8081 8082 8083; do
+            body="$(curl -fsS --max-time 10 "http://127.0.0.1:$port/metrics")" || {
+              echo "::error title=UNMEASURED::could not scrape worker on :$port -- this is a failure of the check, not a finding about /metrics"
+              exit 2
+            }
+            n_hist="$(printf '%s\n' "$body" | grep -c '^cleat_db_probe_duration_seconds_bucket' || true)"
+            if [ -z "$body" ] || [ "$n_hist" -lt 2 ]; then
+              echo "::error title=UNMEASURED::the scrape from :$port carried $n_hist cleat_db_probe_duration_seconds_bucket lines, so it cannot exercise histogram output -- a failure of the check, not a finding about /metrics"
+              exit 2
+            fi
+            printf '%s\n' "$body" > "/tmp/scrape-$port.txt"
+            # `&& rc=0 || rc=$?`, not `out=$(...); rc=$?`: Actions runs this under `bash -e -o pipefail`, so a
+            # bare assignment from a command that exits 3 ends the step before rc is read. A healthy worker
+            # always exits 3 here (style findings), which failed this job on every run and stopped the
+            # integration tests from ever executing (cleat-review, #2263).
+            out="$(docker run --rm -i --entrypoint promtool prom/prometheus:v3.14.0 check metrics < "/tmp/scrape-$port.txt" 2>&1)" && rc=0 || rc=$?
+            case "$rc" in
+              0) ;;
+              # Exit 3 is promtool's STYLE lint (a counter's HELP name without _total, a gauge named *_count),
+              # which Prometheus ingests without complaint. Exit 1 is "text format parsing error", which drops
+              # the scrape: that is the failure this step exists for. Measured against a worker built with the
+              # pre-fix writer: rc=1, "invalid label name for metric cleat_db_probe_duration_seconds". Style
+              # findings are printed, not gated on; they are tracked separately (cleat#2272).
+              3) echo "::notice title=promtool style findings (not parse errors)::worker on :$port"; printf '%s\n' "$out" ;;
+              *)
+                echo "::error title=/metrics is not valid exposition text::worker on :$port (promtool exit $rc)"
+                printf '%s\n' "$out"
+                head -40 "/tmp/scrape-$port.txt"
+                exit 1
+                ;;
+            esac
+            echo ":$port parses ($n_hist probe-duration buckets, promtool exit $rc)"
           done
 
       # IMPROVEMENT-PLAN 2.5, and the end-to-end regression test for 2.28.

@@ -92,8 +92,8 @@ api:
 #
 # cleat-worker's supported configuration defaults to --require-auth=true
 # (tiers.yaml does not grant support for --require-auth=false), which
-# rejects every request without a valid API key except /healthz and
-# /metrics. That includes the preStop drain hook this chart runs on every
+# rejects every request without a valid API key except the infrastructure paths (/healthz, /livez, /readyz,
+# /metrics). That includes the preStop drain hook this chart runs on every
 # pod shutdown (templates/deployment.yaml) -- POST /api/admin/drain. Without
 # a key configured here, that hook 401s, the failure is swallowed by the
 # hook's own `|| true` (needed so a slow/unreachable API server does not

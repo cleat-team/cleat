@@ -97,11 +97,31 @@ func TenantFromAPIKey(ctx context.Context, store TenantResolver, keyHash []byte)
 	return store.ResolveTenantFromAPIKey(ctx, keyHash)
 }
 
+// infrastructurePaths are answered without a credential because the things that call them (a kubelet,
+// a load balancer, a Prometheus scraper) hold none and address the worker by IP. There used to be
+// three hand-kept copies of this list (here, host_binding.go, plugins/oauthprovider) that could drift
+// apart, and a new endpoint had to be added to each. cleat#2007 added /livez and /readyz and made it one.
+//
+// These bodies are public, so what they say is limited to ok, degraded and reason codes
+// (cmd/cleat-worker/health.go). The detail is on /api/admin/health, which is NOT in this list.
+var infrastructurePaths = map[string]struct{}{
+	"/healthz": {}, // alias of /livez
+	"/livez":   {},
+	"/readyz":  {},
+	"/metrics": {},
+}
+
+// IsInfrastructurePath reports whether path is answered without authentication.
+func IsInfrastructurePath(path string) bool {
+	_, ok := infrastructurePaths[path]
+	return ok
+}
+
 // Middleware authenticates requests using a cleat API key.
 // Supports: Authorization: Bearer cleat_sk_<key>
 // Also supports: X-Cleat-API-Key: <key>
 // When requireAuth is true, requests without a valid API key are rejected with 401,
-// except for public paths (/healthz, /metrics, and any additional patterns passed via
+// except for public paths (IsInfrastructurePath, and any additional patterns passed via
 // publicPatterns).
 //
 // publicPatterns is a hand-maintained allowlist, not a generic plugin-declared
@@ -127,7 +147,7 @@ func Middleware(store TenantResolver, requireAuth bool, publicPatterns ...string
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Public paths are always accessible without authentication.
 			path := r.URL.Path
-			if path == "/healthz" || path == "/metrics" {
+			if IsInfrastructurePath(path) {
 				next.ServeHTTP(w, r)
 				return
 			}

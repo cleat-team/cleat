@@ -80,9 +80,15 @@ type Metrics struct {
 	backgroundLoops         metric.Int64Counter
 	backgroundLoopRestarts  metric.Int64Counter
 	pluginEventsLost        metric.Int64Counter
-	reaperInstancesClaimed  metric.Int64Counter
-	suspectedDBStalls       metric.Int64Counter
-	httpRequests            metric.Int64Counter
+
+	// Database reachability (cleat#2007), fed by the worker's deadline-bounded probes.
+	dbReachable            metric.Int64Gauge
+	dbLastSuccess          metric.Float64Gauge
+	dbConsecutiveFailures  metric.Int64Gauge
+	dbProbeDuration        metric.Float64Histogram
+	reaperInstancesClaimed metric.Int64Counter
+	suspectedDBStalls      metric.Int64Counter
+	httpRequests           metric.Int64Counter
 
 	// --- UpDownCounters (Int64UpDownCounter) ---
 	workflowsActive                metric.Int64UpDownCounter
@@ -413,6 +419,38 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_plugin_events_lost_total: %w", err)
+	}
+
+	m.dbReachable, err = meter.Int64Gauge(
+		"cleat_db_reachable",
+		metric.WithDescription("1 if this worker's latest deadline-bounded database call succeeded within its deadline, 0 if it failed or ran past it. All workers at 0 is a database incident; one worker at 0 is that worker's connectivity"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_db_reachable: %w", err)
+	}
+	m.dbLastSuccess, err = meter.Float64Gauge(
+		"cleat_db_last_success_timestamp_seconds",
+		metric.WithDescription("Unix time of this worker's last database call that succeeded within its deadline"),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_db_last_success_timestamp_seconds: %w", err)
+	}
+	m.dbConsecutiveFailures, err = meter.Int64Gauge(
+		"cleat_db_consecutive_failures",
+		metric.WithDescription("Database calls in a row that failed or ran past their deadline; 0 once one succeeds"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_db_consecutive_failures: %w", err)
+	}
+	m.dbProbeDuration, err = meter.Float64Histogram(
+		"cleat_db_probe_duration_seconds",
+		metric.WithDescription("How long the worker's deadline-bounded database calls took (heartbeat, idle ping, reaper). A slow database shows here before it is unreachable"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.000, 2.500, 5.000, 10.000),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_db_probe_duration_seconds: %w", err)
 	}
 
 	m.reaperInstancesClaimed, err = meter.Int64Counter(
@@ -1126,6 +1164,24 @@ func (m *Metrics) RecordPluginEventsLost(ctx context.Context, pluginName, reason
 	m.pluginEventsLost.Add(ctx, count, metric.WithAttributes(attrs...))
 }
 
+// RecordDBProbe records one deadline-bounded database call: how long it took and whether it counts
+// as reachable (it returned without error and inside its deadline). consecutiveFailures is the run
+// of failed calls ending with this one (0 after a success); lastSuccess is the time of the latest
+// good call, the zero time if there has been none. cleat#2007.
+func (m *Metrics) RecordDBProbe(ctx context.Context, dialect string, elapsed time.Duration, reachable bool, consecutiveFailures int64, lastSuccess time.Time) {
+	attrs := m.mergeAttrs(attribute.String("dialect", dialect))
+	var up int64
+	if reachable {
+		up = 1
+	}
+	m.dbReachable.Record(ctx, up, metric.WithAttributes(attrs...))
+	m.dbConsecutiveFailures.Record(ctx, consecutiveFailures, metric.WithAttributes(attrs...))
+	m.dbProbeDuration.Record(ctx, elapsed.Seconds(), metric.WithAttributes(attrs...))
+	if !lastSuccess.IsZero() {
+		m.dbLastSuccess.Record(ctx, float64(lastSuccess.UnixNano())/1e9, metric.WithAttributes(attrs...))
+	}
+}
+
 // RecordBackgroundLoopRestart increments the background-loop-restarts counter.
 func (m *Metrics) RecordBackgroundLoopRestart(ctx context.Context, loopName string, count int64, extraAttrs ...attribute.KeyValue) {
 	attrs := m.mergeAttrs(append([]attribute.KeyValue{
@@ -1782,6 +1838,15 @@ func writeMetric(w io.Writer, m metricdata.Metrics) error {
 
 // writeHistogramDataPoint writes a single histogram data point in Prometheus
 // exposition format, including _bucket, _count, and _sum lines.
+//
+// Two things about the exposition format that this used to get wrong (cleat#2266), and that made
+// Prometheus reject the whole scrape rather than one series:
+//
+//   - formatLabels already returns its labels wrapped in braces, so a bucket line is built by adding
+//     `le` INSIDE them. Wrapping the result in a second pair produced `{{a="b"},le="1"}`.
+//   - `_bucket` counts are CUMULATIVE: le="x" is the number of observations <= x, and le="+Inf" equals
+//     `_count`. OTel's BucketCounts are per-bucket (len(bounds)+1 of them, the last being everything
+//     above the top bound), so they are summed here.
 func writeHistogramDataPoint(
 	w io.Writer,
 	name string,
@@ -1793,31 +1858,38 @@ func writeHistogramDataPoint(
 ) error {
 	labels := formatLabels(attrs)
 
-	// Write _bucket lines.
+	var cumulative uint64
 	for i, bound := range bounds {
-		le := fmt.Sprintf("%g", bound)
-		if _, err := fmt.Fprintf(w, "%s_bucket{%s,le=%q} %d\n", name, labels, le, bucketCounts[i]); err != nil {
+		if i < len(bucketCounts) {
+			cumulative += bucketCounts[i]
+		}
+		if _, err := fmt.Fprintf(w, "%s_bucket%s %d\n", name, labelsWithLE(labels, fmt.Sprintf("%g", bound)), cumulative); err != nil {
 			return err
 		}
 	}
-	// +Inf bucket
-	tailCount := count
-	if len(bucketCounts) > 0 {
-		tailCount = bucketCounts[len(bucketCounts)-1]
-	}
-	if _, err := fmt.Fprintf(w, "%s_bucket{%s,le=%q} %d\n", name, labels, "+Inf", tailCount); err != nil {
+	// +Inf is every observation, so it is _count by definition, not the last bucket's own tally.
+	if _, err := fmt.Fprintf(w, "%s_bucket%s %d\n", name, labelsWithLE(labels, "+Inf"), count); err != nil {
 		return err
 	}
 
 	// _count and _sum.
-	if _, err := fmt.Fprintf(w, "%s_count{%s} %d\n", name, labels, count); err != nil {
+	if _, err := fmt.Fprintf(w, "%s_count%s %d\n", name, labels, count); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "%s_sum{%s} %g\n", name, labels, sum); err != nil {
+	if _, err := fmt.Fprintf(w, "%s_sum%s %g\n", name, labels, sum); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// labelsWithLE adds the `le` label to a label string produced by formatLabels, which is either empty
+// or `{k="v",...}`.
+func labelsWithLE(labels, le string) string {
+	if labels == "" {
+		return fmt.Sprintf("{le=%q}", le)
+	}
+	return fmt.Sprintf("%s,le=%q}", strings.TrimSuffix(labels, "}"), le)
 }
 
 // formatLabels renders an attribute.Set as a Prometheus label string.

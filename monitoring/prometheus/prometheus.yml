@@ -15,7 +15,7 @@ global:
 # Load rules once and periodically evaluate them according to the global
 # 'evaluation_interval'.
 rule_files:
-  # - "alerts.yml"
+  - "alerts.yml"
 
 # Scrape configurations for each target.
 scrape_configs:

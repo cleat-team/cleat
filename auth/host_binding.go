@@ -89,7 +89,7 @@ func NormalizeHost(host string) string {
 // exempt paths are skipped entirely. Two kinds qualify, and both are named
 // rather than inferred:
 //
-//   - /healthz and /metrics, addressed by infrastructure rather than by a
+//   - the infrastructure paths (IsInfrastructurePath), addressed by infrastructure rather than by a
 //     tenant hostname. A load balancer probing a worker by IP has no tenant
 //     URL to present.
 //   - auth.Middleware's public patterns, which are reached by third parties
@@ -108,7 +108,7 @@ func HostBindingMiddleware(resolver DomainResolver, publicPatterns ...string) fu
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			path := r.URL.Path
-			if path == "/healthz" || path == "/metrics" {
+			if IsInfrastructurePath(path) {
 				next.ServeHTTP(w, r)
 				return
 			}

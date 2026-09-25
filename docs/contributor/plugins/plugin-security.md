@@ -1124,27 +1124,19 @@ Alert on any plugin-related workflow failures. These are always operator-actiona
 
 ### Worker health endpoint
 
-The worker exposes a health endpoint that includes plugin status:
+A plugin that implements `plugin.HasHealth` (`Health() error`) is polled every 10 seconds by the worker, off
+the request path, and a plugin that reports an error makes `/livez`, `/readyz` and `/healthz` answer 200
+with `"degraded": true` and the reason code `plugin_unhealthy`. The public bodies never name the plugin or
+quote its message; the authenticated `GET /api/admin/health` does:
 
 ```
-GET /healthz
+GET /api/admin/health          (needs an API key)
 
-{
-  "status": "ok",
-  "plugins": {
-    "llm": { "status": "ok" },
-    "example/hello-world": {
-      "status": "degraded",
-      "error": "gas limit exceeded on last 3 calls"
-    }
-  },
-  "tenants": {
-    "active": 12,
-    "pools": 12,
-    "total_connections": 48
-  }
-}
+{ "live": true, "ready": true, "degraded": ["plugin_unhealthy"],
+  "plugins": { "audit-log": "audit-log lost 3 event(s) ..." }, ... }
 ```
+
+See [Health, readiness and telling a database incident from a worker incident](../../operations/health-and-incidents.md).
 
 ### Dashboard recommendations
 

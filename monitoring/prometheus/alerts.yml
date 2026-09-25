@@ -1,0 +1,112 @@
+# Alert rules that tell a DATABASE incident from a WORKER incident (cleat#2007).
+#
+# Every worker reports cleat_db_reachable (1 or 0) from the deadline-bounded database calls it already
+# makes: the heartbeat, the idle ping and the reaper. A call counts as failed if it errors OR runs past
+# its deadline, so a database that hangs connections instead of refusing them (docker pause, a
+# failover, a saturated proxy) is caught too. That is the whole trick:
+#
+#   every worker reports 0        -> the database (or the network to it) is the incident
+#   one worker reports 0, others 1 -> that worker's connectivity is the incident
+#
+# Worker-side signals (a run reclaimed by the reaper, a worker gone from its peers) read as a WORKER
+# failing during a database outage, which is the wrong page. The second group suppresses them while
+# the database is unreachable and for ten minutes after, so an outage pages once, as a database
+# incident.
+#
+# The metric names here are checked against monitoring/prometheus/metrics.go by
+# TestDashboardMetricsExist, and the file by `promtool check rules` in CI: a rule on a metric nobody
+# emits never fires and reads as a quiet system.
+
+groups:
+  - name: cleat-database-incident
+    rules:
+      - alert: CleatDatabaseUnreachable
+        # max() over the workers is 0 only if EVERY worker reports 0.
+        expr: max by (dialect) (cleat_db_reachable) == 0
+        for: 1m
+        labels:
+          severity: critical
+          incident: database
+        annotations:
+          summary: "Every cleat worker reports its database unreachable ({{ $labels.dialect }})"
+          description: >-
+            All workers' latest deadline-bounded database call failed or ran past its deadline for at least a
+            minute. This is a database or network incident, not a worker incident: restarting workers will not
+            help (cleat's /livez stays 200 and /readyz returns 503, so no traffic is routed to them).
+            CleatRunsReclaimedByTheReaper is suppressed while this fires and for ten minutes after.
+            CleatWorkerDown is not: a database outage leaves /metrics up, so it should not fire.
+
+      - alert: CleatWorkerCannotReachDatabase
+        # Some workers report 0 while at least one peer reports 1.
+        expr: (cleat_db_reachable == 0) and on() (max(cleat_db_reachable) == 1)
+        for: 2m
+        labels:
+          severity: warning
+          incident: worker
+        annotations:
+          summary: "{{ $labels.instance }} cannot reach the database while its peers can"
+          description: >-
+            This worker's database calls are failing or running past their deadline, and at least one other
+            worker's are not: a network path, a connection limit, or credentials for this worker. Read the worker's log for the line
+            "database unreachable (...)": it names the class of failure and is written whether or not anything
+            can authenticate. (GET /api/admin/health has the error text, but it authenticates against the same
+            database, so it can hang or answer 401 while the database is down.)
+
+      - alert: CleatDatabaseSlow
+        # A slow database shows in the probe latency before it is unreachable.
+        expr: >-
+          histogram_quantile(0.95, sum by (le, dialect) (rate(cleat_db_probe_duration_seconds_bucket[5m]))) > 1
+        for: 5m
+        labels:
+          severity: warning
+          incident: database
+        annotations:
+          summary: "The 95th-percentile database round trip from cleat workers is over 1s ({{ $labels.dialect }})"
+          description: >-
+            Heartbeats, idle pings and reaper calls are taking over a second. The deadline for one of them is
+            half the heartbeat interval, so a database this slow is close to being declared unreachable.
+
+      - alert: CleatDatabaseNoRecentSuccess
+        # Catches a worker whose reachability gauge has stopped updating (a stuck heartbeat loop keeps the
+        # last value), which cleat_db_reachable alone cannot.
+        expr: time() - cleat_db_last_success_timestamp_seconds > 120
+        for: 1m
+        labels:
+          severity: warning
+          incident: worker
+        annotations:
+          summary: "{{ $labels.instance }} has had no successful database call for over two minutes"
+          description: >-
+            Either the database is unreachable from this worker (cleat_db_reachable is 0) or the worker's
+            heartbeat loop has stopped calling it (its /livez will be 503).
+
+  - name: cleat-worker-incident
+    rules:
+      - alert: CleatWorkerDown
+        expr: up{job="cleat-workers"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          incident: worker
+        annotations:
+          summary: "{{ $labels.instance }} is not being scraped"
+          description: >-
+            The worker's /metrics is not answering. That is the process or the network to it, not the
+            database (a database outage leaves /metrics up).
+
+      - alert: CleatRunsReclaimedByTheReaper
+        # Reclaims read as workers failing. Suppressed during, and for ten minutes after, a database
+        # outage, when they are the outage's echo and not a worker fault.
+        expr: >-
+          (increase(cleat_reaper_instances_claimed_total[10m]) > 0)
+          unless on() (max(cleat_db_reachable) == 0)
+          unless on() (max_over_time((max(cleat_db_reachable) == bool 0)[10m:1m]) == 1)
+        for: 0m
+        labels:
+          severity: warning
+          incident: worker
+        annotations:
+          summary: "Runs were reclaimed from a stale worker while the database was reachable"
+          description: >-
+            The reaper reclaimed workflow runs, and no database outage explains it. A worker stopped
+            heartbeating while its peers could still reach the database: a worker incident.

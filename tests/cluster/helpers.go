@@ -82,7 +82,7 @@ func TeardownCluster(t *testing.T) {
 	}
 }
 
-// WaitForReady polls each worker's /healthz endpoint until all respond or the
+// WaitForReady polls each worker's /readyz endpoint (the database answered, not draining) until all respond or the
 // timeout elapses.
 func WaitForReady(t *testing.T, timeout time.Duration) {
 	t.Helper()
@@ -94,7 +94,7 @@ func WaitForReady(t *testing.T, timeout time.Duration) {
 			if time.Now().After(deadline) {
 				t.Fatalf("timed out waiting for worker on port %s", port)
 			}
-			resp, err := http.Get(fmt.Sprintf("http://localhost:%s/healthz", port))
+			resp, err := http.Get(fmt.Sprintf("http://localhost:%s/readyz", port))
 			if err == nil && resp.StatusCode == http.StatusOK {
 				resp.Body.Close()
 				break
