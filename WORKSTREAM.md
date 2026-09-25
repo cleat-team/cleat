@@ -1,10 +1,16 @@
-# Three-stream coordination
+# Four-stream coordination — WS-1…WS-4, cleat-review, coordinator
 
-**This is the only coordination file.** It replaces the 2026-08-06 "one at a time" version, whose
-title had stopped describing the project (its own table measured all three streams writing in
-September). Rewritten 2026-09-04.
+**The coordination file for the 0.3.0 release.** Four delivery streams (WS-1…WS-4, the fourth added
+2026-09-23), one review session (`cleat-review`), one coordinator. Rewritten 2026-09-04 (three-stream
+era) and brought current 2026-09-25.
 
-Everything here is operative. Nothing here is history — git has that.
+**The live state is elsewhere.** What is being worked on now, by whom, and the assignment queue are
+tracked in `cleat-internal/coordinator-queue.md` and the dated `HANDOFF-*` files beside it. This file
+is the durable reference — rules, sandboxes, DSNs, shared-file protocol — not the status board.
+
+The **Rules** and **Sandboxes, databases, and shared files** sections below are operative. **"The
+diagnosis, measured"**, **"The next 24 hours"**, and **"The convergence metric"** are history from the
+2026-09-05 host-call round — left for their reasoning, not current.
 
 ---
 
@@ -837,11 +843,13 @@ Two operational notes from those runs, recorded because each cost someone time:
 | **WS-1** | `/localssd/rcownie/cleat` | `colima` (default) |
 | **WS-2** | `/localssd/rcownie/cleat-agent1` | `colima` (default) |
 | **WS-3** | `/localssd/rcownie/cleat-agent2` | `colima-cleat-ws3` |
+| **WS-4** | `/localssd/rcownie/cleat-agent3` | `colima` (default) |
 
-The same tree is reachable as `/localssd/…` and as `/Users/Shared/localssd/…`, so identify a
-checkout by its git *common* directory rather than `$PWD` — which is what
-`scripts/section-blocks.sh` does, and it is also how the 14 `cleat-wt-*` worktrees resolve back to
-the stream that owns them.
+The docker-context column is historical — see the ⚠️ CORRECTION above (the current host runs
+OrbStack and containers are per-session). The same tree is reachable as `/localssd/…` and as
+`/Users/Shared/localssd/…`, so identify a checkout by its git *common* directory rather than `$PWD`
+— which is what `scripts/section-blocks.sh` does, and it is also how the `cleat-wt-*` worktrees
+resolve back to the stream that owns them.
 
 ### DSNs
 
