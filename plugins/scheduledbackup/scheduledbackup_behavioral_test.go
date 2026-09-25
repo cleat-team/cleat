@@ -399,7 +399,7 @@ func TestPluginRegistrationBehavioral(t *testing.T) {
 // queries dropped every tenant_id column and parameter to match. This fake
 // driver only needs to model what the background loop actually reads and
 // writes now -- runDueBackups' claim query, executeScheduledBackup's history
-// insert and status updates, and updateNextRun/updateNextRunTx's config
+// insert and status updates, and updateNextRunTx's config
 // update. Everything that modeled the deleted HTTP handlers' SQL (list,
 // get, dynamic update, delete, and the tenant-filtered forms of all of
 // them) went with routes.go.
@@ -579,7 +579,7 @@ func (c *sbConn) execInsertHistory(args []driver.NamedValue) (driver.Result, err
 // execUpdateConfig handles the only UPDATE backup_config statement left
 // once routes.go's dynamic UPDATE and the deleted runBackupAsync's
 // next_run_at=NULL form went with it:
-// updateNextRun/updateNextRunTx's SET last_run_at = $1, next_run_at = $2
+// updateNextRunTx's SET last_run_at = $1, next_run_at = $2
 // WHERE id = $3.
 func (c *sbConn) execUpdateConfig(args []driver.NamedValue) (driver.Result, error) {
 	if len(args) < 3 {
@@ -1000,7 +1000,7 @@ func TestSB_Run_Cancel(t *testing.T) {
 		t.Fatal("config should exist after Run")
 	}
 	if cfg.lastRunAt == nil {
-		t.Error("last_run_at should be set after Run (via updateNextRun)")
+		t.Error("last_run_at should be set after Run (via updateNextRunTx, at claim time)")
 	}
 }
 
@@ -1142,84 +1142,18 @@ func TestSB_ExecuteScheduledBackup_Error(t *testing.T) {
 	if cfg == nil {
 		t.Fatal("config should exist after executeScheduledBackup")
 	}
-	if cfg.lastRunAt == nil {
-		t.Error("last_run_at should be set after executeScheduledBackup (via updateNextRun)")
+	// executeScheduledBackup no longer touches next_run_at/last_run_at at
+	// all (cleat#2291 follow-up): runDueBackups' claim transaction is the
+	// only writer now, and this test calls executeScheduledBackup directly,
+	// bypassing that claim -- so lastRunAt is correctly left untouched here.
+	if cfg.lastRunAt != nil {
+		t.Error("last_run_at should be untouched by executeScheduledBackup directly -- only the claim advances it")
 	}
 	if gotStatus != "failed" {
 		t.Errorf("want status 'failed' (no real pg_dump on PATH), got %q", gotStatus)
 	}
 	if gotErr == nil || *gotErr != backupErrPgDumpFailed {
 		t.Errorf("want error_message %q, got %v", backupErrPgDumpFailed, gotErr)
-	}
-}
-
-func TestSB_UpdateNextRun(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	cfgID := "00000000-0000-0000-0000-000000000222"
-	configUUID := uuid.MustParse(cfgID)
-	now := time.Now()
-
-	fdb.mu.Lock()
-	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, name: "next-run-test", cron: "0 9 * * *",
-		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: now, updatedAt: now,
-	}
-	fdb.mu.Unlock()
-
-	p.updateNextRun(context.Background(), configUUID, "0 9 * * *", now)
-
-	fdb.mu.RLock()
-	row := fdb.configs[cfgID]
-	fdb.mu.RUnlock()
-
-	if row == nil {
-		t.Fatal("config should exist after updateNextRun")
-	}
-	if row.lastRunAt == nil {
-		t.Error("last_run_at should be set after updateNextRun")
-	}
-	if row.nextRunAt == nil {
-		t.Error("next_run_at should be set (cron has future match)")
-	}
-	if row.nextRunAt != nil && row.nextRunAt.Before(now) {
-		t.Error("next_run_at should be in the future")
-	}
-}
-
-func TestSB_UpdateNextRun_NoMatch(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	cfgID := "00000000-0000-0000-0000-000000000223"
-	configUUID := uuid.MustParse(cfgID)
-	now := time.Now()
-
-	fdb.mu.Lock()
-	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, name: "no-match-test", cron: "0 9 31 2 *",
-		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: now, updatedAt: now,
-	}
-	fdb.mu.Unlock()
-
-	// Feb 31 won't match, so next_run_at should stay nil.
-	p.updateNextRun(context.Background(), configUUID, "0 9 31 2 *", now)
-
-	fdb.mu.RLock()
-	row := fdb.configs[cfgID]
-	fdb.mu.RUnlock()
-
-	if row == nil {
-		t.Fatal("config should exist after updateNextRun")
-	}
-	if row.lastRunAt == nil {
-		t.Error("last_run_at should be set even with no cron match")
-	}
-	if row.nextRunAt != nil {
-		t.Error("next_run_at should be nil when cron has no future match within window")
 	}
 }
 
@@ -1242,23 +1176,60 @@ func TestSB_Migrations_DownSQL(t *testing.T) {
 }
 
 // =========================================================================
-// updateNextRun ExecContext error path
+// updateNextRunTx ExecContext error path
 // =========================================================================
 
-func TestSB_UpdateNextRun_ExecError(t *testing.T) {
+// TestSB_RunDueBackups_UpdateNextRunTxErrorExcludesConfigFromDispatch is
+// cleat#2291's follow-up (cleat-review's should-fix on #2327):
+// updateNextRunTx's error used to be logged and discarded, so a config whose
+// advance failed was dispatched anyway with no durable claim behind it --
+// on MySQL that meant it could be dispatched again on every subsequent poll
+// (nothing ever advanced it), and on PostgreSQL a single bad row aborted the
+// whole claim transaction and blocked every OTHER due config in the same
+// batch too. Now the error is returned and the config is dropped from this
+// poll's dispatch instead, left due for the next one.
+func TestSB_RunDueBackups_UpdateNextRunTxErrorExcludesConfigFromDispatch(t *testing.T) {
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
+	p.config.DumpDir = t.TempDir()
 
-	cfgID := uuid.MustParse("00000000-0000-0000-0000-000000000553")
-	now := time.Now()
+	cfgID := "00000000-0000-0000-0000-000000000553"
+	past := time.Now().Add(-time.Hour)
 
 	fdb.mu.Lock()
-	fdb.forceExecErr = 1
+	fdb.configs[cfgID] = &sbConfigRow{
+		id: cfgID, name: "update-next-run-tx-err-test", cron: "0 9 * * *",
+		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
+		nextRunAt: &past, createdAt: past, updatedAt: past,
+	}
+	// 2: one for cleanupOrphanedHistory's unconditional Exec at the top of
+	// runDueBackups, one for this config's updateNextRunTx Exec inside the
+	// claim transaction -- forceExecErr is a single counter shared by every
+	// connection this fake hands out, decremented in call order regardless
+	// of statement text.
+	fdb.forceExecErr = 2
 	fdb.mu.Unlock()
 
-	// updateNextRun should log the error but not panic/return error.
-	p.updateNextRun(context.Background(), cfgID, "0 9 * * *", now)
-	// No panic = success.
+	p.runDueBackups(context.Background())
+	waitForBgBackups(t, p)
+
+	fdb.mu.RLock()
+	histCount := len(fdb.history)
+	cfg := fdb.configs[cfgID]
+	fdb.mu.RUnlock()
+
+	if histCount != 0 {
+		t.Errorf("dispatched %d backup(s) for a config whose next_run_at advance failed, want 0", histCount)
+	}
+	if cfg == nil {
+		t.Fatal("config should still exist")
+	}
+	if cfg.lastRunAt != nil {
+		t.Error("last_run_at should be untouched: the write that sets it is the one that failed")
+	}
+	if cfg.nextRunAt == nil || !cfg.nextRunAt.Equal(past) {
+		t.Errorf("next_run_at = %v, want unchanged at %v -- still due for the next poll", cfg.nextRunAt, past)
+	}
 }
 
 // =========================================================================

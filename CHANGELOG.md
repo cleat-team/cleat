@@ -672,6 +672,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`runDueBackups` advanced `next_run_at` from inside the due-rows scan loop, on the same
+  transaction while its own result set was still open.** (cleat#2291)
+
+  On PostgreSQL the second statement failed outright ("there is already a query being processed
+  on this connection"), leaving `next_run_at` unadvanced, so the config stayed due and a later
+  poll (or a concurrent worker) could dispatch it again. On MySQL the failed statement poisoned
+  the connection ("driver: bad connection"), and since that error was only logged, the config
+  was fired anyway on every single poll — never advancing, dispatching every ~60s indefinitely.
+  The advance now runs after the due-rows cursor closes, and its error is no longer just logged:
+  a config whose advance fails is dropped from that poll's dispatch rather than fired blind.
+
+  On PostgreSQL specifically, an isolated per-config failure also used to abort the *whole*
+  claim transaction — unlike MySQL and SQL Server, where a single statement error leaves the
+  transaction usable, Postgres marks the entire transaction aborted, so one bad config's
+  `UPDATE` silently took every *other* due config in that poll down with it too. The advance now
+  runs under a `SAVEPOINT` on Postgres, rolled back on error, so a failing config no longer
+  blocks its siblings.
+
+  `executeScheduledBackup` no longer recomputes and overwrites `next_run_at`/`last_run_at` after
+  a backup finishes — the claim transaction above is now the only place either column is
+  written. Previously, a manual "run now" (`cleatctl backup-run`, which just sets
+  `next_run_at = now()`) issued while a scheduled backup was still in flight could have its
+  `next_run_at` clobbered by that backup's own completion-time write, silently dropping the
+  manual trigger; measured losing it on PostgreSQL. One consequence: `LAST_RUN_AT` in
+  `cleatctl backup-list`'s output now means when the backup was *dispatched* (claimed), not when
+  it *completed* — check `backup-history` for completion status and timing.
+
 - **The fullstack template's documented path reaches a `done` run.** (cleat#2067)
 
   Re-measured on `develop` on a stock `postgres:16`: of the six breaks in the issue, the superuser worker, the
