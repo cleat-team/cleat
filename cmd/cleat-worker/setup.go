@@ -822,6 +822,19 @@ func pluginNames(m map[string]string) string {
 // ---------------------------------------------------------------------------
 
 // sqlDriverName maps the --driver flag value to a database/sql driver name.
+func sqlDriverName(driver string) string {
+	switch driver {
+	case "postgres":
+		return "postgres"
+	case "mysql":
+		return "mysql"
+	case "mssql":
+		return "sqlserver"
+	default:
+		return driver
+	}
+}
+
 // batchFlushEnabled reports whether this worker builds the adaptive batch flusher.
 //
 // POSTGRESQL ONLY. The batch writer's fence check and INSERT are PostgreSQL
@@ -847,19 +860,6 @@ func batchFlushIgnoredNotice(driver string, disabled, noPerStepFlush bool) strin
 		return ""
 	}
 	return "adaptive batch flushing is PostgreSQL-only: this worker flushes each step directly, and --batch-flush-* settings have no effect on this driver"
-}
-
-func sqlDriverName(driver string) string {
-	switch driver {
-	case "postgres":
-		return "postgres"
-	case "mysql":
-		return "mysql"
-	case "mssql":
-		return "sqlserver"
-	default:
-		return driver
-	}
 }
 
 // mysqlBaseDSN strips the database name from a MySQL DSN, producing a base DSN
