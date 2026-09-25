@@ -200,9 +200,18 @@ func drainBudgetProblem(out string) string {
 	}
 	deadline, _ := strconv.Atoi(tg[1])
 	const margin = 10 // release writes and process exit
-	if need := int(grace.Seconds()) + sleep + margin; deadline < need {
-		return fmt.Sprintf("terminationGracePeriodSeconds is %d but the drain needs %d (shutdown-grace %s + preStop sleep %ds + %ds margin)",
-			deadline, need, grace, sleep, margin)
+	// cleat#2147: after the drain the worker also calls plugin.Stoppable.Stop, under its own
+	// budget, and that comes out of the same clock.
+	//
+	// Spelled out rather than imported: cmd/cleat-worker is package main, so pluginStopDeadline
+	// cannot be reached from here -- the same reason tests/crash spells out DefaultTenantUUID
+	// instead of importing it. This is therefore a SECOND place to change if that budget moves,
+	// and the drift is silent in the direction that matters: the chart would be judged to have
+	// room it does not have, and the kubelet would SIGKILL the worker mid-Stop.
+	const pluginStopBudget = 5
+	if need := int(grace.Seconds()) + sleep + pluginStopBudget + margin; deadline < need {
+		return fmt.Sprintf("terminationGracePeriodSeconds is %d but the shutdown path needs %d (shutdown-grace %s + preStop sleep %ds + plugin Stop up to %ds + %ds margin)",
+			deadline, need, grace, sleep, pluginStopBudget, margin)
 	}
 	return ""
 }

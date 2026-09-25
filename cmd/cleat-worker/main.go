@@ -2502,8 +2502,8 @@ func main() {
 		// cleat#2147: after the drain, beside the worker's own components
 		// stopping. Stop() was documented as running here for four docs' worth
 		// of releases and nothing called it. See plugin_stop.go for why the
-		// deadline is shared, why this is after the drain, and why a plugin
-		// whose Init failed is offered the call too.
+		// deadline is shared, why this is after the drain, why a plugin whose
+		// Init FAILED is not stopped, and what the budget does not bound.
 		if stopped, failed := stopStoppablePlugins(context.Background(), plugList, pluginStopDeadline, logger); stopped > 0 || failed > 0 {
 			logger.InfoContext(context.Background(), "shutdown: plugin Stop() complete",
 				"worker_id", workerID, "stopped", stopped, "failed", failed)

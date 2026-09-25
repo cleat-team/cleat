@@ -27,15 +27,30 @@ import (
 
 // pluginStopDeadline bounds the WHOLE set of plugin Stop calls, not each one.
 //
-// Shared rather than per-plugin deliberately: the property that matters is
-// that a hung plugin cannot hold worker exit open, and N plugins each granted
-// the full budget gives a worst case of N times it. One budget makes exit
-// bounded by a number the operator can reason about without knowing how many
-// plugins are installed.
+// Shared rather than per-plugin deliberately: N plugins each granted the full
+// budget gives a worst case of N times it, and one budget is a number the
+// operator can reason about without knowing how many plugins are installed.
 //
 // Not the shutdown grace. That budget has already been spent by the drain by
 // the time this runs -- reusing it would either mean nothing on a worker that
 // drained slowly, or a second full grace on every shutdown.
+//
+// WHAT THIS BUDGET DOES NOT DO, because an earlier version of this comment
+// claimed it did and a reviewer measured that it does not: it cannot bound a
+// plugin that IGNORES ctx. The calls below are synchronous, so this deadline
+// is only ever observed by a plugin that checks ctx and returns -- which is
+// the cooperative case, and the one a plugin author is asked for. A Stop that
+// blocks on a channel or a syscall without watching ctx blocks the host for as
+// long as it likes, and every plugin behind it goes unstopped for that whole
+// time. That is stated plainly in plugin-developer-guide.md's Stoppable
+// section ("cannot be bounded by the worker"); it is repeated here so the two
+// do not disagree, and the code is not the place the optimistic version lives.
+//
+// The backstop is the orchestrator's kill deadline, not this. Running each Stop
+// in a goroutine we then abandon would make the budget real, at the cost of
+// leaking that goroutine and its plugin's half-closed state past exit -- a
+// trade nobody asked for, so it is not made. Both facts are pinned by
+// TestStopStoppablePluginsCannotBoundAPluginThatIgnoresContext.
 const pluginStopDeadline = 5 * time.Second
 
 // stopStoppablePlugins calls Stop on every loaded plugin that implements

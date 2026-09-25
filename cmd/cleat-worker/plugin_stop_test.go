@@ -79,44 +79,95 @@ func TestStopStoppablePluginsCallsStopOnEveryStoppablePlugin(t *testing.T) {
 	}
 }
 
-func TestStopStoppablePluginsIsBoundedByItsBudget(t *testing.T) {
-	// A plugin that ignores nothing and simply waits for the deadline the host
-	// gave it -- the shape of a plugin whose Stop is well-behaved but slow.
-	slow := &stopFixturePlugin{
-		name:    "slow",
+// TestStopStoppablePluginsHonoursItsBudgetForACooperativePlugin measures the
+// budget against the only case it can bound: a plugin that watches ctx.
+//
+// This test used to carry a SECOND fixture, commented "one that ignores ctx
+// entirely, which is the case the budget exists for", whose body was
+// `return nil` -- it ignored nothing and returned instantly. So the elapsed
+// assertion was bounded entirely by the cooperative fixture, and the test read
+// as proving a bound on a hung plugin that it had never exercised. cleat-review
+// measured the real thing (a genuinely blocking Stop, 50ms budget: still
+// blocked at 1002ms, 20x) and the deadline comment claimed the property this
+// did not test. The honest version is below and in the next test.
+func TestStopStoppablePluginsHonoursItsBudgetForACooperativePlugin(t *testing.T) {
+	cooperative := &stopFixturePlugin{
+		name:    "waits-for-ctx",
 		healthy: true,
 		onStop:  func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() },
-	}
-	// And one that ignores ctx entirely, which is the case the budget exists
-	// for: it can only be bounded by the host not waiting for it.
-	ignore := &stopFixturePlugin{
-		name:    "ignores-context",
-		healthy: true,
-		onStop:  func(ctx context.Context) error { return nil },
 	}
 
 	const budget = 50 * time.Millisecond
 	start := time.Now()
 	stopped, failed := stopStoppablePlugins(context.Background(), []*plugin.LoadedPlugin{
-		{Plugin: slow, Healthy: true},
-		{Plugin: ignore, Healthy: true},
+		{Plugin: cooperative, Healthy: true},
 	}, budget, quietLogger())
 	elapsed := time.Since(start)
 
 	if elapsed > 10*budget {
-		t.Errorf("stopStoppablePlugins took %v for a budget of %v.\n\n"+
-			"The property is that a hung plugin cannot hold worker exit open. If this "+
-			"grows with the number of plugins, the budget is being applied per plugin "+
-			"rather than shared, and N slow plugins cost N times it.", elapsed, budget)
+		t.Errorf("stopStoppablePlugins took %v for a budget of %v against a plugin that "+
+			"returns as soon as ctx is done. If this grows with the number of plugins, the "+
+			"budget is being applied per plugin rather than shared, and N cooperative "+
+			"plugins cost N times it.", elapsed, budget)
 	}
-	if !slow.stopped || !ignore.stopped {
-		t.Errorf("Stop reached slow=%v ignore=%v, want both: a plugin that overran the "+
-			"budget must not prevent the plugins after it from being offered their call",
-			slow.stopped, ignore.stopped)
+	if stopped != 0 || failed != 1 {
+		t.Errorf("stopped=%d failed=%d, want 0/1: a Stop that returns ctx.Err() must be "+
+			"counted as a failure, not a success", stopped, failed)
 	}
-	if stopped != 1 || failed != 1 {
-		t.Errorf("stopped=%d failed=%d, want 1/1: the slow plugin's Stop returns ctx.Err() "+
-			"and that must be counted as a failure, not a success", stopped, failed)
+}
+
+// TestStopStoppablePluginsCannotBoundAPluginThatIgnoresContext pins the
+// limitation plugin_stop.go's deadline comment states, in both directions.
+//
+// It is deliberately a test of the LIMITATION rather than of the budget. The
+// calls are synchronous, so a plugin that blocks without watching ctx blocks
+// the worker for as long as it likes, and the plugins behind it get nothing
+// during that time -- the failure mode KeepsGoingAfterAFailure prevents for
+// errors and panics, which synchronous calls cannot prevent for a hang. The
+// backstop is the orchestrator's kill deadline.
+func TestStopStoppablePluginsCannotBoundAPluginThatIgnoresContext(t *testing.T) {
+	unblock := make(chan struct{})
+	stuck := &stopFixturePlugin{
+		name: "stuck", healthy: true,
+		// Blocks on a channel and never looks at ctx: exactly the plugin the
+		// budget cannot bound.
+		onStop: func(context.Context) error { <-unblock; return nil },
+	}
+	behind := &stopFixturePlugin{name: "behind", healthy: true}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		stopStoppablePlugins(context.Background(), []*plugin.LoadedPlugin{
+			{Plugin: stuck, Healthy: true},
+			{Plugin: behind, Healthy: true},
+		}, 20*time.Millisecond, quietLogger())
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("stopStoppablePlugins returned within 200ms while a plugin's Stop was " +
+			"blocked ignoring ctx.\n\n" +
+			"That means the calls are no longer synchronous. If that was deliberate, update " +
+			"this test AND plugin_stop.go's pluginStopDeadline comment together -- the " +
+			"comment states this behaviour, and deleting the assertion without changing it " +
+			"would leave the code claiming a bound this no longer describes.")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// Ten times the budget has elapsed and the call has not returned: the
+	// budget did not bound it. The plugin behind it is the cost.
+	if behind.stopped {
+		t.Error("the plugin behind a blocked one was stopped, which the synchronous " +
+			"implementation cannot have done")
+	}
+
+	close(unblock)
+	<-done
+	if !behind.stopped {
+		t.Error("after the blocked Stop returned, the plugin behind it was still never " +
+			"stopped. A hang must delay the plugins behind it, not skip them: that is the " +
+			"difference between a slow shutdown and a leak")
 	}
 }
 
