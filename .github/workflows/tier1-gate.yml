@@ -85,10 +85,14 @@
 # jobs used to re-provision three databases and a Python/wasm-tools toolchain
 # to re-run test content the PR's own `pull_request` run had already proven
 # green, on the critical path of every merge. Each now runs a single
-# unconditional `echo` step on `merge_group` and skips everything else --
-# same pattern as stream-trailer-check.yml. `tier1-coverage` is deliberately
-# NOT report-only: it is cheap (~40s), needs no DB, and re-running it in the
-# queue is free insurance that the shard partition itself did not change
+# unconditional `echo` step on `merge_group` and skips every OTHER step in
+# the job -- the job-level `services:` blocks (postgres, mysql, mssql) are
+# not a step, so they still start on `merge_group` regardless; "report-only"
+# here means the test content doesn't re-run, not that the job costs
+# nothing. Same pattern as stream-trailer-check.yml. `tier1-coverage` is
+# deliberately NOT report-only: it is cheap (~40s), needs no DB, and
+# re-running it in the queue is free insurance that the shard partition
+# itself did not change
 # underneath the merge. The `tier1` aggregator below is unchanged; its
 # `needs.*.result` check reads "success" for a report-only run exactly as it
 # would for a real one.
@@ -377,7 +381,7 @@ jobs:
       # run (and engine-race.yml's schedule) rather than in the queue.
       - name: Already checked on the pull request
         if: github.event_name == 'merge_group'
-        run: echo "tier 1 gate -- engine shard ${{ matrix.shard }}/3 -- validated when the pull request was opened -- cleat#2080"
+        run: echo "tier 1 gate -- engine shard ${{ matrix.shard }}/3 -- validated by this pull request's own pull_request run -- cleat#2080"
 
       - uses: actions/checkout@v7
         if: github.event_name != 'merge_group'
@@ -583,7 +587,7 @@ jobs:
       # See tier1-engine's identical step for the full rationale (cleat#2080).
       - name: Already checked on the pull request
         if: github.event_name == 'merge_group'
-        run: echo "tier 1 gate -- rest shard 3/3 -- validated when the pull request was opened -- cleat#2080"
+        run: echo "tier 1 gate -- rest shard 3/3 -- validated by this pull request's own pull_request run -- cleat#2080"
 
       - uses: actions/checkout@v7
         if: github.event_name != 'merge_group'
