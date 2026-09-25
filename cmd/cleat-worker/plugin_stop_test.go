@@ -271,6 +271,23 @@ func TestMainCallsStopStoppablePluginsOnShutdown(t *testing.T) {
 	drain := strings.Index(s, "w.gracefulShutdown(*shutdownGrace, force)")
 	stop := strings.Index(s, "stopStoppablePlugins(context.Background(), plugList, pluginStopDeadline, logger)")
 	switch {
+	case strings.Count(s, "w.gracefulShutdown(*shutdownGrace, force)") != 1 ||
+		strings.Count(s, "stopStoppablePlugins(context.Background(), plugList, pluginStopDeadline, logger)") != 1:
+		// cleat-review's finding on #2400. The comparison below takes the FIRST
+		// occurrence of each anchor, so with a second occurrence earlier in the
+		// file it silently compares the wrong pair of lines and reports on an
+		// ordering that is not the one the worker runs. Both anchors are unique
+		// in main.go today; nothing enforced that until this check, and a
+		// second shutdown path is exactly the change that would break it
+		// without touching this file. A regex would not have helped -- it
+		// matches duplicates just as happily.
+		t.Errorf("UNMEASURED: expected exactly one occurrence of each anchor in main.go, "+
+			"found %d of the drain and %d of the plugin Stop call. The ordering check "+
+			"below compares the first of each, which is only the pair that runs while "+
+			"there is one of each; with more than one it would report on a different "+
+			"pair and still say the ordering is fine",
+			strings.Count(s, "w.gracefulShutdown(*shutdownGrace, force)"),
+			strings.Count(s, "stopStoppablePlugins(context.Background(), plugList, pluginStopDeadline, logger)"))
 	case drain < 0:
 		t.Error("main.go no longer calls w.gracefulShutdown(*shutdownGrace, force); this " +
 			"test's ordering check cannot run, which is a failure of the check rather " +
