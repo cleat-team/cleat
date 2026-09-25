@@ -143,6 +143,9 @@ result, err := h.DurableCallTyped("webhook-ingest", "await_webhook",
 - No metrics on how many jobs were processed, how many webhooks received, etc.
 - On shutdown (SIGTERM), the worker cancels the context but doesn't wait for background goroutines to finish — cleanup may be interrupted mid-operation
 - The `Stoppable` interface exists but is only used for individual plugin cleanup, not coordinated shutdown
+  *(this was true when this design was written and stopped being true on 2026-09-25: cleat#2147 wired
+  `Stop` into the worker's shutdown path. Left as written because it is the gap this section's design
+  was responding to, not a description of current behaviour.)*
 
 ### Design: Structured Logging + WaitGroup Shutdown
 

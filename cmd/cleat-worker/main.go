@@ -2499,6 +2499,15 @@ func main() {
 		if tenantLim != nil {
 			tenantLim.stop()
 		}
+		// cleat#2147: after the drain, beside the worker's own components
+		// stopping. Stop() was documented as running here for four docs' worth
+		// of releases and nothing called it. See plugin_stop.go for why the
+		// deadline is shared, why this is after the drain, and why a plugin
+		// whose Init failed is offered the call too.
+		if stopped, failed := stopStoppablePlugins(context.Background(), plugList, pluginStopDeadline, logger); stopped > 0 || failed > 0 {
+			logger.InfoContext(context.Background(), "shutdown: plugin Stop() complete",
+				"worker_id", workerID, "stopped", stopped, "failed", failed)
+		}
 	}()
 
 	// SIGHUP is reserved for a future config/key reload (cleat#1992 part 2,

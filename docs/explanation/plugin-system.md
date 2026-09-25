@@ -105,7 +105,7 @@ Worker Startup
 Worker Running
      |
      v
-8. Stop() -- call Stop() for Stoppable plugins on shutdown
+8. Stop() -- after in-flight runs drain, call Stop() for Stoppable plugins, bounded
 ```
 
 ## Registration and Discovery

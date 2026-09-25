@@ -56,7 +56,7 @@ optional — the loader discovers capabilities via type assertion.
 7. Background start  HasBackground.Run(ctx) in goroutine
 8. Host funcs reg    HasHostFunctions.RegisterHostFunctions(scope)
 9. Worker starts     dispatch loop begins
-10. Shutdown         ctx cancelled → Stop() called if Stoppable
+10. Shutdown         drain ends → Stop() called if Stoppable, with a bounded context
 ```
 
 Key: migrations run BEFORE Init. Your `Init()` can query tables your
@@ -295,7 +295,23 @@ func (p *Plugin) Stop(ctx context.Context) error {
 }
 ```
 
-Called during graceful shutdown. Not called if the process is killed.
+Called during graceful shutdown, **after** the worker has finished draining in-flight runs — so
+your `Stop` can assume nothing is still executing against your plugin.
+
+The `ctx` you receive is **not** the worker's cancelled shutdown context. It is a live context with
+a deadline: one budget is shared across every plugin being stopped (5 seconds as of cleat#2147,
+which wired this call up), and the first plugin to overrun it leaves the rest with an already-expired
+context. Do not treat a cancelled `ctx` as "the worker is gone and I should bail" — check it, do the
+cleanup you can within it, and return. A `Stop` that ignores `ctx` entirely cannot be bounded by the
+worker, and will be counted as failed with `deadline_exceeded=true` in the worker log.
+
+A panic or an error from `Stop` does not stop the other plugins from being stopped, and does not
+prevent the worker from exiting: this runs on a path that is already shutting down, and refusing to
+exit is worse than a failed cleanup.
+
+Not called if the process is killed (`SIGKILL`, OOM), and **not called for a plugin whose `Init`
+failed** — the same rule `HasHealth` follows. If your `Init` returns an error it owns the cleanup of
+whatever it opened, because the worker cannot see what state it left you in.
 
 ### HasCommands — CLI subcommands
 
