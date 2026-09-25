@@ -435,17 +435,15 @@ linters:
       - linters: [staticcheck]
         text: "SA6001"
         path: 'wasm/component_rewrite\.go$'
-      # SA1019 deprecated API, 3 sites, none of them a behaviour bug today:
+      # SA1019 deprecated API, 1 site, not a behaviour bug today:
       #   cmd/cleat-gen/main.go: parser.ParseDir does not consider build tags. cleat-gen parses one spec
       #     directory of plain files with no build constraints.
-      #   plugins/oauthprovider/oidc.go x2: building an ecdsa.PublicKey from a JWK's x and y by setting the
-      #     coordinates directly, then checking IsOnCurve. Go 1.26 deprecates that in favour of
-      #     ecdsa.ParseUncompressedPublicKey. THIS ONE SHOULD BE FIXED, not excluded for good: it is the
-      #     code that decides whether an identity provider's key is valid. Tracked in cleat#2300; the
-      #     exclusion is scoped to the file so the next deprecation in it is still reported.
+      # (plugins/oauthprovider/oidc.go had two more, an ecdsa.PublicKey built from a JWK's x and y by setting
+      # the coordinates directly. It uses ecdsa.ParseUncompressedPublicKey now, cleat#2300, so it is no
+      # longer excluded and the next deprecation there is reported.)
       - linters: [staticcheck]
         text: "SA1019"
-        path: '(cmd/cleat-gen/main|plugins/oauthprovider/oidc)\.go$'
+        path: 'cmd/cleat-gen/main\.go$'
 issues:
   # THERE IS NO `exclude-files` HERE ANY MORE, AND THAT IS THE POINT.
   #

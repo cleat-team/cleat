@@ -655,6 +655,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the durable sleep). Each of the superuser worker, a `make deploy` with no database, the failing placeholder, a
   missing `--plugin-config` and a `/state` route in the README was reinstated one at a time and fails it.
 
+- **`oauth-provider` builds an identity provider's EC signing key with `ecdsa.ParseUncompressedPublicKey`.** (cleat#2300)
+
+  `parseJWK` made the key by setting `X` and `Y` on an `ecdsa.PublicKey` and calling `IsOnCurve`, which Go 1.26
+  deprecates in favour of the parse function (the linter reported it once the toolchain moved to 1.27, cleat#2216).
+  Behaviour is unchanged for every key that was accepted or refused before: a coordinate is still read as a number
+  (a stripped or zero-padded one is accepted, since some providers send those), and one that does not fit the curve
+  is refused with the existing `EC point is not on <curve>` message. The new function also refuses the point at
+  infinity. Nothing else in the plugin changed.
+
 - **SIGTERM drains before it cancels, and a run cut off by shutdown is released, never failed.** (cleat#2285)
 
   The signal handler cancelled the worker's context at once. Every in-flight durable wait was aborted and the

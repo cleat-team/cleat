@@ -285,9 +285,25 @@ func parseJWK(raw json.RawMessage) (crypto.PublicKey, string, error) {
 		if err != nil {
 			return nil, k.Kid, fmt.Errorf("EC y: %w", err)
 		}
-		pub := &ecdsa.PublicKey{Curve: curve, X: new(big.Int).SetBytes(x), Y: new(big.Int).SetBytes(y)}
-		if !curve.IsOnCurve(pub.X, pub.Y) {
-			return nil, k.Kid, fmt.Errorf("EC point is not on %s", k.Crv)
+		// ecdsa.ParseUncompressedPublicKey, not a struct literal plus IsOnCurve: it is the API the standard
+		// library names for turning a point into a key (setting X and Y directly is deprecated), it also refuses
+		// the point at infinity, and it is what the rest of crypto/ecdsa is tested against (cleat#2300).
+		//
+		// A coordinate is read as a NUMBER, exactly as before: RFC 7518 wants full-size coordinates, some providers
+		// strip the leading zero byte, and a few pad extra ones, so a value that fits the curve is accepted however
+		// it is padded. What does not fit is refused before it can be truncated into a different point.
+		size := (curve.Params().BitSize + 7) / 8
+		xi, yi := new(big.Int).SetBytes(x), new(big.Int).SetBytes(y)
+		if xi.BitLen() > size*8 || yi.BitLen() > size*8 {
+			return nil, k.Kid, fmt.Errorf("EC point is not on %s: a coordinate is larger than the curve's %d bytes", k.Crv, size)
+		}
+		point := make([]byte, 1+2*size)
+		point[0] = 4 // SEC 1 uncompressed
+		xi.FillBytes(point[1 : 1+size])
+		yi.FillBytes(point[1+size:])
+		pub, err := ecdsa.ParseUncompressedPublicKey(curve, point)
+		if err != nil {
+			return nil, k.Kid, fmt.Errorf("EC point is not on %s: %w", k.Crv, err)
 		}
 		return pub, k.Kid, nil
 
