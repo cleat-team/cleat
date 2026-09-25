@@ -499,6 +499,15 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 	// write of batchMode under the lock (cleat#2382). Capture the two guarded
 	// scalars under the lock and log after dropping it -- every counter below
 	// is an atomic and needs no lock.
+	//
+	// The lock also makes the due test a real check-and-set, and that is a
+	// behaviour change worth naming rather than a tidy-up: `if due { ... }` used
+	// to be an unlocked read-then-write, so two flushers that arrived inside the
+	// same 5s window could both see it expire and both emit ADAPTIVE-STATS. Now
+	// exactly one wins per window and the other skips the whole block. Found in
+	// review, not by the detector -- it is a second production pair (two
+	// flushAndNotify goroutines against each other) that the reported race
+	// happened to hide behind.
 	now := time.Now()
 	af.mu.Lock()
 	due := now.Sub(af.lastReportTime) >= 5*time.Second
