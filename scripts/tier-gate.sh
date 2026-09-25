@@ -38,10 +38,18 @@
 # property of the partition -- see --self-test, which asserts two independent
 # invocations agree.
 #
-# Deliberately unfixed here: the package-list extraction below still finds only
-# 8 of tiers.yaml's declared 12 tier1.packages entries (cleat#2085 -- an awk
-# pattern that stops at an embedded comment). This PR shards what tier-gate
-# already runs; it does not change what that is.
+# tiers.yaml is read with a YAML parser, not with awk (cleat#2085). Until that
+# fix each tier1.* list had its own hand-rolled awk, and four of them stopped at
+# the first line inside their block that was not a `- ` entry -- which is what a
+# comment line is. `packages` therefore found 8 of the declared 12, so
+# ./monitoring/..., ./tests/integrity/..., ./tests/upgrade/... and
+# ./tests/crash/... ran in NO tier-1 gate, and the two counts that existed to
+# catch a short read were the same pattern twice and confirmed it instead.
+#
+# The parse happens AFTER --self-test and --verify-shard-coverage, because both run
+# in the `tier1-coverage` job, which has "No DB, no Python, no wasm-tools" by design
+# and exists to fail a broken partition in seconds. Both modes exit before the parse,
+# so neither acquires a PyYAML dependency from this change.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -241,6 +249,75 @@ if [ -n "$LIST_SHARD_SPEC" ]; then
   exit 0
 fi
 
+# --- 0. Every tier1.* read comes from ONE YAML parse --------------------------------
+# See the header. Four separate awk parses of one file disagreed about the same key;
+# this replaces all of them. It is also what scripts/check-required-contexts.py
+# already did -- and that script read 12 tier1.packages while this one read 8, for
+# as long as both existed. Two readings of one file that nobody compares are not a
+# check; the disagreement is what found this (CLAUDE.md, "could this check have
+# disagreed?").
+#
+# Fail closed, with its OWN exit status. 2 means "could not establish what was being
+# measured" and is deliberately not 1 ("a finding about the tree"), because the two
+# send the next person to different places: 1 says go and look at the code, 2 says
+# the gate itself is broken. A gate that cannot read its own manifest must not
+# report a green -- that is the failure this whole script exists to refuse.
+TIERS_TSV=$(python3 - "$TIERS" <<'PY'
+import sys
+
+try:
+    import yaml
+except ImportError:
+    sys.stderr.write(
+        "tier-gate: PyYAML is not installed, so tiers.yaml cannot be parsed.\n"
+        "  Install it (pip install pyyaml). A gate that cannot read its own\n"
+        "  manifest must not report success.\n")
+    sys.exit(2)
+
+try:
+    with open(sys.argv[1]) as fh:
+        doc = yaml.safe_load(fh)
+except Exception as exc:                 # any parse failure is the same answer here
+    sys.stderr.write("tier-gate: %s is not valid YAML: %s\n" % (sys.argv[1], exc))
+    sys.exit(2)
+
+tier1 = doc.get("tier1") if isinstance(doc, dict) else None
+if not isinstance(tier1, dict):
+    sys.stderr.write("tier-gate: %s has no `tier1:` mapping\n" % sys.argv[1])
+    sys.exit(2)
+
+# `key<TAB>value`, one line per entry. An ABSENT key prints nothing rather than
+# erroring -- skip_allowlist and exclude_tests are legitimately empty in some trees,
+# and an empty list is a legitimate value for any of these. A key of the WRONG SHAPE
+# is an error: that is a manifest this gate does not understand, not an empty one.
+for key in ("dialects", "languages", "packages", "modules",
+            "skip_allowlist", "exclude_tests"):
+    value = tier1.get(key)
+    if value is None:
+        continue
+    if not isinstance(value, list):
+        sys.stderr.write("tier-gate: tier1.%s is not a list (got %s)\n"
+                         % (key, type(value).__name__))
+        sys.exit(2)
+    for item in value:
+        if key == "modules":
+            if not isinstance(item, dict) or not isinstance(item.get("dir"), str):
+                sys.stderr.write(
+                    "tier-gate: tier1.modules entries must be `- dir: <path>`\n")
+                sys.exit(2)
+            item = item["dir"]
+        if not isinstance(item, str):
+            sys.stderr.write("tier-gate: tier1.%s has a non-string entry\n" % key)
+            sys.exit(2)
+        sys.stdout.write("%s\t%s\n" % (key, item))
+PY
+) || exit 2
+
+# tier1_list KEY: the entries for one key, one per line. tier1_list_ws: the same,
+# space-separated, for the inline lists the code below walks with `for d in $V`.
+tier1_list()    { printf '%s\n' "$TIERS_TSV" | awk -F'\t' -v k="$1" '$1==k{print $2}'; }
+tier1_list_ws() { tier1_list "$1" | paste -sd ' ' -; }
+
 [ -n "$SHARD_SPEC" ] && note "shard $SHARD_I_NUM/$SHARD_N_NUM ($RUN_MODE)"
 
 # --- 1. CGO must be on -------------------------------------------------------------
@@ -254,7 +331,7 @@ fi
 # --- 2. Every tier-1 dialect must actually connect ----------------------------------
 # Read the dialect list out of tiers.yaml rather than restating it here, so the file
 # stays the source of truth.
-DIALECTS=$(awk '/^tier1:/{t=1} t&&/^  dialects:/{gsub(/.*\[|\].*/,""); gsub(/,/," "); print; exit}' "$TIERS")
+DIALECTS=$(tier1_list_ws dialects)
 [ -n "$DIALECTS" ] || { echo "tier-gate: could not read tier1.dialects from $TIERS" >&2; exit 2; }
 note "tier 1 dialects: $DIALECTS"
 
@@ -360,8 +437,14 @@ done
 # never can be), so this precondition does not apply there -- checked here rather than
 # left to be discovered as an unused service, so a future engine-shard-only CI job does
 # not carry a requirement it cannot trigger.
-if [ "$RUN_MODE" != "engine-shard" ] && awk '/^tier1:/{t=1} t&&/^  packages:/{p=1;next} p&&/^    - /{print;next} p{exit}' "$TIERS" \
-     | grep -q '\./tests/crash/'; then
+#
+# This guard never fired until cleat#2085. It tested membership by running the SAME
+# truncated packages extraction the rest of the script used, and ./tests/crash/... is
+# one of the four entries that extraction dropped -- so the check for "is the crash
+# suite in tier 1" was itself answered by the bug it was written to be robust against,
+# and the whole of 2a2 above was dead. Checked on the real list now:
+# `tier1_list packages | grep -qxF ./tests/crash/...` -> matches.
+if [ "$RUN_MODE" != "engine-shard" ] && tier1_list packages | grep -qxF './tests/crash/...'; then
   if [ -z "${CLEAT_CRASH_DB:-}" ]; then
     fail "CLEAT_CRASH_DB is unset -- ./tests/crash/... is a tier-1 package and does not use
        the CLEAT_TEST_* DSNs. It defaults to port 5433 (WORKSTREAM.md gives this
@@ -380,7 +463,7 @@ fi
 # missing componentize-py, and there are TWO prerequisites checked independently
 # (componentize-py and wasm-tools), so installing only the first leaves the engine tests
 # skipping with a different message.
-LANGS=$(awk '/^tier1:/{t=1} t&&/^  languages:/{gsub(/.*\[|\].*/,""); gsub(/,/," "); print; exit}' "$TIERS")
+LANGS=$(tier1_list_ws languages)
 [ -n "$LANGS" ] || { echo "tier-gate: could not read tier1.languages from $TIERS" >&2; exit 2; }
 note "tier 1 languages: $LANGS"
 
@@ -421,23 +504,51 @@ if [ "$FAILED" = "1" ] && [ "$MEASURE" = "0" ]; then
 fi
 
 # --- 3. Run tier-1 packages ---------------------------------------------------------
-# `next` is load-bearing: sub() rewrites $0, so without it the stripped line no longer
-# matches /^    - / and the following rule's exit fires after the first entry. That bug
-# shipped once and made this gate test 1 of 11 packages while reporting healthily --
-# which is precisely the class of failure this script exists to catch.
-PKGS=$(awk '/^tier1:/{t=1} t&&/^  packages:/{p=1;next} p&&/^    - /{sub(/^    - /,"");print;next} p{exit}' "$TIERS")
+PKGS=$(tier1_list packages)
 [ -n "$PKGS" ] || { echo "tier-gate: could not read tier1.packages from $TIERS" >&2; exit 2; }
 
 NPKG=$(echo "$PKGS" | grep -c .)
-NDECL=$(awk '/^tier1:/{t=1} t&&/^  packages:/{p=1;next} p&&/^    - /{n++;next} p{exit} END{print n+0}' "$TIERS")
+
+# NDECL is a deliberately DIFFERENT reading of the same key: a line-range scan that
+# never parses YAML at all and never exits early. Its only job is to disagree.
+#
+# It replaces two awk counters that shared the extractor's own pattern, so a short
+# read confirmed itself -- the check that existed to catch an 8-of-12 extraction was
+# the same bug written twice, and reported 8 == 8. A check that cannot disagree with
+# the thing it checks is a claim, not a check (CLAUDE.md, "Is this result real?").
+#
+# Two things this scan deliberately does NOT understand, both on purpose:
+#   * `- ` entries with trailing YAML comments (`- foo   # note`) are counted whole;
+#     the YAML parse strips the comment. That would differ, so the difference is
+#     reported rather than resolved. No entry carries one today; if one ever does,
+#     this is where a reviewer is told.
+#   * it ends the block at the next 2-space key, which is the manifest's shape. A
+#     construct it does not model is a disagreement, not a silent truncation -- the
+#     failure mode the old pattern had and this exists to refuse.
+NDECL=$(awk '
+  /^tier1:[[:space:]]*$/              {t=1; next}
+  t && /^[^[:space:]#]/               {exit}       # next top-level key ends the block
+  t && /^  packages:[[:space:]]*$/    {p=1; next}
+  p && /^  [A-Za-z_]/                 {exit}       # next sibling key ends the block
+  p && /^    - /                      {n++}        # an entry, whatever follows it
+  END                                 {print n+0}
+' "$TIERS")
+
 if [ "$NPKG" != "$NDECL" ]; then
-  echo "tier-gate: extracted $NPKG package(s) but tiers.yaml declares $NDECL" >&2; exit 2
+  echo "tier-gate: the YAML parse found $NPKG tier1.package(s), an independent line-range scan found $NDECL." >&2
+  echo "  The two disagree, so one of them is wrong and this gate will not run until that is resolved:" >&2
+  echo "  a short read here means packages silently run in NO tier-1 gate." >&2
+  exit 2
 fi
+note "tier1.packages: $NPKG entries (YAML parse and independent line-range scan agree)"
 
 # --- Which packages does THIS invocation actually run? -------------------------
 # Unsharded: all of them, as always. An engine shard: only ./engine/..., further
-# narrowed by -run below. The rest shard: everything else, unchanged -- deliberately
-# still the buggy 8-of-12 extraction above (cleat#2085), not fixed here.
+# narrowed by -run below. The rest shard: everything else.
+#
+# The rest shard grew its four packages when cleat#2085 was fixed: it is the shard
+# that runs ./monitoring/..., ./tests/integrity/..., ./tests/upgrade/... and
+# ./tests/crash/..., none of which any shard ran before.
 SHARD_PATTERN=""
 RUN_MOD_DIRS=1
 case "$RUN_MODE" in
@@ -478,13 +589,21 @@ esac
 #     on every run, so what was excluded is in the log next to what ran;
 #   * a pattern matching nothing is a hard failure, so an entry cannot rot into place
 #     after the test it names is renamed or deleted.
-EXCL=$(awk '/^tier1:/{t=1} t&&/^  exclude_tests:/{p=1;next} p&&/^    - /{sub(/^    - /,"");gsub(/"/,"");print;next} p&&/^    #/{next} p&&/^$/{next} p{exit}' "$TIERS")
+EXCL=$(tier1_list exclude_tests)
 
 SKIP_RE=""
 if [ -n "$EXCL" ]; then
-  for pat in $EXCL; do
+  # One pattern per line, read with `while read` rather than `for pat in $EXCL`.
+  # The old word-splitting form was fine only because no pattern contains a space;
+  # a quoted regex with one would have been split into two patterns silently, and
+  # a split pattern matches nothing -- the stale-entry failure this block exists to
+  # detect, reached from the other side.
+  while IFS= read -r pat; do
+    [ -n "$pat" ] || continue
     if [ -z "$SKIP_RE" ]; then SKIP_RE="$pat"; else SKIP_RE="$SKIP_RE|$pat"; fi
-  done
+  done <<EOF
+$EXCL
+EOF
   note "excluding lower-tier tests: $SKIP_RE"
 
   # Resolve to names. -list does not run anything, so this is cheap and is the only
@@ -504,7 +623,8 @@ if [ -n "$EXCL" ]; then
 
   # A pattern that matches nothing individually is just as stale as the whole list
   # being stale, and is far easier to miss.
-  for pat in $EXCL; do
+  while IFS= read -r pat; do
+    [ -n "$pat" ] || continue
     # SC2086: $PKGS is a deliberately unquoted package list.
     # SC2015: `A && B || C` is not if-then-else, but here C is `|| true` on
     # the pipeline, guarding grep -c's exit 1 on no match -- which is the
@@ -512,7 +632,9 @@ if [ -n "$EXCL" ]; then
     # shellcheck disable=SC2086,SC2015
     n=$(cd "$REPO_ROOT" && go test -list "$pat" $PKGS 2>/dev/null | grep -cE '^Test' || true)
     [ "$n" = "0" ] && fail "tier1.exclude_tests pattern '$pat' matches no test -- stale entry"
-  done
+  done <<EOF
+$EXCL
+EOF
 fi
 
 if [ "$FAILED" = "1" ] && [ "$MEASURE" = "0" ]; then
@@ -562,7 +684,7 @@ TEST_RC=$?
 # ./cleat/...` from the root fails with "main module does not contain package".
 # Run once only -- skipped by the engine shards, which own no module directory.
 if [ "$RUN_MOD_DIRS" = "1" ]; then
-  MODDIRS=$(awk '/^tier1:/{t=1} t&&/^  modules:/{p=1;next} p&&/^    - dir: /{sub(/^    - dir: /,"");print;next} p&&/^      /{next} p{exit}' "$TIERS")
+  MODDIRS=$(tier1_list modules)
   for md in $MODDIRS; do
     [ -f "$REPO_ROOT/$md/go.mod" ] || { fail "tiers.yaml names module '$md' but $md/go.mod does not exist"; continue; }
     note "running module: $md"
@@ -597,7 +719,7 @@ fi
 # --- 4. A skip in tier 1 is a failure -----------------------------------------------
 # The allowlist covers non-tests only (see tiers.yaml). Allowlisted skips are still
 # printed, so the exception stays visible rather than becoming invisible policy.
-ALLOW=$(awk '/^tier1:/{t=1} t&&/^  skip_allowlist:/{p=1;next} p&&/^    - /{sub(/^    - /,"");print;next} p&&/^ *#/{next} p{exit}' "$TIERS")
+ALLOW=$(tier1_list skip_allowlist)
 SKIP_ALLOWED=0
 if [ -n "$ALLOW" ]; then
   for a in $ALLOW; do
