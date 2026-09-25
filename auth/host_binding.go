@@ -207,8 +207,11 @@ func tenantForHostStmt(dialect string) string {
 	}
 }
 
-// CountTenantDomains reports how many hostname mappings exist across all
-// tenants.
+// CountTenantDomains reports whether any hostname mapping exists across all tenants, as a count that is
+// EXACT ONLY AT ZERO: it stops at the first tenant that has a row and returns that tenant's count, since
+// the one caller asks only whether it is zero and the walk is otherwise one query per tenant (measured
+// about a millisecond each, 9.9s at 10,000 tenants, which is startup-probe territory over a network).
+// Only the refusal case, no domain anywhere, reads every tenant.
 //
 // It exists for ONE caller: the worker's startup check. Enabling host binding
 // on a deployment that has configured no domains would refuse every
@@ -255,6 +258,9 @@ func (s *TenantStore) CountTenantDomains(ctx context.Context) (int, error) {
 			return 0, fmt.Errorf("count tenant_domains for tenant %s: %w", id, err)
 		}
 		total += n
+		if total > 0 {
+			return total, nil
+		}
 	}
 	return total, nil
 }

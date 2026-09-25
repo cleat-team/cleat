@@ -37,6 +37,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cleat-team/cleat/auth"
 )
 
 const defaultTenantForHostTest = "00000000-0000-0000-0000-000000000000"
@@ -112,6 +114,25 @@ func TestRequireHostMatchBootsAsTheAppRoleAndServesOnEveryDialect(t *testing.T) 
 			// 3. The default tenant's domain: boots, and the request path is scoped and still refuses.
 			host := "app.tenant.example.test"
 			execDomain(t, owner, c.name, host, defaultTenantForHostTest)
+
+			// The count stops at the first tenant that has a row (it is exact only at zero), so a boot does
+			// not walk every tenant to answer "is anything registered". Two tenants now have one domain
+			// each: a walk would say 2, the early exit says 1. Without this the walk could come back
+			// unnoticed, and it costs about a millisecond per tenant.
+			if other != "" {
+				appDB, err := sql.Open(c.driver, appDSN)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer appDB.Close()
+				store, err := auth.NewTenantStoreForDialect(appDB, c.name)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if n, err := store.CountTenantDomains(context.Background()); err != nil || n != 1 {
+					t.Errorf("CountTenantDomains over two tenants with one domain each = %d, %v; want 1 (it stops at the first tenant with a row)", n, err)
+				}
+			}
 			ok, out2 := hostMatchServes(t, bin, args(), &key, func(base, key string) {
 				status := func(h string) int {
 					req, _ := http.NewRequest(http.MethodGet, base+"/api/workflows", nil)
