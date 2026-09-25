@@ -245,9 +245,16 @@ func TestSustainedHigherPriorityArrivalsStarveAnOlderRun(t *testing.T) {
 			t.Fatalf("round %d: claimed %d, want 1", i, len(got))
 		}
 		if got[0].ID == "old-low-priority" {
-			t.Logf("round %d claimed the older lower-priority run; the starvation path this "+
-				"test describes was not taken on this run", i)
-			return
+			t.Fatalf("round %d claimed old-low-priority, the OLDER run, ahead of a "+
+				"priority-0 arrival.\n\n"+
+				"This test records a measured consequence of `ORDER BY priority ASC, "+
+				"created_at`: priority outranks age, so an older lower-priority run is passed "+
+				"over while higher-priority work keeps arriving. It failing means that "+
+				"ordering moved.\n\n"+
+				"It is (likely) INTENDED behaviour -- priority is a feature -- so do NOT revert "+
+				"the ordering to make this pass. Find which change moved it, and if "+
+				"age-outranks-priority is now the design, update this test and cleat#2041's "+
+				"note rather than the store.", i)
 		}
 	}
 
