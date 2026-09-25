@@ -85,6 +85,18 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 
 	// Check cancellation before making the call.
 	callCtx := ctx
+	if s.engine.hardStopCtx != nil {
+		// cleat#2287: ctx is the wasmtime host function's own context, derived
+		// from context.Background() and never cancelled, so an in-flight
+		// callService would otherwise ride out its own timeout even after the
+		// worker hard-stops. Derive a context the blocking call can observe and
+		// abort on, without leaking a goroutine past freshCall.
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		stop := context.AfterFunc(s.engine.hardStopCtx, cancel)
+		defer stop()
+	}
 	if s.engine.signalStore != nil {
 		cancelled, _, err := s.engine.signalStore.PollCancellation(ctx, s.engine.workflowID)
 		if err != nil {
@@ -173,6 +185,19 @@ func (s *execSession) freshCall(ctx context.Context, m api.Module, service, oper
 
 	resp, err := s.callService(callCtx, service, operation, requestJSON, step)
 	callElapsed := time.Since(callStart)
+
+	if err != nil && s.engine.hardStopObserved() {
+		// cleat#2287: the worker hard-stopped mid-call. Suspend, do not fail
+		// and do not complete. suspendErr is what makes executor.go's suspend
+		// path win over the error even when the guest swallows it and returns
+		// normally (the cleat#2285 COMPLETED hazard). No call event is
+		// recorded: the call's outcome is unknown, and the next worker replays
+		// from before it under the same idempotency key. The error handed to
+		// the guest unwinds its error path, draining its defer table.
+		s.suspendErr = &SuspendError{Reason: shutdownSuspendReason}
+		written, _ := s.writeResult(ctx, m, responsePtr, shutdownCallError, responseMaxLen)
+		return packDurableCallResult(int(written), callFailureCode, 1)
+	}
 
 	var callErr string
 	if err != nil {

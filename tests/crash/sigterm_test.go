@@ -134,6 +134,46 @@ func TestSIGTERM_b_ReleasesARunThatOutlastsTheGraceInsteadOfFailingIt(t *testing
 	}
 }
 
+// (b2) The discriminating case cleat#2287 closes: a guest that CATCHES the
+// hard-stop error and returns a success. Before suspendErr was set on the
+// hard-stop, that swallow ended the run COMPLETED on a call that was cut off.
+// The suspend must win over the swallowed error, so the run is released and
+// another worker finishes it -- never COMPLETED, never FAILED.
+func TestSIGTERM_b2_ACatchingGuestIsReleasedNotCompleted(t *testing.T) {
+	db := ownerDB(t)
+	defer db.Close()
+	suffix := uniqueSuffix()
+	taskQueue, wfID := "queue-term-b2-"+suffix, "term-b2-wf-"+suffix
+
+	deployFixture(t, db, taskQueue)
+	bin := buildWorker(t)
+	svc := newChargeService(t)
+	release := svc.holdOperation("Ship")
+	defer release()
+
+	first := startWorker(t, bin, taskQueue, svc.srv.URL, "--shutdown-grace", "2s")
+	startWorkflowEntry(t, db, wfID, "order-"+suffix, taskQueue, "catches_abort")
+	svc.awaitHeldCall(t, first, startBudget)
+
+	exited := first.term()
+	time.Sleep(4 * time.Second) // grace over, the held Ship is hard-stopped
+	release()
+	awaitExit(t, exited, 30*time.Second, first)
+
+	requireReleased(t, db, wfID, first)
+
+	second := startWorker(t, bin, taskQueue, svc.srv.URL)
+	requireDone(t, db, wfID, completeBudget, second)
+	r, c, s := svc.allCounts()
+	t.Logf("Reserve=%d Charge=%d Ship=%d", r, c, s)
+	if r != 1 || c != 1 {
+		t.Errorf("Reserve=%d Charge=%d, want 1/1: the calls that had finished must not be repeated", r, c)
+	}
+	if s < 1 || s > 2 {
+		t.Errorf("Ship=%d, want 1 or 2: at-least-once, the interrupted call may replay once", s)
+	}
+}
+
 func TestSIGTERM_c_ACompensatingRunIsNotToldItsCallFailed(t *testing.T) {
 	db := ownerDB(t)
 	defer db.Close()
