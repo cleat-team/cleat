@@ -43,7 +43,7 @@ func setupErrorPlugin(t *testing.T) http.Handler {
 	if err := p.RegisterRoutes(p.mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	return auth.Middleware(engine.NewPostgresStore(db), false)(p.mux)
+	return auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, p.mux)(p.mux)
 }
 
 // TestGetDBError verifies that handleGet returns 500 when the DB query fails.
@@ -134,7 +134,7 @@ func TestPutWithIfMatchMySQL(t *testing.T) {
 	if err := p.RegisterRoutes(p.mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	mysqlHandler := auth.Middleware(engine.NewPostgresStore(sql.OpenDB(&fakeConnector{store: store})), false)(p.mux)
+	mysqlHandler := auth.MiddlewareWithMux(engine.NewPostgresStore(sql.OpenDB(&fakeConnector{store: store})), false, p.mux)(p.mux)
 
 	// Update with correct If-Match.
 	req := authedRequest("PUT", "/kv/mysql-key", bytes.NewReader([]byte(`"v2"`)))
@@ -171,7 +171,7 @@ func TestPutUpsertMySQL(t *testing.T) {
 	if err := p.RegisterRoutes(p.mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	mysqlHandler := auth.Middleware(engine.NewPostgresStore(sql.OpenDB(&fakeConnector{store: store})), false)(p.mux)
+	mysqlHandler := auth.MiddlewareWithMux(engine.NewPostgresStore(sql.OpenDB(&fakeConnector{store: store})), false, p.mux)(p.mux)
 
 	// Upsert a new key with MySQL dialect.
 	req := authedRequest("PUT", "/kv/new-key", bytes.NewReader([]byte(`"v1"`)))

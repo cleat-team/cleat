@@ -5,12 +5,12 @@ package main
 // (plugins/webhookingest, verifies its own HMAC signature), a third-party
 // IdP's OAuth redirect (plugins/oauthprovider), and Slack's own
 // interactive-callback POST (plugins/slacknotify, cleat#2172). See
-// auth.Middleware's doc comment for why this is a hand-maintained list
+// auth.MiddlewareWithMux's doc comment for why this is a hand-maintained list
 // rather than something plugins declare themselves.
 //
 // A single shared variable, not three hand-copied literals -- before
 // cleat#2273's fix, this exact list was typed out separately at both
-// auth.HostBindingMiddleware's and auth.Middleware's call sites in main.go,
+// auth.HostBindingMiddleware's and auth.MiddlewareWithMux's call sites in main.go,
 // plus a fourth copy in plugin_route_body_limit_exempt_test.go. A pattern
 // added to one and missed in another fails exactly the way cleat#2172's
 // first problem did: silently, as a 401 on a request that has no way to

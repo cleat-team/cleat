@@ -194,10 +194,11 @@ X-Cleat-API-Key: cleat_sk_abc123...
 
 ### Implementation
 
-The `auth.Middleware` function wraps the HTTP handler chain:
+The `auth.MiddlewareWithMux` function wraps the HTTP handler chain (simplified -- the real
+signature also takes `requireAuth bool`, a real `*http.ServeMux`, and `publicPatterns ...string`):
 
 ```go
-func Middleware(db *sql.DB) func(http.Handler) http.Handler {
+func MiddlewareWithMux(db *sql.DB) func(http.Handler) http.Handler {
     return func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
             key := extractAPIKey(r)

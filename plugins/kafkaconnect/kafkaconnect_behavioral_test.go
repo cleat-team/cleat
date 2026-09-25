@@ -452,7 +452,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 	return p, handler, store
 }
 
@@ -964,7 +964,7 @@ func TestKafkaConfigTenantIsolation(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	// Tenant A creates a config.
 	body := `{"name":"tenant-a-config","brokers":"a:9092","topic":"a-topic"}`

@@ -1271,7 +1271,7 @@ func TestSN_UpdateConfig_ClearDefaultChannel(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	// Clear default_channel by setting to empty string.
 	body := `{"default_channel":""}`
@@ -1311,7 +1311,7 @@ func TestSN_UpdateConfig_NoFieldsError(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	// Empty body - should fail read body or parse.
 	req := authedRequest("PUT", "/slack/configs/"+cfgID.String(), bytes.NewReader([]byte("{}")))
@@ -1369,7 +1369,7 @@ func TestSN_ListScanError(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	req := authedRequest("GET", "/slack/configs", nil)
 	rec := httptest.NewRecorder()
@@ -1413,7 +1413,7 @@ func TestSN_UpdateConfigRefetchError(t *testing.T) {
 	}
 	mux := http.NewServeMux()
 	p.RegisterRoutes(mux)
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	// Update name, then try to re-fetch a non-existent config to trigger the error.
 	// Actually this is tricky with the fake store. Let me test that the update works first.

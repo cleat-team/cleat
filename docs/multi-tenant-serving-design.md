@@ -182,7 +182,7 @@ That clobber depends on both middlewares writing the same context key, which the
 `internal/tenantctx`. Had they been distinct keys the two values would coexist and the winner would
 be whichever `tenantFor` happened to read — so this is the load-bearing detail, not an aside.
 
-It is **not** clobbered on the paths auth lets through without a key. `auth.Middleware` returns
+It is **not** clobbered on the paths auth lets through without a key. `auth.MiddlewareWithMux` returns
 early via `next.ServeHTTP` for the infrastructure paths (`auth.IsInfrastructurePath`: `/healthz`, `/livez`, `/readyz`, `/metrics`), and each public pattern —
 `POST /ingest/{source_id}` and `GET /oauth/{provider}/callback`, wired at
 `cmd/cleat-worker/main.go:1447-1450`. On those routes a client-supplied tenant header survives into

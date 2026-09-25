@@ -82,7 +82,7 @@ func (s *FakeSecrets) retireLocked(tenantID, name string) (int64, error) {
 }
 
 // tenantIDFromContext resolves the same value production code does:
-// auth.WithTenantID / the real auth.Middleware and auth.TenantIDFromContext
+// auth.WithTenantID / the real auth.MiddlewareWithMux and auth.TenantIDFromContext
 // share one underlying mechanism (both delegate to internal/tenantctx), so a
 // test context built either way resolves here exactly as it would against a
 // real engine.SecretStore.

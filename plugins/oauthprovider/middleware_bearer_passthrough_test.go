@@ -64,7 +64,7 @@ func (sessionDB) QueryRow(_ context.Context, _ string, _ ...any) plugin.RowScann
 // presented exactly that way, so once #891 linked oauthprovider -- and
 // cmd/cleat-worker/main.go wraps the whole handler chain in every plugin
 // implementing HasMiddleware -- every authenticated request answered
-// `401 {"error":"invalid session"}` before reaching auth.Middleware.
+// `401 {"error":"invalid session"}` before reaching auth.MiddlewareWithMux.
 //
 // `--require-auth` defaults to true, so a default deployment served an API
 // where no key worked at all (#912).
@@ -79,7 +79,7 @@ func (sessionDB) QueryRow(_ context.Context, _ string, _ ...any) plugin.RowScann
 //
 // # What it must do instead
 //
-// Fall through. Refusing an unauthenticated request is auth.Middleware's
+// Fall through. Refusing an unauthenticated request is auth.MiddlewareWithMux's
 // decision and it still makes it -- a request with no valid credential is
 // refused there. Nothing is loosened: what changes is WHICH component decides,
 // and only the component that owns every accepted scheme can decide correctly.
@@ -101,7 +101,7 @@ func TestABearerTokenThatIsNotAnOAuthSessionFallsThrough(t *testing.T) {
 		t.Errorf("the request never reached the next handler; the OAuth middleware answered %d %q.\n\n"+
 			"A bearer token absent from oauth_sessions is not necessarily invalid -- it is most "+
 			"likely a credential for another scheme, and a cleat API key is presented exactly "+
-			"this way. Rejecting here means auth.Middleware never runs and no API key works "+
+			"this way. Rejecting here means auth.MiddlewareWithMux never runs and no API key works "+
 			"anywhere. Fall through and let the component that owns every scheme decide.",
 			rec.Code, rec.Body.String())
 	}

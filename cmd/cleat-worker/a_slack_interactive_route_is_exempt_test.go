@@ -6,7 +6,7 @@ package main
 // handleInteractiveCallback's own signature check ever ran -- the first
 // problem #2172 reported. The fix is a hand-maintained exemption, the same
 // shape ingest and the OAuth callback already use, and it needs BOTH
-// middleware call sites: auth.Middleware (always installed with
+// middleware call sites: auth.MiddlewareWithMux (always installed with
 // --require-auth) and auth.HostBindingMiddleware (installed only with
 // --require-host-match, but when it is, every non-exempt path needs a
 // matching tenant domain, which Slack's request never carries).
@@ -20,11 +20,14 @@ package main
 // first problem -- a dropped call site silently, a dropped list entry
 // silently in a different place.
 //
-// cleat#2274 changed both call sites from auth.Middleware/HostBindingMiddleware
-// to the *WithMux variants, passing the real serving mux so a literal sibling
-// of a public wildcard (POST /ingest/sources beside POST /ingest/{source_id})
-// can't be wrongly matched by a throwaway matcher that never saw it. The
-// regexes below were updated to match; they still assert the same two things.
+// cleat#2274 changed both call sites from the mux-less Middleware/
+// HostBindingMiddleware wrappers to the *WithMux variants, passing the real
+// serving mux so a literal sibling of a public wildcard (POST /ingest/sources
+// beside POST /ingest/{source_id}) can't be wrongly matched by a throwaway
+// matcher that never saw it. The regexes below were updated to match; they
+// still assert the same two things. (The mux-less Middleware wrapper itself
+// was later removed -- cleat#2320 -- once every caller had a real mux to
+// pass instead of taking its nil-mux shortcut.)
 //
 // This is a source scan, not a live-server test, for the same reason
 // TestMainSwitchesOnClassifyPluginInitError (a_plugin_init_error_severity_test.go)

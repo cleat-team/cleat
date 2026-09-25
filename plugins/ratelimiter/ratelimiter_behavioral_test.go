@@ -329,7 +329,7 @@ func behRouteHandler(t *testing.T) (*Plugin, http.Handler) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes(): %v", err)
 	}
-	return p, auth.Middleware(engine.NewPostgresStore(p.db.(*engine.SQLDBAdapter).DB), false)(mux)
+	return p, auth.MiddlewareWithMux(engine.NewPostgresStore(p.db.(*engine.SQLDBAdapter).DB), false, mux)(mux)
 }
 
 // ---------------------------------------------------------------------------
@@ -486,7 +486,7 @@ func TestHandlePut_EmptyKey(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.handlePut(w, r)
 	})
-	authHandler := auth.Middleware(engine.NewPostgresStore(p.db.(*engine.SQLDBAdapter).DB), false)(handler)
+	authHandler := auth.MiddlewareWithMux(engine.NewPostgresStore(p.db.(*engine.SQLDBAdapter).DB), false, nil)(handler)
 
 	body := `{"max_requests":10,"window_seconds":60}`
 	req := behAuthedReq("PUT", "/rate-limits/", bytes.NewReader([]byte(body)))
@@ -504,7 +504,7 @@ func TestHandleDelete_EmptyKey(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.handleDelete(w, r)
 	})
-	authHandler := auth.Middleware(engine.NewPostgresStore(p.db.(*engine.SQLDBAdapter).DB), false)(handler)
+	authHandler := auth.MiddlewareWithMux(engine.NewPostgresStore(p.db.(*engine.SQLDBAdapter).DB), false, nil)(handler)
 
 	req := behAuthedReq("DELETE", "/rate-limits/", nil)
 	rec := httptest.NewRecorder()

@@ -179,7 +179,7 @@ func TestHostBindingMiddlewareWithMux_LiteralSiblingOfPublicWildcardStaysProtect
 	// in: HostBindingMiddleware shares buildPublicMatcher, so it independently
 	// treats POST /ingest/sources as exempt from the host check too, even for
 	// a request that already carries a resolved tenant (i.e. one that made it
-	// past a since-fixed auth.Middleware). Given the real mux both patterns
+	// past a since-fixed auth.MiddlewareWithMux). Given the real mux both patterns
 	// are registered on, it must not.
 	tenantA := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	res := &fakeDomains{owner: map[string]uuid.UUID{"a.example.com": tenantA}}
@@ -202,7 +202,7 @@ func TestHostBindingMiddlewareWithMux_LiteralSiblingOfPublicWildcardStaysProtect
 	}
 
 	// The actual public wildcard, with no tenant in context (as it would have
-	// if auth.Middleware treated it as public and set none), still passes
+	// if auth.MiddlewareWithMux treated it as public and set none), still passes
 	// through regardless of Host.
 	r = httptest.NewRequest(http.MethodPost, "/ingest/abc-123", nil)
 	r.Host = "wrong.example.com"

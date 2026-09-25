@@ -196,7 +196,7 @@ That order determines plugin `Init` order and, because each middleware wraps the
     PROBE   audit-log,oauth-provider,rate-limiter         239
     PROBE   rate-limiter,audit-log,oauth-provider         130
 
-The built-in `auth.Middleware` wraps outermost (`main.go:1447`), so the tenant is always in context
+The built-in `auth.MiddlewareWithMux` wraps outermost (`main.go:1447`), so the tenant is always in context
 before any plugin middleware runs — which is why this has not bitten. What is unstable is ordering
 *among* the plugin middlewares: whether `auditlog` sees `oauthprovider`'s session depends on the
 run. A sort is a one-line fix; declared ordering is the fuller one.

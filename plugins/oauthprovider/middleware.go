@@ -73,7 +73,7 @@ func (p *Plugin) Middleware(next http.Handler) http.Handler {
 		//
 		// Falling through is not a loosening. This middleware only ever ADDS
 		// SessionInfo; it grants nothing on its own, and it sits OUTSIDE
-		// auth.Middleware, which still refuses a request carrying no valid
+		// auth.MiddlewareWithMux, which still refuses a request carrying no valid
 		// credential.
 		if !looksLikeSessionToken(token) {
 			next.ServeHTTP(w, r)

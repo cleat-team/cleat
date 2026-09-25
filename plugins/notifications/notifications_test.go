@@ -906,7 +906,7 @@ func buildHandler(t *testing.T, p *Plugin, store *fakeNotifyStore) http.Handler 
 	}
 	db := sql.OpenDB(&fakeConnector{store: store})
 	t.Cleanup(func() { db.Close() })
-	return auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	return auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 }
 
 // ---------------------------------------------------------------------------

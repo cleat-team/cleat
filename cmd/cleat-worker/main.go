@@ -2233,7 +2233,7 @@ func main() {
 			// POST (plugins/slacknotify, cleat#2172) -- so they must stay
 			// reachable without one even though --require-auth wraps the
 			// same mux/plugHandler every other plugin route goes through.
-			// See auth.Middleware's doc comment for why this is a
+			// See auth.MiddlewareWithMux's doc comment for why this is a
 			// hand-maintained list rather than something plugins declare
 			// themselves.
 			//
@@ -2266,7 +2266,7 @@ func main() {
 				logger.ErrorContext(context.Background(), "cannot build the API key resolver, so no request could be authenticated", "worker_id", workerID, "error", arErr)
 				os.Exit(1)
 			}
-			// HOST BINDING GOES ON FIRST, so that after auth.Middleware wraps
+			// HOST BINDING GOES ON FIRST, so that after auth.MiddlewareWithMux wraps
 			// it below the order is auth OUTSIDE, host binding INSIDE.
 			//
 			// That order is the whole correctness argument. Installed the other

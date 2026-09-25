@@ -984,7 +984,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 	}
 
 	// Auth middleware for management routes; ingest route works without auth.
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 	return p, handler, store
 }
 
@@ -1494,7 +1494,7 @@ func TestIngestDisabledSource(t *testing.T) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	req := httptest.NewRequest("POST", "/ingest/"+sourceID.String(), bytes.NewReader([]byte(`{"test":true}`)))
 	rec := httptest.NewRecorder()
@@ -1621,7 +1621,7 @@ func TestDeletingASourceCancelsItsPendingEventsForBothDeliveryPaths(t *testing.T
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	req := authedRequest("DELETE", "/ingest/sources/"+sourceID.String(), nil)
 	rec := httptest.NewRecorder()
@@ -2148,7 +2148,7 @@ func TestIngestWithSignalDelivery(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	// Ingest a payload, signed with the source's secret -- every source
 	// requires one now (cleat#1992/#2172).
@@ -2709,7 +2709,7 @@ func TestWH_ListSources_TenantIsolation(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	// Tenant 1 lists sources.
 	req := httptest.NewRequest("GET", "/ingest/sources", nil)
@@ -3102,7 +3102,7 @@ func TestWH_Ingest_BodyReadError(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	// Send request with a body that fails on Read.
 	req := httptest.NewRequest("POST", "/ingest/"+sourceID.String(), &errReadCloser{})
@@ -3184,7 +3184,7 @@ func TestWH_Ingest_SignalWorkflowError(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	// Ingest a payload, signed with the source's secret.
 	payload := `{"action":"test"}`
@@ -3246,7 +3246,7 @@ func TestWH_Ingest_EmptySignalName(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	// Ingest a payload, signed with the source's secret.
 	payload := `{"action":"test"}`
@@ -3317,7 +3317,7 @@ func TestWH_Ingest_NonJSONBodyWithSignal(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	// Ingest a non-JSON plain text body, signed with the source's secret.
 	rawText := "plain text body"

@@ -438,7 +438,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeEventStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(p.mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, p.mux)(p.mux)
 	return p, handler, store
 }
 
@@ -1036,7 +1036,7 @@ func TestHandleReadDBError(t *testing.T) {
 		config: Config{MaxEventSize: 1 * 1024 * 1024},
 	}
 	p.RegisterRoutes(p.mux)
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(p.mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, p.mux)(p.mux)
 
 	// Append an event (should succeed).
 	store.mu.Lock()
@@ -1159,7 +1159,7 @@ func TestHandleAppendDBError(t *testing.T) {
 		config: Config{MaxEventSize: 1 * 1024 * 1024},
 	}
 	p.RegisterRoutes(p.mux)
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(p.mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, p.mux)(p.mux)
 
 	req := authedRequest("POST", "/events/fail-append", bytes.NewReader([]byte(`{"x":1}`)))
 	rec := httptest.NewRecorder()
