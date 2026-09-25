@@ -55,8 +55,9 @@ type chainEnv struct {
 }
 
 // scratchDatabase creates an empty database on the server the dialect's test DSN names
-// and returns a DSN for it.
-func scratchDatabase(t *testing.T, d chainDialect, admin *sql.DB, adminDSN string) string {
+// and returns a DSN for it. cleanup registers its drop: t.Cleanup for a database of one test's own,
+// the package's end for the shared one.
+func scratchDatabase(t *testing.T, d chainDialect, admin *sql.DB, adminDSN string, cleanup func(func())) string {
 	t.Helper()
 	name := "cleat_audit2047_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
 	var dsn, drop string
@@ -90,7 +91,7 @@ func scratchDatabase(t *testing.T, d chainDialect, admin *sql.DB, adminDSN strin
 		u.Path = "/" + name
 		dsn, drop = u.String(), "DROP DATABASE IF EXISTS "+name+" WITH (FORCE)"
 	}
-	t.Cleanup(func() {
+	cleanup(func() {
 		if a, err := sql.Open(d.driver, adminDSN); err == nil {
 			defer a.Close()
 			_, _ = a.Exec(drop)
@@ -99,7 +100,84 @@ func scratchDatabase(t *testing.T, d chainDialect, admin *sql.DB, adminDSN strin
 	return dsn
 }
 
+// newChainEnv builds a database of the test's own. Almost nothing needs one: see sharedChainEnv.
 func newChainEnv(t *testing.T, d chainDialect) *chainEnv {
+	t.Helper()
+	return buildChainEnv(t, d, t.Cleanup)
+}
+
+// The shared databases, one per dialect, built by the first test that asks and dropped by TestMain.
+//
+// Building a database is the cost that matters here and it is not small: applying the whole core schema
+// took about nine seconds on MySQL in CI, and every test on every dialect paid it, which is what made this
+// package take between three and fifteen minutes and, on one slow runner, exceed the 900s per-package
+// budget while a test was 11 seconds old (cleat#2276). Nothing was hung.
+//
+// Sharing is sound for a test that keeps to its own tenant, and every one that goes through
+// forEachChainDialect does: rows, chain heads, verification and export are all keyed by a tenant the test
+// made up. What is NOT tenant-scoped is anything that reads or acts on the whole database: a sweep
+// (cleanupRetention deletes and counts other tests' aged rows) or a listing of every chained tenant. A test
+// that does uses forEachIsolatedChainDialect, and one that forgets fails on the first foreign row it meets
+// (TestChainedTenantsListsEveryTenantThatHasAChain did, the first time this was run).
+var sharedChain = struct {
+	mu       sync.Mutex
+	envs     map[string]*chainEnv
+	failed   map[string]string
+	cleanups []func()
+}{envs: map[string]*chainEnv{}, failed: map[string]string{}}
+
+// runSharedChainCleanups drops the shared databases, in reverse order of creation.
+func runSharedChainCleanups() {
+	sharedChain.mu.Lock()
+	defer sharedChain.mu.Unlock()
+	for i := len(sharedChain.cleanups) - 1; i >= 0; i-- {
+		sharedChain.cleanups[i]()
+	}
+	sharedChain.cleanups = nil
+}
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	runSharedChainCleanups()
+	os.Exit(code)
+}
+
+// sharedChainEnv returns this test's view of the dialect's shared database: its own *chainEnv (helpers
+// report to the calling test's t) over the one connection pool and the one database.
+func sharedChainEnv(t *testing.T, d chainDialect) *chainEnv {
+	t.Helper()
+	sharedChain.mu.Lock()
+	base, built := sharedChain.envs[d.name]
+	failure := sharedChain.failed[d.name]
+	sharedChain.mu.Unlock()
+	if failure != "" {
+		t.Fatalf("the shared %s database could not be built by an earlier test: %s", d.name, failure)
+	}
+	if !built {
+		// Built under the first test's t, but registered for teardown at the package's end, not that test's.
+		// A failure to build is remembered so the tests after it say why instead of retrying a broken server.
+		built := false
+		defer func() {
+			if !built && !t.Skipped() {
+				sharedChain.mu.Lock()
+				sharedChain.failed[d.name] = "the test that first asked for it failed while building it (see that test's output)"
+				sharedChain.mu.Unlock()
+			}
+		}()
+		base = buildChainEnv(t, d, func(f func()) {
+			sharedChain.mu.Lock()
+			sharedChain.cleanups = append(sharedChain.cleanups, f)
+			sharedChain.mu.Unlock()
+		})
+		built = true
+		sharedChain.mu.Lock()
+		sharedChain.envs[d.name] = base
+		sharedChain.mu.Unlock()
+	}
+	return &chainEnv{t: t, d: base.d, owner: base.owner, dsn: base.dsn}
+}
+
+func buildChainEnv(t *testing.T, d chainDialect, cleanup func(func())) *chainEnv {
 	t.Helper()
 	adminDSN := os.Getenv(d.env)
 	if adminDSN == "" && d.name == "postgres" {
@@ -116,16 +194,16 @@ func newChainEnv(t *testing.T, d chainDialect) *chainEnv {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { admin.Close() })
+	cleanup(func() { admin.Close() })
 	if err := admin.Ping(); err != nil {
 		t.Fatalf("%s is set but unreachable: %v", d.env, err)
 	}
-	dsn := scratchDatabase(t, d, admin, adminDSN)
+	dsn := scratchDatabase(t, d, admin, adminDSN, cleanup)
 	owner, err := sql.Open(d.driver, dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { owner.Close() })
+	cleanup(func() { owner.Close() })
 	// The core schema first: the tenant policy the plugin's v2 migration emits calls
 	// cleat.assert_tenant_set(), and AllTenantIDs reads admin.tenants.
 	testutil.SetupFullSchema(t, owner, d.td)
@@ -138,7 +216,18 @@ func newChainEnv(t *testing.T, d chainDialect) *chainEnv {
 	return &chainEnv{t: t, d: d, owner: owner, dsn: dsn}
 }
 
+// forEachChainDialect runs fn on each dialect over the dialect's shared database. Use only tenants the test
+// made up; a test that sweeps the whole database uses forEachIsolatedChainDialect.
 func forEachChainDialect(t *testing.T, fn func(t *testing.T, e *chainEnv)) {
+	t.Helper()
+	for _, d := range chainDialects {
+		t.Run(d.name, func(t *testing.T) { fn(t, sharedChainEnv(t, d)) })
+	}
+}
+
+// forEachIsolatedChainDialect gives each dialect a database of the test's own, for a test whose effect is
+// not confined to its tenants (cleanupRetention deletes and counts every tenant's aged rows).
+func forEachIsolatedChainDialect(t *testing.T, fn func(t *testing.T, e *chainEnv)) {
 	t.Helper()
 	for _, d := range chainDialects {
 		t.Run(d.name, func(t *testing.T) { fn(t, newChainEnv(t, d)) })
@@ -539,7 +628,7 @@ func TestTextThatCannotBeStoredIsReplacedNotDropped(t *testing.T) {
 // row is gone -- the very break a verifier exists to report -- and must not include a
 // tenant that only has rows from before the chain existed.
 func TestChainedTenantsListsEveryTenantThatHasAChain(t *testing.T) {
-	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+	forEachIsolatedChainDialect(t, func(t *testing.T, e *chainEnv) {
 		p := e.plugin()
 		withChain, headLost, preChain := uuid.New(), uuid.New(), uuid.New()
 		e.record(p, withChain, 3)

@@ -196,7 +196,7 @@ func TestAFloorThatDoesNotMatchTheRowsIsReported(t *testing.T) {
 // chain is fine, and rows written before the chain existed (no seq) are still removed on
 // their age.
 func TestTheRetentionSweepVisitsEveryTenantAndTheUnchainedRows(t *testing.T) {
-	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+	forEachIsolatedChainDialect(t, func(t *testing.T, e *chainEnv) {
 		p := e.plugin()
 		errs := p.captureErrors()
 		// NONE OF THEM IS REGISTERED in the tenants table, deliberately: audit rows outlive
