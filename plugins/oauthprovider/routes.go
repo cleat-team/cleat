@@ -361,9 +361,18 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// response: this handler is UNAUTHENTICATED (handleLogin accepts
 		// ?tenant_id= from anyone), so an operator-actionable message
 		// naming cleat's internal secret scheme and the cleatctl command
-		// that fixes it would hand an anonymous caller both an enumeration
-		// oracle ("this provider IS configured") and detail about cleat's
+		// that fixes it would hand an anonymous caller detail about cleat's
 		// own tooling (cleat-review's item (4) on cleat#2295).
+		//
+		// The uniform TEXT below closes the STRING oracle only, and an
+		// earlier version of this comment claimed more than it delivers. The
+		// STATUS still discriminates: a configured tenant that gets past this
+		// point ends at the redirect this handler closes with (302), while
+		// this branch answers 500. So a caller who has not authenticated can
+		// still read "this (tenant, provider) pair IS configured" off a 302.
+		// That is one-directional and therefore not closed. The residual is
+		// recorded on cleat#2340, which owns the identity half and is where
+		// narrowing it belongs; the log line keeps the operator detail.
 		p.logger.Error("oauth: config lookup", "provider", provider, "error", err,
 			"secret_not_found", errors.Is(err, plugin.ErrSecretNotFound))
 		p.writeError(w, http.StatusInternalServerError, "oauth config not found")
@@ -514,12 +523,22 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		// provider has no client secret set" (an operator setup step was
 		// skipped) from every other lookup failure, and that distinction is
 		// worth the operator's attention -- but only in the log, not the
-		// response: this handler is UNAUTHENTICATED (handleLogin accepts
-		// ?tenant_id= from anyone), so an operator-actionable message
-		// naming cleat's internal secret scheme and the cleatctl command
-		// that fixes it would hand an anonymous caller both an enumeration
-		// oracle ("this provider IS configured") and detail about cleat's
-		// own tooling (cleat-review's item (4) on cleat#2295).
+		// response, so an operator-actionable message naming cleat's internal
+		// secret scheme and the cleatctl command that fixes it does not hand
+		// a caller detail about cleat's own tooling (cleat-review's item (4)
+		// on cleat#2295).
+		//
+		// This route is unauthenticated because it is EXEMPT from plugin auth,
+		// not because it reads a tenant from the query string -- that
+		// justification sat on both handlers and describes only handleLogin.
+		// Here tid comes from the oauth_sessions row the state parameter
+		// selects (the CROSS-TENANT lookup above), so the caller cannot choose
+		// whose config is read, and any pair this branch could probe,
+		// handleLogin already probes directly.
+		//
+		// The uniform TEXT closes the STRING oracle only; the STATUS still
+		// discriminates (500 here, the 200 JSON finishLogin returns on
+		// success). Same residual, recorded on cleat#2340.
 		p.logger.Error("oauth: config lookup", "provider", provider, "error", err,
 			"secret_not_found", errors.Is(err, plugin.ErrSecretNotFound))
 		p.writeError(w, http.StatusInternalServerError, "oauth config not found")
