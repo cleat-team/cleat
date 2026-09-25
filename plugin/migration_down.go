@@ -234,7 +234,25 @@ func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target 
 		// unqualified names against a different search_path and drop nothing,
 		// which is the bug this whole function had. RunMigrations applies each
 		// migration on the session for the same reason.
-		if _, err := session.ExecContext(ctx, downFor(m, dialect)); err != nil {
+		//
+		// execSQLStatements, not a single session.ExecContext(ctx, downFor(...)):
+		// RunMigrations' own Up path already splits a migration's SQL into
+		// individual statements before executing (the line above this one
+		// does exactly that for the migrations-table DDL), because MySQL's
+		// production DSN carries no CLIENT_MULTI_STATEMENTS flag and a
+		// multi-statement Down -- the PREPARE/EXECUTE/DEALLOCATE idiom this
+		// package's own migrations use to guard a conditional DDL -- fails
+		// the whole statement at the SECOND `;` with a syntax error, on the
+		// SQL after it rather than anything wrong with that SQL itself. The
+		// Down path called ExecContext directly and never split, so it
+		// worked only on however many single-statement Downs happened to be
+		// written and had never been exercised end-to-end against a
+		// multi-statement one until TestUninstallSchedulerBackupOnEveryDialect
+		// (cleat#2247) reversed v5's pre-existing DownMySQL for the first
+		// time. cleat-review's own CI, not a local run, is what caught it:
+		// CI's CLEAT_TEST_MYSQL carries no multiStatements=true and a local
+		// DSN typed by hand easily does.
+		if err := execSQLStatements(ctx, session.ExecContext, downFor(m, dialect)); err != nil {
 			return res, fmt.Errorf("plugin %s: reversing %d: %w\n\nVersions already reversed: %v",
 				name, m.Version, err, res.Reversed)
 		}
