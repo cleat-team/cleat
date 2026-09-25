@@ -664,6 +664,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is refused with the existing `EC point is not on <curve>` message. The new function also refuses the point at
   infinity. Nothing else in the plugin changed.
 
+- **A literal route sibling of a public wildcard is no longer treated as public, and a plugin stuck on
+  the pre-cleat#2232 route signature now refuses to boot instead of silently registering nothing.**
+  (cleat#2274, cleat#2277)
+
+  `auth.Middleware`/`auth.HostBindingMiddleware` decided whether a request was public by matching it
+  against a throwaway `*http.ServeMux` built from only the exempt patterns, not the real serving mux.
+  A literal route that happens to share a path segment with a public wildcard — `POST /ingest/sources`
+  beside the public `POST /ingest/{source_id}` — matched the wildcard on the throwaway mux and was
+  let through with no credential at all. `auth.MiddlewareWithMux`/`auth.HostBindingMiddlewareWithMux`
+  now resolve the exemption against the same `*http.ServeMux` the worker actually serves from, so a
+  request is public only when the real mux itself would route it to an exempt pattern.
+  `HostBindingMiddleware`, the mux-less wrapper, is removed — every caller now passes the real mux.
+
+  Separately, `checkPluginRouteSignatures` (added with cleat#2232's `plugin.Router` interface) already
+  detected a plugin still implementing the old `RegisterRoutes(mux *http.ServeMux) error` signature,
+  but only logged a warning: the worker kept booting with that plugin's routes silently unregistered.
+  It now returns an error that `cleat-worker`'s `main` treats as fatal, refusing to start rather than
+  serving with a route table that does not match what a plugin author believes is wired up.
+
 - **SIGTERM drains before it cancels, and a run cut off by shutdown is released, never failed.** (cleat#2285)
 
   The signal handler cancelled the worker's context at once. Every in-flight durable wait was aborted and the

@@ -72,8 +72,8 @@ func NormalizeHost(host string) string {
 	return strings.ToLower(h)
 }
 
-// HostBindingMiddleware refuses a request whose Host does not belong to the
-// authenticated tenant.
+// HostBindingMiddlewareWithMux refuses a request whose Host does not belong
+// to the authenticated tenant.
 //
 // THE RULE IT IMPLEMENTS. An API key is proved; a Host header is asserted. The
 // tenant comes from the credential -- which auth.Middleware has already put in
@@ -97,14 +97,22 @@ func NormalizeHost(host string) string {
 //     redirect. There is no authenticated tenant on those requests, so there
 //     is nothing to compare a Host against.
 //
+// The public-pattern exemption is resolved against mux -- the real serving
+// mux -- the same way MiddlewareWithMux does and for the same reason (see its
+// doc comment, and isPublicRoute in public_route.go): a throwaway mux built
+// from only publicPatterns cannot see a literal sibling of a public wildcard,
+// and wrongly exempts it too. cleat#2274. mux may be nil for a caller with no
+// real serving mux to hand.
+//
 // A request with no tenant in context is PASSED THROUGH rather than refused.
 // That is not a hole: with --require-auth (the default) such a request has
 // already been answered 401 by auth.Middleware and never reaches here. Refusing
 // it here instead would make this middleware the thing that breaks
 // --require-auth=false deployments, which is a separate decision from the one
 // this implements.
-func HostBindingMiddleware(resolver DomainResolver, publicPatterns ...string) func(http.Handler) http.Handler {
+func HostBindingMiddlewareWithMux(resolver DomainResolver, mux *http.ServeMux, publicPatterns ...string) func(http.Handler) http.Handler {
 	publicMatcher := buildPublicMatcher(publicPatterns)
+	patternSet := publicPatternSet(publicPatterns)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			path := r.URL.Path
@@ -112,11 +120,9 @@ func HostBindingMiddleware(resolver DomainResolver, publicPatterns ...string) fu
 				next.ServeHTTP(w, r)
 				return
 			}
-			if publicMatcher != nil {
-				if _, pattern := publicMatcher.Handler(r); pattern != "" {
-					next.ServeHTTP(w, r)
-					return
-				}
+			if isPublicRoute(mux, publicMatcher, patternSet, r) {
+				next.ServeHTTP(w, r)
+				return
 			}
 
 			tenantID, ok := TenantIDFromContext(r.Context())
@@ -187,7 +193,7 @@ func (s *TenantStore) TenantForHost(ctx context.Context, hostname string, want u
 	if errors.Is(err, sql.ErrNoRows) {
 		// No row is the answer for BOTH "nobody owns this hostname" and "another
 		// tenant owns it". They are deliberately indistinguishable here, and
-		// HostBindingMiddleware answers identically for each.
+		// HostBindingMiddlewareWithMux answers identically for each.
 		return false, nil
 	}
 	if err != nil {

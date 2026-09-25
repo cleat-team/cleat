@@ -39,7 +39,7 @@ func TestHostBindingRefusesAHostTheTenantDoesNotOwn(t *testing.T) {
 		"a.example.com": tenantA,
 		"b.example.com": tenantB,
 	}}
-	h := HostBindingMiddleware(res)(okHandler())
+	h := HostBindingMiddlewareWithMux(res, nil)(okHandler())
 
 	for _, tc := range []struct {
 		name string
@@ -78,7 +78,7 @@ func TestHostBindingIsNotAnOracle(t *testing.T) {
 	tenantA := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	tenantB := uuid.MustParse("22222222-2222-2222-2222-222222222222")
 	res := &fakeDomains{owner: map[string]uuid.UUID{"taken.example.com": tenantB}}
-	h := HostBindingMiddleware(res)(okHandler())
+	h := HostBindingMiddlewareWithMux(res, nil)(okHandler())
 
 	get := func(host string) (int, string) {
 		r := httptest.NewRequest(http.MethodGet, "/api/workflows", nil)
@@ -110,7 +110,7 @@ func TestHostBindingIsNotAnOracle(t *testing.T) {
 func TestHostBindingFailsClosedWhenTheLookupErrors(t *testing.T) {
 	tenantA := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	res := &fakeDomains{err: errors.New("database is down")}
-	h := HostBindingMiddleware(res)(okHandler())
+	h := HostBindingMiddlewareWithMux(res, nil)(okHandler())
 
 	r := httptest.NewRequest(http.MethodGet, "/api/workflows", nil)
 	r.Host = "a.example.com"
@@ -129,7 +129,7 @@ func TestHostBindingFailsClosedWhenTheLookupErrors(t *testing.T) {
 func TestHostBindingSkipsPathsWithNoTenantUrlToPresent(t *testing.T) {
 	tenantA := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	res := &fakeDomains{owner: map[string]uuid.UUID{}}
-	h := HostBindingMiddleware(res, "POST /ingest/{source_id}")(okHandler())
+	h := HostBindingMiddlewareWithMux(res, nil, "POST /ingest/{source_id}")(okHandler())
 
 	for _, tc := range []struct{ name, method, path string }{
 		{"healthz", http.MethodGet, "/healthz"},
@@ -159,7 +159,7 @@ func TestHostBindingSkipsPathsWithNoTenantUrlToPresent(t *testing.T) {
 // change behaviour for --require-auth=false deployments.
 func TestHostBindingPassesThroughWhenThereIsNoTenant(t *testing.T) {
 	res := &fakeDomains{owner: map[string]uuid.UUID{}}
-	h := HostBindingMiddleware(res)(okHandler())
+	h := HostBindingMiddlewareWithMux(res, nil)(okHandler())
 
 	r := httptest.NewRequest(http.MethodGet, "/api/workflows", nil)
 	r.Host = "unregistered.example.com"
@@ -171,6 +171,45 @@ func TestHostBindingPassesThroughWhenThereIsNoTenant(t *testing.T) {
 	}
 	if res.calls != 0 {
 		t.Errorf("the resolver was consulted %d times with no tenant to compare against", res.calls)
+	}
+}
+
+func TestHostBindingMiddlewareWithMux_LiteralSiblingOfPublicWildcardStaysProtected(t *testing.T) {
+	// Same defect as MiddlewareWithMux's sibling test (cleat#2274), one layer
+	// in: HostBindingMiddleware shares buildPublicMatcher, so it independently
+	// treats POST /ingest/sources as exempt from the host check too, even for
+	// a request that already carries a resolved tenant (i.e. one that made it
+	// past a since-fixed auth.Middleware). Given the real mux both patterns
+	// are registered on, it must not.
+	tenantA := uuid.MustParse("11111111-1111-1111-1111-111111111111")
+	res := &fakeDomains{owner: map[string]uuid.UUID{"a.example.com": tenantA}}
+
+	mux := http.NewServeMux()
+	mux.Handle("POST /ingest/{source_id}", okHandler())
+	mux.Handle("POST /ingest/sources", okHandler())
+
+	h := HostBindingMiddlewareWithMux(res, mux, "POST /ingest/{source_id}")(mux)
+
+	// A tenant-bound request to the literal sibling, on a host that tenant
+	// does not own, must be refused -- not waved through as "public".
+	r := httptest.NewRequest(http.MethodPost, "/ingest/sources", nil)
+	r.Host = "wrong.example.com"
+	r = r.WithContext(WithTenantID(context.Background(), tenantA))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("POST /ingest/sources on an unowned host: got %d, want 404 (refused)", w.Code)
+	}
+
+	// The actual public wildcard, with no tenant in context (as it would have
+	// if auth.Middleware treated it as public and set none), still passes
+	// through regardless of Host.
+	r = httptest.NewRequest(http.MethodPost, "/ingest/abc-123", nil)
+	r.Host = "wrong.example.com"
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Errorf("POST /ingest/{source_id} with no tenant: got %d, want 200 (public)", w.Code)
 	}
 }
 

@@ -131,9 +131,12 @@ func IsInfrastructurePath(path string) bool {
 // (plugins/oauthprovider) -- and would otherwise 401 before that endpoint's own
 // verification ever runs. Each entry is a Go 1.22+ http.ServeMux pattern
 // ("POST /ingest/{source_id}"), matched with the exact same method+wildcard semantics
-// the real mux uses, via a throwaway ServeMux built only for matching (see
-// buildPublicMatcher) -- so "POST /ingest/{source_id}" does not also make
-// "GET /ingest/sources" public.
+// the real mux uses -- call MiddlewareWithMux, passing the real serving mux, rather
+// than Middleware, wherever a public wildcard might have a literal same-method
+// sibling registered on that mux ("POST /ingest/sources" beside the public "POST
+// /ingest/{source_id}"). Middleware alone matches against a throwaway mux built only
+// from publicPatterns, which has no such sibling to lose to and so wrongly reports
+// the sibling itself as public -- cleat#2274.
 //
 // A plugin-declared version of this (a PublicRoutes() method plugins implement
 // themselves) would need changes to plugin/plugin.go and to each plugin, which are
@@ -142,7 +145,20 @@ func IsInfrastructurePath(path string) bool {
 // adding a new externally-triggered plugin endpoint must add it here too -- nothing
 // enforces that the two stay in sync.
 func Middleware(store TenantResolver, requireAuth bool, publicPatterns ...string) func(http.Handler) http.Handler {
+	return MiddlewareWithMux(store, requireAuth, nil, publicPatterns...)
+}
+
+// MiddlewareWithMux is Middleware, but decides whether a request is public by
+// asking mux -- the real, fully-registered *http.ServeMux that will go on to
+// serve it -- which pattern it resolves to, instead of a throwaway mux built
+// from only publicPatterns. See isPublicRoute's doc comment (public_route.go)
+// for why that distinction matters: a literal sibling of a public wildcard,
+// registered anywhere on mux, is what makes the difference. cleat#2274.
+//
+// mux may be nil, in which case this behaves exactly like Middleware.
+func MiddlewareWithMux(store TenantResolver, requireAuth bool, mux *http.ServeMux, publicPatterns ...string) func(http.Handler) http.Handler {
 	publicMatcher := buildPublicMatcher(publicPatterns)
+	patternSet := publicPatternSet(publicPatterns)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Public paths are always accessible without authentication.
@@ -151,11 +167,9 @@ func Middleware(store TenantResolver, requireAuth bool, publicPatterns ...string
 				next.ServeHTTP(w, r)
 				return
 			}
-			if publicMatcher != nil {
-				if _, pattern := publicMatcher.Handler(r); pattern != "" {
-					next.ServeHTTP(w, r)
-					return
-				}
+			if isPublicRoute(mux, publicMatcher, patternSet, r) {
+				next.ServeHTTP(w, r)
+				return
 			}
 
 			key := extractAPIKey(r)

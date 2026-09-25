@@ -465,6 +465,105 @@ func TestMiddleware_NoPublicPatterns_StillRequiresAuth(t *testing.T) {
 	}
 }
 
+func TestMiddlewareWithMux_LiteralSiblingOfPublicWildcardStaysProtected(t *testing.T) {
+	// cleat#2274: POST /ingest/sources is a real, non-public route registered
+	// on the same mux as the public POST /ingest/{source_id}. Middleware's
+	// throwaway matcher -- built from only the public pattern -- has no
+	// sibling to lose to, so a same-method, same-prefix literal path like
+	// this one wrongly matches the wildcard and skips key resolution
+	// entirely. TestMiddleware_PublicPattern_DoesNotWidenToSiblingPath above
+	// does not catch this: it sends a GET, a different method, which the
+	// throwaway matcher already rejects for an unrelated reason. This test
+	// uses the SAME method as the public pattern, which is what actually
+	// shadowed.
+	//
+	// MiddlewareWithMux, given the real mux both patterns are registered on,
+	// must not have this gap: net/http's mux prefers the literal pattern over
+	// the wildcard for an exact path match, the same way it will when this
+	// mux really serves the request.
+	store := newFakeDBStore()
+	addTestKey(store)
+	db := newTestDB(store)
+	t.Cleanup(func() { db.Close() })
+
+	var sourcesCalled, sourceIDCalled bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /ingest/{source_id}", func(w http.ResponseWriter, r *http.Request) {
+		sourceIDCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("POST /ingest/sources", func(w http.ResponseWriter, r *http.Request) {
+		sourcesCalled = true
+		w.WriteHeader(http.StatusCreated)
+	})
+
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), true, mux, "POST /ingest/{source_id}")
+	handler := mw(mux)
+
+	// The literal sibling must require a key, not pass through as public.
+	req := httptest.NewRequest("POST", "/ingest/sources", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if sourcesCalled {
+		t.Error("expected POST /ingest/sources NOT to be reached without a key")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for POST /ingest/sources without a key, got %d", rec.Code)
+	}
+
+	// With a valid key, the literal sibling must still work (proving this
+	// isn't merely rejecting every request to that path).
+	sourcesCalled = false
+	req = httptest.NewRequest("POST", "/ingest/sources", nil)
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if !sourcesCalled {
+		t.Error("expected POST /ingest/sources to be reached with a valid key")
+	}
+	if rec.Code != http.StatusCreated {
+		t.Errorf("expected 201 for POST /ingest/sources with a valid key, got %d", rec.Code)
+	}
+
+	// The actual public wildcard must still pass through with no key.
+	req = httptest.NewRequest("POST", "/ingest/abc-123", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if !sourceIDCalled {
+		t.Error("expected POST /ingest/{source_id} to stay public")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for the public wildcard, got %d", rec.Code)
+	}
+}
+
+func TestMiddlewareWithMux_NilMuxFallsBackToThrowawayMatcher(t *testing.T) {
+	// mux may be nil (e.g. a caller with no real serving mux to hand); that
+	// must behave exactly like Middleware, not panic or silently deny
+	// everything.
+	store := newFakeDBStore()
+	db := newTestDB(store)
+	t.Cleanup(func() { db.Close() })
+
+	var handlerCalled bool
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), true, nil, "POST /ingest/{source_id}")
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("POST", "/ingest/abc-123", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if !handlerCalled {
+		t.Error("expected downstream handler to be called for a declared public pattern")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
 // --- TenantFromAPIKey direct tests ------------------------------------------
 
 func TestTenantFromAPIKey_Found(t *testing.T) {

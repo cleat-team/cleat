@@ -20,6 +20,12 @@ package main
 // first problem -- a dropped call site silently, a dropped list entry
 // silently in a different place.
 //
+// cleat#2274 changed both call sites from auth.Middleware/HostBindingMiddleware
+// to the *WithMux variants, passing the real serving mux so a literal sibling
+// of a public wildcard (POST /ingest/sources beside POST /ingest/{source_id})
+// can't be wrongly matched by a throwaway matcher that never saw it. The
+// regexes below were updated to match; they still assert the same two things.
+//
 // This is a source scan, not a live-server test, for the same reason
 // TestMainSwitchesOnClassifyPluginInitError (a_plugin_init_error_severity_test.go)
 // and a_deployment_secrets_wiring_test.go are: main() wires --require-auth
@@ -45,17 +51,17 @@ func TestSlackInteractiveIsExemptFromBothAuthMiddlewares(t *testing.T) {
 		call *regexp.Regexp
 	}{
 		{
-			name: "auth.HostBindingMiddleware",
-			call: regexp.MustCompile(`auth\.HostBindingMiddleware\(authResolver, pluginAuthExemptPatterns\.\.\.\)\(handler\)`),
+			name: "auth.HostBindingMiddlewareWithMux",
+			call: regexp.MustCompile(`auth\.HostBindingMiddlewareWithMux\(authResolver, mux, pluginAuthExemptPatterns\.\.\.\)\(handler\)`),
 		},
 		{
-			name: "auth.Middleware",
-			call: regexp.MustCompile(`handler = auth\.Middleware\(authResolver, true, pluginAuthExemptPatterns\.\.\.\)\(handler\)`),
+			name: "auth.MiddlewareWithMux",
+			call: regexp.MustCompile(`handler = auth\.MiddlewareWithMux\(authResolver, true, mux, pluginAuthExemptPatterns\.\.\.\)\(handler\)`),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !tc.call.MatchString(body) {
-				t.Fatalf("could not find %s(authResolver, ..., pluginAuthExemptPatterns...)(handler) in main.go -- "+
+				t.Fatalf("could not find %s(authResolver, ..., mux, pluginAuthExemptPatterns...)(handler) in main.go -- "+
 					"either the wiring was restructured (update the pattern above) or this call site stopped "+
 					"spreading the shared exempt-pattern list, which would let it drift from the other call site "+
 					"exactly as the two hand-copied literals this replaced once could", tc.name)
