@@ -21,6 +21,7 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/internal/tenantctx"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/google/uuid"
 )
@@ -225,11 +226,19 @@ func TestSN_SendMessage_NoChannel(t *testing.T) {
 // ===========================================================================
 
 // interactiveServer creates a plugin+handler for testing interactive callbacks.
+// p.db defaults to an empty fakeSlackWorkspaceDB (no team mapped to any
+// tenant), so a test that never calls withSlackWorkspace sees the same
+// "workspace not mapped" 404 for any signed route it constructs -- the safe
+// default for tests that aren't exercising tenant resolution itself.
 func interactiveServer(t *testing.T) (*Plugin, http.Handler) {
 	t.Helper()
 	p := &Plugin{
-		logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
-		deploymentSecrets: &fakeInteractiveDeploymentSecrets{secret: testSigningSecret},
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		deploymentSecrets: &fakeInteractiveDeploymentSecrets{
+			secret:   testSigningSecret,
+			routeKey: testRouteSigningKey,
+		},
+		db: &fakeSlackWorkspaceDB{teamToTenant: map[string]string{}},
 	}
 	mux := http.NewServeMux()
 	if err := p.RegisterRoutes(mux); err != nil {
@@ -238,12 +247,94 @@ func interactiveServer(t *testing.T) (*Plugin, http.Handler) {
 	return p, mux
 }
 
+// withSlackWorkspace maps teamID -> tenantID in p's fake DB, as if
+// `cleatctl` had registered the mapping via slack_workspace (cleat#2262).
+// t.Helper's Fatalf if p.db isn't the type interactiveServer wires in --
+// this is a test-authoring bug, not a runtime condition.
+func withSlackWorkspace(t *testing.T, p *Plugin, teamID, tenantID string) {
+	t.Helper()
+	ws, ok := p.db.(*fakeSlackWorkspaceDB)
+	if !ok {
+		t.Fatalf("withSlackWorkspace: p.db is %T, not *fakeSlackWorkspaceDB", p.db)
+	}
+	ws.teamToTenant[teamID] = tenantID
+}
+
 // testSigningSecret is the value interactiveServer's default
 // fakeDeploymentSecrets answers for "slacknotify.signing_secret". Tests that
 // want to reach past signature verification sign their request with it via
 // signSlackRequest; tests of the verification step itself override
 // p.deploymentSecrets (or clear it) after interactiveServer returns.
 const testSigningSecret = "test-signing-secret"
+
+// testRouteSigningKey is the value interactiveServer's default
+// fakeInteractiveDeploymentSecrets answers for
+// "slacknotify.route_signing_key". signTestRoute signs with it, matching
+// what verifyRouteSignature will check against inside the handler.
+const testRouteSigningKey = "test-route-signing-key-0123456789"
+
+// signTestRoute signs unsignedRoute the way sendMessage/stampBlocksWithRoutes
+// would for a button posted by tenantID, under testRouteSigningKey. Tests of
+// verifyRouteSignature's own primitives (rotation, expiry, tampering) call
+// signRoute directly with a different key/issuedAt instead of this helper.
+func signTestRoute(unsignedRoute, tenantID, blockID, value string) string {
+	return signRoute([]byte(testRouteSigningKey), unsignedRoute, tenantID, blockID, value, time.Now())
+}
+
+// fakeSlackWorkspaceDB is a minimal plugin.PluginDB answering only the one
+// query resolveSlackTenant issues (SELECT ... FROM slack_workspace WHERE
+// team_id = $1). It is deliberately separate from fakeConn/fakeDBStore
+// (slacknotify_behavioral_test.go), which model slack_config: slack_workspace
+// does not exist in this branch's own migrations at all -- it ships with
+// cleat#2262, not yet merged here -- so there is no real schema to match
+// beyond the one query this package itself writes.
+type fakeSlackWorkspaceDB struct {
+	teamToTenant map[string]string
+}
+
+func (f *fakeSlackWorkspaceDB) Begin(ctx context.Context) (plugin.PluginTx, error) {
+	return nil, fmt.Errorf("fakeSlackWorkspaceDB: Begin not supported")
+}
+func (f *fakeSlackWorkspaceDB) Exec(ctx context.Context, query string, args ...any) (int64, error) {
+	return 0, fmt.Errorf("fakeSlackWorkspaceDB: Exec not supported")
+}
+func (f *fakeSlackWorkspaceDB) Query(ctx context.Context, query string, args ...any) (plugin.Rows, error) {
+	return nil, fmt.Errorf("fakeSlackWorkspaceDB: Query not supported")
+}
+func (f *fakeSlackWorkspaceDB) Ping(ctx context.Context) error { return nil }
+
+func (f *fakeSlackWorkspaceDB) QueryRow(ctx context.Context, query string, args ...any) plugin.RowScanner {
+	if !strings.Contains(query, "FROM slack_workspace") {
+		return fakeSingleValueRow{err: fmt.Errorf("fakeSlackWorkspaceDB: unexpected query: %s", query)}
+	}
+	if len(args) != 1 {
+		return fakeSingleValueRow{err: fmt.Errorf("fakeSlackWorkspaceDB: expected 1 arg, got %d", len(args))}
+	}
+	teamID, _ := args[0].(string)
+	tenantID, ok := f.teamToTenant[teamID]
+	if !ok {
+		return fakeSingleValueRow{err: sql.ErrNoRows}
+	}
+	return fakeSingleValueRow{val: tenantID}
+}
+
+// fakeSingleValueRow implements plugin.RowScanner over one string column.
+type fakeSingleValueRow struct {
+	val string
+	err error
+}
+
+func (f fakeSingleValueRow) Scan(dest ...any) error {
+	if f.err != nil {
+		return f.err
+	}
+	ptr, ok := dest[0].(*string)
+	if !ok {
+		return fmt.Errorf("fakeSingleValueRow: dest[0] is %T, not *string", dest[0])
+	}
+	*ptr = f.val
+	return nil
+}
 
 // withTestTenant stamps a request's context with testTenantID. It no longer
 // represents a legitimate path to a tenant on this route -- /slack/interactive
@@ -260,21 +351,38 @@ func withTestTenant(req *http.Request) *http.Request {
 }
 
 // fakeInteractiveDeploymentSecrets is a plugin.DeploymentSecrets that
-// answers one fixed value for "slacknotify.signing_secret" and an error for
-// anything else, or always errors if errOnGet is set -- covering "absent",
-// "wrong name", and "lookup fails (unreadable/retired)" with one type. The
-// same shape as email's and llm's fakeDeploymentSecrets test doubles.
+// answers fixed values for "slacknotify.signing_secret",
+// "slacknotify.route_signing_key" and "slacknotify.route_signing_key.previous"
+// and an error for anything else, or always errors if errOnGet is set --
+// covering "absent", "wrong name", and "lookup fails (unreadable/retired)"
+// with one type. The same shape as email's and llm's fakeDeploymentSecrets
+// test doubles.
 type fakeInteractiveDeploymentSecrets struct {
-	secret   string
-	errOnGet error
+	secret           string
+	routeKey         string
+	routeKeyPrevious string
+	errOnGet         error
 }
 
+// Each of the three known names answers its field verbatim, including when
+// that field is "" -- the fake does not distinguish "configured empty" from
+// "never set" itself, so a test wanting the "not configured at all" path
+// gets it from an unrecognized name or errOnGet, not from an empty field.
+// This is deliberate: TestSN_InteractiveCallback_EmptyStoredSecret relies on
+// signingSecret's OWN empty check firing on a successful-but-empty Get, and
+// would stop being a known-positive for that check if this fake started
+// synthesizing its own "not set" error for the same case.
 func (f *fakeInteractiveDeploymentSecrets) Get(ctx context.Context, name string) (string, error) {
 	if f.errOnGet != nil {
 		return "", f.errOnGet
 	}
-	if name == "slacknotify.signing_secret" {
+	switch name {
+	case "slacknotify.signing_secret":
 		return f.secret, nil
+	case "slacknotify.route_signing_key":
+		return f.routeKey, nil
+	case "slacknotify.route_signing_key.previous":
+		return f.routeKeyPrevious, nil
 	}
 	return "", fmt.Errorf("fakeInteractiveDeploymentSecrets: %q not set", name)
 }
@@ -302,6 +410,94 @@ func signedInteractiveRequest(body string) *http.Request {
 	req.Header.Set("X-Slack-Request-Timestamp", timestamp)
 	req.Header.Set("X-Slack-Signature", signature)
 	return req
+}
+
+// ===========================================================================
+// resolveSlackTenant
+// ===========================================================================
+
+// TestResolveSlackTenant covers the direct cases: missing team.id, an
+// unmapped team, an ordinary single-workspace resolution, and Slack
+// Connect's cross-team check -- a click posted through a Slack Connect
+// shared channel carries the CLICKING user's own team_id separately from
+// the channel-owning team.id, and the two must resolve to the SAME tenant
+// or the click refuses. EqualFold, not ==: cleat-review's addendum flagged
+// that tenant_id round-trips through CAST(... AS CHAR(36)), whose casing is
+// dialect-dependent (MSSQL commonly upper-cases), so a same-tenant match by
+// exact string comparison would spuriously refuse on that dialect alone.
+func TestResolveSlackTenant(t *testing.T) {
+	tenantA := uuid.New().String()
+	tenantB := uuid.New().String()
+
+	tests := []struct {
+		name         string
+		teamToTenant map[string]string
+		payload      string
+		wantTenant   string
+		wantOK       bool
+	}{
+		{
+			name:         "missing team.id",
+			teamToTenant: map[string]string{},
+			payload:      `{}`,
+			wantOK:       false,
+		},
+		{
+			name:         "unmapped team",
+			teamToTenant: map[string]string{},
+			payload:      `{"team":{"id":"T-unmapped"}}`,
+			wantOK:       false,
+		},
+		{
+			name:         "ordinary single-workspace resolution",
+			teamToTenant: map[string]string{"T1": tenantA},
+			payload:      `{"team":{"id":"T1"}}`,
+			wantTenant:   tenantA,
+			wantOK:       true,
+		},
+		{
+			name:         "slack connect, same tenant, matching case",
+			teamToTenant: map[string]string{"T1": tenantA, "T-user": tenantA},
+			payload:      `{"team":{"id":"T1"},"user":{"id":"U1","team_id":"T-user"}}`,
+			wantTenant:   tenantA,
+			wantOK:       true,
+		},
+		{
+			name:         "slack connect, same tenant, different case (dialect cast)",
+			teamToTenant: map[string]string{"T1": strings.ToUpper(tenantA), "T-user": tenantA},
+			payload:      `{"team":{"id":"T1"},"user":{"id":"U1","team_id":"T-user"}}`,
+			wantTenant:   strings.ToUpper(tenantA),
+			wantOK:       true,
+		},
+		{
+			name:         "slack connect, DIFFERENT tenant refuses",
+			teamToTenant: map[string]string{"T1": tenantA, "T-user": tenantB},
+			payload:      `{"team":{"id":"T1"},"user":{"id":"U1","team_id":"T-user"}}`,
+			wantOK:       false,
+		},
+		{
+			name:         "slack connect, user's team unmapped, refuses",
+			teamToTenant: map[string]string{"T1": tenantA},
+			payload:      `{"team":{"id":"T1"},"user":{"id":"U1","team_id":"T-unmapped"}}`,
+			wantOK:       false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Plugin{db: &fakeSlackWorkspaceDB{teamToTenant: tc.teamToTenant}}
+			var payload slackInteractivePayload
+			if err := json.Unmarshal([]byte(tc.payload), &payload); err != nil {
+				t.Fatalf("invalid test fixture: %v", err)
+			}
+			gotTenant, gotOK := p.resolveSlackTenant(context.Background(), payload)
+			if gotOK != tc.wantOK {
+				t.Fatalf("resolveSlackTenant ok = %v, want %v", gotOK, tc.wantOK)
+			}
+			if gotOK && gotTenant != tc.wantTenant {
+				t.Errorf("resolveSlackTenant tenant = %q, want %q", gotTenant, tc.wantTenant)
+			}
+		})
+	}
 }
 
 func TestSN_InteractiveCallback_MissingPayload(t *testing.T) {
@@ -585,29 +781,136 @@ func TestSN_InteractiveCallback_InvalidSignature(t *testing.T) {
 	}
 }
 
-// TestSN_InteractiveCallback_ValidSignature pins cleat#2230(a)'s unconditional
-// refusal: a correctly-signed request naming a valid wf:...:sig:... route
-// still 404s and never reaches signalWorkflow, because there is no tenant
-// this handler will trust until cleat#2230(b) lands. Before that fix landed
-// this same request (with a tenant in ctx) delivered successfully; now that
-// path is deliberately dead.
-func TestSN_InteractiveCallback_ValidSignature(t *testing.T) {
-	rawBody := "payload=%7B%22type%22%3A%22block_actions%22%2C%22callback_id%22%3A%22wf%3Awf-123%3Asig%3Abutton-click%22%7D"
+// TestSN_InteractiveCallback_ValidSignedRouteDelivers is cleat#2230 ("signed
+// routes")'s happy path: a correctly-signed route, naming a tenant that
+// slack_workspace maps the clicking team to, delivers -- replacing
+// cleat#2230(a)'s unconditional-refusal stub this test used to pin (see the
+// prior TestSN_InteractiveCallback_ValidSignature). ctx passed to
+// signalWorkflow must carry the RESOLVED tenant via plugin.ForTenant, never
+// anything from withTestTenant's stray context tenant, which this test
+// deliberately also injects to prove it is ignored (the same property
+// TestSN_InteractiveCallback_TenantInContextIsIgnored pins for the refusal
+// path).
+func TestSN_InteractiveCallback_ValidSignedRouteDelivers(t *testing.T) {
+	unsignedRoute := "wf:wf-123:sig:button-click"
+	signed := signTestRoute(unsignedRoute, testTenantStr, "", "")
+	rawBody := fmt.Sprintf(`{"type":"block_actions","callback_id":%q,"team":{"id":"T123"}}`, signed)
+	body := "payload=" + url.QueryEscape(rawBody)
 
 	p, mux := interactiveServer(t)
-	signalDelivered := false
+	withSlackWorkspace(t, p, "T123", testTenantStr)
+	var gotWF, gotSig string
+	var gotTenant uuid.UUID
+	var gotTenantOK bool
 	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
-		signalDelivered = true
+		gotWF, gotSig = workflowID, signalName
+		gotTenant, gotTenantOK = tenantctx.From(ctx)
 		return nil
 	}
 
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, withTestTenant(signedInteractiveRequest(rawBody)))
-	if rec.Code != http.StatusNotFound {
-		t.Errorf("expected 404 (every click refuses until cleat#2230(b)), got %d: %s", rec.Code, rec.Body.String())
+	mux.ServeHTTP(rec, withTestTenant(signedInteractiveRequest(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for a validly signed, resolvable route, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if signalDelivered {
-		t.Error("signal must not be delivered -- there is no trusted tenant to deliver it under")
+	if gotWF != "wf-123" || gotSig != "button-click" {
+		t.Errorf("expected workflow=wf-123 signal=button-click, got workflow=%q signal=%q", gotWF, gotSig)
+	}
+	if !gotTenantOK || gotTenant.String() != testTenantStr {
+		t.Errorf("expected signalWorkflow's ctx to carry tenant %s (from slack_workspace), got ok=%v tenant=%s", testTenantStr, gotTenantOK, gotTenant)
+	}
+}
+
+// TestSN_InteractiveCallback_WrongTenantSignatureRefuses is the core
+// cross-tenant property cleat#2230 exists for: a route signed for tenant A
+// does not verify against tenant B, even when team T's workspace maps to B
+// and the route is otherwise well-formed and fresh. Without this, a button
+// posted into A's channel and reposted (or its webhook leaked) into B's
+// channel would resolve under B and fire in B's workflow.
+func TestSN_InteractiveCallback_WrongTenantSignatureRefuses(t *testing.T) {
+	tenantA := uuid.New().String()
+	tenantB := uuid.New().String()
+	unsignedRoute := "wf:wf-1:sig:action"
+	signedForA := signTestRoute(unsignedRoute, tenantA, "", "")
+	rawBody := fmt.Sprintf(`{"type":"block_actions","callback_id":%q,"team":{"id":"T-B"}}`, signedForA)
+	body := "payload=" + url.QueryEscape(rawBody)
+
+	p, mux := interactiveServer(t)
+	withSlackWorkspace(t, p, "T-B", tenantB)
+	signalCalled := false
+	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
+		signalCalled = true
+		return nil
+	}
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, signedInteractiveRequest(body))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for a route signed for a different tenant, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if signalCalled {
+		t.Error("signal must not be delivered -- the route was minted for a different tenant than the clicking workspace resolves to")
+	}
+}
+
+// TestSN_InteractiveCallback_ExpiredRouteRefuses pins owner decision 2A: a
+// route older than Config.routeMaxAge (default 30 days) is refused even
+// though its signature is otherwise perfectly valid.
+func TestSN_InteractiveCallback_ExpiredRouteRefuses(t *testing.T) {
+	unsignedRoute := "wf:wf-1:sig:action"
+	stale := signRoute([]byte(testRouteSigningKey), unsignedRoute, testTenantStr, "", "", time.Now().Add(-31*24*time.Hour))
+	rawBody := fmt.Sprintf(`{"type":"block_actions","callback_id":%q,"team":{"id":"T123"}}`, stale)
+	body := "payload=" + url.QueryEscape(rawBody)
+
+	p, mux := interactiveServer(t)
+	withSlackWorkspace(t, p, "T123", testTenantStr)
+	signalCalled := false
+	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
+		signalCalled = true
+		return nil
+	}
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, signedInteractiveRequest(body))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for a route older than the max age, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if signalCalled {
+		t.Error("signal must not be delivered for an expired route")
+	}
+}
+
+// TestSN_InteractiveCallback_PreviousKeyRotationGrace pins the design
+// addendum's rotation grace period: a route signed under
+// slacknotify.route_signing_key.previous still verifies (and delivers) once
+// the current key has been rotated away from it.
+func TestSN_InteractiveCallback_PreviousKeyRotationGrace(t *testing.T) {
+	const oldKey = "old-route-signing-key-0123456789"
+	unsignedRoute := "wf:wf-1:sig:action"
+	signed := signRoute([]byte(oldKey), unsignedRoute, testTenantStr, "", "", time.Now())
+	rawBody := fmt.Sprintf(`{"type":"block_actions","callback_id":%q,"team":{"id":"T123"}}`, signed)
+	body := "payload=" + url.QueryEscape(rawBody)
+
+	p, mux := interactiveServer(t)
+	p.deploymentSecrets = &fakeInteractiveDeploymentSecrets{
+		secret:           testSigningSecret,
+		routeKey:         testRouteSigningKey, // rotated to a NEW key
+		routeKeyPrevious: oldKey,              // grace period still active
+	}
+	withSlackWorkspace(t, p, "T123", testTenantStr)
+	signalCalled := false
+	p.signalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
+		signalCalled = true
+		return nil
+	}
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, signedInteractiveRequest(body))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for a route signed under the previous key during rotation grace, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !signalCalled {
+		t.Error("expected signal delivery for a route valid under the previous key")
 	}
 }
 
@@ -641,20 +944,14 @@ func TestSN_InteractiveCallback_BadCallbackID(t *testing.T) {
 	}
 }
 
-// TestSN_InteractiveCallback_NoTenantRefuses is cleat#2230(a)'s tenant
-// refusal: /slack/interactive is auth-exempt (cleat#2172), so before this fix
-// a click with a valid route delivered its signal with NO tenant in ctx --
-// which signalPluginWorkflow (cmd/cleat-worker/main.go) treats as unscoped,
-// i.e. the DEFAULT tenant's own session on Postgres/SQL Server. Any tenant
-// could post a button naming the default tenant's workflow and signal it,
-// while no other tenant's own buttons worked at all. Until cleat#2230(b)
-// adds a real slack_workspace lookup, this route has no way to resolve a
-// tenant, so every click with an otherwise-valid route must refuse.
-// Known-positive: falsified by restoring the auth.TenantIDFromRequest-gated
-// version, which makes this test still pass (it supplies no tenant either
-// way) but TestSN_InteractiveCallback_TenantInContextIsIgnored fail --
-// that's the version cleat-review's second pass actually caught, which this
-// test alone did not.
+// TestSN_InteractiveCallback_NoTenantRefuses is cleat#2230's tenant refusal:
+// /slack/interactive is auth-exempt (cleat#2172), so a click naming a team
+// slack_workspace has no mapping for must refuse rather than fall through to
+// any default tenant. The route itself is validly SHAPED and signed (it must
+// be, or extractCallbackRoute would report no-route at all, a 200 OK-no-op
+// rather than this 404 refusal) -- what makes resolution fail is that team
+// "T-unmapped" has no row in slack_workspace, which resolveSlackTenant's own
+// db query is what the handler checks before it ever verifies the MAC.
 func TestSN_InteractiveCallback_NoTenantRefuses(t *testing.T) {
 	p, mux := interactiveServer(t)
 	signalCalled := false
@@ -664,10 +961,14 @@ func TestSN_InteractiveCallback_NoTenantRefuses(t *testing.T) {
 	}
 	before := p.interactiveNoTenantRefusals.Load()
 
-	body := "payload=%7B%22type%22%3A%22block_actions%22%2C%22callback_id%22%3A%22wf%3Awf-1%3Asig%3Aaction%22%7D"
+	unsignedRoute := "wf:wf-1:sig:action"
+	signed := signTestRoute(unsignedRoute, testTenantStr, "", "")
+	rawBody := fmt.Sprintf(`{"type":"block_actions","callback_id":%q,"team":{"id":"T-unmapped"}}`, signed)
+	body := "payload=" + url.QueryEscape(rawBody)
+
 	rec := httptest.NewRecorder()
 	// Deliberately NOT withTestTenant -- this is the real shape of a
-	// request on this route today: signed, valid route, no tenant.
+	// request on this route today: signed, valid route, unmapped team.
 	mux.ServeHTTP(rec, signedInteractiveRequest(body))
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for a click with no resolvable tenant, got %d: %s", rec.Code, rec.Body.String())
@@ -682,20 +983,17 @@ func TestSN_InteractiveCallback_NoTenantRefuses(t *testing.T) {
 
 // TestSN_InteractiveCallback_TenantInContextIsIgnored is the fix for
 // cleat-review's second-pass finding on this PR: the first version of the
-// stub above read auth.TenantIDFromRequest and refused only when THAT found
-// no tenant -- which is bypassable, because a deployment running
+// tenant-refusal stub read auth.TenantIDFromRequest and refused only when
+// THAT found no tenant -- which is bypassable, because a deployment running
 // --tenant-resolver header:X-Tenant-ID puts a tenant in context on every
 // route, exempt ones included, from a request header Slack's signature never
 // covers (measured live against a real worker: header mode +
 // X-Tenant-ID: B -> 200, signal delivered into B's workflow_signals).
 // withTestTenant simulates exactly that -- a tenant present in context from
-// some source outside this handler's control -- and the fixed handler must
-// refuse identically to the no-tenant case, because it no longer reads a
-// tenant from the request at all. Known-positive: falsified by reintroducing
-// `if tid, ok := auth.TenantIDFromRequest(r); ok { ... deliver ... }`, which
-// makes this test fail (200, signalCalled true) while
-// TestSN_InteractiveCallback_NoTenantRefuses above stays green -- proving
-// that test alone cannot catch this gap.
+// some source outside this handler's control. resolveSlackTenant must refuse
+// identically (the team is still unmapped) whether or not that context
+// tenant is present, because it never reads ctx at all -- only
+// payload.Team.id and, for Slack Connect, payload.User.team_id.
 func TestSN_InteractiveCallback_TenantInContextIsIgnored(t *testing.T) {
 	p, mux := interactiveServer(t)
 	signalCalled := false
@@ -705,7 +1003,11 @@ func TestSN_InteractiveCallback_TenantInContextIsIgnored(t *testing.T) {
 	}
 	before := p.interactiveNoTenantRefusals.Load()
 
-	body := "payload=%7B%22type%22%3A%22block_actions%22%2C%22callback_id%22%3A%22wf%3Awf-1%3Asig%3Aaction%22%7D"
+	unsignedRoute := "wf:wf-1:sig:action"
+	signed := signTestRoute(unsignedRoute, testTenantStr, "", "")
+	rawBody := fmt.Sprintf(`{"type":"block_actions","callback_id":%q,"team":{"id":"T-unmapped"}}`, signed)
+	body := "payload=" + url.QueryEscape(rawBody)
+
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, withTestTenant(signedInteractiveRequest(body)))
 	if rec.Code != http.StatusNotFound {
@@ -719,42 +1021,46 @@ func TestSN_InteractiveCallback_TenantInContextIsIgnored(t *testing.T) {
 	}
 }
 
-// TestExtractCallbackRouteAndBuildScopedPayload is cleat#2230(a), moved to a
-// direct unit test of the two helpers rather than an HTTP-level test through
-// handleInteractiveCallback: that handler now refuses every click
-// unconditionally (see TestSN_InteractiveCallback_ValidSignature), so it can
-// no longer exercise what this test actually checks -- that a real Slack
-// block_actions payload (shaped the way Slack actually sends it, and the way
-// this plugin's own sendMessage host function actually builds buttons;
-// host_functions.go's Blocks field is opaque JSON the plugin never stamps a
-// callback_id into, so there is never a top-level callback_id, only
-// actions[0].action_id) parses to the right route and scopes down to the
-// right payload. buildScopedPayload and extractCallbackRoute stay directly
-// tested here so cleat#2230(b) can wire them back into the handler without
-// reproving either. Known-positive: falsified by reverting
-// extractCallbackRoute to check only payload.CallbackID, which makes ok
-// false and this test fail.
+// TestExtractCallbackRouteAndBuildScopedPayload is a direct unit test of the
+// two routing helpers, independent of tenant resolution and MAC
+// verification: it checks that a real Slack block_actions payload (shaped
+// the way Slack actually sends it, and the way this plugin's own sendMessage
+// host function actually builds buttons; host_functions.go's Blocks field is
+// opaque JSON the plugin never stamps a callback_id into, so there is never
+// a top-level callback_id, only actions[0].action_id) parses to the right
+// unsigned route and scopes down to the right payload, once signed.
+// Known-positive: falsified by reverting extractCallbackRoute to check only
+// payload.CallbackID, which makes ok false and this test fail.
 func TestExtractCallbackRouteAndBuildScopedPayload(t *testing.T) {
-	rawPayload := `{"type":"block_actions","actions":[{"type":"button","action_id":"wf:wf-456:sig:approve","block_id":"approval_block","value":"approve","action_ts":"1234567890.123456"}],"team":{"id":"T123"},"user":{"id":"U123"},"channel":{"id":"C123"}}`
+	signedActionID := signTestRoute("wf:wf-456:sig:approve", testTenantStr, "approval_block", "approve")
+	rawPayload := fmt.Sprintf(`{"type":"block_actions","actions":[{"type":"button","action_id":%q,"block_id":"approval_block","value":"approve","action_ts":"1234567890.123456"}],"team":{"id":"T123"},"user":{"id":"U123"},"channel":{"id":"C123"}}`, signedActionID)
 
 	var payload slackInteractivePayload
 	if err := json.Unmarshal([]byte(rawPayload), &payload); err != nil {
 		t.Fatalf("invalid test fixture: %v", err)
 	}
 
-	wfID, sigName, action, ok := extractCallbackRoute(payload)
+	unsignedRoute, issuedAtHex, mac, action, ok := extractCallbackRoute(payload)
 	if !ok {
 		t.Fatalf("expected a routable action_id, got ok=false")
 	}
-	if wfID != "wf-456" || sigName != "approve" {
-		t.Errorf("expected wf-456/approve from actions[].action_id, got wf=%q sig=%q", wfID, sigName)
+	if unsignedRoute != "wf:wf-456:sig:approve" {
+		t.Errorf("expected unsigned route wf:wf-456:sig:approve, got %q", unsignedRoute)
+	}
+	if issuedAtHex == "" || mac == "" {
+		t.Errorf("expected a non-empty issued-at and mac, got issuedAtHex=%q mac=%q", issuedAtHex, mac)
+	}
+	usedPrevious, sigOK := verifyRouteSignature([]byte(testRouteSigningKey), nil, testTenantStr, unsignedRoute, issuedAtHex, "approval_block", "approve", mac, defaultRouteMaxAge, time.Now())
+	if !sigOK || usedPrevious {
+		t.Fatalf("expected the freshly signed route to verify under the current key, got ok=%v usedPrevious=%v", sigOK, usedPrevious)
 	}
 
 	// gotPayload must be the REAL scoped payload -- decode it and check the
 	// fields cleat-review's #2253 review specified (action_id, block_id,
 	// value, user_id, team_id, channel_id, action_ts) survived the round
-	// trip.
-	sigPayload, err := buildScopedPayload(payload, action)
+	// trip. ActionID is the UNSIGNED route -- the internal signed wire
+	// format must never reach a workflow.
+	sigPayload, err := buildScopedPayload(payload, unsignedRoute, action)
 	if err != nil {
 		t.Fatalf("buildScopedPayload: %v", err)
 	}

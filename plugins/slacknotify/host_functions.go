@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/google/uuid"
@@ -94,10 +95,32 @@ func (p *Plugin) sendMessage(ctx context.Context, inputJSON string) (string, err
 		channel = *defaultChannel
 	}
 
+	// Stamp every routable button before it ever reaches Slack (cleat#2230,
+	// "signed routes"). tenantID is cc.TenantID -- the host call context the
+	// engine itself set for this workflow instance -- never anything from
+	// input, because the whole security property is that a workflow cannot
+	// claim to stamp on behalf of a tenant it is not actually running as.
+	// hasUnsignedRoute is a cheap pre-scan so a plain-text message, or one
+	// whose buttons carry no wf:...:sig:... route, costs no deployment-secret
+	// lookup and works even in a deployment that has never configured
+	// slacknotify.route_signing_key.
+	blocks := input.Blocks
+	if hasUnsignedRoute(blocks) {
+		routeKey, _, keyErr := p.routeSigningKey(ctx)
+		if keyErr != nil {
+			return "", fmt.Errorf("slack-notify: message contains a routable button but signed routes are not configured: %w", keyErr)
+		}
+		stamped, stampErr := stampBlocksWithRoutes(blocks, routeKey, cc.TenantID, time.Now())
+		if stampErr != nil {
+			return "", fmt.Errorf("slack-notify: %w", stampErr)
+		}
+		blocks = stamped
+	}
+
 	payload := slackWebhookPayload{
 		Channel: channel,
 		Text:    input.Text,
-		Blocks:  input.Blocks,
+		Blocks:  blocks,
 	}
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
