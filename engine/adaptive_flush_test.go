@@ -455,6 +455,146 @@ func TestAdaptiveFlusher_Flush_BatchFillTriggersImmediateFlush(t *testing.T) {
 	}
 }
 
+// TestAdaptiveFlusher_FlushAndNotify_RefusesToOverwriteACompletedAwaitChildRow
+// is cleat#2364: flushAndNotify's ON CONFLICT DO UPDATE ... WHERE clause is
+// the batch path's equivalent of insertEventSQL's pending-guard (cleat#2333)
+// -- it only lets a write through when the existing row's completion columns
+// are still all NULL. cleat-review read the clause and found it correct, but
+// no test failed when it was deleted: the crash-test suite's scenarios never
+// attempt a SECOND write against an already-completed row, so the clause is
+// mutation-invisible to everything that exercised it before this test.
+//
+// maxBatch=1 makes every single af.Flush call fill its own batch and trigger
+// an immediate flushAndNotify, so the three writes below run as three
+// separate statements in strict order rather than one batch -- the same
+// technique TestAdaptiveFlusher_Flush_BatchFillTriggersImmediateFlush uses,
+// with maxBatch lowered from 2 to 1 so a single call is enough.
+func TestAdaptiveFlusher_FlushAndNotify_RefusesToOverwriteACompletedAwaitChildRow(t *testing.T) {
+	store, teardown := (&PostgresBackend{}).Setup(t)
+	defer teardown()
+	ctx := context.Background()
+
+	wfID := newIntentWorkflow(t, ctx, store, "await-child-guard")
+	af := NewAdaptiveFlusher(rawDBOf(t, store), DefaultTenantUUID, time.Hour /* timer must not fire */, 1, 0, 0, 0)
+	af.mu.Lock()
+	af.batchMode = true
+	af.mu.Unlock()
+
+	// Step 0 created pending: no conflict on (workflow_id, step) yet, so this
+	// is a plain INSERT -- every completion column NULL.
+	done1, useBatch1 := af.Flush(ctx, wfID, EventRecord{Step: 0, EventType: EventTypeAwaitChild}, "cksum-pending", "", 0)
+	if !useBatch1 {
+		t.Fatal("first Flush: useBatch = false")
+	}
+	if err := waitDone(t, done1); err != nil {
+		t.Fatalf("first Flush (create pending row): %v", err)
+	}
+
+	// Completed: same step, a real response. This DOES conflict, so the
+	// guard's WHERE clause runs -- and lets it through, because the existing
+	// row is still all-NULL.
+	done2, useBatch2 := af.Flush(ctx, wfID, EventRecord{Step: 0, EventType: EventTypeAwaitChild, Response: "child result"}, "cksum-done", "", 0)
+	if !useBatch2 {
+		t.Fatal("second Flush: useBatch = false")
+	}
+	if err := waitDone(t, done2); err != nil {
+		t.Fatalf("second Flush (complete the row): %v", err)
+	}
+
+	hist, err := store.LoadEventHistory(ctx, wfID)
+	if err != nil {
+		t.Fatalf("LoadEventHistory after completion: %v", err)
+	}
+	if len(hist) != 1 || hist[0].Response != "child result" {
+		t.Fatalf("after completion, history = %+v, want one event with Response=%q", hist, "child result")
+	}
+
+	// Stale re-flush: same step, a DIFFERENT response. The row is no longer
+	// all-NULL, so the guard's WHERE clause must evaluate false -- Postgres
+	// silently skips the UPDATE for this row rather than erroring, leaving
+	// the completed row untouched. Without the clause this overwrites a
+	// completed await_child's result with stale data, corrupting it exactly
+	// the way cleat#2333's insertEventSQL guard exists to prevent on the
+	// direct-flush path.
+	done3, useBatch3 := af.Flush(ctx, wfID, EventRecord{Step: 0, EventType: EventTypeAwaitChild, Response: "STALE OVERWRITE"}, "cksum-stale", "", 0)
+	if !useBatch3 {
+		t.Fatal("third Flush: useBatch = false")
+	}
+	if err := waitDone(t, done3); err != nil {
+		t.Fatalf("third Flush (stale re-flush): %v", err)
+	}
+
+	hist2, err := store.LoadEventHistory(ctx, wfID)
+	if err != nil {
+		t.Fatalf("LoadEventHistory after stale re-flush: %v", err)
+	}
+	if len(hist2) != 1 || hist2[0].Response != "child result" {
+		t.Fatalf("a completed await_child row was overwritten by a stale re-flush: "+
+			"history = %+v, want Response=%q unchanged", hist2, "child result")
+	}
+}
+
+// TestRetryBatchFlush_RefusesToOverwriteACompletedAwaitChildRow is
+// TestAdaptiveFlusher_FlushAndNotify_RefusesToOverwriteACompletedAwaitChildRow's
+// twin for retryBatchFlush's own copy of the same WHERE clause (cleat#2364).
+// retryBatchFlush only runs on flushAndNotify's error path, so forcing that
+// call chain would need a fault-injecting driver; calling retryBatchFlush
+// directly with a hand-built row -- via batchEntryJSONRow, the same
+// construction flushAndNotify itself uses, so this cannot silently drift
+// from what production actually sends -- exercises its WHERE clause exactly
+// as directly, without needing to simulate a transient DB error first.
+func TestRetryBatchFlush_RefusesToOverwriteACompletedAwaitChildRow(t *testing.T) {
+	store, teardown := (&PostgresBackend{}).Setup(t)
+	defer teardown()
+	ctx := context.Background()
+
+	wfID := newIntentWorkflow(t, ctx, store, "retry-await-child-guard")
+	af := NewAdaptiveFlusher(rawDBOf(t, store), DefaultTenantUUID, time.Hour, 1, 0, 0, 0)
+	af.mu.Lock()
+	af.batchMode = true
+	af.mu.Unlock()
+
+	// Create pending, then complete -- same two steps as the sibling test
+	// above, through the ordinary af.Flush path.
+	done1, useBatch1 := af.Flush(ctx, wfID, EventRecord{Step: 0, EventType: EventTypeAwaitChild}, "cksum-pending", "", 0)
+	if !useBatch1 {
+		t.Fatal("first Flush: useBatch = false")
+	}
+	if err := waitDone(t, done1); err != nil {
+		t.Fatalf("first Flush (create pending row): %v", err)
+	}
+	done2, useBatch2 := af.Flush(ctx, wfID, EventRecord{Step: 0, EventType: EventTypeAwaitChild, Response: "child result"}, "cksum-done", "", 0)
+	if !useBatch2 {
+		t.Fatal("second Flush: useBatch = false")
+	}
+	if err := waitDone(t, done2); err != nil {
+		t.Fatalf("second Flush (complete the row): %v", err)
+	}
+
+	// Now call retryBatchFlush DIRECTLY -- bypassing flushAndNotify's own
+	// statement entirely -- with a stale re-flush's row.
+	entry, err := af.prepareEntry(wfID, EventRecord{Step: 0, EventType: EventTypeAwaitChild, Response: "STALE OVERWRITE"}, "cksum-stale")
+	if err != nil {
+		t.Fatalf("prepareEntry: %v", err)
+	}
+	eventsJSON, err := json.Marshal([]map[string]interface{}{batchEntryJSONRow(entry)})
+	if err != nil {
+		t.Fatalf("marshal events: %v", err)
+	}
+	if err := retryBatchFlush(ctx, af, eventsJSON, 1); err != nil {
+		t.Fatalf("retryBatchFlush: %v", err)
+	}
+
+	hist, err := store.LoadEventHistory(ctx, wfID)
+	if err != nil {
+		t.Fatalf("LoadEventHistory after retryBatchFlush's stale re-flush: %v", err)
+	}
+	if len(hist) != 1 || hist[0].Response != "child result" {
+		t.Fatalf("retryBatchFlush overwrote a completed await_child row: "+
+			"history = %+v, want Response=%q unchanged", hist, "child result")
+	}
+}
+
 func TestAdaptiveFlusher_OnTimer_FlushesPartialBatch(t *testing.T) {
 	store, teardown := (&PostgresBackend{}).Setup(t)
 	defer teardown()
