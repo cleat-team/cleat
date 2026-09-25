@@ -6,7 +6,34 @@ workflows that compile to WebAssembly.
 
 ## Installation
 
-Add to your `Cargo.toml`:
+`cleat-sdk` and `cleat-macro` are not published to crates.io (`publish = false`
+in both `Cargo.toml`s). Outside a cleat checkout, depend on them from git at a
+release tag -- Cargo resolves a crate by its `[package].name` anywhere inside
+the cloned repo, so no `path` is needed even though both crates live under
+`crates/`:
+
+```toml
+[dependencies]
+cleat-sdk = { git = "https://github.com/cleat-team/cleat", tag = "v0.3.0" }
+cleat-macro = { git = "https://github.com/cleat-team/cleat", tag = "v0.3.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+```
+
+Before `v0.3.0` is tagged, pin a commit instead with `rev = "<sha>"` in place
+of `tag`.
+
+Verified 2026-09-24 outside a checkout, pinned to a `develop` commit (`cargo
+build` and `cargo build --target wasm32-wasip1 --release` both succeeded,
+resolving and compiling both crates from git):
+
+```toml
+cleat-sdk = { git = "https://github.com/cleat-team/cleat", rev = "a5467370496ee41b5edd068a0ea325e5d4ee0e8c" }
+cleat-macro = { git = "https://github.com/cleat-team/cleat", rev = "a5467370496ee41b5edd068a0ea325e5d4ee0e8c" }
+```
+
+Inside a cleat checkout (e.g. contributing to the repo itself), use a path
+dependency instead:
 
 ```toml
 [dependencies]

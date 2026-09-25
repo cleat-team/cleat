@@ -10,23 +10,51 @@ workflows that compile to WebAssembly.  Re-exports from `assembly/index.ts`:
 
 ## Installation
 
+**Not published to npm** -- `@cleat/sdk` and `@cleat/transform` are not on the
+npm registry (`npm view @cleat/sdk` / `@cleat/transform` both 404). Install
+from git at a release tag instead. `@cleat/transform` is the transform plugin
+that generates ABI-compatible WASM export wrappers from
+`@cleatEntry`-decorated functions; it is needed alongside `@cleat/sdk` to
+compile a workflow.
+
+### pnpm (recommended -- handles the subdirectory)
+
+Both packages live in a subdirectory of the cleat repo (`packages/cleat-as`
+and `packages/cleat-as/transform`), not at its root, so plain `npm install
+github:...` cannot find a `package.json` there. pnpm's `#<ref>&path:<subdir>`
+git syntax names both the ref and the subdirectory in one dependency spec:
+
 ```bash
-npm install @cleat/sdk
+pnpm add "github:cleat-team/cleat#v0.3.0&path:packages/cleat-as"
+pnpm add -D "github:cleat-team/cleat#v0.3.0&path:packages/cleat-as/transform"
+pnpm add -D assemblyscript@^0.28.19
 ```
 
-Or from source:
+### npm (fallback -- clone, then install by local path)
+
+```bash
+git clone --branch v0.3.0 --depth 1 https://github.com/cleat-team/cleat cleat-src
+npm install "file:./cleat-src/packages/cleat-as" "file:./cleat-src/packages/cleat-as/transform" --save
+npm install assemblyscript@^0.28.19 --save-dev
+```
+
+Or from within a cleat checkout:
 
 ```bash
 cd packages/cleat-as/
 npm link
 ```
 
-The SDK also provides a transform plugin that generates ABI-compatible WASM
-export wrappers from `@cleatEntry`-decorated functions:
+Before `v0.3.0` is tagged, use `#develop&path:...` (pnpm) or `--branch
+develop` (npm clone) instead -- the dependency form does not change, only the
+ref.
 
-```bash
-npm install @cleat/transform
-```
+Verified 2026-09-24 outside a checkout, pinned to a `develop` commit, both
+paths: `pnpm add "github:cleat-team/cleat#<sha>&path:packages/cleat-as"` and
+the npm clone-then-`file:`-install fallback each resolved both packages, and
+`npx asc assembly/index.ts --target release --transform
+./node_modules/@cleat/transform/index.js -o dist/workflow.wasm` produced a
+real `dist/workflow.wasm` from each.
 
 See the [Import resolution](#scoped-package-import-resolution-in-as-02732) section for
 AssemblyScript compiler configuration.

@@ -5,44 +5,50 @@ durable workflows that compile via [TeaVM](https://teavm.org/) to WebAssembly.
 
 ## Installation
 
-### Maven
+**Not published to Maven Central or any other registry** -- `com.cleat` in
+`build.gradle.kts` is only this project's internal Gradle group id, there is
+no `maven-publish` block, and no artifact exists under that coordinate.
+Source-only: clone the repo at a release tag and include `crates/cleat-java`
+as a Gradle subproject.
 
-The SDK is published to Maven Central as `com.cleat:cleat-java`. Add the
-dependency to your `pom.xml`:
-
-```xml
-<dependency>
-    <groupId>com.cleat</groupId>
-    <artifactId>cleat-java</artifactId>
-    <version>0.1.0</version>
-</dependency>
+```bash
+git clone --branch v0.3.0 --depth 1 https://github.com/cleat-team/cleat cleat-src
 ```
 
-TeaVM dependencies are also required for compilation:
+**`settings.gradle.kts`**:
+```kotlin
+rootProject.name = "my-workflow"
 
-```xml
-<dependency>
-    <groupId>org.teavm</groupId>
-    <artifactId>teavm-classlib</artifactId>
-    <version>0.10.2</version>
-</dependency>
-<dependency>
-    <groupId>org.teavm</groupId>
-    <artifactId>teavm-jso-apis</artifactId>
-    <version>0.10.2</version>
-</dependency>
+dependencyResolutionManagement {
+    repositories {
+        mavenCentral()
+    }
+}
+
+include(":cleat-java")
+project(":cleat-java").projectDir = file("cleat-src/crates/cleat-java")
 ```
 
-### Gradle
-
+**Your workflow module's `build.gradle.kts`**:
 ```kotlin
 dependencies {
-    annotationProcessor("com.cleat:cleat-java:0.1.0")
-    implementation("com.cleat:cleat-java:0.1.0")
+    annotationProcessor(project(":cleat-java"))
+    implementation(project(":cleat-java"))
 }
 ```
 
-For complete TeaVM build configuration, see the [Build setup](#build-setup) section.
+Before `v0.3.0` is tagged, clone `--branch develop` (or a specific commit)
+instead and re-clone at the tag once it exists -- the dependency form does not
+change, only the ref.
+
+Verified 2026-09-24 outside a checkout, pinned to a `develop` commit: cloning
+and wiring the subproject as above resolved `cleat-java` and ran its
+`@CleatEntry` annotation processor against a workflow class in a separate
+Gradle module (`gradle :workflow:compileJava` generated
+`GreetingWorkflow_hello_Export.java`, `CleatEntryIndex` and `WorkflowEntry`
+from the SDK's processor). For complete TeaVM build configuration to take
+that module the rest of the way to `.wasm`, see the [Build setup](#build-setup)
+section.
 
 ## Quick start
 
@@ -219,11 +225,14 @@ When the SDK is included as a Gradle subproject (recommended for real workflows)
 use the `apply false` pattern in the root project to avoid plugin version
 conflicts between the SDK's buildscript and the root project:
 
-**Root `settings.gradle.kts`**:
+**Root `settings.gradle.kts`**: same form as [Installation](#installation)
+above -- `projectDir` points at `crates/cleat-java` inside a checkout, cloned
+at a release tag when building outside the cleat repo itself:
+
 ```kotlin
 rootProject.name = "my-workflow"
 include(":cleat-java")
-project(":cleat-java").projectDir = file("path/to/cleat/crates/cleat-java")
+project(":cleat-java").projectDir = file("cleat-src/crates/cleat-java")
 ```
 
 **Root `build.gradle.kts`** (applies `org.teavm` plugin without loading it):
