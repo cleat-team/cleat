@@ -251,15 +251,26 @@ written first, if it tracks the status), and `Unwrap() http.ResponseWriter`, whi
 
 The host bounds every plugin route's request body before a plugin's handler runs
 (`pluginBodyLimitRouter`, `cmd/cleat-worker/plugin_body_limit.go`) —
-`--plugin-max-body-size` by default, or a larger ceiling the route declared with
-`plugin.MaxBody`. That bound does nothing on its own: `http.MaxBytesReader` only
-makes the *next* read past the limit fail, and a handler that calls
-`io.ReadAll(r.Body)` or `json.NewDecoder(r.Body)` directly gets a bare
-`*http.MaxBytesError`, which reads to a caller as a malformed-body 400 or a
-hung connection, not as a 413 naming the limit (cleat#1338 first paid for this
-on the core API; cleat#2232 is the same defect on plugin routes). `ReadBody` and
-`ReadJSONBody` (`plugin/body.go`) are the only two places that translation is
-written.
+`--plugin-max-body-size` by default, or a ceiling the route declared with
+`plugin.MaxBody` (a tighter cap under the flag: effective limit is
+`min(n, --plugin-max-body-size)`) or `plugin.MaxBodyFromConfig` (an
+unconditional ceiling the plugin's own config owns, ignoring the flag —
+refused on any of `pluginAuthExemptPatterns`, since those routes carry no
+cleat credential and the operator's flag must always bound them). That bound
+does nothing on its own: `http.MaxBytesReader` only makes the *next* read past
+the limit fail, and a handler that calls `io.ReadAll(r.Body)` or
+`json.NewDecoder(r.Body)` directly gets a bare `*http.MaxBytesError`, which
+reads to a caller as a malformed-body 400 or a hung connection, not as a 413
+naming the limit (cleat#1338 first paid for this on the core API; cleat#2232 is
+the same defect on plugin routes). `ReadBody` and `ReadJSONBody` (`plugin/body.go`)
+are the only two places that translation is written.
+
+**`MaxBody`/`MaxBodyFromConfig` must be the outermost wrapper around a route's
+handler.** Both read the concrete `http.Handler` value passed to `mux.Handle`
+with a type assertion (`plugin.MaxBodyLimit`); a route that wraps its own
+handler in another `http.Handler` first and passes *that* to `MaxBody` hides
+the assertion from `pluginBodyLimitRouter`, and the route silently falls back
+to the bare default ceiling.
 
 The guard is AST-based: it collects every identifier bound to an `*http.Request`
 parameter in a file and flags `io.ReadAll`/`json.NewDecoder` only when the

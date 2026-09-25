@@ -10447,9 +10447,65 @@ proving the same anonymous request is accepted under the limit. `plugin/body_tes
 unit coverage of `MaxBody`/`MaxBodyLimit`'s round trip and `ReadBody`/`ReadJSONBody`'s three
 outcomes (under the limit, over it, and a genuine non-size read error that must stay 400).
 
-**Remaining before this closes:** open the PR for `feature/plugin-request-body-limits` and send it
-to cleat-review, per design review's condition that this and cleat#2247 each go to cleat-review
-before enqueue.
+**PR #2273 opened, reviewed by cleat-review, and a second round of fixes landed on top of the
+above.** cleat-review found that a single `plugin.MaxBody` could not tell apart two different
+things a route means by "my own ceiling": a tighter cap that should still yield to a lower
+`--plugin-max-body-size` (slacknotify's fixed interactive-callback size), and a ceiling the
+*plugin's own config* owns and that the flag must not silently override in either direction
+(blobstore's `max_blob_size`) — a single constructor could only pick one behaviour, and had picked
+the one that makes blobstore's operator-configured 10 MiB shrink to a 1 MiB default flag, silently.
+
+**Two named constructors replaced the one.** `plugin.MaxBody(n, h)` keeps the original meaning,
+made precise: effective limit is `min(n, --plugin-max-body-size)`, and a 413 always names
+`--plugin-max-body-size` (whichever value actually bound). `plugin.MaxBodyFromConfig(n, knob, h)`
+is new: effective limit is `n` unconditionally, and a 413 names `knob` — blobstore's `PUT
+/blobs/{key...}` now uses this against `max_blob_size in --plugin-config`; slacknotify's `POST
+/slack/interactive` keeps `MaxBody` unchanged. **Guard rail:** `pluginBodyLimitRouter.Handle`
+refuses `MaxBodyFromConfig`'s unconditional ceiling on any of `pluginAuthExemptPatterns` (falling
+back to the default limit and knob instead) — those three routes carry no cleat credential at
+all, so the operator's global flag must always bound them regardless of what a plugin's config
+claims. Covered at both the router level
+(`cmd/cleat-worker/plugin_body_limit_test.go`) and end-to-end through the real
+`auth.Middleware`/`auth.HostBindingMiddleware` chain
+(`TestMaxBodyFromConfigIsClampedOnAnAuthExemptRoute`,
+`plugin_route_body_limit_exempt_test.go`).
+
+**A shared `pluginAuthExemptPatterns` var (`cmd/cleat-worker/plugin_exempt_routes.go`) replaced
+four hand-copied literal lists** — main.go's two middleware call sites, the exempt-clamp check
+above, and the e2e test's own copy — so the list can no longer drift between them the way the
+un-shared copies could have.
+
+**A boot-time check closes the "nothing would say why" gap `HasRoutes`'s own doc comment named.**
+`warnAboutStalePluginRouteSignatures` (`cmd/cleat-worker/plugin_stale_routes_check.go`) logs an
+ERROR naming any loaded plugin whose concrete type has a `RegisterRoutes` method that does not
+satisfy `plugin.HasRoutes` — the pre-#2232 `*http.ServeMux` signature is exactly this — instead of
+the routes silently never registering.
+
+**`plugin.ReadJSONBody`'s empty-body handling reverted to strict (a 400, matching every
+pre-#2232 call site) and became opt-in via a new `plugin.ReadOptionalJSONBody`.** The original
+change made every one of ~26 call sites accept an empty body as a no-op, which was a real
+behaviour change at every site except one: `jobqueue`'s `POST /jobqueue/{queue_name}/jobs`, whose
+pre-#2232 code hand-rolled exactly this (`if len(body) > 0 { json.Unmarshal(...) }`) because a
+bare enqueue with no def_name/payload/input is a legitimate request. Only that call site now uses
+`ReadOptionalJSONBody`; every other site is back to 400 on empty.
+
+**Every new/changed assertion in this round was falsified by hand** (mutate the source, confirm
+the relevant test goes red for the expected reason, restore, confirm `diff` against the backup is
+empty) rather than only inspected — the min()-clamp test, the exempt-clamp guard rail (both the
+router-level and end-to-end test), the knob-threading test, the empty-body-is-400 test, and the
+stale-signature boot check all confirmed this way.
+
+Files (round 2, on top of the list below): `plugin/body.go`, `plugin/body_test.go`,
+`cmd/cleat-worker/plugin_body_limit.go`, `cmd/cleat-worker/plugin_body_limit_test.go`,
+`cmd/cleat-worker/plugin_exempt_routes.go`, `cmd/cleat-worker/plugin_stale_routes_check.go`,
+`cmd/cleat-worker/plugin_stale_routes_check_test.go`,
+`cmd/cleat-worker/plugin_route_body_limit_exempt_test.go`,
+`cmd/cleat-worker/a_slack_interactive_route_is_exempt_test.go`, `cmd/cleat-worker/main.go`,
+`plugins/blobstore/routes.go`, `plugins/slacknotify/slacknotify_new_test.go`,
+`plugins/jobqueue/routes.go`, `CHANGELOG.md`.
+
+**Remaining before this closes:** push the round-2 fixes, re-run the full verification loop, and
+send back to cleat-review.
 
 Files: `plugin/body.go`, `plugin/body_test.go`, `plugin/plugin_http.go`, `plugin/capabilities_test.go`,
 `cmd/cleat-worker/plugin_body_limit.go`, `cmd/cleat-worker/plugin_route_body_limit_exempt_test.go`,
