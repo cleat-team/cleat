@@ -546,9 +546,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this half). `plugin.FuncOptions.SecretOnlyFields` now lets a registration name which top-level
   JSON fields must hold exactly a `${secret:NAME}` reference; `llm`'s `chat` and `chat_stream`
   declare `["api_key"]`. A call whose declared field holds a literal, an ambiguous case-variant
-  duplicate (`api_key` and `API_KEY` present together), or malformed (non-JSON) input is refused
-  before the plugin function is invoked, and the `event_history` row records the refusal with the
-  field's value replaced by a fixed marker rather than the caller's input.
+  duplicate (`api_key` and `API_KEY` present together), an exact duplicate (the same key spelled
+  identically twice), or input that is not a JSON object at all — malformed JSON, or valid JSON
+  that is an array, a string, or a top-level `null` — is refused before the plugin function is
+  invoked, and the `event_history` row records the refusal with the field's value replaced by a
+  fixed marker rather than the caller's input.
 
   **Who is affected:** any workflow passing a literal instead of `${secret:NAME}` for `llm.chat`'s
   or `llm.chat_stream`'s `api_key` now gets a refusal instead of the call proceeding. The failure

@@ -217,11 +217,13 @@ Rules:
   as typed. `SecretOnlyFields` names top-level JSON field names (the wire
   tag, e.g. `"api_key"`, not the Go struct field `APIKey`) whose raw value
   the engine requires to be **exactly** one `${secret:NAME}` reference before
-  your function is ever called. A literal, a case-variant duplicate of the
-  field (`api_key` and `API_KEY` together — refused as an ambiguity, not
-  resolved one way or the other), or input that isn't even JSON is refused
-  before dispatch, and the recorded `event_history` row has the field
-  redacted rather than holding the offending value.
+  your function is ever called. A literal, a duplicate of the field — exact
+  (`api_key` twice) or case-variant (`api_key` and `API_KEY` together) —
+  refused as an ambiguity rather than resolved one way or the other, or
+  input that isn't a JSON object at all (malformed JSON, or valid JSON that
+  is an array, a string, or a top-level `null`) is refused before dispatch,
+  and the recorded `event_history` row has the field redacted rather than
+  holding the offending value.
 
   **Top-level fields only — there is no dot-path support**, so a credential
   nested inside a sub-object is not covered; keep secret fields at the top
