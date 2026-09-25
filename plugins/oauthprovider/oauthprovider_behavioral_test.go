@@ -1277,8 +1277,58 @@ func TestOA_Login_ConfigNotFound(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	// cleat#2368: this answered 500, which an unauthenticated caller could read
+	// against the 302 a configured pair gets -- "this (tenant, provider) pair
+	// IS configured", for any tenant id it could guess. It is the same 302 now,
+	// at a harmless same-origin path.
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected the uniform 302, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if loc := rec.Header().Get("Location"); loc != "/" {
+		t.Errorf("want the harmless same-origin root, got Location %q", loc)
+	}
+}
+
+// TestOA_Login_ConfiguredAndUnconfiguredAreIndistinguishable is cleat#2368's
+// regression guard, and it deliberately asserts only one thing: the same
+// caller on the same route, one tenant with a working (tenant, provider)
+// config and one with none at all, must not be separable by HTTP status.
+//
+// It is falsifiable by construction. Restore the 500 on the not-configured
+// branch and this reddens on the status comparison while every functional
+// login test in this package stays green -- which is the point. The defect was
+// never that a login failed; it was that a failure to log in was readable as
+// "this tenant exists and is configured".
+func TestOA_Login_ConfiguredAndUnconfiguredAreIndistinguishable(t *testing.T) {
+	configured := newFakeDBStore()
+	_, configuredHandler := setupTestPlugin(t, configured)
+	configured.AddOAuthConfig(testTenantID, "google", "g-client-id", "g-secret", "http://localhost/callback", "", true)
+
+	unconfigured := newFakeDBStore()
+	_, unconfiguredHandler := setupTestPlugin(t, unconfigured)
+
+	probe := func(h http.Handler) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/oauth/google/login?tenant_id="+testTenantID.String(), nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	gotConfigured := probe(configuredHandler)
+	gotUnconfigured := probe(unconfiguredHandler)
+
+	// The negative control for the comparison below, and it is load-bearing:
+	// if the configured arm were not actually reaching the provider, both arms
+	// being "the same status" would prove nothing about the oracle.
+	if loc := gotConfigured.Header().Get("Location"); !strings.Contains(loc, "accounts.google.com") {
+		t.Fatalf("the configured arm did not reach the provider (Location %q), so the status "+
+			"comparison below would be vacuous", loc)
+	}
+
+	if gotConfigured.Code != gotUnconfigured.Code {
+		t.Errorf("status distinguishes configured from unconfigured: configured=%d, unconfigured=%d -- "+
+			"an unauthenticated caller can enumerate (tenant, provider) pairs",
+			gotConfigured.Code, gotUnconfigured.Code)
 	}
 }
 
