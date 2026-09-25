@@ -2,8 +2,14 @@
 
 `--encryption-key-file` (with `--encrypt-sensitive-payloads`) encrypts
 `event_history`'s sensitive columns (`engine.EncryptedEventColumns` --
-workflow input, output and error, plugin call arguments and results) at
-rest, per tenant, on PostgreSQL. This is a **different key from the
+`request`, `response`, `error`, `signal_payload`, `child_input`,
+`new_input`, `plugin_input`, `plugin_output`, `promise_result`,
+`promise_error`, `payload`) at rest, per tenant, on PostgreSQL. **It does
+not cover `workflow_instances.result`**, the workflow's final result,
+which is a different table this mechanism never touches -- see cleat#2312,
+open at this writing, on the doc's own former overstatement of this
+("workflow input, output and error" read as covering it, and did not).
+This is a **different key from the
 per-tenant secrets master key** ([`use-secrets.md`](use-secrets.md),
 `CLEAT_SECRET_MASTER_KEY`) -- different table, different threat model
 (workflow data your own tenants generated, not third-party credentials they
@@ -52,8 +58,10 @@ the **stop-the-world** procedure is still the simpler and safer choice:
    `--dry-run` first if you want a report before it writes anything. The
    sweep is online-safe against readers in the sense that it verifies each
    re-seal before writing it and is safe to interrupt and re-run -- the
-   stop-the-world requirement here is about the **worker**, which cannot
-   yet hold two keys at once, not about the sweep itself.
+   stop-the-world requirement here is about the **worker** deliberately not
+   being given `--encryption-key-file-previous` in this procedure (that is
+   what makes it simpler than "Rolling rotation" below), not about the
+   sweep itself.
 4. Confirm it converged: the command's own output reports `unreadable: 0`,
    and its exit status is non-zero while any row is still on the old form
    (`cmd/cleatctl/resealpayloads.go`'s own doc comment: "Exit status is
@@ -116,9 +124,15 @@ any worker starts writing it:
    read. This is the guarantee `docs/how-to/use-secrets.md`'s tenant-secret
    rotation gives, applied here by construction rather than by an
    `admin.workers` gate; it is proven at the ring level by
-   `engine/payload_key_rotation_test.go`, and the two-phase sequence
-   end-to-end by `tests/crash/payload_encryption_rotation_test.go`,
-   `TestPayloadEncryptionKeyRotationWiresIntoARealWorker`.
+   `engine/payload_key_rotation_test.go`. On a real worker,
+   `tests/crash/payload_encryption_rotation_test.go`'s
+   `TestPayloadEncryptionKeyRotationWiresIntoARealWorker` proves the single
+   hop this step depends on -- a worker holding only A crashes mid-flight,
+   and a worker started directly on phase 2's flags (B current, A previous)
+   decrypts A's leftover event during replay and finishes the run -- **not**
+   the full two-phase sequence above: no worker in that test ever runs
+   under phase 1's flags (A current, B previous) at all, so it does not by
+   itself demonstrate step 3's fleet-wide-completion requirement.
 5. Once every worker reports phase-2 flags, run
    `cleatctl reseal-payloads --encryption-key-file B --from-key-file A`
    to move every remaining A-sealed row onto B. Until this runs, A remains
@@ -143,6 +157,9 @@ any worker starts writing it:
   responsible for its own storage.
 - **PostgreSQL only.** `--encrypt-sensitive-payloads` is refused unless
   `--driver=postgres`; the encrypting write path is Postgres-specific SQL.
+- **`workflow_instances.result`.** See the intro above and cleat#2312: it is
+  plaintext today regardless of any flag here, on every path (sharded or
+  not), rotated or not.
 
 ## See also
 

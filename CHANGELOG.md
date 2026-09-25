@@ -12,6 +12,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **Security: a sharded worker (`--shards-file`) with `--encrypt-sensitive-payloads` and
+  `--encryption-key-file` set wrote `event_history` in plain text, with no error, and the
+  affected workflows still ended `done`.** (cleat#2305)
+
+  `cmd/cleat-worker/main.go`'s sharded branch declared its own `payloadEncryption` variable that
+  shadowed the one `loadPayloadEncryption` populated from the flags, so every shard's store
+  factory was built with `WithEncryption(nil, true)` — encryption silently off — regardless of
+  what `--encryption-key-file` pointed at. The non-sharded path was unaffected; this was specific
+  to `--shards-file`. Found by cleat-review reviewing #2308; a real sharded worker with a real
+  crash test now asserts against it
+  (`tests/crash/payload_encryption_rotation_test.go`,
+  `TestPayloadEncryptionShardedWorkerDoesNotWritePlaintext`).
+
+  **To upgrade:** a sharded deployment that ran with `--encrypt-sensitive-payloads` before this
+  fix has `event_history` rows written in plain text that believed they were encrypted.
+  `cleatctl reseal-payloads` does **not** repair them: it converts ciphertext sealed under a
+  previous key, and classifies a plain-text row as `unreadable` rather than as something to
+  reseal, since nothing distinguishes "plaintext" from "ciphertext under a key I don't have" at
+  that layer. There is no tool in this release that finds or reseals these rows; treat any
+  sharded deployment that ran with encryption on before this fix as having unencrypted sensitive
+  data in `event_history` for that period.
+
 - **`cmd/cleat-worker` now catches `SIGHUP` and logs it rather than exiting.** (cleat#1992)
 
   Previously `SIGHUP` had no handler installed, so it fell through to the default action and

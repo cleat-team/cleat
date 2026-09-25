@@ -1,14 +1,18 @@
 package crash
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // writeEncryptionKeyFile writes a fresh random 32-byte AES-256 key,
@@ -25,6 +29,62 @@ func writeEncryptionKeyFile(t *testing.T) string {
 		t.Fatalf("write key file: %v", err)
 	}
 	return path
+}
+
+// writeShardsFile writes a one-shard --shards-file config pointing at
+// connStr, in the format cmd/cleat-worker/setup.go's loadShardConfigs
+// expects. A local struct, not engine.ShardConfig: this package deliberately
+// does not import engine (see harness_test.go's comment on defaultTenant),
+// so this is the same trade harness_test.go already makes.
+func writeShardsFile(t *testing.T, connStr string) string {
+	t.Helper()
+	type shardConfig struct {
+		Name    string `json:"name"`
+		ConnStr string `json:"conn_str"`
+	}
+	data, err := json.Marshal([]shardConfig{{Name: "shard-0", ConnStr: connStr}})
+	if err != nil {
+		t.Fatalf("marshal shards config: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "shards.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write shards file: %v", err)
+	}
+	return path
+}
+
+// startShardedWorker launches the worker in --shards-file mode against a
+// single shard. It cannot reuse startWorkerOn: that helper always passes
+// --db, and cmd/cleat-worker/main.go's sharded branch (main.go:811) never
+// reads --db at all -- it builds its runtime pool from the shard config's
+// own conn_str instead, which is the entire reason the shadowed-variable bug
+// (cleat#2305) had no test that could see it: nothing in this package
+// started a worker this way before this file.
+func startShardedWorker(t *testing.T, bin, shardsFile, taskQueue, svcURL string, extraFlags ...string) *worker {
+	t.Helper()
+	w := &worker{log: &strings.Builder{}}
+	args := []string{
+		"--shards-file", shardsFile,
+		"--migrate-db", ensureCrashDatabase(t),
+		"--task-queue", taskQueue,
+		"--bench-svc-url", svcURL,
+		"--poll", "200ms",
+		"--concurrency", "1",
+		"--migrate-on-start",
+	}
+	args = append(args, extraFlags...)
+	//nolint:gosec // bin is built by this test from this repo.
+	cmd := exec.Command(bin, args...)
+	cmd.Dir = repoRoot(t)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdout = &syncWriter{w: w.log, mu: &w.mu}
+	cmd.Stderr = &syncWriter{w: w.log, mu: &w.mu}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("starting the sharded worker: %v", err)
+	}
+	w.cmd = cmd
+	t.Cleanup(func() { w.kill() })
+	return w
 }
 
 // eventTextContains reports whether any request/response column of id's
@@ -284,14 +344,25 @@ func dumpEventHistory(t *testing.T, db *sql.DB, id string) {
 // chance to run for a real invocation. This starts the compiled binary the
 // way an operator would and confirms it now exits non-zero rather than
 // starting quietly with encryption off.
+//
+// Bounded with exec.CommandContext, not exec.Command (cleat-review,
+// #2308): on a regression the worker does not exit at all -- it starts
+// cleanly with encryption off and sits polling for work -- so
+// CombinedOutput blocks until something kills the process. Without a
+// deadline of its own, that "something" is go test's whole-suite timeout,
+// which turns one silent regression into every other test in this package
+// failing to report anything either.
 func TestEncryptionKeyFilePreviousWithoutCurrentIsRefusedByARealWorker(t *testing.T) {
 	suffix := uniqueSuffix()
 	taskQueue := "queue-payload-rotation-refuse-" + suffix
 	keyA := writeEncryptionKeyFile(t)
 	bin := buildWorker(t)
 
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	//nolint:gosec // bin is built by this test from this repo.
-	cmd := exec.Command(bin,
+	cmd := exec.CommandContext(ctx, bin,
 		"--db", appDSN(t),
 		"--migrate-db", ensureCrashDatabase(t),
 		"--task-queue", taskQueue,
@@ -301,12 +372,124 @@ func TestEncryptionKeyFilePreviousWithoutCurrentIsRefusedByARealWorker(t *testin
 		"--encryption-key-file-previous", keyA,
 	)
 	cmd.Dir = repoRoot(t)
+	// Own process group, so a context-deadline kill (which signals cmd.Process
+	// alone) cannot leave a grandchild running -- matching worker.kill()'s
+	// SysProcAttr elsewhere in this package.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		t.Fatalf("worker did not exit within 15s of being given "+
+			"--encryption-key-file-previous with no --encryption-key-file -- "+
+			"want a fast non-zero refusal, not a worker that starts and runs\n"+
+			"--- output ---\n%s", out)
+	}
 	if err == nil {
 		t.Fatalf("worker exited 0 with --encryption-key-file-previous and no "+
 			"--encryption-key-file -- want a non-zero refusal\n--- output ---\n%s", out)
 	}
 	if !strings.Contains(string(out), "requires --encryption-key-file") {
 		t.Errorf("worker refused, but its output does not name the missing flag:\n%s", out)
+	}
+}
+
+// TestPayloadEncryptionShardedWorkerDoesNotWritePlaintext pins cleat#2305's
+// second half, found by cleat-review while re-reviewing #2308: restoring the
+// shadowing var cleat#2305 removed keeps every OTHER test in this file
+// green, because none of them start a worker with --shards-file.
+// cmd/cleat-worker/main.go's sharded branch (main.go:811-855) builds each
+// shard's store factory from the sharded-path's own `payloadEncryption`
+// variable, which the shadow left permanently nil even with
+// --encryption-key-file set and loaded correctly -- so
+// f.WithEncryption(nil, true) ran, encryption was silently off, and
+// event_history was written in plain text with the run still ending done.
+// That was develop's behaviour before the fix in this PR; this test is what
+// should have caught it, and did not exist to.
+//
+// Also exercises one rotation handover (worker A under key A crashes,
+// worker B under key B with A as previous resumes) on the sharded path --
+// the same sequence TestPayloadEncryptionKeyRotationWiresIntoARealWorker
+// proves on the non-sharded one. The two paths build their
+// PayloadEncryption independently (main.go:843 sharded vs. main.go:1190 and
+// :1229 non-sharded), so proving one says nothing about the other -- which
+// is exactly how cleat#2305's sharded half survived this file's first
+// version unnoticed.
+func TestPayloadEncryptionShardedWorkerDoesNotWritePlaintext(t *testing.T) {
+	db := ownerDB(t)
+	defer db.Close()
+
+	suffix := uniqueSuffix()
+	taskQueue := "queue-payload-rotation-sharded-" + suffix
+	wfID := "payload-rotation-sharded-wf-" + suffix
+	marker := "order-rotation-sharded-marker-" + suffix
+
+	deployFixture(t, db, taskQueue)
+	bin := buildWorker(t)
+	shardsFile := writeShardsFile(t, appDSN(t))
+
+	svc := newChargeService(t)
+	releaseCharge := svc.holdOperation("Charge")
+	defer releaseCharge() // see TestPayloadEncryptionKeyRotationWiresIntoARealWorker's comment on this pattern
+
+	keyA := writeEncryptionKeyFile(t)
+	first := startShardedWorker(t, bin, shardsFile, taskQueue, svc.srv.URL,
+		"--encrypt-sensitive-payloads", "--encryption-key-file", keyA)
+	startWorkflow(t, db, wfID, marker, taskQueue)
+
+	svc.awaitHeldCall(t, first, startBudget)
+	if r, c, _ := svc.allCounts(); r != 1 || c != 1 {
+		t.Fatalf("before the crash: Reserve=%d Charge=%d, want 1/1 -- the workflow "+
+			"did not reach the held call cleanly\n--- worker log ---\n%s", r, c, first.output())
+	}
+
+	// Checked HERE, while the workflow is still "running" -- see
+	// TestPayloadEncryptionWiringKnownPositive's comment on why after
+	// awaitTerminal would prove nothing.
+	if eventTextContains(t, db, wfID, marker) {
+		dumpEventHistory(t, db, wfID)
+		t.Fatalf("event_history for %s carries %q in plain text on a SHARDED "+
+			"worker with --encryption-key-file set -- cleat#2305: the sharded "+
+			"path's own store factory never received the loaded key\n"+
+			"--- worker log ---\n%s", wfID, marker, first.output())
+	}
+
+	first.kill()
+	releaseCharge()
+
+	releaseShip := svc.holdOperation("Ship")
+	defer releaseShip()
+
+	keyB := writeEncryptionKeyFile(t)
+	second := startShardedWorker(t, bin, shardsFile, taskQueue, svc.srv.URL,
+		"--encrypt-sensitive-payloads", "--encryption-key-file", keyB,
+		"--encryption-key-file-previous", keyA)
+
+	// Reaching this requires worker B's sharded store to have decrypted
+	// Reserve's keyA-sealed event during replay.
+	svc.awaitHeldCall(t, second, startBudget)
+
+	if eventTextContains(t, db, wfID, marker) {
+		dumpEventHistory(t, db, wfID)
+		t.Fatalf("event_history for %s carries %q in plain text after Charge's "+
+			"retry on the rolled sharded worker\n--- worker log ---\n%s",
+			wfID, marker, second.output())
+	}
+	releaseShip()
+
+	status, errMsg := awaitTerminal(t, db, wfID, completeBudget)
+	if status != "done" && status != "completed" {
+		t.Fatalf("workflow ended %q (%s) on the sharded rotation handover\n--- worker log ---\n%s",
+			status, errMsg, second.output())
+	}
+
+	reserve, charge, ship := svc.allCounts()
+	t.Logf("sharded, after rotation: Reserve=%d Charge=%d Ship=%d", reserve, charge, ship)
+	if reserve != 1 {
+		t.Errorf("Reserve=%d, want 1", reserve)
+	}
+	if charge != 2 {
+		t.Errorf("Charge=%d, want 2", charge)
+	}
+	if ship != 1 {
+		t.Errorf("Ship=%d, want 1", ship)
 	}
 }
