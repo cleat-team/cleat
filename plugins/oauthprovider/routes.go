@@ -560,9 +560,13 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		// whose config is read, and any pair this branch could probe,
 		// handleLogin already probes directly.
 		//
-		// The uniform TEXT closes the STRING oracle only; the STATUS still
-		// discriminates (500 here, the 200 JSON finishLogin returns on
-		// success). Same residual, recorded on cleat#2368.
+		// The uniform TEXT closes the STRING oracle only; the STATUS here
+		// still discriminates (500 here, the 200 JSON finishLogin returns on
+		// success). This branch is NOT cleat#2368's fix -- that issue closed
+		// the login route's status. It is not the same oracle either: a caller
+		// reaches this only with a state row, and production mints one only
+		// after a login already cleared getConfig (the INSERT in handleLogin),
+		// so any pair this branch could probe, handleLogin already answered.
 		p.logger.Error("oauth: config lookup", "provider", provider, "error", err,
 			"secret_not_found", errors.Is(err, plugin.ErrSecretNotFound))
 		p.writeError(w, http.StatusInternalServerError, "oauth config not found")
