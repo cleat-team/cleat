@@ -767,7 +767,7 @@ jobs:
           sys.exit(1 if bad else 0)
           PY
 
-      # Four structural guards over the workflows, each catching a CLASS that
+      # Six structural guards over the workflows, each catching a CLASS that
       # has already cost a session to find one instance of by hand:
       #
       #   1. every context in .github/required-checks.txt resolves to a job
@@ -780,7 +780,17 @@ jobs:
       #   4. every `--filter ancestor=<ref>` names an image pinned in the same
       #      file -- the trap found while pinning SQL Server, where that filter
       #      matches on the pull reference, so pinning `image:` alone leaves
-      #      `docker exec` with an empty container ID.
+      #      `docker exec` with an empty container ID;
+      #   5. every `mssql/server` service sets MSSQL_MEMORY_LIMIT_MB -- SQL
+      #      Server sizes its buffer pool to 80% of VISIBLE host memory by
+      #      default, so a service missing the cap runs fine alone and only
+      #      contends once the runner is busy (cleat#2101);
+      #   6. no `run:`/github-script `script:` in a workflow_run or
+      #      pull_request_target workflow splices github.event.*,
+      #      github.head_ref, steps.*.outputs.* or needs.*.outputs.* directly
+      #      via `${{ }}` -- both triggers run in the base repo's trusted
+      #      context even for a fork's PR, and this is the shape cleat#2150
+      #      found in review before #2309 ever ran (cleat#2310).
       #
       # The script fails on anything it cannot analyse -- an unexpandable
       # matrix, an unresolvable expression, an empty context list -- rather
@@ -793,10 +803,21 @@ jobs:
       # human with one. A green Lint is not evidence that the file matches the
       # API, and the file says so at the top.
       #
+      # --self-test first, exercising guard 6's known-positive/known-negative
+      # pairs against synthetic YAML -- the same "prove it can fail" reason
+      # the Dependabot coverage guard below runs its self-test before the
+      # real check. It is not decorative here: guard 6's first version parsed
+      # the real tree's `on:` key as the boolean True (YAML 1.1's bare-word
+      # coercion, the same trap the "Workflow files parse" step above already
+      # works around), which made it pass every real workflow vacuously --
+      # caught by this self-test before the guard ever ran against a file.
+      #
       # pyyaml comes from the "Workflow files parse" step above; this step must
       # stay after it.
       - name: Workflow integrity guards
-        run: scripts/check-workflow-guards.py
+        run: |
+          scripts/check-workflow-guards.py --self-test
+          scripts/check-workflow-guards.py
 
       # Dependabot coverage. Two directions, both silent without this: an entry
       # naming a directory that does not exist is skipped by Dependabot with no
