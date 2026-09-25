@@ -259,7 +259,7 @@ That is a reasonable default and it is not a storage solution.
 `query_state` is a **JSONB column on `workflow_instances`**, written by the finalize procedure
 (`migrations/postgres/003_procedures.sql:52`, `:65`, and redefined in later migrations), and read
 one key at a time by `GetQueryState(ctx, id, key)` behind
-`GET /api/workflows/{id}/state?key=` (`cmd/cleat-worker/server.go:1671`). Listing keys is refused
+`GET /api/workflows/{id}/query?key=` (`cmd/cleat-worker/server.go:1909`). Listing keys is refused
 deliberately (cleat#1119).
 
 So "show me this tenant's open orders" — which every playbook needs — has no answer except scanning
