@@ -31,14 +31,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hand-rolled INSERT and were converted too, for parity -- a no-op on those dialects today, since
   encryption at rest is not supported there and `--encrypt-sensitive-payloads` is refused at
   worker startup unless `--driver=postgres`. All three were also missing the `payload_encoding`
-  column outright (NULL by omission; now written explicitly).
+  column outright -- omitted from the INSERT's column list, rather than explicitly written. Its
+  value is still `NULL` for a `child_workflow` event either way: `payloadEncodingFor` returns `nil`
+  when the record's `Request`/`Response` are both empty, which is always true for this event type.
+  The fix makes that `NULL` the encoder's explicit, reviewed answer rather than an accident of the
+  column being left out of the statement -- the same value, reached the correct way, which matters
+  once any dialect other than Postgres gains real encryption and this stops being a no-op.
   `TestEveryEventHistoryWriteRoutesThroughTheEncoder` guards every `INSERT INTO event_history` in
   `engine/` against this regressing again: each site must call the encoder or be named on an
   exemption list with a reason (MySQL/MSSQL sites with nothing to encrypt, and Postgres sites that
   consume an already-encoded value built elsewhere). Its own first version was blind to two of the
-  eleven sites: MySQL spells this `INSERT IGNORE INTO event_history`, not `INSERT INTO`, so
-  `mysql_store.go` and `mysql_events.go` evaded a guard whose pattern only knew the other two
-  dialects' spelling -- found re-deriving the site count, not by review.
+  thirteen production sites: MySQL spells this `INSERT IGNORE INTO event_history`, not
+  `INSERT INTO`, so `mysql_store.go` and `mysql_events.go` evaded a guard whose pattern only knew
+  the other two dialects' spelling -- found re-deriving the site count against cleat-review's
+  independent sweep, not by review alone.
 
   **To upgrade:** `cleatctl reseal-payloads` does **not** repair rows already affected by this.
   Measured directly: seeded a `child_workflow` event with a plaintext `child_input` and ran
