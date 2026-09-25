@@ -213,5 +213,59 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE oauth_config DROP COLUMN IF EXISTS issuer;
 			`,
 		},
+		{
+			// oauth_config.client_secret moves into plugin.Secrets /
+			// tenant_secrets, the same envelope-encrypted store
+			// dd_config.api_key and pd_config.routing_key already use
+			// (#2179). cleat#1992.
+			//
+			// ONE FIXED NAME PER (TENANT, PROVIDER), not per config id like
+			// dd_config/pd_config: oauth_config's own primary key is
+			// (tenant_id, provider), so a tenant can have at most one row
+			// per provider already -- keying the secret name by provider
+			// alone (OAuthClientSecretName, routes.go) preserves that, with
+			// no risk of two configs colliding under one name.
+			//
+			// No backfill step: cleat#2058 (owner decision 3) settled that
+			// 0.3.0 requires a fresh database, with no upgrade path from
+			// v0.2.0, so no deployment ever has a plaintext value in this
+			// column that needs to survive the DROP.
+			//
+			// oauth_sessions.session_token/access_token/refresh_token are
+			// NOT touched by this migration. They move to plugin.Payloads
+			// instead of plugin.Secrets (high-churn, one per session, minted
+			// on every login rather than operator-set), which seals VALUES
+			// rather than moving them to a different store -- so those
+			// columns keep their existing TEXT/NVARCHAR(MAX)/VARCHAR(255)
+			// types and hold base64(sealed) instead of plaintext from this
+			// version onward. See finishLogin's own comment in routes.go for
+			// the rotation caveat this implies for refresh_token
+			// specifically.
+			Version: 5,
+			Up: `
+				ALTER TABLE oauth_config DROP COLUMN IF EXISTS client_secret;
+			`,
+			UpMySQL: `
+				ALTER TABLE oauth_config DROP COLUMN client_secret;
+			`,
+			UpMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('oauth_config') AND name = 'client_secret')
+				ALTER TABLE oauth_config DROP COLUMN client_secret;
+			`,
+			// Down restores the SCHEMA, not the data -- the value is gone
+			// from oauth_config the moment Up runs; it now lives in tenant
+			// secrets, a different store. No NOT NULL: existing rows have
+			// nothing to put there.
+			Down: `
+				ALTER TABLE oauth_config ADD COLUMN IF NOT EXISTS client_secret TEXT;
+			`,
+			DownMySQL: `
+				ALTER TABLE oauth_config ADD COLUMN client_secret TEXT;
+			`,
+			DownMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('oauth_config') AND name = 'client_secret')
+				ALTER TABLE oauth_config ADD client_secret NVARCHAR(MAX);
+			`,
+		},
 	}
 }

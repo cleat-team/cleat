@@ -113,16 +113,33 @@ func (p *Plugin) resolveEndpoints(ctx context.Context, provider string, cfg *oau
 	}, nil
 }
 
-// oauthConfigRow represents a row from the oauth_config table.
+// oauthConfigRow represents a row from the oauth_config table, plus the
+// tenant secret that used to be one of its columns.
 type oauthConfigRow struct {
 	TenantID     uuid.UUID
 	Provider     string
 	ClientID     string
-	ClientSecret string
+	ClientSecret plugin.Secret
 	RedirectURL  string
 	Domain       string
 	Issuer       string
 	Enabled      bool
+}
+
+// OAuthClientSecretName is the tenant-secret name an oauth_config row's
+// client secret is stored under. cleat#1992.
+//
+// ONE NAME PER (TENANT, PROVIDER), not per config id like
+// datadogexport.DatadogAPIKeySecretName: oauth_config's own primary key is
+// (tenant_id, provider), so a tenant already has at most one row per
+// provider. Keying by provider alone preserves that -- there is no second
+// config of the same provider a fixed name could collide with.
+//
+// EXPORTED for the same reason DatadogAPIKeySecretName is: a caller seeding
+// or verifying an oauth_config secret (a test, tests/plugin-harness)
+// computes the name the same way rather than reimplementing the scheme.
+func OAuthClientSecretName(provider string) string {
+	return "oauthprovider.client_secret." + provider
 }
 
 // RegisterRoutes registers HTTP handlers for the OAuth flow and session
@@ -172,17 +189,27 @@ func (p *Plugin) getConfig(ctx context.Context, tenantID uuid.UUID, provider str
 	// the value in hand is the only reliable one.
 	ctx = plugin.ForTenant(ctx, tenantID)
 	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
-			SELECT tenant_id, provider, client_id, client_secret, redirect_url,
+			SELECT tenant_id, provider, client_id, redirect_url,
 			       COALESCE(domain, '') AS domain, COALESCE(issuer, '') AS issuer, enabled
 			FROM oauth_config
 			WHERE tenant_id = $1 AND provider = $2 AND enabled = true
 		`, p.dialect), tenantID, provider),
-		&cfg.TenantID, &cfg.Provider, &cfg.ClientID, &cfg.ClientSecret,
+		&cfg.TenantID, &cfg.Provider, &cfg.ClientID,
 		&cfg.RedirectURL, &cfg.Domain, &cfg.Issuer, &cfg.Enabled,
 	)
 	if err != nil {
 		return nil, err
 	}
+
+	// client_secret moved into tenant secrets, cleat#1992. Same ctx: it is
+	// already ForTenant-marked above, and plugin.Secrets reads the tenant
+	// from ctx the identical way plugin.ForTenant marks it for SQL.
+	secret, err := p.secrets.Get(ctx, OAuthClientSecretName(provider))
+	if err != nil {
+		return nil, fmt.Errorf("oauth-provider: client secret for %s/%s: %w", tenantID, provider, err)
+	}
+	cfg.ClientSecret = plugin.Secret(secret)
+
 	return &cfg, nil
 }
 
@@ -244,6 +271,22 @@ func (p *Plugin) extractSession(r *http.Request) *SessionInfo {
 		SessionID: sessionID,
 		UserEmail: userEmail.String,
 	}
+}
+
+// sealForStorage seals plaintext under ctx's tenant -- ctx must already carry
+// plugin.ForTenant, the same requirement Payloads.Seal itself states -- and
+// base64-encodes the result. oauth_sessions' session_token/access_token/
+// refresh_token columns are TEXT/NVARCHAR(MAX)/VARCHAR(255), and
+// Payloads.Seal returns raw ciphertext bytes, which are not guaranteed to
+// round-trip through a string-typed column unmodified (a Postgres TEXT
+// column is UTF-8; arbitrary ciphertext bytes are not valid UTF-8 in
+// general). cleat#1992.
+func (p *Plugin) sealForStorage(ctx context.Context, plaintext string) (string, error) {
+	sealed, err := p.payloads.Seal(ctx, []byte(plaintext))
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(sealed), nil
 }
 
 // formatProviderURL substitutes the Okta domain into endpoint templates that
@@ -443,7 +486,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	data := url.Values{}
 	data.Set("code", code)
 	data.Set("client_id", cfg.ClientID)
-	data.Set("client_secret", cfg.ClientSecret)
+	data.Set("client_secret", cfg.ClientSecret.Reveal())
 	data.Set("redirect_uri", cfg.RedirectURL)
 	data.Set("grant_type", "authorization_code")
 	data.Set("code_verifier", codeVerifier.String)
@@ -585,7 +628,11 @@ func (p *Plugin) finishLogin(
 		return
 	}
 
-	// Hash the session token for at-rest storage.
+	// Hash the session token for at-rest storage. token_hash is what
+	// middleware/extractSession actually looks a caller up by; the sealed
+	// session_token column below is never read back by any code path today,
+	// same as sealed access_token/refresh_token -- see this function's own
+	// sealing comment.
 	tokenHash := sha256Hex(sessionToken)
 
 	var expiresAt *time.Time
@@ -594,21 +641,69 @@ func (p *Plugin) finishLogin(
 		expiresAt = &t
 	}
 
+	// ForTenant with the tid the state lookup above derived. Both the UPDATE
+	// below and the seals share this ctx: the UPDATE addresses the row BY ID
+	// with no tenant predicate, so the policy is what keeps a state
+	// collision from writing another tenant's session, and Payloads.Seal
+	// requires the identical ForTenant marking to bind ciphertext to a
+	// tenant at all.
+	ctx := plugin.ForTenant(r.Context(), tid)
+
+	// session_token/access_token/refresh_token are sealed via plugin.Payloads
+	// rather than stored plaintext, cleat#1992 (closes cleat#2156, which
+	// asked for defense-in-depth on all four oauthprovider credential
+	// fields -- client_secret is the fourth, handled in getConfig).
+	//
+	// NOT COVERED BY `cleatctl reseal-payloads`, per plugin.Payloads' own doc
+	// comment: that command only rewrites event_history's columns. A value
+	// sealed here stays readable only as long as the key it was sealed under
+	// remains in the key ring as a PREVIOUS key -- this plugin never opens
+	// any of the three back (nothing reads them today), so in practice that
+	// only matters if a future caller adds a read path.
+	//
+	// refresh_token is the one of the three that can genuinely outlive a key
+	// rotation: session_token and access_token are both short-lived (a
+	// session_token is revocable via DELETE /oauth/sessions/{id}, and an
+	// access_token's own provider-side lifetime is typically under an hour),
+	// but a refresh_token can be valid for months. If the key it was sealed
+	// under is ever retired from the ring entirely (not just superseded as
+	// current), a stored refresh_token becomes unreadable -- the same
+	// PayloadOpenFailed outcome engine/db.go already logs for event_history.
+	// Nothing in this plugin currently opens refresh_token back, so that
+	// outcome is silent today; a future caller that adds a refresh-token
+	// read path must either re-seal on rotation itself or accept that an
+	// old-enough refresh_token forces the user through a fresh login instead.
+	sealedSessionToken, err := p.sealForStorage(ctx, sessionToken)
+	if err != nil {
+		p.logger.Error("oauth: seal session token", "error", err)
+		p.writeError(w, http.StatusInternalServerError, "failed to create session")
+		return
+	}
+	sealedAccessToken, err := p.sealForStorage(ctx, accessToken)
+	if err != nil {
+		p.logger.Error("oauth: seal access token", "error", err)
+		p.writeError(w, http.StatusInternalServerError, "failed to create session")
+		return
+	}
+	sealedRefreshToken, err := p.sealForStorage(ctx, refreshToken)
+	if err != nil {
+		p.logger.Error("oauth: seal refresh token", "error", err)
+		p.writeError(w, http.StatusInternalServerError, "failed to create session")
+		return
+	}
+
 	// Update the pre-inserted state row with the actual session data and clear
 	// the PKCE fields. The nonce is cleared with them: it is single-use by
 	// definition, and a spent nonce left in the row is a replay waiting for a
 	// state collision.
-	// ForTenant with the tid the state lookup above derived. The UPDATE
-	// addresses the row BY ID with no tenant predicate, so the policy is what
-	// keeps a state collision from writing another tenant's session.
-	_, err = p.db.Exec(plugin.ForTenant(r.Context(), tid), plugin.Rebind(`
+	_, err = p.db.Exec(ctx, plugin.Rebind(`
 			UPDATE oauth_sessions
 			SET session_token = $1, token_hash = $2, user_email = $3,
 			    access_token = $4, refresh_token = $5, expires_at = $6,
 			    state = NULL, code_verifier = NULL, nonce = NULL
 			WHERE id = $7
-		`, p.dialect), sessionToken, tokenHash, email, accessToken,
-		refreshToken, expiresAt, sessionID)
+		`, p.dialect), sealedSessionToken, tokenHash, email, sealedAccessToken,
+		sealedRefreshToken, expiresAt, sessionID)
 	if err != nil {
 		p.logger.Error("oauth: create session", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to create session")

@@ -19,6 +19,7 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"github.com/google/uuid"
 )
 
@@ -37,13 +38,32 @@ type fakeSession struct {
 	TokenHash    driver.Value // nil or string (sha256 hex of session token)
 	CreatedAt    time.Time
 	ExpiresAt    driver.Value // nil or time.Time
+
+	// SessionTokenAtRest/AccessTokenAtRest/RefreshTokenAtRest hold exactly
+	// what finishLogin wrote for columns 1, 4 and 5 of the UPDATE -- base64
+	// of a plugintest.FakePayloads-sealed value from cleat#1992 onward, not
+	// plaintext. Captured so a test can assert the at-rest form differs from
+	// the plaintext the provider returned, the same way a real DB row would.
+	SessionTokenAtRest driver.Value
+	AccessTokenAtRest  driver.Value
+	RefreshTokenAtRest driver.Value
 }
 
 type fakeDBStore struct {
 	mu       sync.RWMutex
 	sessions map[uuid.UUID]*fakeSession
-	configs  map[string]*oauthConfigRow // key: "tenantID:provider"
+	configs  map[string]*oauthConfigRow // key: "tenantID:provider"; ClientSecret unused, see AddOAuthConfig
 	now      func() time.Time
+
+	// secrets backs AddOAuthConfig's client secret and must be the SAME
+	// instance wired into the Plugin under test as p.secrets -- setupTestPlugin
+	// does that. Owned by the store rather than created separately in each
+	// test, so the existing AddOAuthConfig(tenantID, provider, ..., clientSecret,
+	// ...) call sites (all seven of them, predating cleat#1992) need no change:
+	// this seeds both the DB-shaped row and the tenant secret in one call, the
+	// same way production's two stores (oauth_config, tenant_secrets) are two
+	// separate writes only at the SQL layer.
+	secrets *plugintest.FakeSecrets
 }
 
 func newFakeDBStore() *fakeDBStore {
@@ -51,6 +71,7 @@ func newFakeDBStore() *fakeDBStore {
 		sessions: make(map[uuid.UUID]*fakeSession),
 		configs:  make(map[string]*oauthConfigRow),
 		now:      time.Now,
+		secrets:  plugintest.NewFakeSecrets(),
 	}
 }
 
@@ -376,9 +397,11 @@ func setupTestPlugin(t *testing.T, store *fakeDBStore) (*Plugin, http.Handler) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		mux:    http.NewServeMux(),
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:       &engine.SQLDBAdapter{DB: db},
+		mux:      http.NewServeMux(),
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets:  store.secrets,
+		payloads: plugintest.NewFakePayloads(),
 	}
 
 	if err := p.RegisterRoutes(p.mux); err != nil {
@@ -821,14 +844,17 @@ func (s *fakeDBStore) AddOAuthConfig(tenantID uuid.UUID, provider, clientID, cli
 	defer s.mu.Unlock()
 	key := tenantID.String() + ":" + provider
 	s.configs[key] = &oauthConfigRow{
-		TenantID:     tenantID,
-		Provider:     provider,
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		RedirectURL:  redirectURL,
-		Domain:       domain,
-		Enabled:      enabled,
+		TenantID:    tenantID,
+		Provider:    provider,
+		ClientID:    clientID,
+		RedirectURL: redirectURL,
+		Domain:      domain,
+		Enabled:     enabled,
 	}
+	// client_secret lives in tenant secrets, not the oauth_config row, from
+	// cleat#1992 onward -- Seed bypasses ctx/tenant resolution the way this
+	// whole fake bypasses SQL, so no ForTenant-marked context is needed here.
+	s.secrets.Seed(tenantID.String(), OAuthClientSecretName(provider), clientSecret)
 }
 
 func (c *fakeConn) execInsertSession(args []driver.NamedValue) (driver.Result, error) {
@@ -897,11 +923,20 @@ func (c *fakeConn) execUpdateSession(args []driver.NamedValue) (driver.Result, e
 		return &fakeResult{rowsAffected: 0}, nil
 	}
 
+	if sessionToken, err := argString(args, 1); err == nil {
+		s.SessionTokenAtRest = sessionToken
+	}
 	if tokenHash, err := argString(args, 2); err == nil {
 		s.TokenHash = tokenHash
 	}
 	if userEmail, err := argAny(args, 3); err == nil {
 		s.UserEmail = userEmail
+	}
+	if accessToken, err := argString(args, 4); err == nil {
+		s.AccessTokenAtRest = accessToken
+	}
+	if refreshToken, err := argString(args, 5); err == nil {
+		s.RefreshTokenAtRest = refreshToken
 	}
 	if expiresAt, err := argAny(args, 6); err == nil {
 		s.ExpiresAt = expiresAt
@@ -926,17 +961,16 @@ func (c *fakeConn) queryOAuthConfig(args []driver.NamedValue) (driver.Rows, erro
 	cfg, ok := c.store.configs[key]
 	if !ok || !cfg.Enabled {
 		return &fakeRows{
-			columns: []string{"tenant_id", "provider", "client_id", "client_secret", "redirect_url", "domain", "issuer", "enabled"},
+			columns: []string{"tenant_id", "provider", "client_id", "redirect_url", "domain", "issuer", "enabled"},
 		}, nil
 	}
 
 	return &fakeRows{
-		columns: []string{"tenant_id", "provider", "client_id", "client_secret", "redirect_url", "domain", "issuer", "enabled"},
+		columns: []string{"tenant_id", "provider", "client_id", "redirect_url", "domain", "issuer", "enabled"},
 		data: [][]driver.Value{{
 			cfg.TenantID.String(),
 			cfg.Provider,
 			cfg.ClientID,
-			cfg.ClientSecret,
 			cfg.RedirectURL,
 			cfg.Domain,
 			cfg.Issuer,
