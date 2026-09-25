@@ -61,6 +61,19 @@ func TestARealLoginStoresNoTokensOnAnyDialect(t *testing.T) {
 				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
 				t.Fatalf("oauthprovider migrations on %s: %v", be.Name, err)
 			}
+			// RunMigrations creates oauth_config and oauth_sessions (and, on
+			// MSSQL, their tenant_isolation security policies) directly in
+			// be.DB, which PluginTestBackend reuses across runs rather than
+			// recreating -- and be.Cleanup only closes the pool, it never
+			// runs this plugin's Down SQL. Left behind, the next
+			// `go test ./...` against this same shared test database fails
+			// engine.TestEveryTenantOwnedTableIsEmptiedByDropTenant on both
+			// tables (cleat-review, #2295 at 831a66fb) -- the same shape
+			// #2271 found and fixed for slacknotify's slack_config.
+			// Registered after RunMigrations but before be.Cleanup so it
+			// always runs first (defers unwind LIFO), whether this subtest
+			// reaches t.Fatalf or the end.
+			defer cleanupOauthproviderSchema(t, be.DB, be.Dialect)
 
 			// A real SecretStore under a fixed test key -- the same shape
 			// TestARetiredSecretRefusesIngest and
@@ -252,5 +265,63 @@ func TestARealLoginStoresNoTokensOnAnyDialect(t *testing.T) {
 					"session lookup depends on it", be.Name, tokenHash)
 			}
 		})
+	}
+}
+
+// cleanupOauthproviderSchema undoes oauth-provider's Migrations() against
+// this test's shared, persistent test database: RunMigrations has no
+// matching teardown call anywhere in this file, and plugin.RunDownMigrations
+// would not help here even if called -- oauth_config and oauth_sessions are
+// TenantScoped (migrations.go:172), so their MSSQL security policies are
+// applied through plugin.RunMigrations' own runtime side effect
+// (applyTenantScoping), not through any Up/Down SQL the migration declares.
+// A Down pass never drops the policy, and DROP TABLE would fail on SQL
+// Server while it still references either table. Same shape, same fix, as
+// plugins/slacknotify's cleanupSlackConfigSchema (cleat#2230, #2271): drop
+// each policy by the "<table>_tenant_isolation" name
+// plugin/migration.go's applyTenantScopingMSSQL constructs, then the table,
+// then the plugin_migrations row so a re-run of this test applies the
+// migration fresh rather than finding it already recorded against tables
+// that are gone.
+func cleanupOauthproviderSchema(t *testing.T, conn *sql.DB, dialect testutil.Dialect) {
+	t.Helper()
+	ctx := context.Background()
+	const pluginName = "oauth-provider"
+	tables := []string{"oauth_sessions", "oauth_config"}
+
+	exec := func(query string) {
+		if _, err := conn.ExecContext(ctx, query); err != nil {
+			t.Errorf("cleanupOauthproviderSchema: %s: %v", query, err)
+		}
+	}
+	exists := func(query string, args ...any) bool {
+		var n int
+		if err := conn.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+			t.Errorf("cleanupOauthproviderSchema: existence check %s: %v", query, err)
+			return false
+		}
+		return n > 0
+	}
+
+	if dialect == testutil.DialectMSSQL {
+		for _, table := range tables {
+			policy := table + "_tenant_isolation"
+			if exists(`SELECT COUNT(*) FROM sys.security_policies WHERE name = @p1`, policy) {
+				exec(`DROP SECURITY POLICY dbo.` + policy)
+			}
+			if exists(`SELECT COUNT(*) FROM sys.tables WHERE name = @p1`, table) {
+				exec(`DROP TABLE ` + table)
+			}
+		}
+		exec(`DELETE FROM plugin_migrations WHERE plugin_name = '` + pluginName + `'`)
+		return
+	}
+
+	for _, table := range tables {
+		exec(`DROP TABLE IF EXISTS ` + table)
+	}
+	exec(`DELETE FROM plugin_migrations WHERE plugin_name = '` + pluginName + `'`)
+	if dialect == testutil.DialectPostgres {
+		exec(`DELETE FROM admin.plugin_tables WHERE plugin_name = '` + pluginName + `'`)
 	}
 }
