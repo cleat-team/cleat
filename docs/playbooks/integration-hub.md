@@ -1,7 +1,9 @@
 # Playbook 4 — Event-driven integration hub (per-tenant iPaaS)
 
-**Status:** engineering reference. Drafted 2026-09-14 against `develop` at `654d6f84`.
-Nothing here has been built end to end; see [What was verified](#what-was-verified) at the end.
+**Status:** engineering reference. Drafted 2026-09-14 against `develop` at `654d6f84`; corrected
+2026-09-25 against `develop` at `656aced4` (cleat#2050) — see
+[What was verified](#what-was-verified) at the end for what changed and what is still unverified.
+Nothing here has been built end to end.
 
 **Who this is for:** your product has to talk to your customers' other systems. Each customer wants
 their CRM, their warehouse, their ERP, their Slack — and each wants slightly different rules about
@@ -94,6 +96,52 @@ price the axis that grows.
 
 ---
 
+## The wedge: the tenant's own step, not yours
+
+Everything above is still **you** writing the integrations — a definition per customer, authored by
+your team. The stronger claim is that a tenant supplies its own logic, and that is shipped:
+**`POST /api/definitions` lets a tenant upload its own WASM workflow.** It is created through
+`s.scopedStore`, so a tenant cannot write into another's namespace, and it is auto-versioned when no
+version is given (`handleCreateDefinition`, `cmd/cleat-worker/server.go`) — each tenant owns its own
+`(tenant_id, name, version)` rows.
+
+So the shape is: your workflow owns the parts that must not vary — auth, retry policy, the audit
+record, per-tenant limits — and calls the tenant's step for the part that must.
+
+**A worked case.** A customer's CRM emits `order.created` and wants it normalized before your
+`SyncOrder` workflow stores it:
+
+1. The tenant uploads a `normalize-order` definition of its own through `POST /api/definitions`,
+   carrying the transform it actually wants. It is scoped to that tenant and invisible to every
+   other.
+2. Your `SyncOrder` workflow awaits the event, then invokes the tenant's step as a child workflow,
+   handing it the raw payload.
+3. The tenant revises its transform next month. That is a new version of *their* definition, routed
+   by the version pinning and routing rules the platform already uses — not a change to your
+   product's code, and not a deploy.
+
+**WASM is what makes this safe to offer.** The tenant's step runs in the same sandbox as every other
+workflow: no ambient filesystem, no network beyond the host functions you allow, and its durable
+calls go through the same recorder. You are not handing a tenant a scripting hook inside your own
+process; the isolation containing it is the one that already contains your own workflows.
+
+**Two things to get right before exposing it.**
+
+*Exposure is not free.* Serving a tenant's workflow on a **public** route needs the exposure-class
+work in cleat#1986 — each definition declaring `public`, `auth` (the default) or `internal`,
+enforced on every workflow route. Until that lands, keep tenant-supplied definitions behind
+authenticated routes.
+
+*Webhook ingest is already safe, and it is the exception.* `POST /ingest/{source_id}` is one of
+exactly two auth-exempt routes, and it learns its tenant **from the row rather than the request**:
+the handler reads `webhook_sources` for `source_id` and takes `tenant_id` from it, through a *named*
+cross-tenant read bound to its own context variable (`plugins/webhookingest/routes.go`, cleat#1538).
+A caller cannot name a tenant. `an_auth_exempt_route_cannot_assume_a_tenant_test.go` is what stops a
+future auth-exempt route from assuming one — which answers the question this playbook used to carry
+forward as unverified.
+
+---
+
 ## The second win: replay is the support tool
 
 Integrations fail constantly, and almost always for reasons outside your control — the customer's
@@ -106,9 +154,29 @@ logs, a way to find the right one, and a re-drive mechanism someone builds. Here
 by-products:
 
 - Every external call is recorded with inputs and outputs, because durability requires it.
-- The failed run is in the dead-letter queue with its whole history.
-- Reprocess re-drives it, honouring `Idempotency-Key` so the re-drive is deliberate.
+- A plain failure keeps its whole history, and can be re-replayed while retention holds it.
+- A run whose last durable call exhausted its retry policy is dead-lettered, and is the one an
+  operator can retry or reprocess.
 - `cleatctl replay` and `cleatctl debug` exist for inspecting a run offline.
+
+**Those last two are different runs, and the difference decides what a support engineer can do.**
+Only a run whose last durable act was a call that **exhausted its retry policy** reaches the
+dead-letter queue — the predicate is `endedOnAnExhaustedCall`, which reads the run's history and
+does not look at the error text. A plain failure — the workflow returned an error, a trap,
+schema-drift parsing, an `[AMBIGUOUS]` call — is `failed`: it is **not** in
+`GET /api/dead-letters`, it cannot be retried or reprocessed, it **keeps its history** until
+`--retention-days` sweeps it (default 30 days), and it **can** be re-replayed. The two reach
+different verbs:
+
+| the run's outcome | where it is | what re-drives it |
+|---|---|---|
+| `failed` | not in the DLQ | re-replay — same run, from recorded history |
+| `dead_lettered` | in the DLQ | retry (in place), or reprocess (a new run from definition and input) |
+
+This is worth stating precisely because getting it wrong fails quietly in the expensive direction:
+a support engineer who goes looking for a plainly-failed sync in the dead-letter queue will not
+find it, and the natural conclusion — that the run was never recorded — is wrong.
+[Workflow lifecycle → Outcomes](../reference/workflow-lifecycle.md#outcomes) is the full contract.
 
 **This is the feature your support team will actually notice**, and it is worth more than the cost
 argument in day-to-day terms.
@@ -166,14 +234,23 @@ A customer doing a bulk backfill is bounded without you writing the bounding.
 **Use the plugin's `db` mode, not its default.** `ratelimiter` defaults to `memory` — in-process
 buckets, so N workers give a tenant N times the configured rate. Mode `db` coordinates through a
 `rate_counter` table with per-second buckets summed over a sliding window
-(`plugins/ratelimiter/middleware.go:211-268`), which is cluster-wide and dialect-portable. For an
+(`checkDBRateLimit`, `plugins/ratelimiter/middleware.go`), which is cluster-wide and
+dialect-portable. For an
 integration hub, where a runaway customer backfill is the archetypal incident, that distinction is
 the difference between a limit and a suggestion.
 
-Watch two things: `Init` falls back to memory without erroring when no DB is available
-(`plugins/ratelimiter/plugin.go:91-97`), so confirm the mode in the startup log; and the DB path
-**fails open** on a database error (`middleware.go:186`), so a database problem removes the limiter
-rather than stopping traffic.
+One thing to watch: **the DB path fails open on a database error** (`checkDBRateLimit` in
+`plugins/ratelimiter/middleware.go`), so a database problem removes the limiter rather than stopping
+traffic.
+
+**It no longer silently downgrades**, and that matters if you have read an older copy of this
+playbook. `Init` used to log a warning and fall back to per-process memory buckets when `mode: db`
+was configured with no database reachable; it now **refuses to start** (cleat#1581). The reasoning
+is that a warning is not a refusal — the worker came up, every tenant got a per-process limiter, and
+N workers served N times the configured rate while the configuration said otherwise. An
+unrecognised mode string is refused for the same reason, because `middleware.go` treated everything
+that was not exactly `"db"` as memory. So the startup log is no longer where you catch this: a
+deployment that asked for a cluster-wide limit and cannot have one does not start at all.
 
 **Background loops need their tenant exemption deliberately.** Several plugins here run `Run` loops,
 and a plugin loop has no tenant and cannot get one. Under the fail-closed policy it **fails outright**
@@ -187,7 +264,7 @@ rather than reading fewer rows, and must request `plugin.AcrossAllTenants` by na
 Per sync, with no instrumentation: what was sent, what came back, how many attempts, what the
 backoff was, where it failed, and whether a compensation ran. Per tenant, by construction.
 
-`eventstore`'s SSE endpoint (`plugins/eventstore/routes.go:218-277`, using `http.Flusher`) gives a
+`eventstore`'s SSE endpoint (`handleSSE`, `plugins/eventstore/routes.go`, using `http.Flusher`) gives a
 live tail of an event stream, which is a genuinely useful thing to point an admin UI at while
 debugging a customer's integration.
 
@@ -216,11 +293,25 @@ it with per-tenant execution ceilings as well, and consider a dedicated task que
 segments workers, so bulk work can be given its own pool.
 
 **A poisonous event retried forever.** Set `--dead-letter-retention-days`; it defaults to 0, meaning
-off, so failures accumulate indefinitely.
+off, so dead-lettered runs accumulate indefinitely. **That flag bounds only the dead-lettered ones.** A
+poison event that fails *plainly* — where no call ever exhausted a retry policy — is `failed`, and
+is bounded by `--retention-days` (default 30) instead, which removes its history but leaves the run
+record alone. The record itself is removed by `--dead-letter-retention-days` or
+`--completed-workflow-retention-days`, depending on which outcome it settled as; both are off by
+default. Setting only one of the two leaves the other accumulating.
 
-**Replaying a sync that is no longer safe to replay.** Reprocess re-drives a failed run. If the
-customer has since fixed the record by hand, re-driving may overwrite it. Honour idempotency keys
-downstream, and make re-drive an operator decision rather than an automatic sweep.
+**Replaying a sync that is no longer safe to replay.** Reprocess re-drives a **dead-lettered** run,
+from its definition and input. If the customer has since fixed the record by hand, re-driving may
+overwrite it. Honour idempotency keys downstream, and make re-drive an operator decision rather than
+an automatic sweep.
+
+**Re-replay is only as good as what retention has left.** Two redrive gaps closed on 2026-09-23
+(cleat#2038, cleat#2039) and their consequences are worth designing around rather than reading past.
+`RetryWorkflow` (`dead_lettered` → `ready`) had no pending-intent guard at all, and re-replay's
+guard was defeated once `--retention-days` had swept a failed run's history. Both now refuse rather
+than proceeding — which means a **retention window shorter than your incident-response window**
+silently converts "we can re-drive it" into "we cannot". Size `--retention-days` against how long
+you actually take to act on a failed sync, not against storage cost.
 
 **Webhook ingest and the tenant question.** The ingest route is a public pattern, so auth does not
 overwrite a client-supplied tenant header on it. See
@@ -236,9 +327,12 @@ payloads; see `CHANGELOG.md`'s breaking-changes entry for the migration note. `n
 outbound `send_webhook` delivery got the same requirement the same PR: `POST /webhooks` also
 rejects a missing secret, and `PUT /webhooks/{id}` can rotate one but can no longer clear it.
 
-**Schema drift in a customer's system.** Nothing detects it. Your integration fails, lands in the
-dead-letter queue with the offending payload recorded, and someone reads it — which is the good
-version of this failure, but it is still a human in the loop.
+**Schema drift in a customer's system.** Nothing detects it. Your integration fails, and *where it
+lands depends on how it failed*: a call that exhausted its retry policy is dead-lettered, while a
+parse error or an error returned by the workflow is a plain `failed` run that never reaches the DLQ.
+Either way the offending payload is in the history and someone reads it — which is the good version
+of this failure, but it is still a human in the loop. Query both (`GET /api/dead-letters` and the
+failed-status listing) or you will miss half of them.
 
 ---
 
@@ -254,6 +348,18 @@ with `http.Flusher`; the plugin extension-point taxonomy; the public-pattern lis
 boundary, which is a judgement about where the crossover lies rather than a measured crossover.
 Nobody has run this at volume.
 
-**Not verified:** the `webhookingest` tenant question, carried forward from the design doc. Also
-unverified is whether `eventtriggers`' filter expressions are expressive enough for real routing
+**Not verified:** whether `eventtriggers`' filter expressions are expressive enough for real routing
 rules — the package comment says filters exist; their grammar was not read.
+
+**Resolved since drafting:** the `webhookingest` tenant question, which used to be carried forward
+unverified. The tenant comes from the `webhook_sources` row and not from the request, through a
+*named* cross-tenant read (`plugins/webhookingest/routes.go`, cleat#1538), and
+`an_auth_exempt_route_cannot_assume_a_tenant_test.go` keeps a future auth-exempt route from assuming
+one. See [The wedge](#the-wedge-the-tenants-own-step-not-yours).
+
+**Corrected since drafting (2026-09-25, cleat#2050):** the claim that every failed run is in the
+dead-letter queue (it is not — only retry-exhausted ones are, and the two kinds reach different
+redrive verbs); the claim that `ratelimiter` falls back to memory when no database is reachable (it
+refuses to start, cleat#1581); the claim that `--dead-letter-retention-days` alone bounds a poison
+event (a plainly-failed one is bounded by `--retention-days`); and the tenant-supplied-logic gap,
+which was shipped and unnarrated.
