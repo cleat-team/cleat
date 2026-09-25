@@ -10460,15 +10460,17 @@ made precise: effective limit is `min(n, --plugin-max-body-size)`, and a 413 alw
 `--plugin-max-body-size` (whichever value actually bound). `plugin.MaxBodyFromConfig(n, knob, h)`
 is new: effective limit is `n` unconditionally, and a 413 names `knob` — blobstore's `PUT
 /blobs/{key...}` now uses this against `max_blob_size in --plugin-config`; slacknotify's `POST
-/slack/interactive` keeps `MaxBody` unchanged. **Guard rail:** `pluginBodyLimitRouter.Handle`
-refuses `MaxBodyFromConfig`'s unconditional ceiling on any of `pluginAuthExemptPatterns` (falling
-back to the default limit and knob instead) — those three routes carry no cleat credential at
-all, so the operator's global flag must always bound them regardless of what a plugin's config
-claims. Covered at both the router level
-(`cmd/cleat-worker/plugin_body_limit_test.go`) and end-to-end through the real
-`auth.Middleware`/`auth.HostBindingMiddleware` chain
-(`TestMaxBodyFromConfigIsClampedOnAnAuthExemptRoute`,
-`plugin_route_body_limit_exempt_test.go`).
+/slack/interactive` keeps `MaxBody` unchanged. **Guard rail, per cleat-review's final call:**
+`pluginBodyLimitRouter.Handle` PANICS at registration time if `MaxBodyFromConfig` is used on any
+of `pluginAuthExemptPatterns` — those three routes carry no cleat credential at all, so a plugin
+claiming an unconditional ceiling there is a plugin bug, not a runtime condition to degrade
+around; `RegisterRoutes`' caller in `main.go` has no `recover()`, so this refuses to boot rather
+than silently downgrading (an earlier version of this fix fell back to the default limit/knob
+instead of panicking — cleat-review's review changed that: "the only way to reach it is a plugin
+bug", so it should refuse loudly). Covered at the router level
+(`TestMaxBodyFromConfigOnAnExemptPatternPanicsAtRegistration`,
+`cmd/cleat-worker/plugin_body_limit_test.go`), with a control proving `MaxBodyFromConfig` on a
+non-exempt pattern (blobstore's actual shape) does not panic.
 
 **A shared `pluginAuthExemptPatterns` var (`cmd/cleat-worker/plugin_exempt_routes.go`) replaced
 four hand-copied literal lists** — main.go's two middleware call sites, the exempt-clamp check

@@ -127,41 +127,47 @@ func TestMaxBodyFromConfigIgnoresTheFlagInBothDirections(t *testing.T) {
 	}
 }
 
-// TestMaxBodyFromConfigOnAnExemptPatternFallsBackToTheDefault is cleat#2273's
-// guard rail 1 at the router level: registering MaxBodyFromConfig on one of
-// pluginAuthExemptPatterns must not grant that route an unconditional
-// ceiling the operator's flag cannot reach. See
-// TestMaxBodyFromConfigIsClampedOnAnAuthExemptRoute
-// (plugin_route_body_limit_exempt_test.go) for the same property proven
-// through the real auth middleware chain end to end.
-func TestMaxBodyFromConfigOnAnExemptPatternFallsBackToTheDefault(t *testing.T) {
+// TestMaxBodyFromConfigOnAnExemptPatternPanicsAtRegistration is cleat#2273's
+// guard rail 1, per cleat-review's final call: a plugin registering
+// MaxBodyFromConfig on one of pluginAuthExemptPatterns is a plugin bug, and
+// the host refuses at registration time (panic; RegisterRoutes' caller in
+// main.go has no recover() around it, so this refuses to boot) rather than
+// silently downgrading to the default ceiling. A silent downgrade was tried
+// first and rejected on review: it protects the operator's flag either way,
+// but nothing would ever tell a plugin author their MaxBodyFromConfig call
+// was quietly ignored.
+func TestMaxBodyFromConfigOnAnExemptPatternPanicsAtRegistration(t *testing.T) {
 	const pattern = "POST /ingest/{source_id}" // IS one of pluginAuthExemptPatterns
-	const path = "/ingest/src-1"
-	const defaultLimit = 64
-	const huge = 10 * 1024 * 1024
 
-	register := func(r *pluginBodyLimitRouter) {
-		r.Handle(pattern, plugin.MaxBodyFromConfig(huge, "some_plugin_setting", handlerReadsBody()))
-	}
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Handle did not panic for MaxBodyFromConfig registered on an auth-exempt pattern")
+		}
+		msg := fmt.Sprint(r)
+		if !strings.Contains(msg, pattern) {
+			t.Errorf("panic message %q does not name the offending pattern", msg)
+		}
+		if !strings.Contains(msg, "MaxBody") {
+			t.Errorf("panic message %q does not say which constructor to use instead", msg)
+		}
+	}()
 
-	if code, body := probeRouter(t, defaultLimit, pattern, path, register, defaultLimit-1); code != http.StatusOK {
-		t.Fatalf("control: %d-byte body got %d, want 200 (body: %s)", defaultLimit-1, code, body)
-	}
-	code, body := probeRouter(t, defaultLimit, pattern, path, register, defaultLimit+1)
-	if code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("got %d, want 413 -- a %d-byte body should trip the %d-byte default, not the plugin's "+
-			"%d-byte MaxBodyFromConfig declaration on an auth-exempt route (body: %s)",
-			code, defaultLimit+1, defaultLimit, huge, body)
-	}
-	if want := fmt.Sprintf("%d bytes", defaultLimit); !strings.Contains(body, want) {
-		t.Errorf("413 body %q does not name the clamped default limit %s", body, want)
-	}
-	if strings.Contains(body, "some_plugin_setting") {
-		t.Errorf("413 body %q names the plugin's own knob even though it was refused on an exempt route", body)
-	}
-	if !strings.Contains(body, "--plugin-max-body-size") {
-		t.Errorf("413 body %q does not fall back to naming --plugin-max-body-size", body)
-	}
+	plugMux := http.NewServeMux()
+	router := &pluginBodyLimitRouter{mux: plugMux, defaultLimit: 64}
+	router.Handle(pattern, plugin.MaxBodyFromConfig(10*1024*1024, "some_plugin_setting", handlerReadsBody()))
+	t.Fatal("unreachable: Handle should have panicked before returning")
+}
+
+// TestMaxBodyFromConfigOnANonExemptPatternDoesNotPanic is the control for the
+// test above: MaxBodyFromConfig is exactly what a legitimate route (like
+// blobstore's PUT) is meant to use, and registering it on any pattern that
+// is NOT auth-exempt must not panic.
+func TestMaxBodyFromConfigOnANonExemptPatternDoesNotPanic(t *testing.T) {
+	const pattern = "PUT /blobs/{key...}" // not one of pluginAuthExemptPatterns
+	plugMux := http.NewServeMux()
+	router := &pluginBodyLimitRouter{mux: plugMux, defaultLimit: 64}
+	router.Handle(pattern, plugin.MaxBodyFromConfig(10*1024*1024, "max_blob_size", handlerReadsBody()))
 }
 
 // TestPluginBodyLimitRouterDefaultLimitComesFromThePluginFlag is the mutation

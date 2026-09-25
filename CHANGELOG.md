@@ -395,9 +395,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that does not declare its own. A route declares a tighter cap with `plugin.MaxBody(n, h)`
   (effective limit is `min(n, --plugin-max-body-size)`, so the flag can always tighten it
   further), or an unconditional, operator-config-owned ceiling with
-  `plugin.MaxBodyFromConfig(n, knob, h)` (ignores the flag entirely, and is refused on
-  `POST /ingest/{source_id}`, `GET /oauth/{provider}/callback` and `POST /slack/interactive` --
-  the flag always bounds a route no credential guards). `blobstore`'s `PUT /blobs/{key...}` uses
+  `plugin.MaxBodyFromConfig(n, knob, h)` (ignores the flag entirely, and PANICS at registration --
+  refusing to boot -- if used on `POST /ingest/{source_id}`, `GET /oauth/{provider}/callback` or
+  `POST /slack/interactive`, since the flag must always bound a route no credential guards).
+  `blobstore`'s `PUT /blobs/{key...}` uses
   `MaxBodyFromConfig` against its own `max_blob_size` setting (default 10 MiB);
   `slacknotify`'s `POST /slack/interactive` uses `MaxBody` against its fixed 1 MiB callback size.
 

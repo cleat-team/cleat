@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/cleat-team/cleat/plugin"
@@ -39,12 +40,12 @@ type pluginBodyLimitRouter struct {
 //     -- whichever of the two values actually bound, an operator can always
 //     turn the flag down and have it take effect here.
 //   - plugin.MaxBodyFromConfig(n, knob): n applies unconditionally, and the
-//     413 names knob -- UNLESS pattern is one of pluginAuthExemptPatterns,
-//     reachable with no cleat credential at all, in which case this falls
-//     back to defaultLimit and the default knob regardless of what the
-//     plugin declared. cleat#2273: the operator's global ceiling must always
-//     bound an anonymously-reachable route; a plugin's own config is not
-//     something an unauthenticated caller should be able to reason about.
+//     413 names knob -- REFUSED outright when pattern is one of
+//     pluginAuthExemptPatterns, reachable with no cleat credential at all.
+//     cleat#2273: the operator's global ceiling must always bound an
+//     anonymously-reachable route, and a plugin declaring otherwise there is
+//     a plugin bug, not a runtime condition to degrade gracefully around --
+//     see the panic below.
 //
 // A route that declares neither gets defaultLimit under the default knob.
 func (r *pluginBodyLimitRouter) Handle(pattern string, handler http.Handler) {
@@ -54,13 +55,25 @@ func (r *pluginBodyLimitRouter) Handle(pattern string, handler http.Handler) {
 	if declared, fromConfig, declaredKnob, ok := plugin.MaxBodyLimit(handler); ok {
 		if fromConfig {
 			if isPluginAuthExemptPattern(pattern) {
-				// SAFETY: refuse the plugin's own unconditional ceiling on a
-				// route no credential guards. limit/knob stay at the
-				// defaults set above.
-			} else {
-				limit = declared
-				knob = declaredKnob
+				// This can only be reached by a plugin bug -- registering
+				// MaxBodyFromConfig on a route this codebase itself
+				// exempts from tenant auth -- and the fix is always a
+				// one-line change in that plugin (use MaxBody instead, or
+				// pick a different pattern). RegisterRoutes' caller
+				// (main.go) has no recover() around it, so this panic
+				// refuses to boot rather than silently downgrading the
+				// ceiling on a route no credential guards; cleat-review's
+				// call on cleat#2273 (a registration-time error, not a
+				// silent fallback, since the only way to reach it is a
+				// plugin bug).
+				panic(fmt.Sprintf(
+					"plugin.MaxBodyFromConfig registered on %q, which is an auth-exempt route "+
+						"(see pluginAuthExemptPatterns) -- an auth-exempt route must always stay "+
+						"bounded by --plugin-max-body-size, so a plugin's own config cannot claim an "+
+						"unconditional ceiling on it. Use plugin.MaxBody instead.", pattern))
 			}
+			limit = declared
+			knob = declaredKnob
 		} else if declared < limit {
 			limit = declared
 		}

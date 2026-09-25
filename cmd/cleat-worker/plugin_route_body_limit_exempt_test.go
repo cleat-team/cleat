@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -119,61 +118,12 @@ func TestPluginRouteBodyLimitAppliesOnBothAuthExemptRoutes(t *testing.T) {
 	}
 }
 
-// TestMaxBodyFromConfigIsClampedOnAnAuthExemptRoute is cleat#2273's guard
-// rail 1, end to end: if a plugin registered plugin.MaxBodyFromConfig on one
-// of pluginAuthExemptPatterns -- reachable with no cleat credential at all --
-// the host must refuse the plugin's own unconditional ceiling and fall back
-// to defaultLimit, so the operator's --plugin-max-body-size flag still bounds
-// every anonymous request regardless of what a plugin's config claims.
-//
-// This does not exercise a real plugin doing this (none does; blobstore,
-// the only MaxBodyFromConfig user, registers on a tenant-scoped route). It
-// proves the host-side safety net exists independently of any plugin
-// currently behaving -- see plugin_body_limit_test.go's
-// TestMaxBodyFromConfigOnAnExemptPatternFallsBackToTheDefault for the
-// router-level unit test this corroborates at the real middleware chain.
-func TestMaxBodyFromConfigIsClampedOnAnAuthExemptRoute(t *testing.T) {
-	const defaultLimit = 64
-	const hugeConfiguredLimit = 10 * 1024 * 1024
-
-	var bodyProcessed bool
-	plugMux := http.NewServeMux()
-	router := &pluginBodyLimitRouter{mux: plugMux, defaultLimit: defaultLimit}
-	router.Handle("POST /ingest/{source_id}", plugin.MaxBodyFromConfig(hugeConfiguredLimit, "some_plugin_setting", func(w http.ResponseWriter, r *http.Request) {
-		body, ok := plugin.ReadBody(w, r)
-		if !ok {
-			return
-		}
-		bodyProcessed = true
-		_ = body
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	var handler http.Handler = plugMux
-	handler = auth.HostBindingMiddleware(nil, pluginAuthExemptPatterns...)(handler)
-	handler = auth.Middleware(nil, true, pluginAuthExemptPatterns...)(handler)
-
-	oversized := strings.Repeat("x", defaultLimit+1024)
-	req := httptest.NewRequest(http.MethodPost, "/ingest/src-1", strings.NewReader(oversized))
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	if w.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("got %d, want 413 -- a %d-byte body should have tripped the %d-byte default ceiling, "+
-			"not the plugin's own %d-byte MaxBodyFromConfig declaration (body: %s)",
-			w.Code, defaultLimit+1024, defaultLimit, hugeConfiguredLimit, w.Body.String())
-	}
-	if bodyProcessed {
-		t.Fatal("plugin.ReadBody reported success -- the exempt-pattern safety clamp did not apply")
-	}
-	if want := fmt.Sprintf("%d bytes", defaultLimit); !strings.Contains(w.Body.String(), want) {
-		t.Errorf("413 body %q does not name the clamped default limit (%s)", w.Body.String(), want)
-	}
-	if strings.Contains(w.Body.String(), "some_plugin_setting") {
-		t.Errorf("413 body %q names the plugin's own knob even though it was refused on an exempt route",
-			w.Body.String())
-	}
-	if !strings.Contains(w.Body.String(), "--plugin-max-body-size") {
-		t.Errorf("413 body %q does not fall back to naming --plugin-max-body-size", w.Body.String())
-	}
-}
+// The end-to-end version of the exempt-pattern guard rail that used to live
+// here (TestMaxBodyFromConfigIsClampedOnAnAuthExemptRoute) asserted a 413
+// fallback at REQUEST time. cleat-review's final call on cleat#2273 moved
+// the refusal to REGISTRATION time (a panic in pluginBodyLimitRouter.Handle,
+// with no recover() around RegisterRoutes' caller in main.go, so it refuses
+// to boot) -- there is no request to send once registration itself has
+// panicked, so the request-level version of this test no longer applies.
+// See plugin_body_limit_test.go's
+// TestMaxBodyFromConfigOnAnExemptPatternPanicsAtRegistration.
