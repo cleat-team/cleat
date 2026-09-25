@@ -13,6 +13,7 @@ make up          # postgres + worker
 make logs        # confirm the rate limiter mode -- see below
 make deploy      # build the workflow to WASM and deploy it
 make run         # start one run (needs CLEAT_API_KEY, below)
+make web         # the browser page, on http://127.0.0.1:3000 (needs CLEAT_API_KEY too)
 ```
 
 `make up` prints an API key on first start, when no keys exist yet
@@ -24,17 +25,18 @@ seconds), `complete`. A bad input (`qty` below 1, no `item`) ends `failed` with 
 `invalid order` message instead. Read either back with
 `GET /api/workflows/{id}` and `GET /api/workflows/{id}/query?key=status`.
 
-`web/index.html` is the browser half of the same contract, and it does not work
-as a file you open: the worker sends no CORS headers, so a browser refuses its
-calls from any origin but the worker's own, and it holds no API key. See
-"Authentication, and the mistake to avoid" below, and cleat#2307.
+`web/index.html` is the browser half of the same contract. `make web` serves it
+from a small same-origin proxy (`proxy/main.go`, standard library only) that adds
+the API key on the server, so the page holds no key and needs no CORS: open
+`http://127.0.0.1:3000`, press Submit, and watch the run reach `complete`. See
+"Authentication, and the mistake to avoid" below.
 
 Two things that can differ on your machine:
 
 - **Ports.** Postgres is published on 5432 and the worker on 8080. If either is
   taken, set `CLEAT_PG_PORT` / `CLEAT_API_PORT` (for example
-  `CLEAT_API_PORT=8081 make up`) and use the same values for every `make` target.
-  `web/index.html` still calls port 8080.
+  `CLEAT_API_PORT=8081 make up`) and use the same values for every `make` target,
+  `make web` included (it forwards to that port; `CLEAT_WEB_PORT` moves the page off 3000).
 - **The worker image.** `docker-compose.yml` uses
   `ghcr.io/cleat-team/cleat-worker:latest`, which is published with each release.
   If `docker pull` says `denied`, no release has published it yet: build it from a
@@ -48,7 +50,7 @@ Two things that can differ on your machine:
 | Durable command path | `SubmitOrder` in `main.go` | started over HTTP, resumed after a crash |
 | Duplicate suppression | `Idempotency-Key` header | a retried request returns the original run |
 | Per-tenant rate limiting | `rate-limiter`, **`db` mode** | set in `plugin-config.json`; the default is weaker |
-| Front-end | `web/index.html` | no framework, deliberately — see below |
+| Front-end | `web/index.html`, served by `proxy/main.go` | no framework, deliberately; the proxy holds the key — see below |
 
 ## Check the rate limiter actually took
 
@@ -99,13 +101,28 @@ workflows would write event history on every page refresh.
 The API key the worker prints identifies the **whole tenant**. It must never
 reach a browser.
 
-`web/index.html` calls the API without one, and from the browser, so against the
-worker `docker-compose.yml` starts it gets `401` (authentication is on) and, before
-that, a CORS refusal (the worker sends no `Access-Control-*` headers; cleat#2307).
-It is a sketch of the calls, not something to open from disk. For a real
-application, serve your page from your own backend, use the `oauth-provider`
-plugin for per-user login, and have that backend call cleat server-side with the
-tenant key.
+That is why the page does not call the worker itself. The worker sends no CORS
+headers, so a browser refuses a page served from any other origin; and the worker
+requires a key the page must not hold (cleat#2307). `make web` runs `proxy/main.go`,
+which serves the page (its script is `web/app.js`, so the page needs no inline
+script and the policy it is served under allows none) and forwards exactly two calls — start a run, and read
+`query?key=status` — adding the key from `CLEAT_API_KEY` (or the file named by
+`CLEAT_API_KEY_FILE`, which wins if both are set; use the file form when you
+deploy). Every other path is a 404 and every other method a 405; the browser's own
+`Authorization` and `Cookie` headers are dropped; the key is never logged or sent
+back.
+
+Two things to keep in mind:
+
+- **It listens on 127.0.0.1 by default, and that is the safe setting.** Anything
+  that can reach the proxy's port acts as your tenant, so any other `-listen`
+  address is refused unless you also pass `-allow-remote` (and it then prints a
+  warning and cannot check the `Host` header). Do not do it on a network you do
+  not trust.
+- **It is a sketch of the boundary, not your application's backend.** It has no
+  users. For a real application, serve your page from your own backend, use the
+  `oauth-provider` plugin for per-user login, and have that backend call cleat
+  server-side with the tenant key: keep these two routes, add the authentication.
 
 Note the boundary: cleat's row-level security scopes by **tenant**. A user
 principal exists at the HTTP layer (`SessionInfo` carries the email), but the
@@ -121,8 +138,8 @@ contradict that, and would put an npm toolchain inside a Go project.
 
 `web/index.html` is a single file with no build step. Its job is to show the
 **API contract** — start a run, poll state — not to be your application.
-Replace it entirely. In production, serve your bundle from a CDN; cleat is the
-origin and the API, not your bundler.
+Replace it entirely. In production, serve your bundle from your own backend,
+which calls cleat with the key; cleat is the API, not your bundler.
 
 ## A note on `plugin-config.json`
 

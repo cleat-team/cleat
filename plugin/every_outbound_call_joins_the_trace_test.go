@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"fmt"
+	"go/build/constraint"
 	"go/parser"
 	"go/token"
 	"os"
@@ -140,7 +141,7 @@ func TestEveryOutboundCallJoinsTheTrace(t *testing.T) {
 	var undeclared []string
 	var stale []string
 	seen := map[string]bool{}
-	sites := 0
+	sites, ignored := 0, 0
 
 	for _, f := range strings.Fields(string(out)) {
 		if strings.HasSuffix(f, "_test.go") {
@@ -149,6 +150,14 @@ func TestEveryOutboundCallJoinsTheTrace(t *testing.T) {
 		src, err := os.ReadFile(filepath.Join("..", f))
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
+		}
+		// A file excluded from the build (`//go:build ignore`) is not part of what cleat runs, so it cannot
+		// be one of cleat's outbound hops. Today that is the scaffold templates (cmd/cleat/templates/..., which
+		// are written into a customer's own project, where the trace is theirs to propagate) and the
+		// scripts/ tools. cleat#2307: the fullstack template's proxy is the first of them to build a request.
+		if isBuildIgnored(src) {
+			ignored++
+			continue
 		}
 		blanked, err := withoutComments(f, src)
 		if err != nil {
@@ -205,8 +214,8 @@ func TestEveryOutboundCallJoinsTheTrace(t *testing.T) {
 		t.Fatal("UNMEASURED: no outbound request construction found anywhere in the tree. " +
 			"That is not plausible -- it is the pattern no longer matching.")
 	}
-	t.Logf("outbound request sites: %d checked, %d declared as not yet propagating",
-		sites, len(notYetPropagating))
+	t.Logf("outbound request sites: %d checked, %d declared as not yet propagating, %d build-ignored files not scanned",
+		sites, len(notYetPropagating), ignored)
 
 	sort.Strings(undeclared)
 	if len(undeclared) > 0 {
@@ -389,5 +398,52 @@ func TestTheTraceScanIsNotSatisfiedByAComment(t *testing.T) {
 					got, tc.want, enclosing[idx])
 			}
 		})
+	}
+}
+
+// isBuildIgnored reports whether src is excluded from EVERY build: its first //go:build line, before the package
+// clause, is exactly the single tag `ignore`. A prefix match is not enough, because `//go:build ignore || linux`
+// IS compiled on Linux and `//go:build ignored` is a different tag altogether; skipping either would leave a
+// shipped outbound call unchecked.
+func isBuildIgnored(src []byte) bool {
+	for _, line := range strings.Split(string(src), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "package ") {
+			return false
+		}
+		if !constraint.IsGoBuild(line) {
+			continue
+		}
+		expr, err := constraint.Parse(line)
+		if err != nil {
+			return false
+		}
+		tag, ok := expr.(*constraint.TagExpr)
+		return ok && tag.Tag == "ignore"
+	}
+	return false
+}
+
+func TestIsBuildIgnoredIsExact(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"plain", "//go:build ignore\n\npackage main\n", true},
+		{"after a licence comment", "// Copyright\n\n//go:build ignore\n\npackage main\n", true},
+		{"with trailing space", "//go:build ignore \n\npackage main\n", true},
+		{"or another tag, compiled on linux", "//go:build ignore || linux\n\npackage main\n", false},
+		{"and another tag", "//go:build ignore && linux\n\npackage main\n", false},
+		{"a different tag that starts with it", "//go:build ignored\n\npackage main\n", false},
+		{"a different tag with a suffix", "//go:build ignore_foo\n\npackage main\n", false},
+		{"negated", "//go:build !ignore\n\npackage main\n", false},
+		{"no constraint", "package main\n", false},
+		{"constraint after the package clause is not a constraint", "package main\n\n//go:build ignore\n", false},
+		{"unparseable", "//go:build ignore ||\n\npackage main\n", false},
+	} {
+		if got := isBuildIgnored([]byte(c.src)); got != c.want {
+			t.Errorf("%s: isBuildIgnored = %v, want %v", c.name, got, c.want)
+		}
 	}
 }

@@ -19,8 +19,8 @@
   demonstrates is the API CONTRACT: start a run, then poll published state.
   Replace it wholesale with whatever you actually build.
 
-  In production, serve your bundle from a CDN and point it at the worker.
-  cleat is the origin and the API, not your bundler.
+  In production, serve your bundle from your own backend, which calls cleat with
+  the key (see README.md, "Authentication"). cleat is the API, not your bundler.
 -->
 
 <p>
@@ -30,50 +30,4 @@
 
 <div id="status">idle</div>
 
-<script>
-  // Replace with however your app authenticates. A tenant API key must NEVER
-  // reach a browser -- it identifies the whole tenant. Use a per-user session
-  // (the oauth-provider plugin issues one) and have your own endpoint call
-  // cleat server-side.
-  //
-  // TWO THINGS STOP THIS PAGE WORKING AS-IS, and neither is a bug in the page
-  // (cleat#2307): the worker sends no CORS headers, so a browser refuses these
-  // calls from a page served anywhere but the worker's own origin (file:// and
-  // another port both count); and with --require-auth on, which docker-compose.yml
-  // leaves at its default, every call needs a key this page must not hold. Serve the
-  // page from your own backend and have that backend call cleat.
-  const API = "http://localhost:8080";
-  const statusEl = document.getElementById("status");
-
-  document.getElementById("go").onclick = async () => {
-    statusEl.textContent = "starting...";
-    const res = await fetch(`${API}/api/workflows/my-fullstack-app/start`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        // A retry of this exact request returns the original run rather than
-        // creating a second one. The response says which happened.
-        "Idempotency-Key": crypto.randomUUID(),
-      },
-      body: JSON.stringify({ input: { item: document.getElementById("item").value, qty: 1 } }),
-    });
-    if (!res.ok) { statusEl.textContent = `start failed: ${res.status}`; return; }
-    const { id } = await res.json();
-    poll(id);
-  };
-
-  // The browser polls published state rather than waiting on the run. See
-  // README.md, "Why the browser does not wait".
-  async function poll(id) {
-    for (let i = 0; i < 60; i++) {
-      const r = await fetch(`${API}/api/workflows/${id}/query?key=status`);
-      if (r.ok) {
-        const { value } = await r.json();
-        statusEl.textContent = `${id}: ${value || "(no state yet)"}`;
-        if (value === "complete" || value === "rejected") return;
-      }
-      await new Promise(s => setTimeout(s, 500));
-    }
-    statusEl.textContent = `${id}: gave up polling`;
-  }
-</script>
+<script src="/app.js"></script>
