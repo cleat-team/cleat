@@ -199,12 +199,12 @@ func (s *execSession) writeOut(ctx context.Context, m api.Module, ptr uint32, va
 // themselves, for any reader that queries them directly rather than through
 // LoadEventHistory's overlay.
 //
-// The `response = ''` disjunct this WHERE used to carry is gone, not
-// widened: nullStr (store_events.go) stores every empty string as SQL NULL
-// on every write path in this file, so `response = ''` can never be true --
-// see the "That clause declines for EVERY existing row" comment history on
-// this constant. Checking IS NULL alone says the same thing without the
-// dead half.
+// The disjunct this WHERE used to carry, comparing response to the SQL
+// empty-string literal, is gone, not widened: nullStr (store_events.go)
+// stores every empty string as SQL NULL on every write path in this file,
+// so that comparison can never be true -- see the "That clause declines for
+// EVERY existing row" comment history on this constant. Checking IS NULL
+// alone says the same thing without the dead half.
 //
 // # event_type = EXCLUDED.event_type closes the empty-outcome residual, using a column this guard already reads
 //
