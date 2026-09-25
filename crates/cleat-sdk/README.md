@@ -58,9 +58,16 @@ fn greet_workflow(h: &HostCalls, input: GreetInput) -> Result<String, String> {
     h.cleat_log(&format!("Hello workflow started for {}", input.name));
     let (resp, err) = h.cleat_call("greeter", "Greet",
         &serde_json::json!({"name": input.name}).to_string());
-    resp.ok_or_else(|| err.unwrap_or_else(|| "unknown error".into()))
+    match err {
+        Some(e) => Err(e),
+        None => Ok(resp),
+    }
 }
 ```
+
+`cleat_call` returns `(String, Option<String>)`, not `(Option<String>, Option<String>)`
+-- `resp` is always a `String` (empty on error), so match on `err` rather than
+calling `Option` methods on `resp`.
 
 ## The `#[cleat_entry]` Macro
 

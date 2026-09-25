@@ -70,13 +70,20 @@ import { HostCalls, cleatEntry } from "@cleat/sdk";
 
 @cleatEntry
 export function helloWorkflow(h: HostCalls, name: string): string {
-    h.cleatLog("Hello workflow started for " + name);
-    let resp = h.cleatCall("greeter", "Greet",
+    h.log("Hello workflow started for " + name);
+    let outcome = h.cleatCall("greeter", "Greet",
         '{"name": "' + name + '"}');
-    h.cleatLog("Got response: " + resp);
-    return resp;
+    if (outcome.isError) {
+        return '{"error": "' + outcome.error! + '"}';
+    }
+    h.log("Got response: " + outcome.response);
+    return outcome.response;
 }
 ```
+
+`HostCalls` has no `cleatLog` -- the method is `log`. `cleatCall` returns a
+`CleatCallOutcome` (`response: string`, `error: string | null`, `isError:
+bool`), not a bare `string`.
 
 The `@cleatEntry` decorator triggers the cleat transform plugin, which
 generates an ABI-compatible wrapper

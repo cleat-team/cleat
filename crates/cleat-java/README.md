@@ -85,12 +85,16 @@ WASM export wrappers conforming to the Cleat ABI
 the Java bytecode is translated to WebAssembly. On replay, completed calls
 return cached results instead of re-executing.
 
-Compile the workflow with Gradle:
+Compile the workflow with Gradle (see [Build setup](#build-setup) for the
+`teavm { wasm { ... } }` configuration this requires):
 
 ```bash
-./gradlew build
+gradle generateWasm
 # Output: build/wasm/workflow.wasm
 ```
+
+`gradle build` does not invoke `generateWasm` -- run the wasm task
+explicitly, or add it as a dependency of `build` in your own `build.gradle`.
 
 ## HostCalls overview
 
@@ -193,6 +197,26 @@ analysis root.  The processor is registered via
 
 ### Single-project setup
 
+Since `cleat-java` is not published (see [Installation](#installation)), a
+genuinely single-`settings.gradle` project cannot declare it as an ordinary
+`implementation "com.cleat:cleat-java"` dependency the way the pre-2026-09-24
+version of this section implied. Use a Gradle **composite build**
+(`includeBuild`) instead: it substitutes `com.cleat:cleat-java` with the
+git-cloned project by matching group/name, without pulling `cleat-java` into
+this project's own `settings.gradle`/`include(...)` graph the way
+[Multi-project setup](#multi-project-setup) does.
+
+```bash
+git clone --branch v0.3.0 --depth 1 https://github.com/cleat-team/cleat cleat-src
+```
+
+**`settings.gradle`**:
+```gradle
+rootProject.name = 'my-workflow'
+includeBuild('cleat-src/crates/cleat-java')
+```
+
+**`build.gradle`**:
 ```gradle
 buildscript {
     repositories { mavenCentral() }
@@ -204,20 +228,39 @@ buildscript {
 apply plugin: "java"
 apply plugin: "org.teavm"
 
+repositories { mavenCentral() }
+
 dependencies {
+    annotationProcessor "com.cleat:cleat-java"
+    implementation "com.cleat:cleat-java"
     implementation "org.teavm:teavm-classlib:0.10.2"
     implementation "org.teavm:teavm-jso-apis:0.10.2"
 }
 
 teavm {
-    mainClass = "cleat.WorkflowEntry"
-    fileName = "workflow.wasm"
-    outputDir = file("build/wasm")
-    targetType = "WASM"
-    optimizationLevel = "BALANCED"
-    obfuscated = false
+    wasm {
+        mainClass = "cleat.WorkflowEntry"
+        targetFileName = "workflow.wasm"
+        outputDir = layout.buildDirectory
+        optimization = org.teavm.gradle.api.OptimizationLevel.BALANCED
+    }
 }
 ```
+
+The `teavm { }` extension in `org.teavm:teavm-gradle-plugin:0.10.2` has no
+top-level `mainClass`/`fileName`/`targetType`/`optimizationLevel`/`obfuscated`
+properties -- those were a pre-0.10 shape that no longer exists. Per-target
+settings (`mainClass`, `targetFileName`, `outputDir`, `optimization`, and
+others) live inside a nested `wasm { }` block (`js { }`, `wasi { }` and
+`c { }` also exist, for the plugin's other targets); `optimization` takes the
+`org.teavm.gradle.api.OptimizationLevel` enum (`NONE`, `BALANCED`,
+`AGGRESSIVE`), not a string; there is no `obfuscated` property in this
+version. Confirmed by decompiling `teavm-gradle-plugin-0.10.2.jar`'s
+`org.teavm.gradle.api.TeaVM*Configuration` interfaces with `javap`.
+
+Run `gradle generateWasm` (not `gradle build`, which does not invoke the wasm
+task) -- output lands at `build/wasm/workflow.wasm`, matching the path the
+Quick Start section above already documents.
 
 ### Multi-project setup
 
@@ -245,7 +288,8 @@ plugins {
 **Workflow subproject `build.gradle.kts`**:
 ```kotlin
 plugins {
-    id("org.teavm")          // resolved from the root project
+    java                      // required before org.teavm can configure itself
+    id("org.teavm")           // resolved from the root project
 }
 
 dependencies {
@@ -257,14 +301,20 @@ dependencies {
 }
 
 teavm {
-    mainClass.set("cleat.WorkflowEntry")
-    fileName.set("workflow.wasm")
-    outputDir.set(layout.buildDirectory.dir("wasm"))
-    targetType.set("WASM")
-    optimizationLevel.set("BALANCED")
-    obfuscated.set(false)
+    wasm {
+        mainClass.set("cleat.WorkflowEntry")
+        targetFileName.set("workflow.wasm")
+        outputDir.set(layout.buildDirectory)
+        optimization.set(org.teavm.gradle.api.OptimizationLevel.BALANCED)
+    }
 }
 ```
+
+Without `java` applied first, `org.teavm` fails to configure with
+`Configuration with name 'testImplementation' not found` -- TeaVM's plugin
+wires into the Java source sets and needs them to already exist. Run `gradle
+:workflow:generateWasm` (see [Build setup](#build-setup) above for why not
+plain `build`).
 
 The `cleat-java` subproject itself declares the `org.teavm` plugin and TeaVM
 dependencies in its own `build.gradle`/`build.gradle.kts`.  The `apply false`
@@ -282,14 +332,18 @@ keeping the entire export chain alive through the tree-shaker's reachability
 analysis.
 
 If you need to preserve additional classes manually, use the `preservedClasses`
-property in your `teavm` block:
+property inside your `teavm` block's `wasm { }` target (it lives on
+`TeaVMCommonConfiguration`, shared by every target, not on `teavm { }`
+directly -- see [Build setup](#build-setup)):
 
 ```gradle
 teavm {
-    preservedClasses = [
-        "com.example.MyWorkflow_processOrder_Export",
-        "com.example.MyWorkflow_cancelOrder_Export",
-    ]
+    wasm {
+        preservedClasses = [
+            "com.example.MyWorkflow_processOrder_Export",
+            "com.example.MyWorkflow_cancelOrder_Export",
+        ]
+    }
 }
 ```
 
