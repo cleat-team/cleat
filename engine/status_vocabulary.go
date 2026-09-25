@@ -112,7 +112,7 @@ func childOutcomeForSettledStatus(status, result string, errMsg sql.NullString) 
 	case statusFailed, statusDeadLettered:
 		// The result column is never written on either branch; the message
 		// is in error_msg, which MoveToDeadLetterQueue also writes.
-		return ChildOutcome{Completed: true, Failed: true, Error: errMsg.String}, true
+		return ChildOutcome{Completed: true, Failed: true, Error: nonEmptyChildError(errMsg.String)}, true
 	case statusTerminated:
 		// Kind travels as a stable message prefix, the way "[AMBIGUOUS]"
 		// already does (durablecalls.go, heartbeats.go) -- no new SDK
@@ -123,9 +123,34 @@ func childOutcomeForSettledStatus(status, result string, errMsg sql.NullString) 
 		return ChildOutcome{Completed: true, Failed: true, Error: "[CANCELLED] " + errMsg.String}, true
 	}
 	if isSettledStatus(status) {
-		return ChildOutcome{Completed: true, Failed: true, Error: errMsg.String}, true
+		return ChildOutcome{Completed: true, Failed: true, Error: nonEmptyChildError(errMsg.String)}, true
 	}
 	return ChildOutcome{}, false
+}
+
+// nonEmptyChildError guarantees a non-empty Error on a Failed ChildOutcome,
+// the same way every GetChildResult already COALESCEs a done child's result
+// to '{}' rather than returning "". Found auditing cleat#2333's completion
+// guard against an "errored completion" case, alongside cleat-review's
+// promise_result "" question: admin_ops.go's ForceFail validates workflowID,
+// generation, operator and errorCode, but never errorMsg, so an operator can
+// force-fail a workflow with an empty message. That reaches AwaitChild's
+// completing write (children.go) as Err == "", which nullStr stores as SQL
+// NULL -- column-identical, across response/error, to AwaitChild's own
+// pending row. Unlike AwaitPromise, AwaitChild's event_type never
+// transitions between pending and complete (both write EventTypeAwaitChild),
+// so there is no event_type escape hatch the way a promise resolved with ""
+// gets from event_type leaving the pending set. Without this, a later stray
+// reflush of the same step would read the completed-with-empty-error row as
+// still pending and pass every dialect's completion guard, reopening
+// cleat#1379's corruption case. statusTerminated/statusCancelled do not need
+// this: their "[TERMINATED] "/"[CANCELLED] " prefix already guarantees
+// non-emptiness regardless of errMsg.
+func nonEmptyChildError(msg string) string {
+	if msg == "" {
+		return "child failed with no error message recorded"
+	}
+	return msg
 }
 
 // isSettledStatus reports whether status is one of the five settledStatusList

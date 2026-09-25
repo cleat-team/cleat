@@ -243,7 +243,8 @@ func (s *PostgresStore) WriteCallIntent(ctx context.Context, workflowID string, 
 //
 // It used to be bound raw, so a call that completed with an EMPTY response
 // stored the empty string where every INSERT path stores NULL. That is not a
-// cosmetic difference: engine/flush.go's insertEventSQL carries
+// cosmetic difference: engine/flush.go's insertEventSQL carried (before
+// cleat#2333 fixed the clause itself, see below)
 //
 //	ON CONFLICT (workflow_id, step) DO UPDATE
 //	  SET response = EXCLUDED.response, error = EXCLUDED.error
@@ -275,6 +276,35 @@ func (s *PostgresStore) WriteCallIntent(ctx context.Context, workflowID string, 
 // So the firing this closes was never self-healing; it could only corrupt.
 // With NULL the clause is false for these rows too, which is what
 // engine/flush.go's comment has always claimed it is for every row.
+//
+// cleat#2333: that dead clause was not only harmless here, it was actively
+// broken for the event types that DO rely on the generic ON CONFLICT path to
+// complete a suspended row -- AwaitChild chief among them, which has no
+// CompleteCallIntent-style direct UPDATE of its own. A parent that awaited a
+// child, then recorded one more event, failed every subsequent replay with a
+// checksum mismatch, because the completing overwrite never took effect. The
+// fix widens the WHERE to also match a NULL response and adds checksum,
+// payload and payload_encoding to the SET list, so the clause now does what
+// this file's comment always said it did -- for every row, not none of them.
+//
+// That widening is not enough on its own to leave THIS mechanism's rows
+// immutable, and an earlier draft of this comment claimed it was --
+// "response/error/checksum/payload now move together" is true and beside
+// the point, because the vulnerability this reopens is not columns going
+// stale relative to each other, it is the WHOLE ROW being eligible for
+// overwrite again. A call intent completed here with a genuinely empty
+// response (this function's own WHY comment, two paragraphs up) stores
+// response/error NULL exactly like a row that has never been completed at
+// all, and nothing in response/error/checksum tells the two apart --
+// checksum is set on both, just by different writers. What insertEventSQL's
+// WHERE actually relies on to stay immutable is event_type: only
+// await_child/await_promise/await_all_children are in its pending-test
+// list, and a "call" row's event_type never changes, so a re-append of an
+// already-completed call intent (FinalizeWorkflowSegment's routine
+// re-append of a whole segment, not an exotic path) fails that test and
+// leaves this row alone regardless of how empty its response was. See
+// insertEventSQL's own doc, and TestACompletedIntentIsNotOverwrittenByALaterAppend,
+// which is what caught the draft of this fix that omitted event_type.
 func (s *PostgresStore) CompleteCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, checksum string, workerID string, generation int64) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {

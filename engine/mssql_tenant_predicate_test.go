@@ -149,6 +149,34 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "update workflow_instances set event_count = event_count + @p1 where id = @p2",
 		Reason: scopedByCaller,
 	},
+	// cleat#2333 rewrote this function's event_history write from
+	// INSERT...SELECT...WHERE NOT EXISTS to MERGE...WITH (HOLDLOCK)... (see
+	// the statement's own doc comment for why -- WHERE NOT EXISTS discarded a
+	// completing re-flush unconditionally). The digest changed with the SQL
+	// text, so this is a new key for the SAME statement the old
+	// INSERT...SELECT carried with no allowlist entry at all: neither form
+	// compares tenant_id to a parameter, and neither needs to, for the same
+	// reason the sibling entry immediately above does not -- workflow_id
+	// arrives here from a caller that already read it under a tenant
+	// predicate (ClaimWorkflow), and MSSQLStore is re-scoped per tenant by
+	// storeFor. The MERGE's WHEN MATCHED clause only matches on
+	// (workflow_id, step), which is event_history's actual primary key
+	// (migrations/mssql's event_history table has no tenant_id in its PK
+	// either) -- so there is no row this statement could touch that a
+	// tenant-scoped caller did not already name.
+	//
+	// The digest moved a SECOND time, from #0b59a5d77eeb to #2f9f711af184,
+	// when event_type joined the WHEN MATCHED ... THEN UPDATE SET list
+	// (cleat#2333's event_type-transition fix, added after this entry was
+	// first registered) -- the key digests the WHOLE statement, so a change
+	// to the SET clause moves it exactly like a change to the USING clause
+	// would. Re-derived from this guard's own error-message suggestion, not
+	// guessed. The reasoning above is unaffected: it is about the MERGE's
+	// join predicate, which event_type's addition does not touch.
+	"mssql_events.go:appendEventsInTxOpts#2f9f711af184": {
+		SQL:    "merge event_history with (holdlock) as target using (select @p1 as workflow_id",
+		Reason: scopedByCaller,
+	},
 	"mssql_events.go:VerifyWorkflowEvents#63b72d6f4db8": {
 		SQL:    "select step, checksum from event_history where workflow_id = @p1 order by step",
 		Reason: scopedByCaller,

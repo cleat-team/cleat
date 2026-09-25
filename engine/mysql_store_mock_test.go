@@ -271,8 +271,13 @@ func TestMySQLStore_AppendEventHistoryBatch_BeginError(t *testing.T) {
 }
 
 func TestMySQLStore_AppendEventHistoryBatch_ExecError(t *testing.T) {
+	// cleat#2333 dropped INSERT IGNORE for a real INSERT ... ON DUPLICATE KEY
+	// UPDATE (INSERT IGNORE unconditionally discarded a completing re-flush of
+	// an AwaitChild/AwaitPromise/AwaitAllChildren row -- see mysql_events.go's
+	// doc comment on this statement) -- so the mock now matches on
+	// "INSERT INTO event_history", not the old "INSERT IGNORE INTO" spelling.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "INSERT IGNORE INTO event_history", err: errors.New("insert failed")},
+		{match: "INSERT INTO event_history", err: errors.New("insert failed")},
 	})
 	defer db.Close()
 

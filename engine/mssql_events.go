@@ -496,8 +496,59 @@ func (s *MSSQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 		return nil
 	}
 
-	// Use INSERT...SELECT WHERE NOT EXISTS for idempotent event insertion.
-	// This is the SQL Server equivalent of PostgreSQL's ON CONFLICT DO NOTHING.
+	// A MERGE, not INSERT...SELECT WHERE NOT EXISTS. That was the SQL Server
+	// equivalent of PostgreSQL's ON CONFLICT DO NOTHING, and DO NOTHING is not
+	// what a re-flush of an existing step needs: AwaitChild (and its
+	// siblings) suspend by writing a pending row -- response and error both
+	// NULL -- and complete by writing the SAME step again once the result is
+	// known, with no CompleteCallIntent-style direct UPDATE of its own to fall
+	// back on. WHERE NOT EXISTS discarded that second write unconditionally,
+	// so the completing response never reached event_history on this dialect,
+	// and a later step's checksum -- chained, in the worker's memory, from the
+	// completed record -- could never be reproduced by a replay that could
+	// only ever load the stale pending one. cleat#2333, the same defect
+	// Postgres's dead ON CONFLICT WHERE clause had, reached here by
+	// unconditional discarding rather than by a guard that never fired.
+	//
+	// WHEN MATCHED is gated on the EXISTING row's event_type, response,
+	// error, promise_result and promise_error, not the incoming row's, so a
+	// row that already carries a result stays immutable -- the same "only
+	// complete a still-pending row" contract flush.go's insertEventSQL
+	// states for Postgres and mysql_events.go's IF()-gated ON DUPLICATE KEY
+	// UPDATE states for MySQL. promise_result/promise_error are in the guard
+	// and the UPDATE SET for the same reason they are on those two:
+	// AwaitPromise is the same suspend-then-complete same-step write
+	// AwaitChild is, but its outcome lives in those columns. (LoadEventHistory
+	// scans the raw columns AND overlays from the payload blob afterwards
+	// via populateFromPayload, which wins when it applies -- so payload
+	// alone would suffice for replay correctness; the raw columns are kept
+	// in sync here for any reader that queries them directly.)
+	//
+	// event_type IN (...) is not optional, and dropping it reopens
+	// cleat#1379's corruption case: store_intent.go's CompleteCallIntent
+	// completes a call intent with a genuinely empty response by storing
+	// NULL, same as flush.go's insertEventSQL does, and a row completed that
+	// way is bit-for-bit identical -- response/error/promise_result/
+	// promise_error all NULL, checksum set -- to a row from one of these
+	// three event types that was never completed at all. Only event_type
+	// tells them apart: a "call" row's event_type never changes, so
+	// restricting WHEN MATCHED's pending test to await_child/await_promise/
+	// await_all_children leaves a call-intent-completed row alone
+	// regardless of how empty its response was. See flush.go's insertEventSQL
+	// doc for the full writeup and TestACompletedIntentIsNotOverwrittenByALaterAppend,
+	// which is what caught this omission.
+	//
+	// WITH (HOLDLOCK) upgrades the MATCH's shared lock to hold through the
+	// statement: without it, two concurrent MERGEs against the same
+	// (workflow_id, step) can both evaluate WHEN NOT MATCHED true (neither
+	// sees the other's still-uncommitted insert) and both attempt the
+	// INSERT, and the loser fails on the unique constraint instead of
+	// falling through to WHEN MATCHED. This is the standard, documented
+	// MERGE race (Microsoft's own MERGE reference warns of it under
+	// concurrent load) and not specific to this statement; HOLDLOCK is the
+	// standard fix, forcing the second writer to wait for the first's
+	// commit and then evaluate WHEN MATCHED against the now-visible row.
+	//
 	// Chain in step order, seeded from what is already stored -- see
 	// chainOrder and PostgresStore.previousStoredChecksum for why both halves
 	// are required.
@@ -518,7 +569,10 @@ func (s *MSSQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 		prevChecksum = checksum
 
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO event_history (
+			MERGE event_history WITH (HOLDLOCK) AS target
+			USING (SELECT @p1 AS workflow_id, @p2 AS step) AS source
+			ON target.workflow_id = source.workflow_id AND target.step = source.step
+			WHEN NOT MATCHED THEN INSERT (
 				workflow_id, step, event_type, service, operation, request, response, error,
 				duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 				defer_description, defer_id, child_name, child_input, run_id, new_input,
@@ -526,12 +580,14 @@ func (s *MSSQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 				promise_name, promise_id, promise_result, promise_error, payload,
 				created_at, checksum, tenant_id, payload_encoding
 			)
-			SELECT @p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10,
-			       @p11, @p12, @p13, @p14, @p15, @p16, @p17, @p18, @p19, @p20,
-			       @p21, @p22, @p23, @p24, @p25, @p26, @p27, @p28, @p29, @p30, @p31, @p32, @p33
-			WHERE NOT EXISTS (
-				SELECT 1 FROM event_history WHERE workflow_id = @p1 AND step = @p2
-			)
+			VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10,
+			        @p11, @p12, @p13, @p14, @p15, @p16, @p17, @p18, @p19, @p20,
+			        @p21, @p22, @p23, @p24, @p25, @p26, @p27, @p28, @p29, @p30, @p31, @p32, @p33)
+			WHEN MATCHED AND target.event_type IN ('await_child', 'await_promise', 'await_all_children')
+			     AND target.response IS NULL AND target.error IS NULL
+			     AND target.promise_result IS NULL AND target.promise_error IS NULL THEN UPDATE SET
+				response = @p7, error = @p8, promise_result = @p27, promise_error = @p28,
+				checksum = @p31, payload = @p29, payload_encoding = @p33, event_type = @p3;
 		`, workflowID, rec.Step, rec.EventType,
 			nullStr(rec.Service), nullStr(rec.Op), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Request))), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Response))), nullStr(rec.Err),
 			nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
@@ -541,7 +597,7 @@ func (s *MSSQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(rec.PluginInput), nullStr(rec.PluginOutput), nullStr(rec.PluginError),
 			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(rec.PromiseResult), nullStr(rec.PromiseError),
 			payloadArg,
-			time.UnixMilli(rec.TimestampMs),
+			eventCreatedAt(rec),
 			checksum,
 			s.tenantID,
 			payloadEncodingFor(rec))

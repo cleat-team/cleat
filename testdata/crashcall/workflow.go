@@ -107,6 +107,47 @@ func mustReq(orderID, op string) string {
 	return string(req)
 }
 
+// childCallIn is the shape ParentWithChild marshals as the child's input.
+type childCallIn struct {
+	OrderID string `json:"orderID"`
+}
+
+// ParentWithChild is cleat#2333's fixture: ChildWorkflow, then AwaitChild,
+// then two more durable calls. The worker is meant to die during the second
+// (Ship), well after the await_child event has already been overwritten with
+// its completed result -- the step whose checksum chaining is in question.
+func ParentWithChild(h cleat.HostCalls, input string) (string, error) {
+	var in childCallIn
+	_ = json.Unmarshal([]byte(input), &in)
+	childIn, _ := json.Marshal(map[string]string{"__entry_point": "child_echo", "orderID": in.OrderID})
+	rid, err := h.ChildWorkflow("crashcall", string(childIn))
+	if err != nil {
+		return "", err
+	}
+	if _, err := h.AwaitChild(rid); err != nil {
+		return "", err
+	}
+	if _, err := h.DurableCall("payments", "Charge", mustReq(in.OrderID, "Charge")); err != nil {
+		return "", err
+	}
+	if _, err := h.DurableCall("payments", "Ship", mustReq(in.OrderID, "Ship")); err != nil {
+		return "", err
+	}
+	return `{"parent":"done"}`, nil
+}
+
+// ChildEcho is ParentWithChild's child: one durable call, then done. Kept
+// short deliberately -- the parent's AwaitChild is meant to suspend waiting
+// for this to finish, not race it.
+func ChildEcho(h cleat.HostCalls, input string) (string, error) {
+	var in childCallIn
+	_ = json.Unmarshal([]byte(input), &in)
+	if _, err := h.DurableCall("payments", "Reserve", mustReq(in.OrderID, "Reserve")); err != nil {
+		return "", err
+	}
+	return `{"child":"done"}`, nil
+}
+
 // ContinuesAsNew makes one call and then continues as a new run of ThreeCharges: cleat#2285's ContinueAsNew
 // in flight when the grace ends. The new run's input is fixed because a lone string parameter receives the
 // whole input JSON.

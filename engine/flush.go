@@ -164,6 +164,148 @@ func (s *execSession) writeOut(ctx context.Context, m api.Module, ptr uint32, va
 // validates the recomputed value against history -- fail any workflow that
 // wrapped a clock read. store_children.go already bound the event's own
 // timestamp here; this brings the two write paths into agreement.
+//
+// # The completion guard covers promise_result/promise_error too, not just response/error
+//
+// AwaitPromise (engine/promises.go) is the same suspend-then-complete
+// same-step pattern as AwaitChild: a pending write with everything empty,
+// then -- on the replay that finds the promise resolved -- a second write to
+// the SAME step carrying the real outcome. But its outcome lives in
+// PromiseResult/PromiseError, not Response/Err -- both of the latter stay
+// empty on BOTH writes.
+//
+// LoadEventHistory does not actually need the raw response/promise_result
+// COLUMNS to be current for replay correctness: it scans them, but then
+// unconditionally overlays from the payload blob via populateFromPayload
+// (store_events.go) for every event type that function's switch names,
+// "await_child" and "promise_resolved"/"promise_rejected"/"await_promise"
+// included. payload = EXCLUDED.payload alone -- already necessary for
+// AwaitChild's fix -- is therefore already sufficient to make a completed
+// AwaitPromise replay correctly too, and this section originally reasoned
+// from the raw-column read before checking that this overlay exists.
+//
+// What promise_result/promise_error being absent from this guard actually
+// breaks is IMMUTABILITY, and it breaks it for every completed
+// AwaitPromise, not a narrow edge case: with the guard reading only
+// response/error, a resolved promise's row stays "pending" by this WHERE's
+// own test forever, because response and error never carry its content on
+// EITHER write. Any later stray reflush of that step -- a retried batch, a
+// duplicate segment append -- would then pass the guard and overwrite its
+// checksum and payload, reopening cleat#1379's corruption case for this
+// event type on every completion, confirmed by falsifying just this half of
+// the guard: TestAPromiseStyleEventCompletesOnEveryDialect's immutability
+// check fails with the stray value's checksum in place of the original's.
+// The SET list also syncs the raw promise_result/promise_error columns
+// themselves, for any reader that queries them directly rather than through
+// LoadEventHistory's overlay.
+//
+// The disjunct this WHERE used to carry, comparing response to the SQL
+// empty-string literal, is gone, not widened: nullStr (store_events.go)
+// stores every empty string as SQL NULL on every write path in this file,
+// so that comparison can never be true -- see the "That clause declines for
+// EVERY existing row" comment history on this constant. Checking IS NULL
+// alone says the same thing without the dead half.
+//
+// # event_type = EXCLUDED.event_type closes the empty-outcome residual, using a column this guard already reads
+//
+// This section used to say the guard "cannot tell genuinely pending from
+// genuinely completed with an empty outcome" for a hand-called
+// `resolve_promise(id, "")`, and called that documented-not-fixed --
+// PromiseResult has no equivalent of AwaitChild's out.Result
+// COALESCE(...,'{}') guarantee of non-emptiness, so response/error/
+// promise_result/promise_error IS NULL genuinely cannot discriminate a
+// promise resolved with "" from one never resolved at all. cleat-review
+// caught that this was left open rather than closed (cleat#2333 review,
+// point 4) and asked for it to be settled before the PR, not documented
+// again.
+//
+// Checking for it surfaced a second, more basic gap the empty-value question
+// was standing on: event_type ITSELF never transitioned. AwaitPromise's
+// pending write records EventTypeAwaitPromise; its completing write records
+// EventTypePromiseResolved or EventTypePromiseRejected (promises.go) -- a
+// DIFFERENT event_type, unlike AwaitChild and AwaitAllChildren, whose pending
+// and completed writes share one event_type throughout. Nothing in this SET
+// list touched event_type, so the stored column stayed "await_promise"
+// forever after every completing flush -- confirmed against a real database,
+// not inferred: LoadEventHistory returned EventType "await_promise" on a
+// workflow whose promise had genuinely resolved. That is not cosmetic:
+// AwaitPromise's OWN replay logic branches on it (`if rec.EventType ==
+// EventTypePromiseResolved` vs `== EventTypeAwaitPromise`, promises.go), so a
+// replay of a completed await was re-entering the "still pending, re-check
+// the promise store" branch and re-querying promiseStore.GetPromise on every
+// single replay instead of trusting the durable outcome -- silently correct
+// only for as long as the promise store's answer never changed or expired
+// after the workflow first observed it.
+//
+// Fixing that (event_type = EXCLUDED.event_type here) also closes the
+// empty-outcome residual for free, because event_type IN (...) two lines
+// down never lists "promise_resolved" or "promise_rejected" -- only the
+// three PENDING spellings. Once a promise's row transitions, its event_type
+// no longer matches the IN(...) half of this WHERE, so the whole guard
+// evaluates false and the row is immutable regardless of what
+// response/error/promise_result/promise_error hold -- NULL, empty string, or
+// real content, resolved or rejected, all alike. The four NULL checks stay
+// necessary for AwaitChild and AwaitAllChildren, whose event_type never
+// leaves the IN(...) list and whose immutability genuinely depends on
+// response being guaranteed non-empty on completion -- this paragraph only
+// removes AwaitPromise's dependence on that guarantee, which it never had.
+//
+// TestAPromiseStyleEventCompletesOnEveryDialect now asserts the stored
+// EventType after completion, and a stray reflush case that resolves with ""
+// then reflushes with different content, on all three dialects -- both
+// regressions this paragraph would otherwise only assert in prose.
+//
+// # AwaitChild's ERRORED completion needed the SAME guarantee, on the other column
+//
+// Extending cleat-review's question to AwaitChild's own error path (not
+// asked directly, but the same shape) surfaced a live gap: an AwaitChild
+// completing write can set Err instead of Response (children.go, when the
+// child failed), and error_msg -- unlike result -- was read with no
+// COALESCE-style guarantee. admin_ops.go's ForceFail validates workflowID,
+// generation, operator and errorCode, but never errorMsg, so an operator can
+// force-fail a child with an empty message; childOutcomeForSettledStatus
+// then returned Error == "" for it, which nullStr stores as SQL NULL --
+// column-identical to AwaitChild's own pending row, on both response AND
+// error. AwaitChild has no event_type escape hatch the way a resolved
+// promise now does (its event_type never leaves the IN(...) list at all,
+// pending or complete), so this was reachable corruption via cleat#1379's
+// exact mechanism, on a path this PR's own review process exists to catch.
+// Fixed at the source, matching how `result` is already COALESCEd:
+// status_vocabulary.go's childOutcomeForSettledStatus now runs errMsg through
+// nonEmptyChildError before returning it, so every GetChildResult
+// implementation (all three dialects share this one function) is covered at
+// once rather than patched per reader of ChildOutcome.Error.
+//
+// # event_type IN (...) is not an optimization, it is the other half of the guard
+//
+// TestACompletedIntentIsNotOverwrittenByALaterAppend (cleat#1379) failed
+// once the response-IS-NULL widening above landed, and it is the same
+// ambiguity from the opposite direction: WriteCallIntent/CompleteCallIntent
+// (store_intent.go) is a SEPARATE two-phase mechanism for "call" events, and
+// a call that completes with a genuinely empty response and no error is
+// exactly as reachable as an AwaitPromise resolved with "" -- CompleteCallIntent
+// stores it as NULL, on purpose, per that file's own WHY comment. Once
+// completed that way, its row is bit-for-bit identical, in every column this
+// guard could otherwise inspect, to an AwaitChild/AwaitPromise/
+// AwaitAllChildren row that has never been completed at all: response,
+// error, promise_result and promise_error all NULL, checksum SET (computed
+// by whichever writer wrote it last). checksum cannot discriminate them
+// either -- AwaitChild's PENDING flush already computes and stores a real
+// checksum over the pending record itself, so checksum is never NULL on
+// that path even before completion.
+//
+// event_type is the one column that does discriminate: only await_child,
+// await_promise and await_all_children ever suspend and complete by
+// re-inserting the SAME step (see each's own "no cached result, exitReplay
+// to fresh" comment, which is where this list was enumerated from -- every
+// other suspend-shaped call, AwaitAnyChild and AwaitSignals among them,
+// records its outcome at a NEW, later step instead, so a stray reflush of
+// their pending row is not a concern this WHERE needs to cover). A "call"
+// row's event_type never changes, in either the ordinary write path or the
+// call-intent path, so restricting the pending test to these three names is
+// sufficient to leave a call-intent-completed row immutable regardless of
+// how empty its outcome was, without reopening the completion this WHERE
+// exists to allow for the three event types that actually need it.
 const insertEventSQL = `
 	INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
 		duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
@@ -178,7 +320,13 @@ const insertEventSQL = `
 	WHERE ($32 = '' OR EXISTS (
 		SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $32 AND generation = $33
 	))
-	ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error WHERE event_history.response = '' AND event_history.error IS NULL`
+	ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error,
+		promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,
+		checksum = EXCLUDED.checksum, payload = EXCLUDED.payload, payload_encoding = EXCLUDED.payload_encoding,
+		event_type = EXCLUDED.event_type
+		WHERE event_history.event_type IN ('await_child', 'await_promise', 'await_all_children')
+		  AND event_history.response IS NULL AND event_history.error IS NULL
+		  AND event_history.promise_result IS NULL AND event_history.promise_error IS NULL`
 
 // setRLSOnTx sets the transaction-local tenant context that the row-level
 // security policies require.
@@ -614,6 +762,21 @@ func (e *Engine) runDefers(ctx context.Context, wasmBytes []byte, deferrals map[
 // eventCreatedAt is the timestamp the event itself carries, falling back to now
 // only if it has none. See insertEventSQL's doc for why the column must hold
 // this rather than the moment of the write.
+//
+// cleat#2333: mysql_events.go, mssql_events.go and store_event_write.go used
+// to call time.UnixMilli(rec.TimestampMs) directly, bypassing the fallback.
+// MySQL's TIMESTAMP(6) column has a hard floor at 1970-01-01 00:00:01 UTC,
+// one second above the epoch, so a genuinely zero TimestampMs -- every test
+// fixture in this package that builds an EventRecord literal without
+// setting it, which INSERT IGNORE was silently swallowing the resulting
+// Error 1292 for -- became a hard INSERT failure once cleat#2333 replaced
+// IGNORE with a real conditional completion. No production caller sends
+// TimestampMs == 0 (lifecycle.go's recordEvent always stamps one), but a
+// zero timestamp should not be able to fail a workflow on one dialect only
+// because a column type on that dialect happens to reject the epoch --
+// routing all three dialects' per-step writers through this same helper
+// closes that regardless of which side (test fixture debt or a future
+// caller) a zero ever comes from.
 func eventCreatedAt(rec EventRecord) time.Time {
 	if rec.TimestampMs > 0 {
 		return time.UnixMilli(rec.TimestampMs)
