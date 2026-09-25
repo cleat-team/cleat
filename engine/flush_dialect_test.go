@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cleat-team/cleat/engine/testutil"
 )
@@ -99,6 +100,12 @@ func requireFlushPersists(t *testing.T, db *sql.DB, dialect testutil.Dialect, wf
 		Op:        "Charge",
 		Request:   `{"amount":100}`,
 		Response:  `{"charge_id":"chg-1"}`,
+		// recordEvent (lifecycle.go) stamps TimestampMs before ever calling
+		// flushEvent, so it is never zero in production. This test calls
+		// flushEvent directly and must stamp its own -- MySQL's created_at is
+		// TIMESTAMP(6), whose valid range starts at 1970-01-01 00:00:01 UTC, one
+		// second after what a zero TimestampMs would produce.
+		TimestampMs: time.Now().UnixMilli(),
 	}
 
 	if err := eng.flushEvent(context.Background(), wfID, rec, ""); err != nil {

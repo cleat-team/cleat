@@ -246,9 +246,23 @@ func checkEventHistoryInsertSites(t *testing.T, files map[string]string, manifes
 // file-level grep that first swept this package for cleat#2328 and to this
 // guard's own file-level pre-filter, until a second pass re-derived the site
 // count with "INTO event_history" instead of anchoring on "INSERT INTO".
+//
+// "MERGE event_history" is a third spelling, added for cleat#2333: MSSQLStore
+// .appendEventsInTxOpts stopped being an "INSERT...SELECT WHERE NOT EXISTS"
+// and became a MERGE (see mssql_events.go's doc comment on that statement for
+// why -- WHERE NOT EXISTS discarded a completing re-flush unconditionally,
+// which was the SQL Server half of cleat#2333's root cause). A MERGE's own
+// insert clause reads "WHEN NOT MATCHED THEN INSERT (", never "INSERT INTO
+// event_history", so without this third pattern the file-level pre-filter
+// above stops matching mssql_events.go entirely and the whole file -- not
+// just this statement -- silently drops out of the scan. That is exactly the
+// "operation reports success without doing the thing" class CLAUDE.md warns
+// about: TestEveryEventHistoryWriteRoutesThroughTheEncoder still runs and
+// still passes, having looked at nothing in this file.
 func containsEventHistoryInsert(s string) bool {
 	return strings.Contains(s, "INSERT INTO event_history") ||
-		strings.Contains(s, "INSERT IGNORE INTO event_history")
+		strings.Contains(s, "INSERT IGNORE INTO event_history") ||
+		strings.Contains(s, "MERGE event_history")
 }
 
 // declTextAndKey returns a top-level declaration's own source text and its

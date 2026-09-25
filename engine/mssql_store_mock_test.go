@@ -225,7 +225,7 @@ func TestMSSQLStore_AppendEventHistoryBatch_Empty(t *testing.T) {
 func TestMSSQLStore_AppendEventHistoryBatch_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "INSERT INTO event_history", affected: 1},
+		{match: "MERGE event_history", affected: 1},
 	})
 	defer db.Close()
 
@@ -264,7 +264,7 @@ func TestMSSQLStore_AppendEventHistoryBatch_BeginError(t *testing.T) {
 func TestMSSQLStore_AppendEventHistoryBatch_InsertError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "INSERT INTO event_history", err: errors.New("insert failed")},
+		{match: "MERGE event_history", err: errors.New("insert failed")},
 	})
 	defer db.Close()
 
@@ -286,7 +286,7 @@ func TestMSSQLStore_AppendEventHistoryBatch_InsertError(t *testing.T) {
 func TestMSSQLStore_AppendEventHistory_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "INSERT INTO event_history", affected: 1},
+		{match: "MERGE event_history", affected: 1},
 	})
 	defer db.Close()
 

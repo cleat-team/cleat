@@ -259,7 +259,16 @@ var knownRLSFaults = map[string]string{
 // Each entry still has to name the gate, and the gate has to be checkable by
 // reading one `if`. "It is fine" is not a reason.
 var statementsWithoutATenantByDesign = map[string]string{
-	"flush.go:453": "the UNTENANTED path of Engine.flushEvent, guarded by `if e.tenantID != \"\"` " +
+	// cleat#2333 added a large doc comment above insertEventSQL and inside
+	// flushEvent, which pushed this line down twice more as the fix grew --
+	// 453 -> 539 -> 581, the last when the event_type-transition doc comment
+	// (and its SET-list addition) landed above this call. Re-derived with
+	// `grep -n "res, err := e.db.ExecContext(ctx, insertEventSQL, workflowID" engine/flush.go`
+	// rather than guessed, per this map's own instruction two lines up: a
+	// stale line number here is indistinguishable from "the gate moved or
+	// went away" until someone re-reads it, which is exactly what this guard
+	// forced, twice now, when the key stopped matching.
+	"flush.go:581": "the UNTENANTED path of Engine.flushEvent, guarded by `if e.tenantID != \"\"` " +
 		"immediately above it -- the tenanted branch opens a transaction, calls " +
 		"setRLSOnFlushTx and returns, so this line runs only when there is no tenant to set. " +
 		"Not reached by a worker: cmd/cleat-worker/setup.go:2260 always passes " +
