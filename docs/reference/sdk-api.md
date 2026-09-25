@@ -1,5 +1,25 @@
 # cleat SDK API Reference
 
+## Installing an SDK
+
+Five language SDKs exist; **only Python is published to a package registry**
+for 0.3.0 (PyPI, `cleat-sdk`). Go is fetched with `go get`. The other three --
+Rust, Java, AssemblyScript -- are not published anywhere and are installed
+from git at the release tag. Full instructions, with commands verified
+outside a cleat checkout, live in each SDK's own README:
+
+| Language | Install | Details |
+|---|---|---|
+| Go | `go install github.com/cleat-team/cleat/cmd/cleat@latest` | this page, below |
+| Python | `pip install cleat-sdk` | [`python-sdk/README.md`](../../python-sdk/README.md#installation) |
+| Rust | `git`+`tag` in `Cargo.toml` | [`crates/cleat-sdk/README.md`](../../crates/cleat-sdk/README.md#installation) |
+| Java | git-cloned Gradle subproject (source-only) | [`crates/cleat-java/README.md`](../../crates/cleat-java/README.md#installation) |
+| AssemblyScript | pnpm git+subdirectory, or npm clone+`file:` | [`packages/cleat-as/README.md`](../../packages/cleat-as/README.md#installation) |
+
+The rest of this page documents the Go SDK's `HostCalls` interface.
+
+---
+
 Package `cleat` defines the durable SDK -- the only import a workflow author
 needs. All external interactions go through the `HostCalls` interface, which
 enables deterministic replay.
