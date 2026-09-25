@@ -55,12 +55,19 @@
 #   mysql    3306    tier1.dialects
 #   mssql    1433    tier1.dialects
 #   postgres 5433    ./tests/crash/... is a tier-1 package and uses none of the
-#   (tier1-rest      CLEAT_TEST_* DSNs. It reads CLEAT_CRASH_DB, derives an
-#    only)           unprivileged cleat_app role from it, and applies the
-#                    shipped migrations itself. Its tests Fatal rather than
-#                    skip when it is unreachable -- moot while cleat#2085
-#                    keeps it out of the extracted package list, kept
-#                    provisioned regardless (see above).
+#   mysql    (same   CLEAT_TEST_* DSNs. It reads CLEAT_CRASH_DB, derives an
+#   mssql    services unprivileged cleat_app role from it, and applies the
+#   (tier1-rest      shipped migrations itself. Its tests Fatal rather than
+#    only)           skip when it is unreachable.
+#
+#                    The dialect half reads CLEAT_CRASH_MYSQL and
+#                    CLEAT_CRASH_MSSQL and reuses the mysql/mssql services
+#                    above rather than standing up separate ones. Those two
+#                    entries are load-bearing rather than tidy: the shutdown
+#                    scenarios t.Skip without them, and cleat#2085 -- now
+#                    fixed, so ./tests/crash/... IS in the extracted package
+#                    list -- is what put the suite in this shard. Before they
+#                    were provisioned, the gate failed on four skips.
 #   componentize-py  tier1.languages includes python (D2). Both it and
 #   wasm-tools       wasm-tools are checked independently by the gate, because
 #                    installing only the first leaves the engine tests skipping
@@ -590,6 +597,26 @@ jobs:
       CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=cleat
       CLEAT_TEST_MSSQL_ROW_AUDIT: "1"
       CLEAT_CRASH_DB: postgres://cleat:cleat@127.0.0.1:5433/cleat?sslmode=disable
+
+      # The two dialect crash DSNs, which `./tests/crash/...` needs now that it
+      # is a tier-1 package (cleat#2085) and has shutdown scenarios on MySQL and
+      # SQL Server (cleat#2386). Without them those four subtests t.Skip, and
+      # tier 1's contract is that a skip is a failure -- measured on 108202408297,
+      # `ran=4600 pass=4594 fail=0 skip=6` followed by
+      # `FAIL: tier 1 skipped 4 test(s)`.
+      #
+      # Provisioned rather than listed in tier1.exclude_tests. An exclusion is
+      # applied with `go test -skip`, which emits no `--- SKIP` line, so the
+      # tests would be invisible rather than merely unrun -- the known-failures
+      # mechanism the gate's own comment above that list forbids wearing a
+      # different hat.
+      #
+      # The suite creates its own databases beside the one each DSN names, so
+      # the services above are enough; nothing else needs provisioning. Cost of
+      # the four subtests measured at 120.6s, against ~6m40s of headroom in this
+      # job's 45-minute timeout at the time it was added.
+      CLEAT_CRASH_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true
+      CLEAT_CRASH_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=cleat
 
     steps:
       # See tier1-engine's identical step for the full rationale (cleat#2080).
