@@ -8,11 +8,19 @@ import (
 // storedEvent is the on-disk encoding of one event: the ten sensitive column
 // values and the payload JSON, in the form that goes into event_history.
 //
-// ONE ENCODING, ONE PLACE. Five writers insert into event_history --
-// engine/flush.go's per-step insert, AdaptiveFlusher.prepareEntry, and the
-// three stores' appendEventsInTx -- and until this function existed each
-// carried its own copy of the encoding. Two of the five encrypted and three
-// did not, and that was not visible from any one of them.
+// ONE ENCODING, ONE PLACE. On PostgreSQL, every production event_history
+// writer calls this: engine/flush.go's per-step insert
+// (PostgresStore.appendOneEvent / execEventStmt), AdaptiveFlusher.prepareEntry,
+// PostgresStore.WriteCallIntent, and PostgresStore.StartChildWorkflowAtomic
+// (cleat#2328 -- the last to be routed through here; until then its
+// child_workflow event bypassed this file entirely, with its own hand-rolled
+// plaintext INSERT). Until this function existed each carried its own copy of
+// the encoding. Two of the original five encrypted and three did not, and
+// that was not visible from any one of them.
+//
+// MSSQLStore.StartChildWorkflowAtomic also calls this now (cleat#2328), even
+// though encrypt is always false there -- see the SCOPE paragraph below for
+// why MSSQL's other writers do not.
 //
 // So --encrypt-sensitive-payloads covered the per-event path and left
 // FinalizeWorkflowSegment, ContinueAsNew, the defer phase and the audit

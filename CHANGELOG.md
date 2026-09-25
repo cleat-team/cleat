@@ -12,6 +12,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **Security: a child workflow's `child_workflow` event was written in plain text in the
+  parent's `event_history`, with `--encrypt-sensitive-payloads` on.** (cleat#2312, cleat#2328)
+
+  `PostgresStore.StartChildWorkflowAtomic` -- the function the live `ChildWorkflow` host call
+  actually uses (`engine/children.go:244`) -- built its own hand-rolled `INSERT INTO
+  event_history` for the `child_workflow` event and never called `encodeEventForStorage`, the
+  one function every other write path routes through. So a child workflow's `child_input`, and
+  the `payload` column carrying its `parent_workflow_id`/`parent_close_policy`, were plaintext on
+  disk regardless of the flag -- despite `child_input` being named in `EncryptedEventColumns` and
+  `TestEncryptedEventColumnsIsComplete` implying full coverage; that test only ever calls
+  `encodeEventForStorage` directly, so it had no visibility into a write path that bypassed it.
+  Found doing the measure-and-document follow-up on cleat#2312, confirmed live with a marker
+  string before being fixed. `engine/store_children.go`'s `StartChildWorkflowAtomic` now calls
+  `encodeEventForStorage` like every other writer
+  (`TestAChildWorkflowEventIsEncryptedLikeAnyOther`). The MySQL and SQL Server twins of this
+  function (`engine/mysql_store.go`, `engine/mssql_signals_promises.go`) had the identical
+  hand-rolled INSERT and were converted too, for parity -- a no-op on those dialects today, since
+  encryption at rest is not supported there and `--encrypt-sensitive-payloads` is refused at
+  worker startup unless `--driver=postgres`. All three were also missing the `payload_encoding`
+  column outright (NULL by omission; now written explicitly).
+  `TestEveryEventHistoryWriteRoutesThroughTheEncoder` guards every `INSERT INTO event_history` in
+  `engine/` against this regressing again: each site must call the encoder or be named on an
+  exemption list with a reason (MySQL/MSSQL sites with nothing to encrypt, and Postgres sites that
+  consume an already-encoded value built elsewhere). Its own first version was blind to two of the
+  eleven sites: MySQL spells this `INSERT IGNORE INTO event_history`, not `INSERT INTO`, so
+  `mysql_store.go` and `mysql_events.go` evaded a guard whose pattern only knew the other two
+  dialects' spelling -- found re-deriving the site count, not by review.
+
+  **To upgrade:** `cleatctl reseal-payloads` does **not** repair rows already affected by this.
+  Measured directly: seeded a `child_workflow` event with a plaintext `child_input` and ran
+  `reseal-payloads --dry-run` against it -- it reported `not ciphertext: 2` (the `child_input` and
+  `payload` columns) and left both untouched. A JSON object is not valid base64 (`{`, `"`, `:` are
+  outside the alphabet), so `resealValue` classifies plaintext JSON the same way it classifies a
+  column that was never supposed to be encrypted, and there is nothing in the stored row that
+  tells the two apart. If a deployment ran with `--encrypt-sensitive-payloads` on and used child
+  workflows before this fix, treat those `child_workflow` events' `child_input` and `payload` as
+  unencrypted for that period; there is no tool in this release that finds or reseals them.
+
+  Also see the entry below (cleat#2305) for the sharded-worker plaintext bug found the same
+  week -- a different code path, the same shape of gap, and the same answer on `reseal-payloads`.
+
 - **Security: a sharded worker (`--shards-file`) with `--encrypt-sensitive-payloads` and
   `--encryption-key-file` set wrote `event_history` in plain text, with no error, and the
   affected workflows still ended `done`.** (cleat#2305)

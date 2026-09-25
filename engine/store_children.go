@@ -93,32 +93,35 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 	}
 	checksum := computeEventChecksum(event, prevCS)
 
-	// The payload column, which this INSERT used to omit.
+	// The same encoding every other event_history writer on this dialect uses
+	// -- see encodeEventForStorage's doc. Until cleat#2312/#2328 this INSERT
+	// built its own plaintext payload by hand and had no payload_encoding
+	// column at all, so a child_workflow event's child_input and payload were
+	// never covered by --encrypt-sensitive-payloads even though both are
+	// listed in EncryptedEventColumns: TestEncryptedEventColumnsIsComplete
+	// only ever exercises encodeEventForStorage directly, so it had no
+	// visibility into a write path that bypassed it entirely.
 	//
-	// It is not a duplicate of the named columns. eventRecordToPayload is what
-	// the checksum is computed over, and for child_workflow it covers
-	// parent_workflow_id and parent_close_policy -- neither of which has a
-	// column on event_history. LoadEventHistory restores those fields by
-	// calling populateFromPayload on this column; with the column NULL they
-	// come back empty, VerifyWorkflowEvents recomputes the checksum without
-	// them, and it cannot match what was written here. Every workflow that
-	// spawned a child failed verification, deterministically.
-	//
-	// Plaintext, matching the batch write path: see the note on
-	// PostgresStore.encryption for why encryption is confined to flushEvent.
-	payloadJSON, _ := eventRecordToPayload(event)
-	payloadArg := nullStr("")
-	if len(payloadJSON) > 0 {
-		payloadArg = sql.NullString{String: string(payloadJSON), Valid: true}
+	// The checksum above is computed BEFORE this call, over the plaintext
+	// event -- encodeEventForStorage's doc explains why: VerifyWorkflowEvents
+	// recomputes it from the decrypted record it loads, so a checksum over
+	// ciphertext would make every workflow with a child fail verification.
+	stored, err := encodeEventForStorage(event, s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
+	if err != nil {
+		// Same accounting as appendOneEvent/execEventStmt/WriteCallIntent:
+		// see the cleat#1317 note on those for why this is recorded here
+		// rather than left silent.
+		s.recordEncryptionFailure(ctx)
+		return "", fmt.Errorf("start child workflow atomic: encode event: %w", err)
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum, tenant_id, payload)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		INSERT INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum, tenant_id, payload, payload_encoding)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (workflow_id, step) DO NOTHING
 	`, parentID, event.Step, string(event.EventType),
-		nullStr(event.ChildName), nullStr(event.ChildInput), nullStr(childID),
-		time.UnixMilli(event.TimestampMs), checksum, s.tenantID, payloadArg)
+		nullStr(event.ChildName), nullStr(stored.ChildInput), nullStr(childID),
+		time.UnixMilli(event.TimestampMs), checksum, s.tenantID, stored.Payload, stored.Encoding)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert event: %w", err)
 	}

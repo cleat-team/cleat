@@ -407,22 +407,28 @@ func (s *MySQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 		return "", fmt.Errorf("start child workflow atomic: previous checksum: %w", err)
 	}
 	checksum := computeEventChecksum(event, prevCS)
-	// See PostgresStore.StartChildWorkflowAtomic for why the payload column
-	// matters here: it carries the fields the checksum covers that have no
-	// column of their own, and LoadEventHistory restores them from it. Omitted,
-	// every child_workflow event failed VerifyWorkflowEvents.
-	payloadJSON, _ := eventRecordToPayload(event)
-	payloadArg := nullStr("")
-	if len(payloadJSON) > 0 {
-		payloadArg = sql.NullString{String: string(payloadJSON), Valid: true}
+
+	// The same encoder every other event_history writer calls (cleat#2328;
+	// see PostgresStore.StartChildWorkflowAtomic). MySQL does not support
+	// encryption at rest -- s.encryptSensitivePayloads is always false here,
+	// so this is a no-op transform today -- but routing through it anyway
+	// means there is exactly one place that builds the payload column and
+	// the payload_encoding column, rather than a second hand-rolled copy
+	// that would need to be found again if MySQL ever gains encryption.
+	// The checksum above is computed BEFORE this call, over the plaintext
+	// event, for the same reason encodeEventForStorage's doc gives: it must
+	// match what VerifyWorkflowEvents recomputes from the decrypted record.
+	stored, err := encodeEventForStorage(event, s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
+	if err != nil {
+		return "", fmt.Errorf("start child workflow atomic: encode event: %w", err)
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT IGNORE INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum, tenant_id, payload)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT IGNORE INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum, tenant_id, payload, payload_encoding)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, parentID, event.Step, string(event.EventType),
-		nullStr(event.ChildName), nullStr(event.ChildInput), nullStr(childID),
-		time.UnixMilli(event.TimestampMs), checksum, s.tenantID, payloadArg)
+		nullStr(event.ChildName), nullStr(stored.ChildInput), nullStr(childID),
+		time.UnixMilli(event.TimestampMs), checksum, s.tenantID, stored.Payload, stored.Encoding)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert event: %w", err)
 	}
