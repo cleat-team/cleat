@@ -679,6 +679,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--uninstall-plugin` on MySQL: 10 more plugins move from refused to verified.** (cleat#2306
+  phase 2)
+
+  `audit-log`, `datadog-export`, `eventstore`, `feature-flags`, `kvstore`, `notifications`,
+  `pagerduty-alert`, `rate-limiter`, `slack-notify` and `tenant-quota` join `scheduled-backup` in
+  `plugin.provenPluginDialects` for MySQL: the phase-2 sweep
+  (`TestUninstallDownChainIsClassifiedOnEveryDialect`,
+  `cmd/cleat-worker/a_uninstall_down_chain_is_classified_on_every_dialect_test.go`) found their
+  Down chains already clean there, matching cleat-review's original #2290 measurement, and the
+  table-driven harness itself is what proves it now for every plugin, on every dialect, rather
+  than the one-off test the phase-1 entry above required per plugin. Every other loaded plugin is
+  classified too — as `outcomeRecoverable` or `outcomeUnrecoverable` in the same file's
+  `knownBrokenPluginDown` — so an unclassified (plugin, dialect) pair fails CI outright instead
+  of shipping silent, the same guarantee phase 1 gave `--uninstall-plugin` at the operator
+  boundary.
+
+  The harness's recoverable/unrecoverable split is schema-verified, not just exit-code-verified:
+  it snapshots the schema after the initial install and compares it (via the new
+  `migration/catalogdiff` package) against the schema after a failed Down's follow-up
+  `--migrate-only` run, rather than trusting that run's `nil` error. That caught three pairs
+  where the follow-up succeeds but the recovered schema is silently missing an object the failed
+  Down destroyed — `blobstore`/MySQL (loses the `workflow_blob_refs` table),
+  `oauth-provider`/MSSQL (loses `oauth_sessions.nonce`), `webhook-ingest`/MSSQL (loses
+  `webhook_events.error_msg`) — found during cleat-review's PR #2346 verification and
+  reclassified `outcomeUnrecoverable` before landing, rather than advertised as recoverable via
+  `--migrate-only`.
+
 - **`--encryption-key-file-previous`: `cmd/cleat-worker` can hold a previous payload-encryption key alongside the current one, for rolling key rotation.** (cleat#1992, #2308)
 
   `engine.PayloadEncryption` has supported a two-key ring since before this flag existed
