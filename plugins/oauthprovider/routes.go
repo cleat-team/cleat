@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,6 +27,11 @@ type providerEndpoints struct {
 	tokenURL    string
 	userinfoURL string
 	scope       string
+	// userEmailsURL is where to ask whether an address the provider reported
+	// is one it VOUCHES for. Empty for every provider whose userinfo answer is
+	// already authoritative about that -- see the GitHub entry below, which is
+	// the only one that sets it. cleat#2340.
+	userEmailsURL string
 }
 
 // endpoints holds each provider's PUBLIC OAuth URLs. No secret is stored here:
@@ -51,7 +57,15 @@ var endpoints = map[string]providerEndpoints{
 		authURL:     "https://github.com/login/oauth/authorize",
 		tokenURL:    "https://github.com/login/oauth/access_token",
 		userinfoURL: "https://api.github.com/user",
-		scope:       "read:user",
+		// user:email is REQUIRED, not optional, and its absence was the
+		// first half of the cleat#2340 defect. GitHub's /user returns `email`
+		// only when the account has made an address public, and null
+		// otherwise -- so for a private-email account (the common case) the
+		// only address available is the one /user/emails reports, and reading
+		// that endpoint at all needs this scope. Without it the call is a
+		// 404/403 and the login has no address it can vouch for.
+		userEmailsURL: "https://api.github.com/user/emails",
+		scope:         "read:user user:email",
 	},
 	"okta": {
 		authURL:     "https://%s/oauth2/v1/authorize",
@@ -93,10 +107,11 @@ func (p *Plugin) resolveEndpoints(ctx context.Context, provider string, cfg *oau
 			return providerEndpoints{}, fmt.Errorf("no endpoints for provider %q", provider)
 		}
 		return providerEndpoints{
-			authURL:     formatProviderURL(ep.authURL, cfg.Domain),
-			tokenURL:    formatProviderURL(ep.tokenURL, cfg.Domain),
-			userinfoURL: formatProviderURL(ep.userinfoURL, cfg.Domain),
-			scope:       ep.scope,
+			authURL:       formatProviderURL(ep.authURL, cfg.Domain),
+			tokenURL:      formatProviderURL(ep.tokenURL, cfg.Domain),
+			userinfoURL:   formatProviderURL(ep.userinfoURL, cfg.Domain),
+			scope:         ep.scope,
+			userEmailsURL: formatProviderURL(ep.userEmailsURL, cfg.Domain),
 		}, nil
 	}
 
@@ -126,6 +141,12 @@ type oauthConfigRow struct {
 	Domain       string
 	Issuer       string
 	Enabled      bool
+	// AllowlistEnabled is the operator's switch for the identity allowlist
+	// (migration v6). False means finishLogin does not consult
+	// oauth_allowed_identities AT ALL -- not "the table is empty", which would
+	// be an unreliable way to say the same thing, since an empty table is also
+	// what a mistyped tenant id produces. cleat#2340.
+	AllowlistEnabled bool
 }
 
 // OAuthClientSecretName is the tenant-secret name an oauth_config row's
@@ -192,12 +213,14 @@ func (p *Plugin) getConfig(ctx context.Context, tenantID uuid.UUID, provider str
 	ctx = plugin.ForTenant(ctx, tenantID)
 	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
 			SELECT tenant_id, provider, client_id, redirect_url,
-			       COALESCE(domain, '') AS domain, COALESCE(issuer, '') AS issuer, enabled
+			       COALESCE(domain, '') AS domain, COALESCE(issuer, '') AS issuer, enabled,
+			       allowlist_enabled
 			FROM oauth_config
 			WHERE tenant_id = $1 AND provider = $2 AND enabled = true
 		`, p.dialect), tenantID, provider),
 		&cfg.TenantID, &cfg.Provider, &cfg.ClientID,
 		&cfg.RedirectURL, &cfg.Domain, &cfg.Issuer, &cfg.Enabled,
+		&cfg.AllowlistEnabled,
 	)
 	if err != nil {
 		return nil, err
@@ -607,7 +630,12 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// that can be skipped on error is the permissive validator
 	// docs/enterprise-identity-decision.md warns about, and skipping it is
 	// indistinguishable from a forged token succeeding.
-	var idTokenEmail string
+	//
+	// The verification claim and the subject come out of the same validated
+	// token, which is the only place either is cryptographically attested:
+	// `email_verified` says the issuer proved the address belongs to the
+	// account, and `sub` is the account. cleat#2340.
+	var identity resolvedIdentity
 	if tokenResult.IDToken != "" && provider == providerOIDC {
 		claims, err := p.validateIDToken(r.Context(), tokenResult.IDToken, cfg.Issuer, cfg.ClientID, storedNonce.String)
 		if err != nil {
@@ -615,7 +643,9 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 			p.writeError(w, http.StatusUnauthorized, "id_token validation failed")
 			return
 		}
-		idTokenEmail = claims.Email
+		identity.Email = claims.Email
+		identity.EmailVerified = bool(claims.EmailVerified)
+		identity.Subject = normalizeSubject(claims.Subject)
 	}
 
 	// Fetch user info from the provider.
@@ -627,12 +657,12 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// here, unlike the unvalidated case this code is careful never to reach.
 	userinfoURL := ep.userinfoURL
 	if userinfoURL == "" {
-		if idTokenEmail == "" {
+		if identity.Email == "" {
 			p.logger.Error("oauth: no identity source", "provider", provider)
 			p.writeError(w, http.StatusBadGateway, "issuer publishes no userinfo endpoint and returned no usable id_token")
 			return
 		}
-		p.finishLogin(w, r, tid, provider, sessionID, cfg, idTokenEmail, tokenResult.ExpiresIn)
+		p.finishLogin(w, r, tid, provider, sessionID, cfg, identity, tokenResult.ExpiresIn)
 		return
 	}
 	userReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, userinfoURL, nil)
@@ -652,24 +682,78 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	var userInfo struct {
 		Email string `json:"email"`
-		Login string `json:"login"` // GitHub uses "login" instead of "email"
+		// EmailVerified is a verificationFlag, not a bool: the claim is
+		// optional and some issuers emit it as a string. An unreadable value
+		// must read as unverified rather than turning this decode into a 502
+		// -- see that type's doc comment for why the direction matters.
+		EmailVerified verificationFlag `json:"email_verified"`
+		Sub           string           `json:"sub"` // OIDC's stable account id
+		ID            int64            `json:"id"`  // GitHub's, which is numeric
 	}
 	if err := json.NewDecoder(userResp.Body).Decode(&userInfo); err != nil {
 		p.writeError(w, http.StatusBadGateway, "failed to parse userinfo response")
 		return
 	}
 
-	email := userInfo.Email
-	if email == "" {
-		email = userInfo.Login
-	}
-	// Only as a fallback, and only from a token that passed every check above:
-	// some issuers put the address in the ID token and omit it from userinfo.
-	if email == "" {
-		email = idTokenEmail
+	// The address, source by source, with the verification claim that belongs
+	// to whichever source supplied it.
+	//
+	// GitHub is a case of its own, and it is the case cleat#2340 item 1 is
+	// about. Until this change the fallback here was `userInfo.Login`, and
+	// `login` is a GitHub USERNAME -- user-changeable, not an address, and
+	// never proved to belong to anyone. An allowlist keyed on it would have
+	// admitted whoever registered the name next. It is deleted rather than
+	// demoted, because there is now a real source for a GitHub address:
+	// /user/emails, which labels each address verified or not, and the scope
+	// that lets us read it (user:email, in the endpoints table).
+	if provider == "github" {
+		verified, verr := p.githubVerifiedEmail(r.Context(), tokenResult.AccessToken, ep.userEmailsURL)
+		if verr != nil {
+			// Not fatal: an address we could not confirm is exactly the
+			// unverified case below, and the login still has the /user
+			// address (if any) to be labelled with. Logged because it is the
+			// difference between "this account has no verified address" and
+			// "we could not ask", and only one of those is the user's
+			// problem.
+			p.logger.Warn("oauth: github verified-email lookup", "error", verr)
+		}
+		switch {
+		case verified != "":
+			identity.Email = verified
+			identity.EmailVerified = true
+		case userInfo.Email != "":
+			// GitHub returns this only for accounts with a PUBLIC profile
+			// email, and publishes no claim about it here. Carried so the
+			// session row has a label; not eligible to match an allowlist
+			// row, because nothing has vouched for it.
+			identity.Email = userInfo.Email
+			identity.EmailVerified = false
+		}
+		if userInfo.ID != 0 {
+			identity.Subject = strconv.FormatInt(userInfo.ID, 10)
+		}
+	} else if userInfo.Email != "" {
+		// Source precedence is unchanged from before this change -- userinfo
+		// first, the ID token only as a fallback -- and the verification flag
+		// travels with the source that supplied the address rather than being
+		// OR-ed across both. An issuer that marks the address verified in the
+		// userinfo response and unverified in the token (or vice versa) is
+		// saying the same thing twice; picking either one is a choice, and
+		// picking the source we actually use keeps the answer explainable.
+		identity.Email = userInfo.Email
+		identity.EmailVerified = bool(userInfo.EmailVerified)
 	}
 
-	p.finishLogin(w, r, tid, provider, sessionID, cfg, email, tokenResult.ExpiresIn)
+	// The subject ladder for the OIDC-shaped providers. userinfo's `sub` is
+	// accepted because it arrives over TLS from the endpoint the operator's own
+	// config names, carrying an access token minted moments ago at that same
+	// endpoint -- and the validated ID token's `sub`, when there is one, wins,
+	// since that is the copy with a signature behind it.
+	if identity.Subject == "" {
+		identity.Subject = normalizeSubject(userInfo.Sub)
+	}
+
+	p.finishLogin(w, r, tid, provider, sessionID, cfg, identity, tokenResult.ExpiresIn)
 }
 
 // finishLogin turns a verified identity into a session row and a response.
@@ -677,16 +761,77 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 // Extracted so the two ways a callback can arrive here -- via userinfo, or via
 // a validated ID token when the issuer publishes no userinfo endpoint -- write
 // the session exactly the same way. A second copy of this is how the two paths
-// would drift on something like clearing the nonce.
+// would drift on something like clearing the nonce. The allowlist gate below is
+// a third reason: a check that ran on one path and not the other would be an
+// authentication bypass reachable by choosing an issuer whose discovery
+// document omits userinfo_endpoint.
 func (p *Plugin) finishLogin(
 	w http.ResponseWriter, r *http.Request,
 	tid uuid.UUID, provider string, sessionID uuid.UUID,
-	cfg *oauthConfigRow, email string, expiresIn int,
+	cfg *oauthConfigRow, id resolvedIdentity, expiresIn int,
 ) {
-	if email == "" {
+	// The guard is on the ADDRESS and stays on the address. An identity with a
+	// subject but no address is still refused here, exactly as it was before
+	// the subject became an allowlist key, because relaxing this would admit
+	// logins that fail today on every deployment -- with no operator opt-in,
+	// on a change whose entire purpose is to narrow who gets in. A tenant whose
+	// issuer publishes no address must keep using an issuer that does; a tenant
+	// whose issuer publishes an address but no email_verified claim can admit
+	// people with a subject row (see identityAllowed).
+	if id.Email == "" {
 		p.logger.Error("oauth: no email resolved", "provider", provider, "tenant", tid)
 		p.writeError(w, http.StatusBadGateway, "provider returned no usable identity")
 		return
+	}
+
+	// ForTenant with the tid the state lookup above derived. The UPDATE below
+	// addresses the row BY ID with no tenant predicate, so the policy is what
+	// keeps a state collision from writing another tenant's session, and the
+	// allowlist read below is scoped the same way for the same reason.
+	ctx := plugin.ForTenant(r.Context(), tid)
+
+	// The allowlist gate. cleat#2340 item 2.
+	//
+	// BEFORE the token is minted and before the UPDATE, so a refused login
+	// leaves no trace on the session row: the row keeps its state and its
+	// expiry and is swept by the ordinary abandoned-row path. A gate placed
+	// after the write would refuse the response while still having minted a
+	// usable token_hash, which is the failure mode this ordering exists to
+	// make impossible.
+	//
+	// It runs ONLY when the operator turned it on. With the switch off --
+	// which is every deployment until someone sets it, the column defaults
+	// false -- nothing here consults the table at all, and a login proceeds
+	// exactly as it did before this migration. That default is what makes the
+	// check safe to ship while the table has no writer in cleat: a
+	// fail-closed check against a table nobody can populate would deny every
+	// login on every upgraded deployment.
+	if cfg.AllowlistEnabled {
+		allowed, aerr := p.identityAllowed(ctx, tid, provider, id)
+		if aerr != nil {
+			p.logger.Error("oauth: allowlist lookup", "provider", provider, "tenant", tid, "error", aerr)
+			p.writeError(w, http.StatusInternalServerError, "failed to evaluate the identity allowlist")
+			return
+		}
+		if !allowed {
+			// Operator-actionable in the LOG, not the response. The caller may
+			// be anyone who reached this callback -- handleLogin accepts
+			// ?tenant_id= -- so the response names neither the table nor the
+			// row that would fix it (the same reasoning as handleCallback's
+			// secret_not_found branch, cleat#2295). The log carries exactly
+			// what an operator needs to write the INSERT: the identity, its
+			// kind, and whether the address was even eligible to match.
+			p.logger.Warn("oauth: identity refused by the tenant's allowlist",
+				"provider", provider, "tenant", tid,
+				"email", id.Email, "email_verified", id.EmailVerified,
+				"subject", id.Subject)
+			p.writeJSON(w, http.StatusForbidden, map[string]any{
+				"error":   "identity not authorized",
+				"code":    "identity_not_allowlisted",
+				"message": "this tenant restricts which identities may sign in with " + provider + "; contact your cleat administrator",
+			})
+			return
+		}
 	}
 
 	// Generate a 32-byte hex session token.
@@ -706,11 +851,6 @@ func (p *Plugin) finishLogin(
 		t := time.Now().Add(time.Duration(expiresIn) * time.Second)
 		expiresAt = &t
 	}
-
-	// ForTenant with the tid the state lookup above derived. The UPDATE below
-	// addresses the row BY ID with no tenant predicate, so the policy is what
-	// keeps a state collision from writing another tenant's session.
-	ctx := plugin.ForTenant(r.Context(), tid)
 
 	// session_token/access_token/refresh_token are NOT persisted, cleat#2295
 	// (closes cleat#2156's ask for these three; client_secret, the fourth
@@ -739,22 +879,27 @@ func (p *Plugin) finishLogin(
 			    access_token = NULL, refresh_token = NULL, expires_at = $3,
 			    state = NULL, code_verifier = NULL, nonce = NULL
 			WHERE id = $4
-		`, p.dialect), tokenHash, email, expiresAt, sessionID)
+		`, p.dialect), tokenHash, id.Email, expiresAt, sessionID)
 	if err != nil {
 		p.logger.Error("oauth: create session", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to create session")
 		return
 	}
 
+	// allowlist_enabled belongs in this line. It is the precondition that
+	// separates "the operator's list admitted this person" from "there was no
+	// list", and those want different follow-ups when someone asks why a
+	// deprovisioned account could still sign in.
 	p.logger.Info("oauth: session created",
 		"provider", provider,
 		"tenant", tid,
-		"email", email,
+		"email", id.Email,
+		"allowlist_enabled", cfg.AllowlistEnabled,
 	)
 
 	p.writeJSON(w, http.StatusOK, map[string]any{
 		"session_token": sessionToken,
-		"user_email":    email,
+		"user_email":    id.Email,
 		"expires_at":    expiresAt,
 	})
 }

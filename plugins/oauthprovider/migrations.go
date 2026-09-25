@@ -266,5 +266,131 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE oauth_config ADD client_secret NVARCHAR(MAX);
 			`,
 		},
+		{
+			// The identity allowlist. cleat#2340 item 2, implementing
+			// docs/enterprise-identity-decision.md.
+			//
+			// TWO things, one concern: the list itself, and the switch that
+			// decides whether it is consulted.
+			//
+			// WHY THE SWITCH IS A COLUMN AND NOT AN ABSENCE. The obvious
+			// alternative -- treat "no rows for this tenant+provider" as "no
+			// allowlist configured", so an empty table means everyone is
+			// admitted -- is fail-OPEN, and it fails open in the direction that
+			// is hardest to notice: an operator who means to restrict logins to
+			// three addresses, and mistypes the tenant id on the INSERT, gets a
+			// deployment that admits anyone, with no error anywhere. A column an
+			// operator deliberately sets has no such failure; the mode is a fact
+			// they wrote, not a fact they failed to write. It also gives them a
+			// way to turn the check off that an empty table cannot express.
+			//
+			// DEFAULT false, so this migration changes no existing deployment's
+			// behaviour on its own: an upgraded cleat still admits whoever it
+			// admitted before until an operator opts in. That is deliberate and
+			// it is the reason the check in finishLogin is gated rather than
+			// unconditional -- with no management surface for this table yet
+			// (cleat#2340 asks for one; see that issue), an unconditional check
+			// against an empty table would deny every login on every deployment
+			// that took this release.
+			//
+			// identity_type exists because a provider's stable identifier and a
+			// person's email are different things with different failure modes.
+			// An email can be reassigned by whoever controls the domain; an OIDC
+			// `sub` and GitHub's numeric id cannot be reassigned at all. Both
+			// kinds may be present for one (tenant, provider) and EITHER
+			// matching admits, so a tenant can migrate from emails to subjects
+			// without a flag day.
+			//
+			// The value column is identity_value rather than the obvious
+			// `identity`, and that is not a style choice. IDENTITY is a T-SQL
+			// reserved word (the IDENTITY(1,1) column property), so SQL Server
+			// rejects a bare `identity` column with "Incorrect syntax near the
+			// keyword 'identity'". Measured 2026-09-25 against this migration,
+			// which failed at CREATE TABLE -- and RunMigrations is FATAL
+			// (cmd/cleat-worker/main.go), so a v6 that does not parse stops the
+			// worker booting on SQL Server at all. Note where the defect was
+			// found: the SQL Server leg of TestPluginMigrations_AllDialects was
+			// SKIPping for want of a bootable container, so the DDL had never
+			// executed anywhere, while its 900-byte width arithmetic below had
+			// been checked by hand and was correct.
+			//
+			// Quoting would fix the DDL and not the readers. This table's only
+			// writer today is an operator hand-writing an INSERT (see
+			// identityAllowed's doc comment), and each of those would have to
+			// remember the brackets on one dialect and not the others. Renamed
+			// once, here, the trap does not exist. It is named in exactly two
+			// places -- this DDL and the SELECT in identity.go.
+			//
+			// The PRIMARY KEY is all four columns, so a re-inserted row is a
+			// no-op rather than a duplicate. On PostgreSQL and MySQL the widths
+			// follow their neighbours above; SQL Server's are narrower for a
+			// reason that is not cosmetic -- see DownMSSQL's sibling comment
+			// below.
+			Version:      6,
+			TenantScoped: []string{"oauth_allowed_identities"},
+			Up: `
+				CREATE TABLE IF NOT EXISTS oauth_allowed_identities (
+					tenant_id      UUID NOT NULL,
+					provider       TEXT NOT NULL,
+					identity_type  TEXT NOT NULL DEFAULT 'email',
+					identity_value TEXT NOT NULL,
+					created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+					PRIMARY KEY (tenant_id, provider, identity_type, identity_value)
+				);
+
+				ALTER TABLE oauth_config ADD COLUMN IF NOT EXISTS allowlist_enabled BOOLEAN NOT NULL DEFAULT false;
+			`,
+			UpMySQL: `
+				CREATE TABLE IF NOT EXISTS oauth_allowed_identities (
+					tenant_id      CHAR(36) NOT NULL,
+					provider       VARCHAR(64) NOT NULL,
+					identity_type  VARCHAR(16) NOT NULL DEFAULT 'email',
+					identity_value VARCHAR(255) NOT NULL,
+					created_at     TIMESTAMP(6) NOT NULL DEFAULT NOW(6),
+					PRIMARY KEY (tenant_id, provider, identity_type, identity_value)
+				);
+				ALTER TABLE oauth_config ADD COLUMN allowlist_enabled TINYINT(1) NOT NULL DEFAULT 0;
+			`,
+			// The widths here are the narrowest of the three dialects ON PURPOSE.
+			// A SQL Server PRIMARY KEY is clustered unless told otherwise, and a
+			// clustered index key is capped at 900 bytes. NVARCHAR(255) for both
+			// provider and identity_value plus the other two columns is
+			// 16 + 510 + 64 + 510 = 1100 bytes, which SQL Server refuses at
+			// CREATE TABLE time with "exceeds the maximum key length". 64 and 255
+			// for provider and identity_value give 16 + 128 + 32 + 510 = 686.
+			//
+			// provider fits in 64 because the value is one of the four entries in
+			// validProviders (routes.go) -- the longest, "github", is six
+			// characters. It is narrower than oauth_config.provider's 255, which
+			// is fine: this table is only ever written for a provider that
+			// parsed as valid.
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'oauth_allowed_identities')
+				CREATE TABLE oauth_allowed_identities (
+					tenant_id      UNIQUEIDENTIFIER NOT NULL,
+					provider       NVARCHAR(64) NOT NULL,
+					identity_type  NVARCHAR(16) NOT NULL DEFAULT 'email',
+					identity_value NVARCHAR(255) NOT NULL,
+					created_at     DATETIMEOFFSET NOT NULL DEFAULT SYSUTCDATETIME(),
+					PRIMARY KEY (tenant_id, provider, identity_type, identity_value)
+				);
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('oauth_config') AND name = 'allowlist_enabled')
+				ALTER TABLE oauth_config ADD allowlist_enabled BIT NOT NULL DEFAULT 0;
+			`,
+			Down: `
+				ALTER TABLE oauth_config DROP COLUMN IF EXISTS allowlist_enabled;
+				DROP TABLE IF EXISTS oauth_allowed_identities;
+			`,
+			DownMySQL: `
+				ALTER TABLE oauth_config DROP COLUMN allowlist_enabled;
+				DROP TABLE IF EXISTS oauth_allowed_identities;
+			`,
+			DownMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('oauth_config') AND name = 'allowlist_enabled')
+				ALTER TABLE oauth_config DROP COLUMN allowlist_enabled;
+				IF EXISTS (SELECT 1 FROM sys.tables WHERE name = 'oauth_allowed_identities')
+				DROP TABLE oauth_allowed_identities;
+			`,
+		},
 	}
 }

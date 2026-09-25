@@ -679,6 +679,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An identity allowlist for the OAuth provider, off by default.** (cleat#2340)
+
+  `oauth_config.allowlist_enabled` plus an `oauth_allowed_identities` table (plugin migration v6,
+  on all three dialects) let a tenant restrict which identities may sign in through a given
+  provider — the half of cleat#2340 that a deployment needs before it can expose OAuth login to
+  more than a hand-picked set of people. The column defaults to `false`, so an upgraded cleat
+  admits exactly whoever it admitted before until an operator opts in; enabling it with no rows
+  denies every login, deliberately, because the obvious alternative — treating "no rows for this
+  tenant+provider" as "no allowlist configured" — fails **open**, and fails open in the direction
+  hardest to notice: an operator who means to allow three addresses and mistypes the tenant id on
+  the `INSERT` gets a deployment that admits anyone, with no error anywhere. A mode an operator
+  explicitly set is a fact they wrote, not a fact they failed to write.
+
+  A row carries an `identity_type` of `email` or `subject`, and either kind matching admits, so a
+  tenant can migrate from email addresses to OIDC `sub` (or GitHub's numeric id) without a flag
+  day. An `email` row matches only a **verified** address — GitHub's `/user/emails` is consulted
+  for `primary AND verified`, and an unverified address is treated as a label, never as a key —
+  because an email can be reassigned by whoever controls the domain while a `sub` cannot. The
+  comparison runs in Go rather than in SQL so the normalization rule (case-folded email,
+  case-**sensitive** subject, per OIDC Core §2) lives in one unit-tested place instead of being
+  spelled per-dialect in a `WHERE`.
+
+  Migration v6's SQL Server DDL initially named its value column `identity`, which is a T-SQL
+  reserved word: `CREATE TABLE` failed with `Incorrect syntax near the keyword 'identity'`, and
+  because `plugin.RunMigrations` is fatal at boot that is not a broken feature but a worker that
+  will not start on SQL Server at all. It is `identity_value` now. Worth recording how it was
+  found, because the SQL Server leg of `TestPluginMigrations_AllDialects` had been **skipping** for
+  want of a bootable container, so the DDL had never executed on any dialect while the 900-byte
+  clustered-key arithmetic in its comment had been checked by hand and was correct — the migration
+  test's green said nothing about the dialect it was skipping, and the column had been renamed
+  rather than quoted so that the hand-written `INSERT`s this table's design calls for do not have
+  to remember brackets on one dialect and not the others.
+
 - **`--uninstall-plugin` on MySQL: 10 more plugins move from refused to verified.** (cleat#2306
   phase 2)
 

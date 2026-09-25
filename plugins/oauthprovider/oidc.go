@@ -326,9 +326,16 @@ var validMethods = []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"
 // idTokenClaims is the part of an ID token this plugin reads itself. Issuer,
 // audience and expiry are checked by the parser via the options below, not
 // here, so that the comparison is the library's rather than a hand-rolled one.
+//
+// EmailVerified is a verificationFlag rather than a *bool so that the string
+// form some issuers emit ("true") reads as verified instead of failing the
+// parse, and so that anything unreadable reads as UNVERIFIED -- the direction
+// that cannot admit anyone. Subject comes from jwt.RegisteredClaims, which
+// already carries `sub`; it is not redeclared here.
 type idTokenClaims struct {
-	Nonce string `json:"nonce"`
-	Email string `json:"email"`
+	Nonce         string           `json:"nonce"`
+	Email         string           `json:"email"`
+	EmailVerified verificationFlag `json:"email_verified"`
 	jwt.RegisteredClaims
 }
 

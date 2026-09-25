@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -57,6 +58,13 @@ type fakeDBStore struct {
 	configs  map[string]*oauthConfigRow // key: "tenantID:provider"; ClientSecret unused, see AddOAuthConfig
 	now      func() time.Time
 
+	// allowlist mirrors oauth_allowed_identities (cleat#2340), keyed the same
+	// way configs is. A nil/absent key is an EMPTY allowlist, which -- with
+	// AllowlistEnabled true -- must deny; TestOA_Allowlist_EnabledAndEmptyDenies
+	// is the case that says so, because "no rows" and "the lookup never ran"
+	// are otherwise indistinguishable from a denial.
+	allowlist map[string][]allowedIdentityRow
+
 	// secrets backs AddOAuthConfig's client secret and must be the SAME
 	// instance wired into the Plugin under test as p.secrets -- setupTestPlugin
 	// does that. Owned by the store rather than created separately in each
@@ -68,12 +76,22 @@ type fakeDBStore struct {
 	secrets *plugintest.FakeSecrets
 }
 
+// allowedIdentityRow is one row of oauth_allowed_identities. Deliberately
+// EXACTLY the shape the SELECT returns -- identity_type and identity_value, no
+// id or created_at -- so the fake cannot satisfy the query with a column the
+// production statement does not ask for.
+type allowedIdentityRow struct {
+	IdentityType string
+	Identity     string
+}
+
 func newFakeDBStore() *fakeDBStore {
 	return &fakeDBStore{
-		sessions: make(map[uuid.UUID]*fakeSession),
-		configs:  make(map[string]*oauthConfigRow),
-		now:      time.Now,
-		secrets:  plugintest.NewFakeSecrets(),
+		sessions:  make(map[uuid.UUID]*fakeSession),
+		configs:   make(map[string]*oauthConfigRow),
+		allowlist: make(map[string][]allowedIdentityRow),
+		now:       time.Now,
+		secrets:   plugintest.NewFakeSecrets(),
 	}
 }
 
@@ -241,11 +259,45 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		return c.querySessionByState(args)
 	case strings.Contains(query, "token_hash = $1"):
 		return c.queryByTokenHash(args)
+	case strings.Contains(query, "FROM oauth_allowed_identities"):
+		return c.queryAllowedIdentities(args)
 	case strings.Contains(query, "ORDER BY created_at DESC"):
 		return c.queryListSessions(args)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Query query: %s", query)
 	}
+}
+
+// queryAllowedIdentities answers identityAllowed's SELECT.
+//
+// It returns the rows for (tenant_id, provider) WITHOUT filtering on any
+// identity value, deliberately: the production statement does not filter
+// either -- the comparison happens in Go (see identityAllowed's doc comment) --
+// and a fake that pre-filtered would let a bug in that comparison pass the
+// tests by never exercising it.
+//
+// A tenant with no rows returns an empty result, not an error. That is the
+// case the migration calls out as the one an unconditional check would turn
+// into "deny every login", so it has to be reachable here.
+func (c *fakeConn) queryAllowedIdentities(args []driver.NamedValue) (driver.Rows, error) {
+	// SELECT identity_type, identity_value
+	// FROM oauth_allowed_identities
+	// WHERE tenant_id = $1 AND provider = $2
+	tenantStr, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	provider, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+
+	cols := []string{"identity_type", "identity_value"}
+	rows := [][]driver.Value{}
+	for _, r := range c.store.allowlist[tenantStr+":"+provider] {
+		rows = append(rows, []driver.Value{r.IdentityType, r.Identity})
+	}
+	return &fakeRows{columns: cols, data: rows}, nil
 }
 
 func (c *fakeConn) queryByTokenHash(args []driver.NamedValue) (driver.Rows, error) {
@@ -866,6 +918,45 @@ func (s *fakeDBStore) AddOAuthConfig(tenantID uuid.UUID, provider, clientID, cli
 	s.secrets.Seed(tenantID.String(), OAuthClientSecretName(provider), clientSecret)
 }
 
+// AddAllowedIdentity inserts one oauth_allowed_identities row. cleat#2340.
+//
+// Written as the operator would write it -- the raw identity_type and
+// identity_value strings, unnormalised -- because the whole point of the
+// comparison living in
+// Go is that a hand-written row may carry mixed case. A helper that normalised
+// here would make TestOA_Allowlist_MixedCaseMatch pass vacuously.
+func (s *fakeDBStore) AddAllowedIdentity(tenantID uuid.UUID, provider, identityType, identity string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := tenantID.String() + ":" + provider
+	s.allowlist[key] = append(s.allowlist[key], allowedIdentityRow{
+		IdentityType: identityType,
+		Identity:     identity,
+	})
+}
+
+// EnableAllowlist flips oauth_config.allowlist_enabled for an existing config.
+//
+// Separate from AddOAuthConfig rather than an eighth parameter, because the two
+// are independent facts and the tests need every combination: an enabled
+// allowlist with rows, an enabled allowlist with NO rows (the fail-closed case),
+// and a disabled allowlist WITH rows (which must be ignored -- see
+// TestOA_Allowlist_DisabledIgnoresRows).
+func (s *fakeDBStore) EnableAllowlist(tenantID uuid.UUID, provider string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := tenantID.String() + ":" + provider
+	cfg, ok := s.configs[key]
+	if !ok {
+		// Fail loudly. A typo'd tenant id here would otherwise read as "the
+		// allowlist is off", which is exactly the failure this whole feature
+		// exists to make impossible, and it would make the denial tests pass
+		// for the wrong reason.
+		panic("EnableAllowlist: no oauth config for " + key + " -- call AddOAuthConfig first")
+	}
+	cfg.AllowlistEnabled = true
+}
+
 func (c *fakeConn) execInsertSession(args []driver.NamedValue) (driver.Result, error) {
 	idStr, err := argString(args, 1)
 	if err != nil {
@@ -1019,14 +1110,22 @@ func (c *fakeConn) queryOAuthConfig(args []driver.NamedValue) (driver.Rows, erro
 
 	key := tenantStr + ":" + provider
 	cfg, ok := c.store.configs[key]
+	// allowlist_enabled is the eighth column and the reason this fake needed
+	// changing for cleat#2340: production's getConfig scans it, so a fake
+	// returning seven columns fails with "expected 8 destination arguments in
+	// Scan, not 7" and every callback test reads as a 500.
+	//
+	// The WHERE enabled = true in the production statement is modelled by the
+	// empty result below rather than by filtering the row, which is what
+	// production does too -- no row comes back at all.
 	if !ok || !cfg.Enabled {
 		return &fakeRows{
-			columns: []string{"tenant_id", "provider", "client_id", "redirect_url", "domain", "issuer", "enabled"},
+			columns: []string{"tenant_id", "provider", "client_id", "redirect_url", "domain", "issuer", "enabled", "allowlist_enabled"},
 		}, nil
 	}
 
 	return &fakeRows{
-		columns: []string{"tenant_id", "provider", "client_id", "redirect_url", "domain", "issuer", "enabled"},
+		columns: []string{"tenant_id", "provider", "client_id", "redirect_url", "domain", "issuer", "enabled", "allowlist_enabled"},
 		data: [][]driver.Value{{
 			cfg.TenantID.String(),
 			cfg.Provider,
@@ -1035,6 +1134,7 @@ func (c *fakeConn) queryOAuthConfig(args []driver.NamedValue) (driver.Rows, erro
 			cfg.Domain,
 			cfg.Issuer,
 			cfg.Enabled,
+			cfg.AllowlistEnabled,
 		}},
 	}, nil
 }
@@ -1110,8 +1210,22 @@ func TestOA_Login_GitHub_Redirect(t *testing.T) {
 	if !strings.Contains(loc, "github.com/login/oauth/authorize") {
 		t.Errorf("expected GitHub auth URL, got: %s", loc)
 	}
-	if !strings.Contains(loc, "scope=read%3Auser") {
-		t.Errorf("expected scope=read:user, got: %s", loc)
+	// Parse the scope out and compare the WHOLE value. The assertion this
+	// replaced was strings.Contains(loc, "scope=read%3Auser"), which passed
+	// both before and after cleat#2340 added user:email -- "read%3Auser" is a
+	// prefix of "read%3Auser+user%3Aemail", and the encoded form of the new
+	// space separator is not the "&" the "expected scope=read:user" message
+	// implies. It was a check that could not disagree with the change it was
+	// supposed to catch, which is why the fix is the assertion rather than a
+	// second one beside it.
+	u, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("redirect Location is not a URL: %v", err)
+	}
+	if got := u.Query().Get("scope"); got != "read:user user:email" {
+		t.Errorf("scope = %q, want %q -- user:email is REQUIRED: GitHub's /user\n"+
+			"returns an address only when the account has made one public, and the\n"+
+			"allowlist (cleat#2340) may only compare a verified address", got, "read:user user:email")
 	}
 }
 
@@ -1631,5 +1745,512 @@ func TestOA_ExtractSession_BasicAuth(t *testing.T) {
 	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
 	if s := p.extractSession(req); s != nil {
 		t.Error("expected nil for Basic auth")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Identity allowlist (cleat#2340 item 2)
+// ---------------------------------------------------------------------------
+
+// allowlistCase is the fixture every callback test below shares: a fake store,
+// the plugin, the HTTP handler, the callback session row, and a mock IdP the
+// callback will call. Built once rather than copied seven times, because the
+// tests differ ONLY in what the IdP asserts and what the allowlist holds, and a
+// copy-paste divergence in the setup is indistinguishable from a difference in
+// the thing under test.
+type allowlistCase struct {
+	store   *fakeDBStore
+	plugin  *Plugin
+	handler http.Handler
+	session uuid.UUID
+	state   string
+	srv     *httptest.Server
+}
+
+// newAllowlistCase wires a callback test up to a mock IdP.
+//
+// userinfo is the body served at /userinfo; mount may register further handlers
+// on the same mux (the GitHub tests use it for /user/emails). The provider's
+// endpoints are swapped to point at the mock for the duration of the test --
+// restored on cleanup, the same defer the older callback tests use.
+func newAllowlistCase(t *testing.T, provider, state, userinfo string, mount func(*http.ServeMux)) *allowlistCase {
+	t.Helper()
+
+	store := newFakeDBStore()
+	p, handler := setupTestPlugin(t, store)
+
+	mockMux := http.NewServeMux()
+	mockMux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"mock-at","expires_in":3600}`))
+	})
+	mockMux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(userinfo))
+	})
+	if mount != nil {
+		mount(mockMux)
+	}
+	srv := httptest.NewServer(mockMux)
+	t.Cleanup(srv.Close)
+
+	origEndpoints := endpoints
+	endpoints = map[string]providerEndpoints{
+		provider: {
+			tokenURL:      srv.URL + "/token",
+			userinfoURL:   srv.URL + "/userinfo",
+			userEmailsURL: srv.URL + "/user/emails",
+		},
+	}
+	t.Cleanup(func() { endpoints = origEndpoints })
+
+	p.httpClient = srv.Client()
+
+	sessionID := uuid.New()
+	store.mu.Lock()
+	store.sessions[sessionID] = &fakeSession{
+		ID: sessionID, TenantID: testTenantID, Provider: provider,
+		State: state, CodeVerifier: "v",
+		CreatedAt: time.Now(), ExpiresAt: time.Now().Add(5 * time.Minute),
+	}
+	store.mu.Unlock()
+	store.AddOAuthConfig(testTenantID, provider, "cid", "cs", "http://localhost/cb", "", true)
+
+	return &allowlistCase{store: store, plugin: p, handler: handler, session: sessionID, state: state, srv: srv}
+}
+
+// callback drives the callback for this case's session.
+func (c *allowlistCase) callback(t *testing.T, provider string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/oauth/"+provider+"/callback?code=x&state="+c.state, nil)
+	rec := httptest.NewRecorder()
+	c.handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// sessionRow returns the callback's session row, read under the store lock.
+func (c *allowlistCase) sessionRow() *fakeSession {
+	c.store.mu.RLock()
+	defer c.store.mu.RUnlock()
+	return c.store.sessions[c.session]
+}
+
+// TestOA_Allowlist_VerifiedEmailAdmits is the positive control for the pair
+// below: a verified address that is on the list is admitted.
+func TestOA_Allowlist_VerifiedEmailAdmits(t *testing.T) {
+	c := newAllowlistCase(t, "google", "al-verified",
+		`{"email":"ada@example.com","email_verified":true}`, nil)
+	c.store.AddAllowedIdentity(testTenantID, "google", identityTypeEmail, "ada@example.com")
+	c.store.EnableAllowlist(testTenantID, "google")
+
+	if rec := c.callback(t, "google"); rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOA_Allowlist_UnverifiedEmailOnListDenies is THE core invariant, and it is
+// written as a near-copy of the test above on purpose.
+//
+// Same tenant, same provider, same allowlist row, same address. The only
+// difference is email_verified: true above, absent here. If this pair ever
+// agrees, the flag is not being consulted, and the whole feature is a
+// decoration -- an address anyone can type into an account being admitted
+// because an operator listed it.
+func TestOA_Allowlist_UnverifiedEmailOnListDenies(t *testing.T) {
+	c := newAllowlistCase(t, "google", "al-unverified",
+		`{"email":"ada@example.com"}`, nil)
+	c.store.AddAllowedIdentity(testTenantID, "google", identityTypeEmail, "ada@example.com")
+	c.store.EnableAllowlist(testTenantID, "google")
+
+	rec := c.callback(t, "google")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for an UNVERIFIED address even when it is on the list, got %d: %s",
+			rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("403 body is not JSON: %v", err)
+	}
+	if body["code"] != "identity_not_allowlisted" {
+		t.Errorf("code = %v, want identity_not_allowlisted", body["code"])
+	}
+	// The refusal must not name a table, a row, or a count. It is served to
+	// whoever holds the callback URL, which is not an authenticated operator.
+	for _, leak := range []string{"oauth_allowed_identities", "SELECT", "allowlist_enabled"} {
+		if strings.Contains(rec.Body.String(), leak) {
+			t.Errorf("403 body leaks internal detail %q: %s", leak, rec.Body.String())
+		}
+	}
+}
+
+// TestOA_Allowlist_MixedCaseMatchAdmits covers the reason the comparison is in
+// Go rather than in SQL. Rows are hand-written INSERTs and an operator will
+// write the address the way they see it; the provider asserts its own casing.
+func TestOA_Allowlist_MixedCaseMatchAdmits(t *testing.T) {
+	c := newAllowlistCase(t, "google", "al-case",
+		`{"email":"ada@example.com","email_verified":true}`, nil)
+	c.store.AddAllowedIdentity(testTenantID, "google", identityTypeEmail, "Ada@Example.COM")
+	c.store.EnableAllowlist(testTenantID, "google")
+
+	if rec := c.callback(t, "google"); rec.Code != http.StatusOK {
+		t.Fatalf("a row differing only in case must match, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOA_Allowlist_SubjectAdmitsWithoutVerifiedEmail is the case the subject
+// rows exist for: an issuer that publishes no email_verified at all.
+//
+// Provider "google" rather than "oidc" deliberately. The generic oidc provider
+// resolves its endpoints through DISCOVERY and validates an ID token against
+// the discovered JWKS, so exercising it here would mean standing up a discovery
+// document, a JWKS and a signed token -- a fixture that measures the OIDC
+// validator, which is not the thing under test. The subject branch in
+// handleCallback is provider-independent (it reads userinfo's `sub`), and
+// google reaches it on the same code path.
+func TestOA_Allowlist_SubjectAdmitsWithoutVerifiedEmail(t *testing.T) {
+	c := newAllowlistCase(t, "google", "al-subject",
+		`{"email":"ada@example.com","sub":"00u1a2b3c"}`, nil)
+	c.store.AddAllowedIdentity(testTenantID, "google", identityTypeSubject, "00u1a2b3c")
+	c.store.EnableAllowlist(testTenantID, "google")
+
+	if rec := c.callback(t, "google"); rec.Code != http.StatusOK {
+		t.Fatalf("a subject row must admit on its own, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOA_Allowlist_SubjectRowDoesNotAdmitAnotherSubject is its negative. Without
+// it the test above would pass on a plugin that admits every subject.
+func TestOA_Allowlist_SubjectRowDoesNotAdmitAnotherSubject(t *testing.T) {
+	c := newAllowlistCase(t, "google", "al-subject-other",
+		`{"email":"ada@example.com","sub":"00u1a2b3c"}`, nil)
+	c.store.AddAllowedIdentity(testTenantID, "google", identityTypeSubject, "99x9z8y7w")
+	c.store.EnableAllowlist(testTenantID, "google")
+
+	if rec := c.callback(t, "google"); rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for an unlisted subject, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOA_Allowlist_SubjectRowIsNotCaseFolded pins normalizeSubject's asymmetry
+// with normalizeEmail. OIDC Core §2 defines `sub` as case-sensitive, so a row
+// differing only in case is a DIFFERENT account and must not match -- folding
+// here would admit one person under another's row.
+func TestOA_Allowlist_SubjectRowIsNotCaseFolded(t *testing.T) {
+	c := newAllowlistCase(t, "google", "al-subject-case",
+		`{"email":"ada@example.com","sub":"00U1A2B3C"}`, nil)
+	c.store.AddAllowedIdentity(testTenantID, "google", identityTypeSubject, "00u1a2b3c")
+	c.store.EnableAllowlist(testTenantID, "google")
+
+	if rec := c.callback(t, "google"); rec.Code != http.StatusForbidden {
+		t.Fatalf("a case-differing subject must NOT match, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOA_Allowlist_EnabledAndEmptyDenies is the migration's stated contract:
+// enabled with no rows refuses, rather than falling through to "no allowlist
+// configured, admit everyone".
+func TestOA_Allowlist_EnabledAndEmptyDenies(t *testing.T) {
+	c := newAllowlistCase(t, "google", "al-empty",
+		`{"email":"ada@example.com","email_verified":true}`, nil)
+	c.store.EnableAllowlist(testTenantID, "google")
+
+	if rec := c.callback(t, "google"); rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 with the allowlist enabled and empty, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOA_Allowlist_DisabledIgnoresRows is the other half of the switch: rows in
+// the table with allowlist_enabled false must change nothing. This is what makes
+// the migration safe to take on a deployment that never opts in.
+func TestOA_Allowlist_DisabledIgnoresRows(t *testing.T) {
+	c := newAllowlistCase(t, "google", "al-disabled",
+		`{"email":"grace@example.com","email_verified":true}`, nil)
+	// A row for somebody else, and the allowlist left DISABLED.
+	c.store.AddAllowedIdentity(testTenantID, "google", identityTypeEmail, "ada@example.com")
+
+	if rec := c.callback(t, "google"); rec.Code != http.StatusOK {
+		t.Fatalf("a disabled allowlist must not refuse anyone, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOA_Allowlist_RefusalLeavesSessionUnclaimed is why the gate sits before the
+// UPDATE in finishLogin. A refused login must leave the session row exactly as
+// the login start wrote it: no token_hash, no cleared state. Otherwise a refused
+// person leaves a claimed-looking row behind, and re-driving the callback -- the
+// ordinary thing a user does after a refusal -- finds it already consumed.
+func TestOA_Allowlist_RefusalLeavesSessionUnclaimed(t *testing.T) {
+	c := newAllowlistCase(t, "google", "al-untouched",
+		`{"email":"grace@example.com","email_verified":true}`, nil)
+	c.store.EnableAllowlist(testTenantID, "google") // enabled, empty -> refuse
+	c.store.AddAllowedIdentity(testTenantID, "google", identityTypeEmail, "ada@example.com")
+
+	rec := c.callback(t, "google")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	row := c.sessionRow()
+	if row == nil {
+		t.Fatal("the session row was deleted by a refusal")
+	}
+	if row.TokenHash != nil && row.TokenHash != "" {
+		t.Errorf("a refused login wrote a token_hash: %v", row.TokenHash)
+	}
+	if row.State != c.state {
+		t.Errorf("a refused login consumed the state: %q -> %v", c.state, row.State)
+	}
+	// And the flow is still usable: the same callback, once the person is on
+	// the list, must succeed. This is the assertion that would fail if the
+	// refusal had taken a shortcut that half-consumed the row.
+	c.store.AddAllowedIdentity(testTenantID, "google", identityTypeEmail, "grace@example.com")
+	if rec := c.callback(t, "google"); rec.Code != http.StatusOK {
+		t.Fatalf("re-driving the callback after a refusal gave %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOA_Allowlist_UnrecognisedIdentityTypeMatchesNothing pins the default
+// branch. An identity_type cleat does not know -- a typo, or a kind added later
+// -- must not fall through to an unconditional admit.
+func TestOA_Allowlist_UnrecognisedIdentityTypeMatchesNothing(t *testing.T) {
+	c := newAllowlistCase(t, "google", "al-badtype",
+		`{"email":"ada@example.com","email_verified":true}`, nil)
+	c.store.AddAllowedIdentity(testTenantID, "google", "username", "ada@example.com")
+	c.store.EnableAllowlist(testTenantID, "google")
+
+	if rec := c.callback(t, "google"); rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for an unrecognised identity_type, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GitHub: the verified-address lookup (cleat#2340 item 1)
+// ---------------------------------------------------------------------------
+
+// TestOA_Callback_GitHubUsesVerifiedEmailFromEmailsEndpoint is item 1 of
+// cleat#2340. GitHub's /user returns an address only when the account has made
+// one public and carries NO verification claim even then, so the address the
+// allowlist compares must come from /user/emails, filtered to primary+verified.
+func TestOA_Callback_GitHubUsesVerifiedEmailFromEmailsEndpoint(t *testing.T) {
+	c := newAllowlistCase(t, "github", "gh-verified",
+		`{"email":null,"id":4242}`,
+		func(m *http.ServeMux) {
+			m.HandleFunc("/user/emails", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`[
+					{"email":"old@example.com","primary":false,"verified":true},
+					{"email":"unproved@example.com","primary":true,"verified":false},
+					{"email":"ada@example.com","primary":true,"verified":true}
+				]`))
+			})
+		})
+	c.store.AddAllowedIdentity(testTenantID, "github", identityTypeEmail, "ada@example.com")
+	c.store.EnableAllowlist(testTenantID, "github")
+
+	rec := c.callback(t, "github")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &body)
+	if body["user_email"] != "ada@example.com" {
+		t.Errorf("session labelled %v, want the verified primary address ada@example.com", body["user_email"])
+	}
+}
+
+// TestOA_Callback_GitHubUnverifiedEmailNotAllowlistEligible is the same account
+// shape with the allowlist listing the address GitHub will not vouch for.
+// Primary but unverified -- the exact case item 1 is about -- must be refused,
+// because a person can add an address they do not control and it lands here
+// immediately.
+func TestOA_Callback_GitHubUnverifiedEmailNotAllowlistEligible(t *testing.T) {
+	c := newAllowlistCase(t, "github", "gh-unverified",
+		// The public address MUST be present, and MUST equal the allowlist row
+		// below. With it null the account resolves no address at all and the
+		// login is refused 502 before the allowlist is consulted -- green, and
+		// measuring the "no address" guard instead of the comparison this test
+		// is named for. That comparison is only reached when an address exists
+		// and fails to be verified.
+		`{"email":"unproved@example.com","id":4242}`,
+		func(m *http.ServeMux) {
+			m.HandleFunc("/user/emails", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`[{"email":"unproved@example.com","primary":true,"verified":false}]`))
+			})
+		})
+	c.store.AddAllowedIdentity(testTenantID, "github", identityTypeEmail, "unproved@example.com")
+	c.store.EnableAllowlist(testTenantID, "github")
+
+	if rec := c.callback(t, "github"); rec.Code != http.StatusForbidden {
+		t.Fatalf("a PRIMARY BUT UNVERIFIED address must not satisfy the allowlist, got %d: %s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// TestOA_Callback_GitHubSubjectAdmitsWhenNoEmailIsVerifiable is the documented
+// escape hatch: an account with no verified address can still be admitted by
+// its numeric id, which is GitHub's stable identifier and is not reassignable.
+func TestOA_Callback_GitHubSubjectAdmitsWhenNoEmailIsVerifiable(t *testing.T) {
+	c := newAllowlistCase(t, "github", "gh-subject",
+		// "No email is VERIFIABLE" is the premise, not "no email exists": the
+		// session still needs an address to be labelled with, and the pre-existing
+		// no-address guard (see TestOA_Callback_GitHubNoAddressAtAllIsRefused)
+		// would otherwise fire first and refuse the login for an unrelated reason.
+		`{"email":"unproved@example.com","id":4242}`,
+		func(m *http.ServeMux) {
+			m.HandleFunc("/user/emails", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`[{"email":"unproved@example.com","primary":true,"verified":false}]`))
+			})
+		})
+	c.store.AddAllowedIdentity(testTenantID, "github", identityTypeSubject, "4242")
+	c.store.EnableAllowlist(testTenantID, "github")
+
+	if rec := c.callback(t, "github"); rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 on a subject match, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOA_Callback_GitHubEmailsEndpointFailingStillLogsIn covers the failure
+// direction identity.go argues for: the lookup upgrades an address, so a lookup
+// that cannot run must not be worse for the user than not having tried.
+func TestOA_Callback_GitHubEmailsEndpointFailingStillLogsIn(t *testing.T) {
+	c := newAllowlistCase(t, "github", "gh-lookup-fails",
+		`{"email":"public@example.com","id":4242}`,
+		func(m *http.ServeMux) {
+			m.HandleFunc("/user/emails", func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusInternalServerError)
+			})
+		})
+	// Allowlist off: the login must still complete on the public address.
+	if rec := c.callback(t, "github"); rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 when /user/emails fails, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestOA_Callback_GitHubNoAddressAtAllIsRefused pins the guard that was
+// deliberately NOT widened. An account with no public email and no verified
+// address resolves no address at all, and is refused with the pre-existing 502
+// -- the subject is an ADDITIONAL allowlist key, never a substitute for having
+// an address. Widening this would admit logins that fail today, with no
+// operator opt-in.
+func TestOA_Callback_GitHubNoAddressAtAllIsRefused(t *testing.T) {
+	c := newAllowlistCase(t, "github", "gh-no-address",
+		`{"email":null,"id":4242}`,
+		func(m *http.ServeMux) {
+			m.HandleFunc("/user/emails", func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Write([]byte(`[]`))
+			})
+		})
+	// A subject row exists AND the allowlist is enabled -- the strongest form
+	// of "this person is expected" -- and the login is still refused, because
+	// there is no address to label the session with.
+	c.store.AddAllowedIdentity(testTenantID, "github", identityTypeSubject, "4242")
+	c.store.EnableAllowlist(testTenantID, "github")
+
+	if rec := c.callback(t, "github"); rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502 for a GitHub account resolving no address, got %d: %s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// TestSelectGitHubVerifiedEmail is the pure half of the lookup: the selection
+// rule, with no HTTP anywhere. The table is the whole point -- each row is a
+// shape GitHub actually returns, and the "want" column is what the allowlist
+// is then allowed to compare against.
+func TestSelectGitHubVerifiedEmail(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"primary and verified", `[{"email":"a@x.com","primary":true,"verified":true}]`, "a@x.com"},
+		{"primary but unverified", `[{"email":"a@x.com","primary":true,"verified":false}]`, ""},
+		{"verified but not primary", `[{"email":"a@x.com","primary":false,"verified":true}]`, ""},
+		{"neither", `[{"email":"a@x.com","primary":false,"verified":false}]`, ""},
+		{"empty list", `[]`, ""},
+		{
+			"second entry qualifies",
+			`[{"email":"a@x.com","primary":false,"verified":true},{"email":"b@x.com","primary":true,"verified":true}]`,
+			"b@x.com",
+		},
+		{
+			"first qualifying entry wins",
+			`[{"email":"a@x.com","primary":true,"verified":true},{"email":"b@x.com","primary":true,"verified":true}]`,
+			"a@x.com",
+		},
+		{"blank address is not an address", `[{"email":"  ","primary":true,"verified":true}]`, ""},
+		{"missing fields read as false", `[{"email":"a@x.com"}]`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := selectGitHubVerifiedEmail([]byte(tc.body))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("selectGitHubVerifiedEmail(%s) = %q, want %q", tc.body, got, tc.want)
+			}
+		})
+	}
+
+	// A body that is not a JSON array is an error, not an empty answer:
+	// "no verified address" and "I could not read the response" lead to
+	// different follow-ups, and collapsing them would hide a GitHub API change
+	// behind a login that simply starts refusing people.
+	if _, err := selectGitHubVerifiedEmail([]byte(`{"message":"Not Found"}`)); err == nil {
+		t.Error("a non-array body must be an error, not an empty selection")
+	}
+}
+
+// TestVerificationFlag_UnmarshalJSON pins the claim's decoding. Every row is a
+// value an issuer actually emits, and the unrecognised ones must read as false
+// rather than erroring: an error here is a 502 on a deployment that may not even
+// have an allowlist enabled, and `true` must never be read out of something that
+// is not the word.
+func TestVerificationFlag_UnmarshalJSON(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want bool
+	}{
+		{`true`, true},
+		{`"true"`, true},
+		{`"TRUE"`, true},
+		{`"True"`, true},
+		{`false`, false},
+		{`"false"`, false},
+		{`"FALSE"`, false},
+		{`null`, false},
+		{`1`, false},
+		{`0`, false},
+		{`""`, false},
+		{`"yes"`, false},
+		{`" true "`, true},
+	} {
+		t.Run(tc.raw, func(t *testing.T) {
+			var v verificationFlag
+			if err := json.Unmarshal([]byte(tc.raw), &v); err != nil {
+				t.Fatalf("UnmarshalJSON(%s) errored, which is the 502 this type exists to prevent: %v", tc.raw, err)
+			}
+			if bool(v) != tc.want {
+				t.Errorf("UnmarshalJSON(%s) = %v, want %v", tc.raw, bool(v), tc.want)
+			}
+		})
+	}
+}
+
+// TestIDTokenClaims_EmailVerifiedStringForm is the same claim arriving through
+// the ID token, which is the door the type was written for: a whole
+// idTokenClaims decode must not fail on a string-valued email_verified.
+func TestIDTokenClaims_EmailVerifiedStringForm(t *testing.T) {
+	var claims idTokenClaims
+	body := `{"nonce":"n1","email":"ada@example.com","email_verified":"true","sub":"00u1"}`
+	if err := json.Unmarshal([]byte(body), &claims); err != nil {
+		t.Fatalf("idTokenClaims decode failed on the string form: %v", err)
+	}
+	if !bool(claims.EmailVerified) {
+		t.Error("string-form \"true\" read as unverified")
+	}
+	if claims.Subject != "00u1" {
+		t.Errorf("sub = %q, want 00u1 -- it comes from jwt.RegisteredClaims", claims.Subject)
 	}
 }
