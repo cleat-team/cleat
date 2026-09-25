@@ -357,6 +357,18 @@ const (
 	// plaintext that happens to be valid base64, a row sealed under a key this
 	// ring holds neither as current nor previous, or corruption. Reported,
 	// never rewritten.
+	//
+	// The three are one bucket ON PURPOSE, not a gap: at or above the shortest
+	// ciphertext the encryptor can produce (nonce 12 + tag 16 = 28 bytes), every
+	// form fails GCM authentication with the same "message authentication
+	// failed", so no shape check can separate the plaintext-that-is-base64
+	// false positive from the wrong-key true positive -- they are the same
+	// bytes. OpenAndClassify classifies by authentication rather than
+	// inspection for exactly this reason, so do not add a version prefix or a
+	// "does it look like plaintext" discriminator here: any such check that
+	// catches the false positive also catches the true one. (openGCM's
+	// "ciphertext too short" floor below the nonce size is a buffer guard, not
+	// the kind of shape check this forbids, and it must stay.)
 	PayloadFormUnreadable
 )
 

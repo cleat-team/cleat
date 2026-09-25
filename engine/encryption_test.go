@@ -552,3 +552,28 @@ func TestDecryptCannotOpenASealForPluginCiphertext(t *testing.T) {
 		t.Fatalf("engine's own Decrypt opened a SealForPlugin-domain ciphertext: got=%q", got)
 	}
 }
+
+// TestOpenAndClassifyReportsPlaintextAsUnreadable pins cleat#2337's safe half:
+// a plaintext byte slice that is not valid ciphertext under any key -- the
+// decoded form of a stored value that merely happened to be valid base64 -- is
+// reported unreadable with nil plaintext, never "decrypted" into a value it is
+// not, and never rewritten. That is the "reported, never touched" property that
+// makes the sealed-shape false positive survivable rather than corrupting.
+func TestOpenAndClassifyReportsPlaintextAsUnreadable(t *testing.T) {
+	pe, err := NewPayloadEncryption(validKey(t))
+	if err != nil {
+		t.Fatalf("NewPayloadEncryption: %v", err)
+	}
+
+	raw := []byte("an opaque token that happens to be valid base64 when stored")
+	plain, form, err := pe.OpenAndClassify(DefaultTenantUUID, raw)
+	if err == nil {
+		t.Fatalf("plaintext opened (form=%v), want PayloadFormUnreadable", form)
+	}
+	if form != PayloadFormUnreadable {
+		t.Errorf("form = %v, want PayloadFormUnreadable", form)
+	}
+	if plain != nil {
+		t.Errorf("plaintext = %q, want nil: an unreadable value must never be turned into a value", plain)
+	}
+}
