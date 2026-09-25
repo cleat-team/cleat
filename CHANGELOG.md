@@ -766,6 +766,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The fullstack template's page works: `make web` serves it through a same-origin proxy that holds the API key.** (cleat#2307)
+
+  The page called the worker directly, which cannot work: the worker sends no CORS headers, so a browser refuses
+  the calls from any other origin, and the worker requires a key that a page must never hold. The template now
+  ships `proxy/main.go` (standard library only, run by `make web`, on `http://127.0.0.1:3000`): it serves the page
+  and forwards exactly two calls, `POST /api/workflows/my-fullstack-app/start` and
+  `GET /api/workflows/{id}/query?key=status`, adding the key from `CLEAT_API_KEY` or the file named by
+  `CLEAT_API_KEY_FILE` (the file wins; with neither it refuses to start). Every other path is a 404 and every
+  other method a 405; the browser's `Authorization` and `Cookie` are dropped, upstream `Set-Cookie` and every
+  response header but `Content-Type` are dropped, redirects are not followed, and the key is never logged. It
+  listens on loopback by default, and while it does it refuses a foreign `Origin` (403), a non-JSON `POST` (415)
+  and a non-loopback `Host` (421, the DNS-rebinding case). The template's CI test now runs `make web` and drives
+  the page's calls through it to `complete`, and asserts each of those refusals and that the key appears in no
+  response and no log line. Worker-side CORS is not added.
+
 - **`runDueBackups` advanced `next_run_at` from inside the due-rows scan loop, on the same
   transaction while its own result set was still open.** (cleat#2291)
 

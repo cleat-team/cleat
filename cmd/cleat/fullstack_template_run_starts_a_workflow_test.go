@@ -39,6 +39,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -193,6 +194,196 @@ func TestFullstackTemplateRunStartsAWorkflow(t *testing.T) {
 	if r.StatusCode != http.StatusOK || !strings.Contains(string(body), "complete") {
 		t.Errorf("GET /query?key=status after the run finished = %d %s, want 200 containing \"complete\"", r.StatusCode, body)
 	}
+
+	// The page's own path, cleat#2307: `make web` serves web/index.html and the two calls it makes through a
+	// same-origin proxy that holds the API key. Everything below is what a browser on that page can do, done
+	// without any Authorization header of its own -- so a run that starts and finishes proves the proxy added
+	// the key -- plus what it must NOT be able to do.
+	driveTheProxy(t, proj, env, keyMatch[1])
+}
+
+// driveTheProxy runs the scaffold's own `make web` and drives it the way index.html does.
+func driveTheProxy(t *testing.T, proj string, env []string, apiKey string) {
+	t.Helper()
+	webPort := freeTCPPort(t)
+	webEnv := append(append([]string{}, env...), fmt.Sprintf("CLEAT_WEB_PORT=%d", webPort))
+
+	// First, no key: it must refuse to start, not start and answer 401 to everything.
+	noKey := exec.Command("make", "web")
+	noKey.Dir = proj
+	noKey.Env = withoutEnv(webEnv, "CLEAT_API_KEY", "CLEAT_API_KEY_FILE")
+	if out, err := noKey.CombinedOutput(); err == nil || !strings.Contains(string(out), "no API key") {
+		t.Fatalf("`make web` without CLEAT_API_KEY = err %v, want it to fail saying \"no API key\":\n%s", err, out)
+	}
+
+	var proxyLog lockedBuffer
+	cmd := exec.Command("make", "web")
+	cmd.Dir = proj
+	cmd.Env = webEnv
+	cmd.Stdout, cmd.Stderr = &proxyLog, &proxyLog
+	inOwnProcessGroup(cmd)
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("make web: %v", err)
+	}
+	t.Cleanup(func() { killProcessGroup(cmd) })
+	web := fmt.Sprintf("http://127.0.0.1:%d", webPort)
+	waitForHealthzAt(t, web+"/", 90*time.Second, &proxyLog) // `go run` compiles first
+
+	call := func(method, path string, hdr map[string]string, body string) (int, http.Header, string) {
+		t.Helper()
+		req, _ := http.NewRequestWithContext(context.Background(), method, web+path, strings.NewReader(body))
+		for k, v := range hdr {
+			if k == "Host" {
+				req.Host = v
+				continue
+			}
+			req.Header.Set(k, v)
+		}
+		resp, err := (&http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}}).Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v\n--- proxy log ---\n%s", method, path, err, proxyLog.String())
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, resp.Header, string(b)
+	}
+	noKeyIn := func(what string, h http.Header, body string) {
+		t.Helper()
+		if strings.Contains(body, apiKey) {
+			t.Errorf("the API key is in %s's body", what)
+		}
+		for name, vals := range h {
+			for _, v := range vals {
+				if strings.Contains(v, apiKey) {
+					t.Errorf("the API key is in %s's %s header", what, name)
+				}
+			}
+		}
+	}
+
+	// The page, and the calls it makes: start, then poll published state, to `complete`.
+	code, hdr, page := call(http.MethodGet, "/", nil, "")
+	if code != 200 || !strings.Contains(page, "my-fullstack-app/start") {
+		t.Fatalf("GET / = %d, want the scaffold's page", code)
+	}
+	noKeyIn("the page", hdr, page)
+	if strings.Contains(page, "http://localhost:8080") {
+		t.Error("the page still names the worker's own address; it must call the proxy on its own origin")
+	}
+	code, hdr, body := call(http.MethodPost, "/api/workflows/my-fullstack-app/start",
+		map[string]string{"Content-Type": "application/json", "Idempotency-Key": fmt.Sprintf("proxy-%d", time.Now().UnixNano())},
+		`{"input":{"item":"widget","qty":1}}`)
+	var started struct {
+		ID string `json:"id"`
+	}
+	if code/100 != 2 || json.Unmarshal([]byte(body), &started) != nil || started.ID == "" {
+		t.Fatalf("POST start through the proxy = %d %s, want a run id\n--- proxy log ---\n%s", code, body, proxyLog.String())
+	}
+	noKeyIn("start", hdr, body)
+	var state string
+	for deadline := time.Now().Add(45 * time.Second); time.Now().Before(deadline); time.Sleep(300 * time.Millisecond) {
+		c, h, b := call(http.MethodGet, "/api/workflows/"+started.ID+"/query?key=status", nil, "")
+		noKeyIn("query", h, b)
+		var v struct {
+			Value string `json:"value"`
+		}
+		if c == 200 && json.Unmarshal([]byte(b), &v) == nil {
+			if state = v.Value; state == "complete" || state == "rejected" {
+				break
+			}
+		}
+	}
+	if state != "complete" {
+		t.Fatalf("through the proxy the run's published state is %q, want complete\n--- proxy log ---\n%s", state, proxyLog.String())
+	}
+
+	// What a page must not be able to do. A listed path with an unlisted method (405), an unlisted path (404),
+	// and the three ways a request from another site reaches a loopback proxy (403, 415, 421).
+	for _, c := range []struct {
+		name, method, path string
+		hdr                map[string]string
+		want               int
+	}{
+		{"DELETE on the query route", http.MethodDelete, "/api/workflows/" + started.ID + "/query?key=status", nil, 405},
+		{"DELETE on the start route", http.MethodDelete, "/api/workflows/my-fullstack-app/start", nil, 405},
+		{"DELETE on a run", http.MethodDelete, "/api/workflows/" + started.ID, nil, 404},
+		{"a run's full record", http.MethodGet, "/api/workflows/" + started.ID, nil, 404},
+		{"another published key", http.MethodGet, "/api/workflows/" + started.ID + "/query?key=secret", nil, 404},
+		{"the admin API", http.MethodPost, "/api/admin/drain", map[string]string{"Content-Type": "application/json"}, 404},
+		{"another workflow", http.MethodPost, "/api/workflows/other/start", map[string]string{"Content-Type": "application/json"}, 404},
+		{"a foreign Origin", http.MethodPost, "/api/workflows/my-fullstack-app/start",
+			map[string]string{"Content-Type": "application/json", "Origin": "https://evil.example"}, 403},
+		{"a non-JSON body (no preflight in a browser)", http.MethodPost, "/api/workflows/my-fullstack-app/start",
+			map[string]string{"Content-Type": "text/plain"}, 415},
+		{"a rebinding Host", http.MethodGet, "/", map[string]string{"Host": "rebind.evil.example"}, 421},
+	} {
+		if code, _, _ := call(c.method, c.path, c.hdr, `{}`); code != c.want {
+			t.Errorf("%s: %s %s = %d, want %d", c.name, c.method, c.path, code, c.want)
+		}
+	}
+
+	// It sends the browser's own credentials nowhere: the proxy, not the caller, authenticates. A call carrying a
+	// WRONG Authorization header still works, because the header never reaches the worker.
+	if code, _, body := call(http.MethodGet, "/api/workflows/"+started.ID+"/query?key=status",
+		map[string]string{"Authorization": "Bearer not-the-key", "Cookie": "sid=1"}, ""); code != 200 {
+		t.Errorf("a browser-supplied Authorization changed the result (%d %s); the proxy must ignore it", code, body)
+	}
+
+	if strings.Contains(proxyLog.String(), apiKey) {
+		t.Errorf("the API key appears in the proxy's own log:\n%s", proxyLog.String())
+	}
+}
+
+// waitForHealthzAt polls url until it answers 200, dumping the proxy's log if it never does.
+func waitForHealthzAt(t *testing.T, url string, within time.Duration, log *lockedBuffer) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+		if resp, err := (&http.Client{Timeout: 2 * time.Second}).Do(req); err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	t.Fatalf("the proxy at %s did not answer within %v\n--- proxy log ---\n%s", url, within, log.String())
+}
+
+// withoutEnv returns env minus the named variables.
+func withoutEnv(env []string, names ...string) []string {
+	var out []string
+outer:
+	for _, kv := range env {
+		for _, n := range names {
+			if strings.HasPrefix(kv, n+"=") {
+				continue outer
+			}
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// lockedBuffer is a bytes.Buffer safe to write from a running process and read from the test.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // pollWorkflowStatus polls a workflow's status endpoint until it reaches a

@@ -19,8 +19,8 @@
   demonstrates is the API CONTRACT: start a run, then poll published state.
   Replace it wholesale with whatever you actually build.
 
-  In production, serve your bundle from a CDN and point it at the worker.
-  cleat is the origin and the API, not your bundler.
+  In production, serve your bundle from your own backend, which calls cleat with
+  the key (see README.md, "Authentication"). cleat is the API, not your bundler.
 -->
 
 <p>
@@ -31,18 +31,12 @@
 <div id="status">idle</div>
 
 <script>
-  // Replace with however your app authenticates. A tenant API key must NEVER
-  // reach a browser -- it identifies the whole tenant. Use a per-user session
-  // (the oauth-provider plugin issues one) and have your own endpoint call
-  // cleat server-side.
-  //
-  // TWO THINGS STOP THIS PAGE WORKING AS-IS, and neither is a bug in the page
-  // (cleat#2307): the worker sends no CORS headers, so a browser refuses these
-  // calls from a page served anywhere but the worker's own origin (file:// and
-  // another port both count); and with --require-auth on, which docker-compose.yml
-  // leaves at its default, every call needs a key this page must not hold. Serve the
-  // page from your own backend and have that backend call cleat.
-  const API = "http://localhost:8080";
+  // This page is served by proxy/main.go (`make web`), so every call here is same-origin and holds no key: the
+  // proxy adds the tenant API key on the server, which is where it belongs (a key in a browser identifies the whole
+  // tenant). The worker sends no CORS headers, so the page could not call it directly from anywhere else. The
+  // proxy answers only the two calls below. To use your own backend instead, keep the two routes and have it
+  // authenticate the user (the oauth-provider plugin issues sessions) before it calls cleat with the key.
+  const API = "";
   const statusEl = document.getElementById("status");
 
   document.getElementById("go").onclick = async () => {

@@ -1,9 +1,11 @@
-.PHONY: build deploy up down run logs
+.PHONY: build deploy up down run logs web
 
 # The host ports docker-compose.yml publishes; override if 5432 or 8080 is taken (and use the same values for
 # every target). Exported so `docker compose`, which reads them, sees them.
 export CLEAT_PG_PORT  ?= 5432
 export CLEAT_API_PORT ?= 8080
+# The port `make web` serves the page on (127.0.0.1 only).
+export CLEAT_WEB_PORT ?= 3000
 
 build:
 	cleat build -o ./out ./
@@ -40,3 +42,9 @@ run:
 	  -H "Idempotency-Key: $$(uuidgen)" \
 	  -H "Content-Type: application/json" \
 	  -d '{"input":{"item":"widget","qty":1}}'
+
+# Serve web/index.html and the two calls it makes, with the API key added on the server. Needs CLEAT_API_KEY
+# (or CLEAT_API_KEY_FILE), the same key `make run` uses. Listens on 127.0.0.1 only: anything that can reach it
+# acts as your tenant. See proxy/main.go for exactly what it forwards.
+web:
+	go run ./proxy -listen 127.0.0.1:$(CLEAT_WEB_PORT) -upstream http://localhost:$(CLEAT_API_PORT)
