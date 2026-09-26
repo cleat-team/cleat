@@ -55,6 +55,10 @@ var (
 	msBlockRe  = regexp.MustCompile(`(?i)ADD BLOCK PREDICATE`)
 	// The document's own table cells.
 	docRowRe = regexp.MustCompile(`(?m)^\| RLS / filter predicates \| \*\*(\d+)\*\*[^|]*\| \*\*(\d+)\*\* \| \*\*(\d+)\*\* \|`)
+	// A partition child, as migrations/postgres names them: <parent>_p<digits>.
+	// Used to fold children into the table they are storage for -- see the
+	// note beside pgTables, which explains why that folding is not cosmetic.
+	partitionChildRe = regexp.MustCompile(`^(.*)_p\d+$`)
 )
 
 func repoRootForDoc(t *testing.T) string {
@@ -103,6 +107,31 @@ func TestTheDocumentedTenantCoverageIsMeasured(t *testing.T) {
 	pgTables := map[string]bool{}
 	for _, m := range pgRLSRe.FindAllStringSubmatch(readDialect(t, root, "postgres"), -1) {
 		pgTables[strings.ToLower(m[2])] = true
+	}
+	// A PARTITION IS NOT A SEPARATE TENANT-SCOPED TABLE. event_history is
+	// hash-partitioned into 64 children (cleat#2059) and 001 enables RLS on
+	// each of them, so counting raw names read 81 where the document says 17 --
+	// and the document is the one that is right. The children are storage for
+	// one table, not 64 further places a tenant's rows can live; reporting 81
+	// would tell a reader there are 81 tenant-scoped tables to review.
+	//
+	// Folded only when the PARENT IS ITSELF COVERED, which is the falsifiable
+	// half: the rule is "a partition of a covered table", not "a name ending in
+	// _p<digits>". A real table called foo_p1 with no covered foo stays counted
+	// as itself.
+	//
+	// This is the same distinction the rest of this file draws: the regex was
+	// measuring a format it does not model -- physical relations, where the
+	// document's claim is about logical tables -- and it moved in the direction
+	// that inflated the denominator.
+	unfolded := make([]string, 0, len(pgTables))
+	for name := range pgTables {
+		if parent := partitionChildRe.ReplaceAllString(name, "$1"); parent != name && pgTables[parent] {
+			unfolded = append(unfolded, name)
+		}
+	}
+	for _, name := range unfolded {
+		delete(pgTables, name)
 	}
 	msSrc := readDialect(t, root, "mssql")
 	msTables := map[string]bool{}
