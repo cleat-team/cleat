@@ -17,6 +17,26 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 )
 
+// wakeRoundTripTolerance is how far a next_wake_at read back from the database
+// may differ from the instant the caller passed in.
+//
+// It is a PRECISION allowance, not a clock allowance, and that distinction is
+// the whole point of it existing (cleat#2427). The store writes the value it
+// was handed -- `next_wake_at = @p3` (mssql_lifecycle.go) and `$3`
+// (store_lifecycle.go) -- so a read-back is the same process-clock value after
+// a database round trip. No host<->container clock offset enters that
+// comparison, which is why a generous tolerance costs nothing: one second is
+// thousands of times any plausible driver truncation and still catches a store
+// that wrote a different instant.
+//
+// The assertion this replaced compared a DB-clock instant against
+// time.Now() with ZERO margin, so its verdict was decided by the SIGN of the
+// host<->container skew. It passes here because the container clock runs ahead
+// (measured 0.09-0.27s), and flips on a runner where it lags by a millisecond
+// -- reporting "next_wake_at is in the past", which reads as a store bug and is
+// a clock artifact.
+const wakeRoundTripTolerance = time.Second
+
 // ---------------------------------------------------------------------------
 // Test helper
 // ---------------------------------------------------------------------------
@@ -484,8 +504,21 @@ func TestMSSQLIntegration_ReleaseWorkflow(t *testing.T) {
 	if status != "ready" {
 		t.Errorf("status = %s, want ready", status)
 	}
-	if nextWakeAt.Before(time.Now()) {
-		t.Error("next_wake_at should be in the future")
+	// cleat#2427: the value ROUND-TRIPS, rather than being merely "in the
+	// future". Both sides of this comparison are process-clock values -- one of
+	// them passed through the database -- so no host<->container skew can
+	// decide it, and it additionally catches a store that wrote some other
+	// future instant instead of the one it was given.
+	if d := nextWakeAt.Sub(futureWake); d < -wakeRoundTripTolerance || d > wakeRoundTripTolerance {
+		t.Errorf("next_wake_at = %v (%v from now), want the instant ReleaseWorkflow was given: %v "+
+			"(within %v).\n\nThe store writes its argument verbatim, so the read-back should be "+
+			"the same value after a round trip. A difference larger than a precision allowance "+
+			"means the release either ignored the instant it was handed or adjusted it.",
+			nextWakeAt, time.Until(nextWakeAt), futureWake, wakeRoundTripTolerance)
+	}
+	if !futureWake.After(time.Now()) {
+		t.Fatal("the fixture's futureWake is not in the future, so the assertion above would " +
+			"pass for a store that did nothing at all -- fix the fixture, not the assertion")
 	}
 }
 
@@ -2337,8 +2370,18 @@ func TestMSSQLIntegration_FinalizeWorkflowSegment_Suspend(t *testing.T) {
 	if status != "ready" {
 		t.Errorf("status = %s, want ready", status)
 	}
-	if nextWakeAt.Before(time.Now()) {
-		t.Error("next_wake_at should be in the future after suspend")
+	// Same round-trip assertion as the release test above, and for the same
+	// reason: the caller supplies the instant, so comparing it against the
+	// process clock at assert time is a sign-of-skew test that the database
+	// round trip makes unnecessary. See wakeRoundTripTolerance.
+	if d := nextWakeAt.Sub(futureWake); d < -wakeRoundTripTolerance || d > wakeRoundTripTolerance {
+		t.Errorf("next_wake_at after suspend = %v (%v from now), want the instant "+
+			"FinalizeWorkflowSegment was given: %v (within %v)",
+			nextWakeAt, time.Until(nextWakeAt), futureWake, wakeRoundTripTolerance)
+	}
+	if !futureWake.After(time.Now()) {
+		t.Fatal("the fixture's futureWake is not in the future, so the assertion above would " +
+			"pass for a store that did nothing at all -- fix the fixture, not the assertion")
 	}
 }
 
