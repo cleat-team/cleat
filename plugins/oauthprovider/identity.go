@@ -206,41 +206,80 @@ type allowedIdentity struct {
 	Value string
 }
 
-// oauthIdentityTag renders an admit into the value stored on
+// identityKind canonicalises an allowlist row's identity_type.
+//
+// ONE PLACE decides which of the two kinds a row is, because the matcher and
+// the renderer must agree about it. identityAllowed dispatches on
+// strings.TrimSpace(identityType) in a Go switch, so the comparison is
+// case-SENSITIVE whatever the column's collation is; anything that is not
+// "subject" is the address kind, which is safe only because identityAllowed
+// admits no row whose trimmed type is neither. A row spelled "Subject" or
+// "EMAIL" never matches there, so it is never rendered here.
+func identityKind(identityType string) string {
+	if strings.TrimSpace(identityType) == identityTypeSubject {
+		return identityTypeSubject
+	}
+	return identityTypeEmail
+}
+
+// OAuthIdentityValue returns the identity_value an allowlist row stores, and
+// that OAuthIdentityTag renders into a minted key's tag. cleat#2340.
+//
+// EXPORTED WITH THE TAG, deliberately, because cmd/cleatctl writes rows and
+// revokes keys and must not normalise differently from the matcher. The
+// matcher compares in Go -- normaliseEmail on both sides -- so a row stored
+// un-normalised still MATCHES; but a `remove` that deleted by the raw value an
+// operator typed would miss a row stored under a different spelling while the
+// revoke it computed from that same value succeeded, leaving the row present
+// and the keys dead. Storing this form and deleting by this form keeps the two
+// halves of one operation looking at the same string.
+func OAuthIdentityValue(identityType, identityValue string) string {
+	switch identityKind(identityType) {
+	case identityTypeSubject:
+		return normalizeSubject(identityValue)
+	default:
+		return normalizeEmail(identityValue)
+	}
+}
+
+// OAuthIdentityTag renders an allowlist row into the value stored on
 // admin.tenant_api_keys.oauth_identity.
 //
-// ONE function, used by the mint path and by the revoke path. The revoke
-// matches this column by exact string equality, so if the two sides rendered a
+// ONE FUNCTION, USED BY EVERY CALLER THAT WRITES OR MATCHES THAT COLUMN: the
+// mint, and the revoke that runs when an operator removes an allowlist row.
+// The column is compared by exact string equality, so if two sides rendered a
 // tag even slightly differently -- a case difference, a different separator --
-// the delete would silently match nothing and the keys it meant to kill would
+// the revoke would silently match nothing and the keys it meant to kill would
 // keep authenticating until they expired on their own.
 //
-// IT NORMALISES ITS INPUT, AND THAT IS NOT REDUNDANT WITH THE CALLERS. Sharing
-// this function shares the LAYOUT; it does not by itself share the VALUE, and
-// the two callers read theirs from different places: the mint tags the identity
-// the login PRESENTED, which identityAllowed has already run through
-// normalizeEmail/normalizeSubject, while a revoke renders the STORED ROW --
-// exactly what an operator typed, which the comparison tolerates but does not
-// rewrite. A row written as "  Alice@Example.COM  " is admitted, and would mint
-// "google:alice@example.com" while rendering as "google:  Alice@Example.COM  ".
-// Normalising here means a caller CANNOT get it wrong, which is a stronger
-// guarantee than a comment asking both callers to remember.
+// EXPORTED BECAUSE THE REVOKE PATH IS NOT IN THIS PACKAGE. cmd/cleatctl removes
+// the allowlist row and then calls auth.TenantStore.RevokeOAuthAPIKeys, and it
+// has to render the tag HERE rather than assembling "provider:identity" itself.
+// A caller that hand-builds the string re-opens cleat#2410 with the fix sitting
+// unused beside it -- which is why this is exported rather than reimplemented.
 //
-// The type is trimmed to match identityAllowed's own comparison, which trims it
-// too. Any type that is not "subject" renders as the address form, which is
-// safe precisely because identityAllowed admits nothing whose trimmed type is
-// neither: a row spelled "Subject" or "EMAIL" never matches there, so this
-// function is never reached for one.
+// IT NORMALISES ITS INPUT, AND THAT IS NOT REDUNDANT WITH ITS CALLERS. Sharing
+// a function shares the LAYOUT; it does not by itself share the VALUE, and the
+// two sides read theirs from different places: the mint tags the identity the
+// login PRESENTED, which identityAllowed has already run through the
+// normaliser, while a revoke renders the STORED ROW -- exactly what an operator
+// typed, which the comparison tolerates but does not rewrite. A row written
+// "  Alice@Example.COM  " is admitted, and would mint "google:alice@example.com"
+// while rendering as "google:  Alice@Example.COM  ". Normalising here means a
+// caller CANNOT get it wrong, which is a stronger guarantee than a comment
+// asking every caller to remember.
 //
 // The shape is design v2's, verbatim: "<provider>:<identity>", with the subject
 // kind spelled out, because an address and a subject are different namespaces
 // that could otherwise collide as strings -- "github:alice@example.com" for an
 // address, "oidc:subject:110169..." for a subject.
-func oauthIdentityTag(provider string, m allowedIdentity) string {
-	if strings.TrimSpace(m.Type) == identityTypeSubject {
-		return provider + ":subject:" + normalizeSubject(m.Value)
+func OAuthIdentityTag(provider, identityType, identityValue string) string {
+	kind := identityKind(identityType)
+	v := OAuthIdentityValue(kind, identityValue)
+	if kind == identityTypeSubject {
+		return provider + ":subject:" + v
 	}
-	return provider + ":" + normalizeEmail(m.Value)
+	return provider + ":" + v
 }
 
 // identityAllowed reports WHICH row of oauth_allowed_identities admits id, and

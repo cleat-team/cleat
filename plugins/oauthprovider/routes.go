@@ -864,7 +864,7 @@ func (p *Plugin) finishLogin(
 		return
 	}
 
-	identityTag := oauthIdentityTag(provider, admit)
+	identityTag := OAuthIdentityTag(provider, admit.Type, admit.Value)
 	// A VALUE, never nil: an OAuth-minted key always expires. See oauthKeyExpiry.
 	keyExpiresAt := oauthKeyExpiry(expiresIn)
 

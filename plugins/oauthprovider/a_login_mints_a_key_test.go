@@ -235,9 +235,7 @@ func TestOA_Callback_TheIdentityTagNormalisesHoweverItIsCalled(t *testing.T) {
 	const wantTag = "google:user@example.com"
 
 	// The rendering the revoke path will do, on the row exactly as stored.
-	if got := oauthIdentityTag("google", allowedIdentity{
-		Type: identityTypeEmail, Value: storedRow,
-	}); got != wantTag {
+	if got := OAuthIdentityTag("google", identityTypeEmail, storedRow); got != wantTag {
 		t.Errorf("rendering the stored row %q gives %q, want %q -- a revoke matching on that "+
 			"string finds no keys and they keep authenticating until they expire",
 			storedRow, got, wantTag)
@@ -290,8 +288,8 @@ func TestOAIdentityTagNormalisesTheSubjectArm(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := oauthIdentityTag("google", tc.match); got != tc.want {
-				t.Errorf("oauthIdentityTag(%q, %+v) = %q, want %q",
+			if got := OAuthIdentityTag("google", tc.match.Type, tc.match.Value); got != tc.want {
+				t.Errorf("OAuthIdentityTag(%q, %+v) = %q, want %q",
 					"google", tc.match, got, tc.want)
 			}
 		})

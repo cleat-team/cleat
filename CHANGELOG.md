@@ -703,9 +703,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decision): it never shipped, so nothing has to migrate off it, and the opt-in was itself the
   failure mode — a deployment configured for OAuth, with nobody able to sign in, presenting a
   symptom indistinguishable from a misconfigured allowlist. What remains awkward is real and is
-  not hidden by removing the column: cleat has no writer for `oauth_allowed_identities` yet, so
-  every row is hand-written, and a fresh OAuth deployment must hand-write one before anyone can
-  sign in. That cost is part of the work still open in cleat#2340.
+  not hidden by removing the column: a fresh OAuth deployment admits nobody until an operator
+  writes a row. When this entry was first written that meant a hand-written `INSERT`, which was
+  the whole of the management surface; `cleatctl oauth-allow` now writes them, and see the entry
+  below for it and for what a minted key is worth.
 
   A row carries an `identity_type` of `email` or `subject`, and either kind matching admits, so a
   tenant can migrate from email addresses to OIDC `sub` (or GitHub's numeric id) without a cutover.
@@ -726,6 +727,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test's green said nothing about the dialect it was skipping, and the column had been renamed
   rather than quoted so that the hand-written `INSERT`s this table's design calls for do not have
   to remember brackets on one dialect and not the others.
+
+- **OAuth login works end to end, and an allowlisted identity gets a real `cleat_sk_...` key —
+  which carries FULL TENANT ACCESS.** (cleat#2340)
+
+  Before this, OAuth login did not work anywhere: `/login` completed and the callback returned a
+  session token that core auth rejected with 401 everywhere under the default `--require-auth`,
+  because `auth.MiddlewareWithMux` reads a Bearer token as an API key and had never heard of
+  oauthprovider's private session format. The fix is not a second credential format — it is that
+  `finishLogin` now mints a real `admin.tenant_api_keys` row, so `auth`, host binding, revocation
+  and the admin API all see an ordinary key. Every request path is unchanged; nothing about how
+  any endpoint is called has moved.
+
+  **A key minted this way is not scoped.** `tenant_api_keys` has no role or scope column, so an
+  operator who admits an identity to the allowlist is granting that person the same power as any
+  other tenant API key: deploying workflow code (`POST /api/definitions`, `/api/versions`),
+  reprocessing runs, schedules and plugins, and `/api/admin/*` where it is enabled. **OAuth login
+  is operator SSO, and the allowlist is an operator list — add only identities you would hand
+  that tenant's API key to.** The owner chose this over adding a role column for 0.3.0, and the
+  price of the choice is that the warning has to be where the operator reads it: it prints in
+  the usage text of every `cleatctl oauth-allow` invocation and again in the output of `add`.
+
+  A minted key expires at `min(expires_in, 24h)`, defaulting to 24h when the provider reports
+  nothing — an IdP that omits `expires_in` must not produce a permanent credential by omission —
+  and is tagged `oauth_identity` with the row that admitted it, so removing that row can revoke
+  it. The credential is delivered once, in the body of a same-origin response that is not
+  cacheable and not framable; it is never put in a URL, a `Location` header or a query string,
+  and never in a cookie — a cookie-borne credential would force core auth to accept cookies and
+  expose every state-changing endpoint to CSRF.
+
+  `cleatctl oauth-allow list|add|remove <tenant> --provider <p> [--type email|subject]` manages
+  the allowlist. `remove` also revokes the live keys that row minted, in the same command: a
+  removal that left the credential authenticating until it expired would mean the operator
+  removed nothing in practice, and nothing on the deployment would say so. Removal finds rows by
+  the matcher's own folding rule rather than by the spelling typed, because this table's only
+  writer before the CLI existed was a hand-written `INSERT` — a row that `list` shows but
+  `remove` cannot name would be a dead end.
+
+  The background loop also soft-disables OAuth-minted keys whose expiry has passed. **That is
+  bookkeeping, not enforcement** — `ResolveTenantFromAPIKey` already refuses an expired key at
+  read time, on all three dialects, so a worker that never ran the loop would not authenticate
+  one. What the sweep keeps true is that `disabled_at IS NULL` keeps meaning "this key
+  authenticates" for keys this feature minted, so an operator counting an identity's live keys
+  does not count credentials that stopped working when their expiry went by.
+
+  **PostgreSQL only in 0.3.0**, matching `RevokeAPIKey`'s existing dialect limit and the owner's
+  decision. `/login` and `/callback` answer 501 with a message naming the limit on MySQL and SQL
+  Server rather than half-working, and `cleatctl oauth-allow` refuses there for the same reason.
+  MySQL/MSSQL support is a follow-up. Not listed as breaking: OAuth login did not work before
+  this, so no deployment loses a capability it had — what changes is that the feature now works,
+  and that a deployment which had configured OAuth and admitted everyone no longer does.
+
+  Two things about this were measured rather than assumed, and both changed an implementation
+  that read correctly. Design v2 section 7 put the expiry sweep in the plugin, alongside the
+  abandoned-login sweep already there; written that way it cannot run at all, because a plugin's
+  cross-tenant statement executes under `SET LOCAL ROLE cleat_sweep` and that role holds **no**
+  privilege on `admin.tenant_api_keys` — `permission denied for table tenant_api_keys (42501)`,
+  every tick, disabling nothing, into a background loop nobody reads. The write moved to the
+  worker's own connection, which is the connection that holds the grant, and therefore the same
+  side of the boundary `Environment.MintOAuthAPIKey` already sits on. And the plugin's own
+  regression test for that sweep was initially blind to its dialect gate: with the gate deleted,
+  the host's own off-Postgres refusal left every row untouched, so a rows-only assertion reported
+  the mutation green. The test counts host calls now, which is the only thing that separates "this
+  loop asked nothing" from "this loop asked and was refused".
 
 - **`--uninstall-plugin` on MySQL: 10 more plugins move from refused to verified.** (cleat#2306
   phase 2)
