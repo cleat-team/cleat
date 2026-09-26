@@ -37,9 +37,16 @@ import (
 //     would then be exactly what the generator produces, which is the state
 //     this mode asserts.
 //
-// 002_defaults.sql is exempt by construction: it is hand-assembled, because the
-// rows a migration inserts are not recoverable from a catalogue read. The mode
-// says so rather than silently skipping it.
+// 002_defaults.sql cannot be compared byte for byte: it is hand-assembled,
+// because the rows a migration inserts are not recoverable from a catalogue
+// read. It is NOT exempt from the check, and this comment said it was until the
+// assertion below was added -- its EFFECT is asserted instead of its text.
+//
+// That distinction is the whole finding. A missing ROW is not a structural
+// difference, so a 002 that had been emptied or replaced builds a database with
+// no seed rows while the byte comparison of 001/003 and the A/B differential
+// both report clean. Measured: with 002 replaced by a comment, the build passes
+// and the comparison passes, and only seedRows below catches it.
 //
 // baselineFiles are the three files the generator owns, named explicitly so the
 // build cannot pick up anything added after the baseline was cut.
@@ -180,7 +187,8 @@ func verify(ctx context.Context, db *sql.DB, committed string) error {
 		return fmt.Errorf("regenerate: %w", err)
 	}
 
-	// The two generated files. 002 is hand-assembled and is not compared.
+	// The two generated files. 002 is hand-assembled and is not compared byte
+	// for byte -- its seed rows are asserted by effect instead, above.
 	generated := []string{"001_schema.sql", "003_procedures.sql"}
 	differing := 0
 	for _, name := range generated {
@@ -204,7 +212,8 @@ func verify(ctx context.Context, db *sql.DB, committed string) error {
 		fmt.Printf("            %s\n", firstDifference(have, want))
 	}
 
-	fmt.Printf("\n002_defaults.sql is hand-assembled by design and is not compared\n")
+	fmt.Printf("\n002_defaults.sql is hand-assembled and is not compared byte for byte --\n" +
+		"its seed rows are asserted by effect instead (see seedRows)\n")
 	if differing != 0 {
 		return fmt.Errorf("%d of %d generated file(s) differ from a fresh emit", differing, len(generated))
 	}
