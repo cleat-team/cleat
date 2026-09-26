@@ -213,18 +213,34 @@ type allowedIdentity struct {
 // matches this column by exact string equality, so if the two sides rendered a
 // tag even slightly differently -- a case difference, a different separator --
 // the delete would silently match nothing and the keys it meant to kill would
-// keep authenticating until they expired on their own. Sharing the function is
-// what makes that impossible rather than merely tested for.
+// keep authenticating until they expired on their own.
+//
+// IT NORMALISES ITS INPUT, AND THAT IS NOT REDUNDANT WITH THE CALLERS. Sharing
+// this function shares the LAYOUT; it does not by itself share the VALUE, and
+// the two callers read theirs from different places: the mint tags the identity
+// the login PRESENTED, which identityAllowed has already run through
+// normalizeEmail/normalizeSubject, while a revoke renders the STORED ROW --
+// exactly what an operator typed, which the comparison tolerates but does not
+// rewrite. A row written as "  Alice@Example.COM  " is admitted, and would mint
+// "google:alice@example.com" while rendering as "google:  Alice@Example.COM  ".
+// Normalising here means a caller CANNOT get it wrong, which is a stronger
+// guarantee than a comment asking both callers to remember.
+//
+// The type is trimmed to match identityAllowed's own comparison, which trims it
+// too. Any type that is not "subject" renders as the address form, which is
+// safe precisely because identityAllowed admits nothing whose trimmed type is
+// neither: a row spelled "Subject" or "EMAIL" never matches there, so this
+// function is never reached for one.
 //
 // The shape is design v2's, verbatim: "<provider>:<identity>", with the subject
 // kind spelled out, because an address and a subject are different namespaces
 // that could otherwise collide as strings -- "github:alice@example.com" for an
 // address, "oidc:subject:110169..." for a subject.
 func oauthIdentityTag(provider string, m allowedIdentity) string {
-	if m.Type == identityTypeSubject {
-		return provider + ":subject:" + m.Value
+	if strings.TrimSpace(m.Type) == identityTypeSubject {
+		return provider + ":subject:" + normalizeSubject(m.Value)
 	}
-	return provider + ":" + m.Value
+	return provider + ":" + normalizeEmail(m.Value)
 }
 
 // identityAllowed reports WHICH row of oauth_allowed_identities admits id, and

@@ -213,3 +213,87 @@ func TestOA_Callback_TheKeyPageIsNotFramableOrCacheable(t *testing.T) {
 			"does not account for:\n%s", rec.Body.String())
 	}
 }
+
+// TestOA_Callback_TheIdentityTagNormalisesHoweverItIsCalled. cleat#2410.
+//
+// The mint tags the identity the login PRESENTED, which identityAllowed has
+// already run through normalizeEmail; the revoke path renders the STORED ROW,
+// which is whatever an operator typed. Sharing oauthIdentityTag shares the
+// LAYOUT, and without normalising inside it the two produce different strings
+// for the same person -- so the revoke's `DELETE ... WHERE oauth_identity = $1`
+// matches nothing and the keys it meant to kill keep authenticating until they
+// expire on their own.
+//
+// THE FIXTURE IS DELIBERATELY PADDED AND MIXED-CASE, which no other test in
+// this package does, and that is the point: a row written plainly is admitted
+// and rendered identically whether or not the renderer normalises, so every
+// other test here is blind to this by construction.
+func TestOA_Callback_TheIdentityTagNormalisesHoweverItIsCalled(t *testing.T) {
+	// user@example.com is the address the mock IdP presents, spelled here the
+	// way an operator plausibly types it into an INSERT.
+	const storedRow = "  User@Example.COM  "
+	const wantTag = "google:user@example.com"
+
+	// The rendering the revoke path will do, on the row exactly as stored.
+	if got := oauthIdentityTag("google", allowedIdentity{
+		Type: identityTypeEmail, Value: storedRow,
+	}); got != wantTag {
+		t.Errorf("rendering the stored row %q gives %q, want %q -- a revoke matching on that "+
+			"string finds no keys and they keep authenticating until they expire",
+			storedRow, got, wantTag)
+	}
+
+	// And the same through the real login, so the property is asserted on the
+	// path that actually mints rather than only on the helper.
+	c := newAllowlistCase(t, "google", "mint-padded", userinfoVerifiedEmail, nil)
+	c.store.AddAllowedIdentity(testTenantID, "google", identityTypeEmail, storedRow)
+
+	rec := c.callback(t, "google")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("a padded, mixed-case row must still be admitted -- identityAllowed trims and "+
+			"folds both sides -- got %d: %s", rec.Code, rec.Body.String())
+	}
+	mints := c.mints()
+	if len(mints) != 1 {
+		t.Fatalf("minted %d keys, want exactly 1", len(mints))
+	}
+	if mints[0].OAuthIdentity != wantTag {
+		t.Errorf("the mint tagged %q, want %q -- the tag must not depend on how the row was "+
+			"typed", mints[0].OAuthIdentity, wantTag)
+	}
+}
+
+// The subject arm of the same property. normalizeSubject TRIMS but does NOT
+// fold -- OIDC Core section 2 defines `sub` as case-sensitive, so folding would
+// admit one account under another's row -- and the type is trimmed to match
+// identityAllowed's own comparison of it.
+func TestOAIdentityTagNormalisesTheSubjectArm(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		match allowedIdentity
+		want  string
+	}{
+		{
+			"a padded subject value is trimmed, not folded",
+			allowedIdentity{Type: identityTypeSubject, Value: "  00u1a2b3c  "},
+			"google:subject:00u1a2b3c",
+		},
+		{
+			"a padded identity TYPE still renders as the subject kind",
+			allowedIdentity{Type: " subject ", Value: "00u1a2b3c"},
+			"google:subject:00u1a2b3c",
+		},
+		{
+			"an address keeps its case folded and its padding trimmed",
+			allowedIdentity{Type: identityTypeEmail, Value: "  BOB@Example.COM "},
+			"google:bob@example.com",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := oauthIdentityTag("google", tc.match); got != tc.want {
+				t.Errorf("oauthIdentityTag(%q, %+v) = %q, want %q",
+					"google", tc.match, got, tc.want)
+			}
+		})
+	}
+}

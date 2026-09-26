@@ -868,18 +868,12 @@ func (p *Plugin) finishLogin(
 	// A VALUE, never nil: an OAuth-minted key always expires. See oauthKeyExpiry.
 	keyExpiresAt := oauthKeyExpiry(expiresIn)
 
-	rawKey, err := p.mintOAuthAPIKey(ctx, plugin.MintOAuthAPIKeyRequest{
-		TenantID:      tid,
-		Description:   "OAuth login as " + identityTag,
-		ExpiresAt:     keyExpiresAt,
-		OAuthIdentity: identityTag,
-	})
-	if err != nil {
-		p.logger.Error("oauth: mint an API key for the admitted identity",
-			"provider", provider, "tenant", tid, "error", err)
-		p.writeError(w, http.StatusInternalServerError, "failed to mint a credential")
-		return
-	}
+	// THE MINT ITSELF IS DELIBERATELY LATER -- after the session row is
+	// written, below. Both remaining steps can fail, and a key minted before
+	// them would be live and unheld if one did: the caller never receives it,
+	// nothing revokes it, and it authenticates until its expiry passes. The
+	// nil-minter guard above stays here, because it is a check with no side
+	// effect, and refusing before writing anything beats refusing after.
 
 	// Generate a 32-byte hex session token.
 	sessionToken, err := generateSessionToken()
@@ -930,6 +924,32 @@ func (p *Plugin) finishLogin(
 	if err != nil {
 		p.logger.Error("oauth: create session", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to create session")
+		return
+	}
+
+	// The mint, last of the fallible steps that PRECEDE delivery -- see the note
+	// where identityTag is computed. Everything above has already succeeded, so
+	// a key created here is one the caller is about to be handed.
+	//
+	// ONE FAILURE THIS DOES NOT REMOVE, stated rather than implied because the
+	// first version of this comment claimed the reorder removed all of them. If
+	// the client disconnects while the page is being written, the key IS
+	// minted, is never delivered, and stays live until it expires -- exactly the
+	// condition the reorder exists to narrow. No ordering closes it: a page that
+	// shows a secret once cannot hand over one that does not exist yet. The
+	// answer is the sweep (design item 7), which collects an OAuth-minted key by
+	// its expiry and its oauth_identity tag, and this is why the key carries
+	// both.
+	rawKey, err := p.mintOAuthAPIKey(ctx, plugin.MintOAuthAPIKeyRequest{
+		TenantID:      tid,
+		Description:   "OAuth login as " + identityTag,
+		ExpiresAt:     keyExpiresAt,
+		OAuthIdentity: identityTag,
+	})
+	if err != nil {
+		p.logger.Error("oauth: mint an API key for the admitted identity",
+			"provider", provider, "tenant", tid, "error", err)
+		p.writeError(w, http.StatusInternalServerError, "failed to mint a credential")
 		return
 	}
 
