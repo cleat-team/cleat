@@ -40,14 +40,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     correction. **`WITH INHERIT FALSE` is load-bearing** — a plain grant lets the app role read
     every tenant's rows — and the retention path runs `SET LOCAL ROLE cleat_sweep`, so a
     missing membership is a hard `42501` on every sweep rather than a silent degradation.
-  - **Partitioning is not in this change.** It moves `event_history`'s primary key, and
-    PostgreSQL needs a unique index matching every conflict target — so the live
-    `ON CONFLICT (workflow_id, step)` statements on the event write path would stop working
-    (`42P10`). That code travels with the schema that needs it, separately.
+  - **Partitioning is not in *this* change**, and it is in the release: it moves
+    `event_history`'s primary key, which no existing database can be migrated into, so the code
+    it requires travels with it. See the next entry.
 
   None of this is visible to a fresh install, which is the only kind 0.3.0 supports — there is
   nothing to upgrade *from*. It is called out because the migration tree an operator goes to
   read is no longer shaped like the one every previous release documented.
+
+- **`event_history` is hash-partitioned on `tenant_id` into 64 buckets, and its primary key is
+  now `(tenant_id, workflow_id, step)`.** (cleat#2059, cleat#2421)
+
+  **PostgreSQL only.** MySQL is single-tenant by owner decision and SQL Server's partitions are
+  not separate objects, so both keep the plain table and are held to expand/contract instead.
+  Like the rebaseline above, this is possible only because 0.3.0 ships a fresh database: moving
+  the primary key is not something an existing database can be migrated into.
+
+  **Consequences.**
+  - **Every `ON CONFLICT` target on `event_history` must carry the partition key.** PostgreSQL
+    requires a conflict target to match a unique index, and on a partitioned table that index
+    must cover the partition key — so the old `(workflow_id, step)` fails outright with `42P10`,
+    `there is no unique or exclusion constraint matching the ON CONFLICT specification`. Every
+    site now names `(tenant_id, workflow_id, step)`, in the Go statements and inside the
+    generated routine bodies alike. The coverage is asserted as a **predicate** rather than
+    counted — `engine/every_event_history_conflict_target_covers_the_partition_key_test.go`
+    fails on a new site that omits it — so a deployment with its own `INSERT` into
+    `event_history` must change its conflict target the same way, and the test is the thing that
+    keeps that true rather than a number.
+  - **Row-level security does not propagate to partitions, and privilege is the boundary that
+    holds first.** Measured on the generated schema: the parent was
+    `relrowsecurity=t/relforcerowsecurity=t` while **all 64 children were `f/f`** with no policy
+    of their own, so each child now carries `ENABLE` + `FORCE` and its parent's policy. Worth
+    being exact about which mechanism refuses what — a read against a child is refused by
+    *privilege* first, because the parent's `GRANT` does not extend to its partitions, and the
+    policy only does any work once that privilege has been granted. A deployment that customises
+    grants on `event_history` must grant on the partitions too.
+  - **The defect that actually broke it was `ONLY` on the primary key.** `pg_dump` emits
+    `ALTER TABLE ONLY <t> ADD CONSTRAINT <t>_pkey`, and on a partitioned table `ONLY` suppresses
+    the recursion to its partitions — so the unique index landed on the parent alone, no
+    partition carried a matching one, and the table could serve **no** conflict target at all,
+    including the ones already corrected.
+
+  See `docs/schema-partitioning-design.md`; its status line is the authority on what shipped.
 
 - **Security: a child workflow's `child_workflow` event was written in plain text in the
   parent's `event_history`, with `--encrypt-sensitive-payloads` on.** (cleat#2312, cleat#2328)
