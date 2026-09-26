@@ -113,6 +113,90 @@ DEFINER_COND = re.compile(r"/\*!\d+\s+DEFINER\s*=\s*`[^`]*`\s*@\s*`[^`]*`\s*\*/"
 
 DELIMITER = "DELIMITER ;;"
 
+# Tables that belong to the RUNNER, not to cleat's schema.
+#
+# The dump is of a database the migration runner built, so it contains the
+# runner's own bookkeeping. `schema_migrations` is created by
+# migration.Runner.ensureMigrationsTable and by NO migration in the chain
+# (verified: zero references across all 70 files). Emitting it into the
+# baseline is not merely untidy -- engine/check-entity-contract.py reads the
+# shipped files to enumerate every table cleat defines, and reported it as
+# "defined in mysql and classified nowhere". A baseline that declares the
+# runner's own state table is claiming a fact about cleat's schema that is not
+# one.
+EXCLUDED_TABLES = {"schema_migrations"}
+
+# mysqldump quotes every identifier; the chain quotes none (0 backticked
+# CREATE TABLE across all 70 files, against 30 in a raw dump). The difference
+# is not cosmetic: engine/a_test_that_drops_a_migrated_object_restores_it_test.go
+# extracts object names with
+#     CREATE ... (?:IF NOT EXISTS )?([A-Za-z_][A-Za-z0-9_.]*)
+# which cannot match a backtick. Against ``CREATE TABLE IF NOT EXISTS `x` `` it
+# backtracks the optional group away and captures IF as the table name -- so the
+# guard reported a table called `IF` that a test "drops". Restoring the chain's
+# unquoted form fixes that at the source, rather than by loosening the guard.
+QUOTED_IDENT = re.compile(r"`([^`]+)`")
+
+# Kept quoted if the bare form would be a MySQL reserved word. Deliberately
+# short and NOT hand-trusted: the generator prints any identifier it leaves
+# quoted, and the build is the arbiter -- an unquoted reserved word fails at
+# apply time rather than silently.
+RESERVED_WORDS = {
+    "ADD", "ALL", "ALTER", "ANALYZE", "AND", "AS", "ASC", "BEFORE", "BETWEEN",
+    "BOTH", "BY", "CALL", "CASCADE", "CASE", "CHANGE", "CHARACTER", "CHECK",
+    "COLLATE", "COLUMN", "CONDITION", "CONSTRAINT", "CONTINUE", "CONVERT",
+    "CREATE", "CROSS", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP",
+    "CURRENT_USER", "CURSOR", "DATABASE", "DATABASES", "DEC", "DECIMAL",
+    "DECLARE", "DEFAULT", "DELAYED", "DELETE", "DESC", "DESCRIBE",
+    "DETERMINISTIC", "DISTINCT", "DISTINCTROW", "DIV", "DOUBLE", "DROP",
+    "DUAL", "EACH", "ELSE", "ELSEIF", "ENCLOSED", "ESCAPED", "EXISTS", "EXIT",
+    "EXPLAIN", "FALSE", "FETCH", "FLOAT", "FOR", "FORCE", "FOREIGN", "FROM",
+    "FULLTEXT", "GENERATED", "GET", "GRANT", "GROUP", "GROUPS", "HAVING",
+    "HIGH_PRIORITY", "IF", "IGNORE", "IN", "INDEX", "INFILE", "INNER", "INOUT",
+    "INSENSITIVE", "INSERT", "INTERVAL", "INTO", "IS", "ITERATE", "JOIN",
+    "KEY", "KEYS", "KILL", "LAG", "LAST_VALUE", "LATERAL", "LEAD", "LEADING",
+    "LEAVE", "LEFT", "LIKE", "LIMIT", "LINEAR", "LINES", "LOAD", "LOCALTIME",
+    "LOCALTIMESTAMP", "LOCK", "LONG", "LOOP", "LOW_PRIORITY", "MATCH",
+    "MAXVALUE", "MODIFIES", "NATURAL", "NOT", "NO_WRITE_TO_BINLOG", "NTH_VALUE",
+    "NTILE", "NULL", "NUMERIC", "OF", "ON", "OPTIMIZE", "OPTION",
+    "OPTIONALLY", "OR", "ORDER", "OUT", "OUTER", "OUTFILE", "OVER",
+    "PARTITION", "PERCENT_RANK", "PRECISION", "PRIMARY", "PROCEDURE", "PURGE",
+    "RANGE", "RANK", "READ", "READS", "REAL", "RECURSIVE", "REFERENCES",
+    "REGEXP", "RELEASE", "RENAME", "REPEAT", "REPLACE", "REQUIRE",
+    "RESTRICT", "RETURN", "REVOKE", "RIGHT", "RLIKE", "ROW", "ROWS",
+    "ROW_NUMBER", "SCHEMA", "SCHEMAS", "SELECT", "SENSITIVE", "SEPARATOR",
+    "SET", "SHOW", "SMALLINT", "SPATIAL", "SPECIFIC", "SQL", "SQLEXCEPTION",
+    "SQLSTATE", "SQLWARNING", "SQL_BIG_RESULT", "SQL_CALC_FOUND_ROWS",
+    "SQL_SMALL_RESULT", "SSL", "STARTING", "STORED", "STRAIGHT_JOIN", "SYSTEM",
+    "TABLE", "TERMINATED", "THEN", "TO", "TRAILING", "TRIGGER", "TRUE",
+    "UNDO", "UNION", "UNIQUE", "UNLOCK", "UNSIGNED", "UPDATE", "USAGE", "USE",
+    "USING", "UTC_DATE", "UTC_TIME", "UTC_TIMESTAMP", "VALUES", "VARBINARY",
+    "VARCHAR", "VARCHARACTER", "VARYING", "VIRTUAL", "WHEN", "WHERE", "WHILE",
+    "WINDOW", "WITH", "WRITE", "XOR", "ZEROFILL",
+}
+
+
+def unquote_identifiers(text):
+    """Drop mysqldump's identifier quoting where the chain would not have it.
+
+    Returns (text, unquoted_count, still_quoted_names). The third is reported
+    rather than swallowed: a name left quoted is one the caller should look at,
+    not a success.
+    """
+    unquoted = 0
+    kept = []
+
+    def repl(m):
+        nonlocal unquoted
+        name = m.group(1)
+        if name.upper() in RESERVED_WORDS:
+            kept.append(name)
+            return m.group(0)
+        unquoted += 1
+        return name
+
+    return QUOTED_IDENT.sub(repl, text), unquoted, sorted(set(kept))
+
 # MySQL's version-gated comment: /*!50003 sql */ means "run `sql` on 5.0.3+".
 # mysqldump wraps object DDL in it.
 VERSION_COMMENT = re.compile(r"/\*!\d*\s*(.*?)\*/", re.S)
@@ -243,6 +327,8 @@ def main(src, outdir):
     proc_like, trig_like, other = [], [], []
     definers_stripped = 0
     unwrapped = 0
+    unquoted_total = 0
+    still_quoted = set()
     for obj in objects:
         obj, _ = strip_session(obj)
         obj, nu = unwrap_version_comments(obj)
@@ -266,8 +352,14 @@ def main(src, outdir):
         die("could not classify %d object block(s); first 200 chars:\n%s"
             % (len(other), other[0][:200]))
 
+    procs_out = []
+    for o in proc_like + trig_like:
+        o, n, kept = unquote_identifiers(o)
+        unquoted_total += n
+        still_quoted.update(kept)
+        procs_out.append(o)
     procedures = "\n\n".join(
-        [DELIMITER + "\n" + o + "\nDELIMITER ;" for o in proc_like + trig_like])
+        [DELIMITER + "\n" + o + "\nDELIMITER ;" for o in procs_out])
 
     # --- tables -------------------------------------------------------------
     head, session_stmts = strip_session(head)
@@ -276,6 +368,14 @@ def main(src, outdir):
     tables = split_tables(head)
     if not tables:
         die("no CREATE TABLE found in the dump's head section")
+
+    excluded = [n for n, _ in tables if n.lower() in EXCLUDED_TABLES]
+    if len(excluded) != len(EXCLUDED_TABLES):
+        die("expected to exclude %d runner-owned table(s) %s from the dump, "
+            "found %d -- if the runner stopped creating one, say so here "
+            "rather than silently emitting it"
+            % (len(EXCLUDED_TABLES), sorted(EXCLUDED_TABLES), len(excluded)))
+    tables = [(n, s) for n, s in tables if n.lower() not in EXCLUDED_TABLES]
 
     table_names = [n for n, _ in tables]
     if len(set(table_names)) != len(table_names):
@@ -288,6 +388,10 @@ def main(src, outdir):
                flags=re.I)
         for _, stmt in tables
     ]
+    for i, stmt in enumerate(rendered):
+        rendered[i], n, kept = unquote_identifiers(stmt)
+        unquoted_total += n
+        still_quoted.update(kept)
 
     # ORDER-SAFE BY CONSTRUCTION, and this is the acceptance's preferred form
     # (section 1.7) rather than a workaround.
@@ -395,6 +499,9 @@ def main(src, outdir):
     print("routines:          %d" % len(proc_like))
     print("triggers:          %d" % len(trig_like))
     print("DEFINER stripped:  %d" % definers_stripped)
+    print("identifiers unquoted: %d" % unquoted_total)
+    if still_quoted:
+        print("  LEFT QUOTED (reserved word, check by building): %s" % ", ".join(still_quoted))
     print("version comments unwrapped: %d" % unwrapped)
     print("session stmts cut: %d" % session_stmts)
     print("wrote %s/001_schema.sql, 002_defaults.sql, 003_procedures.sql"

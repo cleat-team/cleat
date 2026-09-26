@@ -6,7 +6,7 @@
 -- account ran the dump. See the generator's docstring.
 
 DELIMITER ;;
-CREATE PROCEDURE `finalize_workflow_status`(
+CREATE PROCEDURE finalize_workflow_status(
     p_workflow_id      VARCHAR(255),
     p_worker_id        VARCHAR(255),
     p_generation       BIGINT,
@@ -83,7 +83,7 @@ END ;;
 DELIMITER ;
 
 DELIMITER ;;
- CREATE   TRIGGER `tenants_org_id_immutable` BEFORE UPDATE ON `tenants` FOR EACH ROW BEGIN
+ CREATE   TRIGGER tenants_org_id_immutable BEFORE UPDATE ON tenants FOR EACH ROW BEGIN
     IF NEW.org_id <> OLD.org_id THEN
         SIGNAL SQLSTATE '45000'
             SET MESSAGE_TEXT = 'tenants.org_id is immutable and cannot be changed';
