@@ -20,8 +20,8 @@ cleat build -o /tmp/out ./examples/travel/
 ## Run
 
 ```bash
-cleat deploy --name travel /tmp/out/travel.wasm
-cleat run --wasm /tmp/out/travel.wasm --entry-point BookTravel \
+cleat deploy --name travel /tmp/out/book_travel.wasm
+cleat run --wasm /tmp/out/book_travel.wasm --entry-point book_travel \
   --input '{"user_id":"usr_001","flight":{"origin":"PDX","destination":"SFO","date":"2026-06-01","passengers":1},"hotel":{"city":"San Francisco","check_in":"2026-06-01","check_out":"2026-06-03","guests":1},"car":{"city":"San Francisco","pickup_date":"2026-06-01","dropoff_date":"2026-06-03"}}'
 ```
 

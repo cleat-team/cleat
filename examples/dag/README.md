@@ -19,8 +19,8 @@ cleat build -o /tmp/out ./examples/dag/
 ## Run
 
 ```bash
-cleat deploy --name dag /tmp/out/dag.wasm
-cleat run --wasm /tmp/out/dag.wasm --entry-point Pipeline \
+cleat deploy --name dag /tmp/out/pipeline.wasm
+cleat run --wasm /tmp/out/pipeline.wasm --entry-point pipeline \
   --input '{"text":"raw document content","lang":"en"}'
 ```
 
