@@ -23,6 +23,24 @@
 //	# emit the baseline from it
 //	go run ./scripts/gen-mssql-baseline -mode=emit -dsn "$DSN" -out /tmp/baseline
 //
+//	# check the COMMITTED baseline is what the emitter produces (empty database)
+//	go run ./scripts/gen-mssql-baseline -mode=verify -dsn "$DSN" \
+//	  -migrations migrations -committed migrations/mssql
+//
+// Acceptance, in the order it is meant to be run:
+//
+//	# A: build from the PRE-compaction chain, B: from the shipped files
+//	-migrations <chain>          onto A
+//	-migrations migrations       onto B
+//	-mode=diff         -dsn A -bdsn B     -> must report 0 differences
+//	-mode=supplementary -dsn A -bdsn B    -> must report 11 of 11 PASS
+//	scripts/mssql-baseline-known-positive.sh <A-dsn> <B-dsn>
+//
+// The differential needs the pre-compaction chain as its A side, which after
+// the compaction exists only in git history -- so it is a documented operator
+// procedure rather than a CI check, exactly as scripts/gen-postgres-baseline.py
+// is. -mode=verify is the half that CAN run against the committed tree alone.
+//
 // Building through cmd/cleat-worker instead would NOT give a core-only
 // database. The worker runs core migrations and then plugin.RunMigrations
 // unconditionally (cmd/cleat-worker/main.go:1546 and :1580 at develop bd3e7a14),
@@ -57,17 +75,18 @@ func main() {
 }
 
 func run() error {
-	mode := flag.String("mode", "", "build|emit|diff|supplementary")
+	mode := flag.String("mode", "", "build|emit|diff|supplementary|verify")
 	dsn := flag.String("dsn", "", "sqlserver:// DSN, database already created")
 	bdsn := flag.String("bdsn", "", "second DSN, for -mode=diff and -mode=supplementary")
 	root := flag.String("migrations", "migrations", "migrations root containing mssql/")
 	out := flag.String("out", "", "output directory (emit)")
+	committed := flag.String("committed", "", "directory holding the committed baseline (verify)")
 	flag.Parse()
 
 	switch *mode {
-	case "build", "emit", "diff", "supplementary":
+	case "build", "emit", "diff", "supplementary", "verify":
 	default:
-		return fmt.Errorf("-mode must be build, emit, diff or supplementary, got %q", *mode)
+		return fmt.Errorf("-mode must be build, emit, diff, supplementary or verify, got %q", *mode)
 	}
 	if *dsn == "" {
 		return fmt.Errorf("-dsn is required")
@@ -90,6 +109,11 @@ func run() error {
 		return diffAgainst(ctx, db, *bdsn)
 	case "supplementary":
 		return supplementary(ctx, db, *bdsn)
+	case "verify":
+		if *committed == "" {
+			return fmt.Errorf("-committed is required for -mode=verify")
+		}
+		return verify(ctx, db, *root, *committed)
 	default:
 		if *out == "" {
 			return fmt.Errorf("-out is required for emit")

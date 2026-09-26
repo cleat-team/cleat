@@ -129,6 +129,24 @@ func enableMSSQLTenantPolicies(t *testing.T, db *sql.DB) {
 		t.Fatalf("could not find any CREATE SECURITY POLICY in %s -- the shipped schema "+
 			"stopped carrying one, or this scan no longer matches how one is written", path)
 	}
+
+	// The check above fails on ZERO and not on FEWER, which cleat-review named
+	// on cleat#2438: a pattern that matched five of fourteen would verify five
+	// policies and report success. A count is no defence against that on its
+	// own, so the matched set is cross-checked against a deliberately looser
+	// read of the same file -- count the declarations by name, ignore their
+	// shape, and require the two to agree. This is the "a strict parse and a
+	// loose parse must be made to disagree" move, applied where the strict one
+	// would otherwise be the only reader.
+	//
+	// Comments are stripped first, or the prose above each policy counts as a
+	// declaration.
+	declared := strings.Count(stripSQLComments(src), "CREATE SECURITY POLICY")
+	if len(policies) != declared {
+		t.Fatalf("%s declares %d CREATE SECURITY POLICY statement(s) but this scan matched %d. "+
+			"Under-selection checks fewer policies than ship and passes, which is what this "+
+			"count exists to catch -- re-read the pattern against the file.", path, declared, len(policies))
+	}
 	if fn := mssqlFilterFnRe.FindString(src); fn == "" {
 		t.Fatalf("could not find dbo.fn_tenant_filter in %s -- the migration changed shape "+
 			"and this test no longer describes the shipped predicate", path)
