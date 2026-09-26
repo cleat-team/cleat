@@ -79,6 +79,12 @@ type idempotencyDialect struct {
 	skipReason string
 }
 
+// newMySQLScratchDB creates an empty MySQL database and returns a handle to it.
+//
+// Unlike the PostgreSQL helper this skips when CLEAT_TEST_MYSQL is unset,
+// matching engine's MySQLBackend.Enabled: there is no default MySQL in CI's
+// support matrix, so an unset variable means "not configured here" rather
+// than "broken environment".
 func newMySQLScratchDB(t *testing.T, name string) *sql.DB {
 	t.Helper()
 	dsn := os.Getenv("CLEAT_TEST_MYSQL")

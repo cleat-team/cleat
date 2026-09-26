@@ -74,6 +74,14 @@ import (
 // sets CLEAT_TEST_POSTGRES for this package, so the leg SKIPPED rather than
 // failing -- an absent DSN and a missing file look the same from here.
 
+// ONE CONNECTION, NOT THE POOL. SQL Server's tenant context is
+// sp_set_session_context, which is per-connection state; issued through a
+// *sql.DB it lands on whichever connection the pool hands out and the next
+// query may run on a different one. cmd/cleatctl/droptenant_mssql.go records
+// the same hazard for the same reason.
+//
+// Postgres needs nothing here: migrations and this test connect as a superuser,
+// which bypasses RLS unconditionally. MySQL has no row-level policy at all.
 func pinnedConn(t *testing.T, ctx context.Context, db *sql.DB, d idempotencyDialect) *sql.Conn {
 	t.Helper()
 	conn, err := db.Conn(ctx)

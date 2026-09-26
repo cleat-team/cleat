@@ -25,7 +25,11 @@
 //
 //	# check the COMMITTED baseline is what the emitter produces (empty database)
 //	go run ./scripts/gen-mssql-baseline -mode=verify -dsn "$DSN" \
-//	  -migrations migrations -committed migrations/mssql
+//	  -committed migrations/mssql
+//
+// -mode=verify ignores -migrations on purpose: it builds from the three baseline
+// files BY NAME, so a later numbered migration cannot be folded into the
+// regenerated 001 and fail the check on a correct tree.
 //
 // Acceptance, in the order it is meant to be run:
 //
@@ -113,7 +117,7 @@ func run() error {
 		if *committed == "" {
 			return fmt.Errorf("-committed is required for -mode=verify")
 		}
-		return verify(ctx, db, *root, *committed)
+		return verify(ctx, db, *committed)
 	default:
 		if *out == "" {
 			return fmt.Errorf("-out is required for emit")

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/cleat-team/cleat/migration"
 )
 
 // verify builds a database from the COMMITTED migrations, regenerates the
@@ -39,12 +41,81 @@ import (
 // rows a migration inserts are not recoverable from a catalogue read. The mode
 // says so rather than silently skipping it.
 //
+// baselineFiles are the three files the generator owns, named explicitly so the
+// build cannot pick up anything added after the baseline was cut.
+var baselineFiles = []string{"001_schema.sql", "002_defaults.sql", "003_procedures.sql"}
+
 // The database passed to -dsn must be EMPTY. verify builds into it, so pointing
 // it at an existing database would compare the emitter's output for that
 // database against the committed baseline for a different one.
-func verify(ctx context.Context, db *sql.DB, root, committed string) error {
-	if err := build(ctx, db, root); err != nil {
-		return fmt.Errorf("build from the committed migrations: %w", err)
+func verify(ctx context.Context, db *sql.DB, committed string) error {
+	// The empty-database precondition, ASSERTED rather than described.
+	//
+	// Pointing verify at a populated database compares the emitter's output for
+	// that database against the committed baseline for a different one, and
+	// reports a difference that means nothing -- a number that looks like a
+	// finding. The CI step works around it by creating its own scratch
+	// database, but nothing stopped a caller from not doing that, and the only
+	// statement of the requirement was a comment.
+	//
+	// The assertion is here rather than only in the comment because this file
+	// is the template for the PostgreSQL and MySQL verify modes: a comment does
+	// not survive being copied into another dialect, and an assertion does.
+	// Raised by cleat-review on cleat#2438.
+	var dbName string
+	var existing int
+	if err := db.QueryRowContext(ctx, `SELECT DB_NAME()`).Scan(&dbName); err != nil {
+		return fmt.Errorf("read the target database name: %w", err)
+	}
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM sys.tables
+		WHERE is_ms_shipped = 0 AND name <> 'schema_migrations'`).Scan(&existing); err != nil {
+		return fmt.Errorf("probe %q for existing tables: %w", dbName, err)
+	}
+	if existing != 0 {
+		return fmt.Errorf(
+			"verify needs an EMPTY database and %q already holds %d user table(s). It BUILDS "+
+				"into the database it is given, so a populated one would compare this database's "+
+				"emit against the committed baseline for another. Create a scratch database first",
+			dbName, existing)
+	}
+
+	// Build from the BASELINE FILES BY NAME, never from the migrations
+	// directory.
+	//
+	// The runner applies every numbered file in the dialect directory, and emit
+	// reads the live catalogue -- so building from `migrations` would fold the
+	// first future 004_*.sql into the regenerated 001, and this check would
+	// fail on a CORRECT tree, pointing at the generator when the cause is a
+	// legitimate migration. The convention says the next core change IS a new
+	// numbered file and that re-baselining is not per-change, so that is the
+	// first thing anyone following the convention would hit. A guard that goes
+	// red the first time someone does the right thing is worse than no guard,
+	// because it teaches people to ignore it.
+	//
+	// The check's subject is "is the committed 001 exactly what the generator
+	// produces", so the database it verifies against must be the baseline
+	// alone. Found by WS-1 reading this file before mirroring it for PostgreSQL.
+	staged, err := os.MkdirTemp("", "gen-mssql-baseline-verify-src-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(staged)
+	stagedDir := filepath.Join(staged, string(migration.DialectMSSQL))
+	if err := os.MkdirAll(stagedDir, 0o755); err != nil {
+		return err
+	}
+	for _, name := range baselineFiles {
+		b, err := os.ReadFile(filepath.Join(committed, name))
+		if err != nil {
+			return fmt.Errorf("read committed %s: %w", name, err)
+		}
+		if err := os.WriteFile(filepath.Join(stagedDir, name), b, 0o644); err != nil {
+			return err
+		}
+	}
+	if err := build(ctx, db, staged); err != nil {
+		return fmt.Errorf("build from the committed baseline: %w", err)
 	}
 
 	tmp, err := os.MkdirTemp("", "gen-mssql-baseline-verify-")
