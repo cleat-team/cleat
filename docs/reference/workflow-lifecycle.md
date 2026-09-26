@@ -740,8 +740,8 @@ marker the deadline sweep would later act on.
 - `IMPROVEMENT-PLAN.md` §3.75 — the durable record for the defer phase, and why the obvious
   designs are the wrong shape.
 - `docs/explanation/execution-engine.md` — how a segment executes.
-- `docs/troubleshooting.md` §6.2, "Engine Error Codes" — the runtime values of `error_code`, and
-  which of them are retried automatically.
+- `docs/troubleshooting.md`, the "Engine Error Codes" section — the runtime values of `error_code`,
+  and which of them are retried automatically.
   **Not** `docs/reference/error-codes.md`, which this line pointed at until 2026-09-25: that file is
   the `cleat vet` *static-analysis* catalog (`E001`–`E021`, determinism violations found before a run
   exists). The two share a word and nothing else.
