@@ -269,11 +269,16 @@ ones. If a test fails, check:
 ### Step 1: Run the tenant roles migration
 
 Apply migration 009, which creates the `create_tenant_role` and
-`drop_tenant_role` PostgreSQL functions:
+`drop_tenant_role` PostgreSQL functions. Migrations are applied by the worker,
+which exits once they are done — there is no `cleat migrate` subcommand:
 
 ```bash
-cleat migrate up
+cleat-worker --migrate-only --db "$CLEAT_DATABASE_URL"
 ```
+
+`--migrate-on-start` migrates and then keeps running instead, for a single node.
+See [upgrading.md](../../operations/upgrading.md) for the shape each deployment
+uses.
 
 This adds:
 
@@ -288,21 +293,33 @@ This adds:
 
 ### Step 2: Enable tenant roles (opt-in)
 
-The per-tenant DB path is opt-in. Set the `--tenant-roles` flag on the worker
-to enable it:
+The per-tenant DB path is opt-in, and it is a worker **flag**, not a config key.
+Enable it with `--tenant-isolation=role`:
 
-```json
-{
-  "tenant_roles": {
-    "enabled": true,
-    "default_max_connections": 5,
-    "pool_eviction_ttl": "15m"
-  }
-}
+```bash
+cleat-worker --driver=postgres --tenant-isolation=role \
+  --tenant-role-secret-file /etc/cleat/tenant-role-key
 ```
 
-Without this flag, the worker continues to use the existing single-role
-connection pool. Existing tenants continue to work unchanged.
+`--tenant-isolation` defaults to `rls`. The `role` value is PostgreSQL only, and
+`--tenant-role-secret-file` is **required** with it — a worker given `role` and
+no usable secret refuses to start rather than falling back silently.
+
+> **Corrected 2026-09-26.** This step prescribed a `--tenant-roles` flag, shown
+> as a JSON config block with `default_max_connections` and `pool_eviction_ttl`
+> keys. None of the three exists: no binary defines `--tenant-roles`, and
+> nothing reads a `tenant_roles` config key —
+> `grep -rn 'tenant-roles' --include='*.go' .` returns nothing, and outside
+> this document no file in the tree mentions it at all — which is why nothing
+> else ever failed on it.
+>
+> It survived because it is prose: `cmd/cleat/documented_cli_surface_test.go`
+> reads only fenced blocks, and `documented_flags_and_codes_test.go` reads flags
+> only inside a fenced invocation whose line begins with `cleat-worker`. A flag
+> named in a sentence is inside neither scan.
+
+Without `--tenant-isolation=role`, the worker continues to use the existing
+single-role connection pool. Existing tenants continue to work unchanged.
 
 > **Steps 3, 4 and 5 are not implemented, and the `cleat tenant …` commands they show do not
 > exist.** `cleat tenant provision-role`, `cleat tenant enable-plugin` and
@@ -385,14 +402,11 @@ SELECT * FROM tenant_a1b2c3.some_table;  -- ERROR: permission denied for schema
 
 ### Rollback: disable tenant roles
 
-If issues arise, disable tenant roles:
+If issues arise, disable tenant roles by dropping `--tenant-isolation=role`
+(the default is `rls`) and restarting the worker:
 
-```json
-{
-  "tenant_roles": {
-    "enabled": false
-  }
-}
+```bash
+cleat-worker --driver=postgres --tenant-isolation=rls
 ```
 
 The worker falls back to the owner connection for all queries. This is a
@@ -415,7 +429,7 @@ DROP ROLE cleat_tenant_<uuid>;
 
 ### For Go plugin migration
 
-- [ ] `plugin.json` passes `cleat plugin validate`
+- [ ] `plugin.json` passes `cleat plugin validate --manifest plugin.json`
 - [ ] Generated `host_functions.gen.go` compiles with `go build ./...`
 - [ ] Hand-written JSON parsing removed
 - [ ] Hand-written input/output type structs removed (replaced by generated)
@@ -432,15 +446,16 @@ DROP ROLE cleat_tenant_<uuid>;
 
 ### For tenant isolation migration
 
-- [ ] Migration 009 applied: `cleat migrate up`
+- [ ] Migration 009 applied: `cleat-worker --migrate-only --db "$CLEAT_DATABASE_URL"`
 - [ ] Tenant roles created for all existing tenants
 - [ ] Plugin access granted for each tenant's enabled plugins
 - [ ] ~~`cleat tenant list` shows all tenants with roles~~ — no such command; see the note under
       Step 3. There is no `cleat tenant` command tree, so this cannot be checked as written
 - [ ] `cleat plugin list` shows all installed plugins correctly
 - [ ] Cross-tenant access test passes (tenant A can't see tenant B's data)
-- [ ] Worker starts successfully with `--tenant-roles` flag
-- [ ] Rollback plan tested (disable `--tenant-roles`, confirm everything works)
+- [ ] Worker starts successfully with `--tenant-isolation=role` and a readable
+      `--tenant-role-secret-file`
+- [ ] Rollback plan tested (drop `--tenant-isolation=role`, confirm everything works)
 
 ---
 
@@ -476,11 +491,11 @@ If the generated code has issues:
 
 ### Tenant isolation rollback
 
-The tenant roles system is opt-in. To disable:
+The tenant roles system is opt-in. To disable it, stop passing
+`--tenant-isolation=role` (or set it to the default, `rls`):
 
-```json
-// In worker config:
-{ "tenant_roles": { "enabled": false } }
+```bash
+cleat-worker --driver=postgres --tenant-isolation=rls
 ```
 
 The worker reverts to using the owner connection. The tenant roles remain in

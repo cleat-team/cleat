@@ -54,7 +54,6 @@ var docBaseline = map[string]string{
 	// knows what each was meant to do; see the note above.
 	"docs/contributor/design/cleat-execution-design.md|cleat schedules": "possibly a stale plural of `cleat schedule`",
 	"docs/contributor/plugins/plugin-migration-guide.md|cleat tenant":   "`cleatctl drop-tenant` is the nearest real command",
-	"docs/contributor/plugins/plugin-migration-guide.md|cleat migrate":  "the same absent subcommand the upgrade runbook had",
 	"docs/contributor/plugins/plugin-security.md|cleat config":          "no config subcommand on either binary",
 	"examples/third-party-plugin/README.md|cleat workflow":              "no workflow subcommand on either binary",
 
