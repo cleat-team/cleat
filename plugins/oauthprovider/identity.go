@@ -192,8 +192,43 @@ func (p *Plugin) githubVerifiedEmail(ctx context.Context, accessToken, emailsURL
 	return selectGitHubVerifiedEmail(body)
 }
 
-// identityAllowed reports whether id may sign in to (tenant, provider) under
-// the rows currently in oauth_allowed_identities.
+// allowedIdentity is the allowlist ROW that admitted a login: the identity type
+// and value an operator wrote, normalised the same way the comparison
+// normalises them.
+//
+// It is returned rather than a bare bool because a minted key has to record
+// which row let its owner in (see oauthIdentityTag). Reporting only "allowed"
+// would leave nothing to revoke BY: design item 4 removes an identity's live
+// keys when its allowlist row goes, and a key that does not name the row it
+// came from cannot be found by that deletion.
+type allowedIdentity struct {
+	Type  string
+	Value string
+}
+
+// oauthIdentityTag renders an admit into the value stored on
+// admin.tenant_api_keys.oauth_identity.
+//
+// ONE function, used by the mint path and by the revoke path. The revoke
+// matches this column by exact string equality, so if the two sides rendered a
+// tag even slightly differently -- a case difference, a different separator --
+// the delete would silently match nothing and the keys it meant to kill would
+// keep authenticating until they expired on their own. Sharing the function is
+// what makes that impossible rather than merely tested for.
+//
+// The shape is design v2's, verbatim: "<provider>:<identity>", with the subject
+// kind spelled out, because an address and a subject are different namespaces
+// that could otherwise collide as strings -- "github:alice@example.com" for an
+// address, "oidc:subject:110169..." for a subject.
+func oauthIdentityTag(provider string, m allowedIdentity) string {
+	if m.Type == identityTypeSubject {
+		return provider + ":subject:" + m.Value
+	}
+	return provider + ":" + m.Value
+}
+
+// identityAllowed reports WHICH row of oauth_allowed_identities admits id, and
+// whether any does.
 //
 // The rows are read and COMPARED IN GO rather than matched in SQL, and that is
 // the one design decision in this function worth stating. The stored value is
@@ -205,18 +240,18 @@ func (p *Plugin) githubVerifiedEmail(ctx context.Context, accessToken, emailsURL
 // normalizeEmail/normalizeSubject to both sides costs nothing measurable and
 // keeps the comparison rule in one place, in Go, where it is unit-tested.
 //
-// An empty result is NOT "admit" -- it is "no row matches", and the caller
-// decides what that means. finishLogin asks UNCONDITIONALLY: cleat#2371 removed
-// the oauth_config.allowlist_enabled opt-in that used to gate the call, so
-// "no rows" denies rather than admits, on every deployment.
+// No match is NOT "admit" -- it is "no row matches", and the caller decides
+// what that means. finishLogin asks UNCONDITIONALLY: cleat#2371 removed the
+// oauth_config.allowlist_enabled opt-in that used to gate the call, so "no
+// rows" denies rather than admits, on every deployment.
 //
 // Read that together with the paragraph above. The table still has no writer in
 // cleat -- every row is hand-written -- so a tenant that has just configured
 // OAuth cannot sign anyone in until an operator inserts a row for them. That is
 // the intended fail-closed behaviour (cleat#2340 design v1 section 2, "no escape
-// hatch"), not an oversight; what it implies for a default install is a
-// separate question from what the gate should do, and is tracked in cleat#2340.
-func (p *Plugin) identityAllowed(ctx context.Context, tid uuid.UUID, provider string, id resolvedIdentity) (bool, error) {
+// hatch"), not an oversight; the allowlist CLI that gives that sentence a
+// happier ending is part of the same work.
+func (p *Plugin) identityAllowed(ctx context.Context, tid uuid.UUID, provider string, id resolvedIdentity) (allowedIdentity, bool, error) {
 	// The tenant is the one the state row named, exactly as in finishLogin's
 	// UPDATE: this runs on an unauthenticated callback, so the value in hand is
 	// the only reliable one.
@@ -228,7 +263,7 @@ func (p *Plugin) identityAllowed(ctx context.Context, tid uuid.UUID, provider st
 			WHERE tenant_id = $1 AND provider = $2
 		`, p.dialect), tid, provider)
 	if err != nil {
-		return false, err
+		return allowedIdentity{}, false, err
 	}
 	defer rows.Close()
 
@@ -238,7 +273,7 @@ func (p *Plugin) identityAllowed(ctx context.Context, tid uuid.UUID, provider st
 	for rows.Next() {
 		var identityType, identity string
 		if err := plugin.ScanRow(rows, &identityType, &identity); err != nil {
-			return false, err
+			return allowedIdentity{}, false, err
 		}
 		switch strings.TrimSpace(identityType) {
 		case identityTypeEmail:
@@ -246,16 +281,16 @@ func (p *Plugin) identityAllowed(ctx context.Context, tid uuid.UUID, provider st
 				continue
 			}
 			if normalizeEmail(identity) == email {
-				return true, nil
+				return allowedIdentity{Type: identityTypeEmail, Value: email}, true, nil
 			}
 		case identityTypeSubject:
 			if subject == "" {
 				continue
 			}
 			if normalizeSubject(identity) == subject {
-				return true, nil
+				return allowedIdentity{Type: identityTypeSubject, Value: subject}, true, nil
 			}
 		}
 	}
-	return false, rows.Err()
+	return allowedIdentity{}, false, rows.Err()
 }

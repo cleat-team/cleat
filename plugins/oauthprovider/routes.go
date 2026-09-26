@@ -813,7 +813,7 @@ func (p *Plugin) finishLogin(
 	// list" are deliberately the same answer: a second column saying which of
 	// the two it is can only disagree with the table it is meant to describe,
 	// and nothing reading that table could tell the difference either.
-	allowed, aerr := p.identityAllowed(ctx, tid, provider, id)
+	admit, allowed, aerr := p.identityAllowed(ctx, tid, provider, id)
 	if aerr != nil {
 		p.logger.Error("oauth: allowlist lookup", "provider", provider, "tenant", tid, "error", aerr)
 		p.writeError(w, http.StatusInternalServerError, "failed to evaluate the identity allowlist")
@@ -901,6 +901,11 @@ func (p *Plugin) finishLogin(
 		"provider", provider,
 		"tenant", tid,
 		"email", id.Email,
+		// Which allowlist ROW admitted this login. An operator reading a
+		// login through to why it was allowed needs to know whether it was
+		// the address or the subject that matched -- the two are separate
+		// rows they may have written months apart.
+		"admitted_as", admit.Type,
 	)
 
 	p.writeJSON(w, http.StatusOK, map[string]any{
