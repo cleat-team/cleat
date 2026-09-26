@@ -231,6 +231,101 @@ func TestDiffCatchesADroppedForce(t *testing.T) {
 	}
 }
 
+// TestDiffCatchesAPartitionedParentsDifference is the known-positive for the
+// snapshot's relkind coverage, and it exists because cleat#2059 partitions
+// event_history.
+//
+// A partitioned TABLE is relkind 'p'; its partition children are 'r'. While the
+// snapshot filtered on 'r' alone it saw every child and not the parent, so the
+// parent's own primary key, indexes, policies and FORCE flag were never
+// compared. That is not a small gap here: partitioning FORCES the primary key
+// to change -- PostgreSQL requires the partition key to be covered by every
+// unique constraint, which is why event_history_pkey moves to
+// (tenant_id, workflow_id, step) -- so a harness blind to the parent is blind
+// to the single difference the step exists to produce, and the design doc's
+// acceptance criterion ("identical catalogs apart from the intended
+// partitioning and PK change") is unverifiable in exactly the direction that
+// flatters it.
+//
+// Observed on the real trees before the fix: the 64 partitions and their grants
+// appeared as 2624 + 448 added lines, and public.event_history itself appeared
+// only as 44 REMOVALS. The parent's PK change was nowhere in the diff.
+//
+// Proven as a true known-positive by putting the filter back to 'r': the
+// snapshot assertion below fails, and the diff comes back empty.
+func TestDiffCatchesAPartitionedParentsDifference(t *testing.T) {
+	if postgresAdminDSN() == "" {
+		t.Skip("CLEAT_TEST_POSTGRES/CLEAT_TEST_DB not set, skipping")
+	}
+
+	// Same table and same two partitions on both sides. The ONLY difference is
+	// a parent-level attribute no child carries, so a pass here cannot be the
+	// children talking.
+	build := func(force bool) *sql.DB {
+		db := scratchPostgresDB(t)
+		stmts := []string{
+			`CREATE TABLE partition_probe (
+			     id integer NOT NULL,
+			     tenant_id uuid NOT NULL,
+			     payload text
+			 ) PARTITION BY HASH (tenant_id)`,
+			`CREATE TABLE partition_probe_p0 PARTITION OF partition_probe
+			     FOR VALUES WITH (MODULUS 2, REMAINDER 0)`,
+			`CREATE TABLE partition_probe_p1 PARTITION OF partition_probe
+			     FOR VALUES WITH (MODULUS 2, REMAINDER 1)`,
+			`ALTER TABLE partition_probe ENABLE ROW LEVEL SECURITY`,
+		}
+		if force {
+			stmts = append(stmts, `ALTER TABLE partition_probe FORCE ROW LEVEL SECURITY`)
+		}
+		for _, s := range stmts {
+			if _, err := db.Exec(s); err != nil {
+				t.Fatalf("building the partitioned fixture: %v", err)
+			}
+		}
+		return db
+	}
+
+	forced := snapshotOrFatal(t, build(true))
+	unforced := snapshotOrFatal(t, build(false))
+
+	// The direct form of the question, which fails with the filter back at 'r'
+	// even before any diff is taken.
+	// Look the parent up by NAME, not as "public.partition_probe". The tables
+	// this test creates land in whatever schema the connection's search_path
+	// resolves, which is a property of the environment and not of the thing
+	// under test -- that is the harness's own rule, applied to itself.
+	//
+	// It DID hardcode `public`, passed locally, and failed on CI:
+	//
+	//   the snapshot does not contain the partitioned parent
+	//   public.partition_probe (it holds 32 tables)
+	//
+	// The 32 tables were there; the name was in another schema. Asserting the
+	// schema as well as the schema-relative fact is the same mistake the
+	// migration guard this package feeds exists to catch.
+	parentKey := ""
+	for k := range forced.Tables {
+		if strings.HasSuffix(k, ".partition_probe") {
+			parentKey = k
+			break
+		}
+	}
+	if parentKey == "" {
+		t.Fatalf("the snapshot contains no partitioned parent named partition_probe (it holds %d tables); "+
+			"a partitioned table is relkind 'p' and is being skipped", len(forced.Tables))
+	}
+
+	diff := Diff(forced, unforced)
+	if len(diff) == 0 {
+		t.Fatal("known-positive did not fire: dropping FORCE on a partitioned PARENT produced an EMPTY diff -- the harness is comparing the children and not the parent")
+	}
+	if !anyLineContains(diff, "partition_probe ROWSECURITY") {
+		t.Fatalf("diff is non-empty (%d lines) but none is about the parent's ROWSECURITY -- the known-positive fired for the wrong reason:\n%s",
+			len(diff), joinLines(diff))
+	}
+}
+
 // TestNeitherScratchDatabaseContainsAPluginObject is the precondition check
 // docs/schema-partitioning-design.md requires be run, not assumed, before
 // any Diff between two databases is trusted: "Plugins run against neither

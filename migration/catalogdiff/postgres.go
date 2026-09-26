@@ -28,11 +28,23 @@ func snapshotPostgres(ctx context.Context, db *sql.DB) (*Catalog, error) {
 		schema, name                string
 		relrowsecurity, relforcerls bool
 	}
+	// 'p' as well as 'r': a PARTITIONED TABLE is relkind 'p', and its children
+	// are 'r'. Filtering on 'r' alone sees every partition and not the parent --
+	// so the parent's own primary key, indexes, policies and FORCE flag are
+	// never compared while the partition rows around them are. That is not a
+	// gap in coverage so much as a blind spot aimed at the one change that
+	// motivates partitioning: a diff between a plain table and a partitioned
+	// one reads as "the table was dropped", with no line about its key.
+	//
+	// Found on cleat#2059: with the filter at 'r', the 64 new partitions and
+	// their grants appeared (2624 + 448 lines) and public.event_history itself
+	// appeared only as 44 REMOVALS -- the parent's PK change, the entire point
+	// of the step, was invisible. See TestDiffCatchesAPartitionedParentsDifference.
 	rows, err := db.QueryContext(ctx, `
 		SELECT c.oid, n.nspname, c.relname, c.relrowsecurity, c.relforcerowsecurity
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE c.relkind = 'r'
+		WHERE c.relkind IN ('r', 'p')
 		  AND n.nspname NOT IN ('pg_catalog', 'information_schema')
 		ORDER BY 1
 	`)
