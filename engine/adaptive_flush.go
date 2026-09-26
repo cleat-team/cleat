@@ -446,7 +446,7 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 			promise_name, promise_id, promise_result, promise_error,
 			payload, created_at, checksum, tenant_id, payload_encoding
 		FROM jsonb_populate_recordset(NULL::event_history, $1::jsonb), cfg
-		ON CONFLICT (workflow_id, step) DO UPDATE
+		ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE
 			SET response = EXCLUDED.response, error = EXCLUDED.error,
 				promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,
 				checksum = EXCLUDED.checksum, payload = EXCLUDED.payload, payload_encoding = EXCLUDED.payload_encoding,
@@ -695,7 +695,7 @@ func retryBatchFlush(ctx context.Context, af *AdaptiveFlusher, eventsJSON []byte
 				promise_name, promise_id, promise_result, promise_error,
 				payload, created_at, checksum, tenant_id, payload_encoding
 			FROM jsonb_populate_recordset(NULL::event_history, $1::jsonb), cfg
-			ON CONFLICT (workflow_id, step) DO UPDATE
+			ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE
 				SET response = EXCLUDED.response, error = EXCLUDED.error,
 					promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,
 					checksum = EXCLUDED.checksum, payload = EXCLUDED.payload, payload_encoding = EXCLUDED.payload_encoding,

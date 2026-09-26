@@ -320,7 +320,7 @@ const insertEventSQL = `
 	WHERE ($32 = '' OR EXISTS (
 		SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $32 AND generation = $33
 	))
-	ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error,
+	ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error,
 		promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,
 		checksum = EXCLUDED.checksum, payload = EXCLUDED.payload, payload_encoding = EXCLUDED.payload_encoding,
 		event_type = EXCLUDED.event_type

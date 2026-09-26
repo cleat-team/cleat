@@ -899,7 +899,7 @@ END $do$;
 DO $do$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_pkey'
                    AND conrelid = 'event_history'::regclass) THEN
-        ALTER TABLE ONLY event_history
+        ALTER TABLE event_history
             ADD CONSTRAINT event_history_pkey PRIMARY KEY (tenant_id, workflow_id, step);
     END IF;
 END $do$;

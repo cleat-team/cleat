@@ -228,8 +228,9 @@ func TestAReplayConsumedSignalDoesNotBreakTheChecksumChain(t *testing.T) {
 				}
 				// The whole tail, exactly as the worker passes it -- including
 				// events recordEvent already flushed inline. The insert is
-				// ON CONFLICT (workflow_id, step) DO UPDATE, so re-offering
-				// one is tolerated and does not overwrite its checksum.
+				// ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE, so
+				// re-offering one is tolerated and does not overwrite its
+				// checksum.
 				if err := store.AppendEventHistoryBatch(ctx, wfID, s.history[loaded:]); err != nil {
 					t.Fatalf("segment-end persist: %v", err)
 				}

@@ -56,7 +56,7 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 				promise_name, promise_id, promise_result, promise_error, payload,
 				created_at, checksum, tenant_id, payload_encoding)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
-			ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error,
+			ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error,
 			promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,
 			checksum = EXCLUDED.checksum, payload = EXCLUDED.payload, payload_encoding = EXCLUDED.payload_encoding,
 			event_type = EXCLUDED.event_type
@@ -139,7 +139,7 @@ func (s *PostgresStore) appendOneEvent(ctx context.Context, tx *sql.Tx, workflow
 			promise_name, promise_id, promise_result, promise_error, payload,
 			created_at, checksum, tenant_id, payload_encoding)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
-		ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error,
+		ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error,
 			promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,
 			checksum = EXCLUDED.checksum, payload = EXCLUDED.payload, payload_encoding = EXCLUDED.payload_encoding,
 			event_type = EXCLUDED.event_type

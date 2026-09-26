@@ -470,6 +470,29 @@ PARTITIONED_TABLE = "event_history"
 PARTITION_BUCKETS = 64
 OLD_PK = "PRIMARY KEY (workflow_id, step)"
 NEW_PK = "PRIMARY KEY (tenant_id, workflow_id, step)"
+# The PK move's other half, and the reason the generator has to carry it: an
+# `ON CONFLICT` arbiter must match a unique index, and on a partitioned table
+# that index must cover the partition key. The two routine bodies in 003 are
+# dumped verbatim from the UNPARTITIONED chain, so they name the old arbiter and
+# would ship a baseline whose own procedures fail every batch flush:
+#
+#   ERROR: there is no unique or exclusion constraint matching the
+#          ON CONFLICT specification (42P10)
+#
+# Not a hand-edit to 003. 003 is GENERATED, so a hand-edit has no conflict
+# surface and the next regeneration silently reverts it -- the failure survives
+# review precisely because the file that was reviewed is not the file that ships.
+#
+# Matched as a CLAUSE and asserted as a PROPERTY, never as a string. The first
+# draft was `body.replace(OLD, NEW)` plus a residue scan for OLD, and it had a
+# hole that a green run hid completely: narrow the search text to one site's
+# spelling and the replace moves that site, the residue scan looks for the same
+# narrowed text and finds none, and the generator exits 0 having emitted a
+# baseline whose other procedure still names the old arbiter. Measured
+# 2026-09-26 by mutating OLD_CONFLICT to the flush_event_step spelling -- 003
+# line 131 moved, line 28 did not, rc=0. Reading the column list is
+# spelling-independent, which is the whole point of the check.
+CONFLICT_RE = re.compile(r"ON CONFLICT\s*\(([^)]*)\)")
 
 
 def routine_name(body: str) -> str:
@@ -710,6 +733,95 @@ def main(src, outdir):
         if OLD_PK not in cs[hit[0]]:
             raise SystemExit("PK is not %r: %r" % (OLD_PK, cs[hit[0]]))
         cs[hit[0]] = cs[hit[0]].replace(OLD_PK, NEW_PK)
+
+        # ...and drop ONLY from that same statement. pg_dump emits
+        # `ALTER TABLE ONLY <t> ADD CONSTRAINT <t>_pkey ...` for every table,
+        # which is harmless on an ordinary one -- but on a PARTITIONED table
+        # ONLY suppresses the recursion to the partitions. The unique index is
+        # then created on the parent ALONE, no partition carries a matching
+        # one, and the table cannot serve any ON CONFLICT at all, whichever
+        # arbiter it names:
+        #
+        #   pq: there is no unique or exclusion constraint matching the
+        #       ON CONFLICT specification (42P10)
+        #
+        # Measured 2026-09-26 with the arbiter held constant: as shipped,
+        # 42P10 on both; after re-adding the identical constraint without
+        # ONLY, err=<nil> and event_history_p0 gains a unique index. Nothing
+        # else differed between the two readings. That the OLD arbiter fails
+        # the same way is what identifies this as a separate defect rather
+        # than a symptom of the arbiter rewrite -- and it is why the arbiter
+        # change is inert until this line is right.
+        only_pat = re.compile(r"ALTER TABLE ONLY\s+%s\b" % PARTITIONED_TABLE)
+        cs[hit[0]], n_only = only_pat.subn("ALTER TABLE %s" % PARTITIONED_TABLE,
+                                           cs[hit[0]])
+        if n_only != 1:
+            raise SystemExit(
+                "expected exactly one 'ALTER TABLE ONLY %s' in the %s_pkey entry; "
+                "found %d" % (PARTITIONED_TABLE, PARTITIONED_TABLE, n_only))
+
+        # Every routine body that names an arbiter moves with the PK, for the
+        # same 42P10 reason. Gated on PARTITION because the rewrite is only
+        # correct WITH the new PK: against the unpartitioned schema the old
+        # (workflow_id, step) target is the one that matches a unique index, and
+        # `ON CONFLICT (tenant_id, workflow_id, step)` would fail instead.
+        def add_tenant(m):
+            cols = m.group(1).strip()
+            if "tenant_id" in cols:
+                return m.group(0)
+            return "ON CONFLICT (tenant_id, %s)" % cols
+
+        seen = 0
+        for kind in ("FUNCTION", "PROCEDURE"):
+            bodies = buckets.get(kind, [])
+            for i, b in enumerate(bodies):
+                moved, n = CONFLICT_RE.subn(add_tenant, b)
+                if n:
+                    seen += n
+                    bodies[i] = moved
+        if seen == 0:
+            raise SystemExit(
+                "no 'ON CONFLICT (...)' arbiter found in any routine body; the "
+                "rewrite did not fire on a tree it was written for")
+
+        # The same predicate, re-applied to the result -- and it is not a
+        # restatement of the count above. `seen` says the rewrite ran; this says
+        # it covered every clause, and the two come apart exactly when a clause
+        # reaches the file in a shape the substitution handles differently from
+        # the scan. That is not hypothetical: see the CONFLICT_RE note.
+        short = [(kind, m.group(0), b.strip().split("\n")[0][:70])
+                 for kind in ("FUNCTION", "PROCEDURE")
+                 for b in buckets.get(kind, [])
+                 for m in CONFLICT_RE.finditer(b)
+                 if "tenant_id" not in m.group(1)]
+        if short:
+            raise SystemExit(
+                "%d arbiter(s) in routine bodies still omit tenant_id, which a "
+                "partitioned event_history refuses with 42P10:\n  %s"
+                % (len(short), "\n  ".join("%s: %r in %s" % s for s in short)))
+
+        # A THIRD check, and it exists only because the two above share one
+        # anchor. Both use CONFLICT_RE, so narrowing that regex narrows the
+        # substitution and the residue scan together and neither can notice --
+        # measured 2026-09-26: with CONFLICT_RE narrowed to the flush_event_step
+        # spelling, that site moved, the residue scan looked for the narrowed
+        # text, found none, and the generator exited 0 on a baseline whose other
+        # procedure still named the old arbiter. Counting the bare KEYWORD is
+        # different code from matching the clause, which is what makes the
+        # coverage claim falsifiable rather than a restatement of itself.
+        #
+        # It also subsumes the `ON CONFLICT ON CONSTRAINT <name>` form, which
+        # carries no column list and which CONFLICT_RE cannot see: keywords=1,
+        # covered=0.
+        for kind in ("FUNCTION", "PROCEDURE"):
+            for b in buckets.get(kind, []):
+                keywords = b.count("ON CONFLICT")
+                covered = len(CONFLICT_RE.findall(b))
+                if keywords != covered:
+                    raise SystemExit(
+                        "%d 'ON CONFLICT' keyword(s) but %d clause(s) matched by "
+                        "CONFLICT_RE in:\n  %s"
+                        % (keywords, covered, b.strip().split("\n")[0][:70]))
 
     # GRANTs naming functions the baseline does NOT create. pg_dump emits an ACL
     # for every object in the database, including the ones an EXTENSION owns --

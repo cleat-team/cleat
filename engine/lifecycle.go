@@ -275,8 +275,8 @@ func (s *execSession) recordEvent(rec EventRecord) eventPersistence {
 			// happened to be written. cleat#1717.
 			//
 			// RETRYING IS SAFE HERE BECAUSE A RE-INSERT IS NOT A DOUBLE WRITE.
-			// insertEventSQL is ON CONFLICT (workflow_id, step) DO UPDATE with
-			// a WHERE that cannot fire (see its doc), so an attempt that
+			// insertEventSQL is ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE
+			// with a WHERE that cannot fire (see its doc), so an attempt that
 			// committed and lost its acknowledgement replays as zero rows
 			// affected -- and afterFencedInsert answers zero rows by asking
 			// Heartbeat whether the fence still holds, which it does, so the
