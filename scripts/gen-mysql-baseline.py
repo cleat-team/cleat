@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+"""Generate a compacted migration baseline from a mysqldump of the CURRENT chain.
+
+The dump is the RESOLVED final state: every ALTER already applied, every routine
+already at its last definition, every index already where its migration put it.
+That sidesteps the "four of ten routines are redefined, take the LAST" trap by
+construction rather than by reading 70 files and hoping.
+
+cleat#2422, MySQL half (cleat#2433). Mirrors scripts/gen-postgres-baseline.py
+deliberately, including the 002 refusal, which is the one defect from the
+PostgreSQL half that is worth carrying across as a warning rather than
+re-learning.
+
+Reads:  argv[1] = `mysqldump --no-data --routines --triggers --skip-comments` of
+                  a database built from the chain being compacted
+Writes: argv[2]/001_schema.sql, 002_defaults.sql, 003_procedures.sql
+
+How to run it, end to end -- this is what makes the baseline re-derivable from
+the repo rather than a trusted artifact:
+
+    # 1. Build a database from the chain. Apply it the way every other consumer
+    #    does -- migration.NewRunner over migrations/mysql/, which is what a
+    #    worker does at boot and what engine/testutil does in tests.
+    #      CREATE DATABASE cleat_src CHARACTER SET utf8mb4;
+    #      (then let the runner apply all 70 files)
+    # 2. Dump its resolved state. The flags are part of the procedure:
+    #      --no-data       YES. A catalog dump carries no rows, so 002 cannot be
+    #                      generated from it -- see the refusal at the bottom.
+    #      --skip-comments YES. mysqldump's own header carries the server
+    #                      version and the dump TIME, which would make the
+    #                      generator's output nondeterministic.
+    #      --no-tablespaces, --single-transaction  YES, both.
+    mysqldump -uroot -p"$PW" --no-data --routines --triggers --skip-comments \
+              --no-tablespaces --single-transaction cleat_src > /tmp/dump.sql
+    # 3. Compact:
+    python3 scripts/gen-mysql-baseline.py /tmp/dump.sql migrations/mysql
+
+Step 3 is the cheap half. What decides whether the result is EQUIVALENT is the
+differential: migration/catalogdiff compares a database built from the chain
+against one built from the baseline. MySQL's acceptance is STRICTER than
+PostgreSQL's -- there is no intended delta here, MySQL stays unpartitioned and
+single-tenant, so the expected diff is EXACTLY EMPTY with no carve-out
+(acceptance 2026-09-26, section 1).
+
+Three things this generator rewrites, each of which it ASSERTS it matched. A
+rewrite that silently matches nothing emits a baseline that applies cleanly and
+is quietly wrong, which is the failure mode this whole file exists to avoid:
+
+  1. DEFINER. The chain contains NO `DEFINER=` anywhere -- measured, 0 across
+     all 70 files, comment-stripped. mysqldump nonetheless EMITS one, because
+     MySQL stores an implicit definer (the creating account) for every routine
+     and every trigger. Measured on a real build: both objects came back as
+     `root@%`. Left in, the baseline pins an account that need not exist on the
+     target, and fails to apply there.
+     It appears in TWO syntactic forms, which is why one check is not enough:
+         CREATE DEFINER=`root`@`%` PROCEDURE ...
+         /*!50003 CREATE*/ /*!50017 DEFINER=`root`@`%`*/ /*!50003 TRIGGER ...
+     Both are stripped, and the output is asserted to contain neither.
+
+  2. The builder's session settings. mysqldump bakes its own `sql_mode`,
+     `collation_connection`, `character_set_client` and `TIME_ZONE` into the
+     file. None is cleat's intent; all are properties of whichever container
+     ran the dump. Acceptance section 4.1 asks whether a baseline depends on a
+     session setting the builder happens to supply -- for a dump-shaped
+     generator the answer is yes, and these are where.
+
+  3. Idempotence shape. mysqldump emits `DROP TABLE IF EXISTS t; CREATE TABLE t`,
+     which is destructive-then-create. The chain is `CREATE TABLE IF NOT
+     EXISTS`, which is a no-op on an existing database. The baseline keeps the
+     chain's shape, because re-appliability is asserted separately
+     (acceptance 1.6) and a DROP/CREATE baseline cannot satisfy it on a
+     non-empty database.
+
+What it does NOT rewrite, and the decision is deliberate rather than an
+omission: the explicit `COLLATE=utf8mb4_0900_ai_ci` that mysqldump puts on all
+30 tables. The chain specifies COLLATE in exactly one file, so the dump is
+adding it to 29 -- but the LIVE database has that collation, so a baseline
+without it would differ from the chain and the differential would name it. The
+rule the differential enforces is the tiebreak: reproduce the resolved state,
+and let the A/B diff decide what is intent. (It is also utf8mb4's default on
+MySQL 8, so it pins a value the supported server already uses.)
+"""
+
+import os
+import re
+import sys
+
+# What this generator can say about 002 without overwriting it. See the refusal
+# next to where it is written -- inherited from the PostgreSQL generator, where
+# an unconditional write replaced the real 002 on 2026-09-26 and the catalog
+# diff reported EMPTY, because a missing ROW is invisible to a structural diff.
+PLACEHOLDER_002 = (
+    "-- cleat MySQL default data (002)\n"
+    "-- HAND-ASSEMBLED: a catalog dump carries no rows. cleat#2433.\n"
+)
+
+# mysqldump's session preamble and footer. Removed wholesale: every statement
+# in them sets a session variable the builder happened to have, and the
+# `@OLD_*` restores at the end have nothing to restore in a fresh apply.
+# mysqldump writes the terminator both as `*/;` and as `*/ ;` -- the per-routine
+# block uses the spaced form, so a pattern that insists on `*/;` silently leaves
+# every one of those in place.
+SET_STMT = re.compile(r"^[ \t]*/\*!\d+\s+SET\b.*?\*/[ \t]*;?[ \t]*$", re.M | re.S)
+SET_STMT_INLINE = re.compile(r"\s*/\*!\d+\s+SET\b.*?\*/;", re.S)
+
+# `DROP TABLE IF EXISTS \`t\`;` immediately before its CREATE -- replaced by the
+# chain's IF NOT EXISTS form.
+DROP_TABLE = re.compile(r"DROP\s+TABLE\s+IF\s+EXISTS\s+`([^`]+)`\s*;\s*", re.I)
+
+# The two syntactic forms of a dump-introduced definer.
+DEFINER_PLAIN = re.compile(r"\bDEFINER\s*=\s*`[^`]*`\s*@\s*`[^`]*`\s*", re.I)
+DEFINER_COND = re.compile(r"/\*!\d+\s+DEFINER\s*=\s*`[^`]*`\s*@\s*`[^`]*`\s*\*/", re.I)
+
+DELIMITER = "DELIMITER ;;"
+
+# MySQL's version-gated comment: /*!50003 sql */ means "run `sql` on 5.0.3+".
+# mysqldump wraps object DDL in it.
+VERSION_COMMENT = re.compile(r"/\*!\d*\s*(.*?)\*/", re.S)
+
+
+def unwrap_version_comments(text):
+    """Turn `/*!NNNNN sql */` into plain `sql`. Returns (text, count).
+
+    THIS IS LOAD-BEARING AND ITS ABSENCE IS INVISIBLE. migration/runner.go's
+    splitSQL treats ANY `/* ... */` as a comment and replaces it with a single
+    space -- it has no special case for the `/*!` form. mysqldump writes the
+    trigger as
+
+        /*!50003 CREATE*/ /*!50003 TRIGGER `t` BEFORE UPDATE … END */;;
+
+    so the splitter reduces the entire statement to whitespace, `flush()`
+    discards it as a fragment that is "only comments and whitespace", and the
+    baseline applies CLEANLY with no trigger at all.
+
+    Nothing reports it. catalogdiff reads no MySQL triggers (acceptance
+    section 0), so the differential is empty; the file applies; the count of
+    statements is nobody's assertion. The chain never uses this form -- it
+    writes `CREATE TRIGGER … END//` with its own DELIMITER -- so the version
+    comment is purely a dump artifact, and unwrapping restores the chain's
+    shape.
+    """
+    n = 0
+
+    def repl(m):
+        nonlocal n
+        n += 1
+        return " " + m.group(1) + " "
+
+    return VERSION_COMMENT.sub(repl, text), n
+
+
+def die(msg):
+    raise SystemExit(msg)
+
+
+def strip_session(text):
+    """Drop the builder's session settings, as whole statements only.
+
+    Statement-anchored on purpose. An inline sub would also delete the
+    `/*!50003 SET ... */` lines that sit *inside* a routine block, which is
+    where mysqldump parks the per-routine sql_mode -- and deleting those is
+    desired -- but it would equally eat a conditional comment that is part of
+    an object's own text. Counted and reported either way.
+    """
+    n_before = len(SET_STMT.findall(text))
+    out = SET_STMT.sub("", text)
+    return out, n_before
+
+
+def split_objects(text):
+    """Split a dump into (head, [object blocks]).
+
+    Splitting on mysqldump's own `DELIMITER ;;` is reliable where a semicolon
+    split is not: routine and trigger bodies contain semicolons, and the whole
+    reason mysqldump emits a DELIMITER directive is to say so. The head holds
+    the preamble and the CREATE TABLEs; each later chunk holds exactly one
+    routine or trigger, terminated by `DELIMITER ;`.
+    """
+    if DELIMITER not in text:
+        die("no 'DELIMITER ;;' in the dump: this does not look like a "
+            "mysqldump --routines --triggers output")
+    segments = text.split(DELIMITER)
+    head_parts = [segments[0]]
+    objects = []
+    for chunk in segments[1:]:
+        body, sep, after = chunk.partition("DELIMITER ;")
+        if not sep:
+            die("unterminated object block: a 'DELIMITER ;;' with no "
+                "matching 'DELIMITER ;'")
+        objects.append(body.strip())
+        # NOT discarded. mysqldump emits a table's triggers IMMEDIATELY AFTER
+        # that table, so the file is tables, an object, more tables, another
+        # object -- this generator's first version dropped `after`, and lost
+        # 11 of 30 tables. The count assertion below is what caught it.
+        head_parts.append(after)
+    return "\n".join(head_parts), objects
+
+
+def strip_definers(text):
+    """Remove both forms of the dump-introduced definer. Returns (text, count)."""
+    text, n1 = DEFINER_COND.subn("", text)
+    text, n2 = DEFINER_PLAIN.subn("", text)
+    return text, n1 + n2
+
+
+def split_tables(head):
+    """Return the list of CREATE TABLE statements in a dump's head section."""
+    # The head is preamble + `DROP TABLE IF EXISTS t;` + `CREATE TABLE t (...);`
+    # Repeatedly, in mysqldump's alphabetical order.
+    stmts = []
+    for m in re.finditer(r"CREATE\s+TABLE\s+`([^`]+)`", head, re.I):
+        start = m.start()
+        end = head.find("\n) ENGINE", start)
+        if end == -1:
+            die("no '\\n) ENGINE' after CREATE TABLE `%s` -- the dump's table "
+                "form is not what this generator models" % m.group(1))
+        end = head.find(";", end)
+        if end == -1:
+            die("unterminated CREATE TABLE `%s`" % m.group(1))
+        stmts.append((m.group(1), head[start:end + 1]))
+    return stmts
+
+
+def main(src, outdir):
+    text = open(src).read()
+
+    if "DEFINER" not in text:
+        # Not a refusal -- a dump of a chain with no routines/triggers is a
+        # legitimate input. But it must be SAID, because a generator whose
+        # strip silently ran on nothing is indistinguishable from one whose
+        # strip failed, and the assertion below would then pass vacuously.
+        print("note: the dump contains no DEFINER token at all, so the strip "
+              "below is vacuous on this input")
+
+    head, objects = split_objects(text)
+
+    # --- objects: triggers and routines -------------------------------------
+    # Order is forced: session settings out FIRST (so they are deleted rather
+    # than unwrapped into live `SET` statements), then the version comments
+    # unwrapped, then the definer -- which mysqldump puts INSIDE a version
+    # comment (`/*!50017 DEFINER=...*/`) and which only becomes matchable in
+    # its plain form once the comment is unwrapped.
+    proc_like, trig_like, other = [], [], []
+    definers_stripped = 0
+    unwrapped = 0
+    for obj in objects:
+        obj, _ = strip_session(obj)
+        obj, nu = unwrap_version_comments(obj)
+        unwrapped += nu
+        obj, n = strip_definers(obj)
+        definers_stripped += n
+        # The conditional-comment form hides the verb: mysqldump writes
+        # `/*!50003 CREATE*/ /*!50017 DEFINER=…*/ /*!50003 TRIGGER …`, so the
+        # verb and the noun are separated by a comment terminator and a naive
+        # `CREATE TRIGGER` search finds nothing.
+        flat = re.sub(r"/\*!\d+", "", obj)
+        flat = flat.replace("*/", " ")
+        if re.search(r"\bTRIGGER\b", flat, re.I):
+            trig_like.append(obj)
+        elif re.search(r"\b(PROCEDURE|FUNCTION|EVENT)\b", flat, re.I):
+            proc_like.append(obj)
+        else:
+            other.append(obj)
+
+    if other:
+        die("could not classify %d object block(s); first 200 chars:\n%s"
+            % (len(other), other[0][:200]))
+
+    procedures = "\n\n".join(
+        [DELIMITER + "\n" + o + "\nDELIMITER ;" for o in proc_like + trig_like])
+
+    # --- tables -------------------------------------------------------------
+    head, session_stmts = strip_session(head)
+    head, head_unwrapped = unwrap_version_comments(head)
+    unwrapped += head_unwrapped
+    tables = split_tables(head)
+    if not tables:
+        die("no CREATE TABLE found in the dump's head section")
+
+    table_names = [n for n, _ in tables]
+    if len(set(table_names)) != len(table_names):
+        dupes = sorted({n for n in table_names if table_names.count(n) > 1})
+        die("duplicate CREATE TABLE for: %s" % ", ".join(dupes))
+
+    # Idempotence shape: the chain's IF NOT EXISTS, not the dump's DROP+CREATE.
+    rendered = [
+        re.sub(r"^CREATE\s+TABLE\s+", "CREATE TABLE IF NOT EXISTS ", stmt,
+               flags=re.I)
+        for _, stmt in tables
+    ]
+
+    # ORDER-SAFE BY CONSTRUCTION, and this is the acceptance's preferred form
+    # (section 1.7) rather than a workaround.
+    #
+    # mysqldump emits tables ALPHABETICALLY. The chain creates them in
+    # DEPENDENCY order. So a dump's first table is `concurrency_keys`, which
+    # carries a foreign key to `workflow_instances` -- created far later -- and
+    # applying the baseline straight through fails 1824, "Failed to open the
+    # referenced table". Measured, not anticipated.
+    #
+    # The alternative is a topological sort of the tables, which is more code
+    # and fails on a cycle rather than tolerating one. This is the standard
+    # answer: with `foreign_key_checks = 0` MySQL creates a foreign key without
+    # requiring its target to exist yet, so the baseline's statement order
+    # stops mattering. mysqldump relies on exactly this.
+    #
+    # IT IS WRITTEN OUT RATHER THAN INHERITED. mysqldump's own
+    # `/*!40014 SET FOREIGN_KEY_CHECKS=0 */;` preamble is what strip_session
+    # removes, and the first version of this generator removed it -- turning a
+    # working dump into a baseline that could not apply. A session setting the
+    # builder supplied is a hazard; this one is the file's own requirement, and
+    # the difference is that this one is written here deliberately.
+    schema = (
+        "-- cleat MySQL consolidated schema (001)\n"
+        "-- GENERATED by scripts/gen-mysql-baseline.py from a mysqldump of a\n"
+        "-- database built from the numbered chain. Do not hand-edit: the next\n"
+        "-- regeneration silently reverts it. Add a new numbered migration.\n"
+        "--\n"
+        "-- Tables carry their indexes inline, which is how a dump resolves 39\n"
+        "-- CREATE INDEX and 111 ALTER TABLE statements in the chain.\n"
+        "--\n"
+        "-- CREATE TABLE IF NOT EXISTS guards idempotency, matching the chain's\n"
+        "-- shape. A re-run is a no-op.\n"
+        "--\n"
+        "-- FOREIGN_KEY_CHECKS is off for the body and restored after it: a dump\n"
+        "-- orders tables alphabetically, the chain orders them by dependency,\n"
+        "-- and this makes the baseline correct in either order.\n\n"
+        "SET FOREIGN_KEY_CHECKS = 0;\n\n"
+        + "\n\n".join(rendered) +
+        "\n\nSET FOREIGN_KEY_CHECKS = 1;\n")
+
+    # --- assertions ---------------------------------------------------------
+    # Each of these can fail, and each reports the number it decided on. A
+    # clean result here is evidence only because the same checks are known to
+    # fire -- see the known-positives in cleat#2433.
+    out_all = schema + "\n" + procedures
+    remaining = DEFINER_PLAIN.findall(out_all) + DEFINER_COND.findall(out_all)
+    if remaining:
+        die("DEFINER survived the strip (%d remaining); the baseline would pin "
+            "the builder's account" % len(remaining))
+
+    # A surviving version comment is a statement the runner will discard. This
+    # is the check that would have caught the trigger, had it existed before
+    # the unwrap -- see unwrap_version_comments for why its absence is silent.
+    leftover_version = re.findall(r"/\*!\d", out_all)
+    if leftover_version:
+        die("%d version comment(s) survived; the runner's splitSQL discards "
+            "/* ... */ wholesale, so these statements would vanish silently"
+            % len(leftover_version))
+
+    # ANCHORED TO LINE START, on purpose. The first version of this counted the
+    # phrase anywhere in the output, and the generated file's own header
+    # comment contains the sentence "CREATE TABLE IF NOT EXISTS guards
+    # idempotency" -- so it reported 31 for 30 tables and refused to write.
+    # A text search cannot tell a statement from prose ABOUT the statement, and
+    # the fix is to ask the question at the position a statement occupies.
+    n_create = len(re.findall(r"^CREATE TABLE IF NOT EXISTS", schema, re.M))
+    if n_create != len(tables):
+        die("emitted %d CREATE TABLE IF NOT EXISTS for %d tables"
+            % (n_create, len(tables)))
+
+    if session_stmts == 0 and "SET" in head:
+        die("the session-setting strip matched nothing, but the head still "
+            "mentions SET -- the pattern no longer models the dump")
+
+    os.makedirs(outdir, exist_ok=True)
+    open(f"{outdir}/001_schema.sql", "w").write(schema)
+    open(f"{outdir}/003_procedures.sql", "w").write(
+        "-- cleat MySQL stored procedures (003)\n"
+        "-- GENERATED by scripts/gen-mysql-baseline.py. Do not hand-edit.\n"
+        "--\n"
+        "-- A DEFINER clause is stripped here and the absence is asserted:\n"
+        "-- the chain declares none, and mysqldump adds one naming whichever\n"
+        "-- account ran the dump. See the generator's docstring.\n\n"
+        + procedures + "\n")
+
+    # BUT NEVER OVER AN EXISTING FILE. Inherited from the PostgreSQL generator,
+    # where this write was unconditional and replaced the real 002 -- the only
+    # carrier of the default rows -- on 2026-09-26. The A/B diff reported EMPTY
+    # (a missing row is invisible to a structural diff) and ~70 tests then
+    # failed on foreign keys to rows that no longer existed.
+    defaults = f"{outdir}/002_defaults.sql"
+    if os.path.exists(defaults):
+        with open(defaults) as fh:
+            existing = fh.read()
+        if existing.strip() != PLACEHOLDER_002.strip():
+            raise SystemExit(
+                "refusing to overwrite %s: it already carries content this "
+                "generator cannot produce (a catalog dump carries no rows).\n"
+                "Generate into an empty directory, or move that file aside "
+                "deliberately -- do not let this overwrite the seed." % defaults)
+    open(defaults, "w").write(PLACEHOLDER_002)
+
+    print("tables:            %d" % len(tables))
+    print("routines:          %d" % len(proc_like))
+    print("triggers:          %d" % len(trig_like))
+    print("DEFINER stripped:  %d" % definers_stripped)
+    print("version comments unwrapped: %d" % unwrapped)
+    print("session stmts cut: %d" % session_stmts)
+    print("wrote %s/001_schema.sql, 002_defaults.sql, 003_procedures.sql"
+          % outdir)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        raise SystemExit(__doc__)
+    main(sys.argv[1], sys.argv[2])
