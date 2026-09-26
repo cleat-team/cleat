@@ -829,6 +829,33 @@ def main(src, outdir):
                         "CONFLICT_RE in:\n  %s"
                         % (keywords, covered, b.strip().split("\n")[0][:70]))
 
+        # idx_event_history_tenant_wf is now EXACTLY the primary key, so drop it.
+        #
+        # It was not redundant before this change, and that is why it belongs
+        # here rather than in a cleanup: the old PK was (workflow_id, step), so a
+        # tenant-leading index was the only path that could prune by tenant. The
+        # PK move to (tenant_id, workflow_id, step) makes the index a duplicate
+        # of the PK's own -- same columns, same order -- on all 64 partitions,
+        # serving nothing the PK does not serve.
+        #
+        # Free to drop now and not later: 0.3.0 requires a fresh database, so
+        # this is a line in a baseline; removing it afterwards would be an
+        # ALTER on a partitioned table for no behavioural gain.
+        #
+        # Asserted both ways. A silent no-match leaves the duplicate in place and
+        # NOTHING would say so -- it is a valid index, the catalog diff compares
+        # structure on one side only, and the suite passes. A silent over-match
+        # would drop an index the cursor read depends on.
+        idx = buckets.get("INDEX", [])
+        hit_idx = [i for i, b in enumerate(idx) if "idx_event_history_tenant_wf" in b]
+        if len(hit_idx) != 1:
+            raise SystemExit(
+                "expected exactly one idx_event_history_tenant_wf index statement; "
+                "found %d" % len(hit_idx))
+        del idx[hit_idx[0]]
+        if any("idx_event_history_tenant_wf" in b for b in idx):
+            raise SystemExit("idx_event_history_tenant_wf still present after removal")
+
     # GRANTs naming functions the baseline does NOT create. pg_dump emits an ACL
     # for every object in the database, including the ones an EXTENSION owns --
     # and those are not in this file, because CREATE EXTENSION makes them. Named

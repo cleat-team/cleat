@@ -43,10 +43,14 @@ import (
 // 36-45x, and one reader polling the full read at 250ms would spend ~17% of a
 // core on a single stream.
 //
-// It needs no new index. (tenant_id, workflow_id, step) -- idx_event_history_tenant_wf,
-// which has existed since the table did -- is an exact prefix match for the
-// predicate, and EXPLAIN reports an index scan touching 2-3 buffers against a
-// 5000-row history with execution at 0.016-0.018 ms.
+// It needs no new index. (tenant_id, workflow_id, step) -- the primary key's
+// own index, event_history_pkey, since cleat#2059 moved the PK -- is an exact
+// prefix match for the predicate, and EXPLAIN reports an index scan touching
+// 2-3 buffers against a 5000-row history with execution at 0.016-0.018 ms.
+//
+// This used to name idx_event_history_tenant_wf, which was a separate index
+// over the same three columns. The PK move made it a duplicate, so 001 no
+// longer creates it. Same access path, named correctly.
 //
 // That last number is the one to design against rather than the query: a poll
 // measured 0.7-1.9 ms in Go against a 0.016 ms query, because on PostgreSQL the

@@ -1206,8 +1206,6 @@ CREATE INDEX IF NOT EXISTS idx_defs_tenant_name_version ON workflow_defs USING b
 
 CREATE INDEX IF NOT EXISTS idx_event_history_pending ON event_history USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
 
-CREATE INDEX IF NOT EXISTS idx_event_history_tenant_wf ON event_history USING btree (tenant_id, workflow_id, step);
-
 CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_keys USING btree (expires_at);
 
 CREATE INDEX IF NOT EXISTS idx_idempotency_workflow_id ON idempotency_keys USING btree (workflow_id);
