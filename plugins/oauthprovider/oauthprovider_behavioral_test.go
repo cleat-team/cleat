@@ -494,9 +494,17 @@ func setupTestPlugin(t *testing.T, store *fakeDBStore) (*Plugin, http.Handler) {
 	// WIRED HERE, AND THAT IS WHY THIS FAKE IS NOT EVIDENCE PRODUCTION WIRES
 	// IT: deleting Environment.MintOAuthAPIKey from cmd/cleat-worker's
 	// pluginEnv leaves every test in this package green, because this line puts
-	// one back. The wiring itself is observed by a boot test -- the same split
-	// a_booted_worker_wires_the_oauth_plugin_test.go documents for the host
-	// binding, and for the same reason.
+	// one back.
+	//
+	// THIS COMMENT USED TO SAY THE WIRING WAS OBSERVED BY A BOOT TEST, AND THAT
+	// WAS MEASURABLY FALSE. cleat#2412's review deleted the assignment and ran
+	// the package: 1206 pass, 0 fail, 2 skip -- the same result as deleting the
+	// revoke's assignment. No boot test witnessed either. One does now
+	// (TestABootedWorkerDisablesAnExpiredOAuthMintedKey, for the revoke, whose
+	// nil arm is silent by design and so would have degraded invisibly);
+	// MINT's wiring is still unobserved, which is cleat#2408 and why its nil
+	// guard is fail-LOUD -- a login refuses rather than completing with a
+	// credential nothing recorded.
 	p.mintOAuthAPIKey = func(_ context.Context, req plugin.MintOAuthAPIKeyRequest) (string, error) {
 		store.mu.Lock()
 		defer store.mu.Unlock()
