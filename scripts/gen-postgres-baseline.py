@@ -64,9 +64,10 @@ defaults would have overwritten the shipped baseline with a wrong one and nothin
 would have said so -- the tool and the artifact disagreeing about what "the
 baseline" is.
 
-`CLEAT_2059_PARTITION=0` still reproduces the pre-partitioning form. That form was
-the point while PR A and PR B were separate PRs: the partition was the ONE intended
-difference, so the differential was empty only without it.
+Setting `CLEAT_2059_PARTITION` to `0`, `false`, `no` or `off` -- any form a person
+actually writes -- still reproduces the pre-partitioning form. That form was the point
+while PR A and PR B were separate PRs: the partition was the ONE intended difference,
+so the differential was empty only without it.
 """
 import os
 import re
@@ -473,7 +474,12 @@ $$;
 # and the old (workflow_id, step) omits tenant_id. The doc records that this is
 # free "with no deployments", which is the same precondition as the rest of this
 # rebaseline.
-PARTITION = os.environ.get("CLEAT_2059_PARTITION", "1") != "0"
+# `not in` rather than `!= "0"`. A variable that READS `false` and ACTS true is the
+# same shape as a default that does not match its artifact, which is the defect this
+# gate was just fixed for -- so every form a person actually writes for "off" means
+# off. The original `== "1"` had the mirror trap: it made `true` mean off.
+PARTITION = os.environ.get("CLEAT_2059_PARTITION", "1").strip().lower() not in (
+    "", "0", "false", "no", "off")
 PARTITIONED_TABLE = "event_history"
 PARTITION_BUCKETS = 64
 OLD_PK = "PRIMARY KEY (workflow_id, step)"
@@ -629,8 +635,8 @@ def main(src, outdir):
     # ── event_history: hash-partition it ────────────────────────────
     # ON by default, because the committed baseline is partitioned: a generator
     # whose default output differs from the artifact it generates is a footgun.
-    # CLEAT_2059_PARTITION=0 reproduces the pre-partitioning form, which is what
-    # the switch was for while PR A and PR B were separate.
+    # Setting CLEAT_2059_PARTITION to 0/false/no/off reproduces the pre-partitioning
+    # form, which is what the switch was for while PR A and PR B were separate.
     #
     # The two are separate PRs because partitionING moves event_history's primary
     # key, and that is NOT a schema-only change. PostgreSQL needs a unique index
