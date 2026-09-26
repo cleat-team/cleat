@@ -47,12 +47,33 @@ import (
 // states the dependency even more directly than re-installing it did: the old
 // form could not fail if the migration were a no-op, and this cannot pass if
 // the policy is absent.
+// The lookup is deliberately NOT filtered on schemaname. It was, on
+// `schemaname = current_schema()`, and that predicate is a property of the
+// CONNECTION rather than of the schema the migrations built into:
+//
+//	SET search_path = cleat, public;  SELECT current_schema();   -- cleat
+//	SET search_path = public;         SELECT current_schema();   -- public
+//
+// PostgreSQL resolves current_schema() to the FIRST schema of search_path that
+// exists, and the default search_path is `"$user", public` -- so a deployment
+// connecting as a role called `cleat` resolves it to the (real, and empty-of-
+// policies) `cleat` schema, counts 0, and fails all five call sites, while the
+// same suite run as `postgres` resolves to `public` and passes. Measured in
+// this repo's WS-3 container, 2026-09-26: every one of its 22 policies lives in
+// `public`, none in any other schema, so the predicate was excluding exactly
+// the rows it was asked for and reporting their absence.
+//
+// Keying on the name alone also keeps this honest under --schema relocation,
+// which the baseline is written to support; hardcoding 'public' would pass here
+// and be wrong there. tablename+policyname is already unambiguous in this
+// database, which is what makes dropping the predicate safe rather than merely
+// convenient.
 func assertRLSPolicyExists(t *testing.T, db *sql.DB, table, policy string) {
 	t.Helper()
 	var n int
 	if err := db.QueryRow(
 		`SELECT count(*) FROM pg_policies
-		 WHERE schemaname = current_schema() AND tablename = $1 AND policyname = $2`,
+		 WHERE tablename = $1 AND policyname = $2`,
 		table, policy).Scan(&n); err != nil {
 		t.Fatalf("looking for policy %s on %s: %v", policy, table, err)
 	}

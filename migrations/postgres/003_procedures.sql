@@ -31,7 +31,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION finalize_workflow_status(p_workflow_id text, p_worker_id text, p_generation bigint, p_final_status text, p_result text, p_error_code text, p_error_op text, p_query_state jsonb, p_next_wake_at timestamp with time zone, p_notify_channel text) RETURNS boolean
+CREATE OR REPLACE FUNCTION finalize_workflow_status(p_workflow_id text, p_worker_id text, p_generation bigint, p_final_status text, p_result text, p_error_code text, p_error_op text, p_query_state jsonb, p_next_wake_at TIMESTAMPTZ, p_notify_channel text) RETURNS boolean
     LANGUAGE plpgsql
     AS $$
 DECLARE
@@ -138,6 +138,6 @@ $$;
 
 GRANT ALL ON FUNCTION batch_flush_events(p_events jsonb) TO cleat_app;
 
-GRANT ALL ON FUNCTION finalize_workflow_status(p_workflow_id text, p_worker_id text, p_generation bigint, p_final_status text, p_result text, p_error_code text, p_error_op text, p_query_state jsonb, p_next_wake_at timestamp with time zone, p_notify_channel text) TO cleat_app;
+GRANT ALL ON FUNCTION finalize_workflow_status(p_workflow_id text, p_worker_id text, p_generation bigint, p_final_status text, p_result text, p_error_code text, p_error_op text, p_query_state jsonb, p_next_wake_at TIMESTAMPTZ, p_notify_channel text) TO cleat_app;
 
 GRANT ALL ON FUNCTION flush_event_step(p_workflow_id text, p_step integer, p_event_type text, p_service text, p_operation text, p_request text, p_response text, p_error text, p_duration_ms bigint, p_signal_names text, p_timeout_ms bigint, p_signal_name text, p_signal_payload text, p_defer_description text, p_defer_id text, p_child_name text, p_child_input text, p_run_id text, p_new_input text, p_plugin_name text, p_plugin_func text, p_plugin_input text, p_plugin_output text, p_plugin_error text, p_promise_name text, p_promise_id text, p_promise_result text, p_promise_error text, p_payload jsonb, p_checksum text, p_tenant_id uuid) TO cleat_app;

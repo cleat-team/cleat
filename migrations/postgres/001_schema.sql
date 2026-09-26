@@ -30,6 +30,30 @@ BEGIN
     END IF;
 END $$;
 
+-- Correct the attributes if the role PRE-EXISTED with different ones. From 005,
+-- and it is here for the same reason the memberships below are: role attributes
+-- live in the CLUSTER, so a fresh database on a cluster that already has a
+-- cleat_app does not get them from the CREATE above -- that branch is skipped by
+-- IF NOT EXISTS, and nothing else would notice.
+--
+-- Only the differing case executes, deliberately (005's own note): asserting a
+-- value the CREATE branch just set makes this the first file to fail on managed
+-- PostgreSQL, where no true superuser exists and the ALTER would be a no-op
+-- refusal. A deployment that really did grant SUPERUSER to cleat_app still
+-- fails here, loudly, and should.
+DO $$
+DECLARE
+    r RECORD;
+BEGIN
+    SELECT rolsuper, rolcreatedb, rolcreaterole, rolbypassrls
+      INTO r FROM pg_roles WHERE rolname = 'cleat_app';
+
+    IF r.rolsuper     THEN ALTER ROLE cleat_app NOSUPERUSER;  END IF;
+    IF r.rolcreatedb  THEN ALTER ROLE cleat_app NOCREATEDB;   END IF;
+    IF r.rolcreaterole THEN ALTER ROLE cleat_app NOCREATEROLE; END IF;
+    IF r.rolbypassrls THEN ALTER ROLE cleat_app NOBYPASSRLS;  END IF;
+END $$;
+
 -- BYPASSRLS is the whole point of this one: the `global` claim strategy reads
 -- across tenants and needs the exemption. Only a superuser can grant it, so a
 -- deployment applying these files as a non-superuser gets the NOTICE and the
@@ -57,6 +81,15 @@ BEGIN
 END
 $$;
 
+-- From 077. A role comment is stored in pg_shdescription, which is CLUSTER-wide
+-- like pg_auth_members -- so no pg_dump of a database carries it and no
+-- per-database catalog diff can see its absence. Restored here for the same
+-- reason the memberships below are.
+COMMENT ON ROLE cleat_sweep IS
+    'Cross-tenant plugin sweeps (cleat#1490). Entered with SET LOCAL ROLE from '
+    'engine/plugindb_tenant.go; never connected to directly. Granted WITH '
+    'INHERIT FALSE so membership alone does not apply its policies.';
+
 -- The DEFAULT tenant's login role. Normally a tenant role is provisioned at
 -- runtime by admin.create_tenant_role, which derives its password from the
 -- worker's key -- but this file's own GRANTs below name it, so it has to exist
@@ -76,6 +109,42 @@ BEGIN
             LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
     END IF;
 END $$;
+
+-- ── Role memberships ────────────────────────────────────────────────────────
+-- From 077, the only migration that ever granted these. A role GRANT does not
+-- belong in a per-database dump, so the rebaseline had to carry it explicitly
+-- -- and dropping it is silent in exactly the way 077's own comment warns
+-- about one line further on: nothing in a catalog diff of the DATABASE can see
+-- a membership, because pg_auth_members is CLUSTER-wide.
+--
+-- Membership WITH INHERIT FALSE: enough to SET ROLE, not enough to match the
+-- sweep policy passively. This distinction is load-bearing and silent when got
+-- wrong -- measured, a plain GRANT lets the application role read all 400000
+-- rows with no error and the correct number of policies; WITH INHERIT FALSE
+-- returns 1000. PostgreSQL 16+.
+--
+-- `cleat_app` is the one the worker names: cmd/cleat-worker/setup.go does
+-- `SET LOCAL ROLE cleat_sweep` on the retention path, and without this membership
+-- that fails with 42501 `permission denied to set role "cleat_sweep"`.
+--
+-- The loop covers whatever cleat_tenant_% roles exist at this instant. On a
+-- fresh bootstrap that is the default tenant role just created above, which is
+-- exactly what 077 swept on a fresh database too -- so the rebaseline preserves
+-- the behaviour rather than narrowing it. (Roles a worker provisions later via
+-- admin.create_tenant_role are not covered, and never were: no migration after
+-- 077 granted this.)
+DO $$
+DECLARE
+    r record;
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cleat_app') THEN
+        EXECUTE 'GRANT cleat_sweep TO cleat_app WITH INHERIT FALSE';
+    END IF;
+    FOR r IN SELECT rolname FROM pg_roles WHERE rolname LIKE 'cleat_tenant\_%' LOOP
+        EXECUTE format('GRANT cleat_sweep TO %I WITH INHERIT FALSE', r.rolname);
+    END LOOP;
+END
+$$;
 
 
 CREATE SCHEMA IF NOT EXISTS admin;
@@ -105,7 +174,7 @@ CREATE SEQUENCE IF NOT EXISTS workflow_signals_id_seq
 CREATE TABLE IF NOT EXISTS admin.orgs (
     org_id uuid DEFAULT gen_random_uuid() NOT NULL,
     name text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS admin.plugin_tables (
@@ -120,34 +189,34 @@ CREATE TABLE IF NOT EXISTS admin.tenant_api_keys (
     tenant_id uuid NOT NULL,
     key_hash bytea NOT NULL,
     description text DEFAULT ''::text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    disabled_at timestamp with time zone,
-    expires_at timestamp with time zone,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    disabled_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
     oauth_identity text,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS admin.tenant_egress_allow (
     tenant_id uuid NOT NULL,
     host text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    disabled_at timestamp with time zone,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    disabled_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS admin.tenant_roles (
     tenant_id uuid NOT NULL,
     role_name text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    disabled_at timestamp with time zone,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    disabled_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS admin.tenants (
     tenant_id uuid DEFAULT gen_random_uuid() NOT NULL,
     name text NOT NULL,
     display_name text DEFAULT ''::text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     suspended boolean DEFAULT false NOT NULL,
     org_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL
 );
@@ -158,8 +227,8 @@ CREATE TABLE IF NOT EXISTS admin.workers (
     pid integer DEFAULT 0 NOT NULL,
     concurrency integer DEFAULT 0 NOT NULL,
     connection_budget integer DEFAULT 0 NOT NULL,
-    started_at timestamp with time zone DEFAULT now() NOT NULL,
-    last_heartbeat_at timestamp with time zone DEFAULT now() NOT NULL,
+    started_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    last_heartbeat_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     secret_key_versions text
 );
 
@@ -167,8 +236,8 @@ CREATE TABLE IF NOT EXISTS concurrency_keys (
     key_hash bytea NOT NULL,
     key_text text NOT NULL,
     workflow_id text NOT NULL,
-    acquired_at timestamp with time zone DEFAULT now() NOT NULL,
-    expires_at timestamp with time zone NOT NULL,
+    acquired_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
     tenant_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL
 );
 
@@ -178,9 +247,9 @@ CREATE TABLE IF NOT EXISTS deployment_secrets (
     name text NOT NULL,
     ciphertext text NOT NULL,
     key_version integer DEFAULT 1 NOT NULL,
-    disabled_at timestamp with time zone,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    disabled_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     CONSTRAINT ck_deployment_secrets_ciphertext_nonempty CHECK ((length(ciphertext) > 0)),
     CONSTRAINT ck_deployment_secrets_name_charset CHECK ((name ~ '^[A-Za-z0-9_.-]{1,128}$'::text))
 );
@@ -193,7 +262,7 @@ CREATE TABLE IF NOT EXISTS event_history (
     request text,
     response text,
     error text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     event_type text DEFAULT 'call'::text NOT NULL,
     duration_ms bigint,
     signal_names text,
@@ -221,7 +290,7 @@ CREATE TABLE IF NOT EXISTS event_history (
     thread_id text DEFAULT 'main'::text NOT NULL,
     local_step integer DEFAULT 0 NOT NULL,
     global_seq bigint DEFAULT 0 NOT NULL,
-    intent_at timestamp with time zone,
+    intent_at TIMESTAMPTZ,
     payload_encoding smallint
 );
 
@@ -231,8 +300,8 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
     key_hash bytea NOT NULL,
     workflow_id text NOT NULL,
     error_msg text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    expires_at timestamp with time zone DEFAULT (now() + '7 days'::interval) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    expires_at TIMESTAMPTZ DEFAULT (now() + '7 days'::interval) NOT NULL,
     tenant_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL,
     def_name text,
     input_digest text
@@ -245,7 +314,7 @@ CREATE TABLE IF NOT EXISTS plugin_defs (
     version text NOT NULL,
     wasm_bytes bytea,
     config jsonb DEFAULT '{}'::jsonb NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     deprecated boolean DEFAULT false NOT NULL
 );
 
@@ -253,7 +322,7 @@ CREATE TABLE IF NOT EXISTS queue_holders (
     tenant_id uuid NOT NULL,
     queue_name text NOT NULL,
     workflow_id text NOT NULL,
-    expires_at timestamp with time zone NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
     worker_id text
 );
 
@@ -261,16 +330,16 @@ CREATE TABLE IF NOT EXISTS queue_rate_tokens (
     tenant_id uuid NOT NULL,
     queue_name text NOT NULL,
     workflow_id text NOT NULL,
-    expires_at timestamp with time zone NOT NULL
+    expires_at TIMESTAMPTZ NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS queues (
     tenant_id uuid NOT NULL,
     name text NOT NULL,
     concurrency_limit integer NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    disabled_at timestamp with time zone,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    disabled_at TIMESTAMPTZ,
     rate_limit integer,
     rate_period_seconds integer,
     worker_concurrency integer,
@@ -288,7 +357,7 @@ ALTER TABLE ONLY queues FORCE ROW LEVEL SECURITY;
 CREATE TABLE IF NOT EXISTS slack_workspace (
     team_id text NOT NULL,
     tenant_id uuid NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     CONSTRAINT ck_slack_workspace_team_id_length CHECK ((length(team_id) <= 32)),
     CONSTRAINT ck_slack_workspace_team_id_shape CHECK ((team_id ~ '^[TE][A-Z0-9]+$'::text))
 );
@@ -296,9 +365,9 @@ CREATE TABLE IF NOT EXISTS slack_workspace (
 CREATE TABLE IF NOT EXISTS tenant_domains (
     hostname text NOT NULL,
     tenant_id uuid NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    disabled_at timestamp with time zone,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    disabled_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     CONSTRAINT ck_tenant_domains_hostname_lowercase CHECK ((hostname = lower(hostname))),
     CONSTRAINT ck_tenant_domains_hostname_no_port CHECK ((POSITION((':'::text) IN (hostname)) = 0)),
     CONSTRAINT ck_tenant_domains_hostname_nonempty CHECK ((length(hostname) > 0))
@@ -311,9 +380,9 @@ CREATE TABLE IF NOT EXISTS tenant_secrets (
     name text NOT NULL,
     ciphertext text NOT NULL,
     key_version integer DEFAULT 1 NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
-    disabled_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    disabled_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     CONSTRAINT ck_tenant_secrets_ciphertext_nonempty CHECK ((length(ciphertext) > 0)),
     CONSTRAINT ck_tenant_secrets_name_charset CHECK ((name ~ '^[A-Za-z0-9_.-]{1,128}$'::text))
 );
@@ -325,10 +394,10 @@ CREATE TABLE IF NOT EXISTS tenant_settings (
     wasm_instance_timeout_ms bigint,
     wasm_wall_clock_ceiling_ms bigint,
     host_retry_budget_ms bigint,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     max_workflow_duration_ms bigint,
-    disabled_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    disabled_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     CONSTRAINT ck_tenant_settings_instance_timeout_positive CHECK (((wasm_instance_timeout_ms IS NULL) OR (wasm_instance_timeout_ms > 0))),
     CONSTRAINT ck_tenant_settings_retry_budget_positive CHECK (((host_retry_budget_ms IS NULL) OR (host_retry_budget_ms > 0))),
     CONSTRAINT ck_tenant_settings_wall_clock_positive CHECK (((wasm_wall_clock_ceiling_ms IS NULL) OR (wasm_wall_clock_ceiling_ms > 0))),
@@ -343,16 +412,16 @@ CREATE TABLE IF NOT EXISTS workflow_defs (
     wasm_bytes bytea NOT NULL,
     entry_points text[] DEFAULT '{}'::text[] NOT NULL,
     min_version integer DEFAULT 0 NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     max_history_length integer DEFAULT 0 NOT NULL,
     dag_spec jsonb,
     tenant_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL,
     task_queue text DEFAULT 'default'::text NOT NULL,
     abi_version integer DEFAULT 1 NOT NULL,
     plugin_deps jsonb DEFAULT '{}'::jsonb NOT NULL,
-    disabled_at timestamp with time zone,
+    disabled_at TIMESTAMPTZ,
     gc_eligible boolean DEFAULT false NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
 );
 
 ALTER TABLE ONLY workflow_defs FORCE ROW LEVEL SECURITY;
@@ -364,10 +433,10 @@ CREATE TABLE IF NOT EXISTS workflow_instances (
     status text DEFAULT 'ready'::text NOT NULL,
     input jsonb DEFAULT '{}'::jsonb NOT NULL,
     assigned_to text,
-    heartbeat_at timestamp with time zone,
-    next_wake_at timestamp with time zone DEFAULT now() NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    completed_at timestamp with time zone,
+    heartbeat_at TIMESTAMPTZ,
+    next_wake_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    completed_at TIMESTAMPTZ,
     cancellation_requested boolean DEFAULT false NOT NULL,
     cancellation_reason text,
     result jsonb,
@@ -382,7 +451,7 @@ CREATE TABLE IF NOT EXISTS workflow_instances (
     tenant_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL,
     task_queue text DEFAULT 'default'::text NOT NULL,
     compaction_state jsonb,
-    compacted_at timestamp with time zone,
+    compacted_at TIMESTAMPTZ,
     compaction_step integer,
     plugin_vers jsonb DEFAULT '{}'::jsonb NOT NULL,
     event_count bigint DEFAULT 0 NOT NULL,
@@ -390,14 +459,14 @@ CREATE TABLE IF NOT EXISTS workflow_instances (
     priority integer DEFAULT 0 NOT NULL,
     generation bigint DEFAULT 0 NOT NULL,
     pending_terminal_status text,
-    defer_phase_deadline timestamp with time zone,
+    defer_phase_deadline TIMESTAMPTZ,
     continued_from text,
     signal_seq bigint DEFAULT 0 NOT NULL,
     signal_seq_at_claim bigint DEFAULT 0 NOT NULL,
     signal_consumed_seq bigint DEFAULT 0 NOT NULL,
     signal_consumed_at_claim bigint DEFAULT 0 NOT NULL,
     reclaim_count bigint DEFAULT 0 NOT NULL,
-    started_at timestamp with time zone,
+    started_at TIMESTAMPTZ,
     concurrency_key text,
     concurrency_key_hash bytea,
     run_wasm_instance_timeout_ms bigint,
@@ -405,7 +474,7 @@ CREATE TABLE IF NOT EXISTS workflow_instances (
     run_host_retry_budget_ms bigint,
     completed_by text,
     run_max_workflow_duration_ms bigint,
-    history_swept_at timestamp with time zone,
+    history_swept_at TIMESTAMPTZ,
     CONSTRAINT ck_wi_run_instance_timeout_positive CHECK (((run_wasm_instance_timeout_ms IS NULL) OR (run_wasm_instance_timeout_ms > 0))),
     CONSTRAINT ck_wi_run_max_workflow_duration_positive CHECK (((run_max_workflow_duration_ms IS NULL) OR (run_max_workflow_duration_ms > 0))),
     CONSTRAINT ck_wi_run_retry_budget_positive CHECK (((run_host_retry_budget_ms IS NULL) OR (run_host_retry_budget_ms > 0))),
@@ -418,7 +487,7 @@ CREATE TABLE IF NOT EXISTS workflow_memory_samples (
     id bigint NOT NULL,
     def_name text NOT NULL,
     sample_bytes bigint NOT NULL,
-    recorded_at timestamp with time zone DEFAULT now() NOT NULL,
+    recorded_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     tenant_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL
 );
 
@@ -429,7 +498,7 @@ CREATE TABLE IF NOT EXISTS workflow_memory_stats (
     mean_bytes double precision DEFAULT 0 NOT NULL,
     sample_count integer DEFAULT 0 NOT NULL,
     alpha double precision DEFAULT 0.3 NOT NULL,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     tenant_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL
 );
 
@@ -443,8 +512,8 @@ CREATE TABLE IF NOT EXISTS workflow_promises (
     status text DEFAULT 'pending'::text NOT NULL,
     result jsonb,
     error_msg text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    resolved_at timestamp with time zone,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    resolved_at TIMESTAMPTZ,
     tenant_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL
 );
 
@@ -455,10 +524,10 @@ CREATE TABLE IF NOT EXISTS workflow_routing (
     workflow_name text NOT NULL,
     target_version integer NOT NULL,
     weight real DEFAULT 1.0 NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     tenant_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL,
-    disabled_at timestamp with time zone,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    disabled_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     CONSTRAINT workflow_routing_weight_check CHECK (((weight >= (0)::double precision) AND (weight <= (1)::double precision)))
 );
 
@@ -470,10 +539,10 @@ CREATE TABLE IF NOT EXISTS workflow_schedules (
     entry_point text DEFAULT ''::text NOT NULL,
     cron_expression text NOT NULL,
     input jsonb DEFAULT '{}'::jsonb NOT NULL,
-    disabled_at timestamp with time zone,
-    next_run_at timestamp with time zone DEFAULT now() NOT NULL,
-    last_run_at timestamp with time zone,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    disabled_at TIMESTAMPTZ,
+    next_run_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    last_run_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     tenant_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL,
     timezone text DEFAULT 'UTC'::text NOT NULL,
     misfire_policy text DEFAULT 'catch_up'::text NOT NULL,
@@ -482,7 +551,7 @@ CREATE TABLE IF NOT EXISTS workflow_schedules (
     last_run_id text,
     idempotency_key text,
     request_digest text,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     CONSTRAINT ck_schedules_catch_up_limit CHECK ((catch_up_limit >= 0)),
     CONSTRAINT ck_schedules_misfire_policy CHECK ((misfire_policy = ANY (ARRAY['catch_up'::text, 'skip'::text]))),
     CONSTRAINT ck_schedules_overlap_policy CHECK ((overlap_policy = ANY (ARRAY['allow'::text, 'skip'::text])))
@@ -494,7 +563,7 @@ CREATE TABLE IF NOT EXISTS workflow_signals (
     workflow_id text NOT NULL,
     signal_name text NOT NULL,
     payload jsonb DEFAULT '{}'::jsonb NOT NULL,
-    delivered_at timestamp with time zone DEFAULT now() NOT NULL,
+    delivered_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     tenant_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL,
     id bigint NOT NULL
 );
@@ -505,10 +574,10 @@ CREATE TABLE IF NOT EXISTS workflow_tags (
     workflow_name text NOT NULL,
     version integer NOT NULL,
     tag text NOT NULL,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
     tenant_id uuid DEFAULT '00000000-0000-0000-0000-000000000000'::uuid NOT NULL,
-    disabled_at timestamp with time zone,
-    updated_at timestamp with time zone DEFAULT now() NOT NULL
+    disabled_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ DEFAULT now() NOT NULL
 );
 
 ALTER TABLE ONLY workflow_tags FORCE ROW LEVEL SECURITY;
@@ -523,8 +592,8 @@ CREATE TABLE IF NOT EXISTS workflow_update_requests (
     status text DEFAULT 'pending'::text NOT NULL,
     result jsonb,
     error_msg text,
-    created_at timestamp with time zone DEFAULT now() NOT NULL,
-    completed_at timestamp with time zone,
+    created_at TIMESTAMPTZ DEFAULT now() NOT NULL,
+    completed_at TIMESTAMPTZ,
     request_id text NOT NULL
 );
 
@@ -1042,7 +1111,7 @@ CREATE INDEX IF NOT EXISTS idx_workflow_signals_queue ON workflow_signals USING 
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_workflow_schedules_idempotency_key ON workflow_schedules USING btree (tenant_id, idempotency_key) WHERE (idempotency_key IS NOT NULL);
 
-CREATE OR REPLACE FUNCTION admin.claim_workflows(p_worker_id text, p_task_queues text[], p_limit integer) RETURNS TABLE(id text, def_name text, def_version integer, status text, input jsonb, assigned_to text, next_wake_at timestamp with time zone, tenant_id uuid, created_at timestamp with time zone, error_code text, error_op text, generation bigint, priority integer, trace_id text, pending_terminal_status text)
+CREATE OR REPLACE FUNCTION admin.claim_workflows(p_worker_id text, p_task_queues text[], p_limit integer) RETURNS TABLE(id text, def_name text, def_version integer, status text, input jsonb, assigned_to text, next_wake_at TIMESTAMPTZ, tenant_id uuid, created_at TIMESTAMPTZ, error_code text, error_op text, generation bigint, priority integer, trace_id text, pending_terminal_status text)
     LANGUAGE sql SECURITY DEFINER
     SET search_path FROM CURRENT
     AS $$
@@ -1271,7 +1340,7 @@ BEGIN
 END;
 $_$;
 
-CREATE OR REPLACE FUNCTION admin.get_due_schedules() RETURNS TABLE(name text, def_name text, entry_point text, cron_expression text, input jsonb, disabled_at timestamp with time zone, next_run_at timestamp with time zone, last_run_at timestamp with time zone, timezone text, tenant_id uuid, misfire_policy text, catch_up_limit integer, overlap_policy text, last_run_id text)
+CREATE OR REPLACE FUNCTION admin.get_due_schedules() RETURNS TABLE(name text, def_name text, entry_point text, cron_expression text, input jsonb, disabled_at TIMESTAMPTZ, next_run_at TIMESTAMPTZ, last_run_at TIMESTAMPTZ, timezone text, tenant_id uuid, misfire_policy text, catch_up_limit integer, overlap_policy text, last_run_id text)
     LANGUAGE sql SECURITY DEFINER
     SET search_path FROM CURRENT
     AS $$
