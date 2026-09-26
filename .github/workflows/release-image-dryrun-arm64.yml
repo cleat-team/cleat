@@ -41,7 +41,7 @@ jobs:
           platforms: arm64
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # Dockerfile's own `RUN /cleat-worker --verify-backend` (see Dockerfile
       # and scripts/verify-release-worker.sh) runs as part of this build, so
