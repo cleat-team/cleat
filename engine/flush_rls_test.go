@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
 	"strings"
 	"testing"
 
@@ -223,28 +222,36 @@ func TestEventFlushSucceedsAsOwner(t *testing.T) {
 // db.Conn pins one physical connection for the life of the returned handle, so
 // RESET ALL is guaranteed to undo the SET on the same session it was set on,
 // before Close returns that connection to the pool.
+// It used to read and execute migrations/postgres/005_app_role.sql. Since the
+// cleat#2059 rebaseline that file's role, attributes and grants all live in
+// 001_schema.sql, which SetupFullSchema applies, so the helper asserts rather
+// than installs.
+//
+// The leak TestApplyingTheAppRoleMigrationLeavesThePoolAlone watches for had its
+// source in 005's last line, `SET search_path = public`, which is session-scoped.
+// 001 carries no top-level SET at all -- the schema guard forbids one in any
+// migration file ("do not set search_path in a file at all. The runner owns it.").
+// The test is kept anyway and deliberately: it no longer guards 005, it guards
+// the BASELINE. If a future 001 or 002 ever sets search_path at the top level the
+// leak comes back, and this is the thing that notices. Retargeted, not retired.
 func applyAppRoleMigration(t *testing.T, db *sql.DB) {
 	t.Helper()
-	body, err := os.ReadFile("../migrations/postgres/005_app_role.sql")
-	if err != nil {
-		t.Fatalf("reading 005_app_role.sql: %v", err)
+	var roles, grants int
+	if err := db.QueryRow(`SELECT count(*) FROM pg_roles WHERE rolname = 'cleat_app'`).Scan(&roles); err != nil {
+		t.Fatalf("looking for the cleat_app role: %v", err)
 	}
-
-	ctx := context.Background()
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatalf("reserving a connection for 005_app_role.sql: %v", err)
+	if roles == 0 {
+		t.Fatalf("the cleat_app role does not exist. 001_schema.sql's roles preamble " +
+			"creates it, so either the baseline lost it or SetupFullSchema did not run")
 	}
-	defer conn.Close()
-
-	if _, err := conn.ExecContext(ctx, string(body)); err != nil {
-		t.Fatalf("applying 005_app_role.sql: %v", err)
+	if err := db.QueryRow(
+		`SELECT count(*) FROM information_schema.role_table_grants WHERE grantee = 'cleat_app'`,
+	).Scan(&grants); err != nil {
+		t.Fatalf("counting cleat_app's table privileges: %v", err)
 	}
-	// RESET ALL rather than `RESET search_path`: it undoes every session
-	// parameter the file set, so a future edit adding a second SET does not
-	// reintroduce this silently.
-	if _, err := conn.ExecContext(ctx, `RESET ALL`); err != nil {
-		t.Fatalf("resetting session state after 005_app_role.sql: %v", err)
+	if grants == 0 {
+		t.Fatalf("cleat_app holds no table privileges. 001_schema.sql grants them; " +
+			"without them this suite's RLS tests run as a role that cannot read anything")
 	}
 }
 

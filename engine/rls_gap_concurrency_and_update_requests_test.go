@@ -28,28 +28,70 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/cleat-team/cleat/engine/testutil"
 )
 
-// apply031RLSGapMigration reads and executes
-// migrations/postgres/031_rls_gap_concurrency_and_update_requests.sql
-// against db. Must be called with a superuser/owner connection, same
-// requirement as SetupFullSchema.
+// assertRLSPolicyExists fails unless table carries a policy called policy.
+//
+// This is how the applyXXX RLS helpers work since the cleat#2059 rebaseline.
+// They used to re-apply a specific numbered migration; the consolidated
+// baseline carries every one of those policies in 001_schema.sql, and
+// SetupFullSchema applies the whole directory, so there was nothing left to
+// apply -- and re-applying 001 wholesale is not safe, because it has no
+// IF NOT EXISTS on its CREATE SCHEMA and it now redefines every routine.
+//
+// What the call sites actually need is that the policy is THERE. Asserting that
+// states the dependency even more directly than re-installing it did: the old
+// form could not fail if the migration were a no-op, and this cannot pass if
+// the policy is absent.
+// The lookup is deliberately NOT filtered on schemaname. It was, on
+// `schemaname = current_schema()`, and that predicate is a property of the
+// CONNECTION rather than of the schema the migrations built into:
+//
+//	SET search_path = cleat, public;  SELECT current_schema();   -- cleat
+//	SET search_path = public;         SELECT current_schema();   -- public
+//
+// PostgreSQL resolves current_schema() to the FIRST schema of search_path that
+// exists, and the default search_path is `"$user", public` -- so a deployment
+// connecting as a role called `cleat` resolves it to the (real, and empty-of-
+// policies) `cleat` schema, counts 0, and fails all five call sites, while the
+// same suite run as `postgres` resolves to `public` and passes. Measured in
+// this repo's WS-3 container, 2026-09-26: every one of its 22 policies lives in
+// `public`, none in any other schema, so the predicate was excluding exactly
+// the rows it was asked for and reporting their absence.
+//
+// Keying on the name alone also keeps this honest under --schema relocation,
+// which the baseline is written to support; hardcoding 'public' would pass here
+// and be wrong there. tablename+policyname is already unambiguous in this
+// database, which is what makes dropping the predicate safe rather than merely
+// convenient.
+func assertRLSPolicyExists(t *testing.T, db *sql.DB, table, policy string) {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM pg_policies
+		 WHERE tablename = $1 AND policyname = $2`,
+		table, policy).Scan(&n); err != nil {
+		t.Fatalf("looking for policy %s on %s: %v", policy, table, err)
+	}
+	if n == 0 {
+		t.Fatalf("%s has no RLS policy named %s; 001_schema.sql should have installed "+
+			"one, so either the baseline lost it or SetupFullSchema did not run", table, policy)
+	}
+}
+
+// apply031RLSGapMigration used to read and execute
+// migrations/postgres/031_rls_gap_concurrency_and_update_requests.sql. That file
+// is part of the consolidated baseline now; this asserts what the call sites
+// need from it. Kept under its old name so the call sites still read as a
+// stated dependency on 031's fix.
 func apply031RLSGapMigration(t *testing.T, db *sql.DB) {
 	t.Helper()
-	path := filepath.Join("..", "migrations", "postgres", "031_rls_gap_concurrency_and_update_requests.sql")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	if _, err := db.Exec(string(data)); err != nil {
-		t.Fatalf("apply %s: %v", path, err)
-	}
+	assertRLSPolicyExists(t, db, "concurrency_keys", "tenant_isolation_concurrency_keys")
+	assertRLSPolicyExists(t, db, "workflow_update_requests", "tenant_isolation_update_requests")
 }
 
 // assertNotSuperuserBypass is the check CLAUDE.md asks be made explicit

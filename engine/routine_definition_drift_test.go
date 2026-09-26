@@ -2,6 +2,7 @@ package engine
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -358,10 +359,15 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 		// so losing the parse does. Measured 2026-09-04: postgres 9 distinct,
 		// mysql 2, mssql 2.
 		minRoutines int
+		// consolidated marks a dialect whose migrations are a generated baseline
+		// rather than a history. Postgres is, since cleat#2059: each routine is
+		// defined exactly once, so the supersession guard below is INVERTED for
+		// it rather than skipped. MySQL and SQL Server still carry their chains.
+		consolidated bool
 	}{
-		{testutil.DialectPostgres, filepath.Join("..", "migrations", "postgres"), 5},
-		{testutil.DialectMySQL, filepath.Join("..", "migrations", "mysql"), 1},
-		{testutil.DialectMSSQL, filepath.Join("..", "migrations", "mssql"), 2},
+		{testutil.DialectPostgres, filepath.Join("..", "migrations", "postgres"), 5, true},
+		{testutil.DialectMySQL, filepath.Join("..", "migrations", "mysql"), 1, false},
+		{testutil.DialectMSSQL, filepath.Join("..", "migrations", "mssql"), 2, false},
 	} {
 		t.Run(string(d.dialect), func(t *testing.T) {
 			defs := parseRoutineDefinitions(t, d.dialect, d.dir)
@@ -389,7 +395,37 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 					superseded++
 				}
 			}
-			if superseded == 0 {
+			if d.consolidated {
+				// INVERTED, not deleted, for a consolidated dialect. This guard
+				// exists because a supersession is what makes the
+				// latest-definition comparison mean anything. Once cleat#2059's
+				// rebaseline lands there is nothing to supersede BY
+				// CONSTRUCTION: 001_schema.sql is generated from a pg_dump of
+				// the fully-migrated database, so it carries each routine's LAST
+				// definition and no earlier one.
+				//
+				// The same property, read in the other direction, is still worth
+				// asserting -- and is now the stronger claim. A routine defined
+				// twice in a consolidated dialect is the BASELINE GROWING BACK a
+				// superseded definition, which is exactly what the consolidation
+				// exists to remove.
+				if superseded != 0 {
+					var names []string
+					for name, defs := range byName {
+						if len(defs) > 1 {
+							names = append(names, fmt.Sprintf("%s (%d)", name, len(defs)))
+						}
+					}
+					sort.Strings(names)
+					t.Fatalf("%s is CONSOLIDATED, but %d routine(s) are defined more than "+
+						"once: %s.\n\nA consolidated baseline carries each routine's last "+
+						"definition and nothing earlier, so a duplicate means a superseded "+
+						"definition has grown back. Fix the generation, not this guard.",
+						d.dir, superseded, strings.Join(names, ", "))
+				}
+				t.Logf("%s is consolidated: %d routine(s), none defined twice",
+					d.dialect, len(byName))
+			} else if superseded == 0 {
 				t.Fatalf("no routine in %s is defined more than once, so the "+
 					"latest-definition check has nothing to discriminate.\n\n"+
 					"On 2026-09-04 every dialect had at least one "+
@@ -573,7 +609,22 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 				}
 			}
 
-			if checkedDiscriminators == 0 {
+			if d.consolidated {
+				// A consolidated dialect supersedes nothing BY CONSTRUCTION, so
+				// nothing can reach the discriminator comparison and that is the
+				// correct outcome rather than a vacuous one -- the existence arm
+				// above still ran for all 14 routines.
+				//
+				// The guard is kept in the direction that can still fail: if a
+				// supersession ever reappears here and STILL nothing is checked,
+				// then the drop detection or the database query is swallowing
+				// cases, which is what this check exists to notice.
+				if superseded != 0 && checkedDiscriminators == 0 {
+					t.Errorf("%s is consolidated but %d routine(s) are superseded and none "+
+						"reached the discriminator comparison -- the drop-detection or the "+
+						"database query is swallowing cases.", d.dir, superseded)
+				}
+			} else if checkedDiscriminators == 0 {
 				t.Errorf("no routine reached the discriminator comparison, so this "+
 					"dialect's arm asserted only existence. %d routines parsed, %d "+
 					"superseded -- if those disagree the drop-detection or the "+

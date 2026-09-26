@@ -58,23 +58,20 @@ func tablesCreatedByMigrations(t *testing.T) []string {
 			seen[strings.ToLower(m[1])] = true
 		}
 	}
-	// A floor on the INPUT, not on the answer. If the path is wrong or the
-	// suffix filter stops matching, the loop reads nothing, the expected set is
-	// empty, and the comparison below reports every entry as an extra -- a loud
-	// failure, but one that blames the list rather than the reader. This blames
-	// the reader.
-	// A FLOOR on a growing population, which is safe where a census is not: the
-	// number of migrations only ever goes up, so a floor cannot rot the way the
-	// counts CLAUDE.md warns about do.
+	// A floor on the EXTRACTION, not on the file count, and the difference is
+	// the lesson. This said `files < 30`, with the note that "the number of
+	// migrations only ever goes UP, so a floor cannot rot the way the counts
+	// CLAUDE.md warns about do". cleat#2059's rebaseline makes it go DOWN, to
+	// three -- so the count rotted in the one direction the note promised was
+	// impossible, and this guard failed on a correct tree.
 	//
-	// 30, against 38 measured on 2026-09-11 (`ls migrations/postgres/*.sql | wc -l`).
-	// The first draft of this said 40 "because the schema is at version 57" --
-	// which is a different quantity: the version counter has gaps and is shared
-	// across dialects, so 57 numbers its way to 38 files. The floor fired on the
-	// first run and it was the floor that was wrong, not the tree.
-	if files < 30 {
-		t.Fatalf("read only %d .sql files from %s: the extraction is broken, "+
-			"not the list (38 on 2026-09-11)", files, dir)
+	// What has to be true is that the scan PRODUCED something. If the path or
+	// the suffix filter breaks, the extracted set is empty and the comparison
+	// below blames the list for every entry; this blames the reader. It cannot
+	// rot: it asks whether the extraction worked, not how many files exist today.
+	if files == 0 || len(seen) == 0 {
+		t.Fatalf("read %d .sql file(s) from %s and extracted %d table name(s): the "+
+			"extraction is broken, not the list", files, dir, len(seen))
 	}
 	var out []string
 	for name := range seen {

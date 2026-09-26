@@ -56,7 +56,15 @@ func TestMSSQLValidatesEveryPostgresJSONBColumn(t *testing.T) {
 			"changed and this guard is no longer reading it", len(pgTables), len(mssqlTables))
 	}
 
-	jsonbCol := regexp.MustCompile(`(?m)^\s+(\w+)\s+JSONB`)
+	// (?i) is load-bearing since the cleat#2059 rebaseline, and its absence was
+	// the first thing that broke here. The chain wrote the type as `JSONB`;
+	// 001_schema.sql is generated from a pg_dump, which writes `jsonb`. A
+	// case-sensitive pattern then matches nothing, `checked` stays 0, and the
+	// anti-vacuity guard below fires with "the parse is broken, not the schema".
+	//
+	// SQL type names are case-insensitive, so the parser should have been. The
+	// assertion this feeds is unchanged: it is the reading of it that was wrong.
+	jsonbCol := regexp.MustCompile(`(?im)^\s+(\w+)\s+JSONB`)
 
 	var missing []string
 	checked := 0

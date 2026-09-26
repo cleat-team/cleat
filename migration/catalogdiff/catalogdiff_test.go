@@ -167,15 +167,158 @@ func TestSnapshotExcludesTheRunnersOwnBootstrapTable(t *testing.T) {
 	}
 }
 
+// supersededFinalizeWorkflowStatus is finalize_workflow_status EXACTLY as
+// 004_fix_finalize_workflow_status_fence.sql shipped it -- the first version
+// that was correct enough to fence, and superseded by nine later redefinitions.
+//
+// 004 rather than 003 for a mechanical reason worth recording: 003 returns VOID
+// and the current routine returns BOOLEAN, and CREATE OR REPLACE cannot change a
+// return type --
+//
+//	pq: cannot change return type of existing function (42P13)
+//
+// so a VOID fixture would need a DROP first, which changes what the
+// known-positive is doing. 004 has the current signature, so installing it is a
+// plain replacement and the harness has a wrong body to catch, which is the
+// whole of what the design doc asks for.
+//
+// This known-positive is MANDATED by docs/schema-partitioning-design.md, and it
+// used to get its wrong-body fixture by re-executing the tree's own
+// 003_procedures.sql. That worked only while 003 held a SUPERSEDED body, which
+// it did: ten later migrations redefined the routine over it.
+//
+// The cleat#2059 rebaseline inverts that. The consolidated 003 is generated from
+// a pg_dump of the fully-migrated database, so it holds finalize_workflow_status's
+// LAST definition -- re-applying it changes nothing, the diff comes back EMPTY,
+// and the mandated known-positive cannot fire:
+//
+//	known-positive did not fire: reapplying 003_procedures.sql's superseded
+//	finalize_workflow_status body produced an EMPTY diff -- the harness cannot
+//	catch a wrong routine body, which is the design doc's first mandated
+//	known-positive
+//
+// Embedding the old body keeps the known-positive meaning what it says: a
+// deliberately WRONG routine body is installed and the harness must report it.
+// The fixture stops depending on the tree still carrying history, which after a
+// rebaseline it does not.
+const supersededFinalizeWorkflowStatus = `CREATE OR REPLACE FUNCTION finalize_workflow_status(
+    p_workflow_id      TEXT,
+    p_worker_id        TEXT,
+    p_generation       BIGINT,
+    p_final_status     TEXT,
+    p_result           TEXT,
+    p_error_code       TEXT,
+    p_error_op         TEXT,
+    p_query_state      JSONB,
+    p_next_wake_at     TIMESTAMPTZ,
+    p_notify_channel   TEXT
+) RETURNS BOOLEAN AS $$
+DECLARE
+    v_rows_updated INT;
+BEGIN
+    -- Update workflow status, fenced on (assigned_to, generation) so a
+    -- caller that no longer owns the workflow cannot modify it.
+    CASE p_final_status
+        WHEN 'done' THEN
+            UPDATE workflow_instances
+            SET status = 'done',
+                result = p_result::jsonb,
+                completed_at = now(),
+                assigned_to = NULL,
+                query_state = p_query_state
+            WHERE id = p_workflow_id
+              AND assigned_to = p_worker_id
+              AND generation = p_generation;
+
+        WHEN 'failed' THEN
+            UPDATE workflow_instances
+            SET status = 'failed',
+                error_msg = p_result,
+                error_code = p_error_code,
+                error_op = p_error_op,
+                completed_at = now(),
+                assigned_to = NULL,
+                query_state = p_query_state
+            WHERE id = p_workflow_id
+              AND assigned_to = p_worker_id
+              AND generation = p_generation;
+
+        WHEN 'ready' THEN
+            UPDATE workflow_instances
+            SET status = 'ready',
+                assigned_to = NULL,
+                next_wake_at = p_next_wake_at
+            WHERE id = p_workflow_id
+              AND assigned_to = p_worker_id
+              AND generation = p_generation;
+
+        ELSE
+            RAISE EXCEPTION 'finalize_workflow_status: unknown final status: %', p_final_status;
+    END CASE;
+
+    GET DIAGNOSTICS v_rows_updated = ROW_COUNT;
+
+    -- Terminal status side-effects -- only run if the fenced UPDATE above
+    -- actually matched this caller's (worker_id, generation). If it
+    -- matched zero rows, another worker now owns this workflow and none
+    -- of these effects (idempotency recording, parent wake, await_child
+    -- injection, event history deletion) are safe to apply on its behalf.
+    IF v_rows_updated > 0 AND (p_final_status = 'done' OR p_final_status = 'failed') THEN
+        -- Record idempotency outcome (before deleting events, since
+        -- the parent's await_child event references this workflow).
+        IF p_final_status = 'done' THEN
+            UPDATE idempotency_keys
+            SET result = p_result::jsonb
+            WHERE workflow_id = p_workflow_id;
+        ELSE
+            UPDATE idempotency_keys
+            SET error_msg = p_result
+            WHERE workflow_id = p_workflow_id;
+        END IF;
+
+        -- Wake parent workflow atomically.
+        UPDATE workflow_instances
+        SET next_wake_at = now()
+        WHERE id = (
+            SELECT parent_workflow_id FROM workflow_instances WHERE id = p_workflow_id
+        )
+        AND status IN ('ready', 'suspended');
+
+        -- Populate parent's await_child event result (reads from the
+        -- parent's events, not the child's, so this is safe to run
+        -- before deleting the child's events).
+        UPDATE event_history
+        SET response = p_result
+        WHERE workflow_id = (
+            SELECT parent_workflow_id FROM workflow_instances WHERE id = p_workflow_id
+        )
+        AND event_type = 'await_child'
+        AND run_id = p_workflow_id
+        AND (response IS NULL OR response = '');
+
+        -- Delete this workflow's events -- they are no longer needed
+        -- for replay once the workflow has reached a terminal state.
+        -- This keeps event_history bounded to active workflows only,
+        -- preventing unbounded table growth that slows per-step INSERTs.
+        DELETE FROM event_history WHERE workflow_id = p_workflow_id;
+    END IF;
+
+    -- Dispatch hint
+    IF p_notify_channel IS NOT NULL AND p_notify_channel != '' THEN
+        PERFORM pg_notify(p_notify_channel, '');
+    END IF;
+
+    RETURN v_rows_updated > 0;
+END;
+$$ LANGUAGE plpgsql;`
+
 // TestDiffCatchesAWrongRoutineBody is the design doc's first mandated
 // known-positive: "substitute 003's finalize_workflow_status body for 053's
-// and confirm it fails." migrations/postgres/003_procedures.sql's original
-// body is no longer authoritative (10 migrations have redefined the routine
-// since; see migrations/postgres/101_..., the current authoritative
-// definition) -- so reapplying 003's own file on top of a fully-migrated
-// database reintroduces exactly the old body as a live regression, which is
-// the same shape of mistake a bad compaction would make: shipping an
-// earlier, superseded definition.
+// and confirm it fails." The wrong body is applied from an explicit literal --
+// see supersededFinalizeWorkflowStatus -- and installing it on a fully-migrated
+// database reintroduces exactly an old definition as a live regression, which is
+// the same shape of mistake a bad compaction would make: shipping an earlier,
+// superseded definition.
 func TestDiffCatchesAWrongRoutineBody(t *testing.T) {
 	if postgresAdminDSN() == "" {
 		t.Skip("CLEAT_TEST_POSTGRES/CLEAT_TEST_DB not set, skipping")
@@ -184,12 +327,8 @@ func TestDiffCatchesAWrongRoutineBody(t *testing.T) {
 	cleanCat := snapshotOrFatal(t, clean)
 
 	broken := scratchPostgresDB(t)
-	oldBody, err := os.ReadFile(filepath.Join(postgresMigrationsDir(t), "postgres", "003_procedures.sql"))
-	if err != nil {
-		t.Fatalf("reading 003_procedures.sql: %v", err)
-	}
-	if _, err := broken.Exec(string(oldBody)); err != nil {
-		t.Fatalf("reapplying 003_procedures.sql's superseded body: %v", err)
+	if _, err := broken.Exec(supersededFinalizeWorkflowStatus); err != nil {
+		t.Fatalf("applying the superseded finalize_workflow_status body: %v", err)
 	}
 	brokenCat := snapshotOrFatal(t, broken)
 

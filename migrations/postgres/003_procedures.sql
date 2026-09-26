@@ -1,79 +1,51 @@
--- cleat consolidated stored procedures (003)
--- Combines: 012_finalize_workflow_segment_fn, 013_flush_event_step_fn,
---           014_cleanup_events_on_terminal, 016_batch_flush_events
+-- cleat consolidated procedures (003)
 --
--- finalize_workflow_status() is the final version from 014 (includes event
--- cleanup on terminal status, idempotency recording, parent wake, and FK drop).
--- flush_event_step() is a per-step event INSERT (from 013).
--- batch_flush_events() is the bulk variant using jsonb_populate_recordset (016).
+-- GENERATED from pg_get_functiondef via pg_dump, so each body is the LAST
+-- definition of that routine. cleat#2059.
 
--- Unqualified names below resolve through search_path, which migration.Runner
--- sets to the configured schema before applying this file (and which
--- deploy/postgres/100-apply-migrations.sh sets through PGOPTIONS on the psql
--- path). This file used to pin it to the literal `public` itself; see the
--- WithSchema comment in migration/runner.go for why that had to stop.
-
--- ── Drop FK on event_history (no longer needed; events are deleted on terminal) ─
-
-ALTER TABLE event_history DROP CONSTRAINT IF EXISTS fk_event_history_workflow;
-
--- ── Finalize workflow status ─────────────────────────────────────────────────
--- Updates the workflow instance status, records idempotency outcome, wakes
--- the parent workflow, populates the parent's await_child event result, deletes
--- events for terminal workflows, and dispatches a pg_notify hint.
--- Called within an existing transaction after events have been appended and
--- event_count has been incremented.
-
--- Drop before creating, for the same reason 004 does: this file declares
--- RETURNS VOID and 004 replaces it with RETURNS BOOLEAN, and PostgreSQL
--- rejects a return-type change through CREATE OR REPLACE with
---   ERROR: cannot change return type of existing function (42P13)
--- Re-applying the migration set to a database that already has 004's version
--- would otherwise fail here -- and re-applying is exactly what an operator
--- upgrading an existing deployment does. The files are advertised as
--- idempotent (docs/explanation/postgresql-schema.md) and
--- TestShippedSchema_IsIdempotent enforces it.
---
--- Dropping 004's version here is safe: 004 sorts after 003, so any run that
--- applies this file also re-applies 004 afterwards and the BOOLEAN version
--- with the fence guard is always the end state.
-DROP FUNCTION IF EXISTS finalize_workflow_status(
-    TEXT, TEXT, BIGINT, TEXT, TEXT, TEXT, TEXT, JSONB, TIMESTAMPTZ, TEXT
-);
-
-CREATE OR REPLACE FUNCTION finalize_workflow_status(
-    p_workflow_id      TEXT,
-    p_worker_id        TEXT,
-    p_generation       BIGINT,
-    p_final_status     TEXT,
-    p_result           TEXT,
-    p_error_code       TEXT,
-    p_error_op         TEXT,
-    p_query_state      JSONB,
-    p_next_wake_at     TIMESTAMPTZ,
-    p_notify_channel   TEXT
-) RETURNS VOID AS $$
+CREATE OR REPLACE FUNCTION batch_flush_events(p_events jsonb) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
 BEGIN
-    -- Update workflow status
+    INSERT INTO event_history (
+        workflow_id, step, event_type, service, operation,
+        request, response, error, duration_ms, signal_names,
+        timeout_ms, signal_name, signal_payload, defer_description,
+        defer_id, child_name, child_input, run_id, new_input,
+        plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+        promise_name, promise_id, promise_result, promise_error,
+        payload, created_at, checksum, tenant_id
+    )
+    SELECT
+        workflow_id, step, event_type, service, operation,
+        request, response, error, duration_ms, signal_names,
+        timeout_ms, signal_name, signal_payload, defer_description,
+        defer_id, child_name, child_input, run_id, new_input,
+        plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
+        promise_name, promise_id, promise_result, promise_error,
+        payload, created_at, checksum, tenant_id
+    FROM jsonb_populate_recordset(NULL::event_history, p_events)
+    ON CONFLICT (workflow_id, step) DO UPDATE
+        SET response = EXCLUDED.response, error = EXCLUDED.error
+        WHERE event_history.response = '' AND event_history.error IS NULL;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION finalize_workflow_status(p_workflow_id text, p_worker_id text, p_generation bigint, p_final_status text, p_result text, p_error_code text, p_error_op text, p_query_state jsonb, p_next_wake_at TIMESTAMPTZ, p_notify_channel text) RETURNS boolean
+    LANGUAGE plpgsql
+    AS $$
+DECLARE
+    v_rows_updated INT;
+BEGIN
+    -- Update workflow status, fenced on (assigned_to, generation) so a
+    -- caller that no longer owns the workflow cannot modify it.
     CASE p_final_status
         WHEN 'done' THEN
             UPDATE workflow_instances
             SET status = 'done',
                 result = p_result::jsonb,
                 completed_at = now(),
-                assigned_to = NULL,
-                query_state = p_query_state
-            WHERE id = p_workflow_id
-              AND assigned_to = p_worker_id
-              AND generation = p_generation;
-
-        WHEN 'failed' THEN
-            UPDATE workflow_instances
-            SET status = 'failed',
-                error_msg = p_result,
-                error_code = p_error_code,
-                error_op = p_error_op,
-                completed_at = now(),
+                completed_by = assigned_to,
                 assigned_to = NULL,
                 query_state = p_query_state
             WHERE id = p_workflow_id
@@ -84,7 +56,11 @@ BEGIN
             UPDATE workflow_instances
             SET status = 'ready',
                 assigned_to = NULL,
-                next_wake_at = p_next_wake_at
+                next_wake_at = CASE
+                                    WHEN signal_seq <> signal_seq_at_claim
+                                      OR signal_consumed_seq <> signal_consumed_at_claim
+                                    THEN now() ELSE p_next_wake_at END,
+                query_state = p_query_state
             WHERE id = p_workflow_id
               AND assigned_to = p_worker_id
               AND generation = p_generation;
@@ -93,20 +69,13 @@ BEGIN
             RAISE EXCEPTION 'finalize_workflow_status: unknown final status: %', p_final_status;
     END CASE;
 
-    -- Terminal status side-effects
-    IF p_final_status = 'done' OR p_final_status = 'failed' THEN
-        -- Record idempotency outcome (before deleting events, since
-        -- the parent's await_child event references this workflow).
-        IF p_final_status = 'done' THEN
-            UPDATE idempotency_keys
-            SET result = p_result::jsonb
-            WHERE workflow_id = p_workflow_id;
-        ELSE
-            UPDATE idempotency_keys
-            SET error_msg = p_result
-            WHERE workflow_id = p_workflow_id;
-        END IF;
+    GET DIAGNOSTICS v_rows_updated = ROW_COUNT;
 
+    -- Terminal status side-effects -- only run if the fenced UPDATE above
+    -- actually matched this caller's (worker_id, generation), and only for
+    -- 'done': a real failure never reaches this procedure (cleat#1973), so
+    -- there is no 'failed' case left to guard here.
+    IF v_rows_updated > 0 AND p_final_status = 'done' THEN
         -- Wake parent workflow atomically.
         UPDATE workflow_instances
         SET next_wake_at = now()
@@ -114,18 +83,6 @@ BEGIN
             SELECT parent_workflow_id FROM workflow_instances WHERE id = p_workflow_id
         )
         AND status IN ('ready', 'suspended');
-
-        -- Populate parent's await_child event result (reads from the
-        -- parent's events, not the child's, so this is safe to run
-        -- before deleting the child's events).
-        UPDATE event_history
-        SET response = p_result
-        WHERE workflow_id = (
-            SELECT parent_workflow_id FROM workflow_instances WHERE id = p_workflow_id
-        )
-        AND event_type = 'await_child'
-        AND run_id = p_workflow_id
-        AND (response IS NULL OR response = '');
 
         -- Delete this workflow's events -- they are no longer needed
         -- for replay once the workflow has reached a terminal state.
@@ -138,46 +95,14 @@ BEGIN
     IF p_notify_channel IS NOT NULL AND p_notify_channel != '' THEN
         PERFORM pg_notify(p_notify_channel, '');
     END IF;
+
+    RETURN v_rows_updated > 0;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
--- ── Per-step event flush ─────────────────────────────────────────────────────
--- Replaces the BEGIN+INSERT+COMMIT transaction in flushEvent with a single
--- SELECT call that does the INSERT server-side, eliminating 2 RTs per step.
-
-CREATE OR REPLACE FUNCTION flush_event_step(
-    p_workflow_id TEXT,
-    p_step        INT,
-    p_event_type  TEXT,
-    p_service     TEXT,
-    p_operation   TEXT,
-    p_request     TEXT,
-    p_response    TEXT,
-    p_error       TEXT,
-    p_duration_ms BIGINT,
-    p_signal_names TEXT,
-    p_timeout_ms  BIGINT,
-    p_signal_name TEXT,
-    p_signal_payload TEXT,
-    p_defer_description TEXT,
-    p_defer_id    TEXT,
-    p_child_name  TEXT,
-    p_child_input TEXT,
-    p_run_id      TEXT,
-    p_new_input   TEXT,
-    p_plugin_name TEXT,
-    p_plugin_func TEXT,
-    p_plugin_input TEXT,
-    p_plugin_output TEXT,
-    p_plugin_error TEXT,
-    p_promise_name TEXT,
-    p_promise_id  TEXT,
-    p_promise_result TEXT,
-    p_promise_error TEXT,
-    p_payload     JSONB,
-    p_checksum    TEXT,
-    p_tenant_id   UUID
-) RETURNS VOID AS $$
+CREATE OR REPLACE FUNCTION flush_event_step(p_workflow_id text, p_step integer, p_event_type text, p_service text, p_operation text, p_request text, p_response text, p_error text, p_duration_ms bigint, p_signal_names text, p_timeout_ms bigint, p_signal_name text, p_signal_payload text, p_defer_description text, p_defer_id text, p_child_name text, p_child_input text, p_run_id text, p_new_input text, p_plugin_name text, p_plugin_func text, p_plugin_input text, p_plugin_output text, p_plugin_error text, p_promise_name text, p_promise_id text, p_promise_result text, p_promise_error text, p_payload jsonb, p_checksum text, p_tenant_id uuid) RETURNS void
+    LANGUAGE plpgsql
+    AS $$
 BEGIN
     INSERT INTO event_history (
         workflow_id, step, event_type, service, operation,
@@ -209,37 +134,10 @@ BEGIN
         WHERE event_history.response = ''
           AND event_history.error IS NULL;
 END;
-$$ LANGUAGE plpgsql;
+$$;
 
--- ── Batch event flush ────────────────────────────────────────────────────────
--- Bulk event persistence via jsonb_populate_recordset.
--- Replaces per-event INSERTs with a single set-based INSERT that processes
--- an entire JSONB array of event objects in one operation.
+GRANT ALL ON FUNCTION batch_flush_events(p_events jsonb) TO cleat_app;
 
-CREATE OR REPLACE FUNCTION batch_flush_events(
-    p_events JSONB
-) RETURNS VOID AS $$
-BEGIN
-    INSERT INTO event_history (
-        workflow_id, step, event_type, service, operation,
-        request, response, error, duration_ms, signal_names,
-        timeout_ms, signal_name, signal_payload, defer_description,
-        defer_id, child_name, child_input, run_id, new_input,
-        plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
-        promise_name, promise_id, promise_result, promise_error,
-        payload, created_at, checksum, tenant_id
-    )
-    SELECT
-        workflow_id, step, event_type, service, operation,
-        request, response, error, duration_ms, signal_names,
-        timeout_ms, signal_name, signal_payload, defer_description,
-        defer_id, child_name, child_input, run_id, new_input,
-        plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
-        promise_name, promise_id, promise_result, promise_error,
-        payload, created_at, checksum, tenant_id
-    FROM jsonb_populate_recordset(NULL::event_history, p_events)
-    ON CONFLICT (workflow_id, step) DO UPDATE
-        SET response = EXCLUDED.response, error = EXCLUDED.error
-        WHERE event_history.response = '' AND event_history.error IS NULL;
-END;
-$$ LANGUAGE plpgsql;
+GRANT ALL ON FUNCTION finalize_workflow_status(p_workflow_id text, p_worker_id text, p_generation bigint, p_final_status text, p_result text, p_error_code text, p_error_op text, p_query_state jsonb, p_next_wake_at TIMESTAMPTZ, p_notify_channel text) TO cleat_app;
+
+GRANT ALL ON FUNCTION flush_event_step(p_workflow_id text, p_step integer, p_event_type text, p_service text, p_operation text, p_request text, p_response text, p_error text, p_duration_ms bigint, p_signal_names text, p_timeout_ms bigint, p_signal_name text, p_signal_payload text, p_defer_description text, p_defer_id text, p_child_name text, p_child_input text, p_run_id text, p_new_input text, p_plugin_name text, p_plugin_func text, p_plugin_input text, p_plugin_output text, p_plugin_error text, p_promise_name text, p_promise_id text, p_promise_result text, p_promise_error text, p_payload jsonb, p_checksum text, p_tenant_id uuid) TO cleat_app;
