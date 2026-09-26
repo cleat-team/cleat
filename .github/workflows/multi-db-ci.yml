@@ -477,6 +477,55 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # The committed PostgreSQL baseline is a claim about the PROCESS -- "these
+      # three files are exactly what the generator produces" -- and until this step
+      # nothing checked it of the ARTIFACT. Two guards in engine/ were narrowed on
+      # the strength of that claim, so a hand-edit to 001_schema.sql or
+      # 003_procedures.sql would have gone unnoticed while they rested on it.
+      #
+      # NOT SHAPED LIKE THE MSSQL MODE, and it cannot be. The MSSQL emitter is a pure
+      # function from the live catalogue to the files, so it is a fixed point of its
+      # own input and self-application verifies it. gen-postgres-baseline.py is a
+      # one-shot transform from a dump of the PRE-REBASELINE chain -- regenerating
+      # from its own output is not defined and fails at the partition anchor. So this
+      # checks the artifact against the tree it claims to come from.
+      #
+      # --prior-rebaseline IS THE PROVENANCE PIN: the commit whose chain produced the
+      # committed baseline. It moves when, and only when, the baseline is regenerated
+      # from a different tree. The mode prints it in full on every run, including a
+      # passing one, so the evidence says what it was measured against. It must be a
+      # FULL 40-char SHA: `git fetch --depth 1 origin 8f91b43a` fails with
+      # `couldn't find remote ref` -- an exact-string miss, not a prefix resolve.
+      # The mode fetches it itself (~3s, 18M); the job's shallow checkout is fine.
+      #
+      # FIRST IN THE JOB, and for PostgreSQL that is load-bearing rather than tidy:
+      # the baseline creates cluster-wide ROLES (cleat_app, cleat_sweep,
+      # cleat_dispatcher, and the cleat_tenant_% loop), and a scratch DATABASE does
+      # not isolate those. A test step that ran first would leave a cluster this
+      # check then reads. SQL Server has no equivalent exposure -- its roles are
+      # database-scoped -- which is why the MSSQL mode has no ordering requirement.
+      # Do not move this below the test steps.
+      #
+      # It needs the SERVER, not the test selection: this job is chosen because it
+      # is the one with a PostgreSQL service, and the step adds no new service. It
+      # creates its own database because the mode asserts the target is empty -- it
+      # BUILDS INTO whatever it is given, so pointing it at `cleat` would compare
+      # one database's output against another database's baseline.
+      #
+      # The container is found by PUBLISHED PORT, not by image digest. The digest is
+      # already pinned in six places that Lint requires to move together; a seventh
+      # here would be a site nothing checks, and it would break on the next bump.
+      - name: Verify the committed PostgreSQL baseline is a fresh emit
+        run: |
+          CONTAINER=$(docker ps -q --filter "publish=5432")
+          test -n "$CONTAINER" || { echo "no container publishing 5432"; exit 1; }
+          docker exec "$CONTAINER" psql -U postgres -c "CREATE DATABASE cleat_baseline_verify"
+          python3 scripts/verify-postgres-baseline.py \
+            --dsn 'postgres://postgres:postgres@127.0.0.1:5432/cleat_baseline_verify?sslmode=disable' \
+            --pg-container "$CONTAINER" \
+            --prior-rebaseline 8f91b43a8e2259332c5bdbd2c47db15261927d10 \
+            --committed migrations/postgres
+
       - name: Create cleat database on MSSQL
         run: |
           docker exec $(docker ps --filter "ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89" -q) /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C -Q "CREATE DATABASE cleat"
