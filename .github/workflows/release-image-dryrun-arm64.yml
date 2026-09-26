@@ -47,7 +47,7 @@ jobs:
       # and scripts/verify-release-worker.sh) runs as part of this build, so
       # a broken arm64 backend fails here rather than first at a tag.
       - name: Docker build cleat-worker (linux/arm64, no push)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/arm64
