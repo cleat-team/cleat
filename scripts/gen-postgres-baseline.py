@@ -55,10 +55,18 @@ Two caveats on that diff, both learned the expensive way in cleat#2059:
   * It is blind to idempotence: that the shipped files can be RE-APPLIED is a
     separate property, asserted by engine/schema_bootstrap_test.go.
 
-CLEAT_2059_PARTITION=1 additionally emits the hash-partitioned event_history and
-its (tenant_id, workflow_id, step) primary key -- cleat#2059's PR B. It is OFF
-by default precisely because that partition is the ONE intended difference, and
-the differential is empty only without it.
+The hash-partitioned event_history and its (tenant_id, workflow_id, step) primary
+key are emitted by DEFAULT, because that is what the committed baseline contains.
+`CLEAT_2059_PARTITION` used to default to off, and that was a live footgun once
+cleat#2059's PR B shipped: the generator's default output was an UNPARTITIONED
+event_history while the committed file was partitioned, so regenerating with
+defaults would have overwritten the shipped baseline with a wrong one and nothing
+would have said so -- the tool and the artifact disagreeing about what "the
+baseline" is.
+
+`CLEAT_2059_PARTITION=0` still reproduces the pre-partitioning form. That form was
+the point while PR A and PR B were separate PRs: the partition was the ONE intended
+difference, so the differential was empty only without it.
 """
 import os
 import re
@@ -465,7 +473,7 @@ $$;
 # and the old (workflow_id, step) omits tenant_id. The doc records that this is
 # free "with no deployments", which is the same precondition as the rest of this
 # rebaseline.
-PARTITION = os.environ.get("CLEAT_2059_PARTITION") == "1"
+PARTITION = os.environ.get("CLEAT_2059_PARTITION", "1") != "0"
 PARTITIONED_TABLE = "event_history"
 PARTITION_BUCKETS = 64
 OLD_PK = "PRIMARY KEY (workflow_id, step)"
@@ -618,8 +626,11 @@ def main(src, outdir):
                 out.append(b)
         return "\n".join(out).rstrip() + "\n"
 
-    # ── event_history: hash-partition it (partitioning PR only) ─────
-    # OFF by default; CLEAT_2059_PARTITION=1 turns it on.
+    # ── event_history: hash-partition it ────────────────────────────
+    # ON by default, because the committed baseline is partitioned: a generator
+    # whose default output differs from the artifact it generates is a footgun.
+    # CLEAT_2059_PARTITION=0 reproduces the pre-partitioning form, which is what
+    # the switch was for while PR A and PR B were separate.
     #
     # The two are separate PRs because partitionING moves event_history's primary
     # key, and that is NOT a schema-only change. PostgreSQL needs a unique index
