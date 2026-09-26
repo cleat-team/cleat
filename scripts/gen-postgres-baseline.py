@@ -494,6 +494,12 @@ NEW_PK = "PRIMARY KEY (tenant_id, workflow_id, step)"
 # spelling-independent, which is the whole point of the check.
 CONFLICT_RE = re.compile(r"ON CONFLICT\s*\(([^)]*)\)")
 
+# What this generator can say about 002 without overwriting it. See the
+# refusal next to where it is written.
+PLACEHOLDER_002 = (
+    "-- cleat consolidated defaults (002)\n"
+    "-- HAND-ASSEMBLED: a catalog dump carries no rows. cleat#2059.\n")
+
 
 def routine_name(body: str) -> str:
     m = re.search(r"FUNCTION\s+([A-Za-z0-9_.]+)\s*\(", body, re.I)
@@ -963,8 +969,30 @@ END $do$;"""]
     # 002 is data and behaviour, which a catalog dump cannot carry -- it is
     # hand-assembled from the files that touched data. Left as a marker so the
     # omission is visible rather than silent.
-    open(f"{outdir}/002_defaults.sql", "w").write(
-        "-- cleat consolidated defaults (002)\n-- HAND-ASSEMBLED: a catalog dump carries no rows. cleat#2059.\n")
+    #
+    # BUT NEVER OVER AN EXISTING FILE. This write used to be unconditional, and
+    # on 2026-09-26 it replaced the real 002 -- the only carrier of admin.orgs
+    # and the default tenant/org seed -- with the 100-byte marker below. The
+    # whole file still applied cleanly, the catalog A/B diff reported EMPTY
+    # (a missing ROW is invisible to a structural diff, which is the same blind
+    # spot this generator's own notes describe for the org/tenant FK ordering),
+    # and ~70 database tests then failed on foreign keys to admin.orgs and
+    # admin.tenants with a schema that looked perfectly correct.
+    #
+    # A refusal, not a warning: the placeholder is a correct thing to emit into
+    # an empty directory and a destructive thing to emit over a hand-assembled
+    # file, and nothing in the filename distinguishes those.
+    defaults = f"{outdir}/002_defaults.sql"
+    if os.path.exists(defaults):
+        with open(defaults) as fh:
+            existing = fh.read()
+        if existing.strip() != PLACEHOLDER_002.strip():
+            raise SystemExit(
+                "refusing to overwrite %s: it already carries content this "
+                "generator cannot produce (a catalog dump has no rows).\n"
+                "Generate into an empty directory, or move that file aside "
+                "deliberately -- do not let this overwrite the seed." % defaults)
+    open(defaults, "w").write(PLACEHOLDER_002)
 
     print("objects by kind:", {k: len(v) for k, v in buckets.items()})
 
