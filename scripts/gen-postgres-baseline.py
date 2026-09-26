@@ -470,6 +470,35 @@ PARTITIONED_TABLE = "event_history"
 PARTITION_BUCKETS = 64
 OLD_PK = "PRIMARY KEY (workflow_id, step)"
 NEW_PK = "PRIMARY KEY (tenant_id, workflow_id, step)"
+# The PK move's other half, and the reason the generator has to carry it: an
+# `ON CONFLICT` arbiter must match a unique index, and on a partitioned table
+# that index must cover the partition key. The two routine bodies in 003 are
+# dumped verbatim from the UNPARTITIONED chain, so they name the old arbiter and
+# would ship a baseline whose own procedures fail every batch flush:
+#
+#   ERROR: there is no unique or exclusion constraint matching the
+#          ON CONFLICT specification (42P10)
+#
+# Not a hand-edit to 003. 003 is GENERATED, so a hand-edit has no conflict
+# surface and the next regeneration silently reverts it -- the failure survives
+# review precisely because the file that was reviewed is not the file that ships.
+#
+# Matched as a CLAUSE and asserted as a PROPERTY, never as a string. The first
+# draft was `body.replace(OLD, NEW)` plus a residue scan for OLD, and it had a
+# hole that a green run hid completely: narrow the search text to one site's
+# spelling and the replace moves that site, the residue scan looks for the same
+# narrowed text and finds none, and the generator exits 0 having emitted a
+# baseline whose other procedure still names the old arbiter. Measured
+# 2026-09-26 by mutating OLD_CONFLICT to the flush_event_step spelling -- 003
+# line 131 moved, line 28 did not, rc=0. Reading the column list is
+# spelling-independent, which is the whole point of the check.
+CONFLICT_RE = re.compile(r"ON CONFLICT\s*\(([^)]*)\)")
+
+# What this generator can say about 002 without overwriting it. See the
+# refusal next to where it is written.
+PLACEHOLDER_002 = (
+    "-- cleat consolidated defaults (002)\n"
+    "-- HAND-ASSEMBLED: a catalog dump carries no rows. cleat#2059.\n")
 
 
 def routine_name(body: str) -> str:
@@ -609,7 +638,20 @@ def main(src, outdir):
         # A/B diff then reports an EMPTY difference -- a pass, on a tree where the
         # one change this step exists to make did not happen.
         tb = buckets.get("TABLE", [])
-        found = [i for i, b in enumerate(tb) if b.startswith("CREATE TABLE %s (" % PARTITIONED_TABLE)]
+        # BOTH spellings, because make_idempotent has already run by this point
+        # (it is applied per bucket, above) and has rewritten the declaration to
+        # `CREATE TABLE IF NOT EXISTS event_history (`. Matching only the bare
+        # form finds 0 and the SystemExit below fires on a correct tree --
+        # measured 2026-09-26, first time this branch was ever executed:
+        #
+        #   expected exactly one CREATE TABLE event_history; found 0
+        #
+        # Same shape as the trgm opclass rewrite, which also ran after
+        # make_idempotent had added the clause it was not expecting.
+        marker = "CREATE TABLE %s (" % PARTITIONED_TABLE
+        marker_ine = "CREATE TABLE IF NOT EXISTS %s (" % PARTITIONED_TABLE
+        found = [i for i, b in enumerate(tb)
+                 if b.startswith(marker) or b.startswith(marker_ine)]
         if len(found) != 1:
             raise SystemExit("expected exactly one CREATE TABLE %s; found %d"
                              % (PARTITIONED_TABLE, len(found)))
@@ -617,17 +659,77 @@ def main(src, outdir):
         # them -- in the SAME "-- Name: event_history; Type: TABLE" block, so the
         # body does not end at the column list. Anchor on the ");" that closes it.
         body = tb[found[0]]
-        decl = body.index("CREATE TABLE %s (" % PARTITIONED_TABLE)
+        anchor = marker_ine if marker_ine in body else marker
+        decl = body.index(anchor)
         close = body.index("\n);", decl)
         tb[found[0]] = (body[:close]
                         + "\n)\nPARTITION BY HASH (tenant_id);"
                         + body[close + len("\n);"):])
 
+        # IF NOT EXISTS on every child, because this bucket is built AFTER
+        # make_idempotent has already run over the buckets that existed then --
+        # so nothing else will add it, and a second apply of the shipped file
+        # dies on the first child:
+        #
+        #   pq: relation "event_history_p0" already exists (42P07)
+        #
+        # engine/schema_bootstrap_test.go's TestShippedSchema_IsIdempotent
+        # re-applies the shipped files deliberately, so this is not optional.
+        # RLS does NOT propagate from a partitioned parent to its partitions.
+        # Measured on the generated schema, 2026-09-26 -- the parent is t/t and
+        # every child is f/f -- and independently measured in the design doc,
+        # which calls it "a hard constraint on this design":
+        #
+        #   relname  relrowsecurity  relforcerowsecurity
+        #   eh       t               t
+        #   eh_p0    f               f          <- partitions inherit neither
+        #
+        # Reading THROUGH the parent applies the parent's policy. Reading a
+        # partition DIRECTLY does not, and that is a real leak rather than a
+        # theoretical one: as the table's owner, with tenant 1 in context, a
+        # direct read of one partition returned 100 rows -- tenant 1's row COUNT
+        # while holding a different tenant's rows entirely. It is the partition
+        # with an unexpected count that exposes it, so spot-checking one
+        # partition confirms the wrong answer.
+        #
+        # So each child gets the same three things the parent has. FORCE matters
+        # as much as ENABLE: without it the table's OWNER bypasses the policy,
+        # and the retention sweeps run as a role that would otherwise see
+        # everything.
+        # The three statements go in THREE different buckets, and the split is
+        # load-bearing rather than tidiness. PARTITION is emitted immediately
+        # after TABLE -- the children must follow their parent -- but FUNCTION
+        # and POLICY come much later, so a policy emitted here names
+        # cleat.assert_tenant_set() before it exists:
+        #
+        #   ERROR: function cleat.assert_tenant_set() does not exist
+        #
+        # Measured 2026-09-26, on the first apply of the partitioned baseline.
+        # The parent's policy has no such problem only because POLICY already
+        # sits after FUNCTION in schema_kinds.
         buckets["PARTITION"] = [
-            "CREATE TABLE %s_p%d PARTITION OF %s\n    FOR VALUES WITH (MODULUS %d, REMAINDER %d);"
+            "CREATE TABLE IF NOT EXISTS %s_p%d PARTITION OF %s\n"
+            "    FOR VALUES WITH (MODULUS %d, REMAINDER %d);"
             % (PARTITIONED_TABLE, i, PARTITIONED_TABLE, PARTITION_BUCKETS, i)
             for i in range(PARTITION_BUCKETS)
         ]
+        buckets.setdefault("ROW SECURITY", []).extend(
+            "ALTER TABLE %s_p%d %s ROW LEVEL SECURITY;"
+            % (PARTITIONED_TABLE, i, clause)
+            for i in range(PARTITION_BUCKETS)
+            for clause in ("ENABLE", "FORCE")
+        )
+        # Bare CREATE POLICY, no DROP: guard_policy (below) prepends the
+        # DROP POLICY IF EXISTS for every POLICY body, and rejects anything that
+        # does not start with CREATE POLICY -- which is what caught the first
+        # draft of this:
+        #   unrecognised policy body: 'DROP POLICY IF EXISTS ...'
+        buckets.setdefault("POLICY", []).extend(
+            "CREATE POLICY tenant_isolation_events ON %s_p%d "
+            "USING ((tenant_id = cleat.assert_tenant_set()));"
+            % (PARTITIONED_TABLE, i)
+            for i in range(PARTITION_BUCKETS)
+        )
 
         cs = buckets.get("CONSTRAINT", [])
         hit = [i for i, b in enumerate(cs) if PARTITIONED_TABLE + "_pkey" in b]
@@ -637,6 +739,122 @@ def main(src, outdir):
         if OLD_PK not in cs[hit[0]]:
             raise SystemExit("PK is not %r: %r" % (OLD_PK, cs[hit[0]]))
         cs[hit[0]] = cs[hit[0]].replace(OLD_PK, NEW_PK)
+
+        # ...and drop ONLY from that same statement. pg_dump emits
+        # `ALTER TABLE ONLY <t> ADD CONSTRAINT <t>_pkey ...` for every table,
+        # which is harmless on an ordinary one -- but on a PARTITIONED table
+        # ONLY suppresses the recursion to the partitions. The unique index is
+        # then created on the parent ALONE, no partition carries a matching
+        # one, and the table cannot serve any ON CONFLICT at all, whichever
+        # arbiter it names:
+        #
+        #   pq: there is no unique or exclusion constraint matching the
+        #       ON CONFLICT specification (42P10)
+        #
+        # Measured 2026-09-26 with the arbiter held constant: as shipped,
+        # 42P10 on both; after re-adding the identical constraint without
+        # ONLY, err=<nil> and event_history_p0 gains a unique index. Nothing
+        # else differed between the two readings. That the OLD arbiter fails
+        # the same way is what identifies this as a separate defect rather
+        # than a symptom of the arbiter rewrite -- and it is why the arbiter
+        # change is inert until this line is right.
+        only_pat = re.compile(r"ALTER TABLE ONLY\s+%s\b" % PARTITIONED_TABLE)
+        cs[hit[0]], n_only = only_pat.subn("ALTER TABLE %s" % PARTITIONED_TABLE,
+                                           cs[hit[0]])
+        if n_only != 1:
+            raise SystemExit(
+                "expected exactly one 'ALTER TABLE ONLY %s' in the %s_pkey entry; "
+                "found %d" % (PARTITIONED_TABLE, PARTITIONED_TABLE, n_only))
+
+        # Every routine body that names an arbiter moves with the PK, for the
+        # same 42P10 reason. Gated on PARTITION because the rewrite is only
+        # correct WITH the new PK: against the unpartitioned schema the old
+        # (workflow_id, step) target is the one that matches a unique index, and
+        # `ON CONFLICT (tenant_id, workflow_id, step)` would fail instead.
+        def add_tenant(m):
+            cols = m.group(1).strip()
+            if "tenant_id" in cols:
+                return m.group(0)
+            return "ON CONFLICT (tenant_id, %s)" % cols
+
+        seen = 0
+        for kind in ("FUNCTION", "PROCEDURE"):
+            bodies = buckets.get(kind, [])
+            for i, b in enumerate(bodies):
+                moved, n = CONFLICT_RE.subn(add_tenant, b)
+                if n:
+                    seen += n
+                    bodies[i] = moved
+        if seen == 0:
+            raise SystemExit(
+                "no 'ON CONFLICT (...)' arbiter found in any routine body; the "
+                "rewrite did not fire on a tree it was written for")
+
+        # The same predicate, re-applied to the result -- and it is not a
+        # restatement of the count above. `seen` says the rewrite ran; this says
+        # it covered every clause, and the two come apart exactly when a clause
+        # reaches the file in a shape the substitution handles differently from
+        # the scan. That is not hypothetical: see the CONFLICT_RE note.
+        short = [(kind, m.group(0), b.strip().split("\n")[0][:70])
+                 for kind in ("FUNCTION", "PROCEDURE")
+                 for b in buckets.get(kind, [])
+                 for m in CONFLICT_RE.finditer(b)
+                 if "tenant_id" not in m.group(1)]
+        if short:
+            raise SystemExit(
+                "%d arbiter(s) in routine bodies still omit tenant_id, which a "
+                "partitioned event_history refuses with 42P10:\n  %s"
+                % (len(short), "\n  ".join("%s: %r in %s" % s for s in short)))
+
+        # A THIRD check, and it exists only because the two above share one
+        # anchor. Both use CONFLICT_RE, so narrowing that regex narrows the
+        # substitution and the residue scan together and neither can notice --
+        # measured 2026-09-26: with CONFLICT_RE narrowed to the flush_event_step
+        # spelling, that site moved, the residue scan looked for the narrowed
+        # text, found none, and the generator exited 0 on a baseline whose other
+        # procedure still named the old arbiter. Counting the bare KEYWORD is
+        # different code from matching the clause, which is what makes the
+        # coverage claim falsifiable rather than a restatement of itself.
+        #
+        # It also subsumes the `ON CONFLICT ON CONSTRAINT <name>` form, which
+        # carries no column list and which CONFLICT_RE cannot see: keywords=1,
+        # covered=0.
+        for kind in ("FUNCTION", "PROCEDURE"):
+            for b in buckets.get(kind, []):
+                keywords = b.count("ON CONFLICT")
+                covered = len(CONFLICT_RE.findall(b))
+                if keywords != covered:
+                    raise SystemExit(
+                        "%d 'ON CONFLICT' keyword(s) but %d clause(s) matched by "
+                        "CONFLICT_RE in:\n  %s"
+                        % (keywords, covered, b.strip().split("\n")[0][:70]))
+
+        # idx_event_history_tenant_wf is now EXACTLY the primary key, so drop it.
+        #
+        # It was not redundant before this change, and that is why it belongs
+        # here rather than in a cleanup: the old PK was (workflow_id, step), so a
+        # tenant-leading index was the only path that could prune by tenant. The
+        # PK move to (tenant_id, workflow_id, step) makes the index a duplicate
+        # of the PK's own -- same columns, same order -- on all 64 partitions,
+        # serving nothing the PK does not serve.
+        #
+        # Free to drop now and not later: 0.3.0 requires a fresh database, so
+        # this is a line in a baseline; removing it afterwards would be an
+        # ALTER on a partitioned table for no behavioural gain.
+        #
+        # Asserted both ways. A silent no-match leaves the duplicate in place and
+        # NOTHING would say so -- it is a valid index, the catalog diff compares
+        # structure on one side only, and the suite passes. A silent over-match
+        # would drop an index the cursor read depends on.
+        idx = buckets.get("INDEX", [])
+        hit_idx = [i for i, b in enumerate(idx) if "idx_event_history_tenant_wf" in b]
+        if len(hit_idx) != 1:
+            raise SystemExit(
+                "expected exactly one idx_event_history_tenant_wf index statement; "
+                "found %d" % len(hit_idx))
+        del idx[hit_idx[0]]
+        if any("idx_event_history_tenant_wf" in b for b in idx):
+            raise SystemExit("idx_event_history_tenant_wf still present after removal")
 
     # GRANTs naming functions the baseline does NOT create. pg_dump emits an ACL
     # for every object in the database, including the ones an EXTENSION owns --
@@ -778,8 +996,30 @@ END $do$;"""]
     # 002 is data and behaviour, which a catalog dump cannot carry -- it is
     # hand-assembled from the files that touched data. Left as a marker so the
     # omission is visible rather than silent.
-    open(f"{outdir}/002_defaults.sql", "w").write(
-        "-- cleat consolidated defaults (002)\n-- HAND-ASSEMBLED: a catalog dump carries no rows. cleat#2059.\n")
+    #
+    # BUT NEVER OVER AN EXISTING FILE. This write used to be unconditional, and
+    # on 2026-09-26 it replaced the real 002 -- the only carrier of admin.orgs
+    # and the default tenant/org seed -- with the 100-byte marker below. The
+    # whole file still applied cleanly, the catalog A/B diff reported EMPTY
+    # (a missing ROW is invisible to a structural diff, which is the same blind
+    # spot this generator's own notes describe for the org/tenant FK ordering),
+    # and ~70 database tests then failed on foreign keys to admin.orgs and
+    # admin.tenants with a schema that looked perfectly correct.
+    #
+    # A refusal, not a warning: the placeholder is a correct thing to emit into
+    # an empty directory and a destructive thing to emit over a hand-assembled
+    # file, and nothing in the filename distinguishes those.
+    defaults = f"{outdir}/002_defaults.sql"
+    if os.path.exists(defaults):
+        with open(defaults) as fh:
+            existing = fh.read()
+        if existing.strip() != PLACEHOLDER_002.strip():
+            raise SystemExit(
+                "refusing to overwrite %s: it already carries content this "
+                "generator cannot produce (a catalog dump has no rows).\n"
+                "Generate into an empty directory, or move that file aside "
+                "deliberately -- do not let this overwrite the seed." % defaults)
+    open(defaults, "w").write(PLACEHOLDER_002)
 
     print("objects by kind:", {k: len(v) for k, v in buckets.items()})
 

@@ -78,6 +78,42 @@ func tenantOwnedTables(t *testing.T, ctx context.Context, db *sql.DB) []string {
 		t.Fatal("no table in public or admin carries a tenant_id column, so every count " +
 			"below would be zero for a reason that has nothing to do with drop_tenant")
 	}
+
+	// A PARTITION IS NOT A SEPARATE TENANT-OWNED TABLE. event_history is
+	// hash-partitioned into 64 children (cleat#2059), each inheriting the
+	// tenant_id column, so information_schema -- which lists partitions as
+	// tables -- grew this universe by 64 entries for one table. Measured
+	// 2026-09-26 on the shipped baseline: 88 entries, of which 64 are
+	// event_history's children.
+	//
+	// Left unfolded, the ratchet below demands a decision, 64 times, about
+	// storage for a table it already accounts for: admin.drop_tenant deletes
+	// through event_history, and deleting through a partitioned parent reaches
+	// every partition exactly as it reaches every row. The failure mode is not
+	// only noise -- whether the entries pass depends on the seeding order and
+	// on what is already in the tables, which is how this appeared in a suite
+	// run and passed in isolation on a fresh database.
+	//
+	// Folded only when the parent is in the universe too, so the rule is "a
+	// partition of a tenant-owned table" rather than "a name ending in
+	// _p<digits>". partitionChildRe is shared with the tenant-coverage check,
+	// which needs the same distinction, so the two cannot drift apart.
+	owned := make(map[string]bool, len(out))
+	for _, n := range out {
+		owned[n] = true
+	}
+	kept := out[:0]
+	for _, n := range out {
+		dot := strings.LastIndex(n, ".")
+		schema, name := n[:dot], n[dot+1:]
+		if parent := partitionChildRe.ReplaceAllString(name, "$1"); parent != name &&
+			owned[schema+"."+parent] {
+			continue
+		}
+		kept = append(kept, n)
+	}
+	out = kept
+
 	sort.Strings(out)
 	return out
 }

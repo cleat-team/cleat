@@ -51,13 +51,15 @@ func (s *MySQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 	// duplicates.
 	//
 	// THIS COMMENT USED TO SAY "instead of ON CONFLICT DO NOTHING", AND
-	// POSTGRES DOES NOT DO NOTHING. adaptive_flush.go:384 is a CONDITIONAL
-	// UPSERT:
+	// POSTGRES DOES NOT DO NOTHING. flushAndNotify and retryBatchFlush in
+	// adaptive_flush.go run a CONDITIONAL UPSERT -- `ON CONFLICT ... DO UPDATE`
+	// with a WHERE that admits only a row still awaiting its result --
 	//
-	//	ON CONFLICT (workflow_id, step) DO UPDATE
-	//	  SET response = EXCLUDED.response, error = EXCLUDED.error,
-	//	      checksum = EXCLUDED.checksum, payload = EXCLUDED.payload, payload_encoding = EXCLUDED.payload_encoding
-	//	  WHERE (event_history.response = '' OR event_history.response IS NULL) AND event_history.error IS NULL
+	// It is named rather than quoted. This block used to transcribe the clause,
+	// and the transcription had rotted three ways before anyone looked: the
+	// cited adaptive_flush.go:384 had moved, the SET list was missing three
+	// columns, and the WHERE predated cleat#2333's rewrite of it. A copied
+	// statement is a second source of truth.
 	//
 	// so on Postgres a re-flush COMPLETES a row that was written without a
 	// result, while leaving finished rows immutable. INSERT IGNORE discards

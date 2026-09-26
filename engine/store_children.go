@@ -118,7 +118,7 @@ func (s *PostgresStore) StartChildWorkflowAtomic(ctx context.Context, childID, p
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum, tenant_id, payload, payload_encoding)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-		ON CONFLICT (workflow_id, step) DO NOTHING
+		ON CONFLICT (tenant_id, workflow_id, step) DO NOTHING
 	`, parentID, event.Step, string(event.EventType),
 		nullStr(event.ChildName), nullStr(stored.ChildInput), nullStr(childID),
 		time.UnixMilli(event.TimestampMs), checksum, s.tenantID, stored.Payload, stored.Encoding)

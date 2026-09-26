@@ -25,7 +25,7 @@ BEGIN
         promise_name, promise_id, promise_result, promise_error,
         payload, created_at, checksum, tenant_id
     FROM jsonb_populate_recordset(NULL::event_history, p_events)
-    ON CONFLICT (workflow_id, step) DO UPDATE
+    ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE
         SET response = EXCLUDED.response, error = EXCLUDED.error
         WHERE event_history.response = '' AND event_history.error IS NULL;
 END;
@@ -128,7 +128,7 @@ BEGIN
         nullif(p_promise_result, ''), nullif(p_promise_error, ''),
         CASE WHEN p_payload IS NOT NULL THEN p_payload ELSE NULL END,
         p_checksum, now(), p_tenant_id
-    ) ON CONFLICT (workflow_id, step) DO UPDATE
+    ) ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE
         SET response = EXCLUDED.response,
             error = EXCLUDED.error
         WHERE event_history.response = ''
