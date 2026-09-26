@@ -64,6 +64,55 @@ func TestADryRunReportsWithoutDeleting(t *testing.T) {
 		t.Fatalf("FinalizeWorkflowSegment: %v", err)
 	}
 
+	// AGE THE SEEDED ROW. DO NOT WIDEN THE WINDOW. cleat#2423.
+	//
+	// The predicate is `completed_at < $1` (pgCompletedWorkflows,
+	// engine/retention_predicates.go) and the cutoff below is
+	// `previewedAt.Add(-window)` with window=1ns, so the seeded row has to be
+	// strictly older than an instant one nanosecond ago -- while `completed_at`
+	// is written by PostgreSQL's own now().
+	//
+	// THE TWO CLOCKS ARE NOT THE SAME CLOCK, and that is what decides it. The
+	// row's timestamp comes from the DATABASE SERVER; the cutoff comes from
+	// time.Now() in THIS PROCESS. Measured on this host, the PostgreSQL
+	// container's clock runs AHEAD of the host's by 0.09s to 0.27s:
+	//
+	//	host=1790445356.920  container=1790445357.006  container-host=+0.086s
+	//
+	// so the row is stamped up to ~270ms in the cutoff's FUTURE, `completed_at
+	// < cutoff` is false, the sweep matches nothing, and the positive control
+	// below aborts on a fixture that looks correct.
+	//
+	// THAT IS DETERMINISTIC, NOT A RACE, and it is why this read as "~1 in 3".
+	// Against a freshly dropped suite database it failed 12 times in 12 runs;
+	// against a database holding earlier runs' completed rows it passes, because
+	// those are minutes old, match the 1ns cutoff easily, and satisfy the count
+	// the positive control reads. So the rate was never a coin flip -- it was a
+	// function of whether earlier runs had left older rows behind, which is also
+	// why WS-3 saw it on fresh databases and not on reused ones.
+	//
+	// A 1ns window is ALSO below PostgreSQL's resolution, which collapses a
+	// nanosecond subtraction to nothing (`now() - interval '0.000000001 seconds'
+	// = now()` is true; one microsecond is not). That is a real second fragility
+	// of the same window, not the trigger here -- and neither is survivable by a
+	// test that has to decide.
+	//
+	// THE ROW MOVES, NOT THE WINDOW, and the direction is the whole reason: a
+	// larger older_than moves the cutoff EARLIER, which makes an
+	// already-completed-just-now row LESS likely to match, not more. "Use a
+	// bigger window" is the obvious repair and it is backwards. An hour is four
+	// orders of magnitude beyond the measured skew and nine beyond the storage
+	// resolution, so neither can decide this any more.
+	//
+	// Not a production defect: the real sweep's window is 30 days, against which
+	// 270ms of skew is nothing. The 1ns window exists only here, to mean "match
+	// everything already completed".
+	if _, err := db.ExecContext(ctx,
+		`UPDATE workflow_instances SET completed_at = $2 WHERE id = $1`,
+		id, time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("age the seeded row: %v", err)
+	}
+
 	decode := func(t *testing.T, body []byte) retentionSweepResult {
 		t.Helper()
 		var res retentionSweepResult
