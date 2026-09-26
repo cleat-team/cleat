@@ -340,9 +340,30 @@ def main():
         # to the file: if 002 gains a fourth seed, this mode stays green and silently
         # stops covering it, which is precisely the decay this whole mode exists to
         # prevent. So derive the set from the committed file and require them to match.
-        declared = {t for t, _ in SEED_ROWS}
+        # WHAT THIS DOES NOT SEE, so it is not read as stronger than it is: it counts
+        # statements that NAME a table, so a seed written as a function call is
+        # invisible here AND to the row assertions below. That is not hypothetical in
+        # this file -- 002's own comment records that it used to call
+        # admin.create_tenant_role(tenant_id), the call raised, an EXCEPTION handler
+        # swallowed the raise, and the row silently never appeared. This check has that
+        # same shape one level out.
+        #
+        # Strip comments FIRST. The whole file is prose describing what it used to do,
+        # so a comment mentioning `INSERT INTO` would otherwise be counted as a seed,
+        # and the mode would red-light a tree where every row is present and correct.
+        # A guard that goes red the first time someone does the right thing is worse
+        # than no guard: it teaches the next person to ignore it. Measured when this
+        # was added -- 3 statements raw, 3 after stripping, so the defect was LATENT
+        # rather than live, which is exactly why nothing had caught it. `--` alone is
+        # sufficient here: 002 carries no /* */ block.
+        #
+        # Fold BOTH sides. `seeded` was lowercased and `declared` was not, so a
+        # capitalised entry would report UNASSERTED and STALE for the same table on a
+        # correct tree -- latent only because all three entries happen to be lowercase.
+        declared = {t.lower() for t, _ in SEED_ROWS}
+        src002 = re.sub(r"--[^\n]*", "", open(path002).read())
         seeded = {t.lower() for t in re.findall(
-            r"INSERT\s+INTO\s+([A-Za-z_]+\.[A-Za-z_]+)", open(path002).read(), re.I)}
+            r"INSERT\s+INTO\s+([A-Za-z_]+\.[A-Za-z_]+)", src002, re.I)}
         if seeded != declared:
             differing += 1
             for t in sorted(seeded - declared):
