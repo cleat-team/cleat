@@ -127,7 +127,29 @@ type keyInfo struct {
 	cols    []string
 }
 
-type namedBody struct{ name, body string }
+// namedBody carries a check constraint. `untrusted` is the source database's
+// sys.check_constraints.is_not_trusted, and it is part of the end state rather
+// than an artefact of how the baseline was generated.
+//
+// Seven constraints in the pre-compaction chain were added WITH NOCHECK on
+// purpose -- 036_plugin_deps_isjson.sql and 037_json_column_checks.sql -- and
+// both files say why: a constraint added with validation fails the whole
+// migration if any existing row violates it, which turns a latent data problem
+// into a blocked upgrade. The cost is that SQL Server marks the constraint
+// untrusted and will not use it for query optimisation, and that cost was
+// accepted deliberately.
+//
+// Emitting them bare therefore does NOT reproduce the chain: it upgrades all
+// seven to trusted, which is precisely the tidy-up
+// TestPluginDepsCheckConstraintIsUntrusted exists to refuse. On a fresh
+// database the two forms insert identically, so nothing but is_not_trusted
+// tells them apart -- and that column was in neither this read nor
+// catalogdiff's compared set when the baseline was generated, which is why a
+// differential reporting zero differences said nothing about all seven.
+type namedBody struct {
+	name, body string
+	untrusted  bool
+}
 
 type indexInfo struct {
 	name     string
@@ -341,7 +363,7 @@ func (e *emitter) readKeys(objID int64) ([]keyInfo, error) {
 
 func (e *emitter) readChecks(objID int64) ([]namedBody, error) {
 	rows, err := e.db.QueryContext(e.ctx, `
-		SELECT name, COALESCE(OBJECT_DEFINITION(object_id), '')
+		SELECT name, COALESCE(OBJECT_DEFINITION(object_id), ''), is_not_trusted
 		FROM sys.check_constraints WHERE parent_object_id = @p1 ORDER BY name`, objID)
 	if err != nil {
 		return nil, err
@@ -350,7 +372,7 @@ func (e *emitter) readChecks(objID int64) ([]namedBody, error) {
 	var out []namedBody
 	for rows.Next() {
 		var n namedBody
-		if err := rows.Scan(&n.name, &n.body); err != nil {
+		if err := rows.Scan(&n.name, &n.body, &n.untrusted); err != nil {
 			return nil, err
 		}
 		out = append(out, n)
@@ -659,10 +681,19 @@ func (e *emitter) schemaFile() ([]byte, error) {
 	// "([status]='ok')", with no CHECK keyword -- so emitting it bare is a
 	// syntax error at apply time. catalogdiff prefixes 'CHECK ' itself, which is
 	// why the omission is invisible to a diff-derived expectation.
+	//
+	// WITH NOCHECK sits between the table and ADD, which is where SQL Server
+	// accepts it, and is emitted only where the source database had the
+	// constraint untrusted. See namedBody for why that is the end state and not
+	// a detail.
 	for _, t := range e.tables {
 		for _, c := range t.checks {
-			fmt.Fprintf(&b, "ALTER TABLE %s ADD CONSTRAINT %s CHECK %s;\nGO\n\n",
-				plainName(t.schema, t.name), id(c.name), c.body)
+			nocheck := ""
+			if c.untrusted {
+				nocheck = " WITH NOCHECK"
+			}
+			fmt.Fprintf(&b, "ALTER TABLE %s%s ADD CONSTRAINT %s CHECK %s;\nGO\n\n",
+				plainName(t.schema, t.name), nocheck, id(c.name), c.body)
 		}
 	}
 	for _, t := range e.tables {

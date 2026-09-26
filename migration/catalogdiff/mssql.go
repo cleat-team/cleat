@@ -175,8 +175,21 @@ func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 		// constraints of the same kind on the same table (two DEFAULTs, two
 		// UNIQUEs, two FOREIGN KEYs) collapsing onto an identical line and
 		// silently losing one from the comparison.
+		//
+		// is_not_trusted is part of the compared text, and that is the whole
+		// reason the CASE below exists. It was not, until cleat#2438: the
+		// pre-compaction chain adds seven JSON check constraints WITH NOCHECK on
+		// purpose (036_plugin_deps_isjson.sql, 037_json_column_checks.sql) so an
+		// existing deployment with a violating row upgrades instead of blocking,
+		// and a baseline generated without it reproduces every one of those
+		// definitions while silently marking all seven trusted. A fresh database
+		// inserts identically either way, so only this column separates them --
+		// and while it was outside the compared set this differential reported
+		// zero differences about constraints it had not looked at. Appended, not
+		// prepended: line 218 takes the definition's first token as the kind.
 		conRows, err := db.QueryContext(ctx, `
 			SELECT name, 'CHECK ' + COALESCE(OBJECT_DEFINITION(object_id), '')
+				+ CASE WHEN is_not_trusted = 1 THEN ' WITH NOCHECK' ELSE '' END
 			FROM sys.check_constraints WHERE parent_object_id = @p1
 			UNION ALL
 			SELECT dc.name, 'DEFAULT ' + COALESCE(OBJECT_DEFINITION(dc.object_id), '') + ' FOR ' + c.name

@@ -548,7 +548,7 @@ GO
 ALTER TABLE dbo.deployment_secrets ADD CONSTRAINT ck_deployment_secrets_ciphertext_nonempty CHECK (len([ciphertext])>(0));
 GO
 
-ALTER TABLE dbo.event_history ADD CONSTRAINT ck_event_history_payload CHECK ([payload] IS NULL OR isjson([payload])=(1));
+ALTER TABLE dbo.event_history WITH NOCHECK ADD CONSTRAINT ck_event_history_payload CHECK ([payload] IS NULL OR isjson([payload])=(1));
 GO
 
 ALTER TABLE dbo.plugin_defs ADD CONSTRAINT ck_plugin_defs_config CHECK (isjson([config])=(1));
@@ -599,10 +599,10 @@ GO
 ALTER TABLE dbo.tenant_settings ADD CONSTRAINT ck_ts_max_workflow_duration_positive CHECK ([max_workflow_duration_ms] IS NULL OR [max_workflow_duration_ms]>(0));
 GO
 
-ALTER TABLE dbo.workflow_defs ADD CONSTRAINT ck_workflow_defs_dag_spec CHECK ([dag_spec] IS NULL OR isjson([dag_spec])=(1));
+ALTER TABLE dbo.workflow_defs WITH NOCHECK ADD CONSTRAINT ck_workflow_defs_dag_spec CHECK ([dag_spec] IS NULL OR isjson([dag_spec])=(1));
 GO
 
-ALTER TABLE dbo.workflow_defs ADD CONSTRAINT ck_workflow_defs_plugin_deps CHECK (isjson([plugin_deps])=(1));
+ALTER TABLE dbo.workflow_defs WITH NOCHECK ADD CONSTRAINT ck_workflow_defs_plugin_deps CHECK (isjson([plugin_deps])=(1));
 GO
 
 ALTER TABLE dbo.workflow_instances ADD CONSTRAINT ck_wi_run_instance_timeout_positive CHECK ([run_wasm_instance_timeout_ms] IS NULL OR [run_wasm_instance_timeout_ms]>(0));
@@ -617,16 +617,16 @@ GO
 ALTER TABLE dbo.workflow_instances ADD CONSTRAINT ck_wi_run_wall_clock_positive CHECK ([run_wasm_wall_clock_ceiling_ms] IS NULL OR [run_wasm_wall_clock_ceiling_ms]>(0));
 GO
 
-ALTER TABLE dbo.workflow_instances ADD CONSTRAINT ck_workflow_instances_allowed_signals CHECK ([allowed_signals] IS NULL OR isjson([allowed_signals])=(1));
+ALTER TABLE dbo.workflow_instances WITH NOCHECK ADD CONSTRAINT ck_workflow_instances_allowed_signals CHECK ([allowed_signals] IS NULL OR isjson([allowed_signals])=(1));
 GO
 
-ALTER TABLE dbo.workflow_instances ADD CONSTRAINT ck_workflow_instances_compaction_state CHECK ([compaction_state] IS NULL OR isjson([compaction_state])=(1));
+ALTER TABLE dbo.workflow_instances WITH NOCHECK ADD CONSTRAINT ck_workflow_instances_compaction_state CHECK ([compaction_state] IS NULL OR isjson([compaction_state])=(1));
 GO
 
 ALTER TABLE dbo.workflow_instances ADD CONSTRAINT ck_workflow_instances_input CHECK (isjson([input])=(1));
 GO
 
-ALTER TABLE dbo.workflow_instances ADD CONSTRAINT ck_workflow_instances_plugin_vers CHECK (isjson([plugin_vers])=(1));
+ALTER TABLE dbo.workflow_instances WITH NOCHECK ADD CONSTRAINT ck_workflow_instances_plugin_vers CHECK (isjson([plugin_vers])=(1));
 GO
 
 ALTER TABLE dbo.workflow_instances ADD CONSTRAINT ck_workflow_instances_query_state CHECK ([query_state] IS NULL OR isjson([query_state])=(1));
@@ -659,7 +659,7 @@ GO
 ALTER TABLE dbo.workflow_update_requests ADD CONSTRAINT ck_workflow_update_requests_payload CHECK (isjson([payload],VALUE)=(1));
 GO
 
-ALTER TABLE dbo.workflow_update_requests ADD CONSTRAINT ck_workflow_update_requests_result CHECK ([result] IS NULL OR isjson([result])=(1));
+ALTER TABLE dbo.workflow_update_requests WITH NOCHECK ADD CONSTRAINT ck_workflow_update_requests_result CHECK ([result] IS NULL OR isjson([result])=(1));
 GO
 
 ALTER TABLE admin.tenant_api_keys ADD CONSTRAINT fk_admin_api_keys_tenant FOREIGN KEY (tenant_id) REFERENCES admin.tenants (tenant_id);
