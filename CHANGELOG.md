@@ -12,6 +12,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **PostgreSQL's schema now ships as three generated files, not 87 numbered migrations.** The
+  chain is `migrations/postgres/001_schema.sql`, `002_defaults.sql` and `003_procedures.sql`.
+  MySQL and SQL Server are unchanged — both still numbered chains. (cleat#2059, cleat#2416)
+
+  No behavioural change is intended and none was measured: the A/B differential reports an
+  **empty catalog diff** against the chain this replaces, on a fresh cluster. The baseline is
+  produced by `scripts/gen-postgres-baseline.py` from a `pg_dump` of a database built by that
+  chain, so every table carries its final column set and every routine is its last definition
+  *by construction*, rather than by someone taking the last of ten by hand. The generator is
+  committed, so the artifact is re-derivable and verified to reproduce `001` and `003`
+  byte-identically from that dump. (`002` seeds rows, which a schema-only dump cannot carry,
+  and is hand-written.)
+
+  **Consequences.**
+  - **Anything that names a `migrations/postgres/NNN` file is now wrong.** That includes
+    comments and docs across the repository — a tracked follow-up — and older entries in this
+    changelog (cleat#2424). A runbook or deployment script that applied a numbered file, or
+    pinned one by name, must apply the three in lexical order instead.
+  - **Cluster-level facts are absent from the baseline, and no per-database check could have
+    seen them go.** A database dump carries no `CREATE ROLE` and no role *membership*, because
+    `pg_auth_members` and `pg_shdescription` are cluster-wide — so the catalog diff that
+    verified this rebaseline compared two databases and was blind to the difference. Three
+    statements were deleted with the chain and restored explicitly:
+    `GRANT cleat_sweep TO cleat_app WITH INHERIT FALSE` (plus its loop over the
+    `cleat_tenant_%` roles), `COMMENT ON ROLE cleat_sweep`, and one defensive attribute
+    correction. **`WITH INHERIT FALSE` is load-bearing** — a plain grant lets the app role read
+    every tenant's rows — and the retention path runs `SET LOCAL ROLE cleat_sweep`, so a
+    missing membership is a hard `42501` on every sweep rather than a silent degradation.
+  - **Partitioning is not in *this* change**, and it is in the release: it moves
+    `event_history`'s primary key, which no existing database can be migrated into, so the code
+    it requires travels with it. See the next entry.
+
+  None of this is visible to a fresh install, which is the only kind 0.3.0 supports — there is
+  nothing to upgrade *from*. It is called out because the migration tree an operator goes to
+  read is no longer shaped like the one every previous release documented.
+
+- **`event_history` is hash-partitioned on `tenant_id` into 64 buckets, and its primary key is
+  now `(tenant_id, workflow_id, step)`.** (cleat#2059, cleat#2421)
+
+  **PostgreSQL only.** MySQL is single-tenant by owner decision and SQL Server's partitions are
+  not separate objects, so both keep the plain table and are held to expand/contract instead.
+  Like the rebaseline above, this is possible only because 0.3.0 ships a fresh database: moving
+  the primary key is not something an existing database can be migrated into.
+
+  **Consequences.**
+  - **Every `ON CONFLICT` target on `event_history` must carry the partition key.** PostgreSQL
+    requires a conflict target to match a unique index, and on a partitioned table that index
+    must cover the partition key — so the old `(workflow_id, step)` fails outright with `42P10`,
+    `there is no unique or exclusion constraint matching the ON CONFLICT specification`. Every
+    site now names `(tenant_id, workflow_id, step)`, in the Go statements and inside the
+    generated routine bodies alike. The coverage is asserted as a **predicate** rather than
+    counted — `engine/every_event_history_conflict_target_covers_the_partition_key_test.go`
+    fails on a new site that omits it — so a deployment with its own `INSERT` into
+    `event_history` must change its conflict target the same way, and the test is the thing that
+    keeps that true rather than a number.
+  - **Row-level security does not propagate to partitions, and privilege is the boundary that
+    holds first.** Measured on the generated schema: the parent was
+    `relrowsecurity=t/relforcerowsecurity=t` while **all 64 children were `f/f`** with no policy
+    of their own, so each child now carries `ENABLE` + `FORCE` and its parent's policy. Worth
+    being exact about which mechanism refuses what — a read against a child is refused by
+    *privilege* first, because the parent's `GRANT` does not extend to its partitions, and the
+    policy only does any work once that privilege has been granted. A deployment that customises
+    grants on `event_history` must grant on the partitions too.
+  - **The defect that actually broke it was `ONLY` on the primary key.** `pg_dump` emits
+    `ALTER TABLE ONLY <t> ADD CONSTRAINT <t>_pkey`, and on a partitioned table `ONLY` suppresses
+    the recursion to its partitions — so the unique index landed on the parent alone, no
+    partition carried a matching one, and the table could serve **no** conflict target at all,
+    including the ones already corrected.
+
+  See `docs/schema-partitioning-design.md`; its status line is the authority on what shipped.
+
 - **Security: a child workflow's `child_workflow` event was written in plain text in the
   parent's `event_history`, with `--encrypt-sensitive-payloads` on.** (cleat#2312, cleat#2328)
 
@@ -677,7 +748,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TestUninstallSchedulerBackupOnEveryDialect`, after which the plugin is added to
   `plugin.provenPluginDialects` (cleat#2306's phase 2 tracks doing this for every plugin).
 
-### Added
+- **Terminating a workflow that has registered `defer` bodies is now asynchronous,
+  and runs those bodies before the workflow becomes terminal.** Migrations
+  `postgres/040`, `mssql/043` (MySQL needs none).
+
+  Previously `TerminateWorkflow` wrote `status = 'terminated'` and then released
+  the workflow's sticky assignment and concurrency keys. The registered defers
+  never ran — and the resources a defer body would have released were dropped
+  anyway, by the host, in the wrong order, with nothing recording that anything
+  was owed.
+
+  Now such a workflow goes to a new non-terminal status, **`terminating`**,
+  carrying the outcome it will be given. A worker claims it like any other
+  workflow, replays its history as a *defer segment* — the body does not run
+  again; it is refused any new work — runs the outstanding defer bodies, and only
+  then applies the recorded outcome and releases the resources.
+
+  **Consequences.**
+  - A caller that terminates and immediately reads `status` may see `terminating`
+    rather than `terminated`, and must poll. This is `tiers.yaml`'s decision D6.
+  - A workflow with **no** registered defers still terminates in one step, as
+    before. Most deployments will see no change at all.
+  - Terminating a workflow that is already in its defer phase terminates it
+    immediately, cutting the cleanup short.
+  - A defer phase never changes the outcome: if it traps, times out, or cannot
+    start, the recorded outcome is applied anyway and the lost cleanup is logged.
+    `defer_phase_deadline` (5 minutes) bounds it.
+  - **Apply the migrations.** `postgres/040` widens `admin.claim_workflows` and
+    the claim's partial indexes; `mssql/043` widens the filtered ones. A
+    deployment running this code against the older schema keeps working — the
+    cross-tenant claim falls back with a warning naming the migration — but its
+    defer phases are never claimed, so every terminate waits out its deadline and
+    skips the cleanup.
+
+  **A closing parent's `TERMINATE` children work the same way**, and the change
+  matters more there because it is a bulk operation: one closing parent used to
+  drop every child's concurrency keys and sticky assignment at once, before any
+  of their defers had run. A child that owes cleanup now goes to `terminating`
+  carrying `pending_terminal_status = 'failed'` — the close policy's own
+  outcome, not `terminated` — and is failed once its defers have run. A child
+  that owes none is failed immediately, as before.
+
+  The admin force-resolve verbs are unchanged: they still terminate in one step
+  and still skip their defers.
+
+  See IMPROVEMENT-PLAN §3.75, §3.112 and §3.114, and
+  `docs/reference/workflow-lifecycle.md` for the whole state machine.
+
+- **Workflow definition names are now per-tenant.** `workflow_defs`' primary key
+  becomes `(tenant_id, name, version)`, and the three foreign keys that reference
+  it — from `workflow_instances`, `workflow_tags` and `workflow_routing` — carry
+  `tenant_id` too. Migrations `postgres/035`, `mysql/034`, `mssql/038`.
+
+  Two tenants can now each hold their own `order-processor`. Previously the name
+  was a shared namespace: the second tenant to deploy one was refused, and before
+  that (pre-0.2.0) it silently overwrote the first.
+
+  **Consequences.** A deploy no longer returns `409` for a name another tenant
+  holds — there is no conflict to report. `ErrWorkflowDefOwnedByAnotherTenant` is
+  removed, along with the default-tenant adoption window that let a definition
+  deployed before per-tenant ownership stay reachable by every tenant; on
+  PostgreSQL that also removes `OR tenant_id = '00000000-...'` from
+  `tenant_isolation_defs`, bringing it into line with SQL Server, which never had
+  it. A workflow started for a tenant that has not deployed the definition it
+  names is refused by the foreign key.
+
+  **MySQL only:** `workflow_defs.tenant_id` was nullable with no default, unlike
+  the other two dialects. `mysql/034` backfills `NULL`s to the default tenant and
+  makes the column `NOT NULL DEFAULT`, as a primary-key column must be.
+
+  See IMPROVEMENT-PLAN §3.77 and D7 in `tiers.yaml`.
+
+- **Cross-schema child workflows are removed.** The `cleat_child_workflow_in_schema`
+  host call, the `cleat:host-calls/durable-extended-children` component interface,
+  the `--peer-schemas` worker flag and the corresponding surface in the Go, Rust,
+  Java, Python and AssemblyScript SDKs are all gone. A worker started with
+  `--peer-schemas` now fails on an unknown flag.
+
+  It let a workflow start a child by writing a row directly into another
+  PostgreSQL schema. That makes the other deployment's schema part of your API and
+  its migrations part of your compatibility surface, and it had no settled answer
+  for whose tenant the child belonged to — the definition lookup in the peer schema
+  carried no tenant predicate, and where the target tenant could not be recovered
+  from the schema name the insert ran with no tenant context at all.
+
+  **Use the other pool's API instead**, the same way any two services talk. Nothing
+  in `tiers.yaml` claimed this feature at any tier and no end-to-end test exercised
+  it. See IMPROVEMENT-PLAN §3.78.
+
+  ABI host-function count goes 59 → 58 on both backends. `CurrentABIVersion` is
+  unchanged: nothing that remains changed shape.
+
+- **Terminating a parent now closes its children.** `TerminateWorkflow` never
+  called `enforceParentClosePolicy`, on any dialect, so terminating a parent
+  left its `TERMINATE`-policy children running and its `REQUEST_CANCEL`
+  children unflagged — while force-completing or force-failing the *same*
+  parent closed them. Measured 2026-09-02: a child of a parent closed with
+  `TerminateWorkflow` stayed `ready`; the same child under `AdminForceComplete`
+  went to `failed`.
+
+  Who this breaks: a deployment that relied on `terminate` being the narrow
+  "stop this one workflow" verb. Its children now close with it —
+  `TERMINATE` children are failed with `parent workflow terminated`, and
+  `REQUEST_CANCEL` children have cancellation requested. `ABANDON` children are
+  unaffected, as they always were.
+
+  The design document says this is what should happen (*"`enforceParentClosePolicy`
+  runs on parent terminal transition"*, *"children are cancelled with their
+  parent, preventing orphan workflows"*), and the deciding argument is internal
+  consistency: `adminForceResolve` is an operator verb on an unclaimed workflow
+  setting a terminal status with a direct `UPDATE` — the same shape as
+  `TerminateWorkflow` in every respect — and it enforced the policy. See
+  IMPROVEMENT-PLAN §3.79.
 
 - **An identity allowlist for the OAuth provider, enforced by default.** (cleat#2340)
 
@@ -727,6 +909,403 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   test's green said nothing about the dialect it was skipping, and the column had been renamed
   rather than quoted so that the hand-written `INSERT`s this table's design calls for do not have
   to remember brackets on one dialect and not the others.
+
+- **`/livez`, `/readyz`, database-reachability metrics and alert rules: a database incident now looks different from a worker incident.** (cleat#2007)
+
+  `/livez` says the process and its background loops are ticking and never looks at the database, so a
+  database outage does not restart workers. `/readyz` is 503 while the worker has not finished starting, is
+  draining, or its database did not answer its last deadline-bounded call, so a load balancer stops sending
+  traffic a worker cannot serve. `/healthz` stays as an alias of `/livez`. The Helm chart and
+  `k8s/deployment.yaml` now use `/livez` for liveness and `/readyz` for readiness (both used `/healthz`, so a
+  worker that could not reach its database stayed "ready"). New metrics: `cleat_db_reachable`,
+  `cleat_db_last_success_timestamp_seconds`, `cleat_db_consecutive_failures`, `cleat_db_probe_duration_seconds`
+  (each with a `dialect` label). A call counts as failed if it errors or runs past its deadline, and the
+  deadline is now enforced by a timer: against a real `docker pause` the gauge used to flip only at unpause.
+  Two log lines mark the transitions: `database unreachable (deadline exceeded)` and `database reachable again
+  after 43s`. `monitoring/prometheus/alerts.yml` tells the two incidents apart (every worker reports 0: the
+  database; one worker reports 0 among healthy peers: that worker), suppresses the reaper's echo of an outage,
+  and is unit-tested with `promtool test rules` in CI.
+
+  **Breaking:** the unauthenticated health bodies contain only `ok`, `degraded` and reason codes
+  (`background_loop_stuck`, `database_unreachable`, `starting`, `draining`, `memory_pressure`,
+  `plugin_unhealthy`). `stale_loops` (loop names) and `pressure` are gone from them, and `reasons` lists every
+  degraded reason (memory pressure no longer hides an unhealthy plugin). The detail is on the new
+  authenticated `GET /api/admin/health`. Degraded states (memory pressure, an unhealthy plugin) are 200 on every
+  probe; only the database, draining, starting and a stuck loop are 503. `backendkit`'s `Health()` now calls
+  `/readyz`.
+
+  `/livez` does not fail because a background loop is stuck in a call the database is holding: a stale loop
+  is put down to the database only while the database has not answered since it went quiet and that is
+  still being observed, with a 30-second grace after recovery. Measured against a real `docker pause`.
+
+  **The audit log no longer records the infrastructure probes** (`/healthz`, `/livez`, `/readyz`, `/metrics`): a
+  fixed list, not configurable, and the same one that is exempt from authentication.
+
+- **The audit log is now tamper-evident: each tenant's rows form a SHA-256 hash chain, and `cleatctl audit verify` checks it.** (cleat#2047)
+
+  Every `audit_events` row carries `seq`, `prev_hash` and `row_hash`, and each tenant has a head
+  row in `audit_chain_heads`. An edited row, a row removed from the middle, and rows removed from
+  the end are each reported, by kind, at the first place they occur. `cleatctl audit verify
+  (--tenant <id> | --all-tenants) [--json]` exits `0` clean, `1` on a break, and `2` when it could
+  not look, and the two non-zero values are different on purpose.
+
+  **What it is not:** the chain proves the integrity of what was recorded, not that everything was
+  recorded, and it does not stop a database administrator who rewrites a whole chain and its head
+  together. `docs/reference/audit-log.md` states both, with the encoding an offline verifier needs.
+
+  **Export.** `GET /audit/export` streams the caller's tenant as JSON Lines (any authenticated caller of
+  the tenant, like `/audit/events`), ending in a `checkpoint` record so a truncated export is visible,
+  and `GET /audit/verify` reports the chain. `cleatctl audit export (--tenant | --all-tenants)` is the
+  operator variant: there is deliberately no cross-tenant HTTP endpoint. Every event record is
+  verifiable offline with `plugins/auditlog/testdata/audit_chain_reference.py verify-export`, and the
+  record schema is documented as a contract in `docs/reference/audit-log.md`.
+
+  **An export never ends in a checkpoint over a hole.** Rows removed while it runs (a retention sweep) fail
+  the export (`409` before anything was sent, otherwise the connection is aborted and `cleatctl` says
+  `INCOMPLETE`) rather than leave a gap that verifies. The checkpoint records `from`, `to` and `after_seq`, so
+  `verify-export` knows which completeness rules apply. The checkpoint itself is unsigned, so an edit can
+  present a full export as a range or a resumed one: the options say what the caller knows (`--require-full`,
+  `--expect-head`, `--expect-floor`, `--expect-after`, `--expect-unchained`), each pins the kind of export
+  expected, and a bare run prints a `NOTE` saying what it did not establish. An anchor is a point the chain
+  passes through, so one recorded earlier still verifies an honest later export; one that retention has
+  removed is reported as retired. At least one anchor must match a record in the file, or the run is
+  INCONCLUSIVE (exit 2), because retirement is decided by the checkpoint and a forger writes that; only
+  `--expect-head` can, so `--expect-floor` and `--expect-after` always need it beside them. The chain is unkeyed, so records above the highest anchor can
+  be rewritten and re-hashed: the run says how many. An unchained record after a chained one is refused, as is
+  any in a resumed export, and the checkpoint records `unchained`. The behaviour of every kind x option x edit
+  is one table, `chain_export_matrix_test.go`.
+
+  **`GET /audit/events` no longer answers 500 on SQL Server:** it wrote a literal `LIMIT`.
+
+  Behaviour changes to know about:
+  - **Existing rows are not backfilled.** They stay unchained and are outside the guarantee.
+  - **Retention is per tenant.** It deletes an expired prefix of a tenant's chain (at most 5,000 rows
+    per tenant per hourly sweep) and records a floor, instead of one cross-tenant `DELETE`. A backlog
+    of expired rows now drains over several sweeps.
+  - **Each request is a short transaction that locks its tenant's head row,** so a tenant's appends
+    serialise. Different tenants do not contend.
+  - **Text that cannot be stored (invalid UTF-8, NUL) is replaced with U+FFFD instead of dropping the
+    whole event.**
+  - **A value too long for its column is truncated with a `...[truncated]` marker instead of failing the
+    insert** (`path` 700 characters and 800 UTF-16 units, `method` 255, the free-text columns 4,096). On
+    MySQL and SQL Server an over-long path used to leave no audit row at all.
+  - **The MySQL `audit_events.timestamp` column becomes `DATETIME(6)` holding UTC** (it was
+    `TIMESTAMP(6)`, which stops at 2038).
+  - **`cleatctl audit verify --retention-days N`** also reports a retention floor that covers rows too
+    young to have expired.
+  - **Verify also reports `rows_below_floor`:** chained rows that survive at or below the recorded floor.
+    Retention deletes them in the same transaction that moves the floor, so a floor moved by a single
+    `UPDATE` no longer hides an edit beneath it (cleat#2188).
+
+- **Tenant-secrets master-key rotation: a key ring and `cleatctl reseal-secrets`.** (cleat#1991)
+
+  A key is now named by an integer version. `CLEAT_SECRET_MASTER_KEY_VERSION` (default `1`, which is what every
+  existing row carries), `CLEAT_SECRET_MASTER_KEY_PREVIOUS` and `CLEAT_SECRET_MASTER_KEY_PREVIOUS_VERSION` let a
+  worker open rows sealed under the key being retired while sealing new ones under the new key. `cleatctl
+  reseal-secrets [--dry-run]` re-seals every row online, verifying before it writes and writing conditionally so a
+  concurrent `set-secret` is not undone. A worker that cannot open some stored version refuses to start and names it.
+  See `docs/how-to/use-secrets.md`.
+
+  **The system now checks it.** Every worker publishes the key versions it can open in `admin.workers`, and a
+  write at version *v* (`set-secret`, and each row `reseal-secrets` moves) is refused while any live worker
+  cannot open *v*, naming the worker. The worker's start (publish its keys, read every stored secret) and a
+  write (read the registry, write the row) are serialised by one named database lock, so a worker cannot start
+  while a write is landing that it would then be unable to read. A worker whose membership loop stalled longer
+  than its stale window re-registers and re-checks, and stops if it now holds a secret it cannot open.
+
+  **Upgrade notes.**
+  - **Every worker now registers in `admin.workers`**, not only those started with
+    `--cluster-connection-budget`. The connection share still counts only workers that have a budget, so a
+    mixed fleet divides what it did before.
+  - **Complete the upgrade before the first rotation.** A worker from before this release is invisible to the
+    gate unless it registered under the connection budget, and a registry row with no key set is read as
+    "opens version 1 only".
+  - A worker stalled for more than five minutes while still serving is invisible to a writer; see
+    `docs/how-to/use-secrets.md`.
+
+- **`cleat build --target rust` refuses a workflow that iterates a `HashMap` or `HashSet` (R008).**
+  (cleat#1864)
+
+  Iterating a map is idiomatic Rust requiring no unusual act, unlike every other rule this checker
+  enforces (opening a file, spawning a thread, reading the clock) — so it was the rule an author was
+  least likely to suspect was missing. `HashMap`/`HashSet` default to a per-process random hash
+  seed, so their enumeration order is not guaranteed by the language.
+
+  **This is hardening, not a fix for an observed divergence.** cleat intercepts the WASI
+  `random_get` import a `HashMap`'s hasher seeds from and binds it to a value deterministic in
+  (workflow ID, step), so two replays of one workflow see the same order today regardless. The rule
+  guards a language guarantee cleat is not relying on staying true, and its message does not claim
+  otherwise.
+
+  Construction, insertion, lookup and removal on a `HashMap`/`HashSet` are unaffected — only
+  enumerating one (`for x in m`, `.iter()`, `.keys()`, `.values()`, `.into_iter()`, `.drain()`)
+  triggers R008, which suggests `BTreeMap`/`BTreeSet`.
+
+  **Detected via syntactic binding tracking, not a full type checker**, matching this checker's
+  existing no-toolchain design: a function parameter's declared type or a `let`'s type
+  annotation/constructor call is tracked within that function, and an enumerating use of a tracked
+  name is reported. Two shapes are known, documented limits rather than silent misses — a map
+  reached through a struct field, and one enumerated inline off a `.collect::<HashMap<_, _>>()`
+  chain with no intermediate binding — see `testdata/vet-checks/rust/known_limit_*`.
+
+- **Pre-emptive cancellation, with a terminal status of its own.**
+  `POST /api/workflows/:id/cancel` accepts `{"preemptive": true}`, which stops the workflow and
+  records **`cancelled`** rather than asking it to stop. (cleat#1153)
+
+  **Why it exists.** Cancellation was cooperative *and unobservable*: `RequestCancellation` set a
+  flag and left both stopping and reporting to the workflow, and `cancelled` was an error code
+  rather than a status the engine ever wrote. So a run that honoured a cancellation and one that
+  simply finished were **both `done`**, and an operator could not answer "did this stop because I
+  asked it to?".
+
+  **It runs the defers it owes.** A workflow with registered `defer` bodies goes to `terminating`
+  carrying `cancelled` as its recorded outcome, is re-claimed, replays its history as a defer
+  segment, and only then becomes `cancelled`. That is the same two-phase transition `terminate`
+  uses, shared rather than rebuilt.
+
+  **Asynchronous, like terminate**, and for the same reason (`tiers.yaml` decision D6). The
+  endpoint answers `{"status": "cancelled"}`, which names the *outcome*; a caller that needs to
+  know the run has finished polls the status.
+
+  **Not a breaking change.** `preemptive` defaults to `false`: a client sending `{"reason": "..."}`
+  gets the cooperative path and the `cancellation_requested` response exactly as before.
+
+  **`cancelled` is a new terminal status**, so a client that switches exhaustively on workflow
+  status should add a case. It is excluded from the active-child count, from parent close
+  policies, and from every other "is this run settled?" predicate — see
+  `docs/reference/workflow-lifecycle.md`.
+
+- **The rate limiter refuses a cluster-wide limit it cannot honour, instead of quietly giving you
+  a per-process one.** (cleat#1581)
+
+  `mode: "db"` with no database configured used to log a warning and fall back to `memory`. The
+  worker started, and because the memory limiter is an in-process map, **every worker served the
+  full configured rate** — a four-worker deployment enforced four times the limit it was told to.
+  An unrecognised mode did the same thing more quietly: the middleware tests `mode == "db"` and
+  treats everything else as memory, so `"DB"`, `"database"` and any other near-miss also selected
+  per-process limiting.
+
+  Both now return an error from the plugin's `Init`, naming the reason.
+
+  **Who is affected: only deployments that are already not getting what they asked for.** The
+  default is unchanged (`memory`), and a config that does not set `mode` behaves exactly as
+  before. If a worker now refuses to start, it was silently enforcing the wrong limits before.
+  The fix is to supply a database or to say `mode: "memory"` and mean it.
+
+- **An update name is now reusable.** `POST /api/workflows/:id/update/:name` may be called any
+  number of times over a run's life; each request is a row of its own with its own `promise_id`.
+  Previously a name was consumed for the life of the workflow and the second request was refused
+  with `409 update_name_used`. That `detail` value no longer occurs — `update_already_pending` is
+  the only remaining 409 on this endpoint, and it clears when the in-flight request is answered.
+  A client that branches on `detail` keeps working. (cleat#1416)
+
+  **Schema change**, applied by `postgres/068`, `mysql/062` and `mssql/066`:
+  `workflow_update_requests` gains a `request_id` column and is keyed
+  `(workflow_id, request_id)` instead of `(workflow_id, update_name)`. Existing rows are backfilled
+  from `update_name`, which is unique per workflow under the old key, so a workflow suspended
+  mid-update across the upgrade completes against the correct row.
+
+  Updates are **not** idempotent: a caller that retries after its first request was answered gets a
+  new update rather than a replay. Carry your own key in the payload if you need at-most-once.
+
+- **OAuth login is Postgres-only in this release: `/oauth/{provider}/login` and
+  `/oauth/{provider}/callback` return `501` on MySQL and SQL Server.** (cleat#2340)
+
+  A login mints a credential, and `auth.TenantStore.RevokeAPIKey` already refuses on
+  non-Postgres — there is no revocation path there for a session token issued by a login
+  (`auth.RevokeAPIKeyByHash` does not exist at all), so a credential minted on MySQL or
+  SQL Server could not be withdrawn once issued. Rather than ship a login whose
+  credentials cannot be revoked, both handlers refuse at their first statement and the
+  worker logs the limitation once at startup.
+
+  The refusal is per-request rather than at plugin `Init`: every bundled plugin
+  initializes on every boot against one flat configuration with no reliable "am I
+  configured" signal, so refusing at `Init` would stop every MySQL or SQL Server worker
+  from starting at all, whether or not anyone there uses OAuth — the failure mode
+  cleat#2202 hit with the email plugin.
+
+  **Who is affected:** a MySQL or SQL Server deployment that uses OAuth login. Use API
+  keys on those dialects for this release. Nothing else about such a deployment changes,
+  and no other plugin's routes are affected.
+
+- **A literal route sibling of a public wildcard is no longer treated as public, and a plugin stuck on
+  the pre-cleat#2232 route signature now refuses to boot instead of silently registering nothing.**
+  (cleat#2274, cleat#2277)
+
+  `auth.Middleware`/`auth.HostBindingMiddleware` decided whether a request was public by matching it
+  against a throwaway `*http.ServeMux` built from only the exempt patterns, not the real serving mux.
+  A literal route that happens to share a path segment with a public wildcard — `POST /ingest/sources`
+  beside the public `POST /ingest/{source_id}` — matched the wildcard on the throwaway mux and was
+  let through with no credential at all. `auth.MiddlewareWithMux`/`auth.HostBindingMiddlewareWithMux`
+  now resolve the exemption against the same `*http.ServeMux` the worker actually serves from, so a
+  request is public only when the real mux itself would route it to an exempt pattern.
+  `HostBindingMiddleware`, the mux-less wrapper, is removed — every caller now passes the real mux.
+
+  Separately, `checkPluginRouteSignatures` (added with cleat#2232's `plugin.Router` interface) already
+  detected a plugin still implementing the old `RegisterRoutes(mux *http.ServeMux) error` signature,
+  but only logged a warning: the worker kept booting with that plugin's routes silently unregistered.
+  It now returns an error that `cleat-worker`'s `main` treats as fatal, refusing to start rather than
+  serving with a route table that does not match what a plugin author believes is wired up.
+
+- **A worker that cannot decrypt a run's history now releases the run instead of failing it, or completing it on garbage.** (cleat#2311)
+
+  The store swallowed a payload decryption failure: it put `"[DECRYPTION_FAILED]"` in the field and carried
+  on. A worker holding the wrong key (a mis-ordered key rotation, a mis-deploy) therefore ended the run
+  FAILED permanently on the checksum chain, or, with `--disable-checksum-verification`, ended it DONE having
+  run the guest on the placeholder. A worker holding the right key could have finished it either way.
+  `LoadEventHistory` (the read replay acts on) now returns an error wrapping `engine.ErrPayloadDecryption`
+  for any of the ten encrypted event fields, or for a sealed `payload` column, that will not open; a value
+  that is not shaped like a sealed one is plaintext and is read as it is, so runs whose history was written
+  before `--encrypt-sensitive-payloads` was switched on, by sharded workers before cleat#2308, or as
+  plaintext child events before cleat#2328, still load (one edge: a plaintext string field that happens to be
+  valid base64 of 28 or more bytes is read as sealed and refused, since there is no envelope to tell them
+  apart); the worker
+  treats that like a plugin it lacks (cleat#1710) and releases the run with `--unservable-release-backoff`,
+  so a worker with the key picks it up. The history stream's `error` event says so in one sentence, and the
+  paginated and streaming-chunk reads that display history still show the placeholder for a field they cannot
+  read.
+
+  Also from the same change, because a worker that cannot read a history must not write to it either: every
+  admin verb that appends an event (`POST /api/admin/instances/{id}/force-complete`, `.../force-fail`,
+  `.../re-replay`, the dead-letter retry) checks, inside the transaction that would write it, that the history
+  can be decrypted, and answers 409 (`state_conflict`, "this worker cannot read workflow ... Nothing was
+  changed") otherwise, with the status change rolled back. `.../steps/{n}/resolve` refuses the same way.
+  Before, force-fail and force-complete answered 200 and appended an `admin_action` sealed under the wrong key,
+  after which no single-key worker could re-replay, retry or resolve the run; re-replay did the same when its
+  history load failed, and resolve returned a 500 carrying the decrypt text. A run released this way is counted
+  in the new `cleat_workflow_releases_total{check}` (`check="history_decrypt"` for this case; the version and
+  plugin checks are counted too) and logged at WARN once per five minutes per run (a stuck run wrote about 23 MB
+  of identical lines a day; the store's own per-field decrypt WARN is now silent on the replay read, which
+  returns the failure instead). The worker's own store and the shard stores now carry the metrics instance, so
+  `cleat_decryption_errors_total` moves on the default and the sharded paths (it was a no-op there).
+
+  Not covered (cleat#2324): a worker started WITHOUT `--encrypt-sensitive-payloads` has no key ring to fail
+  against, and nothing in a sealed column marks it as ciphertext (by design, engine/encryption.go has no
+  envelope). Measured: such a worker ends the run FAILED on the checksum chain, or DONE with
+  `--disable-checksum-verification`, exactly as before this change.
+
+- **SIGTERM drains before it cancels, and a run cut off by shutdown is released, never failed.** (cleat#2285)
+
+  The signal handler cancelled the worker's context at once. Every in-flight durable wait was aborted and the
+  run was written FAILED (`finalize workflow: begin tx: context canceled`), a terminal status nothing
+  reclaims, so a rolling deploy lost every run it interrupted. The worker now stops claiming and waits up to
+  `--shutdown-grace` (default 20s; Helm `worker.shutdownGrace`) with heartbeats alive; a run that finishes in
+  time is finalized normally. What is still running when the grace ends is cancelled and **released** for another
+  worker to replay, on every path that ends a run because the worker is going away (the outcome that comes back,
+  a finalize or continue-as-new that could not begin, the defer phase). The guest is told to stop rather than
+  that a call failed, so a workflow that compensates on error does not run its compensation on a fault that
+  never happened.
+
+  **What this does not promise.** A durable call still in flight when the grace ends can run twice: the worker
+  does not abort an HTTP call already on the wire, and another worker may replay the step (cleat#2287). A
+  genuine failure that lands during shutdown is delayed rather than lost: the run is released and fails again,
+  for real, on the worker that picks it up. If your calls run longer than 20s, raise `--shutdown-grace` and the
+  orchestrator's kill deadline with it.
+
+  Also changed: `GET /api/admin/drain` no longer completes the drain or stops the worker (it is read-only), and
+  `POST /api/admin/drain` is a cordon that does not exit the process. The chart sets
+  `terminationGracePeriodSeconds: 60` (was the 30s default), `k8s/deployment.yaml` likewise, and the compose
+  files set `stop_grace_period: 60s` (Docker's 10s default would cut the drain off).
+
+- **The audit log no longer drops events silently when the database is slow or down.** (cleat#2168)
+
+  A request that finds the audit buffer full now waits up to 1s for room (`audit_enqueue_wait_ms`), and an
+  event whose insert fails is retried with backoff until `audit_retry_deadline_ms` (60s) instead of being
+  discarded on the first error. A retry checks by event id that the first attempt did not commit before
+  appending, so a lost commit acknowledgement does not record the event twice. What is still given up is
+  counted, logged at Error (at most once a second per reason), and reported: the new metric
+  `cleat_plugin_events_lost_total{plugin,reason}` (reasons `buffer_full`, `insert_failed`, `shutdown`,
+  `shutdown_inflight`, with a Grafana panel), and `/healthz` answers `200` with `"degraded": true, "reason":
+  "plugin_unhealthy"` (a reason code only; the endpoint is unauthenticated) for five minutes after a loss (not
+  503: a stalled audit table must not restart the worker). Plugin health is computed by a background loop and
+  cached, so a probe never runs plugin code. Four workers now drain the buffer, and shutdown drains it for up
+  to 10s on a timer that does not wait for a database call the driver will not cancel: what is queued is
+  counted `shutdown`, and what is inside such a call is counted `shutdown_inflight` (an upper bound, since it
+  may still commit).
+  A row's timestamp is now the time of the request rather than of the append, so **chain order (seq) may
+  differ from timestamp order**; the chain follows commit order and verifies either way. Anything that polls
+  `/audit/events` or `/audit/export` by time can miss a retried row and should follow `seq`. There is still
+  no durable spool: a killed process loses what is in its buffer. The five config keys are prefixed
+  (`audit_buffer_size`, `audit_workers`, `audit_enqueue_wait_ms`, `audit_retry_deadline_ms`,
+  `audit_shutdown_drain_ms`), because the plugin config is one flat object; zero or negative means the
+  default, and buffer 1,000,000, 64 workers, enqueue wait 30s, retry deadline 1h and shutdown drain 25s are
+  the caps. New public surface: `plugin.Environment.EventsLost`, the metric, and the `/healthz` shape.
+
+- **A worker with no `CLEAT_SECRET_MASTER_KEY` now refuses to start on PostgreSQL and SQL Server when the
+  database holds secrets, as it always did on MySQL.** (cleat#2123)
+
+  The startup check read `tenant_secrets` across all tenants, and that read cannot see the table there: on
+  PostgreSQL it raised (and the caller treated the error as "cannot tell"), on SQL Server it returned 0. So a
+  worker started without the key against a database full of secrets booted normally and failed on the first
+  workflow that resolved one, from inside a plugin call, with an error that does not mention keys.
+
+  The check now reads each tenant's rows under that tenant's own context, **suspended tenants included**, and
+  runs after the migrations. **A read that fails now refuses to start** rather than passing: with no key and a
+  table it cannot read, the worker cannot tell whether it would fail on its first plugin call.
+
+  **Upgrade note.** A deployment that was silently running without the key while holding secrets will now
+  refuse to start. That is the check working; set `CLEAT_SECRET_MASTER_KEY` to the key the secrets were sealed
+  with.
+
+- **A sharded deployment now honours per-tenant and per-run limit overrides, and says so when it
+  can't.** (cleat#1853)
+
+  `ShardedStore` was also missing `GetTenantSettings` and `GetRunLimits`, which all three dialect
+  stores implement. Both are reached by a type assertion that returns **with no log at all** on
+  failure, so every workflow on a sharded deployment silently got the worker's flag values for
+  `WasmInstanceTimeout`, `WasmWallClockCeiling`, `HostRetryBudget` and `MaxWorkflowDuration`,
+  regardless of what a tenant or a run had configured.
+
+  **This is not a limit escape.** A tenant's settings are already clamped to the operator's, and a
+  run's to its tenant's, so the fallback can only ever be wider than intended, never past the
+  operator's ceiling.
+
+  Both now route to the shard that has the answer. `GetRunLimits` routes by workflow ID, like the
+  rest of `ShardedStore`. `GetTenantSettings` has no workflow ID to route by — every shard was
+  opened for the same tenant — so it tries each shard and uses the first non-empty result, which
+  survives an operator having written the override to only one shard (the writer, `cleatctl
+  set-tenant-setting`, takes one connection and has no fan-out across shards). A shard that
+  genuinely cannot answer now logs a warning naming itself, once per request, instead of nothing.
+
+- **The reaper's reclaim-timeout default was too tight to safely cover a single
+  failed-then-retried heartbeat, and an idle worker had no way to detect a
+  database stall at all.** After a database stall, every running instance's
+  `heartbeat_at` ages past the stale threshold at once; whichever worker's
+  reaper reaches the database first after recovery could reclaim a run that is
+  still alive, including its own. `engine.DBPinger` gives an otherwise-idle
+  worker (nothing in flight, so no heartbeat write to prove liveness with) a
+  real liveness signal, and `reapingIsSafe()` now requires both a recent
+  confirmed contact-OK and an elapsed grace period since the last recorded
+  trouble before trusting a stale `heartbeat_at` as evidence of a dead holder.
+
+  **`--reclaim-timeout`'s derived default changes from `2*heartbeat` (floored
+  at 10s) to `heartbeat + 3*dbCallDeadline(heartbeat) + heartbeatRetryInterval(heartbeat)
+  + reclaimSlack` (floored at 10s) — about 14.5s at the default 5s
+  `--heartbeat`, up from 10s.** This is a wider safety margin, not a
+  behaviour anyone has to opt into: the old value undercounted a single
+  heartbeat call that fails and is retried. A real network-level stall (not
+  just a slow-but-reachable server) also keeps a failing call blocked until
+  the stall itself clears rather than until its own client-side deadline —
+  measured directly against a real PostgreSQL container under `docker
+  pause` — so the invariant also accounts for the wait before that retry is
+  even issued, which at `--heartbeat` below one second gets no faster a
+  retry than the worker's own ordinary cadence. Finally, the modeled worst
+  case has zero margin at `--heartbeat` >= 4s (the two formulas are
+  algebraically identical there), and does not account for the retry
+  needing a fresh connection — real and documented on SQL Server, which
+  marks a connection bad after a cancelled call whose own cancel-drain also
+  fails, exactly what a genuine stall produces — so `reclaimSlack` (a fixed
+  1s) covers what the model leaves out rather than widening a term that
+  means something else. An explicit `--reclaim-timeout` is unaffected.
+
+  MySQL's `ReapStaleInstances` also now runs inside an explicit transaction —
+  under `interpolateParams=true`, the previous autocommit statement could keep
+  committing server-side after the caller's context was cancelled, so a
+  caller-visible "deadline exceeded" did not mean the reclaim had not
+  happened. Postgres and SQL Server were already transactional here.
+  cleat#2005.
+
+### Added
 
 - **OAuth login works end to end, and an allowlisted identity gets a real `cleat_sk_...` key —
   which carries FULL TENANT ACCESS.** (cleat#2340)
@@ -860,37 +1439,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   for the rollout sequence a rolling rotation needs to stay safe, and cleat#2311 for a
   pre-existing gap the sequencing works around rather than closes.
 
-- **`/livez`, `/readyz`, database-reachability metrics and alert rules: a database incident now looks different from a worker incident.** (cleat#2007)
-
-  `/livez` says the process and its background loops are ticking and never looks at the database, so a
-  database outage does not restart workers. `/readyz` is 503 while the worker has not finished starting, is
-  draining, or its database did not answer its last deadline-bounded call, so a load balancer stops sending
-  traffic a worker cannot serve. `/healthz` stays as an alias of `/livez`. The Helm chart and
-  `k8s/deployment.yaml` now use `/livez` for liveness and `/readyz` for readiness (both used `/healthz`, so a
-  worker that could not reach its database stayed "ready"). New metrics: `cleat_db_reachable`,
-  `cleat_db_last_success_timestamp_seconds`, `cleat_db_consecutive_failures`, `cleat_db_probe_duration_seconds`
-  (each with a `dialect` label). A call counts as failed if it errors or runs past its deadline, and the
-  deadline is now enforced by a timer: against a real `docker pause` the gauge used to flip only at unpause.
-  Two log lines mark the transitions: `database unreachable (deadline exceeded)` and `database reachable again
-  after 43s`. `monitoring/prometheus/alerts.yml` tells the two incidents apart (every worker reports 0: the
-  database; one worker reports 0 among healthy peers: that worker), suppresses the reaper's echo of an outage,
-  and is unit-tested with `promtool test rules` in CI.
-
-  **Breaking:** the unauthenticated health bodies contain only `ok`, `degraded` and reason codes
-  (`background_loop_stuck`, `database_unreachable`, `starting`, `draining`, `memory_pressure`,
-  `plugin_unhealthy`). `stale_loops` (loop names) and `pressure` are gone from them, and `reasons` lists every
-  degraded reason (memory pressure no longer hides an unhealthy plugin). The detail is on the new
-  authenticated `GET /api/admin/health`. Degraded states (memory pressure, an unhealthy plugin) are 200 on every
-  probe; only the database, draining, starting and a stuck loop are 503. `backendkit`'s `Health()` now calls
-  `/readyz`.
-
-  `/livez` does not fail because a background loop is stuck in a call the database is holding: a stale loop
-  is put down to the database only while the database has not answered since it went quiet and that is
-  still being observed, with a 30-second grace after recovery. Measured against a real `docker pause`.
-
-  **The audit log no longer records the infrastructure probes** (`/healthz`, `/livez`, `/readyz`, `/metrics`): a
-  fixed list, not configurable, and the same one that is exempt from authentication.
-
 - **`/metrics` is valid Prometheus text again: histograms had doubled label braces and non-cumulative
   buckets, so Prometheus dropped every scrape.** (cleat#2266)
 
@@ -914,24 +1462,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first; a concurrent writer's change since that read refuses the write (`409`-shaped, not a
   silent overwrite) rather than clobbering it, and says so with a re-read command.
 
+- **`audit-log` now records who: `user_id` on every row was the empty string, always.** (cleat#1881)
+
+  The identity was already available — `oauth-provider` resolves an OAuth session to an email and
+  puts it in request context — but nothing read it. A new neutral `auth.SubjectFromContext`
+  (populated by `oauth-provider`, readable by any plugin) closes the gap without one plugin
+  importing the other; an unauthenticated request still records an empty `user_id` and is never
+  refused over a missing identity.
+
+  **The ordering this depends on is now declared, not inherited from the alphabet.** `audit-log`
+  reads context after the request has passed through every plugin wrapped around it, so it only
+  sees `oauth-provider`'s value because `"oauth-provider"` happens to sort after `"audit-log"` in
+  the tie-break `plugin.Discover()` falls back to when neither plugin declares a relationship.
+  Renaming either plugin would have silently reverted `user_id` to always-empty with no test
+  failing. A new plugin-contract clause (C14) and guard pin the real registered order instead —
+  `plugin.PluginInfo.Requires` was considered and rejected for this, since it makes plugin
+  discovery fail outright if the required plugin isn't registered, which is the wrong coupling
+  between two independently-optional features.
+
+- **`completed_by` on the workflow object** — the worker that performed the terminal write.
+  `assigned_to` is a *lease*, not an audit field: every terminal write clears it while fencing on
+  it, so it is blank on every finished run and cannot answer "which worker ran this" after the
+  fact. Measured on a live database, `assigned_to` was blank on 185 of 185 terminal runs.
+  (cleat#1118)
+
+  **Schema change**, applied by `postgres/074`, `mysql/064` and `mssql/068`: `workflow_instances`
+  gains a nullable `completed_by`. `postgres/075` additionally re-emits `finalize_workflow_status`,
+  whose `done` and `failed` branches record it; the `ready` branch deliberately does not, because
+  that run goes back on the queue and recording there would name whoever yielded.
+
+  Returned by both read paths — `GET /api/workflows/:id` and the workflow listing.
+
+  **Nothing is backfilled.** The column is NULL on every row written before the migration, and on
+  any run that reached a terminal state without ever being claimed — no worker ran it. A run
+  terminated through its *defer phase* names the worker that ran the defer phase rather than the
+  workflow body: that transition clears the lease deliberately, to fence the old owner out.
+
+- **`allowed_signals` can be set.** `GET` and `PUT
+  /api/workflows/{id}/allowed-signals` read and replace the list
+  `--require-signal-auth` checks a caller against, backed by
+  `WorkflowStore.SetAllowedSignalCallers` on all three dialects. Until now
+  nothing in cleat could write that column, so 0.2.0's note below — that the
+  flag denied every signal with no supported remedy — described a gap that is
+  now closed.
+
+  `PUT` replaces the whole list; send it without a caller to revoke, or `[]` to
+  clear. Both verbs are scoped to the calling tenant, and a workflow belonging
+  to another tenant answers `404` rather than `403`, so the endpoint cannot be
+  used to find out which ids exist.
+
+  **`--require-signal-auth` still defaults to `false`.** Every workflow starts
+  with an empty list and nothing sets one at start time, so enabling the flag
+  denies every signal until callers are granted per workflow. Grant first, then
+  enable. See `docs/reference/worker-config.md`.
+
+- **An operator can resolve a call left ambiguous by a crash.** `POST
+  /api/admin/instances/{id}/steps/{step}/resolve`, with `X-Confirm:
+  resolve-step` and `{"response": "..."}`, records an outcome for a durable
+  call that was in flight when the process died.
+
+  Such a call leaves a pending row, and replay reports it as `[AMBIGUOUS]` and
+  says to check the external service before retrying — with nowhere to put the
+  answer. An `AmbiguityResolver` could supply one, but the resolve path returns
+  immediately when none is configured, which is most deployments, so the
+  workflow reported the same ambiguity on every replay forever.
+
+  The response is written to the event as though the call had returned it,
+  because that is what replay has to see. What keeps it honest is the new
+  `resolved_by` field, written to the same row in the same statement: the
+  outcome is usable by replay and permanently marked as **asserted by an
+  operator rather than observed**. The row must still be pending, so an
+  operator racing a worker cannot overwrite a real result — whoever writes
+  first wins. IMPROVEMENT-PLAN §1.4 phase F.
+
+- **An operator can re-replay a stopped workflow.** `POST
+  /api/admin/instances/{id}/re-replay`, with `X-Confirm: re-replay` and
+  `{"generation": N}`, returns a `failed`, `terminated` or `dead_lettered`
+  workflow to `ready`: the claim, heartbeat and error fields are cleared and
+  the generation is bumped, so a stale worker's late write cannot land. History
+  is **kept** — the workflow resumes from what it recorded rather than starting
+  over. The non-terminal statuses are refused because the dispatcher owns them.
+
+  Re-replay refuses a workflow whose history holds an unresolved ambiguous
+  call, and names the step: replaying one stops again in the same place for the
+  same reason, so it points at the resolve endpoint above instead. This was the
+  last of the three admin operations that was a stub returning
+  `not implemented` on all three dialects. IMPROVEMENT-PLAN §3.20.
+
+- **`GET /api/workflows/{id}/history` reports `err_code` and `resolved_by` per
+  event.** `err_code` is how the caller classified a failed call — the
+  `ErrorCode` a `ServiceCaller` supplied through `CleatError` — recorded at the
+  time of the failure, where history previously collapsed the whole
+  classification to a single retryable-or-not bit. Its vocabulary is the one
+  `workflow_instances.error_code` already stores, so one operator query matches
+  in both tables.
+
+  It is for reading, not for deciding: `err_non_retryable` stays authoritative
+  for retry behaviour, deliberately. The two can legitimately disagree, because
+  the guest's own retry policy travels across the ABI — and deriving
+  retryability from the class instead would let an upgrade change the retry
+  behaviour of workflows already in flight, which is the determinism bug §2.35
+  exists to prevent. Both fields survive history compaction.
+  IMPROVEMENT-PLAN §2.35.
+
 ### Changed
-
-- **The rate limiter refuses a cluster-wide limit it cannot honour, instead of quietly giving you
-  a per-process one.** (cleat#1581)
-
-  `mode: "db"` with no database configured used to log a warning and fall back to `memory`. The
-  worker started, and because the memory limiter is an in-process map, **every worker served the
-  full configured rate** — a four-worker deployment enforced four times the limit it was told to.
-  An unrecognised mode did the same thing more quietly: the middleware tests `mode == "db"` and
-  treats everything else as memory, so `"DB"`, `"database"` and any other near-miss also selected
-  per-process limiting.
-
-  Both now return an error from the plugin's `Init`, naming the reason.
-
-  **Who is affected: only deployments that are already not getting what they asked for.** The
-  default is unchanged (`memory`), and a config that does not set `mode` behaves exactly as
-  before. If a worker now refuses to start, it was silently enforcing the wrong limits before.
-  The fix is to supply a database or to say `mode: "memory"` and mean it.
 
 ### Fixed
 
@@ -1091,85 +1725,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is refused with the existing `EC point is not on <curve>` message. The new function also refuses the point at
   infinity. Nothing else in the plugin changed.
 
-- **A literal route sibling of a public wildcard is no longer treated as public, and a plugin stuck on
-  the pre-cleat#2232 route signature now refuses to boot instead of silently registering nothing.**
-  (cleat#2274, cleat#2277)
-
-  `auth.Middleware`/`auth.HostBindingMiddleware` decided whether a request was public by matching it
-  against a throwaway `*http.ServeMux` built from only the exempt patterns, not the real serving mux.
-  A literal route that happens to share a path segment with a public wildcard — `POST /ingest/sources`
-  beside the public `POST /ingest/{source_id}` — matched the wildcard on the throwaway mux and was
-  let through with no credential at all. `auth.MiddlewareWithMux`/`auth.HostBindingMiddlewareWithMux`
-  now resolve the exemption against the same `*http.ServeMux` the worker actually serves from, so a
-  request is public only when the real mux itself would route it to an exempt pattern.
-  `HostBindingMiddleware`, the mux-less wrapper, is removed — every caller now passes the real mux.
-
-  Separately, `checkPluginRouteSignatures` (added with cleat#2232's `plugin.Router` interface) already
-  detected a plugin still implementing the old `RegisterRoutes(mux *http.ServeMux) error` signature,
-  but only logged a warning: the worker kept booting with that plugin's routes silently unregistered.
-  It now returns an error that `cleat-worker`'s `main` treats as fatal, refusing to start rather than
-  serving with a route table that does not match what a plugin author believes is wired up.
-
-- **A worker that cannot decrypt a run's history now releases the run instead of failing it, or completing it on garbage.** (cleat#2311)
-
-  The store swallowed a payload decryption failure: it put `"[DECRYPTION_FAILED]"` in the field and carried
-  on. A worker holding the wrong key (a mis-ordered key rotation, a mis-deploy) therefore ended the run
-  FAILED permanently on the checksum chain, or, with `--disable-checksum-verification`, ended it DONE having
-  run the guest on the placeholder. A worker holding the right key could have finished it either way.
-  `LoadEventHistory` (the read replay acts on) now returns an error wrapping `engine.ErrPayloadDecryption`
-  for any of the ten encrypted event fields, or for a sealed `payload` column, that will not open; a value
-  that is not shaped like a sealed one is plaintext and is read as it is, so runs whose history was written
-  before `--encrypt-sensitive-payloads` was switched on, by sharded workers before cleat#2308, or as
-  plaintext child events before cleat#2328, still load (one edge: a plaintext string field that happens to be
-  valid base64 of 28 or more bytes is read as sealed and refused, since there is no envelope to tell them
-  apart); the worker
-  treats that like a plugin it lacks (cleat#1710) and releases the run with `--unservable-release-backoff`,
-  so a worker with the key picks it up. The history stream's `error` event says so in one sentence, and the
-  paginated and streaming-chunk reads that display history still show the placeholder for a field they cannot
-  read.
-
-  Also from the same change, because a worker that cannot read a history must not write to it either: every
-  admin verb that appends an event (`POST /api/admin/instances/{id}/force-complete`, `.../force-fail`,
-  `.../re-replay`, the dead-letter retry) checks, inside the transaction that would write it, that the history
-  can be decrypted, and answers 409 (`state_conflict`, "this worker cannot read workflow ... Nothing was
-  changed") otherwise, with the status change rolled back. `.../steps/{n}/resolve` refuses the same way.
-  Before, force-fail and force-complete answered 200 and appended an `admin_action` sealed under the wrong key,
-  after which no single-key worker could re-replay, retry or resolve the run; re-replay did the same when its
-  history load failed, and resolve returned a 500 carrying the decrypt text. A run released this way is counted
-  in the new `cleat_workflow_releases_total{check}` (`check="history_decrypt"` for this case; the version and
-  plugin checks are counted too) and logged at WARN once per five minutes per run (a stuck run wrote about 23 MB
-  of identical lines a day; the store's own per-field decrypt WARN is now silent on the replay read, which
-  returns the failure instead). The worker's own store and the shard stores now carry the metrics instance, so
-  `cleat_decryption_errors_total` moves on the default and the sharded paths (it was a no-op there).
-
-  Not covered (cleat#2324): a worker started WITHOUT `--encrypt-sensitive-payloads` has no key ring to fail
-  against, and nothing in a sealed column marks it as ciphertext (by design, engine/encryption.go has no
-  envelope). Measured: such a worker ends the run FAILED on the checksum chain, or DONE with
-  `--disable-checksum-verification`, exactly as before this change.
-
-- **SIGTERM drains before it cancels, and a run cut off by shutdown is released, never failed.** (cleat#2285)
-
-  The signal handler cancelled the worker's context at once. Every in-flight durable wait was aborted and the
-  run was written FAILED (`finalize workflow: begin tx: context canceled`), a terminal status nothing
-  reclaims, so a rolling deploy lost every run it interrupted. The worker now stops claiming and waits up to
-  `--shutdown-grace` (default 20s; Helm `worker.shutdownGrace`) with heartbeats alive; a run that finishes in
-  time is finalized normally. What is still running when the grace ends is cancelled and **released** for another
-  worker to replay, on every path that ends a run because the worker is going away (the outcome that comes back,
-  a finalize or continue-as-new that could not begin, the defer phase). The guest is told to stop rather than
-  that a call failed, so a workflow that compensates on error does not run its compensation on a fault that
-  never happened.
-
-  **What this does not promise.** A durable call still in flight when the grace ends can run twice: the worker
-  does not abort an HTTP call already on the wire, and another worker may replay the step (cleat#2287). A
-  genuine failure that lands during shutdown is delayed rather than lost: the run is released and fails again,
-  for real, on the worker that picks it up. If your calls run longer than 20s, raise `--shutdown-grace` and the
-  orchestrator's kill deadline with it.
-
-  Also changed: `GET /api/admin/drain` no longer completes the drain or stops the worker (it is read-only), and
-  `POST /api/admin/drain` is a cordon that does not exit the process. The chart sets
-  `terminationGracePeriodSeconds: 60` (was the 30s default), `k8s/deployment.yaml` likewise, and the compose
-  files set `stop_grace_period: 60s` (Docker's 10s default would cut the drain off).
-
 - **`--require-host-match` now boots and serves as the role a deployment runs as (cleat#2258).**
   The boot check counted `tenant_domains`, and every authenticated request looked its Host up in
   it, both on a connection that carried no tenant. As `cleat_app` on PostgreSQL the count raised
@@ -1189,46 +1744,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A test serves a real request through the real plugin middleware chain, and another fails the build
   for any type that embeds `http.ResponseWriter` without both methods. The stream tests never met a
   wrapper before, because they call the handler directly with a recorder that has a `Flush`.
-
-- **The audit log no longer drops events silently when the database is slow or down.** (cleat#2168)
-
-  A request that finds the audit buffer full now waits up to 1s for room (`audit_enqueue_wait_ms`), and an
-  event whose insert fails is retried with backoff until `audit_retry_deadline_ms` (60s) instead of being
-  discarded on the first error. A retry checks by event id that the first attempt did not commit before
-  appending, so a lost commit acknowledgement does not record the event twice. What is still given up is
-  counted, logged at Error (at most once a second per reason), and reported: the new metric
-  `cleat_plugin_events_lost_total{plugin,reason}` (reasons `buffer_full`, `insert_failed`, `shutdown`,
-  `shutdown_inflight`, with a Grafana panel), and `/healthz` answers `200` with `"degraded": true, "reason":
-  "plugin_unhealthy"` (a reason code only; the endpoint is unauthenticated) for five minutes after a loss (not
-  503: a stalled audit table must not restart the worker). Plugin health is computed by a background loop and
-  cached, so a probe never runs plugin code. Four workers now drain the buffer, and shutdown drains it for up
-  to 10s on a timer that does not wait for a database call the driver will not cancel: what is queued is
-  counted `shutdown`, and what is inside such a call is counted `shutdown_inflight` (an upper bound, since it
-  may still commit).
-  A row's timestamp is now the time of the request rather than of the append, so **chain order (seq) may
-  differ from timestamp order**; the chain follows commit order and verifies either way. Anything that polls
-  `/audit/events` or `/audit/export` by time can miss a retried row and should follow `seq`. There is still
-  no durable spool: a killed process loses what is in its buffer. The five config keys are prefixed
-  (`audit_buffer_size`, `audit_workers`, `audit_enqueue_wait_ms`, `audit_retry_deadline_ms`,
-  `audit_shutdown_drain_ms`), because the plugin config is one flat object; zero or negative means the
-  default, and buffer 1,000,000, 64 workers, enqueue wait 30s, retry deadline 1h and shutdown drain 25s are
-  the caps. New public surface: `plugin.Environment.EventsLost`, the metric, and the `/healthz` shape.
-
-- **A worker with no `CLEAT_SECRET_MASTER_KEY` now refuses to start on PostgreSQL and SQL Server when the
-  database holds secrets, as it always did on MySQL.** (cleat#2123)
-
-  The startup check read `tenant_secrets` across all tenants, and that read cannot see the table there: on
-  PostgreSQL it raised (and the caller treated the error as "cannot tell"), on SQL Server it returned 0. So a
-  worker started without the key against a database full of secrets booted normally and failed on the first
-  workflow that resolved one, from inside a plugin call, with an error that does not mention keys.
-
-  The check now reads each tenant's rows under that tenant's own context, **suspended tenants included**, and
-  runs after the migrations. **A read that fails now refuses to start** rather than passing: with no key and a
-  table it cannot read, the worker cannot tell whether it would fail on its first plugin call.
-
-  **Upgrade note.** A deployment that was silently running without the key while holding secrets will now
-  refuse to start. That is the check working; set `CLEAT_SECRET_MASTER_KEY` to the key the secrets were sealed
-  with.
 
 - **Write-ahead call intent now works on a sharded deployment, and an operator can resolve an
   ambiguous call there.** (cleat#1778)
@@ -1252,403 +1767,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deployments are unchanged — the three dialect stores always implemented these methods. A shard
   whose store cannot honour the guarantee still fails loudly, and now names the shard.
 
-- **A sharded deployment now honours per-tenant and per-run limit overrides, and says so when it
-  can't.** (cleat#1853)
-
-  `ShardedStore` was also missing `GetTenantSettings` and `GetRunLimits`, which all three dialect
-  stores implement. Both are reached by a type assertion that returns **with no log at all** on
-  failure, so every workflow on a sharded deployment silently got the worker's flag values for
-  `WasmInstanceTimeout`, `WasmWallClockCeiling`, `HostRetryBudget` and `MaxWorkflowDuration`,
-  regardless of what a tenant or a run had configured.
-
-  **This is not a limit escape.** A tenant's settings are already clamped to the operator's, and a
-  run's to its tenant's, so the fallback can only ever be wider than intended, never past the
-  operator's ceiling.
-
-  Both now route to the shard that has the answer. `GetRunLimits` routes by workflow ID, like the
-  rest of `ShardedStore`. `GetTenantSettings` has no workflow ID to route by — every shard was
-  opened for the same tenant — so it tries each shard and uses the first non-empty result, which
-  survives an operator having written the override to only one shard (the writer, `cleatctl
-  set-tenant-setting`, takes one connection and has no fan-out across shards). A shard that
-  genuinely cannot answer now logs a warning naming itself, once per request, instead of nothing.
-
-### Added
-
-- **The audit log is now tamper-evident: each tenant's rows form a SHA-256 hash chain, and `cleatctl audit verify` checks it.** (cleat#2047)
-
-  Every `audit_events` row carries `seq`, `prev_hash` and `row_hash`, and each tenant has a head
-  row in `audit_chain_heads`. An edited row, a row removed from the middle, and rows removed from
-  the end are each reported, by kind, at the first place they occur. `cleatctl audit verify
-  (--tenant <id> | --all-tenants) [--json]` exits `0` clean, `1` on a break, and `2` when it could
-  not look, and the two non-zero values are different on purpose.
-
-  **What it is not:** the chain proves the integrity of what was recorded, not that everything was
-  recorded, and it does not stop a database administrator who rewrites a whole chain and its head
-  together. `docs/reference/audit-log.md` states both, with the encoding an offline verifier needs.
-
-  **Export.** `GET /audit/export` streams the caller's tenant as JSON Lines (any authenticated caller of
-  the tenant, like `/audit/events`), ending in a `checkpoint` record so a truncated export is visible,
-  and `GET /audit/verify` reports the chain. `cleatctl audit export (--tenant | --all-tenants)` is the
-  operator variant: there is deliberately no cross-tenant HTTP endpoint. Every event record is
-  verifiable offline with `plugins/auditlog/testdata/audit_chain_reference.py verify-export`, and the
-  record schema is documented as a contract in `docs/reference/audit-log.md`.
-
-  **An export never ends in a checkpoint over a hole.** Rows removed while it runs (a retention sweep) fail
-  the export (`409` before anything was sent, otherwise the connection is aborted and `cleatctl` says
-  `INCOMPLETE`) rather than leave a gap that verifies. The checkpoint records `from`, `to` and `after_seq`, so
-  `verify-export` knows which completeness rules apply. The checkpoint itself is unsigned, so an edit can
-  present a full export as a range or a resumed one: the options say what the caller knows (`--require-full`,
-  `--expect-head`, `--expect-floor`, `--expect-after`, `--expect-unchained`), each pins the kind of export
-  expected, and a bare run prints a `NOTE` saying what it did not establish. An anchor is a point the chain
-  passes through, so one recorded earlier still verifies an honest later export; one that retention has
-  removed is reported as retired. At least one anchor must match a record in the file, or the run is
-  INCONCLUSIVE (exit 2), because retirement is decided by the checkpoint and a forger writes that; only
-  `--expect-head` can, so `--expect-floor` and `--expect-after` always need it beside them. The chain is unkeyed, so records above the highest anchor can
-  be rewritten and re-hashed: the run says how many. An unchained record after a chained one is refused, as is
-  any in a resumed export, and the checkpoint records `unchained`. The behaviour of every kind x option x edit
-  is one table, `chain_export_matrix_test.go`.
-
-  **`GET /audit/events` no longer answers 500 on SQL Server:** it wrote a literal `LIMIT`.
-
-  Behaviour changes to know about:
-  - **Existing rows are not backfilled.** They stay unchained and are outside the guarantee.
-  - **Retention is per tenant.** It deletes an expired prefix of a tenant's chain (at most 5,000 rows
-    per tenant per hourly sweep) and records a floor, instead of one cross-tenant `DELETE`. A backlog
-    of expired rows now drains over several sweeps.
-  - **Each request is a short transaction that locks its tenant's head row,** so a tenant's appends
-    serialise. Different tenants do not contend.
-  - **Text that cannot be stored (invalid UTF-8, NUL) is replaced with U+FFFD instead of dropping the
-    whole event.**
-  - **A value too long for its column is truncated with a `...[truncated]` marker instead of failing the
-    insert** (`path` 700 characters and 800 UTF-16 units, `method` 255, the free-text columns 4,096). On
-    MySQL and SQL Server an over-long path used to leave no audit row at all.
-  - **The MySQL `audit_events.timestamp` column becomes `DATETIME(6)` holding UTC** (it was
-    `TIMESTAMP(6)`, which stops at 2038).
-  - **`cleatctl audit verify --retention-days N`** also reports a retention floor that covers rows too
-    young to have expired.
-  - **Verify also reports `rows_below_floor`:** chained rows that survive at or below the recorded floor.
-    Retention deletes them in the same transaction that moves the floor, so a floor moved by a single
-    `UPDATE` no longer hides an edit beneath it (cleat#2188).
-
-- **Tenant-secrets master-key rotation: a key ring and `cleatctl reseal-secrets`.** (cleat#1991)
-
-  A key is now named by an integer version. `CLEAT_SECRET_MASTER_KEY_VERSION` (default `1`, which is what every
-  existing row carries), `CLEAT_SECRET_MASTER_KEY_PREVIOUS` and `CLEAT_SECRET_MASTER_KEY_PREVIOUS_VERSION` let a
-  worker open rows sealed under the key being retired while sealing new ones under the new key. `cleatctl
-  reseal-secrets [--dry-run]` re-seals every row online, verifying before it writes and writing conditionally so a
-  concurrent `set-secret` is not undone. A worker that cannot open some stored version refuses to start and names it.
-  See `docs/how-to/use-secrets.md`.
-
-  **The system now checks it.** Every worker publishes the key versions it can open in `admin.workers`, and a
-  write at version *v* (`set-secret`, and each row `reseal-secrets` moves) is refused while any live worker
-  cannot open *v*, naming the worker. The worker's start (publish its keys, read every stored secret) and a
-  write (read the registry, write the row) are serialised by one named database lock, so a worker cannot start
-  while a write is landing that it would then be unable to read. A worker whose membership loop stalled longer
-  than its stale window re-registers and re-checks, and stops if it now holds a secret it cannot open.
-
-  **Upgrade notes.**
-  - **Every worker now registers in `admin.workers`**, not only those started with
-    `--cluster-connection-budget`. The connection share still counts only workers that have a budget, so a
-    mixed fleet divides what it did before.
-  - **Complete the upgrade before the first rotation.** A worker from before this release is invisible to the
-    gate unless it registered under the connection budget, and a registry row with no key set is read as
-    "opens version 1 only".
-  - A worker stalled for more than five minutes while still serving is invisible to a writer; see
-    `docs/how-to/use-secrets.md`.
-
-- **`audit-log` now records who: `user_id` on every row was the empty string, always.** (cleat#1881)
-
-  The identity was already available — `oauth-provider` resolves an OAuth session to an email and
-  puts it in request context — but nothing read it. A new neutral `auth.SubjectFromContext`
-  (populated by `oauth-provider`, readable by any plugin) closes the gap without one plugin
-  importing the other; an unauthenticated request still records an empty `user_id` and is never
-  refused over a missing identity.
-
-  **The ordering this depends on is now declared, not inherited from the alphabet.** `audit-log`
-  reads context after the request has passed through every plugin wrapped around it, so it only
-  sees `oauth-provider`'s value because `"oauth-provider"` happens to sort after `"audit-log"` in
-  the tie-break `plugin.Discover()` falls back to when neither plugin declares a relationship.
-  Renaming either plugin would have silently reverted `user_id` to always-empty with no test
-  failing. A new plugin-contract clause (C14) and guard pin the real registered order instead —
-  `plugin.PluginInfo.Requires` was considered and rejected for this, since it makes plugin
-  discovery fail outright if the required plugin isn't registered, which is the wrong coupling
-  between two independently-optional features.
-
-- **`cleat build --target rust` refuses a workflow that iterates a `HashMap` or `HashSet` (R008).**
-  (cleat#1864)
-
-  Iterating a map is idiomatic Rust requiring no unusual act, unlike every other rule this checker
-  enforces (opening a file, spawning a thread, reading the clock) — so it was the rule an author was
-  least likely to suspect was missing. `HashMap`/`HashSet` default to a per-process random hash
-  seed, so their enumeration order is not guaranteed by the language.
-
-  **This is hardening, not a fix for an observed divergence.** cleat intercepts the WASI
-  `random_get` import a `HashMap`'s hasher seeds from and binds it to a value deterministic in
-  (workflow ID, step), so two replays of one workflow see the same order today regardless. The rule
-  guards a language guarantee cleat is not relying on staying true, and its message does not claim
-  otherwise.
-
-  Construction, insertion, lookup and removal on a `HashMap`/`HashSet` are unaffected — only
-  enumerating one (`for x in m`, `.iter()`, `.keys()`, `.values()`, `.into_iter()`, `.drain()`)
-  triggers R008, which suggests `BTreeMap`/`BTreeSet`.
-
-  **Detected via syntactic binding tracking, not a full type checker**, matching this checker's
-  existing no-toolchain design: a function parameter's declared type or a `let`'s type
-  annotation/constructor call is tracked within that function, and an enumerating use of a tracked
-  name is reported. Two shapes are known, documented limits rather than silent misses — a map
-  reached through a struct field, and one enumerated inline off a `.collect::<HashMap<_, _>>()`
-  chain with no intermediate binding — see `testdata/vet-checks/rust/known_limit_*`.
-
-- **Pre-emptive cancellation, with a terminal status of its own.**
-  `POST /api/workflows/:id/cancel` accepts `{"preemptive": true}`, which stops the workflow and
-  records **`cancelled`** rather than asking it to stop. (cleat#1153)
-
-  **Why it exists.** Cancellation was cooperative *and unobservable*: `RequestCancellation` set a
-  flag and left both stopping and reporting to the workflow, and `cancelled` was an error code
-  rather than a status the engine ever wrote. So a run that honoured a cancellation and one that
-  simply finished were **both `done`**, and an operator could not answer "did this stop because I
-  asked it to?".
-
-  **It runs the defers it owes.** A workflow with registered `defer` bodies goes to `terminating`
-  carrying `cancelled` as its recorded outcome, is re-claimed, replays its history as a defer
-  segment, and only then becomes `cancelled`. That is the same two-phase transition `terminate`
-  uses, shared rather than rebuilt.
-
-  **Asynchronous, like terminate**, and for the same reason (`tiers.yaml` decision D6). The
-  endpoint answers `{"status": "cancelled"}`, which names the *outcome*; a caller that needs to
-  know the run has finished polls the status.
-
-  **Not a breaking change.** `preemptive` defaults to `false`: a client sending `{"reason": "..."}`
-  gets the cooperative path and the `cancellation_requested` response exactly as before.
-
-  **`cancelled` is a new terminal status**, so a client that switches exhaustively on workflow
-  status should add a case. It is excluded from the active-child count, from parent close
-  policies, and from every other "is this run settled?" predicate — see
-  `docs/reference/workflow-lifecycle.md`.
-
-- **`completed_by` on the workflow object** — the worker that performed the terminal write.
-  `assigned_to` is a *lease*, not an audit field: every terminal write clears it while fencing on
-  it, so it is blank on every finished run and cannot answer "which worker ran this" after the
-  fact. Measured on a live database, `assigned_to` was blank on 185 of 185 terminal runs.
-  (cleat#1118)
-
-  **Schema change**, applied by `postgres/074`, `mysql/064` and `mssql/068`: `workflow_instances`
-  gains a nullable `completed_by`. `postgres/075` additionally re-emits `finalize_workflow_status`,
-  whose `done` and `failed` branches record it; the `ready` branch deliberately does not, because
-  that run goes back on the queue and recording there would name whoever yielded.
-
-  Returned by both read paths — `GET /api/workflows/:id` and the workflow listing.
-
-  **Nothing is backfilled.** The column is NULL on every row written before the migration, and on
-  any run that reached a terminal state without ever being claimed — no worker ran it. A run
-  terminated through its *defer phase* names the worker that ran the defer phase rather than the
-  workflow body: that transition clears the lease deliberately, to fence the old owner out.
-
-### Changed
-
-- **An update name is now reusable.** `POST /api/workflows/:id/update/:name` may be called any
-  number of times over a run's life; each request is a row of its own with its own `promise_id`.
-  Previously a name was consumed for the life of the workflow and the second request was refused
-  with `409 update_name_used`. That `detail` value no longer occurs — `update_already_pending` is
-  the only remaining 409 on this endpoint, and it clears when the in-flight request is answered.
-  A client that branches on `detail` keeps working. (cleat#1416)
-
-  **Schema change**, applied by `postgres/068`, `mysql/062` and `mssql/066`:
-  `workflow_update_requests` gains a `request_id` column and is keyed
-  `(workflow_id, request_id)` instead of `(workflow_id, update_name)`. Existing rows are backfilled
-  from `update_name`, which is unique per workflow under the old key, so a workflow suspended
-  mid-update across the upgrade completes against the correct row.
-
-  Updates are **not** idempotent: a caller that retries after its first request was answered gets a
-  new update rather than a replay. Carry your own key in the payload if you need at-most-once.
-
-
-### UPGRADE NOTES — breaking
-
-- **Terminating a workflow that has registered `defer` bodies is now asynchronous,
-  and runs those bodies before the workflow becomes terminal.** Migrations
-  `postgres/040`, `mssql/043` (MySQL needs none).
-
-  Previously `TerminateWorkflow` wrote `status = 'terminated'` and then released
-  the workflow's sticky assignment and concurrency keys. The registered defers
-  never ran — and the resources a defer body would have released were dropped
-  anyway, by the host, in the wrong order, with nothing recording that anything
-  was owed.
-
-  Now such a workflow goes to a new non-terminal status, **`terminating`**,
-  carrying the outcome it will be given. A worker claims it like any other
-  workflow, replays its history as a *defer segment* — the body does not run
-  again; it is refused any new work — runs the outstanding defer bodies, and only
-  then applies the recorded outcome and releases the resources.
-
-  **Consequences.**
-  - A caller that terminates and immediately reads `status` may see `terminating`
-    rather than `terminated`, and must poll. This is `tiers.yaml`'s decision D6.
-  - A workflow with **no** registered defers still terminates in one step, as
-    before. Most deployments will see no change at all.
-  - Terminating a workflow that is already in its defer phase terminates it
-    immediately, cutting the cleanup short.
-  - A defer phase never changes the outcome: if it traps, times out, or cannot
-    start, the recorded outcome is applied anyway and the lost cleanup is logged.
-    `defer_phase_deadline` (5 minutes) bounds it.
-  - **Apply the migrations.** `postgres/040` widens `admin.claim_workflows` and
-    the claim's partial indexes; `mssql/043` widens the filtered ones. A
-    deployment running this code against the older schema keeps working — the
-    cross-tenant claim falls back with a warning naming the migration — but its
-    defer phases are never claimed, so every terminate waits out its deadline and
-    skips the cleanup.
-
-  **A closing parent's `TERMINATE` children work the same way**, and the change
-  matters more there because it is a bulk operation: one closing parent used to
-  drop every child's concurrency keys and sticky assignment at once, before any
-  of their defers had run. A child that owes cleanup now goes to `terminating`
-  carrying `pending_terminal_status = 'failed'` — the close policy's own
-  outcome, not `terminated` — and is failed once its defers have run. A child
-  that owes none is failed immediately, as before.
-
-  The admin force-resolve verbs are unchanged: they still terminate in one step
-  and still skip their defers.
-
-  See IMPROVEMENT-PLAN §3.75, §3.112 and §3.114, and
-  `docs/reference/workflow-lifecycle.md` for the whole state machine.
-
-- **Workflow definition names are now per-tenant.** `workflow_defs`' primary key
-  becomes `(tenant_id, name, version)`, and the three foreign keys that reference
-  it — from `workflow_instances`, `workflow_tags` and `workflow_routing` — carry
-  `tenant_id` too. Migrations `postgres/035`, `mysql/034`, `mssql/038`.
-
-  Two tenants can now each hold their own `order-processor`. Previously the name
-  was a shared namespace: the second tenant to deploy one was refused, and before
-  that (pre-0.2.0) it silently overwrote the first.
-
-  **Consequences.** A deploy no longer returns `409` for a name another tenant
-  holds — there is no conflict to report. `ErrWorkflowDefOwnedByAnotherTenant` is
-  removed, along with the default-tenant adoption window that let a definition
-  deployed before per-tenant ownership stay reachable by every tenant; on
-  PostgreSQL that also removes `OR tenant_id = '00000000-...'` from
-  `tenant_isolation_defs`, bringing it into line with SQL Server, which never had
-  it. A workflow started for a tenant that has not deployed the definition it
-  names is refused by the foreign key.
-
-  **MySQL only:** `workflow_defs.tenant_id` was nullable with no default, unlike
-  the other two dialects. `mysql/034` backfills `NULL`s to the default tenant and
-  makes the column `NOT NULL DEFAULT`, as a primary-key column must be.
-
-  See IMPROVEMENT-PLAN §3.77 and D7 in `tiers.yaml`.
-
-- **Cross-schema child workflows are removed.** The `cleat_child_workflow_in_schema`
-  host call, the `cleat:host-calls/durable-extended-children` component interface,
-  the `--peer-schemas` worker flag and the corresponding surface in the Go, Rust,
-  Java, Python and AssemblyScript SDKs are all gone. A worker started with
-  `--peer-schemas` now fails on an unknown flag.
-
-  It let a workflow start a child by writing a row directly into another
-  PostgreSQL schema. That makes the other deployment's schema part of your API and
-  its migrations part of your compatibility surface, and it had no settled answer
-  for whose tenant the child belonged to — the definition lookup in the peer schema
-  carried no tenant predicate, and where the target tenant could not be recovered
-  from the schema name the insert ran with no tenant context at all.
-
-  **Use the other pool's API instead**, the same way any two services talk. Nothing
-  in `tiers.yaml` claimed this feature at any tier and no end-to-end test exercised
-  it. See IMPROVEMENT-PLAN §3.78.
-
-  ABI host-function count goes 59 → 58 on both backends. `CurrentABIVersion` is
-  unchanged: nothing that remains changed shape.
-
-- **Terminating a parent now closes its children.** `TerminateWorkflow` never
-  called `enforceParentClosePolicy`, on any dialect, so terminating a parent
-  left its `TERMINATE`-policy children running and its `REQUEST_CANCEL`
-  children unflagged — while force-completing or force-failing the *same*
-  parent closed them. Measured 2026-09-02: a child of a parent closed with
-  `TerminateWorkflow` stayed `ready`; the same child under `AdminForceComplete`
-  went to `failed`.
-
-  Who this breaks: a deployment that relied on `terminate` being the narrow
-  "stop this one workflow" verb. Its children now close with it —
-  `TERMINATE` children are failed with `parent workflow terminated`, and
-  `REQUEST_CANCEL` children have cancellation requested. `ABANDON` children are
-  unaffected, as they always were.
-
-  The design document says this is what should happen (*"`enforceParentClosePolicy`
-  runs on parent terminal transition"*, *"children are cancelled with their
-  parent, preventing orphan workflows"*), and the deciding argument is internal
-  consistency: `adminForceResolve` is an operator verb on an unclaimed workflow
-  setting a terminal status with a direct `UPDATE` — the same shape as
-  `TerminateWorkflow` in every respect — and it enforced the policy. See
-  IMPROVEMENT-PLAN §3.79.
-
-### Added
-
-- **`allowed_signals` can be set.** `GET` and `PUT
-  /api/workflows/{id}/allowed-signals` read and replace the list
-  `--require-signal-auth` checks a caller against, backed by
-  `WorkflowStore.SetAllowedSignalCallers` on all three dialects. Until now
-  nothing in cleat could write that column, so 0.2.0's note below — that the
-  flag denied every signal with no supported remedy — described a gap that is
-  now closed.
-
-  `PUT` replaces the whole list; send it without a caller to revoke, or `[]` to
-  clear. Both verbs are scoped to the calling tenant, and a workflow belonging
-  to another tenant answers `404` rather than `403`, so the endpoint cannot be
-  used to find out which ids exist.
-
-  **`--require-signal-auth` still defaults to `false`.** Every workflow starts
-  with an empty list and nothing sets one at start time, so enabling the flag
-  denies every signal until callers are granted per workflow. Grant first, then
-  enable. See `docs/reference/worker-config.md`.
-
-- **An operator can resolve a call left ambiguous by a crash.** `POST
-  /api/admin/instances/{id}/steps/{step}/resolve`, with `X-Confirm:
-  resolve-step` and `{"response": "..."}`, records an outcome for a durable
-  call that was in flight when the process died.
-
-  Such a call leaves a pending row, and replay reports it as `[AMBIGUOUS]` and
-  says to check the external service before retrying — with nowhere to put the
-  answer. An `AmbiguityResolver` could supply one, but the resolve path returns
-  immediately when none is configured, which is most deployments, so the
-  workflow reported the same ambiguity on every replay forever.
-
-  The response is written to the event as though the call had returned it,
-  because that is what replay has to see. What keeps it honest is the new
-  `resolved_by` field, written to the same row in the same statement: the
-  outcome is usable by replay and permanently marked as **asserted by an
-  operator rather than observed**. The row must still be pending, so an
-  operator racing a worker cannot overwrite a real result — whoever writes
-  first wins. IMPROVEMENT-PLAN §1.4 phase F.
-
-- **An operator can re-replay a stopped workflow.** `POST
-  /api/admin/instances/{id}/re-replay`, with `X-Confirm: re-replay` and
-  `{"generation": N}`, returns a `failed`, `terminated` or `dead_lettered`
-  workflow to `ready`: the claim, heartbeat and error fields are cleared and
-  the generation is bumped, so a stale worker's late write cannot land. History
-  is **kept** — the workflow resumes from what it recorded rather than starting
-  over. The non-terminal statuses are refused because the dispatcher owns them.
-
-  Re-replay refuses a workflow whose history holds an unresolved ambiguous
-  call, and names the step: replaying one stops again in the same place for the
-  same reason, so it points at the resolve endpoint above instead. This was the
-  last of the three admin operations that was a stub returning
-  `not implemented` on all three dialects. IMPROVEMENT-PLAN §3.20.
-
-- **`GET /api/workflows/{id}/history` reports `err_code` and `resolved_by` per
-  event.** `err_code` is how the caller classified a failed call — the
-  `ErrorCode` a `ServiceCaller` supplied through `CleatError` — recorded at the
-  time of the failure, where history previously collapsed the whole
-  classification to a single retryable-or-not bit. Its vocabulary is the one
-  `workflow_instances.error_code` already stores, so one operator query matches
-  in both tables.
-
-  It is for reading, not for deciding: `err_non_retryable` stays authoritative
-  for retry behaviour, deliberately. The two can legitimately disagree, because
-  the guest's own retry policy travels across the ABI — and deriving
-  retryability from the class instead would let an upgrade change the retry
-  behaviour of workflows already in flight, which is the determinism bug §2.35
-  exists to prevent. Both fields survive history compaction.
-  IMPROVEMENT-PLAN §2.35.
-
-### Fixed
-
 - **Closing a workflow left concurrency slots and sticky-worker assignments
   held until their TTL.** `releaseWorkflowResources` runs the two best-effort
   cleanups that follow every commit taking a workflow out of the runnable set.
@@ -1665,44 +1783,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the reaper deletes expired rows, so the slots freed themselves at the key's
   TTL. They freed themselves silently, with every workflow queued on those keys
   waiting out the window for nothing.
-
-- **The reaper's reclaim-timeout default was too tight to safely cover a single
-  failed-then-retried heartbeat, and an idle worker had no way to detect a
-  database stall at all.** After a database stall, every running instance's
-  `heartbeat_at` ages past the stale threshold at once; whichever worker's
-  reaper reaches the database first after recovery could reclaim a run that is
-  still alive, including its own. `engine.DBPinger` gives an otherwise-idle
-  worker (nothing in flight, so no heartbeat write to prove liveness with) a
-  real liveness signal, and `reapingIsSafe()` now requires both a recent
-  confirmed contact-OK and an elapsed grace period since the last recorded
-  trouble before trusting a stale `heartbeat_at` as evidence of a dead holder.
-
-  **`--reclaim-timeout`'s derived default changes from `2*heartbeat` (floored
-  at 10s) to `heartbeat + 3*dbCallDeadline(heartbeat) + heartbeatRetryInterval(heartbeat)
-  + reclaimSlack` (floored at 10s) — about 14.5s at the default 5s
-  `--heartbeat`, up from 10s.** This is a wider safety margin, not a
-  behaviour anyone has to opt into: the old value undercounted a single
-  heartbeat call that fails and is retried. A real network-level stall (not
-  just a slow-but-reachable server) also keeps a failing call blocked until
-  the stall itself clears rather than until its own client-side deadline —
-  measured directly against a real PostgreSQL container under `docker
-  pause` — so the invariant also accounts for the wait before that retry is
-  even issued, which at `--heartbeat` below one second gets no faster a
-  retry than the worker's own ordinary cadence. Finally, the modeled worst
-  case has zero margin at `--heartbeat` >= 4s (the two formulas are
-  algebraically identical there), and does not account for the retry
-  needing a fresh connection — real and documented on SQL Server, which
-  marks a connection bad after a cancelled call whose own cancel-drain also
-  fails, exactly what a genuine stall produces — so `reclaimSlack` (a fixed
-  1s) covers what the model leaves out rather than widening a term that
-  means something else. An explicit `--reclaim-timeout` is unaffected.
-
-  MySQL's `ReapStaleInstances` also now runs inside an explicit transaction —
-  under `interpolateParams=true`, the previous autocommit statement could keep
-  committing server-side after the caller's context was cancelled, so a
-  caller-visible "deadline exceeded" did not mean the reclaim had not
-  happened. Postgres and SQL Server were already transactional here.
-  cleat#2005.
 
 - **The reaper can no longer be fooled into reclaiming a live run by a
   whole-fleet database stall, only by a genuinely dead worker.** #2166
@@ -1863,28 +1943,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row readable after it expires for anything that later needs it. The sweep runs on all
   three dialects and is a no-op on MySQL and SQL Server, where `/login` refuses before a
   row is ever written.
-
-### Changed
-
-- **OAuth login is Postgres-only in this release: `/oauth/{provider}/login` and
-  `/oauth/{provider}/callback` return `501` on MySQL and SQL Server.** (cleat#2340)
-
-  A login mints a credential, and `auth.TenantStore.RevokeAPIKey` already refuses on
-  non-Postgres — there is no revocation path there for a session token issued by a login
-  (`auth.RevokeAPIKeyByHash` does not exist at all), so a credential minted on MySQL or
-  SQL Server could not be withdrawn once issued. Rather than ship a login whose
-  credentials cannot be revoked, both handlers refuse at their first statement and the
-  worker logs the limitation once at startup.
-
-  The refusal is per-request rather than at plugin `Init`: every bundled plugin
-  initializes on every boot against one flat configuration with no reliable "am I
-  configured" signal, so refusing at `Init` would stop every MySQL or SQL Server worker
-  from starting at all, whether or not anyone there uses OAuth — the failure mode
-  cleat#2202 hit with the email plugin.
-
-  **Who is affected:** a MySQL or SQL Server deployment that uses OAuth login. Use API
-  keys on those dialects for this release. Nothing else about such a deployment changes,
-  and no other plugin's routes are affected.
 
 ## [0.2.0] - 2026-08-10
 
