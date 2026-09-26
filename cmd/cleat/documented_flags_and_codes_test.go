@@ -16,6 +16,21 @@ package main
 // a lookup failure. A warning-where-there-is-an-error tells a reader the
 // toolchain will tolerate what they wrote, and gives them a reason not to
 // check.
+//
+// WHAT THIS DELIBERATELY DOES NOT SCAN, and it is the same choice the
+// subcommand guard beside it makes. A flag is checked only inside a fenced
+// block, on a line that BEGINS with `cleat-worker`. That shape is a CLAIM that
+// the worker defines the flag. A flag named in prose is a CROSS-REFERENCE, and
+// scanning those would report every mention as a definition.
+//
+// THE COST, measured 2026-09-26: docs/contributor/plugins/plugin-migration-guide.md
+// told readers to "Set the `--tenant-roles` flag on the worker". No binary
+// defines it -- the real flag is --tenant-isolation=role, which additionally
+// requires --tenant-role-secret-file, so both of a reader's attempts fail -- and
+// `grep -rn 'tenant-roles' --include='*.go' .` returns nothing. It was prose,
+// outside this scan and the subcommand scan both, which is how one phantom flag
+// survived three guards. A worker flag in a fenced `cleat-worker` line is
+// checkable; the same flag in a sentence is not.
 
 import (
 	"os"
