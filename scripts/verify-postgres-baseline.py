@@ -26,6 +26,17 @@ this mode existed nothing checked it of the ARTIFACT: a hand-edit to
 `001_schema.sql` or `003_procedures.sql` would have been undetectable, and the
 guards' justification would have been resting on a property the tree did not have.
 
+**Three checks, and the third is not redundant with the second.** The two GENERATED
+files must be byte-identical to a fresh emit. `002_defaults.sql` is hand-assembled -- a
+`pg_dump --schema-only` carries no rows, so the generator writes a placeholder instead --
+and it is asserted twice: that it is NOT that placeholder, and that the rows it exists to
+seed are really in a database built from the COMMITTED baseline. The second of those is
+not decoration. "Not the placeholder" catches total loss and says nothing about a single
+deleted row, and it is exactly that case the mode's own failure text describes -- *a
+missing ROW is not a structural difference*, so no catalog diff can see it. Found by
+cleat-review, which measured this file and showed its only row query was the
+empty-database precondition.
+
     ./scripts/verify-postgres-baseline.py --dsn postgres://... \\
         --prior-rebaseline 8f91b43a8e2259332c5bdbd2c47db15261927d10
 
@@ -33,10 +44,20 @@ Exit status carries three outcomes, not two, because "could not measure" and "th
 artifact is wrong" send you to different places (CLAUDE.md):
 
     0   the committed baseline is exactly what the generator produces
-    1   a finding: a committed file is not a fresh emit
+    1   a finding about the TREE: a committed file is not a fresh emit, a seed row it
+        exists to insert is missing, or the committed files do not APPLY.
     2   could not establish what was being measured -- the target database was not
-        empty, the prior tree could not be fetched, or no client was available.
-        This is a failure of the CHECK, not of the tree.
+        empty, the prior tree could not be fetched, the server version cannot produce
+        a comparable dump, or no client was available. A failure of the CHECK.
+
+**Choose 1 over 2 whenever the unexpected thing is in what is being measured.** The
+temptation, on any surprise, is to file it under "could not measure" and stop -- but
+that is a statement about the INSTRUMENT, and it sends the reader to fix the harness.
+A defect in the artifact is a statement about the TREE and must be 1. Measured while
+building this mode: two half-statement deletions from 002 left a dangling `ON CONFLICT`,
+so the committed file stopped applying, and the first version reported rc=2. The
+detection was right and the bucket was wrong -- an unappliable shipped file is the
+worst possible thing to route away from the tree.
 
 **The DSN's database must be EMPTY, and it is asserted rather than documented.**
 This mode BUILDS INTO the database it is given, so pointing it at a shared one
@@ -77,6 +98,23 @@ import tempfile
 import urllib.parse
 
 GENERATED = ("001_schema.sql", "003_procedures.sql")
+BASELINE = ("001_schema.sql", "002_defaults.sql", "003_procedures.sql")
+
+# The rows 002 exists to seed. Asserted by NAME, not by count: a count of one passes
+# on the wrong row, and a count of zero is the failure this exists to catch. These are
+# the three the file inserts -- the default org, the default tenant, and the
+# tenant_roles row the tenant_roles loop derives from them.
+SEED_ROWS = (
+    ("admin.orgs", "org_id = '00000000-0000-0000-0000-000000000000'"),
+    ("admin.tenants", "tenant_id = '00000000-0000-0000-0000-000000000000'"),
+    ("admin.tenant_roles", "role_name = 'cleat_tenant_00000000_0000_0000_0000_000000000000'"),
+)
+
+
+def replace_db(dsn, db):
+    """The same DSN pointed at a different database, for the maintenance connection."""
+    u = urllib.parse.urlparse(dsn)
+    return urllib.parse.urlunparse(u._replace(path="/" + db))
 
 # The generator's PLACEHOLDER_002, which it writes into an empty outdir and refuses
 # to write over anything else. Compared against the COMMITTED 002: if they match, the
@@ -144,15 +182,32 @@ def main():
     user = urllib.parse.unquote(urllib.parse.urlparse(args.dsn).username or "postgres")
     dbname = (urllib.parse.urlparse(args.dsn).path or "/postgres").lstrip("/") or "postgres"
 
-    def psql(sql=None, stdin=None):
-        cmd = ["docker", "exec", "-i", container, "psql"] if container else ["psql", args.dsn]
-        cmd += ["-U", user, "-d", dbname] if container else []
+    def psql(sql=None, stdin=None, db=None):
+        """psql against the target database, or another when `db` is given.
+
+        `db` exists for the seed-row assertions, which need a database holding the
+        COMMITTED baseline rather than the prior chain -- see check_seed_rows().
+        """
+        target = db or dbname
+        if container:
+            cmd = ["docker", "exec", "-i", container, "psql", "-U", user, "-d", target]
+        else:
+            cmd = ["psql", args.dsn if target == dbname else replace_db(args.dsn, target)]
         cmd += ["-v", "ON_ERROR_STOP=1", "-q"]
         if sql is not None:
             cmd += ["-tAc", sql]
         if stdin is not None:
             cmd += ["-f", "-"]
         return subprocess.run(cmd, input=stdin, capture_output=True, text=True)
+
+    def admin_sql(sql):
+        """Run one statement on the maintenance database, for CREATE/DROP DATABASE."""
+        if container:
+            cmd = ["docker", "exec", "-i", container, "psql", "-U", user, "-d", "postgres"]
+        else:
+            cmd = ["psql", replace_db(args.dsn, "postgres")]
+        return subprocess.run(cmd + ["-v", "ON_ERROR_STOP=1", "-q", "-tAc", sql],
+                              capture_output=True, text=True)
 
     # ---- precondition: the target database is empty -----------------------
     r = psql(sql=(
@@ -270,6 +325,63 @@ def main():
             print("            difference. Restore it from git history.")
         else:
             print(f"hand-made   {path002} (not the generator's placeholder)")
+
+        # ---- and 002's rows, BY EFFECT ---------------------------------------
+        # The comparison above catches 002 being replaced by the generator's
+        # placeholder and NOTHING ELSE. An emptied file, or one row deleted from an
+        # otherwise intact file, also differs from the placeholder -- so it prints
+        # `hand-made` and passes. That is the gap cleat-review found on this PR, and it
+        # is exactly the failure the message above describes ("a missing ROW is not a
+        # structural difference") for a check that only covered the total-loss form.
+        #
+        # So assert the ROWS, in a database built from the COMMITTED baseline rather
+        # than from the prior chain -- the prior chain's seed is not the artifact. This
+        # is a third, narrower check rather than a widening of the second, which is the
+        # shape this mode already uses for 002.
+        rows_db = dbname + "_seedrows"
+        admin_sql(f'DROP DATABASE IF EXISTS "{rows_db}"')
+        r = admin_sql(f'CREATE DATABASE "{rows_db}"')
+        if r.returncode != 0:
+            fail(f"could not create {rows_db} for the row assertions:\n{r.stderr.strip()}", 2)
+        try:
+            # An unappliable committed file is a FINDING about the artifact, not a
+            # failure to measure -- it is the shipped files that are the subject here.
+            # Exit 1 rather than 2, or the reader is sent to the check when the tree is
+            # what is broken. Measured: a two-line deletion from 002 left a dangling
+            # `ON CONFLICT`, the apply died on syntax, and the first version of this
+            # reported it as rc=2.
+            applied = True
+            for name in BASELINE:
+                with open(os.path.join(args.committed, name)) as fh:
+                    r = psql(stdin=pin + fh.read(), db=rows_db)
+                if r.returncode != 0:
+                    applied = False
+                    differing += 1
+                    print(f"UNAPPLIABLE {os.path.join(args.committed, name)}")
+                    print("            a database built from the committed baseline cannot")
+                    print("            apply this file, so it does not install and its seed")
+                    print("            rows cannot be checked.")
+                    last = [l for l in r.stderr.strip().splitlines() if l.strip()]
+                    if last:
+                        print(f"            {last[-1]}")
+                    break
+            for table, where in (SEED_ROWS if applied else ()):
+                r = psql(sql=f"SELECT count(*) FROM {table} WHERE {where}", db=rows_db)
+                if r.returncode != 0:
+                    fail(f"could not read {table}: {r.stderr.strip()}", 2)
+                n = (r.stdout or "").strip()
+                if not n.isdigit():
+                    fail(f"reading {table} returned {n!r}", 2)
+                if int(n) == 0:
+                    differing += 1
+                    print(f"MISSING     {path002}: {table} has no row where {where}")
+                    print("            the seed 002 exists to insert is gone. No schema diff")
+                    print("            can see this: a missing ROW is not a structural")
+                    print("            difference, which is why it is asserted here.")
+                else:
+                    print(f"seeded      {table} WHERE {where}")
+        finally:
+            admin_sql(f'DROP DATABASE IF EXISTS "{rows_db}"')
 
         if differing:
             fail(f"{differing} file(s) are not what this tree claims", 1)
