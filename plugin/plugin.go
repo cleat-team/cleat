@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -261,6 +262,55 @@ type Environment struct {
 	// the operator didn't ask for enforcement."
 	HostResolver     DomainResolver
 	RequireHostMatch bool
+
+	// MintOAuthAPIKey records an API key that a plugin minted on an OAuth
+	// login, bound to the identity that logged in and to an expiry, and
+	// returns the plaintext for the plugin to hand back to the client.
+	// cleat#2340.
+	//
+	// THE HOST GENERATES AND STORES IT; THE PLUGIN NEVER SEES THE FORMAT. That
+	// is why this RETURNS the plaintext rather than taking one: the cleat_sk_
+	// shape, the hash, and the table it lands in are core auth's business, and
+	// a plugin that assembled them itself would be a second implementation of
+	// the credential format -- which is cleat#866's failure, where a key
+	// written by one path was looked up by another that disagreed about where
+	// it lived, and every request 401'd with the row sitting in the database.
+	//
+	// NIL MEANS "THIS HOST CANNOT MINT", and a plugin must REFUSE THE LOGIN
+	// rather than proceed without it. A login that returns a credential nothing
+	// recorded is not a degraded login: the token authenticates nothing, and it
+	// fails later and elsewhere, as a 401 from core auth on the first request
+	// that uses it. cleattest, the embedded runner and a plugin's own unit
+	// tests construct an Environment directly and have no host to build one;
+	// the worker always sets it.
+	//
+	// The error is the store's, unmodified. A plugin logs it and refuses; it
+	// must not fall back to minting something else.
+	MintOAuthAPIKey func(ctx context.Context, req MintOAuthAPIKeyRequest) (rawKey string, err error)
+}
+
+// MintOAuthAPIKeyRequest is what a plugin hands Environment.MintOAuthAPIKey.
+//
+// A STRUCT RATHER THAN A PARAMETER LIST, for the reason StartWorkflow's comment
+// gives: Description, OAuthIdentity and the returned key are all strings and
+// adjacent, so transposing two of them compiles, runs, and produces a key whose
+// description is its own identity tag -- a failure with no symptom at the call
+// site.
+//
+// TenantID is a uuid.UUID, not the text Environment.TenantID carries. This
+// package already imports uuid, and a caller here is not crossing the host-call
+// boundary: a string would add a parse that can fail on a value the caller
+// already held typed.
+//
+// ExpiresAt IS A TIME, NOT A *time.Time. An OAuth-minted key always expires --
+// an IdP that omits expires_in must not yield a permanent credential by
+// omission -- and the host's store refuses to write one without an expiry, so
+// there is deliberately no way to express "never" here.
+type MintOAuthAPIKeyRequest struct {
+	TenantID      uuid.UUID
+	Description   string
+	ExpiresAt     time.Time
+	OAuthIdentity string
 }
 
 // DomainResolver mirrors auth.DomainResolver's single method exactly.
