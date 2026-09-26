@@ -72,6 +72,13 @@ func TestThePreviewNamesEveryTenantOwnedTable(t *testing.T) {
 			"not migrated, and an empty universe would make every assertion below vacuous")
 	}
 
+	// A PARTITION IS NOT A SEPARATE TENANT-OWNED TABLE. information_schema lists
+	// event_history's 64 children as tables, and each inherits the tenant_id
+	// column, so the universe arrived 64 entries too large and the preview --
+	// which correctly names the table, not its storage -- was reported as
+	// omitting 64 tables that are not tables. See foldPartitionChildren.
+	universe = foldPartitionChildren(universe)
+
 	listed := map[string]bool{}
 	for _, tbl := range dropTenantTables {
 		listed[tbl.label] = true

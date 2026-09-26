@@ -78,6 +78,46 @@ func tablesCreatedByMigrations(t *testing.T) []string {
 		out = append(out, name)
 	}
 	sort.Strings(out)
+	return foldPartitionChildren(out)
+}
+
+// partitionChildRE matches the name the baseline's generator gives a partition:
+// <parent>_p<digits>.
+var partitionChildRE = regexp.MustCompile(`^(.*)_p[0-9]+$`)
+
+// foldPartitionChildren removes entries that are partition children of a table
+// already in the same set, so a partitioned table is counted once.
+//
+// A PARTITION IS NOT A SEPARATE TABLE, and this file is the third place that had
+// to learn it. Hash-partitioning event_history into 64 children (cleat#2059) put
+// 65 `CREATE TABLE` statements in 001_schema.sql -- the parent and its children
+// -- and `information_schema` lists partitions as tables, so every enumeration
+// of "the tables this schema has" grew by 64 entries for one table:
+//
+//   - engine/the_documented_tenant_coverage_is_measured_test.go  (RLS on 81, not 17)
+//   - engine/a_dropped_tenants_rows_all_go_with_it_test.go       (88 in the universe)
+//   - here, in both of this package's table enumerations
+//
+// The first two each folded it locally, which is what let the third arrive on CI
+// with the PR already under review. Hence one helper, used by everything in this
+// package that enumerates tables -- a fourth copy is the thing to avoid, not a
+// fourth bug to fix.
+//
+// Folded only when the PARENT is in the set too, so the rule is "a partition of
+// a table I already know about", not "a name ending in _p<digits>". A real table
+// named foo_p1 with no foo stays counted as itself.
+func foldPartitionChildren(names []string) []string {
+	set := make(map[string]bool, len(names))
+	for _, n := range names {
+		set[n] = true
+	}
+	out := names[:0]
+	for _, n := range names {
+		if parent := partitionChildRE.ReplaceAllString(n, "$1"); parent != n && set[parent] {
+			continue
+		}
+		out = append(out, n)
+	}
 	return out
 }
 
