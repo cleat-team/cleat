@@ -98,10 +98,16 @@ caller** (it has a full unit-test suite, so grepping the name finds plenty of
 hits; grep for calls outside `_test.go` files). So the grant loop is always
 zero-iteration, and no plugin migration issues `CREATE SCHEMA` anywhere.
 
-Plugin migrations pin `search_path = public` unconditionally
-(`plugin/migration.go`), so a plugin table lands in `public` even when the
-worker runs with a non-default `--schema`. That has its own consequence,
-tracked as cleat#1287.
+Plugin migrations follow the configured schema. This paragraph said the
+opposite until 2026-09-26 — that they "pin `search_path = public`
+unconditionally (`plugin/migration.go`), so a plugin table lands in `public`
+even when the worker runs with a non-default `--schema`" — which was true when
+written and was fixed by #1353 and #1362 on 2026-09-12.
+`pluginMigrationSession` now takes the schema and runs
+`SET search_path = <schema>, pg_temp` (`plugin/migration.go`), and
+`migration.Runner.WithSchema` has a production caller
+(`cmd/cleat-worker/main.go`). `docs/plugin-table-handling.md` carries the
+longer retraction under its section (b).
 
 ### What actually isolates a plugin's rows
 
