@@ -45,17 +45,19 @@ import (
 // contradicted by a suite that still passes. That happened: the query_state
 // fix below was written, applied to a real database, verified over HTTP, and
 // its own engine test still failed, because the harness was running 004.
+// ONE entry since the cleat#2059 rebaseline, and that is the whole point of it.
+// The list used to run to ten files, each redefining the routine on top of the
+// last, and this test exists because a missing entry made the harness keep
+// running an older definition while every test still passed. 003 now carries the
+// FINAL body -- generated from a pg_dump of the fully-migrated database, so it is
+// the last definition by construction rather than by taking the last of ten by
+// hand. There is no longer a sequence to keep in order.
+//
+// TestProcedureMigrationListsAreComplete still checks this against the
+// directory, so it stays honest: if a later migration defines the routine, the
+// list must name it.
 var postgresProcedureMigrations = []string{
 	"003_procedures.sql",
-	"004_fix_finalize_workflow_status_fence.sql",
-	"043_query_state_on_suspension.sql",
-	"044_child_does_not_rewrite_parent_event.sql",
-	"047_a_signal_delivered_mid_segment_wakes_the_workflow.sql",
-	"049_a_burst_wakes_finalize_on_progress.sql",
-	"050_the_idempotency_write_needs_the_tenant.sql",
-	"053_the_finalize_procedure_stops_writing_the_result_column.sql",
-	"075_the_finalize_procedure_records_the_worker.sql",
-	"101_the_finalize_procedure_stops_deleting_failed_history.sql",
 }
 
 var mysqlProcedureMigrations = []string{

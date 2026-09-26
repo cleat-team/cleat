@@ -14,8 +14,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -25,35 +23,33 @@ import (
 	_ "github.com/lib/pq"
 )
 
-// apply032ForDropTenantTest reads and executes
-// migrations/postgres/032_drop_tenant_deletes_tenant_data.sql, the same
-// approach engine/drop_tenant_test.go uses for its own copy -- duplicated
-// here rather than exported from the engine package's _test.go file, which
-// cmd/cleatctl cannot import.
+// apply032ForDropTenantTest used to read and execute
+// migrations/postgres/032_drop_tenant_deletes_tenant_data.sql and 059, in that
+// order, the same approach engine/drop_tenant_test.go used for its own copy.
+//
+// The list is gone with the cleat#2059 rebaseline: 001_schema.sql is generated
+// from a pg_dump of the fully-migrated database, so it carries admin.drop_tenant's
+// LAST definition by construction and there is no sequence to replay. Replaying
+// the old first entry over it would have reinstalled the 032 body over the
+// current one -- the exact hazard the list existed to prevent (CREATE OR
+// REPLACE keeps whichever ran last, and cleat#1201's fix lives in 059).
+//
+// What the call sites need is that the CURRENT routine is installed. This
+// asserts that instead: the two-argument form, which 069 gave it the schema
+// parameter for.
 func apply032ForDropTenantTest(t *testing.T, db *sql.DB) {
 	t.Helper()
-	// Every migration that DEFINES admin.drop_tenant, in order. Applying only
-	//032 reinstalls the 032 body over whatever the migrations produced --
-	// CREATE OR REPLACE keeps whichever ran last -- so a later change to the
-	// routine would be invisible here while the command under test used it.
-	// cleat#1201's fix lives in 059; with this list pinned to 032 the tests
-	// below exercised a routine the shipped schema does not have.
-	//
-	// Duplicated from engine/drop_tenant_test.go's list for the reason the
-	// comment above already gives: cmd/cleatctl cannot import another
-	// package's _test.go file. Keep the two in step.
-	for _, f := range []string{
-		"032_drop_tenant_deletes_tenant_data.sql",
-		"059_a_dropped_tenants_definitions_go_with_it.sql",
-	} {
-		path := filepath.Join("..", "..", "migrations", "postgres", f)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		if _, err := db.Exec(string(data)); err != nil {
-			t.Fatalf("apply %s: %v", path, err)
-		}
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM pg_proc p
+		JOIN pg_namespace ns ON ns.oid = p.pronamespace
+		WHERE ns.nspname = 'admin' AND p.proname = 'drop_tenant'
+		  AND pg_get_function_identity_arguments(p.oid) LIKE '%,%'`).Scan(&n); err != nil {
+		t.Fatalf("looking for admin.drop_tenant: %v", err)
+	}
+	if n == 0 {
+		t.Fatalf("admin.drop_tenant is absent, or only the one-argument form exists. " +
+			"001_schema.sql ships the two-argument form; a one-argument-only result " +
+			"means the baseline lost it or the schema was never applied")
 	}
 }
 

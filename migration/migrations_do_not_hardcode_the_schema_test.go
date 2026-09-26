@@ -94,11 +94,25 @@ func TestMigrationsDoNotHardcodeTheSchema(t *testing.T) {
 		}
 	}
 
-	// A scan that examined nothing reports the same zero as a clean tree. The
-	// count is not a fixed number on purpose -- the population grows -- but it
-	// is never small.
-	if examined < 20 {
-		t.Fatalf("examined only %d migration files; the scan is not reaching them", examined)
+	// A scan that examined nothing reports the same zero as a clean tree, so
+	// this must establish that it reached the directory at all.
+	//
+	// It used to read `examined < 20`, with the note that the count "is not a
+	// fixed number on purpose -- the population grows -- but it is never small".
+	// The population does not only grow. cleat#2059's rebaseline replaces this
+	// dialect's whole numbered chain with a three-file baseline, and 3 < 20, so
+	// the guard failed on a tree that was exactly what it was supposed to be.
+	// A threshold that has to be re-tuned whenever the migrations are
+	// reorganized is a census of a moving population, which is the thing
+	// CLAUDE.md says is guaranteed to go wrong; it went wrong in the direction
+	// nobody was watching for.
+	//
+	// `examined` can only fall short of the file count if ReadDir or the suffix
+	// filter broke, and the count of files is what is left, so zero is the whole
+	// of the anti-vacuity claim. This cannot rot: it asks whether the scan ran,
+	// not how many files the repo happens to have today.
+	if examined == 0 {
+		t.Fatalf("examined 0 migration files under %s; the scan is not reaching them", dir)
 	}
 	if len(findings) > 0 {
 		t.Errorf("%d line(s) name the schema instead of asking for it "+

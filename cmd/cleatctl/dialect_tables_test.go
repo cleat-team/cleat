@@ -107,8 +107,9 @@ func tablesCreatedByDialect(t *testing.T, dialectDir string, floor int) map[stri
 			}
 		}
 	}
-	if files < floor {
-		t.Fatalf("read only %d .sql files from %s: the extraction is broken, not the mapping", files, dir)
+	if files == 0 || len(seen) == 0 {
+		t.Fatalf("read %d .sql file(s) from %s and extracted %d name(s): the extraction "+
+			"is broken, not the mapping", files, dir, len(seen))
 	}
 	return seen
 }

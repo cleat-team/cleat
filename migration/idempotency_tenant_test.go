@@ -141,6 +141,27 @@ func postgresDialect() idempotencyDialect {
 		rebind:          rebindNumbered,
 		futureTimestamp: "now() + INTERVAL '1 day'",
 		tenantIDText:    "tenant_id::text",
+		// SKIPPED, and this is a precondition rather than a bail-out. Both tests
+		// that use this dialect build their "before" state by applying a SUBSET
+		// of the chain -- 001 alone, or every file but one -- and then applying
+		// the migration under test on top of it. cleat#2059's rebaseline leaves
+		// PostgreSQL three files generated from a pg_dump of the fully-migrated
+		// database, so 010 and 086 are no longer separate steps: there is no
+		// subset that produces a pre-migration state, and 001 alone now yields
+		// the finished schema. The "before" and "after" would be the same
+		// database, which is what the second test's own UNMEASURED check reports.
+		//
+		// It is a skip rather than a retirement because the property is still
+		// real and still tested -- on MySQL and SQL Server, whose chains are
+		// untouched. It goes when their arms do, and not before.
+		//
+		// What is NOT tested on PostgreSQL any more: that a key written before
+		// 010 is re-scoped by 010, and that created_at is backfilled rather than
+		// stamped now(). Both are upgrade-path properties, and 0.3.0 ships only a
+		// fresh database -- the rebaseline's own premise, recorded in the issue.
+		skipReason: "cleat#2059 consolidated PostgreSQL's migrations, so there is no pre-migration " +
+			"state to build: the tests that need one still run on MySQL and SQL Server, whose " +
+			"chains are unchanged",
 	}
 }
 

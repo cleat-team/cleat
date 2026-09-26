@@ -27,30 +27,25 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/cleat-team/cleat/engine/testutil"
 )
 
-// applyIdempotencyKeysRLSMigration applies this fix's migration directly, the
-// way applyMemoryProfileRLSMigration does for 061. Redundant with
-// testutil.TestDB, which runs the whole migrations/postgres/ directory, and
-// kept anyway because it states the dependency locally rather than relying on
-// the reader to know it. Idempotent: DROP POLICY IF EXISTS ... CREATE POLICY.
+// applyIdempotencyKeysRLSMigration states this test's dependency on 083's fix,
+// the way applyMemoryProfileRLSMigration does for 061 and
+// apply031RLSGapMigration does for its own.
+//
+// It used to re-apply 083 directly, "redundant with testutil.TestDB, which runs
+// the whole migrations/postgres/ directory, and kept anyway". Since the
+// cleat#2059 rebaseline that directory is three files and 083 is one of the
+// history it replaced; the policy lives in 001_schema.sql now. So the helper
+// asserts the policy is present instead of installing it -- see
+// assertRLSPolicyExists.
 func applyIdempotencyKeysRLSMigration(t *testing.T, db *sql.DB) {
 	t.Helper()
-	path := filepath.Join("..", "migrations", "postgres",
-		"083_an_idempotency_key_belongs_to_one_tenant.sql")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	if _, err := db.Exec(string(data)); err != nil {
-		t.Fatalf("apply %s: %v", path, err)
-	}
+	assertRLSPolicyExists(t, db, "idempotency_keys", "idempotency_keys_tenant_isolation")
 }
 
 func TestAnIdempotencyKeyBelongsToOneTenant(t *testing.T) {

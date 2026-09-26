@@ -25,31 +25,24 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/cleat-team/cleat/engine/testutil"
 )
 
-// applyMemoryProfileRLSMigration applies this fix's migration directly, the way
-// apply031RLSGapMigration does for its own. Redundant with testutil.TestDB,
-// which now runs the whole migrations/postgres/ directory -- and kept anyway,
-// because it states the dependency locally instead of relying on the reader to
-// know that. The statements are idempotent (DROP POLICY IF EXISTS ... CREATE
-// POLICY), so reapplying is a no-op.
+// applyMemoryProfileRLSMigration states this test's dependency on 061's fix, the
+// way apply031RLSGapMigration does for its own.
+//
+// It used to re-apply 061 directly, "redundant with testutil.TestDB, which now
+// runs the whole migrations/postgres/ directory -- and kept anyway". Since the
+// cleat#2059 rebaseline that directory is three files and 061 is one of the
+// history it replaced; the policy lives in 001_schema.sql now. So the helper
+// asserts the policy is present instead of installing it -- see
+// assertRLSPolicyExists.
 func applyMemoryProfileRLSMigration(t *testing.T, db *sql.DB) {
 	t.Helper()
-	path := filepath.Join("..", "migrations", "postgres",
-		"061_the_memory_profile_has_a_policy_behind_its_predicate.sql")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	if _, err := db.Exec(string(data)); err != nil {
-		t.Fatalf("apply %s: %v", path, err)
-	}
+	assertRLSPolicyExists(t, db, "workflow_memory_samples", "tenant_isolation_memory_samples")
 }
 
 func TestMemoryProfileRLS_LayerSeparation(t *testing.T) {

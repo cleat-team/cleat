@@ -33,8 +33,6 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -42,45 +40,41 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
-// dropTenantDefiningMigrations lists, in order, every migration that defines
-// admin.drop_tenant. Applying only the first of them is how a change to the
-// routine becomes invisible: CREATE OR REPLACE installs whichever file ran
-// last, so a helper pinned to 032 silently reinstalls the 032 body over
-// whatever the migrations produced, and every test here then exercises a
-// routine the shipped schema does not have.
+// dropTenantDefiningMigrations used to list, in order, every migration that
+// redefines admin.drop_tenant -- five files, replayed in sequence so the helper
+// below arrived at the CURRENT body. The hazard it guarded is worth keeping in
+// mind even though the list is gone: CREATE OR REPLACE installs whichever file
+// ran last, so a helper pinned to an early file silently reinstalls that body
+// over whatever the migrations produced, and every test here then exercises a
+// routine the shipped schema does not have. That is why cleat#1201's fix had to
+// be verified twice.
 //
-// That is not hypothetical -- it is why cleat#1201's fix had to be verified
-// twice. The first version leaned on a foreign key, so the tests passed while
-// this helper was still installing 032; moving the fix INTO the routine made
-// them fail, correctly, and TestTheDatabaseHasTheLatestDefinitionOfEveryRoutine
-// TheMigrationsShip reported the same drift one layer down.
-//
-// Add to this list whenever a migration redefines admin.drop_tenant. The same
-// hazard, and the same shape of list, is documented at
-// postgresProcedureMigrations in store_backends_procedures_test.go.
-var dropTenantDefiningMigrations = []string{
-	"032_drop_tenant_deletes_tenant_data.sql",
-	"059_a_dropped_tenants_definitions_go_with_it.sql",
-	"066_a_dropped_tenants_plugin_rows_go_with_it.sql",
-	"069_drop_tenant_takes_the_schema_it_deletes_from.sql",
-	"082_a_dropped_tenants_memory_profile_goes_with_it.sql",
-}
+// The list went with the cleat#2059 rebaseline: 001_schema.sql is generated from
+// a pg_dump of the fully-migrated database, so it carries the LAST definition by
+// construction and there is no sequence left to replay. The same hazard is still
+// guarded, in the form that survives -- see
+// TestProcedureMigrationListsAreComplete's check against the directory.
 
-// apply032DropTenantMigration installs the CURRENT admin.drop_tenant by
-// applying every migration that defines it, in order. The name is kept because
-// call sites read as "give me the drop_tenant the migrations ship".
-// Must be called with a superuser/owner connection.
+// apply032DropTenantMigration asserts the CURRENT admin.drop_tenant is installed.
+// Kept under its old name because call sites read as "give me the drop_tenant
+// the migrations ship". Must be called with a superuser/owner connection.
 func apply032DropTenantMigration(t *testing.T, db *sql.DB) {
 	t.Helper()
-	for _, f := range dropTenantDefiningMigrations {
-		path := filepath.Join("..", "migrations", "postgres", f)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("read %s: %v", path, err)
-		}
-		if _, err := db.Exec(string(data)); err != nil {
-			t.Fatalf("apply %s: %v", path, err)
-		}
+	// Since the cleat#2059 rebaseline the CURRENT admin.drop_tenant is defined
+	// once, in 001_schema.sql, which SetupFullSchema applies -- there is no
+	// longer a sequence of files to replay to arrive at it. Assert it is the
+	// current (two-argument) form, which is what the call sites need.
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM pg_proc p
+		JOIN pg_namespace ns ON ns.oid = p.pronamespace
+		WHERE ns.nspname = 'admin' AND p.proname = 'drop_tenant'
+		  AND pg_get_function_identity_arguments(p.oid) LIKE '%,%'`).Scan(&n); err != nil {
+		t.Fatalf("looking for admin.drop_tenant: %v", err)
+	}
+	if n == 0 {
+		t.Fatalf("admin.drop_tenant is absent, or only the one-argument form exists. " +
+			"001_schema.sql ships the two-argument form (069 gave it the schema); " +
+			"a one-argument-only result means the baseline lost it")
 	}
 }
 
@@ -126,16 +120,58 @@ func apply032DropTenantMigration(t *testing.T, db *sql.DB) {
 //	grep -n 'CREATE OR REPLACE FUNCTION' migrations/postgres/001_schema.sql
 //
 // and check each name for later definitions before widening this again.
+// pre032DropTenant is admin.drop_tenant EXACTLY as 001_schema.sql shipped it,
+// before 032 replaced it. It is an explicit literal since the cleat#2059
+// rebaseline, and that is a deliberate change of kind rather than a workaround.
+//
+// This used to be extracted at run time from migrations/postgres/001_schema.sql
+// -- which worked only while 001 held the PRE-032 body, because 032 is a later
+// file in the chain. The rebaseline's 001 is generated from a pg_dump of the
+// fully-migrated database, so it holds the CURRENT function; extracting from it
+// would hand these three tests the fixed version, and the comment below records
+// exactly what happens then ("all three then fail claiming the old version worked
+// correctly").
+//
+// Embedding it makes the fixture explicit instead of implicit in a file that no
+// longer means what the old one did. The three tests keep their meaning: they pin
+// a data-loss bug, and that is worth keeping whether or not the chain still
+// carries the buggy version.
+const pre032DropTenant = `CREATE OR REPLACE FUNCTION admin.drop_tenant(p_tenant_id UUID) RETURNS void AS $$
+DECLARE
+    v_role_name TEXT;
+    v_schema_name TEXT;
+BEGIN
+    v_schema_name := 'tenant_' || replace(p_tenant_id::text, '-', '_');
+    v_role_name := 'cleat_tenant_' || replace(p_tenant_id::text, '-', '_');
+
+    EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', v_schema_name);
+    EXECUTE format('DROP ROLE IF EXISTS %I', v_role_name);
+
+    DELETE FROM admin.tenant_roles WHERE tenant_id = p_tenant_id;
+    DELETE FROM admin.tenants WHERE tenant_id = p_tenant_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;`
+
 func resetToOriginal001DropTenant(t *testing.T, db *sql.DB) {
 	t.Helper()
-	path := filepath.Join("..", "migrations", "postgres", "001_schema.sql")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+	if _, err := db.Exec(pre032DropTenant); err != nil {
+		t.Fatalf("reinstall the pre-032 admin.drop_tenant: %v", err)
 	}
-	body := extractPlpgsqlFunction(t, string(data), "admin.drop_tenant")
-	if _, err := db.Exec(body); err != nil {
-		t.Fatalf("reinstall 001's admin.drop_tenant: %v", err)
+	// The REVOKE is not optional, and leaving it out is a real hazard rather
+	// than an untidy fixture. PostgreSQL's default for a NEW function is
+	// `EXECUTE TO PUBLIC`, and this one is SECURITY DEFINER -- so recreating the
+	// body without revoking hands every role in the database an owner-privileged
+	// DROP. That is cleat#1365 exactly, and TestNoAdminFunctionGrantsExecuteToPublic
+	// caught this fixture doing it:
+	//
+	//   admin.drop_tenant(p_tenant_id uuid)
+	//     acl={=X/postgres,postgres=X/postgres,cleat_app=X/postgres}
+	//
+	// The deployed old function carried no PUBLIC grant either: 065 revokes
+	// EXECUTE from PUBLIC on every admin function, and this restores that
+	// property alongside the body it belongs to.
+	if _, err := db.Exec(`REVOKE EXECUTE ON FUNCTION admin.drop_tenant(uuid) FROM PUBLIC`); err != nil {
+		t.Fatalf("revoke PUBLIC execute on the reinstalled pre-032 admin.drop_tenant: %v", err)
 	}
 }
 
