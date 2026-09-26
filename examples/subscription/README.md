@@ -21,8 +21,8 @@ cleat build -o /tmp/out ./examples/subscription/
 ## Run
 
 ```bash
-cleat deploy --name subscription /tmp/out/subscription.wasm
-cleat run --wasm /tmp/out/subscription.wasm --entry-point ManageSubscription \
+cleat deploy --name subscription /tmp/out/manage_subscription.wasm
+cleat run --wasm /tmp/out/manage_subscription.wasm --entry-point manage_subscription \
   --input '{"user_id":"usr_001","plan_id":"pro","amount_usd":1999}'
 ```
 

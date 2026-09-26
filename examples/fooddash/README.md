@@ -22,8 +22,8 @@ cleat build -o /tmp/out ./examples/fooddash/
 ## Run
 
 ```bash
-cleat deploy --name fooddash /tmp/out/fooddash.wasm
-cleat run --wasm /tmp/out/fooddash.wasm --entry-point PlaceOrder \
+cleat deploy --name fooddash /tmp/out/cancel_order.wasm
+cleat run --wasm /tmp/out/cancel_order.wasm --entry-point place_order \
   --input '{"userID":"usr_001","restaurantID":"rest_1","items":[{"sku":"pizza","name":"Pepperoni","quantity":1}],"address":{"street":"123 Main St","city":"Portland","zipCode":"97201"}}'
 ```
 
