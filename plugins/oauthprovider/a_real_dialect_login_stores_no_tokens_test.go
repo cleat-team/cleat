@@ -2,18 +2,20 @@ package oauthprovider
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
-	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 
+	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
@@ -106,6 +108,28 @@ func TestARealLoginStoresNoTokensOnAnyDialect(t *testing.T) {
 			p.mux = http.NewServeMux()
 			if err := p.RegisterRoutes(p.mux); err != nil {
 				t.Fatalf("RegisterRoutes: %v", err)
+			}
+
+			// THE REAL MINTER, not the recording fake the behavioural tests
+			// use. cleat#2340: this is the ONLY place auth.TenantStore's
+			// per-dialect INSERT runs against a real database -- everywhere
+			// else wires a fake that never emits SQL, so a wrong column list or
+			// a dialect-specific spelling would pass every one of them and fail
+			// only here. That is the class of defect this file already exists
+			// for on the read side.
+			realKeyStore, ksErr := auth.NewTenantStoreForDialect(be.DB, string(dialect))
+			if ksErr != nil {
+				t.Fatalf("build the real API key store: %v", ksErr)
+			}
+			var mintedKey string
+			p.mintOAuthAPIKey = func(ctx context.Context, req plugin.MintOAuthAPIKeyRequest) (string, error) {
+				raw := auth.GenerateAPIKey()
+				if err := realKeyStore.CreateOAuthAPIKey(ctx, req.TenantID,
+					req.Description, raw, req.ExpiresAt, req.OAuthIdentity); err != nil {
+					return "", err
+				}
+				mintedKey = raw
+				return raw, nil
 			}
 
 			// engine.DefaultTenantUUID, not a freshly generated one: MySQL's
@@ -295,14 +319,32 @@ func TestARealLoginStoresNoTokensOnAnyDialect(t *testing.T) {
 			if callbackRec.Code != http.StatusOK {
 				t.Fatalf("GET /callback: want 200, got %d: %s", callbackRec.Code, callbackRec.Body.String())
 			}
-			var callbackResp struct {
-				SessionToken string `json:"session_token"`
+			// cleat#2340: the body is the key page, not JSON, and the assertion
+			// that matters is the one the whole issue is about -- the
+			// credential a login hands back must authenticate through core
+			// auth's OWN resolver. Before this change the login returned a
+			// 64-hex session token that ResolveTenantFromAPIKey could never
+			// find, so every request carrying it 401'd at the outermost
+			// middleware, before this plugin saw the request at all.
+			//
+			// Resolving is also a real SELECT of the row the mint wrote, so it
+			// proves the INSERT landed in the table the reader reads -- the
+			// writer/reader agreement cleat#866 lost on MySQL, checked here on
+			// the dialect whose spelling differs.
+			if mintedKey == "" {
+				t.Fatal("the callback minted nothing")
 			}
-			if err := json.Unmarshal(callbackRec.Body.Bytes(), &callbackResp); err != nil {
-				t.Fatalf("decode callback response: %v", err)
+			if !strings.Contains(callbackRec.Body.String(), mintedKey) {
+				t.Fatalf("the page does not carry the key that was minted (%s), so the caller has "+
+					"no way to authenticate:\n%s", mintedKey, callbackRec.Body.String())
 			}
-			if callbackResp.SessionToken == "" {
-				t.Fatal("callback response carries no session_token")
+			mintedHash := sha256.Sum256([]byte(mintedKey))
+			resolved, resErr := realKeyStore.ResolveTenantFromAPIKey(ctx, mintedHash[:])
+			if resErr != nil {
+				t.Fatalf("the minted key does not resolve through core auth on %s: %v", be.Name, resErr)
+			}
+			if resolved != tenantID {
+				t.Errorf("the minted key resolved to tenant %s, want %s", resolved, tenantID)
 			}
 
 			// The real assertion: read the row back with a real SELECT, not

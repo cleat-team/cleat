@@ -1454,9 +1454,9 @@ func main() {
 			}
 			return rawKey, nil
 		},
-		Done:             ctx.Done(),
-		Dialect:          plugin.Dialect(factory.Dialect()),
-		EventsLost:       pluginEventsLostHook(metricsInstance),
+		Done:       ctx.Done(),
+		Dialect:    plugin.Dialect(factory.Dialect()),
+		EventsLost: pluginEventsLostHook(metricsInstance),
 		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
 			return startPluginWorkflow(ctx, store, req)
 		},
