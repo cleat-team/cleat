@@ -110,6 +110,12 @@ func verify(ctx context.Context, db *sql.DB, committed string) error {
 		if err != nil {
 			return fmt.Errorf("read committed %s: %w", name, err)
 		}
+		//nolint:gosec // G703: both halves of this path are fixed. stagedDir is a
+		// directory this function created itself with os.MkdirTemp one screen up,
+		// and name comes from baselineFiles -- a package-level literal slice whose
+		// three entries contain no path separator, so Join cannot escape stagedDir.
+		// Nothing caller-controlled reaches the WRITE path: -committed selects what
+		// is read, not where the staging copy lands.
 		if err := os.WriteFile(filepath.Join(stagedDir, name), b, 0o644); err != nil {
 			return err
 		}

@@ -85,9 +85,11 @@ expect() {
     fi
     local got
     got=$(check)
+    # Parameter expansion rather than sed: shellcheck's SC2001, and the parse is
+    # simple enough that a subprocess buys nothing.
     local gd gs
-    gd=$(sed 's/.*diff=\([^ ]*\).*/\1/' <<<"$got")
-    gs=$(sed 's/.*supp=\([^ ]*\).*/\1/' <<<"$got")
+    gd="${got#*diff=}"; gd="${gd%% *}"
+    gs="${got#*supp=}"; gs="${gs%% *}"
     if [ "$gd" = "$want_d" ] && [ "$gs" = "$want_s" ]; then
         printf '%-4s %-46s %-18s ok\n' "$case_no" "$label" "$got"
     else
