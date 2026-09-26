@@ -54,6 +54,7 @@ cmd/cleat-bench	TestHelperProcess	1
 cmd/cleat-gen-plugin	TestHelperProcess	1
 cmd/cleat-worker	TestABlockedStartIsAcceptedAndWaits	1
 cmd/cleat-worker	TestABootedWorkerBindsLoginToTheHost	2
+cmd/cleat-worker	TestABootedWorkerDisablesAnExpiredOAuthMintedKey	2
 cmd/cleat-worker	TestABootedWorkerSweepsAnAbandonedLogin	2
 cmd/cleat-worker	TestAFencedExecutionMakesNoFurtherCallsAndASecondWorkerFinishesTheWorkflow	1
 cmd/cleat-worker	TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun	4
