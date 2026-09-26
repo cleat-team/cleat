@@ -1,7 +1,9 @@
 # Playbook 2 — Multi-tenant B2B SaaS control plane
 
-**Status:** engineering reference. Drafted 2026-09-14 against `develop` at `654d6f84`.
-Nothing here has been built end to end; see [What was verified](#what-was-verified) at the end.
+**Status:** engineering reference. Drafted 2026-09-14 against `develop` at `654d6f84`; corrected
+2026-09-25 against `develop` at `656aced4` (cleat#2052) — see
+[What was verified](#what-was-verified) at the end for what changed. Nothing here has been built end
+to end.
 
 **Who this is for:** you sell software to businesses. Each customer gets their own login, their own
 data, their own settings, often their own branded URL, and an auditor will eventually ask you to
@@ -60,15 +62,23 @@ everything hung off that model inherits tenancy for free.
 
 | Concern | Component | Hitch point |
 |---|---|---|
-| Login and sessions | `oauthprovider` — `GET /oauth/{provider}/login`, `/callback`, session list and revoke (`routes.go:85-88`) | edge middleware + routes |
+| Login and sessions | `oauthprovider` — `GET /oauth/{provider}/login`, `/callback`, session list and revoke; **generic OIDC since cleat#1582** (`providerOIDC`, `routes.go`) | edge middleware + routes |
 | Per-tenant request limits | `ratelimiter` | edge middleware |
-| Audit trail | `auditlog` | edge middleware + routes |
+| Per-tenant volume quotas | `tenantquota` — counter-based, with `cleatctl quota` to set a plan without SQL. **`enforce` defaults to false**, deliberately: over the limit is recorded and reported, not refused | edge middleware |
+| Audit trail | `auditlog`, plus `cleatctl audit export` for the streamed export | edge middleware + routes |
 | Flags and rollout | `featureflags`: `evaluate_flag` | host function + routes |
-| Business processes | your workflows | — |
+| Business processes | your workflows — or your **tenants' own**, via `POST /api/definitions`. See *Tenant-supplied steps* below | — |
 | Schedules | `scheduler` | routes + background loop |
 | Settings and metadata | `kvstore` (versioned JSONB, optimistic concurrency) | routes |
+| Per-tenant secrets | the tenant secret store (migration 081) — read by the host and **never handed to the guest**; `cleatctl set-secret`, rotation via `reseal-secrets` | host + admin |
+| Hostname to tenant | `auth/host_binding.go` (cleat#1568) | edge middleware |
+| Grouping a customer's tenants | orgs (cleat#1898, `091_an_org_groups_a_customers_tenants.sql`) | schema |
 | Files and attachments | `blobstore` (S3-backed) | host functions |
 | Notifications | `email`, `slacknotify`, `notifications` | host functions |
+
+Every row from *Per-tenant volume quotas* down to *Grouping a customer's tenants* was shipped and
+unmentioned when this table was written; the page listed them under "what you still have to build"
+or did not list them at all.
 
 ---
 
@@ -92,6 +102,20 @@ Three isolation postures are available, in increasing strength:
    tenant, so a bug in cleat cannot reach across tenants either.
 3. **Schema or database separation** — see `docs/schema-partitioning-design.md` and
    `docs/sharding.md`.
+
+**All three are PostgreSQL, and this section read as though they were not.** Until 2026-09-25 it said
+isolation is "enforced below your code" without qualification, which is true of PostgreSQL and false
+of MySQL. **MySQL has no row-level security at all.** There, isolation is a **static predicate guard
+over the SQL source**: every statement is required to carry its tenant predicate, enforced by a
+source scan (`engine/mysql_tenant_predicate_test.go`) rather than by the database — and MySQL is
+single-tenant by owner decision for exactly that reason.
+
+That distinction is worth an auditor's attention rather than a footnote, because it changes what the
+guarantee *is*: on PostgreSQL the database refuses a query that does not name a tenant, and on MySQL
+a test refuses a *source file* that does not — so a statement reaching MySQL by a path the scan does
+not read is not caught by anything. If per-tenant isolation with the database enforcing it is a
+requirement you have to demonstrate, that is PostgreSQL, and it is the only one of the three
+postures above that MySQL supports.
 
 **The posture is checkable, and there is a command for it.** `cleatctl` includes an RLS-posture
 check (`cmd/cleatctl/rlsposture.go`) distinguishing three states: `rlsExempt` (superuser or
@@ -167,6 +191,42 @@ Re-derive the current list rather than trusting any copy of it:
 **What is not covered:** blobs in S3 via `blobstore`, and anything your own application wrote to
 its own tables. Tenant deletion is complete with respect to cleat's tables and no further.
 
+**`drop-tenant` also clears the tenant's domains and secrets** (`tenant_domains`,
+`tenant_secrets`), which matters for erasure: a hostname mapping left behind is a record that the
+customer existed, and a secret left behind is worse. Re-derive the current table list rather than
+trusting any copy of it — the command above.
+
+---
+
+## Tenant-supplied steps, which is the actual wedge
+
+Everything above has **you** writing the workflows. The stronger claim — the one that makes this a
+platform rather than a product with an engine in it — is that a tenant supplies its own logic, and
+that shipped: **`POST /api/definitions` accepts a tenant's own WASM workflow.** It is created through
+`scopedStore`, so a tenant cannot write into another tenant's namespace, and it is auto-versioned
+when no version is given.
+
+**A worked case.** A customer wants its own approval rule — "orders over $10k need a second
+approver" — and every customer's rule differs. You are not going to ship a rule builder:
+
+1. The tenant uploads a `needs-second-approval` definition of its own via `POST /api/definitions`.
+   Scoped to that tenant, invisible to every other.
+2. Your `PlaceOrder` workflow invokes it as a child workflow, handing it the order. **Yours** owns the
+   charge, the compensation, the audit trail and the idempotency; **theirs** owns the rule.
+3. The customer revises its rule next quarter. That is a new version of *their* definition, routed by
+   the same version pinning and routing rules you already use — not a change to your product, and not
+   a deploy.
+
+**WASM is what makes this safe to offer.** The tenant's step runs in the same sandbox as your own
+workflows: no ambient filesystem, no network beyond the host functions you allow, and its durable
+calls go through the same recorder — so it lands in the same history and the same audit trail, which
+is the property an auditor asks about. You are not handing a customer a scripting hook inside your
+own process; the isolation containing it is the one that already contains your code.
+
+**Before you expose it: serving a tenant's workflow on a public route needs exposure classes**
+(cleat#1986) — each definition declaring `public`, `auth` (the default) or `internal`, enforced on
+every workflow route. Until that lands, keep tenant-supplied definitions behind authenticated routes.
+
 ---
 
 ## Cost
@@ -196,9 +256,11 @@ name.
 **SAML has since been decided and the answer is not "build it"** — see
 [`docs/enterprise-identity-decision.md`](../enterprise-identity-decision.md). A SAML proxy *is* an
 OIDC provider, so a customer terminates SAML themselves and presents it to cleat as OIDC; cleat
-never handles an XML signature. That needs a generic OIDC issuer, which `oauthprovider` does not yet
-have — three providers are hardcoded (#1582). **SCIM remains genuinely absent** and is deferred
-rather than declined.
+never handles an XML signature. **The generic OIDC issuer that needs shipped** — this paragraph said
+`oauthprovider` "does not yet have" one and that three providers were hardcoded, which was true when
+drafted and stopped being true at cleat#1582; the provider is now `"oidc"` (`plugins/oauthprovider/routes.go`,
+`providerOIDC`), so a customer's SAML proxy can be pointed at cleat without a new code change per
+vendor. **SCIM remains genuinely absent** and is deferred rather than declined.
 
 *Feature flags without the product around them.* `featureflags` evaluates rules with targeting and
 percentage rollout. It has no experimentation platform, no metrics-linked rollout, no approval
@@ -252,13 +314,21 @@ thing you have to route through a workflow for the history to answer it.
 
 ## What you still have to build or buy
 
-1. **A terminator, if a customer needs SAML**, plus the generic OIDC issuer support to accept it
-   (#1582). cleat does not implement SAML by decision, not by omission —
-   [`docs/enterprise-identity-decision.md`](../enterprise-identity-decision.md). **SCIM** is still
-   yours to build or buy.
-2. **Per-tenant TLS**, if tenants get their own domains.
+**Two items this list used to carry have shipped, and the issue that asked for them to be added here
+was overtaken by the same thing** — the quota admin surface (cleat#2046, now `cleatctl quota`) and
+the audit export (cleat#2047, now `cleatctl audit export`) are in the assembly table above, not here.
+Re-check a "still to build" list against the tree before acting on it; this one drifted in the
+direction that costs you work you did not have to do.
+
+1. **A terminator, if a customer needs SAML** — but **not** the issuer support. Generic OIDC shipped
+   in cleat#1582 (`providerOIDC`), so a customer's SAML proxy terminates SAML itself and presents
+   OIDC to cleat, with no per-vendor code. cleat does not implement SAML by decision, not by omission
+   — [`docs/enterprise-identity-decision.md`](../enterprise-identity-decision.md). **SCIM remains
+   genuinely absent**, deferred rather than declined, and is still yours to build or buy.
+2. **Per-tenant TLS**, if tenants get their own domains. The host-to-tenant *binding* is shipped
+   (`auth/host_binding.go`, cleat#1568); this is the certificate and its renewal, not the mapping.
 3. **A user-level authorization model.** `SessionInfo` carries `TenantID`, `SessionID` and
-   `UserEmail` (`plugins/oauthprovider/middleware.go:16-20`), so a principal below the tenant
+   `UserEmail` (`SessionInfo`, `plugins/oauthprovider/middleware.go`), so a principal below the tenant
    exists at the HTTP layer — but **RLS is scoped by tenant and knows nothing about the user**.
    Role-based access within a tenant is application-layer, and the database will not catch your
    mistakes there the way it catches cross-tenant ones. This is the most important boundary in this
@@ -300,6 +370,25 @@ table list and the cascade note; `cleatctl cost`'s parameters and its retention 
 argument, which follows from the data model rather than from a deployment.
 
 **Since confirmed.** That `oauthprovider` lacks SAML was inferred here from the provider list in
-`routes.go:49-55`; the map and its `validProviders` allowlist have since been read in full — three
-providers, no SAML, and `oauth_config` already per-tenant. Recorded in
-[`docs/enterprise-identity-decision.md`](../enterprise-identity-decision.md) and #1582.
+`routes.go`; the map and its `validProviders` allowlist have since been read in full — and
+`oauth_config` was already per-tenant. Recorded in
+[`docs/enterprise-identity-decision.md`](../enterprise-identity-decision.md) and cleat#1582.
+
+**Corrected since drafting (2026-09-25, cleat#2052).** Four corrections, each verified against the
+tree rather than taken from the issue:
+
+- **The generic OIDC issuer shipped** (cleat#1582). This page said `oauthprovider` "does not yet
+  have" one and that three providers were hardcoded; the provider is now `"oidc"`.
+- **The isolation claim needed a MySQL qualification it did not carry.** "Enforced below your code"
+  is true of PostgreSQL row-level security and false of MySQL, where isolation is a static predicate
+  guard over the SQL source and the database enforces nothing. See *Isolation is the product
+  feature*.
+- **Host binding (cleat#1568), orgs (cleat#1898), per-tenant secrets (cleat#1570, with rotation),
+  `tenantquota` (cleat#1569) and the quota admin surface (cleat#2046) and audit export (cleat#2047)
+  were all shipped and unmentioned or misfiled** as future work. They are in the assembly table now.
+- **Tenant-supplied steps were the missing story.** `POST /api/definitions` lets a tenant upload its
+  own WASM workflow; the page's "Business processes | your workflows" row read as vendor-authored
+  only. See *Tenant-supplied steps*.
+
+Line citations were replaced with symbol names throughout, per the precedent
+`docs/reference/workflow-lifecycle.md` set — several had drifted.
