@@ -186,16 +186,23 @@ func oauthAllowAdd(ctx context.Context, db *sql.DB, tenant uuid.UUID, provider, 
 	return err
 }
 
-// oauthRevocation is what a successful removal did: the allowlist row is gone,
-// and Removed is how many rows that was (0 or 1).
+// oauthRevocation is what a removal did, in two counts that answer different
+// questions: how many allowlist rows went, and how many live keys stopped
+// working as a result.
 //
-// The two facts are reported separately because they answer different
-// questions and an operator needs both. "No row matched" is not a failure of
-// the revoke and must not be reported as one: a removal that matched nothing
-// revokes nothing, and a caller that cannot tell those apart will read its own
-// typo as a successful revocation.
+// Removed is 0 or 1 per matched spelling, and 0 is a real answer rather than a
+// failure: "no row matched" must not be reported as a failed revoke, or a
+// caller reads its own typo as a successful revocation.
+//
+// Revoked counts keys whose disabled_at was NULL and is not any more. That is
+// the definition of "live" this feature maintains -- the expiry sweep exists so
+// it stays true for OAuth-minted keys -- so a key that expired but has not yet
+// been swept counts here. Reporting it is still worth doing: an operator who
+// removes someone and sees 0 wants to know that before they walk away, and the
+// alternative is a number nobody can check.
 type oauthRevocation struct {
 	Removed int64
+	Revoked int64
 }
 
 // oauthAllowRemove deletes the allowlist row(s) admitting one identity and, in
@@ -275,11 +282,12 @@ func oauthAllowRemove(ctx context.Context, db *sql.DB, d dialect, tenant uuid.UU
 			fmt.Errorf("the allowlist row is removed, but the key store could not be opened to "+
 				"revoke the keys it minted: %w", err)
 	}
-	if _, err := store.RevokeOAuthAPIKeys(ctx, oauthprovider.OAuthIdentityTag(provider, identityType, value)); err != nil {
+	revoked, err := store.RevokeOAuthAPIKeys(ctx, oauthprovider.OAuthIdentityTag(provider, identityType, value))
+	if err != nil {
 		return oauthRevocation{Removed: removed},
 			fmt.Errorf("the allowlist row is removed, but revoking the keys it minted failed: %w", err)
 	}
-	return oauthRevocation{Removed: removed}, nil
+	return oauthRevocation{Removed: removed, Revoked: revoked}, nil
 }
 
 func runOAuthAllowList(ctx context.Context, db *sql.DB, tenant uuid.UUID, provider string) {
@@ -353,6 +361,11 @@ func runOAuthAllowRemove(ctx context.Context, db *sql.DB, d dialect, tenant uuid
 	}
 
 	fmt.Printf("tenant %s no longer admits %s for %s.\n", tenant, tag, provider)
+	// Said even when it is 0, and said as "disabled" rather than "revoked":
+	// what the count is of is keys whose disabled_at this command set, which is
+	// the operator's question -- "is that credential dead?" -- and not "how many
+	// did it ever hold". A 0 is the answer worth reading twice.
+	fmt.Printf("disabled %d key(s) it had minted.\n", rev.Revoked)
 }
 
 // printOAuthAuthorityWarning is the owner's decision, in the two places an

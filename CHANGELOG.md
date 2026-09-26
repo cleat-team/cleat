@@ -759,7 +759,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cleatctl oauth-allow list|add|remove <tenant> --provider <p> [--type email|subject]` manages
   the allowlist. `remove` also revokes the live keys that row minted, in the same command: a
   removal that left the credential authenticating until it expired would mean the operator
-  removed nothing in practice, and nothing on the deployment would say so. Removal finds rows by
+  removed nothing in practice, and nothing on the deployment would say so. It reports how many
+  keys it disabled, because "0" is the number an operator wants to see before walking away.
+  Removal finds rows by
   the matcher's own folding rule rather than by the spelling typed, because this table's only
   writer before the CLI existed was a hand-written `INSERT` — a row that `list` shows but
   `remove` cannot name would be a dead end.

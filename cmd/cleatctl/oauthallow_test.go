@@ -171,8 +171,14 @@ func TestOAuthAllowRemoveRevokesTheKeysThatRowMinted(t *testing.T) {
 		t.Fatal("the seeded key is not live before the removal, so the assertion below is vacuous")
 	}
 
-	if _, err := oauthAllowRemove(ctx, db, dialectPostgres, tenant, "google", "email", "revoke@example.com"); err != nil {
+	rev, err := oauthAllowRemove(ctx, db, dialectPostgres, tenant, "google", "email", "revoke@example.com")
+	if err != nil {
 		t.Fatalf("remove: %v", err)
+	}
+	if rev.Revoked != 1 {
+		t.Errorf("remove reported %d keys disabled, want exactly 1 -- the count is what an operator "+
+			"reads to decide the credential is dead, and 0 here would be indistinguishable from a "+
+			"revoke that matched nothing", rev.Revoked)
 	}
 
 	if keyIsLive(t, db, target) {
