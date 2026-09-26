@@ -291,8 +291,28 @@ func TestDiffCatchesAPartitionedParentsDifference(t *testing.T) {
 
 	// The direct form of the question, which fails with the filter back at 'r'
 	// even before any diff is taken.
-	if _, ok := forced.Tables["public.partition_probe"]; !ok {
-		t.Fatalf("the snapshot does not contain the partitioned parent public.partition_probe (it holds %d tables); "+
+	// Look the parent up by NAME, not as "public.partition_probe". The tables
+	// this test creates land in whatever schema the connection's search_path
+	// resolves, which is a property of the environment and not of the thing
+	// under test -- that is the harness's own rule, applied to itself.
+	//
+	// It DID hardcode `public`, passed locally, and failed on CI:
+	//
+	//   the snapshot does not contain the partitioned parent
+	//   public.partition_probe (it holds 32 tables)
+	//
+	// The 32 tables were there; the name was in another schema. Asserting the
+	// schema as well as the schema-relative fact is the same mistake the
+	// migration guard this package feeds exists to catch.
+	parentKey := ""
+	for k := range forced.Tables {
+		if strings.HasSuffix(k, ".partition_probe") {
+			parentKey = k
+			break
+		}
+	}
+	if parentKey == "" {
+		t.Fatalf("the snapshot contains no partitioned parent named partition_probe (it holds %d tables); "+
 			"a partitioned table is relkind 'p' and is being skipped", len(forced.Tables))
 	}
 
