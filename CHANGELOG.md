@@ -12,6 +12,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
+- **PostgreSQL's schema now ships as three generated files, not 87 numbered migrations.** The
+  chain is `migrations/postgres/001_schema.sql`, `002_defaults.sql` and `003_procedures.sql`.
+  MySQL and SQL Server are unchanged — both still numbered chains. (cleat#2059, cleat#2416)
+
+  No behavioural change is intended and none was measured: the A/B differential reports an
+  **empty catalog diff** against the chain this replaces, on a fresh cluster. The baseline is
+  produced by `scripts/gen-postgres-baseline.py` from a `pg_dump` of a database built by that
+  chain, so every table carries its final column set and every routine is its last definition
+  *by construction*, rather than by someone taking the last of ten by hand. The generator is
+  committed, so the artifact is re-derivable and verified to reproduce `001` and `003`
+  byte-identically from that dump. (`002` seeds rows, which a schema-only dump cannot carry,
+  and is hand-written.)
+
+  **Consequences.**
+  - **Anything that names a `migrations/postgres/NNN` file is now wrong.** That includes
+    comments and docs across the repository — a tracked follow-up — and older entries in this
+    changelog (cleat#2424). A runbook or deployment script that applied a numbered file, or
+    pinned one by name, must apply the three in lexical order instead.
+  - **Cluster-level facts are absent from the baseline, and no per-database check could have
+    seen them go.** A database dump carries no `CREATE ROLE` and no role *membership*, because
+    `pg_auth_members` and `pg_shdescription` are cluster-wide — so the catalog diff that
+    verified this rebaseline compared two databases and was blind to the difference. Three
+    statements were deleted with the chain and restored explicitly:
+    `GRANT cleat_sweep TO cleat_app WITH INHERIT FALSE` (plus its loop over the
+    `cleat_tenant_%` roles), `COMMENT ON ROLE cleat_sweep`, and one defensive attribute
+    correction. **`WITH INHERIT FALSE` is load-bearing** — a plain grant lets the app role read
+    every tenant's rows — and the retention path runs `SET LOCAL ROLE cleat_sweep`, so a
+    missing membership is a hard `42501` on every sweep rather than a silent degradation.
+  - **Partitioning is not in this change.** It moves `event_history`'s primary key, and
+    PostgreSQL needs a unique index matching every conflict target — so the live
+    `ON CONFLICT (workflow_id, step)` statements on the event write path would stop working
+    (`42P10`). That code travels with the schema that needs it, separately.
+
+  None of this is visible to a fresh install, which is the only kind 0.3.0 supports — there is
+  nothing to upgrade *from*. It is called out because the migration tree an operator goes to
+  read is no longer shaped like the one every previous release documented.
+
 - **Security: a child workflow's `child_workflow` event was written in plain text in the
   parent's `event_history`, with `--encrypt-sensitive-payloads` on.** (cleat#2312, cleat#2328)
 
