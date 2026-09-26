@@ -102,7 +102,7 @@ type WorkflowStore interface {
 	IsHistorySwept(ctx context.Context, workflowID string) (bool, error)
 
 	// AppendEventHistory appends a single event to the history.
-	// Uses ON CONFLICT (workflow_id, step) DO NOTHING for idempotency.
+	// Idempotent: PostgreSQL upserts on ON CONFLICT (tenant_id, workflow_id, step).
 	AppendEventHistory(ctx context.Context, workflowID string, rec EventRecord) error
 
 	// AppendEventHistoryBatch appends multiple events atomically.

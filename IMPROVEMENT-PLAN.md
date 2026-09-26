@@ -9532,8 +9532,11 @@ history, 31 columns, decrypt and redact per row, no step predicate. Three runs, 
 
 The full read is linear; the cursor read is **flat** — its spread within one history size is as
 large as its spread across all three. One reader polling the full read on a 5000-chunk run would
-spend ~17% of a core. It needs no new index: `idx_event_history_tenant_wf` is an exact prefix
-match, and `EXPLAIN` reports 2-3 buffers with execution at 0.016-0.018 ms.
+spend ~17% of a core. It needs no new index: the primary key's own index,
+`event_history_pkey (tenant_id, workflow_id, step)` — the PK since cleat#2059 moved it there — is an
+exact prefix match, and `EXPLAIN` reports 2-3 buffers with execution at 0.016-0.018 ms. (This
+paragraph named `idx_event_history_tenant_wf`, a separate index over the same three columns; the PK
+move made it a duplicate and 001 no longer creates it.)
 
 **The number worth carrying forward is that execution is 2% of the cost.** A poll measures 0.7-1.9
 ms in Go against a 0.016 ms query, because `beginTxWithRLS` makes it BEGIN + `set_config` + SELECT

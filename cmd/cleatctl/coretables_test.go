@@ -78,7 +78,144 @@ func tablesCreatedByMigrations(t *testing.T) []string {
 		out = append(out, name)
 	}
 	sort.Strings(out)
+	return foldPartitionChildren(out)
+}
+
+// partitionChildRE matches the name the baseline's generator gives a partition:
+// <parent>_p<digits>.
+var partitionChildRE = regexp.MustCompile(`^(.*)_p[0-9]+$`)
+
+// foldPartitionChildren removes entries that are partition children of a table
+// already in the same set, so a partitioned table is counted once.
+//
+// A PARTITION IS NOT A SEPARATE TABLE, and this file is the third place that had
+// to learn it. Hash-partitioning event_history into 64 children (cleat#2059) put
+// 65 `CREATE TABLE` statements in 001_schema.sql -- the parent and its children
+// -- and `information_schema` lists partitions as tables, so every enumeration
+// of "the tables this schema has" grew by 64 entries for one table:
+//
+//   - engine/the_documented_tenant_coverage_is_measured_test.go  (RLS on 81, not 17)
+//   - engine/a_dropped_tenants_rows_all_go_with_it_test.go       (88 in the universe)
+//   - here, in both of this package's table enumerations
+//
+// The first two each folded it locally, which is what let the third arrive on CI
+// with the PR already under review. Hence one helper, used by everything in this
+// package that enumerates tables -- a fourth copy is the thing to avoid, not a
+// fourth bug to fix.
+//
+// Folded only when the PARENT is in the set too, so the rule is "a partition of
+// a table I already know about", not "a name ending in _p<digits>". A real table
+// named foo_p1 with no foo stays counted as itself.
+func foldPartitionChildren(names []string) []string {
+	set := make(map[string]bool, len(names))
+	for _, n := range names {
+		set[n] = true
+	}
+	// A fresh slice, NOT `names[:0]`. Filtering in place returns the right
+	// answer and overwrites the caller's own backing array, which is invisible
+	// until a caller keeps the argument -- and this helper exists to be reused,
+	// so the third caller is the one that would find it. Tested by
+	// TestFoldPartitionChildren asserting the input is unchanged.
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if parent := partitionChildRE.ReplaceAllString(n, "$1"); parent != n && set[parent] {
+			continue
+		}
+		out = append(out, n)
+	}
 	return out
+}
+
+// TestFoldPartitionChildren pins the helper's NEGATIVE case, which is the half
+// its comments assert and nothing exercised.
+//
+// The positive fold -- 81 tables read as 17, 88 read as 24 -- is covered
+// incidentally by the tests that call it, because those are the failures that
+// brought the helper into existence. But nothing anywhere constructs a foo_p1
+// with no foo, so deleting the `set[parent]` condition leaves every one of those
+// tests GREEN while the rule they rely on is gone. That is the failure this
+// commit is itself an instance of: a local fix that generalised to nothing,
+// recurring in a third package. Testing the helper makes it durable; testing
+// only its positive case would not.
+func TestFoldPartitionChildren(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   []string
+		want []string
+		why  string
+	}{
+		{
+			name: "children fold into a parent that is present",
+			in:   []string{"event_history", "event_history_p0", "event_history_p63", "workflow_tags"},
+			want: []string{"event_history", "workflow_tags"},
+			why:  "the case the helper exists for",
+		},
+		{
+			name: "an ORPHAN partition-looking name is kept",
+			in:   []string{"event_history", "foo_p1"},
+			want: []string{"event_history", "foo_p1"},
+			why: "the condition -- a partition OF a table I know about, not a name " +
+				"ending in _p<digits>. Delete `set[parent]` and this is the only " +
+				"case that notices",
+		},
+		{
+			name: "an orphan alone is kept, with no parent anywhere",
+			in:   []string{"foo_p1", "bar"},
+			want: []string{"foo_p1", "bar"},
+			why:  "same condition, when the parent is absent from the set entirely",
+		},
+		{
+			name: "a schema-qualified parent folds its child",
+			in:   []string{"admin.tenants", "admin.tenants_p0"},
+			want: []string{"admin.tenants"},
+			why: "callers pass qualified names too, and the regex is not anchored to " +
+				"a bare identifier",
+		},
+		{
+			name: "digits only: foo_p is not a child",
+			in:   []string{"foo_p", "foo_px"},
+			want: []string{"foo_p", "foo_px"},
+			why:  "the suffix must be digits; a name that merely starts like one is kept",
+		},
+		{
+			name: "empty input",
+			in:   nil,
+			want: []string{},
+			why:  "no panic, and nothing invented",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := foldPartitionChildren(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("foldPartitionChildren(%v) = %v, want %v\n%s", tc.in, got, tc.want, tc.why)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("foldPartitionChildren(%v) = %v, want %v\n%s", tc.in, got, tc.want, tc.why)
+				}
+			}
+		})
+	}
+
+	// The input must survive. Filtering in place would pass every case above and
+	// silently rewrite whatever the caller still holds.
+	//
+	// EVERY element is compared, not one of them. The first draft checked only
+	// the last index, and filtering in place rewrites the kept elements from
+	// index 0 -- so the corruption landed at index 1 and the assertion passed
+	// against the very implementation it exists to reject. Measured: reverting
+	// to `names[:0]` with the one-index check gives `ok`. A control that cannot
+	// disagree is not a control.
+	in := []string{"event_history", "event_history_p0", "keep_me"}
+	want := append([]string(nil), in...)
+	_ = foldPartitionChildren(in)
+	for i := range want {
+		if in[i] != want[i] {
+			t.Errorf("foldPartitionChildren overwrote its argument at %d: got %q, want %q "+
+				"(whole slice now %v). A caller that keeps the slice it passed sees its own "+
+				"data change.", i, in[i], want[i], in)
+		}
+	}
 }
 
 func TestCoreTablesMatchTheMigrations(t *testing.T) {

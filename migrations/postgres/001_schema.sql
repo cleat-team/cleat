@@ -292,7 +292,8 @@ CREATE TABLE IF NOT EXISTS event_history (
     global_seq bigint DEFAULT 0 NOT NULL,
     intent_at TIMESTAMPTZ,
     payload_encoding smallint
-);
+)
+PARTITION BY HASH (tenant_id);
 
 ALTER TABLE ONLY event_history FORCE ROW LEVEL SECURITY;
 
@@ -599,6 +600,198 @@ CREATE TABLE IF NOT EXISTS workflow_update_requests (
 
 ALTER TABLE ONLY workflow_update_requests FORCE ROW LEVEL SECURITY;
 
+CREATE TABLE IF NOT EXISTS event_history_p0 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 0);
+
+CREATE TABLE IF NOT EXISTS event_history_p1 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 1);
+
+CREATE TABLE IF NOT EXISTS event_history_p2 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 2);
+
+CREATE TABLE IF NOT EXISTS event_history_p3 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 3);
+
+CREATE TABLE IF NOT EXISTS event_history_p4 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 4);
+
+CREATE TABLE IF NOT EXISTS event_history_p5 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 5);
+
+CREATE TABLE IF NOT EXISTS event_history_p6 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 6);
+
+CREATE TABLE IF NOT EXISTS event_history_p7 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 7);
+
+CREATE TABLE IF NOT EXISTS event_history_p8 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 8);
+
+CREATE TABLE IF NOT EXISTS event_history_p9 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 9);
+
+CREATE TABLE IF NOT EXISTS event_history_p10 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 10);
+
+CREATE TABLE IF NOT EXISTS event_history_p11 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 11);
+
+CREATE TABLE IF NOT EXISTS event_history_p12 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 12);
+
+CREATE TABLE IF NOT EXISTS event_history_p13 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 13);
+
+CREATE TABLE IF NOT EXISTS event_history_p14 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 14);
+
+CREATE TABLE IF NOT EXISTS event_history_p15 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 15);
+
+CREATE TABLE IF NOT EXISTS event_history_p16 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 16);
+
+CREATE TABLE IF NOT EXISTS event_history_p17 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 17);
+
+CREATE TABLE IF NOT EXISTS event_history_p18 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 18);
+
+CREATE TABLE IF NOT EXISTS event_history_p19 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 19);
+
+CREATE TABLE IF NOT EXISTS event_history_p20 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 20);
+
+CREATE TABLE IF NOT EXISTS event_history_p21 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 21);
+
+CREATE TABLE IF NOT EXISTS event_history_p22 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 22);
+
+CREATE TABLE IF NOT EXISTS event_history_p23 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 23);
+
+CREATE TABLE IF NOT EXISTS event_history_p24 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 24);
+
+CREATE TABLE IF NOT EXISTS event_history_p25 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 25);
+
+CREATE TABLE IF NOT EXISTS event_history_p26 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 26);
+
+CREATE TABLE IF NOT EXISTS event_history_p27 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 27);
+
+CREATE TABLE IF NOT EXISTS event_history_p28 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 28);
+
+CREATE TABLE IF NOT EXISTS event_history_p29 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 29);
+
+CREATE TABLE IF NOT EXISTS event_history_p30 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 30);
+
+CREATE TABLE IF NOT EXISTS event_history_p31 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 31);
+
+CREATE TABLE IF NOT EXISTS event_history_p32 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 32);
+
+CREATE TABLE IF NOT EXISTS event_history_p33 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 33);
+
+CREATE TABLE IF NOT EXISTS event_history_p34 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 34);
+
+CREATE TABLE IF NOT EXISTS event_history_p35 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 35);
+
+CREATE TABLE IF NOT EXISTS event_history_p36 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 36);
+
+CREATE TABLE IF NOT EXISTS event_history_p37 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 37);
+
+CREATE TABLE IF NOT EXISTS event_history_p38 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 38);
+
+CREATE TABLE IF NOT EXISTS event_history_p39 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 39);
+
+CREATE TABLE IF NOT EXISTS event_history_p40 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 40);
+
+CREATE TABLE IF NOT EXISTS event_history_p41 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 41);
+
+CREATE TABLE IF NOT EXISTS event_history_p42 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 42);
+
+CREATE TABLE IF NOT EXISTS event_history_p43 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 43);
+
+CREATE TABLE IF NOT EXISTS event_history_p44 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 44);
+
+CREATE TABLE IF NOT EXISTS event_history_p45 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 45);
+
+CREATE TABLE IF NOT EXISTS event_history_p46 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 46);
+
+CREATE TABLE IF NOT EXISTS event_history_p47 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 47);
+
+CREATE TABLE IF NOT EXISTS event_history_p48 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 48);
+
+CREATE TABLE IF NOT EXISTS event_history_p49 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 49);
+
+CREATE TABLE IF NOT EXISTS event_history_p50 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 50);
+
+CREATE TABLE IF NOT EXISTS event_history_p51 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 51);
+
+CREATE TABLE IF NOT EXISTS event_history_p52 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 52);
+
+CREATE TABLE IF NOT EXISTS event_history_p53 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 53);
+
+CREATE TABLE IF NOT EXISTS event_history_p54 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 54);
+
+CREATE TABLE IF NOT EXISTS event_history_p55 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 55);
+
+CREATE TABLE IF NOT EXISTS event_history_p56 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 56);
+
+CREATE TABLE IF NOT EXISTS event_history_p57 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 57);
+
+CREATE TABLE IF NOT EXISTS event_history_p58 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 58);
+
+CREATE TABLE IF NOT EXISTS event_history_p59 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 59);
+
+CREATE TABLE IF NOT EXISTS event_history_p60 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 60);
+
+CREATE TABLE IF NOT EXISTS event_history_p61 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 61);
+
+CREATE TABLE IF NOT EXISTS event_history_p62 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 62);
+
+CREATE TABLE IF NOT EXISTS event_history_p63 PARTITION OF event_history
+    FOR VALUES WITH (MODULUS 64, REMAINDER 63);
+
 ALTER SEQUENCE workflow_memory_samples_id_seq OWNED BY workflow_memory_samples.id;
 
 ALTER SEQUENCE workflow_signals_id_seq OWNED BY workflow_signals.id;
@@ -706,8 +899,8 @@ END $do$;
 DO $do$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'event_history_pkey'
                    AND conrelid = 'event_history'::regclass) THEN
-        ALTER TABLE ONLY event_history
-            ADD CONSTRAINT event_history_pkey PRIMARY KEY (workflow_id, step);
+        ALTER TABLE event_history
+            ADD CONSTRAINT event_history_pkey PRIMARY KEY (tenant_id, workflow_id, step);
     END IF;
 END $do$;
 
@@ -1012,8 +1205,6 @@ CREATE INDEX IF NOT EXISTS idx_defs_active ON workflow_defs USING btree (name, v
 CREATE INDEX IF NOT EXISTS idx_defs_tenant_name_version ON workflow_defs USING btree (tenant_id, name, version DESC);
 
 CREATE INDEX IF NOT EXISTS idx_event_history_pending ON event_history USING btree (workflow_id, step) WHERE ((intent_at IS NOT NULL) AND (checksum IS NULL));
-
-CREATE INDEX IF NOT EXISTS idx_event_history_tenant_wf ON event_history USING btree (tenant_id, workflow_id, step);
 
 CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_keys USING btree (expires_at);
 
@@ -1546,6 +1737,262 @@ ALTER TABLE workflow_tags ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE workflow_update_requests ENABLE ROW LEVEL SECURITY;
 
+ALTER TABLE event_history_p0 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p0 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p1 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p1 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p2 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p2 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p3 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p3 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p4 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p4 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p5 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p5 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p6 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p6 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p7 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p7 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p8 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p8 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p9 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p9 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p10 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p10 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p11 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p11 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p12 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p12 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p13 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p13 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p14 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p14 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p15 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p15 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p16 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p16 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p17 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p17 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p18 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p18 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p19 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p19 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p20 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p20 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p21 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p21 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p22 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p22 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p23 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p23 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p24 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p24 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p25 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p25 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p26 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p26 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p27 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p27 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p28 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p28 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p29 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p29 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p30 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p30 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p31 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p31 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p32 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p32 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p33 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p33 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p34 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p34 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p35 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p35 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p36 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p36 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p37 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p37 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p38 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p38 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p39 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p39 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p40 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p40 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p41 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p41 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p42 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p42 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p43 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p43 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p44 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p44 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p45 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p45 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p46 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p46 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p47 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p47 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p48 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p48 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p49 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p49 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p50 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p50 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p51 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p51 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p52 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p52 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p53 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p53 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p54 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p54 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p55 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p55 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p56 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p56 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p57 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p57 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p58 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p58 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p59 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p59 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p60 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p60 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p61 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p61 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p62 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p62 FORCE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p63 ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE event_history_p63 FORCE ROW LEVEL SECURITY;
+
 DROP POLICY IF EXISTS idempotency_keys_cross_tenant ON idempotency_keys;
 CREATE POLICY idempotency_keys_cross_tenant ON idempotency_keys TO cleat_sweep USING (true);
 
@@ -1599,6 +2046,198 @@ CREATE POLICY tenant_isolation_tags ON workflow_tags USING ((tenant_id = cleat.a
 
 DROP POLICY IF EXISTS tenant_isolation_update_requests ON workflow_update_requests;
 CREATE POLICY tenant_isolation_update_requests ON workflow_update_requests USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p0;
+CREATE POLICY tenant_isolation_events ON event_history_p0 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p1;
+CREATE POLICY tenant_isolation_events ON event_history_p1 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p2;
+CREATE POLICY tenant_isolation_events ON event_history_p2 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p3;
+CREATE POLICY tenant_isolation_events ON event_history_p3 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p4;
+CREATE POLICY tenant_isolation_events ON event_history_p4 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p5;
+CREATE POLICY tenant_isolation_events ON event_history_p5 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p6;
+CREATE POLICY tenant_isolation_events ON event_history_p6 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p7;
+CREATE POLICY tenant_isolation_events ON event_history_p7 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p8;
+CREATE POLICY tenant_isolation_events ON event_history_p8 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p9;
+CREATE POLICY tenant_isolation_events ON event_history_p9 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p10;
+CREATE POLICY tenant_isolation_events ON event_history_p10 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p11;
+CREATE POLICY tenant_isolation_events ON event_history_p11 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p12;
+CREATE POLICY tenant_isolation_events ON event_history_p12 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p13;
+CREATE POLICY tenant_isolation_events ON event_history_p13 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p14;
+CREATE POLICY tenant_isolation_events ON event_history_p14 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p15;
+CREATE POLICY tenant_isolation_events ON event_history_p15 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p16;
+CREATE POLICY tenant_isolation_events ON event_history_p16 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p17;
+CREATE POLICY tenant_isolation_events ON event_history_p17 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p18;
+CREATE POLICY tenant_isolation_events ON event_history_p18 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p19;
+CREATE POLICY tenant_isolation_events ON event_history_p19 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p20;
+CREATE POLICY tenant_isolation_events ON event_history_p20 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p21;
+CREATE POLICY tenant_isolation_events ON event_history_p21 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p22;
+CREATE POLICY tenant_isolation_events ON event_history_p22 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p23;
+CREATE POLICY tenant_isolation_events ON event_history_p23 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p24;
+CREATE POLICY tenant_isolation_events ON event_history_p24 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p25;
+CREATE POLICY tenant_isolation_events ON event_history_p25 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p26;
+CREATE POLICY tenant_isolation_events ON event_history_p26 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p27;
+CREATE POLICY tenant_isolation_events ON event_history_p27 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p28;
+CREATE POLICY tenant_isolation_events ON event_history_p28 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p29;
+CREATE POLICY tenant_isolation_events ON event_history_p29 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p30;
+CREATE POLICY tenant_isolation_events ON event_history_p30 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p31;
+CREATE POLICY tenant_isolation_events ON event_history_p31 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p32;
+CREATE POLICY tenant_isolation_events ON event_history_p32 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p33;
+CREATE POLICY tenant_isolation_events ON event_history_p33 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p34;
+CREATE POLICY tenant_isolation_events ON event_history_p34 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p35;
+CREATE POLICY tenant_isolation_events ON event_history_p35 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p36;
+CREATE POLICY tenant_isolation_events ON event_history_p36 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p37;
+CREATE POLICY tenant_isolation_events ON event_history_p37 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p38;
+CREATE POLICY tenant_isolation_events ON event_history_p38 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p39;
+CREATE POLICY tenant_isolation_events ON event_history_p39 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p40;
+CREATE POLICY tenant_isolation_events ON event_history_p40 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p41;
+CREATE POLICY tenant_isolation_events ON event_history_p41 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p42;
+CREATE POLICY tenant_isolation_events ON event_history_p42 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p43;
+CREATE POLICY tenant_isolation_events ON event_history_p43 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p44;
+CREATE POLICY tenant_isolation_events ON event_history_p44 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p45;
+CREATE POLICY tenant_isolation_events ON event_history_p45 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p46;
+CREATE POLICY tenant_isolation_events ON event_history_p46 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p47;
+CREATE POLICY tenant_isolation_events ON event_history_p47 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p48;
+CREATE POLICY tenant_isolation_events ON event_history_p48 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p49;
+CREATE POLICY tenant_isolation_events ON event_history_p49 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p50;
+CREATE POLICY tenant_isolation_events ON event_history_p50 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p51;
+CREATE POLICY tenant_isolation_events ON event_history_p51 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p52;
+CREATE POLICY tenant_isolation_events ON event_history_p52 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p53;
+CREATE POLICY tenant_isolation_events ON event_history_p53 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p54;
+CREATE POLICY tenant_isolation_events ON event_history_p54 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p55;
+CREATE POLICY tenant_isolation_events ON event_history_p55 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p56;
+CREATE POLICY tenant_isolation_events ON event_history_p56 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p57;
+CREATE POLICY tenant_isolation_events ON event_history_p57 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p58;
+CREATE POLICY tenant_isolation_events ON event_history_p58 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p59;
+CREATE POLICY tenant_isolation_events ON event_history_p59 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p60;
+CREATE POLICY tenant_isolation_events ON event_history_p60 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p61;
+CREATE POLICY tenant_isolation_events ON event_history_p61 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p62;
+CREATE POLICY tenant_isolation_events ON event_history_p62 USING ((tenant_id = cleat.assert_tenant_set()));
+
+DROP POLICY IF EXISTS tenant_isolation_events ON event_history_p63;
+CREATE POLICY tenant_isolation_events ON event_history_p63 USING ((tenant_id = cleat.assert_tenant_set()));
 
 CREATE OR REPLACE TRIGGER tenants_org_id_immutable BEFORE UPDATE ON admin.tenants FOR EACH ROW EXECUTE FUNCTION admin.tenants_org_id_is_immutable();
 

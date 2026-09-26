@@ -563,7 +563,7 @@ type ChildWorkflowStore interface {
 	// The event is written to event_history atomically with the child row.
 	// The caller should still append the event to the in-memory history for
 	// same-execution replay. The later event flush will skip it via
-	// ON CONFLICT (workflow_id, step) DO NOTHING.
+	// ON CONFLICT (tenant_id, workflow_id, step) DO NOTHING.
 	StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (runID string, err error)
 
 	// GetChildResult reports what a child run left behind. The returned error
