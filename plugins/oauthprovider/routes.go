@@ -379,17 +379,27 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 		// that fixes it would hand an anonymous caller detail about cleat's
 		// own tooling (cleat-review's item (4) on cleat#2295).
 		//
-		// The uniform TEXT below closes the STRING oracle only, and an
-		// earlier version of this comment claimed more than it delivers. The
-		// STATUS still discriminates: a configured tenant that gets past this
-		// point ends at the redirect this handler closes with (302), while
-		// this branch answers 500. So a caller who has not authenticated can
-		// still read "this (tenant, provider) pair IS configured" off a 302.
-		// That is one-directional and therefore not closed. The residual is
-		// recorded on cleat#2368; the log line keeps the operator detail.
+		// THE STATUS WAS A SECOND CHANNEL FOR THE SAME BIT, and this branch is
+		// where cleat#2368 closed it. It answered 500 here, while a configured
+		// pair ended at the redirect this handler closes with (302) -- so an
+		// anonymous caller supplying ?tenant_id=<guess> could read "this
+		// (tenant, provider) pair IS configured" off the status alone, which
+		// is the enumeration surface #2368 is about. It now answers the same
+		// 302, at a same-origin relative path so a caller cannot turn this
+		// into an open redirect, and harmless for a pair that cannot complete
+		// a login.
+		//
+		// WHAT THIS DOES NOT CLOSE, recorded because it is inherent to the
+		// feature rather than an oversight: a login that succeeds for a
+		// configured pair must hand the browser the provider's authorize URL,
+		// so that response necessarily carries something an unconfigured pair
+		// cannot produce, and the Location header still separates the two.
+		// Closing that would mean not logging in at all -- cleat#2368's option
+		// (B). The owner chose (A), which closes the cheapest channel and
+		// leaves this one recorded rather than unnoticed.
 		p.logger.Error("oauth: config lookup", "provider", provider, "error", err,
 			"secret_not_found", errors.Is(err, plugin.ErrSecretNotFound))
-		p.writeError(w, http.StatusInternalServerError, "oauth config not found")
+		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
 
@@ -550,9 +560,13 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		// whose config is read, and any pair this branch could probe,
 		// handleLogin already probes directly.
 		//
-		// The uniform TEXT closes the STRING oracle only; the STATUS still
-		// discriminates (500 here, the 200 JSON finishLogin returns on
-		// success). Same residual, recorded on cleat#2368.
+		// The uniform TEXT closes the STRING oracle only; the STATUS here
+		// still discriminates (500 here, the 200 JSON finishLogin returns on
+		// success). This branch is NOT cleat#2368's fix -- that issue closed
+		// the login route's status. It is not the same oracle either: a caller
+		// reaches this only with a state row, and production mints one only
+		// after a login already cleared getConfig (the INSERT in handleLogin),
+		// so any pair this branch could probe, handleLogin already answered.
 		p.logger.Error("oauth: config lookup", "provider", provider, "error", err,
 			"secret_not_found", errors.Is(err, plugin.ErrSecretNotFound))
 		p.writeError(w, http.StatusInternalServerError, "oauth config not found")

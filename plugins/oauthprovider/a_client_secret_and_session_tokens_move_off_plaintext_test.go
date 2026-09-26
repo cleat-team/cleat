@@ -74,14 +74,22 @@ func TestClientSecretFlowsFromTenantSecretsIntoTheTokenExchange(t *testing.T) {
 	}
 }
 
-// TestMissingClientSecretRefusesLogin is the negative control for the test
-// above: an oauth_config row whose provider has no matching entry in tenant
-// secrets must refuse rather than proceed with an empty client_secret, which
-// would silently send an unauthenticated-looking token exchange to the IdP.
-// Falsified by construction: AddOAuthConfig always seeds a secret, so this
-// seeds the config row directly (bypassing it) with nothing behind
-// OAuthClientSecretName("google") for this tenant.
-func TestMissingClientSecretRefusesLogin(t *testing.T) {
+// TestMissingClientSecretDoesNotHandTheBrowserToTheProvider is the negative
+// control for the test above: an oauth_config row whose provider has no
+// matching entry in tenant secrets must not proceed with an empty
+// client_secret, which would silently send an unauthenticated-looking token
+// exchange to the IdP. Falsified by construction: AddOAuthConfig always seeds
+// a secret, so this seeds the config row directly (bypassing it) with nothing
+// behind OAuthClientSecretName("google") for this tenant.
+//
+// Until cleat#2368 this asserted a FAILURE STATUS, and that assertion was the
+// thing #2368 removed: a status separating "configured but broken" from "never
+// configured" is the enumeration oracle an unauthenticated caller reads with
+// ?tenant_id=<guess>. The property worth keeping is narrower and survives the
+// change -- a login that cannot succeed must not hand the browser to the
+// provider -- so the assertion moved to the Location, which is where that
+// distinction still legitimately lives.
+func TestMissingClientSecretDoesNotHandTheBrowserToTheProvider(t *testing.T) {
 	store := newFakeDBStore()
 	_, handler := setupTestPlugin(t, store)
 
@@ -97,11 +105,16 @@ func TestMissingClientSecretRefusesLogin(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if rec.Code == http.StatusFound {
-		t.Fatalf("login redirected (302) with no client secret configured; want a failure status, got a working authorize redirect")
+	// cleat#2368: the uniform 302, not a failure status.
+	if rec.Code != http.StatusFound {
+		t.Fatalf("expected the uniform 302, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec.Code < 500 {
-		t.Errorf("expected a server-side failure (secret lookup error), got %d: %s", rec.Code, rec.Body.String())
+	loc := rec.Header().Get("Location")
+	if strings.Contains(loc, "accounts.google.com") || strings.Contains(loc, "client_id=") {
+		t.Fatalf("a login with no client secret behind it was handed to the provider anyway: Location %q", loc)
+	}
+	if loc != "/" {
+		t.Errorf("want the harmless same-origin root, got Location %q", loc)
 	}
 }
 
