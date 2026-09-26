@@ -424,7 +424,7 @@ default_pool_size = 25
 > | session-scoped thing | where |
 > |---|---|
 > | `pg_advisory_lock`, serialising migrations across workers | `migration/runner.go:209`, `plugin/migration.go:177` |
-> | `SET search_path = public`, held across the plugin run | `plugin/migration.go:181` |
+> | `SET search_path = <schema>, pg_temp`, held across the plugin run | `plugin/migration.go:202` |
 >
 > The lock is taken on one backend and the unlock may land on another, so the
 > serialisation is silently absent — at **every worker boot**, on the path that

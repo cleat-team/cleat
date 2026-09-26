@@ -304,6 +304,26 @@ to enable it:
 Without this flag, the worker continues to use the existing single-role
 connection pool. Existing tenants continue to work unchanged.
 
+> **Steps 3, 4 and 5 are not implemented, and the `cleat tenant …` commands they show do not
+> exist.** `cleat tenant provision-role`, `cleat tenant enable-plugin` and
+> `cleat tenant migrate-data` are not subcommands of `cleat`; `cmd/` has no `tenant` command tree
+> at all. Verified 2026-09-26:
+>
+> ```bash
+> grep -rn '"provision-role"\|"enable-plugin"\|"migrate-data"' cmd/   # nothing
+> ```
+>
+> **What is real, and it is less than these steps describe.** `admin.create_tenant` does create a
+> `tenant_<uuid>` schema and a login role. `admin.grant_plugin_to_tenant` does exist to `GRANT`
+> plugin tables to that role — but it reads `admin.plugin_tables`, and the only writer of that
+> registry, `plugin.RegisterPluginTables` (`plugin/migration.go:751`), **has no production
+> caller**; it has a full unit-test suite, so grepping the name finds plenty of hits and none of
+> them are call sites. On a real deployment the grant loop is therefore zero-iteration.
+>
+> Plugin tables additionally do **not** live in `tenant_<uuid>` — they live in the same schema as
+> the core tables, following `--schema`. See `plugin-security.md`, "Where the tables are", which
+> carries the same correction.
+
 ### Step 3: Provision roles for existing tenants
 
 Run the provisioning command for each existing tenant:
@@ -415,7 +435,8 @@ DROP ROLE cleat_tenant_<uuid>;
 - [ ] Migration 009 applied: `cleat migrate up`
 - [ ] Tenant roles created for all existing tenants
 - [ ] Plugin access granted for each tenant's enabled plugins
-- [ ] `cleat tenant list` shows all tenants with roles
+- [ ] ~~`cleat tenant list` shows all tenants with roles~~ — no such command; see the note under
+      Step 3. There is no `cleat tenant` command tree, so this cannot be checked as written
 - [ ] `cleat plugin list` shows all installed plugins correctly
 - [ ] Cross-tenant access test passes (tenant A can't see tenant B's data)
 - [ ] Worker starts successfully with `--tenant-roles` flag
