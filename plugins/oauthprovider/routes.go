@@ -864,7 +864,7 @@ func (p *Plugin) finishLogin(
 		return
 	}
 
-	identityTag := oauthIdentityTag(provider, admit)
+	identityTag := OAuthIdentityTag(provider, admit.Type, admit.Value)
 	// A VALUE, never nil: an OAuth-minted key always expires. See oauthKeyExpiry.
 	keyExpiresAt := oauthKeyExpiry(expiresIn)
 
@@ -937,7 +937,7 @@ func (p *Plugin) finishLogin(
 	// minted, is never delivered, and stays live until it expires -- exactly the
 	// condition the reorder exists to narrow. No ordering closes it: a page that
 	// shows a secret once cannot hand over one that does not exist yet. The
-	// answer is the sweep (design item 7), which collects an OAuth-minted key by
+	// answer is the sweep (design item 7, cleat#2340), which collects an OAuth-minted key by
 	// its expiry and its oauth_identity tag, and this is why the key carries
 	// both.
 	rawKey, err := p.mintOAuthAPIKey(ctx, plugin.MintOAuthAPIKeyRequest{

@@ -26,6 +26,7 @@
 //	suspend-tenant <tenant-id>       — stop new work for a tenant, reversibly
 //	resume-tenant <tenant-id>        — undo suspend-tenant
 //	revoke-api-key [flags]           — revoke a cleat API key (credential rotation)
+//	oauth-allow <list|add|remove>    — manage a tenant's OAuth identity allowlist
 package main
 
 import (
@@ -150,6 +151,8 @@ func main() {
 		runQuota(ctx, db, d, args[1:])
 	case "egress-allow":
 		runEgressAllow(ctx, db, d, args[1:])
+	case "oauth-allow":
+		runOAuthAllow(ctx, db, d, args[1:])
 	case "set-secret":
 		runSetSecret(ctx, db, d, args[1:])
 	case "retire-secret":
@@ -207,6 +210,12 @@ Commands:
   egress-allow list <tenant>      show which hosts a tenant's workflows may fetch
   egress-allow add <tenant> <host>...     permit hosts (.example.com = subdomains)
   egress-allow remove <tenant> <host>...  revoke hosts
+  oauth-allow list <tenant>       show which identities may sign in through a provider
+  oauth-allow add <tenant> --provider <p> [--type email|subject] <identity>
+                                  admit one, warning that the key it mints carries
+                                  FULL TENANT ACCESS (PostgreSQL only)
+  oauth-allow remove <tenant> --provider <p> [--type email|subject] <identity>
+                                  revoke it AND the live keys that row minted
   queue list <tenant>             show a tenant's declared concurrency queues
   queue create <tenant> <name> --concurrency N  register one, admitting N at a time
   queue disable <tenant> <name>   retire it (its key reverts to a mutex, N=1)

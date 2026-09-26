@@ -17,6 +17,7 @@ import (
 
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/oauthprovider"
 	"github.com/cleat-team/cleat/plugins/scheduledbackup"
 )
 
@@ -62,9 +63,16 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 	// TestEveryInlineStatementParsesOnPostgres` alone -- a normal dev and
 	// bisect workflow -- reached PREPARE against a database that had never
 	// run the plugin's migration at all.
+	// oauthprovider is here for the same reason and by the same argument
+	// (cleat#2340): `cleatctl oauth-allow` addresses oauth_allowed_identities,
+	// which is a PLUGIN table -- so a PREPARE against the core schema fails
+	// with 42P01, and the guard's own fallback, a pin, is worse than the
+	// migration because a pin is permanent. Running the migration is what
+	// makes these four statements genuinely prepare rather than be waived.
 	lp := &plugin.LoadedPlugin{Plugin: scheduledbackup.New(), Healthy: true}
-	if err := plugin.RunMigrations(ctx, db, plugin.DialectPostgres, nil, []*plugin.LoadedPlugin{lp}); err != nil {
-		t.Fatalf("applying scheduledbackup's migrations: %v", err)
+	oauth := &plugin.LoadedPlugin{Plugin: oauthprovider.New(), Healthy: true}
+	if err := plugin.RunMigrations(ctx, db, plugin.DialectPostgres, nil, []*plugin.LoadedPlugin{lp, oauth}); err != nil {
+		t.Fatalf("applying plugin migrations: %v", err)
 	}
 
 	stmts := inlineStatements(t)

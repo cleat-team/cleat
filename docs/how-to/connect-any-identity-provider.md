@@ -128,6 +128,66 @@ if you would rather not run one.
 
 ---
 
+## Who may sign in: the allowlist
+
+Completing a login produces a **real cleat API key** for that tenant. There is
+no separate "OAuth credential" — the key is an ordinary `admin.tenant_api_keys`
+row, so anything that accepts an API key accepts it.
+
+> **A minted key carries FULL TENANT ACCESS.** `tenant_api_keys` has no role or
+> scope column in this release, so an identity admitted here can do everything
+> the tenant's API key can: deploy workflow code (`POST /api/definitions`,
+> `/api/versions`), reprocess runs, manage schedules and plugins, and reach
+> `/api/admin/*` where it is enabled. **OAuth login is operator SSO, and the
+> allowlist is an operator list. Add only identities you would hand that
+> tenant's API key to.** Nothing enforces that for you.
+
+Because of that, **the allowlist is mandatory and fails closed**: a
+`(tenant, provider)` pair with no rows refuses every login for that pair. There
+is no switch to turn the check off, and "there is no list" and "this person is
+not on the list" are deliberately the same answer — the alternative (treating an
+empty list as "admit everyone") fails *open*, which is the direction an operator
+mistyping a tenant id would never notice.
+
+```bash
+# Admit an address, and see what you are granting:
+cleatctl --db "$DSN" oauth-allow add <tenant-uuid> --provider oidc ada@example.com
+
+# Admit a stable subject instead. Use this when the issuer publishes no verified
+# address, or to survive an address being reassigned:
+cleatctl --db "$DSN" oauth-allow add <tenant-uuid> --provider oidc --type subject 00u1a2b3c
+
+# See who is admitted (this also prints the warning above):
+cleatctl --db "$DSN" oauth-allow list <tenant-uuid> --provider oidc
+
+# Remove someone — and revoke the keys that row minted, in the same command:
+cleatctl --db "$DSN" oauth-allow remove <tenant-uuid> --provider oidc ada@example.com
+```
+
+`--type email` (the default) matches only an address the provider **vouches
+for**: for OIDC, the ID token or userinfo must assert `email_verified`, and for
+GitHub cleat consults `/user/emails` and takes only an entry that is both
+`primary` and `verified`. An unverified address is carried as a label and never
+used as a key — an IdP that lets a user set an unverified address would
+otherwise let anyone who claimed `ceo@yourcompany.com` into the tenant.
+Comparison is case-folded for an address and case-**sensitive** for a subject
+(OIDC Core §2 defines `sub` that way). `--type subject` is therefore both the
+stricter key and the more durable one, and a tenant can hold both kinds and
+migrate at leisure.
+
+`remove` is not just a delete: it revokes the live keys that row minted. A
+removal that only deleted the row would leave the person's credential
+authenticating until it expired, which is not what an operator means by
+"remove".
+
+**PostgreSQL only, in this release.** On MySQL and SQL Server, `/login` and
+`/callback` answer `501` with a message naming the limit, and `cleatctl
+oauth-allow` refuses, rather than half-working. A minted key expires at
+`min(expires_in, 24h)` — a provider reporting a week does not get a week, and one
+reporting nothing gets 24 hours rather than a permanent credential.
+
+---
+
 ## What cleat checks on the way in
 
 Identity comes from the `userinfo` endpoint, which is the path the named
@@ -160,6 +220,8 @@ fetch rather than an outage.
 | `id_token validation failed` | Signature, `iss`, `aud`, `exp` or `nonce` did not check out. The worker log names which. `aud` mismatch usually means `client_id` differs from the client the IdP issued the token to. |
 | `issuer … publishes no signing keys` | The discovery document has no `jwks_uri`, or the set held no usable key, but an `id_token` was returned. |
 | `provider "oidc" requires an issuer URL` | The `oauth_config` row has an empty `issuer`. |
+| `501` from `/login` or `/callback` | This worker is not on PostgreSQL. OAuth login is Postgres-only in this release; the response names the limit. |
+| `403 identity_not_allowlisted` | That identity is not on the tenant's allowlist for this provider. `cleatctl oauth-allow list <tenant> --provider <p>` shows who is. The worker log names the identity that was refused. |
 
 ## See also
 

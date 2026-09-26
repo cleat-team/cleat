@@ -59,6 +59,23 @@ type Plugin struct {
 	// observes the wiring and a unit test cannot.
 	mintOAuthAPIKey func(ctx context.Context, req plugin.MintOAuthAPIKeyRequest) (string, error)
 
+	// revokeExpiredOAuthAPIKeys asks the HOST to soft-disable the OAuth-minted
+	// keys whose expiry has passed; Run's ticker calls it. cleat#2340 design v2
+	// §(7).
+	//
+	// A HOST FUNCTION RATHER THAN A STATEMENT IN background.go, and the reason
+	// is a grant rather than taste: this plugin's cross-tenant statements run
+	// under `SET LOCAL ROLE cleat_sweep`, which holds no privilege on
+	// admin.tenant_api_keys -- so §(7)'s UPDATE written here fails with 42501 on
+	// every tick and disables nothing. Background.go's sweepExpiredOAuthKeys
+	// carries the detail.
+	//
+	// NIL MEANS THIS HOST HAS NO KEY STORE (cleattest, the embedded runner), and
+	// unlike the mint above that is not a reason to refuse anything: the sweep
+	// is bookkeeping, and skipping it degrades a count rather than an
+	// authentication.
+	revokeExpiredOAuthAPIKeys func(ctx context.Context) (int64, error)
+
 	// OIDC discovery + JWKS cache for the generic `oidc` provider (cleat#1582).
 	// Reached through p.cache() rather than directly: several tests construct a
 	// Plugin without calling Init, and a nil map there would panic inside a
@@ -103,6 +120,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.hostResolver = env.HostResolver
 	p.requireHostMatch = env.RequireHostMatch
 	p.mintOAuthAPIKey = env.MintOAuthAPIKey
+	p.revokeExpiredOAuthAPIKeys = env.RevokeExpiredOAuthAPIKeys
 	p.httpClient = &http.Client{
 		// cleat#1565: every outbound request goes through the egress guard.
 		// Nil in tests that build an Environment directly, which falls back to

@@ -53,6 +53,20 @@ var portedOn = map[string][]string{
 	"debug":    {"postgres", "mysql", "mssql"},
 	"check-db": {"postgres", "mysql", "mssql"},
 
+	// oauth-allow, cleat#2340: PostgreSQL only, and again the FEATURE's scope
+	// rather than this command's -- except that here the SQL is genuinely
+	// unportable too, which is worth stating because the two reasons are
+	// independent and only one of them would have to change.
+	//
+	// The feature: OAuth login answers 501 on MySQL and SQL Server (design v2
+	// section 5, owner decision A), so a row written there admits nobody. The
+	// SQL: the add is `INSERT ... ON CONFLICT (cols) DO NOTHING`, which MySQL
+	// spells ON DUPLICATE KEY UPDATE and SQL Server has no equivalent for at
+	// all, and the revoke's auth.TenantStore method refuses off Postgres. A
+	// version that ran here would write rows nothing reads and refuse at the
+	// second statement of `remove`, having already deleted the first.
+	"oauth-allow": {"postgres"},
+
 	// egress-allow, cleat#1565: written for all three from the start. Its
 	// statements are plugin.Query values with a MySQL arm for the unprefixed
 	// table, routed through plugin.Rebind -- which is exactly what the

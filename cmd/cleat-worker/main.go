@@ -1454,6 +1454,21 @@ func main() {
 			}
 			return rawKey, nil
 		},
+		// WS-2's second addition to WS-3's file, same declaration and the same
+		// reason as the mint above: oauthprovider's background loop cannot
+		// reach admin.tenant_api_keys itself, because a plugin's cross-tenant
+		// statement runs as cleat_sweep and that role holds no privilege on the
+		// table -- measured, see auth.TenantStore.RevokeExpiredOAuthAPIKeys.
+		// The host's own connection is where the grant is, so the write goes
+		// here.
+		//
+		// It disables nothing but expired OAuth-minted keys, so the grant it
+		// needs is exactly the one the mint above already needs; a deployment
+		// where this fails is a deployment where the mint failed first, and
+		// loudly.
+		RevokeExpiredOAuthAPIKeys: func(ctx context.Context) (int64, error) {
+			return authResolver.RevokeExpiredOAuthAPIKeys(ctx)
+		},
 		Done:       ctx.Done(),
 		Dialect:    plugin.Dialect(factory.Dialect()),
 		EventsLost: pluginEventsLostHook(metricsInstance),

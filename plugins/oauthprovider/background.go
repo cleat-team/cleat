@@ -69,17 +69,23 @@ var _ plugin.HasBackground = (*Plugin)(nil)
 
 // Run starts the oauth-provider background sweep loop, satisfying
 // plugin.HasBackground. Every sweepInterval it deletes oauth_sessions rows
-// left behind by an abandoned login (see sweepExpiredSessionsQuery). Returns
-// promptly when ctx is cancelled.
+// left behind by an abandoned login (see sweepExpiredSessionsQuery) and
+// soft-disables OAuth-minted keys past their expiry (see
+// sweepExpiredOAuthKeys). Returns promptly when ctx is cancelled.
 //
-// Runs on every dialect, not gated on p.dialect == plugin.DialectPostgres
-// the way handleLogin/handleCallback are (see pgOnly in plugin.go): on
-// mysql/mssql /login already refuses before any row is ever inserted, so
-// the query here finds nothing and this is a correctly-behaving no-op --
-// simpler than adding a second refusal path for a loop that is harmless to
-// run everywhere, and consistent with scheduledbackup.Run, which also
-// polls unconditionally and lets "nothing to do" fall out of an empty
+// The SESSION sweep runs on every dialect, not gated on p.dialect ==
+// plugin.DialectPostgres the way handleLogin/handleCallback are (see pgOnly in
+// plugin.go): on mysql/mssql /login already refuses before any row is ever
+// inserted, so the query here finds nothing and this is a correctly-behaving
+// no-op -- simpler than adding a second refusal path for a loop that is
+// harmless to run everywhere, and consistent with scheduledbackup.Run, which
+// also polls unconditionally and lets "nothing to do" fall out of an empty
 // result rather than being special-cased at startup.
+//
+// The KEY sweep is the exception and is gated, for a reason of its own: it
+// writes a table this plugin has no privilege on, so it asks the host instead,
+// and on a dialect where nothing can have minted a key there is nothing to ask
+// for. See sweepExpiredOAuthKeys.
 func (p *Plugin) Run(ctx context.Context) error {
 	if p.db == nil {
 		p.logger.Warn("oauth-provider: no database, background loop disabled")
@@ -95,8 +101,9 @@ func (p *Plugin) Run(ctx context.Context) error {
 	// Run once immediately on startup, matching scheduledbackup.Run and
 	// plugins/scheduler's background loop -- an abandoned row left over
 	// from before a restart should not have to wait a full interval to be
-	// swept.
+	// swept, and neither should an expired key.
 	p.sweepExpiredSessions(ctx)
+	p.sweepExpiredOAuthKeys(ctx)
 
 	for {
 		select {
@@ -106,7 +113,62 @@ func (p *Plugin) Run(ctx context.Context) error {
 
 		case <-ticker.C:
 			p.sweepExpiredSessions(ctx)
+			p.sweepExpiredOAuthKeys(ctx)
 		}
+	}
+}
+
+// sweepExpiredOAuthKeys soft-disables the OAuth-minted API keys whose expiry
+// has passed, by asking the HOST to do it. cleat#2340 design v2 §(7).
+//
+// THE STATEMENT IS NOT HERE, AND THAT IS THE POINT OF THIS FUNCTION'S SHAPE.
+// §(7) specifies the UPDATE as a second statement in this ticker, alongside
+// the oauth_sessions DELETE above. Written that way it cannot run: a plugin's
+// cross-tenant statement executes under `SET LOCAL ROLE cleat_sweep`, and
+// cleat_sweep holds no privilege on admin.tenant_api_keys at all -- not
+// SELECT, not UPDATE -- so every tick would log
+// `permission denied for table tenant_api_keys (42501)` and disable nothing.
+// Measured, not inferred; auth.TenantStore.RevokeExpiredOAuthAPIKeys carries
+// the command that measured it, and the plugin's own test reproduced the 42501
+// before this function was changed.
+//
+// So the write lives on the worker's own connection, the one that holds the
+// grant -- which is the same connection, for the same reason, that
+// plugin.Environment.MintOAuthAPIKey already exists for. This plugin does not
+// hold a credential to that table and never did; the mint only appeared to work
+// from here because it was never actually issued from here.
+//
+// WHAT THIS STILL DOES NOT DO IS ENFORCE EXPIRY. The read path does that, on
+// every dialect (resolveAPIKeyStmt). This keeps `disabled_at IS NULL` meaning
+// "authenticates" for keys OAuth minted, so an operator's count of an
+// identity's live keys does not grow forever. A worker that never ran this
+// loop would not authenticate an expired key; it would only report one.
+//
+// THE DIALECT GATE IS §(5)'s SCOPE, restated where the loop can see it.
+// handleLogin and handleCallback both refuse non-Postgres at 501 (pgOnly,
+// routes.go), so no OAuth-minted key exists on MySQL or SQL Server and the
+// correct number to disable there is zero. Gating here rather than calling
+// through spares every MySQL worker a cross-boundary call on each tick to be
+// told that. Delete this gate when §(5)'s follow-up lifts the limit -- that is
+// also when the host function stops refusing on those dialects, and the two
+// changes belong in one PR.
+func (p *Plugin) sweepExpiredOAuthKeys(ctx context.Context) {
+	if p.dialect != plugin.DialectPostgres {
+		return
+	}
+	if p.revokeExpiredOAuthAPIKeys == nil {
+		// Same convention as the mint, applied to an arm that is allowed to be
+		// absent: a host with no key store (cleattest, the embedded runner) can
+		// skip bookkeeping without refusing anything.
+		return
+	}
+	n, err := p.revokeExpiredOAuthAPIKeys(ctx)
+	if err != nil {
+		p.logger.Error("oauth-provider: sweep expired OAuth keys", "error", err)
+		return
+	}
+	if n > 0 {
+		p.logger.Info("oauth-provider: disabled expired OAuth-minted keys", "count", n)
 	}
 }
 

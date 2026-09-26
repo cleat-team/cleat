@@ -67,6 +67,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"fmt"
@@ -247,6 +248,157 @@ func TestABootedWorkerSweepsAnAbandonedLogin(t *testing.T) {
 				"has passed. Session expiry is enforced at read time, not by deleting the row, and the "+
 				"`token_hash IS NULL` half of the predicate is what spares it -- a worker that deleted "+
 				"every expired row would also have removed the abandoned one", completedExpiredID)
+		}
+		return nil
+	}
+
+	args := []string{"--driver=postgres", "--db=" + appDSN, "--migrate-db=" + ownerDSN,
+		fmt.Sprintf("--api-addr=127.0.0.1:%d", freePort(t))}
+	var key string
+	var probeErr error
+	ok, out := hostMatchServes(t, bin, args, &key, func(_, _ string) { probeErr = observe() })
+	if !ok {
+		t.Fatalf("the worker did not boot:\n%s", out)
+	}
+	if probeErr != nil {
+		t.Fatalf("%v\n\nWorker output:\n%s", probeErr, out)
+	}
+}
+
+// TestABootedWorkerDisablesAnExpiredOAuthMintedKey pins the
+// RevokeExpiredOAuthAPIKeys assignment into plugin.Environment.
+//
+// cleat#2412's review measured this gap rather than inferring it: deleting the
+// assignment from cmd/cleat-worker/main.go leaves the whole package green
+// (1206 pass / 0 fail / 2 skip), and so does deleting MintOAuthAPIKey. The
+// plugin's own suite cannot see either, because its fixture wires its own host
+// function -- and for THIS half the miss is silent by design: a nil host is
+// treated as "this host has no key store" and the sweep returns without
+// logging, which TestSweepExpiredOAuthKeysWithNoHostIsASilentNoOp deliberately
+// pins. So an unwired revoke degrades invisibly rather than loudly.
+//
+// THE ROW IS SEEDED BEFORE THE WORKER STARTS because Run sweeps once on
+// startup (plugins/oauthprovider/background.go), the same reason
+// TestABootedWorkerSweepsAnAbandonedLogin does it: seeding afterwards would
+// measure the 5-minute ticker instead of the wiring.
+//
+// TWO CONTROLS, WITHOUT WHICH THE ASSERTION IS VACUOUS. "The expired OAuth key
+// is disabled" is satisfied by a worker that disables EVERY key, and by one that
+// disables every EXPIRED key regardless of who minted it. So a live OAuth key
+// and an expired key with no oauth_identity are seeded beside it, and both must
+// survive. The second is the predicate's own boundary: the statement is scoped
+// to `oauth_identity IS NOT NULL` on purpose, because un-revoking is not a
+// supported operation in this release and flipping an operator's service key
+// would be a surprise with no way back.
+func TestABootedWorkerDisablesAnExpiredOAuthMintedKey(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs the worker binary")
+	}
+	c := deployDialect{"postgres", "CLEAT_TEST_POSTGRES", "postgres"}
+	if c.admin() == "" {
+		t.Skip("CLEAT_TEST_POSTGRES/CLEAT_TEST_DB not set, skipping")
+	}
+	bin, ownerDSN, owner := buildWorker(t, c)
+	_ = masterKey(t)
+	appDSN := pgAppRoleDSN(t, owner, ownerDSN)
+
+	ctx := context.Background()
+	// The default tenant: it exists already, so nothing has to be seeded for it.
+	// engine.DefaultTenantUUID is a STRING; the keys table takes a uuid.
+	tenantID := uuid.MustParse(engine.DefaultTenantUUID)
+	past := time.Now().Add(-1 * time.Hour)
+
+	// Written on the OWNER connection, so the sweep has to find rows written by
+	// a path that is not itself.
+	seed := func(forTenant uuid.UUID, oauthIdentity any, expiresAt time.Time, why string) uuid.UUID {
+		t.Helper()
+		id := uuid.New()
+		hash := sha256.Sum256([]byte(id.String()))
+		if _, err := owner.ExecContext(ctx, `
+			INSERT INTO admin.tenant_api_keys
+				(tenant_id, key_id, key_hash, description, expires_at, oauth_identity)
+			VALUES ($1, $2, $3, $4, $5, $6)`,
+			forTenant, id, hash[:], "boot-test: "+why, expiresAt, oauthIdentity); err != nil {
+			t.Fatalf("seed key %s: %v", id, err)
+		}
+		t.Cleanup(func() {
+			_, _ = owner.ExecContext(context.Background(),
+				`DELETE FROM admin.tenant_api_keys WHERE key_id = $1`, id)
+		})
+		return id
+	}
+
+	// The subject: an OAuth-minted key whose expiry has passed.
+	target := seed(tenantID, "google:expired@example.com", past, "expired oauth key")
+	// Control 2: expired, but this feature did not mint it.
+	serviceKey := seed(tenantID, nil, past, "expired service key")
+
+	// THERE IS NO "LIVE OAUTH KEY" CONTROL, and its absence is a property of
+	// this harness rather than an oversight. A live key under ANY tenant
+	// suppresses the startup API key the worker prints -- liveAPIKeyCountQuery
+	// (cmd/cleat-worker) is `WHERE disabled_at IS NULL AND (expires_at IS NULL
+	// OR expires_at > now())` with NO tenant predicate, and hostMatchServes
+	// needs that printed key before it will run any probe. So the control cannot
+	// be seeded in any tenant of this database, and the first version of this
+	// test asserted "the worker did not print a startup API key" on a run where
+	// the sweep had demonstrably worked -- the worker logged "disabled expired
+	// OAuth-minted keys count=1" while the test failed in the harness.
+	//
+	// What that control would have guarded -- that the sweep does not disable
+	// OAuth-minted keys wholesale, by dropping `expires_at < now()` from the
+	// statement -- is covered where it can be measured, with mutations:
+	// plugins/oauthprovider's TestSweepDisablesOnlyExpiredOAuthMintedKeys pins
+	// the live and no-expiry cases and goes red when either clause is removed.
+	// This test's job is the WIRING, which is the gap the review measured, and
+	// one control is enough for that: the row below catches a sweep that empties
+	// the table of expired keys without regard to who minted them.
+
+	isDisabled := func(id uuid.UUID) (bool, error) {
+		var disabled bool
+		if err := owner.QueryRowContext(ctx,
+			`SELECT disabled_at IS NOT NULL FROM admin.tenant_api_keys WHERE key_id = $1`,
+			id).Scan(&disabled); err != nil {
+			return false, fmt.Errorf("reading disabled_at for %s: %w", id, err)
+		}
+		return disabled, nil
+	}
+
+	// A diagnostic rather than a t.Fatalf, so the caller can attach the
+	// worker's own log -- which is what says whether the sweep ran and errored
+	// or never ran at all.
+	observe := func() error {
+		// A liveness deadline, not a timing assertion: a correct worker sweeps
+		// in milliseconds, so a generous bound cannot make a working one look
+		// broken, only make a broken one report instead of hanging.
+		deadline := time.Now().Add(30 * time.Second)
+		for {
+			disabled, err := isDisabled(target)
+			if err != nil {
+				return err
+			}
+			if disabled {
+				break
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("the booted worker never disabled the expired OAuth-minted key "+
+					"(row %s, oauth_identity set, expires_at in the past) within 30s. Either "+
+					"pluginEnv's RevokeExpiredOAuthAPIKeys assignment is gone -- a nil host is "+
+					"treated as 'no key store' and the sweep returns silently, which is the "+
+					"documented behaviour of that arm -- or the loop that calls it is not running. "+
+					"Both leave the suite green without this test", target)
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+
+		// The control, asserted only once the sweep has demonstrably run.
+		if disabled, err := isDisabled(serviceKey); err != nil {
+			return err
+		} else if disabled {
+			return fmt.Errorf("the sweep disabled an expired key that OAuth login did not mint "+
+				"(row %s, oauth_identity NULL). The statement is scoped to `oauth_identity IS NOT "+
+				"NULL` deliberately: un-revoking is not supported in this release, so flipping an "+
+				"operator's service key would be a surprise with no way back, and the read path "+
+				"already refuses it", serviceKey)
 		}
 		return nil
 	}

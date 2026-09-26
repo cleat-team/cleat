@@ -287,6 +287,36 @@ type Environment struct {
 	// The error is the store's, unmodified. A plugin logs it and refuses; it
 	// must not fall back to minting something else.
 	MintOAuthAPIKey func(ctx context.Context, req MintOAuthAPIKeyRequest) (rawKey string, err error)
+
+	// RevokeExpiredOAuthAPIKeys soft-disables every OAuth-minted API key whose
+	// expiry has passed and returns how many it disabled. cleat#2340 design v2
+	// §(7), called from oauthprovider's background loop.
+	//
+	// THE HOST OWNS THIS TABLE, for the same reason and the same measured
+	// grant MintOAuthAPIKey above exists for: a plugin's cross-tenant
+	// statements run under `SET LOCAL ROLE cleat_sweep`, which holds no
+	// privilege whatever on admin.tenant_api_keys, so the design's statement
+	// written into the plugin fails with 42501 on every tick and disables
+	// nothing. See auth.TenantStore.RevokeExpiredOAuthAPIKeys for the command
+	// that measured it.
+	//
+	// IT TAKES NO TENANT. The table is read before a tenant is known (which is
+	// why migration 061 declined it an RLS policy), so there is no tenant to
+	// hand it -- unlike every other sweep-shaped call in this struct, whose
+	// subject is a tenant's own rows.
+	//
+	// NIL MEANS "THIS HOST CANNOT DO IT", and the same convention as the mint
+	// above applies in reverse: a background loop that finds this nil SKIPS the
+	// sweep and logs nothing, because an arm that cannot run is not a login that
+	// must be refused. cleattest and the embedded runner construct an
+	// Environment directly and have no key store; the worker always sets it.
+	//
+	// AN ERROR IS LOGGED AND RETRIED ON THE NEXT TICK rather than returned to
+	// any caller -- there is no caller. A persistent error here means expiry
+	// bookkeeping has stopped, which is worth a log line and is not worth
+	// stopping the loop over: the read path refuses expired keys regardless, so
+	// the failure degrades a number rather than an authentication.
+	RevokeExpiredOAuthAPIKeys func(ctx context.Context) (disabled int64, err error)
 }
 
 // MintOAuthAPIKeyRequest is what a plugin hands Environment.MintOAuthAPIKey.
