@@ -45,6 +45,18 @@ import (
 // build cannot pick up anything added after the baseline was cut.
 var baselineFiles = []string{"001_schema.sql", "002_defaults.sql", "003_procedures.sql"}
 
+// seedRows are the rows 002_defaults.sql exists to insert. They are the whole
+// of what a fresh install gets: of the 30 user tables, only these three hold
+// anything after a full migration run -- measured on a chain-built database,
+// which is also how 002's content was recovered when the baseline was cut.
+var seedRows = []struct{ what, query string }{
+	{"default org", `SELECT COUNT(*) FROM admin.orgs
+		WHERE org_id = '00000000-0000-0000-0000-000000000000'`},
+	{"default tenant", `SELECT COUNT(*) FROM admin.tenants
+		WHERE tenant_id = '00000000-0000-0000-0000-000000000000'`},
+	{"recorded RLS predicate form", `SELECT COUNT(*) FROM admin.rls_predicate_form WHERE only_row = 1`},
+}
+
 // The database passed to -dsn must be EMPTY. verify builds into it, so pointing
 // it at an existing database would compare the emitter's output for that
 // database against the committed baseline for a different one.
@@ -122,6 +134,40 @@ func verify(ctx context.Context, db *sql.DB, committed string) error {
 	}
 	if err := build(ctx, db, staged); err != nil {
 		return fmt.Errorf("build from the committed baseline: %w", err)
+	}
+
+	// 002_defaults.sql is hand-assembled, so there is nothing to compare it
+	// against byte for byte -- but exempting it ENTIRELY leaves a hole, and
+	// cleat-review named it while reviewing the PostgreSQL verify mode: a 002
+	// that had been emptied or replaced builds a database with no seed rows,
+	// and both the byte comparison above and the A/B differential still report
+	// clean. A missing ROW is not a structural difference, and no catalogue
+	// check can see one.
+	//
+	// So its EFFECT is asserted rather than its text: the rows a fresh install
+	// must have. That catches every way 002 can lose its content, not only the
+	// one a comparison against a known-bad string would recognise.
+	//
+	// Note the dialect asymmetry, because it is why this check is written this
+	// way rather than copied from PostgreSQL's. gen-postgres-baseline.py WRITES
+	// a PLACEHOLDER_002 and refuses to overwrite a real file, so on that side a
+	// placeholder left on disk is a detectable state and comparing the
+	// committed file against that constant is the right test. This generator
+	// never writes 002 at all -- there is no placeholder to detect, and what
+	// needs asserting is that the hand-assembled file did something.
+	for _, seed := range seedRows {
+		var n int
+		if err := db.QueryRowContext(ctx, seed.query).Scan(&n); err != nil {
+			return fmt.Errorf("check the seed row %s: %w", seed.what, err)
+		}
+		if n == 0 {
+			return fmt.Errorf(
+				"the database built from the committed baseline has no %s. That row is "+
+					"inserted by 002_defaults.sql, which is hand-assembled and is not compared "+
+					"byte for byte -- so this is the only thing that would notice it had been "+
+					"emptied or replaced. Restore the file from git history",
+				seed.what)
+		}
 	}
 
 	tmp, err := os.MkdirTemp("", "gen-mssql-baseline-verify-")
