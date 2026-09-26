@@ -1,7 +1,9 @@
 # Playbook 1 — AI agent platform with per-tenant budgets
 
-**Status:** engineering reference. Drafted 2026-09-14 against `develop` at `654d6f84`.
-Nothing here has been built end to end; see [What was verified](#what-was-verified) at the end.
+**Status:** engineering reference. Drafted 2026-09-14 against `develop` at `654d6f84`; corrected
+2026-09-25 against `develop` at `656aced4` (cleat#2053) — see
+[What was verified](#what-was-verified) at the end for what changed. Nothing here has been built end
+to end.
 
 **Who this is for:** you are building a product where a user's request kicks off an agent that
 thinks for anywhere from ten seconds to ten minutes, calls tools, retrieves documents, sometimes
@@ -74,12 +76,44 @@ model provider and your vector index to the cleat, and they come with the boat.
 
 ---
 
+## Three things this page was missing, and two of them were the load-bearing ones
+
+**The agent loop itself is still hand-rolled, and you should not write your own.** As of 2026-09-25
+there is no reusable loop: `cleat/ai/agent` exists and **has no importer at all**, and the only
+working versions are two hand-copies inside `cleat init` templates
+(`cmd/cleat/templates/agent/workflow.go`, `templates/agent-python/agent.py`) — separate from each
+other, and untested as loops. cleat#1983 replaces all three with one reusable agent workflow any SDK
+starts as a child. **Until it lands: copy a template, and expect to delete it.** Do not build a
+product on a loop you are writing yourself — the loop is the part the engine is supposed to own, and
+it is the part that is not there yet.
+
+**Model keys are per-tenant now, which this page would have told you was impossible.** It listed
+per-tenant model keys under what you still have to build, because the `llm` request had no `api_key`
+field — so a `${secret:…}` was resolved and discarded, and **every tenant spent the operator's key**.
+That is fixed (cleat#1988): a request's `APIKey` wins over the configured default, and the key is a
+*deployment secret* (`llm.providers.<provider>.api_key`) so it can be rotated without a restart
+(cleat#1992). For a page whose whole premise is per-tenant budgets, this was the most load-bearing
+wrong assumption on it. Check the shape in `plugins/llm/plugin.go` before designing key distribution.
+
+**The field is secret-only, which closes the other half of the same hole.** `api_key` is declared in
+`SecretOnlyFields`, so a raw literal in a request is **refused** rather than written to
+`event_history` (cleat#2043) — a tenant cannot put its key in the replay log even by trying. Worth
+knowing because it is the shape you want for any BYOK field you add: the field is checked, not the
+caller's intentions.
+
+**Once #1983 lands, a tenant's own workflow can be an agent TOOL** — a customer supplies the step,
+isolated by WASM and scoped by `tenant_id`, exactly as `POST /api/definitions` already allows for a
+plain workflow. That is this page's positioning wedge, and it is a **target rather than a feature**:
+the tool kind is not in the tree yet. Worth designing toward, not planning around.
+
+---
+
 ## The part worth reading twice: replay and paid calls
 
 This is where an agent platform built on a generic queue goes wrong, and where cleat's design has
 already done the thinking.
 
-A host function declares **two independent properties** (`plugin/plugin.go:221-243`), and the
+A host function declares **two independent properties** (`FuncOptions`, `plugin/plugin.go`), and the
 engine re-invokes on replay only when both are true:
 
 - `Idempotent` — is calling this again *safe*? Says nothing about what it returns.
@@ -97,9 +131,8 @@ Look at how the shipped plugins actually declare themselves:
 | `pgvector.search` | true | false | Not re-invoked: the index is mutable, so a later insert would change the result set |
 | `pgvector.upsert` | false | false | Not re-invoked — it is a write |
 
-`llm.chat` is registered as a bare `FuncOptions{Name: "chat"}`
-(`plugins/llm/host_functions.go:19`), which means both properties are false, which is exactly
-right and is the single most important line in this playbook. **A replayed agent run does not
+`llm.chat` is registered with neither property set (`plugins/llm/host_functions.go`), which means
+both are false — which is exactly right, and is the single most important line in this playbook. **A replayed agent run does not
 re-ask the model.** It reads back what the model said the first time. That is simultaneously the
 cost control, the determinism guarantee, and the audit trail — one mechanism, three benefits.
 
@@ -109,7 +142,7 @@ wrong the first time someone forgets it.
 
 Two honest caveats, both already written down in the tree rather than by me:
 
-- `llm.embed`'s registration carries its own warning (`plugins/llm/host_functions.go:29-35`): the
+- `llm.embed`'s registration carries its own warning (`plugins/llm/host_functions.go`): the
   "near" in near-deterministic is load-bearing, a hosted model can change behind a stable name, and
   re-invoking costs money — "a real cost, though not a workflow side effect. Both halves are
   asserted here rather than derived from the code."
@@ -125,7 +158,7 @@ Two honest caveats, both already written down in the tree rather than by me:
 
 Three execution ceilings are settable per tenant, with a clamp rule that is the right way round:
 the operator's flag is the maximum, and **a tenant may lower it and can never raise it**. A larger
-value is clamped at execution time rather than rejected (`cmd/cleatctl/settenantsetting.go:205-216`,
+value is clamped at execution time rather than rejected (`settenantsetting.go`,
 schema from `migrations/postgres/039_tenant_settings.sql`):
 
     cleatctl --db <dsn> set-tenant-setting <tenant-uuid> \
@@ -144,10 +177,10 @@ token buckets as edge middleware, backed by a config table reloaded on an interv
 bound time, not spend. A cost ceiling means recording token counts per call and enforcing against
 an accumulated total — see [What you still have to build](#what-you-still-have-to-build-or-buy).
 
-**Set the plugin to `db` mode, and know why.** `ratelimiter` has two modes (`plugin.go:52`). The
+**Set the plugin to `db` mode, and know why.** `ratelimiter` has two modes (`plugins/ratelimiter/plugin.go`). The
 default is `memory`: in-process token buckets, so with N workers a tenant gets N times the
 configured rate. Mode `db` is genuinely cluster-wide — `checkDBRateLimit`
-(`plugins/ratelimiter/middleware.go:211-268`) keeps per-second buckets in a `rate_counter` table and
+(`checkDBRateLimit`, `plugins/ratelimiter/middleware.go`) keeps per-second buckets in a `rate_counter` table and
 sums them over a sliding window, working across all three dialects.
 
 For a spend-sensitive product the default is the wrong one. Set `mode: "db"` in the plugin config.
@@ -164,7 +197,7 @@ The default is still `memory`, and a config that does not mention `mode` still g
 refusal fires only where a deployment asked for something it was not getting.
 
 Two properties of the DB path to design around: it **fails open** on a database error
-(`middleware.go:186`), which is the right default for availability and the wrong one if the limiter
+(the fail-open branch, `plugins/ratelimiter/middleware.go`), which is the right default for availability and the wrong one if the limiter
 is your spend control; and the read-then-increment is not one atomic statement, so concurrent
 workers can slightly overshoot a limit at its boundary. It is a cluster-wide limiter, not a
 cluster-wide semaphore.
@@ -279,9 +312,10 @@ tells you what happened; it does not tell you whether it was any good.
    ceiling. The `tenant_settings` clamp pattern is the model to copy; the metric plumbing does not
    exist.
 2. **Nothing — but configure it.** Fleet-wide rate limiting already exists as `ratelimiter` in
-   `db` mode. What you have to do is turn it on and verify it took, since the default is `memory`
-   and the fallback is silent. Listed here because an unconfigured default looks identical to a
-   missing feature.
+   `db` mode, and the default is `memory`. Listed here because an unconfigured default looks
+   identical to a missing feature. **You no longer have to verify it took by reading a log line**:
+   since cleat#1581 a `mode: "db"` that cannot be honoured refuses to start, so a silent downgrade is
+   no longer possible — see the note in *Per-tenant budgets*, which this list used to contradict.
 3. **Nothing, for token streaming — it shipped.** `GET /api/workflows/{id}/stream`, cleat#1572,
    and it works on every worker as of cleat#1639, so no load-balancer stickiness is yours to
    arrange. What is still yours is a sizing decision: `--stream-poll-interval` is latency your
@@ -306,16 +340,22 @@ wins when it is lower. An agent that needs ninety seconds under a tenant-set thi
 clock fails, and it fails per-tenant, which is hard to reproduce centrally. Report the effective
 ceiling in the run's error.
 
-**Prompt payloads carry secrets into event history.** `engine.Redact` is applied on some paths
-(the update payload path, `cmd/cleat-worker/server.go`). Whether it covers plugin host-function
-arguments was **not verified** — check before putting user PII in a prompt.
+**Prompt payloads carry secrets into event history.** `engine.Redact` **is** applied to plugin call
+payloads before they are persisted — `cmd/cleat-worker/setup.go` redacts `newEvents[i].Request` and
+`.Response` on the plugin-event paths, which is exactly where a prompt and its answer land. This page
+used to record that as unverified; it is checked now, and the answer is the good one.
+
+What remains is that `Redact` is a **field-name heuristic**, not a content classifier: a secret in a
+field it does not recognise still goes to the database. The stronger guarantee is elsewhere —
+`${secret:…}` substitution happens *after* the recorder, so the resolved value is never in the event
+at all. Put credentials in secrets, not in prompts.
 
 ---
 
 ## What was verified
 
 **Read from the tree at `654d6f84`:** `FuncOptions` and its two properties
-(`plugin/plugin.go:208-243`); the registration options for `llm.chat`, `llm.embed`,
+(`FuncOptions`, `plugin/plugin.go`); the registration options for `llm.chat`, `llm.embed`,
 `pgvector.search` and `pgvector.upsert`; the llm provider list; the streaming registry interface;
 `cleatctl set-tenant-setting`'s three ceilings and its clamp and precondition semantics; the
 plugin extension-point taxonomy; and every `text/event-stream` site in the tree, repo-wide rather
@@ -324,5 +364,22 @@ than under `cmd/` and `engine/` only — which is what corrected the streaming c
 **Asserted, not measured:** every cost claim. The "resumed runs do not re-pay" argument follows
 from the replay semantics above, not from a measurement of a running system.
 
-**Not verified:** whether `engine.Redact` reaches plugin host-function arguments. Listed as a
-failure mode deliberately rather than presented as a property.
+**Resolved since drafting:** whether `engine.Redact` reaches plugin host-function arguments. It does
+— the plugin-event paths redact `Request` and `Response` before persisting, in
+`cmd/cleat-worker/setup.go`. See the prompt-payload failure mode above for what that covers and what
+it does not.
+
+**Corrected since drafting (2026-09-25, cleat#2053).** Three things, and two of them were the page's
+load-bearing claims:
+
+- **Per-tenant model keys shipped** (cleat#1988, with rotation via cleat#1992). The page's own
+  premise is per-tenant budgets and it had no idea the key was shared — a `${secret:…}` was resolved
+  and discarded, so every tenant spent the operator's key. Now documented as shipped, in the section
+  above.
+- **The agent loop is still hand-rolled and the section saying so did not exist.** `cleat/ai/agent`
+  has no importer; two `cleat init` templates carry separate untested copies; cleat#1983 replaces
+  them. Builders were being told to build a product on a loop the engine does not yet own.
+- **`engine.Redact` on plugin payloads was checked**, so that "not verified" is discharged.
+
+Line citations were replaced with symbol names throughout — `FuncOptions` was cited at
+`plugin/plugin.go:208-243` and is at `:623`.
