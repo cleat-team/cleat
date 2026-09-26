@@ -131,15 +131,16 @@ func (s *TenantStore) CreateAPIKey(ctx context.Context, tenantID uuid.UUID, desc
 // entry point rather than two more parameters on CreateAPIKey. The design's
 // rule is that an OAuth-minted key must never be permanent: an IdP that omits
 // expires_in must not produce a forever credential by omission, and the sweep
-// (design item 7) selects on `expires_at < now()`, so a key without one is
+// (design item 7, cleat#2340) selects on `expires_at < now()`, so a key without one is
 // never collected. A pointer parameter would leave "no expiry" expressible at
 // this call site; a value makes it unrepresentable, so the invariant is
 // enforced by the signature rather than by every future caller remembering it.
 //
 // oauthIdentity is "<provider>:<identity>" (migrations/postgres/105,
 // migrations/mysql/104). A key that carries one IS an OAuth-minted key --
-// design item 4 revokes on it when an identity leaves the allowlist, and item
-// 7's sweep selects on it -- so there is no second flag that could disagree.
+// design item 4 (cleat#2340) revokes on it when an identity leaves the
+// allowlist, and item 7's sweep selects on it -- so there is no second flag that
+// could disagree.
 //
 // Both entry points share one INSERT, below, so they cannot drift on the
 // per-dialect spellings that createAPIKeyStmt's own comment is about.
