@@ -16,6 +16,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
@@ -278,6 +279,49 @@ func TestOAuthAllowRemovalRevokesASubjectKeyByItsTag(t *testing.T) {
 		t.Errorf("the subject row was removed but the key it minted is still live. The tag renders " +
 			"as \"oidc:subject:<sub>\", and a revoke that assembled \"provider:value\" itself would " +
 			"look for \"oidc:00u1a2b3c\", match nothing, and report success")
+	}
+}
+
+// TestOAuthAllowRemovalReportsWhichHalfFailed. The two halves of a removal can
+// fail independently, and they send the operator to different places: a delete
+// that failed leaves the identity admitted, a revoke that failed leaves a
+// credential authenticating. The error has to say which, and it must not be
+// inferred from the row count -- a caller that reads Removed > 0 as "the delete
+// worked" reports a delete that failed on its second row as a failed revoke.
+//
+// The failure is forced SYNTHETICALLY, by handing the function a dialect whose
+// store refuses (cleat#2340 design v2 section 5): auth.TenantStore.
+// RevokeOAuthAPIKeys answers "not implemented" off Postgres. So the delete
+// genuinely runs and succeeds against PostgreSQL, the revoke genuinely fails,
+// and the assertion is about the message rather than about a mock.
+func TestOAuthAllowRemovalReportsWhichHalfFailed(t *testing.T) {
+	db := oauthAllowTestDB(t)
+	ctx := context.Background()
+	tenant := uuid.MustParse(oauthTestTenant)
+	t.Cleanup(func() { cleanupOAuthAllow(t, db, "google", "email", "half@example.com") })
+
+	if err := oauthAllowAdd(ctx, db, tenant, "google", "email", "half@example.com"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	key := seedOAuthMintedKey(t, db, "google:half@example.com", time.Now().Add(time.Hour))
+
+	rev, err := oauthAllowRemove(ctx, db, dialectMySQL, tenant, "google", "email", "half@example.com")
+	if err == nil {
+		t.Fatal("the revoke was expected to fail on a non-Postgres dialect, and did not")
+	}
+	if rev.Removed != 1 {
+		t.Errorf("remove reported %d rows removed, want 1: the delete must have happened before "+
+			"the revoke was attempted", rev.Removed)
+	}
+	if !strings.Contains(err.Error(), "revoking the keys it minted failed") {
+		t.Errorf("the error does not name the phase that failed, so an operator cannot tell whether "+
+			"the identity is still admitted or a credential is still live:\n%v", err)
+	}
+	if keyIsLive(t, db, key) {
+		// Not a defect of the code under test -- the revoke was made to fail on
+		// purpose. Asserted because it confirms the failure was in the revoke
+		// phase rather than in the delete.
+		t.Log("the key is still live, as expected: the revoke was the half forced to fail")
 	}
 }
 

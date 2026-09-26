@@ -236,7 +236,7 @@ func oauthAllowRemove(ctx context.Context, db *sql.DB, d dialect, tenant uuid.UU
 	want := oauthprovider.OAuthIdentityValue(identityType, value)
 	matched, err := oauthAllowRowsFoldingTo(ctx, db, tenant, provider, identityType, want)
 	if err != nil {
-		return oauthRevocation{}, err
+		return oauthRevocation{}, fmt.Errorf("reading the allowlist: %w", err)
 	}
 
 	var removed int64
@@ -246,11 +246,18 @@ func oauthAllowRemove(ctx context.Context, db *sql.DB, d dialect, tenant uuid.UU
 			WHERE tenant_id = $1 AND provider = $2 AND identity_type = $3 AND identity_value = $4`,
 			tenant, provider, identityType, stored)
 		if err != nil {
-			return oauthRevocation{Removed: removed}, err
+			// The phase is IN THE ERROR, not inferred by the caller from a
+			// row count. A caller that decided "was the row removed?" from
+			// Removed > 0 would report a delete that failed after its first
+			// row as a failed REVOKE, sending the operator to the wrong half
+			// of the command.
+			return oauthRevocation{Removed: removed},
+				fmt.Errorf("removing the allowlist row %q: %w", stored, err)
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
-			return oauthRevocation{Removed: removed}, err
+			return oauthRevocation{Removed: removed},
+				fmt.Errorf("removing the allowlist row %q: %w", stored, err)
 		}
 		removed += n
 	}
@@ -264,10 +271,13 @@ func oauthAllowRemove(ctx context.Context, db *sql.DB, d dialect, tenant uuid.UU
 	// removed nothing in practice, and nothing on the deployment says so.
 	store, err := auth.NewTenantStoreForDialect(db, d.name)
 	if err != nil {
-		return oauthRevocation{Removed: removed}, err
+		return oauthRevocation{Removed: removed},
+			fmt.Errorf("the allowlist row is removed, but the key store could not be opened to "+
+				"revoke the keys it minted: %w", err)
 	}
 	if _, err := store.RevokeOAuthAPIKeys(ctx, oauthprovider.OAuthIdentityTag(provider, identityType, value)); err != nil {
-		return oauthRevocation{Removed: removed}, err
+		return oauthRevocation{Removed: removed},
+			fmt.Errorf("the allowlist row is removed, but revoking the keys it minted failed: %w", err)
 	}
 	return oauthRevocation{Removed: removed}, nil
 }
@@ -329,11 +339,14 @@ func runOAuthAllowRemove(ctx context.Context, db *sql.DB, d dialect, tenant uuid
 		return
 	}
 	if err != nil {
+		// Printed unmodified: each error names the phase it came from, which
+		// the caller cannot reconstruct from Removed alone. What the caller
+		// adds is the consequence, and only when a row is actually gone.
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		if rev.Removed > 0 {
-			fmt.Fprintf(os.Stderr, "removed the allowlist row, but revoking its keys failed: %v\n"+
-				"The identity is no longer admitted; its existing keys may still be live until they expire.\n", err)
-		} else {
-			fmt.Fprintf(os.Stderr, "removing the identity: %v\n", err)
+			fmt.Fprintln(os.Stderr,
+				"The identity is no longer admitted. Any key it minted that was not revoked keeps "+
+					"authenticating until it expires; `cleatctl revoke-api-key --list` shows them.")
 		}
 		osExit(1)
 		return
