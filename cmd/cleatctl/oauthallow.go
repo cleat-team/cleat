@@ -128,29 +128,51 @@ func oauthAllowList(ctx context.Context, db *sql.DB, tenant uuid.UUID, provider 
 	return listed, rows.Err()
 }
 
-// oauthAllowRowsFoldingTo returns the stored identity_value of every row whose
-// normalised form equals want, so a removal can address each by the exact
-// spelling it was written with. See oauthAllowRemove for why the comparison is
-// in Go rather than in the WHERE clause.
-func oauthAllowRowsFoldingTo(ctx context.Context, db *sql.DB, tenant uuid.UUID,
-	provider, identityType, want string) ([]string, error) {
+// oauthStoredRow is one allowlist row as the TABLE holds it -- the spelling it
+// was written with, which is what a delete has to name. The primary key is
+// (tenant_id, provider, identity_type, identity_value), so the pair identifies
+// the row unambiguously even when two spellings fold to the same identity.
+type oauthStoredRow struct {
+	Type  string
+	Value string
+}
+
+// oauthAllowRowsAdmitting returns every row that ADMITS the given identity,
+// each as the table stores it.
+//
+// THE RULE IS oauthprovider.OAuthRowAdmitsIdentity -- the matcher's own, shared
+// rather than restated. Both axes are compared in Go, and the TYPE axis is the
+// one that was wrong first: this function used to filter `identity_type = $3`
+// in SQL while folding the value in Go, so a hand-written row stored
+// `' email '` was admitted and minted keys while the removal could not see it.
+// That is cleat#2410's shape on the other axis, and the reason the rule is now
+// one function with two callers.
+//
+// The type is NOT filtered in SQL, and that is deliberate rather than lazy:
+// SQL's btrim trims only spaces, so `btrim(identity_type) = $3` would still miss
+// a tab-padded row that the matcher admits -- a narrower trigger for the same
+// false success. Filtering by (tenant, provider) and deciding in Go is also what
+// identityAllowed itself does, for the same reason: one rule, one language, one
+// place to test it.
+func oauthAllowRowsAdmitting(ctx context.Context, db *sql.DB, tenant uuid.UUID,
+	provider, identityType, identityValue string) ([]oauthStoredRow, error) {
 
 	rows, err := db.QueryContext(ctx, `
-		SELECT identity_value
+		SELECT identity_type, identity_value
 		FROM oauth_allowed_identities
-		WHERE tenant_id = $1 AND provider = $2 AND identity_type = $3`, tenant, provider, identityType)
+		WHERE tenant_id = $1 AND provider = $2`, tenant, provider)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var matched []string
+	var matched []oauthStoredRow
 	for rows.Next() {
-		var stored string
-		if err := rows.Scan(&stored); err != nil {
+		var stored oauthStoredRow
+		if err := rows.Scan(&stored.Type, &stored.Value); err != nil {
 			return nil, err
 		}
-		if oauthprovider.OAuthIdentityValue(identityType, stored) == want {
+		if oauthprovider.OAuthRowAdmitsIdentity(stored.Type, stored.Value, identityType, identityValue) {
 			matched = append(matched, stored)
 		}
 	}
@@ -240,18 +262,21 @@ type oauthRevocation struct {
 func oauthAllowRemove(ctx context.Context, db *sql.DB, d dialect, tenant uuid.UUID,
 	provider, identityType, value string) (oauthRevocation, error) {
 
-	want := oauthprovider.OAuthIdentityValue(identityType, value)
-	matched, err := oauthAllowRowsFoldingTo(ctx, db, tenant, provider, identityType, want)
+	matched, err := oauthAllowRowsAdmitting(ctx, db, tenant, provider, identityType, value)
 	if err != nil {
 		return oauthRevocation{}, fmt.Errorf("reading the allowlist: %w", err)
 	}
 
 	var removed int64
 	for _, stored := range matched {
+		// Addressed by the STORED pair, which is the primary key. Deleting by
+		// the operator's type and the stored value would miss a row whose type
+		// carries padding -- the row was found, and then not deleted, which is
+		// the worst of both.
 		res, err := db.ExecContext(ctx, `
 			DELETE FROM oauth_allowed_identities
 			WHERE tenant_id = $1 AND provider = $2 AND identity_type = $3 AND identity_value = $4`,
-			tenant, provider, identityType, stored)
+			tenant, provider, stored.Type, stored.Value)
 		if err != nil {
 			// The phase is IN THE ERROR, not inferred by the caller from a
 			// row count. A caller that decided "was the row removed?" from
@@ -259,12 +284,12 @@ func oauthAllowRemove(ctx context.Context, db *sql.DB, d dialect, tenant uuid.UU
 			// row as a failed REVOKE, sending the operator to the wrong half
 			// of the command.
 			return oauthRevocation{Removed: removed},
-				fmt.Errorf("removing the allowlist row %q: %w", stored, err)
+				fmt.Errorf("removing the allowlist row (%q, %q): %w", stored.Type, stored.Value, err)
 		}
 		n, err := res.RowsAffected()
 		if err != nil {
 			return oauthRevocation{Removed: removed},
-				fmt.Errorf("removing the allowlist row %q: %w", stored, err)
+				fmt.Errorf("removing the allowlist row (%q, %q): %w", stored.Type, stored.Value, err)
 		}
 		removed += n
 	}

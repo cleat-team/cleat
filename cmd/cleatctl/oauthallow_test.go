@@ -331,7 +331,125 @@ func TestOAuthAllowRemovalReportsWhichHalfFailed(t *testing.T) {
 	}
 }
 
-// TestOAuthAllowRemoveThatMatchesNothingRevokesNothing pins the ORDER, and it
+// TestOAuthAllowRemovalFindsARowWhoseTypeCarriesPadding. cleat#2410 landed on
+// the VALUE axis and the TYPE axis was left behind: identityAllowed trims the
+// type before switching on it (`strings.TrimSpace(identityType)`,
+// identity.go:333), so a hand-written row stored `' email '` is admitted, while
+// oauthAllowRowsFoldingTo matched `identity_type = $3` exactly and could not see
+// it. A padded row is therefore admitted but unremovable -- the dead end
+// oauthAllowRemove's own comment says the command exists to prevent.
+//
+// BOTH FORMS ARE SEEDED, because they fail differently and only one is noisy.
+// With the padded row ALONE the removal reports 0 rows and refuses, which at
+// least says something is wrong. With a padded row AND an exact one, the removal
+// deletes the exact row, reports success and revokes the tag's keys -- while the
+// padded row still admits the identity, so the next login mints a fresh key
+// under the tag the command has just said was revoked. That second form is the
+// one that reads as working.
+//
+// THE PADDING VARIES BY ARM, and that is the point rather than thoroughness.
+// The obvious repair is to compare trimmed in SQL, `btrim(identity_type) = $3`,
+// and btrim's default character set is the space ALONE. Seeding only spaces
+// would pass that narrower fix and this test would certify it -- so a tab and a
+// non-breaking space are seeded too, both of which Go's strings.TrimSpace
+// removes and btrim leaves in place:
+//
+//	btrim(E'\temail\t') = 'email'       -> false, while TrimSpace -> true
+//	btrim(E'\u00a0email\u00a0') = 'email' -> false, while TrimSpace -> true
+//
+// The oracle is the seeded rows by their exact stored primary key, not the
+// remover's own matching rule: "the row I wrote is gone" needs no agreement
+// about how to fold anything. The matcher itself is not called because it is
+// unexported and lives in the other package.
+func TestOAuthAllowRemovalFindsARowWhoseTypeCarriesPadding(t *testing.T) {
+	db := oauthAllowTestDB(t)
+	ctx := context.Background()
+	tenant := uuid.MustParse(oauthTestTenant)
+
+	const provider = "google"
+	const email = "padded@example.com"
+
+	for _, pad := range []struct {
+		name string
+		pad  string
+	}{
+		{"a space", " "},
+		{"a tab", "\t"},
+		{"a non-breaking space", "\u00a0"},
+		{"a newline", "\n"},
+	} {
+		t.Run("padded with "+pad.name, func(t *testing.T) {
+			paddedType := pad.pad + "email" + pad.pad
+			const paddedValue = "  padded@example.com  "
+
+			countStored := func(typ, val string) int {
+				t.Helper()
+				var n int
+				if err := db.QueryRow(`SELECT COUNT(*) FROM oauth_allowed_identities
+					WHERE tenant_id = $1 AND provider = $2 AND identity_type = $3 AND identity_value = $4`,
+					tenant, provider, typ, val).Scan(&n); err != nil {
+					t.Fatalf("count stored row: %v", err)
+				}
+				return n
+			}
+			// DELETE then INSERT, not a bare INSERT: the two forms share a
+			// primary key, and when the removal FAILS the first form leaves its
+			// padded row behind, so the second form would abort on a duplicate
+			// key instead of reporting the defect. A test whose failure message
+			// is harness noise hides the finding it exists to state.
+			clear := func(typ, val string) {
+				t.Helper()
+				if _, err := db.Exec(`DELETE FROM oauth_allowed_identities
+					WHERE tenant_id = $1 AND provider = $2 AND identity_type = $3 AND identity_value = $4`,
+					tenant, provider, typ, val); err != nil {
+					t.Fatalf("clear row: %v", err)
+				}
+			}
+			seed := func(typ, val string) {
+				t.Helper()
+				clear(typ, val)
+				if _, err := db.Exec(`INSERT INTO oauth_allowed_identities
+					(tenant_id, provider, identity_type, identity_value) VALUES ($1, $2, $3, $4)`,
+					tenant, provider, typ, val); err != nil {
+					t.Fatalf("seed row: %v", err)
+				}
+				t.Cleanup(func() { clear(typ, val) })
+			}
+
+			for _, form := range []struct {
+				name      string
+				withExact bool
+			}{
+				{"the padded row alone", false},
+				{"the padded row beside an exact one", true},
+			} {
+				t.Run(form.name, func(t *testing.T) {
+					seed(paddedType, paddedValue)
+					if form.withExact {
+						seed("email", email)
+					}
+					if countStored(paddedType, paddedValue) != 1 {
+						t.Fatalf("the padded row did not seed")
+					}
+
+					if _, err := oauthAllowRemove(ctx, db, dialectPostgres, tenant, provider,
+						"email", email); err != nil {
+						t.Fatalf("remove: %v", err)
+					}
+
+					if n := countStored(paddedType, paddedValue); n != 0 {
+						t.Errorf("a row whose identity_type is %q survived a removal for %s. "+
+							"identityAllowed admits that row -- it trims the type before switching on "+
+							"it -- so the identity is still admitted and the next login mints a fresh "+
+							"key under the same tag, whatever the command printed", paddedType, email)
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestOAuthAllowRemoveThatMatchesNothingRevokesNothing pins the ORDER// TestOAuthAllowRemoveThatMatchesNothingRevokesNothing pins the ORDER, and it
 // needs a key the revoke COULD have matched to say anything at all.
 //
 // The obvious version of this test -- remove an identity that was never added,

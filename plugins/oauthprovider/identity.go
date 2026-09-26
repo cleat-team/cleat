@@ -282,6 +282,46 @@ func OAuthIdentityTag(provider, identityType, identityValue string) string {
 	return provider + ":" + v
 }
 
+// OAuthRowAdmitsIdentity reports whether an oauth_allowed_identities row
+// (rowType, rowValue) is a row that admits the identity (identityType,
+// identityValue). It is the row-level rule identityAllowed applies, and it is
+// EXPORTED so the management CLI removes rows by it rather than by a second
+// spelling of it. cleat#2340.
+//
+// identityType is the KIND -- identityTypeEmail or identityTypeSubject -- and
+// identityValue the identity as presented, or as the operator named it. Both
+// sides are folded by OAuthIdentityValue, which keys the fold on the same kind,
+// so this is the comparison the matcher's own switch performs.
+//
+// IT EXISTS BECAUSE THE RULE WAS RESTATED ONCE AND DRIFTED. cmd/cleatctl's
+// `oauth-allow remove` matched the VALUE axis by folding in Go -- #2410 -- and
+// the TYPE axis with `identity_type = $3`, an exact string match. The matcher
+// trims the type before switching on it, so a hand-written row stored
+// `' email '` was admitted and minted keys while the removal could not see it
+// at all: the command reported success, the row survived, and the next login
+// minted a fresh key under the tag the command had just said was revoked. One
+// function, used by both, is what makes that unrepresentable rather than fixed.
+//
+// TRIMSPACE, NOT SQL btrim. The obvious repair was `btrim(identity_type) = $3`
+// in the CLI's SQL, and it is narrower than the defect it names -- measured on
+// PostgreSQL 16:
+//
+//	btrim(E'\temail\t') = 'email'   -> false
+//	btrim(E'\u00a0email\u00a0') = 'email' -> false
+//	btrim(' email ') = 'email'          -> true
+//
+// because btrim's default character set is the space alone, while
+// strings.TrimSpace also trims tabs, newlines and Unicode spaces. A tab-padded
+// row is admitted by the matcher and would have stayed invisible to a btrim
+// removal: the same false success, triggered less often. Comparing in Go on
+// both sides is not merely equivalent to the matcher's rule, it IS it.
+func OAuthRowAdmitsIdentity(rowType, rowValue, identityType, identityValue string) bool {
+	if strings.TrimSpace(rowType) != identityType {
+		return false
+	}
+	return OAuthIdentityValue(rowType, rowValue) == OAuthIdentityValue(identityType, identityValue)
+}
+
 // identityAllowed reports WHICH row of oauth_allowed_identities admits id, and
 // whether any does.
 //
@@ -330,19 +370,25 @@ func (p *Plugin) identityAllowed(ctx context.Context, tid uuid.UUID, provider st
 		if err := plugin.ScanRow(rows, &identityType, &identity); err != nil {
 			return allowedIdentity{}, false, err
 		}
+		// The switch decides WHICH ARMS this matcher considers, and the second
+		// guard on each is about the identity PRESENTED rather than the row;
+		// the row comparison itself is OAuthRowAdmitsIdentity, so the CLI that
+		// deletes rows cannot apply a narrower rule than the one that admits
+		// them. The arm argument repeats what the switch just matched, and that
+		// is deliberate: it is the seam a second caller reuses.
 		switch strings.TrimSpace(identityType) {
 		case identityTypeEmail:
 			if !id.EmailVerified || email == "" {
 				continue
 			}
-			if normalizeEmail(identity) == email {
+			if OAuthRowAdmitsIdentity(identityType, identity, identityTypeEmail, email) {
 				return allowedIdentity{Type: identityTypeEmail, Value: email}, true, nil
 			}
 		case identityTypeSubject:
 			if subject == "" {
 				continue
 			}
-			if normalizeSubject(identity) == subject {
+			if OAuthRowAdmitsIdentity(identityType, identity, identityTypeSubject, subject) {
 				return allowedIdentity{Type: identityTypeSubject, Value: subject}, true, nil
 			}
 		}

@@ -761,10 +761,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   removal that left the credential authenticating until it expired would mean the operator
   removed nothing in practice, and nothing on the deployment would say so. It reports how many
   keys it disabled, because "0" is the number an operator wants to see before walking away.
-  Removal finds rows by
-  the matcher's own folding rule rather than by the spelling typed, because this table's only
-  writer before the CLI existed was a hand-written `INSERT` — a row that `list` shows but
-  `remove` cannot name would be a dead end.
+  Removal finds rows by the matcher's own rule — on the TYPE as well as the value, both compared in
+  Go — rather than by the spelling typed, because this table's only writer before the CLI existed
+  was a hand-written `INSERT`, and a row that `list` shows but `remove` cannot name is a dead end.
+  The type axis is what review caught: the value axis was folded in Go from the start, while the
+  type was matched with `identity_type = $3` exactly, so a row stored `' email '` was admitted and
+  minted keys while a removal could not see it at all.
 
   The background loop also soft-disables OAuth-minted keys whose expiry has passed. **That is
   bookkeeping, not enforcement** — `ResolveTenantFromAPIKey` already refuses an expired key at
