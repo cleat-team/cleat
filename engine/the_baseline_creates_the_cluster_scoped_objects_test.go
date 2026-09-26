@@ -44,18 +44,25 @@ func TestTheBaselineCreatesTheClusterScopedObjects(t *testing.T) {
 	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
 
 	// The roles, with the attributes the deployment depends on.
+	//
+	// NOT rolcanlogin, and the reason is worth stating: this reads LIVE cluster
+	// state, and engine/flush_rls_test.go's appRoleDB deliberately runs
+	// `ALTER ROLE cleat_app LOGIN PASSWORD ...` so that a test can connect as
+	// it. That is a fixture, not drift, and asserting the baseline's NOLOGIN
+	// here fails on a fresh container the moment any other test has run --
+	// measured 2026-09-26, the only failure on a brand-new container. The three
+	// attributes below are ones no test has a reason to move.
 	want := map[string]struct {
 		bypassRLS bool
-		canLogin  bool
 	}{
-		"cleat_app":        {false, false},
-		"cleat_sweep":      {false, false},
-		"cleat_dispatcher": {true, false},
+		"cleat_app":        {false},
+		"cleat_sweep":      {false},
+		"cleat_dispatcher": {true},
 	}
 	for name, attrs := range want {
-		var super, bypass, login bool
-		err := db.QueryRow(`SELECT rolsuper, rolbypassrls, rolcanlogin
-		    FROM pg_roles WHERE rolname = $1`, name).Scan(&super, &bypass, &login)
+		var super, bypass bool
+		err := db.QueryRow(`SELECT rolsuper, rolbypassrls
+		    FROM pg_roles WHERE rolname = $1`, name).Scan(&super, &bypass)
 		if err != nil {
 			t.Errorf("role %s is absent after the baseline applied: %v.\n\n"+
 				"A per-database catalog diff cannot see this -- pg_authid is "+
@@ -69,15 +76,18 @@ func TestTheBaselineCreatesTheClusterScopedObjects(t *testing.T) {
 		if bypass != attrs.bypassRLS {
 			t.Errorf("role %s has rolbypassrls=%v, want %v", name, bypass, attrs.bypassRLS)
 		}
-		if login != attrs.canLogin {
-			t.Errorf("role %s has rolcanlogin=%v, want %v", name, login, attrs.canLogin)
-		}
 	}
 
-	// The memberships. inherit_option must be FALSE: 077 measured that a plain
-	// GRANT lets the application role read all 400000 rows of another tenant's
-	// data with no error, while WITH INHERIT FALSE returns 1000. That flag is
-	// the difference between "may SET ROLE to sweep" and "sweeps passively".
+	// The memberships. inherit_option must be FALSE: the baseline's membership
+	// block (001_schema.sql:139-148, which is where the old migration 077's
+	// grants now live) records the measurement -- a plain GRANT lets the
+	// application role read all 400000 rows of another tenant's data with no
+	// error, while WITH INHERIT FALSE returns 1000. That flag is the difference
+	// between "may SET ROLE to sweep" and "sweeps passively".
+	//
+	// Named by file and line, not by "077": the compaction deleted that file,
+	// so a reader sent to 077_a_plugin_policy_can_use_its_index.sql finds
+	// nothing at all.
 	var members int
 	var inherit bool
 	if err := db.QueryRow(`
@@ -96,9 +106,10 @@ func TestTheBaselineCreatesTheClusterScopedObjects(t *testing.T) {
 			"per-database catalog diff cannot report this.")
 	} else if inherit {
 		t.Errorf("cleat_app's membership in cleat_sweep has inherit_option=true. " +
-			"077 measured that a plain GRANT lets the application role read every " +
-			"tenant's rows with no error; WITH INHERIT FALSE is the whole " +
-			"distinction and it is silent when wrong.")
+			"The baseline's membership block (001_schema.sql:141) carries the " +
+			"measurement: a plain GRANT lets the application role read every " +
+			"tenant's rows with no error, and WITH INHERIT FALSE is the whole " +
+			"distinction -- silent when wrong.")
 	}
 
 	// The role comment. pg_shdescription is a SHARED catalog, so this is the
