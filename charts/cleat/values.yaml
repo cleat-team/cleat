@@ -50,8 +50,12 @@ worker:
   # its durable history, and a durable call that was mid-flight is EXECUTED AGAIN there (at-least-once).
   # If your calls run longer than this, raise it, and terminationGracePeriodSeconds with it.
   shutdownGrace: "20s"
-  # -- The pod's terminationGracePeriodSeconds. Must exceed preStopSleepSeconds + shutdownGrace with room
-  # to spare: the kubelet SIGKILLs the pod when it runs out, drain or no drain. A template test enforces it.
+  # -- The pod's terminationGracePeriodSeconds. Must exceed preStopSleepSeconds + shutdownGrace + the
+  # worker's plugin Stop budget (5s, cleat#2147) with room to spare: the kubelet SIGKILLs the pod when
+  # it runs out, drain or no drain. A template test enforces it.
+  #
+  # The plugin term is new and easy to miss when raising the grace: the worker calls
+  # plugin.Stoppable.Stop after the drain, so that budget comes out of this same clock.
   terminationGracePeriodSeconds: 60
 
 # -- PostgreSQL connection parameters.

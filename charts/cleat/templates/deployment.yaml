@@ -19,9 +19,9 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "cleat.serviceAccountName" . }}
-      # The kubelet SIGKILLs the pod this long after it starts terminating, and the preStop hook and the worker's
-      # SIGTERM drain (--shutdown-grace) both come out of it. The Kubernetes default, 30s, is too short for a 20s
-      # drain plus the preStop sleep (cleat#2285).
+      # The kubelet SIGKILLs the pod this long after it starts terminating, and the preStop hook, the worker's
+      # SIGTERM drain (--shutdown-grace) and its plugin Stop budget (5s, cleat#2147) all come out of it. The
+      # Kubernetes default, 30s, is too short for a 20s drain plus the preStop sleep (cleat#2285).
       terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
