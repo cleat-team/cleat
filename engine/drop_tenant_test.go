@@ -120,6 +120,39 @@ func apply032DropTenantMigration(t *testing.T, db *sql.DB) {
 //	grep -n 'CREATE OR REPLACE FUNCTION' migrations/postgres/001_schema.sql
 //
 // and check each name for later definitions before widening this again.
+func resetToOriginal001DropTenant(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(pre032DropTenant); err != nil {
+		t.Fatalf("reinstall the pre-032 admin.drop_tenant: %v", err)
+	}
+	// The REVOKE is not optional, and leaving it out is a real hazard rather
+	// than an untidy fixture. PostgreSQL's default for a NEW function is
+	// `EXECUTE TO PUBLIC`, and this one is SECURITY DEFINER -- so recreating the
+	// body without revoking hands every role in the database an owner-privileged
+	// DROP. That is cleat#1365 exactly, and TestNoAdminFunctionGrantsExecuteToPublic
+	// caught this fixture doing it:
+	//
+	//   admin.drop_tenant(p_tenant_id uuid)
+	//     acl={=X/postgres,postgres=X/postgres,cleat_app=X/postgres}
+	//
+	// The deployed old function carried no PUBLIC grant either: 065 revokes
+	// EXECUTE from PUBLIC on every admin function, and this restores that
+	// property alongside the body it belongs to.
+	if _, err := db.Exec(`REVOKE EXECUTE ON FUNCTION admin.drop_tenant(uuid) FROM PUBLIC`); err != nil {
+		t.Fatalf("revoke PUBLIC execute on the reinstalled pre-032 admin.drop_tenant: %v", err)
+	}
+}
+
+// Moved BELOW the function it belongs to, deliberately: inserting a declaration
+// between a doc comment and the declaration it documents reattaches the comment
+// to the newcomer, and gofmt and go vet both accept that silently. This guard
+// caught it --
+//
+//   engine/drop_tenant_test.go: `resetToOriginal001DropTenant` had a doc comment
+//   at 8f91b43a and has none at HEAD.
+//
+// Go attaches doc comments by ADJACENCY, so the fix is the order, not a comment.
+
 // pre032DropTenant is admin.drop_tenant EXACTLY as 001_schema.sql shipped it,
 // before 032 replaced it. It is an explicit literal since the cleat#2059
 // rebaseline, and that is a deliberate change of kind rather than a workaround.
@@ -151,29 +184,6 @@ BEGIN
     DELETE FROM admin.tenants WHERE tenant_id = p_tenant_id;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;`
-
-func resetToOriginal001DropTenant(t *testing.T, db *sql.DB) {
-	t.Helper()
-	if _, err := db.Exec(pre032DropTenant); err != nil {
-		t.Fatalf("reinstall the pre-032 admin.drop_tenant: %v", err)
-	}
-	// The REVOKE is not optional, and leaving it out is a real hazard rather
-	// than an untidy fixture. PostgreSQL's default for a NEW function is
-	// `EXECUTE TO PUBLIC`, and this one is SECURITY DEFINER -- so recreating the
-	// body without revoking hands every role in the database an owner-privileged
-	// DROP. That is cleat#1365 exactly, and TestNoAdminFunctionGrantsExecuteToPublic
-	// caught this fixture doing it:
-	//
-	//   admin.drop_tenant(p_tenant_id uuid)
-	//     acl={=X/postgres,postgres=X/postgres,cleat_app=X/postgres}
-	//
-	// The deployed old function carried no PUBLIC grant either: 065 revokes
-	// EXECUTE from PUBLIC on every admin function, and this restores that
-	// property alongside the body it belongs to.
-	if _, err := db.Exec(`REVOKE EXECUTE ON FUNCTION admin.drop_tenant(uuid) FROM PUBLIC`); err != nil {
-		t.Fatalf("revoke PUBLIC execute on the reinstalled pre-032 admin.drop_tenant: %v", err)
-	}
-}
 
 // extractPlpgsqlFunction returns the single CREATE OR REPLACE FUNCTION block
 // for name from sql, from its CREATE line to the $$ LANGUAGE ... ; that ends
