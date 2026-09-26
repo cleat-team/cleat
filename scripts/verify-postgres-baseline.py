@@ -37,6 +37,14 @@ missing ROW is not a structural difference*, so no catalog diff can see it. Foun
 cleat-review, which measured this file and showed its only row query was the
 empty-database precondition.
 
+**The seed-row queries are safe from RLS by two independent properties, and only one of
+them is load-bearing.** None of the three tables `002` seeds is RLS-scoped -- that is the
+substantive one, and it is why those queries can read a row at all. The CI DSN is ALSO a
+superuser, which bypasses row-level security unconditionally, and that is a coincidence of
+the credential rather than a property of the check. The distinction matters for whoever
+adds the fourth assertion: **if it names an RLS-scoped table, the mode starts depending on
+being run as a superuser**, passing here and failing wherever the DSN is an ordinary role.
+
     ./scripts/verify-postgres-baseline.py --dsn postgres://... \\
         --prior-rebaseline 8f91b43a8e2259332c5bdbd2c47db15261927d10
 
@@ -326,6 +334,26 @@ def main():
         else:
             print(f"hand-made   {path002} (not the generator's placeholder)")
 
+        # ---- and the assertions must still be about everything 002 seeds -------
+        # SEED_ROWS is complete today -- every `INSERT INTO` in the file, including the
+        # one inside the DO $$ ... FOR t IN SELECT ... LOOP. But nothing TIES the list
+        # to the file: if 002 gains a fourth seed, this mode stays green and silently
+        # stops covering it, which is precisely the decay this whole mode exists to
+        # prevent. So derive the set from the committed file and require them to match.
+        declared = {t for t, _ in SEED_ROWS}
+        seeded = {t.lower() for t in re.findall(
+            r"INSERT\s+INTO\s+([A-Za-z_]+\.[A-Za-z_]+)", open(path002).read(), re.I)}
+        if seeded != declared:
+            differing += 1
+            for t in sorted(seeded - declared):
+                print(f"UNASSERTED  {path002} seeds {t}, which no row assertion covers")
+                print("            Add it to SEED_ROWS, or this mode goes green without")
+                print("            checking the row that file inserts.")
+            for t in sorted(declared - seeded):
+                print(f"STALE       SEED_ROWS asserts {t}, which {path002} no longer seeds")
+        else:
+            print(f"seed tables {len(seeded)} in {path002}, all asserted")
+
         # ---- and 002's rows, BY EFFECT ---------------------------------------
         # The comparison above catches 002 being replaced by the generator's
         # placeholder and NOTHING ELSE. An emptied file, or one row deleted from an
@@ -361,9 +389,17 @@ def main():
                     print("            a database built from the committed baseline cannot")
                     print("            apply this file, so it does not install and its seed")
                     print("            rows cannot be checked.")
-                    last = [l for l in r.stderr.strip().splitlines() if l.strip()]
-                    if last:
-                        print(f"            {last[-1]}")
+                    # The FIRST line naming an ERROR -- not the last line of stderr.
+                    # For a psql syntax error the last line is the caret (^), which
+                    # carries no line number, and taking it discards the `LINE n:` and
+                    # the `psql:<stdin>:102: ERROR: ...` above it. A syntax error is the
+                    # one thing this branch exists to diagnose, so printing the caret is
+                    # the bucket being right and its contents pointing nowhere. Measured:
+                    # last[-1] printed `^`, and the reader needs line 102.
+                    lines = [l for l in r.stderr.strip().splitlines() if l.strip()]
+                    hits = [l for l in lines if "ERROR:" in l]
+                    for l in (hits[:1] or lines):
+                        print(f"            {l}")
                     break
             for table, where in (SEED_ROWS if applied else ()):
                 r = psql(sql=f"SELECT count(*) FROM {table} WHERE {where}", db=rows_db)
@@ -384,8 +420,13 @@ def main():
             admin_sql(f'DROP DATABASE IF EXISTS "{rows_db}"')
 
         if differing:
-            fail(f"{differing} file(s) are not what this tree claims", 1)
-        print("verify: the committed baseline is exactly what the generator produces")
+            # "finding(s)", NOT "file(s)". `differing` counts findings: an emptied 002 is
+            # ONE file with three missing rows, and the sentence a reader quotes said
+            # "3 file(s) are not what this tree claims". The status was right and the
+            # noun was wrong.
+            fail(f"{differing} finding(s) against the committed baseline", 1)
+        print("verify: the committed baseline is exactly what the generator produces,")
+        print(f"        and the {len(SEED_ROWS)} rows its hand-assembled 002 seeds are present")
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -422,6 +463,11 @@ def trunc(b):
 
 
 def fail(msg, code):
+    # Flush stdout FIRST. Redirected to a pipe it is block-buffered while stderr is not,
+    # so without this the summary is written before the diagnostic it summarises and
+    # appears ABOVE it in a CI log -- the conclusion before the evidence. Measured
+    # fixing the UNAPPLIABLE path: the exit message landed after the stdout block.
+    sys.stdout.flush()
     print(f"verify-postgres-baseline: {msg}", file=sys.stderr)
     sys.exit(code)
 
