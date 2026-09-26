@@ -17,6 +17,22 @@ package main
 // the `switch command` statement plus the handful of commands dispatched before
 // it, and a separate assertion below requires the help string to match. Either
 // can now be wrong; they can no longer be wrong together.
+//
+// WHAT THIS DELIBERATELY DOES NOT SCAN. A pair is taken from a fenced block
+// only, and only where the line BEGINS with the binary name. That shape is a
+// CLAIM that the command exists. A mention in prose is a CROSS-REFERENCE --
+// "there is no `cleat migrate` subcommand" names the command in order to deny
+// it -- and scanning those would report every sentence *about* a command as an
+// invocation of it. Narrow is a choice here, not an oversight, and
+// documented_flags_and_codes_test.go makes the same one beside it.
+//
+// THE COST, measured 2026-09-26: docs/contributor/plugins/plugin-migration-guide.md
+// prescribed a `cleat migrate up` that does not exist, in three shapes at once --
+// a fenced ```bash block, a `- [ ]` checklist item, and prose. Only the fenced
+// one was ever seen (it is the `...|cleat migrate` entry in docBaseline below);
+// the other two, which are the ones a reader follows, were invisible. If you add
+// a command to a document, put it in a fence -- that is also what makes it
+// checkable.
 
 import (
 	"go/ast"
