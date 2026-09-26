@@ -1,7 +1,6 @@
 package oauthprovider
 
 import (
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -230,14 +229,27 @@ func TestSessionAccessRefreshTokensAreNotPersisted(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var callbackResp struct {
-		SessionToken string `json:"session_token"`
+	// cleat#2340: the callback no longer returns session_token as JSON. It
+	// mints a real tenant API key -- the first credential in this flow that
+	// core auth can authenticate at all -- and shows it once on a page.
+	//
+	// The assertion is on the MINTED KEY, not on "200 with a body". A page that
+	// rendered while carrying nothing usable would satisfy a status check and
+	// still leave the caller with no credential, which is the defect this whole
+	// change exists to fix.
+	store.mu.RLock()
+	minted := len(store.mints)
+	var mintedKey string
+	if minted == 1 {
+		mintedKey = store.mints[0].RawKey
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &callbackResp); err != nil {
-		t.Fatalf("decode callback response: %v", err)
+	store.mu.RUnlock()
+	if minted != 1 {
+		t.Fatalf("the callback minted %d keys, want exactly 1", minted)
 	}
-	if callbackResp.SessionToken == "" {
-		t.Fatal("callback response carries no session_token -- the caller has no way to authenticate")
+	if !strings.Contains(rec.Body.String(), mintedKey) {
+		t.Fatalf("the callback page does not carry the key it minted (%s), so the caller has no "+
+			"way to authenticate:\n%s", mintedKey, rec.Body.String())
 	}
 
 	store.mu.RLock()

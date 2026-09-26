@@ -154,3 +154,49 @@ func TestResolveAPIKeyStmt_ExcludesExpired(t *testing.T) {
 		})
 	}
 }
+
+// TestCreateAPIKeyStatementWritesTheOAuthColumns. cleat#2340.
+//
+// THE MySQL AND MSSQL SPELLINGS ARE EXECUTED BY NOTHING, and this is what
+// covers them. The only caller of CreateOAuthAPIKey is oauthprovider's callback,
+// which handleCallback reaches only after p.pgOnly has refused every other
+// dialect with 501 -- so on MySQL and MSSQL this INSERT is unreachable code.
+// The PostgreSQL spelling IS executed, by the real-dialect login test in that
+// package, which resolves the minted key back through ResolveTenantFromAPIKey.
+//
+// Unreachable is not the same as untested-by-omission: the statement still has
+// to be right the day OAuth login reaches those dialects, and a column named
+// without a matching placeholder shifts every argument after it -- which is a
+// key minted with its identity tag in the description column and silently
+// nothing to revoke it by.
+func TestCreateAPIKeyStatementWritesTheOAuthColumns(t *testing.T) {
+	for _, dialect := range []string{DialectPostgres, DialectMySQL, DialectMSSQL} {
+		t.Run(dialect, func(t *testing.T) {
+			stmt, _ := createAPIKeyStmt(dialect)
+
+			for _, col := range []string{"expires_at", "oauth_identity"} {
+				if !strings.Contains(stmt, col) {
+					t.Errorf("createAPIKeyStmt(%q) does not name %s, so an OAuth-minted key's %s "+
+						"would be NULL there and the row would carry no expiry to sweep or no "+
+						"identity to revoke: %s", dialect, col, col, stmt)
+				}
+			}
+
+			// The column names and the values are two lists that must stay the
+			// same length. Asserting only that the columns are named would miss
+			// a placeholder left out, which is the shape that shifts arguments
+			// rather than omitting them.
+			open, close := strings.Index(stmt, "("), strings.Index(stmt, ")")
+			lastOpen, lastClose := strings.LastIndex(stmt, "("), strings.LastIndex(stmt, ")")
+			if open < 0 || close < open || lastOpen <= close || lastClose < lastOpen {
+				t.Fatalf("cannot read the column and value lists out of %q", stmt)
+			}
+			cols := strings.Count(stmt[open+1:close], ",") + 1
+			vals := strings.Count(stmt[lastOpen+1:lastClose], ",") + 1
+			if cols != vals {
+				t.Errorf("createAPIKeyStmt(%q) names %d columns but supplies %d values, so every "+
+					"argument after the gap lands in the wrong column: %s", dialect, cols, vals, stmt)
+			}
+		})
+	}
+}

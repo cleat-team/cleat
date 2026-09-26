@@ -78,6 +78,26 @@ type fakeDBStore struct {
 	// same way production's two stores (oauth_config, tenant_secrets) are two
 	// separate writes only at the SQL layer.
 	secrets *plugintest.FakeSecrets
+
+	// mints records every key the minter was asked for, in order, so a test can
+	// assert WHAT was minted and not only that the login succeeded. The two
+	// things a minted key carries that no HTTP response reveals are exactly the
+	// two the rest of the design acts on: the identity tag design item 4
+	// revokes by, and the expiry the sweep selects by.
+	//
+	// mintErr makes the mint fail, which is how "a mint failure must not
+	// complete the login" is driven.
+	mints   []mintedKey
+	mintErr error
+}
+
+// mintedKey is one call to the minter setupTestPlugin wires.
+type mintedKey struct {
+	TenantID      uuid.UUID
+	Description   string
+	OAuthIdentity string
+	ExpiresAt     time.Time
+	RawKey        string
 }
 
 // allowedIdentityRow is one row of oauth_allowed_identities. Deliberately
@@ -467,6 +487,34 @@ func setupTestPlugin(t *testing.T, store *fakeDBStore) (*Plugin, http.Handler) {
 		mux:     http.NewServeMux(),
 		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
 		secrets: store.secrets,
+	}
+
+	// The minter a login needs to complete. cleat#2340.
+	//
+	// WIRED HERE, AND THAT IS WHY THIS FAKE IS NOT EVIDENCE PRODUCTION WIRES
+	// IT: deleting Environment.MintOAuthAPIKey from cmd/cleat-worker's
+	// pluginEnv leaves every test in this package green, because this line puts
+	// one back. The wiring itself is observed by a boot test -- the same split
+	// a_booted_worker_wires_the_oauth_plugin_test.go documents for the host
+	// binding, and for the same reason.
+	p.mintOAuthAPIKey = func(_ context.Context, req plugin.MintOAuthAPIKeyRequest) (string, error) {
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		if store.mintErr != nil {
+			return "", store.mintErr
+		}
+		// Distinct per mint, so a test can tell two logins apart, and shaped
+		// like the real thing so an assertion on the page is not asserting on a
+		// placeholder production never emits.
+		raw := fmt.Sprintf("cleat_sk_%064x", len(store.mints))
+		store.mints = append(store.mints, mintedKey{
+			TenantID:      req.TenantID,
+			Description:   req.Description,
+			OAuthIdentity: req.OAuthIdentity,
+			ExpiresAt:     req.ExpiresAt,
+			RawKey:        raw,
+		})
+		return raw, nil
 	}
 
 	if err := p.RegisterRoutes(p.mux); err != nil {
@@ -1494,10 +1542,12 @@ func TestOA_Callback_Success(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var result map[string]any
-	json.Unmarshal(rec.Body.Bytes(), &result)
-	if result["user_email"] != "user@example.com" {
-		t.Errorf("expected useremail, got %q", result["user_email"])
+	// cleat#2340: the body is the key page, not JSON. It names the admitted
+	// address so the person can see who they signed in as -- the key itself is
+	// asserted by TestOA_Callback_MintsAKeyTaggedWithTheAdmittingRow and its
+	// siblings, which can also check what the mint was ASKED for.
+	if !strings.Contains(rec.Body.String(), "user@example.com") {
+		t.Errorf("the success page does not name the admitted address:\n%s", rec.Body.String())
 	}
 }
 
@@ -2077,10 +2127,11 @@ func TestOA_Callback_GitHubUsesVerifiedEmailFromEmailsEndpoint(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	var body map[string]any
-	json.Unmarshal(rec.Body.Bytes(), &body)
-	if body["user_email"] != "ada@example.com" {
-		t.Errorf("session labelled %v, want the verified primary address ada@example.com", body["user_email"])
+	// cleat#2340: the body is the key page, not JSON; it names the address the
+	// login resolved.
+	if !strings.Contains(rec.Body.String(), "ada@example.com") {
+		t.Errorf("the success page does not name the verified primary address ada@example.com:\n%s",
+			rec.Body.String())
 	}
 }
 

@@ -44,6 +44,21 @@ type Plugin struct {
 	hostResolver     plugin.DomainResolver
 	requireHostMatch bool
 
+	// mintOAuthAPIKey is how finishLogin turns an admitted identity into a
+	// usable credential. cleat#2340.
+	//
+	// THE HOST OWNS THE KEY; this plugin only asks for one. plugin.Environment
+	// carries it as a function rather than this package importing auth, so the
+	// cleat_sk_ format, the hash and the table stay in one place -- the failure
+	// cleat#866 was, where a key written by one path was looked up by another
+	// that disagreed about where it lived.
+	//
+	// NIL MEANS THIS HOST CANNOT MINT, and finishLogin REFUSES the login rather
+	// than completing without a credential. A nil in production would mean the
+	// worker stopped wiring it (main.go's pluginEnv), which is why a boot test
+	// observes the wiring and a unit test cannot.
+	mintOAuthAPIKey func(ctx context.Context, req plugin.MintOAuthAPIKeyRequest) (string, error)
+
 	// OIDC discovery + JWKS cache for the generic `oidc` provider (cleat#1582).
 	// Reached through p.cache() rather than directly: several tests construct a
 	// Plugin without calling Init, and a nil map there would panic inside a
@@ -87,6 +102,7 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.secrets = env.Secrets
 	p.hostResolver = env.HostResolver
 	p.requireHostMatch = env.RequireHostMatch
+	p.mintOAuthAPIKey = env.MintOAuthAPIKey
 	p.httpClient = &http.Client{
 		// cleat#1565: every outbound request goes through the egress guard.
 		// Nil in tests that build an Environment directly, which falls back to

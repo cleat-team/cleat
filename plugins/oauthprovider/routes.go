@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -813,7 +814,7 @@ func (p *Plugin) finishLogin(
 	// list" are deliberately the same answer: a second column saying which of
 	// the two it is can only disagree with the table it is meant to describe,
 	// and nothing reading that table could tell the difference either.
-	allowed, aerr := p.identityAllowed(ctx, tid, provider, id)
+	admit, allowed, aerr := p.identityAllowed(ctx, tid, provider, id)
 	if aerr != nil {
 		p.logger.Error("oauth: allowlist lookup", "provider", provider, "tenant", tid, "error", aerr)
 		p.writeError(w, http.StatusInternalServerError, "failed to evaluate the identity allowlist")
@@ -838,6 +839,41 @@ func (p *Plugin) finishLogin(
 		})
 		return
 	}
+
+	// Mint the credential the client will actually use. cleat#2340.
+	//
+	// AFTER THE ALLOWLIST, and that ordering is the point: a refused login
+	// mints nothing, so a refusal leaves no key behind to expire, to sweep, or
+	// to revoke. Minting first and refusing after would hand a credential to
+	// someone the tenant's own list just turned away.
+	//
+	// The identity tag names the allowlist ROW that admitted this person, not
+	// the address they happened to present. Design item 4 revokes a person's
+	// live keys when their allowlist row is deleted, and only a tag naming that
+	// row can be found by the deletion; oauthIdentityTag is shared with the
+	// revoke path so the two renderings cannot drift apart.
+	if p.mintOAuthAPIKey == nil {
+		// NIL MEANS THIS HOST CANNOT MINT (see the field's doc comment).
+		// Refusing is the entire point of that convention: completing the
+		// login with a credential nothing recorded would authenticate nothing,
+		// and would surface much later as a 401 from core auth rather than as
+		// a login failure here.
+		p.logger.Error("oauth: this host wired no API key minter, so no login can complete",
+			"provider", provider, "tenant", tid)
+		p.writeError(w, http.StatusInternalServerError, "login is not available on this deployment")
+		return
+	}
+
+	identityTag := oauthIdentityTag(provider, admit)
+	// A VALUE, never nil: an OAuth-minted key always expires. See oauthKeyExpiry.
+	keyExpiresAt := oauthKeyExpiry(expiresIn)
+
+	// THE MINT ITSELF IS DELIBERATELY LATER -- after the session row is
+	// written, below. Both remaining steps can fail, and a key minted before
+	// them would be live and unheld if one did: the caller never receives it,
+	// nothing revokes it, and it authenticates until its expiry passes. The
+	// nil-minter guard above stays here, because it is a check with no side
+	// effect, and refusing before writing anything beats refusing after.
 
 	// Generate a 32-byte hex session token.
 	sessionToken, err := generateSessionToken()
@@ -891,6 +927,32 @@ func (p *Plugin) finishLogin(
 		return
 	}
 
+	// The mint, last of the fallible steps that PRECEDE delivery -- see the note
+	// where identityTag is computed. Everything above has already succeeded, so
+	// a key created here is one the caller is about to be handed.
+	//
+	// ONE FAILURE THIS DOES NOT REMOVE, stated rather than implied because the
+	// first version of this comment claimed the reorder removed all of them. If
+	// the client disconnects while the page is being written, the key IS
+	// minted, is never delivered, and stays live until it expires -- exactly the
+	// condition the reorder exists to narrow. No ordering closes it: a page that
+	// shows a secret once cannot hand over one that does not exist yet. The
+	// answer is the sweep (design item 7), which collects an OAuth-minted key by
+	// its expiry and its oauth_identity tag, and this is why the key carries
+	// both.
+	rawKey, err := p.mintOAuthAPIKey(ctx, plugin.MintOAuthAPIKeyRequest{
+		TenantID:      tid,
+		Description:   "OAuth login as " + identityTag,
+		ExpiresAt:     keyExpiresAt,
+		OAuthIdentity: identityTag,
+	})
+	if err != nil {
+		p.logger.Error("oauth: mint an API key for the admitted identity",
+			"provider", provider, "tenant", tid, "error", err)
+		p.writeError(w, http.StatusInternalServerError, "failed to mint a credential")
+		return
+	}
+
 	// Reaching this line now means the allowlist admitted this identity: the
 	// gate above is unconditional since cleat#2371, and it returns before here
 	// on both a lookup error and a refusal. So this line needs no "was there a
@@ -901,14 +963,124 @@ func (p *Plugin) finishLogin(
 		"provider", provider,
 		"tenant", tid,
 		"email", id.Email,
+		// Which allowlist ROW admitted this login. An operator reading a
+		// login through to why it was allowed needs to know whether it was
+		// the address or the subject that matched -- the two are separate
+		// rows they may have written months apart.
+		"admitted_as", admit.Type,
 	)
 
-	p.writeJSON(w, http.StatusOK, map[string]any{
-		"session_token": sessionToken,
-		"user_email":    id.Email,
-		"expires_at":    expiresAt,
-	})
+	// THE CREDENTIAL IS THE MINTED KEY, NOT sessionToken. session_token was
+	// never usable outside this plugin's own two admin endpoints -- core auth
+	// is the outermost middleware and 401s a 64-hex value it cannot find in
+	// tenant_api_keys before this plugin sees the request (design v1 section 1).
+	// The session row above is kept for the login-flow bookkeeping and audit
+	// trail; token_hash is what its own endpoints still read, and retiring that
+	// is a separate, smaller cleanup this change does not propose.
+	p.writeOAuthKeyPage(w, id.Email, rawKey, keyExpiresAt)
 }
+
+// oauthKeyExpiryMax bounds how long a minted key can live, and is also what a
+// provider that reports no lifetime gets.
+//
+// THE CAP IS THE POINT. An IdP is free to report a days-long expires_in, and a
+// key minted to match it would be a days-long credential for a browser login
+// that ended seconds ago. The floor is the same number for a different reason:
+// expires_in absent (GitHub commonly omits it) must not become "no expiry",
+// because a permanent key is exactly what a login-derived credential must
+// never be -- and the sweep selects on `expires_at < now()`, so a key with no
+// expiry is never collected.
+const oauthKeyExpiryMax = 24 * time.Hour
+
+// oauthKeyExpiry returns when a key minted for this login stops authenticating.
+// Always a real time, never nil: see oauthKeyExpiryMax.
+func oauthKeyExpiry(expiresIn int) time.Time {
+	d := oauthKeyExpiryMax
+	if expiresIn > 0 {
+		if reported := time.Duration(expiresIn) * time.Second; reported < d {
+			d = reported
+		}
+	}
+	return time.Now().Add(d)
+}
+
+// writeOAuthKeyPage serves the page that hands the minted key to the person who
+// just logged in.
+//
+// IT SHOWS THE KEY ONCE, and that is a deliberate choice between the two
+// delivery shapes design v3 allows ("postMessage with an exact targetOrigin, or
+// shows it once"). The postMessage arm needs a targetOrigin that is computed
+// server-side and taken from the request NEVER -- and nothing in this plugin's
+// configuration names the origin a client application would be listening from.
+// Inventing one from the request's Host is precisely the mistake the design
+// forbids, and getting it wrong posts a live credential to whoever opened the
+// window. Showing the key removes the question rather than guessing at it.
+//
+// The headers are v3's hardening list, and each has a job here rather than
+// being boilerplate: no-store and no-referrer keep a credential out of a disk
+// cache and out of any Referer sent by a later navigation; DENY and
+// frame-ancestors 'none' stop this page being framed so a clickjack can read
+// the key out of it; default-src 'none' means the page cannot load or run
+// anything at all -- there is no script here, which is the point, and no
+// postMessage to send it to.
+func (p *Plugin) writeOAuthKeyPage(w http.ResponseWriter, email, rawKey string, expiresAt time.Time) {
+	h := w.Header()
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
+	h.Set("Pragma", "no-cache")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "DENY")
+	// style-src carries 'unsafe-inline' because the page is one self-contained
+	// document with a small inline stylesheet; nothing else is allowed to load.
+	h.Set("Content-Security-Policy",
+		"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; "+
+			"form-action 'none'; frame-ancestors 'none'")
+
+	if err := oauthKeyPage.Execute(w, struct {
+		Email     string
+		Key       string
+		ExpiresAt string
+	}{
+		// html/template escapes every one of these into its context, so a
+		// provider-supplied address cannot inject markup into a page that is
+		// displaying a live credential.
+		Email:     email,
+		Key:       rawKey,
+		ExpiresAt: expiresAt.UTC().Format(time.RFC3339),
+	}); err != nil {
+		// The headers are already written by now if anything has been, so this
+		// cannot become an error response. Log it: a half-sent page means the
+		// person did not get their key, and the log is where that is visible.
+		p.logger.Error("oauth: writing the key page failed after the response began", "error", err)
+	}
+}
+
+// oauthKeyPage is parsed once at init rather than per request, so a template
+// error is a startup failure instead of a login failure.
+var oauthKeyPage = template.Must(template.New("oauth-key").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signed in</title>
+<style>
+ body { font: 16px/1.5 system-ui, sans-serif; margin: 3rem auto; max-width: 42rem; padding: 0 1rem; }
+ code { display: block; word-break: break-all; padding: .75rem; margin: .75rem 0;
+        background: #f4f4f5; border: 1px solid #d4d4d8; border-radius: 4px; }
+ .muted { color: #52525b; font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>Signed in</h1>
+<p>Signed in as <strong>{{.Email}}</strong>.</p>
+<p>Your API key is shown below. <strong>It is shown once and cannot be retrieved
+again</strong>; store it somewhere safe before closing this page.</p>
+<code>{{.Key}}</code>
+<p class="muted">It stops working at {{.ExpiresAt}} (UTC).</p>
+</body>
+</html>
+`))
 
 // ---- GET /oauth/sessions ----
 

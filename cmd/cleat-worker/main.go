@@ -1438,9 +1438,25 @@ func main() {
 		Logger:           slog.Default(),
 		HostResolver:     authResolver,
 		RequireHostMatch: *requireHostMatch,
-		Done:             ctx.Done(),
-		Dialect:          plugin.Dialect(factory.Dialect()),
-		EventsLost:       pluginEventsLostHook(metricsInstance),
+		// WS-2's addition to WS-3's file, declared as WORKSTREAM.md asks:
+		// leaving this unwired is worse than the cross-stream edit, because a
+		// nil here is an OAuth login that cannot mint a credential, and the
+		// plugin has no other way to reach a key store at all.
+		//
+		// THE SAME authResolver as HostResolver above, for the reason that
+		// comment gives -- it is built early precisely so pluginEnv can carry
+		// it. The HOST owns the key format, the hash and the INSERT; the plugin
+		// only asks for a key and gets the plaintext back. cleat#2340.
+		MintOAuthAPIKey: func(ctx context.Context, req plugin.MintOAuthAPIKeyRequest) (string, error) {
+			rawKey := auth.GenerateAPIKey()
+			if err := authResolver.CreateOAuthAPIKey(ctx, req.TenantID, req.Description, rawKey, req.ExpiresAt, req.OAuthIdentity); err != nil {
+				return "", err
+			}
+			return rawKey, nil
+		},
+		Done:       ctx.Done(),
+		Dialect:    plugin.Dialect(factory.Dialect()),
+		EventsLost: pluginEventsLostHook(metricsInstance),
 		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
 			return startPluginWorkflow(ctx, store, req)
 		},

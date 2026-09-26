@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -19,7 +20,7 @@ var randRead = rand.Read
 //
 //	                 postgres                 mysql                 mssql
 //	table            admin.tenant_api_keys    tenant_api_keys       admin.tenant_api_keys
-//	placeholders     $1 $2 $3                 ? ? ?                 @p1 @p2 @p3
+//	placeholders     $1 $2 …                  ? ? …                 @p1 @p2 …
 //	key_id           DEFAULT gen_random_uuid  no default            DEFAULT NEWID()
 //	now()            now()                    NOW(6)                SYSUTCDATETIME()
 //
@@ -98,15 +99,18 @@ func (s *TenantStore) CreateTenant(ctx context.Context, name, displayName string
 	return tid, err
 }
 
-// CreateAPIKey creates an API key for a tenant. Returns the plaintext key
-// (only returned once — caller must store it). The database stores sha256(key).
+// CreateAPIKey creates an API key for a tenant, with no expiry and no OAuth
+// identity. Returns the plaintext key (only returned once — caller must store
+// it). The database stores sha256(key).
+//
+// This is the permanent-service-key path. OAuth login mints through
+// CreateOAuthAPIKey below, which cannot produce a key without an expiry.
 //
 // rawKey must be a high-entropy, randomly generated value — in practice
 // always the output of GenerateAPIKey below (32 bytes from crypto/rand).
-// SHA-256 is used, not a slow password KDF, because the only two
-// production callers (cmd/cleat-worker/main.go) always pass a
-// GenerateAPIKey() value: a 256-bit random token has no meaningful offline
-// brute-force surface even hashed with a fast function, unlike a
+// SHA-256 is used, not a slow password KDF, because every production caller
+// passes a GenerateAPIKey() value: a 256-bit random token has no meaningful
+// offline brute-force surface even hashed with a fast function, unlike a
 // low-entropy user-chosen password. The hash exists so the plaintext key
 // is never persisted and so lookups can use a DB equality index
 // (ResolveTenantFromAPIKey does `WHERE key_hash = $1`); it is not a
@@ -117,9 +121,40 @@ func (s *TenantStore) CreateTenant(ctx context.Context, name, displayName string
 // (golang.org/x/crypto is already a dependency) with a versioned-hash
 // migration path for existing rows.
 func (s *TenantStore) CreateAPIKey(ctx context.Context, tenantID uuid.UUID, description, rawKey string) error {
+	return s.createAPIKey(ctx, tenantID, description, rawKey, nil, nil)
+}
+
+// CreateOAuthAPIKey creates an API key that expires, and records the OAuth
+// identity it was minted for. cleat#2340.
+//
+// expiresAt IS A VALUE, NOT A *time.Time, and that is why this is a separate
+// entry point rather than two more parameters on CreateAPIKey. The design's
+// rule is that an OAuth-minted key must never be permanent: an IdP that omits
+// expires_in must not produce a forever credential by omission, and the sweep
+// (design item 7) selects on `expires_at < now()`, so a key without one is
+// never collected. A pointer parameter would leave "no expiry" expressible at
+// this call site; a value makes it unrepresentable, so the invariant is
+// enforced by the signature rather than by every future caller remembering it.
+//
+// oauthIdentity is "<provider>:<identity>" (migrations/postgres/105,
+// migrations/mysql/104). A key that carries one IS an OAuth-minted key --
+// design item 4 revokes on it when an identity leaves the allowlist, and item
+// 7's sweep selects on it -- so there is no second flag that could disagree.
+//
+// Both entry points share one INSERT, below, so they cannot drift on the
+// per-dialect spellings that createAPIKeyStmt's own comment is about.
+func (s *TenantStore) CreateOAuthAPIKey(ctx context.Context, tenantID uuid.UUID, description, rawKey string, expiresAt time.Time, oauthIdentity string) error {
+	return s.createAPIKey(ctx, tenantID, description, rawKey, &expiresAt, &oauthIdentity)
+}
+
+// createAPIKey is the single INSERT behind both entry points. expiresAt and
+// oauthIdentity are nil for a permanent, non-OAuth key; the drivers write NULL
+// for a nil pointer, which is what those columns hold for every row created
+// before they existed.
+func (s *TenantStore) createAPIKey(ctx context.Context, tenantID uuid.UUID, description, rawKey string, expiresAt *time.Time, oauthIdentity *string) error {
 	keyHash := sha256.Sum256([]byte(rawKey))
 	stmt, needsKeyID := createAPIKeyStmt(s.dialect)
-	args := []any{tenantID, keyHash[:], description}
+	args := []any{tenantID, keyHash[:], description, expiresAt, oauthIdentity}
 	if needsKeyID {
 		// MySQL's key_id column has no default, unlike PostgreSQL's
 		// gen_random_uuid() and SQL Server's NEWID(), so the caller supplies
@@ -144,11 +179,11 @@ func (s *TenantStore) CreateAPIKey(ctx context.Context, tenantID uuid.UUID, desc
 func createAPIKeyStmt(dialect string) (stmt string, needsKeyID bool) {
 	switch dialect {
 	case DialectMySQL:
-		return `INSERT INTO tenant_api_keys (key_id, tenant_id, key_hash, description) VALUES (?, ?, ?, ?)`, true
+		return `INSERT INTO tenant_api_keys (key_id, tenant_id, key_hash, description, expires_at, oauth_identity) VALUES (?, ?, ?, ?, ?, ?)`, true
 	case DialectMSSQL:
-		return `INSERT INTO admin.tenant_api_keys (tenant_id, key_hash, description) VALUES (@p1, @p2, @p3)`, false
+		return `INSERT INTO admin.tenant_api_keys (tenant_id, key_hash, description, expires_at, oauth_identity) VALUES (@p1, @p2, @p3, @p4, @p5)`, false
 	default:
-		return `INSERT INTO admin.tenant_api_keys (tenant_id, key_hash, description) VALUES ($1, $2, $3)`, false
+		return `INSERT INTO admin.tenant_api_keys (tenant_id, key_hash, description, expires_at, oauth_identity) VALUES ($1, $2, $3, $4, $5)`, false
 	}
 }
 
