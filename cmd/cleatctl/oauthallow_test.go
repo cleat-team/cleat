@@ -449,7 +449,7 @@ func TestOAuthAllowRemovalFindsARowWhoseTypeCarriesPadding(t *testing.T) {
 	}
 }
 
-// TestOAuthAllowRemoveThatMatchesNothingRevokesNothing pins the ORDER// TestOAuthAllowRemoveThatMatchesNothingRevokesNothing pins the ORDER, and it
+// TestOAuthAllowRemoveThatMatchesNothingRevokesNothing pins the ORDER, and it
 // needs a key the revoke COULD have matched to say anything at all.
 //
 // The obvious version of this test -- remove an identity that was never added,
