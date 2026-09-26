@@ -66,14 +66,44 @@ func (s *PostgresStore) CountEventHistoryTotal(ctx context.Context) (int, error)
 
 // EstimateEventHistorySize returns the estimated size of event_history in bytes.
 //
-// Stays on s.db deliberately: pg_total_relation_size reads catalog metadata and
-// touches no rows, so no RLS policy is ever evaluated and a tenant context would
-// buy nothing. Verified in TestMetricsQueriesWorkUnderRLS, which asserts it
-// works on a non-superuser connection so that a future change making it read
-// rows does not slip through unnoticed.
+// IT SUMS OVER THE TABLE AND ITS PARTITIONS. event_history is hash-partitioned
+// on tenant_id (cleat#2059), and pg_total_relation_size against a partitioned
+// parent returns 0 -- a partitioned table stores no rows itself and the function
+// does not descend. Measured 2026-09-26: a four-way-partitioned table holding
+// 1000 rows reported 0 through the parent, and 131072 summed over its children.
+//
+// Not a cosmetic zero. This reaches a gauge: cmd/cleat-worker/setup.go's metrics
+// sweep calls SetEventHistorySize with the result. A partitioned deployment
+// would therefore have reported an event store of 0 bytes forever, with no
+// error at any layer, sitting beside a correctly non-zero row count from the
+// sibling CountEventHistoryTotal -- which is unaffected precisely because it
+// carries `tenant_id = $1` and does a real COUNT. Zero with no error is the
+// "lying metric" this file's CountActiveConcurrencyKeys note already
+// distinguishes from a merely broken one.
+//
+// pg_partition_tree is NOT a drop-in replacement, and reaching for it is the
+// obvious first move: it returns ZERO ROWS for a table that is not partitioned,
+// so summing over it reports 0 for every unpartitioned deployment too (measured:
+// 65536 actual, 0 through the tree). The recursion below starts at the named
+// table and descends only where partitions exist, so it agrees with the old
+// single call on the unpartitioned path -- which the record of it above is
+// measuring, and TestPartitionedEventHistorySizeIsNotZero measures directly.
+//
+// Stays on s.db deliberately: these functions read catalog metadata and touch
+// no rows, so no RLS policy is ever evaluated and a tenant context would buy
+// nothing. Verified in TestMetricsQueriesWorkUnderRLS, which asserts it works on
+// a non-superuser connection so that a future change making it read rows does
+// not slip through unnoticed.
 func (s *PostgresStore) EstimateEventHistorySize(ctx context.Context) (int64, error) {
 	var size int64
-	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(pg_total_relation_size('event_history'), 0)`).Scan(&size)
+	err := s.db.QueryRowContext(ctx, `
+		WITH RECURSIVE tree AS (
+			SELECT 'event_history'::regclass AS relid
+			UNION ALL
+			SELECT i.inhrelid
+			  FROM pg_inherits i JOIN tree t ON i.inhparent = t.relid
+		)
+		SELECT COALESCE(SUM(pg_total_relation_size(relid)), 0) FROM tree`).Scan(&size)
 	return size, err
 }
 
