@@ -609,7 +609,20 @@ def main(src, outdir):
         # A/B diff then reports an EMPTY difference -- a pass, on a tree where the
         # one change this step exists to make did not happen.
         tb = buckets.get("TABLE", [])
-        found = [i for i, b in enumerate(tb) if b.startswith("CREATE TABLE %s (" % PARTITIONED_TABLE)]
+        # BOTH spellings, because make_idempotent has already run by this point
+        # (it is applied per bucket, above) and has rewritten the declaration to
+        # `CREATE TABLE IF NOT EXISTS event_history (`. Matching only the bare
+        # form finds 0 and the SystemExit below fires on a correct tree --
+        # measured 2026-09-26, first time this branch was ever executed:
+        #
+        #   expected exactly one CREATE TABLE event_history; found 0
+        #
+        # Same shape as the trgm opclass rewrite, which also ran after
+        # make_idempotent had added the clause it was not expecting.
+        marker = "CREATE TABLE %s (" % PARTITIONED_TABLE
+        marker_ine = "CREATE TABLE IF NOT EXISTS %s (" % PARTITIONED_TABLE
+        found = [i for i, b in enumerate(tb)
+                 if b.startswith(marker) or b.startswith(marker_ine)]
         if len(found) != 1:
             raise SystemExit("expected exactly one CREATE TABLE %s; found %d"
                              % (PARTITIONED_TABLE, len(found)))
@@ -617,17 +630,77 @@ def main(src, outdir):
         # them -- in the SAME "-- Name: event_history; Type: TABLE" block, so the
         # body does not end at the column list. Anchor on the ");" that closes it.
         body = tb[found[0]]
-        decl = body.index("CREATE TABLE %s (" % PARTITIONED_TABLE)
+        anchor = marker_ine if marker_ine in body else marker
+        decl = body.index(anchor)
         close = body.index("\n);", decl)
         tb[found[0]] = (body[:close]
                         + "\n)\nPARTITION BY HASH (tenant_id);"
                         + body[close + len("\n);"):])
 
+        # IF NOT EXISTS on every child, because this bucket is built AFTER
+        # make_idempotent has already run over the buckets that existed then --
+        # so nothing else will add it, and a second apply of the shipped file
+        # dies on the first child:
+        #
+        #   pq: relation "event_history_p0" already exists (42P07)
+        #
+        # engine/schema_bootstrap_test.go's TestShippedSchema_IsIdempotent
+        # re-applies the shipped files deliberately, so this is not optional.
+        # RLS does NOT propagate from a partitioned parent to its partitions.
+        # Measured on the generated schema, 2026-09-26 -- the parent is t/t and
+        # every child is f/f -- and independently measured in the design doc,
+        # which calls it "a hard constraint on this design":
+        #
+        #   relname  relrowsecurity  relforcerowsecurity
+        #   eh       t               t
+        #   eh_p0    f               f          <- partitions inherit neither
+        #
+        # Reading THROUGH the parent applies the parent's policy. Reading a
+        # partition DIRECTLY does not, and that is a real leak rather than a
+        # theoretical one: as the table's owner, with tenant 1 in context, a
+        # direct read of one partition returned 100 rows -- tenant 1's row COUNT
+        # while holding a different tenant's rows entirely. It is the partition
+        # with an unexpected count that exposes it, so spot-checking one
+        # partition confirms the wrong answer.
+        #
+        # So each child gets the same three things the parent has. FORCE matters
+        # as much as ENABLE: without it the table's OWNER bypasses the policy,
+        # and the retention sweeps run as a role that would otherwise see
+        # everything.
+        # The three statements go in THREE different buckets, and the split is
+        # load-bearing rather than tidiness. PARTITION is emitted immediately
+        # after TABLE -- the children must follow their parent -- but FUNCTION
+        # and POLICY come much later, so a policy emitted here names
+        # cleat.assert_tenant_set() before it exists:
+        #
+        #   ERROR: function cleat.assert_tenant_set() does not exist
+        #
+        # Measured 2026-09-26, on the first apply of the partitioned baseline.
+        # The parent's policy has no such problem only because POLICY already
+        # sits after FUNCTION in schema_kinds.
         buckets["PARTITION"] = [
-            "CREATE TABLE %s_p%d PARTITION OF %s\n    FOR VALUES WITH (MODULUS %d, REMAINDER %d);"
+            "CREATE TABLE IF NOT EXISTS %s_p%d PARTITION OF %s\n"
+            "    FOR VALUES WITH (MODULUS %d, REMAINDER %d);"
             % (PARTITIONED_TABLE, i, PARTITIONED_TABLE, PARTITION_BUCKETS, i)
             for i in range(PARTITION_BUCKETS)
         ]
+        buckets.setdefault("ROW SECURITY", []).extend(
+            "ALTER TABLE %s_p%d %s ROW LEVEL SECURITY;"
+            % (PARTITIONED_TABLE, i, clause)
+            for i in range(PARTITION_BUCKETS)
+            for clause in ("ENABLE", "FORCE")
+        )
+        # Bare CREATE POLICY, no DROP: guard_policy (below) prepends the
+        # DROP POLICY IF EXISTS for every POLICY body, and rejects anything that
+        # does not start with CREATE POLICY -- which is what caught the first
+        # draft of this:
+        #   unrecognised policy body: 'DROP POLICY IF EXISTS ...'
+        buckets.setdefault("POLICY", []).extend(
+            "CREATE POLICY tenant_isolation_events ON %s_p%d "
+            "USING ((tenant_id = cleat.assert_tenant_set()));"
+            % (PARTITIONED_TABLE, i)
+            for i in range(PARTITION_BUCKETS)
+        )
 
         cs = buckets.get("CONSTRAINT", [])
         hit = [i for i, b in enumerate(cs) if PARTITIONED_TABLE + "_pkey" in b]
