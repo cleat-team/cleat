@@ -71,14 +71,41 @@ is quietly wrong, which is the failure mode this whole file exists to avoid:
      (acceptance 1.6) and a DROP/CREATE baseline cannot satisfy it on a
      non-empty database.
 
-What it does NOT rewrite, and the decision is deliberate rather than an
-omission: the explicit `COLLATE=utf8mb4_0900_ai_ci` that mysqldump puts on all
-30 tables. The chain specifies COLLATE in exactly one file, so the dump is
-adding it to 29 -- but the LIVE database has that collation, so a baseline
-without it would differ from the chain and the differential would name it. The
-rule the differential enforces is the tiebreak: reproduce the resolved state,
-and let the A/B diff decide what is intent. (It is also utf8mb4's default on
-MySQL 8, so it pins a value the supported server already uses.)
+What it does NOT rewrite: the explicit `COLLATE=utf8mb4_0900_ai_ci` that
+mysqldump puts on EVERY table. That clause is GENERATOR-INTRODUCED, in the same
+family as the `DEFINER` above -- measured, comment-stripped:
+
+	(against origin/develop, which is the chain)
+	COLLATE in migrations/mysql/*.sql                 1   (one file: 103)
+	COLLATE in a raw dump / in this generated 001    29   (29 tables, all of them)
+
+So the chain names a collation in one place and the baseline names one
+everywhere. It is kept because it reproduces what the LIVE database reports and
+because it is utf8mb4's default on MySQL 8 -- not because a check would catch
+its absence.
+
+**AND IT IS UNVERIFIED, WHICH THE FIRST VERSION OF THIS PARAGRAPH GOT WRONG.**
+It said a baseline without the collation "would differ from the chain and the
+differential would name it". **The differential cannot name it.** catalogdiff has
+zero references to collation on any dialect, and its MySQL columns query selects
+`column_name, column_type, is_nullable, column_default` -- no `COLLATION_NAME`,
+and `COLUMN_TYPE` does not embed it, so the property is not in the comparison at
+all. A decision justified by a check that cannot see it reads as verified and is
+not, which is worse than no justification.
+
+	grep -rn -i collat migration/catalogdiff/     # no output
+	git show origin/develop:migrations/mysql/*.sql | grep -ci collate   # 1
+
+**Note the measurement trap this paragraph walked into first**, because it is
+the one this project keeps meeting: run the grep over `migrations/mysql/*.sql`
+in a checkout that has already been compacted and it counts the GENERATED file,
+not the chain -- it reported 30, of which 29 were this generator's own output.
+Measure the chain against `origin/develop`, and print what each side is.
+
+Where this belongs is the supplementary checks (cleat-review's GAP 1 on
+cleat#2435): comparing `information_schema.columns.COLLATION_NAME` between A and
+B would settle it, and collation is what decides case-sensitivity here. Until
+that exists, do not read this file as claiming the collation was checked.
 """
 
 import os
