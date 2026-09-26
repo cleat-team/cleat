@@ -50,11 +50,20 @@ import (
 //     provided: the Test Go matrix runs ./migration/... and reaches PostgreSQL
 //     through ci.yml's CLEAT_TEST_DB, which is the fallback that
 //     CLEAT_TEST_POSTGRES is read with.
-//   * MySQL RAN. multi-db-ci.yml sets CLEAT_TEST_MYSQL and runs
-//     ./migration/... in the same job, and migrations/mysql/010_... exists --
-//     that dialect was never rebaselined. Its arm was live until cleat#2435
-//     added a skip to mysqlDialect(), which this PR's retirement makes dead
-//     code.
+//   * MySQL RAN -- multi-db-ci.yml sets CLEAT_TEST_MYSQL and runs
+//     ./migration/... in the same job -- and at this commit
+//     migrations/mysql/010_idempotency_keys_tenant_id.sql EXISTS, with 70
+//     files in that dialect against postgres's 3. So the original sentence was
+//     false in the strongest available way: these arms did not skip, they ran,
+//     and this is the arm that FAILS when the staged file is absent
+//     (`read 010_...: no such file or directory`, measured on cleat#2435's
+//     branch). "SKIPPED rather than failing" inverts both verbs.
+//
+//     Note the ref, because it is easy to make this clause go stale: cleat#2435
+//     compacts the MySQL chain, and ITS compaction is what deletes that 010. So
+//     "MySQL has not been rebaselined" is true here and will stop being true
+//     when that lands -- which is the same reason its arm is retired by this
+//     PR rather than left alone.
 //
 // The distinction matters beyond this comment: "this was already gone" and
 // "this PR is what ends it" are different claims about what the change costs.
