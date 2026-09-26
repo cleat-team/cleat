@@ -70,9 +70,16 @@ import (
 // chain, backed by a known-positive battery.
 //
 // NOTE, and it predates this change: the Postgres leg of this test was already
-// dead. 086 has not existed since cleat#2059. It went unnoticed because no job
-// sets CLEAT_TEST_POSTGRES for this package, so the leg SKIPPED rather than
-// failing -- an absent DSN and a missing file look the same from here.
+// dead. 086 has not existed since cleat#2059, so the leg SKIPPED rather than
+// failing.
+//
+// It did NOT skip for want of a DSN, which this comment claimed until the
+// cleat#2438 review: the Test Go matrix runs ./migration/... and reaches
+// PostgreSQL through ci.yml's CLEAT_TEST_DB, the fallback CLEAT_TEST_POSTGRES
+// is read with. It skipped because the rebaseline removed the partial chain
+// the before-state is built from -- a precondition, not an absent connection.
+// The distinction is worth keeping because an absent DSN and a missing file
+// look identical from inside the loop, so only the reason tells them apart.
 
 // ONE CONNECTION, NOT THE POOL. SQL Server's tenant context is
 // sp_set_session_context, which is per-connection state; issued through a

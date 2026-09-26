@@ -36,12 +36,28 @@ import (
 //
 // The compaction folded 010 into MSSQL's three-file baseline, so there is no
 // longer a file to stage and no longer a "before" state to build from the
-// shipped tree -- which is what a frozen baseline means. The Postgres and MySQL
-// legs had already gone the same way under cleat#2059: their 010 has not
-// existed since that rebaseline, and the legs went unnoticed because no job
-// sets CLEAT_TEST_POSTGRES or CLEAT_TEST_MYSQL for this package, so they
-// SKIPPED rather than failing. An absent DSN and an absent file look identical
-// from inside the loop.
+// shipped tree -- which is what a frozen baseline means. After this PR no
+// dialect has a partial chain left to stage. THAT is the argument, and it does
+// not need any leg to have died quietly first.
+//
+// What the other two legs were actually doing, because this comment claimed the
+// opposite until cleat#2438's review and the wrong version had already been
+// copied into the PR body before it was caught:
+//
+//   * PostgreSQL SKIPS, and has since cleat#2059 -- that rebaseline left
+//     postgres three files generated from a fully-migrated dump, so there is no
+//     partial chain to build a before-state from. NOT because no DSN was
+//     provided: the Test Go matrix runs ./migration/... and reaches PostgreSQL
+//     through ci.yml's CLEAT_TEST_DB, which is the fallback that
+//     CLEAT_TEST_POSTGRES is read with.
+//   * MySQL RAN. multi-db-ci.yml sets CLEAT_TEST_MYSQL and runs
+//     ./migration/... in the same job, and migrations/mysql/010_... exists --
+//     that dialect was never rebaselined. Its arm was live until cleat#2435
+//     added a skip to mysqlDialect(), which this PR's retirement makes dead
+//     code.
+//
+// The distinction matters beyond this comment: "this was already gone" and
+// "this PR is what ends it" are different claims about what the change costs.
 //
 // Reconstructing the pre-migration schema from git history was considered and
 // rejected: CI checks out with fetch-depth 1, so the older revision is not
