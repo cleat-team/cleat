@@ -137,6 +137,12 @@ EXCLUDED_TABLES = {"schema_migrations"}
 # unquoted form fixes that at the source, rather than by loosening the guard.
 QUOTED_IDENT = re.compile(r"`([^`]+)`")
 
+# Which kind of object, and its name -- needed to emit the DROP that makes the
+# file re-appliable. Read AFTER unquoting, so the name is bare.
+OBJ_KIND_NAME = re.compile(
+    r"\bCREATE\s+(PROCEDURE|FUNCTION|TRIGGER|EVENT)\s+([A-Za-z_][A-Za-z0-9_]*)",
+    re.I)
+
 # Kept quoted if the bare form would be a MySQL reserved word. Deliberately
 # short and NOT hand-trusted: the generator prints any identifier it leaves
 # quoted, and the build is the arbiter -- an unquoted reserved word fails at
@@ -329,6 +335,7 @@ def main(src, outdir):
     unwrapped = 0
     unquoted_total = 0
     still_quoted = set()
+    emitted_drops = []
     for obj in objects:
         obj, _ = strip_session(obj)
         obj, nu = unwrap_version_comments(obj)
@@ -352,14 +359,43 @@ def main(src, outdir):
         die("could not classify %d object block(s); first 200 chars:\n%s"
             % (len(other), other[0][:200]))
 
+    # RE-APPLIABLE, which is not the same property as "the runner will not
+    # re-apply it". The chain drops each object before recreating it -- 12
+    # `DROP <kind> IF EXISTS` statements across the shipped files, and the old
+    # 003 opened with one -- and a baseline that omits them fails 1304,
+    # "PROCEDURE finalize_workflow_status already exists", for any caller that
+    # applies the FILE rather than going through migration.Runner.
+    #
+    # That distinction cost a CI cycle, and the reason is worth keeping: the
+    # generator's own idempotence check applied the baseline through the runner,
+    # where `schema_migrations` suppresses the second apply -- so it was
+    # measuring the runner's bookkeeping, not the SQL's re-appliability. A test
+    # that goes through the same indirection as the thing it is testing cannot
+    # see this.
     procs_out = []
     for o in proc_like + trig_like:
         o, n, kept = unquote_identifiers(o)
         unquoted_total += n
         still_quoted.update(kept)
-        procs_out.append(o)
-    procedures = "\n\n".join(
-        [DELIMITER + "\n" + o + "\nDELIMITER ;" for o in procs_out])
+        m = OBJ_KIND_NAME.search(o)
+        if not m:
+            die("no 'CREATE <kind> <name>' in a routine/trigger body, so the "
+                "DROP that makes the file re-appliable cannot be emitted:\n%s"
+                % o[:200])
+        kind, name = m.group(1).upper(), m.group(2)
+        if kind == "TRIGGER":
+            # MySQL has no DROP TRIGGER ... IF EXISTS before 8.0.19; the
+            # shipped chain targets 8.0+, and engine tests apply this file
+            # directly, so keep the guard but match the chain's spelling.
+            drop = "DROP TRIGGER IF EXISTS %s;" % name
+        else:
+            drop = "DROP %s IF EXISTS %s;" % (kind, name)
+        emitted_drops.append("%s %s" % (kind, name))
+        procs_out.append(drop + "\n\n" + DELIMITER + "\n" + o + "\nDELIMITER ;")
+    if len(emitted_drops) != len(proc_like) + len(trig_like):
+        die("emitted %d DROP(s) for %d object(s)"
+            % (len(emitted_drops), len(proc_like) + len(trig_like)))
+    procedures = "\n\n".join(procs_out)
 
     # --- tables -------------------------------------------------------------
     head, session_stmts = strip_session(head)
@@ -499,6 +535,7 @@ def main(src, outdir):
     print("routines:          %d" % len(proc_like))
     print("triggers:          %d" % len(trig_like))
     print("DEFINER stripped:  %d" % definers_stripped)
+    print("re-appliable DROPs emitted: %d" % len(emitted_drops))
     print("identifiers unquoted: %d" % unquoted_total)
     if still_quoted:
         print("  LEFT QUOTED (reserved word, check by building): %s" % ", ".join(still_quoted))

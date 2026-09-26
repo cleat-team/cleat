@@ -5,6 +5,8 @@
 -- the chain declares none, and mysqldump adds one naming whichever
 -- account ran the dump. See the generator's docstring.
 
+DROP PROCEDURE IF EXISTS finalize_workflow_status;
+
 DELIMITER ;;
 CREATE PROCEDURE finalize_workflow_status(
     p_workflow_id      VARCHAR(255),
@@ -81,6 +83,8 @@ BEGIN
     SELECT v_rows_updated > 0 AS fence_held;
 END ;;
 DELIMITER ;
+
+DROP TRIGGER IF EXISTS tenants_org_id_immutable;
 
 DELIMITER ;;
  CREATE   TRIGGER tenants_org_id_immutable BEFORE UPDATE ON tenants FOR EACH ROW BEGIN

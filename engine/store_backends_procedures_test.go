@@ -60,17 +60,13 @@ var postgresProcedureMigrations = []string{
 	"003_procedures.sql",
 }
 
+// Same shape as the Postgres list above, for the same reason: MySQL was
+// compacted in cleat#2433 and 003_procedures.sql is now generated from a
+// mysqldump of the fully-migrated database, so it carries the FINAL body by
+// construction. There is no longer a sequence to keep in order -- the nine
+// migrations this used to name are folded into it and deleted.
 var mysqlProcedureMigrations = []string{
 	"003_procedures.sql",
-	"004_fix_finalize_workflow_status_fence.sql",
-	"042_query_state_on_suspension.sql",
-	"043_child_does_not_rewrite_parent_event.sql",
-	"046_a_signal_delivered_mid_segment_wakes_the_workflow.sql",
-	"048_a_burst_wakes_finalize_on_progress.sql",
-	"049_the_idempotency_write_needs_the_tenant.sql",
-	"053_the_finalize_procedure_stops_writing_the_result_column.sql",
-	"071_the_finalize_procedure_stops_casting_the_result.sql",
-	"100_the_finalize_procedure_stops_deleting_failed_history.sql",
 }
 
 // ONE entry since the cleat#2434 rebaseline, for the same reason the Postgres
