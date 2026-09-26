@@ -1,8 +1,15 @@
 # Schema partitioning and migration rebaseline
 
-**Status:** proposal, open for review. Decisions 1, 2, 4 and 5 resolved; Decision 3 (plugin
-isolation scope) partly resolved — mechanism shipped in cleat#1280, remainder blocked on cleat#1278.
+**Status:** ACCEPTED and executed for the PostgreSQL half. The compaction (its 43 files are now
+`001`/`002`/`003`), `event_history` hash-partitioned on `tenant_id` into 64 buckets, and the primary
+key moved to `(tenant_id, workflow_id, step)` all shipped in cleat#2059. Decisions 1, 2, 4 and 5
+resolved; Decision 3 (plugin isolation scope) partly resolved — mechanism shipped in cleat#1280,
+remainder blocked on cleat#1278. MySQL and SQL Server are held to expand/contract, not partitioned:
+MySQL is single-tenant by owner decision and SQL Server partitions are not separate objects.
 **Drafted:** 2026-09-11, against `develop` at `6b7f0790`.
+**Numbers refreshed:** 2026-09-26, against the `cleat#2059` branch. Where a count is re-derived,
+the command beside it is the authority — several counts in this document had rotted, including
+every row of the routine table below, which named files the compaction deleted.
 **Measurement environment:** `postgres:16` and `mcr.microsoft.com/mssql/server:2022-latest`
 containers, stock configuration (`maintenance_work_mem` 64MB, `shared_buffers` 128MB).
 
@@ -301,25 +308,47 @@ independent of partitioning.
 > Cold connections are far worse: the first query on a fresh connection measured 14 ms at 64
 > partitions and 61 ms at 1024. Pool churn and worker restarts amplify this.
 
-### The nine predicates
+### The tenant predicates
 
-PostgreSQL statements touching `event_history` with no tenant predicate. Twenty of the
-twenty-nine already carry one; these nine do not:
+PostgreSQL statements touching `event_history` with no tenant predicate. The earlier version of
+this section said nine, with line numbers that had drifted; re-derived on 2026-09-26 it is
+**twelve**, and four of the raw hits are another dialect's arm rather than a PostgreSQL site.
 
-| Site | Path | What it is |
+The value of the predicate is plan-time pruning: a statement scoped `WHERE workflow_id = $1` still
+visits all 64 partitions, because `workflow_id` is not the partition key. Adding `tenant_id` is
+what collapses it to one. That makes the list below a triage, not a to-do — the three groups want
+opposite treatment:
+
+| Site | Group | What it is |
 |---|---|---|
-| `engine/store_event_write.go:183` | **hot** | replay checksum read — the hottest of the nine |
+| `engine/store_event_write.go:218` | **hot** | replay checksum read — the hottest of them |
 | `engine/defer_phase.go:84` | **hot** | `deferPhaseOwedSQL` correlated `EXISTS` |
-| `engine/store_event_stream.go:170` | **hot** | event streaming read |
-| `engine/db.go:646` | sweep | `CompactHistory` DELETE |
-| `engine/db.go:1167` | sweep | retention DELETE via subquery |
-| `engine/db.go:1296` | sweep | status + `EXISTS` probe |
-| `engine/db.go:1481` | sweep | `DeleteDeadLetteredWorkflows` |
-| `engine/db.go:1574` | sweep | `DeleteCompletedWorkflows` |
-| `engine/store_admin.go:359` | admin | admin force audit read |
+| `engine/store_event_stream.go:174` | **hot** | event streaming read |
+| `engine/db.go:974` | sweep | `CompactHistory` DELETE |
+| `engine/db.go:1604` | sweep | retention DELETE via subquery |
+| `engine/db.go:1810` | sweep | `preemptivelySettle` status + `EXISTS` probe |
+| `engine/retention_preview.go:37` | sweep | expired-event count |
+| `engine/store_admin.go:526` | admin | admin force audit read |
+| `engine/db.go:2010` | **cross-tenant** | `deleteDeadLetteredWorkflowsBatch`, `workflow_id = ANY($1)` |
+| `engine/db.go:2117` | **cross-tenant** | `deleteCompletedWorkflowsBatch`, same shape |
+| `cmd/cleatctl/checkdb.go:350` | **global** | whole-table byte size; the whole table is the question |
+| `engine/db_metrics.go:99` | **global** | `EstimateEventHistorySize`; sums relation pages, reads no rows |
+
+**The last four must NOT be given one tenant's predicate, and that is the point of listing them.**
+The two sweeps take a list of workflow ids spanning tenants, and the two global queries have no
+rows to filter — `checkdb` deliberately measures the entire table, and the size estimator reads
+catalog pages. Adding `tenant_id = <the caller's tenant>` to any of them is not a harmless
+narrowing: `PostgresStore.tenantID` defaults to the zero UUID rather than to empty, so the
+predicate would silently restrict a cross-tenant sweep to the default tenant's rows and report
+success. Pruning those wants a per-tenant loop, which is a design change and not in cleat#2059.
+
+Naming the exclusions is the same move the old `admin.drop_tenant` comment makes for `plugin_defs`:
+a list of "tables that need a tenant predicate" that silently omits the ones that must not have one
+reads as an oversight, and the next person adds it.
 
 Re-derive (pair backticks first, then filter — a bound applied *during* pairing re-phases the rest
-of the file):
+of the file). The receiver is what separates a PostgreSQL site from a MySQL or SQL Server arm in a
+shared file, and it is mechanical rather than a judgement about the SQL:
 
 ```python
 import re, subprocess
@@ -334,7 +363,14 @@ for f in files:
         if not re.search(r'\b(SELECT|INSERT|UPDATE|DELETE)\b', q, re.I): continue
         start = src.rfind('\n', 0, m.start()) + 1
         if src[start:m.start()].lstrip().startswith('//'): continue   # prose about SQL is not SQL
-        print(f, src[:m.start()].count('\n')+1)
+        # Which receiver's method encloses this literal. A PostgreSQL site has
+        # no receiver or a *PostgresStore one; the MySQL and SQL Server arms of
+        # a shared file have their own, and are not this dialect's business.
+        recv = ''
+        for fm in re.finditer(r'^func \(s \*(\w+)\) \w+', src[:m.start()], re.M):
+            recv = fm.group(1)
+        if recv.endswith(('MySQLStore', 'MSSQLStore')): continue
+        print(f, src[:m.start()].count('\n')+1, recv or '(free function)')
 ```
 
 > That comment filter is load-bearing. A first pass counted 18, then 12; two of those were
@@ -342,6 +378,13 @@ for f in files:
 > `store_event_shadow.go:16`) and one was the MySQL arm in a shared file
 > (`store_admin.go:471`, inside `func (s *MySQLStore) adminAppendAudit`). A text search cannot tell
 > a thing from a sentence about the thing.
+>
+> **The receiver filter replaces a hand-classification with a mechanical one**, and it is why the
+> count is twelve rather than sixteen. The earlier pass found the MySQL arm by reading the
+> enclosing function and noting it; that does not scale and does not survive the next shared file.
+> Running it as a filter takes the four arms out — `retention_preview.go:98` and `:143`,
+> `store_admin.go:729` and `:937` — leaving twelve PostgreSQL sites, which is what the table above
+> lists.
 
 ---
 
@@ -360,14 +403,22 @@ own header records the same move being made once before (*"Combines: 001_tables,
 The hazard is small but sharp. Four of ten routines are redefined across migrations, and each must
 be taken at its **last** definition. Picking the wrong one ships an older body and fails silently:
 
-| Routine | Definitions | Authoritative |
-|---|---:|---|
-| `finalize_workflow_status` | 8 | `053_the_finalize_procedure_stops_writing_the_result_column.sql` |
-| `admin.drop_tenant` | 3 | `059_a_dropped_tenants_definitions_go_with_it.sql` |
-| `admin.claim_workflows` | 3 | `055_a_run_records_when_a_worker_began_executing_it.sql` |
-| `cleat.assert_tenant_set` | 2 | `034_assert_tenant_set_empty_string.sql` |
+| Routine | Definitions | Now at | Was (the migrations the compaction folded) |
+|---|---:|---|---|
+| `finalize_workflow_status` | 8 | `003_procedures.sql:34` | `053_the_finalize_procedure_stops_writing_the_result_column.sql` |
+| `admin.drop_tenant` | 3 | `001_schema.sql:1404` | `059_a_dropped_tenants_definitions_go_with_it.sql` |
+| `admin.claim_workflows` | 3 | `001_schema.sql:1307` | `055_a_run_records_when_a_worker_began_executing_it.sql` |
+| `cleat.assert_tenant_set` | 2 | `001_schema.sql:1647` | `034_assert_tenant_set_empty_string.sql` |
 
-Re-derive (strip comments first, or a header quoting a `CREATE` counts as a definition):
+**Every file in the right-hand column no longer exists**, which is why the middle column is the one
+to read. The compaction deleted them, so citing them — as this table did until 2026-09-26 — sends a
+reader to a 404 and leaves the "last definition" question unanswerable. The right-hand column is
+kept only because it says which migration each body came from.
+
+Re-derive (strip comments first, or a header quoting a `CREATE` counts as a definition). **On the
+compacted tree this prints nothing, and that is the correct answer**: each routine is now defined
+exactly once, so "redefined across migrations" no longer applies. An empty result here is no longer
+evidence of a mistake, which is a change from the chain this was written against:
 
 ```python
 import re, glob, os, collections
@@ -377,8 +428,14 @@ for f in sorted(glob.glob('migrations/postgres/*.sql')):
     src = '\n'.join(re.sub(r'--.*$', '', l) for l in src.split('\n'))
     for m in re.finditer(r'CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\s+([A-Za-z0-9_.]+)', src, re.I):
         defs[m.group(1).lower()].append(os.path.basename(f))
+found = False
 for name, fs in defs.items():
-    if len(fs) > 1: print(name, '->', fs[-1])   # the LAST is authoritative
+    if len(fs) > 1:
+        print(name, '->', fs[-1])   # the LAST is authoritative
+        found = True
+if not found:
+    print('each routine is defined once in the compacted baseline; nothing to choose between')
+print('routines scanned:', len(defs))   # non-zero, or the glob matched nothing
 ```
 
 ### Differential verification is non-negotiable
