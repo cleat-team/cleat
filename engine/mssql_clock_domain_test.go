@@ -85,9 +85,30 @@ func TestNoMSSQLStatementUsesTheServersLocalClock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("globbing migrations/mssql/*.sql: %v", err)
 	}
-	if len(sqlFiles) < 10 {
-		t.Fatalf("found only %d .sql files in migrations/mssql/; there were 30+ on 2026-09-06. "+
-			"A glob that matches almost nothing passes vacuously.", len(sqlFiles))
+	// The floor here used to be a count of FILES -- `< 10`, anchored on "there
+	// were 30+ on 2026-09-06". The cleat#2434 rebaseline replaced 77 files with
+	// a 3-file baseline, and 3 < 10 is not a defect: the guard was failing on a
+	// tree that is exactly what it is supposed to be. That is the census of a
+	// moving population CLAUDE.md says is guaranteed to go wrong, and it went
+	// wrong in the direction that blocks the change rather than the one that
+	// waves it through. The PostgreSQL rebaseline hit the same floor in the same
+	// file family and repaired it the same way.
+	//
+	// What a floor is FOR is proving the glob reached real schema rather than
+	// matching nothing, so it is now an assertion about CONTENT -- the SQL the
+	// scan is about to read must declare tables. That holds at 3 files and at
+	// 77, and it fails loudly if the glob stops matching.
+	sqlText := ""
+	for _, f := range sqlFiles {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		sqlText += string(b)
+	}
+	if !strings.Contains(sqlText, "CREATE TABLE") {
+		t.Fatalf("the %d .sql files globbed from migrations/mssql/ declare no tables, so this "+
+			"scan is not reading the shipped schema and would pass vacuously", len(sqlFiles))
 	}
 	files := append(append([]string{}, goFiles...), sqlFiles...)
 

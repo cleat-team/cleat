@@ -56,7 +56,14 @@ func TestTheMarkerValuesAreSpelledTheSameEverywhere(t *testing.T) {
 		return string(b)
 	}
 
-	seventyFour := read(filepath.Join(dir, "075_the_admin_bypass_is_opt_in.sql"))
+	// Since cleat#2434 compacted the chain, 075's content lives in the baseline:
+	// 002_defaults.sql carries the MERGE that records the form, and
+	// 001_schema.sql carries the CHECK constraint that admits it. This is not a
+	// rename -- the guard's subject is "the shipped migration set records the
+	// predicate it installs", and the shipped set is three files now, so the
+	// subject is the same and the location moved.
+	baselineDefaults := read(filepath.Join(dir, "002_defaults.sql"))
+	baselineSchema := read(filepath.Join(dir, "001_schema.sql"))
 	optional := read(filepath.Join(dir, "optional", "cross_tenant_claim.sql"))
 
 	// The value each file WRITES, taken from the statement that writes it rather
@@ -74,7 +81,7 @@ func TestTheMarkerValuesAreSpelledTheSameEverywhere(t *testing.T) {
 		src  string
 		want string
 	}{
-		{"075_the_admin_bypass_is_opt_in.sql", seventyFour, rlsPredicatePlain},
+		{"002_defaults.sql (formerly 075_the_admin_bypass_is_opt_in.sql)", baselineDefaults, rlsPredicatePlain},
 		{"optional/cross_tenant_claim.sql", optional, rlsPredicateAdmin},
 	} {
 		m := writes.FindAllStringSubmatch(tc.src, -1)
@@ -101,8 +108,10 @@ func TestTheMarkerValuesAreSpelledTheSameEverywhere(t *testing.T) {
 	// And the CHECK constraint has to admit exactly the two the Go code knows,
 	// or a third value could be written that this package reads as "not admin".
 	for _, want := range []string{rlsPredicatePlain, rlsPredicateAdmin} {
-		if !strings.Contains(seventyFour, "N'"+want+"'") {
-			t.Errorf("075 does not mention %q, so its CHECK constraint cannot be admitting it", want)
+		if !strings.Contains(baselineSchema, "N'"+want+"'") {
+			t.Errorf("001_schema.sql does not mention %q, so the CHECK constraint on "+
+				"admin.rls_predicate_form cannot be admitting it -- and a third value "+
+				"written there would be read by this package as \"not admin\"", want)
 		}
 	}
 }
@@ -151,8 +160,23 @@ func TestTheOptInMigrationIsNotInTheAutoAppliedSet(t *testing.T) {
 // a migration adds a policy.
 func TestNeitherPredicateMigrationHardCodesThePolicyList(t *testing.T) {
 	dir := migrationsDirForRLSTest(t)
+	// Only the opt-in file is listed now. 075_the_admin_bypass_is_opt_in.sql was
+	// the other one, and its content became the generated baseline in
+	// cleat#2434 -- and the baseline is exempt from BOTH assertions below, not
+	// by oversight but by construction: it is the output of a process that
+	// reads sys.security_predicates (scripts/gen-mssql-baseline -mode=emit), so
+	// requiring the emitted text to contain that query would be requiring it to
+	// redo at apply time work the generator already did. Adding it here fails
+	// this test with "does not read sys.security_predicates", which is what
+	// happened when it was first added.
+	//
+	// The baseline's policy set is not left unguarded. It is compared against
+	// the database the migrations build -- per policy, per predicate, per
+	// target table -- by TestEveryShippedTenantPolicyExistsInTheBuiltDatabase
+	// and by scripts/gen-mssql-baseline -mode=supplementary, and the baseline
+	// generator's own known-positive battery drops a policy and requires the
+	// main diff to report CLEAN while the supplementary check FAILS.
 	for _, name := range []string{
-		filepath.Join(dir, "075_the_admin_bypass_is_opt_in.sql"),
 		filepath.Join(dir, "optional", "cross_tenant_claim.sql"),
 	} {
 		b, err := os.ReadFile(name)
@@ -160,9 +184,9 @@ func TestNeitherPredicateMigrationHardCodesThePolicyList(t *testing.T) {
 			t.Fatalf("read %s: %v", name, err)
 		}
 		src := string(b)
-		// Strip comments: both files name policies in prose explaining why they
+		// Strip comments: the file names policies in prose explaining why they
 		// are not listed, and a search that cannot tell code from a sentence
-		// about code is the fault these very files were fixed for.
+		// about code is the fault this file was fixed for.
 		var code strings.Builder
 		for _, line := range strings.Split(src, "\n") {
 			if i := strings.Index(line, "--"); i >= 0 {

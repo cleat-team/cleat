@@ -162,7 +162,33 @@ var alterTableRe = regexp.MustCompile(`(?s)ALTER TABLE\s+(?:dbo\.)?(\w+)(.*?)(?:
 // table. Scoping to the table is the point: `ISJSON(result)` appears four times
 // across the schema on four different tables.
 func mssqlHasISJSONCheck(allMigrations, tableBlock, table, col string) bool {
-	isjson := regexp.MustCompile(`ISJSON\(\s*` + regexp.QuoteMeta(col) + `\s*\)`)
+	// (?i) and the optional brackets are load-bearing since cleat#2434, and
+	// both come from the same fact: the generated baseline's check constraints
+	// are read back out of sys.check_constraints, and SQL Server normalises
+	// what it stores. The chain's source said `ISJSON(dag_spec)`; the catalogue
+	// says `isjson([dag_spec])`. A matcher written against the source spelling
+	// finds neither, and the guard reports every covered column as uncovered --
+	// the loud direction, which is why it was noticed.
+	//
+	// This is the same normalisation that bites the routine bodies: see
+	// normalizeModuleHead in scripts/gen-mssql-baseline, where `CREATE OR ALTER`
+	// comes back as `CREATE` and the whitespace it left behind is the only
+	// record of which form the source used.
+	// The optional `,\s*VALUE` is the second thing cleat#2434 exposed, and it
+	// was hiding a superseded definition rather than a real gap. The chain's
+	// final form for workflow_signals.payload is `ISJSON(payload, VALUE) = 1`
+	// -- 011_json_scalar_payloads.sql's whole purpose, because ISJSON with one
+	// argument rejects a bare scalar and '"x"' is valid JSON. But the old
+	// 001_schema.sql also carried `CHECK (ISJSON(payload) = 1)` inside its
+	// CREATE TABLE block, which 011 later replaced, and THAT is what this
+	// matcher was finding. So the guard passed by matching a definition the
+	// chain had already superseded.
+	//
+	// The generated baseline carries the final form and only the final form, so
+	// the one-argument pattern had nothing left to match. Accepting both is the
+	// correct repair: they are two spellings of the same constraint, and the
+	// two-argument one is the one that actually ships.
+	isjson := regexp.MustCompile(`(?i)ISJSON\(\s*\[?` + regexp.QuoteMeta(col) + `\]?\s*(?:,\s*VALUE\s*)?\)`)
 	if isjson.MatchString(tableBlock) {
 		return true
 	}

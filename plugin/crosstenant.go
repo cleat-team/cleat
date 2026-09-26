@@ -148,10 +148,19 @@ func IsCrossTenant(ctx context.Context) bool {
 // On SQL Server the tenant now reaches the statement in SESSION_CONTEXT, which
 // CHANGES WHAT A PLUGIN SEES ON A CORE TABLE and is worth stating plainly: every
 // one of the shipped ADD FILTER PREDICATE statements binds dbo.fn_tenant_filter
-// (20 of them, 13 distinct tables --
+// (14 of them, 14 distinct tables --
 // `grep -rhoE 'ADD FILTER PREDICATE\s+dbo\.\w+\(' migrations/mssql/*.sql`), and
 // that function's authoritative definition reads SESSION_CONTEXT(N'tenant_id')
-// (migrations/mssql/012_admin_role.sql, the highest-numbered file defining it).
+// (migrations/mssql/003_procedures.sql, which since cleat#2434 holds the FINAL
+// body of every core routine rather than the chain's last redefinition of it).
+//
+// The census read "20 of them, 13 distinct tables" until that change, and the
+// difference is worth knowing because it looks like a regression and is not
+// one: 075 and 103 installed FILTER predicates by dynamic SQL over a temp
+// table, so the same policy's ADD clause appeared in more than one file and a
+// text grep counted it more than once. 003 is generated from the catalogue and
+// carries each policy exactly once. Re-derive rather than trust either number;
+// the command above is the one to run.
 // So a plugin statement against workflow_instances under ForTenant used to
 // match no rows and now matches that tenant's. That is a narrowing to the
 // correct answer rather than a widening -- no tenant's rows become visible to

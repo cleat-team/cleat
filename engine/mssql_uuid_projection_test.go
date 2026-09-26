@@ -229,7 +229,33 @@ var (
 	sqlLiteralRe = regexp.MustCompile("(?s)`([^`]*)`")
 	// A projection list: everything between SELECT/OUTPUT and the clause that
 	// ends it.
-	projectionRe = regexp.MustCompile(`(?is)\b(SELECT|OUTPUT)\b(.*?)(?:\bFROM\b|\bWHERE\b|\bWHEN\b|\bINTO\b|$)`)
+	//
+	// ON is in the alternation for MERGE, and was added by cleat#2434. A MERGE
+	// reads
+	//
+	//	MERGE workflow_memory_stats AS target
+	//	USING (SELECT @p1 AS def_name, ..., @p3 AS tenant_id) AS source
+	//	ON target.def_name = source.def_name AND target.tenant_id = @p3
+	//	WHEN MATCHED THEN UPDATE ...
+	//
+	// and the SELECT inside USING has no FROM, so the only terminator ahead of
+	// it was WHEN -- which put the whole ON clause inside the "projection". A
+	// join or match CONDITION is not a projection and nothing in it is scanned
+	// into Go, so the guard reported mssql_schedules.go's memory-sample upsert
+	// as a raw UUID projection.
+	//
+	// It did not fire until the migrations were compacted, because
+	// workflow_memory_stats.tenant_id was not among the columns the old chain's
+	// text let this parser find. Better column coverage exposed a latent
+	// false positive; the fix is here rather than in an allowlist, since the
+	// next MERGE would have hit it too.
+	//
+	// Adding ON cannot mask a real violation: a genuine projection lists its
+	// columns BEFORE any FROM, and ON only appears after one in a query that
+	// has a FROM at all.
+	projectionRe = regexp.MustCompile(`(?is)\b(SELECT|OUTPUT)\b(.*?)(?:\bFROM\b|\bWHERE\b|\bWHEN\b|\bINTO\b|\bON\b|$)`)
+	// A MERGE with no ON at all still ends at its first WHEN, which the
+	// alternation above already covers.
 	// Every table a statement names, so the guard can ask "is this column a
 	// UUID on a table this query actually touches".
 	tableRefRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|UPDATE|INTO|MERGE)\s+(?:\[?\w+\]?\.)?\[?(\w+)\]?`)
