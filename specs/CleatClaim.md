@@ -1,6 +1,32 @@
 <!-- tla-index: issue=1996 -->
 # CleatClaim.tla — status
 
+**cleat#2041, resolved 2026-09-25.** The `NoStarvation` gap this file below describes as needing
+"per-instance fairness" was fixed — and **not the way that paragraph predicted**. The claimant does
+not choose which instance to take: `engine/store_lifecycle.go` is `ORDER BY w.priority ASC,
+w.created_at LIMIT $2 FOR UPDATE SKIP LOCKED`, a total order whose head is taken, so there was never
+a per-instance disjunct for fairness to be about. `Claim` now takes the head (`FrontBatch`) instead
+of an arbitrary `SUBSET`, `priority` is modelled (`HighPriorityInstances`), and work enters the queue
+through a new **`Arrive`** action — without which `priority` is inert, because a fixed instance set
+is ordered exactly once and no priority value can starve anything.
+
+**What is gated now is a SAFETY property, not `NoStarvation`.** `ClaimRespectsOrder` is an action
+invariant: a claim takes a PREFIX of `Precedes`, so nothing is ever overtaken. It is checked during
+ordinary reachability rather than by the liveness engine, it depends on nothing outside the model,
+and it goes red when `Claim` stops taking a prefix — verified by mutating the batch to claim only the
+newest ready instance, which fails it at 24 distinct states. That is the property the defect was
+actually about, and unlike the liveness one it fails when the thing it names is broken.
+
+**`NoStarvation` remains defined and ungated, but for a NEW reason.** It passes now — through the
+**unclamped `FutureClock`**, not through the claim protocol: with the clamp restored and everything
+else unchanged it FAILS at 3,349 distinct states. And the starvation the engine actually has — a run
+passed over indefinitely by *sustained* higher-priority arrivals, measured against a live store in
+`engine/the_claim_order_is_priority_then_age_test.go` — is not representable at any finite
+`NumInstances`: arrivals stop, the order settles, the queue drains. Unreachable here, which is not
+the same as disproved. Full reasoning is on the definition in `CleatClaim.tla` and in the `.cfg`.
+
+---
+
 **cleat#2034, filed 2026-09-23, FIXED the same day.** `CleatClaim.tla`'s own `ClaimProgress`
 was silently vacuous — deleting `WF_vars(Claim(w))` from `Fairness` left "No error has been
 found" at an identical state count to the unmutated run, the same CONSTRAINT-boundary hazard
@@ -23,13 +49,18 @@ for the full account.
 ## Bounds and state count
 
 `CleatClaim.cfg`: `Workers = {w1, w2}`, `NumInstances = 2`, `HeartbeatInterval = 1`,
-`HeartbeatTimeout = 2`, `MaxClaimBatch = 1`, clock self-clamping at `ClockCeiling == 5` (no
-`.cfg` `CONSTRAINT` — see below and the file's own `ClockCeiling`/`NextClock`/`FutureClock`
-comments). Measured 2026-09-23: **8,738 distinct states, 59,229 states generated, search
-depth 11**, finished in ~2s. `TypeOK`, `Safety`, `ClaimProgress`, `ReapProgress` and
-`TerminalStableLiveness` all hold at this bound; `NoStarvation` is defined but deliberately
-not gated (see below) — re-derive with `make tla`, not by trusting this paragraph, since (per
-CLAUDE.md) a number like this is a snapshot, not a promise.
+`HeartbeatTimeout = 2`, `MaxClaimBatch = 1`, `HighPriorityInstances = {}` (all equal priority),
+clock self-clamping at `ClockCeiling == 5` (no `.cfg` `CONSTRAINT` — see below and the file's own
+`ClockCeiling`/`NextClock`/`FutureClock` comments). **Re-measured 2026-09-25 after cleat#2041:
+2,483 distinct states, 15,233 states generated**, ~2s. `TypeOK`, `Safety`, `ClaimProgress`,
+`ClaimRespectsOrder`, `ReapProgress` and `TerminalStableLiveness` all hold at this bound;
+`NoStarvation` is defined but deliberately not gated (see below) — re-derive with `make tla`, not by
+trusting this paragraph, since (per CLAUDE.md) a number like this is a snapshot, not a promise.
+
+**Note the direction the count moved: 8,738 → 2,483, DOWN.** cleat#2041 replaced `Claim`'s
+arbitrary-subset choice with a deterministic prefix, which removes branching rather than adding it;
+`Arrive` adds some back. A smaller number here is not a weaker check — it is a less nondeterministic
+model of the same system, and the property that matters is now an invariant over it.
 
 Unlike `CleatQueueAdmission.tla`'s clock-elimination fix, this bound did **not** need to be
 re-derived by deliberate incremental growth after removing the CONSTRAINT: a self-clamping
@@ -75,6 +106,13 @@ way: an honest `\/ <>(~antecedent)` escape — the worker coming back alive befo
 is the antecedent ceasing to hold, not starvation. Re-run clean afterward (see the
 known-positive table below).
 
+**SUPERSEDED 2026-09-25 by cleat#2041 — kept to show what the finding was and how it resolved.**
+The paragraph below describes its counter-example correctly, and "needs per-instance fairness, which
+is a real model change" was the right call at the time. What it could not know is that the fairness
+was never the fix: the claimant does not choose, so there is no per-instance disjunct to be fair
+about, and the property that replaced this one — `ClaimRespectsOrder` — is a safety invariant rather
+than a liveness property. See the top of this file.
+
 `NoStarvation` hit the same "disjunctive fairness is not per-entity fairness" root cause but
 could **not** be repaired the same way: a sole surviving worker under `MaxClaimBatch = 1` can
 nondeterministically always choose the same ready instance to reclaim (Claim it, Release it,
@@ -94,13 +132,17 @@ GRAPH.**
 
 | mutation | verdict | distinct states / generated | contrast with the pre-fix run |
 |---|---|---|---|
-| `SF_vars(Claim(w))` deleted from `Fairness` | genuine counterexample — `ClaimProgress` fails | 8,738 / 59,229 (identical to the fair baseline) | pre-fix, the identical mutation (then `WF_vars(Claim(w))`) reported "No error found" at the *same* state count as the fair run (87,180 / 130,501, on the then-current bound) |
-| `WF_vars(Reap)` deleted from `Fairness` | genuine counterexample — `ReapProgress` fails | 8,738 / 59,229 (identical to the fair baseline) | not separately measured pre-fix; the mechanism is the same as the row above |
+| `SF_vars(Claim(w))` deleted from `Fairness` | genuine counterexample — `ClaimProgress` fails | **15,233 / 2,483 (identical to the current baseline)** — re-run 2026-09-25 after cleat#2041, which changed the baseline from 8,738 / 59,229 | pre-fix, the identical mutation (then `WF_vars(Claim(w))`) reported "No error found" at the *same* state count as the fair run (87,180 / 130,501, on the then-current bound) |
+| `WF_vars(Reap)` deleted from `Fairness` | genuine counterexample — `ReapProgress` fails | **15,233 / 2,483 (identical to the current baseline)** — re-run 2026-09-25, same note | not separately measured pre-fix; the mechanism is the same as the row above |
 | Terminal-refusal guard deleted from `Fail(w)` (can now flip any instance, including an already-terminal one) | genuine counterexample — `TerminalStableLiveness` (an action invariant) fails immediately, `Error: Action property TerminalStableLiveness is violated.` | 85 / 143 (early exit — an action invariant halts the search at first violation, unlike a liveness property, which must explore the complete graph before it can report a leads-to failure) | this property is checked during ordinary reachability, not exposed to the liveness engine at all, so it was never subject to the CONSTRAINT-clamping vacuity in the first place — the mutation exists only to confirm the guard being tested is real, not to compare against a pre-fix number |
+
+| `Claim`'s batch mutated from `FrontBatch` to a non-prefix — `LET S == {i \in ReadyInstances : i = NumInstances}`, i.e. claim only the NEWEST ready instance | genuine counterexample — `ClaimRespectsOrder` (an action invariant) fails at once: `Error: Action property ClaimRespectsOrder is violated.` | 24 / 57 (early exit, same reason as the `TerminalStableLiveness` row) | none needed — this property is new in cleat#2041, so there is no pre-fix number to compare against. What it demonstrates is that the gate is not free: it goes red when `Claim` stops taking a prefix |
 
 The first two rows are the direct analogue of `CleatQueueAdmission.tla`'s own known-positive
 table below: identical state count, flipped verdict, is the actual evidence a fairness clause
-is doing real work rather than being checked against an already-truncated graph.
+is doing real work rather than being checked against an already-truncated graph. The fourth row is
+a different use of the same discipline — not a fairness clause proving itself, but a new GATE
+proving it can fail, which is the only thing that makes gating it worth anything.
 
 ## Known drift: `CleatClaim.tla` models the claim protocol as of 2026-08-02, not as of today
 

@@ -48,7 +48,7 @@
   3. Expect a few thousand distinct states with 3 workers, 5 instances.
 *)
 
-EXTENDS Integers, FiniteSets
+EXTENDS Integers, FiniteSets, Sequences
 
 CONSTANTS
     Workers,              \* Set of worker identifiers, e.g. {"w1", "w2", "w3"}
@@ -56,6 +56,12 @@ CONSTANTS
     HeartbeatInterval,    \* Logical time between heartbeats (model parameter)
     HeartbeatTimeout,     \* How much clock advance before a heartbeat goes stale
     MaxClaimBatch,        \* Maximum instances claimed in one batch query
+    HighPriorityInstances, \* cleat#2041: the SUBSET of Instances that sorts ahead of the rest.
+                           \* The engine's ORDER BY is `w.priority ASC, w.created_at`, so priority
+                           \* is the primary key and age only the tie-break. A set rather than a
+                           \* per-instance sequence because that is what TLC's config parser
+                           \* accepts, and because the scenario reads better: {} is "all equal
+                           \* priority", {2} is "instance 2 was started at higher priority".
     NULL                  \* Sentinel "unassigned" value, distinct from every worker --
                            \* a model value bound in CleatClaim.cfg, not derived, since
                            \* CHOOSE x : x \notin Workers is unbounded and TLC cannot
@@ -64,6 +70,8 @@ CONSTANTS
 ASSUME HeartbeatTimeout > HeartbeatInterval
 ASSUME MaxClaimBatch >= 1
 ASSUME NULL \notin Workers
+ASSUME HighPriorityInstances \subseteq 1..NumInstances   \* `Instances` is defined below, and an
+                                                          \* ASSUME cannot forward-reference it.
 
 \* =============================================================================
 \* VARIABLES
@@ -75,9 +83,15 @@ VARIABLES
     heartbeatAt,     \* [1..NumInstances -> Nat] clock value of last heartbeat
     nextWakeAt,      \* [1..NumInstances -> Nat] earliest clock for re-claim after release
     clock,           \* Nat global logical clock, advances on every action
-    alive            \* [Workers -> BOOLEAN] whether each worker is alive
+    alive,           \* [Workers -> BOOLEAN] whether each worker is alive
+    arrived          \* cleat#2041: [Instances -> BOOLEAN] whether this instance has been started
+                     \* yet. WITHOUT THIS, `priority` IS INERT: if every instance exists from
+                     \* Init, "oldest-first" orders the set exactly once and no priority value
+                     \* can starve anything. The starvation the engine actually has
+                     \* (engine/the_claim_order_is_priority_then_age_test.go) needs work to
+                     \* ARRIVE into a queue that already has older, lower-priority work in it.
 
-vars == <<status, assignedTo, heartbeatAt, nextWakeAt, clock, alive>>
+vars == <<status, assignedTo, heartbeatAt, nextWakeAt, clock, alive, arrived>>
 
 \* =============================================================================
 \* CONSTANT HELPERS
@@ -112,6 +126,14 @@ Instances == 1..NumInstances
   liveness formula is being checked). That equality is the actual
   evidence the fix is honest: same graph, verdict flips only with the
   fairness clause -- see specs/README.md's "Known-positive" section for
+
+  The two counts above are the values at the time of the #2034 fix.
+  cleat#2041 changed the model (deterministic `FrontBatch` claim, `Arrive`,
+  `HighPriorityInstances`) and with it the baseline: re-run 2026-09-25, the
+  clean run and BOTH of those mutations are 15,233 generated / 2,483
+  distinct. The equality is what carried over, not the numbers -- which is
+  the point of the check, and the reason it is stated as an equality rather
+  than as two figures.
   the full measurement, including ReapProgress's and TerminalStableLiveness's
   own known-positive re-runs.
 
@@ -149,7 +171,19 @@ Instances == 1..NumInstances
 *)
 ClockCeiling == 5
 NextClock(c) == IF c < ClockCeiling THEN c + 1 ELSE ClockCeiling
-FutureClock(c, offset) == IF c + offset >= ClockCeiling THEN ClockCeiling - 1 ELSE c + offset
+(* cleat#2041, UNCLAMPED deliberately. This used to clamp to ClockCeiling - 1, which is
+   ALWAYS <= the pinned clock, so `nextWakeAt[i] <= clock` was true the instant Release
+   wrote it -- Release could not park an instance at all once the clock pinned. That is a
+   modelling artifact, not engine behaviour: `next_wake_at` is a real FUTURE wall-clock
+   time, and a released run genuinely is not claimable until it passes.
+
+   The consequence is stated rather than hidden: with the clock pinned at ClockCeiling, a
+   deadline past the ceiling is never reached, so such an instance leaves ReadyInstances
+   permanently. Part of why NoStarvation holds below is therefore that a released instance
+   can leave the model's time horizon. Raising ClockCeiling instead was MEASURED and does
+   not work -- the clamp moves with it, and ClockCeiling=8 still fails at 6x the state
+   space. See cleat#2041. *)
+FutureClock(c, offset) == c + offset
 
 \* =============================================================================
 \* TYPE INVARIANT
@@ -162,13 +196,30 @@ TypeOK ==
     /\ nextWakeAt \in [Instances -> Nat]
     /\ clock \in Nat
     /\ alive \in [Workers -> BOOLEAN]
+    /\ arrived \in [Instances -> BOOLEAN]
 
 \* =============================================================================
 \* STATE PREDICATES (helpers used by actions and properties)
 \* =============================================================================
 
-\* Instances eligible for claiming: status is ready AND wake time has passed.
-ReadyInstances == {i \in Instances : status[i] = "ready" /\ nextWakeAt[i] <= clock}
+\* Instances eligible for claiming: STARTED, status ready, wake time passed.
+ReadyInstances == {i \in Instances : arrived[i] /\ status[i] = "ready" /\ nextWakeAt[i] <= clock}
+
+\* cleat#2041: the claim order, modelled on the engine's
+\* `ORDER BY w.priority ASC, w.created_at` (engine/store_lifecycle.go). Lower priority value
+\* sorts first; instance index stands in for created_at, since i is created after i-1.
+Priority == [i \in Instances |-> IF i \in HighPriorityInstances THEN 0 ELSE 1]
+
+Precedes(i, j) ==
+    Priority[i] < Priority[j] \/ (Priority[i] = Priority[j] /\ i < j)
+
+\* The batch a claim actually takes: the HEAD of that order, up to MaxClaimBatch -- not an
+\* arbitrary subset. This is the whole of the fix. The specification modelled `Claim` as a
+\* disjunction over which ready instance to take, and fairness on a disjunction is a guarantee
+\* about the disjunction, not about any disjunct; the claimant has no such choice.
+FrontBatch ==
+    LET ready == ReadyInstances
+    IN {i \in ready : Cardinality({j \in ready : Precedes(j, i)}) < MaxClaimBatch}
 
 \* Currently claimed (running) instances.
 RunningInstances == {i \in Instances : status[i] = "running"}
@@ -212,18 +263,40 @@ StaleInstances ==
   guarantees — disjoint, non-blocking subsets.
 *)
 Claim(w) ==
+    LET S == FrontBatch IN
     /\ alive[w]                                    \* dead workers don't claim
-    /\ \E S \in SUBSET ReadyInstances :
-        /\ S /= {}                                 \* claim at least one
-        /\ Cardinality(S) <= MaxClaimBatch          \* respect batch limit
-        /\ status'  = [i \in Instances |->
-            IF i \in S THEN "running" ELSE status[i]]
-        /\ assignedTo' = [i \in Instances |->
-            IF i \in S THEN w ELSE assignedTo[i]]
-        /\ heartbeatAt' = [i \in Instances |->
-            IF i \in S THEN clock ELSE heartbeatAt[i]]
-        /\ clock' = NextClock(clock)
-        /\ UNCHANGED <<nextWakeAt, alive>>
+    /\ S /= {}                                     \* claim at least one
+    /\ status'  = [i \in Instances |->
+        IF i \in S THEN "running" ELSE status[i]]
+    /\ assignedTo' = [i \in Instances |->
+        IF i \in S THEN w ELSE assignedTo[i]]
+    /\ heartbeatAt' = [i \in Instances |->
+        IF i \in S THEN clock ELSE heartbeatAt[i]]
+    /\ clock' = NextClock(clock)
+    /\ UNCHANGED <<nextWakeAt, alive, arrived>>
+
+(*
+  --- ARRIVE: a new workflow instance is started and joins the ready queue.
+
+  cleat#2041. This action did not exist, and without it `priority` cannot do
+  anything: with every instance present from Init, the claim order is computed
+  once over a fixed set and no priority value can starve anything. The engine
+  test that measured the real starvation
+  (engine/the_claim_order_is_priority_then_age_test.go) needed work to arrive
+  into a queue that already held older, lower-priority work.
+
+  Instances start in index order, so `Priority = <<2, 1, 0>>` models a
+  high-priority job arriving after lower-priority work is already queued --
+  which is the shape that matters, not the priority values themselves.
+*)
+Arrive(i) ==
+    /\ ~arrived[i]
+    \* IF, not \/, so arrived[0] is never evaluated: i=1 has no predecessor and
+    \* `arrived[i - 1]` would be an application outside the function's domain.
+    /\ (IF i = 1 THEN TRUE ELSE arrived[i - 1])      \* instances start in order
+    /\ arrived' = [arrived EXCEPT ![i] = TRUE]
+    /\ clock' = NextClock(clock)
+    /\ UNCHANGED <<status, assignedTo, heartbeatAt, nextWakeAt, alive>>
 
 (*
   --- HEARTBEAT: Worker refreshes the heartbeat timestamp for an instance
@@ -245,7 +318,7 @@ Heartbeat(w) ==
         assignedTo[i] = w
         /\ heartbeatAt' = [heartbeatAt EXCEPT ![i] = clock]
         /\ clock' = NextClock(clock)
-        /\ UNCHANGED <<status, assignedTo, nextWakeAt, alive>>
+        /\ UNCHANGED <<status, assignedTo, nextWakeAt, alive, arrived>>
 
 (*
   --- COMPLETE: Worker marks a workflow as done successfully.
@@ -263,7 +336,7 @@ Complete(w) ==
         /\ status' = [status EXCEPT ![i] = "done"]
         /\ assignedTo' = [assignedTo EXCEPT ![i] = NULL]
         /\ clock' = NextClock(clock)
-        /\ UNCHANGED <<heartbeatAt, nextWakeAt, alive>>
+        /\ UNCHANGED <<heartbeatAt, nextWakeAt, alive, arrived>>
 
 (*
   --- FAIL: Worker marks a workflow as failed.
@@ -281,7 +354,7 @@ Fail(w) ==
         /\ status' = [status EXCEPT ![i] = "failed"]
         /\ assignedTo' = [assignedTo EXCEPT ![i] = NULL]
         /\ clock' = NextClock(clock)
-        /\ UNCHANGED <<heartbeatAt, nextWakeAt, alive>>
+        /\ UNCHANGED <<heartbeatAt, nextWakeAt, alive, arrived>>
 
 (*
   --- RELEASE: Worker suspends a workflow, putting it back to 'ready'
@@ -302,7 +375,7 @@ Release(w) ==
         \* Suspend for HeartbeatTimeout logical time units.
         /\ nextWakeAt' = [nextWakeAt EXCEPT ![i] = FutureClock(clock, HeartbeatTimeout)]
         /\ clock' = NextClock(clock)
-        /\ UNCHANGED <<heartbeatAt, alive>>
+        /\ UNCHANGED <<heartbeatAt, alive, arrived>>
 
 (*
   --- REAP: Background reaper reclaims stale instances.  In the
@@ -323,10 +396,10 @@ Reap ==
         /\ assignedTo' = [assignedTo EXCEPT ![i] = NULL]
         /\ heartbeatAt' = [heartbeatAt EXCEPT ![i] = 0]
         /\ clock' = NextClock(clock)
-        /\ UNCHANGED <<nextWakeAt, alive>>)
+        /\ UNCHANGED <<nextWakeAt, alive, arrived>>)
     \/ (  \* Idle sweep — no stale instances, but time still passes.
         /\ clock' = NextClock(clock)
-        /\ UNCHANGED <<status, assignedTo, heartbeatAt, nextWakeAt, alive>>)
+        /\ UNCHANGED <<status, assignedTo, heartbeatAt, nextWakeAt, alive, arrived>>)
 
 (*
   --- CRASH: A worker dies, ceasing all heartbeats.  Its assigned instances
@@ -336,7 +409,7 @@ Crash(w) ==
     /\ alive[w]
     /\ alive' = [alive EXCEPT ![w] = FALSE]
     /\ clock' = NextClock(clock)
-    /\ UNCHANGED <<status, assignedTo, heartbeatAt, nextWakeAt>>
+    /\ UNCHANGED <<status, assignedTo, heartbeatAt, nextWakeAt, arrived>>
 
 (*
   --- RESTART: A previously crashed worker comes back online and can
@@ -346,7 +419,7 @@ Restart(w) ==
     /\ ~alive[w]
     /\ alive' = [alive EXCEPT ![w] = TRUE]
     /\ clock' = NextClock(clock)
-    /\ UNCHANGED <<status, assignedTo, heartbeatAt, nextWakeAt>>
+    /\ UNCHANGED <<status, assignedTo, heartbeatAt, nextWakeAt, arrived>>
 
 (*
   --- TICK: Pure time passage.  No worker or reaper acts; the logical
@@ -356,7 +429,7 @@ Restart(w) ==
 *)
 Tick ==
     /\ clock' = NextClock(clock)
-    /\ UNCHANGED <<status, assignedTo, heartbeatAt, nextWakeAt, alive>>
+    /\ UNCHANGED <<status, assignedTo, heartbeatAt, nextWakeAt, alive, arrived>>
 
 \* =============================================================================
 \* NEXT-STATE RELATION
@@ -367,6 +440,7 @@ Next ==
     \/ (\E w \in Workers :
         Claim(w) \/ Heartbeat(w) \/ Complete(w) \/ Fail(w) \/ Release(w) \/ Crash(w))
     \/ (\E w \in Workers : Restart(w))
+    \/ (\E i \in Instances : Arrive(i))
     \/ Reap
     \/ Tick
 
@@ -381,6 +455,7 @@ Init ==
     /\ nextWakeAt  = [i \in Instances |-> 0]
     /\ clock     = 0
     /\ alive     = [w \in Workers |-> TRUE]
+    /\ arrived   = [i \in Instances |-> FALSE]   \* nothing has started yet; see Arrive
 
 \* =============================================================================
 \* FAIRNESS (TEMPORAL)
@@ -423,6 +498,12 @@ Fairness ==
     /\ \A w \in Workers : SF_vars(Claim(w))
     /\ \A w \in Workers : SF_vars(Heartbeat(w) \/ Complete(w) \/ Fail(w) \/ Release(w))
     /\ WF_vars(Reap)
+    (* cleat#2041: work must eventually ARRIVE, or the liveness properties below are
+       vacuous -- an empty queue satisfies "every ready instance is eventually claimed"
+       trivially, and a model that can simply never start anything would prove nothing.
+       Weak fairness is enough: Arrive(i) is enabled from the moment i-1 has arrived, and
+       nothing revokes that. *)
+    /\ WF_vars(\E i \in Instances : Arrive(i))
 
 (*
   FleetEventuallyStable: eventually, permanently, at least one worker is
@@ -605,46 +686,85 @@ TerminalStableLiveness ==
          status[i] \in {"done", "failed"} => status'[i] = status[i]]_vars
 
 (*
+  ClaimRespectsOrder:
+    A claim takes a PREFIX of the order. If an instance is claimed in a step,
+    every currently-ready instance ahead of it in `Precedes` was claimed in
+    that same step.
+
+    THIS is the property cleat#2041 actually needed, and it is the one that is
+    GATED. It is a safety property -- an action invariant, like
+    TerminalStableLiveness below, checked during ordinary reachability rather
+    than by the liveness engine -- and it is exactly the thing the model got
+    wrong: `Claim` used to take an arbitrary SUBSET of ReadyInstances, and
+    fairness on that disjunction is a guarantee about the disjunction, not about
+    any disjunct. `FrontBatch` takes the head instead, which is what
+    engine/store_lifecycle.go does (`ORDER BY w.priority ASC, w.created_at
+    LIMIT $2`) and what engine/the_claim_order_is_priority_then_age_test.go
+    measured: the claimant does not choose.
+
+    It is worth gating precisely because it is NOT free. Verified by mutating
+    `Claim`'s batch from `FrontBatch` to a non-prefix --
+    `LET S == {i \in ReadyInstances : i = NumInstances}`, i.e. claim only the
+    NEWEST ready instance -- which fails this at 24 distinct states with
+    "Action property ClaimRespectsOrder is violated". That known-positive is
+    the whole reason to prefer it over the liveness property below: it goes red
+    when the thing it names is broken, and green when it is not.
+
+    It also depends on nothing outside the model. The liveness property below
+    currently passes only because of a clock change (see its own comment), which
+    makes it unfit to gate; this one has no such dependency.
+*)
+ClaimRespectsOrder ==
+    [][ \A j \in Instances :
+         (status[j] /= "running" /\ status'[j] = "running")
+         => (\A i \in ReadyInstances : Precedes(i, j) => status'[i] = "running")
+       ]_vars
+
+(*
   NoStarvation:
     Eventually, every ready instance (past its wake time) is claimed,
     provided some worker is still alive.  This expresses the idea that
     no instance is permanently starved in a system with active workers.
 
-    NOT GATED IN CleatClaim.cfg -- DEFINED, not CHECKED. The paragraph this
-    replaces argued "in practice... every instance eventually transitions
-    because the system cannot avoid a specific ready instance forever",
-    and TLC (2026-09-23) proved that argument wrong with a real,
-    no-mutation-needed counter-example: w1 crashes permanently (never
-    restarted -- legal, nothing requires an operator to; FleetEventuallyStable
-    only requires SOME worker stay alive, not every worker), leaving w2 as
-    the sole claimant with MaxClaimBatch=1. Claim(w2) is a disjunction over
-    WHICH ready instance to take; SF_vars(Claim(w2)) forces the DISJUNCTION
-    to fire infinitely often, not any particular disjunct. w2 can
-    nondeterministically always choose instance 2 (Claim it, Release it,
-    Claim it again, forever), which alone satisfies SF_vars(Claim(w2)) --
-    and instance 1 sits "ready", past its wake time, with an alive worker
-    the whole time, forever unclaimed. This is the same root cause
-    ReapProgress's second fix and specs/CleatRunLifecycle.tla's
-    L2_ClaimProgress/L3_CascadeProgress both name: fairness on a
-    DISJUNCTIVE action is a guarantee about the disjunction, not about any
-    one disjunct or any one entity the disjunction ranges over.
+    NOT GATED IN CleatClaim.cfg -- and as of 2026-09-25 for a DIFFERENT reason
+    than when it was first left out. ClaimRespectsOrder above is the property
+    this file gates; this one stays defined and documented rather than checked.
 
-    Unlike ReapProgress, no "or the antecedent later became false" escape
-    repairs this: nothing here ever revokes instance 1's antecedent (w2
-    never dies, instance 1 never stops being ready past its wake time) --
-    the antecedent stays true for the entire infinite trace, so the escape
-    clause would be exactly as false as the original consequent. Genuinely
-    fixing this needs PER-INSTANCE fairness (something like
-    SF over the specific Claim transition that picks instance i, for each
-    i), which is a real model change, not a rewording -- out of scope for
-    cleat#2034, whose mandate is removing the CONSTRAINT-clamping vacuity,
-    not building new fairness machinery. Left defined and ungated rather
-    than deleted, per specs/CleatRunLifecycle.tla's own precedent for
-    L1/L2/L3 (same file, "NOT YET GATED" comment): shipping this gated
-    would have been a false claim, and the honest state is "found a real
-    gap, tracked it, did not chase convergence within this issue's scope."
-    Follow-up: cleat#2034 was filed for the vacuity; this finding is new
-    and separate, tracked as cleat#2041.
+    It was first left out because `Claim` was a disjunction with only
+    disjunctive fairness, and TLC found a genuine counter-example: w1 dead, w2
+    cycling Claim/Release on one instance while a sibling sat ready, past its
+    wake time, with an alive worker, forever. THAT IS FIXED. `Claim` now takes
+    the head of the order and work arrives through `Arrive`, so the transition
+    that counter-example needed no longer exists -- and the per-instance
+    fairness it asked for turned out not to be the fix: the claimant does not
+    choose (engine/store_lifecycle.go's `ORDER BY w.priority ASC,
+    w.created_at`), so there is no per-instance disjunct to be fair about.
+
+    It is still not gated, for two reasons, both measured:
+
+    1. IT PASSES THROUGH A CLOCK CHANGE, NOT THROUGH THE CLAIM PROTOCOL. The
+       clock here pins at ClockCeiling, and `FutureClock` was unclamped so a
+       released instance's wake time can exceed it. The consequence is that
+       once the clock pins, a released instance can leave ReadyInstances
+       permanently -- the queue drains, and this property holds partly because
+       sleeping work drops out of the obligation. Measured: with the clamp
+       RESTORED and everything else unchanged, this FAILS (3,349 distinct
+       states); unclamped it passes (3,117). A property whose truth turns on
+       which clock arithmetic is in force is not one to gate.
+
+    2. THE STARVATION THE ENGINE ACTUALLY HAS IS NOT REPRESENTABLE HERE.
+       engine/the_claim_order_is_priority_then_age_test.go measured it against
+       a live store: `priority` sorts FIRST and age is only the tie-break, so a
+       run can be passed over indefinitely by SUSTAINED higher-priority
+       arrivals. That needs arrivals that keep coming. `NumInstances` is
+       finite, so arrivals stop, the order settles and the queue drains -- the
+       path is unreachable here, which is not the same as disproved. Modelling
+       an unbounded stream is a real piece of work and was declined as its own
+       item (cleat#2041).
+
+    So this is DEFINED, NOT CHECKED, and the honest summary is: the claim
+    protocol's ORDER is now pinned by a gated safety property, and this
+    liveness property is neither provable nor refutable in this model.
 *)
 NoStarvation ==
     []( \A i \in Instances :
