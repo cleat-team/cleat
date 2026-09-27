@@ -33,7 +33,7 @@ in your head while reading.
 | Extension point | Interface | What it gets you |
 |---|---|---|
 | **Host functions** | `RegisterHostFunctions(FuncRegistry)` | Callable from a workflow. **Recorded in event history and replayed deterministically** — the plugin author writes no replay code. |
-| **HTTP routes** | `RegisterRoutes(*http.ServeMux)` | A control surface on the worker's mux, under the worker's auth and tenant scoping. |
+| **HTTP routes** | `RegisterRoutes(plugin.Router)` | A control surface on the worker's mux, under the worker's auth and tenant scoping. |
 | **Edge middleware** | `Middleware(http.Handler) http.Handler` | Wraps every request: identity, rate limiting, audit. |
 | **Background loop** | `Run(ctx) error` | Sweeps, reconciliation, polling. No tenant of its own — needs `plugin.AcrossAllTenants` to read across tenants, by name and on purpose. |
 
@@ -43,6 +43,12 @@ Re-derive the membership of each rather than trusting a list; these grow:
     grep -rln 'func (p \*Plugin) RegisterRoutes'        plugins/*/*.go | grep -v _test
     grep -rln 'func (p \*Plugin) Middleware'            plugins/*/*.go | grep -v _test
     grep -rln 'func (p \*Plugin) Run'                   plugins/*/*.go | grep -v _test
+
+**Routes take `plugin.Router`, not `*http.ServeMux`.** It is a *narrower* interface — `HandleFunc`
+and `Handle` only — and it exists so the host can wrap every handler with a request-body ceiling
+(`--plugin-max-body-size`, or a larger one a route declares) before it reaches your plugin. That is
+cleat#2232, and the reason to know it is that `*http.ServeMux` satisfies `plugin.Router`
+structurally, so a mux you already have needs no adapter.
 
 The host-function point is the one that makes cleat different from a plugin system, and the
 distinction is worth stating precisely because it is easy to skim past. `plugin/plugin.go:200-206`:
