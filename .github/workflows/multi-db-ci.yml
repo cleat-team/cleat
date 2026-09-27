@@ -360,6 +360,41 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v6
 
+      # cleat#2438. The generated MSSQL baseline is a claim about the PROCESS
+      # -- "these three files are what the emitter produces" -- and until this
+      # step nothing checked it of the ARTIFACT, so a hand-edit to
+      # 001_schema.sql or 003_procedures.sql would have gone unnoticed while
+      # two guards in engine/ rested on the claim.
+      #
+      # -mode=verify builds a database from the committed migrations,
+      # regenerates the baseline from it, and requires the result to be
+      # byte-identical, naming the first differing line. It regenerates from
+      # the sys.* catalogue, so it needs a live server -- which is why it lives
+      # in this job rather than in the Lint job, and it adds no new service.
+      #
+      # ITS OWN EMPTY DATABASE, and this is not tidiness: verify BUILDS into the
+      # database it is given, so pointing it at `cleat` would compare the
+      # emitter's output for one database against the committed baseline for a
+      # different one and report a difference that means nothing.
+      #
+      # The full acceptance -- A from the pre-compaction chain, B from these
+      # files, catalogdiff plus the known-positive battery -- cannot run here:
+      # its A side exists only in git history and this job checks out at
+      # fetch-depth 1. That stays a documented operator procedure, like
+      # scripts/gen-postgres-baseline.py. This step is the half that can be
+      # enforced on every run.
+      - name: Verify the committed MSSQL baseline is a fresh emit
+        run: |
+          CONTAINER=$(docker ps -q --filter "ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89")
+          docker exec "$CONTAINER" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C \
+            -Q "CREATE DATABASE cleat_baseline_verify"
+          # No -migrations: verify builds from the three baseline files by
+          # name, so a later numbered migration (the first 004_*.sql) cannot be
+          # folded into the regenerated 001 and fail this on a correct tree.
+          go run ./scripts/gen-mssql-baseline -mode=verify \
+            -dsn 'sqlserver://sa:CleatTest123!@localhost:1433?database=cleat_baseline_verify' \
+            -committed migrations/mssql
+
       # ./migration/... alongside ./engine/...: this is the only job with a
       # live SQL Server, and the migration tests that assert the shipped
       # .sql files can actually be applied (IMPROVEMENT-PLAN 3.10's upgrade

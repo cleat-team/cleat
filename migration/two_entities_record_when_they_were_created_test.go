@@ -6,10 +6,7 @@ package migration_test
 import (
 	"context"
 	"database/sql"
-	"os"
-	"path/filepath"
 	"testing"
-	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/microsoft/go-mssqldb"
@@ -40,163 +37,50 @@ import (
 // The rows are seeded BEFORE the migration, because a migration whose entire
 // point is what it does to a database that already has rows in it tests the
 // half that does not matter when it is run against an empty schema.
-func TestCreatedAtIsBackfilledFromUpdatedAtNotFromTheMigrationsClock(t *testing.T) {
-	// Deliberately far in the past, and not a round now(). Any value the
-	// migration invents for itself -- now(), SYSUTCDATETIME(), NOW(6) -- is
-	// years away from this, so the two cannot be confused by clock skew,
-	// timezone handling, or a test that happens to run at midnight.
-	seeded := time.Date(2020, 3, 14, 15, 9, 26, 0, time.UTC)
-
-	for _, d := range []idempotencyDialect{postgresDialect(), mysqlDialect(), mssqlDialect()} {
-		d := d
-		t.Run(string(d.dialect), func(t *testing.T) {
-			if d.skipReason != "" {
-				t.Skip(d.skipReason)
-			}
-			db := createdAtScratchDB(t, d)
-			ctx := context.Background()
-
-			// Before: every migration except the one under test, so the
-			// "before" state is the real shipped schema rather than a
-			// hand-written approximation of it.
-			before := stageAllMigrations(t, d.dialect, createdAtMigration(d.dialect))
-			if err := runMigrations(t, ctx,
-				migration.NewRunner(db, d.dialect, before), d.dialect); err != nil {
-				t.Fatalf("apply the migrations preceding the one under test: %v", err)
-			}
-
-			// PRECONDITION, reported as UNMEASURED rather than as a pass. If
-			// the column is already here the seed below writes into the
-			// finished shape and the assertion proves nothing.
-			if columnExists(t, ctx, db, d, "tenant_settings", "created_at") {
-				t.Fatalf("UNMEASURED: tenant_settings.created_at already exists before the " +
-					"migration under test ran, so this test cannot observe the backfill")
-			}
-
-			conn := pinnedConn(t, ctx, db, d)
-
-			if _, err := conn.ExecContext(ctx, d.rebind(
-				`INSERT INTO tenant_settings (tenant_id, updated_at) VALUES (?, ?)`),
-				engine.DefaultTenantUUID, seeded); err != nil {
-				t.Fatalf("seed a pre-upgrade tenant_settings row: %v", err)
-			}
-			if _, err := conn.ExecContext(ctx, d.rebind(
-				`INSERT INTO tenant_secrets (tenant_id, name, ciphertext, updated_at)
-				 VALUES (?, ?, ?, ?)`),
-				engine.DefaultTenantUUID, "pre-upgrade-secret", "Y2lwaGVy", seeded); err != nil {
-				t.Fatalf("seed a pre-upgrade tenant_secrets row: %v", err)
-			}
-
-			// After.
-			after := stageAllMigrations(t, d.dialect, "")
-			if err := runMigrations(t, ctx,
-				migration.NewRunner(db, d.dialect, after), d.dialect); err != nil {
-				t.Fatalf("apply the migration under test: %v", err)
-			}
-
-			for _, tc := range []struct {
-				table string
-				where string
-				arg   any
-			}{
-				{"tenant_settings", "tenant_id = ?", engine.DefaultTenantUUID},
-				{"tenant_secrets", "name = ?", "pre-upgrade-secret"},
-			} {
-				var got time.Time
-				err := conn.QueryRowContext(ctx, d.rebind(
-					`SELECT created_at FROM `+tc.table+` WHERE `+tc.where), tc.arg).Scan(&got)
-				if err != nil {
-					t.Fatalf("%s: read created_at back after migrating: %v\n"+
-						"A row the backfill could not see is the silent failure this "+
-						"migration is written against.", tc.table, err)
-				}
-
-				// The assertion. A second of tolerance covers a dialect that
-				// stores less precision than it is given; it is four orders of
-				// magnitude tighter than the difference between this value and
-				// any clock the migration could have read.
-				if delta := got.UTC().Sub(seeded); delta > time.Second || delta < -time.Second {
-					t.Errorf("%s.created_at is %v, want %v (its updated_at).\n"+
-						"Off by %v. A value near the present means the column was added "+
-						"with DEFAULT now() rather than backfilled from updated_at, which "+
-						"claims every existing row was created when the migration ran.",
-						tc.table, got.UTC(), seeded, delta)
-				}
-			}
-		})
-	}
-}
-
-// createdAtMigration is the file under test for a dialect. Named rather than
-// derived from a number, because the numbers are allocated at push time and
-// differ per dialect -- and a test that reasons about "the highest-numbered
-// file" would silently start testing somebody else's migration.
-func createdAtMigration(d migration.Dialect) string {
-	switch d {
-	case migration.DialectPostgres:
-		return "086_two_entities_record_when_they_were_created.sql"
-	case migration.DialectMySQL:
-		return "074_two_entities_record_when_they_were_created.sql"
-	default:
-		return "078_two_entities_record_when_they_were_created.sql"
-	}
-}
-
-// stageAllMigrations copies every migration for a dialect into a temp tree,
-// optionally omitting one.
+// TestCreatedAtIsBackfilledFromUpdatedAtNotFromTheMigrationsClock was removed
+// by cleat#2434, and the reason is worth recording rather than leaving a gap
+// where a test used to be.
 //
-// stageMigrations next door takes an explicit file list, which is right for a
-// test whose "before" state is two files. This one's before state is every
-// migration but one -- eighty-odd for Postgres -- so naming them is not an
-// option, and a list would go stale on every new migration anyway.
+// It staged every migration for a dialect EXCEPT the one that adds created_at,
+// seeded a row, then applied that migration and asserted the row's created_at
+// landed near its updated_at rather than near the present. That is a real
+// property -- a column added with DEFAULT now() claims every existing row was
+// created when the migration ran -- and it needs a database to test.
 //
-// IT ASSERTS THE EXCLUSION HAPPENED. Passing a name that matches nothing would
-// stage the complete set, the "before" database would already have the column,
-// and the test would pass while measuring nothing. That is the same shape as a
-// `-run` pattern selecting no tests.
-func stageAllMigrations(t *testing.T, dialect migration.Dialect, exclude string) string {
-	t.Helper()
-	root := t.TempDir()
-	dir := filepath.Join(root, string(dialect))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("stage migrations: mkdir: %v", err)
-	}
-	src := filepath.Join(migrationsRoot(t), string(dialect))
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		t.Fatalf("stage migrations: read %s: %v", src, err)
-	}
-	staged, excluded := 0, false
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".sql" {
-			continue
-		}
-		if exclude != "" && e.Name() == exclude {
-			excluded = true
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(src, e.Name()))
-		if err != nil {
-			t.Fatalf("stage migrations: read %s: %v", e.Name(), err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, e.Name()), data, 0o644); err != nil {
-			t.Fatalf("stage migrations: write %s: %v", e.Name(), err)
-		}
-		staged++
-	}
-	if staged == 0 {
-		t.Fatalf("UNMEASURED: staged no migrations from %s", src)
-	}
-	if exclude != "" && !excluded {
-		t.Fatalf("UNMEASURED: %q matched no file in %s, so nothing was held back and "+
-			"the 'before' state is really the 'after' state", exclude, src)
-	}
-	return root
-}
+// It needs something else too, which the compaction took away: the excluded
+// migration has to exist as a file. Postgres's was
+// 086_two_entities_record_when_they_were_created.sql, folded into that
+// dialect's three-file baseline by cleat#2059; MSSQL's was 078_..., folded in
+// by cleat#2434. With no such file stageAllMigrations excludes nothing, its own
+// assertion catches that, and the "before" state cannot be built from the
+// shipped tree -- which is what a frozen baseline MEANS: the pre-migration
+// schema is no longer something this repo ships.
+//
+// Reconstructing it from git history was considered and rejected: CI checks out
+// with fetch-depth 1, so `git show <pre-baseline-commit>:migrations/...` is not
+// available where this test would need it.
+//
+// The property is not left unguarded, only guarded differently. Once a
+// migration is folded into a frozen baseline it can never be applied again --
+// existing databases already record its name in schema_migrations, and fresh
+// ones are built at the end state directly -- so the upgrade it performed
+// cannot regress. What a baseline CAN get wrong is the end state, and that is
+// what scripts/gen-mssql-baseline -mode=diff and -mode=supplementary assert,
+// catalogue to catalogue, against a database built from the pre-compaction
+// chain, backed by a known-positive battery.
+//
+// NOTE, and it predates this change: the Postgres leg of this test was already
+// dead. 086 has not existed since cleat#2059, so the leg SKIPPED rather than
+// failing.
+//
+// It did NOT skip for want of a DSN, which this comment claimed until the
+// cleat#2438 review: the Test Go matrix runs ./migration/... and reaches
+// PostgreSQL through ci.yml's CLEAT_TEST_DB, the fallback CLEAT_TEST_POSTGRES
+// is read with. It skipped because the rebaseline removed the partial chain
+// the before-state is built from -- a precondition, not an absent connection.
+// The distinction is worth keeping because an absent DSN and a missing file
+// look identical from inside the loop, so only the reason tells them apart.
 
-// pinnedConn returns a single connection, with the tenant context set where the
-// dialect needs one.
-//
 // ONE CONNECTION, NOT THE POOL. SQL Server's tenant context is
 // sp_set_session_context, which is per-connection state; issued through a
 // *sql.DB it lands on whichever connection the pool hands out and the next

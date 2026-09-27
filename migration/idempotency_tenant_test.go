@@ -4,18 +4,15 @@ package migration_test
 // file header for why -- engine/testutil now depends on this package.
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"net/url"
 	"os"
-	"path/filepath"
 	"testing"
 
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/microsoft/go-mssqldb"
 
-	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/migration"
 )
 
@@ -29,95 +26,68 @@ import (
 // stored, so the first retry after an upgrade starts a second workflow.
 // Adding a tenant_id column keyed alongside key_hash keeps those rows
 // matching, provided existing rows land on the tenant a single-tenant
-// deployment already writes under. That proviso is the assertion below.
+// deployment already writes under. That proviso was the assertion below.
 //
-// The runner is driven over a staged directory holding one file, then two, so
-// the "before" state is the real 001_schema.sql rather than a hand-written
-// approximation of it -- the failure mode of engine/testutil's schema copies
-// (IMPROVEMENT-PLAN 1.9, 2.60b) is precisely a test fixture that agrees with
-// nothing shipped.
-func TestIdempotencyTenantMigrationPreservesExistingKeys(t *testing.T) {
-	for _, d := range []idempotencyDialect{postgresDialect(), mysqlDialect(), mssqlDialect()} {
-		d := d
-		t.Run(string(d.dialect), func(t *testing.T) {
-			if d.skipReason != "" {
-				t.Skip(d.skipReason)
-			}
-			db := d.scratchDB(t)
-			ctx := context.Background()
+// TestIdempotencyTenantMigrationPreservesExistingKeys was removed by
+// cleat#2434. It drove the runner over a staged directory holding
+// 001_schema.sql alone, then 001_schema.sql plus
+// 010_idempotency_keys_tenant_id.sql, and asserted that a key written before
+// the upgrade still matched afterwards.
+//
+// The compaction folded 010 into MSSQL's three-file baseline, so there is no
+// longer a file to stage and no longer a "before" state to build from the
+// shipped tree -- which is what a frozen baseline means. After this PR no
+// dialect has a partial chain left to stage. THAT is the argument, and it does
+// not need any leg to have died quietly first.
+//
+// What the other two legs were actually doing, because this comment claimed the
+// opposite until cleat#2438's review and the wrong version had already been
+// copied into the PR body before it was caught:
+//
+//   * PostgreSQL SKIPS, and has since cleat#2059 -- that rebaseline left
+//     postgres three files generated from a fully-migrated dump, so there is no
+//     partial chain to build a before-state from. NOT because no DSN was
+//     provided: the Test Go matrix runs ./migration/... and reaches PostgreSQL
+//     through ci.yml's CLEAT_TEST_DB, which is the fallback that
+//     CLEAT_TEST_POSTGRES is read with.
+//   * MySQL RAN -- multi-db-ci.yml sets CLEAT_TEST_MYSQL and runs
+//     ./migration/... in the same job -- and at this commit
+//     migrations/mysql/010_idempotency_keys_tenant_id.sql EXISTS, with 70
+//     files in that dialect against postgres's 3. So the original sentence was
+//     false in the strongest available way: these arms did not skip, they ran,
+//     and this is the arm that FAILS when the staged file is absent
+//     (`read 010_...: no such file or directory`, measured on cleat#2435's
+//     branch). "SKIPPED rather than failing" inverts both verbs.
+//
+//     Note the ref, because it is easy to make this clause go stale: cleat#2435
+//     compacts the MySQL chain, and ITS compaction is what deletes that 010. So
+//     "MySQL has not been rebaselined" is true here and will stop being true
+//     when that lands -- which is the same reason its arm is retired by this
+//     PR rather than left alone.
+//
+// The distinction matters beyond this comment: "this was already gone" and
+// "this PR is what ends it" are different claims about what the change costs.
+//
+// Reconstructing the pre-migration schema from git history was considered and
+// rejected: CI checks out with fetch-depth 1, so the older revision is not
+// there to read.
+//
+// The upgrade itself cannot regress -- a migration folded into a frozen
+// baseline is never applied again, because every existing database already
+// records its name in schema_migrations and every fresh one is built at the end
+// state directly. What a baseline can get wrong is that end state, and
+// scripts/gen-mssql-baseline -mode=diff and -mode=supplementary assert it
+// catalogue-to-catalogue against a database built from the pre-compaction
+// chain.
+//
+// The helpers below are shared with the other migration tests in this package
+// and stay.
 
-			// Before: the schema as it shipped, with no tenant_id on
-			// idempotency_keys at all.
-			before := stageMigrations(t, d.dialect, "001_schema.sql")
-			if err := runMigrations(t, ctx,
-				migration.NewRunner(db, d.dialect, before), d.dialect); err != nil {
-				t.Fatalf("apply 001_schema.sql: %v", err)
-			}
-
-			// A key written by the deployment before the upgrade.
-			legacyHash := []byte("0123456789abcdef0123456789abcdef")
-			if _, err := db.ExecContext(ctx, d.rebind(
-				`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at)
-				 VALUES (?, ?, `+d.futureTimestamp+`)`),
-				legacyHash, "wf-before-upgrade"); err != nil {
-				t.Fatalf("insert pre-upgrade idempotency key: %v", err)
-			}
-
-			// After.
-			after := stageMigrations(t, d.dialect, "001_schema.sql", "010_idempotency_keys_tenant_id.sql")
-			if err := runMigrations(t, ctx,
-				migration.NewRunner(db, d.dialect, after), d.dialect); err != nil {
-				t.Fatalf("apply 010_idempotency_keys_tenant_id.sql: %v", err)
-			}
-
-			// 1. The row survived, and it belongs to the default tenant --
-			//    which is the tenant every write from a single-tenant
-			//    deployment carries, so its keys keep matching.
-			var workflowID, tenantID string
-			err := db.QueryRowContext(ctx, d.rebind(
-				`SELECT workflow_id, `+d.tenantIDText+` FROM idempotency_keys WHERE key_hash = ?`),
-				legacyHash).Scan(&workflowID, &tenantID)
-			if err != nil {
-				t.Fatalf("read the pre-upgrade key back after migrating: %v\n"+
-					"A key that does not survive the upgrade means the first retry "+
-					"after it starts a second workflow.", err)
-			}
-			if workflowID != "wf-before-upgrade" {
-				t.Errorf("pre-upgrade key resolves to workflow %q, want wf-before-upgrade", workflowID)
-			}
-			if tenantID != engine.DefaultTenantUUID {
-				t.Errorf("pre-upgrade key landed on tenant %q, want the default tenant %q: "+
-					"a single-tenant deployment's existing keys no longer match after the upgrade",
-					tenantID, engine.DefaultTenantUUID)
-			}
-
-			// 2. The same key is now insertable for a second tenant. This is
-			//    the defect itself: before 010 the primary key was key_hash
-			//    alone, so tenant B's "order-123" was tenant A's row.
-			const otherTenant = "bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb"
-			if _, err := db.ExecContext(ctx, d.rebind(
-				`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
-				 VALUES (?, ?, `+d.futureTimestamp+`, ?)`),
-				legacyHash, "wf-other-tenant", otherTenant); err != nil {
-				t.Fatalf("a second tenant cannot hold the same idempotency key: %v", err)
-			}
-
-			// 3. And within one tenant the key still deduplicates, which is
-			//    the property the whole table exists for.
-			if _, err := db.ExecContext(ctx, d.rebind(
-				`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
-				 VALUES (?, ?, `+d.futureTimestamp+`, ?)`),
-				legacyHash, "wf-duplicate", otherTenant); err == nil {
-				t.Error("the same key was inserted twice for one tenant: the composite " +
-					"primary key is not enforcing uniqueness within a tenant")
-			}
-		})
-	}
-}
-
-// idempotencyDialect carries the per-dialect knowledge the test above needs:
-// how to get an empty database, and the three places where the SQL genuinely
-// differs.
+// idempotencyDialect carries the per-dialect knowledge the removed test needed,
+// and the rest of the package still uses it: how to get an empty database, and
+// the three places where the SQL genuinely differs. It is kept here rather than
+// moved because that is where it has always lived and nothing about the
+// compaction changes it.
 type idempotencyDialect struct {
 	dialect migration.Dialect
 	// scratchDB returns a handle to an empty database, skipping the subtest
@@ -133,119 +103,6 @@ type idempotencyDialect struct {
 	// skipReason, when set, skips this dialect with an explanation.
 	skipReason string
 }
-
-func postgresDialect() idempotencyDialect {
-	return idempotencyDialect{
-		dialect:         migration.DialectPostgres,
-		scratchDB:       func(t *testing.T) *sql.DB { return newScratchDB(t, "cleat_migration_idem_tenant_test") },
-		rebind:          rebindNumbered,
-		futureTimestamp: "now() + INTERVAL '1 day'",
-		tenantIDText:    "tenant_id::text",
-		// SKIPPED, and this is a precondition rather than a bail-out. Both tests
-		// that use this dialect build their "before" state by applying a SUBSET
-		// of the chain -- 001 alone, or every file but one -- and then applying
-		// the migration under test on top of it. cleat#2059's rebaseline leaves
-		// PostgreSQL three files generated from a pg_dump of the fully-migrated
-		// database, so 010 and 086 are no longer separate steps: there is no
-		// subset that produces a pre-migration state, and 001 alone now yields
-		// the finished schema. The "before" and "after" would be the same
-		// database, which is what the second test's own UNMEASURED check reports.
-		//
-		// It is a skip rather than a retirement because the property is still
-		// real and still tested -- on MySQL and SQL Server, whose chains are
-		// untouched. It goes when their arms do, and not before.
-		//
-		// What is NOT tested on PostgreSQL any more: that a key written before
-		// 010 is re-scoped by 010, and that created_at is backfilled rather than
-		// stamped now(). Both are upgrade-path properties, and 0.3.0 ships only a
-		// fresh database -- the rebaseline's own premise, recorded in the issue.
-		skipReason: "cleat#2059 consolidated PostgreSQL's migrations, so there is no pre-migration " +
-			"state to build: the tests that need one still run on MySQL and SQL Server, whose " +
-			"chains are unchanged",
-	}
-}
-
-func mysqlDialect() idempotencyDialect {
-	return idempotencyDialect{
-		dialect:         migration.DialectMySQL,
-		scratchDB:       func(t *testing.T) *sql.DB { return newMySQLScratchDB(t, idempotencyScratchDB) },
-		rebind:          func(q string) string { return q },
-		futureTimestamp: "DATE_ADD(NOW(6), INTERVAL 1 DAY)",
-		tenantIDText:    "tenant_id",
-
-		// This arm was skipped until IMPROVEMENT-PLAN 3.13: the Runner could
-		// not apply migrations/mysql/001_schema.sql at all, so there was no
-		// "before" state to migrate from. Removing that skip is 3.13's
-		// acceptance test, and this is where it was removed.
-	}
-}
-
-func mssqlDialect() idempotencyDialect {
-	return idempotencyDialect{
-		dialect:         migration.DialectMSSQL,
-		scratchDB:       func(t *testing.T) *sql.DB { return newMSSQLScratchDB(t, idempotencyScratchDB) },
-		rebind:          rebindAtP,
-		futureTimestamp: "DATEADD(DAY, 1, SYSUTCDATETIME())",
-		tenantIDText:    "LOWER(CONVERT(NVARCHAR(36), tenant_id))",
-	}
-}
-
-func rebindNumbered(q string) string {
-	var b []byte
-	n := 0
-	for i := 0; i < len(q); i++ {
-		if q[i] == '?' {
-			n++
-			b = append(b, []byte(fmt.Sprintf("$%d", n))...)
-			continue
-		}
-		b = append(b, q[i])
-	}
-	return string(b)
-}
-
-func rebindAtP(q string) string {
-	var b []byte
-	n := 0
-	for i := 0; i < len(q); i++ {
-		if q[i] == '?' {
-			n++
-			b = append(b, []byte(fmt.Sprintf("@p%d", n))...)
-			continue
-		}
-		b = append(b, q[i])
-	}
-	return string(b)
-}
-
-// stageMigrations builds a migrations root containing only the named files for
-// one dialect, so a Runner can be pointed at a chosen prefix of the real
-// history. The files are the shipped ones, copied rather than rewritten.
-func stageMigrations(t *testing.T, dialect migration.Dialect, names ...string) string {
-	t.Helper()
-	root := t.TempDir()
-	dir := filepath.Join(root, string(dialect))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("stage migrations: mkdir: %v", err)
-	}
-	src := filepath.Join(migrationsRoot(t), string(dialect))
-	for _, name := range names {
-		data, err := os.ReadFile(filepath.Join(src, name))
-		if err != nil {
-			t.Fatalf("stage migrations: read %s: %v", name, err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
-			t.Fatalf("stage migrations: write %s: %v", name, err)
-		}
-	}
-	return root
-}
-
-// Each test needs its own scratch database: these run in one package, and a
-// shared name would make them order-dependent -- the class of defect this
-// file's PostgreSQL sibling (newScratchDB) already guards against by taking a
-// name per test.
-const idempotencyScratchDB = "cleat_migration_idem_tenant_test"
 
 // newMySQLScratchDB creates an empty MySQL database and returns a handle to it.
 //

@@ -73,7 +73,13 @@ func mssqlExecAsTenant(ctx context.Context, t *testing.T, db *sql.DB, tenant, st
 
 var (
 	mssqlFilterFnRe = regexp.MustCompile(`(?s)CREATE OR ALTER FUNCTION dbo\.fn_tenant_filter.*?;`)
-	mssqlPolicyRe   = regexp.MustCompile(`(?s)CREATE SECURITY POLICY (dbo\.\w+)\s+ADD FILTER PREDICATE dbo\.fn_tenant_filter\(tenant_id\) ON dbo\.(\w+)\s+WITH \(STATE = ON\);`)
+	// The FILTER clause no longer has to be the last one before WITH, since
+	// cleat#2434: the generated baseline creates a policy's FILTER and its
+	// BLOCK predicates in one statement, where the old chain created the
+	// FILTER in 001_schema.sql and ALTERed the BLOCKs in later migrations. The
+	// middle group admits those clauses. `[^;]*?` rather than `.*?` so a match
+	// can never run past the statement's own terminator into the next policy.
+	mssqlPolicyRe = regexp.MustCompile(`(?s)CREATE SECURITY POLICY (dbo\.\w+)\s+ADD FILTER PREDICATE dbo\.fn_tenant_filter\(tenant_id\) ON dbo\.(\w+)(?:,\s*ADD [^;]*?)?\s+WITH \(STATE = ON\);`)
 )
 
 // mssqlPolicyTablesMissingFromTestSchema records the tenant-scoped tables the
@@ -106,45 +112,40 @@ var mssqlPolicyTablesMissingFromTestSchema = []string{}
 func enableMSSQLTenantPolicies(t *testing.T, db *sql.DB) {
 	t.Helper()
 
-	path := filepath.Join("..", "migrations", "mssql", "001_schema.sql")
+	// 003_procedures.sql, since cleat#2434. The policies used to be read out of
+	// 001_schema.sql, with 031 and 042 folded in by hand below because each
+	// added its own policy in a separate file the scan could not see. The
+	// compaction put every policy in one generated place, so the folding is
+	// gone: 003 carries all of them, and 001 carries none.
+	path := filepath.Join("..", "migrations", "mssql", "003_procedures.sql")
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read %s: %v", path, err)
 	}
 	src := string(data)
 
-	// 031 adds an eighth policy (dbo.workflow_promises, finding S1/S10's
-	// verification) in its own file rather than in 001_schema.sql, so it is
-	// invisible to the scan above unless read separately. Folding it in here
-	// means this function's "applied" set -- and therefore
-	// TestMSSQLTenantIsolation_UnderRealSecurityPolicies's assertions -- covers
-	// all eight tables the shipped schema actually protects, not the seven
-	// 001_schema.sql originally shipped.
-	promisesPath := filepath.Join("..", "migrations", "mssql", "031_workflow_promises_security_policy.sql")
-	promisesData, err := os.ReadFile(promisesPath)
-	if err != nil {
-		t.Fatalf("read %s: %v", promisesPath, err)
-	}
-	src += "\n" + string(promisesData)
-
-	// 042 adds a ninth policy (dbo.tenant_settings, IMPROVEMENT-PLAN 3.94 step
-	// 3) in its own file, for the same reason 031 did, and it is invisible to
-	// the scan above for the same reason. Folded in here so the "applied" set
-	// stays the set the shipped schema actually protects rather than the set
-	// that happened to live in 001_schema.sql.
-	//
-	// A settings table is the worst place to lose a policy: every tenant would
-	// be able to read and rewrite every other tenant's execution limits.
-	settingsPath := filepath.Join("..", "migrations", "mssql", "042_tenant_settings.sql")
-	settingsData, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatalf("read %s: %v", settingsPath, err)
-	}
-	src += "\n" + string(settingsData)
-
 	policies := mssqlPolicyRe.FindAllStringSubmatch(src, -1)
 	if len(policies) == 0 {
-		t.Fatalf("could not find any CREATE SECURITY POLICY in %s or %s", path, promisesPath)
+		t.Fatalf("could not find any CREATE SECURITY POLICY in %s -- the shipped schema "+
+			"stopped carrying one, or this scan no longer matches how one is written", path)
+	}
+
+	// The check above fails on ZERO and not on FEWER, which cleat-review named
+	// on cleat#2438: a pattern that matched five of fourteen would verify five
+	// policies and report success. A count is no defence against that on its
+	// own, so the matched set is cross-checked against a deliberately looser
+	// read of the same file -- count the declarations by name, ignore their
+	// shape, and require the two to agree. This is the "a strict parse and a
+	// loose parse must be made to disagree" move, applied where the strict one
+	// would otherwise be the only reader.
+	//
+	// Comments are stripped first, or the prose above each policy counts as a
+	// declaration.
+	declared := strings.Count(stripSQLComments(src), "CREATE SECURITY POLICY")
+	if len(policies) != declared {
+		t.Fatalf("%s declares %d CREATE SECURITY POLICY statement(s) but this scan matched %d. "+
+			"Under-selection checks fewer policies than ship and passes, which is what this "+
+			"count exists to catch -- re-read the pattern against the file.", path, declared, len(policies))
 	}
 	if fn := mssqlFilterFnRe.FindString(src); fn == "" {
 		t.Fatalf("could not find dbo.fn_tenant_filter in %s -- the migration changed shape "+

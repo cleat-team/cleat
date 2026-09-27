@@ -43,11 +43,31 @@ func normalizeMSSQLName(name, kind string) string {
 	return name
 }
 
-// snapshotMSSQL builds a Catalog for a SQL Server database. Core migrations
-// create no SECURITY POLICY objects on this dialect -- tenant isolation on
-// SQL Server is a contained-user/role mechanism, not row-level security, per
-// docs/schema-partitioning-design.md's work plan -- so, as with MySQL, every
-// Table's RowSecurity is nil and Policies is empty here.
+// snapshotMSSQL builds a Catalog for a SQL Server database. Every Table's
+// RowSecurity is nil and Policies is empty here, as with MySQL.
+//
+// That is a GAP, not a fact about the dialect, and this comment said the
+// opposite until cleat#2434. It read: "Core migrations create no SECURITY
+// POLICY objects on this dialect -- tenant isolation on SQL Server is a
+// contained-user/role mechanism, not row-level security". Both halves are
+// false, and both were checkable: a chain-built database carries **14**
+// SECURITY POLICY objects holding **56** predicates (14 FILTER + 14 AFTER
+// INSERT + 14 AFTER UPDATE + 14 BEFORE UPDATE), and they are ordinary row-level
+// security -- sys.security_policies joined to sys.security_predicates, with
+// dbo.fn_tenant_filter as the predicate function.
+//
+// The consequence is worse than a missing feature. A comment that says the
+// class does not exist is a comment that stops the next reader from adding the
+// check, and it makes the instrument's silence read as a finding. The baseline
+// generated under cleat#2434 could have lost all 56 predicates and this file
+// would still have reported an empty diff.
+//
+// So a consumer of this package that needs the class compared must do it
+// itself: scripts/gen-mssql-baseline -mode=supplementary reads
+// sys.security_policies and sys.security_predicates directly, and its
+// known-positive battery includes the case where this diff is CLEAN while that
+// check fails. Adding the comparison here would be the better repair and is
+// deliberately not done in the compaction change -- see cleat#2434.
 func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 	cat := &Catalog{
 		Dialect:  migration.DialectMSSQL,
@@ -155,8 +175,21 @@ func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 		// constraints of the same kind on the same table (two DEFAULTs, two
 		// UNIQUEs, two FOREIGN KEYs) collapsing onto an identical line and
 		// silently losing one from the comparison.
+		//
+		// is_not_trusted is part of the compared text, and that is the whole
+		// reason the CASE below exists. It was not, until cleat#2438: the
+		// pre-compaction chain adds seven JSON check constraints WITH NOCHECK on
+		// purpose (036_plugin_deps_isjson.sql, 037_json_column_checks.sql) so an
+		// existing deployment with a violating row upgrades instead of blocking,
+		// and a baseline generated without it reproduces every one of those
+		// definitions while silently marking all seven trusted. A fresh database
+		// inserts identically either way, so only this column separates them --
+		// and while it was outside the compared set this differential reported
+		// zero differences about constraints it had not looked at. Appended, not
+		// prepended: line 218 takes the definition's first token as the kind.
 		conRows, err := db.QueryContext(ctx, `
 			SELECT name, 'CHECK ' + COALESCE(OBJECT_DEFINITION(object_id), '')
+				+ CASE WHEN is_not_trusted = 1 THEN ' WITH NOCHECK' ELSE '' END
 			FROM sys.check_constraints WHERE parent_object_id = @p1
 			UNION ALL
 			SELECT dc.name, 'DEFAULT ' + COALESCE(OBJECT_DEFINITION(dc.object_id), '') + ' FOR ' + c.name

@@ -360,14 +360,23 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 		// mysql 2, mssql 2.
 		minRoutines int
 		// consolidated marks a dialect whose migrations are a generated baseline
-		// rather than a history. Postgres is, since cleat#2059: each routine is
-		// defined exactly once, so the supersession guard below is INVERTED for
-		// it rather than skipped. MySQL and SQL Server still carry their chains.
+		// rather than a history. Postgres is, since cleat#2059; SQL Server is,
+		// since cleat#2434. Each routine is defined exactly once in a
+		// consolidated dialect, so the supersession guard below is INVERTED for
+		// it rather than skipped -- a duplicate there is the baseline growing a
+		// superseded definition back.
+		//
+		// SQL Server moved from false to true in cleat#2434, and the flag was
+		// the whole change: the guard's non-consolidated arm requires at least
+		// one routine to be defined more than once, which a generated baseline
+		// cannot satisfy by construction. Flipping the flag is what the
+		// cleat#2059 rebaseline did for Postgres, and the guard was written with
+		// both arms for exactly this reason.
 		consolidated bool
 	}{
 		{testutil.DialectPostgres, filepath.Join("..", "migrations", "postgres"), 5, true},
 		{testutil.DialectMySQL, filepath.Join("..", "migrations", "mysql"), 1, false},
-		{testutil.DialectMSSQL, filepath.Join("..", "migrations", "mssql"), 2, false},
+		{testutil.DialectMSSQL, filepath.Join("..", "migrations", "mssql"), 2, true},
 	} {
 		t.Run(string(d.dialect), func(t *testing.T) {
 			defs := parseRoutineDefinitions(t, d.dialect, d.dir)

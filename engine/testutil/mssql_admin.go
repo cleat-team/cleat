@@ -254,9 +254,20 @@ func restoreMSSQLPlainPredicate(t *testing.T, baseDSN string) {
 	}
 	defer restoreDB.Close()
 
-	path := filepath.Join(repoRootForMSSQLTestutil(t), "migrations", "mssql",
-		"075_the_admin_bypass_is_opt_in.sql")
-	execMSSQLBatchFile(t, restoreDB, path)
+	// Replay the baseline's seed half and its routines half, in that order.
+	//
+	// Before cleat#2434 this replayed one file,
+	// 075_the_admin_bypass_is_opt_in.sql, which carried both things the plain
+	// form needs: the MERGE that records admin.rls_predicate_form.form='plain',
+	// and the function and policy definitions that implement it. The compaction
+	// split those across 002_defaults.sql (the MERGE) and 003_procedures.sql
+	// (the definitions), so the restore follows the content rather than the
+	// filename. 003 opens by dropping every policy, which is what lets it run
+	// against a database already in the opt-in form.
+	root := repoRootForMSSQLTestutil(t)
+	for _, name := range []string{"002_defaults.sql", "003_procedures.sql"} {
+		execMSSQLBatchFile(t, restoreDB, filepath.Join(root, "migrations", "mssql", name))
+	}
 }
 
 // AdminDB returns the handle a test should use when it needs to see or change

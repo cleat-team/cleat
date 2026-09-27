@@ -73,16 +73,14 @@ var mysqlProcedureMigrations = []string{
 	"100_the_finalize_procedure_stops_deleting_failed_history.sql",
 }
 
+// ONE entry since the cleat#2434 rebaseline, for the same reason the Postgres
+// list above has one: 003 now carries the FINAL body, generated from a database
+// built by the whole chain, so it is the last definition by construction rather
+// than by taking the last of nine in filename order. applyMSSQLProcedures
+// applies only the final entry, so the entries that used to be here were being
+// replayed one after another to arrive at a body 003 already contains.
 var mssqlProcedureMigrations = []string{
 	"003_procedures.sql",
-	"004_fix_finalize_workflow_status_fence.sql",
-	"046_query_state_on_suspension.sql",
-	"047_child_does_not_rewrite_parent_event.sql",
-	"050_a_signal_delivered_mid_segment_wakes_the_workflow.sql",
-	"052_a_burst_wakes_finalize_on_progress.sql",
-	"053_the_idempotency_write_needs_the_tenant.sql",
-	"056_the_finalize_procedure_stops_writing_the_result_column.sql",
-	"100_the_finalize_procedure_stops_deleting_failed_history.sql",
 }
 
 // Every Postgres-backed subtest that goes through PostgresBackend.Setup
@@ -255,15 +253,54 @@ func applyMSSQLProcedures(t *testing.T, db *sql.DB) {
 				mssqlProceduresErr = fmt.Errorf("read migration %s: %v", path, err)
 				return
 			}
-			if _, err := db.Exec(string(data)); err != nil {
-				mssqlProceduresErr = fmt.Errorf("apply migration %s: %v", path, err)
-				return
+			// Split on GO, because since cleat#2434 the final entry is the
+			// generated baseline: one file holding every module, separated by
+			// GO batch terminators. Exec'ing it whole fails with "Incorrect
+			// syntax near 'GO'" and then "'CREATE/ALTER PROCEDURE' must be the
+			// first statement in a query batch" -- neither of which names the
+			// real cause. The migrations this loop used to apply each held a
+			// single statement with no GO, so no split was needed to reach the
+			// same place.
+			//
+			// The rule is migration.Runner's (runner.go:925): a line that is
+			// exactly GO after trimming and upper-casing ends a batch.
+			for _, batch := range splitOnGo(string(data)) {
+				if _, err := db.Exec(batch); err != nil {
+					mssqlProceduresErr = fmt.Errorf("apply migration %s: %v", path, err)
+					return
+				}
 			}
 		}
 	})
 	if mssqlProceduresErr != nil {
 		t.Fatalf("%v", mssqlProceduresErr)
 	}
+}
+
+// splitOnGo splits SQL Server source into batches at lines that are exactly
+// `GO`, which is the batch separator the server's own tooling and
+// migration.Runner both use -- it is not a T-SQL statement, and sending it to
+// the server is a syntax error. Empty batches (from consecutive GO lines or a
+// trailing terminator) are dropped rather than executed.
+func splitOnGo(src string) []string {
+	var out []string
+	var buf strings.Builder
+	flush := func() {
+		if s := strings.TrimSpace(buf.String()); s != "" {
+			out = append(out, s)
+		}
+		buf.Reset()
+	}
+	for _, line := range strings.Split(src, "\n") {
+		if strings.EqualFold(strings.TrimSpace(line), "GO") {
+			flush()
+			continue
+		}
+		buf.WriteString(line)
+		buf.WriteString("\n")
+	}
+	flush()
+	return out
 }
 
 // splitMySQLDelimited splits MySQL SQL source that may contain `DELIMITER`
