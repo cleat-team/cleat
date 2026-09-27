@@ -350,6 +350,16 @@ func databaseRoutineText(t *testing.T, db *sql.DB, dialect testutil.Dialect, qua
 	return text, strings.TrimSpace(text) != ""
 }
 
+// theBaseline is the frozen, generated baseline every dialect was compacted to
+// -- postgres in cleat#2059, MySQL in cleat#2433, SQL Server in cleat#2434.
+//
+// Named once, because docs/contributor/migrations.md names them once. The guard
+// below keys on the NAME rather than on a position or a count, and that choice
+// is the safe direction but not a free one: a dialect that gained a fourth
+// baseline file without this list moving would have that file read as
+// post-baseline, and duplicates inside it would go uncounted.
+var theBaseline = []string{"001_schema.sql", "002_defaults.sql", "003_procedures.sql"}
+
 func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *testing.T) {
 	for _, d := range []struct {
 		dialect testutil.Dialect
@@ -362,8 +372,8 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 		// consolidated marks a dialect whose migrations are a generated baseline
 		// rather than a history. Postgres is, since cleat#2059, MySQL since
 		// cleat#2433, and SQL Server since cleat#2434. Each routine is defined
-		// exactly once in a consolidated dialect, so the supersession guard below
-		// is INVERTED for it rather than skipped -- a duplicate there is the
+		// exactly once IN THE BASELINE, so the supersession guard below is
+		// INVERTED for it rather than skipped -- a duplicate there is the
 		// baseline growing a superseded definition back.
 		//
 		// Flipping this flag WAS the whole change for each of the last two, and
@@ -372,10 +382,16 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 		// baseline cannot satisfy by construction. The guard was written with both
 		// arms for exactly this reason.
 		consolidated bool
+		// baselineFiles names the frozen, generated baseline. A routine defined
+		// twice WITHIN these files is the baseline growing back a superseded
+		// definition; a routine defined once here and superseded by a LATER
+		// numbered migration is the documented shape and is not this arm's
+		// business. See the arm's comment for the ruling that drew that line.
+		baselineFiles []string
 	}{
-		{testutil.DialectPostgres, filepath.Join("..", "migrations", "postgres"), 5, true},
-		{testutil.DialectMySQL, filepath.Join("..", "migrations", "mysql"), 1, true},
-		{testutil.DialectMSSQL, filepath.Join("..", "migrations", "mssql"), 2, true},
+		{testutil.DialectPostgres, filepath.Join("..", "migrations", "postgres"), 5, true, theBaseline},
+		{testutil.DialectMySQL, filepath.Join("..", "migrations", "mysql"), 1, true, theBaseline},
+		{testutil.DialectMSSQL, filepath.Join("..", "migrations", "mssql"), 2, true, theBaseline},
 	} {
 		t.Run(string(d.dialect), func(t *testing.T) {
 			defs := parseRoutineDefinitions(t, d.dialect, d.dir)
@@ -403,6 +419,45 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 					superseded++
 				}
 			}
+			// SUPERSESSION WITHIN THE BASELINE, counted over the FROZEN files
+			// only -- which is the population this arm is about.
+			//
+			// It used to count the whole directory, and cleat#2402 §3 is the
+			// first post-baseline postgres migration, so it was the first thing
+			// to exercise the intersection and it failed a guard whose reasoning
+			// is about the baseline. Two documents disagreed in public: this file
+			// said a consolidated dialect defines each routine exactly once, and
+			// docs/contributor/migrations.md says a routine is changed by ADDING
+			// A NEW NUMBERED MIGRATION. Those cannot both hold, because such a
+			// migration necessarily defines the routine a second time.
+			//
+			// The owner ruled on 2026-09-27 that the GUARD is what narrows, and
+			// that ruling is the resolution recorded here: the baseline files
+			// must still define each routine at most once -- a duplicate among
+			// THEM is still the baseline growing a superseded definition back --
+			// while a later numbered migration is the documented shape for
+			// superseding one.
+			baseline := map[string]bool{}
+			for _, f := range d.baselineFiles {
+				baseline[f] = true
+			}
+			baselineDefs := 0
+			supersededInBaseline := 0
+			var baselineDupes []string
+			for name, defList := range byName {
+				inBaseline := 0
+				for _, def := range defList {
+					if baseline[def.migration] {
+						inBaseline++
+					}
+				}
+				baselineDefs += inBaseline
+				if inBaseline > 1 {
+					supersededInBaseline++
+					baselineDupes = append(baselineDupes, fmt.Sprintf("%s (%d)", name, inBaseline))
+				}
+			}
+
 			if d.consolidated {
 				// INVERTED, not deleted, for a consolidated dialect. This guard
 				// exists because a supersession is what makes the
@@ -413,26 +468,35 @@ func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *tes
 				// definition and no earlier one.
 				//
 				// The same property, read in the other direction, is still worth
-				// asserting -- and is now the stronger claim. A routine defined
-				// twice in a consolidated dialect is the BASELINE GROWING BACK a
-				// superseded definition, which is exactly what the consolidation
-				// exists to remove.
-				if superseded != 0 {
-					var names []string
-					for name, defs := range byName {
-						if len(defs) > 1 {
-							names = append(names, fmt.Sprintf("%s (%d)", name, len(defs)))
-						}
-					}
-					sort.Strings(names)
-					t.Fatalf("%s is CONSOLIDATED, but %d routine(s) are defined more than "+
-						"once: %s.\n\nA consolidated baseline carries each routine's last "+
-						"definition and nothing earlier, so a duplicate means a superseded "+
-						"definition has grown back. Fix the generation, not this guard.",
-						d.dir, superseded, strings.Join(names, ", "))
+				// asserting -- and is still the stronger claim. A routine defined
+				// twice IN THE BASELINE is the BASELINE GROWING BACK a superseded
+				// definition, which is exactly what the consolidation exists to
+				// remove.
+				if baselineDefs == 0 {
+					t.Fatalf("no routine definition in %s came from any of %v, so the arm "+
+						"below would pass vacuously.\n\nThe baseline was renamed or "+
+						"re-split and d.baselineFiles was not moved with it -- which is "+
+						"the permissive direction, so re-point it rather than deleting "+
+						"this check.", d.dir, d.baselineFiles)
 				}
-				t.Logf("%s is consolidated: %d routine(s), none defined twice",
-					d.dialect, len(byName))
+				if supersededInBaseline != 0 {
+					sort.Strings(baselineDupes)
+					t.Fatalf("%s is CONSOLIDATED and %d routine(s) are defined more than "+
+						"once WITHIN its baseline: %s.\n\nA generated baseline carries "+
+						"each routine's last definition and nothing earlier, so a "+
+						"duplicate THERE means a superseded definition has grown back "+
+						"into the baseline. Fix the generation, not this guard.\n\n"+
+						"A routine the baseline defines once and a LATER numbered "+
+						"migration redefines is a different thing and is allowed: that "+
+						"is the documented way to change a routine "+
+						"(docs/contributor/migrations.md, and the owner ruling of "+
+						"2026-09-27 that narrowed this check to %v).",
+						d.dir, supersededInBaseline, strings.Join(baselineDupes, ", "),
+						d.baselineFiles)
+				}
+				t.Logf("%s is consolidated: %d routine(s) overall, none defined twice within "+
+					"the %d baseline files (%d baseline definition(s))",
+					d.dialect, len(byName), len(d.baselineFiles), baselineDefs)
 			} else if superseded == 0 {
 				t.Fatalf("no routine in %s is defined more than once, so the "+
 					"latest-definition check has nothing to discriminate.\n\n"+
