@@ -1975,7 +1975,16 @@ jobs:
         run: scripts/check-skip-budget.sh fuzz fuzz-report.json
 
   # -------------------------------------------------------------------------
-  # Benchmarks (push to main only)
+  # Benchmarks (push to main only; results are artifacts, NOT a trend store)
+  #
+  # It measures and uploads. It does not compare across runs, because the step
+  # that claimed to was never wired up -- see the note where it used to be.
+  #
+  # WHERE THE NUMBERS GO, for anyone who came here looking for trend data:
+  # `bench-output.txt` is uploaded as the artifact `benchmark-results-<sha>`
+  # and **kept for 90 days**. There is no longer-lived store, no baseline to
+  # compare against, and no alert threshold. If you want a trend you must
+  # download successive artifacts before they expire.
   # -------------------------------------------------------------------------
   benchmarks:
     name: Benchmarks
@@ -1984,7 +1993,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # Fetch enough history for benchmark comparison
+          # Full history. This was added so the (now removed) trend step could
+          # diff against a previous run; nothing in the job reads it any more.
+          # Left in place rather than narrowed to 1: it is no longer load
+          # bearing here, but a shallow clone changes what `-buildvcs` can
+          # stamp, and that is not something this job's benchmark run has been
+          # checked against. Narrowing it is a separate, measurable change.
           fetch-depth: 0
 
       - name: Setup Go
@@ -2004,7 +2018,7 @@ jobs:
       # BenchmarkSagaWorkflow and BenchmarkLLMCallWorkflow moved when
       # cleat_bench_test.go moved out of the root module's benchmarks/ dir.
       # Appended (tee -a) to the same bench-output.txt so both halves land in
-      # one trend-tracking upload.
+      # the one artifact the upload step below produces.
       - name: Run SDK workflow benchmarks (benchmarks/workflows module)
         working-directory: benchmarks/workflows
         run: go test -bench=. -benchmem -benchtime=30s ./... | tee -a ../../bench-output.txt
@@ -2016,16 +2030,34 @@ jobs:
           path: bench-output.txt
           retention-days: 90
 
-      - name: Store benchmark result (trend tracking)
-        uses: benchmark-action/github-action-benchmark@v1
-        with:
-          tool: go
-          output-file-path: bench-output.txt
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          auto-push: false
-          alert-threshold: "120%"
-          comment-on-alert: true
-          fail-on-alert: true
+      # The `Store benchmark result (trend tracking)` step that used to sit here
+      # is removed, because it could not do what its name said. It was
+      # benchmark-action/github-action-benchmark@v1 with `auto-push: false`, so
+      # it never wrote a result anywhere even when it ran; and it fetched a
+      # `gh-pages` branch that has never existed in this repo -- there is no
+      # other reference to `gh-pages` anywhere, in any workflow, script or doc,
+      # so nothing was ever going to create one. It failed at the fetch and took
+      # this job red on every push to main.
+      #
+      # Red was the honest half: it did say nothing was being stored. But the
+      # step's NAME claimed trend tracking, so the failure read as a flaky
+      # benchmark rather than as a feature that was never wired up. Removed
+      # rather than muted -- `continue-on-error` here would have bought a green
+      # step that still stores nothing, which is the same defect one level down.
+      #
+      # The measurements are NOT lost. The upload above keeps bench-output.txt
+      # as a 90-day artifact on every run; what is gone is the cross-run
+      # comparison and the `fail-on-alert` threshold, which is exactly what the
+      # deleted step's name promised and could not deliver.
+      #
+      # Making trend tracking real is an owner decision about a published
+      # branch, and it needs BOTH halves:
+      #   1. a `gh-pages` branch to exist, and
+      #   2. `auto-push: true` plus `permissions: contents: write`, so results
+      #      are written back.
+      # Doing only the first buys a green step that stores nothing -- which is
+      # why cleat#2487's suggested remedy ("either create the `gh-pages` branch,
+      # or set `skip-fetch-gh-pages: true`") fixes it in neither form.
 
   # -------------------------------------------------------------------------
   # Build all targets
@@ -2380,7 +2412,24 @@ jobs:
   # -------------------------------------------------------------------------
   coverage:
     name: Coverage
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # Runs where the number is actionable. This was main-push-only, so the
+    # floors were compared exactly once per commit -- after the work had
+    # already landed, on a tree nobody was about to change. A PR could move
+    # coverage in either direction and no one saw it until after the merge.
+    #
+    # This is VISIBILITY, not gating: `continue-on-error: true` below and the
+    # absence of `Coverage` from `.github/required-checks.txt` are what keep it
+    # advisory, and both stay. A job that cannot fail a build is not a gate,
+    # whatever its trigger.
+    #
+    # merge_group is deliberately excluded, and that is the clause to re-read
+    # before widening this line. The workflow triggers on merge_group, so an
+    # unconditional job here would run a full coverage sweep on every queued PR
+    # -- and because Coverage is not a required context, the merge queue would
+    # pay for it and gain nothing. `refs/heads/main` is false for a merge-group
+    # ref (`refs/heads/gh-readonly-queue/...`), so the second clause excludes it
+    # rather than needing a third.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
@@ -2402,7 +2451,23 @@ jobs:
           pip install --upgrade pip
           pip install ".[dev]"
 
+      # On a PUSH TO MAIN the floor is fatal: that is the ratchet, and it is why
+      # this target exits non-zero at all.
+      #
+      # On a PR it is a REPORT, and the step is non-fatal. Ten packages sit below
+      # their floors today (cleat#2487) and no PR can be expected to clear them,
+      # so failing here would put a permanently red `Coverage` check on every
+      # pull request -- the "trains people to ignore red" problem, which is the
+      # thing moving this job onto PRs was meant to avoid rather than reproduce.
+      # The table still prints either way; that it is visible where the work
+      # happens is the whole point.
+      #
+      # STEP-level, and conditional. The job-level `continue-on-error: true`
+      # above is not enough on its own: it stops the RUN failing but the job and
+      # its check run still report `failure`. Measured on cleat#2494, where the
+      # run stayed green while `gh pr checks` read `Coverage  fail`.
       - name: Run Go coverage check
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
         run: make coverage-check
 
       - name: Run Python coverage
