@@ -77,6 +77,20 @@ Worked examples already in the tree: `examples/subscription/billing.go`,
 `examples/fooddash/order.go`, `examples/travel/booking.go`,
 `examples/saga-temporal-port/workflow.go`.
 
+**Those four are read, not run.** They are compiled on every pull request
+(`scripts/build-documented-examples.sh`), which catches a break in their Go, and
+nothing deploys them or starts a run — so a break that compiles is found by a
+person noticing, or not at all.
+
+**`examples/order-lifecycle/` is the runnable one.** It is the same shape as the
+four above — a saga over a payment provider, with a declared undo per step — and
+it is executed end to end on every pull request by
+`scripts/run-order-lifecycle-scenario.sh`: deployed to a real `cleat-worker` on a
+real PostgreSQL, with runs started against it and their published state asserted.
+It is what to read if you want to see the lifecycle actually run rather than
+described, and it is the one to copy when you want a skeleton that is already
+wired to a deployment.
+
 ---
 
 ## Compensation you declare rather than orchestrate

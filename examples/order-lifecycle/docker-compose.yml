@@ -1,0 +1,102 @@
+# Postgres and a cleat worker -- the infrastructure this scenario runs on.
+#
+# The backend (backend/main.go) is deliberately NOT a service here. It is your
+# application: this file stands up what an application connects TO. Run it with
+# `go run ./backend` from the example directory; see the README.
+#
+# This mirrors cmd/cleat/templates/fullstack/docker-compose.yml, and the parts
+# that look fussy are the parts that were measured there rather than reasoned
+# about. Read the comments before simplifying them away.
+
+services:
+  postgres:
+    # Not digest-pinned, unlike cleat's own CI: this file is an example a reader
+    # will copy into a project, and a digest frozen on the day they read it is
+    # theirs to carry, not ours to choose. 16 is cleat's minimum.
+    image: postgres:16
+    environment:
+      POSTGRES_USER: cleat
+      POSTGRES_PASSWORD: cleat
+      POSTGRES_DB: cleat
+    ports:
+      - "${CLEAT_PG_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cleat -d cleat"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  # Schema migration as a one-shot step: a worker no longer migrates itself at
+  # every start (cleat#2117). Runs as the postgres superuser, because DDL needs
+  # it and because migrations/postgres/005_app_role.sql -- the file that creates
+  # the lesser role below -- has to run first.
+  migrate:
+    image: ${CLEAT_WORKER_IMAGE:-ghcr.io/cleat-team/cleat-worker:latest}
+    command:
+      - "--migrate-only"
+      - "--db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # 005_app_role.sql creates cleat_app NOLOGIN and without a password, on
+  # purpose: a credential does not belong in a file that migrations replay.
+  # This one-shot step supplies one for local development, once the migration
+  # above has created the role to receive it.
+  app-role:
+    image: postgres:16
+    environment:
+      PGPASSWORD: cleat
+    command:
+      - psql
+      - -v
+      - ON_ERROR_STOP=1
+      - -h
+      - postgres
+      - -U
+      - cleat
+      - -d
+      - cleat
+      - -c
+      - "ALTER ROLE cleat_app LOGIN PASSWORD '${CLEAT_APP_PASSWORD:-cleat-app-local-dev}';"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  cleat-worker:
+    image: ${CLEAT_WORKER_IMAGE:-ghcr.io/cleat-team/cleat-worker:latest}
+    # A worker drains for --shutdown-grace (default 20s) after SIGTERM before it
+    # cancels its runs (cleat#2285). Docker sends SIGKILL after 10s unless told
+    # otherwise, which would cut the drain off.
+    stop_grace_period: 60s
+    command:
+      # NOT the postgres superuser above. Every tenant-scoped table has
+      # row-level security FORCEd, and PostgreSQL never applies RLS to a
+      # superuser -- see migrations/postgres/005_app_role.sql. --require-auth
+      # (on by default) refuses to start over a connection that is exempt from
+      # RLS, which is what catches this if it regresses.
+      - "--db=postgres://cleat_app:${CLEAT_APP_PASSWORD:-cleat-app-local-dev}@postgres:5432/cleat?sslmode=disable"
+      # Used only for the startup schema-verification's error message; this
+      # worker does not migrate itself -- see the migrate service above.
+      - "--migrate-db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
+      - "--api-addr=:8080"
+      - "--concurrency=4"
+    environment:
+      # `webhook-ingest` seals each source's signing secret before storing it, so
+      # it needs a master key. WITHOUT ONE THE WORKER STILL STARTS and `POST
+      # /ingest/sources` answers 500 -- the failure is at the first write rather
+      # than at boot, which is why it is called out here rather than left to the
+      # reader to discover.
+      #
+      # A fixed local-development value, like the app-role password above: this
+      # file is a starting point, and a real deployment supplies its own out of
+      # band. base64, 32 bytes. Rotating it makes every secret sealed under the
+      # old key unreadable -- see CLEAT_SECRET_MASTER_KEY_PREVIOUS.
+      CLEAT_SECRET_MASTER_KEY: ${CLEAT_SECRET_MASTER_KEY:-kiFstWOvEcdUe9ELx0oCTNorrTniHsyhUwLESCzufzw=}
+    ports:
+      - "${CLEAT_API_PORT:-8080}:8080"
+    depends_on:
+      app-role:
+        condition: service_completed_successfully

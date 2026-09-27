@@ -1245,6 +1245,70 @@ jobs:
       - name: Run every documented example build
         run: scripts/build-documented-examples.sh
 
+  order-lifecycle-scenario:
+    name: Order lifecycle scenario
+    runs-on: ubuntu-latest
+    # merge_group is excluded, deliberately -- and this is the clause to re-read
+    # before removing the line. The workflow triggers on merge_group, so without
+    # this the job runs again against the projected tip of every queue entry,
+    # where it adds its docker build to the critical path of every merge. It is
+    # NOT a required context (.github/required-checks.txt), so that second run
+    # gates nothing: nothing waits on it, and a red result there could not stop
+    # the merge. The PR run is the one that matters.
+    #
+    # The cost of excluding it is the usual one for any non-required job -- a
+    # break that only appears when two green PRs combine is not caught here.
+    # That is worth paying for a job this heavy, but it is the trade.
+    #
+    # AND IF THIS EVER BECOMES REQUIRED, THESE TWO LINES COME OUT IN THE SAME
+    # CHANGE -- the `if:` and the promotion, together. A required context that
+    # never reports in merge_group wedges the queue with nothing red on it: the
+    # queue waits for a status that cannot arrive, and no check fails to say so.
+    # Nine workflow files here carry that warning; this is the tenth.
+    if: github.event_name != 'merge_group'
+    # The example in examples/order-lifecycle, RUN rather than only built.
+    # cleat#2512.
+    #
+    # The job above builds ten examples and runs none of them. This one deploys
+    # a workflow to a real worker on a real PostgreSQL, starts three runs and
+    # asserts what each PUBLISHED -- which is the only way to see the class of
+    # failure that a build check cannot: a workflow that compiles, deploys, and
+    # then cannot reach the plugin it calls.
+    #
+    # It is deliberately NOT a matrix entry under test-go. examples/ is its own
+    # Go module and no matrix entry covers it, so a test living beside the
+    # workflow would be selected by nothing -- the exact "wired to nothing"
+    # shape this repo has been bitten by. A named job is also where a reader
+    # looks for it.
+    #
+    # TIME, so nobody is surprised: it builds the repository's Dockerfile and
+    # then runs compose. That build is the same one cluster-tests does, and it
+    # is the price of measuring the deployment the README documents rather than
+    # a parallel arrangement that merely resembles it.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Docker and compose are present on ubuntu-latest; the script refuses with
+      # UNMEASURED (exit 2) rather than reporting a clean run if either is not,
+      # so a runner image that stops shipping them fails here instead of going
+      # quietly green.
+      - name: Build the cleat CLI
+        run: go build -o .bin/cleat ./cmd/cleat
+
+      # There is deliberately NO "dump the container logs on failure" step after
+      # this one. The script removes the stack in its EXIT trap, so such a step
+      # would run against containers that no longer exist and find nothing --
+      # a step wired to nothing, printing the same output whether the run passed
+      # or failed. The script captures the worker's log itself, on the failure
+      # path, before tearing down. See its cleanup().
+      - name: Run the scenario end to end
+        run: scripts/run-order-lifecycle-scenario.sh
+
   vulncheck:
     name: Vulnerability Check
     runs-on: ubuntu-latest
