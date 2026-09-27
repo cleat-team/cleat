@@ -1,0 +1,163 @@
+# ---------------------------------------------------------------------------
+# Release smoke -- run on a release branch, BEFORE the tag is pushed
+#
+# WHY BEFORE. cleat#2058:156 puts the release smoke test AFTER the tag, i.e.
+# after publication, when nothing can be stopped. This runs it where a failure
+# can still stop the release.
+#
+# WHY THIS CONTENT. Three gaps nothing else covers, all consumer-side:
+#
+#   1. Every SDK stamps its OWN version into the metadata of every workflow it
+#      compiles, and NOTHING reads those values except a consumer inspecting a
+#      compiled module. cleat#2454: release-process.md's step-3 search reaches
+#      one of the six places a version lives, and publish-pypi.yml's tag guard
+#      reads another, so a release could publish a package reporting the OLD
+#      version to every workflow it compiles with every check green.
+#      scripts/check-sdk-version-agreement.py asserts AGREEMENT -- each SDK's
+#      stampers equal that SDK's own manifest -- which is the invariant #2454
+#      is about. Asserting each site is individually plausible is not.
+#
+#   2. The wheel's own metadata has never been read from the consumer side.
+#      ci.yml's Python matrix installs the SOURCE (`pip install ".[dev]"`), so
+#      nothing has ever installed the artefact that ships.
+#
+#   3. 3.13 is claimed in `requires-python`/classifiers and exercised nowhere:
+#      ci.yml's matrix is 3.10-3.12. This job closes that against the BUILT
+#      wheel rather than the source tree.
+#
+# REPORTS, DOES NOT GATE. The owner's decision is no extra gating for the
+# release branch, so this is deliberately NOT a required check: a red run here
+# is information for whoever is cutting the release, not a merge blocker.
+# ---------------------------------------------------------------------------
+name: Release smoke
+
+on:
+  push:
+    branches: ["release/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    name: Version agreement and the Python stamper
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # `release/v0.3.0` -> `0.3.0`; empty on any other ref, and the script
+      # treats an empty expectation as "only require that the sites agree".
+      - name: Derive the release version from the branch
+        id: v
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            release/v*) echo "version=${GITHUB_REF_NAME#release/v}" >> "$GITHUB_OUTPUT" ;;
+            *)          echo "version=" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Every SDK's stamped version matches its own manifest
+        run: scripts/check-sdk-version-agreement.py --expected "${{ steps.v.outputs.version }}"
+
+      # End-to-end for the one SDK with a publisher: run the real stamper over a
+      # real module and read the value back OUT of the compiled metadata. The
+      # agreement check above proves the literal is right; this proves the
+      # literal reaches the artefact.
+      - name: The Python stamper emits the release version into a compiled module
+        run: |
+          expected="${{ steps.v.outputs.version }}"
+          if [ -z "$expected" ]; then
+            expected="$(python3 -c "import tomllib; print(tomllib.load(open('python-sdk/pyproject.toml','rb'))['project']['version'])")"
+          fi
+          fixture=tests/plugin-harness/testdata/asworkflow/prebuilt/workflow.wasm
+          python3 python-sdk/scripts/stamp_metadata.py "$fixture" \
+            --name ReleaseSmoke --version 1 --min-version 1 --abi-version 1 \
+            --output /tmp/stamped.wasm
+          python3 - "$expected" <<'PY'
+          import re, sys
+          expected = sys.argv[1]
+          data = open("/tmp/stamped.wasm", "rb").read()
+          # Anchored on the token, NOT on balanced braces: `plugin_deps: {}` nests
+          # one, and a `[^{}]*` pattern cannot span it -- it returned nothing at
+          # all rather than erroring, which reads as "no version stamped".
+          found = set(re.findall(rb'"sdk_version":"([^"]+)"', data))
+          if not found:
+              sys.exit("no sdk_version in the stamped metadata -- the read-back, "
+                       "not the stamper, is the thing to suspect first")
+          got = {v.decode() for v in found}
+          print(f"  stamped sdk_version={sorted(got)} expected={expected}")
+          if got != {expected}:
+              sys.exit(f"::error::the Python stamper wrote {sorted(got)} into the "
+                       f"compiled metadata, expected {expected}")
+          PY
+
+  wheel:
+    name: The built wheel reports its version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Build the wheel
+        working-directory: python-sdk
+        run: |
+          pip install --quiet build
+          python -m build --wheel
+
+      - name: The wheel's metadata and the SDK constant both report it
+        working-directory: python-sdk
+        run: |
+          expected="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          wheel="$(ls dist/*.whl)"
+          case "$wheel" in
+            *"-$expected-"*) ;;
+            *) echo "::error::wheel $wheel does not carry version $expected"; exit 1 ;;
+          esac
+          pip install --quiet "$wheel"
+          metadata="$(python3 -c 'import importlib.metadata as m; print(m.version("cleat-sdk"))')"
+          constant="$(python3 -c 'import cleat_sdk; print(cleat_sdk.SDK_VERSION)')"
+          echo "  pyproject=${expected}  wheel-metadata=${metadata}  cleat_sdk.SDK_VERSION=${constant}"
+          if [ "$metadata" != "$expected" ] || [ "$constant" != "$expected" ]; then
+            echo "::error::the built wheel reports metadata='$metadata' constant='$constant' but pyproject.toml says '$expected'"
+            exit 1
+          fi
+
+      - name: Upload the built wheel for the version matrix
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-sdk-wheel
+          path: python-sdk/dist/*.whl
+          if-no-files-found: error
+
+  python-versions:
+    name: Built wheel on Python ${{ matrix.python-version }}
+    needs: wheel
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # 3.13 first, because it is the one no other job exercises. ci.yml's
+      # matrix is 3.10-3.12 against the SOURCE tree; every version here is
+      # against the built wheel.
+      matrix:
+        python-version: ["3.13", "3.12", "3.11", "3.10"]
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: python-sdk-wheel
+          path: dist/
+
+      - name: Install the built wheel and read what it reports
+        run: |
+          pip install --quiet dist/*.whl
+          python -c "import sys, cleat_sdk; print('  python', sys.version.split()[0], ' cleat_sdk.SDK_VERSION=' + cleat_sdk.SDK_VERSION)"
