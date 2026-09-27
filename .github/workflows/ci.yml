@@ -2448,7 +2448,23 @@ jobs:
           pip install --upgrade pip
           pip install ".[dev]"
 
+      # On a PUSH TO MAIN the floor is fatal: that is the ratchet, and it is why
+      # this target exits non-zero at all.
+      #
+      # On a PR it is a REPORT, and the step is non-fatal. Ten packages sit below
+      # their floors today (cleat#2487) and no PR can be expected to clear them,
+      # so failing here would put a permanently red `Coverage` check on every
+      # pull request -- the "trains people to ignore red" problem, which is the
+      # thing moving this job onto PRs was meant to avoid rather than reproduce.
+      # The table still prints either way; that it is visible where the work
+      # happens is the whole point.
+      #
+      # STEP-level, and conditional. The job-level `continue-on-error: true`
+      # above is not enough on its own: it stops the RUN failing but the job and
+      # its check run still report `failure`. Measured on cleat#2494, where the
+      # run stayed green while `gh pr checks` read `Coverage  fail`.
       - name: Run Go coverage check
+        continue-on-error: ${{ github.event_name == 'pull_request' }}
         run: make coverage-check
 
       - name: Run Python coverage
