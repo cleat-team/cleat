@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -79,6 +80,7 @@ func TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds(t *testing.T) {
 			}
 
 			proj := filepath.Join(root, name)
+			resolveScaffoldAgainstThisCheckout(t, proj)
 			out, err = runCleatIn(t, proj, "build", "-o", "./out", ".")
 			if err != nil {
 				t.Fatalf("a scaffolded %s project does not build.\n"+
@@ -107,4 +109,64 @@ func runCleatIn(t *testing.T, dir string, args ...string) (string, error) {
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// resolveScaffoldAgainstThisCheckout rewrites a scaffolded project's go.mod so
+// the SDK resolves from this checkout rather than from the module proxy.
+//
+// WHY THIS EXISTS, AND WHY IT IS NOT A COSMETIC CHANGE TO THE TESTS.
+//
+// A freshly scaffolded project's go.mod names no SDK at all -- `module X` and
+// `go 1.24`, nothing else -- so `go mod tidy` (tidyScaffold, init.go) resolves
+// `github.com/cleat-team/cleat/cleat` from the proxy. That module has never
+// been tagged, so its `@latest` is a PSEUDO-VERSION OF THE DEFAULT BRANCH:
+//
+//	proxy …/cleat/cleat/@latest -> v0.0.0-...-<develop head>
+//
+// which means the version a scaffold resolves to is whatever `cleat/go.mod`
+// says AT THE CURRENT PUSHED HEAD -- not at the revision under test. A pull
+// request therefore cannot validate anything on this path: set the require to
+// an unpublished version and the failure lands on the NEXT commit, while the
+// PR that made the change stays green. That is exactly what cleat#2452 did,
+// and it is what made the develop red un-gateable.
+//
+// So the tests below build from this checkout instead. THAT IS A REDUCTION IN
+// COVERAGE AND IT IS RECORDED AS ONE: they no longer prove a user's scaffold
+// resolves over the network. The property is kept, in a form a pull request
+// CAN check, by TestTheRootRequireNamesAPublishedVersion -- which reads this
+// checkout's own cleat/go.mod rather than the pushed head, and so fails on the
+// branch that introduces the bad version rather than the one after it.
+//
+// The durable fix is to tag the SDK submodule (Go needs `cleat/vX.Y.Z` for a
+// module in a subdirectory, and this repo has only ever cut root tags). Once
+// it is tagged, `@latest` is a release rather than a moving head and the
+// network path becomes testable again; this helper can then go.
+func resolveScaffoldAgainstThisCheckout(t *testing.T, proj string) {
+	t.Helper()
+	root := repoRoot(t)
+	sdkDir := filepath.Join(root, "cleat")
+
+	mod := filepath.Join(proj, "go.mod")
+	existing, err := os.ReadFile(mod)
+	if err != nil {
+		t.Fatalf("read the scaffolded go.mod: %v", err)
+	}
+	if strings.Contains(string(existing), "replace github.com/cleat-team/cleat ") {
+		return
+	}
+	added := string(existing)
+	if !strings.Contains(added, "require github.com/cleat-team/cleat ") {
+		added += "\nrequire github.com/cleat-team/cleat v0.0.0\n"
+	}
+	added += "\nreplace github.com/cleat-team/cleat => " + root + "\n" +
+		"replace github.com/cleat-team/cleat/cleat => " + sdkDir + "\n"
+	if err := os.WriteFile(mod, []byte(added), 0o644); err != nil {
+		t.Fatalf("write the scaffolded go.mod: %v", err)
+	}
+
+	tidy := exec.Command("go", "mod", "tidy")
+	tidy.Dir = proj
+	if out, err := tidy.CombinedOutput(); err != nil {
+		t.Fatalf("go mod tidy in the scaffolded project: %v\n%s", err, out)
+	}
 }
