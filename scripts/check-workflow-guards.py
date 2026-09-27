@@ -41,6 +41,19 @@ a session to find one instance of by hand:
      YAML-level splice into the run: text and not a shell variable read
      despite looking like the fix. See SAFE_EXPRESSION_BODIES' doc comment for
      the rest. cleat#2310.
+  7. A PyPI publish gated by required reviewers pauses with the distributions
+     ALREADY BUILT.  `environment:` gates a JOB, so if the job carrying it also
+     builds, the pause lands before checkout and approving means "run the build
+     and publish" -- there is then no instant at which an artifact exists and
+     the upload has not happened, and nothing to inspect before approving.
+     publish-pypi.yml had exactly that shape (one job, `environment: pypi` at
+     job level, `python -m build` at step 3 of 4) until 2026-09-26. The guard
+     requires a `build` job that uploads the distributions and a `publish` job
+     that `needs:` it, downloads them, and carries `environment: pypi`; it also
+     holds `id-token: write` to that job alone (the builder runs `pip install
+     build`, i.e. code fetched from PyPI) and keeps the tag-vs-pyproject guard
+     in a job with no environment, so it still refuses BEFORE the approval
+     (cleat#2127's acceptance).
 
 Design note, since it is the whole point of the exercise: this script FAILS on
 anything it cannot analyse rather than passing.  A matrix it cannot expand, an
@@ -49,7 +62,7 @@ guard that quietly skips the case it does not understand is the thing it was
 written to prevent.
 
 Usage:
-    scripts/check-workflow-guards.py                       # the six guards
+    scripts/check-workflow-guards.py                       # all seven guards
     scripts/check-workflow-guards.py --verify-against-api  # needs an admin token
     scripts/check-workflow-guards.py --self-test            # known-positive/negative pairs
 """
@@ -569,6 +582,155 @@ def guard_no_untrusted_expressions_in_privileged_workflows(errors) -> None:
         errors.extend(find_privileged_expression_violations(path, doc))
 
 
+# ---------------------------------------------------------------------------
+# Guard 7: a gated PyPI publish must pause with the artifact already built.
+# ---------------------------------------------------------------------------
+
+PYPI_PUBLISH_ACTION = "pypa/gh-action-pypi-publish"
+TAG_GUARD_STEP = "Verify the tag matches"
+
+
+def find_publish_approval_order_violations(path: str, doc: dict) -> list[str]:
+    """`environment:` with required reviewers gates a JOB, not a step.
+
+    If the job carrying it also builds, the pause sits BEFORE checkout:
+    approving means "run the build and publish", and there is no instant at
+    which a built artifact exists and the upload has not happened -- so there is
+    nothing to test before approving. Measured on publish-pypi.yml on
+    2026-09-26: one job, `environment: pypi` at job level, `python -m build` at
+    step 3 of 4, and the reviewer's approval was the first thing to happen.
+
+    The shape this requires is a `build` job that produces and uploads the
+    distributions and a `publish` job that `needs:` it, downloads them and
+    carries `environment: pypi`. The tag-vs-pyproject guard must stay in a job
+    with no environment, so it still refuses before the approval and before any
+    upload (cleat#2127's acceptance).
+    """
+    problems: list[str] = []
+    jobs = doc.get("jobs") or {}
+    workflow_permissions = doc.get("permissions") or {}
+
+    if doc.get("environment"):
+        problems.append(
+            f"{path}: workflow-level `environment:` gates EVERY job. Required "
+            f"reviewers gate a job, so this pauses the build too and the "
+            f"approval lands before the artifact exists"
+        )
+
+    publishers = [
+        (job_id, job)
+        for job_id, job in jobs.items()
+        if isinstance(job, dict)
+        and any(
+            PYPI_PUBLISH_ACTION in str(step.get("uses", ""))
+            for step in (job.get("steps") or [])
+            if isinstance(step, dict)
+        )
+    ]
+    if not publishers:
+        return problems  # not a publishing workflow; guards 1-6 still apply
+
+    uploads = {
+        (step.get("with") or {}).get("name")
+        for job in jobs.values()
+        if isinstance(job, dict)
+        for step in (job.get("steps") or [])
+        if isinstance(step, dict) and "upload-artifact" in str(step.get("uses", ""))
+    }
+    uploads.discard(None)
+
+    for job_id, job in publishers:
+        at = f"{path}: job {job_id!r} publishing to PyPI"
+
+        if job.get("environment") != "pypi":
+            problems.append(
+                f"{at} has environment {job.get('environment')!r}, not 'pypi'. "
+                f"PyPI's trusted-publisher OIDC claim is scoped to that "
+                f"environment, so a job outside it cannot authenticate however "
+                f"permissions: is set"
+            )
+
+        job_permissions = job.get("permissions") or {}
+        effective = job_permissions.get("id-token") or workflow_permissions.get("id-token")
+        if effective != "write":
+            problems.append(
+                f"{at} has no effective id-token: write (job={job_permissions!r}, "
+                f"workflow={workflow_permissions!r})"
+            )
+        if workflow_permissions.get("id-token") == "write":
+            for other, other_job in jobs.items():
+                if other == job_id or not isinstance(other_job, dict):
+                    continue
+                if (other_job.get("permissions") or {}).get("id-token") != "read":
+                    problems.append(
+                        f"{path}: workflow-level id-token: write also reaches job "
+                        f"{other!r}, which does not need a token-minting capability"
+                    )
+
+        if not job.get("needs"):
+            problems.append(
+                f"{at} does not `needs:` anything, so it does not wait for a "
+                f"build -- required reviewers would pause it with nothing built"
+            )
+
+        steps = [step for step in (job.get("steps") or []) if isinstance(step, dict)]
+        downloads = [s for s in steps if "download-artifact" in str(s.get("uses", ""))]
+        if not downloads:
+            problems.append(
+                f"{at} downloads no artifact, so approving it is not approving "
+                f"a built artifact"
+            )
+        for step in downloads:
+            name = (step.get("with") or {}).get("name")
+            if name not in uploads:
+                problems.append(
+                    f"{at} downloads artifact {name!r}, which no upload-artifact "
+                    f"in this workflow produces (uploads: {sorted(uploads)})"
+                )
+        for step in steps:
+            if PYPI_PUBLISH_ACTION in str(step.get("uses", "")):
+                if "packages-dir" not in str(step.get("with") or {}):
+                    problems.append(f"{at}: the publish step sets no packages-dir")
+
+    guard_jobs = [
+        (job_id, job)
+        for job_id, job in jobs.items()
+        if isinstance(job, dict)
+        and any(
+            TAG_GUARD_STEP in str(step.get("name", ""))
+            for step in (job.get("steps") or [])
+            if isinstance(step, dict)
+        )
+    ]
+    if not guard_jobs:
+        problems.append(
+            f"{path}: no step matching {TAG_GUARD_STEP!r} -- the tag-vs-pyproject "
+            f"check that refuses a mismatched release is gone"
+        )
+    for job_id, job in guard_jobs:
+        if job.get("environment"):
+            problems.append(
+                f"{path}: job {job_id!r} carries the tag guard AND an "
+                f"environment:, so the tag check runs AFTER the approval instead "
+                f"of before it (cleat#2127)"
+            )
+        if job.get("needs"):
+            problems.append(
+                f"{path}: job {job_id!r} carries the tag guard and `needs:` "
+                f"something, so it may not be the first thing to run"
+            )
+    return problems
+
+
+def guard_publish_approval_order(errors: list[str]) -> None:
+    for path in workflow_files():
+        try:
+            doc = load(path)
+        except (Unexpandable, yaml.YAMLError):
+            continue  # already reported by collect_jobs
+        errors.extend(find_publish_approval_order_violations(path, doc))
+
+
 def self_test() -> int:
     """Known-positive/known-negative pairs for guard 6 -- see CLAUDE.md's
     known-positive discipline: a check that has never been shown capable of
@@ -820,6 +982,134 @@ def self_test() -> int:
         [],
     )
 
+    # --- guard 7: the PyPI approval must land AFTER the build ---------------
+    def check_publish(label: str, yaml_text: str, want_count: int, want_substrings: list[str]):
+        nonlocal cases
+        cases += 1
+        got = find_publish_approval_order_violations("workflow.yml", yaml.safe_load(yaml_text))
+        missing = [w for w in want_substrings if not any(w in g for g in got)]
+        if missing or len(got) != want_count:
+            failures.append(
+                f"{label}: {len(got)} problems, want {want_count}; missing {missing}; got {got}"
+            )
+
+    GOOD_PUBLISH = """
+        on:
+          push:
+            tags: ["v*"]
+        permissions:
+          contents: read
+        jobs:
+          build:
+            runs-on: ubuntu-latest
+            steps:
+              - uses: actions/checkout@v7
+              - name: Verify the tag matches pyproject.toml's version
+                run: ./check.sh
+              - run: python -m build
+              - uses: actions/upload-artifact@v7
+                with:
+                  name: python-sdk-dist
+                  path: python-sdk/dist/
+          publish:
+            needs: build
+            runs-on: ubuntu-latest
+            environment: pypi
+            permissions:
+              id-token: write
+              actions: read
+            steps:
+              - uses: actions/download-artifact@v7
+                with:
+                  name: python-sdk-dist
+                  path: python-sdk/dist/
+              - uses: pypa/gh-action-pypi-publish@release/v1
+                with:
+                  packages-dir: python-sdk/dist/
+        """
+
+    # KNOWN-NEGATIVE: the split. The gate pauses in `publish`, with the
+    # distributions already built and downloadable.
+    check_publish("split build/publish, environment on the publisher", GOOD_PUBLISH, 0, [])
+
+    # KNOWN-POSITIVE, and this is the shape the guard was written for: ONE job
+    # carrying both the environment and the build. It is publish-pypi.yml before
+    # the split, measured 2026-09-26, and its tag guard therefore ran AFTER the
+    # approval -- which is the thing the owner could not see.
+    check_publish(
+        "single job, environment on the builder (the pre-split shape)",
+        """
+        on:
+          push:
+            tags: ["v*"]
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            environment: pypi
+            steps:
+              - uses: actions/checkout@v7
+              - name: Verify the tag matches pyproject.toml's version
+                run: ./check.sh
+              - run: python -m build
+              - uses: pypa/gh-action-pypi-publish@release/v1
+                with:
+                  packages-dir: python-sdk/dist/
+        """,
+        4,
+        [
+            "carries the tag guard AND an environment",
+            "downloads no artifact",
+            "does not `needs:` anything",
+            "has no effective id-token: write",
+        ],
+    )
+
+    # KNOWN-POSITIVE: the plausible regression -- `environment:` lifted to the
+    # workflow, where it gates EVERY job and the approval lands before `build`
+    # has run. It still publishes correctly, and it is silent until a real tag
+    # unless something like this guard is watching.
+    # NOTE ON THE ANCHORS: they are indented to GOOD_PUBLISH's own base (8
+    # spaces), NOT to publish-pypi.yml's. A first draft copied the real file's
+    # 4-space shape, which injected a line at the wrong depth and made the
+    # mutation unparseable -- a self-test that fails to build its own fixture
+    # reports the fixture, not the guard.
+    check_publish(
+        "environment lifted to workflow level",
+        GOOD_PUBLISH.replace(
+            "        permissions:\n          contents: read\n",
+            "        environment: pypi\n        permissions:\n          contents: read\n",
+            1,
+        ),
+        1,
+        ["workflow-level `environment:` gates EVERY job"],
+    )
+
+    # KNOWN-POSITIVE: id-token moved back to workflow level, where the build job
+    # -- which runs `pip install build` and `python -m build`, i.e. code fetched
+    # from PyPI -- also holds a token-minting capability.
+    check_publish(
+        "id-token: write left at workflow level",
+        GOOD_PUBLISH.replace(
+            "        permissions:\n          contents: read\n",
+            "        permissions:\n          contents: read\n          id-token: write\n",
+            1,
+        ).replace(
+            "            permissions:\n              id-token: write\n              actions: read\n",
+            "",
+            1,
+        ),
+        1,
+        ["also reaches job 'build'"],
+    )
+
+    # KNOWN-POSITIVE: the publisher does not wait for the build.
+    check_publish(
+        "publisher does not need: the build",
+        GOOD_PUBLISH.replace("            needs: build\n", "", 1),
+        1,
+        ["does not `needs:` anything"],
+    )
+
     if failures:
         for f in failures:
             print(f"SELF-TEST FAILED: {f}")
@@ -868,7 +1158,7 @@ def main() -> int:
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="run known-positive/known-negative cases for guard 6 against synthetic YAML, not the real tree",
+        help="run known-positive/known-negative cases for guards 6 and 7 against synthetic YAML, not the real tree",
     )
     args = parser.parse_args()
 
@@ -896,6 +1186,7 @@ def main() -> int:
     guard_ancestor_filters_match_images(errors)
     guard_mssql_services_have_memory_cap(errors)
     guard_no_untrusted_expressions_in_privileged_workflows(errors)
+    guard_publish_approval_order(errors)
 
     for error in errors:
         print(f"::error title=Workflow integrity::{error}")
