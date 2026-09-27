@@ -16,8 +16,10 @@ Each dialect has a small generated baseline plus every migration added since:
 ```
 
 `migration.NewRunner` applies these in filename order and dedupes by name, so **the last definition
-wins**. PostgreSQL was compacted from 87 files to these three in cleat#2059 (#2416, #2421); MySQL
-and MSSQL still carry their original chains and are being compacted under cleat#2422.
+wins**. All three dialects are compacted and each holds three files: PostgreSQL since cleat#2059
+(#2416, #2421), SQL Server since cleat#2434, MySQL since cleat#2433. **None of them is a chain any
+more**, which changes how you look a definition up — see
+[Finding the current definition](#finding-the-current-definition).
 
 ## The rule: the baseline is frozen
 
@@ -37,11 +39,44 @@ those three files are *generated*:
   (`git show 8f91b43a:migrations/postgres/`). Re-running it against the *current* chain instead
   would fold every post-baseline migration into `001` while leaving those files in place to be
   applied a second time.
-- **Precedent, already in tree:** `migrations/mssql/004_fix_finalize_workflow_status_fence.sql`
-  (`CREATE OR ALTER PROCEDURE`) sits on top of a compacted baseline. That is the shape.
+- **A numbered file above the baseline is the shape.** `004_*.sql` and up sit on top of the
+  compacted files and are applied after them. `migrations/mssql/004_fix_finalize_workflow_status_fence.sql`
+  was the example here until the SQL Server compaction folded its effect into `003_procedures.sql`
+  — the compacted baseline is generated from a *fully-migrated* database, so a later file's content
+  lands in the baseline rather than beside it. **No dialect currently carries a numbered file above
+  `003`, and that is expected rather than a gap**: the baseline is cut at a release, so these only
+  start accumulating afterwards.
 
 Re-baselining is not something to do per change. It is a deliberate, once-per-era act with its own
 verification, and it is only possible because a release required a fresh database anyway.
+
+## Finding the current definition
+
+`CLAUDE.md` says to find the highest-numbered migration that defines a routine before concluding
+anything about it. **That instruction presumes a chain, and a compacted dialect does not have
+one** — the baseline defines everything, and a numbered file above it is an amendment:
+
+1. **Read the baseline.** `003_procedures.sql` for routines; `001_schema.sql` for tables, indexes,
+   constraints, RLS policies and grants. That is where the definition is.
+2. **Then apply every numbered file above it, in filename order.** `migration.NewRunner` does that
+   for you; what matters when *reading* is that the answer is baseline-then-amendments, never "the
+   newest file that mentions the name".
+
+**A file that MENTIONS a name is not a file that DEFINES it, and a compaction sharpens that
+distinction rather than blurring it.** Measured 2026-09-27: `admin.plugin_tables` appears in
+`migrations/<dialect>/001_schema.sql` and in **no other migration file in the tree** — the numbered
+migration that used to carry its shape was folded into the baseline, so a reader who goes looking
+through the chain finds the name and not the answer.
+
+```bash
+git grep -ln 'plugin_tables' origin/develop -- 'migrations/*'
+# migrations/mssql/001_schema.sql, migrations/mysql/001_schema.sql, migrations/postgres/001_schema.sql
+```
+
+This has already cost someone a wrong reading: the shape of that table was taken from a numbered
+file that no longer holds it, and the mistake surfaced only because the reader went looking. The
+consequence is concrete — you can conclude a routine behaves one way while the database applies
+another, and **both readings are "in the tree"**, so nothing about the search feels wrong.
 
 ## The trap: a signature change is not a replacement
 
@@ -88,7 +123,9 @@ else:
 - **PostgreSQL's role memberships are real and were really lost** (cleat#2416), so that check has
   teeth.
 - **SQL Server's role *existence* is a migration fact; its *membership* is not.** `cleat_admin` is
-  created by `migrations/mssql/012_admin_role.sql`, and after a full migration it has **zero
+  created by `migrations/mssql/001_schema.sql` — it was `012_admin_role.sql` until the SQL Server
+  compaction folded it into the baseline, the same move as the `004_` file above; `<dialect>/001_schema.sql`
+  is where a pre-compaction file's content ends up. After a full migration the role has **zero
   members** — measured on a chain-built database. Nothing in the tree grants membership; the
   *deployment* does it (`cmd/cleat-worker/setup.go`, `cmd/cleatctl/setsecret.go`). A membership
   check on a freshly-migrated database would therefore test nothing. Assert the role exists; do
