@@ -851,6 +851,43 @@ OrbStack and containers are per-session). The same tree is reachable as `/locals
 — which is what `scripts/section-blocks.sh` does, and it is also how the `cleat-wt-*` worktrees
 resolve back to the stream that owns them.
 
+### The clone's git identity is a placeholder, and only one check notices
+
+Added 2026-09-27, after #2494 went red on `CLA Assistant` for a reason that had nothing to do
+with its contents.
+
+    $ git config --show-origin user.email
+    file:/Users/Shared/localssd/rcownie/cleat/.git/config	c@local
+
+The **mechanism** is configured and documented — `core.hooksPath` points at `.githooks`,
+`cleat.stream` is set, so `prepare-commit-msg` stamps both trailers (CONTRIBUTING.md §DCO).
+What is wrong is the identity it reads them *from*: a commit made here without an override is
+authored `c <c@local>`.
+
+The two checks read it differently, and only the second goes red:
+
+| check | what it matches | with `c <c@local>` |
+|---|---|---|
+| `DCO Check` | that a `Signed-off-by` trailer **exists** | **passes** — it never reads the value |
+| `CLA Assistant` | the commit **author's email** against a signed CLA | **fails** |
+
+So a DCO-green PR can be un-mergeable, and the red check names the CLA rather than the identity.
+Every PR merged that day from this clone is authored `rcownie <rcownie@users.noreply.github.com>`:
+the per-commit override is the working practice, and nothing recorded it.
+
+**Fix it per commit; do not change the shared config.** `.git/config` is read by every worktree,
+so editing it moves another stream's identity under it mid-task:
+
+    git -c user.name=rcownie -c user.email=rcownie@users.noreply.github.com \
+      commit --amend --no-edit --reset-author -s
+
+`-s` re-signs as the new identity, and the stale `Signed-off-by` from the old one has to be
+removed or the commit ends up carrying two.
+
+**Same trap one artefact over: annotated tags carry a tagger.** `v0.3.0` and `v0.3.1` are both
+`c <c@local>`. That is not CLA-relevant — a tag is not a commit in a PR — but for a public
+release the tagger is provenance a third party reads.
+
 ### DSNs
 
 Each row was connected to on 2026-09-04 by the stream that owns it.
