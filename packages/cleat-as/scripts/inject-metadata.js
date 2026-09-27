@@ -284,7 +284,7 @@ Options:
     child_binding_policy: childBindingPolicy,
     sdk_language: "assemblyscript",
     language: "assemblyscript",
-    sdk_version: "0.3.1",
+    sdk_version: "0.3.2",
     created_at: new Date().toISOString(),
   };
 
