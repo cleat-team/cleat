@@ -68,9 +68,13 @@ cloned yet: `git clone https://github.com/cleat-team/cleat && cd cleat`.
 make setup
 
 # 1. Build the CLI from THIS checkout, into ./bin.
-#    Do not `go install .../cmd/cleat@latest`: the published CLI is v0.2.0, from
-#    a release branch this one has not merged, and its `deploy` has no --db
-#    flag -- step 4 then fails with a usage error instead of deploying.
+#    In this walkthrough, build rather than `go install .../cmd/cleat@latest`:
+#    the published CLI is v0.2.0, from a release branch this one has not
+#    merged, and its `deploy` has no --db flag -- step 4 then fails with a
+#    usage error instead of deploying. (That is a fact about THIS checkout
+#    tracking ahead of the last release, not about the published CLI being
+#    broken; for installing cleat outside a checkout, `@latest` is right --
+#    see Installation below.)
 #    Build into ./bin deliberately: `-o cleat` writes *inside* ./cleat/, which
 #    is a directory in this repo, so ./cleat stays a directory and is not
 #    runnable.
@@ -252,6 +256,12 @@ go install github.com/cleat-team/cleat/cmd/cleat-gen@latest
 ```
 
 Or build from source: `git clone https://github.com/cleat-team/cleat.git && cd cleat && go install ./cmd/...`
+
+> If you are working **inside** a checkout of this repository -- following the
+> [Quick Start](#quick-start) above, or building workflows against the SDK in
+> that tree -- build the CLI from that checkout rather than installing
+> `@latest`. The checkout tracks ahead of the last release, so the two are not
+> the same code, and the interfaces can differ. See the note in step 1 above.
 
 ### Linux: `.deb` package with a systemd unit
 
