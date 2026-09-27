@@ -12,24 +12,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
-- **PostgreSQL's schema now ships as three generated files, not 87 numbered migrations.** The
-  chain is `migrations/postgres/001_schema.sql`, `002_defaults.sql` and `003_procedures.sql`.
-  MySQL and SQL Server are unchanged — both still numbered chains. (cleat#2059, cleat#2416)
+- **Every dialect's schema now ships as a compacted baseline, not a numbered migration chain.**
+  `migrations/{postgres,mysql,mssql}/` each hold `001_schema.sql`, `002_defaults.sql` and
+  `003_procedures.sql`, replacing 87, 70 and 77 numbered files respectively. Each baseline is
+  generated — `scripts/gen-postgres-baseline.py`, `scripts/gen-mysql-baseline.py`, and
+  `scripts/gen-mssql-baseline/`. (cleat#2059, cleat#2416, cleat#2433, cleat#2434)
 
-  No behavioural change is intended and none was measured: the A/B differential reports an
-  **empty catalog diff** against the chain this replaces, on a fresh cluster. The baseline is
-  produced by `scripts/gen-postgres-baseline.py` from a `pg_dump` of a database built by that
-  chain, so every table carries its final column set and every routine is its last definition
-  *by construction*, rather than by someone taking the last of ten by hand. The generator is
-  committed, so the artifact is re-derivable and verified to reproduce `001` and `003`
-  byte-identically from that dump. (`002` seeds rows, which a schema-only dump cannot carry,
-  and is hand-written.)
+  No behavioural change is intended on any dialect. On PostgreSQL none was measured either: the
+  A/B differential reports an **empty catalog diff** against the chain it replaces, on a fresh
+  cluster. Its baseline is produced by `scripts/gen-postgres-baseline.py` from a `pg_dump` of a
+  database built by that chain, so every table carries its final column set and every routine is
+  its last definition *by construction*, rather than by someone taking the last of ten by hand.
+  That generator is committed, so the artifact is re-derivable and verified to reproduce `001`
+  and `003` byte-identically from that dump. (`002` seeds rows, which a schema-only dump cannot
+  carry, and is hand-written.) MySQL's and SQL Server's baselines are generated the same way
+  from their own trees by their own scripts; each carries its own verification, and this entry
+  does not assert one for them.
 
   **Consequences.**
-  - **Anything that names a `migrations/postgres/NNN` file is now wrong.** That includes
-    comments and docs across the repository — a tracked follow-up — and older entries in this
-    changelog (cleat#2424). A runbook or deployment script that applied a numbered file, or
-    pinned one by name, must apply the three in lexical order instead.
+  - **Anything that names a `migrations/<dialect>/NNN` file is now wrong, on all three
+    dialects.** That includes comments and docs across the repository — a tracked follow-up —
+    and older entries in this changelog (cleat#2424). A runbook or deployment script that
+    applied a numbered file, or pinned one by name, must apply the three in lexical order
+    instead.
   - **Cluster-level facts are absent from the baseline, and no per-database check could have
     seen them go.** A database dump carries no `CREATE ROLE` and no role *membership*, because
     `pg_auth_members` and `pg_shdescription` are cluster-wide — so the catalog diff that
