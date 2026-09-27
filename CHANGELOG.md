@@ -25,9 +25,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its last definition *by construction*, rather than by someone taking the last of ten by hand.
   That generator is committed, so the artifact is re-derivable and verified to reproduce `001`
   and `003` byte-identically from that dump. (`002` seeds rows, which a schema-only dump cannot
-  carry, and is hand-written.) MySQL's and SQL Server's baselines are generated the same way
-  from their own trees by their own scripts; each carries its own verification, and this entry
-  does not assert one for them.
+  carry, and is hand-written.)
+
+  The other two dialects' baselines are generated from their own trees by their own scripts, and
+  **they do not carry the same verification.** SQL Server has a committed verify mode —
+  `scripts/gen-mssql-baseline/verify.go`, run as `-mode=verify` from the `Test SQL Server` job —
+  and a known-positive battery (`scripts/mssql-baseline-known-positive.sh`). **MySQL has
+  neither:** `scripts/gen-mysql-baseline.py` is a generator with no `-mode`, no known-positive
+  script, and no workflow reference at all, so nothing in CI invokes it. That asymmetry is
+  stated here rather than smoothed over, because a reader comparing the three trees would
+  otherwise reasonably assume they match.
 
   **Consequences.**
   - **Anything that names a `migrations/<dialect>/NNN` file is now wrong, on all three
