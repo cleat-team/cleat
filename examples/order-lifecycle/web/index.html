@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Order lifecycle — a saga over a payment provider</title>
+<!--
+  One stylesheet and one script, both same-origin, because this page is served
+  under `default-src 'none'` with `script-src 'self'` and `style-src 'self'`
+  (examples/order-lifecycle/backend/main.go, serveFile). That is why there is no
+  <style> block here and no inline `onclick=` anywhere: the policy refuses both,
+  and a page that relied on them would render blank rather than fail visibly.
+
+  The API key is NOT here. It lives in the backend process; this page calls
+  /api/... on its own origin and the backend attaches the key server-side. A
+  browser page can never hold it, and anything it sent would be stripped.
+-->
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<header class="page-head">
+  <h1>Order lifecycle</h1>
+  <p class="lede">
+    One order, five steps, and a declared undo for each of them. Place an order,
+    then make one of the steps fail and watch the completed steps unwind
+    <em>in reverse</em> — the work the saga does that a plain sequence cannot.
+  </p>
+  <p class="lede note">
+    <strong>The orchestration is the workflow.</strong> This page talks to a
+    backend that has no pipeline logic in it at all — it starts runs, reads
+    their published state, and forwards one signal.
+  </p>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Place an order</h2>
+
+    <form id="order-form" autocomplete="off">
+      <div class="field-row">
+        <label for="order-id">Order ID</label>
+        <input id="order-id" name="order_id" type="text" required>
+      </div>
+
+      <div class="field-row">
+        <label for="email">Customer email</label>
+        <input id="email" name="email" type="email" value="buyer@example.com">
+        <span class="sub">Receives the confirmation — a real call to the bundled
+          <code>email-notify</code> plugin.</span>
+      </div>
+
+      <div class="field-row">
+        <label for="amount">Order value</label>
+        <div class="amount">
+          <span class="currency">$</span>
+          <input id="amount" name="amount_cents" type="number" min="1" step="1"
+                 value="50" aria-describedby="threshold-hint">
+        </div>
+        <span class="sub" id="threshold-hint"></span>
+      </div>
+
+      <fieldset class="failures">
+        <legend>Make a step fail</legend>
+        <label class="check">
+          <input type="checkbox" id="sim-payment">
+          <span>
+            <strong>Decline the charge</strong>
+            <span class="sub">The first spending step fails. The reservation
+              completed, so it unwinds — and only it.</span>
+          </span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="sim-fulfilment">
+          <span>
+            <strong>Fail the dispatch</strong>
+            <span class="sub">Fails <em>after</em> the charge succeeded. The
+              refund is a real unwind rather than an unwind of nothing.</span>
+          </span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="sim-compensation">
+          <span>
+            <strong>Fail the compensation too</strong>
+            <span class="sub">The unwind runs and fails. The order is left in the
+              state the saga exists to avoid, and the page says so.</span>
+          </span>
+        </label>
+      </fieldset>
+
+      <button type="submit" id="submit">Place order</button>
+      <p class="form-error" id="form-error" hidden></p>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Runs</h2>
+    <p class="sub">Started through this backend. Select one to see its outcome.</p>
+    <ul id="run-list" class="run-list">
+      <li class="empty">No runs yet.</li>
+    </ul>
+    <button type="button" id="refresh" class="ghost">Refresh</button>
+  </section>
+
+  <section class="card" id="detail" hidden>
+    <h2>Order <span id="detail-id" class="mono"></span></h2>
+
+    <div class="status-line">
+      <span id="detail-status" class="pill">…</span>
+      <span id="detail-run-status" class="sub"></span>
+    </div>
+
+    <div id="approval-controls" hidden class="approval">
+      <p class="sub">
+        This order is above the approval threshold, so it is parked on a signal.
+        Nothing has been spent yet.
+      </p>
+      <button type="button" id="approve" class="primary">Approve</button>
+      <button type="button" id="reject" class="ghost">Reject</button>
+    </div>
+
+    <!--
+      The compensation outcome. This is the panel the page exists for: the
+      workflow publishes which compensations RAN AND SUCCEEDED and which ran and
+      FAILED as two separate lists, so the page can report the difference rather
+      than collapsing both into "failed".
+    -->
+    <div id="outcome"></div>
+
+    <details class="raw">
+      <summary>Published query state</summary>
+      <dl id="state-list"></dl>
+    </details>
+  </section>
+</main>
+
+<footer class="page-foot">
+  <p class="sub">
+    Workflow-only: the PSP, the inventory system and the 3PL are placeholders.
+    See <code>order.go</code> for why, and the README for what that means for
+    running this against real systems.
+  </p>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>
