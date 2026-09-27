@@ -2431,6 +2431,49 @@ jobs:
     # rather than needing a third.
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # WHY THIS JOB HAS A DATABASE.
+    #
+    # The floors were calibrated on 2026-06-10 with backends configured -- the
+    # Makefile's own comment records `engine/ 70% (actual 70.0% PG-only; 77.6%
+    # with all backends)` and `auth/ 90% (actual 90.9%)`. This job ran with NO
+    # database at all, so it compared a no-backend measurement against a
+    # with-backend threshold (cleat#2487).
+    #
+    # The size of that gap is NOT uniform, which is why the thresholds are
+    # re-derived per package rather than shifted together. Measured: `auth`
+    # moves only +2.9 points when a DSN is supplied, so the database is not
+    # what its 28-point shortfall is about; `pgclusterlock`'s whole 31-point
+    # gap IS the lock path, which needs a live server and two contending
+    # connections. Same job, opposite conclusions per package.
+    services:
+      postgres:
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cleat
+        # Required, and the reason is recorded at the test-go job above: this
+        # job runs on the runner rather than in a container, so without an
+        # explicit host port mapping the service is unreachable.
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # 127.0.0.1, NOT localhost -- runners resolve localhost to ::1 first and
+      # a service container publishes IPv4 only. Copying the hostname form
+      # reproduces the failure documented at test-go: a service declared,
+      # never once connected to, reporting green.
+      #
+      # And because this variable is SET, testutil.TestDB treats an
+      # unreachable server as a FAILURE rather than a skip. That is exactly
+      # the property this job needs: a database that stops answering must fail
+      # rather than silently empty the measurement, or the table reads clean
+      # while measuring nothing -- which is the defect this whole change is
+      # about.
+      CLEAT_TEST_DB: postgres://postgres:postgres@127.0.0.1:5432/cleat?sslmode=disable
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
