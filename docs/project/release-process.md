@@ -354,13 +354,51 @@ the template's install/test logic goes through a normal PR here, same as any
 other file; only `url`/`sha256` are generated, and they never live in this
 repo as real values, so there is nothing here to go stale between releases.
 
-**Token rotation.** `HOMEBREW_TAP_TOKEN` expires (fine-grained PATs always
-do). If the `homebrew-bump` job starts failing with `401`/`403` pushing to
-the tap, or ahead of the token's known expiry, an owner regenerates a
-fine-grained PAT scoped identically (`cleat-team/homebrew-tap`, Contents:
-read and write, no other repos or permissions) and updates the
-`HOMEBREW_TAP_TOKEN` Actions secret on `cleat-team/cleat`. Nothing else in
-this workflow needs to change when the token is rotated.
+**`homebrew-bump` has two failures that look alike and have different remedies.**
+Read the message before acting: get this wrong and you rotate a healthy token
+without touching the actual fault.
+
+| the job fails with | what it means | the remedy |
+|---|---|---|
+| `401`/`403` from the server | the credential expired or lost its scope | **rotate** — an owner regenerates a fine-grained PAT scoped identically (`cleat-team/homebrew-tap`, Contents: read and write, no other repos or permissions) and updates `HOMEBREW_TAP_TOKEN` on `cleat-team/cleat` |
+| `fatal: unable to access '…': URL rejected: Malformed input to a URL function` | git rejected the **URL**, before sending any request — so the token's *value* is malformed, not its credential | **re-set the same token's value**, cleanly — below |
+
+**Rotating ahead of a known expiry is still right** — fine-grained PATs always
+expire and this one is no exception. Nothing below changes that; it is only about
+telling that failure apart from one that looks like it.
+
+`URL rejected: Malformed input to a URL function` **cannot be produced by a
+`401` or a `403`.** Those are HTTP responses; this error happens while parsing
+the URL, before a request exists. So the message alone says which case you are
+in, and neither of the other two candidate causes — an expired token, a wrongly
+scoped one — is involved.
+
+That case is not hypothetical. Measured 2026-09-27 on v0.3.2 (run 36326029213,
+attempt 1): the other three jobs succeeded, and within `homebrew-bump` the
+checkout, the tarball hash and the formula render all succeeded — only the push
+failed. The secret existed, unexpired, and correctly scoped.
+
+**The malformation is stray whitespace or a control character — and not the
+obvious one.** A trailing newline is the intuitive guess and it is wrong: git has
+a case for that and reports it differently (`warning: url contains a newline in
+its password component`). Verified by running each against the real tap URL — a
+carriage return, a space or a tab produces the observed message; a newline does
+not.
+
+Re-set the value with:
+
+```bash
+printf '%s' '<token>' | gh secret set HOMEBREW_TAP_TOKEN -R cleat-team/cleat
+```
+
+`printf '%s'` and not `echo`, which appends the newline that this is so often
+mistaken for.
+
+**But note what is not recoverable.** Actions secrets are write-only, and a
+fine-grained PAT's value is shown once, at creation. So "re-set the value" is
+available only to someone who still holds it. If nobody does, a new PAT is the
+only route — that is a rotation, and the first row above applies. Either way,
+read the message before regenerating anything.
 
 **Verifying it worked**, either by re-deriving the CI job's own steps
 locally with a fake tag (the same check `packaging/homebrew/formula_test.go`'s
