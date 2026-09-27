@@ -111,6 +111,16 @@ jobs:
           pip install --quiet build
           python -m build --wheel
 
+      # Until 2026-09-27 the built wheel carried SIX top-level names -- `tests`,
+      # `examples`, `scripts` and `wit` beside `cleat_sdk` -- so every consumer
+      # got a top-level `tests` module in site-packages. Two routes put them
+      # there, which is why this asserts the ARTEFACT rather than the config.
+      #
+      # The script carries a --self-test whose known-positive is that pre-fix
+      # wheel spelled out, so the check is provable without cutting a release.
+      - name: The wheel ships nothing but the SDK
+        run: scripts/check-python-wheel-contents.py python-sdk/dist/*.whl
+
       - name: The wheel's metadata and the SDK constant both report it
         working-directory: python-sdk
         run: |
