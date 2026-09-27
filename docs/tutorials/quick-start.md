@@ -3,17 +3,28 @@
 This guide walks you through deploying and running your first cleat workflow
 end-to-end. Every command is a copy-paste snippet.
 
+It runs from the root of a **checkout of this repository** -- steps 2 and 3
+read `docker-compose.partner.yml` and `migrations/`, which are repo-relative,
+and there is no packaged distribution of the migration files. If you have not
+cloned yet: `git clone https://github.com/cleat-team/cleat`.
+
 ---
 
 ## 1. Prerequisites
 
 - **Go 1.27+** -- [Download](https://go.dev/dl/)
 - **Docker** -- for running Postgres locally
-- **cleat CLI** -- install with one command:
+- **The `cleat` CLI and `cleat-worker`** -- install both from the checkout:
 
 ```bash
-go install github.com/cleat-team/cleat/cmd/cleat@latest
+go install ./cmd/cleat ./cmd/cleat-worker
 ```
+
+Both land in `$(go env GOPATH)/bin` (usually `~/go/bin`), which is already on
+your `PATH`. Installing rather than building into the tree matters here: step
+7 asks you to open a **second terminal**, and neither an exported `PATH` nor a
+relative `./bin/...` would survive that -- and step 4 moves you into the
+project directory, where `./bin/...` does not resolve anyway.
 
 Verify the installation:
 
@@ -29,6 +40,21 @@ cleat build --help
 > but it lists deployed *workflow* versions from the database, not the CLI's
 > own version, and needs `--db` to do anything.) `cleat build --help` is
 > used here instead because it needs no database and exits 0.
+
+> Corrected 2026-09-27: this step previously said `go install
+> github.com/cleat-team/cleat/cmd/cleat@latest`. That resolves to a CLI from a
+> **different lineage** than this checkout -- the published v0.2.0 predates
+> nothing here, its `deploy` has no `--db` flag, so step 6 fails with a usage
+> error rather than deploying -- and it installs no `cleat-worker`, which step
+> 7 needs. Build both from the tree you are working in. Measured on a30e5769;
+> see cleat#2473.
+
+> Also worth knowing: `go build -o cleat ./cmd/cleat` (without the `bin/`)
+> does not work in this repository. `cleat/` is a directory here -- the Go SDK
+> -- and `go build -o <existing-directory>` writes the binary *inside* it, so
+> that command exits 0, leaves `./cleat` a directory, and buries a 59 MB binary
+> in the SDK source tree. `go build ./cmd/cleat` with no `-o` refuses outright
+> with `build output "cleat" already exists and is a directory`.
 
 ## 2. Start Postgres
 
@@ -60,14 +86,31 @@ docker compose -f docker-compose.partner.yml ps
 > mentioned only in `docs/explanation/postgresql-schema.md`, unlinked from
 > either quick start.
 
-Files are idempotent (`CREATE TABLE IF NOT EXISTS`), so re-running this is
-always safe -- including after `cleat-worker` has already applied them once:
+Run it through the migration runner:
 
 ```bash
-for f in migrations/postgres/*.sql; do
-    psql "postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable" -f "$f"
-done
+export CLEAT_OWNER_DSN="postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable"
+cleat-worker --migrate-only --db "$CLEAT_OWNER_DSN"
 ```
+
+> Corrected 2026-09-27: this was a `for f in migrations/postgres/*.sql; do psql
+> ... -f "$f"; done` loop. That loop builds the schema but **not**
+> `schema_migrations` -- only the migration *runner* writes that table -- and a
+> worker started against the result refuses with:
+>
+> ```
+> refusing to start: the database schema is behind this worker: the database has
+> no schema_migrations table: it has never been migrated, and all 3 migration(s)
+> this binary ships are pending.
+> ```
+>
+> which reads as *"you skipped this step"* at the moment you did it correctly.
+> Measured on a fresh database: the loop leaves **86 tables** and no
+> `schema_migrations`; `--migrate-only` leaves 3 rows in it.
+>
+> `--migrate-only` also runs as the owner. That matters for step 7: the worker
+> refuses a superuser connection, and the app role it wants instead has no DDL
+> rights, so it cannot migrate.
 
 See [postgresql-schema.md](../explanation/postgresql-schema.md) for what
 each migration file does and why applying only `001_schema.sql` is not
@@ -85,6 +128,8 @@ cd my-workflow
 This generates:
 - `main.go` -- a simple "Hello, World" workflow
 - `cleat.yaml` -- project configuration
+- `go.mod` and `go.sum` -- module files that pin the SDK to the tree the CLI
+  was built from
 
 Preview the generated workflow:
 
@@ -101,28 +146,41 @@ import "github.com/cleat-team/cleat/cleat"
 
 // @cleatEntry(name="hello")
 func Hello(h cleat.HostCalls, input string) (string, error) {
-	h.DurableLog("hello", "greeting")
+	h.DurableLog("hello: greeting")
 	return `{"greeting":"hello, world"}`, nil
 }
 ```
 
 > Corrected 2026-08-09: this previously showed a `greet(name string)`
-> function with a `//go:export greet` comment and claimed `cleat init` also
-> generates a `go.mod`. Neither matches `cleat init`'s actual "basic"
-> template (`cmd/cleat/init.go`, `scaffoldBasic`) -- the real entry point is
-> `Hello`, marked with a `// @cleatEntry(name="hello")` comment, and no
-> `go.mod` is written. That last part is a real gap: `cleat build` in the
-> next step needs one and fails immediately with "go.mod file not found"
-> without it. Reported to the team that owns `cmd/cleat/` rather than fixed
-> here (this stream doesn't own CLI code) -- the workaround below is
-> necessary until that's fixed.
+> function with a `//go:export greet` comment. That does not match `cleat
+> init`'s "basic" template (`cmd/cleat/init.go`, `scaffoldBasic`) -- the real
+> entry point is `Hello`, marked with a `// @cleatEntry(name="hello")`
+> comment.
 
-Because `cleat init` doesn't generate a `go.mod`, add one before building:
-
-```bash
-go mod init my-workflow
-go get github.com/cleat-team/cleat@latest
-```
+> **Corrected 2026-09-27, and this one removed a step rather than adding one.**
+> The 2026-08-09 correction above also claimed `cleat init` writes no `go.mod`,
+> and this section carried a two-command workaround for that. **Both are now
+> false.** `cleat init` does write `go.mod` and `go.sum`, and it pins the SDK
+> correctly:
+>
+> ```
+> module my-workflow
+> go 1.27.0
+> require github.com/cleat-team/cleat/cleat v0.0.0-20260927035713-a30e57693613
+> ```
+>
+> Following the old workaround is now actively harmful. `go mod init my-workflow`
+> fails outright (`go.mod already exists`), and `go get
+> github.com/cleat-team/cleat@latest` **succeeds while adding the wrong thing**:
+> it pulls in the *root* module at `v0.2.0 // indirect`, from the other lineage
+> described in step 1, into a project that never needed it. Nothing fails --
+> which is why it is worth deleting rather than leaving as harmless.
+>
+> There is nothing to run here. `cleat init` produces a buildable project.
+>
+> The sample above was also stale in a way that would not compile: it called
+> `h.DurableLog("hello", "greeting")`, and this SDK's `DurableLog` takes a
+> single message argument. The template emits `h.DurableLog("hello: greeting")`.
 
 ## 5. Build the workflow
 
@@ -175,23 +233,49 @@ you see `relation "workflow_defs" does not exist`, go back to step 3.
 
 ## 7. Start the worker
 
-The worker runs deployed workflows and exposes an HTTP API:
+The worker runs deployed workflows and exposes an HTTP API. It needs a
+connection it will accept, so give the app role a password first:
 
 ```bash
-cleat-worker \
-    --db "postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable" \
-    --api-addr :8080
+psql "$CLEAT_OWNER_DSN" -c "ALTER ROLE cleat_app LOGIN PASSWORD 'cleat_app'"
+export CLEAT_APP_DSN="postgres://cleat_app:cleat_app@localhost:5432/cleat?sslmode=disable"
+cleat-worker --db "$CLEAT_APP_DSN" --api-addr :8080
 ```
+
+> Corrected 2026-09-27: this used the owner DSN above. **The worker refuses
+> it**, and correctly:
+>
+> ```
+> refusing to start: this connection is not subject to row-level security, so
+> tenant isolation is not enforced:
+>   - the connecting role "postgres" is a superuser, and PostgreSQL never applies
+>     row-level security to a superuser
+> ```
+>
+> The schema already creates `cleat_app` with its grants, so what is missing is
+> only `LOGIN` and a password -- the one `ALTER ROLE` above. Note the role
+> cannot migrate: it has no DDL rights, so `--migrate-only` (step 3) stays on
+> the owner DSN.
 
 Leave this terminal running and open a new one for the next steps.
 
 ## 8. Run the workflow
 
-Trigger a workflow execution via the REST API:
+Every `/api/workflows/*` route requires an API key. Mint one for the default
+tenant -- the command prints it to stderr and shows it only once:
+
+```bash
+cleat-worker --db "$CLEAT_APP_DSN" \
+    --generate-api-key 00000000-0000-0000-0000-000000000000
+export CLEAT_API_KEY='cleat_sk_...'   # paste the key it printed
+```
+
+Then trigger a workflow execution via the REST API:
 
 ```bash
 curl -X POST http://localhost:8080/api/workflows/my-workflow/start \
     -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $CLEAT_API_KEY" \
     -d '{"input": "World"}'
 ```
 
@@ -211,7 +295,8 @@ Copy the `id` value -- you will need it in the next step.
 Query the workflow's state using the ID from the previous step (replace `<id>`):
 
 ```bash
-curl http://localhost:8080/api/workflows/<id>
+curl -H "Authorization: Bearer $CLEAT_API_KEY" \
+    http://localhost:8080/api/workflows/<id>
 ```
 
 Expected response includes:
