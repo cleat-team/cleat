@@ -450,8 +450,6 @@ func collectRequirements(result *analyzer.AnalysisResult, info *UsageInfo) {
 	}
 }
 
-// collectHostCallsCalls walks a function body and records which HostCalls
-// methods are called.
 // fieldImports is the FieldName -> imports lookup the usage scan runs on.
 //
 // Package-level so a test can exercise the real lookup rather than a rebuilt
@@ -466,6 +464,8 @@ func fieldImports() map[string][]string {
 	return m
 }
 
+// collectHostCallsCalls walks a function body and records which HostCalls
+// methods are called.
 func collectHostCallsCalls(fd *analyzer.FuncDecl, info *UsageInfo) {
 	if fd.Ast.Body == nil || fd.Pkg.Info == nil {
 		return

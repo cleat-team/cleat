@@ -2186,7 +2186,6 @@ func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, 
 	s.writeJSON(w, 200, map[string]string{"status": "rejected"})
 }
 
-// handleWorkflowUpdate handles POST /api/workflows/:id/update/:name
 // isTerminalStatus reports whether a workflow can no longer run guest code, and
 // therefore can never service an update.
 //
@@ -2215,6 +2214,7 @@ func isTerminalStatus(status string) bool {
 	return false
 }
 
+// handleWorkflowUpdate handles POST /api/workflows/:id/update/:name
 func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request, id, updateName string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {

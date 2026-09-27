@@ -372,6 +372,19 @@ func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, sign
 	return nil
 }
 
+// PollSignal satisfies the SignalStore interface by returning the oldest
+// unconsumed delivery with this name, without consuming it.
+//
+// ORDER BY id LIMIT 1 is the whole of the FIFO guarantee, and it needs the
+// surrogate key to mean anything: before 3.215 there was at most one row per
+// (workflow_id, signal_name), so "which one" was not a question the query
+// could be asked.
+//
+// It must stay a plain read. It used to delegate straight to
+// PollAndClaimSignal, whose name and doc comment both say it "atomically
+// checks for AND CLAIMS" a signal (i.e. DELETEs the row) -- the opposite of
+// what SignalStore's own doc comment promises here. Consumption is
+// ConsumeSignal, called separately once the event is durable.
 func (s *PostgresStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

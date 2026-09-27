@@ -1313,7 +1313,6 @@ func logBuildProgress(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format, args...)
 }
 
-// vetJSONOutput builds a VetOutput from analysis results.
 // dropAutoThreaded removes threading errors for functions the transform gave
 // an h parameter to. See the call site for why they are not failures.
 func dropAutoThreaded(errs []closure.ThreadingError, tr *transform.Result) []closure.ThreadingError {
@@ -1333,6 +1332,7 @@ func dropAutoThreaded(errs []closure.ThreadingError, tr *transform.Result) []clo
 	return kept
 }
 
+// vetJSONOutput builds a VetOutput from analysis results.
 func vetJSONOutput(result *analyzer.AnalysisResult, cr *closure.Result, threadingErrs []closure.ThreadingError) VetOutput {
 	var out VetOutput
 	out.Errors = make([]VetResult, 0)
