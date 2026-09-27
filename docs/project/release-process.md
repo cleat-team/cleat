@@ -65,12 +65,48 @@ Because the queue forces the method and nothing can bypass it, the back-merge is
 a three-step operation with an admin action in the middle:
 
 1. Set the ruleset's `merge_method` to `MERGE`.
-2. Merge the back-merge PR — "Create a merge commit".
+2. **Enqueue** the back-merge PR, and leave the ruleset on `MERGE` until it has
+   finished merging.
 3. Restore it to `SQUASH`.
 
 Step 1 and 3 are the owner's; they are item 155 of `#2058`. **Do not leave the
 queue on `MERGE`** — `feature/* -> develop` is squash by design, and a queue set
 to `MERGE` silently stops doing that for every PR that follows.
+
+**The flip must precede the ENQUEUE, not merely the merge — and this was learned
+the expensive way on v0.3.2.** The three steps above used to read "1. Set the
+method to `MERGE`. 2. Merge the back-merge PR. 3. Restore it", which is not wrong
+so much as under-specified: it reads as though the method is consulted when the
+merge happens, so any flip that precedes the merge is sufficient. **It is
+captured when the entry is ENQUEUED.** Measured:
+
+| | |
+|---|---|
+| back-merge PR enqueued | in the same call as the flip, microseconds before it took |
+| ruleset reads `MERGE` | for the full fifteen minutes the entry sat in the queue (verified live at both ends) |
+| it merged | still as a **squash** — one parent, lineage lost |
+
+Nothing failed. No check went red. `MERGE` was the true state of the ruleset
+throughout. The step-2 wording above is therefore "**Enqueue**", not "Merge",
+because that is the ordering that matters, and the ruleset must stay on `MERGE`
+until the entry has actually merged — restoring right after the enqueue would
+leave the merge itself to whatever method is live when it lands.
+
+**Verify the result by parent count, and the expected value depends on the PR.**
+Every state field is identical either way — `MERGED` is true, the checks are
+green, `mergeStateStatus` is `CLEAN` — so only the parent count distinguishes a
+squashed back-merge from a correct one:
+
+```bash
+gh api repos/cleat-team/cleat/commits/$(git rev-parse origin/develop) \
+  --jq '.parents | length'          # back-merge: expect 2.  feature/*: expect 1.
+git merge-base --is-ancestor vX.Y.Z origin/develop && echo "tag is an ancestor"
+```
+
+A bare parent count means nothing without the PR kind: a `feature/*` squash is
+correct at **1**, and a back-merge is correct at **2**. Applying the wrong
+expectation gives a confident wrong answer, which is why both are stated here
+rather than the number alone.
 
 **The failure this prevents is not hypothetical, and it is silent.** #1798 existed
 to make `v0.2.0` an ancestor of `develop`, and its own body argued that "a real
