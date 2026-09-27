@@ -117,6 +117,34 @@ SITES: dict[str, str] = {
 }
 
 
+# Where a stamper can live and what one looks like on disk. Discovery is narrow
+# on purpose: the SDK trees only, code extensions only, and anchored on the
+# ASSIGNMENT rather than a bare mention -- a document quoting `"sdk_version"` in
+# an example is not a site, and a search that cannot tell a thing from a
+# sentence about the thing is a trap this repo has paid for more than once.
+DISCOVERY_ROOTS = ("python-sdk", "crates", "packages")
+DISCOVERY_SUFFIXES = {".py", ".rs", ".sh", ".js", ".ts"}
+DISCOVERY_SKIP = ("node_modules", "/build/", "/target/", "/dist/")
+
+
+def discovered_sites(root: Path) -> set[str]:
+    """Every file under the SDK trees that ASSIGNS a version."""
+    found: set[str] = set()
+    for base in DISCOVERY_ROOTS:
+        base_dir = root / base
+        if not base_dir.is_dir():
+            continue
+        for path in base_dir.rglob("*"):
+            if not path.is_file() or path.suffix not in DISCOVERY_SUFFIXES:
+                continue
+            rel = str(path.relative_to(root))
+            if any(part in rel for part in DISCOVERY_SKIP):
+                continue
+            if SDK_VERSION_FIELD.search(path.read_text(encoding="utf-8", errors="replace")):
+                found.add(rel)
+    return found
+
+
 def manifest_version(path: Path) -> list[str]:
     """The version a manifest pins, read by a parser that knows its format."""
     suffix = path.suffix
@@ -268,6 +296,47 @@ def self_test() -> int:
         1,
         ["nothing version-shaped matched in python-sdk/scripts/stamp_metadata.py"],
     )
+
+    # THE DECLARATIONS MUST RESEMBLE THE TREE, which is a different claim from
+    # every case above. Those run against a SYNTHETIC tree, so a fixture that had
+    # drifted from the repo would pass all of them while saying nothing about it
+    # -- WS-2's lockfile shape, where one pattern matched one of two layouts and
+    # reported zero for the other.
+    #
+    # Both directions, because they fail differently:
+    #
+    #   declared -> fixture  catches "a site was added to SDKS and to nothing
+    #                        else", which is how the fixture silently stops
+    #                        covering the thing it was extended for.
+    #   tree -> declared     catches "a stamper exists in the repo and nothing
+    #                        checks it" -- the SILENT one, because the script
+    #                        then reports 0 problems, which is what a healthy
+    #                        run reports.
+    #
+    # An earlier version of this case compared the ROWS each tree produced. That
+    # was wrong and a mutation showed it: a declared-but-absent file produces a
+    # problem and no row on BOTH sides, so the sets matched and the case passed.
+    # Comparing what was READ cannot notice a site that was never read.
+    repo_root = Path(__file__).resolve().parent.parent
+
+    declared = {rel for rel, _ in SDKS.values()}
+    declared |= {rel for _, rels in SDKS.values() for rel in rels}
+    cases += 1
+    if declared != set(SITES):
+        failures.append(
+            "SDKS and SITES disagree, so the fixture does not cover the "
+            f"declarations. Only declared: {sorted(declared - set(SITES))}; only "
+            f"in the fixture: {sorted(set(SITES) - declared)}"
+        )
+
+    cases += 1
+    undeclared = discovered_sites(repo_root) - declared
+    if undeclared:
+        failures.append(
+            f"these files assign a version and NOTHING checks them: {sorted(undeclared)}. "
+            f"Add each to SDKS (and to SITES) or every release could ship it stale -- "
+            f"this is the direction that reports 0 problems when it goes wrong."
+        )
 
     if failures:
         for f in failures:
