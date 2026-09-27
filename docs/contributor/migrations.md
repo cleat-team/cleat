@@ -122,6 +122,34 @@ none** — with a known-positive, since a check for an absent string passes on a
 > "an explicit denial, read as a confirmation" trap, in the one place the rule is easiest to apply
 > and easiest to forget.
 
+### A harness that applies the baseline must pin `search_path` exactly as the runner does
+
+Not a property of the generator — a property of **anything that builds a database from these files
+outside `migration.Runner`**, which is every harness anyone writes by hand, starting with a `psql -f`
+loop.
+
+The routines carry `SET search_path FROM CURRENT`, which **freezes whatever `search_path` is current
+at `CREATE FUNCTION` time** onto the function, permanently. `migration.Runner` pins
+`<schema>, pg_temp` on its connection before each file (`migration/runner.go`, `searchPath()`);
+`psql` does not. A database built under psql's default `"$user", public` therefore gets functions
+whose frozen path is `'$user', 'public'` — a different schema from the one the shipped baseline
+describes, and one no diff against that baseline would explain.
+
+Measured 2026-09-26, on the first run of the PostgreSQL verify mode. The regenerated dump then reads
+`SET search_path TO '$user', 'public'`, and the generator's `un_freeze_schema` **refuses** rather
+than emitting a baseline pinned to a schema a deployment may not have chosen:
+
+    the generated files name the configured schema on 5 line(s); pg_dump resolved a deferral
+    that un_freeze_schema must put back
+
+Two things to take from that. The refusal is the guard working — it is what makes the failure
+visible rather than producing a subtly non-relocatable baseline. And **the failure text points at the
+schema, not at the harness**, so a harness written by *reading* the code rather than by running it
+will spend a while in the wrong file; this is why the mode pins the path and says so.
+
+So: pin `SET search_path = <schema>, pg_temp;` before every file you apply — per file, because a
+file may change it.
+
 ### Three SQL Server traps, measured on a chain-built database (2026-09-26)
 
 Found while spiking whether a committed Go emitter over `sys.*` can produce an applyable MSSQL
