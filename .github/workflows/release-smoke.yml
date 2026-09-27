@@ -26,7 +26,8 @@
 #      wheel rather than the source tree.
 #
 # REPORTS, DOES NOT GATE. The owner's decision is no extra gating for the
-# release branch, so this is deliberately NOT a required check: a red run here
+# release branch, so this is deliberately NOT A REQUIRED CHECK: Release smoke
+# A red run here
 # is information for whoever is cutting the release, not a merge blocker.
 # ---------------------------------------------------------------------------
 name: Release smoke
