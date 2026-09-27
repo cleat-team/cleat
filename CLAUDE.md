@@ -159,6 +159,18 @@ when the wazero backend was deleted, and it is the opposite of what happens now.
 one database and packages delete each other's fixtures mid-test; the failures look like
 unrelated flakes.
 
+**There is a second, independent reason for the same flag, and it was invisible for as long as
+the first one was sufficient.** A job running several database-backed package trees in one
+invocation at default parallelism also exhausts PostgreSQL's connection limit — measured
+2026-09-27 while adding a database to the `coverage` job: **30 of 62 packages failed, every one
+with `pq: sorry, too many clients already (53300)`**, a message that names neither the flag nor
+the cause. Adding the flag took that job to zero failures on the same tree. The two reasons are
+kept together because either alone would survive the other's removal: the `DELETE FROM` reason
+never surfaces when nothing writes concurrently, and the connection reason never surfaces when
+every database-backed test skips — which is the case in any job that has no database at all.
+**A rule with one *recorded* reason is not a rule with one reason**, and the unrecorded one is
+hard to notice precisely because the rule already works without it.
+
 The length of the list is not the point and this used to give it as eleven, which was wrong by
 four when checked (cleat#986). What makes it dangerous is that the DELETE carries no `WHERE`
 and the list reaches the table every test depends on. Ask that, rather than counting:
