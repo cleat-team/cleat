@@ -1081,7 +1081,6 @@ func updateWorkflowNextWakeAt(t *testing.T, store WorkflowStore, workflowID stri
 	}
 }
 
-// queryWorkflowNextWakeAt returns next_wake_at from the database.
 // queryDatabaseNow returns the database server's own clock, using the same
 // expression the corresponding DeliverSignal uses to set next_wake_at:
 // now() on PostgreSQL, NOW(6) on MySQL, SYSUTCDATETIME() on SQL Server.
@@ -1113,6 +1112,7 @@ func queryDatabaseNow(t *testing.T, store WorkflowStore) time.Time {
 	return now
 }
 
+// queryWorkflowNextWakeAt returns next_wake_at from the database.
 func queryWorkflowNextWakeAt(t *testing.T, store WorkflowStore, workflowID string) time.Time {
 	t.Helper()
 	var nw time.Time

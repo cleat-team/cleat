@@ -529,7 +529,6 @@ func (b *wasmtimeBackend) dispatchRegisterQueryHandler(
 // durable-messaging interface
 // ---------------------------------------------------------------------------
 
-// dispatchDurableSend handles (string,string,string) -> u64.
 // dispatchPollUpdate handles () -> string.
 //
 // The component signature returns the envelope directly rather than writing
@@ -567,6 +566,7 @@ func (b *wasmtimeBackend) dispatchCompleteUpdate(
 	return nil
 }
 
+// dispatchDurableSend handles (string,string,string) -> u64.
 func (b *wasmtimeBackend) dispatchDurableSend(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
 	results *C.wasmtime_component_val_t, nresults C.size_t,
