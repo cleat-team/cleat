@@ -1787,7 +1787,7 @@ jobs:
         run: ${{ github.workspace }}/scripts/check-skip-budget.sh 'test-go/${{ matrix.package.name }}' test-report.json
 
   # -------------------------------------------------------------------------
-  # Test Python (matrix: 3.10 / 3.11 / 3.12)
+  # Test Python (matrix: 3.10 / 3.11 / 3.12 / 3.13)
   # -------------------------------------------------------------------------
   test-python:
     name: Test Python ${{ matrix.python-version }}
@@ -1802,13 +1802,34 @@ jobs:
     # skip is tests/test_wasm_compilation.py's "componentize-py not installed",
     # and this job installs componentize-py -- so on the runner it should be 443
     # passed, 0 skipped. Re-derive (note: measured under 3.14, since that is
-    # what this machine has; the matrix below is 3.10-3.12):
+    # what this machine has; the matrix below is 3.10-3.13):
     #   python3 -m venv /tmp/v && /tmp/v/bin/pip install -q "./python-sdk[dev]"
     #   cd python-sdk && /tmp/v/bin/python -m pytest -q -rs
+    #
+    # Re-measured 2026-09-26 with the same command, also under 3.14: 481 passed,
+    # 1 skipped -- same skip (componentize-py). So the count has grown by 39
+    # since the 2026-08-06 reading, and the original figure is left above with
+    # its date rather than overwritten. The PASSED count is a census of a
+    # growing suite and will be stale again; the SKIP is the part worth
+    # expecting, and on the runner it is 0 because componentize-py is installed
+    # there. Compare that, not the total.
+    #
+    # 3.13 is the version this matrix was MISSING. `python-sdk/pyproject.toml`
+    # claims `requires-python = ">=3.10"` with classifiers for 3.10, 3.11, 3.12
+    # AND 3.13, and the matrix stopped at 3.12 -- so the newest version the
+    # package claims was exercised by nothing. That is not a gap this job can
+    # express by being green: the matrix reported success on three of the four
+    # versions it advertised, and nothing anywhere said one was untested.
+    #
+    # The check that this is not merely a wider matrix: release-smoke.yml's
+    # `python-versions` job installs the BUILT WHEEL on all four, and this one
+    # installs the SOURCE tree (`pip install ".[dev]"`). Neither subsumes the
+    # other -- a wheel can report the wrong version while the source is fine,
+    # and the source can fail to import while the wheel installs.
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v7
 
