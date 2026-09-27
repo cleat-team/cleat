@@ -623,8 +623,17 @@ v0.3.1 (run 36313519805): the tap still pinned `v0.2.0`, and both `Bump the
 Homebrew tap` and `Publish the Helm chart` were skipped, for a release whose
 nine binary assets were all present.
 
-**Re-running.** Re-run the failed jobs from the Actions UI, or dispatch the
-workflow on the tag:
+**Re-run first.** "Re-run failed jobs" in the Actions UI is the recovery path
+that is always available, including on the release that has just failed:
+
+```bash
+gh run rerun <run-id> --failed
+```
+
+**The dispatch route, and its one delay.** `Release` also takes a
+`workflow_dispatch`, which covers what a re-run cannot — a run older than 30
+days or deleted, and a tag pushed with a token that does not trigger workflows,
+so that no run exists to re-run:
 
 ```bash
 gh workflow run Release --ref vX.Y.Z
@@ -636,6 +645,13 @@ a dispatch on `main` hands `main` to every tag check in the file. The
 `goreleaser` job's first step now refuses that by name; before cleat#2488 it
 validated the tag nowhere at all, because it relied entirely on the
 `push: tags:` trigger that a dispatch does not go through.
+
+**That command will 404 at first, and it is not a broken workflow.** GitHub
+serves a `workflow_dispatch` only once the workflow is registered with that
+trigger on the **default branch** — and this repository's default branch is
+`develop`, not `main`. The trigger is on `main` from cleat#2490, but it reaches
+`develop` only at the next back-merge. Until then the re-run above is the whole
+recovery path, and a 404 here means "not registered yet", not "not configured".
 
 Re-running is safe now where it was not before. A run that failed after the
 upload stage leaves the tag's assets already attached to the Release, and the
