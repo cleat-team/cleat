@@ -59,46 +59,100 @@ database.
 
 ## Quick Start
 
+This walkthrough runs from the root of a **checkout of this repository** — steps 2
+and 3 read `migrations/` and `testdata/`, which are repo-relative. If you have not
+cloned yet: `git clone https://github.com/cleat-team/cleat && cd cleat`.
+
 ```bash
 # 0. Verify your toolchain (one command)
 make setup
 
-# 1. Install the CLI
-go install github.com/cleat-team/cleat/cmd/cleat@latest
+# 1. Build the CLI from THIS checkout, into ./bin.
+#    Do not `go install .../cmd/cleat@latest`: the published CLI is v0.2.0, from
+#    a release branch this one has not merged, and its `deploy` has no --db
+#    flag -- step 4 then fails with a usage error instead of deploying.
+#    Build into ./bin deliberately: `-o cleat` writes *inside* ./cleat/, which
+#    is a directory in this repo, so ./cleat stays a directory and is not
+#    runnable.
+go build -o ./bin/cleat ./cmd/cleat
+go build -o ./bin/cleat-worker ./cmd/cleat-worker
 
-# 2. Start Postgres and apply the schema. `cleat-worker` (step 5) also
-#    applies migrations/postgres/*.sql when started with --migrate-on-start
-#    (step 5), but `cleat
-#    deploy` (step 4) does not, and deploy runs first in this walkthrough --
-#    so the schema has to exist before that. See
-#    docs/explanation/postgresql-schema.md for the full procedure.
+# 2. Start Postgres and apply the schema. `cleat deploy` (step 4) does not
+#    migrate, and the worker refuses to start against an unmigrated database,
+#    so this has to happen first. Run it through the migration runner rather
+#    than a `psql -f` loop: only the runner records `schema_migrations`, and
+#    without that table the worker reports the database as never migrated.
+#    The OWNER DSN is required here -- the app role in step 5 has no DDL
+#    rights. See docs/explanation/postgresql-schema.md.
+export CLEAT_OWNER_DSN="postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable"
 docker compose -f docker-compose.partner.yml up -d postgres
-for f in migrations/postgres/*.sql; do
-    psql "postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable" -f "$f"
-done
+./bin/cleat-worker --migrate-only --db "$CLEAT_OWNER_DSN"
 
-# 3. Compile a workflow package to WASM
-cleat build -o ./out ./testdata/basic/
-# Wrote ./out/cancel_order.wasm -- cleat build bundles every entry point
-# in the package (PlaceOrder, CancelOrder, LongRunning) into one module,
+# 3. Compile a workflow package to WASM. The -o directory must sit OUTSIDE this
+#    module: pointed inside it, the follow-on compile resolves the output
+#    directory as a package path and fails with "main module
+#    (github.com/cleat-team/cleat) does not contain package
+#    github.com/cleat-team/cleat/out" (cleat#2473).
+./bin/cleat build -o /tmp/cleat-build ./testdata/basic/
+# Wrote /tmp/cleat-build/cancel_order.wasm -- cleat build bundles every entry
+# point in the package (PlaceOrder, CancelOrder, LongRunning) into one module,
 # named after the first entry point it found. All three are still callable
-# from that one file; --entry-point at trigger time (step 6) picks one.
+# from that one file; --entry-point at trigger time (step 7) picks one.
 
-# 4. Deploy to your database
-cleat deploy --db "postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable" \
-    --name place_order ./out/cancel_order.wasm
+# 4. Deploy to your database. The owner DSN is correct here.
+./bin/cleat deploy --db "$CLEAT_OWNER_DSN" \
+    --name place_order /tmp/cleat-build/cancel_order.wasm
 
-# 5. Start the worker daemon. --migrate-on-start applies the schema itself, which is
-#    right for one node on a fresh database; a fleet migrates once, as a deploy step
-#    (`cleat-worker --migrate-only`) -- see docs/operations/upgrading.md.
-cleat-worker --db "postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable" \
-    --migrate-on-start
+# 5. Give the worker a connection it will accept. It REFUSES a superuser DSN,
+#    because PostgreSQL never applies row-level security to a superuser. The
+#    schema already creates `cleat_app` with its grants -- what it needs is
+#    LOGIN and a password, which is this one statement (cleat#2468):
+psql "$CLEAT_OWNER_DSN" -c "ALTER ROLE cleat_app LOGIN PASSWORD 'cleat_app'"
+export CLEAT_APP_DSN="postgres://cleat_app:cleat_app@localhost:5432/cleat?sslmode=disable"
 
-# 6. Trigger a workflow (via REST API) -- POST .../<name>/start, not POST
-#    .../workflows (that route is GET-only and returns 405 on POST)
+# 6. Start the worker daemon. --api-addr has NO default: without it the worker
+#    opens no HTTP port and step 7 cannot connect. A fleet migrates once as a
+#    deploy step (step 2) and then starts workers with no --migrate flag -- see
+#    docs/operations/upgrading.md.
+./bin/cleat-worker --db "$CLEAT_APP_DSN" --api-addr :8080 &
+
+# 7. Mint an API key for the default tenant and trigger a workflow. The route
+#    requires the key -- and note it is POST .../<name>/start, not POST
+#    .../workflows (that route is GET-only and returns 405 on POST).
+./bin/cleat-worker --db "$CLEAT_APP_DSN" \
+    --generate-api-key 00000000-0000-0000-0000-000000000000
+export CLEAT_API_KEY='cleat_sk_...'   # paste the key the command printed
 curl -X POST http://localhost:8080/api/workflows/place_order/start \
+    -H "Authorization: Bearer $CLEAT_API_KEY" \
     -d '{"input":{"userID":"u1","cart":[{"sku":"widget","quantity":2}]},"entry_point":"PlaceOrder"}'
 ```
+
+<!-- Corrected 2026-09-27. This block was run verbatim, in both of its documented
+     forms, against a checkout of a30e5769 and could not reach a running workflow.
+     Every change above is a measured correction; see cleat#2473.
+
+     `go install .../cmd/cleat@latest` resolved to v0.2.0, whose `deploy` accepts
+     only -name and -task-queue -- `cleat deploy --db ...` exits 2. The tree's own
+     CLI has -db, -dry-run and -max-history-length, and deploys successfully. The
+     published version is not an older snapshot of this tree: it is a different
+     lineage, which is why the interfaces differ.
+
+     The `-o ./out` form could not be kept. It fails on BOTH CLIs with identical
+     output, so it is not the version skew: with a `go.work` in scope that `use`s
+     the module, the compile resolves the output directory as a package path.
+     Reproduced from scratch by adding a three-line go.work to an otherwise
+     passing project, and cleared by GOWORK=off in that project.
+
+     `--migrate-on-start` moved out of step 6 for two independent reasons: on the
+     owner DSN the worker refuses it (superuser), and on the app DSN it dies with
+     "core database migrations failed" (no CREATE/ALTER rights). Step 2 uses
+     --migrate-only as the owner instead, which is also what records
+     schema_migrations.
+
+     The previous text credited `--migrate-on-start` with applying the schema,
+     which is true, and started deploy before it, which is the order that fails. -->
+
+<!-- Corrected 2026-08-09: `cleat build ./testdata/basic/` was previously
 
 <!-- Corrected 2026-08-09: `cleat build ./testdata/basic/` was previously
      followed by `cleat deploy ... ./out/place_order.wasm`, a file `cleat
