@@ -147,6 +147,7 @@ coverage-report:
 
 # Thresholds (enforced via prefix matching; measured 2026-06-10):
 #   engine/testutil    0%     (test helper)
+#   plugins/plugintest 0%     (test helper -- NOT a plugin; see below)
 #   engine/           70%     (actual 70.0% PG-only; 77.6% with all backends)
 #   internal/         65%     (lowest: telemetry 65.7%)
 #   plugin/           70%     (actual 71.7%)
@@ -159,6 +160,27 @@ coverage-report:
 #   cmd/              40%     (lowest non-zero: cleat-worker 42.8%)
 #   wasm/             75%     (actual 79.4%)
 #   auth/             90%     (actual 90.9%)
+#
+# The match below is FIRST-match-wins over `prefixes`, so a package needing its
+# own floor has to be listed BEFORE the broader prefix it would otherwise fall
+# under. That is why engine/testutil heads the list rather than sitting beside
+# engine, and it is the whole mechanism behind the plugins/plugintest entry in
+# this table.
+#
+# plugins/plugintest is a TEST HELPER, not a plugin, and until it was listed it
+# inherited `plugins/` -- an 80% floor calibrated for real plugins. It scored
+# 5.26% and the Coverage job reported a coverage collapse. It is not one: the
+# package's own doc comment says why it exists, and it is the same reason
+# engine/testutil is exempt --
+#
+#   WHY THIS IS A SEPARATE PACKAGE. The natural home is engine/testutil, and it
+#   cannot go there: engine's and plugin's own tests import testutil, so
+#   testutil importing either is an import cycle in the test binary.
+#
+# A helper that cannot live with the other helper is exempt for the same
+# reason that one is. Nothing about this is a bar being lowered: it is a bar
+# that was never meant for this package being correctly withdrawn, and the two
+# helper entries should move together if either does.
 .PHONY: coverage-check
 coverage-check: coverage-go
 	@cat coverage_cleat.out 2>/dev/null | grep -v "^mode:" >> coverage.out 2>/dev/null; \
@@ -166,8 +188,9 @@ coverage-check: coverage-go
 	    fail = 0; \
 	    printf "=== Coverage by Package ===\n"; \
 	    printf "%-40s %8s\n\n", "Package", "Coverage"; \
-	    n = split("engine/testutil engine internal plugin cleat/wasmtest cleat plugins cmd/cleat-plugin-verify cmd/deploy-workflow cmd/wit-rewrite cmd/cleatctl cmd wasm auth", prefixes, " "); \
+	    n = split("engine/testutil plugins/plugintest engine internal plugin cleat/wasmtest cleat plugins cmd/cleat-plugin-verify cmd/deploy-workflow cmd/wit-rewrite cmd/cleatctl cmd wasm auth", prefixes, " "); \
 	    thresh["engine/testutil"] = 0; \
+	    thresh["plugins/plugintest"] = 0; \
 	    thresh["engine"] = 70; \
 	    thresh["internal"] = 65; \
 	    thresh["plugin"] = 70; \
@@ -186,7 +209,7 @@ coverage-check: coverage-go
 	{ \
 	    path = $$1; \
 	    sub(/:[0-9]+:$$/, "", path); \
-	    sub(/\/[^/]+\.go$$/, "", path); \
+	    sub(/\/[^\/]+\.go$$/, "", path); \
 	    sub(/^github\.com\/cleat-team\/cleat\//, "", path); \
 	    gsub(/%$$/, "", $$NF); \
 	    cov[path] += $$NF; \
