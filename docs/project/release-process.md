@@ -25,23 +25,72 @@ gitflow is defined by the merge graph, so the method is not a matter of taste:
 |-----|--------|-----|
 | `feature/*` -> `develop` | **Squash** | Keeps develop's history one commit per change. |
 | `release/*` -> `main` | **Merge commit** | `main` must descend from the released history. |
-| `release/*` -> `develop` | **Merge commit** | Carries the version bump and CHANGELOG back. |
+| `main` -> `develop` | **Merge commit** | Carries the tag back with the version bump; the only merge that makes the tag an ancestor of `develop`. |
 | `hotfix/*` -> `main` | **Merge commit** | Same as a release. |
 | `hotfix/*` -> `develop` | **Merge commit** | The fix reaches develop by merging, never by cherry-pick. |
 
-GitHub cannot enforce a merge method per target branch — both squash and merge
-commit are enabled repo-wide, so the table above is convention and it is on the
-merger to pick the right one from the dropdown. **Squashing a release or hotfix
-PR silently breaks the model**: it discards the second parent, and `main` stops
-being a descendant of anything.
+This table used to say that GitHub cannot enforce a merge method per target
+branch, so it was all convention and "on the merger to pick the right one from
+the dropdown". **That is no longer true, and it is false in the direction that
+bites.** The dropdown still exists repo-wide, but for anything targeting
+`develop` it no longer decides anything: `develop` carries the ruleset
+**`22686489`, "develop merge queue"**, and a merge queue rule is where a merge
+method *can* be pinned to one branch.
 
-Rebase merging is disabled. Re-derive the settings with:
+```bash
+gh api repos/cleat-team/cleat/rulesets/22686489 \
+  --jq '{method:.rules[0].parameters.merge_method, bypass:.bypass_actors}'
+# -> {"bypass":[],"method":"SQUASH"}                   (2026-09-27)
+```
+
+(The keys come out alphabetically because `gh`'s `--jq` is gojq, which sorts
+object keys — read the values, not the order.)
+
+So **the two rows above whose whole point is the second parent — `main -> develop`
+and `hotfix/* -> develop` — cannot be merged as written.** The queue squashes
+them, and `bypass_actors` is empty, so nobody can step around it. The `-> main`
+rows are unaffected: `main` carries no ruleset and the dropdown governs there.
+
+Rebase merging is disabled. Re-derive the repo-wide settings with:
 
 ```bash
 gh api repos/cleat-team/cleat \
   --jq '{merge:.allow_merge_commit,squash:.allow_squash_merge,rebase:.allow_rebase_merge}'
-# -> {"merge":true,"squash":true,"rebase":false}      (2026-08-10)
+# -> {"merge":true,"rebase":false,"squash":true}      (2026-08-10)
 ```
+
+#### The back-merge needs an admin merge-method flip
+
+Because the queue forces the method and nothing can bypass it, the back-merge is
+a three-step operation with an admin action in the middle:
+
+1. Set the ruleset's `merge_method` to `MERGE`.
+2. Merge the back-merge PR — "Create a merge commit".
+3. Restore it to `SQUASH`.
+
+Step 1 and 3 are the owner's; they are item 155 of `#2058`. **Do not leave the
+queue on `MERGE`** — `feature/* -> develop` is squash by design, and a queue set
+to `MERGE` silently stops doing that for every PR that follows.
+
+**The failure this prevents is not hypothetical, and it is silent.** #1798 existed
+to make `v0.2.0` an ancestor of `develop`, and its own body argued that "a real
+merge is the only shape that works" because a squash "carries the content, not the
+lineage". It was squashed by this queue regardless — its merge commit `4753106e`
+has **one** parent — and the lineage never arrived:
+
+```bash
+git merge-base --is-ancestor v0.2.0 origin/develop   # exit 1
+git describe --tags --abbrev=0 origin/develop        # v0.1.0 -- the release before main's v0.2.0
+```
+
+(`v0.1.0` is a lightweight tag on an ordinary commit that `develop` does contain;
+`v0.2.0` is annotated and sits on `main` alone. So `describe` is not failing — it
+is answering correctly about the tag it can reach, and the answer is the wrong
+release.)
+
+Nothing failed; no check went red; the branch model is simply wrong. A squashed
+back-merge looks like a successful merge in every place you would normally look,
+which is why the method is a step in the checklist rather than a judgement call.
 
 ### Branch protection
 
@@ -474,18 +523,29 @@ git push origin vX.Y.Z
 Tag `origin/main` explicitly rather than whatever your local checkout is on. The
 annotated tag matters: GoReleaser reads its message.
 
-### 7. Back-merge into `develop`
+### 7. Back-merge `main` into `develop`
 
-The same release branch now merges into `develop`, carrying the CHANGELOG and
-version bump back so the branches do not drift:
+`main` now merges into `develop`, carrying the CHANGELOG and version bump back so
+the branches do not drift. **From `main`, not from the release branch** — the tag
+sits on a commit that is on `main` and on no release branch, so this is the only
+merge that makes it an ancestor of `develop`, which is what `#2058:155` verifies:
 
 ```bash
-gh pr create --base develop --head release/vX.Y.Z --title "chore: back-merge release vX.Y.Z into develop"
+git merge-base --is-ancestor vX.Y.Z origin/develop   # must exit 0 after this step
+gh pr create --base develop --head main --title "chore: back-merge main into develop"
 ```
 
-Merge this one **with "Create a merge commit"** as well. This step is the one
-that gets skipped, and skipping it is how `main` and `develop` diverge — which
-is exactly the state PR #466 had to repair.
+Merging `main` rather than the release branch loses nothing: main's history
+contains the release branch, so the version bump and the CHANGELOG arrive either
+way, and only this shape brings the tag with them.
+
+Merge this one **with "Create a merge commit"** as well — which the queue will not
+let you do: it pins `develop` to `SQUASH`. Flip the ruleset to `MERGE` first and
+restore it to `SQUASH` afterwards, per
+[the back-merge flip](#the-back-merge-needs-an-admin-merge-method-flip). This step
+is the one that gets skipped, and skipping it — by omission or by squash — is how
+`main` and `develop` diverge; the two `git` commands in that section are how you
+tell, and they are worth running before the next release rather than after.
 
 ### 8. Verify CI
 
