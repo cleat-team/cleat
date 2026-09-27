@@ -100,6 +100,27 @@ its own name that it had not opened.
 A message that already names a stream is left alone, so `git commit --trailer`
 and a rebase onto a checkout that never set the config both work.
 
+**On `develop`, read it with an anchored grep — not the trailer parser.** Every
+commit merged there is a squash, and `squash_merge_commit_message=COMMIT_MESSAGES`
+concatenates the constituent messages, so each one's trailer block lands
+mid-body. `%(trailers:key=Claude-Stream,valueonly)` then returns **empty for a
+commit that plainly carries the line** — 9 of 9 measured 2026-09-17. The text is
+in the commit; the parser is reading the wrong paragraph. (GitHub also appends a
+block of its own after a `---------` separator, which is the paragraph that wins;
+the giveaway is its lowercase `Co-authored-by:` against the hook's capitalised
+`Co-Authored-By:`.)
+
+`Stream Trailer Check` reads a pull request's own commits for exactly this
+reason. The predicate that works on merged history is:
+
+```
+git log -1 --format='%B' <sha> | grep -qE '^Claude-Stream:'
+```
+
+Anything else resolving authorship from merged history needs the same treatment.
+An empty parse there reports a formatting limitation, not an unattributed commit
+— and those two lead to opposite conclusions about who did the work.
+
 The same setting enables `.githooks/pre-commit`, which refuses a commit that
 adds an `IMPROVEMENT-PLAN.md` section outside your sandbox's allocated block.
 CI cannot check that — it asserts uniqueness and block membership, both of
