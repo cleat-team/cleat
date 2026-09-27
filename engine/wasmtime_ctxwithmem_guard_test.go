@@ -39,7 +39,12 @@ func TestWasmtimeWrappersPassGuestMemory(t *testing.T) {
 		t.Fatal("no wasmtime_hostfuncs*.go files found -- has the layout changed?")
 	}
 
-	funcWrap := regexp.MustCompile(`linker\.FuncWrap\("env", "(\w+)"`)
+	// b.hostFunc, not linker.FuncWrap: IMPROVEMENT-PLAN 3.90 routed every host
+	// function through the backend so the guest's epoch budget can be bracketed
+	// around it (engine/wasmtime_hostbudget.go). This guard's `checked == 0`
+	// check is what caught the rename -- it is the reason a source-level
+	// invariant is allowed to depend on a syntax, and worth keeping that way.
+	funcWrap := regexp.MustCompile(`b\.hostFunc\(linker, "env", "(\w+)"`)
 	outParam := regexp.MustCompile(`\w*(MaxLen|maxLen)`)
 
 	var checked int

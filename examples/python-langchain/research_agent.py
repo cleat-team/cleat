@@ -10,8 +10,9 @@ Demonstrates:
 
 Usage (WASM / cleat CLI)::
 
-    durable build --target python --entry research_agent.py:langchain_research_agent
-    durable run langchain_research_agent '{"topic": "Compare Temporal, DBOS, and Cleat"}'
+    cleat build --target python --entry research_agent.py:langchain_research_agent
+    cleat run --wasm langchain_research_agent.wasm --entry-point LangChainResearchAgent \
+      --input '{"topic": "Compare Temporal, DBOS, and Cleat"}'
 
 Usage (standalone test, no WASM needed)::
 
@@ -115,14 +116,17 @@ RESEARCH_TOOLS = [
 
 
 def _execute_web_search(h: HostCalls, query: str) -> str:
-    """Execute a web search via the websearch plugin.
+    """Execute a web search via h.call to a registered "websearch" service.
 
-    The search is recorded as a deterministic event — on crash recovery the
-    same result is returned without re-executing the search.
+    No such plugin ships with cleat -- this calls out to an external service
+    by name, resolved at the worker via `--service-endpoints
+    websearch=https://your-search-provider`. The call is recorded as a
+    deterministic event — on crash recovery the same result is returned
+    without re-executing the search.
     """
     h.cleat_log(f"  Web search: {query[:120]}")
     try:
-        return h.plugin_call("websearch", "search", {"query": query})
+        return h.call("websearch", "search", {"query": query})
     except Exception as e:
         h.cleat_log(f"  Web search failed: {e}")
         return json.dumps({"error": str(e), "results": []})
@@ -204,11 +208,6 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
     plugins = Plugins(h)
 
     # --- Track overall agent status in durable state ---------------------
-    h.set_state("agent_status", {
-        "topic": topic,
-        "started_at": h.now(),
-        "status": "researching",
-    })
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": RESEARCH_PROMPT},
@@ -224,11 +223,6 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
         cancelled, reason = h.poll_cancellation()
         if cancelled:
             h.cleat_log(f"Agent cancelled at step {step + 1}: {reason}")
-            h.set_state("agent_status", {
-                "status": "cancelled",
-                "reason": reason,
-                "steps": step,
-            })
             return json.dumps({
                 "cancelled": True,
                 "reason": reason,
@@ -252,11 +246,6 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
             total_cost += llm_result.cost
 
         # Record per-step progress so the dashboard can show live status.
-        h.set_state(f"step_{step + 1}", {
-            "llm_calls": llm_calls,
-            "total_cost": round(total_cost, 6),
-            "timestamp": h.now(),
-        })
 
         # Handle empty response.
         if not llm_result.choices:
@@ -276,12 +265,6 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
         # The model returned content without asking for tools — we are done.
         if not tool_calls and finish_reason == "stop":
             content = message.get("content", "")
-            h.set_state("agent_status", {
-                "status": "completed",
-                "steps": step + 1,
-                "llm_calls": llm_calls,
-                "total_cost": round(total_cost, 6),
-            })
             h.cleat_log(
                 f"Research complete: {step + 1} steps, "
                 f"{llm_calls} LLM calls, ${total_cost:.4f}"
@@ -321,12 +304,6 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
 
     # --- Max steps reached ----------------------------------------------
     h.cleat_log("Max research steps reached")
-    h.set_state("agent_status", {
-        "status": "max_steps_reached",
-        "steps": MAX_RESEARCH_STEPS,
-        "llm_calls": llm_calls,
-        "total_cost": round(total_cost, 6),
-    })
     return json.dumps({
         "error": "Max steps reached",
         "steps": MAX_RESEARCH_STEPS,
@@ -336,7 +313,7 @@ def _research_agent_impl(h: HostCalls, topic: str) -> str:
 
 
 # ========================================================================
-# Decorated entry point — used by ``durable build`` / ``durable run``
+# Decorated entry point — used by ``cleat build`` / ``cleat run``
 # ========================================================================
 
 
@@ -351,8 +328,8 @@ def langchain_research_agent(h: HostCalls, topic: str) -> str:
 
     When the worker crashes mid-execution and restarts, the decorated
     wrapper replays the event history from the beginning, but every
-    ``plugin_call`` returns the cached result from the previous run —
-    no duplicate API calls, no lost progress.
+    ``plugin_call`` or ``call`` returns the cached result from the
+    previous run — no duplicate API calls, no lost progress.
     """
     return _research_agent_impl(h, topic)
 
@@ -388,15 +365,6 @@ def run_test() -> None:
             self.logs.append(message)
             print(f"  [LOG] {message}")
 
-        def set_state(self, key: str, value: Any) -> None:
-            self.state[key] = value
-
-        def get_state(self, key: str, result_type: type = str) -> Any:
-            return self.state.get(key)
-
-        def list_state(self, prefix: str = "") -> list[str]:
-            return [k for k in self.state if k.startswith(prefix)]
-
         def now(self) -> int:
             return self._current_time
 
@@ -412,10 +380,24 @@ def run_test() -> None:
 
             if plugin_name == "llm" and function_name == "chat":
                 return self._mock_llm(input_data)
-            if plugin_name == "websearch" and function_name == "search":
-                return self._mock_search(input_data)
             return json.dumps({
                 "error": f"No mock for {plugin_name}.{function_name}",
+            })
+
+        def call(self, service: str, operation: str, request: Any,
+                  timeout_ms: int | None = None) -> str:
+            # _execute_web_search reaches "websearch" through h.call, not
+            # h.plugin_call -- it's an external service (--service-endpoints
+            # on the real worker), not a plugin, so it is mocked here rather
+            # than in plugin_call above.
+            self.call_history.append((service, operation, request))
+            if not isinstance(request, dict):
+                request = {}
+
+            if service == "websearch" and operation == "search":
+                return self._mock_search(request)
+            return json.dumps({
+                "error": f"No mock for {service}.{operation}",
             })
 
         # -- Mock response builders ------------------------------------

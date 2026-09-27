@@ -25,6 +25,23 @@
 // which need no SDK import at all. See plugins/dag's package doc for that
 // half and why cmd/cleat only ever needed it.
 //
+// THIS DIRECTIVE IS LOAD-BEARING AND WAS INERT UNTIL cleat#1617. DAG.startChild
+// calls h.ChildWorkflowWithOptions and DAG.ExecuteWithOptions calls
+// h.AwaitAnyChild, both on a HostCalls the workflow handed in -- so a workflow
+// that uses a DAG never NAMES either call, and the usage scan that walks the
+// workflow's own source finds neither. This line is what wires them.
+//
+// It had no effect from here until collectRequirements learned to read
+// imported packages: it read only the workflow's own package, which is the one
+// place a library's directive can never be. A DAG workflow built clean,
+// deployed clean, imported neither host call, and died on its first task with
+// "the HostCalls runtime was not initialized".
+//
+// Do not "tidy" this into wasm/usage.go's sdkHelperImports table. That route
+// goes through analyzer.SDKDurableHelper, which refuses any receiver whose
+// package is not named "cleat" -- a row for DAG would be written and never
+// consulted. TestARequiredHostCallIsReadFromAnImportedPackage covers this line.
+//
 //cleat:require ChildWorkflowWithOptions,AwaitAnyChild
 package dagrun
 

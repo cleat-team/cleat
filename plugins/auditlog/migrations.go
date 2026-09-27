@@ -78,5 +78,135 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS audit_events;
 			`,
 		},
+		{
+			// Tenant isolation for audit_events. cleat#1278.
+			//
+			// A separate version rather than a TenantScoped on v1, for the
+			// reason kvstore's v2 gives: v1 is already recorded as applied
+			// wherever auditlog runs, and a recorded migration never runs
+			// again -- editing it would protect new databases and leave every
+			// existing one open.
+			//
+			// WHAT MAKES THIS ONE DIFFERENT FROM kvstore, AND WHY IT IS THE
+			// TEMPLATE TO COPY. kvstore qualified because every one of its
+			// access sites is request-scoped; its own comment says a plugin
+			// that also sweeps from a background loop "cannot adopt this yet".
+			// auditlog does sweep, and adopts it anyway, because the policy is
+			// not the obstacle -- an unnamed sweep is. The two non-request
+			// writers were resolved in OPPOSITE directions, and telling them
+			// apart is the whole judgement:
+			//
+			//	cleanupRetention  deletes by timestamp for everyone. Genuinely
+			//	                  cross-tenant, so it names itself with
+			//	                  plugin.AcrossAllTenants and the policy lifts.
+			//
+			//	recordAudit       writes ONE tenant's row and had the tenant in
+			//	                  hand the whole time -- it built its insert
+			//	                  context from context.Background() to survive a
+			//	                  cancelled request, and dropped the tenant on
+			//	                  the way. That is a LOST tenant, not a
+			//	                  cross-tenant operation. It carries the tenant
+			//	                  now.
+			//
+			// Bypassing in the second case would have worked, passed every
+			// test, and silently disabled isolation for every audit write --
+			// which is the failure this mechanism exists to make impossible.
+			// Reach for AcrossAllTenants only when there is no tenant to be
+			// had, never when there is one that went missing.
+			//
+			// Up is empty on purpose: the policy is emitted by the runtime from
+			// TenantScoped. On MySQL and SQL Server this version is recorded
+			// and does nothing, which is what the field documents.
+			Version:      2,
+			TenantScoped: []string{"audit_events"},
+		},
+		{
+			// The per-tenant hash chain (cleat#2047). See chain.go for what is hashed.
+			//
+			// seq, prev_hash and row_hash are NULLABLE: a row written before this
+			// version has none, and is reported by verify as unchained rather than
+			// broken. 0.3.0 needs a fresh database, so on a real deployment they are
+			// filled for every row.
+			//
+			// UNIQUE (tenant_id, seq) is what makes a forked chain impossible to
+			// store: two appenders that both read the same head cannot both insert
+			// seq+1. PostgreSQL and MySQL let a unique index hold many NULLs, so the
+			// unchained rows do not collide there; SQL Server treats NULLs as equal,
+			// so its index is filtered to chained rows.
+			//
+			// audit_chain_heads has one row per tenant: the last seq and hash, and the
+			// floor (floor_ts is the UTC epoch-microsecond timestamp of the last row
+			// retention removed, so a floor that covers rows too young to have
+			// expired can be seen). The head row is also the per-tenant lock (SELECT ... FOR UPDATE /
+			// UPDLOCK), which is why it is a table and not an advisory lock: a chain
+			// alone cannot see that its last rows were deleted, and the head can.
+			// floor_seq / floor_hash record what retention removed, so that a deleted
+			// prefix is a recorded fact and not a hole.
+			Version: 3,
+			Up: `
+				ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS seq BIGINT;
+				ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS prev_hash CHAR(64);
+				ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS row_hash CHAR(64);
+
+				CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_events_tenant_seq
+					ON audit_events (tenant_id, seq) WHERE seq IS NOT NULL;
+
+				CREATE TABLE IF NOT EXISTS audit_chain_heads (
+					tenant_id  UUID PRIMARY KEY,
+					seq        BIGINT NOT NULL,
+					hash       CHAR(64) NOT NULL,
+					floor_seq  BIGINT NOT NULL DEFAULT 0,
+					floor_hash CHAR(64) NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000',
+					floor_ts   BIGINT NOT NULL DEFAULT 0
+				);
+			`,
+			// MySQL: the timestamp column becomes DATETIME(6), holding UTC wall-clock
+			// time. TIMESTAMP(6) overflows in 2038, and this is the version that
+			// touches the table anyway. DATETIME does no zone conversion, so a
+			// session's time_zone cannot change what a row holds. (Rows that already
+			// exist are converted from the migrating session's zone; on a fresh
+			// database there are none.)
+			UpMySQL: `
+				ALTER TABLE audit_events
+					MODIFY COLUMN ` + "`" + `timestamp` + "`" + ` DATETIME(6) NOT NULL DEFAULT (UTC_TIMESTAMP(6));
+
+				ALTER TABLE audit_events
+					ADD COLUMN seq BIGINT NULL,
+					ADD COLUMN prev_hash CHAR(64) NULL,
+					ADD COLUMN row_hash CHAR(64) NULL;
+
+				CREATE UNIQUE INDEX idx_audit_events_tenant_seq ON audit_events (tenant_id, seq);
+
+				CREATE TABLE IF NOT EXISTS audit_chain_heads (
+					tenant_id  CHAR(36) PRIMARY KEY,
+					seq        BIGINT NOT NULL,
+					hash       CHAR(64) NOT NULL,
+					floor_seq  BIGINT NOT NULL DEFAULT 0,
+					floor_hash CHAR(64) NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000',
+					floor_ts   BIGINT NOT NULL DEFAULT 0
+				);
+			`,
+			UpMSSQL: `
+				IF COL_LENGTH('audit_events', 'seq') IS NULL
+					ALTER TABLE audit_events ADD seq BIGINT NULL, prev_hash CHAR(64) NULL, row_hash CHAR(64) NULL;
+
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_audit_events_tenant_seq' AND object_id = OBJECT_ID('audit_events'))
+				CREATE UNIQUE INDEX idx_audit_events_tenant_seq ON audit_events (tenant_id, seq) WHERE seq IS NOT NULL;
+
+				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'audit_chain_heads')
+				CREATE TABLE audit_chain_heads (
+					tenant_id  UNIQUEIDENTIFIER PRIMARY KEY,
+					seq        BIGINT NOT NULL,
+					hash       CHAR(64) NOT NULL,
+					floor_seq  BIGINT NOT NULL DEFAULT 0,
+					floor_hash CHAR(64) NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000',
+					floor_ts   BIGINT NOT NULL DEFAULT 0
+				);
+			`,
+			Down: `
+				DROP TABLE IF EXISTS audit_chain_heads;
+			`,
+			TenantScoped: []string{"audit_chain_heads"},
+		},
 	}
 }

@@ -21,8 +21,9 @@ npm run build
 ## Run
 
 ```bash
-cleat deploy as-workflow dist/workflow.stamped.wasm
-cleat run PlaceOrder '{"userID":"usr_001","items":[{"sku":"SKU-1","quantity":2}]}'
+cleat deploy --name as-workflow dist/workflow.stamped.wasm
+cleat run --wasm dist/workflow.stamped.wasm --entry-point PlaceOrder \
+  --input '{"userID":"usr_001","items":[{"sku":"SKU-1","quantity":2}]}'
 ```
 
 ## Key files

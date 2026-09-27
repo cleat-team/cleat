@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugin"
 	"io"
 	"net/http"
 	"strings"
@@ -26,6 +27,7 @@ func OpenAIChat(ctx context.Context, client *http.Client, apiKey, baseURL string
 	if err != nil {
 		return ChatOutput{}, fmt.Errorf("openai: create request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -103,6 +105,7 @@ func OpenAIChatStream(ctx context.Context, client *http.Client, apiKey, baseURL 
 	if err != nil {
 		return nil, fmt.Errorf("openai: create stream request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
@@ -116,44 +119,46 @@ func OpenAIChatStream(ctx context.Context, client *http.Client, apiKey, baseURL 
 	go func() {
 		defer resp.Body.Close()
 		defer close(ch)
+		plugin.RecoverGoroutine("llm/openai", nil, func() {
 
-		scanner := bufio.NewScanner(resp.Body)
-		index := 0
-		for scanner.Scan() {
-			line := scanner.Text()
-			if !strings.HasPrefix(line, "data: ") {
-				continue
-			}
-			payload := strings.TrimPrefix(line, "data: ")
-			if payload == "[DONE]" {
-				return
-			}
+			scanner := bufio.NewScanner(resp.Body)
+			index := 0
+			for scanner.Scan() {
+				line := scanner.Text()
+				if !strings.HasPrefix(line, "data: ") {
+					continue
+				}
+				payload := strings.TrimPrefix(line, "data: ")
+				if payload == "[DONE]" {
+					return
+				}
 
-			var sseData struct {
-				Choices []struct {
-					Delta struct {
-						Content string `json:"content"`
-					} `json:"delta"`
-					FinishReason *string `json:"finish_reason"`
-				} `json:"choices"`
+				var sseData struct {
+					Choices []struct {
+						Delta struct {
+							Content string `json:"content"`
+						} `json:"delta"`
+						FinishReason *string `json:"finish_reason"`
+					} `json:"choices"`
+				}
+				if err := json.Unmarshal([]byte(payload), &sseData); err != nil {
+					continue
+				}
+				if len(sseData.Choices) == 0 {
+					continue
+				}
+				content := sseData.Choices[0].Delta.Content
+				chunk := StreamChunk{
+					Content: content,
+					Index:   index,
+				}
+				index++
+				if sseData.Choices[0].FinishReason != nil {
+					chunk.Done = true
+				}
+				ch <- chunk
 			}
-			if err := json.Unmarshal([]byte(payload), &sseData); err != nil {
-				continue
-			}
-			if len(sseData.Choices) == 0 {
-				continue
-			}
-			content := sseData.Choices[0].Delta.Content
-			chunk := StreamChunk{
-				Content: content,
-				Index:   index,
-			}
-			index++
-			if sseData.Choices[0].FinishReason != nil {
-				chunk.Done = true
-			}
-			ch <- chunk
-		}
+		})
 	}()
 
 	return ch, nil
@@ -174,6 +179,7 @@ func OpenAIEmbed(ctx context.Context, client *http.Client, apiKey, baseURL strin
 	if err != nil {
 		return EmbedOutput{}, fmt.Errorf("openai: create embed request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Content-Type", "application/json")
 

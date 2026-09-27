@@ -1,20 +1,22 @@
 package eventstore
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
+	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
-	"github.com/google/uuid"
 )
 
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("eventstore: nil mux")
 	}
@@ -52,18 +54,11 @@ func isPKConflict(err error) bool {
 		strings.Contains(s, "23505") // PostgreSQL
 }
 
-// tenantID extracts the tenant UUID from the request context. Returns the
-// zero UUID if no tenant is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
-}
-
 // ---- POST /events/{stream_id} ----
 
 func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -75,13 +70,10 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read body.
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("eventstore: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
+	body, ok := plugin.ReadBody(w, r)
+	if !ok {
 		return
 	}
-	defer r.Body.Close()
 
 	if len(body) == 0 {
 		p.writeError(w, 400, "empty body")
@@ -99,14 +91,27 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Insert event with auto-incrementing sequence.
-	// Retry loop handles PK conflicts from concurrent appends.
+	// Insert event with auto-incrementing sequence. The next sequence is
+	// read in its own statement, not a subquery of the INSERT (cleat#2260 --
+	// see nextSequenceForStream's comment in queries.go for why). Retry loop
+	// handles PK conflicts from concurrent appends racing on the same
+	// read-then-write.
+	//
+	// maxAppendAttempts was 3 until cleat#2260's own concurrent-append test
+	// (n=20 appenders against one stream) exhausted it for real: every
+	// loser's retry reads the now-current MAX and can still collide with
+	// another concurrent loser, and a fixed 10/20ms backoff retries every
+	// loser in the same round in lockstep, which does not thin the herd.
+	// 32 attempts with jittered backoff (so losers spread out instead of
+	// re-colliding together) clears n=20 reliably; see that test for the
+	// measurement this is tuned against.
 	var sequence int64
-	const maxAppendAttempts = 3
-	backoff := 10 * time.Millisecond
+	var err error
+	const maxAppendAttempts = 32
+	backoff := 5 * time.Millisecond
+	const maxBackoff = 100 * time.Millisecond
 	for attempt := 1; attempt <= maxAppendAttempts; attempt++ {
-		err = p.db.QueryRow(r.Context(), plugin.Rebind(insertEventReturning.For(p.dialect), p.dialect),
-			tid, streamID, string(body)).Scan(&sequence)
+		err = p.appendOnce(r.Context(), tid, streamID, body, &sequence)
 		if err == nil {
 			break
 		}
@@ -114,8 +119,13 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if attempt < maxAppendAttempts {
-			time.Sleep(backoff)
+			//nolint:gosec // G404: retry-backoff jitter, not a security context -- spreads concurrent losers apart so they don't retry in lockstep. No secret or token derives from it.
+			jitter := time.Duration(rand.Int64N(int64(backoff)))
+			time.Sleep(backoff/2 + jitter)
 			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
 		}
 	}
 	if err != nil {
@@ -136,11 +146,42 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// appendOnce runs one attempt of the read-next-sequence-then-insert pair in
+// a single transaction, writing the sequence it used into *sequence. A
+// caller retries on a duplicate-key error (isPKConflict); see the comment on
+// nextSequenceForStream in queries.go for why this is two statements and
+// why the retry, not a lock, is what makes it safe under concurrency.
+func (p *Plugin) appendOnce(ctx context.Context, tenantID uuid.UUID, streamID string, body []byte, sequence *int64) error {
+	tx, err := p.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+
+	var maxSeq int64
+	if err := tx.QueryRow(ctx, plugin.Rebind(nextSequenceForStream.For(p.dialect), p.dialect),
+		tenantID, streamID).Scan(&maxSeq); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("read next sequence: %w", err)
+	}
+	*sequence = maxSeq + 1
+
+	if _, err := tx.Exec(ctx, plugin.Rebind(insertEvent.For(p.dialect), p.dialect),
+		tenantID, streamID, *sequence, string(body)); err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
 // ---- GET /events/{stream_id} ----
 
 func (p *Plugin) handleRead(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -166,13 +207,8 @@ func (p *Plugin) handleRead(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
-		SELECT sequence, event, created_at
-		FROM event_stream
-		WHERE tenant_id = $1 AND stream_id = $2 AND sequence > $3
-		ORDER BY sequence ASC
-		LIMIT $4
-	`, p.dialect), tid, streamID, fromSeq, limit)
+	rows, err := p.db.Query(r.Context(), queryStreamPage.For(p.dialect),
+		tid, streamID, fromSeq, limit)
 	if err != nil {
 		p.logger.Error("eventstore: read", "stream", streamID, "error", err)
 		p.writeError(w, 500, "failed to read events")
@@ -189,10 +225,18 @@ func (p *Plugin) handleRead(w http.ResponseWriter, r *http.Request) {
 	events := []eventEntry{}
 	for rows.Next() {
 		var e eventEntry
-		if err := rows.Scan(&e.Sequence, &e.Event, &e.CreatedAt); err != nil {
+		// plugin.JSONColumn, not &e.Event directly: json.RawMessage is a
+		// named []byte type, and database/sql's convertAssign fast path
+		// doesn't convert a driver string into one -- go-mssqldb returns
+		// NVARCHAR as string, so every row failed to scan and this endpoint
+		// returned an empty list on SQL Server. See plugin.JSONColumn.
+		// cleat#2257.
+		var eventCol plugin.JSONColumn
+		if err := rows.Scan(&e.Sequence, &eventCol, &e.CreatedAt); err != nil {
 			p.logger.Error("eventstore: scan row", "error", err)
 			continue
 		}
+		e.Event = eventCol.Raw
 		events = append(events, e)
 	}
 
@@ -208,8 +252,8 @@ func (p *Plugin) handleRead(w http.ResponseWriter, r *http.Request) {
 // ---- GET /events/{stream_id}/stream (SSE) ----
 
 func (p *Plugin) handleSSE(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -268,11 +312,14 @@ func (p *Plugin) handleSSE(w http.ResponseWriter, r *http.Request) {
 
 			for rows.Next() {
 				var seq int64
-				var event json.RawMessage
-				if err := rows.Scan(&seq, &event); err != nil {
+				// plugin.JSONColumn: see handleGet's identical comment above.
+				// cleat#2257.
+				var eventCol plugin.JSONColumn
+				if err := rows.Scan(&seq, &eventCol); err != nil {
 					p.logger.Error("eventstore: sse scan", "error", err)
 					continue
 				}
+				event := eventCol.Raw
 
 				payload, _ := json.Marshal(map[string]any{
 					"sequence": seq,

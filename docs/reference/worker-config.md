@@ -14,7 +14,7 @@ drives execution. It supports PostgreSQL, MySQL, and SQL Server backends.
 
 | Type | Default | Env var |
 |------|---------|---------|
-| string | `""` (required) | `DATABASE_URL` |
+| string | `""` (required) | `CLEAT_DATABASE_URL` |
 
 PostgreSQL (or MySQL/SQL Server) connection URL. The worker connects to your
 existing database; it does not manage it. Example:
@@ -42,8 +42,24 @@ Selects the database backend. Must match the `--db` URL scheme.
 | string | `"public"` | -- |
 
 PostgreSQL schema for cleat tables. Sets `search_path` on connections; runs
-`CREATE SCHEMA IF NOT EXISTS` on startup. Enables multiple isolated worker
-pools on a single database cluster.
+`CREATE SCHEMA IF NOT EXISTS` on startup.
+
+**Core tables honour this as of [#1287](https://github.com/cleat-team/cleat/issues/1287); two things
+still do not.** Before that fix the flag set where the runtime connection *looked* and not where the
+migrations *built*, so a non-default value did not degrade — the worker could not finish its core
+migrations at all. What it now covers, and what it does not:
+
+| | follows `--schema` |
+|---|---|
+| core tables, indexes, procedures, `schema_migrations` | yes |
+| plugin tables and `plugin_migrations` | yes |
+| the `admin` and `cleat` schemas | **no** — those names are fixed, so two pools in one database share them |
+
+So a worker's own tables are isolated. "Multiple isolated worker pools on a single database cluster"
+is a stronger claim than that and is **not** yet supported: `admin` and `cleat` are shared, and the
+`SECURITY DEFINER` functions in `admin` have not been examined for what they do when two pools use
+them. Treat `--schema` as "put this worker's tables somewhere other than public", not as a tenancy
+boundary.
 
 ---
 
@@ -72,6 +88,54 @@ watchdog entirely.
 
 ---
 
+## Schema migration
+
+A worker does **not** migrate the database when it starts (cleat#2117). A normal
+start verifies the schema and refuses to start if it is behind; migrating is a
+deploy step.
+
+### --migrate-only
+
+| Type | Default | Description |
+|------|---------|-------------|
+| bool | `false` | Apply the core and plugin migrations and exit |
+
+Exits `0` when the schema is current and non-zero on any failure, having started
+nothing else: it exits before the worker registers and before it reads the secrets,
+so it needs no master key. Use `--migrate-db` for a DSN with DDL rights (default:
+`--db`). Idempotent: a second run on a migrated database changes nothing. Safe if
+several run at once, or alongside a `--migrate-on-start` worker: they queue on a
+named lock in the database, on every dialect. A plugin migration that fails fails
+the run.
+
+---
+
+### --migrate-on-start
+
+| Type | Default | Description |
+|------|---------|-------------|
+| bool | `false` | Let this worker apply pending migrations at startup |
+
+The behaviour every worker had before cleat#2117, kept as an explicit opt-in for a
+single node or development, where there is no deploy step. A fleet should use
+`--migrate-only`.
+
+**What a normal start does instead.** It reads the migration tracking tables (as the
+runtime role, no DDL rights needed) and:
+
+| the schema is | the worker |
+|---|---|
+| **behind** — a migration this binary ships is not applied | refuses to start; the message says which and how to fix it |
+| **equal** | starts |
+| **ahead** — migrations applied that this binary does not ship | starts, and logs a warning naming both versions |
+
+Ahead starts because a rolling upgrade migrates to the new version while workers on
+the old one are still running or restarting; refusing there would wedge the rollout
+on the workers it is replacing. It relies on migrations staying additive within a
+release line.
+
+---
+
 ## Concurrency
 
 ### --concurrency
@@ -83,6 +147,43 @@ watchdog entirely.
 Controls how many workflows a single worker process can execute in parallel.
 Used alongside memory-aware dynamic concurrency when `--memory-soft-limit` is
 configured.
+
+---
+
+### --max-reclaim-per-tick
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `200` | Maximum stale instances the reaper reclaims per tick (`0` = unbounded) |
+
+The reaper reclaims any instance whose heartbeat predates
+`max(2 × --heartbeat-interval, 10s)`. **Any stall that outlasts that window ages
+every running instance past it at once**, because they all heartbeat through the
+same table — a migration holding `ACCESS EXCLUSIVE` at worker boot, a database
+failover, a paused volume. Without a bound, the sweep after the stall reclaims
+the entire running set in one statement and every in-flight workflow replays
+simultaneously, against a database that has just finished whatever stalled it.
+
+No data is lost — fencing guarantees that — but it is a self-inflicted
+thundering herd at the moment the database can least absorb one. See
+[cleat#1320](https://github.com/cleat-team/cleat/issues/1320).
+
+The bound changes the **rate** of recovery, never whether it happens: the sweep
+is ordered by heartbeat age, so the longest-stale are reclaimed first and the
+rest follow on later ticks. At the default `--concurrency` of 10, `200` is
+twenty workers' worth per tick and the reaper ticks at most every 10s, so an
+ordinary failure — one worker, or several — is reclaimed in a single tick and
+never reaches this limit.
+
+When it does bind, the worker logs at WARN:
+
+    Reaper: hit the per-tick reclaim limit; more instances remain stale
+      count=200 limit=200
+
+That line is the only place a whole-set stall is visible: a bounded sweep and a
+sweep that happened to find exactly that many look identical in the count alone.
+
+`0` disables the bound and restores the previous behaviour.
 
 ---
 
@@ -109,6 +210,42 @@ A worker can poll multiple queues. Example:
 The worker updates its heartbeat in the database at this interval. Stale
 instances (missing two consecutive heartbeats) are reaped and made available
 to other workers.
+
+**Must be below 150s.** `cleat-worker` refuses to start otherwise. A secret
+writer (`set-secret`, `reseal-secrets`) counts a worker as live for five minutes
+after its last heartbeat, and the worker re-checks its secrets after a gap longer
+than `max(2 × --heartbeat, 10s)`. At 150s or more that threshold reaches the
+writer's five minutes, so a stalled worker could be written past and resume
+without noticing.
+
+---
+
+### --heartbeat-max-connections
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `3` | Database connections reserved for heartbeat writes |
+
+Opens a small connection pool used only for heartbeat writes, isolated from the
+execution pool. cleat#2009: a saturated execution pool (long-held connections
+claiming or deferring workflows) can starve a heartbeat on the shared pool, and
+a missed heartbeat is what triggers reclaim -- so pool exhaustion under load
+looked like a dead worker. Reserving a few connections up front removes the
+contention.
+
+Set to `0` to disable the reserved pool and share the execution pool as before.
+Negative values are refused at startup.
+
+Counted in the worker's connection budget census (`--connection-budget`) as its
+own `heartbeat=N` term.
+
+**Not yet supported on a sharded deployment (`--shards-file`).** A sharded
+worker's heartbeat stays on the execution pool regardless of this flag.
+
+A heartbeat that succeeds through this pool still records the worker's database
+contact as OK (`recordDBContactOK`), the same signal an idle worker's DB ping
+records -- so the DB-health gate cleat#2166 added does not distinguish which
+pool answered, only whether the database is reachable.
 
 ---
 
@@ -194,13 +331,16 @@ Auto-generates an API key on first startup if no keys exist.
 |------|---------|-------------|
 | bool | `false` | Require signal authorization for cross-workflow signals |
 
-> **Not usable yet.** Nothing in cleat can write `allowed_signals` — there is no
-> API, CLI verb or SDK call that sets it — and the check denies when the list is
-> empty. Enabling this flag therefore denies *every* cross-workflow, plugin and
-> external signal, with no supported way to permit one. It defaulted to `true`
-> until 2026-08-05, which is why it now defaults to `false`. The instructions
-> below describe the intended behaviour and are accurate about the mechanism;
-> they are not followable until the list can be populated.
+> **Usable now, but still off by default.** `allowed_signals` has a writer as of
+> 2026-09-02 — `PUT /api/workflows/{id}/allowed-signals`, below — so the
+> instructions in this section are followable. This block used to say the flag
+> was unusable, which was true from 2026-08-05 until that writer landed.
+>
+> The default stays `false` for a reason that is not about the writer: nothing
+> populates `allowed_signals` when a workflow *starts*. Turning the flag on today
+> denies every signal to every workflow until an operator makes a second API call
+> for each one, so it is a per-deployment decision rather than a safe default. It
+> becomes one once a workflow can declare its callers at start time.
 > See IMPROVEMENT-PLAN §3.15.
 
 When enabled, a workflow or external caller can only signal a target
@@ -214,8 +354,27 @@ Applies to WASM `cleat_signal_workflow`, `SendSignalAndWait`, plugin
   `allowed_signals` to permit them.
 - An empty `allowed_signals` means deny all (fail-secure).
 
-Set to `true` to enable signal authorization. Until `allowed_signals` can be
-populated, that denies every signal.
+Set to `true` to enable signal authorization. Every workflow starts with an
+empty `allowed_signals`, so grant callers before enabling the flag, not after.
+
+#### Reading and setting `allowed_signals`
+
+```
+GET /api/workflows/{id}/allowed-signals
+    → 200 {"allowed_signals": ["billing-service"]}
+
+PUT /api/workflows/{id}/allowed-signals
+    {"allowed_signals": ["billing-service", "*"]}
+    → 200 {"allowed_signals": ["billing-service", "*"]}
+```
+
+`PUT` **replaces** the whole list rather than adding to it, so revoking a caller
+means sending the list without them and clearing it means sending `[]`. Both
+verbs are scoped to the calling tenant: a workflow belonging to another tenant
+answers `404`, the same as one that does not exist, so the endpoint cannot be
+used to discover which ids are in use.
+
+`GET` always returns an array. An unset list comes back as `[]`, never `null`.
 
 ---
 
@@ -276,15 +435,45 @@ are encrypted using AES-256-GCM before being written to the database.
 
 ---
 
+### --encryption-key-file-previous
+
+| Type | Default | Description |
+|------|---------|-------------|
+| string | `""` | Path to a file containing a PREVIOUS base64-encoded AES-256-GCM key, for rolling key rotation |
+
+Read-only: a payload sealed under this key still opens, but every new seal
+uses `--encryption-key-file`. Requires `--encryption-key-file` to also be
+set — a worker started with this flag alone refuses to start. There is no
+`admin.workers`-style gate for this the way tenant-secret rotation has; see
+[`docs/how-to/rotate-payload-encryption-key.md`](../how-to/rotate-payload-encryption-key.md)
+for the rollout sequence a rolling rotation needs to stay safe.
+
+---
+
 ### --encrypt-sensitive-payloads
 
 | Type | Default | Description |
 |------|---------|-------------|
-| bool | `false` | Enable encryption of sensitive event payload fields |
+| bool | `false` | Encrypt select `event_history` payload columns with AES-256-GCM |
 
-When enabled, the worker encrypts sensitive fields (e.g., signal payloads,
-activity results) using the key from `--encryption-key-file`. Requires
-`--encryption-key-file` to also be set.
+PostgreSQL only -- refused at startup on any other `--driver`. When enabled, the
+worker encrypts these `event_history` columns before writing them: `request`,
+`response`, `error`, `signal_payload`, `child_input`, `new_input`,
+`plugin_input`, `plugin_output`, `promise_result`, `promise_error`, and
+`payload`. Encryption is per-tenant (AES-256-GCM, HKDF-derived key, tenant ID
+as AAD), using the key from `--encryption-key-file`, which must also be set.
+
+One event type is an exception: `child_workflow` events are written by a
+separate code path that does not encrypt `child_input` or `payload`, so a
+child workflow's input is plaintext in the parent's `event_history` regardless
+of this flag (cleat#2312).
+
+This flag does **not** cover most other places workflow data is stored --
+`workflow_instances.input`, `.result`, `.error_msg`, and `.query_state`;
+`workflow_signals.payload`; `workflow_promises.result`;
+`workflow_update_requests.payload` and `.result`; `workflow_schedules.input`;
+and `idempotency_keys.error_msg` are all plaintext whether or not this flag is
+set. See cleat#2312 for the full per-column measurement.
 
 ---
 
@@ -317,7 +506,7 @@ Set to `0` to let each plugin use the main worker connection pool directly.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | (host default) | Number of events before history compaction triggers |
+| int | `100` | Number of events before history compaction triggers |
 
 Compaction collapses event history for long-running workflows, retaining only
 the compacted state.
@@ -334,13 +523,85 @@ the compacted state.
 
 ## Networking
 
+### --max-stream-readers
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `1024` | Concurrent live SSE readers of `GET /api/workflows/{id}/stream` this worker may hold (`0` = unlimited) |
+
+A reader costs a goroutine, a held HTTP connection and a bounded chunk buffer.
+Over the ceiling the route answers `503` with `Retry-After`.
+
+**Not `--connection-budget`.** That budget bounds database pools, and a reader
+**holds** no database connection. It is not free of the database, though: each
+reader issues one indexed status read per 15-second heartbeat, so the ceiling
+also sets a floor on background query load. The two flags are independent and
+sizing one from the other will be wrong in both directions.
+
+See [Streaming tokens to a client](../how-to/stream-tokens-to-a-client.md).
+
+---
+
 ### --max-body-size
 
 | Type | Default | Description |
 |------|---------|-------------|
 | int64 | `1048576` (1 MiB) | Maximum request body size in bytes |
 
-General endpoints use this limit. Signal endpoints have a fixed 64 KB limit.
+General endpoints use this limit.
+
+**Five endpoints do not, and this flag does not move any of them.** There are
+four ceilings in total:
+
+| limit | endpoints | moved by |
+|---|---|---|
+| `--max-body-size`, 1 MiB default | everything not listed below | this flag |
+| **64 KB**, fixed | `POST /api/workflows/:id/signal`, `POST /api/workflows/:id/cancel`, `POST /api/workflows/:id/update/:name` | nothing |
+| **10 MiB**, fixed | `POST /api/definitions` (WASM upload) | nothing |
+| **1 KB**, fixed | `POST /api/dead-letters/:id/terminate` | nothing |
+
+This line named only "signal endpoints" until cleat#1332, so cancel was
+undocumented — and cancel is the one most likely to be reached in practice,
+because its field is a free-text `reason`. It then said "which of the two it
+is" until cleat#1338 established that there were four.
+
+**Every one of them answers an oversized body with `413`**, naming the limit
+and the knob, so a request that fails does not need this page to explain
+itself:
+
+    {"error":"request body too large: the limit is 1048576 bytes, set by --max-body-size"}
+    {"error":"request body too large: the limit is 65536 bytes, fixed for the signal, cancel and update endpoints and not changed by --max-body-size"}
+    {"error":"request body too large: the limit is 10485760 bytes, fixed for the definition upload endpoint and not changed by --max-body-size"}
+
+Seven of the sixteen bounded endpoints used to answer `400 {"error":"invalid
+JSON: http: request body too large"}` instead — a status asserting the body was
+malformed, on a body that was never read. cleat#1338 made all sixteen agree;
+that is a status-code change for those seven, and clients branching on `400`
+for an oversized body need to handle `413`.
+
+---
+
+### --plugin-max-body-size
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int64 | `1048576` (1 MiB) | Maximum request body size in bytes for plugin HTTP routes |
+
+Separate from `--max-body-size` above, which bounds only the core API.
+Plugin routes got no request-body limit at all until cleat#2232 — thirteen
+plugins read `r.Body` directly with `io.ReadAll` or `json.NewDecoder`, and
+two of the resulting endpoints are exempt from tenant auth by design
+(`POST /slack/interactive`, `POST /ingest/{source_id}`), so an unauthenticated
+caller could make the worker allocate an unbounded amount of memory.
+
+Every plugin route is bounded by this flag unless it declares its own,
+larger ceiling at registration (`plugin.MaxBody`) — blobstore's
+`PUT /blobs/{key...}` does this, sized by its own `max_blob_size` config
+(default 10 MiB), since a 1 MiB default would refuse an ordinary blob
+upload. An oversized body answers `413`, naming the limit and the knob that
+moves it, the same shape `--max-body-size` uses:
+
+    {"error":"request body too large: the limit is 1048576 bytes, set by --plugin-max-body-size unless this route declares a larger one"}
 
 ---
 
@@ -425,15 +686,71 @@ when `--rate-limit-per-tenant` is set to a non-zero value.
 
 ---
 
+### --wasm-module-cache-max-mb
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `512` | Max **estimated** size of the compiled-module cache, in MB (LRU eviction) |
+
+**Two different caches, and this is the larger one.** `--wasm-cache-max-mb`
+above bounds the WASM *byte* cache — the artifacts as uploaded.
+`--wasm-module-cache-max-mb` bounds the compiled *native code* wasmtime
+produces from them, which measures 2–3× larger for a release build.
+
+This is the bound to size a deployment against. Its sibling,
+`--wasm-module-cache-max-entries`, cannot say what a hundred modules cost —
+measured on cleat's own artifacts, a hundred entries is **8.6 MB of
+AssemblyScript or 4.6 GB of Python**, a ~500× spread in what one flag value
+means. Both bounds apply: the entry count still bounds map and list overhead
+independently of artifact size.
+
+**Estimated, not measured**, and every layer says so. A compiled
+`wasmtime.Module` exposes no cheap size, and `Serialize()` would cost a
+serialisation plus a transient allocation the size of the module — 46 MB for
+the Python component — to learn a number the input length already predicts. So
+each entry is costed at **4× the wasm it came from**.
+
+| artifact | wasm | compiled | ratio |
+|---|---|---|---|
+| widget-store (AssemblyScript) | 9.5 KB | 86 KB | 9.1× |
+| rust-workflow (release) | 149 KB | 458 KB | 3.1× |
+| java-workflow | 299 KB | 694 KB | 2.3× |
+| hostcallsjava | 506 KB | 1.04 MB | 2.1× |
+| **call_all_plugins (Python)** | **19.3 MB** | **46.0 MB** | 2.4× |
+| rust-workflow (debug) | 5.2 MB | 1.1 MB | 0.2× |
+
+Release builds sit in 2.1×–3.1×, and the multiplier is **4** rather than 3 so
+that it clears the measured maximum instead of approximating it — an estimate
+that *under*-counts would let the cache hold more than this bound says, which
+is the one failure it cannot tolerate. The cost is that a typical artifact is
+over-counted by about a third, so a given value holds correspondingly fewer
+modules than raw arithmetic suggests.
+
+Both outliers fail safely: tiny AssemblyScript modules run high but cost tens
+of kilobytes, and debug builds run low so the estimate over-counts them
+further. Over-counting shrinks the cache; it cannot overrun the bound.
+
+Observe it with `cleat_wasm_compiled_module_cache_bytes`, beside the entries
+gauge.
+
+One module larger than the whole bound is **kept**, not evicted on insert —
+otherwise the cache would compile a large artifact, drop it, and recompile it
+on every call.
+
+---
+
 ### --wasm-memory-max-mb
 
 | Type | Default | Description |
 |------|---------|-------------|
 | int | `32` | Max WASM linear memory per module in MB |
 
-Corresponds to 512 WASM pages at 32 MB (64 KiB per page). Set to `0` to use
-the wazero default. Increasing this allows workflows with larger memory
-requirements to execute.
+Corresponds to 512 WASM pages at 32 MB (64 KiB per page). Enforced by the
+wasmtime store limiter; set to `0` to use the built-in default
+(`DefaultWasmtimeMemoryLimitBytes`, `engine/wasmtime_options.go`). Increasing
+this allows workflows with larger memory requirements to execute. (This said
+"the wazero default" until 2026-09-06; wazero has not been a backend since
+#459.)
 
 ---
 
@@ -444,7 +761,13 @@ requirements to execute.
 | int | `0` | Max WASM instructions per invocation |
 
 Limits the number of WASM instructions a single workflow invocation can
-execute. Set to `0` for no limit. Enforced via a wazero function listener.
+execute. Set to `0` for no limit. **Enforced via wasmtime fuel**
+(`SetConsumeFuel`/`SetFuel`) — see the flag's own help text in
+`cmd/cleat-worker/config.go`. This said "a wazero function listener" until
+2026-09-06. That mechanism is real but is not what a worker uses: `fuelMeter`
+in `engine/runtime.go` charges one unit per *function entry* on the wazero
+runtime, which is why wazero cannot fence a compute-bound guest at all — a
+tight loop inside one function never enters another.
 
 ---
 
@@ -505,11 +828,17 @@ is set.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `30` | Days to retain completed/failed workflow event history (0 disables) |
+| int | `30` | Days after which a **failed** workflow's event history is deleted (0 disables) -- a **done** workflow's is already gone at finalize, so this flag only does first-hand work for `failed` |
 
-Deletes `event_history` rows for terminal workflows. The `workflow_instances`
-row itself (status, result, error, def_name) is untouched by this flag --
-see `--completed-workflow-retention-days` below to also reclaim that.
+Deletes `event_history` rows for terminal workflows, but in practice that
+means `failed` ones: a `done` workflow's history is purged immediately at
+finalize (`finalize_workflow_status`'s `done` branch), before this sweep ever
+runs, while a `failed` workflow's history is untouched until this flag's
+window elapses -- `store.FailWorkflow` never purges it (cleat#1973). The
+`workflow_instances` row itself (status, result, error, def_name) is
+untouched by this flag either way -- see `--completed-workflow-retention-days`
+below to also reclaim that. See `docs/operations/workflow-retention.md` for
+the full story, including `terminated` and `dead_lettered`.
 
 ---
 
@@ -517,7 +846,7 @@ see `--completed-workflow-retention-days` below to also reclaim that.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `0` (disabled) | Days to retain `workflow_instances` rows for terminal workflows (done/failed/terminated) before permanently deleting them |
+| int | `0` (disabled) | Days to retain `workflow_instances` rows for terminal workflows (done/failed/terminated/cancelled) before permanently deleting them |
 
 Unlike `--retention-days`, this deletes the workflow's own record, not just
 its step-by-step event history: after this runs, a purged workflow no longer
@@ -525,11 +854,111 @@ appears in `ListWorkflows` or the admin dashboard, and its outcome (result,
 error, status) is gone. Off by default -- an operator opts in after deciding
 how long their own audit/compliance requirements need a workflow's outcome
 retrievable. `dead_lettered` workflows are never affected by this flag; they
-have their own (separate, currently unwired) deletion path.
+have their own deletion path, `--dead-letter-retention-days`, which cleat#1023
+wired and which is also off by default. (This sentence said "currently unwired"
+until cleat#1315 noticed it while adding the flags below.) On the Go SDK a
+workflow reaches that state only by exhausting a retry policy short enough to
+have run on the host (see `cleat.hostRetryBudget`); a long-backoff policy
+retries via durable sleep and produces a terminal error the worker's
+dead-letter predicate does not match. See
+`docs/operations/workflow-retention.md` and IMPROVEMENT-PLAN.md 3.88.
 
 Any remaining `event_history` for a purged workflow is deleted in the same
 pass. See `docs/operations/workflow-retention.md` for the full design
 (default rationale, FK/cascade behavior per dialect, batching, metrics).
+
+**`cancelled` is in the list, and that is deliberate.** All three dialects spell the same predicate
+(`engine/retention_predicates.go`) —
+
+```
+WHERE status IN ('done', 'failed', 'terminated', 'cancelled')
+```
+
+— and a comment beside it gives the reason: an operator who has opted into collecting terminated
+runs expects to collect cancelled ones too, since both are imposed by a person on a run that did not
+finish on its own. The description above said `(done/failed/terminated)` until 2026-09-25, omitting
+`cancelled`; the predicate, not the description, is authoritative.
+
+---
+
+### --dead-letter-retention-days
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `0` (disabled) | Days to retain `dead_lettered` `workflow_instances` rows before permanently deleting them, along with their `event_history`, signals and promises |
+
+**A dead-lettered run has its own lifecycle and its own knob, deliberately.** It is the run an
+operator most wants to inspect afterwards, so it is not swept up with completed work:
+`--completed-workflow-retention-days` never touches a dead-lettered run, and this flag never touches
+one that is not dead-lettered. Off by default, on the same reasoning as
+`--completed-workflow-retention-days` above — it deletes the record itself, not just the history.
+
+**Retention here is about the row, not about membership.** A dead-lettered run leaves the dead-letter
+queue through a redrive verb — `POST /api/dead-letters/:id/retry` or `.../reprocess` — or through
+`POST /api/dead-letters/:id/terminate`; this flag is what eventually removes the record of a run
+nobody acted on. See `docs/operations/workflow-retention.md`, and
+`docs/reference/workflow-lifecycle.md` → *Outcomes* for what each exit commits to.
+
+---
+
+### --version-gc-interval
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `0` (disabled) | Interval between automatic workflow-version garbage collection sweeps |
+
+**This is the switch, and it is off.** Version GC permanently deletes workflow
+*definitions*. An in-flight instance whose version has been collected cannot
+find the WASM binary to replay against — the module cache is keyed by
+`def_name:def_version`, so the failure lands on a running workflow rather than
+at the point of deletion. That is materially more destructive than clearing
+compaction state, which is why `--retention-days` ships on at 30 and this ships
+off, on the same reasoning `--completed-workflow-retention-days` records above.
+
+With this unset, GC still runs when a person invokes it — `cleatctl versions gc`
+or `POST /api/versions/gc` — and those take their own policy overrides. Before
+cleat#1315 those two were the *only* surfaces and neither could change the
+policy.
+
+Unlike `retentionLoop`, this loop is **tick-first**: it does not sweep before
+its first tick. Retention pre-runs because a deploy cadence under its 24-hour
+period would disable it entirely (cleat#1002); that argument does not transfer
+to an opt-in destructive sweep, where a pre-run would make every worker restart
+delete definitions immediately and turn a rolling deploy into a burst of sweeps.
+
+Every pass logs `version gc swept` with the policy it used, **including passes
+that remove nothing** — so "ran and found nothing" and "disabled" are
+distinguishable in the log.
+
+---
+
+### --version-gc-min-versions
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `3` | Minimum recent versions retained per workflow, regardless of age or activity |
+
+Applies to the scheduled sweep. `cleatctl versions gc --min-versions=N` and
+`POST /api/versions/gc?min_versions=N` override it per invocation.
+
+**`0` is refused** on both manual surfaces. `engine.GarbageCollectVersions`
+treats a non-positive value as *unset* and substitutes the default, so accepting
+0 would run under a policy of 3 while reporting success.
+
+---
+
+### --version-gc-max-age
+
+| Type | Default | Description |
+|------|---------|-------------|
+| duration | `720h` (30 days) | Age at which a **deprecated** version becomes eligible for collection |
+
+A version that is not deprecated is never collected, whatever its age.
+`cleatctl versions gc --max-age=DURATION` and
+`POST /api/versions/gc?max_age=DURATION` override it per invocation.
+
+Go duration syntax, so `720h` rather than `30d` — and a bare number is refused:
+`--max-age=7` is seven *nanoseconds* to Go, not seven days.
 
 ---
 
@@ -578,10 +1007,30 @@ started again.
 
 | Type | Default | Description |
 |------|---------|-------------|
-| int | `0` | Max events per workflow (0 = unlimited) |
+| int | `50000` | Max events one run may write before the engine continues it as new (0 disables the bound) |
 
-Limits the total number of events a single workflow instance can generate.
-When exceeded, the workflow is terminated with a quota error.
+Bounds how much history a single **run** may write. Exceeding it is a
+**rollover, not a failure**: the durable call is refused before it is
+dispatched, so no side effect happens; the guest sees an error and unwinds
+through its entry-point wrapper, draining its defers as it would for an
+explicit `ContinueAsNew`; and the executor records a `continue_as_new`
+suspension. The next run starts with a reset event count and makes the refused
+call for real.
+
+`--retention-days` bounds history for *terminal* runs. A runaway is not
+terminal, so that sweep never reaches it — this is the only bound that does.
+
+Setting `0` disables the bound and restores the pre-cleat#1829 behaviour, in
+which one looping workflow can fill `event_history` with nothing to stop it.
+
+> This section said the default was `0` and that "the workflow is terminated
+> with a quota error". Both were wrong, and the second was wrong in the
+> direction that argues against ever setting the flag: an operator reading it
+> would conclude a runaway gets killed. `engine/callerrors.go`'s
+> `eventCapCallError` says the opposite — "a refusal, not a failure" — and
+> `engine/durablecalls.go` auto-triggers `ContinueAsNew`. The default changed in
+> cleat#1829 and this reference did not follow it, because nothing compares a
+> flag's default against this file.
 
 ---
 
@@ -594,6 +1043,11 @@ When exceeded, the workflow is terminated with a quota error.
 Limits the number of child workflows a single parent workflow can spawn.
 When exceeded, further child start attempts fail with a quota error.
 
+**Deliberately unbounded by default**, unlike `--max-quota-events`. Exceeding
+this one *fails* the workflow rather than rolling it over, so any default would
+turn working deployments into failing ones at whatever number was chosen, and
+there is no usage data to choose from. cleat#1829.
+
 ---
 
 ### --max-quota-concurrency-keys
@@ -604,6 +1058,9 @@ When exceeded, further child start attempts fail with a quota error.
 
 Limits the number of distinct concurrency keys a single workflow can register.
 When exceeded, further key registrations fail with a quota error.
+
+**Deliberately unbounded by default**, for the same reason as
+`--max-quota-children`: exceeding it fails the workflow. cleat#1829.
 
 ---
 
@@ -624,19 +1081,64 @@ but are not refused by it.
 
 ---
 
+### --max-priority-magnitude
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `1000` | Bound on a caller-supplied workflow `priority`, in either direction (0 disables the bound) |
+
+`priority` arrives in the start request body, is stored as a bare
+`INTEGER NOT NULL DEFAULT 0`, and the dispatch claim orders
+`priority ASC, created_at` -- **lower runs sooner**. Nothing narrowed the value,
+so the whole int32 range was reachable by any caller who could start a workflow.
+
+Within one tenant that lets a caller put one run permanently in front of its own
+queue. With [`--claim-across-tenants`](#--claim-across-tenants) the same ordering
+is **global**, so `priority: -2147483648` takes the front of every tenant's work
+indefinitely -- a caller deciding the order for a database they share.
+
+A request outside `-N..N` is **refused with 400**, not clamped. Zero already
+means "the default", so there is no value a clamp could substitute that means
+"the number you asked for was not available"; the refusal says what the bound is.
+This matches the per-run limit overrides decoded a few fields away, which refuse
+a negative rather than treating it as absent.
+
+**The bound is symmetric on purpose.** A negative priority is a supported way to
+put work ahead of the default without renumbering everything already at `0`, and
+cleat#1051 exists because a hand-rolled parser made negative values
+unexpressible. A floor of zero would close this hole by removing that feature,
+so the bound constrains *magnitude* rather than sign.
+
+Set `0` to remove the bound and restore the full int32 range.
+
 ## Multi-Tenancy
 
 ### --claim-across-tenants
 
 | Type | Default | Description |
 |------|---------|-------------|
-| bool | `false` | Claim runnable work for every tenant in one query instead of only this worker's own |
+| bool | `true` | Execute work for every tenant, not only this worker's own |
 
-A worker holds one store, scoped to one tenant, and by default its dispatch
-loop claims through it. That claim only ever returns rows for that one tenant --
-enforced by row-level security on PostgreSQL and SQL Server, and by an explicit
-`tenant_id` predicate on MySQL -- which means a non-default tenant's workflows
-never execute.
+A worker holds one store, scoped to one tenant. With this off, its dispatch
+loop claims through that store, and the claim only ever returns rows for that
+one tenant -- enforced by row-level security on PostgreSQL and SQL Server, and
+by an explicit `tenant_id` predicate on MySQL -- which means a non-default
+tenant's workflows never execute.
+
+**This defaults to `true`**, and did not always. The only mechanism used to be
+`admin.claim_workflows`, whose owner needs `BYPASSRLS` — a privilege only a
+superuser can grant, and one managed PostgreSQL cannot grant at all. Turning
+that on had to be a deliberate act, so it was off.
+
+[The per-tenant mechanism](#how-cross-tenant-work-is-served) asks nothing of the
+deployment: it reads the tenant list from `admin.tenants`, which carries no
+row-level security, and then does the per-tenant work under each tenant's own
+RLS context. Nothing is exempt from a policy and nothing has to be granted — at
+which point leaving a non-default tenant's work unexecuted by default stopped
+being caution and became a surprise.
+
+**With one tenant this costs one query per tick** — the tenant list — and
+nothing else changes. Set it to `false` to hold a worker to its own tenant.
 
 Their **schedules** are the other half, and this flag covers both. The firing
 loop reads due schedules through the same widened path, then re-scopes to the
@@ -644,24 +1146,21 @@ schedule's own tenant before starting the run and before advancing the schedule
 -- so a non-default tenant's cron fires, and the run it starts is recorded under
 that tenant.
 
-With this set, the claim sees every tenant in a single query. Each claimed
-workflow then executes against a store scoped to its **own** tenant, so the
-widened view lasts exactly as long as the claim; everything downstream of it --
-event history, state, child workflows, schedules -- is tenant-scoped again
-immediately.
+With this set, each claimed workflow still executes against a store scoped to
+its **own** tenant, so the widened view lasts exactly as long as the claim;
+everything downstream of it -- event history, state, child workflows, schedules
+-- is tenant-scoped again immediately.
 
-The alternative would be polling each tenant separately, one query per tenant
-per tick. This is one query per tick regardless of tenant count, which is the
-point.
-
-**It requires a database-side grant, and it is off by default because of that.**
-Turning it on should be a deliberate act rather than something an upgrade does
-for you.
+**It needs no grant for either half.** The table below is what the *retired*
+widened query required; the mechanism that replaced it requires none of it —
+not for the claim and not for the due-schedule read. It is kept because a
+deployment may still carry those grants, and because `admin.in_flight_workflow_ids`
+(the plugin sweep, migration 073) still uses the same `cleat_dispatcher` role.
 
 | dialect | what the deployment must do |
 |---------|-----------------------------|
 | PostgreSQL | Apply **both** `023_cross_tenant_claim.sql` and `024_cross_tenant_schedules.sql` as a superuser. 023 creates `cleat_dispatcher` (`NOLOGIN BYPASSRLS`) to own the claim function; 024 adds the due-schedule read to the same role. They are separate grants on purpose — with 023 alone, workflows execute but cron never fires, and the warning names the file you are missing. |
-| SQL Server | Add the worker's principal to the `cleat_admin` database role -- see `012_admin_role.sql`, which documents the exact statements. The role ships with no members. One grant covers both the claim and the schedule read: `fn_tenant_filter` is bound to every table involved. |
+| SQL Server | **Two steps since cleat#1541, and the first one is new.** (1) Apply `migrations/mssql/optional/cross_tenant_claim.sql`, which is deliberately *not* in the auto-applied set. (2) Add the worker's principal to the `cleat_admin` role -- see `012_admin_role.sql` for the exact statements; it ships with no members. One grant then covers both the claim and the schedule read, because `fn_tenant_filter` is bound to every table involved. **Step 2 alone does nothing**: the shipped predicate no longer mentions `IS_ROLEMEMBER`, so a member reads `IS_ROLEMEMBER = 1` and still sees zero rows. |
 | MySQL | **Not supported on the default topology.** `MySQLStoreFactory` gives each tenant its own physical database (`cleat_<tenant_id>`), so there is no predicate to drop -- the other tenants' rows are not filtered out, they are in another database. The worker warns once and claims its own tenant. A MySQL deployment pointed at a *single shared* database does work, since there isolation really is just a `tenant_id` predicate. |
 
 If the flag is set but the store cannot claim across tenants -- wrong dialect,
@@ -671,6 +1170,99 @@ and it does not fail to start: on a mixed fleet the flag says what the operator
 wants while the store says what is actually possible, and those can disagree.
 
 A missing grant therefore narrows a worker rather than stopping it.
+
+### How cross-tenant work is served
+
+Not a flag — there is one mechanism, and this is what it does.
+
+Both loops use the same two-phase method: read the tenant list from
+`admin.tenants`, then do the per-tenant work through a store scoped to that
+tenant.
+
+**The dispatch claim** polls tenants in turn, each getting a bounded share of
+the batch, running the **same** single-statement `FOR UPDATE SKIP LOCKED` claim
+the single-tenant path runs, with a tenant predicate added.
+
+**The due-schedule read covers every tenant on every tick**, and that difference
+is deliberate. Work that waits a tick is work that waits a tick; a cron schedule
+that waits a tick has *fired late*, and with enough tenants a minutely schedule
+quietly becomes an every-few-minutes one. The schedule loop runs on a 15-second
+ticker against cron whose finest granularity is a minute, which is what makes a
+full pass affordable — roughly a second of a fifteen-second tick at a thousand
+tenants. At tens of thousands on one worker the answer is more workers with
+fewer tenants each, not a shorter pass.
+
+It needs **no database-side grant**, because `admin.tenants` carries no
+row-level security and `cleat_app` already holds `SELECT` on it. Every read of
+`workflow_instances` and `workflow_schedules` still happens under some tenant's
+own RLS context.
+
+That is what makes multi-tenant dispatch possible on **managed PostgreSQL**.
+`BYPASSRLS` can only be granted by a true superuser, and RDS, Cloud SQL and
+Azure do not have one — AWS documents the RDS master role as
+`LOGIN NOSUPERUSER INHERIT CREATEDB CREATEROLE`.
+
+It is also **fair**. The mechanism it replaced ordered
+`priority ASC, created_at` across every tenant at once, so the tenant holding
+the oldest rows won every slot until its backlog drained. Now a tenant with
+10,000 queued runs takes its share of each batch and no more, and the rotation
+cursor — worker-local, no shared table — resumes past the tenants it served so
+the rest are reached on later ticks.
+
+> **Retired: `--claim-strategy`.** It selected between this and
+> `admin.claim_workflows`, the older single widened query behind a `BYPASSRLS`
+> role. That existed to keep the old mechanism reachable while this one proved
+> itself. The flag is gone, and so is the path it selected; the SQL functions
+> remain in the schema for now and nothing calls them.
+
+### --claim-tenants-per-tick
+
+| Type | Default | Description |
+|------|---------|-------------|
+| int | `16` | The most tenants one dispatch tick will poll when claiming across tenants |
+
+The rotating claim trades one query per tick for one enumeration plus up to *k*
+claims, so *k* needs a ceiling that is not the tenant count: a deployment with
+10,000 tenants must not issue 10,000 queries per second.
+
+Tenants beyond the ceiling are **not skipped** — the cursor resumes past the
+ones served, so they are reached on a later tick. This bounds queries per tick,
+not which tenants get served.
+
+The default sits above the batch sizes a dispatch tick usually asks for, so in
+the common case the limit fills before the ceiling is reached and the ceiling
+costs nothing. `0` uses the default.
+
+### Why SQL Server's opt-in exists, and what it costs to turn on
+
+The `cleat_admin` bypass is a disjunction inside the row-level-security
+predicate:
+
+```sql
+WHERE @tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER)
+   OR IS_ROLEMEMBER(N'cleat_admin') = 1
+```
+
+It is free for a query that supplies its own tenant and expensive for one that
+relies on RLS to supply it, because the disjunction is what stops the optimiser
+pushing a bare equality into an index seek. Measured on SQL Server 2022, 200 000
+rows over 200 tenants:
+
+| predicate | query carries `tenant_id = ?` | plan | logical reads |
+|---|---|---|---|
+| plain (shipped) | yes | Index Seek | 33 |
+| plain (shipped) | **no** | Index Seek | 33 |
+| with the bypass | yes | Index Seek | 33 |
+| with the bypass | **no** | **Index Scan** | **5760** |
+
+So the cost lands on the statements that cannot name a tenant --
+`ClaimWorkflowsAcrossTenants` and `BatchHeartbeat`, which scan by design -- and
+on any future statement that forgets to. Applying the opt-in accepts that on
+every tenant-scoped table, which is why it is a deliberate act rather than the
+default.
+
+To reverse it, re-apply `075_the_admin_bypass_is_opt_in.sql`. It is idempotent
+and restores both the plain predicate and the marker the worker reads.
 
 **The worker says which mode it is in at startup**, before either loop ticks, so
 you do not have to infer it from silence:
@@ -704,17 +1296,6 @@ BYPASSRLS`. The startup line names it.
 ---
 
 ## Multi-Instance
-
-### --peer-schemas
-
-| Type | Default | Description |
-|------|---------|-------------|
-| string | `""` | Comma-separated list of peer cleat schemas |
-
-Enables cross-instance child workflows and signals between separate worker
-pools sharing the same database cluster.
-
----
 
 ### --shards-file
 

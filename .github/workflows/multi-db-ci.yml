@@ -72,15 +72,85 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+    # `edited` is required, not decorative: it is the activity type a BASE
+    # CHANGE fires. Without it a PR opened against a feature branch and later
+    # retargeted here never triggers this workflow at all -- not at open (the
+    # branches filter excluded it) and not at retarget (not a default type).
+    # Such a PR reports CLEAN with only the unfiltered workflows' checks.
+    # scripts/check-workflow-pr-triggers.sh guards this.
+    types: [opened, synchronize, reopened, edited]
 
+  # The merge queue tests the required checks against the PROJECTED tip on a
+  # temporary `gh-readonly-queue/...` ref, which fires `merge_group` and not
+  # `pull_request`. Without this trigger the check never starts in queue
+  # context, the queue waits for a status that cannot arrive, and NOTHING
+  # MERGES -- with no check going red. EVERY required context on develop has to
+  # report here. The list is tiers.yaml's `required_contexts` block; the count
+  # is deliberately not repeated here, because it was -- in nine workflow files
+  # at once -- and all nine said 32 while develop required 33 (cleat#1937).
+  merge_group:
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Every push gets its own group; PR runs share one per ref and supersede.
+  #
+  # `github.ref` is refs/heads/develop for EVERY merge, so keying the group on
+  # it puts consecutive merges in one group. That discards a merge's own
+  # verification, and `cancelled` is not `success` -- nothing downstream reads
+  # it as a failure, so it disappears silently.
+  #
+  # `cancel-in-progress: false` is NOT enough to prevent that, which is the
+  # part the first fix (#634) got wrong. It stops a *running* run being killed,
+  # but GitHub still allows only one pending run per group: when a third push
+  # enters an occupied group, the one waiting is cancelled before it ever
+  # starts. Measured on develop after #634 merged (18:20:48Z on 2026-09-03),
+  # 5 of 24 `Tier 1 Gate` push runs were cancelled -- every one with **zero
+  # jobs**, killed within seconds of the next merge landing.
+  #
+  # The job count separates the two mechanisms, and does it cleanly. Of the 22
+  # cancelled gate runs that day, the 17 before #634 have jobs=1 (killed
+  # mid-run) with a single jobs=0 exception, and all 5 after it have jobs=0:
+  #
+  #   gh run view <cancelled-id> --json jobs --jq '.jobs | length'   # 0
+  #   gh run view <success-id>   --json jobs --jq '.jobs | length'   # 1
+  #
+  # So #634 did exactly what it claimed and no more. The gate takes 20-40
+  # minutes and merges land minutes apart, so the queue is almost always
+  # occupied. Keying push runs on `github.sha` gives each merge a group of its
+  # own: never queued, so never superseded.
+  #
+  # On a pull_request the group stays per-ref and cancellation is the setting's
+  # real purpose: pushing twice to a branch should not run the suite twice.
+  #
+  # `scripts/check-workflow-concurrency.sh` guards both halves.
+  # A BODY EDIT MUST NOT SUPERSEDE THE RUN IT RACES (cleat#1688).
+  #
+  # `edited` is subscribed above because a BASE CHANGE fires it and nothing
+  # else does -- but it also fires for a title or body edit, and `github.ref`
+  # is identical for every pull_request activity type. The edited run therefore
+  # landed in this group and cancelled the synchronize run it followed, and a
+  # superseded run renders as a failure rather than as "replaced".
+  #
+  # `github.run_id` is unique per run, so a no-op edited run shares a group
+  # with nothing and cancels nothing. An `edited` that DID change the base
+  # keeps the per-ref group: that is a real re-evaluation against a different
+  # target and should supersede, which is why the activity type exists here.
+  #
+  # ONE LINE ON PURPOSE: check-workflow-concurrency.sh reads the single line
+  # matching `^\s*group:` and looks for github.sha/run_id/ref in it. A folded
+  # `>-` scalar hides the expression and the guard reports a false alarm.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action == 'edited' && !github.event.changes.base && github.run_id || github.ref) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # CGO is load-bearing here, not incidental. Every step in this file used to run
 # `CGO_ENABLED=0 go test`, which does not merely skip a check: `NewWasmtimeBackend`
-# is behind `//go:build cgo`, so disabling CGO removes the primary backend from the
-# binary and silently runs everything on wazero, the fallback with the known bug tail.
+# is behind `//go:build cgo`, so disabling CGO leaves the binary with NO WASM backend
+# at all -- `cleat-worker` logs "wasmtime is the only WASM backend cleat has, there is
+# no fallback" and exits 1, and engine tests fail rather than degrading quietly.
+#
+# This comment read "silently runs everything on wazero, the fallback with the known
+# bug tail" until 2026-09-06. That was true when written and stopped being true when
+# #459 (2026-08-10) deleted the wazero backend. It is worth correcting rather than
+# leaving as a period detail, because it understates the reason for the pin: the risk
+# is not a degraded run, it is no backend.
 #
 # Measured on 2026-08-04: `go test -list` reports 2401 tests in ./engine/ with
 # CGO_ENABLED=0 against 2557 with CGO on. The 156-test difference is the entire
@@ -134,12 +204,12 @@ jobs:
     env:
       CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       # Java and Gradle, in a job about databases, because `./engine/...`
       # below is unfiltered and TestJavaWorkflowExecute lives in ./engine.
@@ -183,12 +253,12 @@ jobs:
       # Java 17 to match the five other jobs that build this SDK, rather than
       # inheriting the runner image's default, which can change without us.
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v6
 
       # ./migration/... alongside ./engine/...: this is the only job with a
       # live MySQL, and until IMPROVEMENT-PLAN 3.13 nothing anywhere had ever
@@ -197,12 +267,35 @@ jobs:
       # MySQL test path built its schema from engine/testutil's Go copy
       # instead -- which is why nothing noticed. The regression test for that
       # lives in ./migration/ and needs a real MySQL to mean anything.
-      # -p 1: this invocation names three database-backed packages -- engine,
-      # engine/testutil and migration -- against one database. Without it Go
-      # runs them concurrently, and engine/testutil's CleanupPostgresTestData
-      # is an unqualified DELETE across eleven tables, so they delete each
-      # other's fixtures mid-test. Measured on develop 2026-08-09 with just two
-      # of those packages: 3 failures in 8 runs, none in 8 with -p 1.
+      #
+      # -p 1 is retained, but NOT for the reason recorded here until
+      # 2026-08-31. That reason -- "three database-backed packages, engine,
+      # engine/testutil and migration, against one database" -- is not true of
+      # this job, and the "3 failures in 8 runs" figure beside it cannot have
+      # been measured here: engine/testutil has no MySQL test at all to
+      # collide with. It was a PostgreSQL measurement (see ci.yml's engine
+      # entry) copied across.
+      #
+      # What is actually true of MySQL and SQL Server, measured 2026-08-31:
+      # engine/testutil's DB-backed tests are all PostgreSQL and skip in a job
+      # with no PostgreSQL, and every MySQL and SQL Server test under
+      # ./migration/ creates a scratch database of its own (newMySQLScratchDB,
+      # newMSSQLScratchDB) and drops it in cleanup. `engine` is the only
+      # package that touches the shared `cleat` database here, so there is no
+      # cross-package collision for -p 1 to prevent.
+      #
+      # Probed directly rather than read: a sentinel row inserted into
+      # cleat.workflow_defs on MySQL 8.4 survived
+      # `go test ./engine/testutil/... ./migration/...` with CLEAT_TEST_MYSQL
+      # set, and no scratch database was left behind.
+      #
+      # It stays because removing it buys nothing measurable -- ./migration/
+      # runs in ~2s against ./engine/...'s minutes -- and dropping a
+      # serialisation on a required check deserves a better reason than
+      # tidiness. engine/testutil's TestBlanketNonPostgresCleanupHasOneCaller
+      # fails if a second package starts wiping these databases, which is the
+      # condition that would make -p 1 load-bearing. Change this comment when
+      # it does.
       - name: Run tests
         run: go test -count=1 -p 1 -timeout=900s ./engine/... ./migration/...
 
@@ -222,6 +315,13 @@ jobs:
         env:
           ACCEPT_EULA: Y
           MSSQL_SA_PASSWORD: CleatTest123!
+          # SQL Server on Linux sizes its buffer pool to 80% of VISIBLE host
+          # memory by default, with no awareness it shares a runner with
+          # Postgres, MySQL and everything else in this job (cleat#2101).
+          # 2048 is comfortably above what the tier1/multi-db fixtures need
+          # and caps the worst case where several mssql services land on one
+          # runner at once. Bump all six sites together, per the note above.
+          MSSQL_MEMORY_LIMIT_MB: "2048"
         options: >-
           --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
           --health-interval 10s
@@ -231,8 +331,13 @@ jobs:
           --publish 1433:1433
     env:
       CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=cleat
+      # cleat#982: arm the row-disappearance audit (a test-only AFTER DELETE
+      # trigger on workflow_instances) so a recurrence reports WHO deleted a
+      # missing row instead of only that it is gone. No-op for every dialect
+      # except SQL Server; see engine/testutil/mssql_row_disappearance.go.
+      CLEAT_TEST_MSSQL_ROW_AUDIT: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Create cleat database
         run: |
@@ -241,30 +346,74 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       # The second of the two jobs that sweep ./engine/... unfiltered, so the
       # same Java toolchain and the same Gradle cache. See the long note in
       # test-mysql above for why a SQL Server job builds a Java WASM
       # component at all.
       - name: Setup Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v6
+
+      # cleat#2438. The generated MSSQL baseline is a claim about the PROCESS
+      # -- "these three files are what the emitter produces" -- and until this
+      # step nothing checked it of the ARTIFACT, so a hand-edit to
+      # 001_schema.sql or 003_procedures.sql would have gone unnoticed while
+      # two guards in engine/ rested on the claim.
+      #
+      # -mode=verify builds a database from the committed migrations,
+      # regenerates the baseline from it, and requires the result to be
+      # byte-identical, naming the first differing line. It regenerates from
+      # the sys.* catalogue, so it needs a live server -- which is why it lives
+      # in this job rather than in the Lint job, and it adds no new service.
+      #
+      # ITS OWN EMPTY DATABASE, and this is not tidiness: verify BUILDS into the
+      # database it is given, so pointing it at `cleat` would compare the
+      # emitter's output for one database against the committed baseline for a
+      # different one and report a difference that means nothing.
+      #
+      # The full acceptance -- A from the pre-compaction chain, B from these
+      # files, catalogdiff plus the known-positive battery -- cannot run here:
+      # its A side exists only in git history and this job checks out at
+      # fetch-depth 1. That stays a documented operator procedure, like
+      # scripts/gen-postgres-baseline.py. This step is the half that can be
+      # enforced on every run.
+      - name: Verify the committed MSSQL baseline is a fresh emit
+        run: |
+          CONTAINER=$(docker ps -q --filter "ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89")
+          docker exec "$CONTAINER" /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C \
+            -Q "CREATE DATABASE cleat_baseline_verify"
+          # No -migrations: verify builds from the three baseline files by
+          # name, so a later numbered migration (the first 004_*.sql) cannot be
+          # folded into the regenerated 001 and fail this on a correct tree.
+          go run ./scripts/gen-mssql-baseline -mode=verify \
+            -dsn 'sqlserver://sa:CleatTest123!@localhost:1433?database=cleat_baseline_verify' \
+            -committed migrations/mssql
 
       # ./migration/... alongside ./engine/...: this is the only job with a
       # live SQL Server, and the migration tests that assert the shipped
       # .sql files can actually be applied (IMPROVEMENT-PLAN 3.10's upgrade
       # path, 3.13) need a real server to mean anything.
-      # -p 1: this invocation names three database-backed packages -- engine,
-      # engine/testutil and migration -- against one database. Without it Go
-      # runs them concurrently, and engine/testutil's CleanupPostgresTestData
-      # is an unqualified DELETE across eleven tables, so they delete each
-      # other's fixtures mid-test. Measured on develop 2026-08-09 with just two
-      # of those packages: 3 failures in 8 runs, none in 8 with -p 1.
+      #
+      # -p 1 is retained, but NOT for the reason recorded here until
+      # 2026-08-31 -- see the long note in test-mysql above, which applies
+      # unchanged. `engine` is the only package in this invocation that
+      # touches the shared `cleat` database: engine/testutil's DB-backed tests
+      # are all PostgreSQL, and ./migration/'s SQL Server tests each create
+      # and drop a scratch database (newMSSQLScratchDB, and the fixed
+      # cleat_migration_admin_role_test).
+      #
+      # The equivalent of the MySQL sentinel probe was NOT run for SQL Server:
+      # mcr.microsoft.com/mssql/server:2022-latest does not start under QEMU
+      # on an arm64 Mac ("Invalid mapping of address ... in reserved address
+      # space"), and azure-sql-edge, which does, cannot apply the shipped
+      # migrations (011_json_scalar_payloads.sql needs isjson). The claim here
+      # rests on the call sites plus this job, not on a local measurement.
       - name: Run tests
         run: go test -count=1 -p 1 -timeout=900s ./engine/... ./migration/...
 
@@ -337,6 +486,13 @@ jobs:
         env:
           ACCEPT_EULA: Y
           MSSQL_SA_PASSWORD: CleatTest123!
+          # SQL Server on Linux sizes its buffer pool to 80% of VISIBLE host
+          # memory by default, with no awareness it shares a runner with
+          # Postgres, MySQL and everything else in this job (cleat#2101).
+          # 2048 is comfortably above what the tier1/multi-db fixtures need
+          # and caps the worst case where several mssql services land on one
+          # runner at once. Bump all six sites together, per the note above.
+          MSSQL_MEMORY_LIMIT_MB: "2048"
         options: >-
           --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
           --health-interval 10s
@@ -349,12 +505,61 @@ jobs:
       CLEAT_TEST_MYSQL: root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true
       CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=cleat
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
+
+      # The committed PostgreSQL baseline is a claim about the PROCESS -- "these
+      # three files are exactly what the generator produces" -- and until this step
+      # nothing checked it of the ARTIFACT. Two guards in engine/ were narrowed on
+      # the strength of that claim, so a hand-edit to 001_schema.sql or
+      # 003_procedures.sql would have gone unnoticed while they rested on it.
+      #
+      # NOT SHAPED LIKE THE MSSQL MODE, and it cannot be. The MSSQL emitter is a pure
+      # function from the live catalogue to the files, so it is a fixed point of its
+      # own input and self-application verifies it. gen-postgres-baseline.py is a
+      # one-shot transform from a dump of the PRE-REBASELINE chain -- regenerating
+      # from its own output is not defined and fails at the partition anchor. So this
+      # checks the artifact against the tree it claims to come from.
+      #
+      # --prior-rebaseline IS THE PROVENANCE PIN: the commit whose chain produced the
+      # committed baseline. It moves when, and only when, the baseline is regenerated
+      # from a different tree. The mode prints it in full on every run, including a
+      # passing one, so the evidence says what it was measured against. It must be a
+      # FULL 40-char SHA: `git fetch --depth 1 origin 8f91b43a` fails with
+      # `couldn't find remote ref` -- an exact-string miss, not a prefix resolve.
+      # The mode fetches it itself (~3s, 18M); the job's shallow checkout is fine.
+      #
+      # FIRST IN THE JOB, and for PostgreSQL that is load-bearing rather than tidy:
+      # the baseline creates cluster-wide ROLES (cleat_app, cleat_sweep,
+      # cleat_dispatcher, and the cleat_tenant_% loop), and a scratch DATABASE does
+      # not isolate those. A test step that ran first would leave a cluster this
+      # check then reads. SQL Server has no equivalent exposure -- its roles are
+      # database-scoped -- which is why the MSSQL mode has no ordering requirement.
+      # Do not move this below the test steps.
+      #
+      # It needs the SERVER, not the test selection: this job is chosen because it
+      # is the one with a PostgreSQL service, and the step adds no new service. It
+      # creates its own database because the mode asserts the target is empty -- it
+      # BUILDS INTO whatever it is given, so pointing it at `cleat` would compare
+      # one database's output against another database's baseline.
+      #
+      # The container is found by PUBLISHED PORT, not by image digest. The digest is
+      # already pinned in six places that Lint requires to move together; a seventh
+      # here would be a site nothing checks, and it would break on the next bump.
+      - name: Verify the committed PostgreSQL baseline is a fresh emit
+        run: |
+          CONTAINER=$(docker ps -q --filter "publish=5432")
+          test -n "$CONTAINER" || { echo "no container publishing 5432"; exit 1; }
+          docker exec "$CONTAINER" psql -U postgres -c "CREATE DATABASE cleat_baseline_verify"
+          python3 scripts/verify-postgres-baseline.py \
+            --dsn 'postgres://postgres:postgres@127.0.0.1:5432/cleat_baseline_verify?sslmode=disable' \
+            --pg-container "$CONTAINER" \
+            --prior-rebaseline 8f91b43a8e2259332c5bdbd2c47db15261927d10 \
+            --committed migrations/postgres
 
       - name: Create cleat database on MSSQL
         run: |
@@ -363,5 +568,108 @@ jobs:
       - name: Run plugin migration tests
         run: go test -count=1 -p 1 -timeout=600s -run TestPluginMigrations ./engine/...
 
+      # Unfiltered, and -p 1. cleat#1203.
+      #
+      # This step ran `-run 'MultiBackend'` until 2026-09-10, which made the
+      # job's coverage a naming convention rather than a scope. Six
+      # `*_dialect_arms_multidb_test.go` entry points do not carry the
+      # substring, so the only job with MySQL and SQL Server DSNs did not
+      # select them, and the tests built to execute every dialect arm on a
+      # real server of that dialect had only ever run on PostgreSQL.
+      #
+      # Dropping the filter rather than renaming the six ends the class: an
+      # unmatched -run is not an error, so the next badly-named test would be
+      # just as invisible. Measured 2026-09-10 with all three DSNs set, one
+      # tree, one flag varied: filtered 13s, unfiltered with -p 1 31s, against
+      # this step's 900s timeout.
+      #
+      # -p 1 is not optional once the filter is gone. testutil's
+      # CleanupPostgresTestData issues an unqualified DELETE FROM over a list
+      # that includes workflow_instances, so database-backed packages running
+      # concurrently against one server delete each other's fixtures mid-test.
+      # That serialisation is part of the 31s above, not an addition to it.
       - name: Run plugin behavioral tests (all backends)
-        run: go test -count=1 -timeout=900s -run 'MultiBackend' ./plugins/...
+        run: go test -count=1 -p 1 -timeout=900s ./plugins/...
+
+  # -------------------------------------------------------------------------
+  # Crash shutdown scenarios on MySQL and SQL Server (cleat#2288)
+  #
+  # tests/crash is the only suite in this repo that runs the real cleat-worker
+  # binary and signals it, and it ran on PostgreSQL only: the crash matrix entry
+  # in ci.yml sets CLEAT_CRASH_DB and nothing else, and `grep '"--driver"'`
+  # matched nothing anywhere in the tree before this job. So the shutdown path
+  # cleat#2285 fixed -- drain, then release the run rather than fail it -- was
+  # measured on one dialect, while the code it exercises (fenced finalize,
+  # ContinueAsNew, fail, release) is per-dialect.
+  #
+  # Two scenarios, (a) and (b): a run that finishes inside the grace and repeats
+  # no side effect, and a call that outlives the grace and is released for
+  # another worker. The suite's other scenarios stay PostgreSQL-only -- they are
+  # not what cleat#2288 asked for, and each would be its own dialect port.
+  #
+  # NOT A REQUIRED STATUS CHECK, by owner decision on 2026-09-25. It runs and it
+  # reports; it does not gate a merge. Promoting it is three changes that have
+  # to land together: this job's `name:` into .github/required-checks.txt,
+  # tiers.yaml's required_contexts block, and branch protection.
+  #
+  # Unlike its siblings above, this job has no "Create cleat database" step for
+  # SQL Server and does not need one: the harness connects to `master` to create
+  # its own database beside the one the DSN names, exactly as the PostgreSQL
+  # side creates cleat_crash. MySQL's service below still needs MYSQL_DATABASE,
+  # because that harness connection does use the database named in the DSN.
+  #
+  # The service containers mirror test-mysql and test-mssql above, digests
+  # included. Bump them together with the other sites or `Lint` fails the PR.
+  crash-shutdown-dialects:
+    name: Crash Shutdown Scenarios (MySQL, SQL Server)
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4.11@sha256:b3b90af2a6552ae30c266fdb7d5dd55f3afb72404bb78d37fe8a23eb857fd3fb
+        env:
+          MYSQL_ROOT_PASSWORD: cleat
+          MYSQL_DATABASE: cleat
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pcleat"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --publish 3306:3306
+      mssql:
+        image: mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89
+        env:
+          ACCEPT_EULA: Y
+          MSSQL_SA_PASSWORD: CleatTest123!
+          MSSQL_MEMORY_LIMIT_MB: "2048"
+        options: >-
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -Q 'SELECT 1' -C"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 15
+          --health-start-period 30s
+          --publish 1433:1433
+    env:
+      # 127.0.0.1, not localhost: a service container publishes its port on IPv4
+      # only, and localhost resolves to ::1 first on GitHub runners. The same
+      # note, and the green-that-measured-nothing it was written after, are in
+      # ci.yml's test-go job.
+      CLEAT_CRASH_MYSQL: "root:cleat@tcp(127.0.0.1:3306)/cleat?tls=false&parseTime=true&multiStatements=true"
+      CLEAT_CRASH_MSSQL: "sqlserver://sa:CleatTest123!@127.0.0.1:1433?database=cleat"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # CGO stays at its default (on). The harness builds cleat-worker itself,
+      # and CGO_ENABLED=0 would replace NewWasmtimeBackend with the stub and
+      # leave no WASM backend to run the fixture on -- a crash-recovery result
+      # obtained that way would not be about the engine that ships.
+      #
+      # The -run filter is load-bearing: every other test in this package needs
+      # CLEAT_CRASH_DB and Fatals without it, deliberately. It selects the
+      # parent and its four dialect subtests; re-derive with -list.
+      - name: Run the shutdown scenarios on MySQL and SQL Server
+        run: go test -count=1 -timeout=900s ./tests/crash/ -run TestShutdownScenariosOnMySQLAndMSSQL

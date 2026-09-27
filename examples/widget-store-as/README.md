@@ -23,8 +23,9 @@ npm run build
 ## Run
 
 ```bash
-cleat deploy widget-store-as dist/workflow.wasm
-cleat run checkoutWorkflow '{"product":"widget","quantity":2}'
+cleat deploy --name widget-store-as dist/workflow.wasm
+cleat run --wasm dist/workflow.wasm --entry-point checkoutWorkflow \
+  --input '{"product":"widget","quantity":2}'
 ```
 
 ## Key files

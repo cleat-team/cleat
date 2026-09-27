@@ -29,14 +29,75 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+    # `edited` is required, not decorative: it is the activity type a BASE
+    # CHANGE fires. Without it a PR opened against a feature branch and later
+    # retargeted here never triggers this workflow at all -- not at open (the
+    # branches filter excluded it) and not at retarget (not a default type).
+    # Such a PR reports CLEAN with only the unfiltered workflows' checks.
+    # scripts/check-workflow-pr-triggers.sh guards this.
+    types: [opened, synchronize, reopened, edited]
 
+  # The merge queue tests the required checks against the PROJECTED tip on a
+  # temporary `gh-readonly-queue/...` ref, which fires `merge_group` and not
+  # `pull_request`. Without this trigger the check never starts in queue
+  # context, the queue waits for a status that cannot arrive, and NOTHING
+  # MERGES -- with no check going red. EVERY required context on develop has to
+  # report here. The list is tiers.yaml's `required_contexts` block; the count
+  # is deliberately not repeated here, because it was -- in nine workflow files
+  # at once -- and all nine said 32 while develop required 33 (cleat#1937).
+  merge_group:
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Every push gets its own group; PR runs share one per ref and supersede.
+  #
+  # `github.ref` is refs/heads/develop for EVERY merge, so keying the group on
+  # it puts consecutive merges in one group. That discards a merge's own
+  # verification, and `cancelled` is not `success` -- nothing downstream reads
+  # it as a failure, so it disappears silently.
+  #
+  # `cancel-in-progress: false` is NOT enough to prevent that, which is the
+  # part the first fix (#634) got wrong. It stops a *running* run being killed,
+  # but GitHub still allows only one pending run per group: when a third push
+  # enters an occupied group, the one waiting is cancelled before it ever
+  # starts. Measured on develop after #634 merged (18:20:48Z on 2026-09-03),
+  # 5 of 24 `Tier 1 Gate` push runs were cancelled -- every one with **zero
+  # jobs**, killed within seconds of the next merge landing.
+  #
+  # The job count separates the two mechanisms, and does it cleanly. Of the 22
+  # cancelled gate runs that day, the 17 before #634 have jobs=1 (killed
+  # mid-run) with a single jobs=0 exception, and all 5 after it have jobs=0:
+  #
+  #   gh run view <cancelled-id> --json jobs --jq '.jobs | length'   # 0
+  #   gh run view <success-id>   --json jobs --jq '.jobs | length'   # 1
+  #
+  # So #634 did exactly what it claimed and no more. The gate takes 20-40
+  # minutes and merges land minutes apart, so the queue is almost always
+  # occupied. Keying push runs on `github.sha` gives each merge a group of its
+  # own: never queued, so never superseded.
+  #
+  # On a pull_request the group stays per-ref and cancellation is the setting's
+  # real purpose: pushing twice to a branch should not run the suite twice.
+  #
+  # `scripts/check-workflow-concurrency.sh` guards both halves.
+  # A BODY EDIT MUST NOT SUPERSEDE THE RUN IT RACES (cleat#1688).
+  #
+  # `edited` is subscribed above because a BASE CHANGE fires it and nothing
+  # else does -- but it also fires for a title or body edit, and `github.ref`
+  # is identical for every pull_request activity type. The edited run therefore
+  # landed in this group and cancelled the synchronize run it followed, and a
+  # superseded run renders as a failure rather than as "replaced".
+  #
+  # `github.run_id` is unique per run, so a no-op edited run shares a group
+  # with nothing and cancels nothing. An `edited` that DID change the base
+  # keeps the per-ref group: that is a real re-evaluation against a different
+  # target and should supersede, which is why the activity type exists here.
+  #
+  # ONE LINE ON PURPOSE: check-workflow-concurrency.sh reads the single line
+  # matching `^\s*group:` and looks for github.sha/run_id/ref in it. A folded
+  # `>-` scalar hides the expression and the guard reports a false alarm.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action == 'edited' && !github.event.changes.base && github.run_id || github.ref) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
-  GO_VERSION: "1.26"
-
   # Declares the "first-class" policy above to the tests themselves.
   #
   # engine/rust_workflow_test.go and engine/python_wasm_e2e_test.go need to
@@ -74,7 +135,7 @@ jobs:
     timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # ------------------------------------------------------------------
       # Language toolchains
@@ -82,7 +143,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: ${{ env.GO_VERSION }}
+          go-version-file: go.mod
 
       # Both targets, and wasm32-unknown-unknown is the one that matters:
       # `cleat build --target rust` produces that cdylib (cmd/cleat/build_rust.go),
@@ -107,18 +168,18 @@ jobs:
           python-version: "3.12"
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
 
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v6
 
       # ------------------------------------------------------------------
       # Python WASM toolchain
@@ -139,6 +200,25 @@ jobs:
       # -short=false overrides any default -short so WASM integration tests
       #   are not skipped; -count=1 bypasses Go's test cache.
       # The -run regex matches only cross-language E2E tests.
+      #
+      # It is longer than it looks like it should be, and the extra alternatives
+      # are not decoration. This job is the ONLY one that installs Rust, Node,
+      # a JDK and Gradle, so a toolchain-building test this regex does not
+      # match runs nowhere at all -- it skips in every other job, silently,
+      # because a skip and a pass print the same thing.
+      #
+      # `TestRust|TestPython|TestAssemblyScript|TestJava` selects by language
+      # PREFIX, and ten tests build a toolchain while being named for what they
+      # do instead. Three of them -- TestARustGuestSuspendsCleanly,
+      # TestARustGuestReachesTheHostRetryLoop and
+      # TestARustLongRetryPolicySuspendsInsteadOfHoldingTheWorker -- were
+      # already excluded from the tier-1 gate as tier 2, so on 2026-09-03 they
+      # were running in NO job. "TestARust" does not contain "TestRust".
+      #
+      # Do not prune this by hand.
+      # engine/tier2_toolchain_tests_placement_test.go derives the required set
+      # from the source and fails if an alternative is missing (IMPROVEMENT-PLAN
+      # 3.109).
       # ------------------------------------------------------------------
       - name: Run cross-language E2E tests
         shell: bash
@@ -155,7 +235,7 @@ jobs:
           set -o pipefail
           go test -count=1 -short=false -timeout=10m \
             -v \
-            -run "TestRust|TestPython|TestAssemblyScript|TestJava" \
+            -run "TestRust|TestARust|TestPython|TestAssemblyScript|TestJava|TestADeferBody|TestAMissingDeferExport|TestTheBackendLogsToTheConfiguredLogger|TestTheHostRunsDefersOfAKilled|TestTheWazeroPathRunsDefers" \
             ./engine/... 2>&1 | tee e2e-report.txt
 
       # tests/cross-language was in UNWIRED_SUITES: seven tests covering
@@ -193,7 +273,7 @@ jobs:
 
       - name: Upload test report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-test-report-${{ github.sha }}
           path: e2e-report.txt

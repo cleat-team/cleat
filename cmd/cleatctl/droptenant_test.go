@@ -14,8 +14,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -25,20 +23,33 @@ import (
 	_ "github.com/lib/pq"
 )
 
-// apply032ForDropTenantTest reads and executes
-// migrations/postgres/032_drop_tenant_deletes_tenant_data.sql, the same
-// approach engine/drop_tenant_test.go uses for its own copy -- duplicated
-// here rather than exported from the engine package's _test.go file, which
-// cmd/cleatctl cannot import.
+// apply032ForDropTenantTest used to read and execute
+// migrations/postgres/032_drop_tenant_deletes_tenant_data.sql and 059, in that
+// order, the same approach engine/drop_tenant_test.go used for its own copy.
+//
+// The list is gone with the cleat#2059 rebaseline: 001_schema.sql is generated
+// from a pg_dump of the fully-migrated database, so it carries admin.drop_tenant's
+// LAST definition by construction and there is no sequence to replay. Replaying
+// the old first entry over it would have reinstalled the 032 body over the
+// current one -- the exact hazard the list existed to prevent (CREATE OR
+// REPLACE keeps whichever ran last, and cleat#1201's fix lives in 059).
+//
+// What the call sites need is that the CURRENT routine is installed. This
+// asserts that instead: the two-argument form, which 069 gave it the schema
+// parameter for.
 func apply032ForDropTenantTest(t *testing.T, db *sql.DB) {
 	t.Helper()
-	path := filepath.Join("..", "..", "migrations", "postgres", "032_drop_tenant_deletes_tenant_data.sql")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM pg_proc p
+		JOIN pg_namespace ns ON ns.oid = p.pronamespace
+		WHERE ns.nspname = 'admin' AND p.proname = 'drop_tenant'
+		  AND pg_get_function_identity_arguments(p.oid) LIKE '%,%'`).Scan(&n); err != nil {
+		t.Fatalf("looking for admin.drop_tenant: %v", err)
 	}
-	if _, err := db.Exec(string(data)); err != nil {
-		t.Fatalf("apply %s: %v", path, err)
+	if n == 0 {
+		t.Fatalf("admin.drop_tenant is absent, or only the one-argument form exists. " +
+			"001_schema.sql ships the two-argument form; a one-argument-only result " +
+			"means the baseline lost it or the schema was never applied")
 	}
 }
 
@@ -71,17 +82,29 @@ func cleanupDropTenantFixtures(t *testing.T, db *sql.DB) {
 	}
 }
 
+// dropTenantTestDB returns a connection to this package's own database.
+//
+// SuiteTestDB, not TestDB, because the cleanup below is an unqualified
+// `DELETE FROM` across every table and this package does not run alone: the
+// `commands` CI entry runs ./cmd/... with no -p 1, so cmd/cleat-worker's
+// database-backed tests execute concurrently against the same instance. This
+// teardown was deleting their fixtures mid-test, and the failures that
+// produces are timing-dependent -- a row that vanishes between two
+// statements -- so they read as flakes rather than as one cause. The engine
+// entry carries -p 1 for exactly this reason; this one never did.
+// IMPROVEMENT-PLAN 2.60d.
+//
+// SetupFullSchema is gone from here because SuiteTestDB already applies the
+// shipped migrations on first use.
 func dropTenantTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db := testutil.TestDB(t, testutil.DialectPostgres)
-	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+	db := testutil.SuiteTestDB(t, "cleatctl")
 	apply032ForDropTenantTest(t, db)
 	testutil.CleanupPostgresTestData(t, db)
 	cleanupDropTenantFixtures(t, db)
 	t.Cleanup(func() {
 		cleanupDropTenantFixtures(t, db)
 		testutil.CleanupPostgresTestData(t, db)
-		db.Close()
 	})
 	return db
 }
@@ -91,7 +114,7 @@ func TestRunDropTenant_RefusesDefaultTenant(t *testing.T) {
 	ctx := context.Background()
 
 	stderr := withExitPanic(t, func() {
-		runDropTenant(ctx, db, []string{engine.DefaultTenantUUID})
+		runDropTenant(ctx, db, dialectPostgres, []string{engine.DefaultTenantUUID})
 	})
 	if !strings.Contains(stderr, "refusing to drop the default tenant") {
 		t.Errorf("expected refusal message in stderr, got: %s", stderr)
@@ -111,7 +134,7 @@ func TestRunDropTenant_NoTenantIDArgument(t *testing.T) {
 	ctx := context.Background()
 
 	stderr := withExitPanic(t, func() {
-		runDropTenant(ctx, db, []string{})
+		runDropTenant(ctx, db, dialectPostgres, []string{})
 	})
 	if !strings.Contains(stderr, "Usage:") {
 		t.Errorf("expected usage text in stderr, got: %s", stderr)
@@ -124,7 +147,9 @@ func TestRunDropTenant_DryRunDeletesNothing(t *testing.T) {
 
 	const tenant = "d70e0000-0000-4000-8000-000000000001"
 	const defName = "cleatctl-drop-tenant-dryrun-def"
-	if err := engine.NewPostgresStore(db).DeployWorkflowDef(ctx, &engine.WorkflowDef{
+	// Deployed AS the tenant whose instance is seeded below: since D7 the FK on
+	// workflow_instances carries tenant_id (IMPROVEMENT-PLAN 3.77).
+	if err := engine.NewPostgresStore(db).WithTenant(tenant).DeployWorkflowDef(ctx, &engine.WorkflowDef{
 		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
 	}); err != nil {
 		t.Fatalf("DeployWorkflowDef: %v", err)
@@ -138,7 +163,7 @@ func TestRunDropTenant_DryRunDeletesNothing(t *testing.T) {
 	}
 
 	stdout, stderr := captureOutputs(t, func() {
-		runDropTenant(ctx, db, []string{tenant, "--dry-run"})
+		runDropTenant(ctx, db, dialectPostgres, []string{tenant, "--dry-run"})
 	})
 	if stderr != "" {
 		t.Errorf("unexpected stderr: %s", stderr)
@@ -171,7 +196,7 @@ func TestRunDropTenant_ConfirmationMismatchCancels(t *testing.T) {
 	var stdout string
 	withStdin(t, "not-the-tenant-id\n", func() {
 		stdout, _ = captureOutputs(t, func() {
-			runDropTenant(ctx, db, []string{tenant})
+			runDropTenant(ctx, db, dialectPostgres, []string{tenant})
 		})
 	})
 	if !strings.Contains(stdout, "cancelled") {
@@ -193,7 +218,9 @@ func TestRunDropTenant_YesFlagDeletesWithoutPrompt(t *testing.T) {
 
 	const tenant = "d70e0000-0000-4000-8000-000000000003"
 	const defName = "cleatctl-drop-tenant-yes-def"
-	if err := engine.NewPostgresStore(db).DeployWorkflowDef(ctx, &engine.WorkflowDef{
+	// Deployed AS the tenant whose instance is seeded below: since D7 the FK on
+	// workflow_instances carries tenant_id (IMPROVEMENT-PLAN 3.77).
+	if err := engine.NewPostgresStore(db).WithTenant(tenant).DeployWorkflowDef(ctx, &engine.WorkflowDef{
 		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
 	}); err != nil {
 		t.Fatalf("DeployWorkflowDef: %v", err)
@@ -212,7 +239,7 @@ func TestRunDropTenant_YesFlagDeletesWithoutPrompt(t *testing.T) {
 	// No stdin provided: --yes must skip the confirmation read entirely, or
 	// this would block/read EOF and fail the wrong way.
 	stdout, stderr := captureOutputs(t, func() {
-		runDropTenant(ctx, db, []string{tenant, "--yes"})
+		runDropTenant(ctx, db, dialectPostgres, []string{tenant, "--yes"})
 	})
 	if stderr != "" {
 		t.Errorf("unexpected stderr: %s", stderr)
@@ -248,7 +275,7 @@ func TestRunDropTenant_MatchingConfirmationDeletes(t *testing.T) {
 	var stdout string
 	withStdin(t, tenant+"\n", func() {
 		stdout, _ = captureOutputs(t, func() {
-			runDropTenant(ctx, db, []string{tenant})
+			runDropTenant(ctx, db, dialectPostgres, []string{tenant})
 		})
 	})
 	if !strings.Contains(stdout, "Deleted tenant "+tenant) {
@@ -270,7 +297,7 @@ func TestRunDropTenant_NothingToDelete(t *testing.T) {
 
 	const tenant = "d70e0000-0000-4000-8000-000000000005"
 	stdout, stderr := captureOutputs(t, func() {
-		runDropTenant(ctx, db, []string{tenant})
+		runDropTenant(ctx, db, dialectPostgres, []string{tenant})
 	})
 	if stderr != "" {
 		t.Errorf("unexpected stderr: %s", stderr)

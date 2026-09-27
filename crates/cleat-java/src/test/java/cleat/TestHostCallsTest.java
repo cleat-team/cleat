@@ -501,121 +501,14 @@ class TestHostCallsTest {
             + "but got: [" + errMsg + "]");
     }
 
-    // ======================================================================
-    // 18. setState / getState / deleteState / hasState / listState
-    // ======================================================================
 
-    @Test
-    void testStateFullCRUD() {
-        // WHAT: Verify full CRUD lifecycle for workflow state
-        // WHY: Durable state is a fundamental building block for cleat workflows
 
-        // Create / set
-        CleatResult<Void> setResult = host.setState("myKey", "myValue");
-        assertTrue(setResult.isOk(),
-            "Expected setState('myKey', 'myValue') to succeed, "
-            + "but got error: " + setResult.getError());
 
-        // Read
-        assertTrue(host.hasState("myKey"),
-            "Expected hasState('myKey') to return true after setState");
-        CleatResult<String> getResult = host.getState("myKey");
-        assertTrue(getResult.isOk(),
-            "Expected getState('myKey') to succeed after setting it, "
-            + "but got error: " + getResult.getError());
-        assertEquals("myValue", getResult.getValue(),
-            "Expected getState('myKey') to return 'myValue', "
-            + "but got: [" + getResult.getValue() + "]");
 
-        // List with prefix
-        CleatResult<String> listResult = host.listState("my");
-        assertTrue(listResult.isOk(),
-            "Expected listState('my') to succeed, "
-            + "but got error: " + listResult.getError());
-        String listJson = listResult.getValue();
-        assertTrue(listJson.contains("myKey"),
-            "Expected listState('my') result to contain 'myKey', "
-            + "but got: [" + listJson + "]");
 
-        // Delete
-        CleatResult<Void> delResult = host.deleteState("myKey");
-        assertTrue(delResult.isOk(),
-            "Expected deleteState('myKey') to succeed, "
-            + "but got error: " + delResult.getError());
-        assertFalse(host.hasState("myKey"),
-            "Expected hasState('myKey') to return false after deleteState");
 
-        // Read after delete
-        CleatResult<String> getAfterDel = host.getState("myKey");
-        assertTrue(getAfterDel.isErr(),
-            "Expected getState('myKey') to return error after delete, "
-            + "but got success with value: " + getAfterDel.getValue());
-    }
 
-    @Test
-    void testGetStateMissingKeyReturnsError() {
-        CleatResult<String> result = host.getState("does_not_exist");
-        assertTrue(result.isErr(),
-            "Expected getState for missing key to return error");
-        String errMsg = result.getError();
-        assertTrue(errMsg.contains("no such key"),
-            "Expected error message to mention 'no such key', "
-            + "but got: [" + errMsg + "]");
-    }
 
-    @Test
-    void testHasStateReturnsFalseForMissingKey() {
-        assertFalse(host.hasState("absent"),
-            "Expected hasState('absent') to return false for a key that was never set");
-    }
-
-    @Test
-    void testListStateWithNoMatchesReturnsEmptyArray() {
-        host.setState("abc", "val");
-
-        CleatResult<String> result = host.listState("xyz");
-        assertTrue(result.isOk(),
-            "Expected listState('xyz') to succeed even with no matches");
-        assertEquals("[]", result.getValue(),
-            "Expected listState('xyz') to return '[]' when no keys match, "
-            + "but got: [" + result.getValue() + "]");
-    }
-
-    // ======================================================================
-    // 19. incrState
-    // ======================================================================
-
-    @Test
-    void testIncrStateIncrementsFromZero() {
-        // WHAT: Verify incrState returns the delta for a new key (starting from 0)
-        // WHY: Atomic incrementing counters is a common workflow pattern
-
-        long newVal = host.incrState("counter", 5);
-        assertEquals(5L, newVal,
-            "Expected incrState('counter', 5) to return 5 for a new key, "
-            + "but got: " + newVal);
-    }
-
-    @Test
-    void testIncrStateMultipleIncrements() {
-        // WHAT: Verify incrState accumulative increments
-        // WHY: Counter values must compound correctly over multiple operations
-
-        assertEquals(5L, host.incrState("counter", 5),
-            "First incrState should return 5");
-        assertEquals(8L, host.incrState("counter", 3),
-            "Second incrState(3) should return 8 (5+3), "
-            + "but got: " + host.incrState("counter", 0));
-    }
-
-    @Test
-    void testIncrStateNegativeDelta() {
-        assertEquals(10L, host.incrState("counter", 10),
-            "First incrState(10) should return 10");
-        assertEquals(7L, host.incrState("counter", -3),
-            "incrState(-3) from 10 should return 7, "
-            + "but got: " + host.incrState("counter", 0));
-    }
 
     // ======================================================================
     // 20. scope operations
@@ -639,19 +532,6 @@ class TestHostCallsTest {
             + "but got: [" + prev2 + "]");
     }
 
-    @Test
-    void testScopePrefixesStateKeys() {
-        // WHAT: Verify state keys are prefixed with the scope
-        // WHY: Scoped state isolation prevents key collisions in virtual objects
-
-        host.setScope("Order", "ord-123");
-        host.setState("status", "pending");
-
-        // Without scope, the key 'status' should not exist
-        assertFalse(host.hasState("status"),
-            "Expected hasState('status') to return false when scope is set "
-            + "(key should be prefixed)");
-    }
 
     @Test
     void testGetScopeReturnsScopedValues() {
@@ -812,7 +692,7 @@ class TestHostCallsTest {
 
     @Test
     void testSendSignalAndWaitTimesOutByDefault() {
-        // WHAT: Verify sendSignalAndWait returns a timeout error when no reply is sent
+        // WHAT: Verify sendSignalAndWait reports that no reply arrived
         // WHY: Signal-and-wait is the request-reply pattern for cross-workflow communication
 
         CleatResult<String> result = host.sendSignalAndWait(
@@ -820,32 +700,81 @@ class TestHostCallsTest {
             100);
 
         assertTrue(result.isErr(),
-            "Expected sendSignalAndWait to time out when no reply is sent, "
+            "Expected sendSignalAndWait to fail when no reply is sent, "
             + "but got success with value: " + result.getValue());
+        // The message changed with IMPROVEMENT-PLAN 3.220: it now names the
+        // signal and the target rather than saying only "timed out", because
+        // the composite can fail at three distinct steps and the reader needs
+        // to know it was the reply that never came.
         String errMsg = result.getError();
-        assertTrue(errMsg.contains("timed out"),
-            "Expected error message to mention 'timed out', "
+        assertTrue(errMsg.contains("no reply to signal"),
+            "Expected error message to mention 'no reply to signal', "
             + "but got: [" + errMsg + "]");
     }
 
+    /**
+     * Asserts the three things the request/reply envelope has to get right:
+     * the receiver sees the caller's payload exactly as sent, it gets a reply
+     * address without parsing one out of that payload, and replying to that
+     * address settles the promise the sender is waiting on.
+     *
+     * <p>What this replaces hardcoded the string "corr-target-1-mySignal-1" --
+     * the harness's own invented correlation-ID format, which existed in no
+     * other environment (IMPROVEMENT-PLAN 3.220). It asserted that a private
+     * HashMap had been written to.
+     *
+     * <p>It cannot assert the SENDER waking, because awaitPromise returns
+     * immediately for a pending promise rather than suspending
+     * (IMPROVEMENT-PLAN 3.235). The Go harnesses had this and no longer do --
+     * they wait on a channel a concurrent resolver closes. That fix ports
+     * here, because TestHostCalls is an ordinary object a second thread can
+     * reach; it does not port to the Rust harnesses, whose state is in a
+     * RefCell.
+     */
     @Test
-    void testReplyToSignalWithKnownCorrelationIdSucceeds() {
-        // WHAT: Verify replyToSignal succeeds for a known correlation ID that was
-        //       registered by a previous sendSignalAndWait call
-        // WHY: The reply mechanism enables the signal sender to receive a response
+    void testSendSignalAndWaitDeliversAReplyAddressAndTheOriginalPayload() {
+        assertTrue(host.sendSignalAndWait("target-1", "mySignal", "{\"key\":\"val\"}", 100).isErr(),
+            "expected a failure: nothing replied");
 
-        // sendSignalAndWait creates a reply channel and then times out.
-        // We can reply after the timeout because the channel remains registered.
-        host.sendSignalAndWait("target-1", "mySignal", "{}", 100);
+        CleatResult<HostCalls.AwaitSignalsResult> got =
+            host.awaitSignals(new String[] {"mySignal"}, 1000);
+        assertTrue(got.isOk(), "awaitSignals failed: " + got.getError());
+        HostCalls.AwaitSignalsResult sig = got.getValue();
 
-        // The correlation ID pattern: "corr-target-1-mySignal-1" (first call, counter=1)
-        CleatResult<Void> replyResult = host.replyToSignal(
-            "corr-target-1-mySignal-1", "{\"status\":\"ok\"}");
+        assertFalse(sig.timedOut, "the signal was never sent");
+        assertEquals("{\"key\":\"val\"}", sig.payload,
+            "the receiver must see the payload exactly as sent");
+        assertFalse(sig.replyTo.isEmpty(),
+            "expected a reply address on a signal sent with sendSignalAndWait");
 
-        assertTrue(replyResult.isOk(),
-            "Expected replyToSignal to succeed for a known correlation ID "
-            + "'corr-target-1-mySignal-1' that was registered by sendSignalAndWait, "
-            + "but got error: " + replyResult.getError());
+        CleatResult<Void> replied = host.replyToSignal(sig.replyTo, "{\"status\":\"ok\"}");
+        assertTrue(replied.isOk(), "replyToSignal failed: " + replied.getError());
+
+        CleatResult<HostCalls.AwaitPromiseResult> settled = host.awaitPromise(sig.replyTo, 1000);
+        assertTrue(settled.isOk(), "awaitPromise after the reply: " + settled.getError());
+        assertFalse(settled.getValue().timedOut,
+            "the reply promise is still pending after replyToSignal");
+        assertEquals("{\"status\":\"ok\"}", settled.getValue().result);
+    }
+
+    /**
+     * Negative control: a one-way signal must carry no reply address, or a
+     * receiver cannot tell a request that wants an answer from a
+     * notification, and would reply into a promise nobody is awaiting.
+     */
+    @Test
+    void testSignalWorkflowCarriesNoReplyAddress() {
+        host.signalWorkflow("target-1", "mySignal", "{\"key\":\"val\"}");
+
+        CleatResult<HostCalls.AwaitSignalsResult> got =
+            host.awaitSignals(new String[] {"mySignal"}, 1000);
+        assertTrue(got.isOk(), "awaitSignals failed: " + got.getError());
+        HostCalls.AwaitSignalsResult sig = got.getValue();
+
+        assertFalse(sig.timedOut);
+        assertEquals("", sig.replyTo, "a one-way signal must carry no reply address");
+        assertEquals("{\"key\":\"val\"}", sig.payload,
+            "a one-way signal's payload must pass through unchanged");
     }
 
     @Test
@@ -856,9 +785,14 @@ class TestHostCallsTest {
         assertTrue(result.isErr(),
             "Expected replyToSignal with unknown correlation ID to return error, "
             + "but got success");
-        assertTrue(result.getError().contains("no pending signal"),
-            "Expected error to mention 'no pending signal', "
+        // A reply address IS a promise ID since IMPROVEMENT-PLAN 3.220, so an
+        // address nobody is waiting on is an unknown promise.
+        assertTrue(result.getError().contains("promise not found"),
+            "Expected error to mention 'promise not found', "
             + "but got: [" + result.getError() + "]");
+
+        CleatResult<Void> empty = host.replyToSignal("", "response");
+        assertTrue(empty.isErr(), "Expected an error for an empty correlation ID");
     }
 
     // ======================================================================
@@ -1006,85 +940,6 @@ class TestHostCallsTest {
     // 29. reset
     // ======================================================================
 
-    @Test
-    void testResetReturnsToCleanState() {
-        // WHAT: Verify reset() returns TestHostCalls to its initial state
-        // WHY: Between-test isolation depends on complete state cleanup
-
-        // Perform various operations to dirty the state
-        host.registerCallStub("svc", "op", "resp");
-        host.cleatCall("svc", "op", "req");
-        host.setTime(999999L);
-        host.setVersion(5);
-        host.setMinVersion(3);
-        host.setWorkflowId("custom-id");
-        host.setRunId("custom-run");
-        host.setRandomSeq(new long[]{1L, 2L});
-        host.setScope("Order", "ord-1");
-        host.setState("key", "val");
-        host.setQueryState("qkey", "qval");
-        host.createPromise("test-prom");
-        host.deliverSignal("sig", "{}");
-        host.cleatDefer("defer-me");
-        host.setRetrySimulation(3);
-        host.setCancelled(true, "reason");
-
-        // Reset
-        host.reset();
-
-        // 1. Default time
-        assertEquals(1704067200000L, host.now(),
-            "Expected now() to return initial timestamp after reset, "
-            + "but got: " + host.now());
-
-        // 2. Default versions
-        assertEquals(1, host.version(),
-            "Expected version() to return 1 after reset, but got: " + host.version());
-        assertEquals(1, host.minVersion(),
-            "Expected minVersion() to return 1 after reset, but got: " + host.minVersion());
-
-        // 3. Default workflow/run IDs
-        assertEquals("test-workflow", host.currentWorkflowId(),
-            "Expected currentWorkflowId() to return 'test-workflow' after reset, "
-            + "but got: [" + host.currentWorkflowId() + "]");
-        assertEquals("test-run-001", host.currentRunId(),
-            "Expected currentRunId() to return 'test-run-001' after reset, "
-            + "but got: [" + host.currentRunId() + "]");
-
-        // 4. No call history
-        assertFalse(host.assertCalled("svc", "op"),
-            "Expected assertCalled to return false after reset, "
-            + "but call history was not cleared");
-
-        // 5. No state
-        assertFalse(host.hasState("key"),
-            "Expected hasState('key') to return false after reset");
-
-        // 6. No query state
-        assertTrue(host.getQueryState("qkey").isErr(),
-            "Expected getQueryState to return error after reset");
-
-        // 7. No random sequence
-        assertEquals(0L, host.random(),
-            "Expected random() to return 0 after reset");
-
-        // 8. No cancellation
-        assertFalse(host.pollCancellation().getValue(),
-            "Expected pollCancellation to return false after reset");
-
-        // 9. Empty scope
-        String[] scope = host.getScope();
-        assertEquals("", scope[0],
-            "Expected scope to be cleared after reset");
-
-        // 10. No stubs -> calls should fail
-        assertTrue(host.cleatCall("svc", "op", "req").isErr(),
-            "Expected cleatCall to fail after reset since stubs were cleared");
-
-        // 11. No retry simulation -> should fall through to stub logic (no stub = error)
-        assertTrue(host.cleatCall("any", "op", "req").isErr(),
-            "Expected cleatCall to fail after reset with no stubs");
-    }
 
     // ======================================================================
     // 30. currentWorkflowId / currentRunId

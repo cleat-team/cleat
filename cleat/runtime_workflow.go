@@ -16,6 +16,9 @@ func (h *HostCallsImpl) DurableSleep(d time.Duration) {
 }
 
 func (h *HostCallsImpl) DurableSleepMs(ms int64) {
+	// Dispatch point: see DispatchUpdates. Before the suspension, not after --
+	// after would not run until the workflow woke again.
+	h.DispatchUpdates()
 	if h.durableSleep == nil {
 		log.Printf("durable: DurableSleep can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 		return
@@ -108,30 +111,79 @@ func (h *HostCallsImpl) SetQueryState(key, value string) {
 	if h.setQueryState != nil {
 		h.setQueryState(key, value)
 	}
-	// Also store in local state map for typed access.
-	if h.stateMap == nil {
-		h.stateMap = make(map[string]interface{})
-	}
-	h.stateMap[key] = value
 }
 
-// scopedKey returns the internally-stored key, applying the current
-// virtual-object scope prefix when one is active.
-func (h *HostCallsImpl) scopedKey(key string) string {
-	if h.scopeSet && h.scopePrefix != "" {
-		return h.scopePrefix + key
-	}
-	return key
-}
-
-// SetScope sets the state key prefix for virtual object instances.
-// All subsequent SetState/GetState/etc calls are automatically prefixed
-// with "vo:<objectType>:<instanceKey>:". Returns the previous scope
-// prefix for stack-style save/restore.
+// SetScope enters a virtual object instance, and a COMPILED Go workflow takes
+// the engine's lock for it.
+//
+// What the ENGINE does with a scope: freshSetScope (engine/scope.go:89) takes
+// a concurrency key named "vo:<objectType>:<instanceKey>" with a 24h TTL and
+// holds it until the scope is cleared or replaced, so two workflows cannot be
+// inside the same instance at once. That mutual exclusion is the whole of the
+// remaining behaviour, and it is real.
+//
+// THIS COMMENT DESCRIBED THE OPPOSITE UNTIL 2026-09-13, and the correction is
+// worth more space than the fact. It read: "There is no HostCallsOptions field
+// for scope, no row in wasm/usage.go's hostFunctions table, and no entry in
+// wasm/adapter_metadata.go -- so nothing generates a call to cleat_set_scope
+// for a Go guest and the host is never told ... Go is the only one that does
+// not [take the lock]."
+//
+// All three of those were true, and all three stopped being true in #1060
+// (c94c9620, "wire the Go SDK's scope calls to the host, closing #984").
+// HostCallsOptions.SetScope exists (runtime.go), usage.go carries the rows,
+// adapter_metadata.go carries the adapterDef -- and the call five lines below
+// this comment reaches the host. The paragraph survived the fix that falsified
+// it, sitting directly above the code that contradicts it.
+//
+// It was then read as current by an internal review and confirmed as a live
+// cross-SDK divergence in cleat#1322, which is what stale prose costs: not a
+// wrong sentence, but a decision queued about a problem that was already
+// fixed.
+//
+// The artifact-level evidence is not this comment, and does not rot with it:
+// tests/plugin-harness/scope_wired_test.go builds a fixture whose body is
+// SetScope and asserts cleat_set_scope and cleat_get_scope are in the binary's
+// "env" imports (TestACompiledGoWorkflowImportsTheScopeCalls), then asserts it
+// reaches the host (TestACompiledGoWorkflowActuallyReachesTheHostForScope).
+// Both pass. A comment cannot fail; those can.
+//
+// WHAT IS STILL LOCAL, so this does not swing too far the other way: the
+// h.setScope == nil branch below. A hand-built HostCalls that does not supply
+// the hook keeps three local fields and takes no lock -- which is the fallback
+// path, not the compiled one. cleat/embedded is inert for a second, separate
+// reason: its setScope does not touch the in-memory lock map that its own
+// AcquireLock uses.
+//
+// And the prefixing this comment once promised really is gone: "all subsequent
+// SetState/GetState calls are automatically prefixed" went with the rest of
+// the durable-state family (IMPROVEMENT-PLAN 3.216). The returned string is an
+// opaque token for stack-style save/restore -- pass it back, do not parse it.
+//
+// See IMPROVEMENT-PLAN 3.223.
 func (h *HostCallsImpl) SetScope(objectType, instanceKey string) (previousScope string) {
 	if h.scopeSet {
 		previousScope = h.scopePrefix
 	}
+
+	// The host is authoritative: it is the only party that can take the
+	// concurrency key, and until 2026-09-09 nothing here asked it to.
+	if h.setScope != nil {
+		hostPrev, err := h.setScope(objectType, instanceKey)
+		if err != nil {
+			// The host did not change the scope, so neither does the local
+			// mirror -- GetScope keeps reporting what is actually held rather
+			// than what was requested. The signature cannot report this, which
+			// matches Rust's `set_scope(...) -> String` discarding its
+			// err_code; diverging in one SDK would be worse than the shared
+			// gap. Tracked separately.
+			return previousScope
+		}
+		if hostPrev != "" {
+			previousScope = hostPrev
+		}
+	}
+
 	if objectType == "" && instanceKey == "" {
 		h.scopeSet = false
 		h.scopePrefix = ""
@@ -149,6 +201,12 @@ func (h *HostCallsImpl) SetScope(objectType, instanceKey string) (previousScope 
 // GetScope returns the current (objectType, instanceKey) or ("", "")
 // if no scope is set.
 func (h *HostCallsImpl) GetScope() (objectType, instanceKey string) {
+	if h.getScope != nil {
+		objType, instKey, err := h.getScope()
+		if err == nil {
+			return objType, instKey
+		}
+	}
 	if !h.scopeSet {
 		return "", ""
 	}
@@ -157,15 +215,12 @@ func (h *HostCallsImpl) GetScope() (objectType, instanceKey string) {
 
 // ClearScope removes the current scope and returns the previous scope
 // prefix (empty string if none was set).
+//
+// No host call of its own: clearing IS SetScope("", ""), the empty pair that
+// engine/scope.go freshSetScope documents, which is also why ClearScope has no
+// adapterDefs entry.
 func (h *HostCallsImpl) ClearScope() (previousScope string) {
-	if h.scopeSet {
-		previousScope = h.scopePrefix
-	}
-	h.scopeSet = false
-	h.scopePrefix = ""
-	h.scopeObjType = ""
-	h.scopeInstKey = ""
-	return
+	return h.SetScope("", "")
 }
 
 // UUID returns a deterministic UUID scoped to the current workflow
@@ -250,120 +305,28 @@ func (h *HostCallsImpl) NewUUIDv7() string {
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-func (h *HostCallsImpl) SetState(key string, value interface{}) {
-	sk := h.scopedKey(key)
-	if h.stateMap == nil {
-		h.stateMap = make(map[string]interface{})
+func (h *HostCallsImpl) RunDetached(name, inputJSON string) error {
+	if h.runDetached == nil {
+		// An error, not nil. The previous closure-taking version returned nil
+		// here, so in a compiled workflow -- where the field was never set,
+		// because a closure cannot cross the ABI -- RunDetached reported
+		// success and started nothing at all.
+		return errors.New("durable: RunDetached can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
-	// Store as json.RawMessage so GetState can unmarshal directly.
-	data, err := json.Marshal(value)
-	if err != nil {
-		h.stateMap[sk] = value // fallback to raw value
-	} else {
-		h.stateMap[sk] = json.RawMessage(data)
-	}
-	// Persist via existing set_query_state mechanism.
-	if h.setQueryState != nil {
-		if data == nil {
-			data, _ = json.Marshal(value)
-		}
-		h.setQueryState(sk, string(data))
-	}
+	return h.runDetached(name, inputJSON)
 }
 
-func (h *HostCallsImpl) GetState(key string, result interface{}) error {
-	sk := h.scopedKey(key)
-	if h.stateMap == nil {
-		return errors.New("durable: state not found for key: " + sk)
+// StartDetached starts a detached workflow and returns its run id.
+//
+// The uninitialized case returns an error for the same reason RunDetached's
+// does: a nil return would report success from a compiled workflow where the
+// field was never wired, and here it would additionally hand back "" as if it
+// were a run id.
+func (h *HostCallsImpl) StartDetached(name, inputJSON string) (string, error) {
+	if h.startDetached == nil {
+		return "", errors.New("durable: StartDetached can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
-	val, ok := h.stateMap[sk]
-	if !ok {
-		return errors.New("durable: state key not found: " + sk)
-	}
-	// If val is already json.RawMessage, unmarshal directly.
-	if raw, ok := val.(json.RawMessage); ok {
-		return json.Unmarshal(raw, result)
-	}
-	// Otherwise marshal and unmarshal for consistent type conversion.
-	data, err := json.Marshal(val)
-	if err != nil {
-		return fmt.Errorf("durable: marshal state value: %w", err)
-	}
-	return json.Unmarshal(data, result)
-}
-
-func (h *HostCallsImpl) DeleteState(key string) {
-	sk := h.scopedKey(key)
-	if h.stateMap != nil {
-		delete(h.stateMap, sk)
-	}
-	if h.setQueryState != nil {
-		h.setQueryState(sk, "")
-	}
-}
-
-func (h *HostCallsImpl) HasState(key string) bool {
-	if h.stateMap == nil {
-		return false
-	}
-	_, ok := h.stateMap[h.scopedKey(key)]
-	return ok
-}
-
-func (h *HostCallsImpl) IncrState(key string, delta int64) int64 {
-	sk := h.scopedKey(key)
-	if h.stateMap == nil {
-		h.stateMap = make(map[string]interface{})
-	}
-	var current int64
-	if val, ok := h.stateMap[sk]; ok {
-		switch v := val.(type) {
-		case int64:
-			current = v
-		case float64:
-			current = int64(v)
-		case json.Number:
-			current, _ = v.Int64()
-		default:
-			current = 0
-		}
-	}
-	current += delta
-	h.stateMap[sk] = current
-	// Persist via existing set_query_state mechanism.
-	if h.setQueryState != nil {
-		data, err := json.Marshal(current)
-		if err == nil {
-			h.setQueryState(sk, string(data))
-		}
-	}
-	return current
-}
-
-func (h *HostCallsImpl) ListState(prefix string) []string {
-	if h.stateMap == nil {
-		return nil
-	}
-	sk := h.scopedKey(prefix)
-	var keys []string
-	for k := range h.stateMap {
-		if sk == "" || strings.HasPrefix(k, sk) {
-			// Strip scope prefix from returned key names.
-			if h.scopeSet && h.scopePrefix != "" && strings.HasPrefix(k, h.scopePrefix) {
-				keys = append(keys, k[len(h.scopePrefix):])
-			} else {
-				keys = append(keys, k)
-			}
-		}
-	}
-	return keys
-}
-
-func (h *HostCallsImpl) RunDetached(fn func(h HostCalls) error) error {
-	if h.runDetached != nil {
-		return h.runDetached(fn)
-	}
-	return nil
+	return h.startDetached(name, inputJSON)
 }
 
 func (h *HostCallsImpl) DurableFetch(url, method string, headers map[string]string, body string) (responseJSON string, statusCode int, err error) {
@@ -504,6 +467,89 @@ func (s *Saga) AddStep(description string, forward func(HostCalls) (string, erro
 		Compensate:  compensate,
 	})
 	return s
+}
+
+// StepCall describes a saga step as a pair of durable calls rather than as a
+// pair of Go functions. See Saga.AddStepCall.
+type StepCall struct {
+	// Description is used for logging, as with AddStep.
+	Description string
+
+	// Service and Op name the forward durable call; Payload is its JSON input.
+	Service string
+	Op      string
+	Payload string
+
+	// CompensateOp is the operation that undoes the forward call, on the same
+	// Service. Leave it empty for a step with no meaningful compensation --
+	// the equivalent of passing a nil compensate to AddStep.
+	CompensateOp string
+
+	// CompensatePayload is the compensating call's JSON input. It defaults to
+	// Payload when empty, because the common case is undoing the same subject:
+	// withdraw {"account":"A"} is compensated by deposit {"account":"A"}.
+	CompensatePayload string
+}
+
+// AddStepCall adds a step described by the durable calls it makes, rather than
+// by function values the caller has to build.
+//
+//	s.AddStepCall(cleat.StepCall{
+//	    Description:  "withdraw",
+//	    Service:      "banking",
+//	    Op:           "withdraw",
+//	    Payload:      payload,
+//	    CompensateOp: "refund",
+//	})
+//
+// WHY THIS EXISTS, which is narrower than it looks (cleat#1131). AddStep is not
+// being replaced and named functions already work with it:
+//
+//	s.AddStep("withdraw", doWithdraw, doRefund)   // builds today
+//
+// What does not work is PARAMETERISING a step. Writing a helper that returns a
+// step function -- the obvious way to avoid N near-identical named functions --
+// fails whichever way it is written. As a local closure the analyzer reports
+// E009, because the callee is a function value it cannot resolve. As a
+// package-level factory it reports that the factory "is reachable from a
+// workflow entry point but does not have a HostCalls parameter", because the
+// DurableCall inside the returned closure is attributed to the enclosing named
+// function. Neither diagnostic mentions the other, and the shape that satisfies
+// both is a factory carrying an unused HostCalls parameter.
+//
+// This form sidesteps both by construction rather than by exemption: there is
+// no function value for the caller to produce, so E009 has no callee to flag,
+// and no factory to misclassify as a durable leaf. A StepCall is data, and data
+// can be built in a loop, read from config, or returned from a helper.
+//
+// The closures are built HERE, inside the SDK, which is already where Run calls
+// them -- step.Forward(h) is itself a function-value call and has always been
+// accepted, because the analyzer is looking at workflow code rather than at the
+// runtime it links against.
+func (s *Saga) AddStepCall(c StepCall) *Saga {
+	service, op, payload := c.Service, c.Op, c.Payload
+	compOp := c.CompensateOp
+	compPayload := c.CompensatePayload
+	if compPayload == "" {
+		compPayload = payload
+	}
+
+	var compensate func(HostCalls) error
+	if compOp != "" {
+		// Nil rather than a no-op closure when there is nothing to undo: Run
+		// skips nil compensators, and a closure that returns nil would be
+		// indistinguishable from a compensation that ran and succeeded.
+		compensate = func(h HostCalls) error {
+			_, err := h.DurableCall(service, compOp, compPayload)
+			return err
+		}
+	}
+
+	return s.AddStep(c.Description,
+		func(h HostCalls) (string, error) {
+			return h.DurableCall(service, op, payload)
+		},
+		compensate)
 }
 
 // Run executes all forward steps in order. If any step fails, previously
@@ -768,12 +814,41 @@ func SideEffectTyped[T any](h HostCalls, fn func() (T, error)) (T, error) {
 
 // ---- Helpers ----
 
-// isNonRetryable returns true if err matches any of the non-retryable
-// substrings.
+// isNonRetryable reports whether err is one of the CODES this call declared it
+// will not retry.
+//
+// THIS IS THE SDK-SIDE HALF OF A DECISION THE HOST USUALLY MAKES, and the two
+// must agree. DurableCallWithRetry hands the policy to the host when it fits;
+// the loop that calls this is the fallback for a policy the host refused as
+// too long. Before this, the host matched codes while the fallback matched
+// substrings of the message -- so the same workflow got different retry
+// semantics depending on how long its backoff was, which is not a difference
+// anyone would predict from reading it.
+//
+// MATCHED AS A PREFIX OF THE DECLARED CODE, not by extracting a code from the
+// message. engine.ServiceError.Error() writes "CODE: message (correlation_id=
+// ...)", with message and id both optional, so a declared code matches when
+// the text IS it or BEGINS with it followed by a colon.
+//
+// An earlier version extracted the leading token and required it to look like
+// a code -- upper case, digits, underscores -- to keep an ordinary message
+// like "timeout: deadline exceeded" from being read as a code named "timeout".
+// That rule would have rejected PascalCase codes, which is the most common
+// convention there is: AWS ships InvalidParameterValue and ResourceNotFound.
+// Comparing against what the CALLER DECLARED needs no such rule, because a
+// message only matches if the caller named that exact code.
+//
+// An error with no code -- a transport failure, or a service that does not
+// speak the contract -- matches nothing, deliberately. Whether to retry it is
+// then decided by the classification the host already attached, which is a
+// sounder answer than searching an arbitrary message for a caller's word.
 func isNonRetryable(err error, nonRetryableErrors []string) bool {
-	errMsg := err.Error()
-	for _, substr := range nonRetryableErrors {
-		if strings.Contains(errMsg, substr) {
+	msg := err.Error()
+	for _, code := range nonRetryableErrors {
+		if code == "" {
+			continue
+		}
+		if msg == code || strings.HasPrefix(msg, code+":") {
 			return true
 		}
 	}

@@ -20,49 +20,14 @@ func (s *execSession) ChildWorkflowWithOptions(ctx context.Context, m api.Module
 	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, int(version), int(priority), parentClosePolicy, runIDPtr, runIDMaxLen)
 }
 
-// ChildWorkflowInSchema starts a child workflow in a target PostgreSQL schema.
-// This enables cross-instance cooperation: a workflow in schema A can spawn a
-// child in schema B, where B's worker pool claims and executes it.
-//
-// The target schema MUST be in the engine's configured peerSchemas (or be the
-// engine's own schema).  An empty targetSchema falls back to the local schema.
-
-func (s *execSession) ChildWorkflowInSchema(ctx context.Context, m api.Module, targetSchema, name, inputJSON string, version int64, priority int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64 {
-	// Validate: target schema must be a peer or our own schema.
-	if targetSchema != "" && targetSchema != s.engine.schema {
-		allowed := false
-		for _, p := range s.engine.peerSchemas {
-			if p == targetSchema {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			errMsg := fmt.Sprintf("child workflow %q: target schema %q is not an allowed peer", name, targetSchema)
-			errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
-			return int64(uint64(errWritten)<<32 | 4) // errCode 4 = invalid
-		}
-	}
-
-	return s.childWorkflowWithVersion(ctx, m, name, inputJSON, int(version), int(priority), parentClosePolicy, runIDPtr, runIDMaxLen, targetSchema)
-}
-
 // resolveChildVersion resolves the child workflow version by priority:
 //  1. Explicit version from ChildWorkflowOptions (version > 0 from WASM ABI)
 //  2. Runtime override (engine.childBindingOverride)
 //  3. Binding policy from WASM metadata (engine.childBindingPolicy)
 //  4. Fallback: 0 means DB resolves to MAX(version)
-//
-// Cross-schema children (targetSchema != "") skip policy resolution
-// and return explicitVersion (if > 0) or 0 (DB fallback).
-func (s *execSession) resolveChildVersion(ctx context.Context, name string, explicitVersion int, targetSchema string) int {
+func (s *execSession) resolveChildVersion(ctx context.Context, name string, explicitVersion int) int {
 	if explicitVersion > 0 {
 		return explicitVersion
-	}
-
-	// Cross-schema children should still use explicit version or fallback to MAX.
-	if targetSchema != "" {
-		return 0
 	}
 
 	// Check runtime override first (env var or worker flag for debugging).
@@ -138,15 +103,7 @@ func (s *execSession) resolveChildVersion(ctx context.Context, name string, expl
 
 // childWorkflowWithVersion is the shared implementation for creating child workflows.
 // If version <= 0, the parent's version is used as the default.
-// If targetSchema is non-empty, the child is created in that PostgreSQL schema
-// (cross-instance cooperation); otherwise the child is created locally.
-
-func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module, name, inputJSON string, version int, priority int, parentClosePolicy string, runIDPtr, runIDMaxLen uint32, targetSchema ...string) int64 {
-	ts := ""
-	if len(targetSchema) > 0 {
-		ts = targetSchema[0]
-	}
-
+func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module, name, inputJSON string, version int, priority int, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64 {
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
@@ -155,11 +112,60 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 					return 0
 				}
 
-				written, _ := s.writeResult(ctx, m, runIDPtr, rec.RunID, runIDMaxLen)
-				return packSimpleResult(0, written)
+				written, writtenEC := s.writeOut(ctx, m, runIDPtr, rec.RunID, runIDMaxLen)
+				return packSimpleResult(writtenEC, written)
 			}
+			// Event type mismatch -- replay divergence. Report it rather than
+			// falling through.
+			//
+			// This block used to fall into the s.exitReplay() below, which
+			// merged two conditions that are not the same thing. Reaching the
+			// END of the history is how replay NORMALLY finishes -- a workflow
+			// with N events replays 0..N-1 and then runs on -- so the shared
+			// path had to be silent, and a divergence inherited that silence.
+			// The cost is specific: the child is started A SECOND TIME and the
+			// run continues as though nothing happened. AwaitChild, AwaitAnyChild
+			// and replayCall all report this; the spawn did not, and a spawn is
+			// the one where the duplicate is a whole workflow rather than a
+			// re-read.
+			//
+			// Not retryable, for the same reason as replayCall: a divergence is
+			// a bug in the workflow code, and running it again diverges again.
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordReplayFailure(ctx)
+			}
+			errMsg := fmt.Sprintf("replay divergence at step %d: expected child_workflow, got %s.\n  child name: %s\nRun 'cleat vet' on your workflow code to check for common non-determinism issues (time.Now(), random values, map iteration, goroutines).",
+				rec.Step, rec.EventType, name)
+			errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
+			return int64(uint64(errWritten)<<32 | 1)
 		}
 		s.exitReplay()
+	}
+
+	// Refuse an unrecognised parent close policy (cleat#936).
+	//
+	// AFTER the replay block, deliberately. A run whose child_workflow event is
+	// already recorded replays out of history and never reaches here, so
+	// tightening the rule cannot retroactively fail an in-flight workflow that
+	// was started under the old one. Only a FRESH child start is refused.
+	//
+	// Before stopBeforeNewWork, also deliberately: this is a deterministic
+	// property of the arguments, not of the segment, so a defer segment should
+	// report the bad policy rather than suspend and rediscover it next time.
+	if err := ValidateParentClosePolicy(parentClosePolicy); err != nil {
+		errMsg := fmt.Sprintf("child workflow %q: %v", name, err)
+		s.engine.log().ErrorContext(ctx, errMsg,
+			"workflow_id", s.workflowID, "tenant_id", s.tenantID,
+			"parent_close_policy", parentClosePolicy)
+		errWritten, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
+		return int64(uint64(errWritten)<<32 | 4)
+	}
+
+	// Past the frontier in a defer segment: starting a child workflow is new
+	// work, and unlike a durable call it leaves a row behind that outlives the
+	// segment. See IMPROVEMENT-PLAN 3.84.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
 	}
 
 	// Resolve child version by priority:
@@ -172,7 +178,7 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 	//      - "tag:X": resolve against tag X via store
 	//      - "" (empty): use EffectivePolicy() logic
 	//   4. Fallback: DB resolves version <= 0 to MAX(version) via CASE in INSERT
-	childVersion := s.resolveChildVersion(ctx, name, version, ts)
+	childVersion := s.resolveChildVersion(ctx, name, version)
 
 	// Fresh execution: create child workflow atomically with event.
 	var runID string
@@ -216,23 +222,26 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 			TimestampMs:       time.Now().UnixMilli(),
 		}
 
-		var err error
-		if ts != "" {
-			css, ok := s.engine.childWfStore.(CrossSchemaChildStore)
-			if !ok {
-				// Cross-schema requested but store doesn't support it.
-				// Fail loudly rather than silently creating the child in the wrong schema.
-				err := fmt.Errorf("child workflow %q: cross-schema requested (target=%q) but store does not implement CrossSchemaChildStore", name, ts)
+		// AN ORPHAN CHILD MEANS REPLAY COULD NOT SEE A CHILD WE ALREADY
+		// STARTED, and we are about to start a duplicate. cleat#1661.
+		//
+		// Checked HERE and not at replay entry, deliberately. This is the
+		// instant the defect acts, and it is the only instant where the cost is
+		// proportionate: most workflows never start a child, and a check at
+		// replay entry would charge every one of them for a question that
+		// cannot apply to them. This path is already opening a transaction.
+		//
+		// WHY AN ORPHAN IS ANOMALOUS RATHER THAN A RACE. The child row and the
+		// parent's child_workflow event are written by ONE transaction --
+		// StartChildWorkflowAtomic, both INSERTs, on all three dialects -- so
+		// "the child exists but the event does not" is not a window that
+		// ordinary crash timing can open. Something removed it.
+		s.reportOrphanChildren(ctx, parentID)
 
-				errWritten, _ := s.writeResult(ctx, m, runIDPtr, err.Error(), runIDMaxLen)
-				return int64(uint64(errWritten)<<32 | 4) // error code 4 = invalid
-			}
-			runID, err = css.StartChildWorkflowInSchema(context.Background(), ts, parentID, name, inputJSON, childVersion, parentClosePolicy, priority)
-		} else {
-			s.engine.log().InfoContext(ctx, "calling StartChildWorkflowAtomic",
-				"name", name, "parent_id", parentID, "child_version", childVersion)
-			runID, err = s.engine.childWfStore.StartChildWorkflowAtomic(context.Background(), "", parentID, name, inputJSON, childVersion, parentClosePolicy, rec, priority)
-		}
+		var err error
+		s.engine.log().InfoContext(ctx, "calling StartChildWorkflowAtomic",
+			"name", name, "parent_id", parentID, "child_version", childVersion)
+		runID, err = s.engine.childWfStore.StartChildWorkflowAtomic(context.Background(), "", parentID, name, inputJSON, childVersion, parentClosePolicy, rec, priority)
 		if err != nil {
 			s.engine.log().ErrorContext(ctx, "StartChildWorkflowAtomic failed",
 				"error", err, "name", name, "parent_id", parentID, "child_version", childVersion)
@@ -245,6 +254,13 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		// The store already wrote it to event_history atomically;
 		// the later flush will skip it via ON CONFLICT DO NOTHING.
 		rec.RunID = runID
+
+		// Advance the checksum chain. The store computed exactly this value
+		// when it wrote the row; this path replicates recordEvent's other
+		// bookkeeping (history, nowMs, stepCount) and used to omit the chain,
+		// so the next event recorded chained from a stale predecessor.
+		s.lastChecksum = computeEventChecksum(rec, s.lastChecksum)
+
 		s.history = append(s.history, rec)
 		s.nowMs = rec.TimestampMs
 		s.stepCount++
@@ -262,8 +278,8 @@ func (s *execSession) childWorkflowWithVersion(ctx context.Context, m api.Module
 		s.recordEvent(rec)
 	}
 
-	written, _ := s.writeResult(ctx, m, runIDPtr, runID, runIDMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, runIDPtr, runID, runIDMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64 {
@@ -281,8 +297,8 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 						written, _ := s.writeResult(ctx, m, resultPtr, rec.Err, resultMaxLen)
 						return packAwaitChildResult(written, 1)
 					}
-					written, _ := s.writeResult(ctx, m, resultPtr, rec.Response, resultMaxLen)
-					return packAwaitChildResult(written, 0)
+					written, writtenEC := s.writeOut(ctx, m, resultPtr, rec.Response, resultMaxLen)
+					return packAwaitChildResult(written, uint32(writtenEC))
 				}
 				s.engine.log().InfoContext(ctx, "await_child: no cached result, exitReplay to fresh", "workflow_id", s.workflowID, "runID", runID, "step", rec.Step)
 				// No cached result yet — fall through to fresh to re-check.
@@ -306,30 +322,40 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 
 	// Fresh execution: check child result via store.
 	if s.engine.childWfStore != nil {
-		result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
-		if completed && err == nil {
+		out, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
+		// A child that FAILED and a store that could not answer are both
+		// errors to the guest, and they were the same value until cleat#1115:
+		// `err` is a store error, and a failed child arrived as an empty
+		// success. They are now separate conditions with the same handling,
+		// which is deliberate -- the guest can act on neither differently,
+		// and a failed child's message is the more useful of the two.
+		if err != nil || out.Failed {
+			msg := out.Error
+			if err != nil {
+				msg = err.Error()
+			}
 			rec := EventRecord{
 				Step:      s.stepCount,
 				EventType: EventTypeAwaitChild,
 				RunID:     runID,
-				Response:  result,
+				Err:       msg,
 			}
 			s.recordEvent(rec)
 
-			written, _ := s.writeResult(ctx, m, resultPtr, result, resultMaxLen)
-			return packAwaitChildResult(written, 0)
-		}
-		if err != nil {
-			rec := EventRecord{
-				Step:      s.stepCount,
-				EventType: EventTypeAwaitChild,
-				RunID:     runID,
-				Err:       err.Error(),
-			}
-			s.recordEvent(rec)
-
-			written, _ := s.writeResult(ctx, m, resultPtr, err.Error(), resultMaxLen)
+			written, _ := s.writeResult(ctx, m, resultPtr, msg, resultMaxLen)
 			return packAwaitChildResult(written, 1)
+		}
+		if out.Completed {
+			rec := EventRecord{
+				Step:      s.stepCount,
+				EventType: EventTypeAwaitChild,
+				RunID:     runID,
+				Response:  out.Result,
+			}
+			s.recordEvent(rec)
+
+			written, writtenEC := s.writeOut(ctx, m, resultPtr, out.Result, resultMaxLen)
+			return packAwaitChildResult(written, uint32(writtenEC))
 		}
 	}
 
@@ -348,6 +374,50 @@ func (s *execSession) AwaitChild(ctx context.Context, m api.Module, runID string
 	return packAwaitChildResultSuspend()
 }
 
+// pollChildIsDeterministic explains why PollChild records no event.
+//
+// The rule this repo works to is not "everything records an event", it is
+// "the answer must be a function of recorded state". DurableSleep is the
+// precedent: it stores nothing, and what makes it replayable is time -- the
+// timestamp of the last event the workflow recorded, advanced by sleeps.
+//
+// PollChild meets the same bar without an event:
+//
+//	the child is completed as of durable time T  <=>  completed_at <= T
+//
+// where T is s.nowMs, the parent's durable clock. Both operands are stable
+// across replays -- nowMs is derived from recorded history, and completed_at
+// is written once when the child finalizes -- so the comparison returns the
+// same answer on every execution. Before #847 this call queried the child
+// live and answered "completed" on replay where the original run had seen
+// "running", then let the workflow branch on the difference.
+//
+// NOTE for anyone sweeping for replay handling: this method deliberately has
+// no isReplay check and records no event, and neither does PollSignal. A scan
+// that recognises replay handling by name flags both, identically before and
+// after their fixes. Read the comparison above -- completed_at against
+// s.nowMs here, DeliveredAtMs against s.nowMs in PollSignal -- rather than the
+// absence of isReplay. The full warning, including how such a sweep can miss
+// seven methods and still look right, is on PollSignal in
+// engine/signaller.go.
+//
+// THE RESIDUAL WINDOW, stated because it is real and small rather than
+// hidden. completed_at is the DATABASE clock; nowMs is the WORKER clock.
+// They were measured 40ms apart (#804) and ~60ms apart on another machine.
+// So a child that completes within the skew of T can still be reported
+// completed on replay where the original saw running. The window is
+// |skew|, and it closes to zero when the parent has recorded any event
+// after the child finished -- which is the ordinary case, because the
+// await that wakes the parent records one.
+//
+// A constant safety margin was considered and REJECTED. To cover the skew it
+// would have to exceed it, but to preserve the case #847 itself documents --
+// poll, await, poll again, where the second poll must answer completed -- it
+// would have to be smaller than the parent's wake latency after the child
+// finishes. Those two bounds are the same order of magnitude, so a margin
+// large enough to be worth having breaks the behaviour the fix exists to
+// provide. The honest fix for the residual window is a single clock, not a
+// fudge factor.
 func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64 {
 	// Non-blocking check of a child's status. Never suspends.
 	// Returns: {"status":"running|completed|failed", "result":"...", "error":"..."}
@@ -359,26 +429,75 @@ func (s *execSession) PollChild(ctx context.Context, m api.Module, runID string,
 	}
 
 	var pr pollResult
-	if s.engine.childWfStore != nil {
-		result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
-		if err != nil {
-			pr = pollResult{Status: "failed", Error: err.Error()}
-		} else if completed {
-			if result != "" {
-				pr = pollResult{Status: "completed", Result: result}
-			} else {
-				pr = pollResult{Status: "failed", Error: "child workflow failed (empty result)"}
-			}
-		} else {
-			pr = pollResult{Status: "running"}
-		}
-	} else {
+	switch {
+	case s.engine.childWfStore == nil:
 		pr = pollResult{Status: "failed", Error: "no child workflow store"}
+	default:
+		out, err := s.engine.childWfStore.GetChildResult(context.Background(), runID)
+		result := out.Result
+		completed := out.Completed
+		switch {
+		case err != nil:
+			pr = pollResult{Status: "failed", Error: err.Error()}
+		case out.Failed:
+			// A child that ran and failed. Before cleat#1115 this branch did
+			// not exist and the child fell through to "done" below, so a
+			// polling parent was told its failed child had succeeded -- the
+			// same defect as AwaitChild's, one status value away.
+			pr = pollResult{Status: "failed", Error: out.Error}
+		case !completed:
+			// Not complete now, so it was not complete at any earlier durable
+			// time either. No second query needed.
+			pr = pollResult{Status: "running"}
+		default:
+			// Complete NOW. The replayable question is whether it was complete
+			// as of the parent's durable time.
+			completedAtMs, ok, cerr := s.engine.childWfStore.GetChildCompletedAtMs(context.Background(), runID)
+			switch {
+			case cerr != nil:
+				pr = pollResult{Status: "failed", Error: cerr.Error()}
+			case !ok:
+				// Complete but with no recorded instant. Fail closed rather
+				// than guessing: answering "completed" here would reintroduce
+				// exactly the non-replayable answer #847 is about, and it
+				// would do it silently.
+				//
+				// THERE IS A KNOWN POPULATION OF SUCH ROWS, so this is not a
+				// theoretical branch. Before #864 the first TERMINATE arm of
+				// enforceParentClosePolicy set status='failed' with no
+				// completed_at, in all three dialects. #864 fixed the write and
+				// touched no existing row, and every retention sweep gates on
+				// `completed_at IS NOT NULL` -- so those rows are never
+				// collected and the population never shrinks (#867).
+				//
+				// A child terminated that way is genuinely unanswerable here:
+				// its status is terminal and stable, but nothing on the row
+				// says WHEN it became terminal, so "was it complete at the
+				// parent's durable time" has no answer. Naming the cause beats
+				// a bare error, because the operator's next question is "which
+				// children?" and #867 has the enumeration.
+				pr = pollResult{Status: "failed", Error: "child is complete but has no completion timestamp, so poll_child cannot answer deterministically; if this child was terminated by a parent close policy before the #864 fix, its completed_at is permanently NULL -- see #867"}
+			case completedAtMs > s.nowMs:
+				// Completed, but AFTER the parent's durable clock. The original
+				// execution saw it running, so every replay must too.
+				pr = pollResult{Status: "running"}
+			default:
+				// An empty result is NOT a failure. Until cleat#1115 this
+				// branch guessed -- "child workflow failed (empty result)" --
+				// because the store had no way to say whether the child had
+				// failed, and the guess is wrong in the other direction: a
+				// child that succeeds and returns nothing was reported as
+				// failed. `out.Failed` above answers it from the row, so the
+				// guess is gone rather than kept alongside an answer it can
+				// contradict.
+				pr = pollResult{Status: "completed", Result: result}
+			}
+		}
 	}
 
 	out, _ := json.Marshal(pr)
-	written, _ := s.writeResult(ctx, m, resultPtr, string(out), resultMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, resultPtr, string(out), resultMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSON string, resultPtr, resultMaxLen uint32) int64 {
@@ -390,8 +509,8 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 					return 0
 				}
 				if rec.Response != "" {
-					written, _ := s.writeResult(ctx, m, resultPtr, rec.Response, resultMaxLen)
-					return packSimpleResult(0, written)
+					written, writtenEC := s.writeOut(ctx, m, resultPtr, rec.Response, resultMaxLen)
+					return packSimpleResult(writtenEC, written)
 				}
 				// Empty response: this was a suspend (no child was done yet).
 				// Peek at the next event — if it is also an AwaitAnyChild with
@@ -405,8 +524,8 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 						if !s.advanceReplayStep(ctx, &nextRec) {
 							return 0
 						}
-						written, _ := s.writeResult(ctx, m, resultPtr, nextRec.Response, resultMaxLen)
-						return packSimpleResult(0, written)
+						written, writtenEC := s.writeOut(ctx, m, resultPtr, nextRec.Response, resultMaxLen)
+						return packSimpleResult(writtenEC, written)
 					}
 				}
 				// No cached re-execution result — fall through to fresh.
@@ -446,14 +565,20 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 
 	if s.engine.childWfStore != nil {
 		for _, rid := range runIDs {
-			result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
-			if err != nil || completed {
+			co, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
+			if err != nil || co.Completed {
 				var out outcome
 				out.RunID = rid
-				if err != nil {
+				switch {
+				case err != nil:
 					out.Error = err.Error()
-				} else {
-					out.Result = result
+				case co.Failed:
+					// cleat#1115: this filled Error only from the STORE error,
+					// so a child that failed was returned to the guest with
+					// Error empty and Result "{}" -- a success.
+					out.Error = co.Error
+				default:
+					out.Result = co.Result
 				}
 				outJSON, _ := json.Marshal(out)
 				rec := EventRecord{
@@ -463,8 +588,8 @@ func (s *execSession) AwaitAnyChild(ctx context.Context, m api.Module, runIDsJSO
 					Response:  string(outJSON),
 				}
 				s.recordEvent(rec)
-				written, _ := s.writeResult(ctx, m, resultPtr, string(outJSON), resultMaxLen)
-				return packSimpleResult(0, written)
+				written, writtenEC := s.writeOut(ctx, m, resultPtr, string(outJSON), resultMaxLen)
+				return packSimpleResult(writtenEC, written)
 			}
 		}
 	}
@@ -507,6 +632,10 @@ func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, r
 	}
 
 	outcomes := make([]childOutcome, len(runIDs))
+	// pending is tracked beside outcomes rather than as a field on childOutcome
+	// because childOutcome is marshalled into the result the guest reads: adding
+	// a field there would change the wire format for every caller.
+	pending := make([]bool, len(runIDs))
 	var wg sync.WaitGroup
 
 	for i, runID := range runIDs {
@@ -514,20 +643,95 @@ func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, r
 		go func(idx int, rid string) {
 			defer wg.Done()
 			if s.engine.childWfStore != nil {
-				result, completed, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
+				// context.Background() rather than ctx, deliberately, and NOT
+				// for the usual reason.
+				//
+				// The usual reason is lifetime -- a goroutine that outlives its
+				// caller cannot borrow the caller's context. That is why
+				// adaptive_flush.go:474 and scheduledbackup/routes.go:534 use
+				// Background(), and it does NOT apply here: wg.Wait() below
+				// joins every one of these, so they cannot outlive this call.
+				// gosec's G118 flags this site for exactly that mismatch, and
+				// on lifetime grounds it would be right.
+				//
+				// The reason is durability. Whatever these goroutines produce
+				// is marshalled into the EventRecord recorded a few lines down,
+				// and replayAwaitAllChildren hands `rec.Response` back to the
+				// guest verbatim on every future replay. So cancelling these
+				// queries does not abandon work -- it writes
+				// "context canceled" into the workflow's permanent history and
+				// replays it forever. A transient shutdown would become a
+				// durable wrong answer, which is a strictly worse failure than
+				// the one cancellation avoids.
+				//
+				// The cost is real and is accepted: because wg.Wait() joins,
+				// an unreachable database makes this call block for as long as
+				// the driver takes to give up, and a cancelled ctx will not cut
+				// that short. A bounded context would cap the wait but bakes
+				// the same wrong history on timeout, just later -- it moves the
+				// defect rather than fixing it. Compare
+				// cmd/cleat-worker/memory_controller.go:189, which DOES wrap
+				// Background() in a timeout: nothing there is replayed, so
+				// giving up early loses only a stats row.
+				co, err := s.engine.childWfStore.GetChildResult(context.Background(), rid)
 				if err != nil {
 					outcomes[idx] = childOutcome{RunID: rid, Error: err.Error()}
-				} else if completed {
-					outcomes[idx] = childOutcome{RunID: rid, Result: result}
+				} else if co.Failed {
+					// cleat#1115, same as AwaitAnyChild above: Error was
+					// filled only from the store error, so a failed child
+					// arrived here as a result.
+					outcomes[idx] = childOutcome{RunID: rid, Error: co.Error}
+				} else if co.Completed {
+					outcomes[idx] = childOutcome{RunID: rid, Result: co.Result}
 				} else {
+					// Still running. Not an outcome -- see the suspend below.
 					outcomes[idx] = childOutcome{RunID: rid, Error: "child not completed"}
+					pending[idx] = true
 				}
 			} else {
+				// No store configured. AwaitChild reaches its suspend on this
+				// same condition, so this does too; the two calls disagreeing
+				// about it was how IMPROVEMENT-PLAN 3.309 was found.
 				outcomes[idx] = childOutcome{RunID: rid, Error: "no child workflow store"}
+				pending[idx] = true
 			}
 		}(i, runID)
 	}
 	wg.Wait()
+
+	// Any child still running means this call has not been answered yet, so
+	// suspend rather than reporting "not completed" as that child's result.
+	//
+	// Recording an outcome here would be durable, not transient: the outcomes
+	// are marshalled into the EventRecord below and replayAwaitAllChildren
+	// hands rec.Response back verbatim on every future replay. So "had not
+	// finished when I looked" would become the child's permanent answer, and no
+	// later replay would ever say otherwise -- exactly the failure the comment
+	// above argues against for context cancellation, which is what made this
+	// unintentional rather than a design choice. IMPROVEMENT-PLAN 3.309.
+	//
+	// AwaitChild (children.go, "Child not completed") and AwaitAnyChild both
+	// suspend on this condition; the event is recorded WITHOUT a response so the
+	// replay path falls through to fresh and re-checks. ChildResult has no way
+	// to express "pending" either -- it is {RunID, Result, Error} -- so a caller
+	// could not tell a still-running child from a failed one except by matching
+	// the error string.
+	for i, isPending := range pending {
+		if !isPending {
+			continue
+		}
+		rec := EventRecord{
+			Step:      s.stepCount,
+			EventType: EventTypeAwaitAllChildren,
+			Request:   runIDsJSON,
+		}
+		s.recordEvent(rec)
+
+		s.suspendErr = &SuspendError{
+			Reason: fmt.Sprintf("await_all_children(%s)", runIDs[i]),
+		}
+		return packAwaitChildResultSuspend()
+	}
 
 	// Record event.
 	outcomesJSON, _ := json.Marshal(outcomes)
@@ -539,14 +743,36 @@ func (s *execSession) freshAwaitAllChildren(ctx context.Context, m api.Module, r
 	}
 	s.recordEvent(rec)
 
-	written, _ := s.writeResult(ctx, m, resultsPtr, string(outcomesJSON), resultsMaxLen)
-	return packAwaitChildResult(written, 0)
+	written, writtenEC := s.writeOut(ctx, m, resultsPtr, string(outcomesJSON), resultsMaxLen)
+	return packAwaitChildResult(written, uint32(writtenEC))
 }
 
 func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64 {
 
 	if s.stepCount < len(s.history) {
 		rec := s.history[s.stepCount]
+
+		// A record with no response is the suspend marker written by the fresh
+		// path when a child was still running. Fall through to fresh to
+		// re-check, exactly as AwaitChild does ("no cached result, exitReplay to
+		// fresh"). Without this half, suspending in the fresh path would replay
+		// as an EMPTY result -- a durable wrong answer traded for a durable
+		// empty one, which is worse because empty reads as success.
+		//
+		// Checked BEFORE advanceReplayStep and without advancing stepCount: the
+		// fresh execution records the real result at this same step, overwriting
+		// the empty event. Everything past this point keeps its existing order.
+		//
+		// An empty response cannot arise any other way -- the completed path
+		// records json.Marshal of a slice, which is "[]" at its shortest, never
+		// "" -- so this does not reinterpret any pre-existing history.
+		if rec.EventType == EventTypeAwaitAllChildren && rec.Response == "" {
+			s.engine.log().InfoContext(ctx, "await_all_children: no cached result, exitReplay to fresh",
+				"workflow_id", s.workflowID, "runIDs", runIDsJSON, "step", rec.Step)
+			s.exitReplay()
+			return s.freshAwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen)
+		}
+
 		if !s.advanceReplayStep(ctx, &rec) {
 			return 0
 		}
@@ -575,31 +801,116 @@ func (s *execSession) replayAwaitAllChildren(ctx context.Context, m api.Module, 
 			return packAwaitChildResult(written, 1)
 		}
 
-		written, _ := s.writeResult(ctx, m, resultsPtr, rec.Response, resultsMaxLen)
-		return packAwaitChildResult(written, 0)
+		written, writtenEC := s.writeOut(ctx, m, resultsPtr, rec.Response, resultsMaxLen)
+		return packAwaitChildResult(written, uint32(writtenEC))
 	}
 
 	s.exitReplay()
 	return s.freshAwaitAllChildren(ctx, m, runIDsJSON, resultsPtr, resultsMaxLen)
 }
 
+// RunDetached starts a detached run and returns nothing but a status.
+//
+// KEPT UNCHANGED, and deliberately. StartDetached below does the same work and
+// hands back the run id, which is what cleat#1154 asked for -- but a host call's
+// arity is part of its import type, and an arity mismatch is a HARD LINK ERROR
+// that stops a module instantiating at all, not a failure of the one call.
+// IMPROVEMENT-PLAN 3.55 measured that here, through the production path:
+//
+//	incompatible import type for `env::cleat_create_promise`
+//	types incompatible: expected type `(func (param i32 i32 i32 i32) (result i64))`,
+//	                       found type `(func (param i32 i32 i32 i32 i64) (result i64))`
+//
+// Every workflow binary already deployed imports cleat_run_detached with four
+// parameters, including in-flight runs pinned to an older version that
+// tests/upgrade exists to protect. Widening this one in place would stop all of
+// them loading. So the new capability is a new name, which is also how
+// cleat_poll_update and cleat_complete_update arrived (#868).
 func (s *execSession) RunDetached(ctx context.Context, m api.Module, name, inputJSON string) int64 {
+	_, code := s.runDetached(ctx, m, name, inputJSON, 0, 0, false)
+	return code
+}
+
+// StartDetached is RunDetached plus the run id, written to the guest buffer.
+//
+// The two share runDetached below rather than duplicating it, because a detached
+// run's REPLAY behaviour has to be identical whichever call the guest used: a
+// workflow with run_detached events already in its history, recompiled to call
+// this one, must replay against that history. Both record and match
+// EventTypeRunDetached, so it does.
+func (s *execSession) StartDetached(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64 {
+	written, code := s.runDetached(ctx, m, name, inputJSON, runIDPtr, runIDMaxLen, true)
+	if code != 0 {
+		return code
+	}
+	return packSimpleResult(0, written)
+}
+
+// runDetached is the shared body. wantID controls only whether the run id is
+// written back; everything durable -- the event, its step, the replay match --
+// is the same either way.
+func (s *execSession) runDetached(ctx context.Context, m api.Module, name, inputJSON string,
+	runIDPtr, runIDMaxLen uint32, wantID bool) (written uint32, code int64) {
 	if s.isReplay {
 		if s.stepCount < len(s.history) {
 			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
-			}
+			// CHECK BEFORE CONSUMING, and report. cleat#1507.
+			//
+			// This block used to call advanceReplayStep FIRST and compare
+			// afterwards, so a divergence had already consumed the record
+			// belonging to some other operation -- every later step then read
+			// the wrong history entry. That is the same corruption as
+			// DurableSend's (cleat#1532), reached from the other direction:
+			// there the type was never checked, here it was checked too late.
+			//
+			// The old branch also returned a bare `1` with no metric and no
+			// message, so an operator saw a failed detached run and had
+			// nothing saying it was a replay divergence rather than a refused
+			// start. The name is compared as well as the type because a
+			// detached run is identified by both.
 			if rec.EventType != EventTypeRunDetached || rec.DetachedName != name {
-				return 1
+				if s.engine.Metrics != nil {
+					s.engine.Metrics.RecordReplayFailure(ctx)
+				}
+				errMsg := fmt.Sprintf("replay divergence at step %d: expected run_detached %q, got %s %q.\n"+
+					"Run 'cleat vet' on your workflow code to check for common non-determinism issues "+
+					"(time.Now(), random values, map iteration, goroutines).",
+					rec.Step, name, rec.EventType, rec.DetachedName)
+				s.engine.log().ErrorContext(ctx, errMsg,
+					"workflow_id", s.workflowID, "step", rec.Step)
+				n, _ := s.writeResult(ctx, m, runIDPtr, errMsg, runIDMaxLen)
+				return n, 1
 			}
-			return 0
+			if !s.advanceReplayStep(ctx, &rec) {
+				return 0, 0
+			}
+			// The id comes back from the RECORD on replay, not from a fresh
+			// StartChildWorkflow: the run was started on the original
+			// execution and starting it again would be a second run.
+			if wantID {
+				n, _ := s.writeResult(ctx, m, runIDPtr, rec.DetachedRunID, runIDMaxLen)
+				return n, 0
+			}
+			return 0, 0
 		}
 		s.exitReplay()
 	}
 
+	// A detached run is a child workflow by another name: the line below calls
+	// the SAME StartChildWorkflow that childWorkflowWithVersion calls, and
+	// leaves the same claimable workflow_instances row behind. That one is
+	// refused in a defer segment (3.84) and this one was not, so a terminated
+	// workflow's cleanup pass could still create live work -- through the same
+	// store method, two functions apart in this file. IMPROVEMENT-PLAN 3.111.
+	//
+	// After the replay return, because a refusal records no event and a replay
+	// that reached this would find nothing where an event should be.
+	if s.stopBeforeNewWork() {
+		return 0, callSuspendSentinel
+	}
+
 	// Resolve child version using the same policy logic as childWorkflowWithVersion.
-	childVersion := s.resolveChildVersion(ctx, name, 0, "")
+	childVersion := s.resolveChildVersion(ctx, name, 0)
 
 	var runID string
 	if s.engine.childWfStore != nil {
@@ -620,5 +931,70 @@ func (s *execSession) RunDetached(ctx context.Context, m api.Module, name, input
 		DetachedRunID: runID,
 	}
 	s.recordEvent(rec)
-	return 0
+	if wantID {
+		n, _ := s.writeResult(ctx, m, runIDPtr, runID, runIDMaxLen)
+		return n, 0
+	}
+	return 0, 0
+}
+
+// reportOrphanChildren names a child this parent started whose child_workflow
+// event is absent from the history being replayed. cleat#1661.
+//
+// IT REPORTS AND DOES NOT REFUSE, and that is a decision rather than caution.
+// The parent is mid-execution: refusing the start fails a workflow that is
+// otherwise healthy, and the orphan is evidence of something that ALREADY
+// happened -- the duplicate is a consequence, not the cause. Turning a silent
+// wrong answer into a loud one is the whole ask of cleat#1661; turning it into
+// a failure is a separate decision with a blast radius nobody has measured.
+//
+// A FAILED LOOKUP SAYS NOTHING. If the query errors we do not report, because
+// "no children found" and "I could not ask" are the same empty slice, and a
+// check that cannot tell those apart must not speak -- the same rule
+// reportShortReplayHistory follows for an unread event count.
+func (s *execSession) reportOrphanChildren(ctx context.Context, parentID string) {
+	if s.engine == nil || s.engine.childWfStore == nil {
+		return
+	}
+	lister, ok := s.engine.childWfStore.(interface {
+		OriginalChildRunIDs(context.Context, string) ([]string, error)
+	})
+	if !ok {
+		return
+	}
+	started, err := lister.OriginalChildRunIDs(ctx, parentID)
+	if err != nil || len(started) == 0 {
+		return
+	}
+
+	known := make(map[string]struct{}, len(s.history))
+	for _, rec := range s.history {
+		if rec.EventType == EventTypeChildWorkflow && rec.RunID != "" {
+			known[rec.RunID] = struct{}{}
+		}
+	}
+
+	var orphans []string
+	for _, id := range started {
+		if _, ok := known[id]; !ok {
+			orphans = append(orphans, id)
+		}
+	}
+	if len(orphans) == 0 {
+		return
+	}
+
+	if s.engine.Metrics != nil {
+		s.engine.Metrics.RecordReplayShortHistory(ctx)
+	}
+	s.engine.log().ErrorContext(ctx,
+		"this parent already started a child that its history does not record, and is about to start another",
+		"workflow_id", s.workflowID, "tenant_id", s.tenantID,
+		"orphan_child_run_ids", strings.Join(orphans, ","),
+		"children_started", len(started),
+		"child_events_in_history", len(known),
+		"step", s.stepCount,
+		"note", "cleat#1661: the child row and the parent's child_workflow event are written in ONE "+
+			"transaction, so this is not crash timing -- the event was removed after the fact. The "+
+			"duplicate child about to be started is the consequence, not the cause.")
 }

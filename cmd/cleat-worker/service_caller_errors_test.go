@@ -94,7 +94,10 @@ func TestHTTPFetchNetworkFailureStaysRetryable(t *testing.T) {
 	url := srv.URL
 	srv.Close()
 
-	c := &dbServiceCaller{}
+	// httptest always binds loopback, which cleat#1565's egress floor refuses
+	// for guest-initiated fetches. What this test pins is retryability, not
+	// egress, so it opts out of the floor narrowly rather than being deleted.
+	c := &dbServiceCaller{egress: &engine.EgressGuard{AllowLoopback: true}}
 	_, err := c.Call(context.Background(), "http", "fetch", fmt.Sprintf(`{"url":%q}`, url))
 	if err == nil {
 		t.Fatal("expected a connection failure")
@@ -115,7 +118,8 @@ func TestHTTPFetchStatusIsNotAnError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := &dbServiceCaller{}
+	// Loopback, for the same reason as above: this pins status handling.
+	c := &dbServiceCaller{egress: &engine.EgressGuard{AllowLoopback: true}}
 	resp, err := c.Call(context.Background(), "http", "fetch", fmt.Sprintf(`{"url":%q}`, srv.URL))
 	if err != nil {
 		t.Fatalf("a 404 response became a call error: %v", err)
@@ -125,13 +129,13 @@ func TestHTTPFetchStatusIsNotAnError(t *testing.T) {
 	}
 }
 
-func TestBenchSvcStatusClassification(t *testing.T) {
+func TestServiceStatusClassification(t *testing.T) {
 	for _, tc := range []struct {
 		status    int
 		retryable bool
 		why       string
 	}{
-		{http.StatusBadRequest, false, "bench-svc understood the request and rejected it"},
+		{http.StatusBadRequest, false, "the service understood the request and rejected it"},
 		{http.StatusNotFound, false, "the route does not exist"},
 		{http.StatusRequestTimeout, true, "408 is an explicit invitation to try again"},
 		{http.StatusTooManyRequests, true, "429 is an explicit invitation to try again"},
@@ -139,7 +143,7 @@ func TestBenchSvcStatusClassification(t *testing.T) {
 		{http.StatusBadGateway, true, "5xx may well succeed on a retry"},
 	} {
 		t.Run(fmt.Sprintf("%d", tc.status), func(t *testing.T) {
-			err := benchSvcStatusError(tc.status, []byte("body"))
+			err := serviceStatusError(tc.status, []byte("body"))
 			if got := retryabilityOf(err); got != tc.retryable {
 				t.Errorf("status %d: retryable=%v, want %v (%s)", tc.status, got, tc.retryable, tc.why)
 			}

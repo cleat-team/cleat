@@ -128,15 +128,39 @@ func (d Dialect) batchLimit(limitPos int) string {
 }
 
 // workflowInstanceColumns returns the column list for SELECT queries that
-// return WorkflowInstance rows. Includes id, def_name, def_version, status,
-// input, assigned_to, next_wake_at, error_code, error_op, error_msg, created_at,
-// and generation.
+// return WorkflowInstance rows.
+//
+// Used by ListWorkflows on all three dialects and by nothing else -- the claim
+// path has its own list and its own scanner (scanWorkflowInstanceExtra). That
+// distinction is load-bearing: store_types.go argues against carrying
+// reclaim_count on "the hottest query in the system", and it means the CLAIM
+// query. This one is a user-facing list endpoint, so the argument does not
+// reach it (cleat#1123).
+// THE CANCELLATION FLAG IS IN THE LISTING AND THE REASON IS NOT.
+//
+// A cancelled-but-still-running workflow is exactly what an operator scans a
+// list for: cleat's cancellation is COOPERATIVE, so the workflow may poll and
+// legitimately ignore the request, making that state normal and possibly
+// permanent. A listing that cannot show it cannot answer the question it is
+// opened with (cleat#1351).
+//
+// The reason stays out. It is free-text written by a human for another human,
+// and a page that may return hundreds of rows is not where it belongs -- the
+// detail read carries it. So the listing answers "which runs have been asked to
+// stop" and the single-run read answers "and why".
+//
+// COALESCE on a NOT NULL column is deliberate on the flag: SQL Server's is a
+// BIT and the other two are boolean, and a row predating any of the three
+// schemas would otherwise scan a NULL into a Go bool and fail the whole listing
+// rather than the one row.
 func (d Dialect) workflowInstanceColumns() string {
 	switch d {
 	case DialectPostgres:
-		return "id, def_name, def_version, status, input, assigned_to, next_wake_at, error_code, error_op, error_msg, created_at, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id"
-	case DialectMySQL, DialectMSSQL:
-		return "id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, error_code, error_op, error_msg, created_at, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id"
+		return "id, def_name, def_version, status, input, assigned_to, next_wake_at, error_code, error_op, error_msg, created_at, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, reclaim_count, COALESCE(cancellation_requested, false), COALESCE(completed_by, '')"
+	case DialectMySQL:
+		return "id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, error_code, error_op, error_msg, created_at, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, reclaim_count, COALESCE(cancellation_requested, false), COALESCE(completed_by, '')"
+	case DialectMSSQL:
+		return "id, def_name, def_version, status, input, COALESCE(assigned_to, ''), next_wake_at, error_code, error_op, error_msg, created_at, generation, COALESCE(priority, 0) AS priority, COALESCE(trace_id, '') AS trace_id, reclaim_count, COALESCE(cancellation_requested, 0), COALESCE(completed_by, '')"
 	default:
 		panic("unknown dialect: " + d)
 	}
@@ -247,6 +271,7 @@ func (d Dialect) scanWorkflowInstance(row scanner, wf *WorkflowInstance) error {
 			&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&inputStr, &wf.AssignedTo, &nextWakeAt, &errorCode, &errorOp,
 			&errorMsg, &createdAt, &wf.Generation, &wf.Priority, &wf.TraceID,
+			&wf.ReclaimCount, &wf.CancellationRequested, &wf.CompletedBy,
 		); err != nil {
 			return err
 		}
@@ -256,6 +281,7 @@ func (d Dialect) scanWorkflowInstance(row scanner, wf *WorkflowInstance) error {
 			&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&wf.Input, &wf.AssignedTo, &nextWakeAt, &errorCode, &errorOp,
 			&errorMsg, &createdAt, &wf.Generation, &wf.Priority, &wf.TraceID,
+			&wf.ReclaimCount, &wf.CancellationRequested, &wf.CompletedBy,
 		); err != nil {
 			return err
 		}
@@ -274,11 +300,20 @@ func (d Dialect) scanWorkflowInstance(row scanner, wf *WorkflowInstance) error {
 }
 
 // scanWorkflowInstanceExtra is like scanWorkflowInstance but also scans
-// tenant_id (sql.NullString) and created_at (sql.NullTime).
+// tenant_id (sql.NullString), created_at (sql.NullTime) and
+// pending_terminal_status.
+//
+// The last one is only ever non-empty on a claim that took a defer phase
+// (IMPROVEMENT-PLAN 3.75 step 2), which today is the general claim and not the
+// sticky one -- a sticky claim filters on status = 'ready' and a workflow in
+// its defer phase is 'terminating'. Both queries select it anyway, because one
+// scanner reading two column lists is how a claim silently starts returning the
+// wrong field for the right name.
 func (d Dialect) scanWorkflowInstanceExtra(row scanner, wf *WorkflowInstance) error {
 	var nextWakeAt, createdAt sql.NullTime
 	var tenantID sql.NullString
 	var errorCode, errorOp sql.NullString
+	var pendingTerminal sql.NullString
 
 	if d == DialectMSSQL {
 		var inputStr string
@@ -286,6 +321,7 @@ func (d Dialect) scanWorkflowInstanceExtra(row scanner, wf *WorkflowInstance) er
 			&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&inputStr, &wf.AssignedTo, &nextWakeAt,
 			&tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID,
+			&pendingTerminal,
 		); err != nil {
 			return err
 		}
@@ -295,10 +331,12 @@ func (d Dialect) scanWorkflowInstanceExtra(row scanner, wf *WorkflowInstance) er
 			&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status,
 			&wf.Input, &wf.AssignedTo, &nextWakeAt,
 			&tenantID, &createdAt, &errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID,
+			&pendingTerminal,
 		); err != nil {
 			return err
 		}
 	}
+	wf.PendingTerminalStatus = pendingTerminal.String
 
 	if nextWakeAt.Valid {
 		wf.NextWakeAt = nextWakeAt.Time

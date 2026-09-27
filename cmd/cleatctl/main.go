@@ -6,6 +6,11 @@
 //
 //	cleatctl [--db <postgres-dsn>] <command> [<args>]
 //
+// --db must name a PostgreSQL role that row-level security does not apply to
+// (a superuser, or one with BYPASSRLS). It is deliberately not the role
+// cleat-worker takes: the worker refuses to start on a connection that
+// bypasses RLS, and cleatctl needs one. See cleat#1184.
+//
 // Commands:
 //
 //	versions list [<name>]          — list workflow versions
@@ -13,11 +18,15 @@
 //	versions restore <name> <v>     — mark a version active
 //	versions purge <name> <v>       — permanently delete a version
 //	versions active [<name>]        — show active instance counts by version
-//	versions gc [--dry-run]         — run garbage collection on deprecated versions
+//	versions gc [--dry-run] [--min-versions=N] [--max-age=DURATION]
+//	                                — run garbage collection on deprecated versions
 //	deploy workflow <name> <wasm>    — deploy a new workflow WASM binary
 //	deploy plugin <name> <wasm>      — deploy a plugin WASM binary
 //	drop-tenant <tenant-id>          — permanently delete a tenant and all its data
+//	suspend-tenant <tenant-id>       — stop new work for a tenant, reversibly
+//	resume-tenant <tenant-id>        — undo suspend-tenant
 //	revoke-api-key [flags]           — revoke a cleat API key (credential rotation)
+//	oauth-allow <list|add|remove>    — manage a tenant's OAuth identity allowlist
 package main
 
 import (
@@ -27,22 +36,38 @@ import (
 	"fmt"
 	"log"
 	"os"
-
-	"github.com/cleat-team/cleat/engine"
 )
 
 // osExit is replaced in tests to intercept os.Exit calls.
 var osExit = os.Exit
 
+// defaultTenantID is the tenant every cleatctl subcommand that does not take a
+// tenant argument operates on.
+//
+// Named rather than repeated because it is now read twice and the two readings
+// must agree: the store is opened for this tenant, and check-db locates this
+// tenant's per-tenant database (cleat#1956). A second spelling of the literal
+// is a second thing to get wrong.
+//
+// It is also the limit of what those subcommands can see on MySQL, where a
+// tenant's tables are in a database of their own -- stated here because the
+// hardcoding is easy to read as "tenant-agnostic" when it means the opposite.
+const defaultTenantID = "00000000-0000-0000-0000-000000000000"
+
 func main() {
-	dsn := flag.String("db", "", "PostgreSQL DSN (default: $CLEAT_DB_URL)")
+	dsn := flag.String("db", "",
+		"database DSN for a role that is a superuser or has BYPASSRLS "+
+			"-- NOT the cleat_app role cleat-worker requires (default: $CLEAT_DB_URL). "+
+			"PostgreSQL, MySQL and SQL Server are recognised from the DSN's shape")
+	driver := flag.String("driver", "",
+		"postgres, mysql or mssql. Inferred from --db when unset")
 	flag.Parse()
 
 	if *dsn == "" {
 		*dsn = os.Getenv("CLEAT_DB_URL")
 	}
 	if *dsn == "" {
-		fmt.Fprintln(os.Stderr, "error: the --db flag or CLEAT_DB_URL environment variable must be set to a PostgreSQL connection string")
+		fmt.Fprintln(os.Stderr, "error: the --db flag or CLEAT_DB_URL environment variable must be set to a database connection string")
 		flag.Usage()
 		osExit(1)
 	}
@@ -53,9 +78,21 @@ func main() {
 		osExit(1)
 	}
 
-	db, err := sql.Open("postgres", *dsn)
+	// The dialect is settled BEFORE the connection is opened, because the
+	// driver name is part of opening it -- and before the subcommand runs,
+	// because some subcommands are not ported and must refuse rather than
+	// fail partway through (see requirePortedFor).
+	d := detectDialect(*dsn)
+	if *driver != "" {
+		var derr error
+		if d, derr = dialectByName(*driver); derr != nil {
+			log.Fatalf("--driver: %v", derr)
+		}
+	}
+
+	db, err := sql.Open(d.driver, *dsn)
 	if err != nil {
-		log.Fatalf("failed to connect to database: %v — check the --db flag or CLEAT_DB_URL environment variable", err)
+		log.Fatalf("failed to connect to %s database: %v — check the --db flag or CLEAT_DB_URL environment variable", d.name, err)
 	}
 	defer db.Close()
 
@@ -64,14 +101,29 @@ func main() {
 	}
 
 	ctx := context.Background()
-	factory := engine.NewPostgresStoreFactory(db, "public")
-	store, closer, err := factory.OpenStore(ctx, "00000000-0000-0000-0000-000000000000")
+
+	// Say once, up front, that this connection cannot answer the questions
+	// cleatctl asks. Before the store is opened, so it is the first thing on
+	// stderr rather than something to find after a wrong answer. cleat#1184.
+	warnIfTenantScoped(ctx, db, d.name)
+
+	factory, err := d.openStoreFactory(db, *dsn, "public")
+	if err != nil {
+		log.Fatalf("%v", err)
+	}
+	store, closer, err := factory.OpenStore(ctx, defaultTenantID)
 	if err != nil {
 		log.Fatalf("failed to open database store: %v — check that the database is accessible and the public schema exists", err)
 	}
 	defer closer.Close()
 
 	cmd := args[0]
+
+	// Before the subcommand runs: some are not written for this dialect, and
+	// the refusal has to precede the first statement rather than follow a
+	// partial one.
+	requirePortedFor(cmd, d)
+
 	switch cmd {
 	case "versions":
 		runVersions(ctx, store, args[1:])
@@ -79,18 +131,50 @@ func main() {
 		runDeploy(ctx, store, db, args[1:])
 	case "cost":
 		runCost(args[1:])
-	case "restore-workflow":
-		runRestoreWorkflow(ctx, store, db, args[1:])
 	case "replay":
-		runReplay(ctx, store, db, args[1:])
+		runReplay(ctx, store, db, d, args[1:])
 	case "debug":
-		runDebug(ctx, store, db, args[1:])
+		runDebug(ctx, store, db, d, args[1:])
 	case "check-db":
-		runCheckDB(ctx, db, args[1:])
+		runCheckDB(ctx, db, d, *dsn, args[1:])
 	case "drop-tenant":
-		runDropTenant(ctx, db, args[1:])
+		runDropTenant(ctx, db, d, args[1:])
+	case "suspend-tenant":
+		runSuspendTenant(ctx, db, d, args[1:], true)
+	case "resume-tenant":
+		runSuspendTenant(ctx, db, d, args[1:], false)
 	case "revoke-api-key":
 		runRevokeAPIKey(ctx, db, args[1:])
+	case "set-tenant-setting":
+		runSetTenantSetting(ctx, db, args[1:])
+	case "quota":
+		runQuota(ctx, db, d, args[1:])
+	case "egress-allow":
+		runEgressAllow(ctx, db, d, args[1:])
+	case "oauth-allow":
+		runOAuthAllow(ctx, db, d, args[1:])
+	case "set-secret":
+		runSetSecret(ctx, db, d, args[1:])
+	case "retire-secret":
+		runRetireSecret(ctx, db, d, args[1:])
+	case "queue":
+		runQueue(ctx, db, d, *dsn, args[1:])
+	case "reseal-payloads":
+		runResealPayloads(ctx, db, args[1:])
+	case "audit":
+		runAudit(ctx, db, d, args[1:])
+	case "reseal-secrets":
+		runResealSecrets(ctx, db, d, args[1:])
+	case "set-deployment-secret":
+		runSetDeploymentSecret(ctx, db, d, args[1:])
+	case "retire-deployment-secret":
+		runRetireDeploymentSecret(ctx, db, d, args[1:])
+	case "reseal-deployment-secrets":
+		runResealDeploymentSecrets(ctx, db, d, args[1:])
+	case "slack":
+		runSlack(ctx, db, d, args[1:])
+	case "backup":
+		runBackup(ctx, db, d, args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command: %s\n\n", cmd)
 		printUsage()
@@ -108,18 +192,69 @@ Commands:
   versions purge <name> <v>       permanently delete a version
   versions active [<name>]        show active instance counts by version
   versions gc [--dry-run]         run garbage collection on deprecated versions
+      [--min-versions=N] [--max-age=DURATION]
   deploy workflow <name> <wasm>   deploy a new workflow WASM binary
   deploy plugin <name> <wasm>     deploy a plugin WASM binary
   cost [flags]                    estimate monthly operational costs
-  restore-workflow <id> <file>    restore a single workflow from NDJSON backup
   replay <id> --entry-point <n>   replay a workflow's event history for diagnostics
   check-db [--verbose]            verify database connectivity and schema health
   debug <id> [--entry-point <n>] [--watch]  step-through workflow event replay
   drop-tenant <tenant-id> [--dry-run] [--yes]  permanently delete a tenant and all its data
+  suspend-tenant <tenant-id> [--yes]           stop new work for a tenant, reversibly
+  resume-tenant <tenant-id>                    undo suspend-tenant
   revoke-api-key [--key-id|--key-hash|--key-stdin|--list]  revoke an API key
+  quota get  --tenant <uuid> [--resource <name>]  show a tenant's quota
+  quota set  --tenant <uuid> [--resource <name>] [--limit-count N]
+             [--window-seconds N] [--enforce=true|false]  create or update it
+  quota list [--tenant <uuid>]  list quota rows, one tenant's or all
+  egress-allow list <tenant>      show which hosts a tenant's workflows may fetch
+  egress-allow add <tenant> <host>...     permit hosts (.example.com = subdomains)
+  egress-allow remove <tenant> <host>...  revoke hosts
+  oauth-allow list <tenant>       show which identities may sign in through a provider
+  oauth-allow add <tenant> --provider <p> [--type email|subject] <identity>
+                                  admit one, warning that the key it mints carries
+                                  FULL TENANT ACCESS (PostgreSQL only)
+  oauth-allow remove <tenant> --provider <p> [--type email|subject] <identity>
+                                  revoke it AND the live keys that row minted
+  queue list <tenant>             show a tenant's declared concurrency queues
+  queue create <tenant> <name> --concurrency N  register one, admitting N at a time
+  queue disable <tenant> <name>   retire it (its key reverts to a mutex, N=1)
+  queue enable <tenant> <name>    put a retired queue back
+  reseal-payloads --encryption-key-file <path> [--dry-run]
+                                  bind pre-cleat#1776 payload ciphertexts to their tenant
+  audit verify (--tenant <id> | --all-tenants) [--json] [--retention-days N]
+                                  recompute the audit-log hash chain; exit 1 on a break, 2 if unmeasured
+  reseal-secrets [--dry-run]      re-encrypt tenant secrets under the current master key
+  set-deployment-secret --name <name> [--from-file <path>]
+                                  write one deployment-wide credential, encrypted
+  retire-deployment-secret --name <name> [--dry-run]  stop a deployment secret resolving
+  reseal-deployment-secrets [--dry-run]  re-encrypt deployment secrets under the current master key
+  slack map-workspace --team <team_id> --tenant <uuid> [--reassign]
+                                  map a Slack workspace to a tenant (operator-only)
+  slack list-workspaces          list every Slack workspace -> tenant mapping
+  slack unmap-workspace --team <team_id>  remove a mapping
+  backup config-create --name <name> --cron "<expr>" [--retention-days N] [--disabled]
+                                  create a scheduled backup config (operator-only, cleat#2247)
+  backup config-list             list every backup config
+  backup config-update (--id <uuid>|--name <n>) [--cron <e>] [--retention-days N] (--enabled|--disabled)
+  backup config-delete (--id <uuid>|--name <n>)  delete a config (history rows are kept)
+  backup run (--id <uuid>|--name <n>)  request an immediate backup (picked up within 60s)
+  backup history [--id <uuid>|--name <n>] [--limit N]  list backup attempts, newest first
 
 Environment:
   CLEAT_DB_URL   PostgreSQL DSN (alternative to --db)
+
+Which database role:
+  cleatctl asks cluster-wide questions, so --db must name a role that
+  row-level security does not apply to: a superuser, or one with BYPASSRLS.
+  On a connection RLS applies to, commands answer with a single tenant's
+  rows and do not say so, and the raw-statement commands fail with
+  "cleat.tenant_id is not set".
+
+  This is NOT the role cleat-worker takes. cleat-worker refuses to start on
+  a connection that bypasses RLS; cleatctl needs one. Two credentials, on
+  purpose -- run cleatctl with the owner DSN you also pass to the worker's
+  --migrate-db.
 
 `)
 }

@@ -3,7 +3,9 @@ package engine
 import (
 	"container/list"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -99,6 +101,23 @@ func NewPluginLoader(db *sql.DB, rt *Runtime, maxSize ...int) *PluginLoader {
 type constraintRange struct {
 	Min string // minimum version (inclusive), "v"-prefixed semver
 	Max string // maximum version (exclusive), "v"-prefixed semver; empty = no upper bound
+
+	// Exact is set instead of Min/Max for the two forms that name a single
+	// version -- a bare "1.0.0" and "=1.0.0".
+	//
+	// A separate field rather than Min == Max, because Max is EXCLUSIVE by
+	// construction: ^ and ~ compute a *next* version for it, and
+	// versionInRange rejects anything >= Max. Encoding "exactly this one" as a
+	// range whose ends coincide therefore rejected the only version in it --
+	// the one version the constraint names was the one version it excluded.
+	// cleat#1243.
+	//
+	// Special-casing Min == Max inside versionInRange would fix the symptom and
+	// leave the representation lying: it would also silently accept a range
+	// whose bounds coincide for some other reason, which is a different
+	// question with a different right answer. This is the shape plugin/index.go
+	// already uses, and it is why that copy was never affected.
+	Exact string
 }
 
 // parseConstraint parses a semver constraint string and returns the
@@ -151,7 +170,7 @@ func parseConstraint(constraint string) (constraintRange, error) {
 		if !semver.IsValid(v) {
 			return constraintRange{}, fmt.Errorf("invalid semver in constraint %q", constraint)
 		}
-		return constraintRange{Min: v, Max: v}, nil
+		return constraintRange{Exact: v}, nil
 
 	default:
 		// Bare version — treat as exact match.
@@ -159,7 +178,7 @@ func parseConstraint(constraint string) (constraintRange, error) {
 		if !semver.IsValid(v) {
 			return constraintRange{}, fmt.Errorf("invalid semver version %q", constraint)
 		}
-		return constraintRange{Min: v, Max: v}, nil
+		return constraintRange{Exact: v}, nil
 	}
 }
 
@@ -167,6 +186,13 @@ func parseConstraint(constraint string) (constraintRange, error) {
 func versionInRange(v string, r constraintRange) bool {
 	if !semver.IsValid(v) {
 		return false
+	}
+	// Checked before the bounds, and by semver.Compare rather than string
+	// equality: "1.0.0" and "v1.0.0" are the same version, and the two arrive
+	// by different routes -- the stored version comes from plugin_defs, the
+	// constraint through ensureVPrefix. cleat#1243.
+	if r.Exact != "" {
+		return semver.Compare(v, r.Exact) == 0
 	}
 	if semver.Compare(v, r.Min) < 0 {
 		return false
@@ -329,33 +355,86 @@ func (l *PluginLoader) SetLimits(limits plugin.CapabilityLimits) {
 }
 
 // DeployPlugin inserts a new plugin definition into the database.
-// If the definition already exists, it is updated (upsert semantics).
+//
+// Versions are immutable (cleat#2135): deploying a (name, version) that
+// already exists is a no-op if the WASM bytes are byte-identical to what is
+// already stored -- nothing is written, so config, created_at and deprecated
+// are all left exactly as they were, and a reinstall of a deprecated version
+// does NOT silently un-deprecate it. If the bytes differ, the deploy is
+// refused and the error names both checksums. Publishing different code at
+// an existing version is not supported by design; a change needs a new
+// version string. There is no override (no "--force"): neither `cleat
+// plugin install` nor `cleatctl deploy plugin`, the only two callers, have
+// ever had one, so this adds no missing escape hatch -- see cleat#2135.
+//
+// Before this, DeployPlugin upserted unconditionally
+// (`ON CONFLICT (name, version) DO UPDATE SET wasm_bytes = ...`), which
+// replaced a version's code in place on every redeploy. That is what
+// docs/contributor/plugins/plugin-security.md used to promise the opposite
+// of (fixed doc in #2074, behaviour fixed here).
+//
+// Today this only ever runs against PostgreSQL. cmd/cleat's DB-touching
+// subcommands -- including `plugin install`/`uninstall`, the only other
+// caller of DeployPlugin besides cleatctl -- refuse every non-Postgres DSN
+// (cmd/cleat/db.go's openPostgresDB), and cmd/cleatctl's `deploy` subcommand
+// is restricted to postgres in its own portedOn map
+// (cmd/cleatctl/ported.go). Nothing else in the tree constructs a
+// PluginLoader (`grep -rn NewPluginLoader --include="*.go" .`). If a future
+// caller reaches this on another dialect, the $N placeholders and the
+// ON CONFLICT clause below need a Rebind pass first -- their presence here
+// is not evidence this was ever ported.
 //
 //	sql: INSERT INTO plugin_defs (name, version, wasm_bytes, config)
 //	     VALUES ($1, $2, $3, $4)
-//	     ON CONFLICT (name, version) DO UPDATE SET
-//	       wasm_bytes = $3, config = $4, deprecated = false, created_at = now()
+//	     ON CONFLICT (name, version) DO NOTHING
+//	 -- 0 rows affected means (name, version) already exists; then:
+//	     SELECT wasm_bytes FROM plugin_defs WHERE name = $1 AND version = $2
+//	 -- and compare its checksum to the bytes just offered.
 func (l *PluginLoader) DeployPlugin(ctx context.Context, name string, version string, wasmBytes []byte, config map[string]any) error {
 	configJSON, err := json.Marshal(config)
 	if err != nil {
 		return fmt.Errorf("deploy plugin %s v%s: marshal config: %w", name, version, err)
 	}
 
-	_, err = l.db.ExecContext(ctx, `
+	res, err := l.db.ExecContext(ctx, `
 		INSERT INTO plugin_defs (name, version, wasm_bytes, config)
 		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (name, version) DO UPDATE SET
-			wasm_bytes = EXCLUDED.wasm_bytes,
-			config = EXCLUDED.config,
-			deprecated = false,
-			created_at = now()
+		ON CONFLICT (name, version) DO NOTHING
 	`, name, version, wasmBytes, configJSON)
 	if err != nil {
 		return fmt.Errorf("deploy plugin %s v%s: %w", name, version, err)
 	}
 
-	slog.InfoContext(ctx, "plugin deployed", "name", name, "version", version, "size_bytes", len(wasmBytes))
-	return nil
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("deploy plugin %s v%s: rows affected: %w", name, version, err)
+	}
+	if n > 0 {
+		slog.InfoContext(ctx, "plugin deployed", "name", name, "version", version, "size_bytes", len(wasmBytes))
+		return nil
+	}
+
+	// (name, version) already exists. Versions are immutable: succeed as a
+	// no-op if the stored bytes checksum identically to what was offered,
+	// refuse otherwise.
+	var existing []byte
+	err = l.db.QueryRowContext(ctx, `
+		SELECT wasm_bytes FROM plugin_defs WHERE name = $1 AND version = $2
+	`, name, version).Scan(&existing)
+	if err != nil {
+		return fmt.Errorf("deploy plugin %s v%s: read existing version to compare checksums: %w", name, version, err)
+	}
+
+	newSum := sha256.Sum256(wasmBytes)
+	oldSum := sha256.Sum256(existing)
+	if newSum == oldSum {
+		slog.InfoContext(ctx, "plugin already deployed at this checksum, no-op", "name", name, "version", version)
+		return nil
+	}
+
+	return fmt.Errorf("deploy plugin %s v%s: refused: this version is already deployed with different bytes "+
+		"(installed checksum %s, offered checksum %s) -- plugin versions are immutable, publish a new version",
+		name, version, hex.EncodeToString(oldSum[:]), hex.EncodeToString(newSum[:]))
 }
 
 // DeployPluginWithCapabilities is like DeployPlugin but additionally validates

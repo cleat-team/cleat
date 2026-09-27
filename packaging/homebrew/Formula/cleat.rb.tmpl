@@ -1,0 +1,106 @@
+# Homebrew formula for cleat.
+#
+# WHY THIS IS A SOURCE BUILD, AND NOT A BOTTLE OF THE RELEASE ARCHIVES
+#
+# cleat-worker requires CGO: wasmtime is the only WASM backend cleat has, and
+# under CGO_ENABLED=0 engine/backend_wasmtime.go (`//go:build cgo`) is compiled
+# out, NewWasmtimeBackend returns ErrWasmtimeCGOUnavailable, and the worker
+# exits 1 during startup before it reads a flag.
+#
+# .goreleaser.yml therefore builds cleat-worker for **linux only** -- a CGO
+# darwin binary cannot be linked on the ubuntu runner the release job uses
+# without osxcross, and all of .github/workflows runs ubuntu. See
+# IMPROVEMENT-PLAN.md 3.54.
+#
+# So there is no macOS cleat-worker in the release archives for a formula to
+# repackage. Building from source is what closes that gap: it moves the CGO
+# link to the install machine, which is the one place it is free -- Homebrew
+# already requires the Xcode Command Line Tools, so a C toolchain is
+# guaranteed to be present.
+#
+# `cleat` and `cleat-gen` link neither runtime and are built CGO-free here, the
+# same way the release builds them, so that what a Homebrew user gets matches
+# what a tarball user gets.
+#
+# VERIFICATION
+#
+# Measured 2026-09-01 on darwin/arm64, against this exact recipe run over the
+# published v0.2.0 source tarball:
+#
+#   CGO_ENABLED=0 go build -trimpath -o out/cleat     ./cmd/cleat        -> OK
+#   CGO_ENABLED=0 go build -trimpath -o out/cleat-gen ./cmd/cleat-gen    -> OK
+#   CGO_ENABLED=1 go build -trimpath -o out/cleat-worker ./cmd/cleat-worker -> OK
+#   file out/cleat-worker      -> Mach-O 64-bit executable arm64
+#   ./out/cleat-worker --verify-backend
+#                              -> verify-backend: OK: wasmtime backend available
+#
+# THIS IS A TEMPLATE, NOT AN INSTALLABLE FORMULA (cleat#2068)
+#
+# `url` and `sha256` below are literal placeholder tokens, not real values --
+# see scripts/render-homebrew-formula.sh, which is the only thing that
+# understands them. The working formula lives at
+# https://github.com/cleat-team/homebrew-tap/blob/main/Formula/cleat.rb ,
+# `brew install cleat-team/tap/cleat` uses it, and
+# .github/workflows/release.yml's homebrew-bump job pushes a fresh render of
+# THIS file there after every GitHub Release, so the two cannot drift the way
+# a hand-maintained pair does. This copy stays under normal PR review because
+# it is the only editable one -- the tap copy is generated, not authored.
+#
+# Structural changes (the install steps, the test block, comments) belong
+# here. Do not hand-edit url/sha256 here for a real release -- they are
+# placeholders on purpose, and the render script's own test
+# (TestRenderProducesAPinnedTaggedFormula in formula_test.go) fails if they
+# ever stop looking like ones.
+#
+# Testing a structural change before a release: `brew install --HEAD
+# --build-from-source packaging/homebrew/Formula/cleat.rb.tmpl` builds from
+# the `head` line below (the develop branch) and never touches url/sha256 at
+# all -- see docs/project/release-process.md.
+class Cleat < Formula
+  desc "Durable workflow engine that runs workflows compiled to WebAssembly"
+  homepage "https://github.com/cleat-team/cleat"
+  url "https://github.com/cleat-team/cleat/archive/refs/tags/__CLEAT_TAG__.tar.gz"
+  sha256 "__CLEAT_SHA256__"
+  license "Apache-2.0"
+  head "https://github.com/cleat-team/cleat.git", branch: "develop"
+
+  depends_on "go" => :build
+
+  def install
+    # cleat-worker: CGO on, deliberately. Without it the installed binary
+    # cannot construct the wasmtime backend and exits 1 at startup. The test
+    # block below is what stops that shipping silently.
+    with_env(CGO_ENABLED: "1") do
+      system "go", "build", *std_go_args(output: bin/"cleat-worker"), "./cmd/cleat-worker"
+    end
+
+    # cleat and cleat-gen link neither WASM runtime; built CGO-free to match
+    # how .goreleaser.yml ships them.
+    with_env(CGO_ENABLED: "0") do
+      system "go", "build", *std_go_args(output: bin/"cleat"), "./cmd/cleat"
+      system "go", "build", *std_go_args(output: bin/"cleat-gen"), "./cmd/cleat-gen"
+    end
+  end
+
+  test do
+    # The load-bearing assertion. `--verify-backend` constructs the wasmtime
+    # backend for real and exits non-zero if it cannot, so this fails exactly
+    # when the formula has produced the dead-on-arrival worker that
+    # IMPROVEMENT-PLAN.md 3.54 is about.
+    #
+    # Asserting on the output as well as the exit code: a worker built without
+    # CGO prints "verify-backend: FAIL" and exits 1, and this must not pass by
+    # matching some other command's success.
+    assert_match "verify-backend: OK", shell_output("#{bin}/cleat-worker --verify-backend")
+
+    # `version` is a subcommand, not a flag -- cmd/cleat/main.go:88. Go's flag
+    # package rejects an unregistered --version before args are parsed.
+    assert_match "cleat", shell_output("#{bin}/cleat version")
+
+    # cleat-gen has no --help and no zero-exit invocation: with no arguments it
+    # prints usage and exits 1. `system bin/"cleat-gen", "--help"` therefore
+    # fails the whole test block, which is how the first draft of this formula
+    # broke. Assert the usage text and the exit status it really returns.
+    assert_match "Usage: cleat-gen", shell_output("#{bin}/cleat-gen 2>&1", 1)
+  end
+end

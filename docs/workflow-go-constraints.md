@@ -143,9 +143,16 @@ state is not preserved across replays.
 A `fmt.Println()` call during original execution writes to the console, but during
 replay there is no event history entry for it.
 
-**What to use instead**: `h.DurableLog()` records log output in event history
-and replays it deterministically. Alternatively, use `h.DurableLog().LogKV()`
-for structured key-value logging.
+**What to use instead**: `h.DurableLog()`, or `h.DurableLog().LogKV()` for
+structured key-value logging. It writes through the worker's logger, tagged
+with the workflow id, and is **suppressed on replay** -- which is the whole
+difference from `fmt.Println`, since a replayed `fmt.Println` re-prints every
+line on every resumption.
+
+It is **not** recorded in event history. This paragraph said it was until
+cleat#1308 -- and at that point the host call discarded the message outright,
+so an author who followed this rule replaced a call that printed with one that
+did nothing at all. Whether it should become durable is open on cleat#1308.
 
 ### `log` (E015)
 
@@ -163,7 +170,8 @@ is not captured during replay.
 The following packages are **allowed** and safe to use in workflow code. This
 list is not exhaustive — any package not explicitly forbidden is available, but
 be aware that many packages work via determinism-sensitive mechanisms
-(e.g., `sort` uses reflection in some paths, producing W001/W002 warnings).
+(e.g., `sort` uses reflection in some paths, producing W002 warnings; map
+iteration is E021 and is an **error**, not a warning).
 
 ### Always Safe
 
@@ -190,8 +198,8 @@ be aware that many packages work via determinism-sensitive mechanisms
 
 | Package | Warning | Notes |
 |---------|---------|-------|
-| `encoding/json` | W001 (map iteration) | Deterministic if not used with maps. Can add 1-2 MB to WASM binary. |
-| `maps` | W001 | Iteration order over maps is non-deterministic; use sorted keys |
+| `encoding/json` | E021 (map iteration) — an **error** | Deterministic if not used with maps. Can add 1-2 MB to WASM binary. |
+| `maps` | E021 — an **error** | Iteration order over maps is non-deterministic; use sorted keys |
 | `slices` | — | Safe; deterministic |
 | `sync` (only `sync.Once`) | — | `sync.Once` is safe for one-time initialization patterns |
 | `crypto/aes`, `crypto/cipher` | — | Pure computation, deterministic |
@@ -272,10 +280,32 @@ architectures, causing replay divergence.
 **Alternative**: Use integer arithmetic or `math.Float64bits()` for exact
 bitwise comparison.
 
-### Map Iteration (W001)
+### Single-String Entry Point (W003)
+
+An entry point's parameters bind by exact Go parameter name — `Handle(h cleat.HostCalls, intervalMs int)` takes `{"intervalMs": 400}`. There is one exception: an entry point whose only parameter (after `HostCalls`) is a **single `string`** receives the **entire input JSON** as that parameter.
 
 ```go
-for k, v := range myMap { // WARNING: W001
+func CancelOrder(h cleat.HostCalls, orderID string) error { // WARNING: W003
+	// started with {"orderID": "ord-1"},
+	// orderID == `{"orderID": "ord-1"}`
+```
+
+That is deliberate — it is how a workflow takes an opaque payload it parses itself — so W003 is a warning and the rule is unchanged. It is worth warning about because nothing else says so: the rule is invisible at the call site, at build time and at deploy, and it surfaces as a semantic failure in whatever the parameter was eventually used for. A workflow that used such a parameter as a lock key failed every acquire with `cleat_acquire_lock: error 1`, a message that points at locks rather than at argument binding.
+
+If you want the field rather than the payload, add a second parameter or take a struct — struct parameters are unmarshalled from the input JSON and bind by field:
+
+```go
+type OrderRef struct {
+	OrderID string `json:"orderID"`
+}
+
+func CancelOrder(h cleat.HostCalls, ref OrderRef) error { // binds by field
+```
+
+### Map Iteration (E021 — an error, not a warning)
+
+```go
+for k, v := range myMap { // ERROR: E021 -- this fails the build
 ```
 
 **Why**: Map iteration order is intentionally random in Go, producing different
@@ -319,8 +349,9 @@ for _, k := range keys {
 | E017 | Error | `crypto/rand` | Package import |
 | E018 | Error | `math/rand/v2` | Package import |
 | E020 | Error | Durable calls in `init()` | Package structure |
-| W001 | Warning | Map iteration | Language construct |
+| E021 | **Error** | Map iteration | Language construct |
 | W002 | Warning | Float in control flow | Language construct |
+| W003 | Warning | Entry point takes one `string` | Entry-point signature |
 
 ---
 

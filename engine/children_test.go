@@ -18,10 +18,11 @@ const EventTypeSleep = "sleep"
 // ---------------------------------------------------------------------------
 
 type mockChildStore struct {
-	startChildAtomicFn func(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error)
-	startChildFn       func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
-	getChildResultFn   func(ctx context.Context, runID string) (string, bool, error)
-	resolveTagFn       func(ctx context.Context, workflowName string, tag string) (int, error)
+	startChildAtomicFn      func(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error)
+	startChildFn            func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
+	getChildResultFn        func(ctx context.Context, runID string) (ChildOutcome, error)
+	getChildCompletedAtMsFn func(ctx context.Context, runID string) (int64, bool, error)
+	resolveTagFn            func(ctx context.Context, workflowName string, tag string) (int, error)
 }
 
 func (m *mockChildStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error) {
@@ -38,11 +39,11 @@ func (m *mockChildStore) StartChildWorkflow(ctx context.Context, parentID, defNa
 	return "child-run-start", nil
 }
 
-func (m *mockChildStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+func (m *mockChildStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	if m.getChildResultFn != nil {
 		return m.getChildResultFn(ctx, runID)
 	}
-	return "", false, nil
+	return ChildOutcome{}, nil
 }
 
 func (m *mockChildStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
@@ -52,153 +53,22 @@ func (m *mockChildStore) ResolveVersionByTag(ctx context.Context, workflowName s
 	return 0, nil
 }
 
-// mockCrossChildStore extends mockChildStore with CrossSchemaChildStore support.
-type mockCrossChildStore struct {
-	mockChildStore
-	startInSchemaFn func(ctx context.Context, targetSchema, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
-	getInSchemaFn   func(ctx context.Context, targetSchema, runID string) (string, bool, error)
-}
-
-func (m *mockCrossChildStore) StartChildWorkflowInSchema(ctx context.Context, targetSchema, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {
-	if m.startInSchemaFn != nil {
-		return m.startInSchemaFn(ctx, targetSchema, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
-	}
-	return "child-cross-run", nil
-}
-
-func (m *mockCrossChildStore) GetChildResultInSchema(ctx context.Context, targetSchema, runID string) (string, bool, error) {
-	if m.getInSchemaFn != nil {
-		return m.getInSchemaFn(ctx, targetSchema, runID)
-	}
-	return "", false, nil
-}
-
-// mockOnlyChildStore implements ChildWorkflowStore but NOT CrossSchemaChildStore.
-type mockOnlyChildStore struct {
-	mockChildStore
-}
-
-// Ensure compile-time check: mockOnlyChildStore does NOT implement CrossSchemaChildStore.
-
-// ---------------------------------------------------------------------------
-// ChildWorkflowInSchema tests.
-// ---------------------------------------------------------------------------
-
-func TestChildWorkflowInSchema_OwnSchema(t *testing.T) {
-	s := newTestExecSession()
-	s.engine.schema = "my_schema"
-
-	// When targetSchema is the engine's own schema, validation passes.
-	result := s.ChildWorkflowInSchema(context.Background(), nil, "my_schema", "test-wf", `{"x":1}`, 0, 0, "", 0, 0)
-	// With no childWfStore, falls through to synthetic path — errCode 0.
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0 (success), got %d", errCode)
-	}
-}
-
-func TestChildWorkflowInSchema_PeerSchema(t *testing.T) {
-	s := newTestExecSession()
-	s.engine.schema = "my_schema"
-	s.engine.peerSchemas = []string{"peer_a", "peer_b"}
-
-	result := s.ChildWorkflowInSchema(context.Background(), nil, "peer_a", "test-wf", `{}`, 0, 0, "", 0, 0)
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0 (success), got %d", errCode)
-	}
-}
-
-func TestChildWorkflowInSchema_InvalidSchema(t *testing.T) {
-	s := newTestExecSession()
-	s.engine.schema = "my_schema"
-	// No peer schemas configured.
-
-	result := s.ChildWorkflowInSchema(context.Background(), nil, "unknown_schema", "test-wf", `{}`, 0, 0, "", 0, 0)
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 4 {
-		t.Errorf("expected errCode 4 (invalid), got %d", errCode)
-	}
-}
-
-func TestChildWorkflowInSchema_EmptySchema(t *testing.T) {
-	s := newTestExecSession()
-	s.engine.schema = "my_schema"
-
-	// Empty targetSchema should fall back to local schema.
-	result := s.ChildWorkflowInSchema(context.Background(), nil, "", "test-wf", `{}`, 0, 0, "", 0, 0)
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0 (success), got %d", errCode)
-	}
-}
-
-func TestChildWorkflowInSchema_CrossSchemaStore(t *testing.T) {
-	called := false
-	store := &mockCrossChildStore{
-		startInSchemaFn: func(ctx context.Context, targetSchema, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {
-			called = true
-			if targetSchema != "peer_b" {
-				t.Errorf("expected targetSchema 'peer_b', got %q", targetSchema)
-			}
-			return "cross-run-id", nil
-		},
-	}
-	s := newTestExecSession()
-	s.engine.schema = "my_schema"
-	s.engine.peerSchemas = []string{"peer_b"}
-	s.engine.childWfStore = store
-
-	result := s.ChildWorkflowInSchema(context.Background(), nil, "peer_b", "test-wf", `{}`, 0, 0, "", 0, 0)
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
-	}
-	if !called {
-		t.Error("expected StartChildWorkflowInSchema to be called")
-	}
-}
-
-func TestChildWorkflowInSchema_CrossSchemaNotSupported(t *testing.T) {
-	// Store implements ChildWorkflowStore but NOT CrossSchemaChildStore.
-	store := &mockOnlyChildStore{}
-	s := newTestExecSession()
-	s.engine.schema = "my_schema"
-	s.engine.peerSchemas = []string{"peer_b"}
-	s.engine.childWfStore = store
-
-	result := s.ChildWorkflowInSchema(context.Background(), nil, "peer_b", "test-wf", `{}`, 0, 0, "", 0, 0)
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 4 {
-		t.Errorf("expected errCode 4 (cross-schema not supported), got %d", errCode)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // resolveChildVersion tests.
 // ---------------------------------------------------------------------------
 
 func TestResolveChildVersion_Explicit(t *testing.T) {
 	s := newTestExecSession()
-	v := s.resolveChildVersion(context.Background(), "test-wf", 42, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 42)
 	if v != 42 {
 		t.Errorf("expected explicit version 42, got %d", v)
-	}
-}
-
-func TestResolveChildVersion_TargetSchema(t *testing.T) {
-	s := newTestExecSession()
-	// Cross-schema children skip policy resolution and return 0.
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "peer_schema")
-	if v != 0 {
-		t.Errorf("expected 0 for cross-schema child, got %d", v)
 	}
 }
 
 func TestResolveChildVersion_OverrideLatest(t *testing.T) {
 	s := newTestExecSession()
 	s.engine.childBindingOverride = "latest"
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 0 {
 		t.Errorf("expected 0 for latest override, got %d", v)
 	}
@@ -219,7 +89,7 @@ func TestResolveChildVersion_OverrideTag(t *testing.T) {
 	s.engine.childBindingOverride = "tag:canary"
 	s.engine.childWfStore = store
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 7 {
 		t.Errorf("expected version 7 from tag override, got %d", v)
 	}
@@ -233,7 +103,7 @@ func TestResolveChildVersion_Frozen(t *testing.T) {
 	s.engine.childBindingPolicy = "frozen"
 	s.engine.state = &stubWorkflowState{childVer: map[string]int{"test-wf": 5}}
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 5 {
 		t.Errorf("expected frozen version 5, got %d", v)
 	}
@@ -244,7 +114,7 @@ func TestResolveChildVersion_FrozenNoPin(t *testing.T) {
 	s.engine.childBindingPolicy = "frozen"
 	s.engine.state = &stubWorkflowState{} // no childVer map
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 0 {
 		t.Errorf("expected 0 (no pinned version), got %d", v)
 	}
@@ -264,7 +134,7 @@ func TestResolveChildVersion_Stable(t *testing.T) {
 	s.engine.childWfStore = store
 	s.engine.state = &stubWorkflowState{}
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 3 {
 		t.Errorf("expected stable version 3, got %d", v)
 	}
@@ -276,7 +146,7 @@ func TestResolveChildVersion_StableNoStore(t *testing.T) {
 	s.engine.state = &stubWorkflowState{}
 	// childWfStore is nil
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 0 {
 		t.Errorf("expected 0 when stable resolution fails, got %d", v)
 	}
@@ -287,7 +157,7 @@ func TestResolveChildVersion_Latest(t *testing.T) {
 	s.engine.childBindingPolicy = "latest"
 	s.engine.state = &stubWorkflowState{}
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 0 {
 		t.Errorf("expected 0 for latest policy, got %d", v)
 	}
@@ -307,7 +177,7 @@ func TestResolveChildVersion_TagPolicy(t *testing.T) {
 	s.engine.childWfStore = store
 	s.engine.state = &stubWorkflowState{}
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 9 {
 		t.Errorf("expected version 9 from tag policy, got %d", v)
 	}
@@ -318,7 +188,7 @@ func TestResolveChildVersion_FallbackFrozen(t *testing.T) {
 	s.engine.state = &stubWorkflowState{childVer: map[string]int{"test-wf": 4}}
 	// childBindingPolicy is empty → should fall back to "frozen" since pinned version exists.
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 4 {
 		t.Errorf("expected version 4 from frozen fallback, got %d", v)
 	}
@@ -329,7 +199,7 @@ func TestResolveChildVersion_FallbackLatest(t *testing.T) {
 	s.engine.state = &stubWorkflowState{} // no pinned version
 	// childBindingPolicy is empty → should fall back to "latest".
 
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 0 {
 		t.Errorf("expected 0 from latest fallback, got %d", v)
 	}
@@ -338,7 +208,7 @@ func TestResolveChildVersion_FallbackLatest(t *testing.T) {
 func TestResolveChildVersion_NoState(t *testing.T) {
 	s := newTestExecSession()
 	// engine.state is nil
-	v := s.resolveChildVersion(context.Background(), "test-wf", 0, "")
+	v := s.resolveChildVersion(context.Background(), "test-wf", 0)
 	if v != 0 {
 		t.Errorf("expected 0 when state is nil, got %d", v)
 	}
@@ -371,6 +241,22 @@ func TestChildWorkflowWithVersion_ReplayMatch(t *testing.T) {
 	}
 }
 
+// TestChildWorkflowWithVersion_ReplayMismatch asserts that a wrong-type history
+// record is reported as a divergence.
+//
+// It used to assert the OPPOSITE -- errCode 0 and isReplay=false, i.e. "fall
+// through to the fresh path" -- and that is worth recording rather than quietly
+// rewriting. The old assertions did not encode a decision. They arrived in
+// 9fd95738 (#194, "improve coverage across engine, wasm, worker, cleatctl,
+// ~200 new tests"), a sweep that described what the code did; the giveaway is
+// that it checked `s.isReplay` twice with two different messages. So the
+// silence was characterised, not chosen, and a reader finding this test would
+// reasonably have concluded the behaviour was intended.
+//
+// What it actually described is a spawn starting its child a SECOND time after
+// a divergence, with no metric and no message. The repository owner settled it
+// on 2026-09-13: a divergence is loud and non-retryable, as it already was for
+// replayCall, AwaitChild, AwaitAnyChild and replayAwaitAllChildren.
 func TestChildWorkflowWithVersion_ReplayMismatch(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
@@ -381,15 +267,21 @@ func TestChildWorkflowWithVersion_ReplayMismatch(t *testing.T) {
 
 	result := s.childWorkflowWithVersion(context.Background(), nil, "test-wf", `{}`, 0, 0, "", 0, 0)
 
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if !s.isReplay {
+		t.Error("expected isReplay to remain true: leaving replay is what runs the " +
+			"fresh-execution path below the guard and starts the child a second time")
 	}
 	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0 (fresh path), got %d", errCode)
+	if errCode != 1 {
+		t.Errorf("expected errCode 1 (divergence), got %d -- a spawn that diverges must not "+
+			"report success, because the caller then awaits a child that was started twice", errCode)
+	}
+	// The record must not be consumed. Before this change the fresh path below
+	// recorded the duplicate spawn at this step, which advanced stepCount to 1
+	// and misaligned every later step as well -- so the duplicate was not only
+	// run, it was written into the history as though it belonged there.
+	if s.stepCount != 0 {
+		t.Errorf("expected stepCount=0 (record not consumed), got %d", s.stepCount)
 	}
 }
 
@@ -505,8 +397,8 @@ func TestAwaitChild_ReplayCachedError(t *testing.T) {
 }
 
 func TestAwaitChild_ReplayPastEnd(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return "", false, nil // not completed
+	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, nil // not completed
 	}}
 	s := newTestExecSession()
 	s.engine.childWfStore = mock
@@ -527,8 +419,8 @@ func TestAwaitChild_ReplayPastEnd(t *testing.T) {
 }
 
 func TestAwaitChild_FreshCompleted(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return `{"result":"ok"}`, true, nil
+	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{Completed: true, Result: `{"result":"ok"}`}, nil
 	}}
 	s := newTestExecSession()
 	s.engine.childWfStore = mock
@@ -548,8 +440,8 @@ func TestAwaitChild_FreshCompleted(t *testing.T) {
 }
 
 func TestAwaitChild_FreshError(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return "", true, fmt.Errorf("db error")
+	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, fmt.Errorf("db error")
 	}}
 	s := newTestExecSession()
 	s.engine.childWfStore = mock
@@ -569,8 +461,8 @@ func TestAwaitChild_FreshError(t *testing.T) {
 }
 
 func TestAwaitChild_FreshNotCompleted(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return "", false, nil // not completed, no error
+	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, nil // not completed, no error
 	}}
 	s := newTestExecSession()
 	s.engine.childWfStore = mock
@@ -610,10 +502,20 @@ func TestAwaitChild_FreshNoStore(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPollChild_Completed(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return `{"ok":true}`, true, nil
-	}}
+	// Since #847, "completed" is not a property of now -- it is a property of
+	// the parent's durable clock: the child must have completed at or before
+	// it. This test used to say only that the child was done, which is the
+	// question PollChild stopped asking.
+	mock := &mockChildStore{
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{Completed: true, Result: `{"ok":true}`}, nil
+		},
+		getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
+			return 1_000, true, nil
+		},
+	}
 	s := newTestExecSession()
+	s.nowMs = 2_000 // durable clock is after the child completed
 	s.engine.childWfStore = mock
 
 	buf := make([]byte, 256)
@@ -636,8 +538,8 @@ func TestPollChild_Completed(t *testing.T) {
 }
 
 func TestPollChild_Running(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return "", false, nil
+	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, nil
 	}}
 	s := newTestExecSession()
 	s.engine.childWfStore = mock
@@ -658,8 +560,8 @@ func TestPollChild_Running(t *testing.T) {
 }
 
 func TestPollChild_Failed(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return "", false, fmt.Errorf("connection refused")
+	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, fmt.Errorf("connection refused")
 	}}
 	s := newTestExecSession()
 	s.engine.childWfStore = mock
@@ -706,10 +608,66 @@ func TestPollChild_NilStore(t *testing.T) {
 }
 
 func TestPollChild_EmptyResult(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return "", true, nil // completed but empty result == failed
-	}}
+	// Since #847, "completed" is not a property of now -- it is a property of
+	// the parent's durable clock: the child must have completed at or before
+	// it. This test used to say only that the child was done, which is the
+	// question PollChild stopped asking.
+	//
+	// THE PREMISE OF THIS TEST WAS THE DEFECT, and it said so out loud: the
+	// mock's comment read "completed but empty result == failed", which is not
+	// a fact about a child, it is a description of the guess PollChild made
+	// because the store could not tell it whether the child had failed
+	// (cleat#1115). A child that succeeds and returns nothing is a child that
+	// succeeded. The store now answers directly, the guess is gone, and this
+	// asserts the corrected behaviour -- see TestPollChild_ChildFailed for the
+	// case the guess was standing in for.
+	mock := &mockChildStore{
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{Completed: true, Result: ""}, nil
+		},
+		getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
+			return 1_000, true, nil
+		},
+	}
 	s := newTestExecSession()
+	s.nowMs = 2_000 // durable clock is after the child completed
+	s.engine.childWfStore = mock
+
+	buf := make([]byte, 256)
+	ctx := contextWithRawMemBuf(context.Background(), buf)
+	result := s.PollChild(ctx, nil, "run-1", 0, uint32(len(buf)))
+
+	var pr struct {
+		Status string `json:"status"`
+		Error  string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(buf[:result>>32], &pr); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if pr.Status != "completed" {
+		t.Errorf("a child that completed with an EMPTY result is reported as %q, want "+
+			"\"completed\". An empty result is a plausible success value; reporting it as a "+
+			"failure is the old guess, wrong in the other direction (cleat#1115).", pr.Status)
+	}
+	if pr.Error != "" {
+		t.Errorf("expected no error for a child that succeeded, got %q", pr.Error)
+	}
+}
+
+// TestPollChild_ChildFailed is the case the "empty result" guess above stood
+// in for, and could not distinguish: a child that genuinely failed, with a
+// message of its own.
+func TestPollChild_ChildFailed(t *testing.T) {
+	mock := &mockChildStore{
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{Completed: true, Failed: true, Error: "child blew up"}, nil
+		},
+		getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
+			return 1_000, true, nil
+		},
+	}
+	s := newTestExecSession()
+	s.nowMs = 2_000
 	s.engine.childWfStore = mock
 
 	buf := make([]byte, 256)
@@ -724,10 +682,11 @@ func TestPollChild_EmptyResult(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if pr.Status != "failed" {
-		t.Errorf("expected status 'failed', got %q", pr.Status)
+		t.Errorf("a child that FAILED is reported as %q, want \"failed\"", pr.Status)
 	}
-	if !strings.Contains(pr.Error, "empty result") {
-		t.Errorf("expected 'empty result' in error, got %q", pr.Error)
+	if pr.Error != "child blew up" {
+		t.Errorf("the poll result carries error %q, want the child's own message. A failure "+
+			"flag with no message moves the defect rather than fixing it.", pr.Error)
 	}
 }
 
@@ -810,8 +769,8 @@ func TestAwaitAnyChild_ReplayMismatch(t *testing.T) {
 }
 
 func TestAwaitAnyChild_ReplayPastEnd(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return "", false, nil
+	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, nil
 	}}
 	s := newTestExecSession()
 	s.engine.childWfStore = mock
@@ -831,10 +790,10 @@ func TestAwaitAnyChild_ReplayPastEnd(t *testing.T) {
 func TestAwaitAnyChild_FreshCompleted(t *testing.T) {
 	callCount := 0
 	mock := &mockChildStore{
-		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
 			callCount++
 			// First child is completed.
-			return `{"result":"done"}`, true, nil
+			return ChildOutcome{Completed: true, Result: `{"result":"done"}`}, nil
 		},
 	}
 	s := newTestExecSession()
@@ -858,8 +817,8 @@ func TestAwaitAnyChild_FreshCompleted(t *testing.T) {
 }
 
 func TestAwaitAnyChild_FreshAllRunning(t *testing.T) {
-	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-		return "", false, nil // all running
+	mock := &mockChildStore{getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{}, nil // all running
 	}}
 	s := newTestExecSession()
 	s.engine.childWfStore = mock
@@ -894,8 +853,8 @@ func TestAwaitAnyChild_InvalidJSON(t *testing.T) {
 
 func TestAwaitAllChildren_AllCompleted(t *testing.T) {
 	mock := &mockChildStore{
-		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
-			return `{"result":"` + runID + `"}`, true, nil
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{Completed: true, Result: `{"result":"` + runID + `"}`}, nil
 		},
 	}
 	s := newTestExecSession()
@@ -924,14 +883,26 @@ func TestAwaitAllChildren_AllCompleted(t *testing.T) {
 	}
 }
 
+// TestAwaitAllChildren_SomeRunning asserts that a still-running child SUSPENDS
+// the workflow rather than being reported as an outcome.
+//
+// This test previously asserted the opposite -- errCode 0 with
+// Error: "child not completed" for run-b -- which is the behaviour
+// IMPROVEMENT-PLAN 3.309 identified as a durable wrong answer. The outcomes are
+// marshalled into the recorded EventRecord and replayAwaitAllChildren serves
+// rec.Response verbatim forever, so "had not finished when I looked" became
+// run-b's permanent result even after run-b completed.
+//
+// It asserted the code as written and justified neither half, which is why it
+// held the defect in place rather than catching it.
 func TestAwaitAllChildren_SomeRunning(t *testing.T) {
 	mock := &mockChildStore{
-		getChildResultFn: func(ctx context.Context, runID string) (string, bool, error) {
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
 			switch runID {
 			case "run-a":
-				return `{"result":"a"}`, true, nil
+				return ChildOutcome{Completed: true, Result: `{"result":"a"}`}, nil
 			default:
-				return "", false, nil // still running
+				return ChildOutcome{}, nil // still running
 			}
 		},
 	}
@@ -942,29 +913,77 @@ func TestAwaitAllChildren_SomeRunning(t *testing.T) {
 	ctx := contextWithRawMemBuf(context.Background(), buf)
 	result := s.AwaitAllChildren(ctx, nil, `["run-a","run-b"]`, 0, uint32(len(buf)))
 
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
+	if result != packAwaitChildResultSuspend() {
+		t.Errorf("a still-running child must suspend: got %#x, want %#x",
+			result, packAwaitChildResultSuspend())
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
+	}
+	if !strings.Contains(s.suspendErr.Reason, "await_all_children(run-b)") {
+		t.Errorf("expected 'await_all_children(run-b)' in reason, got %q", s.suspendErr.Reason)
 	}
 
-	// Verify the response contains both outcomes including "child not completed" for run-b.
+	// The recorded event must carry NO response. That is what makes the replay
+	// half fall through to fresh and re-check; a response here would be replayed
+	// verbatim forever.
+	if len(s.history) != 1 {
+		t.Fatalf("expected 1 history entry, got %d", len(s.history))
+	}
+	if s.history[0].Response != "" {
+		t.Errorf("suspend record must have an empty response, got %q", s.history[0].Response)
+	}
+}
+
+// TestAwaitAllChildren_ReplayOfSuspendRecordFallsThroughToFresh is the other
+// half of the 3.309 fix, and without it half one is worse than the defect: the
+// fresh path would suspend, and replay would then serve the suspend record's
+// empty response as the answer -- a durable EMPTY result, which reads as
+// success.
+func TestAwaitAllChildren_ReplayOfSuspendRecordFallsThroughToFresh(t *testing.T) {
+	// The child has completed by the time we replay.
+	mock := &mockChildStore{
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{Completed: true, Result: `{"result":"done"}`}, nil
+		},
+	}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+	s.isReplay = true
+	s.history = []EventRecord{{
+		Step:      0,
+		EventType: EventTypeAwaitAllChildren,
+		Request:   `["run-a"]`,
+		// No Response: this is the suspend marker.
+	}}
+
+	buf := make([]byte, 512)
+	ctx := contextWithRawMemBuf(context.Background(), buf)
+	result := s.AwaitAllChildren(ctx, nil, `["run-a"]`, 0, uint32(len(buf)))
+
+	if result == packAwaitChildResultSuspend() {
+		t.Fatal("replay suspended again although the child has since completed")
+	}
+	errCode := uint32(result & 0xFFFFFFFF)
+	if errCode != 0 {
+		t.Fatalf("expected errCode 0, got %d", errCode)
+	}
+
+	written := uint32(result >> 32)
+	if written == 0 {
+		t.Fatal("replay returned an EMPTY result -- the suspend record was served verbatim, " +
+			"which is the failure this test exists to catch")
+	}
 	var outcomes []struct {
 		RunID  string `json:"run_id"`
 		Result string `json:"result,omitempty"`
 		Error  string `json:"error,omitempty"`
 	}
-	written := uint32(result >> 32)
 	if err := json.Unmarshal(buf[:written], &outcomes); err != nil {
 		t.Fatalf("unmarshal outcomes: %v", err)
 	}
-	if len(outcomes) != 2 {
-		t.Fatalf("expected 2 outcomes, got %d", len(outcomes))
-	}
-	// Find the outcome for run-b.
-	for _, o := range outcomes {
-		if o.RunID == "run-b" && o.Error != "child not completed" {
-			t.Errorf("expected 'child not completed' for run-b, got %q", o.Error)
-		}
+	if len(outcomes) != 1 || outcomes[0].Result != `{"result":"done"}` {
+		t.Errorf("expected the child's real result after fall-through, got %+v", outcomes)
 	}
 }
 
@@ -1053,6 +1072,14 @@ func TestFreshAwaitAllChildren_InvalidJSON(t *testing.T) {
 	}
 }
 
+// TestFreshAwaitAllChildren_NoStore asserts the consistency that started
+// IMPROVEMENT-PLAN 3.309: AwaitChild suspends when no child workflow store is
+// configured, and this returned success with "no child workflow store" as the
+// child's outcome. That divergence is what made the two calls disagree about an
+// identical run ID, and it was reported as a harness artifact before the
+// ordinary-path version of it was found.
+//
+// It asserted errCode 0 and that error string until 2026-09-05.
 func TestFreshAwaitAllChildren_NoStore(t *testing.T) {
 	s := newTestExecSession()
 	// childWfStore is nil
@@ -1061,24 +1088,12 @@ func TestFreshAwaitAllChildren_NoStore(t *testing.T) {
 	ctx := contextWithRawMemBuf(context.Background(), buf)
 	result := s.freshAwaitAllChildren(ctx, nil, `["run-a"]`, 0, uint32(len(buf)))
 
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
+	if result != packAwaitChildResultSuspend() {
+		t.Errorf("with no child store configured AwaitAllChildren must suspend, as AwaitChild does: "+
+			"got %#x, want %#x", result, packAwaitChildResultSuspend())
 	}
-
-	var outcomes []struct {
-		RunID string `json:"run_id"`
-		Error string `json:"error,omitempty"`
-	}
-	written := uint32(result >> 32)
-	if err := json.Unmarshal(buf[:written], &outcomes); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if len(outcomes) != 1 {
-		t.Fatalf("expected 1 outcome, got %d", len(outcomes))
-	}
-	if outcomes[0].Error != "no child workflow store" {
-		t.Errorf("expected 'no child workflow store' error, got %q", outcomes[0].Error)
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr non-nil")
 	}
 }
 
@@ -1258,5 +1273,140 @@ func TestChildWorkflowWithOptions_NegativePriority(t *testing.T) {
 	}
 	if s.stepCount != 1 {
 		t.Errorf("expected stepCount=1, got %d", s.stepCount)
+	}
+}
+
+// GetChildCompletedAtMs satisfies the store interface. Added with #847, which
+// made PollChild derive its answer from the child's completion instant rather
+// than querying live. Returning ok=false means "never completed", which keeps
+// every existing test's PollChild answer at "running".
+func (m *mockChildStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	if m.getChildCompletedAtMsFn != nil {
+		return m.getChildCompletedAtMsFn(ctx, runID)
+	}
+	return 0, false, nil
+}
+
+// pollChildStatus drives PollChild once and returns the decoded status/error.
+func pollChildStatus(t *testing.T, completedAtMs, nowMs int64) (string, string) {
+	t.Helper()
+	mock := &mockChildStore{
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{Completed: true, Result: `{"done":true}`}, nil // complete NOW, on every call
+		},
+		getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
+			return completedAtMs, true, nil
+		},
+	}
+	s := newTestExecSession()
+	s.nowMs = nowMs
+	s.engine.childWfStore = mock
+
+	buf := make([]byte, 256)
+	ctx := contextWithRawMemBuf(context.Background(), buf)
+	res := s.PollChild(ctx, nil, "run-1", 0, uint32(len(buf)))
+	var pr struct {
+		Status string `json:"status"`
+		Error  string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(buf[:res>>32], &pr); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	return pr.Status, pr.Error
+}
+
+// TestPollChildAnswersFromDurableTimeNotFromNow is the regression test for
+// #847. The store says "complete" on every call -- that is what a replay sees,
+// because by then the child really has finished. The question PollChild must
+// answer is not that one. It is whether the child had finished as of the
+// parent's durable clock, which is what the first execution observed.
+//
+// The failure this catches is not a crash. It is a workflow taking the other
+// branch of an `if status == "running"` on replay, which produces divergence
+// by a route the divergence check cannot attribute, because no poll event
+// exists in the history to disagree about.
+func TestPollChildAnswersFromDurableTimeNotFromNow(t *testing.T) {
+	// The child completed at 5000. The parent's durable clock is 1000, so at
+	// the point this call is being replayed the parent had not yet seen it.
+	status, errMsg := pollChildStatus(t, 5_000, 1_000)
+	if status != "running" {
+		t.Fatalf("PollChild answered %q (err %q) for a child that completed at 5000 "+
+			"when the parent's durable clock was 1000.\n"+
+			"The store reports it complete NOW, and answering from NOW is exactly "+
+			"the #847 defect: the original execution saw 'running' and this replay "+
+			"would see 'completed', letting the workflow branch differently.",
+			status, errMsg)
+	}
+}
+
+// TestPollChildFlipsOnceDurableTimeReachesCompletion is the other half, and it
+// is what stops the fix from being "always answer running", which would pass
+// the test above and be useless. Same store state, later durable clock.
+func TestPollChildFlipsOnceDurableTimeReachesCompletion(t *testing.T) {
+	if status, errMsg := pollChildStatus(t, 5_000, 5_000); status != "completed" {
+		t.Errorf("at durable time == completion the child must read completed, got %q (%q)", status, errMsg)
+	}
+	if status, errMsg := pollChildStatus(t, 5_000, 9_000); status != "completed" {
+		t.Errorf("at durable time after completion the child must read completed, got %q (%q)", status, errMsg)
+	}
+	// One millisecond earlier and it must still be running -- the boundary is
+	// <=, and an off-by-one here is a silent determinism hole rather than a
+	// visible failure.
+	if status, _ := pollChildStatus(t, 5_000, 4_999); status != "running" {
+		t.Errorf("one ms before completion must read running, got %q", status)
+	}
+}
+
+// TestPollChildFailsClosedWithoutACompletionInstant: a store that reports a
+// child complete but cannot say when leaves PollChild with no replayable
+// answer. It must say so rather than guess, because guessing "completed"
+// reinstates #847 silently -- the same reason resolveBackend fails closed on a
+// language it does not route.
+func TestPollChildFailsClosedWithoutACompletionInstant(t *testing.T) {
+	mock := &mockChildStore{
+		getChildResultFn: func(ctx context.Context, runID string) (ChildOutcome, error) {
+			return ChildOutcome{Completed: true, Result: `{"done":true}`}, nil
+		},
+		getChildCompletedAtMsFn: func(ctx context.Context, runID string) (int64, bool, error) {
+			return 0, false, nil // complete, but no instant
+		},
+	}
+	s := newTestExecSession()
+	s.engine.childWfStore = mock
+	buf := make([]byte, 256)
+	ctx := contextWithRawMemBuf(context.Background(), buf)
+	res := s.PollChild(ctx, nil, "run-1", 0, uint32(len(buf)))
+	var pr struct {
+		Status string `json:"status"`
+		Error  string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(buf[:res>>32], &pr); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if pr.Status != "failed" || !strings.Contains(pr.Error, "no completion timestamp") {
+		t.Errorf("expected a failed status naming the missing timestamp, got %q / %q", pr.Status, pr.Error)
+	}
+}
+
+// TestChildWorkflow_ReplayPastEndStillExitsReplay is the negative control for
+// the test above, and it is the half that matters.
+//
+// The fix splits one path into two. If the split were wrong in the other
+// direction -- treating the end of the history as a divergence -- every
+// workflow that resumed and did any new work would fail, and the test above
+// would still pass. This requires the normal case to stay normal.
+func TestChildWorkflow_ReplayPastEndStillExitsReplay(t *testing.T) {
+	s := newTestExecSession()
+	s.isReplay = true
+	s.history = []EventRecord{} // empty: immediately past the end
+
+	// stopBeforeNewWork returns the suspend sentinel on this bare session
+	// rather than proceeding to a real spawn, which is fine -- what is being
+	// asserted is that replay was EXITED rather than reported as a divergence.
+	_ = s.childWorkflowWithVersion(context.Background(), nil, "child-a", `{}`, 0, 0, "", 0, 0)
+
+	if s.isReplay {
+		t.Error("past the end of history, replay must be EXITED, not reported as divergence -- " +
+			"exhausting the history is how every resumed workflow reaches new work")
 	}
 }

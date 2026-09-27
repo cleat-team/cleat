@@ -310,3 +310,66 @@ type mockCallError struct{ msg string }
 
 func (e *mockCallError) Error() string   { return e.msg }
 func (e *mockCallError) Retryable() bool { return false }
+
+// TestRustWorkflowDefersRun is IMPROVEMENT-PLAN 3.73 for Rust.
+//
+// The Rust SDK's cleat_defer registers a DESCRIPTION. The host recorded it and
+// nothing anywhere ran it -- while the SDK's own docs described cleanup that
+// runs in LIFO order. That is 3.70's defect, in a second language, and this is
+// the regression test for the fix: HostCalls::defer_func takes a closure, and
+// the #[cleat_entry] wrapper drains the table when the entry point returns.
+//
+// It asserts the full sequence rather than mere presence. "The defers ran" is
+// satisfied by running them in registration order, which is wrong in the way
+// that matters: a defer releases what the defer before it acquired, so FIFO
+// unwinds the workflow inside-out.
+func TestRustWorkflowDefersRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping Rust WASM integration test in short mode")
+	}
+
+	wasmPath := buildRustWasm(t)
+	wasmBytes, err := os.ReadFile(wasmPath)
+	if err != nil {
+		t.Fatalf("read Rust WASM: %v", err)
+	}
+
+	ctx := context.Background()
+	rt, err := NewRuntime(ctx, 0, 0)
+	if err != nil {
+		t.Fatalf("NewRuntime: %v", err)
+	}
+	defer rt.Close(ctx)
+	wt, err := NewWasmtimeBackend(ctx)
+	if err != nil {
+		t.Fatalf("NewWasmtimeBackend: %v", err)
+	}
+	defer wt.Close(ctx)
+
+	caller := &mockCaller{}
+	eng := NewEngine(rt, caller,
+		WithBackends(WasmtimeLanguages, wt),
+		WithWorkflowID("wf-rust-defer"))
+
+	input := []byte(`{"user_id":"u1","cart":[]}`)
+	if _, _, _, _, _, err := eng.Execute(ctx, wasmBytes, "defer_order", input); err != nil {
+		t.Fatalf("defer_order: %v", err)
+	}
+
+	got := operationsCalled(caller)
+	want := []string{"body", "second", "first"}
+	if len(got) != len(want) {
+		t.Fatalf("recorded %d calls %v, want %d %v.\n\n"+
+			"Two of these come from defer bodies. If only \"body\" is present the "+
+			"defers did not run at all -- the state every Rust workflow was in "+
+			"before 3.73, while the SDK documented cleanup that runs.",
+			len(got), got, len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("call %d is %q, want %q (full sequence %v, want %v).\n\n"+
+				"Order is not cosmetic: defers unwind, so the last one registered "+
+				"must run first.", i, got[i], want[i], got, want)
+		}
+	}
+}

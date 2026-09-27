@@ -1,8 +1,10 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,13 +29,20 @@ func TestInfo(t *testing.T) {
 
 func TestInit(t *testing.T) {
 	p := &Plugin{}
-	cfg := `{"providers": {"openai": {"api_key": "sk-test", "enabled": true}}}`
-	env := &plugin.Environment{Config: []byte(cfg)}
+	// The API key no longer lives in this JSON config (cleat#1992 part 1) --
+	// see ProviderConfig's doc comment -- so this only checks the fields that
+	// still do.
+	cfg := `{"providers": {"openai": {"enabled": true}}}`
+	secrets := newFakeProviderKeys(map[string]string{"openai": "sk-test"})
+	env := &plugin.Environment{Config: []byte(cfg), DeploymentSecrets: secrets}
 	if err := p.Init(context.Background(), env); err != nil {
 		t.Fatalf("Init() returned error: %v", err)
 	}
 	if p.httpClient == nil {
 		t.Error("expected httpClient to be set")
+	}
+	if p.deploymentSecrets == nil {
+		t.Error("expected deploymentSecrets to be set from env.DeploymentSecrets")
 	}
 	openaiCfg, ok := p.config.Providers["openai"]
 	if !ok {
@@ -41,9 +50,6 @@ func TestInit(t *testing.T) {
 	}
 	if !openaiCfg.Enabled {
 		t.Error("expected openai to be enabled")
-	}
-	if openaiCfg.APIKey != "sk-test" {
-		t.Errorf("expected APIKey 'sk-test', got %q", openaiCfg.APIKey)
 	}
 }
 
@@ -64,6 +70,131 @@ func TestInitInvalidConfig(t *testing.T) {
 	err := p.Init(context.Background(), env)
 	if err == nil {
 		t.Fatal("expected error for invalid config, got nil")
+	}
+}
+
+// ===========================================================================
+// requires_deployment_key opt-out -- cleat-review's #2202 pass, GAP #2: an
+// enabled provider unconditionally required "llm.providers.<provider>.api_key"
+// at boot, which refused the worker for a keyless self-hosted base_url or a
+// BYOK-only provider (cleat#1988) that would never look one up.
+// ===========================================================================
+
+// TestRequiredDeploymentSecretsOmitsAProviderThatOptsOut is the boot-time
+// half: RequiredDeploymentSecrets must not demand a key for a provider that
+// sets "requires_deployment_key": false, while an ordinary enabled provider
+// (omitted field, defaults to required) still appears.
+func TestRequiredDeploymentSecretsOmitsAProviderThatOptsOut(t *testing.T) {
+	p := &Plugin{}
+	cfg := []byte(`{"providers": {
+		"openai": {"enabled": true},
+		"vllm": {"enabled": true, "base_url": "http://localhost:8000", "requires_deployment_key": false}
+	}}`)
+	names, err := p.RequiredDeploymentSecrets(cfg)
+	if err != nil {
+		t.Fatalf("RequiredDeploymentSecrets: %v", err)
+	}
+	foundOpenAI, foundVLLM := false, false
+	for _, n := range names {
+		switch n {
+		case "llm.providers.openai.api_key":
+			foundOpenAI = true
+		case "llm.providers.vllm.api_key":
+			foundVLLM = true
+		}
+	}
+	if !foundOpenAI {
+		t.Errorf("expected llm.providers.openai.api_key to still be required (no opt-out), got names=%v", names)
+	}
+	if foundVLLM {
+		t.Errorf("expected llm.providers.vllm.api_key to be OMITTED (requires_deployment_key: false), got names=%v", names)
+	}
+}
+
+// TestProviderAPIKeySkipsLookupWhenNotRequired is the call-time half: a
+// provider that opted out of a deployment key must never call
+// deploymentSecrets.Get at all -- not "get and ignore a not-found", an
+// outright skip, the same treatment ollama already gets.
+func TestProviderAPIKeySkipsLookupWhenNotRequired(t *testing.T) {
+	no := false
+	p := &Plugin{
+		config: Config{Providers: map[string]ProviderConfig{
+			"vllm": {Enabled: true, BaseURL: "http://localhost:8000", RequiresDeploymentKey: &no},
+		}},
+		// No deploymentSecrets configured at all -- a lookup that ran despite
+		// the opt-out would fail with "no deployment secret store configured"
+		// rather than silently returning "", proving the skip actually
+		// short-circuits before that point rather than merely swallowing the
+		// error.
+	}
+	key, err := p.providerAPIKey(context.Background(), "vllm")
+	if err != nil {
+		t.Fatalf("providerAPIKey: %v", err)
+	}
+	if key != "" {
+		t.Errorf("providerAPIKey for an opted-out provider = %q, want \"\"", key)
+	}
+}
+
+// TestProviderAPIKeyStillLooksUpByDefault is the negative control: omitting
+// requires_deployment_key must still look the key up (today's behavior for
+// every enabled non-ollama provider), so the two tests above are exercising
+// a real opt-out rather than a providerAPIKey that stopped looking anything
+// up at all.
+func TestProviderAPIKeyStillLooksUpByDefault(t *testing.T) {
+	p := &Plugin{
+		config:            Config{Providers: map[string]ProviderConfig{"openai": {Enabled: true}}},
+		deploymentSecrets: newFakeProviderKeys(map[string]string{"openai": "sk-configured"}),
+	}
+	key, err := p.providerAPIKey(context.Background(), "openai")
+	if err != nil {
+		t.Fatalf("providerAPIKey: %v", err)
+	}
+	if key != "sk-configured" {
+		t.Errorf("providerAPIKey = %q, want %q", key, "sk-configured")
+	}
+}
+
+// TestInitWarnsOnLeftoverProviderAPIKey covers legacyProviderConfig's WARN:
+// an api_key left over under providers.<name> in --plugin-config from before
+// cleat#1992 part 1 does nothing (ProviderConfig has no field for it any
+// more) and used to do so silently.
+func TestInitWarnsOnLeftoverProviderAPIKey(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Config: []byte(`{"providers":{"openai":{"enabled":true,"api_key":"sk-leftover-plaintext"}}}`),
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init() returned error: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "providers.openai.api_key") {
+		t.Errorf("expected a WARN naming the leftover providers.openai.api_key, got log output: %q", got)
+	}
+	if !strings.Contains(got, "set-deployment-secret") {
+		t.Errorf("expected the WARN to name the replacement command, got log output: %q", got)
+	}
+	if !strings.Contains(got, "level=WARN") {
+		t.Errorf("expected the leftover-key message at WARN level, got log output: %q", got)
+	}
+}
+
+// TestInitNoWarnWithoutLeftoverProviderAPIKey is the negative control: a
+// config with no api_key field at all must not mention one.
+func TestInitNoWarnWithoutLeftoverProviderAPIKey(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Config: []byte(`{"providers":{"openai":{"enabled":true}}}`),
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init() returned error: %v", err)
+	}
+	if got := buf.String(); strings.Contains(got, "api_key") {
+		t.Errorf("did not expect an api_key WARN with no leftover key present, got log output: %q", got)
 	}
 }
 

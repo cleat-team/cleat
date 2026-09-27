@@ -1,11 +1,7 @@
 package engine
 
 import (
-	"context"
-	"encoding/json"
 	"testing"
-
-	"github.com/tetratelabs/wazero/api"
 )
 
 // Three host functions document behaviour selected by passing an empty name or
@@ -49,41 +45,6 @@ func TestABISetScopeEmptyPairClearsScope(t *testing.T) {
 	}
 }
 
-func TestABIListStateEmptyPrefixListsEverything(t *testing.T) {
-	s := newTestExecSession()
-	s.stateStore = map[string]string{"a:1": "x", "b:2": "y", "c:3": "z"}
-
-	// cleat_list_state: (prefixPtr,prefixLen, keysPtr,keysMaxLen)
-	h := newTestHostFuncHarness(t, "cleat_list_state",
-		[]byte{wasmI32, wasmI32, wasmI32, wasmI32}, []byte{wasmI64}, true, s)
-
-	const keysPtr, keysMaxLen = 2048, 4096
-	got, err := h.call(0, 0, keysPtr, keysMaxLen)
-	if err != nil {
-		t.Fatalf("call cleat_list_state: %v", err)
-	}
-	if got == errBadParam {
-		t.Fatal("cleat_list_state refused an empty prefix; HasPrefix(k, \"\") is " +
-			"true for every k, so an empty prefix means 'list everything'")
-	}
-
-	errCode, written := decodeExportResult(got)
-	if errCode != 0 {
-		t.Fatalf("errCode = %d, want 0", errCode)
-	}
-	raw, ok := h.mem.Read(keysPtr, written)
-	if !ok {
-		t.Fatal("could not read the keys buffer back")
-	}
-	var keys []string
-	if err := json.Unmarshal(raw, &keys); err != nil {
-		t.Fatalf("keys buffer is not JSON (%q): %v", raw, err)
-	}
-	if len(keys) != 3 {
-		t.Errorf("empty prefix listed %d keys (%v), want all 3", len(keys), keys)
-	}
-}
-
 // ---- Reader-level rules ----
 
 func TestReadOptionalServiceNameAllowsEmptyOnly(t *testing.T) {
@@ -101,58 +62,62 @@ func TestReadOptionalServiceNameAllowsEmptyOnly(t *testing.T) {
 	}
 }
 
-// TestABIChildWorkflowInSchemaAcceptsEmptySchemaAndPolicy covers the third
-// unreachable behaviour, and the one place the two backends actively disagreed:
-// wazero guarded the policy parameter with an inline `policyLen > 0` check and
-// wasmtime read it unconditionally, so the same guest call succeeded on one
-// backend and was refused on the other.
-func TestABIChildWorkflowInSchemaAcceptsEmptySchemaAndPolicy(t *testing.T) {
-	rec := &childInSchemaRecorder{}
-	// cleat_child_workflow_in_schema:
-	//   (schemaPtr,schemaLen, namePtr,nameLen, inputPtr,inputLen,
-	//    version i64, priority i64, policyPtr,policyLen, runIDPtr,runIDMaxLen)
-	h := newTestHostFuncHarness(t, "cleat_child_workflow_in_schema",
-		[]byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI32,
-			wasmI64, wasmI64, wasmI32, wasmI32, wasmI32, wasmI32},
-		[]byte{wasmI64}, true, rec)
+// TestABISetScopeReportsPreviousScopeLength pins the half of cleat_set_scope's
+// contract that had no test: the guest must be able to READ the previous scope,
+// not merely have it written somewhere.
+//
+// freshSetScope writes prevScope into the guest buffer and discards the length
+// (`_, _ = s.writeResult(...)`), then returns 0 on every success path. The
+// bytes land in guest memory and nothing reports how many. Every SDK that binds
+// this call decodes the length out of the high 32 bits -- Rust's clear_scope
+// does `let (prev_len, _err) = memory::decode_simple_result(result)` and
+// returns String::new() whenever prev_len is 0, which is always.
+//
+// So the call succeeds, the memory is correct, and the documented return value
+// is unreachable. TestABISetScopeEmptyPairClearsScope already passed a real
+// 256-byte buffer at 2048 with a scope set, and asserted nothing about either
+// the length or the contents -- the write was exercised and never read back.
+func TestABISetScopeReportsPreviousScopeLength(t *testing.T) {
+	s := newTestExecSession()
+	s.scopeSet = true
+	s.scopePrefix = "vo:cart:c1:"
+	s.scopeObjType = "cart"
+	s.scopeInstKey = "c1"
 
-	if !h.mem.Write(64, []byte("child")) || !h.mem.Write(128, []byte("{}")) {
-		t.Fatal("write to memory failed")
+	h := newTestHostFuncHarness(t, "cleat_set_scope",
+		[]byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI32}, []byte{wasmI64}, true, s)
+
+	const objTypePtr, instKeyPtr, prevPtr, prevMax = 1024, 1100, 2048, 256
+	if !h.mem.Write(objTypePtr, []byte("order")) || !h.mem.Write(instKeyPtr, []byte("o1")) {
+		t.Fatal("could not stage the input strings in guest memory")
 	}
 
-	// schemaLen = 0 and policyLen = 0: local schema, default policy.
-	got, err := h.call(0, 0, 64, 5, 128, 2, 1, 0, 0, 0, 2048, 256)
+	got, err := h.call(objTypePtr, 5, instKeyPtr, 2, prevPtr, prevMax)
 	if err != nil {
-		t.Fatalf("call cleat_child_workflow_in_schema: %v", err)
+		t.Fatalf("call cleat_set_scope: %v", err)
 	}
-	if got == errBadParam {
-		t.Fatal("refused an empty targetSchema/policy; children.go documents " +
-			"an empty targetSchema as the local-schema fallback")
+	if errCode := uint32(got & 0xFFFF); errCode != 0 {
+		t.Fatalf("cleat_set_scope reported error code %d; the replacement should succeed", errCode)
 	}
-	if !rec.called {
-		t.Fatal("did not reach the handler")
-	}
-	if rec.targetSchema != "" || rec.policy != "" {
-		t.Errorf("handler got schema=%q policy=%q, want both empty",
-			rec.targetSchema, rec.policy)
-	}
-	if rec.name != "child" {
-		t.Errorf("handler got name=%q, want \"child\"", rec.name)
-	}
-}
 
-type childInSchemaRecorder struct {
-	stubHostHandler
-	called       bool
-	targetSchema string
-	name         string
-	policy       string
-}
+	want := "vo:cart:c1:"
 
-func (h *childInSchemaRecorder) ChildWorkflowInSchema(_ context.Context, _ api.Module,
-	targetSchema, name, inputJSON string, _ int64, _ int64, parentClosePolicy string,
-	_, _ uint32) int64 {
-	h.called = true
-	h.targetSchema, h.name, h.policy = targetSchema, name, parentClosePolicy
-	return 0
+	// The bytes are there -- this half already worked.
+	buf, ok := h.mem.Read(prevPtr, uint32(len(want)))
+	if !ok {
+		t.Fatal("could not read the previous-scope buffer")
+	}
+	if string(buf) != want {
+		t.Errorf("previous scope bytes = %q, want %q", string(buf), want)
+	}
+
+	// This is the half that did not: the guest has no way to learn how many.
+	gotLen := uint32(got >> 32)
+	if gotLen != uint32(len(want)) {
+		t.Errorf("cleat_set_scope returned previous-scope length %d, want %d "+
+			"(raw result %#x). The host wrote %q into the buffer and reported no "+
+			"length, so every SDK that decodes it -- rust, java, assemblyscript -- "+
+			"reads an empty previous scope no matter what was there.",
+			gotLen, len(want), got, want)
+	}
 }

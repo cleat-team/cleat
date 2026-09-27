@@ -88,17 +88,33 @@ func TestEnforceParentClosePolicy(t *testing.T) {
 				t.Fatalf("CompleteWorkflow(parent): %v", err)
 			}
 
-			// TERMINATE: the child must be failed, with the reason recorded.
+			// TERMINATE: the child must be terminated, with the reason
+			// recorded -- cleat#1978. Before that issue the status written
+			// here was "failed" regardless of why the parent closed.
 			terminated, err := store.GetWorkflowByID(ctx, children["TERMINATE"])
 			if err != nil {
 				t.Fatalf("GetWorkflowByID(TERMINATE child): %v", err)
 			}
-			if terminated.Status != "failed" {
+			if terminated.Status != "terminated" {
 				t.Errorf("TERMINATE child status = %q, want %q -- the parent closed and its policy was not applied",
-					terminated.Status, "failed")
+					terminated.Status, "terminated")
 			}
 			if terminated.Error == "" {
 				t.Errorf("TERMINATE child has no error_msg; a child failed by its parent's policy should say so")
+			}
+			if terminated.ErrorOp != "parent_close" {
+				t.Errorf("TERMINATE child error_op = %q, want %q", terminated.ErrorOp, "parent_close")
+			}
+			if terminated.ErrorCode != "" {
+				t.Errorf("TERMINATE child error_code = %q, want empty -- the close policy must not carry over a stale code", terminated.ErrorCode)
+			}
+			// The parent here closed via CompleteWorkflow, so the message
+			// must say so rather than the old hardcoded "parent workflow
+			// terminated" (which was wrong whenever the parent had not, in
+			// fact, been terminated).
+			if terminated.Error != "parent workflow completed" {
+				t.Errorf("TERMINATE child error_msg = %q, want %q -- it must name the parent's actual outcome",
+					terminated.Error, "parent workflow completed")
 			}
 
 			// REQUEST_CANCEL: the child keeps running but is flagged.

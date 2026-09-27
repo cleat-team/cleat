@@ -67,7 +67,7 @@ func TestFFBehavioral_MultiBackend(t *testing.T) {
 			// Initialise the plugin with the real database connection.
 			//
 			// p.dialect is load-bearing and was previously left unset. Every
-			// query goes through plugin.Rebind(query, p.dialect), and Rebind
+			// query goes through query, and Rebind
 			// passes a query through unchanged for a dialect it does not
 			// recognise -- so with the zero value the plugin sent PostgreSQL
 			// $1 placeholders to MySQL and SQL Server and every route returned
@@ -75,7 +75,7 @@ func TestFFBehavioral_MultiBackend(t *testing.T) {
 			// field instead, and so exercised an object no deployment
 			// produces.
 			p.dialect = pluginDialect
-			p.db = &engine.SQLDBAdapter{DB: be.DB}
+			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: plugin.Dialect(be.Dialect)}
 			p.mux = http.NewServeMux()
 			p.logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 
@@ -120,8 +120,15 @@ func cleanupFeatureFlags(t *testing.T, p *Plugin) {
 	}
 	// Rebound like every other query the plugin issues: an unrebound $1 is
 	// an unknown column on MySQL and a money literal on SQL Server.
-	_, err := p.db.Exec(context.Background(),
-		plugin.Rebind(`DELETE FROM feature_flags WHERE tenant_id = $1`, p.dialect), testBackendTenantID)
+	// AND SCOPED TO THE TENANT, which context.Background() is not. The
+	// statement names the tenant in its WHERE clause, and that is not what a
+	// policy reads: PostgreSQL's calls cleat.assert_tenant_set() and RAISES,
+	// SQL Server's filter predicate reads SESSION_CONTEXT and matches nothing
+	// SILENTLY. The identical defect in kvstore's cleanup (cleat#1629) removed
+	// no rows, reported success, and made the next scenario count one row too
+	// many. This one had not surfaced yet; the guard in plugin/ found it.
+	_, err := p.db.Exec(plugin.ForTenant(context.Background(), testBackendTenantID),
+		`DELETE FROM feature_flags WHERE tenant_id = $1`, testBackendTenantID)
 	if err != nil {
 		// Not a log: the list scenarios below assert exact counts, so a
 		// cleanup that did not happen silently invalidates them.

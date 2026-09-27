@@ -101,6 +101,42 @@ var jsonbContains = plugin.Query{
 	MSSQL:   `EXISTS (SELECT 1 FROM OPENJSON(i.tags) AS t1 INNER JOIN OPENJSON($1) AS t2 ON t1.[key] = t2.[key] AND t1.value = t2.value)`,
 }
 
+// staleWorkflowRefs deletes the references held by workflows that are no
+// longer in flight, on the two dialects where one statement can say so.
+//
+// THE POSTGRES ARM DOES NOT READ workflow_instances DIRECTLY, and that is the
+// whole of cleat#1528. That table's policy is 001_schema.sql's inline
+// `tenant_id = cleat.assert_tenant_set()`, which RAISEs on an unset tenant and
+// -- unlike cleat.tenant_row_is_visible -- does not honour a named
+// cross-tenant bypass. A background sweep has no tenant, so this statement was
+// refused and cleanupExpired returned before reaching phase 2. Every tick.
+//
+// admin.in_flight_workflow_ids() (migration 073) is owned by cleat_dispatcher,
+// the NOLOGIN BYPASSRLS role that already owns admin.claim_workflows. It takes
+// no arguments and returns ids, so the exemption is bounded by the body rather
+// than by what a caller asks for.
+//
+// MySQL keeps the direct subquery: it has no row-level security, so it never
+// had the problem.
+//
+// SQL SERVER HAS NO ARM HERE AT ALL, cleat#2125, and that is deliberate --
+// see sweepStaleWorkflowRefsMSSQL in background.go for why one statement
+// cannot express this on that dialect (dbo.fn_tenant_filter does not read
+// AcrossAllTenants's marker, and workflow_blob_refs itself carries no
+// tenant_id for a per-tenant loop to scope). This field is left absent
+// rather than set to something reached by a stale branch: plugin.Query.For
+// falls back to Default when MSSQL is empty, but sweepStaleWorkflowRefs
+// branches on the dialect before ever calling For, so Default is never
+// reached on that dialect either.
+var staleWorkflowRefs = plugin.Query{
+	Default: `DELETE FROM workflow_blob_refs
+WHERE workflow_id NOT IN (SELECT id FROM admin.in_flight_workflow_ids())`,
+	MySQL: `DELETE FROM workflow_blob_refs
+WHERE workflow_id NOT IN (
+	SELECT id FROM workflow_instances WHERE status IN ('ready', 'running')
+)`,
+}
+
 var deleteChunksReturning = plugin.Query{
 	Default: `WITH deleted AS (
 	DELETE FROM blob_index
@@ -118,19 +154,26 @@ INNER JOIN (
 	GROUP BY bi.sha256
 ) d ON bc.sha256 = d.sha256
 SET bc.ref_count = bc.ref_count - d.cnt`,
-	MSSQL: `WITH deleted AS (
-	DELETE FROM blob_index
-	OUTPUT DELETED.sha256
-	WHERE (expires_at < SYSUTCDATETIME() OR deleted_at IS NOT NULL)
-)
+	// T-SQL has no data-modifying CTE: a WITH body must be a SELECT, so the
+	// PostgreSQL arm above does not transliterate. OUTPUT ... INTO a table
+	// variable carries the deleted keys to the UPDATE instead. That makes this
+	// two statements rather than one, so a crash between them leaves the index
+	// rows gone and ref_count too high -- blobs that are never collected, which
+	// is the leak this fix removes rather than a new failure mode.
+	MSSQL: `DECLARE @deleted TABLE (sha256 VARBINARY(32));
+
+DELETE FROM blob_index
+OUTPUT DELETED.sha256 INTO @deleted
+WHERE (expires_at < SYSUTCDATETIME() OR deleted_at IS NOT NULL);
+
 UPDATE bc
-SET ref_count = ref_count - cnt.cnt
+SET ref_count = bc.ref_count - cnt.cnt
 FROM blob_content bc
 INNER JOIN (
 	SELECT sha256, COUNT(*) AS cnt
-	FROM deleted
+	FROM @deleted
 	GROUP BY sha256
-) cnt ON bc.sha256 = cnt.sha256`,
+) cnt ON bc.sha256 = cnt.sha256;`,
 }
 
 var deleteBlobIndexExpired = plugin.Query{
@@ -178,4 +221,33 @@ WHERE bc.ref_count <= 0 AND r.sha256 IS NULL`,
 	MSSQL: `DELETE bc FROM blob_content bc
 LEFT JOIN workflow_blob_refs r ON bc.sha256 = r.sha256
 WHERE bc.ref_count <= 0 AND r.sha256 IS NULL`,
+}
+
+// Record a workflow's reference to a blob, ignoring a duplicate.
+//
+// "Insert unless it is already there" is spelled three different ways and none
+// of them is portable (cleat#1133):
+//
+//	PostgreSQL  INSERT ... ON CONFLICT DO NOTHING
+//	MySQL       INSERT IGNORE
+//	T-SQL       no equivalent -- an explicit NOT EXISTS guard
+//
+// The T-SQL arm uses `INSERT ... SELECT ... WHERE NOT EXISTS` rather than
+// MERGE. MERGE is the textbook answer and is the wrong one here: it is a
+// heavier statement with documented concurrency caveats, and this is a
+// best-effort reference count whose failure is already only logged.
+//
+// This is the class the adapter deliberately does not rewrite. It is not one
+// token mapping to another -- the three statements have different SHAPES, and
+// the T-SQL one names the table twice.
+var insertBlobRefIfAbsent = plugin.Query{
+	Default: `INSERT INTO workflow_blob_refs (workflow_id, sha256)
+VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+	MySQL: `INSERT IGNORE INTO workflow_blob_refs (workflow_id, sha256)
+VALUES ($1, $2)`,
+	MSSQL: `INSERT INTO workflow_blob_refs (workflow_id, sha256)
+SELECT $1, $2
+WHERE NOT EXISTS (
+    SELECT 1 FROM workflow_blob_refs WHERE workflow_id = $1 AND sha256 = $2
+)`,
 }

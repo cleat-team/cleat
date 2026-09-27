@@ -52,6 +52,13 @@ func TestMSSQLStore_ClaimWorkflow_Success(t *testing.T) {
 	inputJSON := `{"input":"x"}`
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
+			// Candidate SELECT (statement 1 of the multi-statement claim): one
+			// runnable row with no concurrency key, so the acquire step admits it
+			// without an INSERT.
+			match: "CONVERT(NVARCHAR(36), w.tenant_id)",
+			data:  [][]driver.Value{{"wf-1", "t-1", nil, nil, int64(0)}},
+		},
+		{
 			match: "SET status = 'running'",
 			data: [][]driver.Value{
 				{
@@ -69,6 +76,7 @@ func TestMSSQLStore_ClaimWorkflow_Success(t *testing.T) {
 					int64(1),   // generation
 					int64(0),   // priority
 					"",         // trace_id
+					"",         // pending_terminal_status
 				},
 			},
 		},
@@ -98,6 +106,10 @@ func TestMSSQLStore_ClaimWorkflow_Success(t *testing.T) {
 
 func TestMSSQLStore_ClaimWorkflow_ScanError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "CONVERT(NVARCHAR(36), w.tenant_id)",
+			data:  [][]driver.Value{{"wf-1", "t-1", nil, nil, int64(0)}},
+		},
 		{
 			match: "SET status = 'running'",
 			err:   errors.New("scan failed"),
@@ -139,8 +151,6 @@ func TestMSSQLStore_CompleteWorkflow_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
 		{match: "SET status = 'done'", affected: 1},
-		// Idempotency update is best-effort — may succeed.
-		{match: "UPDATE idempotency_keys SET result", affected: 1},
 	})
 	defer db.Close()
 
@@ -176,23 +186,6 @@ func TestMSSQLStore_CompleteWorkflow_BeginError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "complete workflow: begin") {
 		t.Errorf("expected error to contain 'complete workflow: begin', got: %v", err)
-	}
-}
-
-func TestMSSQLStore_CompleteWorkflow_IdempotencyUpdateFails(t *testing.T) {
-	// Idempotency UPDATE is best-effort. When it fails, the error is logged
-	// but CompleteWorkflow still succeeds.
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "sp_set_session_context"},
-		{match: "SET status = 'done'", affected: 1},
-		{match: "UPDATE idempotency_keys SET result", err: errors.New("idempotency failed")},
-	})
-	defer db.Close()
-
-	store := NewMSSQLStore(db)
-	err := store.CompleteWorkflow(testCtxMSSQL, "wf-1", "worker-1", 0, `{"result":"ok"}`, nil)
-	if err != nil {
-		t.Fatalf("CompleteWorkflow should succeed when idempotency update fails: %v", err)
 	}
 }
 
@@ -232,7 +225,7 @@ func TestMSSQLStore_AppendEventHistoryBatch_Empty(t *testing.T) {
 func TestMSSQLStore_AppendEventHistoryBatch_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "INSERT INTO event_history", affected: 1},
+		{match: "MERGE event_history", affected: 1},
 	})
 	defer db.Close()
 
@@ -271,7 +264,7 @@ func TestMSSQLStore_AppendEventHistoryBatch_BeginError(t *testing.T) {
 func TestMSSQLStore_AppendEventHistoryBatch_InsertError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "INSERT INTO event_history", err: errors.New("insert failed")},
+		{match: "MERGE event_history", err: errors.New("insert failed")},
 	})
 	defer db.Close()
 
@@ -293,7 +286,7 @@ func TestMSSQLStore_AppendEventHistoryBatch_InsertError(t *testing.T) {
 func TestMSSQLStore_AppendEventHistory_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "INSERT INTO event_history", affected: 1},
+		{match: "MERGE event_history", affected: 1},
 	})
 	defer db.Close()
 
@@ -706,7 +699,7 @@ func TestMSSQLClearStickyWorker(t *testing.T) {
 
 func TestMSSQLMarkVersionDeprecated(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "SET deprecated", affected: 1},
+		{match: "SET disabled_at", affected: 1},
 	})
 	defer db.Close()
 
@@ -719,7 +712,7 @@ func TestMSSQLMarkVersionDeprecated(t *testing.T) {
 
 func TestMSSQLMarkVersionDeprecated_Error(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "SET deprecated", err: errors.New("update failed")},
+		{match: "SET disabled_at", err: errors.New("update failed")},
 	})
 	defer db.Close()
 

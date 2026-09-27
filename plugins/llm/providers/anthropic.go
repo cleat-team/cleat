@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugin"
 	"io"
 	"net/http"
 	"strings"
@@ -136,6 +137,7 @@ func AnthropicChat(ctx context.Context, client *http.Client, apiKey, baseURL str
 	if err != nil {
 		return ChatOutput{}, fmt.Errorf("anthropic: create request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("x-api-key", apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("Content-Type", "application/json")
@@ -227,6 +229,7 @@ func AnthropicChatStream(ctx context.Context, client *http.Client, apiKey, baseU
 	if err != nil {
 		return nil, fmt.Errorf("anthropic: create stream request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("x-api-key", apiKey)
 	req.Header.Set("anthropic-version", "2023-06-01")
 	req.Header.Set("Content-Type", "application/json")
@@ -241,57 +244,59 @@ func AnthropicChatStream(ctx context.Context, client *http.Client, apiKey, baseU
 	go func() {
 		defer resp.Body.Close()
 		defer close(ch)
+		plugin.RecoverGoroutine("llm/anthropic", nil, func() {
 
-		scanner := bufio.NewScanner(resp.Body)
-		index := 0
-		for scanner.Scan() {
-			line := scanner.Text()
-			if !strings.HasPrefix(line, "data: ") {
-				continue
-			}
-			payload := strings.TrimPrefix(line, "data: ")
-			if payload == "[DONE]" {
-				return
-			}
-
-			var sseData struct {
-				Type  string `json:"type"`
-				Delta *struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"delta,omitempty"`
-				ContentBlock *struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				} `json:"content_block,omitempty"`
-			}
-			if err := json.Unmarshal([]byte(payload), &sseData); err != nil {
-				continue
-			}
-
-			var text string
-			switch sseData.Type {
-			case "content_block_delta":
-				if sseData.Delta != nil {
-					text = sseData.Delta.Text
+			scanner := bufio.NewScanner(resp.Body)
+			index := 0
+			for scanner.Scan() {
+				line := scanner.Text()
+				if !strings.HasPrefix(line, "data: ") {
+					continue
 				}
-			case "content_block_start":
-				if sseData.ContentBlock != nil {
-					text = sseData.ContentBlock.Text
+				payload := strings.TrimPrefix(line, "data: ")
+				if payload == "[DONE]" {
+					return
 				}
-			case "message_stop":
-				ch <- StreamChunk{Index: index, Done: true}
-				return
-			}
 
-			if text != "" {
-				ch <- StreamChunk{
-					Content: text,
-					Index:   index,
+				var sseData struct {
+					Type  string `json:"type"`
+					Delta *struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"delta,omitempty"`
+					ContentBlock *struct {
+						Type string `json:"type"`
+						Text string `json:"text"`
+					} `json:"content_block,omitempty"`
 				}
-				index++
+				if err := json.Unmarshal([]byte(payload), &sseData); err != nil {
+					continue
+				}
+
+				var text string
+				switch sseData.Type {
+				case "content_block_delta":
+					if sseData.Delta != nil {
+						text = sseData.Delta.Text
+					}
+				case "content_block_start":
+					if sseData.ContentBlock != nil {
+						text = sseData.ContentBlock.Text
+					}
+				case "message_stop":
+					ch <- StreamChunk{Index: index, Done: true}
+					return
+				}
+
+				if text != "" {
+					ch <- StreamChunk{
+						Content: text,
+						Index:   index,
+					}
+					index++
+				}
 			}
-		}
+		})
 	}()
 
 	return ch, nil

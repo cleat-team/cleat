@@ -24,6 +24,7 @@ package engine
 // that could drift from production.
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -35,19 +36,47 @@ import (
 
 // postgresProcedureMigrations lists the migration files (in order) that
 // define finalize_workflow_status and friends for PostgreSQL.
+//
+// Hand-maintained, and therefore checked: TestProcedureMigrationListsAreComplete
+// fails when a migration defines the routine and is not listed here. A missing
+// entry is silent in the worst way -- every test that goes through
+// PostgresBackend.Setup keeps running against the LAST listed version of the
+// procedure, so a change to it is not merely untested, it is actively
+// contradicted by a suite that still passes. That happened: the query_state
+// fix below was written, applied to a real database, verified over HTTP, and
+// its own engine test still failed, because the harness was running 004.
+// ONE entry since the cleat#2059 rebaseline, and that is the whole point of it.
+// The list used to run to ten files, each redefining the routine on top of the
+// last, and this test exists because a missing entry made the harness keep
+// running an older definition while every test still passed. 003 now carries the
+// FINAL body -- generated from a pg_dump of the fully-migrated database, so it is
+// the last definition by construction rather than by taking the last of ten by
+// hand. There is no longer a sequence to keep in order.
+//
+// TestProcedureMigrationListsAreComplete still checks this against the
+// directory, so it stays honest: if a later migration defines the routine, the
+// list must name it.
 var postgresProcedureMigrations = []string{
 	"003_procedures.sql",
-	"004_fix_finalize_workflow_status_fence.sql",
 }
 
+// Same shape as the Postgres list above, for the same reason: MySQL was
+// compacted in cleat#2433 and 003_procedures.sql is now generated from a
+// mysqldump of the fully-migrated database, so it carries the FINAL body by
+// construction. There is no longer a sequence to keep in order -- the nine
+// migrations this used to name are folded into it and deleted.
 var mysqlProcedureMigrations = []string{
 	"003_procedures.sql",
-	"004_fix_finalize_workflow_status_fence.sql",
 }
 
+// ONE entry since the cleat#2434 rebaseline, for the same reason the Postgres
+// list above has one: 003 now carries the FINAL body, generated from a database
+// built by the whole chain, so it is the last definition by construction rather
+// than by taking the last of nine in filename order. applyMSSQLProcedures
+// applies only the final entry, so the entries that used to be here were being
+// replayed one after another to arrive at a body 003 already contains.
 var mssqlProcedureMigrations = []string{
 	"003_procedures.sql",
-	"004_fix_finalize_workflow_status_fence.sql",
 }
 
 // Every Postgres-backed subtest that goes through PostgresBackend.Setup
@@ -83,6 +112,42 @@ var (
 func applyPostgresProcedures(t *testing.T, db *sql.DB) {
 	t.Helper()
 	postgresProceduresOnce.Do(func() {
+		// On ONE connection, with search_path set, because these files no
+		// longer say which schema they build into. Since cleat#1287 they ask
+		// -- the runner answers from --schema, the initdb script answers with
+		// PGOPTIONS, and this is the third applier in the tree and has to
+		// answer too.
+		//
+		// It matters here more than anywhere, because 003 opens with
+		// `DROP FUNCTION IF EXISTS finalize_workflow_status(...)`. DROP
+		// resolves through search_path and finds the real function in public;
+		// the CREATE that follows lands in the FIRST schema of search_path.
+		// Under the default `"$user", public` as role "cleat" -- which is what
+		// docker-compose.cluster.yml connects as, against a database where 001
+		// has created a schema of that name -- those are two different
+		// schemas, so replaying these files MOVES the function out of public.
+		// Nothing errors. The next test that looks for it in public reports
+		// that the migrations and the database disagree about what exists,
+		// which is true and says nothing about the cause.
+		//
+		// Measured in CI on cleat#1287: this was order-dependent, so the
+		// routine-drift test failed in a full run and passed alone.
+		//
+		// One connection rather than a pool Exec, for the reason
+		// migration.Runner.session gives: a bare db.Exec takes whatever
+		// connection is free, so the SET would apply to one and the files to
+		// whichever others the pool hands out.
+		conn, err := db.Conn(context.Background())
+		if err != nil {
+			postgresProceduresErr = fmt.Errorf("pin a connection: %v", err)
+			return
+		}
+		defer conn.Close()
+		if _, err := conn.ExecContext(context.Background(),
+			`SET search_path = public, pg_temp`); err != nil {
+			postgresProceduresErr = fmt.Errorf("pin search_path: %v", err)
+			return
+		}
 		for _, f := range postgresProcedureMigrations {
 			path := filepath.Join("..", "migrations", "postgres", f)
 			data, err := os.ReadFile(path)
@@ -90,7 +155,7 @@ func applyPostgresProcedures(t *testing.T, db *sql.DB) {
 				postgresProceduresErr = fmt.Errorf("read migration %s: %v", path, err)
 				return
 			}
-			if _, err := db.Exec(string(data)); err != nil {
+			if _, err := conn.ExecContext(context.Background(), string(data)); err != nil {
 				postgresProceduresErr = fmt.Errorf("apply migration %s: %v", path, err)
 				return
 			}
@@ -145,25 +210,93 @@ func applyMySQLProcedures(t *testing.T, db *sql.DB) {
 // As with applyPostgresProcedures, this only actually runs once per test
 // binary (see postgresProceduresOnce doc comment) since every caller shares
 // one CLEAT_TEST_MSSQL database and 004 is not safe to replay atop itself.
+// SQL Server replays only the LAST entry, where PostgreSQL and MySQL replay
+// the whole list.
+//
+// SQL Server binds column names when it compiles a procedure body; PostgreSQL
+// and MySQL do not. So a superseded definition stops being replayable the
+// moment a column it names is dropped, even though it was correct against the
+// schema of its own day. cleat#1049 dropped idempotency_keys.result and
+// 003_procedures.sql went from redundant to fatal:
+//
+//	apply migration ../migrations/mssql/003_procedures.sql:
+//	mssql: Invalid column name 'result'.
+//
+// Applying only the last entry is not a shortcut around that error, it is what
+// this function was always for: the list is ordered, every entry redefines
+// finalize_workflow_status in full, and only the last one decides what the
+// database ends up with. On SQL Server every listed file defines that one
+// routine and nothing else, so nothing is lost by skipping the rest -- which is
+// NOT true of PostgreSQL, whose 003 also defines flush_event_step and
+// batch_flush_events. That asymmetry is why this is a per-dialect change rather
+// than the same edit in three places.
+//
+// TestProcedureMigrationListsAreComplete still guards the list itself, so a new
+// procedure migration that is not listed is still caught -- and it is now the
+// only thing standing between a new definition and a suite that silently tests
+// the previous one.
 func applyMSSQLProcedures(t *testing.T, db *sql.DB) {
 	t.Helper()
 	mssqlProceduresOnce.Do(func() {
-		for _, f := range mssqlProcedureMigrations {
+		if len(mssqlProcedureMigrations) == 0 {
+			mssqlProceduresErr = fmt.Errorf("mssqlProcedureMigrations is empty")
+			return
+		}
+		for _, f := range mssqlProcedureMigrations[len(mssqlProcedureMigrations)-1:] {
 			path := filepath.Join("..", "migrations", "mssql", f)
 			data, err := os.ReadFile(path)
 			if err != nil {
 				mssqlProceduresErr = fmt.Errorf("read migration %s: %v", path, err)
 				return
 			}
-			if _, err := db.Exec(string(data)); err != nil {
-				mssqlProceduresErr = fmt.Errorf("apply migration %s: %v", path, err)
-				return
+			// Split on GO, because since cleat#2434 the final entry is the
+			// generated baseline: one file holding every module, separated by
+			// GO batch terminators. Exec'ing it whole fails with "Incorrect
+			// syntax near 'GO'" and then "'CREATE/ALTER PROCEDURE' must be the
+			// first statement in a query batch" -- neither of which names the
+			// real cause. The migrations this loop used to apply each held a
+			// single statement with no GO, so no split was needed to reach the
+			// same place.
+			//
+			// The rule is migration.Runner's (runner.go:925): a line that is
+			// exactly GO after trimming and upper-casing ends a batch.
+			for _, batch := range splitOnGo(string(data)) {
+				if _, err := db.Exec(batch); err != nil {
+					mssqlProceduresErr = fmt.Errorf("apply migration %s: %v", path, err)
+					return
+				}
 			}
 		}
 	})
 	if mssqlProceduresErr != nil {
 		t.Fatalf("%v", mssqlProceduresErr)
 	}
+}
+
+// splitOnGo splits SQL Server source into batches at lines that are exactly
+// `GO`, which is the batch separator the server's own tooling and
+// migration.Runner both use -- it is not a T-SQL statement, and sending it to
+// the server is a syntax error. Empty batches (from consecutive GO lines or a
+// trailing terminator) are dropped rather than executed.
+func splitOnGo(src string) []string {
+	var out []string
+	var buf strings.Builder
+	flush := func() {
+		if s := strings.TrimSpace(buf.String()); s != "" {
+			out = append(out, s)
+		}
+		buf.Reset()
+	}
+	for _, line := range strings.Split(src, "\n") {
+		if strings.EqualFold(strings.TrimSpace(line), "GO") {
+			flush()
+			continue
+		}
+		buf.WriteString(line)
+		buf.WriteString("\n")
+	}
+	flush()
+	return out
 }
 
 // splitMySQLDelimited splits MySQL SQL source that may contain `DELIMITER`

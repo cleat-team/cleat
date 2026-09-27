@@ -53,11 +53,13 @@ import (
 // InMemorySignalStore implements engine.SignalStore with in-memory maps.
 type InMemorySignalStore struct {
 	mu        sync.Mutex
-	signals   map[string][]pendingSignal   // workflowID -> pending signals
+	nextID    int64
+	signals   map[string][]pendingSignal   // workflowID -> pending signals, oldest first
 	cancelled map[string]cancellationState // workflowID -> cancellation state
 }
 
 type pendingSignal struct {
+	id      int64
 	name    string
 	payload string
 }
@@ -77,25 +79,45 @@ func NewInMemorySignalStore() *InMemorySignalStore {
 func (s *InMemorySignalStore) DeliverSignal(_ context.Context, workflowID, signalName, payload string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.signals[workflowID] = append(s.signals[workflowID], pendingSignal{name: signalName, payload: payload})
+	s.nextID++
+	s.signals[workflowID] = append(s.signals[workflowID], pendingSignal{id: s.nextID, name: signalName, payload: payload})
 	return nil
 }
 
-func (s *InMemorySignalStore) PollSignal(_ context.Context, workflowID, signalName string) (string, bool, error) {
+// PollSignal returns the oldest pending delivery with this name, without
+// consuming it.
+//
+// Note what changed here and what did not. This slice was ALWAYS a FIFO queue
+// per workflow, and this method always removed the entry it returned -- so
+// this double had the semantics IMPROVEMENT-PLAN 3.215 gives the real stores
+// long before they had them, and every wasmtest-based signal test passed
+// against behaviour no database implemented. The queue is unchanged. What
+// changed is that removal moved to ConsumeSignal, so the double now models the
+// separation the real interface has rather than a stronger contract.
+func (s *InMemorySignalStore) PollSignal(_ context.Context, workflowID, signalName string) (engine.SignalDelivery, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sig := range s.signals[workflowID] {
+		if sig.name == signalName {
+			return engine.SignalDelivery{ID: sig.id, Payload: sig.payload}, true, nil
+		}
+	}
+	return engine.SignalDelivery{}, false, nil
+}
+
+// ConsumeSignal removes one delivery by id. Removing an id that is already
+// gone is not an error, matching the real stores.
+func (s *InMemorySignalStore) ConsumeSignal(_ context.Context, workflowID string, id int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	pending := s.signals[workflowID]
 	for i, sig := range pending {
-		if sig.name == signalName {
+		if sig.id == id {
 			s.signals[workflowID] = append(pending[:i], pending[i+1:]...)
-			return sig.payload, true, nil
+			return nil
 		}
 	}
-	return "", false, nil
-}
-
-func (s *InMemorySignalStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	return s.PollSignal(ctx, workflowID, signalName)
+	return nil
 }
 
 func (s *InMemorySignalStore) PollCancellation(_ context.Context, workflowID string) (bool, string, error) {
@@ -145,7 +167,7 @@ func (s *InMemoryPromiseStore) CreatePromise(_ context.Context, _, _, promiseID 
 	return nil
 }
 
-func (s *InMemoryPromiseStore) ResolvePromise(_ context.Context, _, promiseID, result string) error {
+func (s *InMemoryPromiseStore) ResolvePromise(_ context.Context, promiseID, result string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ps, ok := s.promises[promiseID]
@@ -157,7 +179,7 @@ func (s *InMemoryPromiseStore) ResolvePromise(_ context.Context, _, promiseID, r
 	return nil
 }
 
-func (s *InMemoryPromiseStore) RejectPromise(_ context.Context, _, promiseID, errMsg string) error {
+func (s *InMemoryPromiseStore) RejectPromise(_ context.Context, promiseID, errMsg string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ps, ok := s.promises[promiseID]
@@ -296,16 +318,49 @@ func (s *InMemoryChildWorkflowStore) StartChildWorkflowAtomic(_ context.Context,
 	return s.StartChildWorkflow(context.Background(), parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
 
-func (s *InMemoryChildWorkflowStore) GetChildResult(_ context.Context, runID string) (string, bool, error) {
+// GetChildResult implements engine.ChildWorkflowStore.
+//
+// A registered child ERROR is now reported as a completed-and-failed outcome
+// rather than as a returned error. It used to come back as
+// `("", true, fmt.Errorf(msg))` -- the child's failure smuggled through the
+// STORE error return -- which made this fake behave CORRECTLY while every real
+// store reported a failed child as an empty success (cleat#1115). A fake that
+// is right for a reason the production path does not share cannot fail with
+// it, and that is why nothing driven by this store ever noticed.
+func (s *InMemoryChildWorkflowStore) GetChildResult(_ context.Context, runID string) (engine.ChildOutcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if result, ok := s.childResults[runID]; ok {
-		return result, true, nil
+		return engine.ChildOutcome{Completed: true, Result: result}, nil
 	}
 	if errMsg, ok := s.childErrors[runID]; ok {
-		return "", true, fmt.Errorf("%s", errMsg)
+		return engine.ChildOutcome{Completed: true, Failed: true, Error: errMsg}, nil
 	}
-	return "", false, nil
+	return engine.ChildOutcome{}, nil
+}
+
+// GetChildCompletedAtMs implements engine.ChildWorkflowStore.
+//
+// This store completes a child synchronously when it is registered, before the
+// parent runs a step -- so any child it knows about was already complete at
+// every durable time the parent can observe. Epoch (0) is the honest encoding
+// of that, not a stub: PollChild's predicate is `completedAt > nowMs`, and 0 is
+// never greater than a parent's clock, so a known child always reads
+// "completed" and an unknown one reads "running", which is exactly this store's
+// behaviour before #847.
+//
+// A fake that completed children asynchronously would have to record real
+// instants here, or PollChild would answer from the wrong clock.
+func (s *InMemoryChildWorkflowStore) GetChildCompletedAtMs(_ context.Context, runID string) (int64, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.childResults[runID]; ok {
+		return 0, true, nil
+	}
+	if _, ok := s.childErrors[runID]; ok {
+		return 0, true, nil
+	}
+	return 0, false, nil
 }
 
 // ResolveVersionByTag implements engine.ChildWorkflowStore.
@@ -356,11 +411,18 @@ func (s *InMemoryConcurrencyKeyStore) AcquireConcurrencyKey(_ context.Context, k
 	return true, nil
 }
 
-func (s *InMemoryConcurrencyKeyStore) ReleaseConcurrencyKey(_ context.Context, key string) error {
+func (s *InMemoryConcurrencyKeyStore) ReleaseConcurrencyKey(_ context.Context, key, workflowID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Ownership is checked here too. A fake that releases anything would let a
+	// workflow test pass against behaviour the real stores refuse (cleat#1188),
+	// which is the failure mode a fake exists to avoid rather than to add.
+	entry, ok := s.keys[key]
+	if !ok || entry.workflowID != workflowID {
+		return false, nil
+	}
 	delete(s.keys, key)
-	return nil
+	return true, nil
 }
 
 // TestWorkflowState implements engine.WorkflowState for testing.
@@ -392,9 +454,28 @@ func (s *TestWorkflowState) ChildVersion(name string) (int, bool) {
 type mockCaller struct {
 	mu    sync.Mutex
 	Calls []engine.EventRecord
+	// delay, if set, is how long Call blocks before answering. It exists so a
+	// test can outlast a guest-side CallOptions.Timeout: with an instant
+	// caller, a timeout and a working call are indistinguishable because
+	// neither ever elapses.
+	delay time.Duration
+}
+
+// SetDelay makes every subsequent Call block for d before answering.
+func (m *mockCaller) SetDelay(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.delay = d
 }
 
 func (m *mockCaller) Call(_ context.Context, service, operation, requestJSON string) (string, error) {
+	m.mu.Lock()
+	d := m.delay
+	m.mu.Unlock()
+	if d > 0 {
+		time.Sleep(d)
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 

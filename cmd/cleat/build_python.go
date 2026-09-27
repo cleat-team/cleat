@@ -73,6 +73,31 @@ func runBuildPython(pattern, outDir, runtime, channel string) {
 		}
 	}
 
+	// Resolve the entry against the process working directory, which is the
+	// only place a path the user typed can mean anything.
+	//
+	// WHY THE SCRIPT CANNOT DO THIS. build_wasm.py runs with cmd.Dir set to
+	// the SDK root (wasm/build.go, `cmd.Dir = sdkRoot`), so every relative
+	// resolution it makes lands in python-sdk/ rather than where the user is
+	// standing -- and there are three of them, not one: validate_entry's
+	// `Path(entry_file).exists()`, and the two `Path(entry_file).resolve()`
+	// calls that derive componentize-py's package directory and the output
+	// path. The script is RIGHT for the direct invocation its own usage line
+	// documents; what is wrong is handing it a path whose meaning depends on a
+	// directory cleat chose and the user cannot see.
+	//
+	// Both documented Python examples pass a relative --entry, so both build
+	// commands in their READMEs failed from every working directory (cleat#1836).
+	//
+	// The --output path was made absolute for exactly this reason, and is
+	// commented below; the entry never got the same treatment.
+	abs, err := filepath.Abs(pyFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: could not resolve %s against the working directory: %v\n", pyFile, err)
+		os.Exit(1)
+	}
+	pyFile = abs
+
 	// If no function name was specified, try to auto-detect it from the file.
 	if funcName == "" {
 		fn, err := detectEntryFunction(pyFile)
@@ -82,6 +107,44 @@ func runBuildPython(pattern, outDir, runtime, channel string) {
 			os.Exit(1)
 		}
 		funcName = fn
+	}
+
+	// Determinism gate. runBuild early-returns here before reaching analyze(),
+	// so a Python workflow compiled to a deployable artifact with no
+	// determinism checking at all (cleat#1770). Rust landed in #1784, Java in
+	// #1791; AssemblyScript needed none, because its transform already runs
+	// inside the compile.
+	//
+	// It runs BEFORE the componentize-py lookup for the same reason as the Rust
+	// and Java gates run before their toolchain lookups: a workflow with
+	// determinism errors should be refused for that, not for a missing
+	// compiler it was never going to reach.
+	//
+	// THE THREE OUTCOMES ARE WHY THIS IS NOT `if code != 0`. Until cleat#1801
+	// runVetPython returned 0 for every violating file, so this gate would have
+	// been present, green and inert -- exactly the shape #1770 exists to
+	// remove. It now returns 2 when it could not look, and that is a different
+	// message rather than a different decision: the build is refused either
+	// way, because emitting an unchecked artifact is what this gate exists to
+	// prevent, but the reader is told which of the two happened.
+	//
+	// Refusing on UNMEASURED rather than warning is deliberate. detectEntryFunction
+	// above falls back to a line scan when the SDK is missing, with the comment
+	// "so the build still works without the SDK", and that is right for entry
+	// detection: guessing the entry point wrong fails loudly at deploy.
+	// Guessing "deterministic" wrong fails silently in production, on replay,
+	// possibly much later. Same absence, opposite consequence.
+	switch code := runVetPython(pyFile, false); code {
+	case vetExitViolations:
+		fmt.Fprintf(os.Stderr, "\nError: determinism check failed for %s -- no artifact was emitted.\n", pyFile)
+		fmt.Fprintf(os.Stderr, "Fix the errors above, or run 'cleat vet --lang python %s' to see them again.\n", pyFile)
+		os.Exit(1)
+	case vetExitUnmeasured:
+		fmt.Fprintf(os.Stderr, "\nError: the determinism check could not run for %s -- no artifact was emitted.\n", pyFile)
+		fmt.Fprintf(os.Stderr, "This is a failure of the CHECK, not a finding about your workflow: the file may be fine.\n")
+		fmt.Fprintf(os.Stderr, "See the cause above. Refusing rather than building unchecked, because a workflow that\n")
+		fmt.Fprintf(os.Stderr, "is not deterministic replays incorrectly and says nothing at the time.\n")
+		os.Exit(1)
 	}
 
 	// Check for componentize-py on PATH.
@@ -94,7 +157,33 @@ func runBuildPython(pattern, outDir, runtime, channel string) {
 
 	// Determine output name from the function name.
 	name := strings.ReplaceAll(funcName, "-", "_")
-	wasmOutput := name + ".wasm"
+
+	// Build into a temporary directory, via an ABSOLUTE path.
+	//
+	// This was the bare relative name `name + ".wasm"`, and build_wasm.py
+	// resolves a relative --output against the *entry file's* directory --
+	// not the process CWD, and not -o (python-sdk/scripts/build_wasm.py,
+	// "Resolve output path to absolute"). So every Python build dropped two
+	// artifacts beside the user's source, the component and the
+	// `<name>.wasm.component.wasm` backup it copies alongside, and -o only
+	// ever received a copy of the first one. The lookup below used to carry a
+	// fallback that searched the entry directory when "." came up empty,
+	// which is the shape of a symptom worked around rather than fixed.
+	//
+	// It is not only untidy. In this repo the entry directory is tracked, so
+	// TestPluginCalls_Wasm_Python rewrote two committed fixtures on every
+	// run, and componentize-py's output is not reproducible -- five
+	// consecutive builds of an unchanged source gave five distinct SHA-256s
+	// and sizes from 20398088 to 20482296 bytes -- so the rewrite could never
+	// settle. See IMPROVEMENT-PLAN 3.308 for why those particular bytes were
+	// worth protecting rather than regenerating.
+	buildDir, err := os.MkdirTemp("", "cleat-build-python-")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: could not create a temporary build directory: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.RemoveAll(buildDir)
+	wasmOutput := filepath.Join(buildDir, name+".wasm")
 
 	entry := pyFile + ":" + funcName
 
@@ -113,13 +202,11 @@ func runBuildPython(pattern, outDir, runtime, channel string) {
 		os.Exit(1)
 	}
 
-	// Locate and copy the output .wasm file.
-	srcWasm := filepath.Join(".", wasmOutput)
-	if _, err := os.Stat(srcWasm); os.IsNotExist(err) {
-		// The build script may have written it relative to the entry file's directory.
-		entryDir := filepath.Dir(pyFile)
-		srcWasm = filepath.Join(entryDir, wasmOutput)
-	}
+	// Copy the output .wasm to the requested directory. wasmOutput is
+	// absolute, so the build script wrote exactly there and there is nowhere
+	// else to look -- the two-place search this replaced existed only because
+	// a relative output path could land in either.
+	srcWasm := wasmOutput
 
 	input, err := os.ReadFile(srcWasm)
 	if err != nil {

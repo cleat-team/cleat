@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -16,7 +15,7 @@ import (
 )
 
 // RegisterRoutes registers the job queue HTTP handlers on the given mux.
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("jobqueue: nil mux")
 	}
@@ -46,29 +45,75 @@ type enqueueRequest struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
-// tenantID extracts the tenant UUID from the request context. Returns the
-// zero UUID if no tenant is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
-}
-
 // JobResponse is the JSON shape returned for a single job.
 type JobResponse struct {
-	JobID       uuid.UUID       `json:"job_id"`
-	QueueName   string          `json:"queue_name"`
+	JobID     uuid.UUID `json:"job_id"`
+	QueueName string    `json:"queue_name"`
+
+	// Status is one of seven values, in the order a job can reach them:
+	//
+	//	pending       -> enqueued, not yet claimed
+	//	running       -> claimed by a worker, being processed
+	//	dispatched    -> the workflow it names was STARTED. Outcome unknown.
+	//	completed     -> the workflow finished successfully (ObserveFinalize)
+	//	failed        -> the workflow finished unsuccessfully (ObserveFinalize),
+	//	                 OR StartWorkflow itself errored and no run ever existed
+	//	dead_lettered -> the workflow exhausted its retries and was moved to
+	//	                 the dead-letter queue (ObserveFinalize) -- distinct
+	//	                 from "failed" because it is redrivable and "failed" is
+	//	                 not. cleat#1976; before it this bucketed into "failed"
+	//	                 indistinguishably, when it reached ObserveFinalize at
+	//	                 all (it did not, prior to the same issue).
+	//	abandoned     -> the run is gone and no outcome was ever recorded (the
+	//	                 abandonment sweep, background.go) -- not "completed",
+	//	                 "failed" or "dead_lettered", because none of those is
+	//	                 a claim this plugin can support once the run itself
+	//	                 cannot be asked
+	//
+	// A workflow that was cancelled or force-terminated (an operator action,
+	// not a workflow-authored outcome) also reaches ObserveFinalize as of
+	// cleat#1976 and is recorded here as "failed" -- task_queue has no
+	// separate lifecycle for those two, unlike workflow_instances.
+	//
+	// UNTIL cleat#1715, "dispatched" did not exist: a job whose workflow ran
+	// to completion and one whose workflow failed on its first line both read
+	// "completed" the moment StartWorkflow returned, because that write
+	// happened at DISPATCH, not at the workflow's own end. See RunID's
+	// comment for how that stayed invisible even once run_id existed.
 	Status      string          `json:"status"`
 	Payload     json.RawMessage `json:"payload"`
 	CreatedAt   time.Time       `json:"created_at"`
 	StartedAt   *time.Time      `json:"started_at,omitempty"`
 	CompletedAt *time.Time      `json:"completed_at,omitempty"`
+
+	// RunID names the workflow run this job started, or is empty when it
+	// started none.
+	//
+	// THE COLUMN EXISTED AND NOTHING SELECTED IT. The dispatcher has written
+	// task_queue.run_id since the column was added, and no query read it back
+	// and no response carried it -- so the link from a job to its run existed
+	// in the database and was reachable through no API at all. cleat#1715.
+	//
+	// That is what made a job's status unfalsifiable from outside. Before
+	// this field was exposed, a job whose workflow failed and one whose
+	// workflow did the work both read `"status": "completed"`, because status
+	// was written when the run was STARTED, and the only field that could
+	// have distinguished them was not returned. Exposing it made the claim
+	// checkable; Status's own comment above is the rest of cleat#1715, the
+	// fix the checkable claim turned out to need.
+	//
+	// Empty rather than null-typed: a job with no def_name never dispatches a
+	// workflow, and "no run" is not an error or an unknown. omitempty keeps it
+	// out of those responses instead of showing a null the reader has to
+	// interpret.
+	RunID string `json:"run_id,omitempty"`
 }
 
 // ---- POST /jobqueue/{queue_name}/jobs ----
 
 func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -79,20 +124,14 @@ func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("jobqueue: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
+	// An empty body is a valid enqueue -- a bare job with no def_name,
+	// payload, or input, exactly as develop's pre-cleat#2232 hand-rolled
+	// `if len(body) > 0 { json.Unmarshal(...) }` allowed. Every other
+	// ReadJSONBody call site in this tree wants the opposite (a required
+	// body, empty is 400) -- see plugin.ReadOptionalJSONBody's doc comment.
 	var req enqueueRequest
-	if len(body) > 0 {
-		if err := json.Unmarshal(body, &req); err != nil {
-			p.writeError(w, 400, "invalid JSON payload")
-			return
-		}
+	if !plugin.ReadOptionalJSONBody(w, r, &req) {
+		return
 	}
 
 	jobID := uuid.New()
@@ -102,10 +141,35 @@ func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 		defName = &req.DefName
 	}
 
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+	// payload is NOT NULL DEFAULT '{}' on Postgres and SQL Server (MySQL's
+	// was relaxed to nullable in cleat#1622, but the other two still enforce
+	// it). The DEFAULT only applies when the column is OMITTED from the
+	// INSERT; every write here names it explicitly, so an empty or absent
+	// body -- a legitimate enqueue, per ReadOptionalJSONBody's contract --
+	// reached JSONColumn.Value() with a zero-length Raw, which it turns into
+	// an explicit SQL NULL, not the column default. That is a constraint
+	// violation on Postgres/SQL Server: cleat#2278, a regression from #2261
+	// switching this INSERT from a hand-built NULL-safe form to JSONColumn.
+	//
+	// input has no such column default and no such bug: it has been
+	// nullable on every dialect since it was added (migration v2), and NULL
+	// there means "no input was given", which is a real, distinct value from
+	// "{}" that read handlers and RunID dispatch both depend on -- so it is
+	// deliberately left as JSONColumn{Raw: req.Input} rather than defaulted.
+	payload := req.Payload
+	if len(payload) == 0 {
+		payload = json.RawMessage("{}")
+	}
+
+	// plugin.JSONColumn.Value, not req.Payload/req.Input directly: go-mssqldb
+	// maps a bare []byte arg to VARBINARY, which corrupts the NVARCHAR
+	// payload/input columns on write -- a 200 with an empty body on the next
+	// read, because encoding/json fails part-way through writing the
+	// response. See plugin.JSONColumn. cleat#2206.
+	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO task_queue (tenant_id, queue_name, job_id, payload, def_name, input)
 			VALUES ($1, $2, $3, $4, $5, $6)
-		`, p.dialect), tid, queueName, jobID, req.Payload, defName, req.Input)
+		`, p.dialect), tid, queueName, jobID, plugin.JSONColumn{Raw: payload}, defName, plugin.JSONColumn{Raw: req.Input})
 	if err != nil {
 		p.logger.Error("jobqueue: enqueue", "error", err)
 		p.writeError(w, 500, "failed to enqueue job")
@@ -129,8 +193,8 @@ func (p *Plugin) handleEnqueue(w http.ResponseWriter, r *http.Request) {
 // ---- GET /jobqueue/{queue_name}/jobs ----
 
 func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -151,7 +215,7 @@ func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query := `
-			SELECT job_id, queue_name, status, payload, created_at, started_at, completed_at
+			SELECT job_id, queue_name, status, payload, created_at, started_at, completed_at, run_id
 			FROM task_queue
 			WHERE tenant_id = $1 AND queue_name = $2
 		`
@@ -165,7 +229,11 @@ func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query += " ORDER BY created_at DESC"
-	query += fmt.Sprintf(" LIMIT $%d", argIdx)
+	// plugin.LimitClause, not a literal "LIMIT $N": SQL Server has no LIMIT,
+	// and this endpoint answered every list request with a 500,
+	// "Incorrect syntax near 'LIMIT'" -- the same bug #2191 and #2198 already
+	// fixed at the other list endpoints, missed here. cleat#2206.
+	query += " " + plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, limit)
 
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
@@ -180,25 +248,27 @@ func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var (
 			j           JobResponse
-			payloadRaw  []byte
+			payloadCol  plugin.JSONColumn
 			startedAt   sql.NullTime
 			completedAt sql.NullTime
+			runID       sql.NullString
 		)
-		if err := rows.Scan(
+		if err := plugin.ScanRow(rows,
 			&j.JobID, &j.QueueName, &j.Status,
-			&payloadRaw, &j.CreatedAt,
-			&startedAt, &completedAt,
+			&payloadCol, &j.CreatedAt,
+			&startedAt, &completedAt, &runID,
 		); err != nil {
 			p.logger.Error("jobqueue: scan row", "error", err)
 			continue
 		}
-		j.Payload = json.RawMessage(payloadRaw)
+		j.Payload = payloadCol.Raw
 		if startedAt.Valid {
 			j.StartedAt = &startedAt.Time
 		}
 		if completedAt.Valid {
 			j.CompletedAt = &completedAt.Time
 		}
+		j.RunID = runID.String
 		jobs = append(jobs, j)
 	}
 
@@ -212,8 +282,8 @@ func (p *Plugin) handleListJobs(w http.ResponseWriter, r *http.Request) {
 // ---- GET /jobqueue/{queue_name}/jobs/{job_id} ----
 
 func (p *Plugin) handleGetJob(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -232,17 +302,18 @@ func (p *Plugin) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var j JobResponse
-	var payloadRaw []byte
+	var payloadCol plugin.JSONColumn
 	var startedAt, completedAt sql.NullTime
+	var runID sql.NullString
 
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
-			SELECT job_id, queue_name, status, payload, created_at, started_at, completed_at
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+			SELECT job_id, queue_name, status, payload, created_at, started_at, completed_at, run_id
 			FROM task_queue
 			WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3
-		`, p.dialect), tid, queueName, jobID).Scan(
+		`, p.dialect), tid, queueName, jobID),
 		&j.JobID, &j.QueueName, &j.Status,
-		&payloadRaw, &j.CreatedAt,
-		&startedAt, &completedAt,
+		&payloadCol, &j.CreatedAt,
+		&startedAt, &completedAt, &runID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "job not found")
@@ -254,13 +325,14 @@ func (p *Plugin) handleGetJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	j.Payload = json.RawMessage(payloadRaw)
+	j.Payload = payloadCol.Raw
 	if startedAt.Valid {
 		j.StartedAt = &startedAt.Time
 	}
 	if completedAt.Valid {
 		j.CompletedAt = &completedAt.Time
 	}
+	j.RunID = runID.String
 
 	p.writeJSON(w, 200, j)
 }
@@ -268,8 +340,8 @@ func (p *Plugin) handleGetJob(w http.ResponseWriter, r *http.Request) {
 // ---- DELETE /jobqueue/{queue_name}/jobs/{job_id} ----
 
 func (p *Plugin) handleCancelJob(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}

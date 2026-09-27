@@ -50,10 +50,28 @@ type FuncDecl struct {
 
 // AnalysisResult holds the complete analysis of a workflow package.
 type AnalysisResult struct {
-	TargetPkg   *Package
-	UserPkgs    []*Package
-	Funcs       map[string]*FuncDecl // keyed by fully-qualified name
-	EntryPoints []string             // fully-qualified names of entry points
+	TargetPkg *Package
+	UserPkgs  []*Package
+
+	// ImportedPkgs are the non-stdlib packages the build depends on,
+	// transitively, EXCLUDING TargetPkg.
+	//
+	// It exists for //cleat:require. That directive names host calls a package
+	// makes on the caller's behalf, and collectRequirements read it from
+	// TargetPkg.Files alone -- the workflow's own package. LoadPackages only
+	// retains the packages that matched the build pattern, so a directive in
+	// ANY imported package was silently ignored: cleat/dagrun's, and equally a
+	// user's own helper package in their own module. The failure is silent and
+	// late -- the module builds, deploys, and dies on the first call with "the
+	// HostCalls runtime was not initialized" (cleat#1617).
+	//
+	// Non-stdlib rather than cleat-module-only, deliberately: a user's helper
+	// package is not in cleat's module and has exactly the same problem. A
+	// directive is opt-in, can only add imports that already exist in the
+	// hostFunctions table, and there is no way for it to remove one.
+	ImportedPkgs []*Package
+	Funcs        map[string]*FuncDecl // keyed by fully-qualified name
+	EntryPoints  []string             // fully-qualified names of entry points
 
 	// Module information.
 	ModulePath string // e.g., "github.com/cleat-team/cleat"
@@ -117,6 +135,80 @@ func HostCallsMethod(sel *types.Selection) bool {
 		return false
 	}
 	return IsHostCallsType(sel.Recv())
+}
+
+// SDKDurableHelper reports whether a selection is an SDK helper that makes a
+// durable host call on the caller's behalf, rather than a HostCalls method the
+// workflow wrote itself.
+//
+// Saga.AddStepCall is the first of these (cleat#1131). It takes a StepCall --
+// data -- and builds the DurableCall closures inside the SDK, which is the
+// point: it is the only form that can be PARAMETERISED without tripping E009
+// or the durable-leaf check. But three separate layers decide what a workflow
+// does by looking for HostCalls methods in workflow code, and none of them
+// could see it:
+//
+//	callgraph.hasHostCallsCall  -> not a durable leaf
+//	closure analysis            -> not in the durable closure, so...
+//	wasm.collectHostCallsCalls  -> never scanned, so no cleat_call import
+//
+// The module then built clean, imported nothing, and would have failed at RUN
+// time on its first step -- the cleat#1005 symptom reached from the opposite
+// direction. One predicate, asked by all three, keeps them from disagreeing.
+//
+// Saga.AddStep needs no entry: the caller writes the closure and its
+// h.DurableCall is visible to every layer already.
+func SDKDurableHelper(sel *types.Selection) bool {
+	if sel == nil {
+		return false
+	}
+	t := sel.Recv()
+	if ptr, ok := t.(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj() == nil || named.Obj().Pkg() == nil {
+		return false
+	}
+	if named.Obj().Pkg().Name() != "cleat" {
+		return false
+	}
+	switch named.Obj().Name() + "." + sel.Obj().Name() {
+	case "Saga.AddStepCall":
+		return true
+	// Selector.Select is the SECOND of these and it was not found the way
+	// Saga.AddStepCall was. Saga.AddStepCall was reasoned about while the
+	// feature was being written; this one shipped, and a cleat.Selector timer
+	// fired instantly in every compiled workflow that did not independently
+	// write h.DurableSleep -- for as long as the type has existed.
+	//
+	// Measured on 8ca97d46 through the ports harness, two guest packages that
+	// differ by exactly one line:
+	//
+	//	no h.DurableSleep in the package: generation 1, 87ms, a 1500ms timer
+	//	                                  fired, durable clock advanced 0ms
+	//	one h.DurableSleep in the package: generation 2, the timer waited, the
+	//	                                  durable clock advanced exactly 1500ms
+	//
+	// Same Selector, same deadline. The variable is whether the WORKFLOW's own
+	// source happens to mention the host call the SDK makes on its behalf.
+	//
+	// AddTimer is here for Now() and looks harmless next to Select. It is not:
+	// an unwired Now() returns 0, so every deadline this Selector computes is
+	// measured from the epoch and is already in the past. A Select that sleeps
+	// correctly would then fire immediately anyway, for a second reason, and
+	// fixing only Select would have looked like fixing nothing.
+	case "Selector.Select", "Selector.AddTimer":
+		return true
+	// Saga.Run's own LogKV, which is not the steps' calls: those are closures
+	// the workflow wrote, so every layer already sees them. This is the one
+	// host call Run makes that no workflow wrote, and without it a saga's
+	// progress logging is silently dropped in any workflow that does not log
+	// on its own account.
+	case "Saga.Run":
+		return true
+	}
+	return false
 }
 
 // PluginCallerMethod reports whether the given selection is a method call

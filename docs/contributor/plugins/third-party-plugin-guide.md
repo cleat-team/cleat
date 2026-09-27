@@ -43,6 +43,14 @@ module at runtime when a workflow invokes one of its host functions.
 
 ### WASM sandbox
 
+> **Read this section as design intent, not shipped behaviour** (checked
+> 2026-09-06). The plugin loader is real and is genuinely wazero-based, but
+> `PluginLoader.LoadPlugin` has no non-test callers and `cmd/cleat-worker`
+> constructs no loader — nothing on a workflow's path compiles or instantiates
+> a plugin module today. The sandbox properties below are what the design
+> provides once that is wired; they are not a guarantee you can rely on now.
+> See IMPROVEMENT-PLAN §3.314.
+
 Plugins run inside a **wazero** sandbox with no access to:
 
 - The filesystem (no WASI filesystem access)
@@ -184,9 +192,36 @@ cleat plugin validate --manifest plugin.json
 
 ### Step 6: Install locally for testing
 
+`plugin install` has no local-file mode -- it always installs by *name* from
+an *index* (`--index-url`, default `https://plugins.cleat.dev/index.yaml`),
+downloading the WASM binary over HTTP and verifying its checksum. To test a
+plugin you haven't published yet, serve it from a local index instead:
+
 ```
-cleat plugin install --manifest plugin.json --wasm plugin.wasm
+# Serve the built WASM binary locally.
+python3 -m http.server 8765 &
+
+# Compute its checksum (bare hex, no "sha256:" prefix).
+CHECKSUM=$(sha256sum plugin.wasm | cut -d' ' -f1)
+
+# Write a one-entry local index pointing at it.
+cat > index.yaml <<EOF
+plugins:
+  - name: example/hello-world
+    description: A minimal example third-party plugin
+    author: example-corp
+    versions:
+      - version: "0.1.0"
+        wasm_url: http://localhost:8765/plugin.wasm
+        checksum: "$CHECKSUM"
+EOF
+
+cleat --db "$CLEAT_DATABASE_URL" plugin install --index-url ./index.yaml --yes example/hello-world@0.1.0
 ```
+
+This stores the plugin in the local `plugin_defs` table, the same as an
+install from the real index. Stop the local server (`kill %1`) once you're
+done.
 
 ---
 
@@ -250,8 +285,20 @@ identity, capabilities, and host function API.
 | `signal_workflow` | `false` | Can signal running workflows. Granted by default for community plugins. |
 | `http_routes` | `false` | Can register HTTP routes. Denied by default for community plugins. |
 | `http_middleware` | `false` | Can register HTTP middleware. Denied by default. |
-| `call_plugin` | `[]` | List of plugins this plugin can call via `plugin_call`. An empty list denies all. `["*"]` allows all. |
+| `call_plugin` | `[]` | List of plugins this plugin can call via `plugin_call`. Checked at **deploy** against the operator's limits — see the warning below. |
 | `background_worker` | `false` | Can run background goroutines. Denied by default. |
+
+> **`call_plugin` is not enforced at call time.** This table said "an empty list
+> denies all", and that is not true of a running worker: the declaration is
+> validated when the plugin is deployed, against what the operator permits, and
+> then never consulted again. The runtime check exists in the engine
+> (`PluginCallGuard`) and is unreachable — nothing installs it, and the caller
+> identity it needs is never set. So a deployed plugin can call any plugin,
+> whatever its own `call_plugin` list says.
+>
+> Declare it accurately anyway: the deploy-time check is real, it is what an
+> operator's policy bounds, and it is what a fix will enforce. But do not rely
+> on it to contain a plugin you do not trust. Tracked in IMPROVEMENT-PLAN 3.232.
 
 Be conservative: only declare capabilities you actually need. Each capability
 is a vector for accidental damage if your plugin has a bug.
@@ -351,12 +398,21 @@ Return value: a packed `uint64` where:
 
 ### CallContext
 
-When a workflow calls your host function, the engine injects context via the
-`cleat_get_call_context` import. Your WASM module can call this import to
-retrieve the tenant ID and workflow ID of the calling workflow:
+> **`cleat_get_call_context` does not exist.** This paragraph read "the engine
+> injects context via the `cleat_get_call_context` import" in the present
+> tense. No such import is registered by either runtime, so there is nothing
+> to call and no context is injected. Left as a description of the intended
+> shape rather than deleted, because whether to build it is a design decision,
+> not a documentation error. The import line below would also have named the
+> wrong module: guest imports come from `env`, not `cleat`.
+
+When a workflow calls your host function, the intended design is for the engine
+to inject context via a `cleat_get_call_context` import, which the module would
+call to retrieve the tenant ID and workflow ID of the calling workflow:
 
 ```go
-//go:wasmimport cleat cleat_get_call_context
+// NOT IMPLEMENTED -- no such import is registered.
+//go:wasmimport env cleat_get_call_context
 func cleat_get_call_context(ptr uint32, maxLen uint32) uint64
 ```
 
@@ -458,14 +514,13 @@ This checks:
 
 ### Local install test
 
-Install your plugin locally to verify it works end-to-end:
-
-```
-cleat plugin install --manifest plugin.json --wasm plugin.wasm
-```
+Install your plugin locally to verify it works end-to-end, the same way as
+[Step 6](#step-6-install-locally-for-testing) above: serve it from a local
+index, since `plugin install` always installs by name from an index rather
+than from local `--manifest`/`--wasm` files.
 
 This stores the plugin in the local `plugin_defs` table. You can then write a
-workflow that calls your host function and run it with `cleat workflow run`.
+workflow that calls your host function and run it with `cleat run`.
 
 ### Table-driven unit tests
 
@@ -577,7 +632,11 @@ warning:
 - **`background_worker: true`** -- the plugin runs persistent background
   goroutines
 - **`call_plugin: ["*"]`** -- the plugin can call any other plugin's host
-  functions
+  functions. Note that today *every* value behaves this way at run time, `["*"]`
+  or not, because the call-time check is unreachable -- see the warning under
+  the capability table and IMPROVEMENT-PLAN 3.232. The warning on `["*"]` is
+  still worth heeding: it is what the deploy-time check reads, and what a fix
+  will enforce.
 
 ### Default operator limits
 
@@ -695,14 +754,49 @@ If checksums don't match, installation is refused.
 
 ### WASM imports available to plugins
 
-These imports are provided by the cleat worker at runtime. Your WASM module can
-import and call them. They are stable across cleat releases (within the same
-ABI version).
+> **Status, measured 2026-09-07: six of the seven names in this section are not
+> registered by the engine, and a module importing any of them will not
+> instantiate.** This section said they "are provided by the cleat worker at
+> runtime" and "are stable across cleat releases". Neither was true.
+>
+> | documented as | reality |
+> |---|---|
+> | `cleat_plugin_call` | registered as **`plugin_call`** -- no `cleat_` prefix |
+> | `cleat_plugin_call_streaming` | registered as **`plugin_call_streaming`** |
+> | `cleat_log` | real, but the module is **`env`**, not `cleat` |
+> | `cleat_get_call_context` | **does not exist** |
+> | `cleat_get_tenant_id` | **does not exist** |
+> | `cleat_read_stream` | **does not exist** |
+> | `cleat_close_stream` | **does not exist** |
+>
+> Re-derive rather than trusting the table -- it is a copy of the engine, and
+> this section is what happens to a copy nobody checks:
+>
+>     grep -oE '\.Export\("[^"]+"\)' engine/imports.go |
+>       sed 's/.*Export("//;s/")//' | sort -u
+>
+> The four that do not exist are checked against **both** registrations, not
+> just one: `engine/imports.go` and `engine/wasmtime_hostfuncs*.go` each return
+> zero for all four.
+>
+> **The names below are corrected where a real one exists and marked where it
+> does not.** They are not silently repaired: fixing `cleat_plugin_call` while
+> leaving `cleat_get_call_context` beside it would make a fictional import look
+> verified, which is worse than an obviously wrong one.
+>
+> **Why it drifted this far is the useful part.** `PluginLoader.LoadPlugin` has
+> no non-test callers (IMPROVEMENT-PLAN 3.315), so no WASM plugin has ever been
+> instantiated outside a test. Nothing binds these names, so nothing failed
+> when they stopped being right -- and there was never a moment at which they
+> were checked. Treat this whole section as a design sketch for an unwired
+> subsystem, not as an interface to build against.
 
-#### `cleat_plugin_call`
+These imports are intended to be provided by the cleat worker at runtime.
+
+#### `plugin_call`
 
 ```
-cleat_plugin_call(name_ptr, name_len, func_ptr, func_len, input_ptr, input_len, response_ptr, response_max) -> i64
+plugin_call(name_ptr, name_len, func_ptr, func_len, input_ptr, input_len, response_ptr, response_max) -> i64
 ```
 
 Call a host function on a plugin. The name is the target plugin name, and
@@ -710,20 +804,24 @@ Call a host function on a plugin. The name is the target plugin name, and
 low 32 bits and response length in the high 32 bits.
 
 ```go
-//go:wasmimport cleat cleat_plugin_call
-func cleat_plugin_call(namePtr, nameLen, funcPtr, funcLen, inputPtr, inputLen, respPtr, respMax uint32) uint64
+//go:wasmimport env plugin_call
+func plugin_call(namePtr, nameLen, funcPtr, funcLen, inputPtr, inputLen, respPtr, respMax uint32) uint64
 ```
 
-#### `cleat_plugin_call_streaming`
+#### `plugin_call_streaming`
 
 ```
-cleat_plugin_call_streaming(name_ptr, name_len, func_ptr, func_len, input_ptr, input_len, stream_id_ptr) -> i64
+plugin_call_streaming(name_ptr, name_len, func_ptr, func_len, input_ptr, input_len, stream_id_ptr) -> i64
 ```
 
 Start a streaming call to a plugin host function. Returns a stream ID (in the
 high 32 bits) on success.
 
-#### `cleat_read_stream`
+#### `cleat_read_stream` — DOES NOT EXIST
+
+> Not registered by `engine/imports.go` or `engine/wasmtime_hostfuncs*.go`.
+> A module importing this name will not instantiate. Described here as a
+> design sketch; see the status note at the head of this section.
 
 ```
 cleat_read_stream(stream_id, buf_ptr, buf_max) -> i64
@@ -732,7 +830,11 @@ cleat_read_stream(stream_id, buf_ptr, buf_max) -> i64
 Read the next chunk from a stream. Returns the number of bytes written and
 whether the stream is complete.
 
-#### `cleat_close_stream`
+#### `cleat_close_stream` — DOES NOT EXIST
+
+> Not registered by `engine/imports.go` or `engine/wasmtime_hostfuncs*.go`.
+> A module importing this name will not instantiate. Described here as a
+> design sketch; see the status note at the head of this section.
 
 ```
 cleat_close_stream(stream_id) -> i64
@@ -750,11 +852,15 @@ Log a message through the cleat logging system. Level is 0 (debug), 1 (info),
 2 (warn), or 3 (error).
 
 ```go
-//go:wasmimport cleat cleat_log
+//go:wasmimport env cleat_log
 func cleat_log(level uint32, msgPtr, msgLen uint32)
 ```
 
-#### `cleat_get_tenant_id`
+#### `cleat_get_tenant_id` — DOES NOT EXIST
+
+> Not registered by `engine/imports.go` or `engine/wasmtime_hostfuncs*.go`.
+> A module importing this name will not instantiate. Described here as a
+> design sketch; see the status note at the head of this section.
 
 ```
 cleat_get_tenant_id(buf_ptr, buf_max) -> i64
@@ -763,7 +869,11 @@ cleat_get_tenant_id(buf_ptr, buf_max) -> i64
 Get the tenant ID of the calling workflow. Writes the UUID string to the
 buffer. Returns (length << 32) | error_code.
 
-#### `cleat_get_call_context`
+#### `cleat_get_call_context` — DOES NOT EXIST
+
+> Not registered by `engine/imports.go` or `engine/wasmtime_hostfuncs*.go`.
+> A module importing this name will not instantiate. Described here as a
+> design sketch; see the status note at the head of this section.
 
 ```
 cleat_get_call_context(buf_ptr, buf_max) -> i64
@@ -774,17 +884,26 @@ Get the full call context (tenant ID and workflow ID) as JSON. Returns
 
 ### ABI versioning
 
-Your WASM module exports `cleat_abi_version` to declare which ABI version it
-targets:
+> **The worker does not read this export.** `grep -rn '"cleat_abi_version"'`
+> over the Go tree returns nothing, so a module exporting it is not checked
+> and a module omitting it is not rejected. The ABI version cleat actually
+> uses travels in the `cleat.metadata` custom section, injected at build time
+> (`wasm/metadata.go`, `cmd/cleat/main.go:452`) and stored in
+> `workflow_defs.abi_version` -- not through a guest export. Corrected
+> 2026-09-07; the paragraph below described a handshake that never happens.
+
+The intended design is for your WASM module to export `cleat_abi_version` to
+declare which ABI version it targets:
 
 ```go
+// NOT READ BY THE WORKER -- see the note above.
 //export cleat_abi_version
 func cleat_abi_version() int32 {
     return 1
 }
 ```
 
-The worker checks this version before loading:
+The intended check before loading was:
 
 | ABI version | Minimum cleat version | Notes |
 |-------------|----------------------|-------|

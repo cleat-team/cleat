@@ -275,7 +275,6 @@ export class MockHostCalls {
   /** Query state set via setQueryState(). */
   queryState: Map<string, string> = new Map();
 
-  /** Durable workflow state set via setState/getState. */
   workflowState: Map<string, string> = new Map();
 
   /** Defer counter for generating defer IDs. */
@@ -992,94 +991,22 @@ export class MockHostCalls {
   }
 
   // ────────────────────────────────────────────
-  // 35. setState
-  // ────────────────────────────────────────────
 
-  /**
-   * Set a key-value pair in workflow state.
-   */
-  setState(key: string, value: string): string | null {
-    this.workflowState.set(this.scopedKey(key), value);
-    return null;
-  }
 
   // ────────────────────────────────────────────
-  // 36. getState
-  // ────────────────────────────────────────────
 
-  /**
-   * Get a value from workflow state by key.
-   */
-  getState(key: string): string | null {
-    let scoped: string = this.scopedKey(key);
-    if (this.workflowState.has(scoped)) {
-      return this.workflowState.get(scoped);
-    }
-    return null;
-  }
 
   // ────────────────────────────────────────────
-  // 37. deleteState
-  // ────────────────────────────────────────────
 
-  /**
-   * Delete a key from workflow state.
-   */
-  deleteState(key: string): string | null {
-    let scoped: string = this.scopedKey(key);
-    if (this.workflowState.has(scoped)) {
-      this.workflowState.delete(scoped);
-    }
-    return null;
-  }
 
   // ────────────────────────────────────────────
-  // 38. incrState
-  // ────────────────────────────────────────────
 
-  /**
-   * Atomically increment a numeric state value.
-   */
-  incrState(key: string, delta: i64): i64 {
-    let scoped: string = this.scopedKey(key);
-    let current: i64 = 0;
-    if (this.workflowState.has(scoped)) {
-      current = <i64>I64.parseInt(this.workflowState.get(scoped));
-    }
-    current += delta;
-    this.workflowState.set(scoped, current.toString());
-    return current;
-  }
 
   // ────────────────────────────────────────────
-  // 39. hasState
-  // ────────────────────────────────────────────
 
-  /**
-   * Check if a key exists in workflow state.
-   */
-  hasState(key: string): bool {
-    return this.workflowState.has(this.scopedKey(key));
-  }
 
   // ────────────────────────────────────────────
-  // 40. listState
-  // ────────────────────────────────────────────
 
-  /**
-   * List state keys matching a prefix.
-   */
-  listState(prefix: string): string[] {
-    let scopedPrefix: string = this.scopedKey(prefix);
-    let result: string[] = [];
-    let keys: string[] = this.workflowState.keys();
-    for (let i: i32 = 0; i < keys.length; i++) {
-      if (keys[i].startsWith(scopedPrefix)) {
-        result.push(keys[i]);
-      }
-    }
-    return result;
-  }
 
   // ────────────────────────────────────────────
   // 41. awaitAllChildren
@@ -1561,7 +1488,6 @@ export class TestEnv {
    * Assert that the workflow state key has the given value.
    */
   assertState(key: string, value: string): bool {
-    let stateVal: string | null = this.mock.getState(key);
     if (stateVal === null) {
       return false;
     }

@@ -8,6 +8,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"io"
 	"log/slog"
 	"net/http"
@@ -451,7 +452,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 	return p, handler, store
 }
 
@@ -963,7 +964,7 @@ func TestKafkaConfigTenantIsolation(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	// Tenant A creates a config.
 	body := `{"name":"tenant-a-config","brokers":"a:9092","topic":"a-topic"}`
@@ -1067,17 +1068,12 @@ func TestKafkaMigrations(t *testing.T) {
 	if len(migrations) == 0 {
 		t.Fatal("expected at least one migration")
 	}
-	for i, m := range migrations {
-		if m.Version == 0 {
-			t.Errorf("migration %d: version must be non-zero", i)
-		}
-		if m.Up == "" {
-			t.Errorf("migration %d: Up SQL is empty", i)
-		}
-		if m.Down == "" {
-			t.Errorf("migration %d: Down SQL is empty", i)
-		}
-	}
+	// One shared predicate for what a migration must do, rather than a copy
+	// per plugin. Thirteen plugins carried their own and they had already
+	// drifted -- three checked Up and not Down. A TenantScoped migration has
+	// no SQL in either direction by design, so the old wording rejected it by
+	// construction. cleat#1278.
+	plugintest.AssertMigrationsDoSomething(t, migrations)
 }
 
 // ===========================================================================
@@ -1254,8 +1250,11 @@ func TestKafkaConsumeViaRestProxy(t *testing.T) {
 	if records[0].Topic != "test-topic" {
 		t.Errorf("expected topic 'test-topic', got %q", records[0].Topic)
 	}
-	if records[0].Value != "hello" {
-		t.Errorf("expected value 'hello', got %v", records[0].Value)
+	// Compared as BYTES: Value is raw JSON since cleat#1641, so the quotes are
+	// part of it. Decoding it here to compare a Go string would reintroduce
+	// exactly the narrowing the raw type exists to prevent.
+	if string(records[0].Value) != `"hello"` {
+		t.Errorf("expected value `\"hello\"`, got %s", records[0].Value)
 	}
 }
 
@@ -1383,8 +1382,8 @@ func TestKafkaPublishRecord(t *testing.T) {
 
 	record := kafkaRecord{
 		Topic:     "test-topic",
-		Key:       "my-key",
-		Value:     "hello",
+		Key:       json.RawMessage(`"my-key"`),
+		Value:     json.RawMessage(`"hello"`),
 		Partition: 0,
 		Offset:    1,
 	}

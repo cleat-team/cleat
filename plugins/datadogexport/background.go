@@ -91,10 +91,12 @@ func (p *Plugin) Run(ctx context.Context) error {
 // ---- types for metric export ----
 
 // ddConfigRow represents an enabled Datadog configuration from the database.
+// It carries no API key -- cleat#1992 moved that into tenant secrets, keyed
+// per-config by DatadogAPIKeySecretName(ID) (routes.go); exportForConfig
+// fetches it separately, once it has narrowed to this row's own tenant.
 type ddConfigRow struct {
 	ID            uuid.UUID
 	TenantID      uuid.UUID
-	APIKey        plugin.Secret
 	Site          string
 	MetricsPrefix string
 }
@@ -178,8 +180,30 @@ func (p *Plugin) isLeader(ctx context.Context) bool {
 // metrics for each one. Errors for individual configs are logged but do not
 // prevent other configs from being processed.
 func (p *Plugin) exportMetrics(ctx context.Context) error {
-	rows, err := p.db.Query(ctx, `
-			SELECT id, tenant_id, api_key, site, metrics_prefix
+	// A NAMED cross-tenant read. cleat#1278.
+	//
+	// This query's whole job is to discover WHICH tenants have an export
+	// configured, so it cannot be scoped to one -- there is no tenant to scope
+	// it to until after it returns. Once dd_config carries a row-level policy
+	// (migrations.go v3) an unnamed statement here is refused with
+	// "cleat.tenant_id is not set", so adding the policy and leaving this bare
+	// are the same change.
+	//
+	// The scope ends here deliberately: exportForConfig below re-narrows to one
+	// tenant with plugin.ForTenant rather than inheriting this bypass.
+	// A SEPARATE VARIABLE, NOT `ctx =`. Reassigning would carry the bypass into
+	// exportForConfig below, where plugin.ForTenant would be silently ignored --
+	// beginTenantTx tests CrossTenant first, so a bypass in scope wins. That is
+	// the hazard ForTenant's own doc comment names, and the first draft of this
+	// function had it: `ctx =`, then `exportForConfig(ctx, cfg)`, with a comment
+	// in exportForConfig claiming it received the unmarked parent. It did not.
+	//
+	// The narrow scope is the point: the bypass covers the discovery query and
+	// nothing else.
+	discoverCtx := plugin.AcrossAllTenants(ctx, "datadog-export: discovering which tenants have an export configured")
+
+	rows, err := p.db.Query(discoverCtx, `
+			SELECT id, tenant_id, site, metrics_prefix
 			FROM dd_config
 			WHERE enabled = true
 		`)
@@ -191,7 +215,7 @@ func (p *Plugin) exportMetrics(ctx context.Context) error {
 	var configs []ddConfigRow
 	for rows.Next() {
 		var cfg ddConfigRow
-		if err := rows.Scan(&cfg.ID, &cfg.TenantID, &cfg.APIKey, &cfg.Site, &cfg.MetricsPrefix); err != nil {
+		if err := plugin.ScanRow(rows, &cfg.ID, &cfg.TenantID, &cfg.Site, &cfg.MetricsPrefix); err != nil {
 			p.logger.Error("datadog-export: scan config row", "error", err)
 			continue
 		}
@@ -202,7 +226,13 @@ func (p *Plugin) exportMetrics(ctx context.Context) error {
 	}
 
 	for _, cfg := range configs {
-		if err := p.exportForConfig(ctx, cfg); err != nil {
+		// ONE TRACE PER EXPORT. This sweep has no caller to inherit from, and an
+		// export is a real unit of work -- it queries a tenant's workflow
+		// statistics and POSTs them -- rather than a poll that usually finds
+		// nothing. At one per enabled config per 60s that is a legible volume,
+		// which is the test the kafka-connect consumer fails. cleat#1611.
+		ectx := plugin.WithNewTrace(ctx)
+		if err := p.exportForConfig(ectx, cfg); err != nil {
 			p.logger.Error("datadog-export: config export failed",
 				"config_id", cfg.ID, "tenant", cfg.TenantID, "error", err)
 		}
@@ -214,6 +244,42 @@ func (p *Plugin) exportMetrics(ctx context.Context) error {
 // exportForConfig queries workflow statistics for a single tenant and sends
 // them as gauge metrics to the Datadog Metrics API.
 func (p *Plugin) exportForConfig(ctx context.Context, cfg ddConfigRow) error {
+	// NARROWED TO ONE TENANT, not inheriting the caller's bypass. cleat#1278.
+	//
+	// cfg.TenantID is in hand, so this is the ForTenant case rather than the
+	// AcrossAllTenants one: the statement below reads ONE tenant's rows and
+	// should be scoped to say so.
+	//
+	// IT IS NOT COSMETIC. workflow_instances is a CORE table whose policy is
+	// `tenant_id = cleat.assert_tenant_set()`, which RAISES when no tenant is
+	// set -- so this read survives today only because the worker's plugin pool
+	// connects as an owner or superuser, which PostgreSQL waves past a policy.
+	// Point that pool at a non-superuser and the query fails; exportMetrics
+	// logs the error and continues, so the symptom is no metrics, which is
+	// indistinguishable from no enabled configs. Same shape as cleat#958, where
+	// an empty audit table read as a quiet system.
+	//
+	// The WHERE tenant_id = $1 below stays. It is the same value by a second
+	// route, and a scoped connection plus an explicit predicate disagree only
+	// if something is wrong.
+	//
+	// A BYPASS ALREADY IN SCOPE WOULD WIN AND THIS WOULD BE INERT -- see
+	// plugin.ForTenant. The caller marks cross-tenant for its discovery query;
+	// it passes the UNMARKED parent ctx here for exactly that reason.
+	ctx = plugin.ForTenant(ctx, cfg.TenantID)
+
+	// The API key lives in tenant secrets now (cleat#1992), not on this row.
+	// Secrets.ForTenant, not the request-path Get: this sweep has no request
+	// to inherit a tenant from, and cfg.TenantID is the same tenant this
+	// function just scoped its SQL to via plugin.ForTenant above -- see
+	// plugin.Secrets.ForTenant's own doc comment for why a background loop
+	// reaches for this rather than Get. Declared in
+	// plugin/a_secrets_for_tenant_is_declared_test.go's secretsForTenantLedger.
+	apiKey, err := p.secrets.ForTenant(cfg.TenantID.String()).Get(ctx, DatadogAPIKeySecretName(cfg.ID))
+	if err != nil {
+		return fmt.Errorf("get api key: %w", err)
+	}
+
 	// Query workflow counts by status for this tenant.
 	statusRows, err := p.db.Query(ctx, plugin.Rebind(`
 			SELECT status, COUNT(*) AS count
@@ -279,7 +345,8 @@ func (p *Plugin) exportForConfig(ctx context.Context, cfg ddConfigRow) error {
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("DD-API-KEY", cfg.APIKey.Reveal())
+	plugin.SetTraceparentFromContext(ctx, req)
+	req.Header.Set("DD-API-KEY", apiKey)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := p.httpClient.Do(req)

@@ -255,7 +255,15 @@ func TestAdminForceFail_ResolvesAndAudits(t *testing.T) {
 // failed. Leaving the old error on a row now marked done would mean a `done`
 // workflow carrying a failure message, which nothing else in the engine can
 // create and every reader of those columns would have to know to ignore.
-func TestAdminForceComplete_ClearsAnEarlierFailure(t *testing.T) {
+// TestAdminForceComplete_RefusesAnAlreadyFailedWorkflow used to be
+// TestAdminForceComplete_ClearsAnEarlierFailure and asserted the opposite: that
+// force-completing an already-failed workflow was a supported "repair" an
+// operator could make. cleat#1975 (D3, "settled is final") retires that --
+// 'failed' is a settled status, and force-complete now refuses to write over
+// it like every other admin op does. This pins the new behaviour rather than
+// just deleting the old test, because it is exactly the shape D3 exists to
+// close: an admin op racing or retrying against a row that already settled.
+func TestAdminForceComplete_RefusesAnAlreadyFailedWorkflow(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, store WorkflowStore) {
 		ctx := context.Background()
 		wfID, _ := startClaimedWorkflow(t, ctx, store, "acf")
@@ -270,25 +278,30 @@ func TestAdminForceComplete_ClearsAnEarlierFailure(t *testing.T) {
 			t.Fatalf("fixture: the workflow was not left with an error message")
 		}
 
-		if err := store.AdminForceComplete(ctx, wfID, failed.Generation,
-			`{"repaired":true}`, adminTestOperator); err != nil {
-			t.Fatalf("AdminForceComplete on a failed workflow: %v", err)
+		err := store.AdminForceComplete(ctx, wfID, failed.Generation,
+			`{"repaired":true}`, adminTestOperator)
+		if !errors.Is(err, ErrAdminStateConflict) {
+			t.Fatalf("AdminForceComplete on a failed (settled) workflow: err = %v, want ErrAdminStateConflict", err)
 		}
 
 		after := mustGetWorkflow(t, ctx, store, wfID)
-		if after.Status != "done" {
-			t.Errorf("status = %q, want done", after.Status)
+		if after.Status != "failed" {
+			t.Errorf("status = %q, want failed (unchanged)", after.Status)
 		}
-		if after.Error != "" || after.ErrorCode != "" || after.ErrorOp != "" {
-			t.Errorf("a completed workflow still carries its old failure: error_msg=%q error_code=%q error_op=%q",
-				after.Error, after.ErrorCode, after.ErrorOp)
+		if after.Error != failed.Error || after.ErrorCode != failed.ErrorCode {
+			t.Errorf("the refused force-complete altered the row: error_msg=%q error_code=%q, want %q %q",
+				after.Error, after.ErrorCode, failed.Error, failed.ErrorCode)
 		}
-		// Both actions are on the record; the audit trail is append-only.
-		if n := countAdminEvents(t, ctx, store, wfID); n != 2 {
-			t.Errorf("%d admin_action events, want 2 (the force-fail and the force-complete)", n)
+		if after.Generation != failed.Generation {
+			t.Errorf("generation = %d, want unchanged at %d", after.Generation, failed.Generation)
+		}
+		// Only the force-fail is on the record; the refused force-complete
+		// must not have appended a second admin_action event.
+		if n := countAdminEvents(t, ctx, store, wfID); n != 1 {
+			t.Errorf("%d admin_action events, want 1 (the force-fail only)", n)
 		}
 		if err := store.VerifyWorkflowEvents(ctx, wfID); err != nil {
-			t.Errorf("VerifyWorkflowEvents after two admin actions: %v", err)
+			t.Errorf("VerifyWorkflowEvents after the refused force-complete: %v", err)
 		}
 	})
 }

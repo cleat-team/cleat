@@ -61,6 +61,7 @@ func TestASTransform(t *testing.T) {
 	// ---- Full compilation pipeline via npx asc ----
 	if hasNpx {
 		t.Run("compiles_to_wasm", testASCompilesToWasm)
+		t.Run("compiles_when_the_user_imports_the_same_symbols", testASCompilesWhenTheUserImportsTheSameSymbols)
 		// These two are the ones that exercise the static-analysis layer
 		// against a real parse tree. detects_math_random above hands the
 		// validator a hand-built AST in the shape the walker assumed, so it
@@ -142,6 +143,36 @@ check("detect_cleatEntry", detected === true, detected);
 const info = t._extractEntryInfo(entryStmt);
 check("extract_funcName", info.funcName === "myWorkflow", info.funcName);
 check("extract_innerName", info.innerName === "__durable_inner_myWorkflow", info.innerName);
+
+// Test 2b: a REAL AssemblyScript type node carries its name at
+// name.identifier.text, NOT at .text.
+//
+// The mock above uses { type: { text: "string" } }, which is the shape the
+// transform's own reader ASSUMED -- so it could never disagree with it. That
+// is why cleat#1067 survived: a multi-parameter entry point silently bound
+// every parameter as a string and failed to compile for any other type, and
+// this test passed throughout, because its fixture was built to satisfy the
+// implementation rather than to model the parser.
+//
+// The non-string type is load-bearing. With HostCalls + a string the buggy
+// reader produces the right answer by accident, so only a non-string
+// parameter can tell the two readers apart.
+const realShapeStmt = {
+  name: { text: "multiParamWorkflow" },
+  signature: {
+    parameters: [
+      { name: { text: "h" },     type: { name: { identifier: { text: "HostCalls" } } } },
+      { name: { text: "note" },  type: { name: { identifier: { text: "string" } } } },
+      { name: { text: "count" }, type: { name: { identifier: { text: "i32" } } } }
+    ],
+    returnType: { text: "string" }
+  },
+  decorators: [ { name: { text: "cleatEntry" } } ]
+};
+const realInfo = t._extractEntryInfo(realShapeStmt);
+check("realshape_param_count", realInfo.paramTypes.length === 2, realInfo.paramTypes.length);
+check("realshape_string_param", realInfo.paramTypes[0] === "string", realInfo.paramTypes[0]);
+check("realshape_i32_param", realInfo.paramTypes[1] === "i32", realInfo.paramTypes[1]);
 check("extract_paramNames_len", info.paramNames.length === 1, info.paramNames.length);
 check("extract_paramNames_0", info.paramNames[0] === "input", info.paramNames[0]);
 check("extract_retTypeStr", info.retTypeStr === "string", info.retTypeStr);
@@ -606,6 +637,53 @@ func compileASFixture(t *testing.T, indexTS string, env ...string) asFixture {
 	t.Logf("asc output:\n%s", string(out))
 
 	return asFixture{dir: tmpDir, wasmPath: wasmPath, out: string(out), err: err}
+}
+
+// testASCompilesWhenTheUserImportsTheSameSymbols is the case that decides
+// whether the transform may always inject its own @cleat/sdk import.
+//
+// It always does today, and by accident: _hasCleatSdkImport probes four
+// property paths for an import's module name and matched none of them, so it
+// returned false even for a source whose first line is
+// `import { HostCalls, cleatEntry } from "@cleat/sdk"` -- measured 2026-09-02
+// with a probe on the real AS parser. The generated wrapper's references to
+// Memory, SUSPEND_SENTINEL, isWorkflowSuspended, resetWorkflowSuspended and
+// runDeferred resolve BECAUSE the detector is broken.
+//
+// So the question is not "should detection be fixed" -- fixing it breaks every
+// wrapper whose author did not happen to import all five -- but "is always
+// injecting safe when the author imported them too". This is that test.
+func testASCompilesWhenTheUserImportsTheSameSymbols(t *testing.T) {
+	fx := compileASFixture(t, `
+import {
+  HostCalls,
+  cleatEntry,
+  Memory,
+  SUSPEND_SENTINEL,
+  isWorkflowSuspended,
+  resetWorkflowSuspended,
+  runDeferred,
+} from "@cleat/sdk";
+
+@cleatEntry()
+function myWorkflow(h: HostCalls, input: string): string {
+  if (isWorkflowSuspended()) {
+    return "";
+  }
+  return "{\"status\":\"ok\"}";
+}
+`)
+	if fx.err != nil {
+		if _, statErr := os.Stat(fx.wasmPath); os.IsNotExist(statErr) {
+			t.Fatalf("a workflow that imports the same symbols the transform "+
+				"injects failed to compile: %v\n\n%s\n\n"+
+				"If this is a duplicate-identifier error, the transform cannot "+
+				"inject unconditionally and _hasCleatSdkImport has to be made to "+
+				"work instead -- which is the harder job, because it then has to "+
+				"inject only the names the author left out.", fx.err, fx.out)
+		}
+	}
+	t.Logf("compiled with the author importing all five injected symbols")
 }
 
 func testASCompilesToWasm(t *testing.T) {

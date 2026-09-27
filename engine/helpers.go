@@ -2,9 +2,9 @@ package engine
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 )
 
 // truncateWithHash truncates s to maxLen bytes, appending "... [sha256=<hash>]"
@@ -102,10 +102,31 @@ func packAcquireLockResult(acquired bool, errCode uint32) int64 {
 	return int64(uint64(a)<<8 | uint64(errCode))
 }
 
-// isDefinitelyNonRetryable checks if an error should not be retried.
-// Returns true if the error's Retryable() method returns false, or if
-// the error message matches any of the non-retryable patterns.
-func isDefinitelyNonRetryable(err error, nonRetryablePatterns []string) bool {
+// isDefinitelyNonRetryable reports whether an error must not be retried.
+//
+// Two channels, in order: the error's own Retryable() answer, then the
+// workflow's declared non-retryable CODES matched against the code a called
+// service gave for the failure.
+//
+// THE SECOND CHANNEL USED TO BE A SUBSTRING MATCH ON THE MESSAGE, and that was
+// a live defect rather than a stylistic one. The callee's raw response body
+// became the caller's error message, so the callee's PROSE decided the
+// caller's retry behaviour: rewording "insufficient funds" to "balance too
+// low" flipped a caller from fail-fast to retry on a non-idempotent operation,
+// across a team boundary, with nothing declaring the coupling.
+//
+// The intent was always a code. The comment on this feature in durablecalls.go
+// describes a workflow saying "do not retry INSUFFICIENT_FUNDS" -- spelled
+// like a code, matched like prose. Now it is matched like a code: EXACTLY, and
+// only against what the service itself declared the failure to be.
+//
+// An error with no ServiceError in its chain matches no pattern at all. That
+// is the intended outcome, not a gap: a plain HTTP failure, a transport error
+// or a third-party service that does not speak the contract is classified by
+// the status rules the forwarder already applies -- 4xx permanent except 408
+// and 429 -- which is a sounder answer than searching an arbitrary body for a
+// caller's chosen word.
+func isDefinitelyNonRetryable(err error, nonRetryableCodes []string) bool {
 	// Check if error self-reports as non-retryable via Retryable interface.
 	var re RetryableError
 	if errors.As(err, &re) {
@@ -114,17 +135,67 @@ func isDefinitelyNonRetryable(err error, nonRetryablePatterns []string) bool {
 		}
 	}
 
-	// Check non-retryable error substrings.
-	if len(nonRetryablePatterns) > 0 {
-		errMsg := err.Error()
-		for _, p := range nonRetryablePatterns {
-			if strings.Contains(errMsg, p) {
-				return true
-			}
+	if len(nonRetryableCodes) == 0 {
+		return false
+	}
+	var se *ServiceError
+	if !errors.As(err, &se) || se.Code == "" {
+		return false
+	}
+	for _, c := range nonRetryableCodes {
+		if c == se.Code {
+			return true
 		}
 	}
-
 	return false
+}
+
+// parseSignalNames turns the guest's signal-name argument into a list of names.
+//
+// A guest sends a JSON array -- `["a","b"]` -- which is what the recorded
+// await_signals event carries and what the port's event_history dump shows.
+// splitSignalNames splits on commas and nothing else, so on that input it
+// returns `["a` and `"b]`, neither of which is a signal name, and every store
+// lookup misses.
+//
+// THE TWO AWAIT PATHS PARSED THIS DIFFERENTLY UNTIL cleat#975, and the
+// asymmetry was invisible because it produced a correct result. The replay arm
+// tried JSON with splitSignalNames as a fallback; the fresh path used
+// splitSignalNames alone, so a delivery already sitting in the store when a
+// fresh await ran was never matched. The await suspended, and the SAME delivery
+// was found by the replay arm on the next segment -- so the workflow did get
+// the right signal, and no failure was reported anywhere.
+//
+// THE NEXT SEGMENT IS THE TIMEOUT DEADLINE, THOUGH, not a round trip. A
+// suspended workflow is woken by `next_wake_at`, and exactly one thing moves it
+// forward for a signal:
+//
+//	grep -rn 'next_wake_at = now()' engine/store_signals.go   # the delivery
+//	grep -rn next_wake_at --include='*.go' cmd/cleat-worker/  # no sweep, no rows
+//
+// The delivery is what fires that update, and in this scenario it had already
+// happened before the await suspended. So nothing moved the deadline again and
+// the workflow slept the full timeout -- 60s on the port's await -- before
+// picking up a signal that was in the store when it started.
+//
+// The sharper cost is the one that hid it. The delivery-found branch of the
+// fresh path could not execute with the input a guest actually sends, so every
+// test that believed it covered "a signal already waiting when the await runs"
+// was exercising the replay arm instead, and passing. A branch the tests
+// believe they exercise and do not, whose only symptom is latency nobody
+// attributes to it.
+//
+// One function rather than the same two lines twice, so agreement between the
+// paths is structural instead of a coincidence that has already failed once.
+func parseSignalNames(names string) []string {
+	var parsed []string
+	if err := json.Unmarshal([]byte(names), &parsed); err == nil {
+		return parsed
+	}
+	// Not JSON: a bare or comma-separated list. Kept as a fallback because
+	// callers inside the engine pass that form, and because it is what the
+	// replay arm already tolerated.
+	return splitSignalNames(names)
 }
 
 func splitSignalNames(names string) []string {

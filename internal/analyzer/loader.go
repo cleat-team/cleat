@@ -113,6 +113,44 @@ func LoadPackages(pattern string, fset *token.FileSet) (*AnalysisResult, error) 
 		}
 	}
 
+	// Retain the dependency packages for //cleat:require (see
+	// AnalysisResult.ImportedPkgs). The loop above walks `pkgs`, which is only
+	// what matched the build pattern; the dependency graph is reached with
+	// packages.Visit, which is already used above for error collection.
+	//
+	// Cheap by construction: NeedSyntax|NeedDeps means these ASTs are parsed
+	// whether or not anything looks at them, so this keeps pointers rather
+	// than doing work.
+	seen := map[string]bool{}
+	for _, pkg := range pkgs {
+		seen[pkg.PkgPath] = true
+	}
+	packages.Visit(pkgs, func(pkg *packages.Package) bool {
+		if pkg.Types == nil || seen[pkg.PkgPath] {
+			return true
+		}
+		// A standard-library package has no module. Skipping it is not a
+		// correctness requirement -- stdlib carries no cleat directives -- but
+		// it keeps the set to what a reader would expect.
+		if pkg.Module == nil {
+			return true
+		}
+		seen[pkg.PkgPath] = true
+		result.ImportedPkgs = append(result.ImportedPkgs, &Package{
+			Name:  pkg.Name,
+			Path:  pkg.PkgPath,
+			Dir:   pkgDir(pkg),
+			Files: pkg.Syntax,
+			Fset:  fset,
+			Types: pkg.Types,
+			Info:  pkg.TypesInfo,
+		})
+		return true
+	}, nil)
+	sort.Slice(result.ImportedPkgs, func(i, j int) bool {
+		return result.ImportedPkgs[i].Path < result.ImportedPkgs[j].Path
+	})
+
 	// Detect entry points.
 	for _, fd := range result.Funcs {
 		if IsEntryPoint(fd) {
@@ -161,7 +199,7 @@ func newFuncDecl(fn *ast.FuncDecl, pkg *Package) *FuncDecl {
 }
 
 // IsEntryPoint checks if a function is a workflow entry point.
-// It must be exported, not a method, and have cleat.HostCalls as
+// It must be exported, not a method, not generic, and have cleat.HostCalls as
 // its first parameter.
 func IsEntryPoint(fd *FuncDecl) bool {
 	if !fd.IsExported {
@@ -171,6 +209,28 @@ func IsEntryPoint(fd *FuncDecl) bool {
 		return false
 	}
 	if fd.Type == nil {
+		return false
+	}
+	// A GENERIC function cannot be an entry point, and until cleat#1313 this
+	// was not checked. An entry point is exported into the WASM module with a
+	// concrete signature -- wasm/exports.go declares `var __r string` and emits
+	// `return []byte(__r)` -- so there is nothing to instantiate T with and no
+	// single function to export.
+	//
+	// testdata/generics is the repository's own generics fixture and did not
+	// survive `cleat build` because of this: three functions were classified as
+	// entry points where the fixture intends one, and its own doc comments say
+	// so ("Process is a generic workflow helper ... in the durable closure").
+	//
+	// Note the two were caught differently, and only one was caught at all.
+	// Process returns (T, error), so verifyEntryPointResults rejected it -- the
+	// right refusal reached for the wrong reason, since the problem is that it
+	// is not an entry point rather than that T is not a string. GenericLeaf
+	// returns error alone, passes that check, and was therefore exported as a
+	// deployable entry point with nothing objecting. That is the quieter half
+	// of the issue and the reason this belongs here rather than in the result
+	// check.
+	if fd.Type.TypeParams() != nil && fd.Type.TypeParams().Len() > 0 {
 		return false
 	}
 	params := fd.Type.Params()

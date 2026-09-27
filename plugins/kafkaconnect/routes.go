@@ -3,7 +3,6 @@ package kafkaconnect
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -12,7 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("kafka-connect: nil mux")
 	}
@@ -32,13 +31,6 @@ func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 
 func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
-}
-
-// tenantID extracts the tenant UUID from the request context. Returns the
-// zero UUID if no tenant is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
 }
 
 // ---- types ----
@@ -67,23 +59,14 @@ type createConfigRequest struct {
 // ---- POST /kafka/configs ----
 
 func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("kafka-connect: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req createConfigRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
@@ -111,7 +94,7 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New()
 	now := time.Now()
 
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO kafka_config (tenant_id, id, name, brokers, topic, consumer_group, event_type, enabled, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $8)
 		`, p.dialect), tid, id, req.Name, req.Brokers, req.Topic, consumerGroup, eventType, now)
@@ -140,8 +123,8 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 // ---- GET /kafka/configs ----
 
 func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -162,7 +145,7 @@ func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
 	var configs []kafkaConfigJSON
 	for rows.Next() {
 		var c kafkaConfigJSON
-		if err := rows.Scan(&c.ID, &c.Name, &c.Brokers, &c.Topic, &c.ConsumerGroup, &c.EventType, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := plugin.ScanRow(rows, &c.ID, &c.Name, &c.Brokers, &c.Topic, &c.ConsumerGroup, &c.EventType, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			p.logger.Error("kafka-connect: scan config", "error", err)
 			continue
 		}
@@ -180,8 +163,8 @@ func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
 // ---- DELETE /kafka/configs/{id} ----
 
 func (p *Plugin) handleDeleteConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}

@@ -10,10 +10,16 @@ import (
 type errorCaller struct {
 	calls  int
 	errMsg string
+	// errSvc returns a structured service error instead of a bare message, for
+	// tests about non-retryable CODES. It takes precedence over errMsg.
+	errSvc *ServiceError
 }
 
 func (c *errorCaller) Call(_ context.Context, _, _, _ string) (string, error) {
 	c.calls++
+	if c.errSvc != nil {
+		return "", c.errSvc
+	}
 	var err error
 	if c.errMsg != "" {
 		err = fmt.Errorf("%s", c.errMsg)
@@ -273,13 +279,13 @@ func TestFreshAndReplayAgreeOnNonRetryableFailure_Heartbeat(t *testing.T) {
 	}
 }
 
-func TestDurableCallWithHeartbeat_Replay_PendingSentinel(t *testing.T) {
+func TestDurableCallWithHeartbeat_Replay_PendingIntent(t *testing.T) {
 	s := &execSession{
 		isReplay: true,
 		history: []EventRecord{
 			{Step: 0, EventType: EventTypeHeartbeat, Service: "my-svc", Op: "my-op"},
 			{Step: 1, EventType: EventTypeCall, Service: "my-svc", Op: "my-op",
-				Request: `{"key":"val"}`, Err: pendingSentinel},
+				Request: `{"key":"val"}`, Pending: true},
 		},
 		stepCount: 0,
 	}

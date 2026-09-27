@@ -31,11 +31,13 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
-# benchmarks/comparative/** are standalone modules that exist to pin specific
-# competitor releases (Temporal, DBOS) for like-for-like measurement. Their
-# dependency sets are deliberate and tidying them would require network access
-# to unrelated ecosystems, so they are checked out of scope here.
-EXEMPT_PREFIX="benchmarks/comparative/"
+# There is deliberately no exemption list here. There was one -- for
+# benchmarks/comparative/**, standalone modules pinning competitor releases --
+# and it went away with those modules. It is not left blank on purpose: the
+# check was `case "$dir/" in "$EXEMPT_PREFIX"*) continue ;;`, and an empty
+# prefix makes that pattern `*`, which matches every module and skips all of
+# them while still printing OK. Add a prefix back only alongside a module that
+# needs it.
 
 failed=0
 checked=0
@@ -59,8 +61,6 @@ mods="$(find . -name go.mod -not -path './node_modules/*' -not -path '*/node_mod
   sed 's|^\./||; s|/\{0,1\}go\.mod$||; s|^$|.|' | sort)"
 
 for dir in $mods; do
-  case "$dir/" in "$EXEMPT_PREFIX"*) continue ;; esac
-
   checked=$((checked + 1))
   if ! out="$(cd "$REPO_ROOT/$dir" && go mod tidy -diff 2>&1)"; then
     echo "ERROR: $dir/go.mod is not tidy. \`cd $dir && go mod tidy\` would change it:" >&2
@@ -86,9 +86,8 @@ echo "OK: all $checked Go modules are tidy."
 # `modules:` list -- which exists precisely so a separate module gets built -- never
 # named it either. Nothing was ever going to catch that but a check like this one.
 #
-# The root module ("."), covered by tier1.packages rather than a `modules:` entry, and
-# the benchmarks/comparative/** pins above, are the only modules allowed to be absent
-# from tier1.modules / tier2.modules below.
+# The root module ("."), covered by tier1.packages rather than a `modules:` entry, is
+# the only module allowed to be absent from tier1.modules / tier2.modules below.
 #
 # tier2.gated_by counts as a declaration too, and has to. A gated_by entry says
 # the suite runs in a NAMED job in a named workflow, and scripts/tier2-gate.sh
@@ -114,7 +113,6 @@ declared="$( {
 undeclared=0
 for dir in $mods; do
   [ "$dir" = "." ] && continue
-  case "$dir/" in "$EXEMPT_PREFIX"*) continue ;; esac
 
   found=0
   for d in $declared; do
@@ -122,8 +120,8 @@ for dir in $mods; do
   done
   if [ "$found" -eq 0 ]; then
     echo "ERROR: $dir/go.mod exists but is not named in tiers.yaml's tier1.modules or" >&2
-    echo "  tier2.modules, and is not under $EXEMPT_PREFIX. tiers.yaml's modules: list" >&2
-    echo "  exists precisely so a separate Go module gets built -- see the note above" >&2
+    echo "  tier2.modules. tiers.yaml's modules: list exists precisely so a separate" >&2
+    echo "  Go module gets built -- see the note above" >&2
     echo "  tier1.modules in tiers.yaml for the wasm-demo/ precedent. Either add $dir" >&2
     echo "  to a modules: list, or delete it, or record it as excluded with a reason." >&2
     undeclared=1
@@ -134,4 +132,4 @@ if [ "$undeclared" -ne 0 ]; then
   exit 1
 fi
 
-echo "OK: every Go module on disk is declared in tiers.yaml or exempt."
+echo "OK: every Go module on disk is declared in tiers.yaml (or is the root module)."

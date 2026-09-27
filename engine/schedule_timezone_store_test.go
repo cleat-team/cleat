@@ -31,7 +31,6 @@ func TestScheduleTimezone_RoundTrips(t *testing.T) {
 				EntryPoint:     "main",
 				CronExpression: "0 7 * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(time.Hour),
 				Timezone:       zone,
 			}
@@ -63,7 +62,6 @@ func TestScheduleTimezone_EmptyBecomesUTC(t *testing.T) {
 				DefName:        "test-workflow",
 				CronExpression: "0 7 * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(time.Hour),
 				// Timezone deliberately left empty.
 			}
@@ -101,7 +99,6 @@ func TestScheduleTimezone_ReachesGetDueSchedules(t *testing.T) {
 				DefName:        "test-workflow",
 				CronExpression: "0 7 * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(-time.Hour), // already due
 				Timezone:       zone,
 			}

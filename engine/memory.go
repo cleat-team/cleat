@@ -14,6 +14,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 
@@ -190,10 +191,8 @@ func readWasmPayload(mem api.Memory, ptr, length, maxLen uint32) (string, bool) 
 //
 //   - cleat_set_scope with both objectType and instanceKey empty clears the
 //     scope (engine/scope.go, freshSetScope).
-//   - cleat_child_workflow_in_schema with an empty targetSchema falls back to
-//     the local schema (engine/children.go, ChildWorkflowInSchema).
-//   - cleat_child_workflow_in_schema with an empty parentClosePolicy takes the
-//     default, which wazero already allowed and wasmtime did not.
+//   - cleat_child_workflow_with_options with an empty parentClosePolicy takes
+//     the default, which wazero already allowed and wasmtime did not.
 //
 // See IMPROVEMENT-PLAN.md 2.13.
 func readOptionalServiceName(mem api.Memory, ptr, length uint32) (string, bool) {
@@ -221,15 +220,69 @@ func readServiceName(mem api.Memory, ptr, length uint32) (string, bool) {
 // Returns the number of bytes actually written, or an error if the memory write fails.
 func writeWasmString(mem api.Memory, ptr uint32, s string, maxLen uint32) (uint32, error) {
 	data := []byte(s)
+	truncated := false
 	if uint32(len(data)) > maxLen {
 		data = data[:maxLen]
+		truncated = true
 	}
 	if len(data) > 0 {
 		if ok := mem.Write(ptr, data); !ok {
 			return 0, fmt.Errorf("writeWasmString: failed to write %d bytes at ptr %d", len(data), ptr)
 		}
 	}
+	if truncated {
+		// The prefix is still written, deliberately: a caller that has not yet
+		// been taught to propagate this keeps exactly its old behaviour, so
+		// adding the signal cannot itself change what a guest receives.
+		return uint32(len(data)), &OutputTruncatedError{Needed: len(s), Capacity: int(maxLen)}
+	}
 	return uint32(len(data)), nil
+}
+
+// OutputTruncatedError reports that a host call had more to write than the
+// guest's buffer could hold.
+//
+// It carries both numbers because the difference is the actionable part: a
+// guest that asked for 1 MiB and needed 3 MiB has a payload problem, and one
+// that asked for 64 KB has a buffer problem. Before cleat#1312 neither number
+// reached the guest -- writeResult returned only how many bytes it wrote, never
+// how many there were, so a truncated response was indistinguishable from a
+// short one.
+type OutputTruncatedError struct {
+	Needed   int
+	Capacity int
+}
+
+func (e *OutputTruncatedError) Error() string {
+	return fmt.Sprintf("output buffer too small: needed %d bytes, the guest supplied %d",
+		e.Needed, e.Capacity)
+}
+
+// errCodeOutputTruncated is the errCode a host call returns when the guest's
+// output buffer was too small.
+//
+// 7, which is free in both spaces this value has to live in: the simple-result
+// errCode byte (0, 1, 3, 4 and 5 are in use) and cleat.CallErrorCode, whose
+// iota ends at 6 with CallErrorRetryPolicyTooLong. Using one number for both
+// keeps a guest from having to know which layout it is decoding in order to
+// recognise this particular failure.
+//
+// Non-retryable, for the same reason CallErrorRetryPolicyTooLong is: re-issuing
+// the identical call with the identical buffer fails identically.
+const errCodeOutputTruncated byte = 7
+
+// asTruncation reports whether err is an output-truncation error, and returns
+// the errCode to pack if so.
+//
+// A helper rather than an inline errors.As at each of the call sites, because
+// there are over a hundred of them and the point of routing them all through
+// one expression is that the next one cannot get it subtly different.
+func asTruncation(err error) (byte, bool) {
+	var trunc *OutputTruncatedError
+	if errors.As(err, &trunc) {
+		return errCodeOutputTruncated, true
+	}
+	return 0, false
 }
 
 // writeWasmStringOrTrap calls writeWasmString and returns the error on failure.
@@ -245,6 +298,53 @@ func writeWasmStringOrTrap(mem api.Memory, ptr uint32, s string, maxLen uint32) 
 func packDurableCallResult(responseLen int, callErrorCode, errCode byte) int64 {
 	return int64(uint64(responseLen)<<40 | uint64(callErrorCode)<<8 | uint64(errCode))
 }
+
+// callSuspendSentinel tells a guest to stop and unwind without doing new work.
+//
+// The host returns it from any host call that would start fresh work during a
+// defer segment (WithDeferPhase) -- a workflow body that has replayed past the
+// end of its recorded history. The guest unwinds with its suspend flag set,
+// skips its own defer drain, and the host then runs __cleat_run_deferred on the
+// live instance, the path runGuestDefersAfterSuspend already takes.
+//
+// Bit 31, and the choice is load-bearing twice over.
+//
+// It is not bit 62. IMPROVEMENT-PLAN 3.81 specified bit 62 on the grounds that
+// cleat_await_child and cleat_await_any_child already decode it as a suspend.
+// Those pack a 32-bit length at bits 32-63, where bit 62 means 1 GiB. The
+// durable-call layout packs a 24-bit responseLen at bits 40-63, where the same
+// bit means 4 MiB -- and MaxWasmStringLen and OutBufSize are package vars set
+// from -wasm-max-string-len and -wasm-output-buffer-size, both flag.Int with no
+// upper bound. A legitimate response would decode as a suspend. See 3.83.
+//
+// It is not bit 39 either, which is what 3.83 shipped. Bit 39 is free in
+// packDurableCallResult and nowhere else: in packSimpleResult and
+// packAwaitChildResult it sits inside a 32-bit length at bits 32-63, where it
+// means a 128-byte run ID -- an ordinary value. One sentinel has to hold across
+// every layout a stopped guest might be waiting on, so 3.83's bit is correct
+// for cleat_call alone and was replaced rather than widened. See 3.84.
+//
+// Bit 31 is free in all six layouts that can start fresh work, measured by
+// unioning every result each packer can produce and pinned by
+// TestStopSentinelBitsAcrossEveryLayout: the common free window is bits 17-31.
+// packSleepResult is the seventh and shares no free bit with the others, which
+// is why the window is stated over six -- a sleeping guest suspends through its
+// own status byte and never reaches a fresh call
+// (TestASleepingWorkflowNeverReachesAFreshCall).
+//
+// "Free" here means the host cannot produce it, which is what makes it usable
+// as a sentinel. It does not mean every SDK's existing decode ignores it, and
+// those are different claims: in the await-signals layout bits 17-31 fall
+// inside the timed-out field, which the Go SDK reads as
+// `(r>>16)&0xFFFF != 0`, so a decoder that checked its fields before checking
+// the sentinel would read a stop as an ordinary timeout and run on. Every
+// decode site therefore tests the sentinel FIRST, and deferSegmentLanguages
+// fails the segment closed for any SDK not known to do so.
+//
+// The value is exactly 1<<31 with every other field zero, so a guest that tests
+// it by whole-word equality and one that masks both recognise it. The mask form
+// is correct for a payload-carrying word and is what new decoders should use.
+const callSuspendSentinel int64 = 1 << 31
 
 // badParamDurableCall is the bad-parameter result for the host functions whose
 // guest adapter decodes the packDurableCallResult layout: cleat_call,

@@ -17,15 +17,35 @@ from componentize_py_types import Result, Ok, Err, Some
 def durable_call(service: str, operation: str, request: str) -> str:
     """
     Make a durable (deterministically replayed) call to an external service.
+    
+    ``ok`` carries the response JSON. ``err`` is a stop or a failure -- see
+    ``outcomes``; neither is a string a service could have returned.
+    
+    Raises: `componentize_py_types.Err(wit_world.imports.outcomes.CallFailure)`
     """
     raise NotImplementedError
 def durable_call_retry(service: str, operation: str, request: str, max_attempts: int, initial_interval_ms: int, backoff_coefficient_100x: int, max_interval_ms: int, non_retryable_errors: str) -> str:
     """
     Make a durable call with server-side retry policy.
+    
+    The retries happen inside the host and one event is recorded whatever
+    the attempt count, so ``err`` here means the policy was exhausted --
+    or, for ``suspended``, that the call was never started at all.
+    
+    Raises: `componentize_py_types.Err(wit_world.imports.outcomes.CallFailure)`
     """
     raise NotImplementedError
 def durable_call_heartbeat(service: str, operation: str, request: str, heartbeat_interval_ms: int) -> str:
     """
     Make a durable call with periodic heartbeat/progress updates.
+    
+    The type is the same shape as its two siblings because the failure half
+    applies to it identically, and because a third convention for one
+    function would be worse. The host half arrived in IMPROVEMENT-PLAN 3.111
+    (#672): DurableCallWithHeartbeat consults stopBeforeNewWork, so a defer
+    segment stops it, and the component dispatch masks the sentinel ahead of
+    any field decode -- both ends of `suspended` are real on this call.
+    
+    Raises: `componentize_py_types.Err(wit_world.imports.outcomes.CallFailure)`
     """
     raise NotImplementedError

@@ -8,6 +8,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"io"
 	"log/slog"
 	"net/http"
@@ -79,13 +80,29 @@ func TestMigrations(t *testing.T) {
 		if m.Version == 0 {
 			t.Errorf("migrations[%d].Version is 0, expected non-zero", i)
 		}
-		if m.Up == "" {
-			t.Errorf("migrations[%d].Up is empty", i)
-		}
-		if m.Down == "" {
-			t.Errorf("migrations[%d].Down is empty", i)
-		}
+		// A migration must DO something -- but SQL is not the only way. A
+		// TenantScoped migration carries no SQL by design: the runtime emits
+		// ENABLE / FORCE / CREATE POLICY from the declaration, and writing it
+		// here by hand would put a second, drifting copy of the policy in the
+		// tree.
+		//
+		// TEMPORARY SHAPE. cleat#1513 extracts this assertion into
+		// plugintest.AssertMigrationsDoSomething, because thirteen plugins
+		// carried their own copy and they had already drifted apart through
+		// independent authorship alone -- three checked Up and not Down, and
+		// the wording differed in every one. That PR deliberately left this
+		// file alone to avoid conflicting with this branch. Once it lands,
+		// replace this block with the helper rather than leaving a fourteenth
+		// variant behind. cleat#1512.
+		_ = i
 	}
+	// cleat#1513 has landed and the comment above says what to do about it:
+	// replace this block with the helper rather than leave a fourteenth
+	// variant. Done here rather than later because this copy had already
+	// drifted -- it asked `m.Up == ""`, so a MySQL-only migration read as
+	// doing nothing, which is the same defect the shared helper carried until
+	// cleat#1622 fixed it there.
+	plugintest.AssertMigrationsDoSomething(t, migs)
 
 	// Versions should be sequential starting from 1.
 	prevVersion := 0
@@ -96,12 +113,28 @@ func TestMigrations(t *testing.T) {
 		prevVersion = m.Version
 	}
 
-	// Each migration should contain at least one SQL statement keyword.
+	// Each migration should contain at least one SQL statement keyword --
+	// unless it is a TenantScoped declaration, which carries no SQL at all and
+	// whose DDL the runtime emits from the declaration. cleat#1512.
+	//
+	// This is a FOURTH distinct predicate on migration shape, beyond the
+	// non-empty check above, the sequential-version check, and the by-index
+	// and table-name assertions other plugins carry. The thirteen copies of
+	// "assert something about migrations" are more varied than they look,
+	// which is the argument for cleat#1513's shared helper and also the reason
+	// that helper must not absorb the variants -- doing so would impose one
+	// plugin's rule on twelve others.
 	sqlKeywords := []string{"CREATE TABLE", "ALTER TABLE", "CREATE INDEX", "DROP TABLE"}
 	for i, m := range migs {
+		if len(m.TenantScoped) > 0 {
+			continue
+		}
 		hasSQL := false
+		// All three arms: a MySQL-only migration carries its DDL in UpMySQL,
+		// and asking only about Up reports it as containing no SQL.
+		allUp := m.Up + "\n" + m.UpMySQL + "\n" + m.UpMSSQL
 		for _, kw := range sqlKeywords {
-			if strings.Contains(m.Up, kw) {
+			if strings.Contains(allUp, kw) {
 				hasSQL = true
 				break
 			}
@@ -111,8 +144,9 @@ func TestMigrations(t *testing.T) {
 		}
 
 		hasDownSQL := false
+		allDown := m.Down + "\n" + m.DownMySQL + "\n" + m.DownMSSQL
 		for _, kw := range sqlKeywords {
-			if strings.Contains(m.Down, kw) {
+			if strings.Contains(allDown, kw) {
 				hasDownSQL = true
 				break
 			}
@@ -169,8 +203,19 @@ func TestRegisterHostFunctions_ValidRegistry(t *testing.T) {
 	if mock.registered[0].opts.Name != "await_event" {
 		t.Errorf("expected function name 'await_event', got %q", mock.registered[0].opts.Name)
 	}
-	if !mock.registered[0].opts.Idempotent {
-		t.Error("expected Idempotent to be true")
+	// await_event declares NEITHER property as of cleat#1318, and the assertion
+	// is inverted rather than deleted so the reason survives next to the code.
+	//
+	// It is not idempotent: on the not-found path it WRITES, calling
+	// registerAwaiter. And it is not stable: it selects the latest UNPROCESSED
+	// event, so a replay can match a different one. Replay therefore returns
+	// the recorded output instead of calling it live.
+	if mock.registered[0].opts.Idempotent {
+		t.Error("await_event must not declare Idempotent: the not-found path writes")
+	}
+	if mock.registered[0].opts.SameValueOnReplay {
+		t.Error("await_event must not declare SameValueOnReplay: it selects the " +
+			"latest unprocessed event, so a replay can match a different one")
 	}
 	if mock.registered[0].fn == nil {
 		t.Error("registered function is nil")
@@ -293,7 +338,7 @@ func TestAwaitEvent_InputValidation(t *testing.T) {
 func TestMergeInputAndTemplate(t *testing.T) {
 	t.Run("empty template uses event data only", func(t *testing.T) {
 		tmpl := json.RawMessage("")
-		data := map[string]any{"order_id": "123", "amount": 99.5}
+		data := json.RawMessage(`{"order_id": "123", "amount": 99.5}`)
 
 		result, err := mergeInputAndTemplate(tmpl, data)
 		if err != nil {
@@ -314,7 +359,7 @@ func TestMergeInputAndTemplate(t *testing.T) {
 
 	t.Run("template with event data merge", func(t *testing.T) {
 		tmpl := json.RawMessage(`{"source": "webhook", "version": "1.0"}`)
-		data := map[string]any{"order_id": "456", "amount": 50.0}
+		data := json.RawMessage(`{"order_id": "456", "amount": 50.0}`)
 
 		result, err := mergeInputAndTemplate(tmpl, data)
 		if err != nil {
@@ -341,7 +386,7 @@ func TestMergeInputAndTemplate(t *testing.T) {
 
 	t.Run("event data overrides template on key conflict", func(t *testing.T) {
 		tmpl := json.RawMessage(`{"priority": "low", "source": "template"}`)
-		data := map[string]any{"priority": "high", "extra": "value"}
+		data := json.RawMessage(`{"priority": "high", "extra": "value"}`)
 
 		result, err := mergeInputAndTemplate(tmpl, data)
 		if err != nil {
@@ -365,7 +410,7 @@ func TestMergeInputAndTemplate(t *testing.T) {
 
 	t.Run("invalid template JSON is silently ignored", func(t *testing.T) {
 		tmpl := json.RawMessage(`{not valid}`)
-		data := map[string]any{"key": "value"}
+		data := json.RawMessage(`{"key": "value"}`)
 
 		result, err := mergeInputAndTemplate(tmpl, data)
 		if err != nil {
@@ -483,7 +528,7 @@ func TestTypesJSONRoundtrip(t *testing.T) {
 		original := publishEventRequest{
 			ID:        "123e4567-e89b-12d3-a456-426614174000",
 			EventType: "order.created",
-			Data:      map[string]any{"amount": 99.5, "currency": "USD"},
+			Data:      json.RawMessage(`{"amount":99.5,"currency":"USD"}`),
 		}
 
 		data, err := json.Marshal(original)
@@ -502,11 +547,10 @@ func TestTypesJSONRoundtrip(t *testing.T) {
 		if decoded.EventType != original.EventType {
 			t.Errorf("EventType: got %q, want %q", decoded.EventType, original.EventType)
 		}
-		if decoded.Data["amount"] != 99.5 {
-			t.Errorf("Data.amount: got %v, want 99.5", decoded.Data["amount"])
-		}
-		if decoded.Data["currency"] != "USD" {
-			t.Errorf("Data.currency: got %v, want USD", decoded.Data["currency"])
+		// Data is raw JSON since cleat#1641, so the round trip is exact and
+		// this compares the BYTES rather than two decoded values.
+		if string(decoded.Data) != string(original.Data) {
+			t.Errorf("Data: got %s, want %s", decoded.Data, original.Data)
 		}
 	})
 
@@ -662,22 +706,37 @@ func TestWriteJSON_EmptyBody(t *testing.T) {
 
 func TestTenantID(t *testing.T) {
 	t.Run("no tenant", func(t *testing.T) {
-		p := &Plugin{}
 		req := httptest.NewRequest("GET", "/", nil)
-		tid := p.tenantID(req)
-		if tid != uuid.Nil {
-			t.Errorf("expected nil UUID, got %v", tid)
+		tid, ok := auth.TenantIDFromRequest(req)
+		if ok {
+			t.Errorf("expected ok=false with no tenant in context, got ok=true tid=%v", tid)
 		}
 	})
 
 	t.Run("with tenant", func(t *testing.T) {
-		p := &Plugin{}
 		expected := uuid.New()
 		ctx := auth.WithTenantID(context.Background(), expected)
 		req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
-		tid := p.tenantID(req)
+		tid, ok := auth.TenantIDFromRequest(req)
+		if !ok {
+			t.Errorf("expected ok=true, got ok=false")
+		}
 		if tid != expected {
 			t.Errorf("expected %v, got %v", expected, tid)
+		}
+	})
+
+	// cleat#2183 regression: the default tenant's ID IS uuid.Nil, and must
+	// read as ok=true -- not be conflated with "no tenant in context".
+	t.Run("default tenant", func(t *testing.T) {
+		ctx := auth.WithTenantID(context.Background(), uuid.Nil)
+		req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
+		tid, ok := auth.TenantIDFromRequest(req)
+		if !ok {
+			t.Errorf("expected ok=true for the default tenant (uuid.Nil), got ok=false")
+		}
+		if tid != uuid.Nil {
+			t.Errorf("expected tid=uuid.Nil, got %v", tid)
 		}
 	})
 }
@@ -3074,7 +3133,7 @@ func setupETPlugin(t *testing.T) (*Plugin, http.Handler, *etDBStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 	return p, handler, store
 }
 

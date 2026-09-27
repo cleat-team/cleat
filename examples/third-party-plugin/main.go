@@ -105,14 +105,11 @@ func main() {
 //
 // In a real WASM build, this file would be augmented with:
 //
-//   //export cleat_abi_version
-//   func cleat_abi_version() int32 { return 1 }
-//
 //   //export _start
 //   func _start() { /* initialization */ }
 //
-//   //go:wasmimport cleat cleat_plugin_call
-//   func cleat_plugin_call(...) uint64
+//   //go:wasmimport env plugin_call
+//   func plugin_call(...) uint64
 //
 //   //export greet
 //   func greet(inputPtr, inputLen, outputPtr, outputMaxLen uint32) uint64 {
@@ -121,6 +118,23 @@ func main() {
 //       // write output to WASM memory
 //   }
 //
-// See docs/third-party-plugin-guide.md section 11 (Host function ABI reference)
-// for the complete list of imports and exports.
+// Corrected 2026-09-07. This block previously read
+//
+//   //go:wasmimport cleat cleat_plugin_call
+//
+// which is wrong twice over: guest imports come from the "env" module, not
+// "cleat" (wasm/generator.go emits `//go:wasmimport env %s`), and the host
+// function is registered as `plugin_call` with no prefix -- `cleat_plugin_call`
+// is the RUST binding's local name, which carries #[link_name = "plugin_call"].
+// A module built from the old line would not instantiate.
+//
+// It also showed an `//export cleat_abi_version` stub, removed here because
+// nothing reads it: `grep -rn '"cleat_abi_version"' --include='*.go' .` returns
+// nothing. The ABI version travels in the `cleat.metadata` custom section.
+//
+// See docs/contributor/plugins/third-party-plugin-guide.md for the intended
+// import surface -- but read its status note first: six of the seven names it
+// documents are not registered by the engine, and WASM plugin execution is
+// unwired (IMPROVEMENT-PLAN 3.315). ABI.md is the checked source for what a
+// guest can actually import; scripts/check-doc-consistency.sh enforces it.
 // ---------------------------------------------------------------------------

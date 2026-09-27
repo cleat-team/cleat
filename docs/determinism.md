@@ -17,22 +17,30 @@ to incorrect results or workflow failure.
 
 WASM `f32` and `f64` operations follow **IEEE 754-2019**, which guarantees
 bit-identical results for the same arithmetic operations on the same inputs
-across all compliant hardware. wazero's interpreter (used by cleat) implements
-strict IEEE 754 semantics without "fast math" optimizations.
+across all compliant hardware. This is a property of the WASM specification
+rather than of any one engine: both engines cleat runs — wasmtime on a worker,
+wazero under CLI and test tooling — implement strict IEEE 754 semantics without
+"fast math" optimizations.
+
+> Corrected 2026-09-06. This paragraph credited the guarantee to "wazero's
+> interpreter (used by cleat)", which was wrong twice over. A worker has not
+> run on wazero since #459 (2026-08-10) deleted that backend; and cleat does
+> not use wazero's interpreter in any case — `engine/runtime.go` builds it with
+> `wazero.NewRuntimeConfigCompiler()`. The gotchas below are restated as
+> properties of WASM and of the host, which is what they always were.
 
 **Gotchas:**
 
 1. **NaN payloads**: IEEE 754 allows multiple bit patterns for NaN. WASM
    operations that produce NaN may return different NaN payloads across CPU
-   architectures or wazero versions. Use `math.Float64bits()` /
+   architectures or engine versions. Use `math.Float64bits()` /
    `math.Float32bits()` for exact comparison, or avoid NaN entirely.
-2. **Denormal numbers**: Some CPUs flush denormals to zero; wazero's
-   interpreter preserves them. This is only visible if comparing floats
+2. **Denormal numbers**: Some CPUs flush denormals to zero; a conforming WASM
+   engine preserves them. This is only visible if comparing floats
    for equality near the denormal range.
 3. **FMA (Fused Multiply-Add)**: The host Go compiler may apply FMA,
    changing the exact result of `a*b + c` vs `fma(a, b, c)`. WASM code
-   inside wazero is not affected, but be aware if mixing host and WASM
-   computations.
+   is not affected, but be aware if mixing host and WASM computations.
 
 ### Cleat API Determinism
 

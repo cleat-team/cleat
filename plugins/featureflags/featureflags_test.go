@@ -465,17 +465,40 @@ func TestEvaluateFlag_50PercentRolloutThreshold(t *testing.T) {
 func TestMigrations(t *testing.T) {
 	p := &Plugin{}
 	migrations := p.Migrations()
-	if len(migrations) != 1 {
-		t.Fatalf("expected 1 migration, got %d", len(migrations))
+
+	// A PREDICATE, NOT A COUNT. This asserted `len(migrations) != 1`, which is
+	// a census of a set that grows with ordinary work -- every new migration
+	// breaks it, and the break says nothing about whether the new migration is
+	// right. cleat#1512's v2 is what tripped it.
+	//
+	// What the assertion was actually for is that v1 still creates the table
+	// and can still be rolled back, so that is what is checked. Versions must
+	// also be unique and ascending, which is the property the runtime relies on
+	// and which a count never checked.
+	if len(migrations) == 0 {
+		t.Fatal("no migrations")
 	}
-	if migrations[0].Version != 1 {
-		t.Errorf("expected version 1, got %d", migrations[0].Version)
+	seen := map[int]bool{}
+	prev := 0
+	for i, m := range migrations {
+		if seen[m.Version] {
+			t.Errorf("migration %d: version %d is declared twice", i, m.Version)
+		}
+		if m.Version <= prev {
+			t.Errorf("migration %d: version %d does not follow %d", i, m.Version, prev)
+		}
+		seen[m.Version], prev = true, m.Version
 	}
-	if !strings.Contains(migrations[0].Up, "feature_flags") {
-		t.Error("expected migration to mention feature_flags")
+
+	v1 := migrations[0]
+	if v1.Version != 1 {
+		t.Errorf("expected the first migration to be version 1, got %d", v1.Version)
 	}
-	if !strings.Contains(migrations[0].Down, "DROP TABLE") {
-		t.Error("expected Down to contain DROP TABLE")
+	if !strings.Contains(v1.Up, "feature_flags") {
+		t.Error("expected version 1 to create feature_flags")
+	}
+	if !strings.Contains(v1.Down, "DROP TABLE") {
+		t.Error("expected version 1's Down to contain DROP TABLE")
 	}
 }
 

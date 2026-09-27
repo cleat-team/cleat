@@ -229,7 +229,33 @@ var (
 	sqlLiteralRe = regexp.MustCompile("(?s)`([^`]*)`")
 	// A projection list: everything between SELECT/OUTPUT and the clause that
 	// ends it.
-	projectionRe = regexp.MustCompile(`(?is)\b(SELECT|OUTPUT)\b(.*?)(?:\bFROM\b|\bWHERE\b|\bWHEN\b|\bINTO\b|$)`)
+	//
+	// ON is in the alternation for MERGE, and was added by cleat#2434. A MERGE
+	// reads
+	//
+	//	MERGE workflow_memory_stats AS target
+	//	USING (SELECT @p1 AS def_name, ..., @p3 AS tenant_id) AS source
+	//	ON target.def_name = source.def_name AND target.tenant_id = @p3
+	//	WHEN MATCHED THEN UPDATE ...
+	//
+	// and the SELECT inside USING has no FROM, so the only terminator ahead of
+	// it was WHEN -- which put the whole ON clause inside the "projection". A
+	// join or match CONDITION is not a projection and nothing in it is scanned
+	// into Go, so the guard reported mssql_schedules.go's memory-sample upsert
+	// as a raw UUID projection.
+	//
+	// It did not fire until the migrations were compacted, because
+	// workflow_memory_stats.tenant_id was not among the columns the old chain's
+	// text let this parser find. Better column coverage exposed a latent
+	// false positive; the fix is here rather than in an allowlist, since the
+	// next MERGE would have hit it too.
+	//
+	// Adding ON cannot mask a real violation: a genuine projection lists its
+	// columns BEFORE any FROM, and ON only appears after one in a query that
+	// has a FROM at all.
+	projectionRe = regexp.MustCompile(`(?is)\b(SELECT|OUTPUT)\b(.*?)(?:\bFROM\b|\bWHERE\b|\bWHEN\b|\bINTO\b|\bON\b|$)`)
+	// A MERGE with no ON at all still ends at its first WHEN, which the
+	// alternation above already covers.
 	// Every table a statement names, so the guard can ask "is this column a
 	// UUID on a table this query actually touches".
 	tableRefRe = regexp.MustCompile(`(?i)\b(?:FROM|JOIN|UPDATE|INTO|MERGE)\s+(?:\[?\w+\]?\.)?\[?(\w+)\]?`)
@@ -272,6 +298,21 @@ func findRawUUIDProjections(file, src string, byTable map[string]map[string]bool
 			// the word INSERT, which SELECT/OUTPUT never does.
 			head := sql[:pm[2]]
 			if trimmedEndsWith(head, "INSERT") {
+				continue
+			}
+			// Nor is the SELECT that FEEDS an INSERT. Its values go straight
+			// into another column of the same type and are never scanned into
+			// Go, so the driver's raw-bytes behaviour -- the entire subject of
+			// this guard -- cannot apply to them. Converting such a projection
+			// to text would be the wrong fix: it would round-trip a UUID
+			// through NVARCHAR for no reader.
+			//
+			// cleat#1186 added the first one, acquiring concurrency keys with
+			// INSERT INTO concurrency_keys ... SELECT ... FROM workflow_instances.
+			// Detected by looking back for an unterminated INSERT INTO rather
+			// than by allowlisting a line, so the whole class is covered and an
+			// exemption cannot rot onto a different statement.
+			if feedsAnInsert(head) {
 				continue
 			}
 			proj := sql[pm[4]:pm[5]]
@@ -418,4 +459,20 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// feedsAnInsert reports whether the projection starting after head is the
+// source of an INSERT INTO ... SELECT.
+//
+// "Unterminated" is the whole test: an INSERT earlier in the same statement
+// means this SELECT supplies its rows, while one in a PREVIOUS statement --
+// separated by a semicolon -- has nothing to do with it. Without the semicolon
+// check, any SELECT following any INSERT in a multi-statement string would be
+// excused.
+func feedsAnInsert(head string) bool {
+	i := strings.LastIndex(strings.ToUpper(head), "INSERT INTO")
+	if i < 0 {
+		return false
+	}
+	return !strings.Contains(head[i:], ";")
 }

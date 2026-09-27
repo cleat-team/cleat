@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cleat-sdk"
-version = "0.2.0"
+version = "0.3.0"
 description = "Python SDK for cleat — durable execution framework for AI agents"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -43,8 +43,29 @@ all = ["cleat-sdk[langchain,langgraph,dev]"]
 Repository = "https://github.com/cleat-team/cleat"
 Issues = "https://github.com/cleat-team/cleat/issues"
 
+# THE `include` IS LOAD-BEARING AND IT IS AN ALLOWLIST ON PURPOSE.
+#
+# Without it, discovery finds every top-level directory in this one, by two
+# different routes. `tests/` and `scripts/` are found because they carry an
+# `__init__.py`. `examples/` and `wit/` are found through PEP 420 NAMESPACE
+# discovery -- `namespaces` defaults to TRUE for `[tool.setuptools.packages.find]`
+# in pyproject, so a directory with no `__init__.py` is still a package.
+#
+# All four landed in the published wheel: 87 entries under six top-level names,
+# which put a top-level `tests` module into every consumer's site-packages
+# beside `cleat_sdk`. Measured 2026-09-27 and fixed before the 0.3.0 tag.
+#
+# An ALLOWLIST rather than an `exclude` list because it is robust to both routes
+# and to directories that do not exist yet. An exclude list names the four we
+# know about and goes stale the moment someone adds a fifth.
+#
+# MANIFEST.in DOES NOT GOVERN THIS, which is worth knowing before reaching for
+# it: it carries `prune tests` and `prune examples`, and both were in the wheel
+# anyway. MANIFEST.in shapes the SDIST; a wheel's contents come from package
+# discovery plus package data.
 [tool.setuptools.packages.find]
 where = ["."]
+include = ["cleat_sdk*"]
 
 [tool.setuptools.package-data]
 "cleat_sdk._wit" = ["**/*.py"]

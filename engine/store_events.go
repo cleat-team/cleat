@@ -8,7 +8,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 )
+
+// applyCreatedAt sets the two fields every read path derives from the
+// event_history.created_at column, on every dialect.
+//
+// One function because there are nine read paths -- three per dialect -- and
+// before 2026-09-03 they gave four different answers for the same row. Some
+// derived TimestampMs in SQL and truncated it (PostgreSQL's
+// `EXTRACT(EPOCH FROM created_at)::BIGINT * 1000` drops the milliseconds),
+// some derived it in Go and did not, some never set it at all, and only
+// PostgreSQL set CreatedAt. TimestampMs is the replay virtual clock --
+// execSession.Now returns the previous history event's value -- so a truncated
+// or absent one makes a resumed workflow see a Now() the run that recorded it
+// never returned.
+//
+// Deriving both in Go from the one column is what makes the nine agree by
+// construction rather than by nine people remembering. The SQL-side
+// timestamp_ms expressions are gone; there is nothing left for a new read path
+// to copy wrongly.
+func applyCreatedAt(rec *EventRecord, createdAt time.Time) {
+	rec.CreatedAt = createdAt
+	rec.TimestampMs = createdAt.UnixMilli()
+}
 
 func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error) {
 	tx, err := s.beginTxWithRLS(ctx)
@@ -17,14 +40,37 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	history, err := s.readEventHistoryTx(ctx, tx, workflowID)
+	if err != nil {
+		return nil, err
+	}
+	return history, tx.Commit()
+}
+
+// readEventHistoryTx is LoadEventHistory's read, on a transaction the caller
+// owns. It is a function of its own so that the admin operations that are about
+// to append an event can ask, inside the transaction that would write it, "can
+// this worker read this history?" (adminAppendAudit) -- the same strict read
+// replay does, with the same ErrPayloadDecryption, and not a second
+// implementation of it.
+//
+// A decryption failure is returned to the caller, which reports it, so the
+// store's own per-field WARN is suppressed here: on the replay path it fired
+// twice a claim for every stuck run, about 22,000 lines a day. The counter
+// still counts every failed field. cleat#2311.
+func (s *PostgresStore) readEventHistoryTx(ctx context.Context, tx *sql.Tx, workflowID string) ([]EventRecord, error) {
+	quiet := *s
+	quiet.quietDecryptLogs = true
+	s = &quiet
+
 	rows, err := tx.QueryContext(ctx, `
 		SELECT step, event_type, service, operation, request, response, error,
 		       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
+		       payload_encoding,
 		       promise_name, promise_id, promise_result, promise_error,
-		       EXTRACT(EPOCH FROM created_at)::BIGINT * 1000 AS timestamp_ms,
 		       created_at,
 		       (intent_at IS NOT NULL AND checksum IS NULL) AS pending
 		FROM event_history
@@ -48,6 +94,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		var payload sql.NullString
 		var promiseName, promiseID, promiseResult, promiseError sql.NullString
 		var createdAt sql.NullTime
+		var payloadEnc sql.NullInt16
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
@@ -55,18 +102,19 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
+			&payloadEnc,
 			&promiseName, &promiseID, &promiseResult, &promiseError,
-			&rec.TimestampMs, &createdAt, &rec.Pending); err != nil {
+			&createdAt, &rec.Pending); err != nil {
 			return nil, fmt.Errorf("scan history: %w", err)
 		}
 
 		if createdAt.Valid {
-			rec.CreatedAt = createdAt.Time
+			applyCreatedAt(&rec, createdAt.Time)
 		}
 		rec.Service = service.String
 		rec.Op = op.String
-		rec.Request = tryDecodeBase64(request.String)
-		rec.Response = tryDecodeBase64(response.String)
+		rec.Request = decodePayload(request.String, payloadEnc)
+		rec.Response = decodePayload(response.String, payloadEnc)
 		rec.Err = errMsg.String
 		rec.DurationMs = durationMs.Int64
 		rec.SignalNames = signalNames.String
@@ -90,7 +138,18 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		rec.PromiseError = promiseError.String
 
 		// Decrypt and redact event record.
-		s.decryptAndRedactEventRecord(&rec, workflowID)
+		//
+		// A field that will not decrypt fails the LOAD. This is the read that
+		// replay acts on, and the placeholder is not data: with it accepted,
+		// a worker holding the wrong key ended the run FAILED (checksums on)
+		// or DONE on "[DECRYPTION_FAILED]" (checksums off), when a worker
+		// with the right key could have finished it. The error wraps
+		// ErrPayloadDecryption so the worker can tell "this worker cannot
+		// read it" from "the database is down" and release the run.
+		// cleat#2311.
+		if err := s.decryptAndRedactEventRecord(&rec, workflowID); err != nil {
+			return nil, fmt.Errorf("load history: %w", err)
+		}
 
 		// Retroactive redaction on read path: ensure sensitive fields are
 		// redacted even if they were stored before redaction was mandatory.
@@ -110,7 +169,10 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 		}
 
 		if payload.Valid {
-			payloadStr := s.decryptPayloadJSON(payload.String)
+			payloadStr, err := s.decryptPayloadJSON(payload.String)
+			if err != nil {
+				return nil, fmt.Errorf("load history: step %d of workflow %s: %w", rec.Step, workflowID, err)
+			}
 			populateFromPayload(&rec, []byte(payloadStr))
 		}
 
@@ -119,7 +181,7 @@ func (s *PostgresStore) LoadEventHistory(ctx context.Context, workflowID string)
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return history, tx.Commit()
+	return history, nil
 }
 
 // chainOrder returns indices into recs in ascending Step order.
@@ -149,6 +211,18 @@ func nullInt64(v int64) sql.NullInt64 {
 func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 	payload := make(map[string]any)
 	switch rec.EventType {
+	case "call_attempt_failed":
+		// Deliberately NOT the same shape as "call": no response, and the
+		// error is what the attempt is for. Sharing the case would make a
+		// failed attempt hash like a completed call.
+		payload["service"] = rec.Service
+		payload["operation"] = rec.Op
+		if rec.Attempt != 0 {
+			payload["attempt"] = rec.Attempt
+		}
+		if rec.Err != "" {
+			payload["error"] = rec.Err
+		}
 	case "call":
 		payload["service"] = rec.Service
 		payload["operation"] = rec.Op
@@ -163,6 +237,23 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		// payload to what it always did. See EventRecord.ErrNonRetryable.
 		if rec.ErrNonRetryable {
 			payload["error_non_retryable"] = true
+		}
+		// Only when set, for the same reason: an unclassified failure keeps
+		// producing the payload it always did. "error_code" matches the
+		// column name on workflow_instances, which stores the same strings.
+		if rec.ErrCode != "" {
+			payload["error_code"] = rec.ErrCode
+		}
+		// Only when true, same convention as error_non_retryable above: an
+		// ordinary failure's payload stays byte-identical, so its checksum is
+		// unchanged and no existing history reverifies differently.
+		if rec.RetriesExhausted {
+			payload["retries_exhausted"] = true
+		}
+		// Only when an operator asserted the outcome, so an ordinary call's
+		// payload is byte-identical to what it always was.
+		if rec.ResolvedBy != "" {
+			payload["resolved_by"] = rec.ResolvedBy
 		}
 		if rec.DurationMs > 0 {
 			payload["duration_ms"] = rec.DurationMs
@@ -200,9 +291,34 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.RunID != "" {
 			payload["run_id"] = rec.RunID
 		}
+		// Neither is read back on replay -- children.go's replay path consumes
+		// RunID only, and ParentClosePolicy is enforced against live store
+		// state when a parent terminates. Carried anyway, for the reason
+		// compactedEvent gives for carrying the same two: the reconstructed
+		// event should be a faithful copy rather than a replay-sufficient-but-
+		// lossy one, and it costs a line each. It also keeps them out of
+		// payloadExemptFields, which is where a field stops being checked.
+		if rec.ParentWorkflowID != "" {
+			payload["parent_workflow_id"] = rec.ParentWorkflowID
+		}
+		if rec.ParentClosePolicy != "" {
+			payload["parent_close_policy"] = rec.ParentClosePolicy
+		}
 	case "continue_as_new":
 		if rec.NewInput != "" {
 			payload["new_input"] = rec.NewInput
+		}
+		// ContinueAsNewWithVersion reads rec.NewVersion straight off the
+		// replayed event (lifecycle.go) to decide which version to restart as.
+		// Written here by nothing and carried by no column, so a versioned
+		// continue-as-new whose history came back from the database restarted
+		// as version 0 -- "current version" -- and could run the wrong code.
+		// Measured on PostgreSQL and MySQL: 3 in, 0 out.
+		//
+		// Only when set, so every event written before this change produces a
+		// byte-identical payload and its stored checksum still verifies.
+		if rec.NewVersion != 0 {
+			payload["new_version"] = rec.NewVersion
 		}
 	case "plugin_call":
 		if rec.PluginName != "" {
@@ -225,6 +341,12 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		payload["promise_id"] = rec.PromiseID
 	case "await_promise", "promise_resolved", "promise_rejected":
 		payload["promise_id"] = rec.PromiseID
+		// Only when set, so an await recorded before this existed keeps
+		// producing the payload it always did. #814: without the timeout on
+		// the event there is nothing for a later wake to measure against.
+		if rec.TimeoutMs > 0 {
+			payload["timeout_ms"] = rec.TimeoutMs
+		}
 		if rec.PromiseResult != "" {
 			payload["promise_result"] = rec.PromiseResult
 		}
@@ -234,6 +356,29 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 	case "update_handler":
 		if rec.UpdateHandlerName != "" {
 			payload["update_handler_name"] = rec.UpdateHandlerName
+		}
+	case "update_received":
+		if rec.UpdateHandlerName != "" {
+			payload["update_handler_name"] = rec.UpdateHandlerName
+		}
+		if rec.UpdateRequestID != "" {
+			payload["update_request_id"] = rec.UpdateRequestID
+		}
+		// Not omitted when empty: an update whose payload is "" must replay as
+		// "" rather than as absent, because the handler is called with it.
+		payload["update_payload"] = rec.UpdatePayload
+	case "update_completed":
+		if rec.UpdateHandlerName != "" {
+			payload["update_handler_name"] = rec.UpdateHandlerName
+		}
+		if rec.UpdateRequestID != "" {
+			payload["update_request_id"] = rec.UpdateRequestID
+		}
+		if rec.UpdateResponse != "" {
+			payload["update_response"] = rec.UpdateResponse
+		}
+		if rec.UpdateError != "" {
+			payload["update_error"] = rec.UpdateError
 		}
 	case "state_mutation":
 		if rec.StateKey != "" {
@@ -247,6 +392,18 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		}
 		if rec.StateOp != "" {
 			payload["state_op"] = rec.StateOp
+		}
+		// ListState's replay path writes rec.StateKeys to the guest verbatim
+		// (lifecycle.go). Written here by nothing and carried by no column, so
+		// a ListState replayed from the database handed the guest an empty
+		// result where the fresh run handed it the keys -- and reported success
+		// while doing it, because StateKey and StateOp both survive, so the
+		// divergence guard ahead of it passes. Measured on PostgreSQL and
+		// MySQL: ["user:a","user:b"] in, "" out.
+		//
+		// Only when set, as above.
+		if rec.StateKeys != "" {
+			payload["state_keys"] = rec.StateKeys
 		}
 	case "run_detached":
 		if rec.DetachedName != "" {
@@ -282,6 +439,27 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.Err != "" {
 			payload["error"] = rec.Err
 		}
+		// Each key only when the row carried that value. A re-replay of a run
+		// with no error and no completion adds nothing, so every admin event
+		// written before these keys existed hashes to exactly what it hashed
+		// to before -- the same constraint as lock_not_held above. The status
+		// rides along only when there is something else to record: every row
+		// has one, so emitting it alone would put a key on every re-replay.
+		if rec.ReplacedStatus != "" {
+			payload["replaced_status"] = rec.ReplacedStatus
+		}
+		if rec.ReplacedErrorMsg != "" {
+			payload["replaced_error_msg"] = rec.ReplacedErrorMsg
+		}
+		if rec.ReplacedErrorCode != "" {
+			payload["replaced_error_code"] = rec.ReplacedErrorCode
+		}
+		if rec.ReplacedErrorOp != "" {
+			payload["replaced_error_op"] = rec.ReplacedErrorOp
+		}
+		if rec.ReplacedCompletedAt != "" {
+			payload["replaced_completed_at"] = rec.ReplacedCompletedAt
+		}
 	case "side_effect":
 		if rec.SideEffectResult != "" {
 			payload["side_effect_result"] = rec.SideEffectResult
@@ -301,6 +479,31 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		}
 		if rec.PluginError != "" {
 			payload["plugin_error"] = rec.PluginError
+		}
+		// The two fields that say WHICH chunk this is. Neither was written
+		// here or carried by a column, so both were lost the moment history
+		// came back from the database rather than from memory, and
+		// stream_finish is the one that matters: recordStreamError marks a
+		// stream-level failure as a single chunk with Finish set, and
+		// replayPluginCallStreaming recognises that failure by exactly that
+		// flag. Without it a recorded FAILURE replays as a SUCCESS whose
+		// chunk content is the error text. IMPROVEMENT-PLAN 3.96.
+		//
+		// Only when set, so every event written before this change produces a
+		// byte-identical payload and its stored checksum still verifies --
+		// the same discipline error_non_retryable and error_code use above.
+		if rec.StreamChunkIndex > 0 {
+			payload["stream_chunk_index"] = rec.StreamChunkIndex
+		}
+		if rec.StreamFinish {
+			payload["stream_finish"] = true
+		}
+		// The code the guest was told. Only when set, so every chunk written
+		// before IMPROVEMENT-PLAN 2.35's plugin half keeps its exact payload
+		// and its stored checksum -- and decodes to 0, which is
+		// callErrorUnknown, which is what those failures actually reported.
+		if rec.StreamErrCode != 0 {
+			payload["stream_err_code"] = rec.StreamErrCode
 		}
 	case "scope_acquired":
 		if rec.ScopeKey != "" {
@@ -372,6 +575,14 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 		if rec.LockKey != "" {
 			payload["lock_key"] = rec.LockKey
 		}
+		// Emitted ONLY when true, so every release event written before this
+		// field existed -- and every ordinary release written after -- hashes
+		// to exactly what it hashed to before. computeEventChecksum runs over
+		// this map, so an unconditional key would rewrite the checksum of every
+		// release in every existing history.
+		if rec.LockNotHeld {
+			payload["lock_not_held"] = true
+		}
 	case "durable_send":
 		if rec.Service != "" {
 			payload["service"] = rec.Service
@@ -420,6 +631,19 @@ func eventRecordToPayload(rec EventRecord) ([]byte, error) {
 			payload["response_b64"] = base64.StdEncoding.EncodeToString([]byte(rec.Response))
 		}
 	}
+
+	// OUTSIDE the switch, because any event type can be produced while the
+	// guest is draining its defer table -- a call, a log, a state write. Every
+	// other conditional key above belongs to one event type; this one is a
+	// property of WHEN the event happened rather than of what it is.
+	//
+	// Only when true, the same convention as retries_exhausted and
+	// lock_not_held: an event recorded by the workflow body produces a
+	// byte-identical payload to what it always did, so no history written
+	// before this field existed reverifies differently. cleat#1155.
+	if rec.InDeferPhase {
+		payload["in_defer_phase"] = true
+	}
 	return sortedJSONMarshal(payload)
 }
 
@@ -467,6 +691,19 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		return
 	}
 	switch rec.EventType {
+	case "call_attempt_failed":
+		if v, ok := m["service"].(string); ok {
+			rec.Service = v
+		}
+		if v, ok := m["operation"].(string); ok {
+			rec.Op = v
+		}
+		if v, ok := m["attempt"].(float64); ok {
+			rec.Attempt = int(v)
+		}
+		if v, ok := m["error"].(string); ok {
+			rec.Err = v
+		}
 	case "call":
 		if v, ok := m["service"].(string); ok {
 			rec.Service = v
@@ -496,6 +733,22 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		// those replay as retryable, the behaviour they were recorded under.
 		if v, ok := m["error_non_retryable"].(bool); ok {
 			rec.ErrNonRetryable = v
+		}
+		// Absent on every event written before 2.35's second half, and on any
+		// failure no ServiceCaller classified. Empty means "nobody said" --
+		// never a class -- so nothing downstream can mistake it for one.
+		if v, ok := m["error_code"].(string); ok {
+			rec.ErrCode = v
+		}
+		// Absent on every event written before cleat#902, which reads back
+		// false -- the classification those events actually had, which is
+		// none. A workflow already in flight across the upgrade therefore
+		// keeps the dead-lettering behaviour it started with.
+		if v, ok := m["retries_exhausted"].(bool); ok {
+			rec.RetriesExhausted = v
+		}
+		if v, ok := m["resolved_by"].(string); ok {
+			rec.ResolvedBy = v
 		}
 		if v, ok := m["duration_ms"].(float64); ok {
 			rec.DurationMs = int64(v)
@@ -535,9 +788,21 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["run_id"].(string); ok {
 			rec.RunID = v
 		}
+		if v, ok := m["parent_workflow_id"].(string); ok {
+			rec.ParentWorkflowID = v
+		}
+		if v, ok := m["parent_close_policy"].(string); ok {
+			rec.ParentClosePolicy = v
+		}
 	case "continue_as_new":
 		if v, ok := m["new_input"].(string); ok {
 			rec.NewInput = v
+		}
+		// Absent on every continue_as_new written before this change, which
+		// replays as it always did: version 0, meaning current. A float64
+		// because that is what encoding/json produces for a JSON number.
+		if v, ok := m["new_version"].(float64); ok {
+			rec.NewVersion = int(v)
 		}
 	case "plugin_call":
 		if v, ok := m["plugin_name"].(string); ok {
@@ -559,6 +824,9 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["promise_name"].(string); ok {
 			rec.PromiseName = v
 		}
+		if v, ok := m["timeout_ms"].(float64); ok {
+			rec.TimeoutMs = int64(v)
+		}
 		if v, ok := m["promise_id"].(string); ok {
 			rec.PromiseID = v
 		}
@@ -572,6 +840,29 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["update_handler_name"].(string); ok {
 			rec.UpdateHandlerName = v
 		}
+	case "update_received":
+		if v, ok := m["update_handler_name"].(string); ok {
+			rec.UpdateHandlerName = v
+		}
+		if v, ok := m["update_request_id"].(string); ok {
+			rec.UpdateRequestID = v
+		}
+		if v, ok := m["update_payload"].(string); ok {
+			rec.UpdatePayload = v
+		}
+	case "update_completed":
+		if v, ok := m["update_handler_name"].(string); ok {
+			rec.UpdateHandlerName = v
+		}
+		if v, ok := m["update_request_id"].(string); ok {
+			rec.UpdateRequestID = v
+		}
+		if v, ok := m["update_response"].(string); ok {
+			rec.UpdateResponse = v
+		}
+		if v, ok := m["update_error"].(string); ok {
+			rec.UpdateError = v
+		}
 	case "state_mutation":
 		if v, ok := m["state_key"].(string); ok {
 			rec.StateKey = v
@@ -584,6 +875,11 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		}
 		if v, ok := m["state_op"].(string); ok {
 			rec.StateOp = v
+		}
+		// Absent on every state_mutation written before this change, which
+		// replays as it always did: no keys.
+		if v, ok := m["state_keys"].(string); ok {
+			rec.StateKeys = v
 		}
 	case "run_detached":
 		if v, ok := m["detached_name"].(string); ok {
@@ -605,6 +901,17 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["error"].(string); ok {
 			rec.Err = v
 		}
+		for key, dst := range map[string]*string{
+			"replaced_status":       &rec.ReplacedStatus,
+			"replaced_error_msg":    &rec.ReplacedErrorMsg,
+			"replaced_error_code":   &rec.ReplacedErrorCode,
+			"replaced_error_op":     &rec.ReplacedErrorOp,
+			"replaced_completed_at": &rec.ReplacedCompletedAt,
+		} {
+			if v, ok := m[key].(string); ok {
+				*dst = v
+			}
+		}
 	case "side_effect":
 		if v, ok := m["side_effect_result"].(string); ok {
 			rec.SideEffectResult = v
@@ -624,6 +931,18 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		}
 		if v, ok := m["plugin_error"].(string); ok {
 			rec.PluginError = v
+		}
+		// Absent on every stream chunk written before 3.96, which replays as
+		// it always did: index 0 and not finished. A float64 because that is
+		// what encoding/json produces for a JSON number.
+		if v, ok := m["stream_chunk_index"].(float64); ok {
+			rec.StreamChunkIndex = int(v)
+		}
+		if v, ok := m["stream_finish"].(bool); ok {
+			rec.StreamFinish = v
+		}
+		if v, ok := m["stream_err_code"].(float64); ok {
+			rec.StreamErrCode = int(v)
 		}
 	case "scope_acquired":
 		if v, ok := m["scope_key"].(string); ok {
@@ -701,6 +1020,9 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		if v, ok := m["lock_key"].(string); ok {
 			rec.LockKey = v
 		}
+		if v, ok := m["lock_not_held"].(bool); ok {
+			rec.LockNotHeld = v
+		}
 	case "durable_send":
 		if v, ok := m["service"].(string); ok {
 			rec.Service = v
@@ -764,5 +1086,15 @@ func populateFromPayload(rec *EventRecord, payload []byte) {
 		} else if v, ok := m["response"].(string); ok {
 			rec.Response = v
 		}
+	}
+
+	// Outside the switch, mirroring where eventRecordToPayload writes it.
+	// Absent on every event written before cleat#1155, which reads back false
+	// -- meaning "not known to be a defer" -- so a workflow in flight across
+	// the upgrade keeps exactly the dead-lettering behaviour it started with,
+	// the same compatibility this file already relies on for
+	// retries_exhausted.
+	if v, ok := m["in_defer_phase"].(bool); ok {
+		rec.InDeferPhase = v
 	}
 }

@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
+
+	"github.com/lib/pq"
 )
 
 func (s *PostgresStore) RequestCancellation(ctx context.Context, workflowID, reason string) error {
@@ -49,32 +52,49 @@ func (s *PostgresStore) CheckCancellation(ctx context.Context, workflowID string
 	return cancelled, reason.String, tx.Commit()
 }
 
-// PollAndClaimSignal atomically checks for and claims a pending signal.
-
-func (s *PostgresStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+// ConsumeSignal satisfies the SignalStore interface.
+//
+// This replaces PollAndClaimSignal, which read and deleted in one step and had
+// no caller at all -- the whole reason a signal was never consumed and an
+// await loop could re-read the same payload forever (IMPROVEMENT-PLAN 3.215).
+// Consumption is now a separate call the await path makes AFTER its
+// signal_received event is durable, which is what makes delivery at-least-once
+// rather than at-most-once.
+//
+// workflowID is not needed to identify the row -- id alone does that -- but it
+// is in the signature because ShardedStore routes on it, and it is in the
+// WHERE clause so a caller cannot delete another workflow's delivery by
+// guessing an id.
+func (s *PostgresStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", false, err
+		return err
 	}
 	defer tx.Rollback()
 
 	if err := s.setRLSOnTx(tx); err != nil {
-		return "", false, err
+		return err
 	}
 
-	var payload string
-	err = tx.QueryRowContext(ctx, `
-		DELETE FROM workflow_signals
-		WHERE workflow_id = $1 AND signal_name = $2
-		RETURNING payload
-	`, workflowID, signalName).Scan(&payload)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, tx.Rollback()
+	// The consumed counter, bumped in the same statement batch as the delete.
+	//
+	// finalize wakes a segment that CONSUMED something and still has rows
+	// waiting, because a segment that consumed once can consume again --
+	// progress is what separates a burst worth draining from an unrelated
+	// pending signal that would spin (cleat#953). Bumped here rather than
+	// through a new store method, because ConsumeSignal already writes.
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM workflow_signals WHERE id = $1 AND workflow_id = $2
+	`, id, workflowID); err != nil {
+		return fmt.Errorf("consume signal: %w", err)
 	}
-	if err != nil {
-		return "", false, fmt.Errorf("poll signal: %w", err)
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances SET signal_consumed_seq = signal_consumed_seq + 1
+		WHERE id = $1
+	`, workflowID); err != nil {
+		return fmt.Errorf("consume signal: bump consumed counter: %w", err)
 	}
-	return decodeJSONPayload(payload), true, tx.Commit()
+	return tx.Commit()
 }
 
 // encodeJSONPayload makes a payload acceptable to the `payload` column.
@@ -139,66 +159,263 @@ func decodeJSONPayload(raw string) string {
 // call with the same key returns the existing workflow ID without creating a
 // duplicate. Returns the workflow ID, whether it already existed, and any error.
 
+// DeliverSignalIdempotent implements SignalIdempotencyStore.
+//
+// The key insert comes FIRST and is what decides. If it conflicts, this token
+// has already delivered a signal and the transaction rolls back without
+// writing one -- so the duplicate is absorbed rather than detected afterwards.
+// Ordering it the other way would deliver, then discover the duplicate, and
+// have nothing to undo outside a transaction.
+func (s *PostgresStore) DeliverSignalIdempotent(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (bool, error) {
+	if idempotencyKey == "" {
+		// No token. Deliver unconditionally and record nothing -- see the
+		// interface doc for why "" is an absence rather than a value.
+		return false, s.DeliverSignal(ctx, workflowID, signalName, payload)
+	}
+
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return false, fmt.Errorf("deliver signal: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var inserted bool
+	// expires_at from the CONFIGURED TTL, not the column default.
+	//
+	// idempotency_keys.expires_at defaults to now() + 7 days, and the
+	// store's idempotencyKeyTTL defaults to 720 hours. The start path sets
+	// it explicitly; this one did not when it was added in cleat#1266, so a
+	// SIGNAL token silently stopped working after 7 days while the
+	// configured and documented lifetime was 30 -- a retry on day 8 would
+	// be delivered a second time, which is the whole thing the token exists
+	// to prevent.
+	//
+	// Same shape as cleat#1261, where cleanup deleted at created_at + 7
+	// days against the same 720h default and swept LIVE keys 23 days early:
+	// idempotency that stops working long before it says it does, silently,
+	// because nothing compares the two numbers.
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
+		VALUES ($1, $2, now() + ($3 * INTERVAL '1 second'), $4)
+		ON CONFLICT (key_hash, tenant_id) DO NOTHING
+		RETURNING true
+	`, signalIdempotencyHash(idempotencyKey), workflowID,
+		int(s.idempotencyKeyTTL.Seconds()), s.tenantID).Scan(&inserted)
+	if errors.Is(err, sql.ErrNoRows) {
+		// DO NOTHING returned no row: the token is already spent.
+		return true, tx.Commit()
+	}
+	if err != nil {
+		return false, fmt.Errorf("deliver signal: claim idempotency key: %w", err)
+	}
+
+	if err := deliverSignalTx(ctx, tx, s.tenantID, workflowID, signalName, payload); err != nil {
+		return false, err
+	}
+	pgNotify(ctx, tx, s.notifyChannel)
+	return false, tx.Commit()
+}
+
+// isSignalsWorkflowFKViolationPG checks for a foreign-key violation
+// (SQLSTATE 23503) on workflow_signals' FK to workflow_instances(id)
+// (migrations/postgres/001_schema.sql). The FK is an inline column
+// constraint with no explicit name, so PostgreSQL auto-names it by its own
+// convention ("<table>_<column>_fkey") -- confirmed against a live schema
+// via `SELECT conname FROM pg_constraint WHERE conrelid =
+// 'workflow_signals'::regclass AND contype = 'f'`, which returns exactly
+// "workflow_signals_workflow_id_fkey". Checking the constraint name, not
+// just the SQLSTATE, matches the specificity of isSignalsWorkflowFKViolation
+// (MySQL, matched on the child table name) and
+// isMSSQLSignalsWorkflowFKViolation (SQL Server, matched on the fixed
+// constraint name) -- a bare 23503 would also match workflow_promises' own
+// FK to workflow_instances (same migration file), which is not the
+// violation this function exists to translate.
+func isSignalsWorkflowFKViolationPG(err error) bool {
+	var pqErr *pq.Error
+	if !errors.As(err, &pqErr) {
+		return false
+	}
+	if pqErr.Code != "23503" {
+		return false
+	}
+	return pqErr.Constraint == "workflow_signals_workflow_id_fkey"
+}
+
 func (s *PostgresStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("deliver signal: begin: %w", err)
 	}
 	defer tx.Rollback()
-
-	payload = encodeJSONPayload(payload)
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (workflow_id, signal_name) DO UPDATE SET payload = $3, delivered_at = now()
-	`, workflowID, signalName, payload, s.tenantID)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET next_wake_at = now()
-		WHERE id = $1 AND status IN ('ready', 'suspended')
-	`, workflowID)
-	if err != nil {
+	if err := deliverSignalTx(ctx, tx, s.tenantID, workflowID, signalName, payload); err != nil {
 		return err
 	}
 	pgNotify(ctx, tx, s.notifyChannel)
 	return tx.Commit()
 }
 
-// PollSignal satisfies the SignalStore interface by checking for a delivered
-// signal, without consuming it. This must be a plain read: it used to
-// delegate straight to PollAndClaimSignal, whose name and doc comment both
-// say it "atomically checks for AND CLAIMS" a signal (i.e. DELETEs the row)
-// -- the opposite of what SignalStore's own doc comment promises for
-// PollSignal ("checks for a delivered signal", no mention of consuming it).
-// A second PollSignal call for the same signal would find nothing, having
-// silently deleted it on the first call.
-func (s *PostgresStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+// deliverSignalTx is the body of a delivery, inside a caller's transaction.
+//
+// Extracted so DeliverSignal and DeliverSignalIdempotent cannot drift. A second
+// copy of these two writes is exactly the shape this repo keeps paying for --
+// GetChildResult and GetChildCount held two definitions of "terminal" forty
+// lines apart, and only one of them decided anything (cleat#1213).
+func deliverSignalTx(ctx context.Context, tx *sql.Tx, tenantID, workflowID, signalName, payload string) error {
+	payload = encodeJSONPayload(payload)
+	// It carried ON CONFLICT (workflow_id, signal_name) DO UPDATE until 3.215,
+	// which discarded the earlier payload with no error -- so a workflow
+	// collecting one approval per reviewer saw only the last. The conflict is
+	// gone because the key is gone: the table's primary key is now a
+	// surrogate id and every delivery is its own row.
+	//
+	// Gated on EXISTS rather than a plain VALUES INSERT -- cleat#2218. A
+	// cross-tenant workflowID already wrote nothing that mattered (the row
+	// landed tagged under the CALLER's own tenant, invisible to the target,
+	// per the contract on the UPDATE below). A NONEXISTENT workflowID is a
+	// different case on every dialect: workflow_signals carries a real FK to
+	// workflow_instances(id) here too (REFERENCES ... ON DELETE CASCADE,
+	// migrations/postgres/001_schema.sql), so an ungated INSERT throws
+	// instead of writing an orphan row -- an existence oracle by
+	// error-versus-nil, reachable over HTTP through webhookingest's processed
+	// flag. Gating every dialect's INSERT on the same EXISTS predicate makes
+	// "foreign tenant" and "does not exist" take the identical path on all
+	// three: the condition is false either way, nothing is written.
+	//
+	// THE EXISTS PREDICATE IS ALSO A PLAIN, NON-LOCKING READ HERE, and
+	// PostgreSQL's own FK trigger re-checks against the LATEST committed data
+	// rather than this statement's own snapshot (READ COMMITTED takes a fresh
+	// snapshot per sub-query, and an AFTER ROW RI trigger's own SELECT ... FOR
+	// KEY SHARE is one such sub-query) -- so the same purge-races-a-signal
+	// window MySQL (error 1452) and SQL Server (error 547) can hit is
+	// reachable here too, as SQLSTATE 23503, if DeleteCompletedWorkflows'
+	// DELETE commits in the gap between this EXISTS check and the FK
+	// trigger's own re-check. Mapped below for the identical reason those two
+	// are: an unmapped foreign_key_violation would reach the caller as a raw
+	// driver error indistinguishable from an unrelated database failure, and
+	// eventtriggers.signalAwaiters would retry it forever against a workflow
+	// that is never coming back rather than unregistering the awaiter.
+	//
+	// RowsAffected()==0 now returns ErrWorkflowNotFound rather than nil --
+	// cleat#2227, reversing cleat#2218's choice to make this silent. #2218
+	// closed the existence oracle by making a nonexistent id as quiet as a
+	// foreign one; the cost, found in review, was that a signal to a run that
+	// is genuinely gone (purged, or simply never existed) in the CALLER'S OWN
+	// tenant went silent too -- webhookingest marked the event delivered with
+	// nothing sent, and eventtriggers left a dead awaiter registered forever
+	// (cleat#2213). ErrWorkflowNotFound restores the loud failure without
+	// reopening the oracle: it is identical for "foreign tenant" and "does
+	// not exist" -- neither this check nor anything upstream of it can tell
+	// them apart -- so a caller still learns nothing about which is true.
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
+		SELECT $1, $2, $3, $4
+		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = $1 AND tenant_id = $4)
+	`, workflowID, signalName, payload, tenantID)
+	if err != nil {
+		if isSignalsWorkflowFKViolationPG(err) {
+			return ErrWorkflowNotFound
+		}
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("deliver signal: rows affected: %w", err)
+	} else if n == 0 {
+		return ErrWorkflowNotFound
+	}
+	// Two writes, two different windows, and neither replaces the other.
+	//
+	// next_wake_at wakes a workflow that is ALREADY suspended, and its
+	// status filter is why: 'running' is deliberately excluded, because a
+	// claimed workflow's row is about to be overwritten by finalize anyway.
+	//
+	// signal_seq covers the window that leaves -- a delivery arriving while
+	// the workflow is awake. The worker captured this value when it claimed;
+	// finalize compares and schedules an immediate wake if it moved. Bumped
+	// unconditionally, in this transaction, so the counter and the delivery
+	// become visible together: a reader that can see the row can see the
+	// bump (cleat#953).
+	//
+	// No RowsAffected check here, and that is deliberate, not an oversight:
+	// this UPDATE only runs once the INSERT above has already proven the
+	// EXISTS predicate true, under this same tenant, in this same
+	// transaction -- so a caller reaching this line is signalling its OWN
+	// workflow, and the row this UPDATE names cannot have gone missing
+	// between the two statements. RLS's USING clause still filters it by
+	// session, the same way it filters a SELECT, but that is a second,
+	// redundant guard, not the one doing the work. cleat#2209's actual
+	// defect was that SignalWorkflow ran on a store scoped to the WRONG
+	// tenant for a REAL, correctly-owned target -- scopeToTenant
+	// (cmd/cleat-worker/main.go, signalPluginWorkflow) is what fixes that,
+	// by ensuring this UPDATE runs under the target's own tenant, where it
+	// matches. Erroring on n==0 HERE, on the UPDATE, was tried and reverted
+	// (cleat#2207) after it broke the harmless-orphan-write half of this
+	// contract in CI: the INSERT was ungated back then, so a foreign id
+	// still wrote an orphan row under the caller's own tenant before this
+	// UPDATE ran, and erroring here landed on top of a write that had
+	// already happened. That revert is still correct, and is not the case
+	// cleat#2227 revisits: cleat#2218 already gates the INSERT above on its
+	// own EXISTS predicate, so cleat#2227's RowsAffected()==0 check on THAT
+	// statement, not this UPDATE, means nothing was written at all -- an
+	// all-or-nothing failure, not one layered on a completed write.
+	//
+	// (mssql_admin_login_control_plane_tenant_test.go's DeliverSignal and
+	// DeliverSignalNonexistentID cases; IMPROVEMENT-PLAN 3.86/3.215;
+	// cleat#2218, cleat#2227.)
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET signal_seq = signal_seq + 1,
+		    next_wake_at = CASE WHEN status IN ('ready', 'suspended') THEN now() ELSE next_wake_at END
+		WHERE id = $1
+	`, workflowID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// PollSignal satisfies the SignalStore interface by returning the oldest
+// unconsumed delivery with this name, without consuming it.
+//
+// ORDER BY id LIMIT 1 is the whole of the FIFO guarantee, and it needs the
+// surrogate key to mean anything: before 3.215 there was at most one row per
+// (workflow_id, signal_name), so "which one" was not a question the query
+// could be asked.
+//
+// It must stay a plain read. It used to delegate straight to
+// PollAndClaimSignal, whose name and doc comment both say it "atomically
+// checks for AND CLAIMS" a signal (i.e. DELETEs the row) -- the opposite of
+// what SignalStore's own doc comment promises here. Consumption is
+// ConsumeSignal, called separately once the event is durable.
+func (s *PostgresStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return "", false, err
+		return SignalDelivery{}, false, err
 	}
 	defer tx.Rollback()
 
 	if err := s.setRLSOnTx(tx); err != nil {
-		return "", false, err
+		return SignalDelivery{}, false, err
 	}
 
+	var id int64
 	var payload string
+	var deliveredAt time.Time
 	err = tx.QueryRowContext(ctx, `
-		SELECT payload FROM workflow_signals
+		SELECT id, payload, delivered_at FROM workflow_signals
 		WHERE workflow_id = $1 AND signal_name = $2
-	`, workflowID, signalName).Scan(&payload)
+		ORDER BY id
+		LIMIT 1
+	`, workflowID, signalName).Scan(&id, &payload, &deliveredAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, tx.Rollback()
+		return SignalDelivery{}, false, tx.Rollback()
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("poll signal: %w", err)
+		return SignalDelivery{}, false, fmt.Errorf("poll signal: %w", err)
 	}
-	return decodeJSONPayload(payload), true, tx.Commit()
+	return SignalDelivery{
+		ID:            id,
+		Payload:       decodeJSONPayload(payload),
+		DeliveredAtMs: deliveredAt.UnixMilli(),
+	}, true, tx.Commit()
 }
 
 // PollCancellation satisfies the SignalStore interface.
@@ -208,7 +425,12 @@ func (s *PostgresStore) PollCancellation(ctx context.Context, workflowID string)
 }
 
 // GetAllowedSignalCallers returns the allowed_signals list for a workflow.
-// Returns nil when allowed_signals is NULL or the target workflow doesn't exist.
+// Returns nil, with no error, when the workflow exists but allowed_signals
+// is NULL or empty (deny-all semantics). Returns ErrWorkflowNotFound when no
+// workflow with this id is visible to the calling store's tenant -- see that
+// error's doc comment for why the two cases it does not distinguish, and why
+// this getter answers the same way SetAllowedSignalCallers does now, rather
+// than silently as it did before this fix.
 
 func (s *PostgresStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
 	tx, err := s.beginTxWithRLS(ctx)
@@ -222,7 +444,10 @@ func (s *PostgresStore) GetAllowedSignalCallers(ctx context.Context, workflowID 
 		`SELECT allowed_signals FROM workflow_instances WHERE id = $1 AND tenant_id = $2`,
 		workflowID, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, tx.Commit()
+		if cerr := tx.Commit(); cerr != nil {
+			return nil, cerr
+		}
+		return nil, ErrWorkflowNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get allowed signal callers: %w", err)
@@ -235,6 +460,142 @@ func (s *PostgresStore) GetAllowedSignalCallers(ctx context.Context, workflowID 
 		return nil, fmt.Errorf("get allowed signal callers: parse: %w", err)
 	}
 	return callers, tx.Commit()
+}
+
+// ErrWorkflowNotFound is returned by SetAllowedSignalCallers, and by
+// GetAllowedSignalCallers, when no workflow with the given id is visible to
+// the calling store's tenant.
+//
+// It deliberately does not distinguish "no such workflow" from "another
+// tenant's workflow". Splitting them would make the endpoint an existence
+// oracle: a caller could enumerate ids and learn which ones belong to someone
+// else from the difference in the error.
+//
+// The getter returned nil silently for both cases, with no error, until this
+// fix: with --require-signal-auth on, signalPluginWorkflowWithAuth
+// (cmd/cleat-worker/main.go) read that nil as "the workflow exists and has
+// no allowed callers configured" and denied the signal with the ordinary
+// "signal auth denied" a real but unauthorized caller gets -- indistinguishable
+// from a workflow that exists, and different from what the SAME id got through
+// signalPluginWorkflow with auth off, which reported not-found. A caller could
+// tell whether --require-signal-auth was on from the shape of the error alone.
+// And unlike DeliverSignal's own not-found case (cleat#2218, cleat#2227), this
+// one was never fixed by either: cleat#2218's nil only ever reached
+// deliverSignalTx, not this getter, so eventtriggers.signalAwaiters -- which
+// unregisters on ErrWorkflowNotFound but not on an ordinary error -- kept
+// treating a not-found target as an ordinary "signal auth denied" failure on
+// this path and never unregistered it. cleat#2213's leak was live here,
+// continuously, until this fix.
+var ErrWorkflowNotFound = errors.New("workflow not found")
+
+// ErrRoutingRuleNotFound is returned by RemoveRoutingRule when no rule with
+// that ID exists.
+//
+// cleat#946 had two halves. #948 fixed the first -- ShardedStore routed the
+// removal by rule ID while the rows are placed by workflow name, so it deleted
+// from the wrong shard -- and this is the second: the removal reported success
+// either way, because no implementation checked rows-affected. A DELETE that
+// matches nothing succeeds, so the handler answered
+// `200 {"status":"removed"}` for a rule that never existed, and an operator
+// tearing down a canary was told it was gone.
+var ErrRoutingRuleNotFound = errors.New("routing rule not found")
+
+// ErrScheduleExists is returned by CreateSchedule when the name is taken.
+//
+// A schedule's name is its identity -- workflow_schedules.name is the PRIMARY
+// KEY -- so a second create under one name is a caller mistake, not a store
+// fault. It exists so the HTTP layer can answer 409 without reading driver
+// text: each dialect detects its own uniqueness violation while the error is
+// still TYPED (pq SQLSTATE 23505, MySQL 1062, SQL Server 2601/2627) and wraps
+// it in this, so nothing above the store ever parses a message. See
+// engine/mssql_errors.go for what the string form costs -- it records a naive
+// "duplicate key" search matching `invalid column value at row 26270`.
+var ErrScheduleExists = errors.New("schedule already exists")
+
+// ErrScheduleNextRunUnset is returned by CreateSchedule when NextRunAt is the
+// zero time.
+//
+// The column is NOT NULL DEFAULT now() on all three dialects, but the default
+// is UNREACHABLE: every CreateSchedule names next_run_at in its INSERT and
+// passes the field, so a zero is written rather than defaulted. What that zero
+// then means is a three-way divergence -- PostgreSQL stores year 1, MySQL
+// rejects `0000-00-00` with a 500, SQL Server accepts it -- which is cleat#995
+// arriving three different ways from one omission.
+//
+// Rejecting it makes the contract explicit and identical everywhere: a caller
+// that forgot to set it gets the same loud error on every backend, rather than
+// a silently overdue schedule on the dialect most people develop on.
+//
+// ONLY the zero value. A NextRunAt in the past is NOT an error: that is what a
+// deliberately backdated schedule looks like, and the misfire policy exists to
+// decide what to do about the firings it missed. "The caller forgot" and "the
+// caller chose something unusual" are different bugs, and only the first has a
+// safe uniform answer.
+var ErrScheduleNextRunUnset = errors.New("schedule next_run_at is not set")
+
+// SetAllowedSignalCallers replaces the allowed_signals list for a workflow.
+//
+// The write side of GetAllowedSignalCallers above. Until this existed, nothing
+// in the product could write workflow_instances.allowed_signals -- no store
+// method, no API, no CLI, no SDK -- while --require-signal-auth consulted it
+// and denied every signal when it was empty. IMPROVEMENT-PLAN 3.15.
+//
+// An empty list writes NULL rather than "[]", so that a cleared list reads back
+// as the getter's nil rather than as an empty non-null array. The two mean the
+// same thing to signalCallerAllowed, but only one of them survives the round
+// trip unchanged, and a setter whose output the getter renormalises is a
+// setter whose tests can pass while the column holds something else.
+func (s *PostgresStore) SetAllowedSignalCallers(ctx context.Context, workflowID string, callers []string) error {
+	encoded, err := encodeAllowedSignals(callers)
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: %w", err)
+	}
+
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// tenant_id in the predicate as well as RLS underneath it. On PostgreSQL
+	// the policy would be enough; carrying it here keeps the three dialects'
+	// statements the same shape, and MySQL has no policy to fall back on.
+	res, err := tx.ExecContext(ctx,
+		`UPDATE workflow_instances SET allowed_signals = $1 WHERE id = $2 AND tenant_id = $3`,
+		encoded, workflowID, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: rows affected: %w", err)
+	}
+	if n == 0 {
+		// This is what makes a cross-tenant write honest, not just harmless.
+		// Under RLS the other tenant's row is invisible, so the UPDATE is not
+		// refused -- it matches nothing and succeeds. Without this check the
+		// caller is told the grant landed. Falsified: removing it turns
+		// TestSetAllowedSignalCallersRejectsAnotherTenantsWorkflow/postgres red
+		// with "tenant B ... was told it succeeded".
+		return ErrWorkflowNotFound
+	}
+	return tx.Commit()
+}
+
+// encodeAllowedSignals renders a caller list for the allowed_signals column.
+//
+// Returns an invalid sql.NullString (SQL NULL) for an empty list; otherwise a
+// JSON array, which is what GetAllowedSignalCallers unmarshals and what SQL
+// Server's ck_workflow_instances_allowed_signals ISJSON check requires.
+func encodeAllowedSignals(callers []string) (sql.NullString, error) {
+	if len(callers) == 0 {
+		return sql.NullString{}, nil
+	}
+	b, err := json.Marshal(callers)
+	if err != nil {
+		return sql.NullString{}, fmt.Errorf("encode allowed signals: %w", err)
+	}
+	return sql.NullString{String: string(b), Valid: true}, nil
 }
 
 // GetQueryState returns the value for a key in the workflow's query_state JSONB.

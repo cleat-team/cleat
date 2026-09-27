@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugin"
 	"io"
 	"net/http"
 	"strings"
@@ -203,6 +204,7 @@ func GeminiChat(ctx context.Context, client *http.Client, apiKey, baseURL string
 	if err != nil {
 		return ChatOutput{}, fmt.Errorf("gemini: create request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("x-goog-api-key", apiKey)
 	req.Header.Set("Content-Type", "application/json")
 

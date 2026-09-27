@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -17,8 +18,10 @@ import (
 func (s *execSession) writeResult(ctx context.Context, m api.Module, ptr uint32, val string, maxLen uint32) (uint32, error) {
 	if rawBuf, ok := ctx.Value(wasmMemBufKey{}).([]byte); ok && rawBuf != nil {
 		data := []byte(val)
+		truncated := false
 		if uint32(len(data)) > maxLen {
 			data = data[:maxLen]
+			truncated = true
 		}
 		// ptr comes from the guest. Unchecked, `rawBuf[ptr:]` panics for any
 		// ptr past the end of linear memory -- reachable from guest code by
@@ -41,6 +44,12 @@ func (s *execSession) writeResult(ctx context.Context, m api.Module, ptr uint32,
 				len(data), ptr, len(rawBuf))
 		}
 		n := copy(rawBuf[ptr:], data)
+		if truncated {
+			// The prefix is still written; see writeWasmString for why. The
+			// signal is additive, so a caller that does not yet propagate it
+			// behaves exactly as it did before cleat#1312.
+			return uint32(n), &OutputTruncatedError{Needed: len(val), Capacity: int(maxLen)}
+		}
 		return uint32(n), nil
 	}
 	if m != nil {
@@ -49,6 +58,41 @@ func (s *execSession) writeResult(ctx context.Context, m api.Module, ptr uint32,
 		}
 	}
 	return 0, nil
+}
+
+// writeOut is writeResult with the truncation signal turned into an errCode
+// the caller can pack.
+//
+// EVERY host call whose success path would otherwise return errCode 0 goes
+// through this, because that is the population where truncation was invisible:
+// writeResult cut the value to the guest's buffer and returned only the bytes
+// it wrote, so the guest got a short value and a success code and had nothing
+// to compare against (cleat#1312).
+//
+// Sites whose errCode is ALREADY non-zero deliberately do not use it. Those
+// write a human-readable error message into the output buffer alongside a real
+// failure code; a truncated message is cosmetic, and overwriting the actual
+// error with "output truncated" would replace a diagnosis with a symptom.
+//
+// A helper rather than errors.As at each of forty-odd call sites: the point of
+// one expression is that the next site added cannot get it subtly different.
+func (s *execSession) writeOut(ctx context.Context, m api.Module, ptr uint32, val string, maxLen uint32) (uint32, byte) {
+	n, err := s.writeResult(ctx, m, ptr, val, maxLen)
+	code, ok := asTruncation(err)
+	if !ok {
+		return n, 0
+	}
+	// The nil check is not defensive dressing. writeResult never touched
+	// s.engine, so a great many sessions in this package are constructed
+	// without one -- TestAwaitSignals_ReportsBytesWrittenNotPayloadLength builds
+	// an execSession directly and segfaulted here the moment writeOut started
+	// logging. Reaching through the session for a logger is a new dependency
+	// and it has to tolerate what the old code never needed.
+	if s.engine != nil {
+		s.engine.log().WarnContext(ctx, "host call output truncated",
+			"workflow_id", s.workflowID, "needed", len(val), "capacity", maxLen)
+	}
+	return n, code
 }
 
 // insertEventSQL is the shared INSERT statement for both fast and quota paths.
@@ -103,21 +147,186 @@ func (s *execSession) writeResult(ctx context.Context, m api.Module, ptr uint32,
 // clause is what actually loses that inference, forcing an explicit cast per
 // parameter. A bare WHERE EXISTS, with no FROM clause at all, does not have
 // that problem.
+// $34 is created_at, bound rather than NOW().
+//
+// LoadEventHistory reconstructs EventRecord.TimestampMs FROM created_at -- it is
+// the only carrier, since the checksum payload does not include a timestamp --
+// and execSession.Now() returns the previous event's TimestampMs so that time is
+// deterministic across replay. With NOW() the column held the moment of the
+// INSERT rather than the moment of the event, so the value read back on replay
+// was later than the one the first execution saw, by however long the flush
+// took. Measured at 78ms on an idle laptop; the adaptive flusher batches for up
+// to 8ms plus queueing, so it is not bounded by anything useful.
+//
+// The consequence was that h.Now() returned a different value on replay for
+// every workflow, which is what cleat vet E003 promises it does not
+// ("Use h.Now() for deterministic time"), and it made SideEffect -- which
+// validates the recomputed value against history -- fail any workflow that
+// wrapped a clock read. store_children.go already bound the event's own
+// timestamp here; this brings the two write paths into agreement.
+//
+// # The completion guard covers promise_result/promise_error too, not just response/error
+//
+// AwaitPromise (engine/promises.go) is the same suspend-then-complete
+// same-step pattern as AwaitChild: a pending write with everything empty,
+// then -- on the replay that finds the promise resolved -- a second write to
+// the SAME step carrying the real outcome. But its outcome lives in
+// PromiseResult/PromiseError, not Response/Err -- both of the latter stay
+// empty on BOTH writes.
+//
+// LoadEventHistory does not actually need the raw response/promise_result
+// COLUMNS to be current for replay correctness: it scans them, but then
+// unconditionally overlays from the payload blob via populateFromPayload
+// (store_events.go) for every event type that function's switch names,
+// "await_child" and "promise_resolved"/"promise_rejected"/"await_promise"
+// included. payload = EXCLUDED.payload alone -- already necessary for
+// AwaitChild's fix -- is therefore already sufficient to make a completed
+// AwaitPromise replay correctly too, and this section originally reasoned
+// from the raw-column read before checking that this overlay exists.
+//
+// What promise_result/promise_error being absent from this guard actually
+// breaks is IMMUTABILITY, and it breaks it for every completed
+// AwaitPromise, not a narrow edge case: with the guard reading only
+// response/error, a resolved promise's row stays "pending" by this WHERE's
+// own test forever, because response and error never carry its content on
+// EITHER write. Any later stray reflush of that step -- a retried batch, a
+// duplicate segment append -- would then pass the guard and overwrite its
+// checksum and payload, reopening cleat#1379's corruption case for this
+// event type on every completion, confirmed by falsifying just this half of
+// the guard: TestAPromiseStyleEventCompletesOnEveryDialect's immutability
+// check fails with the stray value's checksum in place of the original's.
+// The SET list also syncs the raw promise_result/promise_error columns
+// themselves, for any reader that queries them directly rather than through
+// LoadEventHistory's overlay.
+//
+// The disjunct this WHERE used to carry, comparing response to the SQL
+// empty-string literal, is gone, not widened: nullStr (store_events.go)
+// stores every empty string as SQL NULL on every write path in this file,
+// so that comparison can never be true -- see the "That clause declines for
+// EVERY existing row" comment history on this constant. Checking IS NULL
+// alone says the same thing without the dead half.
+//
+// # event_type = EXCLUDED.event_type closes the empty-outcome residual, using a column this guard already reads
+//
+// This section used to say the guard "cannot tell genuinely pending from
+// genuinely completed with an empty outcome" for a hand-called
+// `resolve_promise(id, "")`, and called that documented-not-fixed --
+// PromiseResult has no equivalent of AwaitChild's out.Result
+// COALESCE(...,'{}') guarantee of non-emptiness, so response/error/
+// promise_result/promise_error IS NULL genuinely cannot discriminate a
+// promise resolved with "" from one never resolved at all. cleat-review
+// caught that this was left open rather than closed (cleat#2333 review,
+// point 4) and asked for it to be settled before the PR, not documented
+// again.
+//
+// Checking for it surfaced a second, more basic gap the empty-value question
+// was standing on: event_type ITSELF never transitioned. AwaitPromise's
+// pending write records EventTypeAwaitPromise; its completing write records
+// EventTypePromiseResolved or EventTypePromiseRejected (promises.go) -- a
+// DIFFERENT event_type, unlike AwaitChild and AwaitAllChildren, whose pending
+// and completed writes share one event_type throughout. Nothing in this SET
+// list touched event_type, so the stored column stayed "await_promise"
+// forever after every completing flush -- confirmed against a real database,
+// not inferred: LoadEventHistory returned EventType "await_promise" on a
+// workflow whose promise had genuinely resolved. That is not cosmetic:
+// AwaitPromise's OWN replay logic branches on it (`if rec.EventType ==
+// EventTypePromiseResolved` vs `== EventTypeAwaitPromise`, promises.go), so a
+// replay of a completed await was re-entering the "still pending, re-check
+// the promise store" branch and re-querying promiseStore.GetPromise on every
+// single replay instead of trusting the durable outcome -- silently correct
+// only for as long as the promise store's answer never changed or expired
+// after the workflow first observed it.
+//
+// Fixing that (event_type = EXCLUDED.event_type here) also closes the
+// empty-outcome residual for free, because event_type IN (...) two lines
+// down never lists "promise_resolved" or "promise_rejected" -- only the
+// three PENDING spellings. Once a promise's row transitions, its event_type
+// no longer matches the IN(...) half of this WHERE, so the whole guard
+// evaluates false and the row is immutable regardless of what
+// response/error/promise_result/promise_error hold -- NULL, empty string, or
+// real content, resolved or rejected, all alike. The four NULL checks stay
+// necessary for AwaitChild and AwaitAllChildren, whose event_type never
+// leaves the IN(...) list and whose immutability genuinely depends on
+// response being guaranteed non-empty on completion -- this paragraph only
+// removes AwaitPromise's dependence on that guarantee, which it never had.
+//
+// TestAPromiseStyleEventCompletesOnEveryDialect now asserts the stored
+// EventType after completion, and a stray reflush case that resolves with ""
+// then reflushes with different content, on all three dialects -- both
+// regressions this paragraph would otherwise only assert in prose.
+//
+// # AwaitChild's ERRORED completion needed the SAME guarantee, on the other column
+//
+// Extending cleat-review's question to AwaitChild's own error path (not
+// asked directly, but the same shape) surfaced a live gap: an AwaitChild
+// completing write can set Err instead of Response (children.go, when the
+// child failed), and error_msg -- unlike result -- was read with no
+// COALESCE-style guarantee. admin_ops.go's ForceFail validates workflowID,
+// generation, operator and errorCode, but never errorMsg, so an operator can
+// force-fail a child with an empty message; childOutcomeForSettledStatus
+// then returned Error == "" for it, which nullStr stores as SQL NULL --
+// column-identical to AwaitChild's own pending row, on both response AND
+// error. AwaitChild has no event_type escape hatch the way a resolved
+// promise now does (its event_type never leaves the IN(...) list at all,
+// pending or complete), so this was reachable corruption via cleat#1379's
+// exact mechanism, on a path this PR's own review process exists to catch.
+// Fixed at the source, matching how `result` is already COALESCEd:
+// status_vocabulary.go's childOutcomeForSettledStatus now runs errMsg through
+// nonEmptyChildError before returning it, so every GetChildResult
+// implementation (all three dialects share this one function) is covered at
+// once rather than patched per reader of ChildOutcome.Error.
+//
+// # event_type IN (...) is not an optimization, it is the other half of the guard
+//
+// TestACompletedIntentIsNotOverwrittenByALaterAppend (cleat#1379) failed
+// once the response-IS-NULL widening above landed, and it is the same
+// ambiguity from the opposite direction: WriteCallIntent/CompleteCallIntent
+// (store_intent.go) is a SEPARATE two-phase mechanism for "call" events, and
+// a call that completes with a genuinely empty response and no error is
+// exactly as reachable as an AwaitPromise resolved with "" -- CompleteCallIntent
+// stores it as NULL, on purpose, per that file's own WHY comment. Once
+// completed that way, its row is bit-for-bit identical, in every column this
+// guard could otherwise inspect, to an AwaitChild/AwaitPromise/
+// AwaitAllChildren row that has never been completed at all: response,
+// error, promise_result and promise_error all NULL, checksum SET (computed
+// by whichever writer wrote it last). checksum cannot discriminate them
+// either -- AwaitChild's PENDING flush already computes and stores a real
+// checksum over the pending record itself, so checksum is never NULL on
+// that path even before completion.
+//
+// event_type is the one column that does discriminate: only await_child,
+// await_promise and await_all_children ever suspend and complete by
+// re-inserting the SAME step (see each's own "no cached result, exitReplay
+// to fresh" comment, which is where this list was enumerated from -- every
+// other suspend-shaped call, AwaitAnyChild and AwaitSignals among them,
+// records its outcome at a NEW, later step instead, so a stray reflush of
+// their pending row is not a concern this WHERE needs to cover). A "call"
+// row's event_type never changes, in either the ordinary write path or the
+// call-intent path, so restricting the pending test to these three names is
+// sufficient to leave a call-intent-completed row immutable regardless of
+// how empty its outcome was, without reopening the completion this WHERE
+// exists to allow for the three event types that actually need it.
 const insertEventSQL = `
 	INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
 		duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 		defer_description, defer_id, child_name, child_input, run_id, new_input,
 		plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		promise_name, promise_id, promise_result, promise_error, payload,
-		checksum, created_at, tenant_id)
+		checksum, created_at, tenant_id, payload_encoding)
 	SELECT $1, $2, $3, $4, $5, $6, $7, $8,
 		$9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
 		$20, $21, $22, $23, $24, $25, $26, $27, $28, $29,
-		$30, NOW(), $31
+		$30, $34, $31, $35
 	WHERE ($32 = '' OR EXISTS (
 		SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $32 AND generation = $33
 	))
-	ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error WHERE event_history.response = '' AND event_history.error IS NULL`
+	ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error,
+		promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,
+		checksum = EXCLUDED.checksum, payload = EXCLUDED.payload, payload_encoding = EXCLUDED.payload_encoding,
+		event_type = EXCLUDED.event_type
+		WHERE event_history.event_type IN ('await_child', 'await_promise', 'await_all_children')
+		  AND event_history.response IS NULL AND event_history.error IS NULL
+		  AND event_history.promise_result IS NULL AND event_history.promise_error IS NULL`
 
 // setRLSOnTx sets the transaction-local tenant context that the row-level
 // security policies require.
@@ -170,15 +379,75 @@ func setRLSOnFlushTx(ctx context.Context, tx *sql.Tx, tenantID string) error {
 // requested" -- exactly the unfenced INSERT this was before B4.
 //
 // A fenced write can report zero rows affected for two different reasons,
-// and they are not the same thing: the fence was lost, or the row already
-// carries a terminal response/error and the pre-existing
+// and they are not the same thing: the fence was lost, or a row already
+// exists for this step and the pre-existing
 //
 //	ON CONFLICT ... WHERE event_history.response = '' AND error IS NULL
 //
-// clause correctly declined to overwrite it (an idempotent re-flush, not a
-// bug). afterFencedInsert disambiguates the rare zero-rows case with one
-// extra Heartbeat call -- paid only there, not on every write, since the
-// common case (a row was actually written) never reaches it.
+// clause declined to overwrite it (an idempotent re-flush, not a bug).
+// afterFencedInsert disambiguates the rare zero-rows case with one extra
+// Heartbeat call -- paid only there, not on every write, since the common
+// case (a row was actually written) never reaches it.
+//
+// # That clause declines for EVERY existing row, not only a terminal one
+//
+// This paragraph used to say the clause declined because the row "already
+// carries a terminal response/error", which reads as though a row with no
+// outcome yet would be filled in. For a row written by any of the INSERT
+// paths it would not: every one of them binds `response` through nullStr,
+// which maps the empty string to NULL, so the comparison the clause makes is
+// NULL against the empty string -- which is NULL, which is not true.
+//
+// **The paragraph then said "no write path in this repo stores the empty
+// string in `response`", that was false for a day, and it is true again.**
+// CompleteCallIntent and ResolveCallIntent bound `rec.Response` directly into
+// `SET response = $3` with no nullStr, so a call that completed with an empty
+// response stored the empty string. Measured 2026-09-12 on PostgreSQL 16:
+// WriteCallIntent then CompleteCallIntent with Response="" left `response` at
+// Valid=true, String="".
+//
+// That was not a cosmetic difference, and it is why cleat#1379 part 1 changed
+// it rather than documenting it. The clause could never fire for the rows it
+// was written for -- a row written without a result has response NULL, and
+// `NULL = ”` is not true -- so the ONLY rows it could fire on were finished
+// call-intent rows that completed with an empty response, which are exactly
+// the rows it exists to leave alone. Inverted relative to this comment.
+// Measured before the fix, completing an intent with an empty response and
+// then appending the same step with a different one:
+//
+//	after re-append   response="eyJs…"  checksum UNCHANGED  payload UNCHANGED
+//	VerifyWorkflowEvents -> checksum mismatch
+//
+// The firing was never self-healing; it could only corrupt, and `response` is
+// not in shadowFields, so nothing but the checksum could see it. All six
+// call-intent binds now go through nullStr.
+//
+// The predicate, which does not rot as writers are added: *every write path
+// binds response through nullStr.* Re-derive with
+//
+//	grep -rn "rec.Response\|stored.Response" --include="*.go" engine/ \
+//	  | grep -v _test.go | grep -E "INSERT|nullStr|SET response"
+//
+// Measured 2026-09-03: appending step 0 with an empty response and then
+// appending step 0 again with `{"ok":true}` leaves the stored `response`
+// column NULL and the stored checksum unchanged. The DO UPDATE never runs,
+// for a row that an INSERT path wrote.
+//
+// So this is `DO NOTHING` wearing a WHERE clause -- for every row now, not
+// only for the ones an INSERT path wrote -- and that is
+// the *correct* behaviour -- it is what MySQL's `INSERT IGNORE` (mysql_events.go) and SQL
+// Server's `WHERE NOT EXISTS` (mssql_events.go) do, so all three dialects
+// agree. Left as it is rather than simplified: rewriting the hottest write
+// path in the engine to change nothing is not worth the risk, and the shape
+// is load-bearing documentation of what the other two do.
+//
+// It matters that it cannot fire, because when it did it left a stale
+// checksum: the row's stored checksum was computed over the record as first
+// written, and the DO UPDATE changes `response` without recomputing it. That
+// is IMPROVEMENT-PLAN 3.88's defect class exactly, and cleat#1379 measured it
+// happening rather than reasoning about it. A legacy row written by an older
+// version holding the empty string rather than NULL is now the only way to
+// reach it.
 //
 // On fence loss this returns ErrFenceLost rather than silently dropping the
 // write. It does not abort the workflow's execution session itself -- that
@@ -236,79 +505,18 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 		}
 	}()
 
+	// Both of these are over the PLAINTEXT record. The checksum has to be,
+	// because VerifyWorkflowEvents recomputes it from the record it loads,
+	// which is decrypted; and the payload has to be, because
+	// populateFromPayload writes the payload's values back over the columns on
+	// read, so a payload built from an encrypted record would put ciphertext
+	// there. encodeEventForStorage preserves both orderings -- see its doc.
 	checksum := computeEventChecksum(rec, prevChecksum)
-	payloadJSON, _ := eventRecordToPayload(rec)
-	payloadArg := nullStr("")
-	if len(payloadJSON) > 0 {
-		payloadArg = sql.NullString{String: string(payloadJSON), Valid: true}
+	stored, encodeErr := encodeEventForStorage(rec, e.encryption, e.encryptSensitivePayloads, tenantForAAD(e.tenantID))
+	if encodeErr != nil {
+		return fmt.Errorf("flush event: %w", encodeErr)
 	}
-
-	requestStr := tryEncodeBase64(rec.Request)
-	responseStr := tryEncodeBase64(rec.Response)
-	errStr := rec.Err
-	sigPayload := rec.SignalPayload
-	childInput := rec.ChildInput
-	newInput := rec.NewInput
-	pluginInput := rec.PluginInput
-	pluginOutput := rec.PluginOutput
-	promiseResult := rec.PromiseResult
-	promiseError := rec.PromiseError
-
-	// Encrypt sensitive payload fields when encryption is enabled.
-	if e.encryptSensitivePayloads && e.encryption != nil {
-		var encErr error
-		if requestStr, encErr = e.encryption.EncryptString(rec.Request); encErr != nil {
-			return fmt.Errorf("flush event: encrypt request: %w", encErr)
-		}
-		if responseStr, encErr = e.encryption.EncryptString(rec.Response); encErr != nil {
-			return fmt.Errorf("flush event: encrypt response: %w", encErr)
-		}
-		if errStr, encErr = e.encryption.EncryptString(rec.Err); encErr != nil {
-			return fmt.Errorf("flush event: encrypt err: %w", encErr)
-		}
-		if rec.SignalPayload != "" {
-			if sigPayload, encErr = e.encryption.EncryptString(rec.SignalPayload); encErr != nil {
-				return fmt.Errorf("flush event: encrypt signal_payload: %w", encErr)
-			}
-		}
-		if rec.ChildInput != "" {
-			if childInput, encErr = e.encryption.EncryptString(rec.ChildInput); encErr != nil {
-				return fmt.Errorf("flush event: encrypt child_input: %w", encErr)
-			}
-		}
-		if rec.NewInput != "" {
-			if newInput, encErr = e.encryption.EncryptString(rec.NewInput); encErr != nil {
-				return fmt.Errorf("flush event: encrypt new_input: %w", encErr)
-			}
-		}
-		if rec.PluginInput != "" {
-			if pluginInput, encErr = e.encryption.EncryptString(rec.PluginInput); encErr != nil {
-				return fmt.Errorf("flush event: encrypt plugin_input: %w", encErr)
-			}
-		}
-		if rec.PluginOutput != "" {
-			if pluginOutput, encErr = e.encryption.EncryptString(rec.PluginOutput); encErr != nil {
-				return fmt.Errorf("flush event: encrypt plugin_output: %w", encErr)
-			}
-		}
-		if rec.PromiseResult != "" {
-			if promiseResult, encErr = e.encryption.EncryptString(rec.PromiseResult); encErr != nil {
-				return fmt.Errorf("flush event: encrypt promise_result: %w", encErr)
-			}
-		}
-		if rec.PromiseError != "" {
-			if promiseError, encErr = e.encryption.EncryptString(rec.PromiseError); encErr != nil {
-				return fmt.Errorf("flush event: encrypt promise_error: %w", encErr)
-			}
-		}
-		if len(payloadJSON) > 0 && e.encryption != nil {
-			encrypted, encErr := e.encryption.EncryptJSON(payloadJSON)
-			if encErr != nil {
-				return fmt.Errorf("flush event: encrypt payload: %w", encErr)
-			}
-			payloadArg = sql.NullString{String: string(encrypted), Valid: true}
-		}
-	}
+	payloadArg := stored.Payload
 
 	fenceWorkerID, fenceGeneration := e.fenceParams()
 
@@ -332,14 +540,15 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 			return fmt.Errorf("flush event: event quota exceeded (max %d)", e.maxQuotaEvents)
 		}
 		res, err := tx.ExecContext(ctx, insertEventSQL, workflowID, rec.Step, rec.EventType,
-			nullStr(rec.Service), nullStr(rec.Op), nullStr(requestStr), nullStr(responseStr), nullStr(errStr),
+			nullStr(rec.Service), nullStr(rec.Op), nullStr(stored.Request), nullStr(stored.Response), nullStr(stored.Err),
 			nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
-			nullStr(rec.SignalName), nullStr(sigPayload),
+			nullStr(rec.SignalName), nullStr(stored.SignalPayload),
 			nullStr(rec.DeferDescription), nullStr(rec.DeferID),
-			nullStr(rec.ChildName), nullStr(childInput), nullStr(rec.RunID), nullStr(newInput),
-			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(pluginInput), nullStr(pluginOutput), nullStr(rec.PluginError),
-			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
-			payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration)
+			nullStr(rec.ChildName), nullStr(stored.ChildInput), nullStr(rec.RunID), nullStr(stored.NewInput),
+			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(stored.PluginInput), nullStr(stored.PluginOutput), nullStr(rec.PluginError),
+			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(stored.PromiseResult), nullStr(stored.PromiseError),
+			payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration, eventCreatedAt(rec),
+			stored.Encoding)
 		if err != nil {
 			return fmt.Errorf("flush event (quota): %w", err)
 		}
@@ -350,14 +559,15 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 	}
 
 	args := []any{workflowID, rec.Step, rec.EventType,
-		nullStr(rec.Service), nullStr(rec.Op), nullStr(requestStr), nullStr(responseStr), nullStr(errStr),
+		nullStr(rec.Service), nullStr(rec.Op), nullStr(stored.Request), nullStr(stored.Response), nullStr(stored.Err),
 		nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
-		nullStr(rec.SignalName), nullStr(sigPayload),
+		nullStr(rec.SignalName), nullStr(stored.SignalPayload),
 		nullStr(rec.DeferDescription), nullStr(rec.DeferID),
-		nullStr(rec.ChildName), nullStr(childInput), nullStr(rec.RunID), nullStr(newInput),
-		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(pluginInput), nullStr(pluginOutput), nullStr(rec.PluginError),
-		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
-		payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration}
+		nullStr(rec.ChildName), nullStr(stored.ChildInput), nullStr(rec.RunID), nullStr(stored.NewInput),
+		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(stored.PluginInput), nullStr(stored.PluginOutput), nullStr(rec.PluginError),
+		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(stored.PromiseResult), nullStr(stored.PromiseError),
+		payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration, eventCreatedAt(rec),
+		stored.Encoding}
 
 	// Tenanted path: the insert must carry the RLS context, which is
 	// transaction-scoped, so it needs an explicit transaction. That costs two
@@ -388,15 +598,17 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 	}
 
 	// Untenanted path: single INSERT auto-commits. No explicit BEGIN/COMMIT.
+	// rls-by-design: untenanted-flush-event-insert
 	res, err := e.db.ExecContext(ctx, insertEventSQL, workflowID, rec.Step, rec.EventType,
-		nullStr(rec.Service), nullStr(rec.Op), nullStr(requestStr), nullStr(responseStr), nullStr(errStr),
+		nullStr(rec.Service), nullStr(rec.Op), nullStr(stored.Request), nullStr(stored.Response), nullStr(stored.Err),
 		nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
-		nullStr(rec.SignalName), nullStr(sigPayload),
+		nullStr(rec.SignalName), nullStr(stored.SignalPayload),
 		nullStr(rec.DeferDescription), nullStr(rec.DeferID),
-		nullStr(rec.ChildName), nullStr(childInput), nullStr(rec.RunID), nullStr(newInput),
-		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(pluginInput), nullStr(pluginOutput), nullStr(rec.PluginError),
-		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
-		payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration)
+		nullStr(rec.ChildName), nullStr(stored.ChildInput), nullStr(rec.RunID), nullStr(stored.NewInput),
+		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(stored.PluginInput), nullStr(stored.PluginOutput), nullStr(rec.PluginError),
+		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(stored.PromiseResult), nullStr(stored.PromiseError),
+		payloadArg, checksum, e.tenantID, fenceWorkerID, fenceGeneration, eventCreatedAt(rec),
+		stored.Encoding)
 	if err != nil {
 		return fmt.Errorf("flush event: %w", err)
 	}
@@ -450,7 +662,40 @@ func (e *Engine) afterFencedInsert(ctx context.Context, res sql.Result, workflow
 
 // runDefers invokes registered defer functions on a fresh module instance.
 // Called on non-suspend errors to ensure cleanup runs even when the workflow fails.
+//
+// The pass is bounded as a whole, which is the part that was missing.
+//
+// Every caller passes context.Background() -- deliberately, so cleanup still
+// happens when the workflow's own context has timed out or been cancelled
+// (executor.go). The consequence nobody had measured is that each RunDefer then
+// reaches configureStore with no deadline to reconcile against, so every defer
+// gets a *fresh* copy of the backend-wide budget and the total scales with the
+// number of defers. Measured 2026-09-01, backend timeout 2s, three runaway
+// defers:
+//
+//	ctx with a 200ms deadline   150ms   ("199.778625ms wall-clock budget")
+//	context.Background()        2.001s  ("2s wall-clock budget")
+//	3 defers, Background        6.001s  -- 2s each, no ceiling
+//
+// On a worker that is 30s each (DefaultWasmtimeExecutionTimeout, settable with
+// --wasm-instance-timeout), so a workflow registering twenty runaway defers
+// held its slot for ten minutes. IMPROVEMENT-PLAN 3.31 recorded this as read
+// off the code and explicitly not measured; the numbers above are that gap
+// closed, and the multiplication is worse than the section predicted.
+//
+// One WithTimeout over the loop is the whole fix: configureStore already takes
+// the tighter of ctx's remaining time and the backend's own timeout, so a
+// single deadline shared by every iteration bounds both the pass and each
+// defer within it, without touching the base context and therefore without
+// re-coupling cleanup to the workflow's cancellation.
 func (e *Engine) runDefers(ctx context.Context, wasmBytes []byte, deferrals map[string]string) {
+	budget := e.deferPassBudget
+	if budget <= 0 {
+		budget = DefaultDeferPassBudget
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+
 	type defEntry struct {
 		id     string
 		desc   string
@@ -484,10 +729,58 @@ func (e *Engine) runDefers(ctx context.Context, wasmBytes []byte, deferrals map[
 			// nothing at all. cmd/cleat-worker's own runDefers has always
 			// logged here; this brings the two into line.
 			if _, err := e.RunDefer(ctx, wasmBytes, deferName, nil); err != nil {
+				// A missing export is not a failed cleanup.
+				//
+				// This pass is the LEGACY per-defer convention: one export per
+				// defer, named cleat_defer_<id>. No guest in any language
+				// emits one -- `grep -rn "cleat_defer_"` finds consumers and no
+				// producers -- so for every SDK-built guest this branch was
+				// reached once per registered defer and said "defer execution
+				// failed" about a convention the guest was never expected to
+				// follow. Since #559 and #560 it could say it immediately
+				// AFTER the real cleanup had succeeded, which is worse than
+				// useless: an operator reading it concludes their cleanup did
+				// not happen when it did.
+				//
+				// errors.Is, not a substring match on the message. Matching the
+				// wording is the same mistake one layer up, and this repo has
+				// already had a check that matched an error message rather than
+				// the condition and reported a broken database as healthy.
+				if errors.Is(err, ErrExportNotFound) {
+					e.log().DebugContext(ctx, "no per-defer export for this defer; the guest drains its own table",
+						"workflow_id", e.workflowID, "defer_id", entry.id,
+						"description", entry.desc, "export", deferName)
+					continue
+				}
 				e.log().WarnContext(ctx, "defer execution failed",
 					"workflow_id", e.workflowID, "defer_id", entry.id,
 					"description", entry.desc, "export", deferName, "error", err)
 			}
 		}
 	}
+}
+
+// eventCreatedAt is the timestamp the event itself carries, falling back to now
+// only if it has none. See insertEventSQL's doc for why the column must hold
+// this rather than the moment of the write.
+//
+// cleat#2333: mysql_events.go, mssql_events.go and store_event_write.go used
+// to call time.UnixMilli(rec.TimestampMs) directly, bypassing the fallback.
+// MySQL's TIMESTAMP(6) column has a hard floor at 1970-01-01 00:00:01 UTC,
+// one second above the epoch, so a genuinely zero TimestampMs -- every test
+// fixture in this package that builds an EventRecord literal without
+// setting it, which INSERT IGNORE was silently swallowing the resulting
+// Error 1292 for -- became a hard INSERT failure once cleat#2333 replaced
+// IGNORE with a real conditional completion. No production caller sends
+// TimestampMs == 0 (lifecycle.go's recordEvent always stamps one), but a
+// zero timestamp should not be able to fail a workflow on one dialect only
+// because a column type on that dialect happens to reject the epoch --
+// routing all three dialects' per-step writers through this same helper
+// closes that regardless of which side (test fixture debt or a future
+// caller) a zero ever comes from.
+func eventCreatedAt(rec EventRecord) time.Time {
+	if rec.TimestampMs > 0 {
+		return time.UnixMilli(rec.TimestampMs)
+	}
+	return time.Now()
 }

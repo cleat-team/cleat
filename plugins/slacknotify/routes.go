@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -14,7 +13,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("slack-notify: nil mux")
 	}
@@ -23,7 +22,7 @@ func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
 	mux.HandleFunc("GET /slack/configs/{id}", p.handleGetConfig)
 	mux.HandleFunc("PUT /slack/configs/{id}", p.handleUpdateConfig)
 	mux.HandleFunc("DELETE /slack/configs/{id}", p.handleDeleteConfig)
-	mux.HandleFunc("POST /slack/interactive", p.handleInteractiveCallback)
+	mux.Handle("POST /slack/interactive", plugin.MaxBody(interactiveMaxBodySize, p.handleInteractiveCallback))
 	return nil
 }
 
@@ -37,13 +36,6 @@ func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 
 func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
-}
-
-// tenantID extracts the tenant UUID from the request context. Returns the
-// zero UUID if no tenant is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
 }
 
 // ---- types ----
@@ -75,23 +67,14 @@ type updateConfigRequest struct {
 // ---- POST /slack/configs ----
 
 func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("slack-notify: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req createConfigRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 	if req.Name == "" {
@@ -106,7 +89,7 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New()
 	now := time.Now()
 
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO slack_config (tenant_id, id, name, webhook_url, default_channel, enabled, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, true, $6, $6)
 		`, p.dialect), tid, id, req.Name, req.WebhookURL.Reveal(), req.DefaultChannel, now)
@@ -133,8 +116,8 @@ func (p *Plugin) handleCreateConfig(w http.ResponseWriter, r *http.Request) {
 // ---- GET /slack/configs ----
 
 func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -155,7 +138,7 @@ func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
 	var configs []slackConfigJSON
 	for rows.Next() {
 		var c slackConfigJSON
-		if err := rows.Scan(&c.ID, &c.Name, &c.WebhookURL, &c.DefaultChannel, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := plugin.ScanRow(rows, &c.ID, &c.Name, &c.WebhookURL, &c.DefaultChannel, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			p.logger.Error("slack-notify: scan config", "error", err)
 			continue
 		}
@@ -173,8 +156,8 @@ func (p *Plugin) handleListConfigs(w http.ResponseWriter, r *http.Request) {
 // ---- GET /slack/configs/{id} ----
 
 func (p *Plugin) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -187,11 +170,11 @@ func (p *Plugin) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var c slackConfigJSON
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, name, webhook_url, default_channel, enabled, created_at, updated_at
 			FROM slack_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid).Scan(&c.ID, &c.Name, &c.WebhookURL, &c.DefaultChannel, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, p.dialect), id, tid), &c.ID, &c.Name, &c.WebhookURL, &c.DefaultChannel, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "config not found")
 		return
@@ -209,8 +192,8 @@ func (p *Plugin) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 // ---- PUT /slack/configs/{id} ----
 
 func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -222,17 +205,8 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("slack-notify: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req updateConfigRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 
@@ -296,11 +270,11 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Return the updated config.
 	var c slackConfigJSON
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, name, webhook_url, default_channel, enabled, created_at, updated_at
 			FROM slack_config
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid).Scan(&c.ID, &c.Name, &c.WebhookURL, &c.DefaultChannel, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+		`, p.dialect), id, tid), &c.ID, &c.Name, &c.WebhookURL, &c.DefaultChannel, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		p.logger.Error("slack-notify: re-fetch config", "error", err)
 		p.writeError(w, 500, "failed to retrieve updated config")
@@ -314,8 +288,8 @@ func (p *Plugin) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 // ---- DELETE /slack/configs/{id} ----
 
 func (p *Plugin) handleDeleteConfig(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}

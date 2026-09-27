@@ -35,7 +35,12 @@ type mockExecResult struct {
 	match    string
 	affected int64
 	err      error // if non-nil, return this error from Exec
-	consume  bool  // if true, this result is removed after first use
+	// affectedErr, if non-nil, is returned from RowsAffected() rather than
+	// from Exec. Drivers can fail there independently -- a caller that reads
+	// RowsAffected to decide something (see MySQLStore.AcquireConcurrencyKey)
+	// has an error path that Exec-level failures cannot reach.
+	affectedErr error
+	consume     bool // if true, this result is removed after first use
 
 	// sideEffect is called after a successful Exec match (no error).
 	// It receives pointers to the shared row/exec result slices so it can
@@ -130,7 +135,7 @@ func (s *mockStmt) Exec(_ []driver.Value) (driver.Result, error) {
 			if er.sideEffect != nil {
 				er.sideEffect(&s.rowsResults, &s.execResults)
 			}
-			return &mockResult{affected: er.affected}, nil
+			return &mockResult{affected: er.affected, affectedErr: er.affectedErr}, nil
 		}
 	}
 	return &mockResult{}, nil
@@ -156,11 +161,12 @@ func (s *mockStmt) Query(_ []driver.Value) (driver.Rows, error) {
 
 // mockResult implements driver.Result with a configurable RowsAffected.
 type mockResult struct {
-	affected int64
+	affected    int64
+	affectedErr error // if non-nil, RowsAffected returns this
 }
 
 func (r *mockResult) LastInsertId() (int64, error) { return 0, nil }
-func (r *mockResult) RowsAffected() (int64, error) { return r.affected, nil }
+func (r *mockResult) RowsAffected() (int64, error) { return r.affected, r.affectedErr }
 
 // mockRows implements driver.Rows with pre-configured data.
 type mockRows struct {
@@ -274,7 +280,7 @@ func TestPostgresStore_ReapStaleInstances(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	n, err := store.ReapStaleInstances(testCtx, 30*time.Second)
+	n, err := store.ReapStaleInstances(testCtx, 30*time.Second, 0)
 	if err != nil {
 		t.Fatalf("ReapStaleInstances: %v", err)
 	}
@@ -490,12 +496,14 @@ func TestPostgresStore_ValidateVersion_False(t *testing.T) {
 
 func TestPostgresStore_GetChildResult_Done(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "SELECT COALESCE", data: [][]driver.Value{{`{"result":"ok"}`, "done"}}},
+		{match: "SELECT COALESCE", data: [][]driver.Value{{`{"result":"ok"}`, "done", nil}}},
 	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	result, completed, err := store.GetChildResult(testCtx, "child-1")
+	_outcome, err := store.GetChildResult(testCtx, "child-1")
+	result := _outcome.Result
+	completed := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -509,12 +517,13 @@ func TestPostgresStore_GetChildResult_Done(t *testing.T) {
 
 func TestPostgresStore_GetChildResult_StillRunning(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "SELECT COALESCE", data: [][]driver.Value{{"{}", "running"}}},
+		{match: "SELECT COALESCE", data: [][]driver.Value{{"{}", "running", nil}}},
 	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	_, completed, err := store.GetChildResult(testCtx, "child-1")
+	_outcome, err := store.GetChildResult(testCtx, "child-1")
+	completed := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -571,7 +580,8 @@ func TestPostgresStore_GetWorkflowDef_Success(t *testing.T) {
 				int64(0),              // min_version
 				[]byte(`{"p":"1.0"}`), // plugin_deps
 				createdAt,             // created_at
-				false,                 // deprecated
+				nil,                   // disabled_at
+				false,                 // gc_eligible
 			}},
 		},
 	}, nil)
@@ -609,7 +619,8 @@ func TestPostgresStore_GetWorkflowDef_NilPluginDeps(t *testing.T) {
 				int64(0),    // min_version
 				[]byte(nil), // plugin_deps (NULL)
 				createdAt,   // created_at
-				false,       // deprecated
+				nil,         // disabled_at
+				false,       // gc_eligible
 			}},
 		},
 	}, nil)
@@ -632,27 +643,39 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	heartbeatAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	completedAt := time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC)
+	startedAt := time.Date(2025, 1, 1, 0, 30, 0, 0, time.UTC)
+	createdAt := time.Date(2024, 12, 31, 23, 0, 0, 0, time.UTC)
 
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
 			match: "SELECT id, def_name, def_version",
 			data: [][]driver.Value{{
-				"wf-1",                     // id
-				"test-wf",                  // def_name
-				int64(1),                   // def_version
-				"done",                     // status
-				[]byte(`{"input":"data"}`), // input
-				"worker-1",                 // assigned_to
-				heartbeatAt,                // heartbeat_at
-				nextWakeAt,                 // next_wake_at
-				completedAt,                // completed_at
-				`{"result":"ok"}`,          // result::text
-				"",                         // error_msg
-				nil,                        // error_code
-				nil,                        // error_op
-				int64(0),                   // generation
-				int64(0),                   // priority
-				"",                         // trace_id
+				"wf-1",                             // id
+				"test-wf",                          // def_name
+				int64(1),                           // def_version
+				"done",                             // status
+				[]byte(`{"input":"data"}`),         // input
+				"worker-1",                         // assigned_to
+				heartbeatAt,                        // heartbeat_at
+				nextWakeAt,                         // next_wake_at
+				completedAt,                        // completed_at
+				startedAt,                          // started_at (cleat#1090)
+				`{"result":"ok"}`,                  // result::text
+				"",                                 // error_msg
+				nil,                                // error_code
+				nil,                                // error_op
+				int64(0),                           // generation
+				int64(0),                           // priority
+				"",                                 // trace_id
+				DefaultTenantUUID,                  // tenant_id (3.99)
+				"wf-0",                             // continued_from (cleat#887)
+				int64(7),                           // reclaim_count (cleat#1008)
+				"wf-parent",                        // parent_workflow_id (cleat#1103)
+				createdAt,                          // created_at (cleat#1105)
+				"failed",                           // pending_terminal_status (cleat#1105)
+				true,                               // cancellation_requested (cleat#1351)
+				"INCIDENT-4242 operator cancelled", // cancellation_reason (cleat#1351)
+				"worker-7",                         // completed_by (cleat#1118)
 			}},
 		},
 	}, nil)
@@ -665,6 +688,34 @@ func TestPostgresStore_GetWorkflowByID_Success(t *testing.T) {
 	}
 	if wf == nil {
 		t.Fatal("expected non-nil workflow")
+	}
+	// cleat#887: the column is in the SELECT, so it must reach the struct. A
+	// value supplied by the fake row and then dropped would leave this test
+	// green while GetWorkflowByID silently returned "" for every chain.
+	if wf.ContinuedFrom != "wf-0" {
+		t.Errorf("ContinuedFrom = %q, want %q", wf.ContinuedFrom, "wf-0")
+	}
+	// cleat#1090, same idiom as the line above: supplied by the fake row, so
+	// it must reach the struct. A nil here is the scan dropping it, which is
+	// exactly how completed_at went unnoticed (cleat#1091).
+	if wf.StartedAt == nil {
+		t.Errorf("StartedAt is nil, want %v -- the fake row supplies it", startedAt)
+	} else if !wf.StartedAt.Equal(startedAt) {
+		t.Errorf("StartedAt = %v, want %v", *wf.StartedAt, startedAt)
+	}
+	// cleat#1103, same idiom as the two lines above: supplied by the fake row,
+	// so it must reach the struct. A nil here is the scan dropping it.
+	if wf.ParentWorkflowID == nil {
+		t.Errorf("ParentWorkflowID is nil, want %q -- the fake row supplies it", "wf-parent")
+	} else if *wf.ParentWorkflowID != "wf-parent" {
+		t.Errorf("ParentWorkflowID = %q, want %q", *wf.ParentWorkflowID, "wf-parent")
+	}
+	// cleat#1008, and the same hazard: the fake row supplies 7, so a scan that
+	// dropped the column would return 0 -- which is also the honest answer for
+	// the overwhelming majority of real rows, and therefore the one value a
+	// broken read path can hide behind.
+	if wf.ReclaimCount != 7 {
+		t.Errorf("ReclaimCount = %d, want 7", wf.ReclaimCount)
 	}
 	if wf.ID != "wf-1" || wf.Status != "done" || wf.AssignedTo != "worker-1" {
 		t.Errorf("unexpected workflow fields: %+v", wf)
@@ -796,8 +847,8 @@ func TestPostgresStore_ListWorkflowDefs_All(t *testing.T) {
 		{
 			match: "SELECT name, version, abi_version",
 			data: [][]driver.Value{
-				{"wf-a", int64(2), int64(1), int64(0), []byte(`{}`), createdAt, false},
-				{"wf-a", int64(1), int64(1), int64(0), []byte(`{"p":"1.0"}`), createdAt, true},
+				{"wf-a", int64(2), int64(1), int64(0), []byte(`{}`), createdAt, nil, false},
+				{"wf-a", int64(1), int64(1), int64(0), []byte(`{"p":"1.0"}`), createdAt, createdAt, true},
 			},
 		},
 	}, nil)
@@ -814,7 +865,7 @@ func TestPostgresStore_ListWorkflowDefs_All(t *testing.T) {
 	if defs[0].Name != "wf-a" || defs[0].Version != 2 {
 		t.Errorf("unexpected first def: %s v%d", defs[0].Name, defs[0].Version)
 	}
-	if defs[1].Deprecated != true {
+	if !defs[1].Disabled() {
 		t.Error("expected second def to be deprecated")
 	}
 }
@@ -825,7 +876,7 @@ func TestPostgresStore_ListWorkflowDefs_ByName(t *testing.T) {
 		{
 			match: "SELECT name, version, abi_version",
 			data: [][]driver.Value{
-				{"wf-a", int64(1), int64(1), int64(0), []byte(`{}`), createdAt, false},
+				{"wf-a", int64(1), int64(1), int64(0), []byte(`{}`), createdAt, nil, false},
 			},
 		},
 	}, nil)
@@ -850,7 +901,7 @@ func TestPostgresStore_ListWorkflowDefs_NilPluginDeps(t *testing.T) {
 		{
 			match: "SELECT name, version, abi_version",
 			data: [][]driver.Value{
-				{"wf-a", int64(1), int64(1), int64(0), []byte(nil), createdAt, false},
+				{"wf-a", int64(1), int64(1), int64(0), []byte(nil), createdAt, nil, false},
 			},
 		},
 	}, nil)
@@ -982,7 +1033,7 @@ func TestPostgresStore_GetWorkflowDef_QueryError(t *testing.T) {
 func TestPostgresStore_MarkVersionDeprecated_QueryError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{
-			match: "UPDATE workflow_defs SET deprecated",
+			match: "UPDATE workflow_defs",
 			err:   fmt.Errorf("simulated exec error"),
 		},
 	})
@@ -1099,7 +1150,7 @@ func TestPostgresStore_ListWorkflows_WithStatus(t *testing.T) {
 		{
 			match: "SELECT id, def_name, def_version",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{"in":1}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), ""},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{"in":1}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", int64(4), false, ""},
 			},
 		},
 	}, nil)
@@ -1116,6 +1167,14 @@ func TestPostgresStore_ListWorkflows_WithStatus(t *testing.T) {
 	if wfs[0].ID != "wf-1" || wfs[0].Status != "running" {
 		t.Errorf("unexpected workflow: %+v", wfs[0])
 	}
+	// reclaim_count is the field cleat#1123 was about: it is a plain int64 with
+	// no omitempty, so before the fix the list serialised a confident 0 for every
+	// run -- "never reclaimed" and "this path does not read the column" looked the
+	// same to a caller. This is the only place the Postgres list scan is exercised
+	// without a live server.
+	if wfs[0].ReclaimCount != 4 {
+		t.Errorf("ReclaimCount = %d, want 4 (cleat#1123)", wfs[0].ReclaimCount)
+	}
 }
 
 func TestPostgresStore_ListWorkflows_NoFilter(t *testing.T) {
@@ -1123,7 +1182,7 @@ func TestPostgresStore_ListWorkflows_NoFilter(t *testing.T) {
 		{
 			match: "SELECT id, def_name, def_version",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", time.Time{}, nil, nil, nil, nil, int64(0), int64(0), ""},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", time.Time{}, nil, nil, nil, nil, int64(0), int64(0), "", int64(4), false, ""},
 			},
 		},
 	}, nil)
@@ -1141,12 +1200,17 @@ func TestPostgresStore_ListWorkflows_NoFilter(t *testing.T) {
 
 func TestPostgresStore_ListSchedules(t *testing.T) {
 	nextRunAt := time.Date(2025, 1, 1, 2, 0, 0, 0, time.UTC)
+	// disabled_at replaced an `enabled` BOOLEAN in cleat#1702, inverting
+	// polarity: nil is LIVE. The instant differs from next_run_at and
+	// last_run_at on purpose -- it sits between them in the scan, so three
+	// equal timestamps would let a misread column pass.
+	disabledAt := nextRunAt.Add(-72 * time.Hour)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nextRunAt, "UTC", "00000000-0000-0000-0000-000000000000", "catch_up", 60, "allow", "run-1"},
-				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), false, nextRunAt, nil, "America/New_York", "33333333-3333-3333-3333-333333333333", "skip", 7, "skip", ""},
+				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), nil, nextRunAt, nextRunAt, "UTC", "00000000-0000-0000-0000-000000000000", "catch_up", 60, "allow", "run-1"},
+				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), disabledAt, nextRunAt, nil, "America/New_York", "33333333-3333-3333-3333-333333333333", "skip", 7, "skip", ""},
 			},
 		},
 	}, nil)
@@ -1160,7 +1224,7 @@ func TestPostgresStore_ListSchedules(t *testing.T) {
 	if len(scheds) != 2 {
 		t.Fatalf("expected 2 schedules, got %d", len(scheds))
 	}
-	if scheds[0].Name != "sched-1" || !scheds[0].Enabled {
+	if scheds[0].Name != "sched-1" || scheds[0].Disabled() {
 		t.Errorf("unexpected first schedule: %+v", scheds[0])
 	}
 	if scheds[1].Name != "sched-2" || scheds[1].LastRunAt != nil {
@@ -1183,7 +1247,7 @@ func TestPostgresStore_GetDueSchedules(t *testing.T) {
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nil, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333", "skip", 11, "skip", "run-due"},
+				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), nil, nextRunAt, nil, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333", "skip", 11, "skip", "run-due"},
 			},
 		},
 	}, nil)
@@ -1261,9 +1325,13 @@ func TestPostgresStore_GetPendingUpdateRequests(t *testing.T) {
 	createdAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT workflow_id, update_name",
+			// The match string is a PREFIX of the real query and the column
+			// list changed under it (cleat#1416 added request_id), so this
+			// stopped matching and the mock returned no rows -- reported as
+			// "expected 1 request, got 0", which reads like a store bug.
+			match: "SELECT workflow_id, COALESCE(request_id",
 			data: [][]driver.Value{
-				{"wf-1", "update-a", `{}`, "prom-1", "pending", "", "", createdAt},
+				{"wf-1", "ureq-1", "update-a", `{}`, "prom-1", "pending", "", "", createdAt},
 			},
 		},
 	}, nil)
@@ -1279,6 +1347,10 @@ func TestPostgresStore_GetPendingUpdateRequests(t *testing.T) {
 	}
 	if reqs[0].UpdateName != "update-a" || reqs[0].Status != "pending" {
 		t.Errorf("unexpected request: %+v", reqs[0])
+	}
+	if reqs[0].RequestID != "ureq-1" {
+		t.Errorf("RequestID = %q, want ureq-1 -- the row's identity must be read back, or "+
+			"CompleteUpdateRequest has nothing to address", reqs[0].RequestID)
 	}
 }
 
@@ -1368,9 +1440,16 @@ func TestPostgresStore_ClaimWorkflows_Success(t *testing.T) {
 	createdAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
+			// Candidate SELECT (statement 1 of the three-statement claim): one
+			// runnable row with no concurrency key, so the acquire step admits it
+			// without an INSERT.
+			match: "SELECT c.id",
+			data:  [][]driver.Value{{"wf-1", "tenant-1", nil, nil, false}},
+		},
+		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{"input":"data"}`), "worker-1", nextWakeAt, "tenant-1", createdAt, nil, nil, int64(0), int64(0), ""},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{"input":"data"}`), "worker-1", nextWakeAt, "tenant-1", createdAt, nil, nil, int64(0), int64(0), "", ""}, // + pending_terminal_status
 			},
 		},
 	}, nil)
@@ -1393,9 +1472,13 @@ func TestPostgresStore_ClaimWorkflows_NoTenantID(t *testing.T) {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
+			match: "SELECT c.id",
+			data:  [][]driver.Value{{"wf-1", "tenant-1", nil, nil, false}},
+		},
+		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), ""},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", ""}, // + pending_terminal_status
 			},
 		},
 	}, nil)
@@ -1447,9 +1530,13 @@ func TestPostgresStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
+			match: "SELECT c.id",
+			data:  [][]driver.Value{{"wf-1", "tenant-1", nil, nil, false}},
+		},
+		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
-				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), ""},
+				{"wf-1", "test-wf", int64(1), "running", []byte(`{}`), "worker-1", nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", ""}, // + pending_terminal_status
 			},
 		},
 	}, nil)
@@ -1502,11 +1589,11 @@ func TestPostgresStore_LoadEventHistory_WithEvents(t *testing.T) {
 					"",               // plugin_output
 					"",               // plugin_error
 					[]byte(nil),      // payload (nil = no payload)
+					nil,              // payload_encoding (NULL = pre-cleat#1319 row)
 					"",               // promise_name
 					"",               // promise_id
 					"",               // promise_result
 					"",               // promise_error
-					int64(0),         // timestamp_ms
 					nil,              // created_at
 					false,            // pending (intent_at IS NOT NULL AND checksum IS NULL)
 				},
@@ -1521,10 +1608,10 @@ func TestPostgresStore_LoadEventHistory_WithEvents(t *testing.T) {
 					"", "", "", "",
 					"", "", "", "", "",
 					[]byte(`{"duration_ms":5000}`), // payload
+					nil,                            // payload_encoding (NULL = pre-cleat#1319 row)
 					"", "", "", "",
-					int64(0), // timestamp_ms
-					nil,      // created_at
-					false,    // pending
+					nil,   // created_at
+					false, // pending
 				},
 			},
 		},
@@ -1611,8 +1698,12 @@ func TestPostgresStore_StartNewRun_WithIdempotencyKey_AlreadyExists(t *testing.T
 	existingID := "existing-run-id"
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT workflow_id FROM idempotency_keys",
-			data:  [][]driver.Value{{existingID}},
+			// Three columns since cleat#1170, two since cleat#1047. A NULL
+			// def_name and a NULL input_digest both read as "unknown, allow"
+			// -- the pre-backfill row's case, and what preserves the dedup
+			// this test was written for.
+			match: "SELECT workflow_id, def_name, input_digest FROM idempotency_keys",
+			data:  [][]driver.Value{{existingID, nil, nil}},
 		},
 	}, nil)
 	defer db.Close()
@@ -1638,14 +1729,19 @@ func TestPostgresStore_StartNewRun_WithIdempotencyKey_Collision(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
 			// First SELECT: no active key found (expired or missing).
-			match:   "SELECT workflow_id FROM idempotency_keys",
+			match:   "SELECT workflow_id, def_name, input_digest FROM idempotency_keys",
 			data:    nil,
 			consume: true,
 		},
 		{
 			// Second SELECT after collision: return the concurrently-inserted key.
-			match: "SELECT workflow_id FROM idempotency_keys",
-			data:  [][]driver.Value{{collidedID}},
+			// Three columns now: cleat#1047 made the collision path check that
+			// the concurrent winner is for the SAME definition, and cleat#1170
+			// that it carries the SAME input. Both NULL is "unknown, allow",
+			// which is this mock's case and preserves the behaviour this test
+			// was written for.
+			match: "SELECT workflow_id, def_name, input_digest FROM idempotency_keys",
+			data:  [][]driver.Value{{collidedID, nil, nil}},
 		},
 	}, []mockExecResult{
 		// INSERT ON CONFLICT DO NOTHING: RowsAffected=0 means collision.
@@ -1681,52 +1777,44 @@ func TestPostgresStore_StartNewRun_WithIdempotencyKey_InsertError(t *testing.T) 
 }
 
 // ---------------------------------------------------------------------------
-// PollAndClaimSignal
+// ConsumeSignal
 // ---------------------------------------------------------------------------
 
-func TestPostgresStore_PollAndClaimSignal_Found(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{
-			match: "DELETE FROM workflow_signals",
-			data:  [][]driver.Value{{`{"signal":"data"}`}},
-		},
-	}, nil)
+// TestPostgresStore_ConsumeSignal replaces TestPostgresStore_PollAndClaimSignal_Found.
+// PollAndClaimSignal read and deleted in one step and had no caller anywhere
+// in the engine; ConsumeSignal deletes a known id and is called from the
+// await paths (IMPROVEMENT-PLAN 3.215).
+func TestPostgresStore_ConsumeSignal(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "DELETE FROM workflow_signals", affected: 1},
+	})
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	payload, found, err := store.PollAndClaimSignal(testCtx, "wf-1", "my-signal")
-	if err != nil {
-		t.Fatalf("PollAndClaimSignal: %v", err)
+	if err := store.ConsumeSignal(testCtx, "wf-1", 7); err != nil {
+		t.Fatalf("ConsumeSignal: %v", err)
 	}
-	if !found {
-		t.Error("expected found=true")
-	}
-	if payload != `{"signal":"data"}` {
-		t.Errorf("unexpected payload: %q", payload)
+}
+
+// TestPostgresStore_ConsumeSignal_AlreadyGone pins the documented no-op. The
+// await path records its event before consuming, so a crash in between leaves
+// a row that a later consume may or may not find -- and "already gone" must
+// not be an error, or a replayed segment fails on a row it correctly removed.
+func TestPostgresStore_ConsumeSignal_AlreadyGone(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
+		{match: "DELETE FROM workflow_signals", affected: 0},
+	})
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	if err := store.ConsumeSignal(testCtx, "wf-1", 7); err != nil {
+		t.Fatalf("deleting an id that is already gone must not error: %v", err)
 	}
 }
 
 // ---------------------------------------------------------------------------
 // CompleteWorkflow and FailWorkflow (complex, with best-effort cleanup)
 // ---------------------------------------------------------------------------
-
-func TestPostgresStore_CompleteWorkflow_IdempotencyUpdateFails(t *testing.T) {
-	// Idempotency UPDATE is best-effort. When it fails, the error is logged
-	// but CompleteWorkflow still succeeds.
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		// Main workflow status update succeeds (fence held).
-		{match: "SET status = 'done'", affected: 1},
-		// Idempotency update fails — logged but non-fatal.
-		{match: "UPDATE idempotency_keys SET result =", err: sql.ErrConnDone},
-	})
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	err := store.CompleteWorkflow(testCtx, "wf-1", "worker-1", 0, `{"result":"ok"}`, map[string]string{"key": "val"})
-	if err != nil {
-		t.Fatalf("CompleteWorkflow should succeed even when idempotency update fails: %v", err)
-	}
-}
 
 func TestPostgresStore_FailWorkflow_IdempotencyUpdateFails(t *testing.T) {
 	// Idempotency error UPDATE is best-effort. When it fails, the error is
@@ -1802,27 +1890,42 @@ func TestPostgresStore_CleanupMemorySamples_WithDefs(t *testing.T) {
 // SELECT. It used to share PollAndClaimSignal's DELETE ... RETURNING
 // implementation (mocked here as "DELETE FROM workflow_signals"), which
 // meant a second poll for the same signal would always come back
-// found=false -- the opposite of what SignalStore's doc comment promises
-// for PollSignal ("checks for a delivered signal", no mention of consuming
-// it) and what PollAndClaimSignal's own doc comment promises only for
-// itself ("checks for AND CLAIMS"). See TestPollSignal_NonDestructive in
-// store_test_groups_6_10_test.go for the real-database regression test.
+// found=false -- the opposite of what SignalStore's doc comment promises.
+// See TestPollSignal_NonDestructive in store_test_groups_6_10_test.go for the
+// real-database regression test.
+//
+// The projection is now "SELECT id, payload": the id is what ConsumeSignal
+// addresses, and a poll that cannot return one leaves the caller with a
+// payload it has no way to consume.
 func TestPostgresStore_PollSignal(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
-			match: "SELECT payload FROM workflow_signals",
-			data:  [][]driver.Value{{`{"polled":true}`}},
+			match: "SELECT id, payload, delivered_at FROM workflow_signals",
+			// delivered_at rides along so PollSignal can be answered from
+			// recorded state rather than from when the poll runs (#882). The
+			// instant here is arbitrary; what the store must do is carry it
+			// back, and execSession.signalIsVisibleNow does the comparing.
+			data: [][]driver.Value{{int64(42), `{"polled":true}`, time.UnixMilli(1_700_000_000_000)}},
 		},
 	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	payload, found, err := store.PollSignal(testCtx, "wf-1", "my-signal")
+	d, found, err := store.PollSignal(testCtx, "wf-1", "my-signal")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
-	if !found || payload != `{"polled":true}` {
-		t.Errorf("unexpected: found=%v, payload=%q", found, payload)
+	if !found || d.Payload != `{"polled":true}` {
+		t.Errorf("unexpected: found=%v, payload=%q", found, d.Payload)
+	}
+	if d.ID != 42 {
+		t.Errorf("expected the row id to be carried back, got %d", d.ID)
+	}
+	if d.DeliveredAtMs != 1_700_000_000_000 {
+		t.Errorf("expected delivered_at to be carried back as %d, got %d. A zero "+
+			"here is treated as visible, so dropping this field silently restores "+
+			"#882 while every other assertion still passes.",
+			1_700_000_000_000, d.DeliveredAtMs)
 	}
 }
 
@@ -1850,26 +1953,37 @@ func TestPostgresStore_PollCancellation(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPostgresStore_GetWorkflowByID_NullOptionals(t *testing.T) {
+	createdAtNull := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{
 			match: "SELECT id, def_name, def_version",
 			data: [][]driver.Value{{
-				"wf-1",       // id
-				"test-wf",    // def_name
-				int64(1),     // def_version
-				"running",    // status
-				[]byte(`{}`), // input
-				nil,          // assigned_to (NULL)
-				nil,          // heartbeat_at (NULL)
-				nil,          // next_wake_at (NULL)
-				nil,          // completed_at (NULL)
-				nil,          // result::text (NULL)
-				nil,          // error_msg (NULL)
-				nil,          // error_code (NULL)
-				nil,          // error_op (NULL)
-				int64(0),     // generation
-				int64(0),     // priority
-				"",           // trace_id (COALESCE)
+				"wf-1",            // id
+				"test-wf",         // def_name
+				int64(1),          // def_version
+				"running",         // status
+				[]byte(`{}`),      // input
+				nil,               // assigned_to (NULL)
+				nil,               // heartbeat_at (NULL)
+				nil,               // next_wake_at (NULL)
+				nil,               // completed_at (NULL)
+				nil,               // started_at (NULL: never claimed)
+				nil,               // result::text (NULL)
+				nil,               // error_msg (NULL)
+				nil,               // error_code (NULL)
+				nil,               // error_op (NULL)
+				int64(0),          // generation
+				int64(0),          // priority
+				"",                // trace_id (COALESCE)
+				DefaultTenantUUID, // tenant_id (3.99)
+				nil,               // continued_from (NULL: not a continuation)
+				int64(0),          // reclaim_count (never reclaimed)
+				nil,               // parent_workflow_id (NULL: top-level run)
+				createdAtNull,     // created_at (NOT NULL in the schema, so a real value)
+				"",                // pending_terminal_status (no two-phase terminal pending)
+				false,             // cancellation_requested (NOT NULL, default false)
+				"",                // cancellation_reason (COALESCE of NULL: never cancelled)
+				"",                // completed_by (COALESCE of NULL: no worker recorded)
 			}},
 		},
 	}, nil)
@@ -2015,7 +2129,7 @@ func TestPostgresStore_ReleaseConcurrencyKey_ExecError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.ReleaseConcurrencyKey(testCtx, "my-key")
+	_, err := store.ReleaseConcurrencyKey(testCtx, "my-key", "wf-1")
 	if err == nil {
 		t.Fatal("expected error from exec failure")
 	}
@@ -2026,7 +2140,7 @@ func TestPostgresStore_ReleaseConcurrencyKey_CommitError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.ReleaseConcurrencyKey(testCtx, "my-key")
+	_, err := store.ReleaseConcurrencyKey(testCtx, "my-key", "wf-1")
 	if err == nil {
 		t.Fatal("expected error from commit failure")
 	}
@@ -2313,7 +2427,7 @@ func TestPostgresStore_ReleaseConcurrencyKey_NonExistent(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.ReleaseConcurrencyKey(testCtx, "nonexistent-key")
+	_, err := store.ReleaseConcurrencyKey(testCtx, "nonexistent-key", "wf-1")
 	if err != nil {
 		t.Fatalf("ReleaseConcurrencyKey (non-existent): %v", err)
 	}
@@ -2363,9 +2477,19 @@ func TestPostgresStore_DecryptField_DecryptError(t *testing.T) {
 	store.encryption = pe
 	store.encryptSensitivePayloads = true
 
-	result := store.decryptField("not-valid-ciphertext", "Request", "wf-1", 0, false)
+	tc, terr := pe.forTenant(DefaultTenantUUID)
+	if terr != nil {
+		t.Fatalf("forTenant: %v", terr)
+	}
+	// Ciphertext-SHAPED (valid base64 of 40 bytes) but not sealed by this key.
+	// A value that is not sealed-shaped is plaintext, not a failure: see
+	// TestAPlaintextFieldIsNotADecryptionFailure.
+	result, derr := store.decryptField(tc, garbageSealedString(), "Request", "wf-1", 0, false)
 	if result != "[DECRYPTION_FAILED]" {
 		t.Errorf("expected [DECRYPTION_FAILED], got %q", result)
+	}
+	if !errors.Is(derr, ErrPayloadDecryption) {
+		t.Errorf("a field that will not decrypt must say so, not only carry a placeholder (cleat#2311); err = %v", derr)
 	}
 }
 
@@ -2836,7 +2960,13 @@ func TestPostgresStore_CreateSchedule_BeginError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.CreateSchedule(testCtx, Schedule{Name: "daily", DefName: "wf"})
+	// NextRunAt is set so the schedule passes Schedule.Validate and this test
+	// reaches the path it is named for. Without it CreateSchedule refuses
+	// before opening a transaction, and the assertion below would pass or fail
+	// on the validation error rather than on the begin failure.
+	err := store.CreateSchedule(testCtx, Schedule{
+		Name: "daily", DefName: "wf", NextRunAt: time.Now().Add(time.Hour),
+	})
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}
@@ -2909,7 +3039,7 @@ func TestPostgresStore_SetScheduleEnabled_BeginError(t *testing.T) {
 
 func TestPostgresStore_SetScheduleEnabled_ExecError(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_schedules SET enabled", err: errors.New("update failed")},
+		{match: "UPDATE workflow_schedules", err: errors.New("update failed")},
 	})
 	defer db.Close()
 
@@ -2917,30 +3047,6 @@ func TestPostgresStore_SetScheduleEnabled_ExecError(t *testing.T) {
 	err := store.SetScheduleEnabled(testCtx, "daily", false)
 	if err == nil {
 		t.Fatal("expected error from update failure")
-	}
-}
-
-func TestPostgresStore_UpdateScheduleNextRun_ExecError(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_schedules SET next_run_at", err: errors.New("update failed")},
-	})
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	err := store.UpdateScheduleNextRun(testCtx, "daily", time.Now())
-	if err == nil {
-		t.Fatal("expected error from update failure")
-	}
-}
-
-func TestPostgresStore_UpdateScheduleNextRun_BeginError(t *testing.T) {
-	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	err := store.UpdateScheduleNextRun(testCtx, "daily", time.Now())
-	if err == nil {
-		t.Fatal("expected error from begin failure")
 	}
 }
 
@@ -3074,7 +3180,7 @@ func TestPostgresStore_StreamEventHistory_SuccessWithPageSizeZero(t *testing.T) 
 	// pageSize <= 0 should default to 1000
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "SELECT step, event_type", data: [][]driver.Value{
-			{int64(0), "call", "", "", `{"req":"data"}`, `{"resp":"ok"}`, "", int64(0), "", int64(0), "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", nil, int64(0)},
+			{int64(0), "call", "", "", `{"req":"data"}`, `{"resp":"ok"}`, "", int64(0), "", int64(0), "", "", "", "", "", "", "", "", "", "", "", "", "", "", nil, "", "", "", "", nil},
 		}},
 	}, nil)
 	defer db.Close()
@@ -3443,7 +3549,7 @@ func TestPostgresStore_GetChildResult_QueryError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	_, _, err := store.GetChildResult(testCtx, "child-1")
+	_, err := store.GetChildResult(testCtx, "child-1")
 	if err == nil {
 		t.Fatal("expected error from query failure")
 	}
@@ -3484,28 +3590,28 @@ func TestPostgresStore_DeliverSignal_ExecError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// PollAndClaimSignal (Postgres variant) — error paths
+// ConsumeSignal (Postgres variant) — error paths
 // ---------------------------------------------------------------------------
 
-func TestPostgresStore_PollAndClaimSignal_DeleteError(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
+func TestPostgresStore_ConsumeSignal_DeleteError(t *testing.T) {
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "DELETE FROM workflow_signals", err: errors.New("delete failed")},
-	}, nil)
+	})
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	_, _, err := store.PollAndClaimSignal(testCtx, "wf-1", "sig")
+	err := store.ConsumeSignal(testCtx, "wf-1", 1)
 	if err == nil {
 		t.Fatal("expected error from delete failure")
 	}
 }
 
-func TestPostgresStore_PollAndClaimSignal_BeginError(t *testing.T) {
+func TestPostgresStore_ConsumeSignal_BeginError(t *testing.T) {
 	db := newMockDBWithErrors(t, nil, nil, errors.New("begin failed"), nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	_, _, err := store.PollAndClaimSignal(testCtx, "wf-1", "sig")
+	err := store.ConsumeSignal(testCtx, "wf-1", 1)
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}
@@ -3523,39 +3629,6 @@ func TestPostgresStore_MoveToDeadLetterQueue_BeginError(t *testing.T) {
 	err := store.MoveToDeadLetterQueue(testCtx, "wf-1", "worker-1", 1, "err", "ERR", "op")
 	if err == nil {
 		t.Fatal("expected error from begin failure")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// BatchHeartbeat (Postgres variant) — error paths
-// ---------------------------------------------------------------------------
-
-func TestPostgresStore_BatchHeartbeat_Success(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances", affected: 3},
-	})
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	n, err := store.BatchHeartbeat(testCtx, "worker-1")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat: %v", err)
-	}
-	if n != 3 {
-		t.Errorf("expected 3, got %d", n)
-	}
-}
-
-func TestPostgresStore_BatchHeartbeat_ExecError(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "SET heartbeat_at", err: errors.New("update failed")},
-	})
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	_, err := store.BatchHeartbeat(testCtx, "worker-1")
-	if err == nil {
-		t.Fatal("expected error from update failure")
 	}
 }
 
@@ -3901,7 +3974,7 @@ func TestPostgresStore_ResolvePromise_Success(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.ResolvePromise(testCtx, "wf-1", "promise-1", `{"result":"ok"}`)
+	err := store.ResolvePromise(testCtx, "promise-1", `{"result":"ok"}`)
 	if err != nil {
 		t.Fatalf("ResolvePromise: %v", err)
 	}
@@ -3914,7 +3987,7 @@ func TestPostgresStore_ResolvePromise_PromiseUpdateError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.ResolvePromise(testCtx, "wf-1", "promise-1", `{}`)
+	err := store.ResolvePromise(testCtx, "promise-1", `{}`)
 	if err == nil {
 		t.Fatal("expected error from promise update failure")
 	}
@@ -3928,7 +4001,7 @@ func TestPostgresStore_ResolvePromise_WakeUpdateError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.ResolvePromise(testCtx, "wf-1", "promise-1", `{}`)
+	err := store.ResolvePromise(testCtx, "promise-1", `{}`)
 	if err == nil {
 		t.Fatal("expected error from wake update failure")
 	}
@@ -3939,7 +4012,7 @@ func TestPostgresStore_ResolvePromise_BeginError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.ResolvePromise(testCtx, "wf-1", "promise-1", `{}`)
+	err := store.ResolvePromise(testCtx, "promise-1", `{}`)
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}
@@ -3960,7 +4033,7 @@ func TestPostgresStore_RejectPromise_Success(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.RejectPromise(testCtx, "wf-1", "promise-1", "error msg")
+	err := store.RejectPromise(testCtx, "promise-1", "error msg")
 	if err != nil {
 		t.Fatalf("RejectPromise: %v", err)
 	}
@@ -3973,7 +4046,7 @@ func TestPostgresStore_RejectPromise_PromiseUpdateError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.RejectPromise(testCtx, "wf-1", "promise-1", "error")
+	err := store.RejectPromise(testCtx, "promise-1", "error")
 	if err == nil {
 		t.Fatal("expected error from promise update failure")
 	}
@@ -3987,7 +4060,7 @@ func TestPostgresStore_RejectPromise_WakeUpdateError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.RejectPromise(testCtx, "wf-1", "promise-1", "error")
+	err := store.RejectPromise(testCtx, "promise-1", "error")
 	if err == nil {
 		t.Fatal("expected error from wake update failure")
 	}
@@ -3998,7 +4071,7 @@ func TestPostgresStore_RejectPromise_BeginError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.RejectPromise(testCtx, "wf-1", "promise-1", "error")
+	err := store.RejectPromise(testCtx, "promise-1", "error")
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}
@@ -4524,7 +4597,10 @@ func TestPostgresStore_DeliverSignal_CommitError(t *testing.T) {
 
 func TestDecryptPayloadJSON_NoEncryption(t *testing.T) {
 	store := NewPostgresStore(nil)
-	result := store.decryptPayloadJSON(`{"plain":"text"}`)
+	result, err := store.decryptPayloadJSON(`{"plain":"text"}`)
+	if err != nil {
+		t.Errorf("no encryption configured is not a failure: %v", err)
+	}
 	if result != `{"plain":"text"}` {
 		t.Errorf("expected original payload, got %q", result)
 	}
@@ -4533,7 +4609,10 @@ func TestDecryptPayloadJSON_NoEncryption(t *testing.T) {
 func TestDecryptPayloadJSON_EmptyPayload(t *testing.T) {
 	enc := newTestPayloadEncryption(t)
 	store := NewPostgresStore(nil).WithEncryption(enc, true)
-	result := store.decryptPayloadJSON("")
+	result, err := store.decryptPayloadJSON("")
+	if err != nil {
+		t.Errorf("an empty payload is not a failure: %v", err)
+	}
 	if result != "" {
 		t.Errorf("expected empty string, got %q", result)
 	}
@@ -4542,20 +4621,26 @@ func TestDecryptPayloadJSON_EmptyPayload(t *testing.T) {
 func TestDecryptPayloadJSON_DecryptionFailure(t *testing.T) {
 	enc := newTestPayloadEncryption(t)
 	store := NewPostgresStore(nil).WithEncryption(enc, true)
-	result := store.decryptPayloadJSON(`"corrupted-base64-data"`)
+	result, err := store.decryptPayloadJSON(`"corrupted-base64-data"`)
 	if result != `"corrupted-base64-data"` {
 		t.Errorf("expected original payload on decryption failure, got %q", result)
+	}
+	if !errors.Is(err, ErrPayloadDecryption) {
+		t.Errorf("a sealed-shaped payload that will not open must report it (cleat#2311); err = %v", err)
 	}
 }
 
 func TestDecryptPayloadJSON_Success(t *testing.T) {
 	enc := newTestPayloadEncryption(t)
 	store := NewPostgresStore(nil).WithEncryption(enc, true)
-	encrypted, err := enc.EncryptJSON([]byte(`{"secret":"data"}`))
+	encrypted, err := mustSeal(t, enc, DefaultTenantUUID).sealJSON([]byte(`{"secret":"data"}`))
 	if err != nil {
 		t.Fatalf("EncryptJSON: %v", err)
 	}
-	result := store.decryptPayloadJSON(string(encrypted))
+	result, err := store.decryptPayloadJSON(string(encrypted))
+	if err != nil {
+		t.Fatalf("decryptPayloadJSON: %v", err)
+	}
 	if result != `{"secret":"data"}` {
 		t.Errorf("expected decrypted payload, got %q", result)
 	}
@@ -4591,8 +4676,8 @@ func TestDecryptAndRedactEventRecord_InvalidEncryptedData(t *testing.T) {
 	enc := newTestPayloadEncryption(t)
 	store := NewPostgresStore(nil).WithEncryption(enc, true)
 	rec := &EventRecord{
-		Step: 0, Request: "tampered-data", Response: "bad-data",
-		Err: "invalid-ciphertext",
+		Step: 0, Request: garbageSealedRaw(), Response: garbageSealedRaw(),
+		Err: garbageSealedString(),
 	}
 	store.decryptAndRedactEventRecord(rec, "wf-1")
 	if rec.Request != "[DECRYPTION_FAILED]" {
@@ -4604,6 +4689,16 @@ func TestDecryptAndRedactEventRecord_InvalidEncryptedData(t *testing.T) {
 	if rec.Err != "[DECRYPTION_FAILED]" {
 		t.Errorf("expected [DECRYPTION_FAILED] for Err, got %q", rec.Err)
 	}
+}
+
+// garbageSealedRaw and garbageSealedString are values shaped like sealed ones (40
+// bytes that are not UTF-8, and their base64) that no key opens.
+func garbageSealedRaw() string {
+	return strings.Repeat("\xff", 40)
+}
+
+func garbageSealedString() string {
+	return base64.StdEncoding.EncodeToString([]byte(garbageSealedRaw()))
 }
 
 // ---------------------------------------------------------------------------
@@ -4640,7 +4735,7 @@ func TestPostgresStore_ListWorkflows_EmptyResult(t *testing.T) {
 func TestPostgresStore_ListWorkflows_StatusFilter(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "status =", data: [][]driver.Value{
-			{"wf-1", "my-wf", int64(1), "running", []byte(`{}`), "worker-1", nil, "", "", nil, nil, int64(0), int64(0), ""},
+			{"wf-1", "my-wf", int64(1), "running", []byte(`{}`), "worker-1", nil, "", "", nil, nil, int64(0), int64(0), "", int64(4), false, ""},
 		}},
 	}, nil)
 	defer db.Close()
@@ -4661,7 +4756,7 @@ func TestPostgresStore_ListWorkflows_StatusFilter(t *testing.T) {
 func TestPostgresStore_ListWorkflows_SearchFilter(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "OR", data: [][]driver.Value{
-			{"wf-2", "my-wf", int64(1), "done", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), ""},
+			{"wf-2", "my-wf", int64(1), "done", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), "", int64(4), false, "worker-2"},
 		}},
 	}, nil)
 	defer db.Close()
@@ -4679,7 +4774,7 @@ func TestPostgresStore_ListWorkflows_SearchFilter(t *testing.T) {
 func TestPostgresStore_ListWorkflows_InputContainsFilter(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "ILIKE", data: [][]driver.Value{
-			{"wf-3", "my-wf", int64(1), "running", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), ""},
+			{"wf-3", "my-wf", int64(1), "running", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), "", int64(4), false, ""},
 		}},
 	}, nil)
 	defer db.Close()
@@ -5092,6 +5187,37 @@ func TestPostgresStore_LoadDAGSpec_NotFound(t *testing.T) {
 	}
 }
 
+// TestPostgresStore_LoadDAGSpec_NullSpec is the case that was missing, and the
+// one that actually happens.
+//
+// The two tests either side of this cover "no row at all" and "the query
+// failed". Neither covers a row whose dag_spec is NULL -- which is EVERY
+// workflow that is not a DAG, so it is not an edge case, it is the common one.
+//
+// Without it, PostgreSQL scanned NULL into a json.RawMessage and returned
+//
+//	sql: Scan error on column index 0, name "dag_spec": unsupported Scan,
+//	storing driver.Value type <nil> into type *jsontext.Value
+//
+// straight out of GET /api/workflows/{id}/dag, while the function's own doc
+// comment promised "or nil if none". MySQL and SQL Server both handled it.
+func TestPostgresStore_LoadDAGSpec_NullSpec(t *testing.T) {
+	db := newMockDBForPostgres(t, []mockRowsResult{
+		{match: "SELECT dag_spec", data: [][]driver.Value{{nil}}},
+	}, nil)
+	defer db.Close()
+
+	store := NewPostgresStore(db)
+	spec, err := store.LoadDAGSpec(testCtx, "not-a-dag", 1)
+	if err != nil {
+		t.Fatalf("a NULL dag_spec must not be an error, it is the normal case for "+
+			"any workflow that is not a DAG: %v", err)
+	}
+	if spec != nil {
+		t.Errorf("expected nil spec for a NULL column, got %q", string(spec))
+	}
+}
+
 func TestPostgresStore_LoadDAGSpec_QueryError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "SELECT dag_spec", err: errors.New("db error")},
@@ -5135,7 +5261,7 @@ func TestBeginTxWithRLS_SetConfigError(t *testing.T) {
 func TestPostgresStore_ListWorkflows_ErrorContainsFilter(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "error_msg", data: [][]driver.Value{
-			{"wf-1", "my-wf", int64(1), "failed", []byte(`{}`), "worker-1", nil, "ERR001", "some-op", "something failed", nil, int64(0), int64(0), ""},
+			{"wf-1", "my-wf", int64(1), "failed", []byte(`{}`), "worker-1", nil, "ERR001", "some-op", "something failed", nil, int64(0), int64(0), "", int64(4), false, "worker-2"},
 		}},
 	}, nil)
 	defer db.Close()
@@ -5156,7 +5282,7 @@ func TestPostgresStore_ListWorkflows_ErrorContainsFilter(t *testing.T) {
 func TestPostgresStore_ListWorkflows_WithOffset(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "OFFSET", data: [][]driver.Value{
-			{"wf-1", "my-wf", int64(1), "running", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), ""},
+			{"wf-1", "my-wf", int64(1), "running", []byte(`{}`), "", nil, "", "", nil, nil, int64(0), int64(0), "", int64(4), false, ""},
 		}},
 	}, nil)
 	defer db.Close()
@@ -5177,6 +5303,10 @@ func TestPostgresStore_ListWorkflows_WithOffset(t *testing.T) {
 
 func TestPostgresStore_ClaimWorkflows_ScanError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
+		{
+			match: "SELECT c.id",
+			data:  [][]driver.Value{{"wf-1", "tenant-1", nil, nil, false}},
+		},
 		{
 			match: "UPDATE workflow_instances",
 			data: [][]driver.Value{
@@ -5209,12 +5339,12 @@ func TestDecryptAndRedactEventRecord_SuccessfulDecryption(t *testing.T) {
 	// base64-decoded by tryDecodeBase64), so decryptField uses
 	// encryption.Decrypt (useBytesDecrypt=true).
 	plainReq := `{"hello":"world"}`
-	rawReq, err := enc.Encrypt([]byte(plainReq))
+	rawReq, err := enc.Encrypt(DefaultTenantUUID, []byte(plainReq))
 	if err != nil {
 		t.Fatalf("Encrypt request: %v", err)
 	}
 	plainResp := `{"ok":true}`
-	rawResp, err := enc.Encrypt([]byte(plainResp))
+	rawResp, err := enc.Encrypt(DefaultTenantUUID, []byte(plainResp))
 	if err != nil {
 		t.Fatalf("Encrypt response: %v", err)
 	}
@@ -5222,7 +5352,7 @@ func TestDecryptAndRedactEventRecord_SuccessfulDecryption(t *testing.T) {
 	// Err is stored as a base64-encoded ciphertext, so decryptField uses
 	// encryption.DecryptString (useBytesDecrypt=false).
 	plainErr := "operation failed"
-	encodedErr, err := enc.EncryptString(plainErr)
+	encodedErr, err := mustSeal(t, enc, DefaultTenantUUID).sealString(plainErr)
 	if err != nil {
 		t.Fatalf("EncryptString: %v", err)
 	}
@@ -5312,14 +5442,14 @@ func TestPostgresStore_Heartbeat_MultipleRows(t *testing.T) {
 func TestPostgresStore_CompleteWorkflow_ZeroRowsAffected(t *testing.T) {
 	// CLEAT-1.2: when the fenced status UPDATE affects zero rows (another
 	// worker now owns this workflow, e.g. after reaping), CompleteWorkflow
-	// must report ErrFenceLost and must NOT run the idempotency-key write.
-	// If the idempotency mock below were matched, its zero-value result
-	// would silently succeed, so a regression back to the old
-	// "always continue" behavior would only be caught by the RowsAffected
-	// assertions here -- not by an error from that statement.
+	// must report ErrFenceLost.
+	//
+	// This used to also assert that the idempotency-key write did not run.
+	// cleat#1049 dropped idempotency_keys.result and with it that write, so
+	// the success path issues no such statement to suppress; ErrFenceLost is
+	// the whole of the claim now.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "SET status = 'done'", affected: 0},
-		{match: "UPDATE idempotency_keys SET result =", affected: 0},
 	})
 	defer db.Close()
 
@@ -5374,12 +5504,12 @@ func TestPostgresStore_LoadEventHistory_QueryError(t *testing.T) {
 func TestPostgresStore_GetChildResult_ScanError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		// struct{} is not a supported driver.Value type for *string Scan target.
-		{match: "SELECT COALESCE", data: [][]driver.Value{{`{}`, struct{}{}}}},
+		{match: "SELECT COALESCE", data: [][]driver.Value{{`{}`, struct{}{}, nil}}},
 	}, nil)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	_, _, err := store.GetChildResult(testCtx, "child-1")
+	_, err := store.GetChildResult(testCtx, "child-1")
 	if err == nil {
 		t.Fatal("expected scan error")
 	}

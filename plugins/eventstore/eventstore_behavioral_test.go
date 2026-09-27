@@ -19,6 +19,7 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"github.com/google/uuid"
 )
 
@@ -140,9 +141,56 @@ func (c *esConn) ExecContext(_ context.Context, query string, args []driver.Name
 	switch {
 	case strings.Contains(q, "DELETE FROM event_stream"):
 		return c.execDelete(args)
+	case strings.Contains(q, "INSERT INTO event_stream"):
+		return c.execAppend(args)
 	default:
 		return nil, fmt.Errorf("esConn: unexpected Exec: %.80s", q)
 	}
+}
+
+// execAppend handles insertEvent (queries.go): a plain INSERT with the
+// caller-computed sequence as an argument, not a RETURNING clause -- see
+// queries.go's comment on why handleAppend now reads the next sequence in
+// its own statement (queryMaxSeq below) rather than a subquery of this
+// INSERT. Returns a duplicate-key-shaped error if the (tenant, stream,
+// sequence) triple already exists, matching isPKConflict's substring check.
+func (c *esConn) execAppend(args []driver.NamedValue) (driver.Result, error) {
+	tidStr, err := esArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	tid, err := uuid.Parse(tidStr)
+	if err != nil {
+		return nil, err
+	}
+	streamID, err := esArgString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	sequence, err := esArgInt64(args, 3)
+	if err != nil {
+		return nil, err
+	}
+	eventBody, err := esArgString(args, 4)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, e := range c.db.events {
+		if e.tenantID == tid && e.streamID == streamID && e.sequence == sequence {
+			return nil, fmt.Errorf("esConn: duplicate key value violates unique constraint (simulated)")
+		}
+	}
+
+	c.db.events = append(c.db.events, esRow{
+		tenantID:  tid,
+		streamID:  streamID,
+		sequence:  sequence,
+		event:     eventBody,
+		createdAt: time.Now().UTC().Truncate(time.Microsecond),
+	})
+
+	return &esResult{1}, nil
 }
 
 func (c *esConn) execDelete(args []driver.NamedValue) (driver.Result, error) {
@@ -188,10 +236,6 @@ func (c *esConn) QueryContext(_ context.Context, query string, args []driver.Nam
 
 	q := strings.ReplaceAll(query, "\n", " ")
 	switch {
-	case strings.Contains(q, "INSERT INTO event_stream") && strings.Contains(q, "RETURNING sequence"):
-		c.db.mu.Lock()
-		defer c.db.mu.Unlock()
-		return c.execInsert(args)
 	case strings.Contains(q, "COALESCE(MAX(sequence)"):
 		c.db.mu.RLock()
 		defer c.db.mu.RUnlock()
@@ -205,48 +249,10 @@ func (c *esConn) QueryContext(_ context.Context, query string, args []driver.Nam
 	}
 }
 
-func (c *esConn) execInsert(args []driver.NamedValue) (driver.Rows, error) {
-	tidStr, err := esArgString(args, 1)
-	if err != nil {
-		return nil, err
-	}
-	tid, err := uuid.Parse(tidStr)
-	if err != nil {
-		return nil, err
-	}
-	streamID, err := esArgString(args, 2)
-	if err != nil {
-		return nil, err
-	}
-	eventBody, err := esArgString(args, 3)
-	if err != nil {
-		return nil, err
-	}
-
-	// Compute next sequence
-	var maxSeq int64
-	for _, e := range c.db.events {
-		if e.tenantID == tid && e.streamID == streamID && e.sequence > maxSeq {
-			maxSeq = e.sequence
-		}
-	}
-	sequence := maxSeq + 1
-
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	c.db.events = append(c.db.events, esRow{
-		tenantID:  tid,
-		streamID:  streamID,
-		sequence:  sequence,
-		event:     eventBody,
-		createdAt: now,
-	})
-
-	return &esRows{
-		columns: []string{"sequence"},
-		data:    [][]driver.Value{{sequence}},
-	}, nil
-}
-
+// queryMaxSeq handles nextSequenceForStream (queries.go): the separate
+// read-side statement appendOnce runs before its INSERT. Its 2-arg shape
+// (tenant, stream) is unchanged by cleat#2260 -- only the INSERT moved to
+// ExecContext's execAppend, above.
 func (c *esConn) queryMaxSeq(args []driver.NamedValue) (driver.Rows, error) {
 	tidStr, err := esArgString(args, 1)
 	if err != nil {
@@ -421,11 +427,26 @@ func TestES_WriteError(t *testing.T) {
 // ===========================================================================
 
 func TestES_TenantID_NoTenant(t *testing.T) {
-	p, _, _ := newESPlugin(t)
 	req := httptest.NewRequest("GET", "/events/foo", nil)
-	tid := p.tenantID(req)
+	tid, ok := auth.TenantIDFromRequest(req)
+	if ok {
+		t.Errorf("expected ok=false with no tenant in context, got ok=true tid=%s", tid)
+	}
+}
+
+// TestES_TenantID_DefaultTenant is the cleat#2183 regression case:
+// authenticated as the seeded default tenant, whose ID IS uuid.Nil, must
+// read as ok=true -- not be conflated with "no tenant in context" the way
+// comparing the UUID to uuid.Nil does.
+func TestES_TenantID_DefaultTenant(t *testing.T) {
+	ctx := auth.WithTenantID(context.Background(), uuid.Nil)
+	req := httptest.NewRequest("GET", "/events/foo", nil).WithContext(ctx)
+	tid, ok := auth.TenantIDFromRequest(req)
+	if !ok {
+		t.Errorf("expected ok=true for the default tenant (uuid.Nil), got ok=false")
+	}
 	if tid != uuid.Nil {
-		t.Errorf("expected nil UUID when no tenant in context, got %s", tid)
+		t.Errorf("expected tid=uuid.Nil, got %s", tid)
 	}
 }
 
@@ -686,23 +707,22 @@ func (r *esFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFunc)
 func TestES_Migrations(t *testing.T) {
 	p, _, _ := newESPlugin(t)
 	migrations := p.Migrations()
-	if len(migrations) == 0 {
-		t.Error("expected at least one migration")
-	}
-	for i, m := range migrations {
-		if m.Version == 0 {
-			t.Errorf("migration %d: version must be non-zero", i)
-		}
-		if m.Up == "" {
-			t.Errorf("migration %d: Up SQL is empty", i)
-		}
-		if m.Down == "" {
-			t.Errorf("migration %d: Down SQL is empty", i)
-		}
-	}
-	// Verify version is exactly 1 for the current schema
+
+	// One shared predicate for what a migration must do, rather than a copy per
+	// plugin -- thirteen plugins carried their own and they had already drifted
+	// (cleat#1513). The copy that stood here rejected a TenantScoped migration
+	// by construction, and the Down half is the one that bit first: v2 declares
+	// a table for the runtime to put a policy on and carries no SQL in either
+	// direction, because there is none to write and no policy an author could
+	// drop. cleat#1512.
+	plugintest.AssertMigrationsDoSomething(t, migrations)
+
+	// Kept local, and deliberately keyed on the INDEX rather than the count.
+	// "migrations[0] is version 1" still holds once v2 exists; `len(migrations)
+	// == 1` would not, and would have broken on every future migration while
+	// saying nothing about whether that migration was right.
 	if len(migrations) > 0 && migrations[0].Version != 1 {
-		t.Errorf("expected migration version 1, got %d", migrations[0].Version)
+		t.Errorf("expected the first migration to be version 1, got %d", migrations[0].Version)
 	}
 }
 

@@ -110,9 +110,11 @@ func Transform(cfg *Config) (*Result, error) {
 			if file == nil {
 				continue
 			}
-			addHostCallsParam(fd.Ast)
+			// Import first: addHostCallsParam needs the name this FILE binds
+			// the SDK to, which may be an alias and must not be changed.
+			local := ensureHostCallsImport(file, cfg.Result)
+			addHostCallsParam(fd.Ast, local)
 			fd.AutoThreaded = true
-			ensureHostCallsImport(file, cfg.Result)
 		}
 	}
 
@@ -281,14 +283,19 @@ func hasHostCallsParam(fd *analyzer.FuncDecl) bool {
 	return analyzer.IsHostCallsType(fd.Type.Params().At(0).Type())
 }
 
-// addHostCallsParam inserts h cleat.HostCalls as the first parameter.
-func addHostCallsParam(fn *ast.FuncDecl) {
+// addHostCallsParam inserts h <local>.HostCalls as the first parameter, where
+// <local> is the name the file binds the SDK import to.
+//
+// It used to hardcode "durable", which was the SDK's package name before the
+// 2026-06-01 rename (commit 3eeb74e). See ensureHostCallsImport for what that
+// cost.
+func addHostCallsParam(fn *ast.FuncDecl, sdkLocal string) {
 	paramName := "h"
 	if fn.Type.Params != nil {
 		for _, field := range fn.Type.Params.List {
 			for _, name := range field.Names {
 				if name.Name == "h" {
-					if isHostCallsField(field) {
+					if isHostCallsField(field, sdkLocal) {
 						return // already has it
 					}
 					// A non-HostCalls param named "h" exists; use a unique name.
@@ -301,7 +308,7 @@ func addHostCallsParam(fn *ast.FuncDecl) {
 	newParam := &ast.Field{
 		Names: []*ast.Ident{ast.NewIdent(paramName)},
 		Type: &ast.SelectorExpr{
-			X:   ast.NewIdent("durable"),
+			X:   ast.NewIdent(sdkLocal),
 			Sel: ast.NewIdent("HostCalls"),
 		},
 	}
@@ -312,8 +319,14 @@ func addHostCallsParam(fn *ast.FuncDecl) {
 	fn.Type.Params.List = append([]*ast.Field{newParam}, fn.Type.Params.List...)
 }
 
-// isHostCallsField checks if a field is of type cleat.HostCalls.
-func isHostCallsField(field *ast.Field) bool {
+// isHostCallsField checks whether a field is already of type
+// <sdkLocal>.HostCalls, so the caller does not add a second one.
+//
+// sdkLocal is the name the FILE binds the SDK import to. It used to be
+// hardcoded "durable" -- the package name before the 2026-06-01 rename -- so an
+// unaliased import, which is the normal spelling, was never recognised.
+// IMPROVEMENT-PLAN 3.230.
+func isHostCallsField(field *ast.Field, sdkLocal string) bool {
 	sel, ok := field.Type.(*ast.SelectorExpr)
 	if !ok {
 		// Also check for *cleat.HostCalls (pointer to struct, backward compat).
@@ -327,31 +340,58 @@ func isHostCallsField(field *ast.Field) bool {
 		}
 	}
 	pkg, ok := sel.X.(*ast.Ident)
-	return ok && pkg.Name == "durable" && sel.Sel.Name == "HostCalls"
+	return ok && pkg.Name == sdkLocal && sel.Sel.Name == "HostCalls"
 }
 
-// ensureHostCallsImport ensures the file imports "github.com/cleat-team/cleat/cleat".
-func ensureHostCallsImport(file *ast.File, result *analyzer.AnalysisResult) {
+// ensureHostCallsImport ensures the file imports the SDK and returns the name
+// this file binds it to.
+//
+// IT MUST NOT RENAME AN EXISTING IMPORT, and doing so was a real defect. This
+// used to run
+//
+//	if imp.Name == nil || imp.Name.Name != "durable" {
+//	    imp.Name = ast.NewIdent("durable")
+//	}
+//
+// on the SDK import -- unconditionally, including when it was UNALIASED, which
+// is the normal spelling. Every existing `cleat.X` reference in that file then
+// failed to compile with `undefined: cleat`. examples/fooddash has 19 of them.
+//
+// "durable" was the SDK's package name before the 2026-06-01 rename (commit
+// 3eeb74e, "promote internal packages to public"). The transform kept the old
+// name for three months. It went unnoticed because auto-threading only engages
+// for a package that declares a global `var h` -- and for such a package the
+// HostCalls threading check rejected the build first, so the transform's output
+// was never compiled. IMPROVEMENT-PLAN 3.230.
+//
+// The returned name is what addHostCallsParam must qualify HostCalls with.
+func ensureHostCallsImport(file *ast.File, result *analyzer.AnalysisResult) string {
 	importPath := "github.com/cleat-team/cleat/cleat"
+	const defaultLocal = "cleat"
 
 	for _, imp := range file.Imports {
 		path := strings.Trim(imp.Path.Value, `"`)
 		if path == importPath {
-			if imp.Name == nil || imp.Name.Name != "durable" {
-				imp.Name = ast.NewIdent("durable")
+			if imp.Name != nil {
+				return imp.Name.Name
 			}
-			return
+			return defaultLocal
 		}
+		// A pre-rename checkout, or a file that already aliased it.
 		if imp.Name != nil && imp.Name.Name == "durable" {
-			return
+			return "durable"
 		}
 		if strings.HasSuffix(path, "/durable") {
-			return
+			if imp.Name != nil {
+				return imp.Name.Name
+			}
+			return "durable"
 		}
 	}
 
+	// Added unaliased: the package is named cleat, so an alias would be noise
+	// in a file the user reads.
 	newImport := &ast.ImportSpec{
-		Name: ast.NewIdent("durable"),
 		Path: &ast.BasicLit{
 			Kind:  token.STRING,
 			Value: `"` + importPath + `"`,
@@ -376,6 +416,8 @@ func ensureHostCallsImport(file *ast.File, result *analyzer.AnalysisResult) {
 	} else {
 		importDecl.Specs = append(importDecl.Specs, newImport)
 	}
+	file.Imports = append(file.Imports, newImport)
+	return defaultLocal
 }
 
 // updateCallSites inserts h as the first argument when calling a function

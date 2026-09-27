@@ -22,8 +22,9 @@ cd examples/saga-java-port
 ## Run
 
 ```bash
-cleat deploy saga-java-port build/wasm/workflow.wasm
-cleat run transfer_money '{"from":"account-a","to":"account-b","amount":100,"currency":"USD"}'
+cleat deploy --name saga-java-port build/wasm/workflow.wasm
+cleat run --wasm build/wasm/workflow.wasm --entry-point transfer_money \
+  --input '{"from":"account-a","to":"account-b","amount":100,"currency":"USD"}'
 ```
 
 ## Key files

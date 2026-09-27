@@ -28,6 +28,13 @@ on:
       - "go.sum"
       # So a change to the filter itself is checked by the filter itself.
       - ".github/workflows/ecosystem-ci.yml"
+    # `edited` is required, not decorative: it is the activity type a BASE
+    # CHANGE fires. Without it a PR opened against a feature branch and later
+    # retargeted here never triggers this workflow at all -- not at open (the
+    # branches filter excluded it) and not at retarget (not a default type).
+    # Such a PR reports CLEAN with only the unfiltered workflows' checks.
+    # scripts/check-workflow-pr-triggers.sh guards this.
+    types: [opened, synchronize, reopened, edited]
   push:
     branches: [main, develop]
 
@@ -50,7 +57,7 @@ jobs:
     name: Python SDK Integration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -67,7 +74,7 @@ jobs:
     name: Rust SDK Integration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
@@ -82,12 +89,12 @@ jobs:
     name: Java SDK Integration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
-      - uses: gradle/actions/setup-gradle@v3
+      - uses: gradle/actions/setup-gradle@v6
       - name: Test Java SDK
         working-directory: crates/cleat-java
         run: gradle test
@@ -100,8 +107,8 @@ jobs:
     # to forgive.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
       - name: Test AS SDK

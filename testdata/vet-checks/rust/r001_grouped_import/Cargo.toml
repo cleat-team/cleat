@@ -1,0 +1,4 @@
+[package]
+name = "cleat-test-r001-grouped-import"
+version = "0.1.0"
+edition = "2021"

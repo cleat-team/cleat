@@ -1,8 +1,44 @@
 # ---------------------------------------------------------------------------
 # Publish Python SDK to PyPI
 #
-# Stream P — P2.6: Trusted publisher (OIDC) based PyPI publishing.
-# Triggered on tag push (python-sdk/v*) or when a release is published.
+# cleat#2127. Trusted publisher (OIDC) based PyPI publishing -- no API token
+# is used or stored anywhere.
+#
+# ONE trigger: push of a tag matching v* (e.g. v0.3.0). This is the SAME tag
+# .github/workflows/release.yml triggers on, and the one #2058's release
+# process actually creates -- the whole repo is released under one tag
+# (`All manifest versions become 0.3.0`), not a per-SDK python-sdk/vX.Y.Z tag.
+# A `release: published` trigger used to sit alongside this one; GoReleaser
+# (release.yml) creates a GitHub Release from that same v* push, so keeping
+# both meant the same version could be uploaded to PyPI twice from two
+# different events -- the second run failing on "file already exists", or
+# racing the first. `environment.pypi`'s deployment branch policy also allows
+# a `python-sdk/v*` tag (checked: `gh api repos/cleat-team/cleat/environments`),
+# which is a hook for a possible future per-SDK release process; nothing in
+# the repo creates that tag today, so it is not this workflow's trigger.
+#
+# `environment: pypi` is required, not decorative: the PyPI trusted publisher
+# was registered (2026-09-23, pending) for owner cleat-team, repo cleat,
+# workflow publish-pypi.yml, ENVIRONMENT pypi specifically -- the OIDC claim
+# PyPI checks is scoped to that environment, so a job running outside it
+# cannot authenticate no matter how permissions: is set.
+#
+# TWO JOBS, SPLIT SO THE APPROVAL CAN BE INFORMED. The owner gates this publish
+# behind a required reviewer on `environment: pypi`, and required reviewers gate
+# a JOB. With one job the pause therefore sat BEFORE checkout: approving meant
+# "run the build and publish", and there was no instant at which a built
+# artifact existed and the upload had not happened -- so there was nothing to
+# test before approving.
+#
+# Now `build` produces the distributions and uploads them as an artifact, and
+# `publish` -- the only job carrying `environment: pypi` -- downloads and
+# uploads them. The artifact is downloadable from the run while the publish
+# waits, so the approval is made against the thing that is about to ship.
+#
+# `environment: pypi` MUST stay on the PUBLISHING job. It is what scopes the
+# OIDC claim (see above); moving it back to the workflow, or onto `build`, puts
+# the pause somewhere the publish does not wait for, and dropping it makes the
+# upload fail to authenticate in a way only a real tag reveals.
 #
 # Requirements:
 #   - A PyPI trusted publisher must be configured for this repo.
@@ -11,30 +47,83 @@
 name: Publish Python SDK to PyPI
 
 on:
-  release:
-    types: [published]
   push:
-    tags: ["python-sdk/v*"]
+    tags: ["v*"]
 
+# `contents: read` for actions/checkout in `build`. `id-token: write` is NOT
+# granted here: it is minted only for the job that authenticates to PyPI, so the
+# build job -- which runs `pip install build` and `python -m build`, i.e. code
+# fetched from PyPI -- does not hold a token-minting capability it never uses.
 permissions:
-  id-token: write
   contents: read
 
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+
+      # cleat#2127 acceptance: a run where the tag and pyproject.toml disagree
+      # must fail HERE, before any upload -- not after PyPI has already
+      # rejected (or worse, accepted) an upload under the wrong name. There is
+      # no TestPyPI publisher configured (the owner skipped the optional
+      # rehearsal), so this is the only check standing between a bad tag and
+      # a real, unrecallable release.
+      #
+      # It now fails EARLIER than it did: in `build`, before the artifact is even
+      # produced, rather than in the same job that uploads.
+      #
+      # tomllib is stdlib since Python 3.11, so this reads pyproject.toml with
+      # no extra dependency. Deliberately does NOT rewrite the file -- #2058
+      # bumps python-sdk/pyproject.toml to 0.3.0 on the release branch, before
+      # the tag exists; this step only checks the two already agree.
+      - name: Verify the tag matches pyproject.toml's version
+        working-directory: python-sdk
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          tag_version="${tag#v}"
+          pkg_version="$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+          echo "tag ${tag} -> version ${tag_version}; pyproject.toml -> version ${pkg_version}"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::tag ${tag} (version ${tag_version}) does not match pyproject.toml's version ${pkg_version} -- refusing to publish. Bump python-sdk/pyproject.toml on the release branch before tagging." >&2
+            exit 1
+          fi
 
       - name: Build
         working-directory: python-sdk
         run: |
           pip install build
           python -m build
+
+      # The hand-off. `if-no-files-found: error` because an empty dist/ would
+      # otherwise be indistinguishable from a build that produced nothing --
+      # and the publish job would then upload an empty directory.
+      - name: Upload the built distributions
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-sdk-dist
+          path: python-sdk/dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    # The gate. Required reviewers on this environment pause the run HERE, with
+    # the built distributions already available from the `build` job above.
+    environment: pypi
+    permissions:
+      id-token: write # mints the OIDC token PyPI's trusted publisher verifies
+      actions: read # actions/download-artifact, below
+    steps:
+      - name: Download the built distributions
+        uses: actions/download-artifact@v7
+        with:
+          name: python-sdk-dist
+          path: python-sdk/dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

@@ -61,6 +61,7 @@ type Metrics struct {
 	calls                   metric.Int64Counter
 	callRetries             metric.Int64Counter
 	replayFailures          metric.Int64Counter
+	replayShortHistories    metric.Int64Counter
 	replayChecksumFailures  metric.Int64Counter
 	ambiguousCalls          metric.Int64Counter
 	compactionEventsDeleted metric.Int64Counter
@@ -70,33 +71,46 @@ type Metrics struct {
 	wasmFuelExhausted       metric.Int64Counter
 	workflowsDeadLettered   metric.Int64Counter
 	workflowsClaimed        metric.Int64Counter
+	executionsFencedOut     metric.Int64Counter
+	workflowReleases        metric.Int64Counter
 	wasmCacheHits           metric.Int64Counter
 	wasmCacheMisses         metric.Int64Counter
 	eventsDeleted           metric.Int64Counter
+	compactionStateCleared  metric.Int64Counter
 	workflowsPurged         metric.Int64Counter
 	backgroundLoops         metric.Int64Counter
 	backgroundLoopRestarts  metric.Int64Counter
-	reaperInstancesClaimed  metric.Int64Counter
-	httpRequests            metric.Int64Counter
+	pluginEventsLost        metric.Int64Counter
+
+	// Database reachability (cleat#2007), fed by the worker's deadline-bounded probes.
+	dbReachable            metric.Int64Gauge
+	dbLastSuccess          metric.Float64Gauge
+	dbConsecutiveFailures  metric.Int64Gauge
+	dbProbeDuration        metric.Float64Histogram
+	reaperInstancesClaimed metric.Int64Counter
+	suspectedDBStalls      metric.Int64Counter
+	httpRequests           metric.Int64Counter
 
 	// --- UpDownCounters (Int64UpDownCounter) ---
-	workflowsActive             metric.Int64UpDownCounter
-	workerCount                 metric.Int64UpDownCounter
-	eventHistorySize            metric.Int64UpDownCounter
-	wasmCacheEntries            metric.Int64UpDownCounter
-	wasmCacheBytes              metric.Int64UpDownCounter
-	workflowsStuck              metric.Int64UpDownCounter
-	eventHistoryRowCount        metric.Int64UpDownCounter
-	concurrencyKeysTotal        metric.Int64UpDownCounter
-	concurrencyKeysExpiringSoon metric.Int64UpDownCounter
-	pluginConnectionsInUse      metric.Int64UpDownCounter
-	pluginConnectionsMax        metric.Int64UpDownCounter
-	memoryRSS                   metric.Int64UpDownCounter
-	memoryAvailable             metric.Int64UpDownCounter
-	memoryTotal                 metric.Int64UpDownCounter
-	concurrencyLimit            metric.Int64UpDownCounter
-	desiredConcurrency          metric.Int64UpDownCounter
-	workflowMemoryEstimate      metric.Int64UpDownCounter
+	workflowsActive                metric.Int64UpDownCounter
+	workerCount                    metric.Int64UpDownCounter
+	eventHistorySize               metric.Int64UpDownCounter
+	wasmCacheEntries               metric.Int64UpDownCounter
+	wasmCompiledModuleCacheEntries metric.Int64UpDownCounter
+	wasmCompiledModuleCacheBytes   metric.Int64UpDownCounter
+	wasmCacheBytes                 metric.Int64UpDownCounter
+	workflowsStuck                 metric.Int64UpDownCounter
+	eventHistoryRowCount           metric.Int64UpDownCounter
+	concurrencyKeysTotal           metric.Int64UpDownCounter
+	concurrencyKeysExpiringSoon    metric.Int64UpDownCounter
+	pluginConnectionsInUse         metric.Int64UpDownCounter
+	pluginConnectionsMax           metric.Int64UpDownCounter
+	memoryRSS                      metric.Int64UpDownCounter
+	memoryAvailable                metric.Int64UpDownCounter
+	memoryTotal                    metric.Int64UpDownCounter
+	concurrencyLimit               metric.Int64UpDownCounter
+	desiredConcurrency             metric.Int64UpDownCounter
+	workflowMemoryEstimate         metric.Int64UpDownCounter
 
 	// --- Int64Gauges ---
 	queueDepth                   metric.Int64Gauge
@@ -108,7 +122,6 @@ type Metrics struct {
 	// --- Float64Gauges ---
 	replayThroughput       metric.Float64Gauge
 	freshThroughput        metric.Float64Gauge
-	memoryPressureRatio    metric.Float64Gauge
 	memoryPressure         metric.Float64Gauge
 	scalingPressure        metric.Float64Gauge
 	backgroundLoopDuration metric.Float64Gauge
@@ -131,23 +144,25 @@ type Metrics struct {
 	defaultAttrs []attribute.KeyValue
 
 	// Delta tracking for UpDownCounters used as absolute-value gauges.
-	mu                              sync.Mutex
-	lastWorkerCount                 int64
-	lastEventHistorySize            map[string]int64 // keyed by workflowName
-	lastRSS                         int64
-	lastAvailable                   int64
-	lastTotal                       int64
-	lastConcurrencyLimit            int64
-	lastDesiredConcurrency          int64
-	lastWorkflowMemoryEstimate      map[string]float64 // keyed by defName
-	lastWasmCacheEntries            int64
-	lastWasmCacheBytes              int64
-	lastWorkflowsStuck              int64
-	lastEventHistoryRowCount        int64
-	lastConcurrencyKeysTotal        int64
-	lastConcurrencyKeysExpiringSoon int64
-	lastPluginConnectionsInUse      int64
-	lastPluginConnectionsMax        int64
+	mu                                 sync.Mutex
+	lastWorkerCount                    int64
+	lastEventHistorySize               map[string]int64 // keyed by workflowName
+	lastRSS                            int64
+	lastAvailable                      int64
+	lastTotal                          int64
+	lastConcurrencyLimit               int64
+	lastDesiredConcurrency             int64
+	lastWorkflowMemoryEstimate         map[workflowMemoryKey]float64 // keyed by (tenant, defName)
+	lastWasmCacheEntries               int64
+	lastWasmCompiledModuleCacheEntries int64
+	lastWasmCompiledModuleCacheBytes   int64
+	lastWasmCacheBytes                 int64
+	lastWorkflowsStuck                 int64
+	lastEventHistoryRowCount           int64
+	lastConcurrencyKeysTotal           int64
+	lastConcurrencyKeysExpiringSoon    int64
+	lastPluginConnectionsInUse         int64
+	lastPluginConnectionsMax           int64
 
 	once sync.Once
 }
@@ -177,7 +192,7 @@ func New(cfg Config) (*Metrics, error) {
 			attribute.String("worker_id", cfg.WorkerID),
 		},
 		lastEventHistorySize:       make(map[string]int64),
-		lastWorkflowMemoryEstimate: make(map[string]float64),
+		lastWorkflowMemoryEstimate: make(map[workflowMemoryKey]float64),
 	}
 
 	var err error
@@ -246,6 +261,14 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_replay_failures_total: %w", err)
+	}
+
+	m.replayShortHistories, err = meter.Int64Counter(
+		"cleat_replay_short_histories_total",
+		metric.WithDescription("Replays whose loaded history was shorter than the instance's recorded event_count"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_replay_short_histories_total: %w", err)
 	}
 
 	m.replayChecksumFailures, err = meter.Int64Counter(
@@ -320,6 +343,22 @@ func New(cfg Config) (*Metrics, error) {
 		return nil, fmt.Errorf("cleat_workflows_claimed_total: %w", err)
 	}
 
+	m.executionsFencedOut, err = meter.Int64Counter(
+		"cleat_executions_fenced_out_total",
+		metric.WithDescription("Executions stopped because their own fenced heartbeat reported the run's generation superseded -- cleat#2008"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_executions_fenced_out_total: %w", err)
+	}
+
+	m.workflowReleases, err = meter.Int64Counter(
+		"cleat_workflow_releases_total",
+		metric.WithDescription("Workflows a worker handed back unserved because of a condition local to it, by check (cleat#2311)"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_workflow_releases_total: %w", err)
+	}
+
 	m.wasmCacheHits, err = meter.Int64Counter(
 		"cleat_wasm_cache_hits_total",
 		metric.WithDescription("WASM cache hits"),
@@ -342,6 +381,21 @@ func New(cfg Config) (*Metrics, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_events_deleted_total: %w", err)
+	}
+
+	// Separate from cleat_events_deleted_total because it counts a different
+	// thing: workflow_instances rows whose compaction bookkeeping was cleared,
+	// not event_history rows deleted. The retention sweep does both, and its
+	// event half can never match (cleat#1016) -- so before this counter existed
+	// the sweep reported zero on runs where it had cleared thousands of rows.
+	// Summing them would have fixed the zero by making the other number mean
+	// two things. cleat#1024.
+	m.compactionStateCleared, err = meter.Int64Counter(
+		"cleat_compaction_state_cleared_total",
+		metric.WithDescription("Number of workflow rows whose compaction state the retention policy cleared"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_compaction_state_cleared_total: %w", err)
 	}
 
 	m.workflowsPurged, err = meter.Int64Counter(
@@ -368,12 +422,60 @@ func New(cfg Config) (*Metrics, error) {
 		return nil, fmt.Errorf("cleat_background_loop_restarts_total: %w", err)
 	}
 
+	m.pluginEventsLost, err = meter.Int64Counter(
+		"cleat_plugin_events_lost_total",
+		metric.WithDescription("Events a plugin gave up on and will never record, by plugin and reason (audit-log: buffer_full, insert_failed, shutdown, shutdown_inflight). Any increase is a loss an operator should know about"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_plugin_events_lost_total: %w", err)
+	}
+
+	m.dbReachable, err = meter.Int64Gauge(
+		"cleat_db_reachable",
+		metric.WithDescription("1 if this worker's latest deadline-bounded database call succeeded within its deadline, 0 if it failed or ran past it. All workers at 0 is a database incident; one worker at 0 is that worker's connectivity"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_db_reachable: %w", err)
+	}
+	m.dbLastSuccess, err = meter.Float64Gauge(
+		"cleat_db_last_success_timestamp_seconds",
+		metric.WithDescription("Unix time of this worker's last database call that succeeded within its deadline"),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_db_last_success_timestamp_seconds: %w", err)
+	}
+	m.dbConsecutiveFailures, err = meter.Int64Gauge(
+		"cleat_db_consecutive_failures",
+		metric.WithDescription("Database calls in a row that failed or ran past their deadline; 0 once one succeeds"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_db_consecutive_failures: %w", err)
+	}
+	m.dbProbeDuration, err = meter.Float64Histogram(
+		"cleat_db_probe_duration_seconds",
+		metric.WithDescription("How long the worker's deadline-bounded database calls took (heartbeat, idle ping, reaper). A slow database shows here before it is unreachable"),
+		metric.WithUnit("s"),
+		metric.WithExplicitBucketBoundaries(0.001, 0.005, 0.010, 0.025, 0.050, 0.100, 0.250, 0.500, 1.000, 2.500, 5.000, 10.000),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_db_probe_duration_seconds: %w", err)
+	}
+
 	m.reaperInstancesClaimed, err = meter.Int64Counter(
 		"cleat_reaper_instances_claimed_total",
 		metric.WithDescription("Workflow instances reclaimed by the stale-instance reaper"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_reaper_instances_claimed_total: %w", err)
+	}
+
+	m.suspectedDBStalls, err = meter.Int64Counter(
+		"cleat_suspected_db_stall_total",
+		metric.WithDescription("Reaper ticks where the stale running set looked like a database stall rather than dead workers, and reclaiming was deferred"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_suspected_db_stall_total: %w", err)
 	}
 
 	m.httpRequests, err = meter.Int64Counter(
@@ -412,7 +514,7 @@ func New(cfg Config) (*Metrics, error) {
 
 	m.wasmCacheEntries, err = meter.Int64UpDownCounter(
 		"cleat_wasm_cache_entries",
-		metric.WithDescription("Number of entries in the WASM module cache"),
+		metric.WithDescription("Number of entries in the WASM BYTE cache (the --wasm-cache-max-entries LRU). NOT the compiled-module cache -- see cleat_wasm_compiled_module_cache_entries."),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_wasm_cache_entries: %w", err)
@@ -420,10 +522,35 @@ func New(cfg Config) (*Metrics, error) {
 
 	m.wasmCacheBytes, err = meter.Int64UpDownCounter(
 		"cleat_wasm_cache_bytes",
-		metric.WithDescription("Total bytes used by the WASM module cache"),
+		metric.WithDescription("Total bytes held by the WASM BYTE cache (the --wasm-cache-max-mb LRU). Compiled modules are not counted here and have no byte accounting."),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("cleat_wasm_cache_bytes: %w", err)
+	}
+
+	// cleat#1563. The two gauges above measure the BYTE cache and were
+	// described as "the WASM module cache", which is the name of this one --
+	// so an operator watching them was not watching the cache that, until
+	// #1563, grew without any bound at all.
+	//
+	// The gauge NAMES above are unchanged on purpose: renaming a published
+	// metric breaks every dashboard and alert built on it, and the confusion is
+	// in the description rather than the name. Both descriptions now say which
+	// cache they measure.
+	m.wasmCompiledModuleCacheEntries, err = meter.Int64UpDownCounter(
+		"cleat_wasm_compiled_module_cache_entries",
+		metric.WithDescription("Number of compiled wasmtime Modules retained (the --wasm-module-cache-max-entries LRU). Bounded by entry count AND by estimated bytes -- see cleat_wasm_compiled_module_cache_bytes, which is the one to size a deployment against."),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_wasm_compiled_module_cache_entries: %w", err)
+	}
+
+	m.wasmCompiledModuleCacheBytes, err = meter.Int64UpDownCounter(
+		"cleat_wasm_compiled_module_cache_bytes",
+		metric.WithDescription("ESTIMATED resident size of the compiled-module cache (the --wasm-module-cache-max-mb LRU). Estimated from each entry's wasm length, not measured from native code: a compiled module exposes no cheap size. The entries gauge beside this one cannot say whether a hundred modules is 8.6 MB or 4.6 GB; measured on cleat's own artifacts, both are true depending on the guest language."),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cleat_wasm_compiled_module_cache_bytes: %w", err)
 	}
 
 	m.workflowsStuck, err = meter.Int64UpDownCounter(
@@ -582,14 +709,6 @@ func New(cfg Config) (*Metrics, error) {
 		return nil, fmt.Errorf("cleat_fresh_throughput_steps_per_second: %w", err)
 	}
 
-	m.memoryPressureRatio, err = meter.Float64Gauge(
-		"cleat_memory_pressure_ratio",
-		metric.WithDescription("Current memory pressure ratio (0.0-1.0)"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("cleat_memory_pressure_ratio: %w", err)
-	}
-
 	m.memoryPressure, err = meter.Float64Gauge(
 		"cleat_memory_pressure",
 		metric.WithDescription("Memory pressure 0.0-1.0"),
@@ -664,8 +783,27 @@ func New(cfg Config) (*Metrics, error) {
 		"cleat_workflow_duration_seconds",
 		metric.WithDescription("Total workflow execution duration (wall clock)"),
 		metric.WithUnit("s"),
+		// THE TOP BUCKET WAS 300s, AND THIS IS A DURABLE-EXECUTION ENGINE.
+		//
+		// Every workflow longer than five minutes landed in +Inf, so a p95 or
+		// p99 over DurableSleep, a multi-day signal wait or a human-approval
+		// step could not be computed at all -- the quantile saturates at the
+		// top finite bucket and reports 300 forever. That is worse than
+		// reporting nothing, because it looks like a number and a dashboard
+		// will draw it. cleat#1309.
+		//
+		// The old set was a REQUEST-LATENCY distribution wearing this metric's
+		// name: eight buckets below one second and none above five minutes.
+		// The workloads this engine exists for live at the other end.
+		//
+		// 0.010 and 0.050 are dropped to pay for the additions, which keeps the
+		// series count near where it was (13 -> 16 per label combination). A
+		// workflow that completes in under 50ms is not a durable-execution
+		// concern and is below the engine's own claim-and-persist overhead
+		// anyway; a workflow that takes a week is exactly what this is for.
 		metric.WithExplicitBucketBoundaries(
-			0.010, 0.050, 0.100, 0.250, 0.500, 1.000, 2.500, 5.000, 10.000, 30.000, 60.000, 120.000, 300.000,
+			0.100, 0.250, 0.500, 1.000, 2.500, 5.000, 10.000, 30.000, 60.000,
+			120.000, 300.000, 900.000, 3600.000, 21600.000, 86400.000, 604800.000,
 		),
 	)
 	if err != nil {
@@ -781,11 +919,34 @@ func (m *Metrics) RecordWorkflowCompleted(ctx context.Context, workflowName stri
 }
 
 // RecordWorkflowFailed increments the workflows-failed counter.
-// workflowName, error, and taskQueue are recorded as labels.
-func (m *Metrics) RecordWorkflowFailed(ctx context.Context, workflowName string, errMsg string, taskQueue string, extraAttrs ...attribute.KeyValue) {
+// workflowName and taskQueue are recorded as labels.
+//
+// THERE IS DELIBERATELY NO ERROR LABEL, and re-adding one as free text would
+// be a defect rather than an improvement. cleat#1309.
+//
+// It used to take an `errMsg string` and record it as `attribute.String("error",
+// errMsg)`. An arbitrary error message as a Prometheus label value is unbounded
+// cardinality -- error strings carry run ids, payload fragments, service URLs
+// and timestamps -- which is the standard way to exhaust a Prometheus server's
+// memory.
+//
+// It was never live: the single non-test caller
+// (cmd/cleat-worker/setup.go) passed "". What made it worth removing rather
+// than leaving is that the SIGNATURE AND THE DOC COMMENT BOTH INVITED IT --
+// the parameter was named errMsg and the comment said "error ... recorded as
+// a label", so the next person wiring a richer failure path would fill it in.
+//
+// And the value waiting to be filled in is worse than a generic message: a
+// divergence error embeds up to two 4 KB payload snapshots (maxPayloadLen,
+// engine/durablecalls.go). That would be a cardinality explosion and a payload
+// leak into the metrics pipeline in one line.
+//
+// If a failure BREAKDOWN is wanted, it needs a bounded classification -- an
+// error code or a small closed enum -- decided on its merits, not a string
+// parameter that happens to be empty today.
+func (m *Metrics) RecordWorkflowFailed(ctx context.Context, workflowName string, taskQueue string, extraAttrs ...attribute.KeyValue) {
 	attrs := m.mergeAttrs(append([]attribute.KeyValue{
 		attribute.String("workflow_name", workflowName),
-		attribute.String("error", errMsg),
 		attribute.String("task_queue", taskQueue),
 	}, extraAttrs...)...)
 	m.workflowsFailed.Add(ctx, 1, metric.WithAttributes(attrs...))
@@ -810,8 +971,26 @@ func (m *Metrics) RecordReplayStep(ctx context.Context, defName string, extraAtt
 }
 
 // RecordCall increments the durable-call-invocations counter.
-func (m *Metrics) RecordCall(ctx context.Context, extraAttrs ...attribute.KeyValue) {
-	attrs := m.mergeAttrs(extraAttrs...)
+// The label is workflow_name rather than def_name, and the choice is
+// consistency rather than taste. cleat#1444's dashboard panel groups
+// cleat_calls_total by workflow_name and got one undifferentiated line,
+// because the metric carried no labels at all.
+//
+// Two names for this one value already exist in this file: workflow_name on
+// RecordWorkflowStarted, RecordWorkflowCompleted, RecordWorkflowFailed,
+// RecordWorkflowDuration and RecordFreshStep; def_name on RecordReplayStep.
+// Five against one, and RecordFreshStep is this counter's closest sibling --
+// engine/durablecalls.go records both on adjacent lines from the same
+// s.defName. So a call counter labelled def_name would be the odd one out
+// among the metrics it is read beside.
+//
+// That the value is a DEFINITION name and the dominant label says
+// "workflow_name" is a real inconsistency, and it is not resolved here:
+// renaming a published label breaks whatever queries it. Filed separately.
+func (m *Metrics) RecordCall(ctx context.Context, workflowName string, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(append([]attribute.KeyValue{
+		attribute.String("workflow_name", workflowName),
+	}, extraAttrs...)...)
 	m.calls.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
@@ -830,6 +1009,18 @@ func (m *Metrics) RecordCallRetry(ctx context.Context, extraAttrs ...attribute.K
 func (m *Metrics) RecordReplayFailure(ctx context.Context, extraAttrs ...attribute.KeyValue) {
 	attrs := m.mergeAttrs(extraAttrs...)
 	m.replayFailures.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordReplayShortHistory increments the replay-short-histories counter.
+//
+// NOT RecordReplayFailure, and the distinction is the whole point: a short
+// history is a SUSPICION, not a divergence. cleat#1507 records a path by which
+// the recorded count can legitimately exceed the rows without any history
+// being lost, so this counter must stay separable from the one an operator
+// pages on.
+func (m *Metrics) RecordReplayShortHistory(ctx context.Context, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(extraAttrs...)
+	m.replayShortHistories.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordReplayChecksumFailure increments the replay-checksum-failures counter.
@@ -891,10 +1082,49 @@ func (m *Metrics) RecordWorkflowsDeadLettered(ctx context.Context, extraAttrs ..
 	m.workflowsDeadLettered.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
-// RecordWorkflowsClaimed increments the workflows-claimed counter by count.
-func (m *Metrics) RecordWorkflowsClaimed(ctx context.Context, count int64, extraAttrs ...attribute.KeyValue) {
-	attrs := m.mergeAttrs(extraAttrs...)
+// RecordWorkflowsClaimed increments the workflows-claimed counter by count,
+// for one definition.
+//
+// PER DEFINITION, NOT PER BATCH, which is why this takes a name and the caller
+// changed. A claim returns a heterogeneous batch -- sticky and general work for
+// whatever definitions happen to be queued -- so the old signature could not
+// carry a label even in principle: there is no single definition a batch of
+// eight belongs to. cleat#1444's panel grouped it by workflow_name and drew one
+// line, and no amount of labelling at THIS function would have fixed that
+// without the caller splitting the batch first.
+//
+// workflow_name rather than def_name for the reason given on RecordCall: every
+// other cleat_workflows_*_total counter in this file carries workflow_name.
+func (m *Metrics) RecordWorkflowsClaimed(ctx context.Context, count int64, workflowName string, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(append([]attribute.KeyValue{
+		attribute.String("workflow_name", workflowName),
+	}, extraAttrs...)...)
 	m.workflowsClaimed.Add(ctx, count, metric.WithAttributes(attrs...))
+}
+
+// RecordExecutionFencedOut increments the fenced-out-executions counter.
+// cleat#2008: one execution's own batched, generation-fenced heartbeat
+// reported its (run, generation) pair unstamped -- another execution now
+// holds the run -- so this execution's context was cancelled before it could
+// start another durable call.
+func (m *Metrics) RecordExecutionFencedOut(ctx context.Context, workflowName string, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(append([]attribute.KeyValue{
+		attribute.String("workflow_name", workflowName),
+	}, extraAttrs...)...)
+	m.executionsFencedOut.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordWorkflowRelease increments the counter of workflows a worker released
+// because THIS worker could not serve them (a version or plugin mismatch, a
+// history it cannot decrypt), labelled by which check refused. A run that no
+// live worker can serve is released again on every backoff interval and stays
+// 'ready', so without this the only sign of it is a log line; a rate on
+// check="history_decrypt" is the alert. cleat#2311.
+func (m *Metrics) RecordWorkflowRelease(ctx context.Context, check string, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(append([]attribute.KeyValue{
+		attribute.String("check", check),
+	}, extraAttrs...)...)
+	m.workflowReleases.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
 // RecordWasmCacheHit increments the wasm-cache-hits counter.
@@ -907,6 +1137,12 @@ func (m *Metrics) RecordWasmCacheHit(ctx context.Context, extraAttrs ...attribut
 func (m *Metrics) RecordWasmCacheMiss(ctx context.Context, extraAttrs ...attribute.KeyValue) {
 	attrs := m.mergeAttrs(extraAttrs...)
 	m.wasmCacheMisses.Add(ctx, 1, metric.WithAttributes(attrs...))
+}
+
+// RecordCompactionStateCleared adds to the compaction-state-cleared counter.
+func (m *Metrics) RecordCompactionStateCleared(ctx context.Context, count int64, extraAttrs ...attribute.KeyValue) {
+	attrs := m.mergeAttrs(extraAttrs...)
+	m.compactionStateCleared.Add(ctx, count, metric.WithAttributes(attrs...))
 }
 
 // RecordEventsDeleted adds to the events-deleted counter.
@@ -933,6 +1169,41 @@ func (m *Metrics) RecordBackgroundLoop(ctx context.Context, loopName, status str
 	m.backgroundLoops.Add(ctx, 1, metric.WithAttributes(attrs...))
 }
 
+// RecordPluginEventsLost adds to the plugin-events-lost counter (cleat#2168).
+//
+// A plugin that buffers events (audit-log queues one per request) reports each one it gives up on
+// through plugin.Environment.EventsLost, which the worker points here. The plugin name and the reason
+// are the only labels: the reason is a short fixed word chosen by the plugin, never a tenant, path or
+// error text, so the series count stays the number of (plugin, reason) pairs.
+func (m *Metrics) RecordPluginEventsLost(ctx context.Context, pluginName, reason string, count int64, extraAttrs ...attribute.KeyValue) {
+	if count <= 0 {
+		return
+	}
+	attrs := m.mergeAttrs(append([]attribute.KeyValue{
+		attribute.String("plugin", pluginName),
+		attribute.String("reason", reason),
+	}, extraAttrs...)...)
+	m.pluginEventsLost.Add(ctx, count, metric.WithAttributes(attrs...))
+}
+
+// RecordDBProbe records one deadline-bounded database call: how long it took and whether it counts
+// as reachable (it returned without error and inside its deadline). consecutiveFailures is the run
+// of failed calls ending with this one (0 after a success); lastSuccess is the time of the latest
+// good call, the zero time if there has been none. cleat#2007.
+func (m *Metrics) RecordDBProbe(ctx context.Context, dialect string, elapsed time.Duration, reachable bool, consecutiveFailures int64, lastSuccess time.Time) {
+	attrs := m.mergeAttrs(attribute.String("dialect", dialect))
+	var up int64
+	if reachable {
+		up = 1
+	}
+	m.dbReachable.Record(ctx, up, metric.WithAttributes(attrs...))
+	m.dbConsecutiveFailures.Record(ctx, consecutiveFailures, metric.WithAttributes(attrs...))
+	m.dbProbeDuration.Record(ctx, elapsed.Seconds(), metric.WithAttributes(attrs...))
+	if !lastSuccess.IsZero() {
+		m.dbLastSuccess.Record(ctx, float64(lastSuccess.UnixNano())/1e9, metric.WithAttributes(attrs...))
+	}
+}
+
 // RecordBackgroundLoopRestart increments the background-loop-restarts counter.
 func (m *Metrics) RecordBackgroundLoopRestart(ctx context.Context, loopName string, count int64, extraAttrs ...attribute.KeyValue) {
 	attrs := m.mergeAttrs(append([]attribute.KeyValue{
@@ -941,12 +1212,35 @@ func (m *Metrics) RecordBackgroundLoopRestart(ctx context.Context, loopName stri
 	m.backgroundLoopRestarts.Add(ctx, count, metric.WithAttributes(attrs...))
 }
 
-// RecordReaperInstanceClaimed increments the reaper-instances-claimed counter.
-func (m *Metrics) RecordReaperInstanceClaimed(ctx context.Context, status string, extraAttrs ...attribute.KeyValue) {
-	attrs := m.mergeAttrs(append([]attribute.KeyValue{
-		attribute.String("status", status),
-	}, extraAttrs...)...)
-	m.reaperInstancesClaimed.Add(ctx, 1, metric.WithAttributes(attrs...))
+// RecordReaperInstancesClaimed adds to the reaper-instances-claimed counter.
+//
+// TAKES A COUNT, AND HAS NO status LABEL, both deliberately. It was declared as
+// Add(1) with a `status` label, which would need one call per reclaimed row
+// carrying that row's outcome. The reaper is a single bounded UPDATE whose
+// status is a CASE over pending_terminal_status, and ReapStaleInstances returns
+// RowsAffected -- a bare count -- on all four dialects. Recovering the per-row
+// status means RETURNING/OUTPUT, which MySQL does not have, so on that dialect
+// the label could only ever be populated by a second query racing the UPDATE.
+//
+// A label that can never vary is worse than no label: it advertises a dimension
+// an operator can group by, and every query returns one bucket. Removing it
+// costs nothing because the metric has emitted no samples -- it had zero call
+// sites when this was written, so no series and no dashboard depend on its
+// shape. cleat#1317.
+func (m *Metrics) RecordReaperInstancesClaimed(ctx context.Context, count int64, extraAttrs ...attribute.KeyValue) {
+	if count <= 0 {
+		return
+	}
+	m.reaperInstancesClaimed.Add(ctx, count, metric.WithAttributes(m.mergeAttrs(extraAttrs...)...))
+}
+
+// RecordSuspectedDBStall increments the suspected-database-stall counter.
+// cleat#2006: fired once per reaper tick where the stale running set looked
+// like a whole-fleet stall (nearly all running rows stale, across more than
+// one worker, clustered in time) rather than dead workers, so reclaiming
+// was deferred that tick.
+func (m *Metrics) RecordSuspectedDBStall(ctx context.Context, extraAttrs ...attribute.KeyValue) {
+	m.suspectedDBStalls.Add(ctx, 1, metric.WithAttributes(m.mergeAttrs(extraAttrs...)...))
 }
 
 // RecordHTTPRequest increments the HTTP requests counter.
@@ -1022,6 +1316,33 @@ func (m *Metrics) SetPluginConnectionsMax(ctx context.Context, count int64, extr
 
 	attrs := m.mergeAttrs(extraAttrs...)
 	m.pluginConnectionsMax.Add(ctx, delta, metric.WithAttributes(attrs...))
+}
+
+// SetWasmCompiledModuleCacheEntries sets the compiled-module cache gauge.
+//
+// cleat#1563: this cache had no bound and no metric, while the similarly-named
+// cleat_wasm_cache_entries measured a different cache entirely.
+// Uses delta tracking to convert absolute values to UpDownCounter deltas.
+func (m *Metrics) SetWasmCompiledModuleCacheEntries(ctx context.Context, count int64, extraAttrs ...attribute.KeyValue) {
+	m.mu.Lock()
+	delta := count - m.lastWasmCompiledModuleCacheEntries
+	m.lastWasmCompiledModuleCacheEntries = count
+	m.mu.Unlock()
+
+	attrs := m.mergeAttrs(extraAttrs...)
+	m.wasmCompiledModuleCacheEntries.Add(ctx, delta, metric.WithAttributes(attrs...))
+}
+
+// SetWasmCompiledModuleCacheBytes sets the compiled-module cache's estimated
+// size gauge.
+func (m *Metrics) SetWasmCompiledModuleCacheBytes(ctx context.Context, bytes int64, extraAttrs ...attribute.KeyValue) {
+	m.mu.Lock()
+	delta := bytes - m.lastWasmCompiledModuleCacheBytes
+	m.lastWasmCompiledModuleCacheBytes = bytes
+	m.mu.Unlock()
+
+	attrs := m.mergeAttrs(extraAttrs...)
+	m.wasmCompiledModuleCacheBytes.Add(ctx, delta, metric.WithAttributes(attrs...))
 }
 
 // SetWasmCacheEntries sets the WASM cache entries gauge.
@@ -1158,20 +1479,38 @@ func (m *Metrics) RecordDesiredConcurrency(ctx context.Context, desired int64, e
 	m.desiredConcurrency.Add(ctx, delta, metric.WithAttributes(attrs...))
 }
 
-// RecordWorkflowMemoryEstimate records the estimated memory per workflow execution
-// by def_name. Converts the absolute value to a delta for the UpDownCounter.
-func (m *Metrics) RecordWorkflowMemoryEstimate(ctx context.Context, defName string, bytes float64, extraAttrs ...attribute.KeyValue) {
+// workflowMemoryKey scopes the delta baseline to the tenant that produced it.
+//
+// cleat#1097. THE BASELINE HAD TO MOVE WITH THE LABEL, and this is the half
+// that makes a naive fix worse than the defect. workflowMemoryEstimate is an
+// UpDownCounter, so this function converts an absolute estimate into a DELTA
+// against the last value it saw. Keyed by def_name alone, tenant A's estimate
+// was differenced against tenant B's last value -- so adding a tenant
+// attribute while leaving this map name-keyed would have produced a per-tenant
+// series carrying arithmetic computed across tenants. Blended numbers replaced
+// by wrong ones, and the label would have made them look trustworthy.
+type workflowMemoryKey struct {
+	tenantID string
+	defName  string
+}
+
+// RecordWorkflowMemoryEstimate records the estimated memory per workflow
+// execution, scoped to the tenant. Converts the absolute value to a delta for
+// the UpDownCounter.
+func (m *Metrics) RecordWorkflowMemoryEstimate(ctx context.Context, tenantID, defName string, bytes float64, extraAttrs ...attribute.KeyValue) {
+	key := workflowMemoryKey{tenantID: tenantID, defName: defName}
 	m.mu.Lock()
-	last, exists := m.lastWorkflowMemoryEstimate[defName]
+	last, exists := m.lastWorkflowMemoryEstimate[key]
 	delta := int64(bytes - last)
 	if !exists {
 		delta = int64(bytes)
 	}
-	m.lastWorkflowMemoryEstimate[defName] = bytes
+	m.lastWorkflowMemoryEstimate[key] = bytes
 	m.mu.Unlock()
 
 	attrs := m.mergeAttrs(append([]attribute.KeyValue{
 		attribute.String("def_name", defName),
+		attribute.String("tenant_id", tenantID),
 	}, extraAttrs...)...)
 	m.workflowMemoryEstimate.Add(ctx, delta, metric.WithAttributes(attrs...))
 }
@@ -1222,12 +1561,6 @@ func (m *Metrics) SetFreshStepCount(ctx context.Context, val int64, extraAttrs .
 func (m *Metrics) SetReplayStepCount(ctx context.Context, val int64, extraAttrs ...attribute.KeyValue) {
 	attrs := m.mergeAttrs(extraAttrs...)
 	m.replayStepCountGauge.Record(ctx, val, metric.WithAttributes(attrs...))
-}
-
-// SetMemoryPressureRatio sets the memory pressure ratio gauge.
-func (m *Metrics) SetMemoryPressureRatio(ctx context.Context, ratio float64, extraAttrs ...attribute.KeyValue) {
-	attrs := m.mergeAttrs(extraAttrs...)
-	m.memoryPressureRatio.Record(ctx, ratio, metric.WithAttributes(attrs...))
 }
 
 // SetMemoryPressure sets the memory pressure gauge.
@@ -1527,6 +1860,15 @@ func writeMetric(w io.Writer, m metricdata.Metrics) error {
 
 // writeHistogramDataPoint writes a single histogram data point in Prometheus
 // exposition format, including _bucket, _count, and _sum lines.
+//
+// Two things about the exposition format that this used to get wrong (cleat#2266), and that made
+// Prometheus reject the whole scrape rather than one series:
+//
+//   - formatLabels already returns its labels wrapped in braces, so a bucket line is built by adding
+//     `le` INSIDE them. Wrapping the result in a second pair produced `{{a="b"},le="1"}`.
+//   - `_bucket` counts are CUMULATIVE: le="x" is the number of observations <= x, and le="+Inf" equals
+//     `_count`. OTel's BucketCounts are per-bucket (len(bounds)+1 of them, the last being everything
+//     above the top bound), so they are summed here.
 func writeHistogramDataPoint(
 	w io.Writer,
 	name string,
@@ -1538,31 +1880,38 @@ func writeHistogramDataPoint(
 ) error {
 	labels := formatLabels(attrs)
 
-	// Write _bucket lines.
+	var cumulative uint64
 	for i, bound := range bounds {
-		le := fmt.Sprintf("%g", bound)
-		if _, err := fmt.Fprintf(w, "%s_bucket{%s,le=%q} %d\n", name, labels, le, bucketCounts[i]); err != nil {
+		if i < len(bucketCounts) {
+			cumulative += bucketCounts[i]
+		}
+		if _, err := fmt.Fprintf(w, "%s_bucket%s %d\n", name, labelsWithLE(labels, fmt.Sprintf("%g", bound)), cumulative); err != nil {
 			return err
 		}
 	}
-	// +Inf bucket
-	tailCount := count
-	if len(bucketCounts) > 0 {
-		tailCount = bucketCounts[len(bucketCounts)-1]
-	}
-	if _, err := fmt.Fprintf(w, "%s_bucket{%s,le=%q} %d\n", name, labels, "+Inf", tailCount); err != nil {
+	// +Inf is every observation, so it is _count by definition, not the last bucket's own tally.
+	if _, err := fmt.Fprintf(w, "%s_bucket%s %d\n", name, labelsWithLE(labels, "+Inf"), count); err != nil {
 		return err
 	}
 
 	// _count and _sum.
-	if _, err := fmt.Fprintf(w, "%s_count{%s} %d\n", name, labels, count); err != nil {
+	if _, err := fmt.Fprintf(w, "%s_count%s %d\n", name, labels, count); err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(w, "%s_sum{%s} %g\n", name, labels, sum); err != nil {
+	if _, err := fmt.Fprintf(w, "%s_sum%s %g\n", name, labels, sum); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// labelsWithLE adds the `le` label to a label string produced by formatLabels, which is either empty
+// or `{k="v",...}`.
+func labelsWithLE(labels, le string) string {
+	if labels == "" {
+		return fmt.Sprintf("{le=%q}", le)
+	}
+	return fmt.Sprintf("%s,le=%q}", strings.TrimSuffix(labels, "}"), le)
 }
 
 // formatLabels renders an attribute.Set as a Prometheus label string.

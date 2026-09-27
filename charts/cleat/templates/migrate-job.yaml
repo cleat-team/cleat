@@ -1,0 +1,97 @@
+{{- if .Values.migration.enabled }}
+{{- /*
+  The schema migration, as a pre-install/pre-upgrade hook (cleat#2117).
+
+  A worker no longer migrates the database when it starts: a normal start VERIFIES
+  the schema and refuses, with the remediation in its message, if a migration is
+  not applied. So a release has to migrate BEFORE the new pods start, and this Job
+  is that step. `cleat-worker --migrate-only` exits 0 when the schema is current,
+  is idempotent, and is safe if two of these run at once (they queue on a named
+  lock on every dialect).
+
+  WHICH DSN. The Job needs DDL rights, which the runtime role deliberately lacks.
+  In order of preference:
+    1. migration.existingSecret            a Secret you manage (key: existingSecretKey)
+    2. postgres.existingSecret             reused, if you set that and no (1)
+    3. a Secret this chart creates as a hook resource, from migration.username /
+       migration.password (defaulting to postgres.username / postgres.password)
+  The chart's own runtime Secret is NOT usable here: a pre-install hook runs before
+  the release's other resources exist, so on a first install it is not there yet.
+  (3) is created ahead of the Job (hook-weight -10) and deleted once the Job
+  succeeds, so DDL credentials are not left in the cluster.
+
+  The ServiceAccount is left as the namespace default for the same reason: the
+  chart's ServiceAccount does not exist yet on a first install.
+*/ -}}
+{{- $secretName := "" }}
+{{- $secretKey := "database-url" }}
+{{- if .Values.migration.existingSecret }}
+{{- $secretName = .Values.migration.existingSecret }}
+{{- $secretKey = .Values.migration.existingSecretKey }}
+{{- else if .Values.postgres.existingSecret }}
+{{- $secretName = .Values.postgres.existingSecret }}
+{{- else }}
+{{- $secretName = printf "%s-migrate" (include "cleat.fullname" .) }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secretName }}
+  labels:
+    {{- include "cleat.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+type: Opaque
+data:
+  database-url: {{ include "cleat.migrationDatabaseURL" . | b64enc | quote }}
+---
+{{- end }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cleat.fullname" . }}-migrate
+  labels:
+    {{- include "cleat.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: {{ .Values.migration.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.migration.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "cleat.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      {{- with .Values.securityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--migrate-only"
+            - "--db=$(MIGRATE_DATABASE_URL)"
+          env:
+            - name: MIGRATE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $secretName }}
+                  key: {{ $secretKey }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}

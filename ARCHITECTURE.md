@@ -41,7 +41,7 @@
 
 | Package | Owns | Depends On |
 |---------|------|------------|
-| `engine/` | Engine, workflow execution loop, WASM backends (wasmtime + wazero), replay, signals | wasm, migration, telemetry |
+| `engine/` | Engine, workflow execution loop, the wasmtime WASM backend, the wazero `Runtime` used by CLI/test tooling, replay, signals | wasm, migration, telemetry |
 | `wasm/` | WASM module loading, codegen | — |
 | `wasmrw/` | WASM read/write helpers | wasm |
 | `migration/` | Schema DDL, migrations (PG/MSSQL/MySQL) | — |
@@ -60,7 +60,7 @@
 
 - `cmd/cleat-worker` → `engine`: MEDIUM (consumes Engine API)
 - `cmd/cleatctl` → `engine`: MEDIUM (read-only Engine API for debug)
-- `engine` → `wasm`: TIGHT (shared wasmtime/wazero types, execution)
+- `engine` → `wasm`: TIGHT (shared WASM module types, execution)
 - `engine` → `migration`: MEDIUM (schema contracts)
 - `engine` → `internal/telemetry`: LOOSE (OTel is initialized separately)
 - `wasmrw` → `wasm`: TIGHT (shared WASM primitives)

@@ -30,4 +30,4 @@ CHILD_BINDING_POLICY = ""
 SDK_LANGUAGE = "python"
 
 # SDK_VERSION is the version of the cleat Python SDK.
-SDK_VERSION = "0.2.0"
+SDK_VERSION = "0.3.0"

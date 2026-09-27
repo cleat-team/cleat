@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/plugins/eventtriggers"
 	"github.com/google/uuid"
 )
@@ -57,7 +58,22 @@ type configRow struct {
 // messages from each one, publishing them as events through the
 // event-triggers pipeline.
 func (p *Plugin) pollConfigs(ctx context.Context) error {
-	rows, err := p.db.Query(ctx, `
+	// A NAMED cross-tenant read, bound to a SEPARATE variable. cleat#1278.
+	//
+	// This query discovers WHICH tenants have an enabled config, so it cannot
+	// be scoped to one -- there is no tenant to scope it to until it returns.
+	// Once kafka_config carries a policy (migrations.go v2) an unnamed
+	// statement here is refused.
+	//
+	// `discoverCtx :=`, never `ctx =`. Reassigning would carry the bypass into
+	// pollConfig below and into everything it reaches, where any narrowing is
+	// silently ignored -- beginTenantTx tests CrossTenant first. Here that
+	// reach is longer than it looks: pollConfig is called INSIDE this cursor
+	// loop, so a bypassed ctx would cover the whole poll, the REST proxy round
+	// trips and the event publish at the far end of it.
+	discoverCtx := plugin.AcrossAllTenants(ctx, "kafka-connect: discovering which tenants have an enabled config")
+
+	rows, err := p.db.Query(discoverCtx, `
 		SELECT id, tenant_id, name, brokers, topic, consumer_group, COALESCE(event_type, topic)
 		FROM kafka_config
 		WHERE enabled = true
@@ -70,7 +86,7 @@ func (p *Plugin) pollConfigs(ctx context.Context) error {
 
 	for rows.Next() {
 		var c configRow
-		if err := rows.Scan(&c.ID, &c.TenantID, &c.Name, &c.Brokers, &c.Topic, &c.ConsumerGroup, &c.EventType); err != nil {
+		if err := plugin.ScanRow(rows, &c.ID, &c.TenantID, &c.Name, &c.Brokers, &c.Topic, &c.ConsumerGroup, &c.EventType); err != nil {
 			p.logger.Error("kafka-connect: scan config row", "error", err)
 			continue
 		}
@@ -128,11 +144,15 @@ func (p *Plugin) pollConfig(ctx context.Context, c configRow) {
 
 // kafkaRecord represents a single Kafka message consumed via the REST Proxy.
 type kafkaRecord struct {
-	Topic     string `json:"topic"`
-	Key       any    `json:"key"`
-	Value     any    `json:"value"`
-	Partition int    `json:"partition"`
-	Offset    int64  `json:"offset"`
+	Topic string `json:"topic"`
+	// RAW, because a Kafka value is arbitrary caller JSON and decoding it into
+	// an `any` rewrote every number float64 cannot hold exactly -- an order id
+	// or a ledger amount larger than 2^53 arrived at the subscribed workflow
+	// as a different number, with no error. cleat#1641.
+	Key       json.RawMessage `json:"key"`
+	Value     json.RawMessage `json:"value"`
+	Partition int             `json:"partition"`
+	Offset    int64           `json:"offset"`
 }
 
 // consumeViaRestProxy uses the Confluent REST Proxy v2 consumer API to poll
@@ -317,7 +337,12 @@ func (p *Plugin) publishRecord(ctx context.Context, c configRow, record kafkaRec
 	}
 
 	// Publish through the event-triggers pipeline.
-	matched, err := eventtriggers.PublishEvent(ctx, p.db, p.logger, p.env, eventID, c.TenantID, c.EventType, eventData)
+	eventDataJSON, err := json.Marshal(eventData)
+	if err != nil {
+		return fmt.Errorf("marshal event data: %w", err)
+	}
+
+	matched, err := eventtriggers.PublishEvent(ctx, p.db, p.logger, p.env, eventID, c.TenantID, c.EventType, eventDataJSON)
 	if err != nil {
 		return fmt.Errorf("publish event: %w", err)
 	}

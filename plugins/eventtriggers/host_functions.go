@@ -18,7 +18,22 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	if scope == nil {
 		return fmt.Errorf("event-triggers: nil function registry")
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "await_event", Idempotent: true}, p.awaitEvent); err != nil {
+	if err := scope.Register(plugin.FuncOptions{
+		Name: "await_event",
+		// NEITHER. It selects the latest UNPROCESSED event, so a replay can
+		// match a different one -- and on the not-found path it WRITES, calling
+		// registerAwaiter before returning a successful "no event" output.
+		// That output is recorded, so under cleat#1318 a replay returns it and
+		// does not re-register.
+		//
+		// WHAT THAT GIVES UP, stated because it was load-bearing by accident:
+		// re-invoking on replay used to re-create an awaiter row that had been
+		// lost. The row is written durably on the original call, so replay does
+		// not need to redo it -- but a deployment that lost the row was being
+		// repaired by a code path whose stated purpose was something else.
+		Idempotent:        false,
+		SameValueOnReplay: false,
+	}, p.awaitEvent); err != nil {
 		return err
 	}
 	return nil
@@ -71,21 +86,19 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 		receivedAt time.Time
 	)
 
-	err := p.db.QueryRow(ctx, plugin.Rebind(`
-		SELECT id, event_type, event_data, received_at
-		FROM ingested_events
-		WHERE tenant_id = $1
-		  AND event_type = $2
-		  AND NOT processed
-		ORDER BY received_at DESC
-		LIMIT 1
-	`, p.dialect), cc.TenantID, input.EventType).Scan(&eventID, &eventType, &eventData, &receivedAt)
+	err := plugin.ScanRow(p.db.QueryRow(ctx,
+		queryLatestUnprocessedEvent.For(p.dialect),
+		cc.TenantID, input.EventType), &eventID, &eventType, &eventData, &receivedAt)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		// No matching event found -- register as an awaiter so the publish
 		// handler can signal this workflow when a matching event arrives.
 		if cc.WorkflowID != "" {
-			p.registerAwaiter(ctx, cc.TenantID, cc.WorkflowID, input.EventType)
+			// Not `Found: false` on failure: that is a success report, and it
+			// is exactly the lie cleat#1473 is about.
+			if err := p.registerAwaiter(ctx, cc.TenantID, cc.WorkflowID, input.EventType); err != nil {
+				return "", err
+			}
 		}
 
 		output := awaitEventOutput{Found: false}
@@ -131,10 +144,26 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 // registerAwaiter records that the given workflow is waiting for an event of
 // the specified type.  This allows the publish handler to deliver a signal
 // when a matching event arrives.
-func (p *Plugin) registerAwaiter(ctx context.Context, tenantID, workflowID, eventType string) {
+// RETURNS ITS ERROR, and that is the whole of cleat#1473.
+//
+// It used to log and return nothing, so awaitEvent's caller could not tell a
+// registration that happened from one that did not -- and awaitEvent went on
+// to return a SUCCESSFUL `{"found": false}` either way. A workflow told "no
+// event yet" settles down to wait, and the row that would have woken it does
+// not exist. The failure was observed and then discarded into a log line, which
+// is the worst place for it: the run hangs and nothing above it knows why.
+//
+// The caller propagates rather than degrading. awaitEvent already fails loudly
+// for every other database error on this path -- the `query events` branch
+// returns its error -- so registration was the one write whose failure was
+// swallowed, and propagating makes the function uniform. A visible error beats
+// an invisible wait.
+func (p *Plugin) registerAwaiter(ctx context.Context, tenantID, workflowID, eventType string) error {
 	_, err := p.db.Exec(ctx, plugin.Rebind(upsertAwaiter.For(p.dialect), p.dialect),
 		workflowID, tenantID, eventType)
 	if err != nil {
 		p.logger.Warn("event-triggers: register awaiter", "error", err, "workflow_id", workflowID)
+		return fmt.Errorf("event-triggers: register awaiter: %w", err)
 	}
+	return nil
 }

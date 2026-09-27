@@ -85,5 +85,86 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			       ALTER TABLE task_queue DROP COLUMN IF EXISTS input;
 			       ALTER TABLE task_queue DROP COLUMN IF EXISTS def_name;`,
 		},
+		{
+			// Tenant isolation for task_queue. cleat#1278.
+			//
+			// A separate version rather than a TenantScoped on v1, for the
+			// reason kvstore's v2 gives: v1 is already recorded as applied
+			// everywhere jobqueue runs, and a recorded migration never runs
+			// again. Editing it would protect new databases and leave every
+			// existing one open.
+			//
+			// Up is empty on purpose. The runtime emits ENABLE / FORCE / the
+			// policy from TenantScoped (plugin.applyTenantScoping), using
+			// cleat.tenant_row_is_visible so that a sweep which named itself
+			// through plugin.AcrossAllTenants is admitted and an unmarked one
+			// still fails closed. On MySQL and SQL Server this version is
+			// recorded and installs nothing, which is what the field means.
+			//
+			// jobqueue could not adopt this when kvstore did, because kvstore
+			// qualified only by having no background loop. The loop is what
+			// made this hard, and Run() naming itself cross-tenant is what
+			// makes it possible -- see plugins/jobqueue/background.go.
+			Version:      3,
+			TenantScoped: []string{"task_queue"},
+		},
+		{
+			// A caller's JSON is stored as TEXT on MySQL, as it already is on
+			// SQL Server.
+			//
+			// cleat#1622, the plugin half of cleat#1022. MySQL's JSON type
+			// keeps an integer as INT64 or UINT64 and falls back to DOUBLE
+			// when it fits neither, so a value outside [-2^63, 2^64-1] -- and
+			// any decimal needing more precision than a float64 holds -- is
+			// REWRITTEN on the way in. Nothing errors, and the result is still
+			// valid JSON of the right shape:
+			//
+			//     sent    {"x":123456789012345678901234567890}
+			//     stored  {"x": 1.2345678901234566e29}
+			//
+			// The narrowing belongs to the JSON TYPE, not to any column: the
+			// same INSERT into a TEXT column in the same row keeps the digits.
+			// This is migrations/mysql/070 applied to jobqueue, including the
+			// CHECK that restores the validation LONGTEXT gives up.
+			//
+			// The CHECK is not optional: dropping to LONGTEXT surrenders the
+			// JSON type's validation, and invalid JSON would become storable
+			// where the column refuses it today. JSON_VALID restores that and
+			// nothing else. It is parsed and IGNORED before MySQL 8.0.16, a
+			// pre-existing dependency this repo already has.
+			//
+			// Existing rows are untouched and already-degraded values stay as
+			// they are -- the digits were lost at write time and there is
+			// nothing to recover. What changes is every write from here on.
+			//
+			// PostgreSQL and SQL Server need nothing: JSONB preserves, and
+			// SQL Server has always used NVARCHAR(MAX) + ISJSON here.
+			Version:         4,
+			Up:              "",
+			DialectSpecific: "MySQL only: converting this plugin's JSON columns to LONGTEXT. PostgreSQL's JSONB preserves a large number already and SQL Server has always used NVARCHAR(MAX) here, so neither has anything to do and an arm for them would be a statement that must not exist. cleat#1622.",
+			UpMySQL: `
+				ALTER TABLE task_queue
+					MODIFY input LONGTEXT NULL,
+					MODIFY payload LONGTEXT NULL;
+
+				ALTER TABLE task_queue
+					ADD CONSTRAINT ck_task_queue_input CHECK (input IS NULL OR JSON_VALID(input)),
+					ADD CONSTRAINT ck_task_queue_payload CHECK (payload IS NULL OR JSON_VALID(payload));
+			`,
+			// Reversal is MySQL-only because the change is. It restores the
+			// JSON type and with it the narrowing -- a value stored intact
+			// while this migration was applied is rewritten by the ALTER
+			// itself, so this is lossy and is only here because a migration
+			// that writes SQL must be reversible.
+			DownMySQL: `
+				ALTER TABLE task_queue
+					DROP CONSTRAINT ck_task_queue_input,
+					DROP CONSTRAINT ck_task_queue_payload;
+
+				ALTER TABLE task_queue
+					MODIFY input JSON NULL,
+					MODIFY payload JSON NULL;
+			`,
+		},
 	}
 }

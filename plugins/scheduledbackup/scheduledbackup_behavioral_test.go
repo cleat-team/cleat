@@ -10,17 +10,17 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
-	"regexp"
-	"strconv"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"github.com/google/uuid"
 )
 
@@ -206,7 +206,7 @@ func TestSB_Init_WithConfig(t *testing.T) {
 		DB:     nil,
 		Mux:    http.NewServeMux(),
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		Config: json.RawMessage(`{"dsn":"postgres://...", "dump_dir":"/tmp/my-backups"}`),
+		Config: json.RawMessage(`{"dump_dir":"/tmp/my-backups"}`),
 	}
 	if err := p.Init(context.Background(), env); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -214,8 +214,82 @@ func TestSB_Init_WithConfig(t *testing.T) {
 	if p.config.DumpDir != "/tmp/my-backups" {
 		t.Errorf("got dump dir %q", p.config.DumpDir)
 	}
-	if p.config.DSN != "postgres://..." {
-		t.Errorf("got DSN %q", p.config.DSN)
+}
+
+// TestSB_InitWarnsOnLeftoverDSN is the mirror of slacknotify's
+// TestSN_InitWarnsOnLeftoverSigningSecret: a dsn left over in
+// --plugin-config from before cleat#1992 part 1b no longer does anything --
+// Config has no field for it -- so Init must WARN naming the dead field and
+// the replacement command, rather than silently ignoring it.
+func TestSB_InitWarnsOnLeftoverDSN(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+		Config: json.RawMessage(`{"dsn":"postgres://old-secret", "dump_dir":"/tmp/my-backups"}`),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "dsn") || !strings.Contains(got, "no longer read") {
+		t.Errorf("expected a WARN naming the dead dsn field, got log output: %q", got)
+	}
+	if !strings.Contains(got, "set-deployment-secret") {
+		t.Errorf("expected the WARN to name the replacement command, got: %q", got)
+	}
+}
+
+// TestSB_InitNoWarnWithoutLeftoverDSN is the negative control: a config with
+// no dsn field at all (or none) must not log the leftover-key WARN.
+func TestSB_InitNoWarnWithoutLeftoverDSN(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+		Config: json.RawMessage(`{"dump_dir":"/tmp/my-backups"}`),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if got := buf.String(); strings.Contains(got, "no longer read") {
+		t.Errorf("did not expect a leftover-dsn WARN with no dsn field in config, got: %q", got)
+	}
+}
+
+// TestSB_RequiredDeploymentSecrets_NoLegacyKey is the "ordinary deployment"
+// case, mirroring slacknotify's TestSN_RequiredDeploymentSecrets_NoLegacyKey:
+// no legacy dsn anywhere in --plugin-config (whether scheduled-backup has no
+// config section at all, or an empty one) must not require
+// scheduledbackup.dsn -- a deployment with no history of scheduled backups
+// must still boot with no DSN configured.
+func TestSB_RequiredDeploymentSecrets_NoLegacyKey(t *testing.T) {
+	p := &Plugin{}
+	for _, cfg := range [][]byte{nil, []byte(``), []byte(`{}`)} {
+		names, err := p.RequiredDeploymentSecrets(cfg)
+		if err != nil {
+			t.Fatalf("RequiredDeploymentSecrets(%q): %v", cfg, err)
+		}
+		if len(names) != 0 {
+			t.Errorf("RequiredDeploymentSecrets(%q) = %v, want none (no legacy key present)", cfg, names)
+		}
+	}
+}
+
+// TestSB_RequiredDeploymentSecrets_LegacyKeyPresent is the upgrade case:
+// --plugin-config still carries dsn from before cleat#1992 part 1b, proving
+// this deployment ran scheduled backups against a real database. Without
+// this, scheduledbackup.dsn being unset would let the worker boot and then
+// silently fail every backup attempt, with nothing at boot saying why.
+func TestSB_RequiredDeploymentSecrets_LegacyKeyPresent(t *testing.T) {
+	p := &Plugin{}
+	cfg := []byte(`{"dsn": "postgres://old-secret"}`)
+	names, err := p.RequiredDeploymentSecrets(cfg)
+	if err != nil {
+		t.Fatalf("RequiredDeploymentSecrets: %v", err)
+	}
+	if len(names) != 1 || names[0] != "scheduledbackup.dsn" {
+		t.Errorf("RequiredDeploymentSecrets(legacy key present) = %v, want [scheduledbackup.dsn]", names)
 	}
 }
 
@@ -233,190 +307,27 @@ func TestSB_Init_InvalidConfig(t *testing.T) {
 	}
 }
 
-// =========================================================================
-// Route registration
-// =========================================================================
-
-func TestSB_RegisterRoutes_NilMux(t *testing.T) {
-	p := &Plugin{}
-	err := p.RegisterRoutes(nil)
-	if err == nil || !strings.Contains(err.Error(), "nil mux") {
-		t.Errorf("want nil mux error, got: %v", err)
-	}
-}
-
-func TestSB_RegisterRoutes_Valid(t *testing.T) {
-	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	mux := http.NewServeMux()
-	if err := p.RegisterRoutes(mux); err != nil {
-		t.Fatalf("RegisterRoutes: %v", err)
-	}
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/backups/configs", nil)
-	mux.ServeHTTP(rec, req)
-	if rec.Code == 404 {
-		t.Error("/backups/configs should be registered")
-	}
-}
-
-// =========================================================================
-// Route error paths — missing tenant
-// =========================================================================
-
-func TestSB_RouteErrorPaths_MissingTenant(t *testing.T) {
-	p := &Plugin{
-		db:     nil,
-		mux:    http.NewServeMux(),
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
-	p.RegisterRoutes(p.mux)
-
-	tests := []struct {
-		method, path string
-		body         []byte
-	}{
-		{"POST", "/backups/configs", []byte(`{"name":"test","cron":"0 0 * * *"}`)},
-		{"GET", "/backups/configs", nil},
-		{"GET", "/backups/configs/00000000-0000-0000-0000-000000000001", nil},
-		{"PUT", "/backups/configs/00000000-0000-0000-0000-000000000001", []byte(`{}`)},
-		{"DELETE", "/backups/configs/00000000-0000-0000-0000-000000000001", nil},
-		{"GET", "/backups/history", nil},
-		{"POST", "/backups/configs/00000000-0000-0000-0000-000000000001/run", nil},
-	}
-
-	for _, tc := range tests {
-		var body io.Reader
-		if tc.body != nil {
-			body = bytes.NewReader(tc.body)
-		}
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(tc.method, tc.path, body)
-		p.mux.ServeHTTP(rec, req)
-		if rec.Code != 401 {
-			t.Errorf("%s %s: want 401, got %d", tc.method, tc.path, rec.Code)
-		}
-	}
-}
-
-// =========================================================================
-// Route error paths — with tenant but no DB
-// =========================================================================
-
-func TestSB_RouteErrorPaths_TenantInvalidID(t *testing.T) {
-	p := &Plugin{
-		db:     nil,
-		mux:    http.NewServeMux(),
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
-	p.RegisterRoutes(p.mux)
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001")
-
-	paths := []string{
-		"/backups/configs/not-a-uuid",
-	}
-	for _, pth := range paths {
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", pth, nil).WithContext(
-			auth.WithTenantID(context.Background(), tid),
-		)
-		p.mux.ServeHTTP(rec, req)
-		if rec.Code != 400 {
-			t.Errorf("GET %s: want 400, got %d", pth, rec.Code)
-		}
-	}
-}
-
-// =========================================================================
-// CLI command validation
-// =========================================================================
-
-func TestSB_CLI_BackupRun_MissingDSN(t *testing.T) {
-	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	err := p.cliBackupRun([]string{"--tenant=00000000-0000-0000-0000-000000000001", "--config=00000000-0000-0000-0000-000000000001"})
-	if err == nil || !strings.Contains(err.Error(), "dsn") {
-		t.Errorf("want dsn error, got: %v", err)
-	}
-}
-
-func TestSB_CLI_BackupRun_MissingTenant(t *testing.T) {
-	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	err := p.cliBackupRun([]string{"--dsn=postgres://...", "--config=00000000-0000-0000-0000-000000000001"})
-	if err == nil || !strings.Contains(err.Error(), "tenant") {
-		t.Errorf("want tenant error, got: %v", err)
-	}
-}
-
-func TestSB_CLI_BackupRun_MissingConfig(t *testing.T) {
-	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	err := p.cliBackupRun([]string{"--dsn=postgres://...", "--tenant=00000000-0000-0000-0000-000000000001"})
-	if err == nil || !strings.Contains(err.Error(), "config") {
-		t.Errorf("want config error, got: %v", err)
-	}
-}
-
-func TestSB_CLI_BackupRun_InvalidTenant(t *testing.T) {
-	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	err := p.cliBackupRun([]string{"--dsn=postgres://...", "--tenant=bad-uuid", "--config=00000000-0000-0000-0000-000000000001"})
-	if err == nil || !strings.Contains(err.Error(), "tenant UUID") {
-		t.Errorf("want tenant UUID error, got: %v", err)
-	}
-}
-
-func TestSB_CLI_BackupRun_InvalidConfig(t *testing.T) {
-	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	err := p.cliBackupRun([]string{"--dsn=postgres://...", "--tenant=00000000-0000-0000-0000-000000000001", "--config=bad-uuid"})
-	if err == nil || !strings.Contains(err.Error(), "config UUID") {
-		t.Errorf("want config UUID error, got: %v", err)
-	}
-}
-
-func TestSB_CLI_BackupList_MissingDSN(t *testing.T) {
-	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	err := p.cliBackupList([]string{"--tenant=00000000-0000-0000-0000-000000000001"})
-	if err == nil || !strings.Contains(err.Error(), "dsn") {
-		t.Errorf("want dsn error, got: %v", err)
-	}
-}
-
-func TestSB_CLI_BackupList_InvalidTenant(t *testing.T) {
-	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	err := p.cliBackupList([]string{"--dsn=postgres://...", "--tenant=bad-uuid"})
-	if err == nil || !strings.Contains(err.Error(), "tenant UUID") {
-		t.Errorf("want tenant UUID error, got: %v", err)
-	}
-}
-
-func TestSB_CLI_BackupList_InvalidTenantFlag(t *testing.T) {
-	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	err := p.cliBackupList([]string{"--dsn=postgres://test", "--tenant=bad-uuid"})
-	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "tenant") {
-		t.Errorf("want tenant error, got: %v", err)
-	}
-}
-
-// =========================================================================
-// RegisterCommands
-// =========================================================================
-
-func TestSB_RegisterCommands(t *testing.T) {
-	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	cmds := p.RegisterCommands()
-	if len(cmds) != 2 {
-		t.Fatalf("want 2 commands, got %d", len(cmds))
-	}
-	found := make(map[string]bool)
-	for _, c := range cmds {
-		found[c.Name] = true
-		if c.Run == nil {
-			t.Errorf("command %q has nil Run", c.Name)
-		}
-	}
-	for _, name := range []string{"backup-run", "backup-list"} {
-		if !found[name] {
-			t.Errorf("expected command %q not found", name)
-		}
-	}
-}
+// TestSB_RegisterRoutes_NilMux, TestSB_RegisterRoutes_Valid,
+// TestSB_RouteErrorPaths_MissingTenant, TestSB_RouteErrorPaths_TenantInvalidID,
+// TestSB_CLI_BackupRun_*, TestSB_CLI_BackupList_*, TestSB_RegisterCommands,
+// TestSB_BackupConfig_JSON, TestSB_BackupHistory_JSON, TestSB_CreateConfig_*,
+// TestSB_ListConfigs_*, TestSB_GetConfig_*, TestSB_UpdateConfig_* (route
+// variants), TestSB_DeleteConfig_*, TestSB_ListHistory_* (route variants),
+// TestSB_RunBackup_Success/NotFound, TestSB_CRUD_FullLifecycle,
+// TestSB_ErrorPaths_InvalidID, TestSB_ErrorPaths_MissingTenantWithDB,
+// TestSB_RunBackupAsync_Error, TestSB_RunBackupAsync_NoDeploymentSecrets and
+// every TestSB_DBError_* aimed at a route handler were removed with
+// routes.go and commands.go: cleat#2247 made backup configuration
+// operator-only, so there is no longer a tenant-facing HTTP surface
+// (RegisterRoutes), a plugin.HasCommands implementation (RegisterCommands,
+// cliBackupRun, cliBackupList), or a runBackupAsync (the HTTP "run now"
+// handler's async half) to test. Operator access is now
+// cmd/cleatctl/backup.go, which talks to backup_config/backup_history
+// directly the same way slackworkspace.go and audit.go do for their own
+// plugins, not through the Plugin interface. Note RegisterCommands was never
+// actually wired to anything: no caller anywhere in this tree ever
+// type-asserted a loaded plugin against plugin.HasCommands, so its two CLI
+// commands were unreachable dead code even before this issue (cleat#2255).
 
 // =========================================================================
 // Migrations
@@ -463,57 +374,39 @@ func TestNextRun_SameMinute(t *testing.T) {
 	}
 }
 
-// =========================================================================
-// Types — JSON roundtrip
-// =========================================================================
-
-func TestSB_BackupConfig_JSON(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	cfg := backupConfig{
-		ID: uuid.New(), Name: "daily", Cron: "0 9 * * *",
-		S3Bucket: "my-bucket", S3Prefix: "backups/", RetentionDays: 30, Enabled: true,
-		CreatedAt: now, UpdatedAt: now,
-	}
-	b, err := json.Marshal(cfg)
+func TestPluginRegistrationBehavioral(t *testing.T) {
+	plugins, err := plugin.Discover()
 	if err != nil {
-		t.Fatalf("marshal: %v", err)
+		t.Fatalf("Discover() returned error: %v", err)
 	}
-	var out backupConfig
-	if err := json.Unmarshal(b, &out); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	found := false
+	for _, lp := range plugins {
+		if lp.Plugin.Info().Name == "scheduled-backup" {
+			found = true
+			break
+		}
 	}
-	if out.Name != "daily" || out.Cron != "0 9 * * *" {
-		t.Errorf("roundtrip failed: %+v", out)
-	}
-}
-
-func TestSB_BackupHistory_JSON(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Second)
-	sz := int64(1024)
-	hist := backupHistory{
-		ID: uuid.New(), ConfigID: uuid.New(), Filename: "test.dump",
-		SizeBytes: &sz, Status: "completed", StartedAt: now, CreatedAt: now,
-	}
-	b, err := json.Marshal(hist)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	var out backupHistory
-	if err := json.Unmarshal(b, &out); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if out.Status != "completed" || *out.SizeBytes != 1024 {
-		t.Errorf("roundtrip failed: %+v", out)
+	if !found {
+		t.Error("scheduled-backup plugin not found after Discover")
 	}
 }
 
 // =========================================================================
 // Fake DB driver for scheduledbackup behavioral tests
+//
+// No tenant_id anywhere below (cleat#2247): backup_config and backup_history
+// stopped being tenant-scoped in the v4 migration, and background.go's
+// queries dropped every tenant_id column and parameter to match. This fake
+// driver only needs to model what the background loop actually reads and
+// writes now -- runDueBackups' claim query, executeScheduledBackup's history
+// insert and status updates, and updateNextRunTx's config
+// update. Everything that modeled the deleted HTTP handlers' SQL (list,
+// get, dynamic update, delete, and the tenant-filtered forms of all of
+// them) went with routes.go.
 // =========================================================================
 
 type sbConfigRow struct {
 	id            string
-	tenantID      string
 	name          string
 	cron          string
 	s3Bucket      string
@@ -529,7 +422,6 @@ type sbConfigRow struct {
 type sbHistoryRow struct {
 	id           string
 	configID     string
-	tenantID     string
 	filename     string
 	status       string
 	sizeBytes    *int64
@@ -651,16 +543,10 @@ func (c *sbConn) ExecContext(_ context.Context, query string, args []driver.Name
 
 	q := strings.Join(strings.Fields(query), " ")
 	switch {
-	case strings.Contains(q, "INSERT INTO backup_config"):
-		return c.execInsertConfig(args)
 	case strings.Contains(q, "INSERT INTO backup_history"):
 		return c.execInsertHistory(args)
-	case strings.Contains(q, "DELETE FROM backup_history"):
-		return c.execDeleteHistory(args)
-	case strings.Contains(q, "DELETE FROM backup_config"):
-		return c.execDeleteConfig(args)
 	case strings.Contains(q, "UPDATE backup_config SET"):
-		return c.execUpdateConfig(q, args)
+		return c.execUpdateConfig(args)
 	case strings.Contains(q, "UPDATE backup_history SET"):
 		return c.execUpdateHistory(q, args)
 	default:
@@ -668,52 +554,14 @@ func (c *sbConn) ExecContext(_ context.Context, query string, args []driver.Name
 	}
 }
 
-func (c *sbConn) execInsertConfig(args []driver.NamedValue) (driver.Result, error) {
-	// Args: tenant_id(1), id(2), name(3), cron(4), s3_bucket(5), s3_prefix(6),
-	//        retention_days(7), enabled(8), next_run_at(9)
-	tid, _ := sbArgS(args, 1)
-	id, _ := sbArgS(args, 2)
-	name, _ := sbArgS(args, 3)
-	cron, _ := sbArgS(args, 4)
-	s3B, _ := sbArgS(args, 5)
-	s3P, _ := sbArgS(args, 6)
-	retentionVal, _ := sbArgAny(args, 7)
-	enabledVal, _ := sbArgAny(args, 8)
-	nextVal, _ := sbArgAny(args, 9)
-
-	enabled := false
-	if b, ok := enabledVal.(bool); ok {
-		enabled = b
-	}
-	retentionDays := 30
-	switch v := retentionVal.(type) {
-	case int64:
-		retentionDays = int(v)
-	case float64:
-		retentionDays = int(v)
-	}
-	now := time.Now()
-	var nextRunAt *time.Time
-	if t, ok := nextVal.(time.Time); ok {
-		nextRunAt = &t
-	}
-
-	c.db.configs[id] = &sbConfigRow{
-		id: id, tenantID: tid, name: name, cron: cron,
-		s3Bucket: s3B, s3Prefix: s3P, retentionDays: retentionDays,
-		enabled: enabled, nextRunAt: nextRunAt,
-		createdAt: now, updatedAt: now,
-	}
-	return &sbResult{n: 1}, nil
-}
-
 func (c *sbConn) execInsertHistory(args []driver.NamedValue) (driver.Result, error) {
-	// Args: id(1), config_id(2), tenant_id(3), filename(4), started_at(5), created_at(5)
+	// INSERT INTO backup_history (id, config_id, filename, status,
+	// started_at, created_at) VALUES ($1, $2, $3, 'running', $4, $4)
+	// -- Args: id(1), config_id(2), filename(3), started_at(4)
 	id, _ := sbArgS(args, 1)
 	configID, _ := sbArgS(args, 2)
-	tid, _ := sbArgS(args, 3)
-	filename, _ := sbArgS(args, 4)
-	startedVal, _ := sbArgAny(args, 5)
+	filename, _ := sbArgS(args, 3)
+	startedVal, _ := sbArgAny(args, 4)
 
 	startedAt := time.Now()
 	if t, ok := startedVal.(time.Time); ok {
@@ -721,120 +569,37 @@ func (c *sbConn) execInsertHistory(args []driver.NamedValue) (driver.Result, err
 	}
 
 	c.db.history[id] = &sbHistoryRow{
-		id: id, configID: configID, tenantID: tid,
+		id: id, configID: configID,
 		filename: filename, status: "running",
 		startedAt: startedAt, createdAt: startedAt,
 	}
 	return &sbResult{n: 1}, nil
 }
 
-func (c *sbConn) execDeleteHistory(args []driver.NamedValue) (driver.Result, error) {
-	// Args: config_id(1), tenant_id(2)
-	configID, _ := sbArgS(args, 1)
-	var deleted int64
-	for id, h := range c.db.history {
-		if h.configID == configID {
-			delete(c.db.history, id)
-			deleted++
-		}
+// execUpdateConfig handles the only UPDATE backup_config statement left
+// once routes.go's dynamic UPDATE and the deleted runBackupAsync's
+// next_run_at=NULL form went with it:
+// updateNextRunTx's SET last_run_at = $1, next_run_at = $2
+// WHERE id = $3.
+func (c *sbConn) execUpdateConfig(args []driver.NamedValue) (driver.Result, error) {
+	if len(args) < 3 {
+		return &sbResult{n: 0}, nil
 	}
-	return &sbResult{n: deleted}, nil
-}
-
-func (c *sbConn) execDeleteConfig(args []driver.NamedValue) (driver.Result, error) {
-	// Args: id(1), tenant_id(2)
-	id, _ := sbArgS(args, 1)
-	_, ok := c.db.configs[id]
+	nowVal, _ := sbArgAny(args, 1)
+	nextVal, _ := sbArgAny(args, 2)
+	configID, _ := sbArgS(args, 3)
+	row, ok := c.db.configs[configID]
 	if !ok {
 		return &sbResult{n: 0}, nil
 	}
-	delete(c.db.configs, id)
+	if t, ok := nowVal.(time.Time); ok {
+		row.lastRunAt = &t
+	}
+	if t, ok := nextVal.(time.Time); ok {
+		row.nextRunAt = &t
+	}
+	row.updatedAt = time.Now()
 	return &sbResult{n: 1}, nil
-}
-
-func (c *sbConn) execUpdateConfig(q string, args []driver.NamedValue) (driver.Result, error) {
-	n := len(args)
-	if n == 0 {
-		return &sbResult{n: 0}, nil
-	}
-
-	switch {
-	case strings.Contains(q, "next_run_at = NULL"):
-		// runBackupAsync: SET last_run_at = $1, next_run_at = NULL ... WHERE id = $2
-		// args: now(1), configID(2)
-		nowVal, _ := sbArgAny(args, 1)
-		configID, _ := sbArgS(args, 2)
-		row, ok := c.db.configs[configID]
-		if !ok {
-			return &sbResult{n: 0}, nil
-		}
-		if t, ok := nowVal.(time.Time); ok {
-			row.lastRunAt = &t
-		}
-		row.nextRunAt = nil
-		row.updatedAt = time.Now()
-		return &sbResult{n: 1}, nil
-
-	case strings.Contains(q, "last_run_at = $1, next_run_at = $2"):
-		// runBackupAsync: SET last_run_at = $1, next_run_at = $2 ... WHERE id = $3
-		// or updateNextRun with non-zero next
-		// args: now(1), nextRunAt(2), configID(3)
-		nowVal, _ := sbArgAny(args, 1)
-		nextVal, _ := sbArgAny(args, 2)
-		configID, _ := sbArgS(args, 3)
-		row, ok := c.db.configs[configID]
-		if !ok {
-			return &sbResult{n: 0}, nil
-		}
-		if t, ok := nowVal.(time.Time); ok {
-			row.lastRunAt = &t
-		}
-		if t, ok := nextVal.(time.Time); ok {
-			row.nextRunAt = &t
-		}
-		row.updatedAt = time.Now()
-		return &sbResult{n: 1}, nil
-
-	default:
-		// Dynamic update from handleUpdateConfig
-		// args: [fieldValues..., id, tid]
-		// Last arg (ordinal=n) is tid, second-to-last (ordinal=n-1) is id
-		if n < 2 {
-			return &sbResult{n: 0}, nil
-		}
-		configID, _ := sbArgS(args, n-1)
-		row, ok := c.db.configs[configID]
-		if !ok {
-			return &sbResult{n: 0}, nil
-		}
-
-		// Parse next_run_at = $N from the query (enabled/cron change path)
-		nextRe := regexp.MustCompile(`next_run_at\s*=\s*\$(\d+)`)
-		if m := nextRe.FindStringSubmatch(q); len(m) >= 2 {
-			if ordinal, err := strconv.Atoi(m[1]); err == nil {
-				if val, err := sbArgAny(args, ordinal); err == nil {
-					if t, ok := val.(time.Time); ok {
-						row.nextRunAt = &t
-					}
-				}
-			}
-		}
-
-		// Parse enabled = $N from the query
-		enabledRe := regexp.MustCompile(`enabled\s*=\s*\$(\d+)`)
-		if m := enabledRe.FindStringSubmatch(q); len(m) >= 2 {
-			if ordinal, err := strconv.Atoi(m[1]); err == nil {
-				if val, err := sbArgAny(args, ordinal); err == nil {
-					if b, ok := val.(bool); ok {
-						row.enabled = b
-					}
-				}
-			}
-		}
-
-		row.updatedAt = time.Now()
-		return &sbResult{n: 1}, nil
-	}
 }
 
 func (c *sbConn) execUpdateHistory(q string, args []driver.NamedValue) (driver.Result, error) {
@@ -880,6 +645,12 @@ func (c *sbConn) execUpdateHistory(q string, args []driver.NamedValue) (driver.R
 		row.completedAt = &now
 	} else if strings.Contains(q, "status = 'failed'") {
 		row.status = "failed"
+		// Since cleat#2247 this is one of the stable error codes
+		// (backupErrDSNUnavailable, backupErrUnsafePath,
+		// backupErrPgDumpFailed), not raw error text -- see
+		// background.go's doc comment on those constants. The fake driver
+		// does not care which: it stores whatever string arrives, same as
+		// the real column does.
 		if errMsg, err := sbArgS(args, 1); err == nil {
 			row.errorMessage = &errMsg
 		}
@@ -908,1068 +679,152 @@ func (c *sbConn) QueryContext(_ context.Context, query string, args []driver.Nam
 	defer c.db.mu.RUnlock()
 
 	q := strings.Join(strings.Fields(query), " ")
-	switch {
-	case strings.Contains(q, "FROM backup_history"):
-		return c.queryListHistory(q, args)
-	case strings.Contains(q, "FROM backup_config") && strings.Contains(q, "ORDER BY"):
-		return c.queryListConfigs(args)
-	case strings.Contains(q, "enabled = true") && strings.Contains(q, "next_run_at"):
+	if strings.Contains(q, "enabled = true") && strings.Contains(q, "next_run_at") {
 		return c.queryDueBackups(args)
-	case strings.Contains(q, "cron, enabled FROM backup_config"):
-		return c.queryUpdateFetch(args)
-	case strings.Contains(q, "name, cron FROM backup_config"):
-		return c.queryRunFetch(args)
-	case strings.Contains(q, "SELECT cron FROM backup_config"):
-		return c.queryCronFetch(args)
-	case strings.Contains(q, "FROM backup_config"):
-		return c.queryGetConfig(args)
-	default:
-		return nil, fmt.Errorf("sbConn: unexpected Query: %.80s", q)
 	}
+	return nil, fmt.Errorf("sbConn: unexpected Query: %.80s", q)
 }
 
-// Columns: id, name, cron, s3_bucket, s3_prefix, retention_days, enabled,
-//
-//	last_run_at, next_run_at, created_at, updated_at
-var sbConfigColumns = []string{
-	"id", "name", "cron", "s3_bucket", "s3_prefix",
-	"retention_days", "enabled", "last_run_at", "next_run_at",
-	"created_at", "updated_at",
-}
-
-func (c *sbConn) queryListConfigs(args []driver.NamedValue) (driver.Rows, error) {
-	tid, _ := sbArgS(args, 1)
-	var data [][]driver.Value
-	for _, row := range c.db.configs {
-		if row.tenantID != tid {
-			continue
-		}
-		data = append(data, sbConfigRowToValues(row))
-	}
-	if data == nil {
-		data = [][]driver.Value{}
-	}
-	return &sbRows{columns: sbConfigColumns, data: data}, nil
-}
-
-func (c *sbConn) queryGetConfig(args []driver.NamedValue) (driver.Rows, error) {
-	id, err := sbArgS(args, 1)
-	if err != nil {
-		return &sbRows{columns: sbConfigColumns}, nil
-	}
-	row, ok := c.db.configs[id]
-	if !ok {
-		return &sbRows{columns: sbConfigColumns}, nil
-	}
-	vals := sbConfigRowToValues(row)
-	return &sbRows{
-		columns: sbConfigColumns,
-		data:    [][]driver.Value{vals},
-	}, nil
-}
-
-func sbConfigRowToValues(row *sbConfigRow) []driver.Value {
-	var lastRunAt, nextRunAt driver.Value
-	if row.lastRunAt != nil {
-		lastRunAt = *row.lastRunAt
-	}
-	if row.nextRunAt != nil {
-		nextRunAt = *row.nextRunAt
-	}
-	return []driver.Value{
-		row.id, row.name, row.cron, row.s3Bucket, row.s3Prefix,
-		int64(row.retentionDays), row.enabled,
-		lastRunAt, nextRunAt,
-		row.createdAt, row.updatedAt,
-	}
-}
-
-func (c *sbConn) queryUpdateFetch(args []driver.NamedValue) (driver.Rows, error) {
-	// SELECT cron, enabled FROM backup_config WHERE id = $1 AND tenant_id = $2
-	id, _ := sbArgS(args, 1)
-	row, ok := c.db.configs[id]
-	if !ok {
-		return &sbRows{columns: []string{"cron", "enabled"}}, nil
-	}
-	return &sbRows{
-		columns: []string{"cron", "enabled"},
-		data:    [][]driver.Value{{row.cron, row.enabled}},
-	}, nil
-}
-
-func (c *sbConn) queryRunFetch(args []driver.NamedValue) (driver.Rows, error) {
-	// SELECT name, cron FROM backup_config WHERE id = $1 AND tenant_id = $2
-	id, _ := sbArgS(args, 1)
-	row, ok := c.db.configs[id]
-	if !ok {
-		return &sbRows{columns: []string{"name", "cron"}}, nil
-	}
-	return &sbRows{
-		columns: []string{"name", "cron"},
-		data:    [][]driver.Value{{row.name, row.cron}},
-	}, nil
-}
-
-func (c *sbConn) queryCronFetch(args []driver.NamedValue) (driver.Rows, error) {
-	// SELECT cron FROM backup_config WHERE id = $1
-	id, _ := sbArgS(args, 1)
-	row, ok := c.db.configs[id]
-	if !ok {
-		return &sbRows{columns: []string{"cron"}}, nil
-	}
-	return &sbRows{
-		columns: []string{"cron"},
-		data:    [][]driver.Value{{row.cron}},
-	}, nil
-}
-
-func (c *sbConn) queryDueBackups(args []driver.NamedValue) (driver.Rows, error) {
-	// SELECT id, tenant_id, name, cron FROM backup_config WHERE enabled = true AND next_run_at <= now() FOR UPDATE SKIP LOCKED
+func (c *sbConn) queryDueBackups(_ []driver.NamedValue) (driver.Rows, error) {
+	// SELECT id, name, cron FROM backup_config WHERE enabled = true AND
+	// next_run_at <= now() FOR UPDATE SKIP LOCKED -- no tenant_id column
+	// (cleat#2247), no WHERE argument to read.
 	now := time.Now()
 	var data [][]driver.Value
 	for _, row := range c.db.configs {
 		if row.enabled && row.nextRunAt != nil && !row.nextRunAt.After(now) {
-			data = append(data, []driver.Value{
-				row.id, row.tenantID, row.name, row.cron,
-			})
+			data = append(data, []driver.Value{row.id, row.name, row.cron})
 		}
 	}
 	if data == nil {
 		data = [][]driver.Value{}
 	}
-	return &sbRows{columns: []string{"id", "tenant_id", "name", "cron"}, data: data}, nil
-}
-
-// Columns for history: id, config_id, filename, size_bytes, status,
-//
-//	started_at, completed_at, error_message, created_at
-var sbHistoryColumns = []string{
-	"id", "config_id", "filename", "size_bytes", "status",
-	"started_at", "completed_at", "error_message", "created_at",
-}
-
-func (c *sbConn) queryListHistory(q string, args []driver.NamedValue) (driver.Rows, error) {
-	tid, _ := sbArgS(args, 1)
-	var configFilter string
-	if strings.Contains(q, "AND config_id = $2") {
-		cf, err := sbArgS(args, 2)
-		if err == nil {
-			configFilter = cf
-		}
-	}
-
-	var data [][]driver.Value
-	for _, row := range c.db.history {
-		if row.tenantID != tid {
-			continue
-		}
-		if configFilter != "" && row.configID != configFilter {
-			continue
-		}
-		data = append(data, sbHistoryRowToValues(row))
-	}
-	if data == nil {
-		data = [][]driver.Value{}
-	}
-	return &sbRows{columns: sbHistoryColumns, data: data}, nil
-}
-
-func sbHistoryRowToValues(row *sbHistoryRow) []driver.Value {
-	var sizeBytes driver.Value
-	if row.sizeBytes != nil {
-		sizeBytes = *row.sizeBytes
-	}
-	var completedAt driver.Value
-	if row.completedAt != nil {
-		completedAt = *row.completedAt
-	}
-	var errorMsg driver.Value
-	if row.errorMessage != nil {
-		errorMsg = *row.errorMessage
-	}
-	return []driver.Value{
-		row.id, row.configID, row.filename, sizeBytes, row.status,
-		row.startedAt, completedAt, errorMsg, row.createdAt,
-	}
+	return &sbRows{columns: []string{"id", "name", "cron"}, data: data}, nil
 }
 
 // =====================================================================
 // Helpers
 // =====================================================================
 
+// testBackupDSN is the value newSBPlugin's default fakeBackupDeploymentSecrets
+// answers for "scheduledbackup.dsn" -- matching what every pre-cleat#1992-part-1b
+// test in this file set directly via p.config.DSN. Tests exercising the
+// missing/failing-lookup path override p.deploymentSecrets (or clear it)
+// after newSBPlugin returns.
+const testBackupDSN = "postgres://test"
+
+// fakeBackupDeploymentSecrets is a plugin.DeploymentSecrets that answers one
+// fixed value for "scheduledbackup.dsn" and an error for anything else, or
+// always errors if errOnGet is set -- the same shape as email's, llm's and
+// slacknotify's fakeDeploymentSecrets test doubles.
+type fakeBackupDeploymentSecrets struct {
+	dsn      string
+	errOnGet error
+}
+
+func (f *fakeBackupDeploymentSecrets) Get(ctx context.Context, name string) (string, error) {
+	if f.errOnGet != nil {
+		return "", f.errOnGet
+	}
+	if name == "scheduledbackup.dsn" {
+		return f.dsn, nil
+	}
+	return "", fmt.Errorf("fakeBackupDeploymentSecrets: %q not set", name)
+}
+
+// newSBPlugin builds a Plugin wired to an in-memory fake database, with no
+// HTTP mux (cleat#2247: there are no routes to register any more).
 func newSBPlugin(t *testing.T) (*Plugin, *sbDB, *sql.DB) {
 	t.Helper()
 	fdb := newSBDB()
 	rawDB := sql.OpenDB(&sbConnector{db: fdb})
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: rawDB},
-		mux:    http.NewServeMux(),
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:                &engine.SQLDBAdapter{DB: rawDB},
+		logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		deploymentSecrets: &fakeBackupDeploymentSecrets{dsn: testBackupDSN},
 	}
-	if err := p.RegisterRoutes(p.mux); err != nil {
-		t.Fatalf("RegisterRoutes: %v", err)
-	}
+	// A real dump directory, which this harness never set (cleat#1305).
+	//
+	// It mattered as soon as SafeDumpPath started refusing an unconfigured one:
+	// `filepath.Join("", name)` is a RELATIVE path, so the previous behaviour
+	// was `pg_dump -f manual_x.dump` into the worker's working directory. One
+	// test at :2016 already set this; the shared harness did not.
+	p.config.DumpDir = t.TempDir()
 	return p, fdb, rawDB
 }
 
-func sbRequest(t *testing.T, method, path string, body io.Reader) *http.Request {
+// installFakePgDump puts a fake pg_dump executable first on PATH for the
+// rest of the test (restored via t.Cleanup), so runPgDump's
+// exec.CommandContext runs it instead of a real pg_dump. body is the rest of
+// the script after the shebang; it runs after the fake binary has already
+// signalled it started (see the returned path).
+//
+// Returns the path to a marker file the fake binary creates as its first
+// action, before body runs -- so a test can wait for the fake process to
+// actually be running before acting on it (e.g. cancelling a context),
+// without a fixed sleep.
+func installFakePgDump(t *testing.T, body string) (startedMarker string) {
 	t.Helper()
-	return httptest.NewRequest(method, path, body).WithContext(
-		auth.WithTenantID(context.Background(), uuid.MustParse("00000000-0000-0000-0000-000000000001")),
-	)
+	fakeDir := t.TempDir()
+	fakeBin := filepath.Join(fakeDir, "pg_dump")
+	startedMarker = filepath.Join(fakeDir, "started.marker")
+	script := "#!/bin/bash\n" +
+		"echo started > " + startedMarker + "\n" +
+		body
+	if err := os.WriteFile(fakeBin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := os.Getenv("PATH")
+	if err := os.Setenv("PATH", fakeDir+string(os.PathListSeparator)+oldPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Setenv("PATH", oldPath) })
+	if p, err := exec.LookPath("pg_dump"); err != nil || p != fakeBin {
+		t.Fatalf("fake pg_dump not first on PATH: %v %v", p, err)
+	}
+	return startedMarker
 }
 
-func sbReadJSON(t *testing.T, rec *httptest.ResponseRecorder, v any) {
+// waitForFile polls for path to exist, failing the test if it doesn't appear
+// within timeout.
+func waitForFile(t *testing.T, path string, timeout time.Duration) {
 	t.Helper()
-	if err := json.NewDecoder(rec.Body).Decode(v); err != nil {
-		t.Fatalf("decode body: %v", err)
-	}
-}
-
-// =====================================================================
-// CreateConfig tests
-// =====================================================================
-
-func TestSB_CreateConfig_Success(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	body := `{"name":"daily-backup","cron":"0 9 * * *","retention_days":30}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "POST", "/backups/configs", bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-
-	if rec.Code != 201 {
-		t.Fatalf("create: want 201, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var result map[string]any
-	sbReadJSON(t, rec, &result)
-	if result["name"] != "daily-backup" {
-		t.Errorf("want name daily-backup, got %v", result["name"])
-	}
-	if result["enabled"] != true {
-		t.Errorf("want enabled true, got %v", result["enabled"])
-	}
-	if _, ok := result["id"]; !ok {
-		t.Error("expected id field in response")
-	}
-	if _, ok := result["next_run_at"]; !ok {
-		t.Error("expected next_run_at field in response")
-	}
-}
-
-// TestSB_CreateConfig_RejectsS3Fields pins the fix for the false "Scheduled
-// PostgreSQL backups to S3" claim: a create request naming a non-empty
-// s3_bucket or s3_prefix must be rejected (400), not silently accepted.
-// This used to be part of TestSB_CreateConfig_Success's request body,
-// asserting 201 -- exactly the defect this test now guards against.
-func TestSB_CreateConfig_RejectsS3Fields(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	body := `{"name":"daily-backup","cron":"0 9 * * *","s3_bucket":"my-bucket","s3_prefix":"backups/","retention_days":30}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "POST", "/backups/configs", bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-
-	if rec.Code != 400 {
-		t.Fatalf("create with s3 fields: want 400 (not supported), got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestSB_CreateConfig_Defaults(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	// Minimal body — only name and cron, rest defaults
-	body := `{"name":"minimal","cron":"0 9 * * *"}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "POST", "/backups/configs", bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 201 {
-		t.Fatalf("create: want 201, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// Check defaults in the fake DB
-	fdb.mu.RLock()
-	defer fdb.mu.RUnlock()
-	for _, row := range fdb.configs {
-		if row.name == "minimal" {
-			if !row.enabled {
-				t.Error("expected enabled default true")
-			}
-			if row.retentionDays != 30 {
-				t.Errorf("expected retention_days default 30, got %d", row.retentionDays)
-			}
-			if row.s3Bucket != "" {
-				t.Errorf("expected empty s3_bucket default, got %q", row.s3Bucket)
-			}
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
 		}
-	}
-}
-
-func TestSB_CreateConfig_MissingName(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	body := `{"cron":"0 9 * * *"}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "POST", "/backups/configs", bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 400 {
-		t.Fatalf("want 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var m map[string]string
-	sbReadJSON(t, rec, &m)
-	if m["error"] != "name is required" {
-		t.Errorf("want 'name is required', got %q", m["error"])
-	}
-}
-
-func TestSB_CreateConfig_MissingCron(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	body := `{"name":"test"}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "POST", "/backups/configs", bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 400 {
-		t.Fatalf("want 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var m map[string]string
-	sbReadJSON(t, rec, &m)
-	if m["error"] != "cron is required" {
-		t.Errorf("want 'cron is required', got %q", m["error"])
-	}
-}
-
-func TestSB_CreateConfig_InvalidCron(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	body := `{"name":"test","cron":"not-a-cron"}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "POST", "/backups/configs", bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 400 {
-		t.Fatalf("want 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var m map[string]string
-	sbReadJSON(t, rec, &m)
-	if !strings.Contains(m["error"], "cron") {
-		t.Errorf("want cron-related error, got %q", m["error"])
-	}
-}
-
-func TestSB_CreateConfig_InvalidJSON(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "POST", "/backups/configs", bytes.NewReader([]byte("not json")))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 400 {
-		t.Fatalf("want 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var m map[string]string
-	sbReadJSON(t, rec, &m)
-	if m["error"] != "invalid JSON body" {
-		t.Errorf("want 'invalid JSON body', got %q", m["error"])
-	}
-}
-
-func TestSB_CreateConfig_ExplicitDisabled(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	body := `{"name":"disabled-test","cron":"0 9 * * *","enabled":false}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "POST", "/backups/configs", bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 201 {
-		t.Fatalf("create: want 201, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var result map[string]any
-	sbReadJSON(t, rec, &result)
-	if result["enabled"] != false {
-		t.Errorf("want enabled false, got %v", result["enabled"])
-	}
-
-	fdb.mu.RLock()
-	defer fdb.mu.RUnlock()
-	for _, row := range fdb.configs {
-		if row.name == "disabled-test" && row.enabled {
-			t.Error("expected config to be disabled in DB")
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s to appear", path)
 		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
-// =====================================================================
-// ListConfigs tests
-// =====================================================================
-
-func TestSB_ListConfigs_Empty(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/configs", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("list: want 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	body := strings.TrimSpace(rec.Body.String())
-	if body != "[]" {
-		t.Errorf("empty list: want [], got %q", body)
-	}
-}
-
-func TestSB_ListConfigs_WithData(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	cid1 := "00000000-0000-0000-0000-00000000000a"
-	cid2 := "00000000-0000-0000-0000-00000000000b"
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	now := time.Now()
-
-	// Seed two configs
-	fdb.mu.Lock()
-	fdb.configs[cid1] = &sbConfigRow{
-		id: cid1, tenantID: tid, name: "daily", cron: "0 9 * * *",
-		s3Bucket: "b1", s3Prefix: "p1/", retentionDays: 30, enabled: true,
-		createdAt: now, updatedAt: now,
-	}
-	fdb.configs[cid2] = &sbConfigRow{
-		id: cid2, tenantID: tid, name: "weekly", cron: "0 9 * * 0",
-		s3Bucket: "b2", s3Prefix: "p2/", retentionDays: 7, enabled: false,
-		createdAt: now.Add(-time.Hour), updatedAt: now.Add(-time.Hour),
-	}
-	fdb.mu.Unlock()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/configs", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("list: want 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var configs []backupConfig
-	sbReadJSON(t, rec, &configs)
-	if len(configs) != 2 {
-		t.Fatalf("want 2 configs, got %d", len(configs))
-	}
-}
-
-func TestSB_ListConfigs_TenantIsolation(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tidA := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	tidB := uuid.MustParse("00000000-0000-0000-0000-000000000002").String()
-	now := time.Now()
-
-	fdb.mu.Lock()
-	fdb.configs["00000000-0000-0000-0000-00000000000e"] = &sbConfigRow{
-		id: "00000000-0000-0000-0000-00000000000e", tenantID: tidA, name: "tenant-a", cron: "0 9 * * *",
-		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: now, updatedAt: now,
-	}
-	fdb.configs["00000000-0000-0000-0000-00000000000f"] = &sbConfigRow{
-		id: "00000000-0000-0000-0000-00000000000f", tenantID: tidB, name: "tenant-b", cron: "0 9 * * *",
-		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: now, updatedAt: now,
-	}
-	fdb.mu.Unlock()
-
-	// Tenant A should only see config a1
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/backups/configs", nil).WithContext(
-		auth.WithTenantID(context.Background(), uuid.MustParse("00000000-0000-0000-0000-000000000001")),
-	)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("list: want 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var configs []backupConfig
-	sbReadJSON(t, rec, &configs)
-	if len(configs) != 1 {
-		t.Fatalf("tenant A: want 1 config, got %d", len(configs))
-	}
-	if len(configs) > 0 && configs[0].Name != "tenant-a" {
-		t.Errorf("tenant A: expected 'tenant-a', got %q", configs[0].Name)
-	}
-}
-
-// =====================================================================
-// GetConfig tests
-// =====================================================================
-
-func TestSB_GetConfig_Seeded(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	cfgID := "00000000-0000-0000-0000-0000000000aa"
-	now := time.Now()
-
-	fdb.mu.Lock()
-	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, tenantID: tid, name: "seeded-daily", cron: "0 9 * * *",
-		s3Bucket: "my-bucket", s3Prefix: "backups/",
-		retentionDays: 30, enabled: true,
-		createdAt: now, updatedAt: now,
-	}
-	fdb.mu.Unlock()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/configs/"+cfgID, nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("get: want 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var c backupConfig
-	sbReadJSON(t, rec, &c)
-	if c.Name != "seeded-daily" {
-		t.Errorf("want name seeded-daily, got %q", c.Name)
-	}
-}
-
-func TestSB_GetConfig_Success(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	now := time.Now()
-
-	fdb.mu.Lock()
-	fdb.configs["00000000-0000-0000-0000-00000000000c"] = &sbConfigRow{
-		id: "00000000-0000-0000-0000-00000000000c", tenantID: tid, name: "daily", cron: "0 9 * * *",
-		s3Bucket: "my-bucket", s3Prefix: "backups/",
-		retentionDays: 30, enabled: true,
-		createdAt: now, updatedAt: now,
-	}
-	fdb.mu.Unlock()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/configs/00000000-0000-0000-0000-00000000000c", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("get: want 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var c backupConfig
-	sbReadJSON(t, rec, &c)
-	if c.Name != "daily" {
-		t.Errorf("want name daily, got %q", c.Name)
-	}
-	if c.Cron != "0 9 * * *" {
-		t.Errorf("want cron '0 9 * * *', got %q", c.Cron)
-	}
-	if c.S3Bucket != "my-bucket" {
-		t.Errorf("want bucket 'my-bucket', got %q", c.S3Bucket)
-	}
-}
-
-func TestSB_GetConfig_NotFound(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/configs/00000000-0000-0000-0000-000000000099", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 404 {
-		t.Fatalf("get not found: want 404, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var m map[string]string
-	sbReadJSON(t, rec, &m)
-	if m["error"] != "backup config not found" {
-		t.Errorf("want not found error, got %q", m["error"])
-	}
-}
-
-// =====================================================================
-// UpdateConfig tests
-// =====================================================================
-
-func TestSB_UpdateConfig_Success(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	now := time.Now()
-
-	fdb.mu.Lock()
-	fdb.configs["00000000-0000-0000-0000-00000000000c"] = &sbConfigRow{
-		id: "00000000-0000-0000-0000-00000000000c", tenantID: tid, name: "daily", cron: "0 9 * * *",
-		s3Bucket: "my-bucket", s3Prefix: "backups/",
-		retentionDays: 30, enabled: true,
-		createdAt: now, updatedAt: now,
-	}
-	fdb.mu.Unlock()
-
-	body := `{"name":"updated-name","enabled":false}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "PUT", "/backups/configs/00000000-0000-0000-0000-00000000000c", bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("update: want 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var m map[string]string
-	sbReadJSON(t, rec, &m)
-	if m["status"] != "updated" {
-		t.Errorf("want status 'updated', got %q", m["status"])
-	}
-}
-
-func TestSB_UpdateConfig_NotFound(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	body := `{"name":"new-name"}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "PUT", "/backups/configs/00000000-0000-0000-0000-000000000099", bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 404 {
-		t.Fatalf("update not found: want 404, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestSB_UpdateConfig_InvalidJSON(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "PUT", "/backups/configs/00000000-0000-0000-0000-000000000001", bytes.NewReader([]byte("not json")))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 400 {
-		t.Fatalf("want 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestSB_UpdateConfig_InvalidCron(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-
-	fdb.mu.Lock()
-	fdb.configs["00000000-0000-0000-0000-00000000000c"] = &sbConfigRow{
-		id: "00000000-0000-0000-0000-00000000000c", tenantID: tid, name: "daily", cron: "0 9 * * *",
-		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: time.Now(), updatedAt: time.Now(),
-	}
-	fdb.mu.Unlock()
-
-	// Changing cron to an invalid expression should return 400
-	body := `{"cron":"not-a-cron"}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "PUT", "/backups/configs/00000000-0000-0000-0000-00000000000c", bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 400 {
-		t.Fatalf("update invalid cron: want 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-// =====================================================================
-// DeleteConfig tests
-// =====================================================================
-
-func TestSB_DeleteConfig_Success(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	now := time.Now()
-
-	fdb.mu.Lock()
-	fdb.configs["00000000-0000-0000-0000-00000000000c"] = &sbConfigRow{
-		id: "00000000-0000-0000-0000-00000000000c", tenantID: tid, name: "daily", cron: "0 9 * * *",
-		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: now, updatedAt: now,
-	}
-	fdb.mu.Unlock()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "DELETE", "/backups/configs/00000000-0000-0000-0000-00000000000c", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 204 {
-		t.Fatalf("delete: want 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// Verify it's gone
-	fdb.mu.RLock()
-	_, exists := fdb.configs["00000000-0000-0000-0000-00000000000c"]
-	fdb.mu.RUnlock()
-	if exists {
-		t.Error("config should be deleted from DB")
-	}
-}
-
-func TestSB_DeleteConfig_NotFound(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "DELETE", "/backups/configs/00000000-0000-0000-0000-000000000099", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 404 {
-		t.Fatalf("delete not found: want 404, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-// =====================================================================
-// ListHistory tests
-// =====================================================================
-
-func TestSB_ListHistory_Empty(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/history", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("list history: want 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	body := strings.TrimSpace(rec.Body.String())
-	if body != "[]" {
-		t.Errorf("empty history: want [], got %q", body)
-	}
-}
-
-func TestSB_ListHistory_WithData(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	now := time.Now()
-	sz := int64(1024)
-
-	fdb.mu.Lock()
-	fdb.history["00000000-0000-0000-0000-0000000000a1"] = &sbHistoryRow{
-		id: "00000000-0000-0000-0000-0000000000a1", configID: "00000000-0000-0000-0000-00000000000c", tenantID: tid,
-		filename: "test1.dump", status: "completed",
-		sizeBytes: &sz, startedAt: now, createdAt: now,
-	}
-	fdb.history["00000000-0000-0000-0000-0000000000a2"] = &sbHistoryRow{
-		id: "00000000-0000-0000-0000-0000000000a2", configID: "00000000-0000-0000-0000-00000000000d", tenantID: tid,
-		filename: "test2.dump", status: "running",
-		startedAt: now, createdAt: now,
-	}
-	fdb.mu.Unlock()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/history", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("list history: want 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var history []backupHistory
-	sbReadJSON(t, rec, &history)
-	if len(history) != 2 {
-		t.Fatalf("want 2 history entries, got %d", len(history))
-	}
-	if history[0].Status != "completed" && history[0].Status != "running" {
-		t.Errorf("unexpected status: %q", history[0].Status)
-	}
-}
-
-func TestSB_ListHistory_WithConfigFilter(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	now := time.Now()
-
-	fdb.mu.Lock()
-	fdb.history["00000000-0000-0000-0000-0000000000a1"] = &sbHistoryRow{
-		id: "00000000-0000-0000-0000-0000000000a1", configID: "00000000-0000-0000-0000-00000000000c", tenantID: tid,
-		filename: "f1.dump", status: "completed",
-		startedAt: now, createdAt: now,
-	}
-	fdb.history["00000000-0000-0000-0000-0000000000a2"] = &sbHistoryRow{
-		id: "00000000-0000-0000-0000-0000000000a2", configID: "00000000-0000-0000-0000-00000000000d", tenantID: tid,
-		filename: "f2.dump", status: "running",
-		startedAt: now, createdAt: now,
-	}
-	fdb.mu.Unlock()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/history?config_id=00000000-0000-0000-0000-00000000000c", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("list filtered history: want 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var history []backupHistory
-	sbReadJSON(t, rec, &history)
-	if len(history) != 1 {
-		t.Fatalf("want 1 history entry, got %d", len(history))
-	}
-	if history[0].Filename != "f1.dump" {
-		t.Errorf("want filename f1.dump, got %q", history[0].Filename)
-	}
-}
-
-func TestSB_ListHistory_InvalidConfigID(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/history?config_id=not-a-uuid", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 400 {
-		t.Fatalf("invalid config_id: want 400, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestSB_ListHistory_TenantIsolation(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tidA := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	tidB := uuid.MustParse("00000000-0000-0000-0000-000000000002").String()
-	now := time.Now()
-
-	fdb.mu.Lock()
-	fdb.history["00000000-0000-0000-0000-0000000000a1"] = &sbHistoryRow{
-		id: "00000000-0000-0000-0000-0000000000a1", configID: "00000000-0000-0000-0000-000000000010", tenantID: tidA,
-		filename: "a.dump", status: "completed",
-		startedAt: now, createdAt: now,
-	}
-	fdb.history["00000000-0000-0000-0000-0000000000a2"] = &sbHistoryRow{
-		id: "00000000-0000-0000-0000-0000000000a2", configID: "00000000-0000-0000-0000-000000000011", tenantID: tidB,
-		filename: "b.dump", status: "completed",
-		startedAt: now, createdAt: now,
-	}
-	fdb.mu.Unlock()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/history", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("list history: want 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var history []backupHistory
-	sbReadJSON(t, rec, &history)
-	if len(history) != 1 {
-		t.Fatalf("tenant A: want 1 history entry, got %d", len(history))
-	}
-}
-
-// =====================================================================
-// RunBackup tests
-// =====================================================================
-
-func TestSB_RunBackup_Success(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	fdb.mu.Lock()
-	fdb.configs["00000000-0000-0000-0000-00000000000c"] = &sbConfigRow{
-		id: "00000000-0000-0000-0000-00000000000c", tenantID: tid, name: "daily", cron: "0 9 * * *",
-		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: time.Now(), updatedAt: time.Now(),
-	}
-	fdb.mu.Unlock()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "POST", "/backups/configs/00000000-0000-0000-0000-00000000000c/run", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 202 {
-		t.Fatalf("run backup: want 202, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var result map[string]any
-	sbReadJSON(t, rec, &result)
-	if result["status"] != "running" {
-		t.Errorf("want status 'running', got %v", result["status"])
-	}
-	if _, ok := result["history_id"]; !ok {
-		t.Error("expected history_id in response")
-	}
-	if _, ok := result["config_id"]; !ok {
-		t.Error("expected config_id in response")
-	}
-
-	// The history entry is created synchronously — verify it
-	var historyID string
-	if v, ok := result["history_id"].(string); ok {
-		historyID = v
-	}
-	fdb.mu.RLock()
-	h, exists := fdb.history[historyID]
-	fdb.mu.RUnlock()
-	if !exists {
-		t.Fatal("history entry should exist in DB")
-	}
-	if h.status != "running" {
-		t.Errorf("expected status 'running', got %q", h.status)
-	}
-	if h.filename == "" {
-		t.Error("expected non-empty filename")
-	}
-}
-
-func TestSB_RunBackup_NotFound(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "POST", "/backups/configs/00000000-0000-0000-0000-000000000099/run", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 404 {
-		t.Fatalf("run backup not found: want 404, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-// =====================================================================
-// CRUD full lifecycle
-// =====================================================================
-
-func TestSB_CRUD_FullLifecycle(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	// Create.
-	createBody := `{"name":"lifecycle-test","cron":"0 9 * * *","enabled":true}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "POST", "/backups/configs", bytes.NewReader([]byte(createBody)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 201 {
-		t.Fatalf("create: want 201, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var created map[string]any
-	sbReadJSON(t, rec, &created)
-	cfgID, ok := created["id"].(string)
-	if !ok || cfgID == "" {
-		t.Fatal("expected non-empty id")
-	}
-
-	// List (should have 1).
-	rec = httptest.NewRecorder()
-	req = sbRequest(t, "GET", "/backups/configs", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("list: want 200, got %d", rec.Code)
-	}
-	var configs []backupConfig
-	sbReadJSON(t, rec, &configs)
-	if len(configs) != 1 {
-		t.Fatalf("want 1 config, got %d", len(configs))
-	}
-
-	// Get by ID.
-	rec = httptest.NewRecorder()
-	req = sbRequest(t, "GET", "/backups/configs/"+cfgID, nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("get: want 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var got backupConfig
-	sbReadJSON(t, rec, &got)
-	if got.Name != "lifecycle-test" {
-		t.Errorf("want name 'lifecycle-test', got %q", got.Name)
-	}
-	if got.Cron != "0 9 * * *" {
-		t.Errorf("want cron '0 9 * * *', got %q", got.Cron)
-	}
-
-	// Update.
-	updateBody := `{"name":"updated-lifecycle","enabled":false}`
-	rec = httptest.NewRecorder()
-	req = sbRequest(t, "PUT", "/backups/configs/"+cfgID, bytes.NewReader([]byte(updateBody)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("update: want 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// Delete.
-	rec = httptest.NewRecorder()
-	req = sbRequest(t, "DELETE", "/backups/configs/"+cfgID, nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 204 {
-		t.Fatalf("delete: want 204, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// Verify deleted.
-	rec = httptest.NewRecorder()
-	req = sbRequest(t, "GET", "/backups/configs", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("list after delete: want 200, got %d", rec.Code)
-	}
-	sbReadJSON(t, rec, &configs)
-	if len(configs) != 0 {
-		t.Errorf("expected 0 configs after delete, got %d", len(configs))
-	}
-}
-
-// =====================================================================
-// Error paths — invalid UUID (non-existent route value triggers 400)
-// =====================================================================
-
-func TestSB_ErrorPaths_InvalidID(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tests := []struct{ method, path, body string }{
-		{"GET", "/backups/configs/not-a-uuid", ""},
-		{"PUT", "/backups/configs/not-a-uuid", `{}`},
-		{"DELETE", "/backups/configs/not-a-uuid", ""},
-		{"POST", "/backups/configs/not-a-uuid/run", ""},
-	}
-
-	for _, tc := range tests {
-		var body io.Reader
-		if tc.body != "" {
-			body = bytes.NewReader([]byte(tc.body))
-		}
-		rec := httptest.NewRecorder()
-		req := sbRequest(t, tc.method, tc.path, body)
-		p.mux.ServeHTTP(rec, req)
-		if rec.Code != 400 {
-			t.Errorf("%s %s: want 400, got %d", tc.method, tc.path, rec.Code)
-		}
-	}
-}
-
-// =====================================================================
-// Missing tenant (with DB connected)
-// =====================================================================
-
-func TestSB_ErrorPaths_MissingTenantWithDB(t *testing.T) {
-	p, _, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tests := []struct {
-		method, path string
-		body         []byte
-	}{
-		{"POST", "/backups/configs", []byte(`{"name":"test","cron":"0 0 * * *"}`)},
-		{"GET", "/backups/configs", nil},
-		{"GET", "/backups/configs/00000000-0000-0000-0000-000000000001", nil},
-		{"PUT", "/backups/configs/00000000-0000-0000-0000-000000000001", []byte(`{}`)},
-		{"DELETE", "/backups/configs/00000000-0000-0000-0000-000000000001", nil},
-		{"GET", "/backups/history", nil},
-		{"POST", "/backups/configs/00000000-0000-0000-0000-000000000001/run", nil},
-	}
-
-	for _, tc := range tests {
-		var body io.Reader
-		if tc.body != nil {
-			body = bytes.NewReader(tc.body)
-		}
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(tc.method, tc.path, body)
-		p.mux.ServeHTTP(rec, req)
-		if rec.Code != 401 {
-			t.Errorf("%s %s: want 401, got %d", tc.method, tc.path, rec.Code)
-		}
+// waitForBgBackups waits for p's in-flight scheduled backups to finish,
+// failing the test rather than hanging forever if they don't.
+//
+// A deterministic wait, not a sleep: since cleat#2055, a due backup runs on
+// its own goroutine that Run does not wait for, so nothing about Run
+// returning tells you whether the backup it dispatched has finished. This is
+// the replacement for the fixed sleep TestSB_Run_Cancel used to need before
+// checking backup_history/backup_config.
+func waitForBgBackups(t *testing.T, p *Plugin) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		p.bgBackups.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for dispatched backup to finish")
 	}
 }
 
 // =========================================================================
-// Background loop — Run, runDueBackups, executeScheduledBackup, updateNextRun
+// Background loop
 // =========================================================================
 
 func TestSB_Run_NilDB(t *testing.T) {
@@ -1989,39 +844,31 @@ func TestSB_Run_NilDB(t *testing.T) {
 	}
 }
 
-func TestSB_Run_NoDSN(t *testing.T) {
-	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: &sql.DB{}},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan error, 1)
-	go func() { done <- p.Run(ctx) }()
-	time.Sleep(10 * time.Millisecond)
-	cancel()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Errorf("Run with no DSN: want nil, got %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("Run did not stop after cancel")
-	}
-}
-
-func TestSB_Run_Cancel(t *testing.T) {
+// TestSB_Run_PollsEvenWithNoDeploymentSecretsWired is the replacement for
+// what used to be TestSB_Run_NoDSN. Before cleat#1992 part 1b, Run refused
+// to start its loop at all when p.config.DSN was empty at boot -- parking on
+// <-ctx.Done() exactly like the p.db==nil case still does a few lines up.
+// That gate is gone (see Run's own doc comment for why): setting a DSN via
+// `cleatctl set-deployment-secret` after the worker has already started must
+// take effect on the very next attempt, which an early exit here would have
+// defeated. So Run must now poll unconditionally, and a due backup with an
+// unresolvable DSN must fail per-attempt -- recorded in backup_history --
+// rather than the whole loop going quiet.
+//
+// This is the known-positive for that: p.deploymentSecrets is nil, so
+// backupDSN can only error, and Run's own "run once immediately on startup"
+// call is what proves the loop was entered at all -- no need to wait for the
+// 60-second ticker.
+func TestSB_Run_PollsEvenWithNoDeploymentSecretsWired(t *testing.T) {
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
-	p.config.DSN = "postgres://test"
-	p.config.DumpDir = t.TempDir()
+	p.deploymentSecrets = nil
 
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	cfgID := "00000000-0000-0000-0000-0000000000ee"
+	cfgID := "00000000-0000-0000-0000-0000000000fe"
 	past := time.Now().Add(-time.Hour)
-
 	fdb.mu.Lock()
 	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, tenantID: tid, name: "run-cancel-test", cron: "0 9 * * *",
+		id: cfgID, name: "no-secrets-test", cron: "0 9 * * *",
 		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
 		nextRunAt: &past, createdAt: past, updatedAt: past,
 	}
@@ -2031,8 +878,101 @@ func TestSB_Run_Cancel(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- p.Run(ctx) }()
 
-	// Give time for runDueBackups (calls executeScheduledBackup → pg_dump fails) to finish.
-	time.Sleep(500 * time.Millisecond)
+	// Run's own goroutine, not this test's, is what calls runDueBackups -- so
+	// wait for the history row to actually land rather than racing
+	// waitForBgBackups against Run's startup, which could observe
+	// p.bgBackups at its zero value before Run has claimed anything.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		fdb.mu.RLock()
+		n := len(fdb.history)
+		fdb.mu.RUnlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for Run's immediate on-startup pass to record a history entry")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("Run with no deployment secrets wired: want nil, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Run did not stop after cancel")
+	}
+
+	fdb.mu.RLock()
+	defer fdb.mu.RUnlock()
+	if len(fdb.history) == 0 {
+		t.Fatal("expected Run's immediate on-startup pass to attempt the due backup and record a history entry")
+	}
+	for _, h := range fdb.history {
+		if h.status != "failed" {
+			t.Errorf("expected the due backup to fail cleanly with no deployment secret store, got status %q", h.status)
+		}
+		if h.errorMessage == nil || *h.errorMessage != backupErrDSNUnavailable {
+			t.Errorf("expected the stable error code %q, got: %v",
+				backupErrDSNUnavailable, h.errorMessage)
+		}
+	}
+}
+
+func TestSB_Run_Cancel(t *testing.T) {
+	// A fake, deliberately slow pg_dump: relying on the real binary failing
+	// fast against the bogus DSN "postgres://test" is exactly the timing
+	// dependency that made TestSB_Run_Cancel flaky in CI in the first place
+	// (cleat#2055) -- sometimes fast (masks the bug), sometimes slow (trips
+	// it). A dump that reliably takes longer than this test's assertion
+	// window makes the outcome depend on Run's behavior, not on DNS timing
+	// or whether pg_dump is even installed.
+	installFakePgDump(t, "sleep 1\nexit 1\n")
+
+	p, fdb, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+	p.config.DumpDir = t.TempDir()
+
+	cfgID := "00000000-0000-0000-0000-0000000000ee"
+	past := time.Now().Add(-time.Hour)
+
+	fdb.mu.Lock()
+	fdb.configs[cfgID] = &sbConfigRow{
+		id: cfgID, name: "run-cancel-test", cron: "0 9 * * *",
+		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
+		nextRunAt: &past, createdAt: past, updatedAt: past,
+	}
+	fdb.mu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- p.Run(ctx) }()
+
+	// Wait for the claim to have happened -- not a fixed sleep, and not tied
+	// to pg_dump's duration: executeScheduledBackup creates its
+	// backup_history row (status "running") as the very first thing it does,
+	// before touching pg_dump at all, so a history row appearing is a fast,
+	// deterministic signal that Run's initial runDueBackups call claimed the
+	// due config and dispatched the backup goroutine. Only then does
+	// cancelling ctx actually exercise "Run returns promptly while a backup
+	// is in flight" -- cancelling any earlier could abort the claim
+	// transaction itself and the test would show nothing was ever dispatched.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		fdb.mu.RLock()
+		n := len(fdb.history)
+		fdb.mu.RUnlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for the due backup to be claimed and dispatched")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	cancel()
 
 	select {
@@ -2040,9 +980,13 @@ func TestSB_Run_Cancel(t *testing.T) {
 		if err != nil {
 			t.Errorf("Run: want nil, got %v", err)
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("Run did not stop after cancel")
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Run did not stop promptly after cancel")
 	}
+
+	// The dispatched backup keeps running after Run returns (cleat#2055):
+	// wait for it deterministically before checking its effects.
+	waitForBgBackups(t, p)
 
 	fdb.mu.RLock()
 	histCount := len(fdb.history)
@@ -2056,29 +1000,94 @@ func TestSB_Run_Cancel(t *testing.T) {
 		t.Fatal("config should exist after Run")
 	}
 	if cfg.lastRunAt == nil {
-		t.Error("last_run_at should be set after Run (via updateNextRun)")
+		t.Error("last_run_at should be set after Run (via updateNextRunTx, at claim time)")
+	}
+}
+
+// TestSB_ExecuteScheduledBackup_KilledMidway_LeavesNoFinalArtifactAndNoSuccess
+// is the data-safety half of cleat#2055's fix: whatever interrupts pg_dump --
+// worker shutdown, a crash, here a direct context cancellation -- must never
+// leave a file at the dump's final name, and must never record the backup as
+// 'completed'.
+func TestSB_ExecuteScheduledBackup_KilledMidway_LeavesNoFinalArtifactAndNoSuccess(t *testing.T) {
+	// Writes some bytes to its -f target immediately (so a bug that renames
+	// unconditionally would be caught), then sleeps long enough to be
+	// reliably still running when the test cancels it.
+	//
+	// "exec sleep 30" rather than "sleep 30": exec replaces the shell's own
+	// process image, so the process exec.CommandContext kills IS the sleep,
+	// with no separate child. A plain "sleep 30" forks a grandchild that
+	// inherits the stderr pipe; killing the shell then leaves that orphaned
+	// sleep holding the pipe's write end open, and cmd.Wait() -- which reads
+	// stderr to a bytes.Buffer via a pipe -- blocks until that grandchild
+	// exits on its own, defeating the kill entirely.
+	startedMarker := installFakePgDump(t, "echo partial-data > \"$2\"\nexec sleep 30\n")
+
+	p, fdb, rawDB := newSBPlugin(t)
+	defer rawDB.Close()
+	p.config.DumpDir = t.TempDir()
+
+	cfgID := uuid.MustParse("00000000-0000-0000-0000-0000000000ee")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		p.executeScheduledBackup(ctx, cfgID, "kill-midway-test", "0 9 * * *")
+		close(done)
+	}()
+
+	waitForFile(t, startedMarker, 3*time.Second)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("executeScheduledBackup did not return after its context was cancelled")
+	}
+
+	entries, err := os.ReadDir(p.config.DumpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".partial") {
+			t.Errorf("found a final-named artifact after a killed backup: %s", e.Name())
+		}
+	}
+
+	fdb.mu.RLock()
+	defer fdb.mu.RUnlock()
+	if len(fdb.history) == 0 {
+		t.Fatal("expected a history entry to have been created")
+	}
+	for _, h := range fdb.history {
+		if h.status == "completed" {
+			t.Errorf("a killed backup must not be recorded as completed, got history entry %+v", h)
+		}
 	}
 }
 
 func TestSB_RunDueBackups(t *testing.T) {
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
-	p.config.DSN = "postgres://test"
 	p.config.DumpDir = t.TempDir()
 
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
 	cfgID := "00000000-0000-0000-0000-0000000000ff"
 	past := time.Now().Add(-time.Hour)
 
 	fdb.mu.Lock()
 	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, tenantID: tid, name: "due-test", cron: "0 9 * * *",
+		id: cfgID, name: "due-test", cron: "0 9 * * *",
 		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
 		nextRunAt: &past, createdAt: past, updatedAt: past,
 	}
 	fdb.mu.Unlock()
 
 	p.runDueBackups(context.Background())
+
+	// runDueBackups only claims and dispatches (cleat#2055); the backup
+	// itself runs on its own goroutine.
+	waitForBgBackups(t, p)
 
 	fdb.mu.RLock()
 	histCount := len(fdb.history)
@@ -2099,29 +1108,32 @@ func TestSB_RunDueBackups(t *testing.T) {
 func TestSB_ExecuteScheduledBackup_Error(t *testing.T) {
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
-	p.config.DSN = "postgres://test"
 	p.config.DumpDir = t.TempDir()
 
-	tidStr := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
 	cfgID := "00000000-0000-0000-0000-000000000111"
 	configUUID := uuid.MustParse(cfgID)
-	tenantUUID := uuid.MustParse(tidStr)
 	now := time.Now()
 
 	fdb.mu.Lock()
 	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, tenantID: tidStr, name: "exec-test", cron: "0 9 * * *",
+		id: cfgID, name: "exec-test", cron: "0 9 * * *",
 		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
 		createdAt: now, updatedAt: now,
 	}
 	fdb.mu.Unlock()
 
 	// This will attempt pg_dump (not available), exercising the error path.
-	p.executeScheduledBackup(context.Background(), configUUID, tenantUUID, "exec-test", "0 9 * * *")
+	p.executeScheduledBackup(context.Background(), configUUID, "exec-test", "0 9 * * *")
 
 	fdb.mu.RLock()
 	histCount := len(fdb.history)
 	cfg := fdb.configs[cfgID]
+	var gotStatus string
+	var gotErr *string
+	for _, h := range fdb.history {
+		gotStatus = h.status
+		gotErr = h.errorMessage
+	}
 	fdb.mu.RUnlock()
 
 	if histCount == 0 {
@@ -2130,121 +1142,18 @@ func TestSB_ExecuteScheduledBackup_Error(t *testing.T) {
 	if cfg == nil {
 		t.Fatal("config should exist after executeScheduledBackup")
 	}
-	if cfg.lastRunAt == nil {
-		t.Error("last_run_at should be set after executeScheduledBackup (via updateNextRun)")
+	// executeScheduledBackup no longer touches next_run_at/last_run_at at
+	// all (cleat#2291 follow-up): runDueBackups' claim transaction is the
+	// only writer now, and this test calls executeScheduledBackup directly,
+	// bypassing that claim -- so lastRunAt is correctly left untouched here.
+	if cfg.lastRunAt != nil {
+		t.Error("last_run_at should be untouched by executeScheduledBackup directly -- only the claim advances it")
 	}
-}
-
-func TestSB_UpdateNextRun(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	cfgID := "00000000-0000-0000-0000-000000000222"
-	configUUID := uuid.MustParse(cfgID)
-	now := time.Now()
-
-	fdb.mu.Lock()
-	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, tenantID: tid, name: "next-run-test", cron: "0 9 * * *",
-		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: now, updatedAt: now,
+	if gotStatus != "failed" {
+		t.Errorf("want status 'failed' (no real pg_dump on PATH), got %q", gotStatus)
 	}
-	fdb.mu.Unlock()
-
-	p.updateNextRun(context.Background(), configUUID, "0 9 * * *", now)
-
-	fdb.mu.RLock()
-	row := fdb.configs[cfgID]
-	fdb.mu.RUnlock()
-
-	if row == nil {
-		t.Fatal("config should exist after updateNextRun")
-	}
-	if row.lastRunAt == nil {
-		t.Error("last_run_at should be set after updateNextRun")
-	}
-	if row.nextRunAt == nil {
-		t.Error("next_run_at should be set (cron has future match)")
-	}
-	if row.nextRunAt != nil && row.nextRunAt.Before(now) {
-		t.Error("next_run_at should be in the future")
-	}
-}
-
-func TestSB_UpdateNextRun_NoMatch(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	cfgID := "00000000-0000-0000-0000-000000000223"
-	configUUID := uuid.MustParse(cfgID)
-	now := time.Now()
-
-	fdb.mu.Lock()
-	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, tenantID: tid, name: "no-match-test", cron: "0 9 31 2 *",
-		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: now, updatedAt: now,
-	}
-	fdb.mu.Unlock()
-
-	// Feb 31 won't match, so next_run_at should stay nil.
-	p.updateNextRun(context.Background(), configUUID, "0 9 31 2 *", now)
-
-	fdb.mu.RLock()
-	row := fdb.configs[cfgID]
-	fdb.mu.RUnlock()
-
-	if row == nil {
-		t.Fatal("config should exist after updateNextRun")
-	}
-	if row.lastRunAt == nil {
-		t.Error("last_run_at should be set even with no cron match")
-	}
-	if row.nextRunAt != nil {
-		t.Error("next_run_at should be nil when cron has no future match within window")
-	}
-}
-
-func TestSB_RunBackupAsync_Error(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-	p.config.DSN = "postgres://test"
-	p.config.DumpDir = t.TempDir()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	cfgID := uuid.MustParse("00000000-0000-0000-0000-000000000333")
-	historyID := uuid.New()
-	now := time.Now()
-
-	fdb.mu.Lock()
-	fdb.configs[cfgID.String()] = &sbConfigRow{
-		id: cfgID.String(), tenantID: tid, name: "async-test", cron: "0 9 * * *",
-		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: now, updatedAt: now,
-	}
-	fdb.history[historyID.String()] = &sbHistoryRow{
-		id: historyID.String(), configID: cfgID.String(), tenantID: tid,
-		filename: "async_test.dump", status: "running",
-		startedAt: now, createdAt: now,
-	}
-	fdb.mu.Unlock()
-
-	p.runBackupAsync(cfgID, historyID, uuid.MustParse(tid), "async_test.dump")
-
-	fdb.mu.RLock()
-	h, ok := fdb.history[historyID.String()]
-	fdb.mu.RUnlock()
-
-	if !ok {
-		t.Fatal("history entry should exist after runBackupAsync")
-	}
-	if h.status != "failed" {
-		t.Errorf("want status 'failed', got %q", h.status)
-	}
-	if h.errorMessage == nil || *h.errorMessage == "" {
-		t.Error("expected non-empty error message after failed pg_dump")
+	if gotErr == nil || *gotErr != backupErrPgDumpFailed {
+		t.Errorf("want error_message %q, got %v", backupErrPgDumpFailed, gotErr)
 	}
 }
 
@@ -2258,479 +1167,69 @@ func TestSB_Migrations_DownSQL(t *testing.T) {
 	if len(migrations) == 0 {
 		t.Fatal("expected migrations")
 	}
-	for _, m := range migrations {
-		if m.Up == "" {
-			t.Error("migration Up SQL must be non-empty")
-		}
-		if m.Down == "" {
-			t.Error("migration Down SQL must be non-empty")
-		}
-	}
+	// One shared predicate for what a migration must do, rather than a copy
+	// per plugin. Thirteen plugins carried their own and they had already
+	// drifted -- three checked Up and not Down. A TenantScoped migration has
+	// no SQL in either direction by design, so the old wording rejected it by
+	// construction. cleat#1278.
+	plugintest.AssertMigrationsDoSomething(t, migrations)
 }
 
 // =========================================================================
-// Route handler DB error paths — using force-error flag on fake DB
+// updateNextRunTx ExecContext error path
 // =========================================================================
 
-func TestSB_DBError_ListConfigs(t *testing.T) {
+// TestSB_RunDueBackups_UpdateNextRunTxErrorExcludesConfigFromDispatch is
+// cleat#2291's follow-up (cleat-review's should-fix on #2327):
+// updateNextRunTx's error used to be logged and discarded, so a config whose
+// advance failed was dispatched anyway with no durable claim behind it --
+// on MySQL that meant it could be dispatched again on every subsequent poll
+// (nothing ever advanced it), and on PostgreSQL a single bad row aborted the
+// whole claim transaction and blocked every OTHER due config in the same
+// batch too. Now the error is returned and the config is dropped from this
+// poll's dispatch instead, left due for the next one.
+func TestSB_RunDueBackups_UpdateNextRunTxErrorExcludesConfigFromDispatch(t *testing.T) {
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
+	p.config.DumpDir = t.TempDir()
 
-	fdb.mu.Lock()
-	fdb.forceQueryErr = 1
-	fdb.mu.Unlock()
+	cfgID := "00000000-0000-0000-0000-000000000553"
+	past := time.Now().Add(-time.Hour)
 
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/configs", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 500 {
-		t.Errorf("list configs query error: want 500, got %d", rec.Code)
-	}
-}
-
-func TestSB_DBError_GetConfig(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	fdb.mu.Lock()
-	fdb.forceQueryErr = 1
-	fdb.mu.Unlock()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/configs/00000000-0000-0000-0000-000000000001", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 500 {
-		t.Errorf("get config query error: want 500, got %d", rec.Code)
-	}
-}
-
-func TestSB_DBError_UpdateConfig(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	// Seed config so we get past the "not found" check.
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	cfgID := "00000000-0000-0000-0000-000000000444"
 	fdb.mu.Lock()
 	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, tenantID: tid, name: "update-err", cron: "0 9 * * *",
+		id: cfgID, name: "update-next-run-tx-err-test", cron: "0 9 * * *",
 		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: time.Now(), updatedAt: time.Now(),
+		nextRunAt: &past, createdAt: past, updatedAt: past,
 	}
-	fdb.mu.Unlock()
-
-	// First request will succeed (fetch config). Force error on the update exec.
-	fdb.mu.Lock()
-	fdb.forceExecErr = 1
-	fdb.mu.Unlock()
-
-	body := `{"name":"new-name"}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "PUT", "/backups/configs/"+cfgID, bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 500 {
-		t.Errorf("update config exec error: want 500, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestSB_DBError_DeleteConfig(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	cfgID := "00000000-0000-0000-0000-000000000555"
-	fdb.mu.Lock()
-	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, tenantID: tid, name: "delete-err", cron: "0 9 * * *",
-		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: time.Now(), updatedAt: time.Now(),
-	}
-	fdb.mu.Unlock()
-
-	fdb.mu.Lock()
+	// 2: one for cleanupOrphanedHistory's unconditional Exec at the top of
+	// runDueBackups, one for this config's updateNextRunTx Exec inside the
+	// claim transaction -- forceExecErr is a single counter shared by every
+	// connection this fake hands out, decremented in call order regardless
+	// of statement text.
 	fdb.forceExecErr = 2
 	fdb.mu.Unlock()
 
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "DELETE", "/backups/configs/"+cfgID, nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 500 {
-		t.Errorf("delete config exec error: want 500, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
+	p.runDueBackups(context.Background())
+	waitForBgBackups(t, p)
 
-func TestSB_DBError_RunBackup(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	cfgID := "00000000-0000-0000-0000-000000000666"
-	fdb.mu.Lock()
-	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, tenantID: tid, name: "run-err", cron: "0 9 * * *",
-		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: time.Now(), updatedAt: time.Now(),
-	}
-	fdb.mu.Unlock()
-
-	fdb.mu.Lock()
-	fdb.forceExecErr = 1
-	fdb.mu.Unlock()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "POST", "/backups/configs/"+cfgID+"/run", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 500 {
-		t.Errorf("run backup exec error: want 500, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestSB_DBError_History(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	fdb.mu.Lock()
-	fdb.forceQueryErr = 1
-	fdb.mu.Unlock()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/history", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 500 {
-		t.Errorf("list history query error: want 500, got %d", rec.Code)
-	}
-}
-
-func TestSB_DBError_UpdateConfig_Fetch(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	cfgID := "00000000-0000-0000-0000-000000000447"
-	fdb.mu.Lock()
-	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, tenantID: tid, name: "fetch-err", cron: "0 9 * * *",
-		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: time.Now(), updatedAt: time.Now(),
-	}
-	fdb.mu.Unlock()
-
-	fdb.mu.Lock()
-	fdb.forceQueryErr = 1
-	fdb.mu.Unlock()
-
-	body := `{"name":"new-name"}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "PUT", "/backups/configs/"+cfgID, bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 500 {
-		t.Errorf("update config fetch error: want 500, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestSB_DBError_ListConfigsScan(t *testing.T) {
-	// Test the scan error path in handleListConfigs by seeding a row with
-	// incompatible column types in the fake DB's config list.
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	// Instead of using force error, we modify the queryListConfigs temporarily.
-	// We inject a row with a type that will fail scanning by using the
-	// forceQueryErr mechanism to trigger a 500 instead.
-	fdb.mu.Lock()
-	fdb.forceQueryErr = 1
-	fdb.mu.Unlock()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/configs", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 500 {
-		t.Errorf("list configs query error: want 500, got %d", rec.Code)
-	}
-}
-
-func TestSB_DBError_CreateConfig(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	fdb.mu.Lock()
-	fdb.forceExecErr = 1
-	fdb.mu.Unlock()
-
-	body := `{"name":"test","cron":"0 9 * * *"}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "POST", "/backups/configs", bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 500 {
-		t.Errorf("create config exec error: want 500, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestSB_UpdateConfig_WithEnabledTrue(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	cfgID := "00000000-0000-0000-0000-000000000448"
-	fdb.mu.Lock()
-	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, tenantID: tid, name: "enable-test", cron: "0 9 * * *",
-		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: time.Now(), updatedAt: time.Now(),
-	}
-	fdb.mu.Unlock()
-
-	// Setting enabled=true triggers nextRunVal recalculation (covers the
-	// next_run_at = $N branch in the dynamic UPDATE query builder).
-	body := `{"enabled":true}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "PUT", "/backups/configs/"+cfgID, bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("update with enabled=true: want 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var m map[string]string
-	sbReadJSON(t, rec, &m)
-	if m["status"] != "updated" {
-		t.Errorf("want status 'updated', got %q", m["status"])
-	}
-
-	// Verify next_run_at was updated in the fake DB.
 	fdb.mu.RLock()
-	row := fdb.configs[cfgID]
+	histCount := len(fdb.history)
+	cfg := fdb.configs[cfgID]
 	fdb.mu.RUnlock()
-	if row.nextRunAt == nil {
-		t.Error("next_run_at should be set after enabling config")
+
+	if histCount != 0 {
+		t.Errorf("dispatched %d backup(s) for a config whose next_run_at advance failed, want 0", histCount)
 	}
-}
-
-func TestSB_UpdateConfig_WithCronChange(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	cfgID := "00000000-0000-0000-0000-000000000449"
-	fdb.mu.Lock()
-	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, tenantID: tid, name: "cron-change", cron: "0 9 * * *",
-		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: time.Now(), updatedAt: time.Now(),
+	if cfg == nil {
+		t.Fatal("config should still exist")
 	}
-	fdb.mu.Unlock()
-
-	body := `{"cron":"0 10 * * *"}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "PUT", "/backups/configs/"+cfgID, bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("update with cron change: want 200, got %d: %s", rec.Code, rec.Body.String())
+	if cfg.lastRunAt != nil {
+		t.Error("last_run_at should be untouched: the write that sets it is the one that failed")
 	}
-}
-
-func TestSB_DBError_RunBackup_Fetch(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	cfgID := "00000000-0000-0000-0000-000000000777"
-	fdb.mu.Lock()
-	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, tenantID: tid, name: "run-fetch-err", cron: "0 9 * * *",
-		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
-		createdAt: time.Now(), updatedAt: time.Now(),
+	if cfg.nextRunAt == nil || !cfg.nextRunAt.Equal(past) {
+		t.Errorf("next_run_at = %v, want unchanged at %v -- still due for the next poll", cfg.nextRunAt, past)
 	}
-	fdb.mu.Unlock()
-
-	// Force the SELECT name, cron query to fail.
-	fdb.mu.Lock()
-	fdb.forceQueryErr = 1
-	fdb.mu.Unlock()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "POST", "/backups/configs/"+cfgID+"/run", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 500 {
-		t.Errorf("run backup fetch error: want 500, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-// =========================================================================
-// UpdateConfig edge: s3_bucket, s3_prefix, retention_days
-// =========================================================================
-
-// TestSB_UpdateConfig_RejectsS3Fields pins the fix for the false "Scheduled
-// PostgreSQL backups to S3" claim: setting s3_bucket/s3_prefix to a
-// non-empty value must be rejected (400), not silently accepted and
-// ignored. This test used to assert the opposite -- a 200 -- which is
-// exactly the defect (an operator who set these expecting off-host storage
-// found out only at restore time, since nothing ever uploads a dump
-// anywhere).
-func TestSB_UpdateConfig_RejectsS3Fields(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	cfgID := "00000000-0000-0000-0000-000000000551"
-	fdb.mu.Lock()
-	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, tenantID: tid, name: "s3-fields", cron: "0 9 * * *",
-		s3Bucket: "old-bucket", s3Prefix: "old/prefix/", retentionDays: 7, enabled: true,
-		createdAt: time.Now(), updatedAt: time.Now(),
-	}
-	fdb.mu.Unlock()
-
-	body := `{"s3_bucket":"new-bucket","s3_prefix":"new/prefix/","retention_days":14}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "PUT", "/backups/configs/"+cfgID, bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 400 {
-		t.Fatalf("update s3 fields: want 400 (not supported), got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	// The config must be untouched -- a rejected request is not a partial
-	// update.
-	fdb.mu.Lock()
-	got := fdb.configs[cfgID]
-	fdb.mu.Unlock()
-	if got.retentionDays != 7 {
-		t.Errorf("rejected update must not apply any field: retentionDays = %d, want unchanged 7", got.retentionDays)
-	}
-}
-
-// TestSB_UpdateConfig_RetentionDaysOnly covers the part of the old
-// TestSB_UpdateConfig_WithS3Fields that remains legitimate: retention_days
-// alone (no S3 fields) still updates normally.
-func TestSB_UpdateConfig_RetentionDaysOnly(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	cfgID := "00000000-0000-0000-0000-000000000552"
-	fdb.mu.Lock()
-	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, tenantID: tid, name: "retention-only", cron: "0 9 * * *",
-		retentionDays: 7, enabled: true,
-		createdAt: time.Now(), updatedAt: time.Now(),
-	}
-	fdb.mu.Unlock()
-
-	body := `{"retention_days":14}`
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "PUT", "/backups/configs/"+cfgID, bytes.NewReader([]byte(body)))
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("update retention_days: want 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-	var m map[string]string
-	sbReadJSON(t, rec, &m)
-	if m["status"] != "updated" {
-		t.Errorf("want status 'updated', got %q", m["status"])
-	}
-}
-
-// =========================================================================
-// ListHistory edge: query error path + completed_at/error_message
-// =========================================================================
-
-func TestSB_ListHistory_QueryError(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	fdb.mu.Lock()
-	fdb.forceQueryErr = 1
-	fdb.mu.Unlock()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/history", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 500 {
-		t.Fatalf("list history query error: want 500, got %d: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestSB_ListHistory_WithNullableFields(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	tid := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
-	now := time.Now()
-	completed := now.Add(-time.Hour)
-	sz := int64(2048)
-	hID1 := "00000000-0000-0000-0000-000000000a01"
-	hID2 := "00000000-0000-0000-0000-000000000a02"
-	hID3 := "00000000-0000-0000-0000-000000000a03"
-	cfgID := "00000000-0000-0000-0000-000000000999"
-
-	fdb.mu.Lock()
-	fdb.history[hID1] = &sbHistoryRow{
-		id: hID1, configID: cfgID, tenantID: tid,
-		filename: "completed_err.dump", status: "failed",
-		sizeBytes: &sz, startedAt: now, createdAt: now,
-		completedAt: &completed, errorMessage: strPtr("disk full"),
-	}
-	fdb.history[hID2] = &sbHistoryRow{
-		id: hID2, configID: cfgID, tenantID: tid,
-		filename: "completed_ok.dump", status: "completed",
-		sizeBytes: &sz, startedAt: now, createdAt: now,
-		completedAt: &completed,
-	}
-	fdb.history[hID3] = &sbHistoryRow{
-		id: hID3, configID: cfgID, tenantID: tid,
-		filename: "running.dump", status: "running",
-		startedAt: now, createdAt: now,
-	}
-	fdb.mu.Unlock()
-
-	rec := httptest.NewRecorder()
-	req := sbRequest(t, "GET", "/backups/history", nil)
-	p.mux.ServeHTTP(rec, req)
-	if rec.Code != 200 {
-		t.Fatalf("list history: want 200, got %d: %s", rec.Code, rec.Body.String())
-	}
-
-	var result []map[string]any
-	sbReadJSON(t, rec, &result)
-	if len(result) != 3 {
-		t.Fatalf("expected 3 history entries, got %d", len(result))
-	}
-	foundCompleted := false
-	foundError := false
-	for _, entry := range result {
-		if entry["completed_at"] != nil {
-			foundCompleted = true
-		}
-		if entry["error_message"] != nil {
-			foundError = true
-		}
-	}
-	if !foundCompleted {
-		t.Error("expected at least one entry with completed_at set")
-	}
-	if !foundError {
-		t.Error("expected at least one entry with error_message set")
-	}
-}
-
-func strPtr(s string) *string { return &s }
-
-// =========================================================================
-// updateNextRun ExecContext error path
-// =========================================================================
-
-func TestSB_UpdateNextRun_ExecError(t *testing.T) {
-	p, fdb, rawDB := newSBPlugin(t)
-	defer rawDB.Close()
-
-	cfgID := uuid.MustParse("00000000-0000-0000-0000-000000000553")
-	now := time.Now()
-
-	fdb.mu.Lock()
-	fdb.forceExecErr = 1
-	fdb.mu.Unlock()
-
-	// updateNextRun should log the error but not panic/return error.
-	p.updateNextRun(context.Background(), cfgID, "0 9 * * *", now)
-	// No panic = success.
 }
 
 // =========================================================================
@@ -2757,25 +1256,22 @@ func TestSB_RunDueBackups_QueryError(t *testing.T) {
 func TestSB_ExecuteScheduledBackup_InsertError(t *testing.T) {
 	p, fdb, rawDB := newSBPlugin(t)
 	defer rawDB.Close()
-	p.config.DSN = "postgres://test"
 	p.config.DumpDir = t.TempDir()
 
-	tidStr := uuid.MustParse("00000000-0000-0000-0000-000000000001").String()
 	cfgID := "00000000-0000-0000-0000-000000000555"
 	configUUID := uuid.MustParse(cfgID)
-	tenantUUID := uuid.MustParse(tidStr)
 	now := time.Now()
 
 	fdb.mu.Lock()
 	fdb.configs[cfgID] = &sbConfigRow{
-		id: cfgID, tenantID: tidStr, name: "insert-err", cron: "0 9 * * *",
+		id: cfgID, name: "insert-err", cron: "0 9 * * *",
 		s3Bucket: "b", s3Prefix: "p/", retentionDays: 30, enabled: true,
 		createdAt: now, updatedAt: now,
 	}
 	fdb.forceExecErr = 1
 	fdb.mu.Unlock()
 
-	p.executeScheduledBackup(context.Background(), configUUID, tenantUUID, "insert-err", "0 9 * * *")
+	p.executeScheduledBackup(context.Background(), configUUID, "insert-err", "0 9 * * *")
 
 	fdb.mu.RLock()
 	histCount := len(fdb.history)

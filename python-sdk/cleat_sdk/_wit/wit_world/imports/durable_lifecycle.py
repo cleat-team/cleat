@@ -3,12 +3,36 @@
 """
 Workflow lifecycle operations (defer, compaction, cancellation).
 """
+from typing import TypeVar, Generic, Union, Optional, Protocol, Tuple, List, Any, Self, Callable
+from types import TracebackType
+from enum import Flag, Enum, auto
+from dataclasses import dataclass
+from abc import abstractmethod
+import weakref
+
+from componentize_py_types import Result, Ok, Err, Some
 
 
 
 def durable_defer(desc: str) -> str:
     """
     Register a deferred cleanup action to run on workflow exit.
+    Returns the generated defer ID.
+    """
+    raise NotImplementedError
+def durable_defer_phase(on: bool) -> None:
+    """
+    Report that the guest has started (true) or finished (false) draining
+    its defer table.
+    
+    Records no event. It marks the events the drain produces so the engine
+    can tell a defer body's durable calls from the workflow body's --
+    without which a workflow that exhausted its retries and then cleaned up
+    is classified failed rather than dead_lettered, and deleted by
+    retention instead of retained for an operator. cleat#1155.
+    
+    The host cannot observe this boundary itself: on the ordinary failure
+    path the guest drains its own table, so the host is not in the loop.
     """
     raise NotImplementedError
 def durable_continue_as_new(input: str) -> int:
@@ -19,5 +43,6 @@ def durable_continue_as_new(input: str) -> int:
 def durable_poll_cancellation() -> str:
     """
     Check if workflow cancellation has been requested.
+    Returns the cancellation reason string, or empty if not cancelled.
     """
     raise NotImplementedError

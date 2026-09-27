@@ -31,15 +31,22 @@ func TestReadImportSection_ParsesEveryImport(t *testing.T) {
 		wantHas   wasmImport
 	}{
 		{
+			// 3 until cleat#1660 regenerated this fixture. The binary was
+			// frozen on 2026-09-04, before #1240 added cleat_defer_phase, so
+			// this count was pinned to a shape the SDK had stopped producing
+			// and the test passed by measuring a stale artefact. The count
+			// itself is not the subject here -- what this test is for is that
+			// a LATER import is reached at all -- but leave it exact: a
+			// deliberately loose bound would have hidden the same drift.
 			name:      "assemblyscript",
-			path:      "../tests/plugin-harness/testdata/asworkflow/dist/workflow.wasm",
-			wantCount: 3,
+			path:      "../tests/plugin-harness/testdata/asworkflow/prebuilt/workflow.wasm",
+			wantCount: 4,
 			wantFirst: wasmImport{module: "env", field: "abort"},
 			wantHas:   wasmImport{module: "env", field: "plugin_call_streaming"},
 		},
 		{
 			name:      "java-teavm",
-			path:      "../tests/plugin-harness/testdata/javaworkflow/build/wasm/wasm/workflow.wasm",
+			path:      "../tests/plugin-harness/testdata/javaworkflow/prebuilt/workflow.wasm",
 			wantCount: 7,
 			wantFirst: wasmImport{module: "teavm", field: "putwcharsOut"},
 			wantHas:   wasmImport{module: "env", field: "plugin_call"},
@@ -94,8 +101,8 @@ func TestDetectLanguage_IdentifiesNonGoGuests(t *testing.T) {
 	cases := []struct {
 		name, path, want string
 	}{
-		{"assemblyscript", "../tests/plugin-harness/testdata/asworkflow/dist/workflow.wasm", "assemblyscript"},
-		{"java-teavm", "../tests/plugin-harness/testdata/javaworkflow/build/wasm/wasm/workflow.wasm", "java"},
+		{"assemblyscript", "../tests/plugin-harness/testdata/asworkflow/prebuilt/workflow.wasm", "assemblyscript"},
+		{"java-teavm", "../tests/plugin-harness/testdata/javaworkflow/prebuilt/workflow.wasm", "java"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -125,7 +132,7 @@ func TestDetectLanguage_IdentifiesNonGoGuests(t *testing.T) {
 // silently taken on every module with more than one import -- so the
 // optimisation it exists for had never applied.
 func TestNeededEnvImports_NoLongerAlwaysNil(t *testing.T) {
-	b, err := os.ReadFile("../tests/plugin-harness/testdata/asworkflow/dist/workflow.wasm")
+	b, err := os.ReadFile("../tests/plugin-harness/testdata/asworkflow/prebuilt/workflow.wasm")
 	if err != nil {
 		t.Fatalf("fixture missing: %v", err)
 	}

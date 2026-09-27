@@ -676,7 +676,7 @@ func TestCallPlugin(t *testing.T) {
 func TestHealth(t *testing.T) {
 	t.Run("healthy", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if want := "/healthz"; r.URL.Path != want {
+			if want := "/readyz"; r.URL.Path != want {
 				t.Errorf("path = %s, want %s", r.URL.Path, want)
 			}
 			w.WriteHeader(http.StatusOK)

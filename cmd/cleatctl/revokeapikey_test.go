@@ -43,7 +43,17 @@ func TestRevokeSelector_RequiresExactlyOne(t *testing.T) {
 // selector that stripped the prefix would compute a hash matching no row and
 // silently report "no such key" during an incident.
 func TestRevokeSelector_KeyStdinHashesFullKeyIncludingPrefix(t *testing.T) {
-	const key = "cleat_sk_3740d7db465bf787d8589a1f023e03c64ba9f658821cee3f7506948869da07ba"
+	// Synthetic. This fixture used to be the real leaked key from
+	// clew-agent.json -- a live credential, pasted into a test whose own file
+	// argues that a live credential must never reach argv. Untracking it in
+	// #457 did not un-expose it, and a literal here is worse than the git
+	// history it came from: it ships in the source tree, in the v0.2.0 tag, and
+	// in every clone at HEAD, where no one needs to know a blob SHA to find it.
+	//
+	// The test does not care which key this is. It asserts that revokeSelector
+	// hashes the whole string including the cleat_sk_ prefix, which any 64 hex
+	// characters exercise identically. Keep it obviously fake.
+	const key = "cleat_sk_" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	want := sha256.Sum256([]byte(key))
 
 	sel, err := revokeSelector("", "", true, strings.NewReader(key))

@@ -21,6 +21,15 @@ func (h *stubHostHandler) DurableCall(_ context.Context, _ api.Module, _, _, _ s
 	return 0
 }
 func (h *stubHostHandler) DurableSleep(_ context.Context, _ api.Module, _ int64) int64 { return 0 }
+
+// ServeWasiSleep returns 0 -- "the wait has already happened" -- so nothing
+// using this stub blocks. cleat#1633.
+//
+// RECORDED AS A CHOICE rather than left as another zero in a file of zeros: a
+// stub that really slept would make every embedder as slow as whatever a guest
+// asks for, and none of them is about sleeping. A test that IS about sleeping
+// must not use this stub, because it would be asserting against the stub.
+func (h *stubHostHandler) ServeWasiSleep(_ context.Context, _ int64) time.Duration { return 0 }
 func (h *stubHostHandler) DurableAwaitSignals(_ context.Context, _ api.Module, _ string, _ int64, _, _, _, _ uint32) int64 {
 	return 0
 }
@@ -42,9 +51,6 @@ func (h *stubHostHandler) ChildWorkflow(_ context.Context, _ api.Module, _, _ st
 	return 0
 }
 func (h *stubHostHandler) ChildWorkflowWithOptions(_ context.Context, _ api.Module, _, _ string, _, _ int64, _ string, _, _ uint32) int64 {
-	return 0
-}
-func (h *stubHostHandler) ChildWorkflowInSchema(_ context.Context, _ api.Module, _, _, _ string, _, _ int64, _ string, _, _ uint32) int64 {
 	return 0
 }
 func (h *stubHostHandler) AwaitChild(_ context.Context, _ api.Module, _ string, _, _ uint32) int64 {
@@ -80,6 +86,12 @@ func (h *stubHostHandler) PluginCall(_ context.Context, _ api.Module, _, _, _ st
 	return 0
 }
 func (h *stubHostHandler) PluginCallStreaming(_ context.Context, _ api.Module, _, _, _ string, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) DurablePollUpdate(_ context.Context, _ api.Module, _, _ uint32) int64 {
+	return 0
+}
+func (h *stubHostHandler) DurableCompleteUpdate(_ context.Context, _ api.Module, _, _, _ string) int64 {
 	return 0
 }
 func (h *stubHostHandler) RegisterUpdateHandler(_ context.Context, _ api.Module, _ string) int64 {
@@ -136,6 +148,9 @@ func (h *stubHostHandler) ListState(_ context.Context, _ api.Module, _ string, _
 	return 0
 }
 func (h *stubHostHandler) RunDetached(_ context.Context, _ api.Module, _, _ string) int64 { return 0 }
+func (h *stubHostHandler) StartDetached(_ context.Context, _ api.Module, _, _ string, _, _ uint32) int64 {
+	return 0
+}
 func (h *stubHostHandler) Fetch(_ context.Context, _ api.Module, _, _, _, _ string, _, _ uint32) int64 {
 	return 0
 }
@@ -636,76 +651,6 @@ func TestCleatCallHeartbeat_ReadsParams(t *testing.T) {
 // cleat_send_signal_and_wait wrapper tests
 // ---------------------------------------------------------------------------
 
-// TestCleatSendSignalAndWait_ReadsTargetSignalPayload verifies that
-// SendSignalAndWait dispatches with the correct target, signal, and payload.
-func TestCleatSendSignalAndWait_ReadsTargetSignalPayload(t *testing.T) {
-	store := newMockSignalWorkflowStore()
-	e := &Engine{
-		signalStore: store,
-	}
-	s := &execSession{
-		engine: e,
-	}
-
-	result := s.SendSignalAndWait(context.Background(), nil,
-		"target-wf-001", "order-approved", `{"order_id":"ord-123"}`, 30000, 0, 0)
-
-	// Without a signal waiting, this should record an await_signals event
-	// and return a suspend indicator.
-	if len(s.history) != 1 {
-		t.Fatalf("expected 1 event in history, got %d", len(s.history))
-	}
-	if s.history[0].EventType != EventTypeAwaitSignals {
-		t.Errorf("event type = %q, want %q", s.history[0].EventType, EventTypeAwaitSignals)
-	}
-	if s.history[0].SignalNames != "order-approved" {
-		t.Errorf("SignalNames = %q, want %q", s.history[0].SignalNames, "order-approved")
-	}
-	if s.history[0].TimeoutMs != 30000 {
-		t.Errorf("TimeoutMs = %d, want %d", s.history[0].TimeoutMs, 30000)
-	}
-
-	// Return value should indicate suspend (packSimpleResult with errCode=1)
-	errCode := byte(result & 0xFF)
-	if errCode != 1 {
-		t.Errorf("errCode = %d, want 1 (suspend)", errCode)
-	}
-}
-
-// TestCleatSendSignalAndWait_WithExistingSignal verifies that SendSignalAndWait
-// correctly reads a pre-existing signal.
-func TestCleatSendSignalAndWait_WithExistingSignal(t *testing.T) {
-	store := newMockSignalWorkflowStore()
-	// Pre-deliver a signal so the poll succeeds.
-	err := store.DeliverSignal(context.Background(), "target-wf-001", "order-approved", `{"approved":true}`)
-	if err != nil {
-		t.Fatalf("DeliverSignal: %v", err)
-	}
-	e := &Engine{
-		signalStore: store,
-	}
-	s := &execSession{
-		engine: e,
-	}
-
-	result := s.SendSignalAndWait(context.Background(), nil,
-		"target-wf-001", "order-approved", `{"order_id":"ord-123"}`, 30000, 0, 0)
-
-	// Should find the pre-existing signal and record a signal_received event
-	if len(s.history) != 1 {
-		t.Fatalf("expected 1 event in history, got %d", len(s.history))
-	}
-	if s.history[0].EventType != EventTypeSignalReceived {
-		t.Errorf("event type = %q, want %q", s.history[0].EventType, EventTypeSignalReceived)
-	}
-
-	// Return value should indicate success (errCode=0)
-	errCode := byte(result & 0xFF)
-	if errCode != 0 {
-		t.Errorf("errCode = %d, want 0", errCode)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // cleat_fetch wrapper tests
 // ---------------------------------------------------------------------------
@@ -1194,51 +1139,6 @@ func TestHostFunc_CleatUUID(t *testing.T) {
 	}
 }
 
-func TestHostFunc_CleatSetState(t *testing.T) {
-	handler := &stateRecorder{}
-	h := newTestHostFuncHarness(t, "cleat_set_state", []byte{wasmI32, wasmI32, wasmI32, wasmI32}, []byte{wasmI64}, true, handler)
-
-	key := "my_state_key"
-	val := `{"count":42}`
-	if !h.mem.Write(0, []byte(key)) {
-		t.Fatal("write key to memory failed")
-	}
-	if !h.mem.Write(256, []byte(val)) {
-		t.Fatal("write value to memory failed")
-	}
-
-	result, err := h.call(0, uint64(len(key)), 256, uint64(len(val)))
-	if err != nil {
-		t.Fatalf("call cleat_set_state: %v", err)
-	}
-	if result == errBadParam {
-		t.Error("got errBadParam")
-	}
-	if handler.key != key {
-		t.Errorf("state key = %q, want %q", handler.key, key)
-	}
-	if handler.value != val {
-		t.Errorf("state value = %q, want %q", handler.value, val)
-	}
-}
-
-func TestHostFunc_CleatGetState(t *testing.T) {
-	h := newTestHostFuncHarness(t, "cleat_get_state", []byte{wasmI32, wasmI32, wasmI32, wasmI32}, []byte{wasmI64}, true, &stubHostHandler{})
-
-	key := "my_state_key"
-	if !h.mem.Write(0, []byte(key)) {
-		t.Fatal("write key to memory failed")
-	}
-
-	result, err := h.call(0, uint64(len(key)), 256, 100)
-	if err != nil {
-		t.Fatalf("call cleat_get_state: %v", err)
-	}
-	if result == errBadParam {
-		t.Error("got errBadParam")
-	}
-}
-
 func TestHostFunc_CleatSetQueryState(t *testing.T) {
 	handler := &queryStateRecorder{}
 	h := newTestHostFuncHarness(t, "set_query_state", []byte{wasmI32, wasmI32, wasmI32, wasmI32}, []byte{wasmI64}, true, handler)
@@ -1562,27 +1462,6 @@ func TestHostFunc_CleatLog_EmptyMsg(t *testing.T) {
 	}
 }
 
-func TestHostFunc_CleatSetState_InvalidKey(t *testing.T) {
-	h := newTestHostFuncHarness(t, "cleat_set_state", []byte{wasmI32, wasmI32, wasmI32, wasmI32}, []byte{wasmI64}, true, &stubHostHandler{})
-
-	// Invalid key (contains a space) should fail readServiceName -> errBadParam
-	invalidKey := "bad key with spaces"
-	if !h.mem.Write(0, []byte(invalidKey)) {
-		t.Fatal("write key to memory failed")
-	}
-	if !h.mem.Write(256, []byte("value")) {
-		t.Fatal("write value to memory failed")
-	}
-
-	result, err := h.call(0, uint64(len(invalidKey)), 256, 5)
-	if err != nil {
-		t.Fatalf("call cleat_set_state invalid: %v", err)
-	}
-	if result != errBadParam {
-		t.Errorf("expected errBadParam, got %x", result)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Custom handlers for additional host function tests
 // ---------------------------------------------------------------------------
@@ -1632,22 +1511,6 @@ func (h *signalWorkflowRecorder) SignalWorkflow(_ context.Context, _ api.Module,
 	h.targetRunID = targetRunID
 	h.signalName = signalName
 	h.payload = payload
-	return 0
-}
-
-type sendSignalAndWaitRecorder struct {
-	stubHostHandler
-	targetRunID string
-	signalName  string
-	payload     string
-	timeoutMs   int64
-}
-
-func (h *sendSignalAndWaitRecorder) SendSignalAndWait(_ context.Context, _ api.Module, targetRunID, signalName, payload string, timeoutMs int64, _, _ uint32) int64 {
-	h.targetRunID = targetRunID
-	h.signalName = signalName
-	h.payload = payload
-	h.timeoutMs = timeoutMs
 	return 0
 }
 
@@ -1821,46 +1684,6 @@ func TestHostFunc_CleatSignalWorkflow(t *testing.T) {
 	}
 }
 
-func TestHostFunc_CleatSendSignalAndWait(t *testing.T) {
-	handler := &sendSignalAndWaitRecorder{}
-	params := []byte{wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI32, wasmI64, wasmI32, wasmI32}
-	h := newTestHostFuncHarness(t, "cleat_send_signal_and_wait", params, []byte{wasmI64}, true, handler)
-
-	targetRunID := "target-wf-002"
-	signalName := "payment_received"
-	payload := `{"amount":99.99}`
-	timeoutMs := int64(15000)
-	if !h.mem.Write(0, []byte(targetRunID)) {
-		t.Fatal("write targetRunID to memory failed")
-	}
-	if !h.mem.Write(256, []byte(signalName)) {
-		t.Fatal("write signalName to memory failed")
-	}
-	if !h.mem.Write(512, []byte(payload)) {
-		t.Fatal("write payload to memory failed")
-	}
-
-	result, err := h.call(0, uint64(len(targetRunID)), 256, uint64(len(signalName)), 512, uint64(len(payload)), uint64(timeoutMs), 768, 4096)
-	if err != nil {
-		t.Fatalf("call cleat_send_signal_and_wait: %v", err)
-	}
-	if result == errBadParam {
-		t.Error("got errBadParam")
-	}
-	if handler.targetRunID != targetRunID {
-		t.Errorf("targetRunID = %q, want %q", handler.targetRunID, targetRunID)
-	}
-	if handler.signalName != signalName {
-		t.Errorf("signalName = %q, want %q", handler.signalName, signalName)
-	}
-	if handler.payload != payload {
-		t.Errorf("payload = %q, want %q", handler.payload, payload)
-	}
-	if handler.timeoutMs != timeoutMs {
-		t.Errorf("timeoutMs = %d, want %d", handler.timeoutMs, timeoutMs)
-	}
-}
-
 func TestHostFunc_CleatAcquireLock(t *testing.T) {
 	handler := &acquireLockRecorder{}
 	params := []byte{wasmI32, wasmI32, wasmI64}
@@ -1975,3 +1798,11 @@ func TestHostFunc_CleatAwaitAllChildren(t *testing.T) {
 		t.Errorf("runIDsJSON = %q, want %q", handler.runIDsJSON, runIDsJSON)
 	}
 }
+
+// SetDeferPhase satisfies HostHandler. The flag it would set is only read when
+// events are recorded, which these mocks do not do.
+func (h *stubHostHandler) SetDeferPhase(_ context.Context, _ bool) int64 { return 0 }
+
+// SetDeferPhase satisfies HostHandler. The flag it would set is only read when
+// events are recorded, which these mocks do not do.
+func (h *deferRecorder) SetDeferPhase(_ context.Context, _ bool) int64 { return 0 }

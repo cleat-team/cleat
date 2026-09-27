@@ -12,6 +12,7 @@ import (
 	"math"
 	"math/big"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -47,36 +48,46 @@ func (s *MySQLStore) CreatePromise(ctx context.Context, workflowID, promiseName,
 // ResolvePromise marks a promise as resolved with the given result.
 // Also wakes the workflow instance so it can pick up the resolved promise
 // on the next poll cycle instead of waiting for the original timeout.
-func (s *MySQLStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *MySQLStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_promises SET status = ?, result = ?, resolved_at = NOW(6)
-		WHERE workflow_id = ? AND promise_id = ? AND tenant_id = ?
-	`, "resolved", result, workflowID, promiseID, s.tenantID)
+		WHERE promise_id = ? AND tenant_id = ?
+	`, "resolved", result, promiseID, s.tenantID)
 	if err != nil {
 		return err
 	}
+	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
+		return fmt.Errorf("resolve promise %s: %w", promiseID, ErrPromiseNotFound)
+	}
 	_, _ = s.db.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = NOW(6)
-		WHERE id = ? AND status = 'ready' AND tenant_id = ?
-	`, workflowID, s.tenantID)
+		WHERE id = (SELECT workflow_id FROM workflow_promises
+		            WHERE promise_id = ? AND tenant_id = ?)
+		  AND status = 'ready' AND tenant_id = ?
+	`, promiseID, s.tenantID, s.tenantID)
 	return nil
 }
 
 // RejectPromise marks a promise as rejected with the given error message.
 // Also wakes the workflow instance so it can pick up the rejected promise
 // on the next poll cycle instead of waiting for the original timeout.
-func (s *MySQLStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *MySQLStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_promises SET status = ?, error_msg = ?, resolved_at = NOW(6)
-		WHERE workflow_id = ? AND promise_id = ? AND tenant_id = ?
-	`, "rejected", errMsg, workflowID, promiseID, s.tenantID)
+		WHERE promise_id = ? AND tenant_id = ?
+	`, "rejected", errMsg, promiseID, s.tenantID)
 	if err != nil {
 		return err
 	}
+	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
+		return fmt.Errorf("reject promise %s: %w", promiseID, ErrPromiseNotFound)
+	}
 	_, _ = s.db.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = NOW(6)
-		WHERE id = ? AND status = 'ready' AND tenant_id = ?
-	`, workflowID, s.tenantID)
+		WHERE id = (SELECT workflow_id FROM workflow_promises
+		            WHERE promise_id = ? AND tenant_id = ?)
+		  AND status = 'ready' AND tenant_id = ?
+	`, promiseID, s.tenantID, s.tenantID)
 	return nil
 }
 
@@ -135,26 +146,53 @@ func (s *MySQLStore) ListPromises(ctx context.Context, workflowID string) ([]Pro
 
 // CreateUpdateRequest registers an incoming update request for a workflow.
 func (s *MySQLStore) CreateUpdateRequest(ctx context.Context, workflowID, updateName, payload, promiseID string) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT IGNORE INTO workflow_update_requests (workflow_id, update_name, payload, promise_id, status)
-		VALUES (?, ?, ?, ?, 'pending')
-	`, workflowID, updateName, encodeJSONPayload(payload), promiseID)
+	requestID, err := newUpdateRequestID()
+	if err != nil {
+		return err
+	}
+
+	// A plain INSERT, not INSERT IGNORE. Under cleat#1416's key there is no
+	// uniqueness left for a duplicate name to violate, but IGNORE would still
+	// be wrong here for the reason cleat#1330 found it wrong: it swallows a row
+	// the caller was told was recorded. IGNORE discarded the row, the result
+	// was discarded too, so RowsAffected == 0 was invisible and this returned
+	// nil -- the handler then answered 202 with a promise id for a request that
+	// did not exist, and the caller held a promise nothing could settle.
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, payload, promise_id, status, tenant_id)
+		VALUES (?, ?, ?, ?, ?, 'pending', ?)
+	`, workflowID, requestID, updateName, encodeJSONPayload(payload), promiseID, s.tenantID)
+	if err != nil {
+		return err
+	}
+
+	// Wake the workflow, exactly as DeliverSignal does.
+	//
+	// Not optional: an update is delivered at a DISPATCH POINT in the guest,
+	// and a suspended workflow reaches no dispatch point. Without this the
+	// request sits pending until something else happens to wake the workflow --
+	// which for a workflow waiting on a signal or a long sleep may be never.
+	_, err = s.db.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET next_wake_at = NOW(6)
+		WHERE id = ? AND tenant_id = ? AND status IN ('ready', 'suspended')
+	`, workflowID, s.tenantID)
 	return err
 }
 
 // GetPendingUpdateRequests returns all pending (not yet dispatched) update requests.
 func (s *MySQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT workflow_id, update_name, CAST(payload AS CHAR),
+		SELECT workflow_id, COALESCE(request_id, update_name), update_name, CAST(payload AS CHAR),
 		       COALESCE(promise_id, ''),
 		       status,
 		       COALESCE(CAST(result AS CHAR), ''),
 		       COALESCE(error_msg, ''),
 		       created_at
 		FROM workflow_update_requests
-		WHERE workflow_id = ? AND status = 'pending'
+		WHERE workflow_id = ? AND status = 'pending' AND tenant_id = ?
 		ORDER BY created_at
-	`, workflowID)
+	`, workflowID, s.tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -163,7 +201,7 @@ func (s *MySQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID st
 	var requests []UpdateRequestInfo
 	for rows.Next() {
 		var r UpdateRequestInfo
-		if err := rows.Scan(&r.WorkflowID, &r.UpdateName, &r.Payload,
+		if err := rows.Scan(&r.WorkflowID, &r.RequestID, &r.UpdateName, &r.Payload,
 			&r.PromiseID, &r.Status, &r.Result, &r.ErrorMsg, &r.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -180,12 +218,12 @@ func (s *MySQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID st
 }
 
 // CompleteUpdateRequest marks an update request as completed with a result or error.
-func (s *MySQLStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (s *MySQLStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_update_requests
 		SET status = 'completed', result = ?, error_msg = ?, completed_at = NOW(6)
-		WHERE workflow_id = ? AND update_name = ? AND status = 'pending'
-	`, result, errMsg, workflowID, updateName)
+		WHERE workflow_id = ? AND request_id = ? AND status = 'pending' AND tenant_id = ?
+	`, jsonOrNull(result), errMsg, workflowID, requestID, s.tenantID)
 	return err
 }
 
@@ -216,9 +254,9 @@ func (s *MySQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 		return false, fmt.Errorf("AcquireConcurrencyKey: cleanup expired: %w", err)
 	}
 
-	// Step 2: try to insert. If the key_hash already exists (held by another
-	// workflow with a still-valid expiry), INSERT IGNORE is a silent no-op.
-	_, err = s.db.ExecContext(ctx, `
+	// Step 2: try to insert. If the key_hash already exists -- held by anyone,
+	// including this same workflow -- INSERT IGNORE is a silent no-op.
+	res, err := s.db.ExecContext(ctx, `
 		INSERT IGNORE INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
 		VALUES (?, ?, ?, DATE_ADD(NOW(6), INTERVAL ? MICROSECOND), ?)
 	`, keyHash, key, workflowID, ttlMicros, s.tenantID)
@@ -226,45 +264,96 @@ func (s *MySQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID 
 		return false, fmt.Errorf("AcquireConcurrencyKey: %w", err)
 	}
 
-	// Step 3: check who owns the key now (tenant-scoped).
-	var ownerID string
-	err = s.db.QueryRowContext(ctx, `
-		SELECT workflow_id FROM concurrency_keys WHERE key_hash = ? AND tenant_id = ?
-	`, keyHash, s.tenantID).Scan(&ownerID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+	// The answer is "did *this call* take the key", which is exactly what the
+	// insert reports. It used to be "who owns the key now", read back with a
+	// SELECT and compared to workflowID -- so a workflow re-acquiring a key it
+	// already held was told true here and false on PostgreSQL and SQL Server,
+	// where the insert is likewise a no-op and nothing is returned.
+	//
+	// Never re-entrant is the contract, and not merely because two dialects
+	// already had it: ReleaseConcurrencyKey takes only the key and deletes the
+	// row unconditionally, with no hold count anywhere. Under the old answer,
+	// acquire(k); acquire(k); release(k) left the key free while the workflow
+	// still believed it held it -- the failure mode a mutual-exclusion
+	// primitive exists to prevent. IMPROVEMENT-PLAN 3.39.
+	inserted, err := res.RowsAffected()
 	if err != nil {
-		return false, fmt.Errorf("AcquireConcurrencyKey: verify: %w", err)
+		return false, fmt.Errorf("AcquireConcurrencyKey: rows affected: %w", err)
 	}
-
-	return ownerID == workflowID, nil
+	return inserted == 1, nil
 }
 
 // ReleaseConcurrencyKey releases a specific concurrency key.
-func (s *MySQLStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (s *MySQLStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
 	hash := sha256.Sum256([]byte(key))
 	keyHash := hash[:]
-	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM concurrency_keys WHERE key_hash = ? AND tenant_id = ?
-	`, keyHash, s.tenantID)
+	// workflow_id, not just tenant_id -- see PostgresStore.ReleaseConcurrencyKey
+	// and cleat#1188. All three dialects carried the same omission.
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM concurrency_keys WHERE key_hash = ? AND workflow_id = ? AND tenant_id = ?
+	`, keyHash, workflowID, s.tenantID)
 	if err != nil {
-		return fmt.Errorf("ReleaseConcurrencyKey: %w", err)
+		return false, fmt.Errorf("ReleaseConcurrencyKey: %w", err)
 	}
-	return nil
+	n, _ := res.RowsAffected()
+	return n > 0, nil
 }
 
-// ReapExpiredConcurrencyKeys deletes all expired concurrency keys
-// for the current tenant. Returns the number of keys deleted.
+// ReapExpiredConcurrencyKeys deletes every concurrency key and queue holder
+// whose run is no longer live for the current tenant, plus every expired
+// queue rate token. Returns the number of rows deleted (keys plus queue
+// holders plus queue rate tokens).
+//
+// cleat#1965: a row is freed the moment its run goes terminal -- or is
+// missing outright, e.g. pruned by retention after a failed release -- not
+// on a fixed clock. `expires_at < NOW(6)` is kept as a backstop alongside the
+// run-state check, for whatever that join misses; see claimedKeyTTL's own
+// comment for why it no longer decides validity on its own.
 func (s *MySQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, error) {
 	result, err := s.db.ExecContext(ctx, `
-		DELETE FROM concurrency_keys WHERE expires_at < NOW(6) AND tenant_id = ?
+		DELETE FROM concurrency_keys ck
+		WHERE ck.tenant_id = ?
+		  AND (
+		    ck.expires_at < NOW(6)
+		    OR NOT EXISTS (SELECT 1 FROM workflow_instances wi
+		                     WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
+		                       AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
+		  )
 	`, s.tenantID)
 	if err != nil {
 		return 0, fmt.Errorf("ReapExpiredConcurrencyKeys: %w", err)
 	}
 	n, _ := result.RowsAffected()
-	return n, nil
+
+	// A worker that dies holding a registered-queue claim, or whose release
+	// failed, leaves a queue_holders row behind; the same run-state rule frees
+	// it, with the same time-based backstop.
+	hresult, err := s.db.ExecContext(ctx, `
+		DELETE FROM queue_holders qh
+		WHERE qh.tenant_id = ?
+		  AND (
+		    qh.expires_at < NOW(6)
+		    OR NOT EXISTS (SELECT 1 FROM workflow_instances wi
+		                     WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
+		                       AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
+		  )
+	`, s.tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("ReapExpiredConcurrencyKeys: queue holders: %w", err)
+	}
+	hn, _ := hresult.RowsAffected()
+
+	// cleat#1918. A rate token outlives its own usefulness the moment its
+	// window closes; reaped for the same reason concurrency_keys and
+	// queue_holders are above.
+	rresult, err := s.db.ExecContext(ctx, `
+		DELETE FROM queue_rate_tokens WHERE expires_at < NOW(6) AND tenant_id = ?
+	`, s.tenantID)
+	if err != nil {
+		return 0, fmt.Errorf("ReapExpiredConcurrencyKeys: queue rate tokens: %w", err)
+	}
+	rn, _ := rresult.RowsAffected()
+	return n + hn + rn, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -273,22 +362,69 @@ func (s *MySQLStore) ReapExpiredConcurrencyKeys(ctx context.Context) (int64, err
 
 // CreateSchedule inserts a new cron schedule.
 func (s *MySQLStore) CreateSchedule(ctx context.Context, sch Schedule) error {
+	if err := sch.ValidateForCreate(); err != nil {
+		return err
+	}
+	digest := scheduleRequestDigest(sch)
+
+	// See PostgresStore.CreateSchedule for why the key is looked up before the
+	// insert rather than only on the way out of a conflict.
+	if sch.IdempotencyKey != "" {
+		stored, found, lerr := s.lookupScheduleKey(ctx, sch.IdempotencyKey)
+		if lerr != nil {
+			return fmt.Errorf("CreateSchedule: read idempotency key: %w", lerr)
+		}
+		if found {
+			return scheduleIdempotencyVerdict(stored, digest)
+		}
+	}
+
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, enabled, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, sch.Input, sch.Enabled, sch.NextRunAt, s.tenantID,
+		INSERT INTO workflow_schedules (name, def_name, entry_point, cron_expression, input, disabled_at, next_run_at, tenant_id, timezone, misfire_policy, catch_up_limit, overlap_policy, idempotency_key, request_digest)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, sch.Name, sch.DefName, sch.EntryPoint, sch.CronExpression, scheduleInputOrDefault(sch.Input), sch.DisabledAt, sch.NextRunAt, s.tenantID,
 		scheduleTimezoneOrDefault(sch.Timezone), MisfirePolicyOrDefault(sch.MisfirePolicy),
-		CatchUpLimitOrDefault(sch.CatchUpLimit), OverlapPolicyOrDefault(sch.OverlapPolicy))
+		CatchUpLimitOrDefault(sch.CatchUpLimit), OverlapPolicyOrDefault(sch.OverlapPolicy),
+		nullableScheduleKey(sch.IdempotencyKey), digest)
 	if err != nil {
+		// Two unique constraints now: the name is the PRIMARY KEY and the key
+		// has its own index. Detected typed, via isDuplicateKeyError, and then
+		// told apart by ASKING whether the key is held -- not by reading the
+		// index name out of the driver's message, which is dialect-specific
+		// text and the one thing a machine-readable error exists to avoid.
+		//
+		// No savepoint here, unlike PostgreSQL: this path runs outside a
+		// transaction, so the failed INSERT leaves the connection usable.
+		if isDuplicateKeyError(err) {
+			if sch.IdempotencyKey != "" {
+				if stored, found, lerr := s.lookupScheduleKey(ctx, sch.IdempotencyKey); lerr == nil && found {
+					return scheduleIdempotencyVerdict(stored, digest)
+				}
+			}
+			return fmt.Errorf("%w: %s", ErrScheduleExists, sch.Name)
+		}
 		return fmt.Errorf("CreateSchedule: %w", err)
 	}
 	return nil
 }
 
+// lookupScheduleKey reports the stored input digest for a key this tenant holds.
+func (s *MySQLStore) lookupScheduleKey(ctx context.Context, key string) (sql.NullString, bool, error) {
+	var stored sql.NullString
+	err := s.db.QueryRowContext(ctx, `
+		SELECT request_digest FROM workflow_schedules
+		WHERE tenant_id = ? AND idempotency_key = ?
+	`, s.tenantID, key).Scan(&stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return stored, false, nil
+	}
+	return stored, err == nil, err
+}
+
 // ListSchedules returns all registered schedules for the current tenant.
 func (s *MySQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, COALESCE(last_run_id, '')
+		SELECT name, def_name, entry_point, cron_expression, input, disabled_at, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, COALESCE(last_run_id, '')
 		FROM workflow_schedules
 		WHERE tenant_id = ?
 		ORDER BY name
@@ -303,7 +439,7 @@ func (s *MySQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 		var sch Schedule
 		var lastRunAt sql.NullTime
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
+			&sch.Input, &sch.DisabledAt, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
 			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
 			return nil, fmt.Errorf("ListSchedules: scan: %w", err)
 		}
@@ -317,6 +453,16 @@ func (s *MySQLStore) ListSchedules(ctx context.Context) ([]Schedule, error) {
 
 // DeleteSchedule removes a schedule by name.
 func (s *MySQLStore) DeleteSchedule(ctx context.Context, name string) error {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM workflow_schedules WHERE name = ? AND tenant_id = ?
+	`, name, s.tenantID).Scan(&n); err != nil {
+		return fmt.Errorf("DeleteSchedule: %w", err)
+	}
+	if n == 0 {
+		return ErrScheduleNotFound
+	}
+
 	_, err := s.db.ExecContext(ctx, `
 		DELETE FROM workflow_schedules WHERE name = ? AND tenant_id = ?
 	`, name, s.tenantID)
@@ -328,8 +474,24 @@ func (s *MySQLStore) DeleteSchedule(ctx context.Context, name string) error {
 
 // SetScheduleEnabled enables or disables a schedule.
 func (s *MySQLStore) SetScheduleEnabled(ctx context.Context, name string, enabled bool) error {
+	// NOT RowsAffected: on MySQL an UPDATE setting a column to the value it
+	// already holds reports 0 affected rows without CLIENT_FOUND_ROWS, which
+	// cleat does not set -- so that reading would 404 an idempotent
+	// re-disable on this dialect alone. cleat#1297.
+	var n int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT count(*) FROM workflow_schedules WHERE name = ? AND tenant_id = ?
+	`, name, s.tenantID).Scan(&n); err != nil {
+		return fmt.Errorf("SetScheduleEnabled: %w", err)
+	}
+	if n == 0 {
+		return ErrScheduleNotFound
+	}
+
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_schedules SET enabled = ? WHERE name = ? AND tenant_id = ?
+		UPDATE workflow_schedules
+		   SET disabled_at = CASE WHEN ? THEN NULL ELSE COALESCE(disabled_at, NOW(6)) END
+		 WHERE name = ? AND tenant_id = ?
 	`, enabled, name, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("SetScheduleEnabled: %w", err)
@@ -337,12 +499,12 @@ func (s *MySQLStore) SetScheduleEnabled(ctx context.Context, name string, enable
 	return nil
 }
 
-// GetDueSchedules returns enabled schedules whose next_run_at <= NOW(6).
+// GetDueSchedules returns live schedules whose next_run_at <= NOW(6).
 func (s *MySQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, COALESCE(last_run_id, '')
+		SELECT name, def_name, entry_point, cron_expression, input, disabled_at, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, COALESCE(last_run_id, '')
 		FROM workflow_schedules
-		WHERE enabled = 1 AND next_run_at <= NOW(6) AND tenant_id = ?
+		WHERE disabled_at IS NULL AND next_run_at <= NOW(6) AND tenant_id = ?
 		FOR UPDATE SKIP LOCKED
 	`, s.tenantID)
 	if err != nil {
@@ -355,7 +517,7 @@ func (s *MySQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 		var sch Schedule
 		var lastRunAt sql.NullTime
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
+			&sch.Input, &sch.DisabledAt, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
 			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
 			return nil, fmt.Errorf("GetDueSchedules: scan: %w", err)
 		}
@@ -365,17 +527,6 @@ func (s *MySQLStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 		schedules = append(schedules, sch)
 	}
 	return schedules, rows.Err()
-}
-
-// UpdateScheduleNextRun updates a schedule's next_run_at after firing.
-func (s *MySQLStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	_, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_schedules SET next_run_at = ?, last_run_at = NOW(6) WHERE name = ? AND tenant_id = ?
-	`, nextRun, name, s.tenantID)
-	if err != nil {
-		return fmt.Errorf("UpdateScheduleNextRun: %w", err)
-	}
-	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -393,8 +544,15 @@ func (s *MySQLStore) GetCompactionCandidates(ctx context.Context, threshold int,
 			FROM event_history
 			GROUP BY workflow_id
 		) e ON w.id = e.workflow_id
-		WHERE e.cnt > ?
-		  AND (w.compaction_step IS NULL OR w.compaction_step < e.cnt - ?)
+		-- LEFT, not INNER: see the PostgreSQL half in engine/db.go. A missing
+		-- definition row must fall through to the global threshold rather than
+		-- removing the workflow from compaction.
+		LEFT JOIN workflow_defs d
+		       ON d.name = w.def_name AND d.version = w.def_version
+		      AND d.tenant_id = w.tenant_id
+		WHERE e.cnt > COALESCE(NULLIF(d.max_history_length, 0), ?)
+		  AND (w.compaction_step IS NULL
+		       OR w.compaction_step < e.cnt - COALESCE(NULLIF(d.max_history_length, 0), ?))
 		  AND w.tenant_id = ?
 		ORDER BY e.cnt DESC
 		LIMIT ?
@@ -494,44 +652,8 @@ func (s *MySQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	)
 	qb.AddArgs(s.tenantID)
 
-	if filter.Status != "" {
-		qb.AddCondition("status = %s", filter.Status)
-	}
-	if filter.InputContains != "" {
-		qb.AddLikeCondition(d.castExpr("input"), "%"+filter.InputContains+"%", true)
-	}
-	if filter.ErrorContains != "" {
-		qb.AddLikeCondition("error_msg", "%"+filter.ErrorContains+"%", true)
-	}
-	if filter.Search != "" {
-		pattern := "%" + filter.Search + "%"
-		icol := d.castExpr("input")
-		rcol := d.castExpr("result")
-		n := qb.NextPos()
-		qb.AddRaw(fmt.Sprintf("AND (%s OR %s OR %s OR %s)",
-			d.likeExpr(icol, n, true),
-			d.likeExpr(rcol, n+1, true),
-			d.likeExpr("error_msg", n+2, true),
-			d.likeExpr("def_name", n+3, true)))
-		qb.AddArgs(pattern, pattern, pattern, pattern)
-	}
-
-	qb.AddRaw("ORDER BY created_at DESC")
-
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = 100
-	} else if limit > 1000 {
-		limit = 1000
-	}
-
-	if filter.Offset > 0 {
-		qb.AddRaw(d.limitOffset(qb.NextPos(), qb.NextPos()+1, true))
-		qb.AddArgs(limit, filter.Offset)
-	} else {
-		qb.AddRaw(d.limitOffset(qb.NextPos(), 0, false))
-		qb.AddArgs(limit)
-	}
+	applyWorkflowFilters(qb, d, filter)
+	applyWorkflowListPaging(qb, d, filter)
 
 	query, args := qb.SQL()
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -554,23 +676,29 @@ func (s *MySQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 // GetWorkflowByID returns a single workflow instance by ID.
 func (s *MySQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) {
 	var wf WorkflowInstance
-	var nextWakeAt, heartbeatAt, completedAt sql.NullTime
+	var nextWakeAt, heartbeatAt, completedAt, startedAt sql.NullTime
 	var assignedTo, errorMsg sql.NullString
 	var result sql.NullString
 	var tenantID sql.NullString
 
 	var errorCode, errorOp sql.NullString
+	var continuedFrom, parentWorkflowID sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
-		       assigned_to, heartbeat_at, next_wake_at, completed_at,
+		       assigned_to, heartbeat_at, next_wake_at, completed_at, started_at,
 		       CAST(result AS CHAR), error_msg, error_code, error_op,
 		       generation, COALESCE(priority, 0) AS priority,
-		       COALESCE(trace_id, ''), tenant_id
+		       COALESCE(trace_id, ''), tenant_id, continued_from, reclaim_count, parent_workflow_id,
+		       created_at, COALESCE(pending_terminal_status, ''),
+		       COALESCE(cancellation_requested, false), COALESCE(cancellation_reason, ''),
+		       COALESCE(completed_by, '')
 		FROM workflow_instances WHERE id = ? AND tenant_id = ?
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
-		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg,
-		&errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID, &tenantID)
+		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &errorMsg,
+		&errorCode, &errorOp, &wf.Generation, &wf.Priority, &wf.TraceID, &tenantID, &continuedFrom, &wf.ReclaimCount, &parentWorkflowID,
+		&wf.CreatedAt, &wf.PendingTerminalStatus,
+		&wf.CancellationRequested, &wf.CancellationReason, &wf.CompletedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -584,8 +712,18 @@ func (s *MySQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	wf.ErrorCode = errorCode.String
 	wf.ErrorOp = errorOp.String
 	wf.TenantID = tenantID.String
+	wf.ContinuedFrom = continuedFrom.String
 	if nextWakeAt.Valid {
 		wf.NextWakeAt = nextWakeAt.Time
+	}
+	if completedAt.Valid {
+		wf.CompletedAt = &completedAt.Time
+	}
+	if startedAt.Valid {
+		wf.StartedAt = &startedAt.Time
+	}
+	if parentWorkflowID.Valid {
+		wf.ParentWorkflowID = &parentWorkflowID.String
 	}
 	return &wf, nil
 }
@@ -691,8 +829,18 @@ func (s *MySQLStore) TraceWorkflow(ctx context.Context, workflowID, traceID stri
 
 // DeployWorkflowDef inserts or updates a workflow definition.
 func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error {
-	pluginDepsJSON, _ := json.Marshal(def.PluginDeps)
-	if pluginDepsJSON == nil {
+	// json.Marshal of a nil map returns the four bytes "null", not nil, so the
+	// guard this replaced -- `if pluginDepsJSON == nil` -- could never fire and
+	// every workflow that declares no plugin dependencies stored the literal
+	// `null`. PostgreSQL JSONB and MySQL JSON both accept a bare JSON scalar, so
+	// nothing noticed; SQL Server's ISJSON does not (`ISJSON('null')` = 0),
+	// which is how the CHECK constraint in migrations/mssql/036 found it.
+	//
+	// An error is folded in for the same reason the default exists: the column
+	// is NOT NULL DEFAULT '{}' on all three dialects, so "no dependencies" has
+	// one spelling and it is not `null`.
+	pluginDepsJSON, err := json.Marshal(def.PluginDeps)
+	if err != nil || len(pluginDepsJSON) == 0 || string(pluginDepsJSON) == "null" {
 		pluginDepsJSON = []byte("{}")
 	}
 	// Refuse to deploy over a definition owned by another tenant.
@@ -712,32 +860,20 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	}
 	defer tx.Rollback()
 
-	var owner sql.NullString
-	err = tx.QueryRowContext(ctx,
-		`SELECT tenant_id FROM workflow_defs WHERE name = ? AND version = ? FOR UPDATE`,
-		def.Name, def.Version).Scan(&owner)
-	switch {
-	case err == nil:
-		if !canAdoptDef(owner.String, s.tenantID) {
-			return defOwnershipError(def.Name, def.Version)
-		}
-	case errors.Is(err, sql.ErrNoRows):
-		// Does not exist yet; the insert below creates it.
-	default:
-		return fmt.Errorf("DeployWorkflowDef: read owner: %w", err)
-	}
-
+	// No ownership check: under (tenant_id, name, version) another tenant's
+	// definition of the same name is a different row. IMPROVEMENT-PLAN 3.77.
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, disabled_at, gc_eligible, tenant_id, max_history_length)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			wasm_bytes = VALUES(wasm_bytes),
 			abi_version = VALUES(abi_version),
 			min_version = VALUES(min_version),
 			plugin_deps = VALUES(plugin_deps),
-			deprecated = VALUES(deprecated),
-			tenant_id = VALUES(tenant_id)
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, s.tenantID)
+			disabled_at = VALUES(disabled_at),
+			gc_eligible = VALUES(gc_eligible),
+			max_history_length = VALUES(max_history_length)
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.DisabledAt, def.GCEligible, s.tenantID, def.MaxHistoryLength)
 	if err != nil {
 		return fmt.Errorf("DeployWorkflowDef: %w", err)
 	}
@@ -751,13 +887,13 @@ func (s *MySQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 	var err error
 	if name == "" {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, deprecated
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
 			FROM workflow_defs WHERE tenant_id = ?
 			ORDER BY name, version DESC
 		`, s.tenantID)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, deprecated
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
 			FROM workflow_defs WHERE name = ? AND tenant_id = ?
 			ORDER BY version DESC
 		`, name, s.tenantID)
@@ -773,12 +909,12 @@ func (s *MySQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 		var pluginDepsRaw []byte
 		var createdAt time.Time
 		if err := rows.Scan(&def.Name, &def.Version, &def.ABIVersion, &def.MinVersion,
-			&pluginDepsRaw, &createdAt, &def.Deprecated); err != nil {
+			&pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible); err != nil {
 			return nil, fmt.Errorf("ListWorkflowDefs: scan: %w", err)
 		}
 		def.CreatedAt = createdAt
 		if len(pluginDepsRaw) > 0 {
-			json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
+			def.PluginDeps = decodePluginDeps(s.log(), pluginDepsRaw, def.Name, def.Version)
 		}
 		if def.PluginDeps == nil {
 			def.PluginDeps = make(map[string]string)
@@ -795,10 +931,10 @@ func (s *MySQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 	var wasmBytes []byte
 	var createdAt time.Time
 	err := s.db.QueryRowContext(ctx, `
-		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, deprecated
+		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
 		FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?
 	`, name, version, s.tenantID).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
-		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.Deprecated)
+		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -808,7 +944,7 @@ func (s *MySQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 	def.WASMBytes = wasmBytes
 	def.CreatedAt = createdAt
 	if len(pluginDepsRaw) > 0 {
-		json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
+		def.PluginDeps = decodePluginDeps(s.log(), pluginDepsRaw, name, version)
 	}
 	if def.PluginDeps == nil {
 		def.PluginDeps = make(map[string]string)
@@ -816,11 +952,23 @@ func (s *MySQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 	return &def, nil
 }
 
-// MarkVersionDeprecated sets the deprecated flag on a workflow version.
+// MarkVersionDeprecated retires a workflow version, or restores it.
+//
+// Writes BOTH columns in one statement -- see the PostgresStore method for why
+// a partial write here would leave a version live and collectable, a state
+// neither column can express alone (cleat#1702).
+//
+// `deprecated` is passed TWICE because MySQL binds `?` by APPEARANCE, not by
+// number: the CASE and the gc_eligible assignment are two placeholders and each
+// needs its own argument in textual order. Getting that wrong binds correctly
+// on the other two dialects and silently swaps values here.
 func (s *MySQLStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_defs SET deprecated = ? WHERE name = ? AND version = ? AND tenant_id = ?
-	`, deprecated, name, version, s.tenantID)
+		UPDATE workflow_defs
+		   SET disabled_at = CASE WHEN ? THEN COALESCE(disabled_at, NOW(6)) ELSE NULL END,
+		       gc_eligible = ?
+		 WHERE name = ? AND version = ? AND tenant_id = ?
+	`, deprecated, deprecated, name, version, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("MarkVersionDeprecated: %w", err)
 	}
@@ -858,7 +1006,7 @@ func (s *MySQLStore) ResolveLatestVersion(ctx context.Context, defName string) (
 	var version int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(version), 0) FROM workflow_defs
-		WHERE name = ? AND NOT deprecated AND tenant_id = ?
+		WHERE name = ? AND disabled_at IS NULL AND tenant_id = ?
 	`, defName, s.tenantID).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("ResolveLatestVersion: %w", err)
@@ -871,7 +1019,7 @@ func (s *MySQLStore) ValidateVersion(ctx context.Context, defName string, defVer
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_defs
-		WHERE name = ? AND version = ? AND NOT deprecated AND tenant_id = ?
+		WHERE name = ? AND version = ? AND disabled_at IS NULL AND tenant_id = ?
 	`, defName, defVersion, s.tenantID).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("ValidateVersion: %w", err)
@@ -923,20 +1071,20 @@ func (s *MySQLStore) RecordWorkflowMemorySample(ctx context.Context, defName str
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO workflow_memory_samples (def_name, sample_bytes) VALUES (?, ?)`,
-		defName, sampleBytes)
+		`INSERT INTO workflow_memory_samples (def_name, sample_bytes, tenant_id) VALUES (?, ?, ?)`,
+		defName, sampleBytes, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("RecordWorkflowMemorySample: insert: %w", err)
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_memory_stats (def_name, mean_bytes, sample_count, updated_at)
-		VALUES (?, ?, 1, NOW(6))
+		INSERT INTO workflow_memory_stats (def_name, mean_bytes, sample_count, updated_at, tenant_id)
+		VALUES (?, ?, 1, NOW(6), ?)
 		ON DUPLICATE KEY UPDATE
 			mean_bytes   = (alpha * VALUES(mean_bytes) + (1 - alpha) * mean_bytes),
 			sample_count = sample_count + 1,
 			updated_at   = NOW(6)
-	`, defName, float64(sampleBytes))
+	`, defName, float64(sampleBytes), s.tenantID)
 	if err != nil {
 		return fmt.Errorf("RecordWorkflowMemorySample: upsert: %w", err)
 	}
@@ -947,7 +1095,7 @@ func (s *MySQLStore) RecordWorkflowMemorySample(ctx context.Context, defName str
 // LoadMemoryEstimates returns EWMA mean bytes for all def_names.
 func (s *MySQLStore) LoadMemoryEstimates(ctx context.Context) (map[string]float64, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT def_name, mean_bytes FROM workflow_memory_stats`)
+		`SELECT def_name, mean_bytes FROM workflow_memory_stats WHERE tenant_id = ?`, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("LoadMemoryEstimates: %w", err)
 	}
@@ -971,8 +1119,9 @@ func (s *MySQLStore) LoadMemoryStats(ctx context.Context) ([]WorkflowMemoryStats
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT def_name, sample_bytes
 		FROM workflow_memory_samples
+		WHERE tenant_id = ?
 		ORDER BY def_name, sample_bytes
-	`)
+	`, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("LoadMemoryStats: %w", err)
 	}
@@ -1071,7 +1220,7 @@ func (s *MySQLStore) QueueDepth(ctx context.Context) (int64, error) {
 // CleanupMemorySamples deletes samples beyond maxSamplesPerDef per def_name.
 func (s *MySQLStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef int) (int64, error) {
 	defRows, err := s.db.QueryContext(ctx,
-		`SELECT DISTINCT def_name FROM workflow_memory_samples`)
+		`SELECT DISTINCT def_name FROM workflow_memory_samples WHERE tenant_id = ?`, s.tenantID)
 	if err != nil {
 		return 0, fmt.Errorf("CleanupMemorySamples: list: %w", err)
 	}
@@ -1094,15 +1243,17 @@ func (s *MySQLStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef 
 		result, err := s.db.ExecContext(ctx, `
 			DELETE FROM workflow_memory_samples
 			WHERE def_name = ?
+			  AND tenant_id = ?
 			  AND id NOT IN (
 			      SELECT id FROM (
 			          SELECT id FROM workflow_memory_samples
 			          WHERE def_name = ?
+			            AND tenant_id = ?
 			          ORDER BY recorded_at DESC
 			          LIMIT ?
 			      ) AS keep
 			  )
-		`, defName, defName, maxSamplesPerDef)
+		`, defName, s.tenantID, defName, s.tenantID, maxSamplesPerDef)
 		if err != nil {
 			return totalDeleted, fmt.Errorf("CleanupMemorySamples: delete %s: %w", defName, err)
 		}
@@ -1114,53 +1265,117 @@ func (s *MySQLStore) CleanupMemorySamples(ctx context.Context, maxSamplesPerDef 
 
 // DeleteExpiredEvents deletes event history rows for workflows that are in a
 // terminal state (completed/failed) and whose last update is older than the
-// cutoff time. It also cleans up associated compaction states.
+// cutoff time. It also marks history_swept_at on every workflow it actually
+// swept, so ReReplay's pending-intent guard (engine/admin_ops.go) can tell
+// "never attempted" from "swept, outcome unknown" -- see
+// PostgresStore.DeleteExpiredEvents in engine/db.go for the full cleat#2038
+// reasoning; this is the MySQL implementation of the same fix.
 // Returns the number of event rows deleted.
+//
+// MySQL's multi-table DELETE has no RETURNING, so the batch's workflow ids
+// are read first, in their own SELECT, rather than derived from the delete
+// itself -- unlike engine/db.go's RETURNING-based version, this is two
+// statements rather than one, matching this function's pre-existing choice
+// (like ClearExpiredCompactionState below) to run un-transacted rather than
+// wrap every batch in a BEGIN/COMMIT.
 func (s *MySQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
-		result, err := s.db.ExecContext(ctx, `
-			DELETE e FROM event_history e
-			INNER JOIN (
-				SELECT id FROM workflow_instances
-				WHERE status IN ('done', 'failed')
-				  AND completed_at IS NOT NULL
-				  AND completed_at < ?
-				  AND tenant_id = ?
-				ORDER BY completed_at
-				LIMIT 10000
-			) AS w ON e.workflow_id = w.id
+		idRows, err := s.db.QueryContext(ctx, `
+			SELECT id`+myExpiredEventsWorkflows+`
+			  AND tenant_id = ?
+			ORDER BY completed_at
+			LIMIT 10000
 		`, olderThan, s.tenantID)
 		if err != nil {
-			return totalDeleted, fmt.Errorf("DeleteExpiredEvents: %w", err)
+			return totalDeleted, fmt.Errorf("delete expired events: select batch: %w", err)
+		}
+		var ids []string
+		for idRows.Next() {
+			var id string
+			if err := idRows.Scan(&id); err != nil {
+				idRows.Close()
+				return totalDeleted, fmt.Errorf("delete expired events: scan: %w", err)
+			}
+			ids = append(ids, id)
+		}
+		if err := idRows.Err(); err != nil {
+			idRows.Close()
+			return totalDeleted, fmt.Errorf("delete expired events: rows: %w", err)
+		}
+		idRows.Close()
+		if len(ids) == 0 {
+			break
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
+		args := make([]any, len(ids))
+		for i, id := range ids {
+			args[i] = id
+		}
+
+		// cleat#2038: which of this batch's workflows actually have a
+		// residual event_history row, BEFORE deleting -- history_swept_at
+		// marks only those. A workflow the predicate matched but that
+		// already has empty history (nothing to sweep, e.g. a 'failed'
+		// workflow that never made a call) was never ambiguous, and
+		// marking it would refuse a re-replay that has no pending intent
+		// to refuse.
+		//nolint:gosec // G202: the only concatenated fragment is placeholders, built above from
+		// strings.Repeat("?,", len(ids)) -- it emits only "?" and nothing else. The ids
+		// themselves are bound as arguments, never interpolated.
+		sweptRows, err := s.db.QueryContext(ctx, `
+			SELECT DISTINCT workflow_id FROM event_history
+			WHERE workflow_id IN (`+placeholders+`)
+			AND tenant_id = ?
+		`, append(args, s.tenantID)...)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete expired events: select swept: %w", err)
+		}
+		var swept []string
+		for sweptRows.Next() {
+			var id string
+			if err := sweptRows.Scan(&id); err != nil {
+				sweptRows.Close()
+				return totalDeleted, fmt.Errorf("delete expired events: scan swept: %w", err)
+			}
+			swept = append(swept, id)
+		}
+		if err := sweptRows.Err(); err != nil {
+			sweptRows.Close()
+			return totalDeleted, fmt.Errorf("delete expired events: swept rows: %w", err)
+		}
+		sweptRows.Close()
+
+		//nolint:gosec // G202: as above -- placeholders only, ids bound as arguments.
+		result, err := s.db.ExecContext(ctx, `
+			DELETE FROM event_history
+			WHERE workflow_id IN (`+placeholders+`)
+			AND tenant_id = ?
+		`, append(args, s.tenantID)...)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("delete expired events: %w", err)
 		}
 		n, _ := result.RowsAffected()
 		totalDeleted += n
-		if n == 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 
-	// Also batch cleanup compaction states for those workflows.
-	for {
-		result, err := s.db.ExecContext(ctx, `
-			UPDATE workflow_instances w
-			INNER JOIN (
-				SELECT id FROM workflow_instances
-				WHERE status IN ('done', 'failed')
-				  AND completed_at IS NOT NULL
-				  AND completed_at < ?
-				  AND compaction_state IS NOT NULL
-				ORDER BY completed_at
-				LIMIT 10000
-			) AS subq ON w.id = subq.id
-			SET w.compaction_state = NULL, w.compaction_step = NULL, w.compacted_at = NULL
-		`, olderThan)
-		if err != nil {
-			break
+		if len(swept) > 0 {
+			sweptPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(swept)), ",")
+			sweptArgs := make([]any, len(swept))
+			for i, id := range swept {
+				sweptArgs[i] = id
+			}
+			//nolint:gosec // G202: the only concatenated fragment is sweptPlaceholders, built
+			// above from strings.Repeat("?,", len(swept)) -- "?" only, ids bound as arguments.
+			if _, err := s.db.ExecContext(ctx, `
+				UPDATE workflow_instances
+				SET history_swept_at = NOW(6)
+				WHERE id IN (`+sweptPlaceholders+`)
+				AND tenant_id = ?
+			`, append(sweptArgs, s.tenantID)...); err != nil {
+				return totalDeleted, fmt.Errorf("delete expired events: mark swept: %w", err)
+			}
 		}
-		n, _ := result.RowsAffected()
+
 		if n == 0 {
 			break
 		}
@@ -1170,37 +1385,238 @@ func (s *MySQLStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Tim
 	return totalDeleted, nil
 }
 
+// ClearExpiredCompactionState clears compaction bookkeeping -- compaction_state,
+// compaction_step, compacted_at -- on terminal workflows older than the cutoff.
+//
+// SPLIT OUT OF DeleteExpiredEvents, and the reason is a metric rather than
+// tidiness. It used to be a second loop inside that function whose RowsAffected
+// was discarded, so the sweep reported "deleted 0 rows" on runs where it had
+// done real work.
+//
+// THIS COMMENT USED TO SAY THE FIRST LOOP "CAN NEVER MATCH" -- that finalize
+// already purges those events -- citing cleat#1016. That was wrong about which
+// code path a 'failed' workflow takes: finalize_workflow_status purges a
+// 'done' workflow's events, not a 'failed' one's, and DeleteExpiredEvents is
+// what removes a 'failed' workflow's events, --retention-days days later.
+// See engine/db.go's PostgresStore.DeleteExpiredEvents doc comment and
+// engine/retention_predicates.go for the full correction, found via cleat#2038
+// while grounding cleat#1999's TLA+ model in source.
+//
+// Summing the two into one return was the obvious fix and the wrong one. They
+// are different tables, different operations and different units -- deleted
+// event_history rows against updated workflow_instances rows -- under a counter
+// documented as "expired event history rows deleted". A counter that silently
+// changes meaning is worse than one stuck at zero, because the zero is at least
+// honest. cleat#1024.
+func (s *MySQLStore) ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	var totalCleared int64
+	// Batched, so a large backlog does not hold one transaction open.
+	for {
+		result, err := s.db.ExecContext(ctx, `
+			UPDATE workflow_instances w
+			INNER JOIN (
+				SELECT id`+myExpiredCompactionState+`
+				  AND tenant_id = ?
+				ORDER BY completed_at
+				LIMIT 10000
+			) AS subq ON w.id = subq.id
+			SET w.compaction_state = NULL, w.compaction_step = NULL, w.compacted_at = NULL
+		`, olderThan, s.tenantID)
+		if err != nil {
+			break
+		}
+		n, _ := result.RowsAffected()
+		totalCleared += n
+		if n == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return totalCleared, nil
+}
+
 // TerminateWorkflow force-terminates a workflow, setting status to 'terminated'.
+// A terminate that matched no row does NOT cascade, and returns
+// ErrWorkflowNotFound rather than nil (3.92).
+//
+// This used to exec the UPDATE, ignore how many rows it touched, and run
+// enforceParentClosePolicy unconditionally afterwards. Once 3.86 put
+// `AND tenant_id` on the UPDATE, a cross-tenant terminate stopped matching the
+// parent -- and went on to close that parent's CHILDREN anyway, because the
+// close-policy statements key on parent_workflow_id. 3.92 scoped those too;
+// this is the root the predicates were the symptom-level twin of, and
+// adminForceResolve has always done it this way: check RowsAffected, return
+// not-found, never reach the cascade.
+//
+// ErrWorkflowNotFound deliberately does not distinguish "no such workflow" from
+// "another tenant's" -- see its doc comment. That is the same boundary 3.101
+// draws at the HTTP layer, and it is why this returns one error rather than two.
+//
+// SUPERSEDED 2026-09-22 (cleat#1975, D3): this used to say an already-terminated
+// workflow "still matches" and terminate "stays idempotent". It no longer does
+// -- see PostgresStore.TerminateWorkflow's doc comment.
+//
+// TERMINATE IS ASYNCHRONOUS WHEN THE WORKFLOW OWES CLEANUP (D6, and
+// IMPROVEMENT-PLAN 3.75 step 2) -- see PostgresStore.TerminateWorkflow for the
+// whole story. A workflow with registered defers goes to 'terminating' here,
+// carrying its outcome in pending_terminal_status, and is finalized by
+// FinalizeDeferPhase once its cleanup has run.
+// TerminateWorkflow force-terminates a workflow, recording 'terminated'.
 func (s *MySQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
-	_, err := s.db.ExecContext(ctx, `
+	return s.preemptivelySettle(ctx, workflowID, reason, statusTerminated)
+}
+
+// CancelWorkflow stops a workflow pre-emptively and records 'cancelled'.
+// cleat#1153. See the PostgresStore method for why this shares a body with
+// TerminateWorkflow rather than repeating the two-phase transition.
+func (s *MySQLStore) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
+	return s.preemptivelySettle(ctx, workflowID, reason, statusCancelled)
+}
+
+func (s *MySQLStore) preemptivelySettle(ctx context.Context, workflowID, reason, finalStatus string) error {
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return fmt.Errorf("%s workflow: begin: %w", finalStatus, err)
+	}
+	defer tx.Rollback()
+
+	// Does this workflow owe a defer phase? See deferPhaseOwed. FOR UPDATE
+	// holds the row for the UPDATE that follows, so the status this reads is
+	// the status that gets marked.
+	var curStatus string
+	var hasDefers, compacted bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT w.status,
+		       EXISTS(SELECT 1 FROM event_history e
+		              WHERE e.workflow_id = w.id AND e.event_type = 'defer'),
+		       w.compaction_state IS NOT NULL
+		FROM workflow_instances w
+		WHERE w.id = ? AND w.tenant_id = ?
+		FOR UPDATE
+	`, workflowID, s.tenantID).Scan(&curStatus, &hasDefers, &compacted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrWorkflowNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("%s workflow: read: %w", finalStatus, err)
+	}
+
+	// cleat#1975 (D3): settled is final. See PostgresStore's twin for the
+	// dead-letter exception.
+	if isSettledStatus(curStatus) && !(finalStatus == statusTerminated && curStatus == statusDeadLettered) {
+		return adminErrorf(ErrAdminStateConflict,
+			"workflow %s: already settled (status=%s); refusing to write %s over it",
+			workflowID, curStatus, finalStatus)
+	}
+
+	if deferPhaseOwed(curStatus, hasDefers, compacted) {
+		// Phase 1 of the two-phase transition: mark, do not finalize. See
+		// PostgresStore.TerminateWorkflow for why next_wake_at moves and why
+		// nothing is released here.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = ?,
+			    pending_terminal_status = ?,
+			    defer_phase_deadline = NOW(6) + INTERVAL ? SECOND,
+			    error_msg = ?,
+			    next_wake_at = NOW(6),
+			    assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = ? AND tenant_id = ?
+		`, statusTerminating, finalStatus, int(deferPhaseTimeout.Seconds()), reason, workflowID, s.tenantID); err != nil {
+			return fmt.Errorf("%s workflow: mark defer phase: %w", finalStatus, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("%s workflow commit: %w", finalStatus, err)
+		}
+		return nil
+	}
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'terminated',
+		SET status = ?,
 		    error_msg = ?,
 		    completed_at = NOW(),
-		    assigned_to = NULL,
-		    generation = generation + 1
+		    completed_by = assigned_to, assigned_to = NULL,
+		    generation = generation + 1,
+		    pending_terminal_status = NULL,
+		    defer_phase_deadline = NULL
 		WHERE id = ? AND tenant_id = ?
-	`, reason, workflowID, s.tenantID)
+	`, finalStatus, reason, workflowID, s.tenantID)
 	if err != nil {
-		return fmt.Errorf("terminate workflow: %w", err)
+		return fmt.Errorf("%s workflow: %w", finalStatus, err)
 	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("%s workflow: rows affected: %w", finalStatus, err)
+	}
+	if n == 0 {
+		return ErrWorkflowNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("%s workflow commit: %w", finalStatus, err)
+	}
+	// The other two dialects have always done this and MySQL never did.
+	//
+	// releaseWorkflowResources' contract names termination explicitly -- "every
+	// commit which takes a workflow out of the runnable set: completion,
+	// failure, termination, continue-as-new, and the admin actions" -- and
+	// PostgresStore.TerminateWorkflow and MSSQLStore's both call it after their
+	// commit. This one exec'd the UPDATE and returned.
+	//
+	// Bounded but real: concurrency_keys.expires_at is NOT NULL and the
+	// reaper deletes expired rows, so the slot was not leaked forever. It was
+	// held until the key's TTL, with every workflow queued on that key waiting
+	// out the window for nothing, on a tier-1 dialect, while postgres and mssql
+	// freed it at once.
+	releaseWorkflowResources(s.log(), s, workflowID)
+	// IMPROVEMENT-PLAN 3.79. Terminate is a terminal transition, and the close
+	// policy is what stops a closed parent leaving orphans behind. Every other
+	// terminal path enforces it -- FinalizeWorkflowSegment for done/failed, and
+	// adminForceResolve, which is an operator verb on an unclaimed workflow
+	// exactly like this one. This path did not, so terminating a parent left
+	// its TERMINATE children running while force-completing the same parent
+	// failed them, with nothing recording why the two differed.
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(finalStatus))
 	return nil
 }
 
 // DeleteDeadLetteredWorkflows permanently deletes dead-lettered workflow instances
-// whose completed_at is older than the cutoff. Child rows (event_history, signals,
-// promises, concurrency_keys, update_requests) are automatically deleted via
-// ON DELETE CASCADE.
+// whose completed_at is older than the cutoff. The five FK'd child rows
+// (event_history, signals, promises, concurrency_keys, update_requests) are
+// automatically deleted via ON DELETE CASCADE. idempotency_keys is not one of
+// them and is deleted explicitly below -- see cleat#1324.
 func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
+		// idempotency_keys has no FK to workflow_instances on any dialect, so
+		// nothing removes it when the instance goes. cleat#1255 fixed this in
+		// DeleteCompletedWorkflows below and left this method -- the sibling
+		// with the same shape -- behind (cleat#1324). The doc comment above was
+		// accurate about the five tables it named; idempotency_keys is simply
+		// outside the set it listed.
+		//
+		// The dead-letter case is the worse of the two: a dead-lettered run is
+		// precisely the one a caller has reason to retry, and a surviving key
+		// answers that retry `already_started` with a workflow_id that 404s.
+		//
+		// Deleted FIRST and by join, matching DeleteCompletedWorkflows: once the
+		// instance row is gone there is nothing left to select the key by.
+		if _, err := s.db.ExecContext(ctx, `
+			DELETE k FROM idempotency_keys k
+			INNER JOIN workflow_instances w ON w.id = k.workflow_id
+			WHERE w.status = 'dead_lettered'
+			  AND w.completed_at IS NOT NULL
+			  AND w.completed_at < ?
+			  AND w.tenant_id = ?
+			  AND k.tenant_id = ?
+		`, olderThan, s.tenantID, s.tenantID); err != nil {
+			return totalDeleted, fmt.Errorf("delete dead-lettered workflows: delete idempotency_keys: %w", err)
+		}
 		result, err := s.db.ExecContext(ctx, `
 			DELETE w FROM workflow_instances w
 			INNER JOIN (
-				SELECT id FROM workflow_instances
-				WHERE status = 'dead_lettered'
-				  AND completed_at IS NOT NULL
-				  AND completed_at < ?
+				SELECT id`+myDeadLetteredWorkflows+`
 				  AND tenant_id = ?
 				ORDER BY id
 				LIMIT 10000
@@ -1235,13 +1651,34 @@ func (s *MySQLStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan 
 func (s *MySQLStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	var totalDeleted int64
 	for {
+		// idempotency_keys has no FK to workflow_instances on any dialect, so
+		// nothing removes it when the instance goes (cleat#1255). It is deleted
+		// FIRST: a key that outlives its run still resolves, and answers a
+		// retry `already_started` with a workflow_id that 404s on every read
+		// path -- telling a client that did not hear the first response that
+		// its work is already running, when the run no longer exists.
+		//
+		// The five FK'd children (event_history, workflow_signals,
+		// workflow_promises, concurrency_keys, workflow_update_requests) are
+		// ON DELETE CASCADE in mysql/001_schema.sql and need nothing here;
+		// verified against a database built fresh from the migrations, because
+		// a long-lived one built before those constraints keeps the old shape
+		// under CREATE TABLE IF NOT EXISTS.
+		if _, err := s.db.ExecContext(ctx, `
+			DELETE k FROM idempotency_keys k
+			INNER JOIN workflow_instances w ON w.id = k.workflow_id
+			WHERE w.status IN ('done', 'failed', 'terminated', 'cancelled')
+			  AND w.completed_at IS NOT NULL
+			  AND w.completed_at < ?
+			  AND w.tenant_id = ?
+			  AND k.tenant_id = ?
+		`, olderThan, s.tenantID, s.tenantID); err != nil {
+			return totalDeleted, fmt.Errorf("delete completed workflows: delete idempotency_keys: %w", err)
+		}
 		result, err := s.db.ExecContext(ctx, `
 			DELETE w FROM workflow_instances w
 			INNER JOIN (
-				SELECT id FROM workflow_instances
-				WHERE status IN ('done', 'failed', 'terminated')
-				  AND completed_at IS NOT NULL
-				  AND completed_at < ?
+				SELECT id`+myCompletedWorkflows+`
 				  AND tenant_id = ?
 				ORDER BY id
 				LIMIT 10000
@@ -1260,18 +1697,55 @@ func (s *MySQLStore) DeleteCompletedWorkflows(ctx context.Context, olderThan tim
 	return totalDeleted, nil
 }
 
-// GetChildCount returns the number of active (non-terminal) child workflows
-// for the given parent workflow. Terminal statuses are excluded.
+// GetChildCount returns the number of ACTIVE child workflows for the given
+// parent -- the number engine/children.go compares against maxQuotaChildren
+// before allowing another child to be created.
+//
+// All four settled statuses are excluded, and 'terminated' was missing from
+// that list until cleat#1153 groundwork: a terminated child went on holding its
+// parent's quota permanently, so a parent that spawned and disposed of children
+// in a loop eventually could not spawn at all. All three dialects had the same
+// omission, independently hand-written.
+//
+// 'terminating' is deliberately NOT excluded. A child mid-shutdown is running
+// its defer phase and can still do work, so it should still occupy a quota
+// slot; it is released by the terminal write that follows. That is the "settled"
+// question rather than the "can no longer run guest code" question -- see
+// engine/status_vocabulary.go, which keeps the two apart, and
+// engine/one_definition_of_settled_test.go, which fails if this list drifts
+// from the canonical set again.
 func (s *MySQLStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_instances
-		WHERE parent_workflow_id = ? AND status NOT IN ('done', 'failed', 'dead_lettered') AND tenant_id = ?
+		WHERE parent_workflow_id = ? AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled') AND tenant_id = ?
 	`, parentWorkflowID, s.tenantID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("get child count for %s: %w", parentWorkflowID, err)
 	}
 	return count, nil
+}
+
+// OriginalChildRunIDs implements WorkflowStore. See the interface for why
+// continued runs are excluded.
+func (s *MySQLStore) OriginalChildRunIDs(ctx context.Context, parentWorkflowID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id FROM workflow_instances
+		WHERE parent_workflow_id = ? AND continued_from IS NULL AND tenant_id = ?
+	`, parentWorkflowID, s.tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("original child run ids for %s: %w", parentWorkflowID, err)
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("original child run ids for %s: scan: %w", parentWorkflowID, err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // GetConcurrencyKeyCount returns the number of non-expired concurrency keys
@@ -1383,11 +1857,15 @@ func (s *MySQLStore) SetRoutingRule(ctx context.Context, workflowName string, ta
 
 // RemoveRoutingRule deletes a routing rule by ID.
 func (s *MySQLStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM workflow_routing WHERE id = ? AND tenant_id = ?
 	`, ruleID, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("RemoveRoutingRule: %w", err)
+	}
+	// See the PostgreSQL implementation for why rows-affected is checked.
+	if n, rErr := res.RowsAffected(); rErr == nil && n == 0 {
+		return ErrRoutingRuleNotFound
 	}
 	return nil
 }
@@ -1496,58 +1974,4 @@ func (s *MySQLStore) ClaimDueSchedule(ctx context.Context, name string, expected
 		return false, fmt.Errorf("ClaimDueSchedule: rows affected: %w", err)
 	}
 	return n == 1, nil
-}
-
-// GetDueSchedulesAcrossTenants returns every tenant's due schedules.
-//
-// Same story as ClaimWorkflowsAcrossTenants, and the same refusal. MySQL has no
-// row-level security, so this is the tenant-scoped query with its predicate
-// dropped -- which widens nothing on the topology cmd/cleat-worker actually
-// builds, because MySQLStoreFactory gives each tenant its OWN physical database
-// (cleat_<tenant_id>). The other tenants' schedules are not filtered out, they
-// are in another database, so the query would return one tenant's schedules and
-// report that it had swept them all.
-//
-// So it refuses, and the worker warns once and falls back to the per-tenant
-// read. Against a single shared database -- NewMySQLStore with no factory,
-// which is what every MySQL test in this package uses and a real if less common
-// deployment -- it does what its name says.
-func (s *MySQLStore) GetDueSchedulesAcrossTenants(ctx context.Context) ([]Schedule, error) {
-	if s.perTenantDatabase {
-		return nil, fmt.Errorf("mysql store is one tenant's database (cleat_%s), so a due-schedule "+
-			"read without a tenant predicate still sees only that tenant: %w",
-			s.tenantID, ErrCrossTenantClaimUnsupported)
-	}
-
-	// No FOR UPDATE SKIP LOCKED, matching the other two dialects: the locks are
-	// released before the caller acts on the rows, and ClaimDueSchedule's
-	// compare-and-swap is what makes delivery at-least-once. See
-	// migrations/postgres/024_cross_tenant_schedules.sql.
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled, next_run_at, last_run_at, timezone, tenant_id, misfire_policy, catch_up_limit, overlap_policy, COALESCE(last_run_id, '')
-		FROM workflow_schedules
-		WHERE enabled = 1 AND next_run_at <= NOW(6)
-		ORDER BY next_run_at
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("get due schedules across tenants: %w", err)
-	}
-	defer rows.Close()
-
-	return scanDueSchedules(rows)
-}
-
-// CheckCrossTenantCapability answers from the topology this store was built
-// for, because on MySQL that is the whole question -- there is no grant to
-// check and no policy to be exempt from.
-func (s *MySQLStore) CheckCrossTenantCapability(ctx context.Context) CrossTenantCapability {
-	if !s.perTenantDatabase {
-		// A store built directly against one shared database. Isolation is an
-		// application-level predicate, and dropping it genuinely widens.
-		return CrossTenantCapability{Claim: true, Schedules: true}
-	}
-	reason := fmt.Sprintf("this store is one tenant's database (cleat_%s); the other tenants' rows "+
-		"are not filtered out, they are in another database, so no query against this connection "+
-		"can see them", s.tenantID)
-	return CrossTenantCapability{ClaimReason: reason, SchedulesReason: reason}
 }

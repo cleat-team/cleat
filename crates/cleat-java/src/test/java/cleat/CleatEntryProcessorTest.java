@@ -250,6 +250,110 @@ class CleatEntryProcessorTest {
     }
 
     // ========================================================================
+    // Test: the generated wrapper can actually suspend (IMPROVEMENT-PLAN 3.74)
+    // ========================================================================
+
+    @Test
+    void testGeneratedWrapperPropagatesSuspension() throws IOException {
+        // WHAT: the generated export wrapper must translate a SuspendSignal into
+        // Memory.SUSPEND_SENTINEL, the value the host checks for.
+        //
+        // WHY: it could not. cleatSleepMs returned true meaning "the workflow
+        // should propagate the suspension by returning Memory.SUSPEND_SENTINEL
+        // from the export" -- but the author does not write the export, the
+        // processor generates it, and the generated wrapper had no branch that
+        // could return that value. It stringified whatever the workflow returned
+        // and reported encodeExportResult(0, written): a plain SUCCESS.
+        //
+        // So a Java workflow that slept on a fresh execution completed with a
+        // bogus result instead of suspending. The host half was ready the whole
+        // time -- engine/backend_wasmtime.go checks `if raw == (1 << 62)`.
+
+        JavaFileObject sourceFile = source("test", "TestWorkflow", validTestSource);
+        CompilationResult result = compile(sourceFile, null);
+
+        Path exportFile = result.generatedSourceFiles.stream()
+            .filter(p -> p.toString().replace('\\', '/')
+                          .endsWith("test/TestWorkflow_testEntry_Export.java"))
+            .findFirst()
+            .orElse(null);
+        assertNotNull(exportFile, "the export wrapper was not generated at all; "
+            + "generated files: " + result.generatedSourceFiles);
+        String content = new String(Files.readAllBytes(exportFile));
+
+        assertTrue(content.contains("catch (cleat.SuspendSignal"),
+            "The generated wrapper has no catch for cleat.SuspendSignal, so a "
+            + "suspending workflow falls through to the general Exception handler "
+            + "and is reported as a FAILURE with the message 'cleat: workflow "
+            + "suspended'. Wrapper was:\n" + content);
+
+        assertTrue(content.contains("Memory.SUSPEND_SENTINEL"),
+            "The generated wrapper never returns Memory.SUSPEND_SENTINEL, so no "
+            + "Java workflow can suspend: the host is waiting for (1 << 62) and "
+            + "the guest cannot produce it. Wrapper was:\n" + content);
+
+        // Order matters and is easy to get wrong: a catch for Exception placed
+        // first would swallow SuspendSignal, since it is a RuntimeException.
+        int suspendAt = content.indexOf("catch (cleat.SuspendSignal");
+        int exceptionAt = content.indexOf("catch (Exception");
+        assertTrue(suspendAt < exceptionAt,
+            "catch (cleat.SuspendSignal) must come BEFORE catch (Exception), or "
+            + "the general handler swallows it and a suspended workflow is "
+            + "reported as failed. Wrapper was:\n" + content);
+    }
+
+    // ========================================================================
+    // Test: the generated wrapper drains defers, and not on suspension (3.73)
+    // ========================================================================
+
+    @Test
+    void testGeneratedWrapperDrainsDefersButNotOnSuspension() throws IOException {
+        // WHAT: the wrapper must run the workflow's defers on the success and
+        // error paths, and must NOT run them in the SuspendSignal branch.
+        //
+        // WHY: "run the defers when the entry point stops running" fires every
+        // cleanup at the first sleep -- releasing locks and refunding payments
+        // in the middle of a workflow that has not finished and is about to
+        // continue. The failure is silent: the workflow still completes, it just
+        // cleaned up too early. This is the control that matters most, and in
+        // Java it only became expressible once suspension worked at all (3.74).
+
+        JavaFileObject sourceFile = source("test", "TestWorkflow", validTestSource);
+        CompilationResult result = compile(sourceFile, null);
+
+        Path exportFile = result.generatedSourceFiles.stream()
+            .filter(p -> p.toString().replace('\\', '/')
+                          .endsWith("test/TestWorkflow_testEntry_Export.java"))
+            .findFirst()
+            .orElse(null);
+        assertNotNull(exportFile, "the export wrapper was not generated");
+        String content = new String(Files.readAllBytes(exportFile));
+
+        assertTrue(content.contains("cleat.Defer.runDeferred()"),
+            "The generated wrapper never drains the defer table on the success "
+            + "path, so no Java workflow's cleanup runs. Wrapper was:\n" + content);
+
+        // The suspend branch must be defer-free. Slice from the SuspendSignal
+        // catch to the next catch and assert nothing drains inside it.
+        int suspendAt = content.indexOf("catch (cleat.SuspendSignal");
+        assertTrue(suspendAt > 0, "no SuspendSignal branch; see 3.74");
+        int nextCatch = content.indexOf("} catch", suspendAt + 1);
+        assertTrue(nextCatch > suspendAt, "could not find the end of the suspend branch");
+        String suspendBranch = content.substring(suspendAt, nextCatch);
+        assertFalse(suspendBranch.contains("Defer.runDeferred"),
+            "The suspend branch drains the defer table. A suspended workflow has "
+            + "NOT exited -- its cleanup is still pending, and firing it at the "
+            + "first sleep releases locks a workflow that is about to continue "
+            + "still holds. Branch was:\n" + suspendBranch);
+
+        // And the error paths must drain, because a defer is FOR the run that
+        // went wrong.
+        assertTrue(content.contains("cleat.Defer.runDeferredForHost()"),
+            "The error paths do not drain the defer table, so a failed workflow "
+            + "never runs its cleanup. Wrapper was:\n" + content);
+    }
+
+    // ========================================================================
     // Test: successful compilation and generated files
     // ========================================================================
 
@@ -409,6 +513,85 @@ class CleatEntryProcessorTest {
             + "Content:\n" + content);
         assertTrue(content.contains("\"test_entry\""),
             "getEntries() must return the export name 'test_entry'. "
+            + "Content:\n" + content);
+    }
+
+    @Test
+    void testGeneratesTheHostDeferRunnerExport() throws Exception {
+        // WHAT: the processor emits __cleat_run_deferred, the export the HOST
+        //       calls to drain a workflow it killed.
+        // WHY:  the generated wrappers drain the defer table when a workflow
+        //       RETURNS. A workflow stopped by the execution fence, the
+        //       instruction limit or the memory ceiling never reaches one, so
+        //       its cleanup would never happen at all -- the lock stays held,
+        //       the charge stays uncompensated. IMPROVEMENT-PLAN 3.35 phase 4.
+
+        JavaFileObject sourceFile = source("test", "TestWorkflow", validTestSource);
+        CompilationResult result = compile(sourceFile, null);
+
+        Path runnerFile = result.generatedSourceFiles.stream()
+            .filter(p -> p.toString().replace('\\', '/').endsWith("cleat/generated/CleatDeferRunner.java"))
+            .findFirst()
+            .orElse(null);
+        assertNotNull(runnerFile,
+            "CleatDeferRunner must be generated for a module that has an entry point. "
+            + "Without it engine/backend_wasmtime.go's runGuestDefersAfterKill looks up "
+            + "__cleat_run_deferred, gets null, and returns having done nothing. "
+            + "Generated files: " + result.generatedSourceFiles);
+
+        String content = Files.readString(runnerFile);
+
+        assertTrue(content.contains("@Export(name = \"__cleat_run_deferred\")"),
+            "the runner must carry TeaVM's @Export under the name the host looks up. "
+            + "Content:\n" + content);
+        assertTrue(content.contains("public static long __cleat_run_deferred()"),
+            "the export takes no arguments and returns a long: the host calls it with "
+            + "none and reads an i64 count. An entry-point signature here would be found "
+            + "by name and then fail at the call. Content:\n" + content);
+
+        // runDeferredForHost, NOT runDeferred, and the difference is the whole
+        // point. The wrapper needs SuspendSignal to escape so its segment
+        // suspends; this caller must swallow it, because a workflow reached
+        // this way is already dead and has no segment left. Letting it out
+        // would turn the host's cleanup call into a trap.
+        assertTrue(content.contains("cleat.Defer.runDeferredForHost()"),
+            "the runner must call runDeferredForHost(), which swallows SuspendSignal. "
+            + "runDeferred() lets it out, which is right for the wrapper and wrong here. "
+            + "Content:\n" + content);
+    }
+
+    @Test
+    void testDeferRunnerIsProtectedFromTreeShaking() throws Exception {
+        // WHAT: CleatEntryIndex.WRAPPER_CLASSES references CleatDeferRunner,
+        //       and getEntries() does NOT.
+        // WHY:  nothing in the guest calls the runner -- its only caller is the
+        //       host, after it has killed the workflow -- so TeaVM's dead-code
+        //       elimination would remove it, and a tree-shaken export is
+        //       indistinguishable from one that was never generated. It is
+        //       still not an entry point, so it must not appear in the list of
+        //       entry point names.
+
+        JavaFileObject sourceFile = source("test", "TestWorkflow", validTestSource);
+        CompilationResult result = compile(sourceFile, null);
+
+        Path indexFile = result.generatedSourceFiles.stream()
+            .filter(p -> p.toString().replace('\\', '/').endsWith("cleat/generated/CleatEntryIndex.java"))
+            .findFirst()
+            .orElse(null);
+        assertNotNull(indexFile, "CleatEntryIndex file must have been generated");
+
+        String content = Files.readString(indexFile);
+
+        assertTrue(content.contains("cleat.generated.CleatDeferRunner.class"),
+            "WRAPPER_CLASSES must reference CleatDeferRunner, or TeaVM drops the export. "
+            + "Content:\n" + content);
+
+        int entriesAt = content.indexOf("getEntries()");
+        assertTrue(entriesAt >= 0, "CleatEntryIndex must have getEntries(). Content:\n" + content);
+        String entriesBody = content.substring(entriesAt);
+        assertFalse(entriesBody.contains("__cleat_run_deferred"),
+            "getEntries() lists workflow entry points, and the defer runner is not one. "
+            + "A caller enumerating entries would try to execute it as a workflow. "
             + "Content:\n" + content);
     }
 

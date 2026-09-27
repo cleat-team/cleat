@@ -13,8 +13,11 @@ import (
 //
 // That list used to be maintained here, separately from the worker's, and the
 // two disagreed. This one registered "python", which the worker never does and
-// which fails on wasmtime anyway: its Component Model binary reaches the
-// decomposition path and dies on `incompatible import type for env::abort`.
+// which fails on wasmtime anyway: its Component Model binary reached the
+// decomposition path and died on `incompatible import type for env::abort`.
+// (That path was deleted 2026-09-01, IMPROVEMENT-PLAN 3.65; the routing
+// conclusion is unchanged, since the worker still does not register python
+// here.)
 // That was reproduced through this harness with a real HostHandler, so it is
 // not an artefact of a half-configured probe.
 //

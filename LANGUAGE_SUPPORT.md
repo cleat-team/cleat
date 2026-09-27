@@ -27,11 +27,12 @@
 Any language must:
 1. **Compile to `wasm32-wasip1` (or `wasm32-unknown-unknown`)** — produce a `.wasm` shared library
 2. **Export functions** with the cleat ABI: `(args_ptr, args_len, out_ptr, max_out_len) -> i64`
-3. **Import host functions** from the `"env"` module with `(ptr, len)` string protocol — 59
-   as of 2026-08-09 (`ABI.md` §2; re-derived via `engine/imports.go`), though a given SDK
-   may only need a subset (Python's WIT world declares 52 — the two Go-`wasip1`-specific
-   dispatch functions, `cleat_poll_work` and `cleat_complete`, don't apply to a
-   component-model SDK)
+3. **Import host functions** from the `"env"` module with `(ptr, len)` string protocol —
+   `ABI.md` §2 enumerates them and `scripts/check-doc-consistency.sh` holds that list to
+   `engine/imports.go`. A given SDK may need only a subset: Python's WIT world omits the
+   two Go-`wasip1`-specific dispatch functions, `cleat_poll_work` and `cleat_complete`,
+   which don't apply to a component-model SDK. No count is quoted here because it moves —
+   this line read 59 from 2026-08-09 and was five short by 09-13
 4. **Read/write linear memory** at a 10 MiB scratch offset for string I/O
 5. **Return the suspend sentinel** `(1 << 62)` for sleep/await-signals
 
@@ -45,7 +46,7 @@ The host runtime doesn't know or care what language produced the WASM bytes.
 
 **How:** `clang --target=wasm32-wasip1` produces standalone WASM. No runtime needed.
 
-**SDK:** A `cleat.h` header declaring the 59 `extern` imports (see ABI.md §2) plus inline memory
+**SDK:** A `cleat.h` header declaring one `extern` per host call (see ABI.md §2) plus inline memory
 helpers (`read_string`, `write_string`, `encode_export_result`). ~200 lines.
 
 **Transformer:** None needed. The user `#include`s the header and writes `extern "C"`
@@ -68,7 +69,7 @@ for all compiled languages.
 simpler toolchain setup than C — no clang/WASI sysroot needed.
 
 **SDK:** A `cleat.zig` module with comptime-generated import wrappers and memory
-helpers. Zig's `comptime` could auto-generate the 59 import declarations (see ABI.md §2). ~150 lines.
+helpers. Zig's `comptime` could auto-generate the import declarations (see ABI.md §2). ~150 lines.
 
 **Transformer:** None needed, but Zig's comptime reflection could generate export
 wrappers at compile time without needing a separate proc-macro. Zero build-step
@@ -150,12 +151,20 @@ provisioned.
 - Still true and worth keeping in mind: AssemblyScript is NOT TypeScript. It's
   a different language that looks like TypeScript. Existing TS code will not
   compile as-is.
+- Workflows must import the SDK as `@cleat/sdk`, not by relative path. Both
+  resolve to the same files, but `asc` treats them as two distinct modules with
+  two distinct `HostCalls` types — and, since §3.73, two distinct defer
+  registries, so a defer registered through one would be drained from the
+  other and silently never run. The generated wrapper calls `runDeferred(h)`,
+  which makes that case a compile error rather than a silent one.
 
 **Measured 2026-08-06** (per `tiers.yaml`'s `sdk-assemblyscript` entry):
 `TestAssemblyScriptWorkflowExecute` passes on wasmtime —
 `inventory.Reserve -> payments.Charge -> shipping.CreateShipment ->
 notifications.SendEmail`, four calls in order — and the SDK's own as-pect
-suite is 106/106 across three spec files. Making the test suite able to fail
+suite is 113/113 across four spec files (re-derive with
+`cd packages/cleat-as && npm test`; measured 2026-09-02, was 106/106 across
+three before §3.73 added `defer.spec.ts`). Making the test suite able to fail
 (rather than degrading every failure to `t.Skipf`, as it did before #350)
 found two real defects the same day: no data flowed between the saga's
 steps (a field-naming mismatch, `reservationID` vs `reservation_id` etc.,
@@ -175,8 +184,8 @@ open_items and `docs/determinism.md`.
 - SDK: `cleat-js` npm package with `HostCalls` class and `cleatEntry()` decorator
 - Transformer: Babel plugin or `tsc` plugin that wraps entry functions with ABI glue
 - **Binary size:** 1-5 MB (embedded JS engine)
-- **Debugging:** Very difficult — JS running inside QuickJS inside WASM inside wazero.
-  Three layers of abstraction.
+- **Debugging:** Very difficult — JS running inside QuickJS inside WASM inside
+  wasmtime. Three layers of abstraction.
 - **Showstoppers:**
   - QuickJS-in-WASM adds significant overhead and debugging complexity
   - TypeScript type information is erased at compile time — can't generate typed
@@ -285,6 +294,90 @@ crates/cleat-macro/src/*.rs`) — grown substantially from the original
 | **Zig** | zig build-exe (mature) | Not built | 5-30 KB (design estimate) | — |
 | **TypeScript** (real) | Javy/QuickJS (mature) | Not built | 1-5 MB (design estimate) | — |
 | **C#/.NET** | NativeAOT-LLVM (exp.) | Not built | 1-5 MB (design estimate) | — |
+
+---
+
+## Determinism enforcement is not the same in every language
+
+"Enforced determinism, not promised determinism" is true of every shipped language in the sense
+that a check exists and runs. It is **not** true that the checks are comparable. They differ by
+about as much as a compiler differs from `grep`, and a table of five green fixtures would hide
+that completely — which is why this section states the mechanism rather than a pass/fail.
+
+| Language | Mechanism | What it can see | What it cannot |
+|---|---|---|---|
+| **Go** | whole-program analysis (`analyze()` in `cmd/cleat`) | the durable closure, computed from the type-checked call graph | — |
+| **Python** | AST call-graph and closure analysis (`python-sdk/cleat_sdk/vet.py`) | what the entry point reaches, across functions | a forbidden call spelled so the `(module, function)` table does not match it |
+| **AssemblyScript** | AST analysis **inside the compiler** (`packages/cleat-as/transform`) | what the entry point reaches, across functions | a call site with no dotted member access |
+| **Java** | import and fully-qualified-name resolution over source with comments, strings, text blocks and character literals blanked first (`cmd/cleat/vet_java.go`) | a path expression **resolving** to a listed class, member or package -- so static imports, wildcard imports (against a known class list) and fully-qualified calls are all seen | java.nio, which is on no list at all; reflection with a computed argument, which no resolver can evaluate |
+| **Rust** | `use`-declaration resolution over source with comments, strings and `#[cfg(test)]` items blanked first (`cmd/cleat/vet_rust.go`); plus, since cleat#1864, per-function syntactic binding tracking for one usage pattern (HashMap/HashSet iteration order, R008) | a path expression **resolving** to a listed module — so grouped imports, nested groups and `as` aliases are all seen; **and** a HashMap/HashSet whose type is declared on a function parameter or a `let` binding, when it is later enumerated (`for x in m`, `m.iter()`, `.keys()`, `.values()`, `.into_iter()`, `.drain()`) |a method call whose receiver is not a bare tracked identifier -- a struct field (`self.counts.iter()`), a value returned from a call, or a map produced inline by `.collect::<HashMap<_, _>>()` and iterated without ever being bound to a name; any module not on the path list; a glob import, which names nothing locally |
+
+Re-derive the shape of each, rather than trusting the row:
+
+    grep -c '^\s*{"' cmd/cleat/vet_rust.go cmd/cleat/vet_java.go   # resolved-path table entries
+    grep -oE '"PY[0-9]{3}"' python-sdk/cleat_sdk/vet.py | sort -u | wc -l
+    grep -ln 'runVet' cmd/cleat/build_*.go                          # which builds gate
+
+### AssemblyScript's arrangement is the strongest and is worth copying
+
+Its checks run as part of `asc`, not beside it: `runBuildAssemblyScript` passes
+`--transform @cleat/transform`, and the transform throws from `afterParse`. A separate gate can be
+removed, reordered, or skipped while the build still succeeds; a check inside the compiler cannot
+drift out of sync with it, because there is only one invocation.
+
+### A longer list is not a stronger check, and neither is a resolver over the wrong list
+
+Java's checker resolves imports and fully-qualified names (cleat#1812), which fixed how a listed
+API is spelled, not which APIs are listed. `java.nio` is on no list at all — the API Java has
+recommended over `java.io` since 1.7 — so it covers the legacy package and not its replacement:
+
+    import java.io.File;                 // reported
+    Files.readString(Path.of("x"));      // not reported
+
+Rust's resolves the same forms Java's does now (cleat#1811) — a grouped import is caught, not
+missed. What it still cannot see, in general, is a **method** call, which names no module at all:
+
+    SystemTime::now();                   // reported -- a path expression
+    t.elapsed();                         // not reported -- names no module, only a receiver's type
+
+**One method-call shape is an exception, since cleat#1864, and it is narrow on purpose.** A HashMap
+or HashSet's *enumeration order* is not itself a module reference, so R008 tracks the receiver's
+type through a syntactic binding — a function parameter or a `let` — rather than through a path:
+
+    fn total(m: &HashMap<String, u64>) { for (k, v) in m { ... } }   // reported -- m is a tracked binding
+    self.counts.iter()                                                // not reported -- a struct field, not a binding
+    pairs.into_iter().collect::<HashMap<_, _>>().into_iter()          // not reported -- never bound to a name
+
+The middle and bottom rows are `known_limit_map_via_struct_field` and `known_limit_collect_into_map`.
+Neither generalises to method calls at large: `t.elapsed()` above is exactly as unseen as before.
+
+Both are measured, and each has a fixture pinning it: see the `known_limit_*` directories under
+`testdata/vet-checks/`, and the `*_build_refuses_nondeterminism_test.go` files, which assert **both**
+that a violation is refused and that the known limit is not. The second arm is the one that keeps
+this table honest — without it, "every language refuses a bad fixture" reads as parity that does not
+exist.
+
+### The scope question, which all four got wrong
+
+A determinism check has to decide what counts as workflow code, and three of the four answered by
+walking the call graph the wrong way (cleat#1789, #1799, #1813):
+
+- **determinism** is a property of what a workflow *executes*, so the scope is forward reachability
+  from the entry points. Walking backwards instead means a helper the workflow **calls** is never
+  checked;
+- **"must carry a HostCalls"** is a property of what *reaches the host*, so it is the intersection
+  of that forward scope with the callers closure. Either closure alone is wrong: the callers closure
+  flags the test harness that *supplies* `h`, and the forward closure flags pure helpers that need
+  none.
+
+Fixed for Python in #1816. The AssemblyScript equivalent is #1818. Rust and Java have no closure
+analysis at all, so they do not have this specific problem — their scope is "every source file in
+the tree, including tests" (cleat#1789).
+
+Rust reads only executable code since #1815 and Java since #1824, so the two rows are now the same
+shape. Java's scanner is the simpler of the pair: block comments do not nest, and `'` always opens a
+character literal rather than sometimes a lifetime. Java 15 text blocks are the one construct Rust
+has no equivalent of.
 
 ---
 

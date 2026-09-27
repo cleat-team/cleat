@@ -19,6 +19,10 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "cleat.serviceAccountName" . }}
+      # The kubelet SIGKILLs the pod this long after it starts terminating, and the preStop hook, the worker's
+      # SIGTERM drain (--shutdown-grace) and its plugin Stop budget (5s, cleat#2147) all come out of it. The
+      # Kubernetes default, 30s, is too short for a 20s drain plus the preStop sleep (cleat#2285).
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
       {{- with .Values.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -33,7 +37,15 @@ spec:
             - "--task-queue={{ .Values.worker.taskQueues }}"
             - "--api-addr=:{{ .Values.api.port }}"
             - "--heartbeat={{ .Values.worker.heartbeatInterval }}"
+            - "--reclaim-timeout={{ .Values.worker.reclaimTimeout }}"
+            - "--flush-retry-window={{ .Values.worker.flushRetryWindow }}"
             - "--poll={{ .Values.worker.pollInterval }}"
+            - "--shutdown-grace={{ .Values.worker.shutdownGrace }}"
+            {{- if .Values.adminApi.enabled }}
+            # Off unless asked for (cleat#2267): while it is on, any authenticated key of any tenant can drain a
+            # worker and trigger an all-tenant retention sweep. See values.yaml and docs/operations/admin-api.md.
+            - "--enable-admin-api"
+            {{- end }}
           env:
             - name: DATABASE_URL
               valueFrom:
@@ -44,11 +56,12 @@ spec:
                   name: {{ include "cleat.fullname" . }}
                   {{- end }}
                   key: database-url
-            {{- if or .Values.auth.existingSecret .Values.auth.adminApiKey }}
+            {{- if and .Values.adminApi.enabled (or .Values.auth.existingSecret .Values.auth.adminApiKey) }}
             # Consumed only by the preStop hook below, to authenticate its own
             # call to /api/admin/drain (--require-auth defaults to true; see
             # values.yaml's auth section for why this can't be provisioned
-            # automatically).
+            # automatically). Only present when adminApi.enabled, since otherwise the hook
+            # does not call that route.
             - name: CLEAT_ADMIN_API_KEY
               valueFrom:
                 secretKeyRef:
@@ -66,13 +79,13 @@ spec:
               protocol: TCP
           livenessProbe:
             httpGet:
-              path: /healthz
+              path: /livez
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5
@@ -82,12 +95,19 @@ spec:
                 command:
                   - /bin/sh
                   - -c
+                  {{- if and .Values.adminApi.enabled (or .Values.auth.existingSecret .Values.auth.adminApiKey) }}
                   # `|| true`: pod termination must not block on this call (an
                   # unreachable or slow API server should not delay shutdown),
                   # so a still-missing CLEAT_ADMIN_API_KEY (see values.yaml's
                   # auth section) fails the same way it always silently has --
                   # this only fixes the case where a key *is* configured.
                   - "wget -q -O- --header=\"Authorization: Bearer ${CLEAT_ADMIN_API_KEY}\" --post-data='{}' http://localhost:{{ .Values.api.port }}/api/admin/drain || true"
+                  {{- else }}
+                  # The admin API is off (the default; cleat#2267), so there is no drain route to call. A short
+                  # sleep lets the endpoint controller take this pod out of Service endpoints before SIGTERM
+                  # arrives; the worker then handles SIGTERM itself (see values.yaml, adminApi).
+                  - "sleep {{ .Values.worker.preStopSleepSeconds }}"
+                  {{- end }}
           {{- with .Values.containerSecurityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}

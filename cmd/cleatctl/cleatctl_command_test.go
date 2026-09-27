@@ -40,7 +40,7 @@ type mockStore struct {
 	getWASMLengthFn                    func(ctx context.Context, defName string, defVersion int) (int64, error)
 	listVersionsFn                     func(ctx context.Context, defName string) ([]int, error)
 	heartbeatFn                        func(ctx context.Context, workflowID, workerID string, generation int64) (bool, error)
-	batchHeartbeatFn                   func(ctx context.Context, workerID string) (int64, error)
+	heartbeatBatchFencedFn             func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error)
 	completeWorkflowFn                 func(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error
 	failWorkflowFn                     func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error
 	releaseWorkflowFn                  func(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error
@@ -50,7 +50,7 @@ type mockStore struct {
 	pollAndClaimSignalFn               func(ctx context.Context, workflowID, signalName string) (string, bool, error)
 	startNewRunFn                      func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error)
 	startChildWorkflowFn               func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
-	getChildResultFn                   func(ctx context.Context, runID string) (string, bool, error)
+	getChildResultFn                   func(ctx context.Context, runID string) (engine.ChildOutcome, error)
 	reapStaleInstancesFn               func(ctx context.Context, timeout time.Duration) (int, error)
 	getQueryStateFn                    func(ctx context.Context, workflowID, key string) (string, error)
 	listWorkflowsFn                    func(ctx context.Context, filter engine.WorkflowFilter) ([]engine.WorkflowInstance, error)
@@ -68,8 +68,8 @@ type mockStore struct {
 	loadCompactionStateFn              func(ctx context.Context, workflowID string) (*engine.CompactionState, error)
 	compactHistoryFn                   func(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error
 	createPromiseFn                    func(ctx context.Context, workflowID, promiseName, promiseID string) error
-	resolvePromiseFn                   func(ctx context.Context, workflowID, promiseID, result string) error
-	rejectPromiseFn                    func(ctx context.Context, workflowID, promiseID, errMsg string) error
+	resolvePromiseFn                   func(ctx context.Context, promiseID, result string) error
+	rejectPromiseFn                    func(ctx context.Context, promiseID, errMsg string) error
 	getPromiseFn                       func(ctx context.Context, workflowID, promiseID string) (string, string, string, error)
 	listPromisesFn                     func(ctx context.Context, workflowID string) ([]engine.PromiseInfo, error)
 	createUpdateRequestFn              func(ctx context.Context, workflowID, updateName, payload, promiseID string) error
@@ -106,6 +106,12 @@ func (m *mockStore) ClaimWorkflows(ctx context.Context, workerID string, limit i
 	return nil, nil
 }
 
+// CountRunnableWorkflows: a double, so the honest answer is "I do not know".
+// Zero is what a store with nothing runnable returns, and the caller treats the
+// number as a floor, so a double reporting 0 never claims work exists that does
+// not. See IMPROVEMENT-PLAN 3.250.
+func (m *mockStore) CountRunnableWorkflows(_ context.Context) (int, error) { return 0, nil }
+
 func (m *mockStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
 	if m.claimStickyWorkflowsFn != nil {
 		return m.claimStickyWorkflowsFn(ctx, workerID, limit)
@@ -118,6 +124,10 @@ func (m *mockStore) LoadEventHistory(ctx context.Context, workflowID string) ([]
 		return m.loadEventHistoryFn(ctx, workflowID)
 	}
 	return nil, nil
+}
+
+func (m *mockStore) IsHistorySwept(ctx context.Context, workflowID string) (bool, error) {
+	return false, nil
 }
 
 func (m *mockStore) AppendEventHistory(ctx context.Context, workflowID string, rec engine.EventRecord) error {
@@ -204,15 +214,14 @@ func (m *mockStore) DeliverSignal(ctx context.Context, workflowID, signalName, p
 	return nil
 }
 
-func (m *mockStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	if m.pollAndClaimSignalFn != nil {
-		return m.pollAndClaimSignalFn(ctx, workflowID, signalName)
-	}
-	return "", false, nil
-}
+func (m *mockStore) ConsumeSignal(context.Context, string, int64) error { return nil }
 
-func (m *mockStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	return m.PollAndClaimSignal(ctx, workflowID, signalName)
+func (m *mockStore) PollSignal(ctx context.Context, workflowID, signalName string) (engine.SignalDelivery, bool, error) {
+	if m.pollAndClaimSignalFn != nil {
+		payload, found, err := m.pollAndClaimSignalFn(ctx, workflowID, signalName)
+		return engine.SignalDelivery{ID: 1, Payload: payload}, found, err
+	}
+	return engine.SignalDelivery{}, false, nil
 }
 
 func (m *mockStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
@@ -237,14 +246,14 @@ func (m *mockStore) StartChildWorkflowAtomic(ctx context.Context, childID, paren
 	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
 
-func (m *mockStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+func (m *mockStore) GetChildResult(ctx context.Context, runID string) (engine.ChildOutcome, error) {
 	if m.getChildResultFn != nil {
 		return m.getChildResultFn(ctx, runID)
 	}
-	return "", false, nil
+	return engine.ChildOutcome{}, nil
 }
 
-func (m *mockStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (m *mockStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	if m.reapStaleInstancesFn != nil {
 		return m.reapStaleInstancesFn(ctx, timeout)
 	}
@@ -258,6 +267,10 @@ func (m *mockStore) GetQueryState(ctx context.Context, workflowID, key string) (
 	return "", nil
 }
 
+func (m *mockStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	return map[string]string{}, nil
+}
+
 func (m *mockStore) ListWorkflows(ctx context.Context, filter engine.WorkflowFilter) ([]engine.WorkflowInstance, error) {
 	if m.listWorkflowsFn != nil {
 		return m.listWorkflowsFn(ctx, filter)
@@ -269,6 +282,10 @@ func (m *mockStore) GetWorkflowByID(ctx context.Context, id string) (*engine.Wor
 	if m.getWorkflowByIDFn != nil {
 		return m.getWorkflowByIDFn(ctx, id)
 	}
+	return nil, nil
+}
+
+func (m *mockStore) GetTerminalRun(ctx context.Context, id string) (*engine.WorkflowInstance, error) {
 	return nil, nil
 }
 
@@ -305,13 +322,6 @@ func (m *mockStore) GetDueSchedules(ctx context.Context) ([]engine.Schedule, err
 		return m.getDueSchedulesFn(ctx)
 	}
 	return nil, nil
-}
-
-func (m *mockStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	if m.updateScheduleNextRunFn != nil {
-		return m.updateScheduleNextRunFn(ctx, name, nextRun)
-	}
-	return nil
 }
 
 func (m *mockStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
@@ -367,16 +377,16 @@ func (m *mockStore) CreatePromise(ctx context.Context, workflowID, promiseName, 
 	return nil
 }
 
-func (m *mockStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	if m.resolvePromiseFn != nil {
-		return m.resolvePromiseFn(ctx, workflowID, promiseID, result)
+		return m.resolvePromiseFn(ctx, promiseID, result)
 	}
 	return nil
 }
 
-func (m *mockStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	if m.rejectPromiseFn != nil {
-		return m.rejectPromiseFn(ctx, workflowID, promiseID, errMsg)
+		return m.rejectPromiseFn(ctx, promiseID, errMsg)
 	}
 	return nil
 }
@@ -409,9 +419,9 @@ func (m *mockStore) GetPendingUpdateRequests(ctx context.Context, workflowID str
 	return nil, nil
 }
 
-func (m *mockStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (m *mockStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	if m.completeUpdateRequestFn != nil {
-		return m.completeUpdateRequestFn(ctx, workflowID, updateName, result, errMsg)
+		return m.completeUpdateRequestFn(ctx, workflowID, requestID, result, errMsg)
 	}
 	return nil
 }
@@ -423,11 +433,11 @@ func (m *mockStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID s
 	return true, nil
 }
 
-func (m *mockStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (m *mockStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
 	if m.releaseConcurrencyKeyFn != nil {
-		return m.releaseConcurrencyKeyFn(ctx, key)
+		return false, m.releaseConcurrencyKeyFn(ctx, key)
 	}
-	return nil
+	return true, nil
 }
 
 func (m *mockStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
@@ -546,14 +556,27 @@ func (m *mockStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time
 	return 0, nil
 }
 
+func (m *mockStore) ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
 // ---------------------------------------------------------------------------
 // mock driver for deploy plugin tests
 // ---------------------------------------------------------------------------
 
 // mockPluginConnector implements driver.Connector for testing deployPlugin.
+//
+// cleat#2135: DeployPlugin's INSERT is now ON CONFLICT DO NOTHING, so a
+// redeploy of an existing (name, version) reports 0 rows affected (existing
+// models that) rather than always succeeding as an upsert, and DeployPlugin
+// then issues a SELECT to compare checksums -- existingBytes is what that
+// SELECT returns. This mock's Exec/Query therefore have to actually route on
+// EXISTING, not just always report success, or these tests would stop
+// exercising the immutability check the moment it was added.
 type mockPluginConnector struct {
-	existing bool
-	fail     bool
+	existing      bool
+	existingBytes []byte // wasm_bytes the mock SELECT returns when existing is true
+	fail          bool
 }
 
 type mockPluginDriver struct{}
@@ -563,7 +586,7 @@ func (d *mockPluginDriver) Open(name string) (driver.Conn, error) {
 }
 
 func (c *mockPluginConnector) Connect(_ context.Context) (driver.Conn, error) {
-	return &mockPluginConn{existing: c.existing, fail: c.fail}, nil
+	return &mockPluginConn{existing: c.existing, existingBytes: c.existingBytes, fail: c.fail}, nil
 }
 
 func (c *mockPluginConnector) Driver() driver.Driver {
@@ -571,15 +594,16 @@ func (c *mockPluginConnector) Driver() driver.Driver {
 }
 
 type mockPluginConn struct {
-	existing bool
-	fail     bool
+	existing      bool
+	existingBytes []byte
+	fail          bool
 }
 
 func (c *mockPluginConn) Prepare(query string) (driver.Stmt, error) {
 	if c.fail {
 		return nil, errors.New("mock db error")
 	}
-	return &mockPluginStmt{existing: c.existing, fail: c.fail}, nil
+	return &mockPluginStmt{existing: c.existing, existingBytes: c.existingBytes, fail: c.fail}, nil
 }
 
 func (c *mockPluginConn) Close() error { return nil }
@@ -589,51 +613,58 @@ func (c *mockPluginConn) Begin() (driver.Tx, error) {
 }
 
 type mockPluginStmt struct {
-	existing bool
-	fail     bool
+	existing      bool
+	existingBytes []byte
+	fail          bool
 }
 
 func (s *mockPluginStmt) Close() error  { return nil }
 func (s *mockPluginStmt) NumInput() int { return -1 }
 
+// Exec is only ever the INSERT ... ON CONFLICT DO NOTHING. 0 rows affected
+// when a row already exists at (name, version) is what a real
+// ON CONFLICT DO NOTHING reports on conflict; 1 when it is a genuinely new
+// version.
 func (s *mockPluginStmt) Exec(_ []driver.Value) (driver.Result, error) {
 	if s.fail {
 		return nil, errors.New("mock exec error")
 	}
-	return &mockResult{}, nil
+	if s.existing {
+		return &mockResult{rowsAffected: 0}, nil
+	}
+	return &mockResult{rowsAffected: 1}, nil
 }
 
+// Query is only ever the SELECT wasm_bytes DeployPlugin issues after a
+// conflict, so it is only reached when existing is true.
 func (s *mockPluginStmt) Query(_ []driver.Value) (driver.Rows, error) {
 	if s.fail {
 		return nil, errors.New("mock query error")
 	}
-	if s.existing {
-		return &mockSingleRow{}, nil
-	}
-	return &mockNoRows{}, nil
+	return &mockWasmBytesRow{bytes: s.existingBytes}, nil
 }
 
-type mockResult struct{}
+type mockResult struct {
+	rowsAffected int64
+}
 
 func (r *mockResult) LastInsertId() (int64, error) { return 0, nil }
-func (r *mockResult) RowsAffected() (int64, error) { return 1, nil }
+func (r *mockResult) RowsAffected() (int64, error) { return r.rowsAffected, nil }
 
-type mockNoRows struct{}
-
-func (r *mockNoRows) Columns() []string           { return []string{"id"} }
-func (r *mockNoRows) Close() error                { return nil }
-func (r *mockNoRows) Next(_ []driver.Value) error { return io.EOF }
-
-type mockSingleRow struct {
+// mockWasmBytesRow models the single-column `SELECT wasm_bytes FROM
+// plugin_defs WHERE name = $1 AND version = $2` DeployPlugin issues on
+// conflict.
+type mockWasmBytesRow struct {
+	bytes  []byte
 	called bool
 }
 
-func (r *mockSingleRow) Columns() []string { return []string{"id"} }
-func (r *mockSingleRow) Close() error      { return nil }
-func (r *mockSingleRow) Next(dest []driver.Value) error {
+func (r *mockWasmBytesRow) Columns() []string { return []string{"wasm_bytes"} }
+func (r *mockWasmBytesRow) Close() error      { return nil }
+func (r *mockWasmBytesRow) Next(dest []driver.Value) error {
 	if !r.called {
 		r.called = true
-		dest[0] = "existing-plugin-id"
+		dest[0] = r.bytes
 		return nil
 	}
 	return io.EOF
@@ -833,8 +864,8 @@ func TestListVersions_All(t *testing.T) {
 				return nil, nil
 			}
 			return []engine.WorkflowDef{
-				{Name: "wf-a", Version: 2, ABIVersion: 1, MinVersion: 1, Deprecated: false, CreatedAt: time.Now().Add(-24 * time.Hour)},
-				{Name: "wf-a", Version: 1, ABIVersion: 1, MinVersion: 0, Deprecated: true, CreatedAt: time.Now().Add(-48 * time.Hour)},
+				{Name: "wf-a", Version: 2, ABIVersion: 1, MinVersion: 1, GCEligible: false, CreatedAt: time.Now().Add(-24 * time.Hour)},
+				{Name: "wf-a", Version: 1, ABIVersion: 1, MinVersion: 0, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now().Add(-48 * time.Hour)},
 			}, nil
 		},
 		getActiveInstanceCountsByVersionFn: func(_ context.Context) (map[string]int, error) {
@@ -865,8 +896,8 @@ func TestListVersions_WithName(t *testing.T) {
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: name, Version: 2, ABIVersion: 1, MinVersion: 1, Deprecated: false, CreatedAt: time.Now().Add(-24 * time.Hour)},
-				{Name: name, Version: 1, ABIVersion: 1, MinVersion: 0, Deprecated: true, CreatedAt: time.Now().Add(-48 * time.Hour)},
+				{Name: name, Version: 2, ABIVersion: 1, MinVersion: 1, GCEligible: false, CreatedAt: time.Now().Add(-24 * time.Hour)},
+				{Name: name, Version: 1, ABIVersion: 1, MinVersion: 0, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now().Add(-48 * time.Hour)},
 			}, nil
 		},
 		countActiveInstancesFn: func(_ context.Context, name string, version int) (int, error) {
@@ -1119,8 +1150,8 @@ func TestActiveInstances_WithName(t *testing.T) {
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: name, Version: 2, Deprecated: false, CreatedAt: time.Now()},
-				{Name: name, Version: 1, Deprecated: true, CreatedAt: time.Now()},
+				{Name: name, Version: 2, GCEligible: false, CreatedAt: time.Now()},
+				{Name: name, Version: 1, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now()},
 			}, nil
 		},
 		countActiveInstancesFn: func(_ context.Context, name string, version int) (int, error) {
@@ -1176,10 +1207,10 @@ func TestGCVersions_Success(t *testing.T) {
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: "wf", Version: 4, Deprecated: false, CreatedAt: time.Now()},
-				{Name: "wf", Version: 3, Deprecated: true, CreatedAt: oldCreated},
-				{Name: "wf", Version: 2, Deprecated: true, CreatedAt: oldCreated},
-				{Name: "wf", Version: 1, Deprecated: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 4, GCEligible: false, CreatedAt: time.Now()},
+				{Name: "wf", Version: 3, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 2, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 1, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
 			}, nil
 		},
 		getActiveInstanceCountsByVersionFn: func(_ context.Context) (map[string]int, error) {
@@ -1207,10 +1238,10 @@ func TestGCVersions_DryRun(t *testing.T) {
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: "wf", Version: 4, Deprecated: false, CreatedAt: time.Now()},
-				{Name: "wf", Version: 3, Deprecated: true, CreatedAt: oldCreated},
-				{Name: "wf", Version: 2, Deprecated: true, CreatedAt: oldCreated},
-				{Name: "wf", Version: 1, Deprecated: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 4, GCEligible: false, CreatedAt: time.Now()},
+				{Name: "wf", Version: 3, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 2, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 1, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
 			}, nil
 		},
 		getActiveInstanceCountsByVersionFn: func(_ context.Context) (map[string]int, error) {
@@ -1480,7 +1511,7 @@ func TestDeployPlugin_DBError(t *testing.T) {
 	defer db.Close()
 
 	stderr := withExitPanic(t, func() {
-		deployPlugin(context.Background(), db, []string{"test-plugin", path})
+		deployPlugin(context.Background(), db, []string{"test-plugin", "1.0.0", path})
 	})
 	if !strings.Contains(stderr, "error") {
 		t.Errorf("expected error in stderr, got: %s", stderr)
@@ -1497,7 +1528,7 @@ func TestDeployPlugin_InsertPath(t *testing.T) {
 	defer db.Close()
 
 	stdout, stderr := captureOutputs(t, func() {
-		deployPlugin(context.Background(), db, []string{"new-plugin", path})
+		deployPlugin(context.Background(), db, []string{"new-plugin", "1.0.0", path})
 	})
 	if !strings.Contains(stdout, "Deployed plugin new-plugin") {
 		t.Errorf("expected 'Deployed plugin new-plugin' in stdout, got: %s", stdout)
@@ -1510,26 +1541,106 @@ func TestDeployPlugin_InsertPath(t *testing.T) {
 	}
 }
 
-func TestDeployPlugin_UpdatePath(t *testing.T) {
+func TestDeployPlugin_RedeployingAVersionSaysDeployed(t *testing.T) {
+	// There is no separate "Updated plugin" message any more, and that is the
+	// change rather than a wording choice. The command used to SELECT by name,
+	// branch, and UPDATE or INSERT -- a one-row-per-name model, on a table that
+	// does not exist. plugin_defs is keyed (name, version) and DeployPlugin
+	// upserts on that key, so redeploying a version and deploying a new one are
+	// the same operation and report the same way (cleat#1226).
+	//
+	// cleat#2135: "redeploying" is now only accepted at all when the bytes are
+	// byte-identical to what's stored -- it is a no-op, not a real write, but
+	// this command reports it the same way either way (it has no way to tell
+	// the two apart, and the plugin ends up deployed at that version's bytes
+	// regardless). existingBytes is set equal to wasmBytes for exactly that
+	// reason; see TestDeployPlugin_RedeployingDifferentBytesIsRefused for the
+	// other half.
 	dir := t.TempDir()
 	wasmBytes := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
 	path := writeWASM(t, dir, wasmBytes)
 
-	connector := &mockPluginConnector{existing: true, fail: false}
+	connector := &mockPluginConnector{existing: true, existingBytes: wasmBytes, fail: false}
 	db := sql.OpenDB(connector)
 	defer db.Close()
 
 	stdout, stderr := captureOutputs(t, func() {
-		deployPlugin(context.Background(), db, []string{"existing-plugin", path})
+		deployPlugin(context.Background(), db, []string{"existing-plugin", "2.1.0", path})
 	})
-	if !strings.Contains(stdout, "Updated plugin existing-plugin") {
-		t.Errorf("expected 'Updated plugin existing-plugin' in stdout, got: %s", stdout)
+	if !strings.Contains(stdout, "Deployed plugin existing-plugin v2.1.0") {
+		t.Errorf("expected 'Deployed plugin existing-plugin v2.1.0' in stdout, got: %s", stdout)
 	}
 	if !strings.Contains(stdout, "SHA256") {
 		t.Errorf("expected SHA256 in stdout, got: %s", stdout)
 	}
 	if stderr != "" {
 		t.Errorf("unexpected stderr: %s", stderr)
+	}
+}
+
+// TestDeployPlugin_RedeployingDifferentBytesIsRefused is the known-positive
+// for cleat#2135 at the cleatctl layer: before that change, this exact
+// scenario -- different bytes at an already-deployed (name, version) --
+// silently overwrote the stored WASM and printed "Deployed plugin ...".
+func TestDeployPlugin_RedeployingDifferentBytesIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	newBytes := []byte{0x00, 0x61, 0x73, 0x6d, 0x02, 0x00, 0x00, 0x00}
+	path := writeWASM(t, dir, newBytes)
+
+	oldBytes := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	connector := &mockPluginConnector{existing: true, existingBytes: oldBytes, fail: false}
+	db := sql.OpenDB(connector)
+	defer db.Close()
+
+	stderr := withExitPanic(t, func() {
+		deployPlugin(context.Background(), db, []string{"existing-plugin", "2.1.0", path})
+	})
+	if !strings.Contains(stderr, "refused") || !strings.Contains(stderr, "immutable") {
+		t.Errorf("expected a refusal naming plugin versions as immutable, got: %s", stderr)
+	}
+}
+
+// TestDeployPlugin_RefusesANonSemverVersion pins the refusal rather than the
+// acceptance, because accepting is the quiet failure. ResolvePlugin compares
+// versions as semver and SKIPS a row it cannot parse, so a plugin deployed
+// with a version like a content hash would sit in plugin_defs, appear in
+// `cleat plugin list`, and be resolvable by nothing (cleat#1226).
+func TestDeployPlugin_RefusesANonSemverVersion(t *testing.T) {
+	dir := t.TempDir()
+	path := writeWASM(t, dir, []byte{0x00, 0x61, 0x73, 0x6d})
+	db := sql.OpenDB(&mockPluginConnector{})
+	defer db.Close()
+
+	for _, bad := range []string{"a3f9c2b1", "sha256:a3f9", "latest", ""} {
+		t.Run(bad, func(t *testing.T) {
+			stderr := withExitPanic(t, func() {
+				deployPlugin(context.Background(), db, []string{"bad-version-plugin", bad, path})
+			})
+			if !strings.Contains(stderr, "invalid plugin version") {
+				t.Errorf("deploying with version %q was not refused; stderr: %s", bad, stderr)
+			}
+		})
+	}
+}
+
+// The control for the test above: the versions the rest of the system actually
+// writes must be ACCEPTED. Without it, "non-semver is refused" is equally
+// satisfied by refusing everything.
+func TestDeployPlugin_AcceptsTheVersionsTheSystemWrites(t *testing.T) {
+	dir := t.TempDir()
+	path := writeWASM(t, dir, []byte{0x00, 0x61, 0x73, 0x6d})
+
+	for _, good := range []string{"1.0.0", "0.1.0", "2.1.0-rc1", "v1.0.0"} {
+		t.Run(good, func(t *testing.T) {
+			db := sql.OpenDB(&mockPluginConnector{})
+			defer db.Close()
+			stdout, stderr := captureOutputs(t, func() {
+				deployPlugin(context.Background(), db, []string{"good-version-plugin", good, path})
+			})
+			if !strings.Contains(stdout, "Deployed plugin good-version-plugin") {
+				t.Errorf("version %q was refused; stdout: %s stderr: %s", good, stdout, stderr)
+			}
+		})
 	}
 }
 
@@ -1551,7 +1662,7 @@ func TestDeployPlugin_FileNotFound(t *testing.T) {
 	defer db.Close()
 
 	stderr := withExitPanic(t, func() {
-		deployPlugin(context.Background(), db, []string{"plugin", "/nonexistent.wasm"})
+		deployPlugin(context.Background(), db, []string{"plugin", "1.0.0", "/nonexistent.wasm"})
 	})
 	if !strings.Contains(stderr, "error reading") {
 		t.Errorf("expected 'error reading' in stderr, got: %s", stderr)
@@ -1596,7 +1707,7 @@ func TestActiveInstances_WithNameCountError(t *testing.T) {
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: name, Version: 1, Deprecated: false, CreatedAt: time.Now()},
+				{Name: name, Version: 1, GCEligible: false, CreatedAt: time.Now()},
 			}, nil
 		},
 		countActiveInstancesFn: func(_ context.Context, name string, version int) (int, error) {
@@ -1621,10 +1732,10 @@ func TestGCVersions_WithErrors(t *testing.T) {
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: "wf", Version: 4, Deprecated: false, CreatedAt: time.Now()},
-				{Name: "wf", Version: 3, Deprecated: true, CreatedAt: oldCreated},
-				{Name: "wf", Version: 2, Deprecated: true, CreatedAt: oldCreated},
-				{Name: "wf", Version: 1, Deprecated: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 4, GCEligible: false, CreatedAt: time.Now()},
+				{Name: "wf", Version: 3, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 2, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 1, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
 			}, nil
 		},
 		getActiveInstanceCountsByVersionFn: func(_ context.Context) (map[string]int, error) {
@@ -1689,10 +1800,10 @@ func TestGCVersions_ArgsNotDryRun(t *testing.T) {
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: "wf", Version: 4, Deprecated: false, CreatedAt: time.Now()},
-				{Name: "wf", Version: 3, Deprecated: true, CreatedAt: oldCreated},
-				{Name: "wf", Version: 2, Deprecated: true, CreatedAt: oldCreated},
-				{Name: "wf", Version: 1, Deprecated: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 4, GCEligible: false, CreatedAt: time.Now()},
+				{Name: "wf", Version: 3, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 2, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
+				{Name: "wf", Version: 1, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: oldCreated},
 			}, nil
 		},
 		getActiveInstanceCountsByVersionFn: func(_ context.Context) (map[string]int, error) {
@@ -1703,18 +1814,35 @@ func TestGCVersions_ArgsNotDryRun(t *testing.T) {
 		},
 	}
 
-	stdout := captureStdout(t, func() {
+	// An unrecognised argument is now REFUSED rather than ignored (cleat#1315).
+	//
+	// This test asserted that such an argument does not turn dry-run on, which
+	// remains true and is stronger now: the sweep does not run at all. It had to
+	// change because `versions gc` grew a policy -- --min-versions and
+	// --max-age -- and silently dropping a typo like `--min-verzions=5` would
+	// run a DESTRUCTIVE sweep under the default policy while printing "GC
+	// complete". Tolerating unknown arguments was harmless while --dry-run was
+	// the only one; it is not harmless now.
+	//
+	// Note what this failure looked like before the test was updated: gcVersions
+	// called the real osExit, so `go test` reported a PACKAGE-level failure with
+	// zero test failures and no build error -- a third cause for that signature
+	// beyond the two CLAUDE.md lists.
+	stderr := withExitPanic(t, func() {
 		gcVersions(context.Background(), store, []string{"--some-other-flag"})
 	})
-	if strings.Contains(stdout, "dry run") {
-		t.Errorf("should not contain 'dry run': %s", stdout)
+	if !strings.Contains(stderr, "unknown argument") {
+		t.Errorf("an unrecognised argument was not refused: %s", strings.TrimSpace(stderr))
+	}
+	if strings.Contains(stderr, "dry run") {
+		t.Errorf("should not have enabled dry run: %s", stderr)
 	}
 }
-func (m *mockStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	if m.batchHeartbeatFn != nil {
-		return m.batchHeartbeatFn(ctx, workerID)
+func (m *mockStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
+	if m.heartbeatBatchFencedFn != nil {
+		return m.heartbeatBatchFencedFn(ctx, workerID, runs)
 	}
-	return 0, nil
+	return nil, nil
 }
 
 func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]engine.EventRecord, error) {
@@ -1747,6 +1875,22 @@ func (m *mockStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error)
 func (m *mockStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
+func (m *mockStore) CountExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockStore) CountExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockStore) CountDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockStore) CountCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
 func (m *mockStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
@@ -1757,6 +1901,10 @@ func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, p
 	return nil, nil
 }
 func (m *mockStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
+	return nil
+}
+
+func (m *mockStore) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
 	return nil
 }
 func (m *mockStore) AdminForceComplete(ctx context.Context, workflowID string, generation int64, result string, operator string) error {
@@ -1770,6 +1918,13 @@ func (m *mockStore) AdminReReplay(ctx context.Context, workflowID string, genera
 }
 func (m *mockStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
 	return 0, nil
+}
+
+// OriginalChildRunIDs returns nothing: no cleatctl test is about cleat#1661's
+// orphan check, and a double that invented children would make the check fire
+// on unrelated tests.
+func (m *mockStore) OriginalChildRunIDs(context.Context, string) ([]string, error) {
+	return nil, nil
 }
 func (m *mockStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
 	return 0, nil
@@ -1808,4 +1963,27 @@ func (m *mockStore) PickVersionByRouting(ctx context.Context, workflowName strin
 }
 func (m *mockStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
 	return 0, nil
+}
+
+func (_ *mockStore) SetAllowedSignalCallers(_ context.Context, _ string, _ []string) error {
+	return nil
+}
+
+// GetChildCompletedAtMs satisfies the store interface. Added with #847, which
+// made PollChild derive its answer from the child's completion instant rather
+// than querying live. Returning ok=false means "never completed", which keeps
+// every existing test's PollChild answer at "running".
+func (m *mockStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	return 0, false, nil
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (m *mockStore) CountWorkflows(ctx context.Context, filter engine.WorkflowFilter) (int, error) {
+	wfs, err := m.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
 }

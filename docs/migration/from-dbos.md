@@ -29,6 +29,61 @@ covers conceptual mapping, API differences, code examples, and known gaps.
 
 ## API Differences
 
+### The first difference: cleat workflows are synchronous
+
+Every DBOS API in this guide is `async`, and every example below says `await`.
+**Cleat workflows are ordinary synchronous functions, and writing `async def` is
+a vet error rather than a style choice.**
+
+    PY012  'my_workflow' is an async function. Async functions cannot be
+           compiled to WASM.
+           Remove the 'async' keyword. Cleat workflows run synchronously --
+           use h.call(), h.sleep(), etc. for durable operations.
+
+`asyncio` inside workflow code is refused too, as PY008, alongside `threading`
+and `multiprocessing`. Both are raised by `cleat vet` at build time, so this is
+caught before deploy rather than at runtime — but only if you run it, and the
+message is the first place most migrants meet the rule. This section exists so
+it is not.
+
+**Nothing is lost in the translation, because the two languages are expressing
+different things.** In DBOS `await` marks a suspension point in an event loop.
+In cleat the equivalent is a *host call* — `h.call`, `h.sleep`,
+`h.await_signals` — and the suspension is durable rather than in-process: the
+workflow's segment ends, the worker is released, and the run resumes from
+history later, possibly on another machine. A DBOS `await` and a cleat host call
+occupy the same position in the code and mean something stronger.
+
+So the mechanical rule when porting is: **drop `async`/`await`, and make sure
+every point that awaited I/O is a host call rather than a direct library
+call.** The second half is the one that matters — `await fetch(...)` becoming a
+synchronous `requests.get(...)` is refused as PY003, and correctly, because a
+direct HTTP call is not replayable. It becomes `h.fetch(...)`.
+
+| DBOS | Cleat | why |
+|---|---|---|
+| `await someStep()` | `h.call("svc", "op", req)` | recorded in history, replayed not re-executed |
+| `await DBOS.sleepSeconds(5)` | `h.sleep(5000)` | durable timer; the worker is released |
+| `await DBOS.recv(...)` | `h.await_signals([...], timeout)` | the run suspends until a signal arrives |
+| `await fetch(...)` | `h.fetch(...)` | direct HTTP is PY003; the host call is replayable |
+
+**Parallelism is not lost either — it moves.** `asyncio.gather` is refused, and
+its vet message names the replacement: *"Use child workflows for parallel
+execution."* Several children run concurrently across workers and the parent
+awaits them (`h.await_all_children`), which is durable where `gather` is
+in-process. What has no cleat expression is concurrency *within a single
+workflow body* — two coroutines interleaving inside one run — because that is
+what makes replay non-deterministic and is the thing the model forbids.
+
+**A consequence worth stating for anyone porting a test suite rather than an
+application:** upstream assertions that are *about* in-process async machinery —
+an event loop, interleaving inside one workflow — are unportable rather than
+unwritten. Assertions that merely *happen* to be written with async syntax —
+"a step's result survives a crash", "a failing step is retried", "these run in
+parallel" — port once the syntax is dropped, the last one via child workflows.
+The question to ask of each is whether the assertion is about the event loop or
+about the durability guarantee, and only the first kind is lost.
+
 ### Workflow Definition
 
 **DBOS (TypeScript):**

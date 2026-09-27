@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -14,7 +13,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("notifications: nil mux")
 	}
@@ -39,24 +38,52 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// tenantID extracts the tenant UUID from the request context. Returns the
-// zero UUID if no tenant is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
+// WebhookSecretName is the tenant-secret name a webhook_config row's signing
+// secret is stored under. cleat#1992.
+//
+// PER-WEBHOOK, NOT PER-TENANT: a tenant can register more than one webhook
+// (own id, url, event filter), so a single fixed name would collide across a
+// tenant's own webhooks -- tenant secrets are keyed (tenant_id, name), a
+// singleton per name. Keying by webhook id preserves that with no product
+// change. Mirrors plugins/datadogexport/routes.go's DatadogAPIKeySecretName.
+func WebhookSecretName(id uuid.UUID) string {
+	return "notifications.webhook_secret." + id.String()
+}
+
+// webhookExistsSQL returns dialect-specific SQL that checks whether a
+// webhook_config row exists for a given (id, tenant_id) pair, scanned into a
+// Go bool. `SELECT EXISTS(...)` as a top-level select list expression is
+// valid PostgreSQL and MySQL but not T-SQL -- SQL Server has no boolean
+// column type, so it needs `CASE WHEN EXISTS(...) THEN 1 ELSE 0 END`. Same
+// shape, same reason, as plugin/migration.go's checkPluginMigrationSQL.
+// Found by cleat-review running sendWebhook and handleListDeliveries against
+// real SQL Server for the first time -- every call failed outright, since
+// SELECT EXISTS(...) is not valid syntax there at all.
+//
+// deleted_at IS NULL: a soft-deleted webhook reads as gone (404/not found),
+// the same as one that never existed, rather than as merely disabled --
+// cleat#2220, matching the treatment cleat#2199 gave webhookingest's sources.
+// Both of this function's callers (handleListDeliveries, sendWebhook) rely on
+// this to refuse a deleted webhook's own sub-resources and new deliveries,
+// not just the config row itself.
+func webhookExistsSQL(d plugin.Dialect) string {
+	if d == plugin.DialectMSSQL {
+		return `SELECT CASE WHEN EXISTS(SELECT 1 FROM webhook_config WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL) THEN 1 ELSE 0 END`
+	}
+	return `SELECT EXISTS(SELECT 1 FROM webhook_config WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL)`
 }
 
 // ---- types ----
 
 type webhookConfigJSON struct {
-	ID        uuid.UUID     `json:"id"`
-	TenantID  uuid.UUID     `json:"tenant_id"`
-	URL       string        `json:"url"`
-	Secret    plugin.Secret `json:"secret"`
-	Events    []string      `json:"events"`
-	Enabled   bool          `json:"enabled"`
-	CreatedAt time.Time     `json:"created_at"`
-	UpdatedAt time.Time     `json:"updated_at"`
+	ID               uuid.UUID `json:"id"`
+	TenantID         uuid.UUID `json:"tenant_id"`
+	URL              string    `json:"url"`
+	SecretConfigured bool      `json:"secret_configured"`
+	Events           []string  `json:"events"`
+	Enabled          bool      `json:"enabled"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type createWebhookRequest struct {
@@ -90,23 +117,14 @@ type deliveryJSON struct {
 // ---- POST /webhooks ----
 
 func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("notifications: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req createWebhookRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 	if req.URL == "" {
@@ -115,6 +133,14 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Events == nil {
 		req.Events = []string{}
+	}
+	// A signing secret is REQUIRED, not optional. cleat#1992/#2172, owner
+	// decision (b): every webhook must sign the deliveries it sends, so the
+	// receiving end can verify them. An unsigned webhook can no longer be
+	// created.
+	if req.Secret.Reveal() == "" {
+		p.writeError(w, 400, "secret is required")
+		return
 	}
 
 	eventsJSON, err := json.Marshal(req.Events)
@@ -126,44 +152,76 @@ func (p *Plugin) handleCreateWebhook(w http.ResponseWriter, r *http.Request) {
 
 	id := uuid.New()
 	now := time.Now()
+	const secretConfigured = true
 
+	// The row is written FIRST, the secret AFTER, with a compensating delete
+	// if the secret write fails -- the opposite order from before cleat-review
+	// on #2198. Secret-first meant every failed INSERT orphaned a secret; on
+	// MySQL the INSERT below failed on EVERY call (the $6, $6 bug this same
+	// change fixes), so it was not a rare edge case, it was every create.
+	// Row-first still risks a row with secret_configured=true and no secret
+	// if the Put fails, which the compensating delete below closes: nothing
+	// is left with secretConfigured=true unless Put actually succeeded.
+	//
+	// Every placeholder numbered once, strictly increasing: $6 named twice
+	// (for created_at and updated_at) would rebind to two SEPARATE "?" on
+	// MySQL, in TEXTUAL order -- plugin.Rebind replaces every $N occurrence
+	// positionally, not by its number (see CLAUDE.md's "MySQL binds `?` by
+	// APPEARANCE") -- while PostgreSQL and SQL Server bind by the number
+	// itself. The only ordering that satisfies both is one placeholder per
+	// argument, numbered in the same order the arguments are passed, so `now`
+	// is passed twice ($6 and $7) rather than reused. Same defect, same fix,
+	// as plugins/webhookingest/routes.go's handleCreateSource -- found there
+	// first; this one was missed in the same PR and caught by cleat-review
+	// running POST /webhooks against real MySQL.
 	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
-			INSERT INTO webhook_config (tenant_id, id, url, secret, events, enabled, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, $5, true, $6, $6)
-		`, p.dialect), tid, id, req.URL, req.Secret.Reveal(), string(eventsJSON), now)
+			INSERT INTO webhook_config (tenant_id, id, url, secret_configured, events, enabled, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, $5, true, $6, $7)
+		`, p.dialect), tid, id, req.URL, secretConfigured, string(eventsJSON), now, now)
 	if err != nil {
 		p.logger.Error("notifications: create webhook", "error", err)
 		p.writeError(w, 500, "failed to create webhook")
 		return
 	}
 
+	if err := p.secrets.Put(r.Context(), WebhookSecretName(id), req.Secret.Reveal()); err != nil {
+		p.logger.Error("notifications: store webhook secret", "error", err)
+		if _, delErr := p.db.Exec(r.Context(), plugin.Rebind(
+			`DELETE FROM webhook_config WHERE id = $1`, p.dialect), id); delErr != nil {
+			p.logger.Error("notifications: compensating delete after failed secret store",
+				"id", id, "error", delErr)
+		}
+		p.writeError(w, 500, "failed to store secret")
+		return
+	}
+
 	p.logger.Info("notifications: webhook created", "id", id, "tenant", tid)
 
 	p.writeJSON(w, 201, webhookConfigJSON{
-		ID:        id,
-		TenantID:  tid,
-		URL:       req.URL,
-		Secret:    req.Secret,
-		Events:    req.Events,
-		Enabled:   true,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:               id,
+		TenantID:         tid,
+		URL:              req.URL,
+		SecretConfigured: secretConfigured,
+		Events:           req.Events,
+		Enabled:          true,
+		CreatedAt:        now,
+		UpdatedAt:        now,
 	})
 }
 
 // ---- GET /webhooks ----
 
 func (p *Plugin) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
 
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
-			SELECT id, url, secret, events, enabled, created_at, updated_at
+			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
 			FROM webhook_config
-			WHERE tenant_id = $1
+			WHERE tenant_id = $1 AND deleted_at IS NULL
 			ORDER BY created_at DESC
 		`, p.dialect), tid)
 	if err != nil {
@@ -179,7 +237,7 @@ func (p *Plugin) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 			c         webhookConfigJSON
 			eventsRaw []byte
 		)
-		if err := rows.Scan(&c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := plugin.ScanRow(rows, &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			p.logger.Error("notifications: scan webhook", "error", err)
 			continue
 		}
@@ -198,8 +256,8 @@ func (p *Plugin) handleListWebhooks(w http.ResponseWriter, r *http.Request) {
 // ---- GET /webhooks/{id} ----
 
 func (p *Plugin) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -215,11 +273,11 @@ func (p *Plugin) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
 		c         webhookConfigJSON
 		eventsRaw []byte
 	)
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
-			SELECT id, url, secret, events, enabled, created_at, updated_at
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
 			FROM webhook_config
-			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid).Scan(&c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+		`, p.dialect), id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "webhook not found")
 		return
@@ -239,8 +297,8 @@ func (p *Plugin) handleGetWebhook(w http.ResponseWriter, r *http.Request) {
 // ---- PUT /webhooks/{id} ----
 
 func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -252,17 +310,8 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("notifications: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req updateWebhookRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 
@@ -276,10 +325,13 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		args = append(args, *req.URL)
 		argIdx++
 	}
-	if req.Secret != nil {
-		setClauses = append(setClauses, fmt.Sprintf("secret = $%d", argIdx))
-		args = append(args, req.Secret.Reveal())
-		argIdx++
+	// A signing secret is REQUIRED, not optional (cleat#1992/#2172, owner
+	// decision (b)): PUT can ROTATE it but can no longer clear it back to
+	// unsigned, so secret_configured has nothing left to set to false and no
+	// longer needs its own SET clause -- true from creation onward, always.
+	if req.Secret != nil && req.Secret.Reveal() == "" {
+		p.writeError(w, 400, "secret cannot be cleared")
+		return
 	}
 	if req.Events != nil {
 		eventsJSON, err := json.Marshal(*req.Events)
@@ -298,7 +350,11 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		argIdx++
 	}
 
-	if len(setClauses) == 0 {
+	// A secret rotation carries no SET clause of its own any more -- it goes
+	// through p.secrets, not this UPDATE -- so it no longer counts toward
+	// setClauses, and the "nothing to update" check has to ask about it
+	// separately or a PUT that rotates only the secret would be rejected.
+	if len(setClauses) == 0 && req.Secret == nil {
 		p.writeError(w, 400, "no fields to update")
 		return
 	}
@@ -309,7 +365,7 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 	query := fmt.Sprintf(`
 			UPDATE webhook_config
 			SET %s
-			WHERE id = $%d AND tenant_id = $%d
+			WHERE id = $%d AND tenant_id = $%d AND deleted_at IS NULL
 		`, joinSetClauses(setClauses), argIdx, argIdx+1)
 
 	rows, err := p.db.Exec(r.Context(), plugin.Rebind(query, p.dialect), args...)
@@ -323,16 +379,30 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The secret write happens AFTER the row update confirms id belongs to
+	// tid -- so a request naming another tenant's (or no) webhook id never
+	// reaches p.secrets at all, rather than rotating a secret under the
+	// caller's own tenant for an id that is not theirs. req.Secret == nil
+	// means the field was omitted (no rotation); req.Secret.Reveal() == ""
+	// was already rejected above, so every reachable call here is a rotation.
+	if req.Secret != nil {
+		if err := p.secrets.Put(r.Context(), WebhookSecretName(id), req.Secret.Reveal()); err != nil {
+			p.logger.Error("notifications: rotate webhook secret", "error", err, "id", id)
+			p.writeError(w, 500, "failed to store secret")
+			return
+		}
+	}
+
 	// Return the updated webhook config.
 	var (
 		c         webhookConfigJSON
 		eventsRaw []byte
 	)
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
-			SELECT id, url, secret, events, enabled, created_at, updated_at
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
+			SELECT id, url, secret_configured, events, enabled, created_at, updated_at
 			FROM webhook_config
-			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid).Scan(&c.ID, &c.URL, &c.Secret, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
+			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+		`, p.dialect), id, tid), &c.ID, &c.URL, &c.SecretConfigured, &eventsRaw, &c.Enabled, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		p.logger.Error("notifications: re-fetch webhook", "error", err)
 		p.writeError(w, 500, "failed to retrieve updated webhook")
@@ -348,8 +418,8 @@ func (p *Plugin) handleUpdateWebhook(w http.ResponseWriter, r *http.Request) {
 // ---- DELETE /webhooks/{id} ----
 
 func (p *Plugin) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -361,18 +431,88 @@ func (p *Plugin) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
-			DELETE FROM webhook_config
-			WHERE id = $1 AND tenant_id = $2
+	// A SOFT delete, not a hard one. cleat#2220, matching cleat#2199's shape
+	// for webhookingest's sources: a hard DELETE FROM webhook_config hit a
+	// foreign key violation on PostgreSQL and SQL Server for any webhook that
+	// had ever received a delivery (webhook_delivery.webhook_id REFERENCES
+	// webhook_config(id), no ON DELETE action before migrations.go v7) and
+	// silently orphaned the delivery rows on MySQL instead. Marking the row
+	// deleted rather than removing it keeps webhook_delivery's rows in the
+	// DATABASE, for anything auditing what was sent before the webhook was
+	// removed, or for a future admin-only endpoint to read them.
+	//
+	// They are NOT reachable through GET .../deliveries once the webhook is
+	// deleted, and this used to say otherwise: handleListDeliveries calls
+	// webhookExistsSQL first, which filters deleted_at IS NULL exactly like
+	// every other read path here, so it 404s for a deleted webhook's id the
+	// same as GET/PUT do (coordinator's #2233 review; see
+	// TestADeletedWebhooksPendingDeliveriesAreCancelledNotSent's own
+	// "LIST deliveries for deleted webhook: want 404" assertion).
+	//
+	// Cancelling the webhook's own pending/retrying deliveries in the SAME
+	// transaction as the soft-delete, not as a separate step, mirrors
+	// cleat#2199's handleDeleteSource exactly: a tenant deleting a webhook
+	// is asking cleat to stop sending to it, and without this a delivery
+	// already queued (or awaiting its next backoff retry) would still go out
+	// after the delete -- background.go's own doc comments describe the
+	// existing config-lookup and secret-lookup failure paths that already
+	// existed if this were left to happen by the config row simply becoming
+	// unreadable, none of which mark the delivery as anything other than
+	// "still pending, retried forever". Setting status='cancelled' here
+	// stops it at the source rather than relying on deliver() to fail its
+	// way to the same place. queryDueDeliveries (background.go) carries an
+	// independent deleted_at IS NULL guard on top of this, the same
+	// defense-in-depth belt-and-suspenders shape #2199 used for
+	// processBatch/awaitWebhook.
+	tx, err := p.db.Begin(r.Context())
+	if err != nil {
+		p.logger.Error("notifications: begin delete transaction", "error", err)
+		p.writeError(w, 500, "failed to delete webhook")
+		return
+	}
+
+	rows, err := tx.Exec(r.Context(), plugin.Rebind(`
+			UPDATE webhook_config
+			SET enabled = false, deleted_at = now()
+			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
 		`, p.dialect), id, tid)
 	if err != nil {
+		tx.Rollback()
 		p.logger.Error("notifications: delete webhook", "error", err)
 		p.writeError(w, 500, "failed to delete webhook")
 		return
 	}
 	if rows == 0 {
+		tx.Rollback()
 		p.writeError(w, 404, "webhook not found")
 		return
+	}
+
+	if _, err := tx.Exec(r.Context(), plugin.Rebind(`
+			UPDATE webhook_delivery
+			SET status = 'cancelled'
+			WHERE webhook_id = $1 AND status IN ('pending', 'retrying')
+		`, p.dialect), id); err != nil {
+		tx.Rollback()
+		p.logger.Error("notifications: cancel pending deliveries after delete", "error", err, "id", id)
+		p.writeError(w, 500, "failed to delete webhook")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		p.logger.Error("notifications: commit delete webhook", "error", err)
+		p.writeError(w, 500, "failed to delete webhook")
+		return
+	}
+
+	// Best-effort, outside the transaction: the config row is already
+	// soft-deleted, which is the operation the caller asked for and got. A
+	// failure here leaves a retired-but-not-yet-retired secret pointing at a
+	// webhook id no route or sweep will read again (every lookup filters
+	// deleted_at IS NULL) -- inert rather than reachable -- so it is logged
+	// rather than turned into a 500 for an otherwise-successful delete.
+	if _, err := p.secrets.Retire(r.Context(), WebhookSecretName(id)); err != nil {
+		p.logger.Error("notifications: retire webhook secret after delete", "error", err, "id", id)
 	}
 
 	p.logger.Info("notifications: webhook deleted", "id", id, "tenant", tid)
@@ -382,8 +522,8 @@ func (p *Plugin) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 // ---- GET /webhooks/{id}/deliveries ----
 
 func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -397,9 +537,8 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 
 	// Verify the webhook belongs to the tenant.
 	var exists bool
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
-			SELECT EXISTS(SELECT 1 FROM webhook_config WHERE id = $1 AND tenant_id = $2)
-		`, p.dialect), webhookID, tid).Scan(&exists)
+	err = p.db.QueryRow(r.Context(), plugin.Rebind(webhookExistsSQL(p.dialect), p.dialect),
+		webhookID, tid).Scan(&exists)
 	if err != nil {
 		p.logger.Error("notifications: verify webhook", "error", err)
 		p.writeError(w, 500, "failed to verify webhook")
@@ -427,7 +566,12 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query += " ORDER BY created_at DESC"
-	query += fmt.Sprintf(" LIMIT $%d", argIdx)
+	// plugin.LimitClause, not a literal "LIMIT $N": SQL Server has no LIMIT,
+	// only OFFSET/FETCH after an ORDER BY (which this query already has).
+	// cleat-review's re-check on #2198 found this endpoint 500ing on MSSQL
+	// with "Incorrect syntax near 'LIMIT'" -- the same bug #2191 already
+	// fixed the same way for /audit/events.
+	query += " " + plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, 100)
 
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
@@ -449,7 +593,7 @@ func (p *Plugin) handleListDeliveries(w http.ResponseWriter, r *http.Request) {
 			responseCode  sql.NullInt64
 			responseBody  sql.NullString
 		)
-		if err := rows.Scan(
+		if err := plugin.ScanRow(rows,
 			&d.ID, &d.WebhookID, &d.EventType, &payloadRaw,
 			&d.Status, &d.AttemptCount,
 			&lastAttemptAt, &nextAttemptAt, &deliveredAt,

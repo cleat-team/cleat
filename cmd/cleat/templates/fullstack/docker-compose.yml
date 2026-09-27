@@ -1,0 +1,99 @@
+services:
+  postgres:
+    # Deliberately NOT digest-pinned, unlike cleat's own CI. This file is
+    # scaffolded into your project, and a digest frozen on the day you ran
+    # `cleat init` is yours to carry, not ours to choose. 16 is cleat's
+    # minimum supported PostgreSQL.
+    image: postgres:16
+    environment:
+      POSTGRES_USER: cleat
+      POSTGRES_PASSWORD: cleat
+      POSTGRES_DB: cleat
+    ports:
+      # Host ports are overridable (CLEAT_PG_PORT, CLEAT_API_PORT) for the day 5432 or 8080 is taken.
+      - "${CLEAT_PG_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cleat -d cleat"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  # Schema migration, as a one-shot deploy step (cleat#2117): a worker no
+  # longer migrates itself at every start. Runs as the postgres superuser --
+  # DDL needs it, and migrations/postgres/005_app_role.sql is the file that
+  # creates the lesser role below, so nothing else can run first.
+  migrate:
+    # CLEAT_WORKER_IMAGE names a locally built image, for when the published one is not there yet:
+    #   docker build -t cleat-worker:local <a cleat checkout>  &&  CLEAT_WORKER_IMAGE=cleat-worker:local make up
+    image: ${CLEAT_WORKER_IMAGE:-ghcr.io/cleat-team/cleat-worker:latest}
+    command:
+      - "--migrate-only"
+      - "--db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # migrations/postgres/005_app_role.sql creates cleat_app NOLOGIN and
+  # without a password, deliberately: a credential does not belong in a file
+  # that migrations commit and replay. This one-shot step supplies one for
+  # local development, once the migration above has created the role to
+  # receive it.
+  app-role:
+    image: postgres:16
+    environment:
+      PGPASSWORD: cleat
+    command:
+      - psql
+      - -v
+      - ON_ERROR_STOP=1
+      - -h
+      - postgres
+      - -U
+      - cleat
+      - -d
+      - cleat
+      - -c
+      - "ALTER ROLE cleat_app LOGIN PASSWORD '${CLEAT_APP_PASSWORD:-cleat-app-local-dev}';"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  cleat-worker:
+    # CLEAT_WORKER_IMAGE names a locally built image, for when the published one is not there yet:
+    #   docker build -t cleat-worker:local <a cleat checkout>  &&  CLEAT_WORKER_IMAGE=cleat-worker:local make up
+    image: ${CLEAT_WORKER_IMAGE:-ghcr.io/cleat-team/cleat-worker:latest}
+    # A worker drains for --shutdown-grace (default 20s) after SIGTERM before it cancels its runs
+    # (cleat#2285). Docker sends SIGKILL after 10s unless told otherwise, which would cut the drain off.
+    stop_grace_period: 60s
+    command:
+      # NOT the postgres superuser above. Every tenant-scoped table has row-
+      # level security FORCEd, and PostgreSQL never applies RLS to a
+      # superuser -- see migrations/postgres/005_app_role.sql. --require-auth
+      # (on by default) refuses to start over a connection that is exempt
+      # from RLS, which is what catches this if it regresses.
+      - "--db=postgres://cleat_app:${CLEAT_APP_PASSWORD:-cleat-app-local-dev}@postgres:5432/cleat?sslmode=disable"
+      # Used only for the startup schema-verification's error message; this
+      # worker does not migrate itself -- see the migrate service above.
+      - "--migrate-db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
+      - "--api-addr=:8080"
+      # WITHOUT THIS FLAG THE RATE LIMITER IS PER-WORKER. plugin-config.json
+      # sets the rate-limiter to "db" mode, which coordinates through a
+      # rate_counter table and therefore holds across every worker. The
+      # default is "memory": in-process token buckets, so N workers give one
+      # tenant N times the configured rate. See README.md, "Check the rate
+      # limiter actually took".
+      - "--plugin-config=/etc/cleat/plugin-config.json"
+      # Per-tenant limits are off unless you set a rate. The per-IP default
+      # (100/s) is the wrong dimension behind a load balancer.
+      - "--rate-limit-per-tenant=50"
+      - "--rate-limit-per-tenant-burst=100"
+      - "--concurrency=10"
+    volumes:
+      - ./plugin-config.json:/etc/cleat/plugin-config.json:ro
+    ports:
+      - "${CLEAT_API_PORT:-8080}:8080"
+    depends_on:
+      app-role:
+        condition: service_completed_successfully

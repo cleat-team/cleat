@@ -1,83 +1,46 @@
 package main
 
 import (
-	"context"
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
+	"strconv"
 	"strings"
-	"time"
 
 	"github.com/cleat-team/cleat/engine"
 )
 
-// StartAPIServer creates and starts the HTTP API server with the given
-// configuration, worker, and plugin chain. It runs in a background goroutine
-// and shuts down when ctx is cancelled.
-//
-// factory is what lets handlers scope each request to the tenant that
-// authenticated it; without it an authenticated request cannot be served at all
-// (storeFor refuses rather than falling back to the default tenant). It is a
-// parameter rather than a Config field because Config holds flag-derived values
-// and this is a live dependency.
-func StartAPIServer(cfg *Config, w *Worker, plugMux, plugHandler http.Handler, plugList any, db *sql.DB, factory engine.StoreFactory) {
-	if cfg.APIAddr == "" {
-		return
-	}
-
-	api := &apiServer{
-		store:       w.store,
-		worker:      w,
-		maxBodySize: cfg.MaxBodySize,
-		db:          db,
-		factory:     factory,
-		taskQueues:  cfg.TaskQueues,
-		requireAuth: cfg.RequireAuth,
-	}
-
-	mux := plugMux
-	if mux == nil {
-		mux = http.NewServeMux()
-	}
-
-	sm, ok := mux.(*http.ServeMux)
-	if !ok {
-		sm = http.NewServeMux()
-	}
-	mux = registerRoutes(sm, api)
-
-	handler := plugHandler
-	if handler == nil {
-		handler = mux
-	}
-
-	srv := &http.Server{
-		Addr:         cfg.APIAddr,
-		Handler:      handler,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
-
-	go func() {
-		w.logger.InfoContext(context.Background(), "HTTP API listening", "worker_id", w.id, "addr", cfg.APIAddr)
-		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-			w.logger.ErrorContext(context.Background(), "HTTP server error", "worker_id", w.id, "error", err)
-		}
-	}()
-
-	go func() {
-		<-w.ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		srv.Shutdown(shutdownCtx)
-	}()
-}
-
 // registerRoutes attaches all API routes to the given mux.
+//
+// This is the ONLY route table. It used to be one of two: main() registered its
+// own set inline and reached this function not at all, so `/api/instances/...`
+// and every `/api/admin/instances/...` route -- instance state, event history,
+// force-complete, force-fail, re-replay, step resolve -- existed on the table
+// the tests drove and on no table the binary served. Seven endpoints, one of
+// them documented in CHANGELOG.md as a shipped operator feature, none of them
+// reachable since app.go was written (ce48f18). `--enable-admin-api` gated a
+// handler nothing routed to.
+//
+// Nothing reported it because of the SPA fallback below, which answered every
+// unmatched path -- `/api/` included -- with 200 and index.html. A JSON client
+// asking for a missing endpoint got HTML and a parse error naming nothing,
+// rather than a 404 naming the path.
 func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
+	// /healthz is /livez under its old name (cleat#2007); the other two are the split it was standing in for.
+	mux.HandleFunc("/livez", api.handleLivez)
+	mux.HandleFunc("/readyz", api.handleReadyz)
 	mux.HandleFunc("/healthz", api.handleHealthz)
+	mux.HandleFunc("/api/admin/health", api.adminAPIOnly(api.handleAdminHealth))
 	mux.HandleFunc("/metrics", handleMetrics)
+	// Every /api/admin/ route is registered through adminAPIOnly: they are gated on --enable-admin-api,
+	// which is off by default, and answer 404 while it is off (cleat#2267). See docs/operations/admin-api.md
+	// for which of them are worker-level and which tenant-scoped, and
+	// TestEveryAdminRouteIsAbsentUntilTheAdminAPIIsEnabled, which reads this file for the registrations and
+	// fails on one that is not gated.
+	mux.HandleFunc("/api/admin/drain", api.adminAPIOnly(api.handleDrain))
+	mux.HandleFunc("/api/admin/retention/sweep", api.adminAPIOnly(api.handleRetentionSweep))
+	// Schedule routes before workflow routes so /api/schedules is not caught
+	// by /api/workflows/.
 	mux.HandleFunc("/api/schedules/", api.handleSchedules)
 	mux.HandleFunc("/api/schedules", api.handleSchedulesList)
 	mux.HandleFunc("/api/workflows/", api.handleWorkflows)
@@ -85,14 +48,74 @@ func registerRoutes(mux *http.ServeMux, api *apiServer) *http.ServeMux {
 	mux.HandleFunc("/api/dead-letters/", api.handleDeadLetters)
 	mux.HandleFunc("/api/dead-letters", api.handleDeadLettersList)
 
+	// Workflow definitions.
+	mux.HandleFunc("GET /api/definitions", api.handleDefinitions)
+	mux.HandleFunc("POST /api/definitions", api.handleCreateDefinition)
+
+	// Version management.
+	//
+	// api.scopedStore, not api.store: store is the process-wide connection
+	// opened at boot against the default tenant, and passing it here served
+	// every caller's version read and -- worst -- POST
+	// /api/versions/<name>/<v>/purge from the default tenant's data regardless
+	// of who authenticated.
+	engine.RegisterVersionHandler(mux, api.scopedStore)
+
 	// Instance inspection endpoints (always on behind auth).
 	mux.HandleFunc("/api/instances/", api.handleInstancesRoutes)
 
-	// Admin API endpoints. Destructive operations are additionally gated
-	// behind --enable-admin-api at request time in handleAdminRoutes (see
-	// api_admin.go), so the route itself can always be registered.
-	mux.HandleFunc("/api/admin/instances/", api.handleAdminRoutes)
+	// Admin API endpoints: tenant-scoped (callerOwnsTarget, in api_admin.go), and gated like the rest.
+	mux.HandleFunc("/api/admin/instances/", api.adminAPIOnly(api.handleAdminRoutes))
+
+	// Plugin discovery, when the binary loaded plugins.
+	if api.plugins != nil {
+		mux.Handle("/api/plugins", api.plugins)
+	}
+
+	// The SPA catch-all, when the binary embeds one.
+	if api.spa != nil {
+		mux.Handle("/", apiAware404(api.spa))
+	}
 	return mux
+}
+
+// adminAPIOnly gates a route that is not part of the ordinary tenant API on --enable-admin-api, which is
+// off by default. While it is off the route does not exist: the answer is the 404 an unregistered /api/
+// path gets, so a caller cannot tell a gated route from a missing one.
+//
+// It exists because worker-level routes (drain, the health detail) accept ANY tenant's API key. cleat has
+// no operator identity yet (cleat#2169), so "who may drain a worker" cannot be answered per caller, and
+// the decision is made per deployment instead: the operator turns the routes on, and while they are on any
+// authenticated key can call them. The gate is checked per request, not at registration, so a test can
+// flip the flag.
+func (s *apiServer) adminAPIOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !*enableAdminAPI {
+			s.writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// apiAware404 wraps the SPA handler so that an unmatched path under /api/ is a
+// JSON 404 rather than the single-page app.
+//
+// Only UNMATCHED paths reach here: ServeMux prefers the longest matching
+// pattern, so every registered /api/ route above still wins. What falls through
+// is a path no handler claims -- a typo, a client built against a newer server,
+// or a route that was never registered at all, which is the case that hid seven
+// endpoints for the life of this file.
+func apiAware404(spa http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
+			return
+		}
+		spa.ServeHTTP(w, r)
+	})
 }
 
 // ---- Dead Letter Queue handlers ----
@@ -106,11 +129,62 @@ func (s *apiServer) handleDeadLettersList(w http.ResponseWriter, r *http.Request
 		s.writeError(w, 405, "method not allowed")
 		return
 	}
-	workflows, err := st.ListWorkflows(r.Context(), engine.WorkflowFilter{Status: "dead_lettered", Limit: 100})
+	// Paging, mirroring handleWorkflowsList, which mirrors
+	// handleGetInstanceEvents: both parameters read from the query, a server
+	// ceiling applied rather than assumed, and the total sent as a header.
+	//
+	// Before this, Limit was hard-coded to 100 and Offset was never read -- the
+	// sentence cleat#1182 wrote about /api/workflows, still true one endpoint
+	// over (cleat#1166). A cap pretending to be a default is worse than a small
+	// cap: a bare array of exactly 100 is indistinguishable from a store
+	// holding exactly 100.
+	//
+	// It matters more here than it did there -- though less than cleat#1166's
+	// headline said, and less than this comment said when #1232 added it.
+	//
+	// --completed-workflow-retention-days never touches a dead-lettered run,
+	// correctly: it is the run an operator most wants to inspect afterwards.
+	// But a SECOND knob deletes them -- --dead-letter-retention-days
+	// (cleat#1023), which removes the row with its event_history, signals and
+	// promises -- and it DEFAULTS TO 0, meaning off.
+	//
+	// So "the one class retention never deletes" is wrong. The true statement
+	// is weaker and still sufficient: unbounded growth is a property of the
+	// DEFAULT CONFIGURATION rather than of the design, which makes this the
+	// listing most likely to be long on a deployment nobody has tuned.
+	//
+	// Both #1166 and cleat#1227 reached the wrong version from the same
+	// sentence: DeleteCompletedWorkflows excludes dead_lettered with a comment
+	// reading "it has its own lifecycle and its own deletion path", and two
+	// readers took that as an explanation for the omission rather than as a
+	// pointer to a path that exists. The refutation was inside the thing being
+	// cited, which is why neither of us went looking.
+	q := r.URL.Query()
+	filter := engine.WorkflowFilter{Status: "dead_lettered", Limit: 100}
+	if v, err := strconv.Atoi(q.Get("limit")); err == nil && v > 0 {
+		filter.Limit = v
+	}
+	if filter.Limit > 1000 {
+		filter.Limit = 1000
+	}
+	if v, err := strconv.Atoi(q.Get("offset")); err == nil && v >= 0 {
+		filter.Offset = v
+	}
+
+	total, err := st.CountWorkflows(r.Context(), filter)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
+	workflows, err := st.ListWorkflows(r.Context(), filter)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+
+	// Header rather than an envelope: the body stays a bare array, so no
+	// existing caller breaks.
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	if workflows == nil {
 		workflows = []engine.WorkflowInstance{}
 	}
@@ -176,33 +250,95 @@ func (s *apiServer) handleDeadLetterReprocess(w http.ResponseWriter, r *http.Req
 	// workflow re-created it under the default tenant regardless of whose
 	// workflow it was, so a tenant's own retry moved its run into another
 	// tenant's scope.
-	runID, alreadyExisted, serr := st.StartNewRun(r.Context(), "", wf.DefName, versions[0], wf.Input, "", s.tenantFor(r), 0)
+	// Reprocess honours Idempotency-Key for the same reason start does: a lost
+	// response followed by a retry would otherwise re-drive work that already
+	// failed partway, so partial side effects get repeated (cleat#1167). The
+	// key is a client-supplied token, unique per (key_hash, tenant_id) -- the
+	// caller never invents an id in the server's namespace.
+	//
+	// With no header this stays as it was: a new run per call. Deriving a key
+	// from `id` would protect callers that send nothing, but it would also
+	// refuse a DELIBERATE second re-drive -- fix the downstream, re-drive
+	// again -- and answering that with the first run is worse than the
+	// duplicate this guards against. Making reprocess idempotent by identity
+	// removes an operation and needs to be its own decision.
+	idempotencyKey := r.Header.Get("Idempotency-Key")
+	runID, alreadyExisted, serr := st.StartNewRun(r.Context(), "", wf.DefName, versions[0], wf.Input, idempotencyKey, s.tenantFor(r), 0)
 	if serr != nil {
 		s.writeError(w, 500, serr.Error())
 		return
 	}
+	// The original response plus the flag, same as start -- cleat#1169. These
+	// two moved together on purpose: cleat#1247 gave reprocess start's exact
+	// duplicate shape rather than inventing a third, specifically so that this
+	// change would not have to reconcile them first.
 	if alreadyExisted {
-		s.writeJSON(w, 200, map[string]string{"workflow_id": runID, "already_started": "true"})
+		s.writeJSON(w, 201, withReplayFlag(map[string]any{"id": runID}, true))
 		return
 	}
 
-	s.writeJSON(w, 201, map[string]string{"id": runID})
+	s.writeJSON(w, 201, withReplayFlag(map[string]any{"id": runID}, false))
 }
 
 func (s *apiServer) handleDeadLetterTerminate(w http.ResponseWriter, r *http.Request, id string) {
-	st, ok := s.scopedStore(w, r)
+	// callerOwnsTarget, not scopedStore. TerminateWorkflow's UPDATE carries
+	// `AND tenant_id` since 3.86, so a foreign id already changed nothing --
+	// but it changed nothing and returned 200, which reads to the caller as
+	// "terminated" and to an operator as a workflow that ignored a terminate.
+	// This answers 404 instead, and answers the SAME 404 for an id that does
+	// not exist anywhere, which is the point: distinguishing the two would
+	// turn this route into an oracle for which workflow ids are real.
+	st, ok := s.callerOwnsTarget(w, r, id)
 	if !ok {
 		return
 	}
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, int64(1<<10)) // 1 KB
-		json.NewDecoder(r.Body).Decode(&req)
+	{
+		// The error was DISCARDED here until cleat#1337, and this is the only
+		// request-body decode in the worker that did not branch on it. The
+		// consequence was not that the operator's note went missing: it is that
+		// the note is written straight into workflow_instances.error_msg by
+		// TerminateWorkflow, unconditionally and in both of its branches, so an
+		// empty reason OVERWRITES the failure message recording why the run
+		// dead-lettered in the first place. Measured on one row: 270 bytes of
+		// host error before, 0 after, and a 200 in between.
+		//
+		// The body that did it was 25 bytes of truncated JSON, nowhere near the
+		// 1 KB cap above -- the cap is one way in, not the defect.
+		//
+		// io.EOF is carved out because an EMPTY body is a supported call: a
+		// terminate with no reason at all. TestHandleDeadLetterTerminate_NoBody
+		// has asserted 200 for a nil body since before this handler had any
+		// error handling, and http.NoBody decodes to exactly io.EOF. A
+		// truncated body is io.ErrUnexpectedEOF, which errors.Is(err, io.EOF)
+		// does NOT match -- verified, because the whole fix turns on those two
+		// being distinguishable.
+		// cleat#1338 has since answered the status question for all sixteen
+		// bounded bodies, so the 1 KB cap and the io.EOF carve-out both live
+		// in decodeOptionalJSONBody now: an oversized body is a 413 naming the
+		// limit, a truncated one is still a 400, and an empty one is still a
+		// supported call.
+		if !s.decodeOptionalJSONBody(w, r, terminateBodyLimit(), &req) {
+			return
+		}
 	}
 	if err := st.TerminateWorkflow(r.Context(), id, req.Reason); err != nil {
-		s.writeError(w, 500, err.Error())
+		// 3.92: the store now reports a terminate that matched nothing rather
+		// than returning nil. callerOwnsTarget above has already answered 404
+		// for an id this tenant does not own, so reaching here means the row
+		// went away between the two -- still a 404, and the same one, because
+		// ErrWorkflowNotFound does not distinguish "gone" from "not yours".
+		if errors.Is(err, engine.ErrWorkflowNotFound) {
+			s.writeError(w, 404, "not found")
+			return
+		}
+		// cleat#1975 (D3): a terminate on a settled row -- other than the
+		// dead_lettered -> terminated transition this route exists to do --
+		// now comes back as engine.ErrAdminStateConflict. handleAdminOpError
+		// is the one place that maps it to 409, the same class re-replay uses.
+		s.handleAdminOpError(w, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"status": "terminated"})
@@ -230,9 +366,32 @@ func (s *apiServer) handleWorkflowRetry(w http.ResponseWriter, r *http.Request, 
 		s.writeError(w, 400, "workflow is not dead-lettered, status="+wf.Status)
 		return
 	}
-	if err := st.RetryWorkflow(r.Context(), id); err != nil {
-		s.writeError(w, 500, err.Error())
+	// cleat#2039: RetryWorkflow had no guard against retrying a workflow with
+	// an unresolved ambiguous call, unlike ReReplay's equivalent
+	// dead_lettered -> ready transition. engine.RetryWorkflow adds that check;
+	// handleAdminOpError maps its ErrAdminStateConflict to 409, the same class
+	// terminate and re-replay use above.
+	if err := engine.RetryWorkflow(r.Context(), st, id); err != nil {
+		s.handleAdminOpError(w, err)
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"id": id, "status": "retried"})
+}
+
+// adminAPIExposure is the startup warning for --enable-admin-api, or "" when there is nothing to say. The
+// flag is a deployment decision that widens who can act on the worker, and until cleat has an operator
+// credential (cleat#2169) it widens it to every authenticated key, so it is said in the log where the
+// operator who set it will see it.
+func adminAPIExposure(enabled, requireAuth bool) string {
+	switch {
+	case !enabled:
+		return ""
+	case !requireAuth:
+		return "--enable-admin-api is set with --require-auth=false: EVERYONE who can reach this port can drain the worker and run " +
+			"the admin operations, with no credential at all"
+	default:
+		return "--enable-admin-api is set: any authenticated API key of any tenant can drain this worker and trigger a retention " +
+			"sweep (the tenant-scoped admin operations stay limited to the caller's own workflows). cleat has no operator " +
+			"credential yet (cleat#2169); see docs/operations/admin-api.md"
+	}
 }

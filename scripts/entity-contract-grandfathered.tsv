@@ -1,0 +1,20 @@
+# Clauses of the entity contract that are NOT enforced yet (cleat#1702).
+#
+# The design converts existing members one at a time, workflow_schedules last
+# because it carries an API break. Each line is one (table, clause) pair that
+# the guard will skip. Delete a line when the migration for it lands.
+#
+# THIS LIST MAY ONLY SHRINK. The ceiling is GRANDFATHER_CEILING in
+# check-entity-contract.py -- deliberately in the guard rather than in this
+# file, so that growing it is an edit to a different file that a reviewer sees,
+# rather than one more line in a list that is already long.
+#
+# The reason that matters: for a plain allowlist, the cheapest way to make the
+# guard pass is to add a name to it, and a pass bought that way is
+# indistinguishable from conforming.
+#
+# Generated 2026-09-16 from the guard's own parse, not typed by hand, so the
+# list cannot disagree with what the guard checks. Re-derive:
+#   python3 scripts/check-entity-contract.py --grandfathered /dev/null
+#
+# table					clause

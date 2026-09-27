@@ -20,34 +20,282 @@ design document and provides day-to-day operational guidance.
 
 ## 1. How tenant isolation works
 
-### Per-tenant schemas
+### What it protects against: two trust surfaces, not one
 
-Each tenant gets its own PostgreSQL login role and schema:
+Almost every design decision in this section turns on a distinction that is easy
+to collapse, and collapsing it produces the wrong answer in a predictable
+direction — reaching for a stricter mechanism to defend against something that
+is not in the model.
+
+**Workflow code is untrusted.** It is WASM, sandboxed, with no database handle
+and no way to issue SQL. It reaches a plugin only through a host call, where
+`engine.pluginCallContext` bridges the workflow's own tenant before the plugin
+function runs. A workflow cannot set a session variable, cannot open a
+connection, and cannot name a tenant other than its own.
+
+**Plugin code is trusted.** It runs in-process, holds a `*sql.DB`, and can issue
+any statement it likes. Plugins are closer to device drivers than to user
+programs: they can wreck things, and the deployment relies on them not to.
+Installing one is a deliberate act by an operator, which is what sections 3 to 6
+of this guide are about.
+
+So the row-level policies on plugin tables **are not a wall against the plugin**.
+A plugin that wanted another tenant's rows does not need to defeat a policy; it
+can simply issue the query. The policies exist to catch the plugin's
+**mistakes** — a forgotten `WHERE tenant_id = $1`, a background sweep that runs
+on a context carrying no tenant — which is the failure cleat#1277 was filed
+about and whose miss rate does not improve on its own.
+
+#### What follows from this, concretely
+
+Two mechanisms can lift the tenant scoping for a legitimate cross-tenant sweep:
+a **granted database role**, which the application cannot give itself, or a
+**session variable**, which it can. The first is strictly stronger against an
+application that has been taken over, and PostgreSQL uses it
+(`SET LOCAL ROLE cleat_sweep`).
+
+SQL Server has no `SET ROLE` — database role membership is a property of the
+connection — so cleat uses a second `SESSION_CONTEXT` key there instead. That is
+a real asymmetry, and it is **acceptable rather than regrettable** for the reason
+above: against trusted code that already holds the connection, the role's one
+advantage does not exist. What it buys against a *mistake* is identical, because
+`plugin.AcrossAllTenants` is an explicit call that refuses an empty reason and
+shows up in a diff.
+
+The risk that remains is not that the bypass can be taken. It is that it is
+**convenient** — one line, and the obvious reach when a fail-closed policy makes
+a sweep return nothing, which is exactly what a correct policy looks like from
+the inside when you forgot to thread the tenant through. That is why every
+cross-tenant bypass in the tree is declared in a ledger with a typed reason
+(`plugin/a_cross_tenant_bypass_is_declared_test.go`, cleat#1623), and why a
+statement naming a tenant-scoped table on a bare context fails at authoring time
+rather than at three in the morning (cleat#1552 step 3).
+
+### Where the tables are
 
 ```
 Database: cleat
 ├── public.*              — core tables (workflow_instances, event_history, ...)
 │                           Owned by cleat_owner. RLS filters by tenant_id.
+│                           PLUGIN TABLES ARE ALSO HERE.
 │
-├── tenant_a1b2c3.*       — tenant X's schema
-│   └── plugin tables live here
-│
+├── tenant_a1b2c3.*       — tenant X's schema, created by admin.create_tenant
 ├── tenant_d4e5f6.*       — tenant Y's schema
 │
-├── admin.*               — admin tables (cleat_owner only)
-└── plugin_shared.*       — shared plugin metadata
+└── admin.*               — admin tables (cleat_owner only)
 ```
 
-The worker connects to PostgreSQL as the **tenant's login role**, not as
-`cleat_owner`, when executing workflow or plugin code. This means:
+**Plugin tables live in the same schema as the core tables, not in a per-tenant
+one.** This section described the opposite until cleat#1279; the per-tenant
+placement was designed and never wired up, and the documentation was written
+as though it had been.
 
-- A plugin querying `SELECT * FROM workflow_instances` only sees its own
-  tenant's rows (RLS enforces this).
-- A plugin querying `SELECT * FROM tenant_Y.some_table` gets a permission
-  error -- it has no access to other tenants' schemas.
-- A plugin running `SET ROLE cleat_owner` fails -- the tenant role is not a
-  member of `cleat_owner`.
-- A plugin running `RESET ROLE` is harmless -- it resets to itself.
+What is true: `admin.create_tenant` does create a `tenant_<uuid>` schema and a
+login role, and `admin.grant_plugin_to_tenant` exists to `GRANT` plugin tables
+to that role. But it reads `admin.plugin_tables`, which nothing populates --
+`plugin.RegisterPluginTables` is the only writer and **has no production
+caller** (it has a full unit-test suite, so grepping the name finds plenty of
+hits; grep for calls outside `_test.go` files). So the grant loop is always
+zero-iteration, and no plugin migration issues `CREATE SCHEMA` anywhere.
+
+Plugin migrations follow the configured schema. This paragraph said the
+opposite until 2026-09-26 — that they "pin `search_path = public`
+unconditionally (`plugin/migration.go`), so a plugin table lands in `public`
+even when the worker runs with a non-default `--schema`" — which was true when
+written and was fixed by #1353 and #1362 on 2026-09-12.
+`pluginMigrationSession` now takes the schema and runs
+`SET search_path = <schema>, pg_temp` (`plugin/migration.go`), and
+`migration.Runner.WithSchema` has a production caller
+(`cmd/cleat-worker/main.go`). `docs/plugin-table-handling.md` carries the
+longer retraction under its section (b).
+
+### What actually isolates a plugin's rows
+
+Every plugin table carries a `tenant_id` column. Two things scope it:
+
+1. **The plugin's own `WHERE tenant_id = $1`**, hand-written at each query
+   site. This is the only protection for most plugin tables.
+2. **A row-level security policy**, for tables that declare `TenantScoped` on
+   their migration (cleat#1280). The runtime emits `ENABLE`/`FORCE ROW LEVEL
+   SECURITY` and a policy filtering on `cleat.assert_tenant_set()`, and the
+   plugin database adapter supplies that value transaction-locally whenever
+   the request context carries a tenant.
+
+**Only one table has a policy today** (`kv_store`). Re-derive rather than
+trusting this sentence:
+
+```bash
+grep -rn 'TenantScoped: \[\]string' plugins/*/migrations.go
+```
+
+The rest are scoped by the Go predicate and nothing else, and a forgotten
+predicate returns another tenant's rows with no error. Why the remaining
+plugins cannot simply adopt a policy is cleat#1278: a tenant reaches a plugin
+only on the HTTP path, so for a plugin with a cross-tenant background sweep,
+"add a fail-closed policy" and "silently empty the sweep" are the same change.
+
+`TenantScoped` installs a policy on **PostgreSQL and SQL Server**. On MySQL it
+is accepted and does nothing: MySQL has no row-level security, and a plugin
+table is scoped there by the Go predicate alone.
+
+Until cleat#1552 this paragraph said the field was PostgreSQL-only, and gave
+one reason for both other dialects. MySQL has no row-level security and never
+will have anything to install. SQL Server does, and the stated obstacle — that
+it "binds a tenant to a whole connection pool, which a per-request tenant does
+not fit" — was wrong: plugins are not handed a connector-scoped pool
+(`getPluginDB` gives them the main or plugin pool), and `sp_set_session_context`
+is cleared when `database/sql` recycles a connection.
+
+Two differences from the PostgreSQL arm are worth knowing, both measured:
+
+* **A read with no tenant returns an empty table rather than raising.**
+  PostgreSQL's `cleat.assert_tenant_set()` raises; a SQL Server filter predicate
+  must be an inline table-valued function, which has no body to raise from.
+* **Writes are covered by `BLOCK` predicates, not by the filter.** A SQL Server
+  `FILTER PREDICATE` hides rows from reads and does not refuse writes at all, so
+  the policy carries `ADD BLOCK PREDICATE … AFTER INSERT` and `AFTER UPDATE`
+  as well. PostgreSQL needs no equivalent: `FOR ALL … USING` defaults its
+  `WITH CHECK` to the `USING` expression.
+
+* **A `DELETE` is a read for the filter predicate's purposes**, which is the
+  half that costs an operator. The predicate hides rows from `DELETE` exactly as
+  it hides them from `SELECT`, so a statement issued with no tenant key removes
+  nothing and reports `(0 rows affected)` -- the one outcome indistinguishable
+  from "already clean". Measured as `sa` with `IS_SRVROLEMEMBER('sysadmin') = 1`:
+  privilege is not what gets you past a security policy on this dialect. The
+  `BLOCK` predicates do not help, because they refuse a write naming the *wrong*
+  tenant and this one names the right one on a connection that has not said who
+  it is.
+
+### The same BLOCK predicates now cover the core tables too
+
+Until cleat#2205 (migration `103_a_filtered_write_is_a_blocked_write.sql`,
+2026-09-24) the asymmetry above was worse on the **core** `dbo.*` tables than on
+plugin ones: `dbo.fn_tenant_filter` carried a `FILTER PREDICATE` only, so an
+`INSERT` or `UPDATE` on `workflow_instances`, `workflow_defs`, and the other
+core tenant-scoped tables could stamp or move a row into the *wrong* tenant
+with no refusal at all — plugin tables had had `BLOCK` predicates on
+`fn_plugin_tenant_filter` since cleat#1552, and core tables did not. 103 closes
+that gap the same way: `AFTER INSERT`, `AFTER UPDATE` and `BEFORE UPDATE` on
+`fn_tenant_filter`, derived live from `sys.security_predicates` against every
+table that already carries the `FILTER` predicate, so a table a later
+migration adds is covered automatically with no edit to 103 itself.
+
+**This changes what a migration is allowed to do.** Before 103, a migration
+connecting as a plain login with no `SESSION_CONTEXT` set could freely
+`INSERT`/`UPDATE` a `tenant_id`-bearing row on a core table — SQL Server does
+not exempt `sa` or `sysadmin` from RLS the way PostgreSQL exempts a superuser
+or table owner, but there was simply nothing to refuse it. There is now: with
+no session context, `SESSION_CONTEXT(N'tenant_id')` is `NULL`, and
+`@tenant_id = NULL` is never true, so `BLOCK` refuses the write outright.
+
+**If your migration or backfill writes a `tenant_id`-bearing row to a
+core table that carries this policy, it must do one of:**
+
+* disable the table's policy for the backfill's duration —
+  `ALTER SECURITY POLICY dbo.<policy> WITH (STATE = OFF)`, the backfill, then
+  `WITH (STATE = ON)` inside a `BEGIN TRY`/`BEGIN CATCH` that re-enables it on
+  failure too. This turns off `FILTER` and `BLOCK` together, needs no optional
+  migration installed, and is the **only** option available to a *shipped*
+  migration, which cannot assume `cross_tenant_claim.sql` has been applied.
+  `migrations/mssql/077_every_entity_records_when_it_last_changed.sql` and
+  `078_two_entities_record_when_they_were_created.sql` already use exactly
+  this pattern; or
+* run as a login that is a member of the `cleat_admin` role, with
+  `migrations/mssql/optional/cross_tenant_claim.sql`'s admin-bypass predicate
+  form installed (it bypasses `BLOCK` exactly as it bypasses `FILTER`, since
+  both share `fn_tenant_filter`) — available to an operator's own backfill
+  script, not to a shipped migration; or
+* call `EXEC sp_set_session_context @key=N'tenant_id', @value=<tenant>` on its
+  own connection, per tenant, before the write — the same pattern
+  `engine`'s tenant-scoped stores and tests already use, since
+  `sp_set_session_context` is connection-scoped and does not survive a pooled
+  connection's `sp_reset_connection`.
+
+As of 2026-09-24, 077 and 078 are the only migrations after `002_defaults.sql`
+that write to one of these tables, and both predate 103 — the `STATE = OFF/ON`
+pattern they already use is exactly what the next one needs too.
+
+Dropping a tenant works on both dialects. `admin.drop_tenant` on SQL Server is
+`migrations/mssql/074_a_dropped_tenants_rows_go_with_it.sql`, and it finds
+tenant-owned tables by asking `sys.columns` which ones carry a `tenant_id`
+column rather than by reading a registry -- which reaches core and plugin tables
+in one query, because on this dialect both live in `dbo`. PostgreSQL reads
+`admin.plugin_tables` because `--schema` can put its plugin tables in a schema
+the function would otherwise have to guess.
+
+This paragraph said "still PostgreSQL-only: `admin.drop_tenant` reads
+`admin.plugin_tables`, which SQL Server does not have". Both halves were wrong.
+`admin.plugin_tables` has existed on SQL Server since
+`migrations/mssql/001_schema.sql:117` -- in the pre-066 two-column shape, with
+no producer -- and the dialect needed no registry to get tenant deletion.
+cleat#1635.
+
+### Which role a plugin runs as
+
+**Plugin code does not use the per-tenant pools described below.** It gets the
+main pool, or a dedicated plugin pool when one is configured
+(`getPluginDB` / `getPluginReadOnlyDB` in `cmd/cleat-worker`), connecting as
+whatever role the worker's DSN names. The per-tenant pools are used for
+**workflow execution** (`cmd/cleat-worker/setup.go`), not for plugin queries.
+
+This matters for what the core tables guarantee a plugin. A plugin reading
+`workflow_instances` is filtered by that table's RLS policy only if its
+connection is subject to RLS -- a superuser bypasses it unconditionally, and
+the table's owner bypasses it unless the table is `FORCE`d. `engine.CheckRLSEnforced`
+exists to detect exactly that, and the worker refuses to start on a bypassing
+connection when `-rls-check` is left at its default.
+
+### What `DatabaseAccessReadOnly` guarantees, and what it does not
+
+A plugin declaring `DatabaseAccessReadOnly` is handed an `engine.ReadOnlyDB`
+(`getPluginReadOnlyDB`). **That type is defence in depth, not a security
+boundary on its own**, and the difference is dialect-dependent.
+
+Three layers, which do not cover the same ground:
+
+| layer | postgres | mysql | sql server |
+|---|---|---|---|
+| `Exec` refused in Go | yes | yes | yes |
+| the **database** refuses a write inside the read transaction | yes | yes | **no** |
+| the connection's own privileges | whatever you granted | whatever you granted | whatever you granted |
+
+The second row is the one that matters, because the first does not cover
+`Query`. `Exec` is the route a caller uses deliberately; `Query` takes any
+statement string and has an ordinary reason to be handed
+`INSERT ... RETURNING`. Every read now runs inside a transaction so that the
+database can refuse it (cleat#1621) -- but **SQL Server has no read-only
+transaction**: go-mssqldb rejects the option and T-SQL has no statement that
+makes an open transaction read-only. There, layer 2 does not exist.
+
+**So grant the privileges.** A plugin that must not write should be given a
+connection whose database user has no `INSERT`, `UPDATE` or `DELETE` on the
+tables it can reach:
+
+```sql
+-- PostgreSQL: a role for read-only plugins
+CREATE ROLE cleat_plugin_ro LOGIN PASSWORD '...';
+GRANT CONNECT ON DATABASE cleat TO cleat_plugin_ro;
+GRANT USAGE ON SCHEMA public TO cleat_plugin_ro;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO cleat_plugin_ro;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO cleat_plugin_ro;
+```
+
+```sql
+-- SQL Server: the db_datareader role is exactly this, and is the ONLY
+-- enforcement available there.
+CREATE LOGIN cleat_plugin_ro WITH PASSWORD = '...';
+CREATE USER cleat_plugin_ro FOR LOGIN cleat_plugin_ro;
+ALTER ROLE db_datareader ADD MEMBER cleat_plugin_ro;
+```
+
+Point the plugin pool at that connection. This is the only guarantee that
+holds on all three dialects, and on SQL Server it is the only one there is.
+
+Note it interacts with the row above: a read-only connection is still subject
+to the RLS question. Least privilege stops a plugin *writing*; it does not
+stop it *reading another tenant's rows*, which is what `engine.CheckRLSEnforced`
+and the tenant scoping are for.
 
 ### Per-tenant connection pools
 
@@ -75,28 +323,117 @@ For N tenants, the cluster sees at most `N * 5` connections from the worker
 that's at most 501 connections. Adjust `max_connections` in PostgreSQL
 accordingly.
 
-### RLS as defense-in-depth
+### Defence in depth, and where it is one layer rather than two
 
-The existing RLS policies on `public.*` tables remain active. Even if a tenant
-role gains access to a system table it shouldn't, RLS filters by `tenant_id`.
-Both mechanisms work together:
+The RLS policies on the **core** `public.*` tables are real and active: even if
+a tenant role reaches a table it should not, the policy filters by `tenant_id`.
 
-- **Schema isolation**: tenant can't see other tenants' plugin tables
-- **RLS on public tables**: tenant can't see other tenants' rows
-- **No DDL on public**: tenant doesn't own the public schema
+For **plugin** tables the picture is thinner than this section used to claim,
+and the claim was load-bearing — it listed "schema isolation" as a layer that
+does not exist:
+
+| Layer | Core tables | Plugin tables |
+|---|---|---|
+| Schema isolation | n/a — both live in `public` | **none**; there is no per-plugin or per-tenant schema |
+| Row-level security | yes, on every tenant-scoped table | wherever `TenantScoped` is declared, on PostgreSQL and SQL Server |
+| The query's own `WHERE tenant_id` | yes | yes, and for most plugin tables it is the **only** layer |
+| No DDL on `public` | a tenant role does not own the schema | same |
+
+So for a plugin table without a policy, a forgotten `WHERE tenant_id = $1`
+returns another tenant's rows, and nothing below it will catch that. That is
+the gap cleat#1277 opened and cleat#1278 tracks the remainder of.
+
+> **This table said "one table today" until 2026-09-15**, which was true when it
+> was written and wrong by more than an order of magnitude by the time anyone
+> read it again: cleat#1512 scoped ten more, and the count has kept moving. The
+> number is gone rather than updated, because a census of a growing population
+> is guaranteed to go wrong and the only question is when. Ask instead:
+>
+> ```
+> # which plugin tables declare a policy?
+> grep -rhoE 'TenantScoped: \[\]string\{[^}]*\}' plugins/*/*.go |
+>   grep -oE '"[a-z_]+"' | sort -u
+> ```
+>
+> MySQL remains the permanent exception: it has no row-level security, so a
+> declaration there is accepted and installs nothing.
 
 ### Tenant deletion
 
-Deleting a tenant is a clean, three-statement operation:
+**Deleting a tenant deletes its plugin rows too**, for every table the plugin
+registered. This section said the opposite until cleat#1279, and the claim
+followed from the same wrong premise as the schema diagram above: plugin tables
+are in `public`, so dropping the tenant's `tenant_<uuid>` schema does not reach
+them. That was true when it was written. cleat#1289 closed it —
+`plugin.RunMigrations` records every table a migration declares `TenantScoped`
+in `admin.plugin_tables`, and `admin.drop_tenant` deletes from each of them.
 
-```sql
-DROP SCHEMA tenant_<uuid> CASCADE;
-DROP ROLE cleat_tenant_<uuid>;
-DELETE FROM admin.tenants WHERE tenant_id = '<uuid>';
+So a dropped tenant's `kv_store`, `audit_events`, `oauth_sessions`,
+`webhook_events` and `blob_index` rows go with it, along with nine core tables
+and the admin rows that name the tenant. `cmd/cleatctl/droptenant.go`'s
+`dropTenantTables` is the maintained list of what an operator sees counted
+before confirming, and its own comment explains why it is **not** derived from
+the function's `DELETE` statements: several entries go by foreign-key cascade,
+and reading only the `DELETE`s is how `tenant_settings` came to be missing from
+that list for twenty migrations.
+
+**The authoritative definition moves, so find it rather than citing a file.**
+`admin.drop_tenant` is `CREATE OR REPLACE`d by several migrations and the last
+one wins, so a citation to an earlier file describes a function that is no
+longer installed — and the earliest still contains the original unguarded body,
+which makes checking the claim against the file the claim named confirm bugs
+that are already fixed. Find the last one:
+
+```bash
+python3 - <<'EOF'
+import re, glob, os
+def strip(s):
+    s = re.sub(r'/\*.*?\*/', '', s, flags=re.S)
+    return '\n'.join(re.sub(r'--.*$', '', l) for l in s.split('\n'))
+for f in sorted(glob.glob('migrations/postgres/*.sql')):
+    if re.search(r'CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+\S*drop_tenant', strip(open(f).read()), re.I):
+        print(os.path.basename(f))     # the LAST line is authoritative
+EOF
 ```
 
-All plugin data is removed atomically with the schema. No orphaned rows, no
-table-by-table cleanup.
+**`p_schema` is required** (cleat#1363), and passing it is what stops those
+`DELETE`s resolving through the caller's `search_path`. The function refuses a
+NULL or empty schema, refuses a schema that does not exist — *"deleting nothing
+and reporting success is the failure this function was fixed to stop"* — and
+refuses the default tenant, which every single-tenant deployment shares.
+
+**What is still outside its reach**, and each of these is a real gap rather
+than a caveat:
+
+- **A plugin that declares no `TenantScoped` tables.** Nothing registers them,
+  so nothing deletes them. The registry is exactly the boundary of what
+  `drop_tenant` reaches.
+- **MySQL.** It has no row-level security and no `admin.drop_tenant`; a
+  tenant's data lives in its own `cleat_<uuid>` database. `cleatctl
+  drop-tenant` has no MySQL path at all — it dispatches on `postgres` and
+  `mssql` only.
+- **SQL Server** is covered, by
+  `migrations/mssql/074_a_dropped_tenants_rows_go_with_it.sql`, which deletes
+  the same way. Its plugin tables are always in `dbo`, so `--schema` is
+  PostgreSQL-only.
+
+**A hand-written cleanup still meets the trap this section originally
+described**, which is why it stays here rather than being deleted with the
+rest:
+
+- A plugin table with a `TenantScoped` policy (cleat#1280) holds its rows
+  behind a policy keyed on the tenant.
+- A `DELETE` issued against such a table by a role the policy applies to
+  removes nothing **and reports success**. Measured: with a different tenant
+  set in the session, `DELETE FROM kv_store WHERE tenant_id = '<dropped>'`
+  returns `DELETE 0` and commits, and the rows remain. With no tenant set it
+  raises instead. So the careless path fails loudly and the careful path fails
+  silently, and `DELETE 0` is also the correct result for "this tenant had no
+  rows" — no row count can tell the two apart.
+
+  `admin.drop_tenant` is `SECURITY DEFINER` and sets `cleat.tenant_id`
+  explicitly for exactly this reason, so its own `DELETE`s are not subject to
+  it. Yours would be.
 
 ---
 
@@ -184,34 +521,19 @@ are not interrupted.
 ```
 $ cleat plugin list
 
-Installed plugins:
-  Name                    Version    Deprecated    Capabilities
-  ────────────────────────────────────────────────────────────────
-  llm                     0.1.0      no            database=true, start_workflow=true
-  blobstore               0.1.0      no            database=true, start_workflow=false
-  example/hello-world     0.1.0      no            database=false, start_workflow=false
-  acme/salesforce         1.2.0      no            database=true, start_workflow=false
+NAME                         VERSION         INSTALLED AT                   STATUS
+-------------------------------------------------------------------------------------
+llm                          0.1.0           2026-05-01T10:30:00Z           active
+blobstore                    0.1.0           2026-05-01T10:30:00Z           active
+example/hello-world          0.1.0           2026-05-01T10:30:00Z           active
+acme/salesforce              1.2.0           2026-05-01T10:30:00Z           active
 ```
 
-### List with capabilities detail
-
-```
-$ cleat plugin list --verbose
-
-  Plugin: example/hello-world v0.1.0
-  ─────────────────────────────────────
-  Author: example-corp
-  Installed: 2026-05-01T10:30:00Z
-  Deprecated: no
-  Capabilities:
-    database:        false
-    start_workflow:  false
-    signal_workflow: false
-    http_routes:     false
-    call_plugin:     []
-  WASM size: 2.3 MB
-  Checksum: sha256:abc123...
-```
+There is no `--verbose` flag, and `plugin list` reads only `name, version,
+created_at, deprecated` from `plugin_defs` -- it has no per-plugin
+capabilities detail view. For a plugin's declared capabilities, read its
+manifest (`plugin validate` below reports whether the manifest itself is
+well-formed, not its contents).
 
 ### List by tenant
 
@@ -246,42 +568,47 @@ ORDER BY created_at DESC;
 
 ### Inspect from the index
 
+There is no separate `inspect` subcommand. `plugin install --dry-run` fetches
+the index entry, prints it, and stops before downloading or deploying
+anything:
+
 ```
-$ cleat plugin inspect example/hello-world@0.1.0
+$ cleat plugin install --dry-run --yes example/hello-world@0.1.0
 
-Plugin: example/hello-world v0.1.0
-Author: example-corp
-Repository: https://github.com/example/cleat-hello-world
-Capabilities:
-  database:        false
-  start_workflow:  false
-  signal_workflow: false
+Plugin: example/hello-world
+  Description: Greets a user by name
+  Author: example-corp
+  Repository: https://github.com/example/cleat-hello-world
+  Version: 0.1.0
+  Version description: Initial release
+  Requires cleat >= 0.2.0
 
-Host functions:
-  greet(name: string) → message: string
-    Returns a greeting for the given name. Idempotent: yes.
+  SECURITY WARNING: This is a third-party plugin.
+  Plugins have access to your database and infrastructure.
+  Only install plugins from trusted sources.
+  Review the source code and manifest before installing.
 
-Checksum: sha256:abc123def456...
-WASM URL: https://github.com/example/cleat-hello-world/releases/download/v0.1.0/plugin.wasm
+Dry run: no changes were made.
+  Would download: https://github.com/example/cleat-hello-world/releases/download/v0.1.0/plugin.wasm
+  Would verify checksum: abc123def456
+  Would deploy to database (set --db or CLEAT_DATABASE_URL): example/hello-world v0.1.0
 ```
+
+Neither host-function signatures nor a manifest's declared capabilities are
+shown here -- the index carries none of that. To see them, download the
+plugin's manifest yourself and run `plugin validate` on it (below).
 
 ### Inspect a local manifest
 
+`plugin validate` checks the manifest is well-formed and prints nothing but
+`valid` or the validation errors -- it does not echo back the manifest's
+fields. Read the manifest file itself (a plain JSON file) for its
+capabilities and host functions:
+
 ```
-$ cleat plugin validate --manifest plugin.json --verbose
+$ cleat plugin validate --manifest plugin.json
 
-✓ Manifest is valid
-  Name:        example/hello-world
-  Version:     0.1.0
-  Author:      example-corp
-  Repository:  https://github.com/example/cleat-hello-world
-  Capabilities:
-    database:        false
-    start_workflow:  false
-    signal_workflow: false
-
-Host functions:
-  greet: (object) → (object), idempotent
+valid
 ```
 
 ### Manual checks before installing
@@ -313,40 +640,71 @@ For community plugins (not reviewed by the cleat project), you should:
 
 ### The upgrade flow
 
-1. Run `cleat plugin update example/hello-world` to see available upgrades:
+There is no `cleat plugin update --show`, and `plugin update` never installs
+anything -- it only reports whether a newer version exists. The command that
+performs an upgrade is `cleat plugin install <name>@<version>`.
+
+1. Check for an update:
 
    ```
    $ cleat plugin update example/hello-world
-   
-   Current: v0.1.0 (installed 2026-05-01)
-   Available:
-     v0.2.0  ─ 2026-05-15  ─ CHANGELOG: view
-     v1.0.0  ─ 2026-06-01  ─ CHANGELOG: view
+
+   example/hello-world: v0.1.0 -> v0.2.0 (update available)
    ```
 
-2. View the details of an upgrade:
+   `checkSinglePluginUpdate` (`cmd/cleat/plugin_cmd.go`) always prints exactly one
+   line for a given name, one of: `not installed`, `error querying: <err>`,
+   `<version> (not found in index)`, `<old> -> <new> (update available)`, or
+   `<version> (latest)`. There is no per-version listing, no install date, and no
+   CHANGELOG link -- `--all` runs the same one-line check for every installed
+   plugin instead of taking a name.
+
+2. Install the new version:
 
    ```
-   $ cleat plugin update example/hello-world@0.2.0 --show
-   
+   $ cleat plugin install example/hello-world@0.2.0
+
    Plugin: example/hello-world
-   Version: 0.2.0
-   Checksum: sha256:789abc... (current: sha256:abc123...)
-   Checksum changed: YES
-   Capabilities: database=false, start_workflow=false (unchanged)
-   
-   Host functions:
-     + greet_all(names: string[]) → messages: string[]
-     greet(name: string) → message: string (unchanged)
-   
-   Proceed with upgrade? [y/N]
+     Description: Greets people by name
+     Author: Example Org
+     Version: 0.2.0
+
+     SECURITY WARNING: This is a third-party plugin.
+     Plugins have access to your database and infrastructure.
+     Only install plugins from trusted sources.
+     Review the source code and manifest before installing.
+
+   Install this plugin? [y/N] y
+   Downloading example/hello-world v0.2.0...
+     Downloaded 4821 bytes
+   Verifying checksum... OK
+   Successfully installed example/hello-world v0.2.0
    ```
 
-3. Confirm the upgrade. The CLI:
-   - Downloads the new WASM binary
-   - Verifies the checksum against the index
-   - Creates a NEW row in `plugin_defs` (it never overwrites existing versions)
-   - Displays a success message
+   There is no per-field diff against the installed version -- no checksum
+   comparison, no capability list, no host-function delta. The security warning
+   only prints for a plugin whose author is not official (`entry.IsOfficial()`);
+   `--yes` skips the confirmation prompt, and `--dry-run` prints what would be
+   downloaded/verified/deployed and stops before doing any of it.
+
+3. What `cleat plugin install` actually does, in order (`runPluginInstall`,
+   `cmd/cleat/plugin_cmd.go`):
+   - Resolves `<name>[@<constraint>]` against the index and prints the info block
+     above.
+   - Returns immediately if the resolved version is bundled with `cleat-worker` --
+     nothing to install.
+   - Prints the security warning for a non-official plugin.
+   - Prompts for confirmation, unless `--yes`.
+   - On `--dry-run`, prints what it would do and stops.
+   - Downloads the WASM binary and verifies its checksum (see below).
+   - Deploys it via `DeployPlugin` (`engine/plugin_loader.go`). Versions are
+     immutable (cleat#2135): a genuinely new version gets a new row and
+     existing rows are untouched; reinstalling the same name and version is a
+     no-op if the WASM bytes are byte-identical to what is already stored, and
+     is refused -- naming both checksums -- if they differ. There is no
+     override; publishing different code at an existing version requires a
+     new version string.
+   - Prints a one-line success message.
 
 ### Important: version pinning
 
@@ -358,21 +716,25 @@ means:
 - You can safely upgrade during production without concern for in-flight
   disruption
 - Old versions remain in `plugin_defs` until all workflows referencing them
-  complete
+  complete. Versions are immutable (cleat#2135): reinstalling that exact name
+  and version is a no-op if the bytes are unchanged, and is refused if they
+  differ -- nothing can overwrite the row in place
 
 ### Checksum verification
 
-On upgrade, the CLI verifies:
+On install, the CLI verifies the downloaded WASM binary against the checksum in
+the index entry (`plugin.VerifyChecksum`, `plugin/index.go`). `DeployPlugin`
+separately compares the downloaded bytes against whatever is already stored at
+that `(name, version)`: reinstalling an unchanged version is a no-op, and
+reinstalling with different bytes is refused (cleat#2135).
 
-1. The downloaded WASM binary matches the checksum in the index
-2. The checksum differs from the currently installed version (a same-checksum
-   upgrade is a no-op)
-
-If checksums don't match, the upgrade is refused:
+If the checksum does not match, the install is refused inline, with no separate
+`ERROR:` banner:
 
 ```
-ERROR: checksum mismatch: expected sha256:abc123..., got sha256:def456...
-The downloaded binary does not match the index record. Upgrade refused.
+Downloading example/hello-world v0.2.0...
+  Downloaded 4821 bytes
+Verifying checksum... failed: checksum mismatch: expected sha256:abc123..., got sha256:def456...
 ```
 
 ---
@@ -547,12 +909,20 @@ exceed the limits will fail at runtime.
 4. If the plugin had `database: true`, check for unexpected data changes:
 
    ```sql
-   -- Unexpected table creations in the tenant's schema
+   -- Unexpected table creations. Plugin tables are in the worker's schema
+   -- (public by default), NOT in a per-tenant one -- this query named
+   -- 'tenant_<uuid>' until cleat#1279 and returned nothing during an
+   -- investigation, which reads as "the plugin created nothing".
    SELECT table_name
    FROM information_schema.tables
-   WHERE table_schema = 'tenant_<uuid>'
+   WHERE table_schema = current_schema()
    AND table_name NOT IN (known_plugin_tables);
    ```
+
+   A plugin's rows are harder to scope than its tables, because every plugin
+   table sits in one shared schema keyed by `tenant_id`. Check the tables the
+   plugin declares, filtered by the affected tenant, rather than looking for a
+   schema that holds its data.
 
 #### Step 4: Remove (after all workflows complete)
 
@@ -564,7 +934,10 @@ cleat plugin uninstall example/compromised 0.1.0 --purge
 ```
 
 This removes the entry from `plugin_defs`. It does NOT remove any data the
-plugin may have written to the tenant's schema -- that requires manual cleanup.
+plugin wrote -- that requires manual cleanup, and there is no schema to drop:
+plugin tables live in the worker's schema alongside the core tables, so removal
+is table-by-table and row-by-row (cleat#1279). Note also that dropping the
+tenant does not do it for you -- see **Tenant deletion** above and cleat#1289.
 
 #### Step 5: Notify affected tenants
 
@@ -641,16 +1014,39 @@ pool.SetMaxIdleConns(2)
 
 ### WASM sandbox resource limits
 
-For WASM plugins, the wazero sandbox enforces:
+> **Corrected 2026-09-06 — this table described enforcement that does not
+> exist, and it is left visible rather than deleted so the gap is not silently
+> re-closed.** Measured on this tree:
+>
+> - `--plugin-memory-limit` and `--plugin-gas-limit` are not flags.
+>   `grep -rn 'plugin-memory-limit\|plugin-gas-limit' --include='*.go' .`
+>   returns nothing; `cmd/cleat-worker/config.go` has `--plugin-config` and
+>   `--max-plugin-connections` and no others in this family.
+> - Nothing in production compiles a plugin module at all.
+>   `PluginLoader.LoadPlugin` has **no non-test callers**, and the only two
+>   non-test `NewPluginLoader` calls are in `cmd/cleat/plugin_cmd.go`, both
+>   passing a nil `*Runtime` (they deploy and list; they do not execute).
+>   `cmd/cleat-worker` constructs no `PluginLoader`.
+> - So the sandbox named below is real code with real wazero types, and it is
+>   not on any path a workflow reaches. **A limits table for an unwired
+>   execution path is the most flattering possible error**: it reads as
+>   defence-in-depth and measures nothing.
+>
+> The wazero attribution itself is *not* the error here — `PluginLoader` is
+> genuinely wazero-typed (`wazero.CompiledModule`), unlike the worker paths
+> corrected elsewhere in this sweep. Tracked as its own item; see
+> IMPROVEMENT-PLAN §3.314.
 
-| Resource | Default limit | Configuration |
+The limits below are the design intent, not the shipped behaviour:
+
+| Resource | Intended limit | Intended configuration |
 |----------|--------------|---------------|
-| Memory | 50 MB | `--plugin-memory-limit` on the worker |
-| CPU instructions (gas) | 10 million per call | `--plugin-gas-limit` on the worker |
+| Memory | 50 MB | `--plugin-memory-limit` on the worker (does not exist) |
+| CPU instructions (gas) | 10 million per call | `--plugin-gas-limit` on the worker (does not exist) |
 | Instance count | 100 concurrent | Fixed; adjust per deployment |
 
-A plugin that exceeds gas limits is killed with an error in the workflow event
-history:
+The intended behaviour when a plugin exceeds its gas limit is an error in the
+workflow event history:
 
 ```
 Plugin "example/hello-world" host function "greet" exceeded instruction budget.
@@ -666,7 +1062,14 @@ Plugin "example/hello-world" host function "greet" exceeded instruction budget.
 
 ### Configuring pool sizes per worker
 
+**None of the configuration below exists.** It described an intended design and
+read as shipped behaviour; cleat#1470 measured that no part of it is
+implemented. Kept as a sketch of the intent, marked, rather than deleted —
+cleat#1486 is where the real policy is being designed, and the shape here is
+part of its input.
+
 ```json
+// DOES NOT EXIST -- intended design only, see cleat#1486
 {
   "tenant_pool": {
     "max_open_per_tenant": 5,
@@ -677,9 +1080,25 @@ Plugin "example/hello-world" host function "greet" exceeded instruction budget.
 }
 ```
 
-For deployments with many tenants, idle pools are evicted after TTL. A
-connection to a tenant that hasn't been active for 15 minutes is dropped,
-freeing the slot.
+`git grep -n 'pool_eviction_ttl\|max_open_per_tenant' -- '*.go'` returns
+nothing. There is no config file of this shape and no key of any of these
+names.
+
+**What exists instead.** One flag, `--tenant-pool-max-conns` (default 25),
+applied per tenant pool. There is no TTL and **no eviction of any kind**:
+
+* `TenantPools.EvictIdle` (`plugin/tenant_db.go:131`) returns `0`
+  unconditionally and has no caller.
+* `TenantPools` records no last-used timestamps, so a TTL policy would have
+  nothing to read even if it were called.
+
+So a worker opens a pool per tenant it has ever touched and holds it for the
+worker's lifetime. **The count is unbounded in tenant count and never
+decreases**, whatever the traffic pattern. Size for the tenants a worker will
+serve, not for the tenants active at any moment.
+
+The sizing table above should be read the same way: it is guidance for
+provisioning, not a description of a mechanism that reclaims anything.
 
 ---
 
@@ -754,27 +1173,20 @@ Alert on any plugin-related workflow failures. These are always operator-actiona
 
 ### Worker health endpoint
 
-The worker exposes a health endpoint that includes plugin status:
+A plugin that implements `plugin.HasHealth` (`Health() error`) is polled every 10 seconds by the worker, off
+the request path, and a plugin that reports an error makes `/livez`, `/readyz` and `/healthz` answer 200
+with `"degraded": true` and the reason code `plugin_unhealthy`. The public bodies never name the plugin or
+quote its message; `GET /api/admin/health` does, when the worker runs with `--enable-admin-api` (any
+authenticated key can then read it; see docs/operations/admin-api.md):
 
 ```
-GET /healthz
+GET /api/admin/health          (needs --enable-admin-api and an API key)
 
-{
-  "status": "ok",
-  "plugins": {
-    "llm": { "status": "ok" },
-    "example/hello-world": {
-      "status": "degraded",
-      "error": "gas limit exceeded on last 3 calls"
-    }
-  },
-  "tenants": {
-    "active": 12,
-    "pools": 12,
-    "total_connections": 48
-  }
-}
+{ "live": true, "ready": true, "degraded": ["plugin_unhealthy"],
+  "plugins": { "audit-log": "audit-log lost 3 event(s) ..." }, ... }
 ```
+
+See [Health, readiness and telling a database incident from a worker incident](../../operations/health-and-incidents.md).
 
 ### Dashboard recommendations
 

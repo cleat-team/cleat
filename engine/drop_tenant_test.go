@@ -10,7 +10,7 @@ package engine
 // engine/rls_gap_concurrency_and_update_requests_test.go uses for 031:
 // engine/testutil's postgresSchemaFiles() is an explicit list (not a
 // directory glob) owned by another stream this round per
-// PARALLEL-WORKSTREAMS.md, so a migration added here is applied locally
+// WORKSTREAM.md's shared-files table, so a migration added here is applied locally
 // rather than by editing that list.
 //
 // CLAUDE.md's standing requirement: prove the regression test can fail, and
@@ -30,55 +30,196 @@ package engine
 // calls out by name).
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
-	"os"
-	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cleat-team/cleat/engine/testutil"
+	"github.com/cleat-team/cleat/plugin"
 )
 
-// apply032DropTenantMigration reads and executes
-// migrations/postgres/032_drop_tenant_deletes_tenant_data.sql against db.
-// Must be called with a superuser/owner connection.
+// dropTenantDefiningMigrations used to list, in order, every migration that
+// redefines admin.drop_tenant -- five files, replayed in sequence so the helper
+// below arrived at the CURRENT body. The hazard it guarded is worth keeping in
+// mind even though the list is gone: CREATE OR REPLACE installs whichever file
+// ran last, so a helper pinned to an early file silently reinstalls that body
+// over whatever the migrations produced, and every test here then exercises a
+// routine the shipped schema does not have. That is why cleat#1201's fix had to
+// be verified twice.
+//
+// The list went with the cleat#2059 rebaseline: 001_schema.sql is generated from
+// a pg_dump of the fully-migrated database, so it carries the LAST definition by
+// construction and there is no sequence left to replay. The same hazard is still
+// guarded, in the form that survives -- see
+// TestProcedureMigrationListsAreComplete's check against the directory.
+
+// apply032DropTenantMigration asserts the CURRENT admin.drop_tenant is installed.
+// Kept under its old name because call sites read as "give me the drop_tenant
+// the migrations ship". Must be called with a superuser/owner connection.
 func apply032DropTenantMigration(t *testing.T, db *sql.DB) {
 	t.Helper()
-	path := filepath.Join("..", "migrations", "postgres", "032_drop_tenant_deletes_tenant_data.sql")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+	// Since the cleat#2059 rebaseline the CURRENT admin.drop_tenant is defined
+	// once, in 001_schema.sql, which SetupFullSchema applies -- there is no
+	// longer a sequence of files to replay to arrive at it. Assert it is the
+	// current (two-argument) form, which is what the call sites need.
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM pg_proc p
+		JOIN pg_namespace ns ON ns.oid = p.pronamespace
+		WHERE ns.nspname = 'admin' AND p.proname = 'drop_tenant'
+		  AND pg_get_function_identity_arguments(p.oid) LIKE '%,%'`).Scan(&n); err != nil {
+		t.Fatalf("looking for admin.drop_tenant: %v", err)
 	}
-	if _, err := db.Exec(string(data)); err != nil {
-		t.Fatalf("apply %s: %v", path, err)
+	if n == 0 {
+		t.Fatalf("admin.drop_tenant is absent, or only the one-argument form exists. " +
+			"001_schema.sql ships the two-argument form (069 gave it the schema); " +
+			"a one-argument-only result means the baseline lost it")
 	}
 }
 
-// resetToOriginal001DropTenant re-applies 001_schema.sql's admin.drop_tenant
-// directly, undoing 032's CREATE OR REPLACE regardless of database history.
+// resetToOriginal001DropTenant reinstalls 001_schema.sql's admin.drop_tenant,
+// undoing 032's CREATE OR REPLACE regardless of database history.
+//
+// THE THREE TESTS THAT CALL THIS USE THE ONE-ARGUMENT FORM DELIBERATELY, and it
+// looks like an oversight next to every other call site in this package. 069
+// gave the current function a second parameter (the schema, cleat#1363) and
+// DROPped the one-argument form, but this helper re-creates it -- so after a
+// reset BOTH arities exist, and the arity is what selects between the historical
+// function and the current one. Adding the schema argument at those call sites
+// silently retargets them at the CURRENT function, which does not have the bug
+// they exist to pin down, and all three then fail claiming the old version
+// worked correctly.
 //
 // testutil.applyPostgresSchemaFile (behind SetupFullSchema) fingerprints the
-// combined contents of the files it applies and skips re-running them
-// against a database where that exact fingerprint was already recorded --
-// 032 is not one of those files, so once 032 has been applied to a given
-// CLEAT_TEST_POSTGRES database (as it is here, by
-// TestDropTenant_DeletesAllTenantData in the same package, and by this
-// stream's own manual verification against the assigned test database --
-// SetupFullSchema alone can never revert it back to the pre-032
-// admin.drop_tenant. TestDropTenant_OldVersionLeavesDataBehind needs
-// exactly that pre-032 version to pin down the bug this migration fixes,
-// so it calls this helper explicitly rather than relying on file-application
-// order within the test binary.
+// combined contents of the files it applies and skips re-running them against a
+// database where that exact fingerprint was already recorded -- 032 is not one
+// of those files, so once 032 has been applied to a given CLEAT_TEST_POSTGRES
+// database, SetupFullSchema alone can never revert it back to the pre-032
+// admin.drop_tenant. TestDropTenant_OldVersionLeavesDataBehind needs exactly
+// that pre-032 version to pin down the bug 032 fixes, so it calls this helper
+// explicitly rather than relying on file-application order within the binary.
+//
+// It extracts ONLY that one function, and that is the whole point.
+//
+// This used to `db.Exec` the entire contents of 001_schema.sql. 001 defines
+// five functions with CREATE OR REPLACE, so re-applying it reverted every one
+// of them -- and two of the five have later migrations that fix them. The
+// collateral one was cleat.assert_tenant_set: 034 makes it treat an empty
+// tenant id like an unset one, and re-applying 001 put the pre-034 body back
+// while leaving version 34 recorded in schema_migrations. No migration run
+// repairs that, because the runner only applies versions it has not recorded.
+//
+// The result was a suite that poisoned its own database. Measured 2026-09-02:
+// a full `go test ./engine/` run finished green and left assert_tenant_set on
+// the 001 body, so the NEXT run failed TestAssertTenantSetRejectsEmptyStringLikeNull
+// with "invalid input syntax for type uuid" -- a tenant/RLS failure with no
+// connection to the test that caused it, appearing and disappearing depending
+// on what had run against that database before. Re-derive the blast radius with
+//
+//	grep -n 'CREATE OR REPLACE FUNCTION' migrations/postgres/001_schema.sql
+//
+// and check each name for later definitions before widening this again.
 func resetToOriginal001DropTenant(t *testing.T, db *sql.DB) {
 	t.Helper()
-	path := filepath.Join("..", "migrations", "postgres", "001_schema.sql")
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
+	if _, err := db.Exec(pre032DropTenant); err != nil {
+		t.Fatalf("reinstall the pre-032 admin.drop_tenant: %v", err)
 	}
-	if _, err := db.Exec(string(data)); err != nil {
-		t.Fatalf("re-apply %s: %v", path, err)
+	// The REVOKE is not optional, and leaving it out is a real hazard rather
+	// than an untidy fixture. PostgreSQL's default for a NEW function is
+	// `EXECUTE TO PUBLIC`, and this one is SECURITY DEFINER -- so recreating the
+	// body without revoking hands every role in the database an owner-privileged
+	// DROP. That is cleat#1365 exactly, and TestNoAdminFunctionGrantsExecuteToPublic
+	// caught this fixture doing it:
+	//
+	//   admin.drop_tenant(p_tenant_id uuid)
+	//     acl={=X/postgres,postgres=X/postgres,cleat_app=X/postgres}
+	//
+	// The deployed old function carried no PUBLIC grant either: 065 revokes
+	// EXECUTE from PUBLIC on every admin function, and this restores that
+	// property alongside the body it belongs to.
+	if _, err := db.Exec(`REVOKE EXECUTE ON FUNCTION admin.drop_tenant(uuid) FROM PUBLIC`); err != nil {
+		t.Fatalf("revoke PUBLIC execute on the reinstalled pre-032 admin.drop_tenant: %v", err)
 	}
+}
+
+// Moved BELOW the function it belongs to, deliberately: inserting a declaration
+// between a doc comment and the declaration it documents reattaches the comment
+// to the newcomer, and gofmt and go vet both accept that silently. This guard
+// caught it --
+//
+//   engine/drop_tenant_test.go: `resetToOriginal001DropTenant` had a doc comment
+//   at 8f91b43a and has none at HEAD.
+//
+// Go attaches doc comments by ADJACENCY, so the fix is the order, not a comment.
+
+// pre032DropTenant is admin.drop_tenant EXACTLY as 001_schema.sql shipped it,
+// before 032 replaced it. It is an explicit literal since the cleat#2059
+// rebaseline, and that is a deliberate change of kind rather than a workaround.
+//
+// This used to be extracted at run time from migrations/postgres/001_schema.sql
+// -- which worked only while 001 held the PRE-032 body, because 032 is a later
+// file in the chain. The rebaseline's 001 is generated from a pg_dump of the
+// fully-migrated database, so it holds the CURRENT function; extracting from it
+// would hand these three tests the fixed version, and the comment below records
+// exactly what happens then ("all three then fail claiming the old version worked
+// correctly").
+//
+// Embedding it makes the fixture explicit instead of implicit in a file that no
+// longer means what the old one did. The three tests keep their meaning: they pin
+// a data-loss bug, and that is worth keeping whether or not the chain still
+// carries the buggy version.
+const pre032DropTenant = `CREATE OR REPLACE FUNCTION admin.drop_tenant(p_tenant_id UUID) RETURNS void AS $$
+DECLARE
+    v_role_name TEXT;
+    v_schema_name TEXT;
+BEGIN
+    v_schema_name := 'tenant_' || replace(p_tenant_id::text, '-', '_');
+    v_role_name := 'cleat_tenant_' || replace(p_tenant_id::text, '-', '_');
+
+    EXECUTE format('DROP SCHEMA IF EXISTS %I CASCADE', v_schema_name);
+    EXECUTE format('DROP ROLE IF EXISTS %I', v_role_name);
+
+    DELETE FROM admin.tenant_roles WHERE tenant_id = p_tenant_id;
+    DELETE FROM admin.tenants WHERE tenant_id = p_tenant_id;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;`
+
+// extractPlpgsqlFunction returns the single CREATE OR REPLACE FUNCTION block
+// for name from sql, from its CREATE line to the $$ LANGUAGE ... ; that ends
+// it.
+//
+// It fails the test rather than returning something partial. A silently empty
+// or truncated extraction here would leave the post-032 admin.drop_tenant in
+// place, and TestDropTenant_OldVersionLeavesDataBehind -- whose whole job is to
+// show the PRE-032 function losing data -- would then quietly assert that the
+// fixed function is broken, or pass for the wrong reason.
+func extractPlpgsqlFunction(t *testing.T, sql, name string) string {
+	t.Helper()
+	marker := "CREATE OR REPLACE FUNCTION " + name
+	start := strings.Index(sql, marker)
+	if start < 0 {
+		t.Fatalf("no %q in 001_schema.sql; it was renamed or removed, and this "+
+			"helper silently reinstalls nothing without this check", marker)
+	}
+	rest := sql[start:]
+	end := strings.Index(rest, "$$ LANGUAGE plpgsql")
+	if end < 0 {
+		t.Fatalf("found %q but no terminating \"$$ LANGUAGE plpgsql\"; the function "+
+			"body's shape changed", marker)
+	}
+	term := strings.Index(rest[end:], ";")
+	if term < 0 {
+		t.Fatalf("found %q but its LANGUAGE clause has no terminating semicolon", marker)
+	}
+	block := rest[:end+term+1]
+	if strings.Count(block, "CREATE OR REPLACE FUNCTION") != 1 {
+		t.Fatalf("the extracted block for %q contains %d function definitions, want 1 "+
+			"-- extracting more than one is how this helper reverted migrations it "+
+			"was never meant to touch", name,
+			strings.Count(block, "CREATE OR REPLACE FUNCTION"))
+	}
+	return block
 }
 
 // cleanupDropTenantExtras deletes any rows this file's fixtures may have
@@ -197,7 +338,15 @@ func dropTenantFixture(t *testing.T, ctx context.Context, adminDB *sql.DB, tenan
 		t.Fatalf("seed concurrency_keys(%s): %v", tag, err)
 	}
 	if _, err := adminDB.ExecContext(ctx,
-		`INSERT INTO workflow_update_requests (workflow_id, update_name, tenant_id) VALUES ($1, $2, $3)`,
+		`INSERT INTO queue_holders (tenant_id, queue_name, workflow_id, expires_at) VALUES ($1, $2, $3, now() + interval '1 hour')`,
+		tenant, "q-"+tag, wfID); err != nil {
+		t.Fatalf("seed queue_holders(%s): %v", tag, err)
+	}
+	if _, err := adminDB.ExecContext(ctx,
+		// request_id is NOT NULL as of cleat#1416; the tag makes it unique per
+		// row, which is all this seed needs.
+		`INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, tenant_id)
+		 VALUES ($1, 'ureq-' || $2, $2, $3)`,
 		wfID, "upd-"+tag, tenant); err != nil {
 		t.Fatalf("seed workflow_update_requests(%s): %v", tag, err)
 	}
@@ -231,7 +380,17 @@ func dropTenantFixture(t *testing.T, ctx context.Context, adminDB *sql.DB, tenan
 	if withRole {
 		// admin.tenant_roles + a real role/schema, exercising the DROP ROLE
 		// path (and the DROP OWNED BY fix for it -- see 032's comment).
-		if _, err := adminDB.ExecContext(ctx, `SELECT admin.create_tenant_role($1)`, tenant); err != nil {
+		// Two arguments since cleat#1307: the password is DERIVED by the caller
+		// and no longer generated or stored. The one-argument form was dropped
+		// rather than overloaded, so a stale call here fails with "function
+		// does not exist" -- which is how this call site was found.
+		pw, err := plugin.TenantRolePassword(
+			bytes.Repeat([]byte("k"), plugin.TenantRoleSecretMinBytes), tenant)
+		if err != nil {
+			t.Fatalf("derive tenant password(%s): %v", tag, err)
+		}
+		if _, err := adminDB.ExecContext(ctx,
+			`SELECT admin.create_tenant_role($1, $2)`, tenant, pw); err != nil {
 			t.Fatalf("create_tenant_role(%s): %v", tag, err)
 		}
 	}
@@ -303,11 +462,9 @@ func TestDropTenant_OldVersionLeavesDataBehind(t *testing.T) {
 	const tenant = "01d00000-0000-4000-8000-00000000001d"
 	const defName = "drop-tenant-old-def"
 	defer cleanupDropTenantExtras(t, ctx, adminDB, tenant) // registered before any possible t.Fatalf below
-	if err := NewPostgresStore(adminDB).DeployWorkflowDef(ctx, &WorkflowDef{
-		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
-	}); err != nil {
-		t.Fatalf("DeployWorkflowDef: %v", err)
-	}
+	// For the tenant whose instances this fixture seeds: workflow_instances_def_fkey
+	// carries tenant_id since D7 (IMPROVEMENT-PLAN 3.77).
+	deployDefForTenants(t, adminDB, defName, 1, tenant)
 	dropTenantFixture(t, ctx, adminDB, tenant, defName, "old", false, false)
 
 	before := countDropTenantRows(t, ctx, adminDB, tenant)
@@ -363,11 +520,9 @@ func TestDropTenant_APIKeyFailureRollsBackEverything(t *testing.T) {
 	const tenant = "01d00002-0000-4000-8000-000000000002"
 	const defName = "drop-tenant-old-apikey-def"
 	defer cleanupDropTenantExtras(t, ctx, adminDB, tenant)
-	if err := NewPostgresStore(adminDB).DeployWorkflowDef(ctx, &WorkflowDef{
-		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
-	}); err != nil {
-		t.Fatalf("DeployWorkflowDef: %v", err)
-	}
+	// For the tenant whose instances this fixture seeds: workflow_instances_def_fkey
+	// carries tenant_id since D7 (IMPROVEMENT-PLAN 3.77).
+	deployDefForTenants(t, adminDB, defName, 1, tenant)
 	dropTenantFixture(t, ctx, adminDB, tenant, defName, "oldapikey", true, false)
 
 	before := countDropTenantRows(t, ctx, adminDB, tenant)
@@ -409,11 +564,9 @@ func TestDropTenant_RoleDropFailureRollsBackEverything(t *testing.T) {
 	const tenant = "01d00001-0000-4000-8000-000000000001"
 	const defName = "drop-tenant-old-role-def"
 	defer cleanupDropTenantExtras(t, ctx, adminDB, tenant)
-	if err := NewPostgresStore(adminDB).DeployWorkflowDef(ctx, &WorkflowDef{
-		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
-	}); err != nil {
-		t.Fatalf("DeployWorkflowDef: %v", err)
-	}
+	// For the tenant whose instances this fixture seeds: workflow_instances_def_fkey
+	// carries tenant_id since D7 (IMPROVEMENT-PLAN 3.77).
+	deployDefForTenants(t, adminDB, defName, 1, tenant)
 	dropTenantFixture(t, ctx, adminDB, tenant, defName, "oldrole", false, true)
 
 	before := countDropTenantRows(t, ctx, adminDB, tenant)
@@ -454,11 +607,9 @@ func TestDropTenant_DeletesAllTenantData(t *testing.T) {
 	// fixture call itself fails partway through via t.Fatalf.
 	defer cleanupDropTenantExtras(t, ctx, adminDB, tenantA)
 	defer cleanupDropTenantExtras(t, ctx, adminDB, tenantB)
-	if err := NewPostgresStore(adminDB).DeployWorkflowDef(ctx, &WorkflowDef{
-		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
-	}); err != nil {
-		t.Fatalf("DeployWorkflowDef: %v", err)
-	}
+	// For the tenant whose instances this fixture seeds: workflow_instances_def_fkey
+	// carries tenant_id since D7 (IMPROVEMENT-PLAN 3.77).
+	deployDefForTenants(t, adminDB, defName, 1, tenantA, tenantB)
 	dropTenantFixture(t, ctx, adminDB, tenantA, defName, "a", true, true)
 	dropTenantFixture(t, ctx, adminDB, tenantB, defName, "b", true, true)
 
@@ -469,12 +620,12 @@ func TestDropTenant_DeletesAllTenantData(t *testing.T) {
 	}
 
 	// Default-tenant guard.
-	if _, err := adminDB.ExecContext(ctx, `SELECT admin.drop_tenant($1)`, DefaultTenantUUID); err == nil {
+	if _, err := adminDB.ExecContext(ctx, `SELECT admin.drop_tenant($1, 'public')`, DefaultTenantUUID); err == nil {
 		t.Fatalf("admin.drop_tenant(default tenant) succeeded -- it must refuse, since that UUID is " +
 			"shared by every single-tenant deployment and by workflow_defs")
 	}
 
-	if _, err := adminDB.ExecContext(ctx, `SELECT admin.drop_tenant($1)`, tenantA); err != nil {
+	if _, err := adminDB.ExecContext(ctx, `SELECT admin.drop_tenant($1, 'public')`, tenantA); err != nil {
 		t.Fatalf("admin.drop_tenant(tenant A): %v", err)
 	}
 

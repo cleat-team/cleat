@@ -92,10 +92,6 @@ Document every host function exposed by the SDK in a table. Group by category.
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `set_query_state` | `(key, value) -> ()` | Set queryable state |
-| `set_state` | `(key, value) -> ()` | Set typed state |
-| `get_state` | `(key, result_type) -> T` | Get typed state |
-| `delete_state` | `(key) -> ()` | Delete a state key |
-| `incr_state` | `(key, delta) -> int` | Atomically increment a numeric key |
 
 ### Promises
 

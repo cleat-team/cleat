@@ -1,0 +1,1 @@
+test-go/commands	2	^TestLiveAPIKeyCountQuery_ExcludesDisabledAndExpired/(mysql|mssql)$	dialect-gated per SUBTEST, same mechanism and same measurement as the sibling line: mysql and mssql skip in this PostgreSQL-only job. cleat#2352: the worker's startup live-key count must exclude disabled AND expired keys.

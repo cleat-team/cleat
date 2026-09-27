@@ -13,6 +13,26 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
+// blobstoreDeploymentSecretsUnavailableMessage is what a tenant's workflow
+// sees in place of the real error when an S3 call fails because
+// errDeploymentSecretsUnavailable is in its chain (backend.go). The real
+// error -- which S3 credential Get failed, or that the stored value was
+// empty -- names deployment-secret plumbing the tenant has no way to act on
+// and no business seeing; the operator sees it via p.logger.Error instead.
+// Same shape as scheduledbackup's DSN-unavailable substitution.
+//
+// gosec G101 reports this constant as "potential hardcoded credentials",
+// flagged for containing the word `secrets` in its own NAME. The value is a
+// generic, credential-free sentence; the finding lands on the constant that
+// exists specifically to avoid ever putting a real credential or its error
+// text in a tenant-visible string. Same shape as
+// cmd/cleatctl/revokeapikey.go's revokeAPIKeyUsage: the scanner flags the
+// documentation of the mitigation and has nothing to say about the
+// mitigation itself.
+//
+//nolint:gosec // G101: a generic message, not a credential -- see above.
+const blobstoreDeploymentSecretsUnavailableMessage = "blobstore: storage backend temporarily unavailable"
+
 // RegisterHostFunctions registers workflow-callable functions on the scoped
 // function registry. The plugin name is implicit -- each plugin gets its own
 // scope, so function names need not be globally unique.
@@ -26,7 +46,20 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	// blob_get is safe to re-invoke during replay -- reads from S3, not from
 	// event history. Registering as idempotent means the engine will re-invoke
 	// the function on replay instead of returning cached output.
-	if err := scope.Register(plugin.FuncOptions{Name: "get", Idempotent: true}, p.blobGet); err != nil {
+	if err := scope.Register(plugin.FuncOptions{
+		Name: "get",
+		// A GET has no effect, and a blob key is treated as write-once, so a
+		// replay reads what the original read.
+		//
+		// CAVEAT, RECORDED BECAUSE THE PLUGIN DOES NOT ENFORCE IT: blobGet
+		// takes a key and no version, and every store it targets will happily
+		// overwrite that key. The determinism claim is a statement about how
+		// callers use blob keys, not something this code guarantees. If that
+		// convention does not hold in a deployment, this is the next wrong
+		// entry and it will be wrong the same way the five in cleat#1318 were.
+		Idempotent:        true,
+		SameValueOnReplay: true,
+	}, p.blobGet); err != nil {
 		return err
 	}
 	return nil
@@ -92,6 +125,10 @@ func (p *Plugin) blobPut(ctx context.Context, inputJSON string) (string, error) 
 
 	// Store bytes via the selected backend.
 	if err := p.backend.Put(ctx, sha256Hex, input.Data, input.ContentType); err != nil {
+		if errors.Is(err, errDeploymentSecretsUnavailable) {
+			p.logger.Error("blobstore: put: deployment secrets unavailable", "error", err)
+			return "", errors.New(blobstoreDeploymentSecretsUnavailableMessage)
+		}
 		return "", fmt.Errorf("blobstore: store content: %w", err)
 	}
 
@@ -181,12 +218,15 @@ func (p *Plugin) blobGet(ctx context.Context, inputJSON string) (string, error) 
 		size        int64
 		expiresAt   sql.NullTime
 	)
-	err := p.db.QueryRow(ctx, plugin.Rebind(`
+	// plugin.QuoteIdent, not a bare "i.key": key is a reserved word in MySQL
+	// and SQL Server both -- see handleGet's identical comment in routes.go.
+	// cleat#2257.
+	err := p.db.QueryRow(ctx, plugin.Rebind(fmt.Sprintf(`
 		SELECT c.sha256, i.content_type, i.size, i.expires_at
 		FROM blob_index i
 		JOIN blob_content c ON i.sha256 = c.sha256
-		WHERE i.key = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
-	`, p.dialect), input.Key, cc.TenantID).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
+		WHERE i.%s = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
+	`, plugin.QuoteIdent("key", p.dialect)), p.dialect), input.Key, cc.TenantID).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("blobstore: blob not found: %s", input.Key)
 	}
@@ -203,6 +243,10 @@ func (p *Plugin) blobGet(ctx context.Context, inputJSON string) (string, error) 
 	sha256Hex := hex.EncodeToString(sha256Bytes)
 	data, err := p.backend.Get(ctx, sha256Hex)
 	if err != nil {
+		if errors.Is(err, errDeploymentSecretsUnavailable) {
+			p.logger.Error("blobstore: get: deployment secrets unavailable", "error", err)
+			return "", errors.New(blobstoreDeploymentSecretsUnavailableMessage)
+		}
 		return "", fmt.Errorf("blobstore: get data: %w", err)
 	}
 
@@ -210,10 +254,8 @@ func (p *Plugin) blobGet(ctx context.Context, inputJSON string) (string, error) 
 	// while this workflow is still in-flight.
 	wfID := cc.WorkflowID
 	if wfID != "" {
-		if _, err := p.db.Exec(ctx, `
-			INSERT INTO workflow_blob_refs (workflow_id, sha256)
-			VALUES ($1, $2) ON CONFLICT DO NOTHING
-		`, wfID, sha256Bytes); err != nil {
+		if _, err := p.db.Exec(ctx, insertBlobRefIfAbsent.For(p.dialect),
+			wfID, sha256Bytes); err != nil {
 			p.logger.Warn("blobstore: record blob ref", "workflow_id", wfID, "sha256", sha256Hex, "error", err)
 		}
 	}

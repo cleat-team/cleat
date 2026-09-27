@@ -15,7 +15,6 @@ Usage::
 
     # Record mode: make real calls in-process
     h = LocalHostCalls(mode="record")
-    h.set_state("counter", 0)
     result = h.call("greeter", "Greet", {"name": "World"})
     log = h.get_event_log()
 
@@ -42,6 +41,7 @@ from .host_calls import (
     RetryPolicy,
     SignalResult,
 )
+from .signal_envelope import decode_signal_envelope, encode_signal_envelope
 
 T = TypeVar("T")
 
@@ -127,6 +127,11 @@ class LocalHostCalls:
         self._update_handlers: dict[
             str, tuple[Callable[[str], str], Callable[[str], bool] | None]
         ] = {}
+        # Workflow updates; see enqueue_update.
+        self._pending_updates: list[tuple[str, str, str, str]] = []
+        self._completed_updates: list[tuple[str, str, str, str]] = []
+        self._update_counter = 0
+        self._dispatching_updates = False
         self._scope_prefix: str = ""
         self._workflow_id: str = "local-wf-id"
         self._run_id: str = "local-run-id"
@@ -527,9 +532,8 @@ class LocalHostCalls:
         operation: str,
         request: Any,
         heartbeat_interval_ms: int,
-        progress: Callable[[str], None],
     ) -> str:
-        """Make a cleat call with heartbeat / progress updates."""
+        """Make a cleat call, heartbeating the claim while it runs."""
         return self.call(service, operation, request)
 
     # ------------------------------------------------------------------
@@ -542,6 +546,7 @@ class LocalHostCalls:
 
     def sleep_ms(self, timeout_ms: int) -> bool:
         """Suspend workflow execution for a duration in milliseconds."""
+        self.dispatch_updates()  # dispatch point; see dispatch_updates
         if self._mode == "replay":
             return self._replay_next("sleep_ms")
         if timeout_ms > 0:
@@ -620,12 +625,32 @@ class LocalHostCalls:
     # 18. await_signals
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _signal_result_from(sig: dict) -> SignalResult:
+        """Build a :class:`SignalResult`, stripping the reply envelope if there
+        is one, so the receiver reads the payload exactly as the sender passed
+        it and gets the address separately.
+
+        Both delivery paths in :meth:`await_signals_ms` go through this. Doing
+        it in only one would make a reply address depend on whether the signal
+        happened to be pending already. IMPROVEMENT-PLAN 3.220.
+        """
+        payload = sig.get("payload", "")
+        reply_to = ""
+        unwrapped = decode_signal_envelope(payload)
+        if unwrapped is not None:
+            reply_to, payload = unwrapped
+        return SignalResult(
+            name=sig["name"], payload=payload, timed_out=False, reply_to=reply_to
+        )
+
     def await_signals(self, signal_names: list[str], timeout_seconds: float) -> SignalResult:
         """Wait for one or more external signals, with a timeout in seconds."""
         return self.await_signals_ms(signal_names, int(timeout_seconds * 1000))
 
     def await_signals_ms(self, signal_names: list[str], timeout_ms: int) -> SignalResult:
         """Wait for one or more external signals, with a timeout in milliseconds."""
+        self.dispatch_updates()  # dispatch point; see dispatch_updates
         if self._mode == "replay":
             return self._replay_next("await_signals_ms")
 
@@ -633,9 +658,7 @@ class LocalHostCalls:
         for i, sig in enumerate(self._signals):
             if sig["name"] in signal_names:
                 self._signals.pop(i)
-                result = SignalResult(
-                    name=sig["name"], payload=sig.get("payload", ""), timed_out=False
-                )
+                result = self._signal_result_from(sig)
                 self._record("await_signals_ms", result=result, signal_names=signal_names, timeout_ms=timeout_ms)
                 return result
 
@@ -653,9 +676,7 @@ class LocalHostCalls:
         for i, sig in enumerate(self._signals):
             if sig["name"] in signal_names:
                 self._signals.pop(i)
-                result = SignalResult(
-                    name=sig["name"], payload=sig.get("payload", ""), timed_out=False
-                )
+                result = self._signal_result_from(sig)
                 self._record("await_signals_ms", result=result, signal_names=signal_names, timeout_ms=timeout_ms)
                 return result
 
@@ -729,34 +750,54 @@ class LocalHostCalls:
         payload: str,
         timeout_ms: int,
     ) -> str:
-        """Send a signal to a target workflow and wait for a response, ms."""
-        if self._mode == "replay":
-            return self._replay_next("send_signal_and_wait_ms")
-        result = json.dumps(
-            {
-                "status": "signal_sent",
-                "target": target_run_id,
-                "signal": signal_name,
-                "echo": self._marshal(payload),
-            }
+        """Send a signal to a target workflow and wait for a response, ms.
+
+        Composed over this harness's own promises, exactly as the SDK composes
+        over the host's (IMPROVEMENT-PLAN 3.220). What this replaces returned a
+        canned ``{"status": "signal_sent", ...}`` without sending a signal,
+        waiting, or ever receiving a reply -- so any assertion about a response
+        passed for no reason.
+
+        It journals nothing of its own: create_promise, signal_workflow and
+        await_promise_ms each record themselves, so replay reproduces the three
+        steps rather than one composite entry that no longer exists.
+        """
+        reply_to = self.create_promise(f"__reply:{signal_name}")
+        self.signal_workflow(
+            target_run_id,
+            signal_name,
+            encode_signal_envelope(reply_to, self._marshal(payload)),
         )
-        self._record(
-            "send_signal_and_wait_ms", result=result,
-            target_run_id=target_run_id, signal_name=signal_name,
-            payload=payload, timeout_ms=timeout_ms,
-        )
-        return result
+
+        res = self.await_promise_ms(reply_to, timeout_ms)
+        if res.rejected:
+            raise RuntimeError(
+                f"send_signal_and_wait: reply to signal {signal_name!r} was rejected: {res.result}"
+            )
+        if res.timed_out:
+            raise RuntimeError(
+                f"send_signal_and_wait: no reply to signal {signal_name!r} from "
+                f"workflow {target_run_id!r} within {timeout_ms}ms"
+            )
+        return res.result
 
     # ------------------------------------------------------------------
     # 22. reply_to_signal
     # ------------------------------------------------------------------
 
     def reply_to_signal(self, correlation_id: str, response: str) -> None:
-        """Send a response back to the sender of a signal."""
-        if self._mode == "replay":
-            self._replay_next("reply_to_signal")
-            return
-        self._record("reply_to_signal", correlation_id=correlation_id, response=response)
+        """Send a response back to the sender of a signal.
+
+        *correlation_id* is :attr:`SignalResult.reply_to`, the reply promise's
+        ID, so replying is resolving that promise. IMPROVEMENT-PLAN 3.220.
+        """
+        if not correlation_id:
+            raise RuntimeError(
+                "reply_to_signal: empty correlation ID. Pass SignalResult.reply_to "
+                "from the signal being answered; it is empty when the sender used "
+                "signal_workflow and is not waiting for a reply."
+            )
+        self.resolve_promise(correlation_id, response)
 
     # ------------------------------------------------------------------
     # 23. signal_workflow
@@ -893,6 +934,7 @@ class LocalHostCalls:
         str
             The child's output JSON.
         """
+        self.dispatch_updates()  # dispatch point; see dispatch_updates
         if self._mode == "replay":
             return self._replay_next("await_child")
         child = self._children.get(run_id)
@@ -930,6 +972,47 @@ class LocalHostCalls:
         self._record("await_all_children", result=results, run_ids=run_ids)
         return results
 
+    def await_any_child(self, run_ids: list[str]) -> ChildResult:
+        """Wait for the FIRST of several child workflows to complete.
+
+        The local host has no concurrency, so "first" means the first in
+        *run_ids* that has a recorded outcome -- which is deterministic here and
+        deliberately so: a local run that picked a different winner than the
+        replay would make every downstream step diverge.
+        """
+        if self._mode == "replay":
+            return self._replay_next("await_any_child")
+        for run_id in run_ids:
+            child = self._children.get(run_id)
+            if child is None:
+                continue
+            result = ChildResult(
+                run_id=run_id,
+                result="" if child.error else child.result,
+                error=child.error or None,
+            )
+            self._record("await_any_child", result=result, run_ids=run_ids)
+            return result
+        result = ChildResult(run_id="", result="", error="no child found")
+        self._record("await_any_child", result=result, run_ids=run_ids)
+        return result
+
+    def poll_child(self, run_id: str) -> ChildResult | None:
+        """Check a child workflow without waiting; None while it is running."""
+        if self._mode == "replay":
+            return self._replay_next("poll_child")
+        child = self._children.get(run_id)
+        if child is None:
+            self._record("poll_child", result=None, run_id=run_id)
+            return None
+        result = ChildResult(
+            run_id=run_id,
+            result="" if child.error else child.result,
+            error=child.error or None,
+        )
+        self._record("poll_child", result=result, run_id=run_id)
+        return result
+
     # ------------------------------------------------------------------
     # 28. set_query_state
     # ------------------------------------------------------------------
@@ -953,100 +1036,22 @@ class LocalHostCalls:
         return result_type(data)
 
     # ------------------------------------------------------------------
-    # 29. set_state
     # ------------------------------------------------------------------
 
-    def set_state(self, key: str, value: Any) -> None:
-        """Set typed cleat state (marshals *value* to JSON)."""
-        if self._mode == "replay":
-            self._replay_next("set_state")
-            return
-        sk = self._scoped_key(key)
-        self._state[sk] = value
-        self._record("set_state", key=key, value=value)
-
     # ------------------------------------------------------------------
-    # 30. get_state
     # ------------------------------------------------------------------
 
-    def get_state(self, key: str, result_type: type[T] = str) -> T:
-        """Get typed cleat state, deserialised into *result_type*."""
-        if self._mode == "replay":
-            return self._replay_next("get_state")
-        sk = self._scoped_key(key)
-        value = self._state.get(sk)
-        if value is None:
-            raise KeyError(f"state key {key!r} not found (scoped: {sk!r})")
-        self._record("get_state", result=value, key=key, result_type=str)
-        if result_type is str:
-            return str(value)  # type: ignore[return-value]
-        if isinstance(value, dict):
-            return result_type(**value)
-        return result_type(value)
-
     # ------------------------------------------------------------------
-    # 31. delete_state
     # ------------------------------------------------------------------
 
-    def delete_state(self, key: str) -> None:
-        """Delete a cleat state key."""
-        if self._mode == "replay":
-            self._replay_next("delete_state")
-            return
-        sk = self._scoped_key(key)
-        self._state.pop(sk, None)
-        self._record("delete_state", key=key)
-
     # ------------------------------------------------------------------
-    # 32. incr_state
     # ------------------------------------------------------------------
 
-    def incr_state(self, key: str, delta: int = 1) -> int:
-        """Atomically increment a numeric cleat state value.
-
-        Returns
-        -------
-        int
-            The new value after incrementing.
-        """
-        if self._mode == "replay":
-            return self._replay_next("incr_state")
-        sk = self._scoped_key(key)
-        current = self._state.get(sk, 0)
-        if not isinstance(current, (int, float)):
-            current = 0
-        new_val = int(current) + delta
-        self._state[sk] = new_val
-        self._record("incr_state", result=new_val, key=key, delta=delta)
-        return new_val
-
     # ------------------------------------------------------------------
-    # 33. has_state
     # ------------------------------------------------------------------
 
-    def has_state(self, key: str) -> bool:
-        """Check if a cleat state key exists."""
-        if self._mode == "replay":
-            return self._replay_next("has_state")
-        sk = self._scoped_key(key)
-        result = sk in self._state
-        self._record("has_state", result=result, key=key)
-        return result
-
     # ------------------------------------------------------------------
-    # 34. list_state
     # ------------------------------------------------------------------
-
-    def list_state(self, prefix: str = "") -> list[str]:
-        """List all cleat state keys matching the given prefix."""
-        if self._mode == "replay":
-            return self._replay_next("list_state")
-        if prefix:
-            result = [k for k in self._state if k.startswith(prefix)]
-        else:
-            result = list(self._state.keys())
-        self._record("list_state", result=result, prefix=prefix)
-        return result
 
     # ------------------------------------------------------------------
     # 35. create_promise
@@ -1080,6 +1085,7 @@ class LocalHostCalls:
 
     def await_promise_ms(self, promise_id: str, timeout_ms: int) -> PromiseResult:
         """Wait for a cleat promise to resolve, with a timeout in milliseconds."""
+        self.dispatch_updates()  # dispatch point; see dispatch_updates
         if self._mode == "replay":
             return self._replay_next("await_promise_ms")
         ps = self._promises.get(promise_id)
@@ -1108,9 +1114,16 @@ class LocalHostCalls:
         if self._mode == "replay":
             self._replay_next("resolve_promise")
             return
-        if promise_id in self._promises:
-            self._promises[promise_id].status = "resolved"
-            self._promises[promise_id].result = value
+        # Not a silent no-op. #818 made the store report ErrPromiseNotFound for
+        # a settle matching no row, and engine/promises.go:280 turns any store
+        # error into a non-zero result code, so a harness that succeeded here
+        # would be more permissive than production -- and a stale reply address
+        # and an unknown promise are the same case once a reply address IS a
+        # promise ID (IMPROVEMENT-PLAN 3.220).
+        if promise_id not in self._promises:
+            raise RuntimeError(f"resolve_promise(promise_id={promise_id!r}): promise not found")
+        self._promises[promise_id].status = "resolved"
+        self._promises[promise_id].result = value
         self._record("resolve_promise", promise_id=promise_id, value=value)
 
     # ------------------------------------------------------------------
@@ -1122,9 +1135,12 @@ class LocalHostCalls:
         if self._mode == "replay":
             self._replay_next("reject_promise")
             return
-        if promise_id in self._promises:
-            self._promises[promise_id].status = "rejected"
-            self._promises[promise_id].error = error
+        # Same not-found contract as resolve_promise above; see the comment
+        # there for why silence became wrong after #818.
+        if promise_id not in self._promises:
+            raise RuntimeError(f"reject_promise(promise_id={promise_id!r}): promise not found")
+        self._promises[promise_id].status = "rejected"
+        self._promises[promise_id].error = error
         self._record("reject_promise", promise_id=promise_id, error=error)
 
     # ------------------------------------------------------------------
@@ -1161,6 +1177,93 @@ class LocalHostCalls:
         if validator is None:
             return True
         return validator(payload)
+
+    # ------------------------------------------------------------------
+    # Workflow updates
+    #
+    # The queue the engine keeps in workflow_update_requests, so a test can
+    # enqueue an update and assert the handler ran, the workflow state changed,
+    # and the caller's promise settled. A delivery leaves the queue only when it
+    # is COMPLETED, mirroring the engine: the request row leaves 'pending' on
+    # completion, not on delivery, so a handler that raises leaves the update to
+    # be redelivered.
+    # ------------------------------------------------------------------
+
+    def enqueue_update(self, name: str, payload: str, promise_id: str = "") -> str:
+        """Make an update request pending, as ``POST /update/:name`` does.
+
+        ``promise_id`` may be empty for a request with no caller waiting on it.
+
+        Returns the request id.
+        """
+        self._update_counter += 1
+        request_id = f"upd-{name}-{self._update_counter}"
+        self._pending_updates.append((name, payload, request_id, promise_id))
+        return request_id
+
+    def completed_updates(self) -> list[tuple[str, str, str, str]]:
+        """The updates handled so far, as ``(name, request_id, result, error)``."""
+        return list(self._completed_updates)
+
+    def poll_update(self) -> str:
+        """Return the next pending update as a JSON envelope, or ""."""
+        if not self._pending_updates:
+            return ""
+        name, payload, request_id, _ = self._pending_updates[0]
+        return json.dumps(
+            {"name": name, "payload": payload, "request_id": request_id},
+            separators=(",", ":"),
+        )
+
+    def complete_update(self, request_id: str, result: str, err: str) -> None:
+        """Record an outcome and settle the caller's promise."""
+        for i, (name, _payload, rid, promise_id) in enumerate(self._pending_updates):
+            if rid != request_id:
+                continue
+            del self._pending_updates[i]
+            self._completed_updates.append((name, rid, result, err))
+            if not promise_id:
+                return
+            if err:
+                self.reject_promise(promise_id, err)
+            else:
+                self.resolve_promise(promise_id, result)
+            return
+        raise RuntimeError(f"no pending update request {request_id!r}")
+
+    def dispatch_updates(self) -> None:
+        """Deliver and run every pending update.
+
+        Mirrors ``HostCalls.dispatch_updates``. Every path completes the
+        request: an unregistered handler, a validator that refuses and a handler
+        that raises are all answers the caller is entitled to. Leaving any of
+        them uncompleted would leave the caller holding a promise nothing
+        settles, which is the defect updates exist to end.
+        """
+        if self._dispatching_updates:
+            return
+        self._dispatching_updates = True
+        try:
+            while self._pending_updates:
+                name, payload, request_id, _ = self._pending_updates[0]
+                if name not in self._update_handlers:
+                    self.complete_update(
+                        request_id, "", f"cleat: no update handler registered for {name!r}"
+                    )
+                    continue
+                try:
+                    if not self._validate_update(name, payload):
+                        self.complete_update(
+                            request_id, "", f"update {name!r} failed validation"
+                        )
+                        continue
+                    result = self._handle_update(name, payload)
+                except Exception as exc:  # noqa: BLE001 -- the caller is owed an answer
+                    self.complete_update(request_id, "", str(exc))
+                    continue
+                self.complete_update(request_id, result if result is not None else "", "")
+        finally:
+            self._dispatching_updates = False
 
     # There is no register_query_handler / _handle_query here (removed
     # 2026-08-09). register_query_handler recorded a handler name but nothing
@@ -1215,40 +1318,6 @@ class LocalHostCalls:
         self._record("continue_as_new_versioned", new_input=new_input, new_version=new_version)
 
     # ------------------------------------------------------------------
-    # 42b. child_workflow_in_schema — start child with schema
-    # ------------------------------------------------------------------
-
-    def child_workflow_in_schema(
-        self,
-        target_schema: str,
-        name: str,
-        input_json: Any,
-        version: int | None = None,
-        parent_close_policy: str | None = None,
-    ) -> str:
-        """Start a child workflow in a schema. Delegates to child_workflow, ignoring schema.
-
-        Parameters
-        ----------
-        target_schema : str
-            Target schema (ignored in local mode; all workflows run in-process).
-        name : str
-            Child workflow definition name.
-        input_json : Any
-            Input for the child workflow.
-        version : int, optional
-            Workflow definition version.
-        parent_close_policy : str, optional
-            Policy for the child when the parent closes.
-
-        Returns
-        -------
-        str
-            The child workflow's run ID.
-        """
-        return self.child_workflow(name, input_json)
-
-    # ------------------------------------------------------------------
     # 42c. side_effect — deterministic function execution
     # ------------------------------------------------------------------
 
@@ -1291,14 +1360,22 @@ class LocalHostCalls:
     # 44. run_detached
     # ------------------------------------------------------------------
 
-    def run_detached(self, fn: Callable[[LocalHostCalls], Any]) -> None:
-        """Execute a function that is detached from workflow cancellation."""
-        saved = self._detached_context
-        self._detached_context = True
-        try:
-            fn(self)
-        finally:
-            self._detached_context = saved
+    def run_detached(self, name: str, input_json: str) -> None:
+        """Start a workflow that outlives this one (fire-and-forget).
+
+        Recorded and replayed like any other host call. The local host does not
+        actually start a second workflow -- there is no scheduler here -- so
+        this records the intent and returns, which is what every other
+        fire-and-forget call does locally.
+
+        .. versionchanged:: 3.253
+           This took a callable and executed it immediately. See
+           :meth:`cleat_sdk.host_calls.HostCalls.run_detached`.
+        """
+        if self._mode == "replay":
+            self._replay_next("run_detached")
+            return
+        self._record("run_detached", name=name, input_json=input_json)
 
     # ------------------------------------------------------------------
     # 45. send

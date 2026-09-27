@@ -53,6 +53,42 @@ public class HostCalls {
     /** Current scope prefix for virtual object state operations. */
     private String _scopePrefix = "";
 
+    /**
+     * Registered update handlers, by name.
+     * <p>
+     * Static rather than per-instance for the same reason {@link Defer} keeps
+     * its bodies static: a workflow may construct more than one HostCalls, and
+     * a handler registered through one must be reachable from the dispatch that
+     * happens through another. A WASM guest is single-threaded and one segment
+     * is one instance, so there is no sharing hazard.
+     */
+    private static final java.util.Map<String, UpdateHandlerEntry> UPDATE_HANDLERS =
+        new java.util.HashMap<>();
+
+    /**
+     * Reentrancy guard for {@link #dispatchUpdates()}.
+     * <p>
+     * Every dispatch point is a suspension point, and an update handler is
+     * ordinary workflow code that may sleep or await -- so without this a
+     * handler doing either would re-enter dispatch and recurse. Nesting would
+     * also be wrong if it terminated: the inner dispatch would interleave a
+     * second update's events inside the first one's, and the received/completed
+     * pair would no longer bracket the handler that produced it.
+     */
+    private static boolean dispatchingUpdates = false;
+
+    /** One registered handler and its optional validator. */
+    private static final class UpdateHandlerEntry {
+        final java.util.function.Function<String, String> handler;
+        final java.util.function.Function<String, String> validator;
+
+        UpdateHandlerEntry(java.util.function.Function<String, String> handler,
+                           java.util.function.Function<String, String> validator) {
+            this.handler = handler;
+            this.validator = validator;
+        }
+    }
+
     // ========================================================================
     // Raw WASM imports (18 host functions from the "env" module)
     // ========================================================================
@@ -86,6 +122,42 @@ public class HostCalls {
     private static native long cleatDeferRaw(
         int descPtr, int descLen, int outPtr, int maxLen);
 
+    @Import(module = "env", name = "cleat_defer_phase")
+    private static native long cleatDeferPhaseRaw(int on);
+
+    /**
+     * Reports the start (1) and end (0) of the defer drain to the host.
+     *
+     * Records no event. It marks the events the drain produces so the engine
+     * can tell a defer body's durable calls from the workflow body's -- without
+     * which a workflow that exhausted its retries and then cleaned up is
+     * classified failed rather than dead_lettered, and deleted by retention
+     * instead of retained for an operator. cleat#1155.
+     *
+     * Called by {@link Defer#runDeferred()}, not by workflow code.
+     */
+    public static void setDeferPhase(boolean on) {
+        try {
+            cleatDeferPhaseRaw(on ? 1 : 0);
+        } catch (UnsatisfiedLinkError e) {
+            // No WASM host: this is the JVM, running the SDK's own unit tests.
+            // Defer.runDeferred() had no native call before cleat#1155, so
+            // introducing one made every DeferTest case throw here -- the same
+            // shape as the AssemblyScript specs, which run the module with no
+            // host and needed a stub.
+            //
+            // SWALLOWED DELIBERATELY, and the cost said out loud: a guest whose
+            // worker does not export cleat_defer_phase also takes this path and
+            // carries on silently, instead of failing. That is the right
+            // direction for THIS call -- an unreported defer phase means the
+            // engine classifies as it did before cleat#1155, which is the
+            // pre-existing defect rather than a new one -- and it would be the
+            // wrong direction for a host call whose result the guest uses.
+            // Nothing here reads a return value; the local flag in Defer is
+            // what the restrictions consult, and it is set independently.
+        }
+    }
+
     @Import(module = "env", name = "cleat_poll_cancellation")
     private static native long cleatPollCancellationRaw(int outPtr, int maxLen);
 
@@ -106,22 +178,30 @@ public class HostCalls {
         int inPtr, int inLen,
         int outPtr, int maxLen);
 
+    // priority is the second i64 and it was MISSING here until 2026-09-05.
+    //
+    // The host takes ten parameters -- engine/imports.go, "cleat_child_workflow
+    // _with_options: (ptr,len x3, i64, i64, ptr,len, ptr,maxLen)" -- and this
+    // declared nine. A WASM import whose arity disagrees with the host does not
+    // fail at that call: the MODULE FAILS TO INSTANTIATE, so a Java workflow
+    // that so much as referenced childWorkflowWithOptions could not run at all.
+    //
+    // It went unnoticed because TeaVM tree-shakes unreferenced imports, and no
+    // Java test called this. Compile-time coverage cannot see it -- the Java
+    // side compiled perfectly well against a signature the host does not have.
+    // Found by the first run of tests/plugin-harness's Java host-call fixture,
+    // which is the whole argument for executing a binding rather than checking
+    // that it exists. Same defect class as IMPROVEMENT-PLAN §3.55, where
+    // cleat_create_promise was registered with a parameter no guest passed.
     @Import(module = "env", name = "cleat_child_workflow_with_options")
     private static native long cleatChildWorkflowWithOptionsRaw(
         int namePtr, int nameLen,
         int inPtr, int inLen,
         long version,
+        long priority,
         int policyPtr, int policyLen,
         int outPtr, int maxLen);
 
-    @Import(module = "env", name = "cleat_child_workflow_in_schema")
-    private static native long cleatChildWorkflowInSchemaRaw(
-        int schemaPtr, int schemaLen,
-        int namePtr, int nameLen,
-        int inPtr, int inLen,
-        long version,
-        int policyPtr, int policyLen,
-        int outPtr, int maxLen);
 
     @Import(module = "env", name = "cleat_await_child")
     private static native long cleatAwaitChildRaw(
@@ -143,6 +223,16 @@ public class HostCalls {
     private static native long cleatRegisterUpdateHandlerRaw(
         int namePtr, int nameLen);
 
+    @Import(module = "env", name = "cleat_poll_update")
+    private static native long cleatPollUpdateRaw(
+        int envelopeOut, int envelopeMax);
+
+    @Import(module = "env", name = "cleat_complete_update")
+    private static native long cleatCompleteUpdateRaw(
+        int requestIdPtr, int requestIdLen,
+        int resultPtr, int resultLen,
+        int errPtr, int errLen);
+
     @Import(module = "env", name = "set_query_state")
     private static native long setQueryStateRaw(
         int keyPtr, int keyLen, int valPtr, int valLen);
@@ -161,18 +251,14 @@ public class HostCalls {
     @Import(module = "env", name = "cleat_run_id")
     private static native long cleatRunIdRaw(int outPtr, int maxLen);
 
-    @Import(module = "env", name = "cleat_send_signal_and_wait")
-    private static native long cleatSendSignalAndWaitRaw(
-        int targetRunIdPtr, int targetRunIdLen,
-        int signalNamePtr, int signalNameLen,
-        int payloadPtr, int payloadLen,
-        long timeoutMs,
-        int responsePtr, int responseMaxLen);
-
-    @Import(module = "env", name = "cleat_reply_to_signal")
-    private static native long cleatReplyToSignalRaw(
-        int correlationIdPtr, int correlationIdLen,
-        int responsePtr, int responseLen);
+    // cleat_send_signal_and_wait (ABI 2.23) and cleat_reply_to_signal
+    // (ABI 2.24) are deliberately NOT imported. Both were inert engine-side,
+    // and request/reply is now composed from createPromise + signalWorkflow
+    // + awaitPromise + resolvePromise (IMPROVEMENT-PLAN 3.220). Declaring an
+    // @Import this SDK never calls would make every Java guest import a host
+    // function it does not use. The engine still exports both; removing the
+    // exports is a separate change that has to come after every SDK stops
+    // importing them.
 
     @Import(module = "env", name = "cleat_signal_workflow")
     private static native long cleatSignalWorkflowRaw(
@@ -190,29 +276,24 @@ public class HostCalls {
     private static native long cleatSendRaw(int svcPtr, int svcLen, int opPtr, int opLen, int reqPtr, int reqLen);
 
 
-    @Import(module = "env", name = "schedule_invoke")
+    @Import(module = "env", name = "cleat_schedule_invoke")
     private static native long scheduleInvokeRaw(int svcPtr, int svcLen, int opPtr, int opLen, int reqPtr, int reqLen, long delayMs);
 
     @Import(module = "env", name = "cleat_run_detached")
     private static native long cleatRunDetachedRaw(int namePtr, int nameLen, int inputPtr, int inputLen);
 
-    @Import(module = "env", name = "cleat_set_state")
-    private static native long cleatSetStateRaw(int keyPtr, int keyLen, int valPtr, int valLen);
+    // cleat_start_detached is cleat_run_detached with the run id written back
+    // (ABI 2.24a). A separate import rather than a sixth parameter on the one
+    // above: arity is part of an import's type, so widening it stops every
+    // already-deployed binary instantiating.
+    @Import(module = "env", name = "cleat_start_detached")
+    private static native long cleatStartDetachedRaw(int namePtr, int nameLen, int inputPtr, int inputLen, int runIdPtr, int runIdMaxLen);
 
-    @Import(module = "env", name = "cleat_get_state")
-    private static native long cleatGetStateRaw(int keyPtr, int keyLen, int outPtr, int maxLen);
 
-    @Import(module = "env", name = "cleat_delete_state")
-    private static native long cleatDeleteStateRaw(int keyPtr, int keyLen);
 
-    @Import(module = "env", name = "cleat_incr_state")
-    private static native long cleatIncrStateRaw(int keyPtr, int keyLen, long delta);
 
-    @Import(module = "env", name = "cleat_has_state")
-    private static native long cleatHasStateRaw(int keyPtr, int keyLen);
 
-    @Import(module = "env", name = "cleat_list_state")
-    private static native long cleatListStateRaw(int prefixPtr, int prefixLen, int outPtr, int maxLen);
+
 
     @Import(module = "env", name = "cleat_await_all_children")
     private static native long cleatAwaitAllChildrenRaw(int idsPtr, int idsLen, int outPtr, int maxLen);
@@ -257,6 +338,25 @@ public class HostCalls {
     private static native long cleatAwaitAnyChildRaw(
         int runIdsPtr, int runIdsLen,
         int resultPtr, int resultMaxLen);
+
+    // The cron family. Present on the host since ABI 2.31 and bound by the
+    // AssemblyScript and Python SDKs; Rust and Java declared no cron surface at
+    // all, which is the stated reason tiers.yaml holds workflow-callable-cron at
+    // tier 2. IMPROVEMENT-PLAN 3.241.
+
+    @Import(module = "env", name = "cleat_schedule_cron")
+    private static native long cleatScheduleCronRaw(
+        int wfPtr, int wfLen,
+        int cronPtr, int cronLen,
+        int tzPtr, int tzLen,
+        int inputPtr, int inputLen,
+        int idPtr, int idMaxLen);
+
+    @Import(module = "env", name = "cleat_delete_cron")
+    private static native long cleatDeleteCronRaw(int idPtr, int idLen);
+
+    @Import(module = "env", name = "cleat_list_crons")
+    private static native long cleatListCronsRaw(int outPtr, int outMaxLen);
 
     @Import(module = "env", name = "cleat_continue_as_new_versioned")
     private static native long cleatContinueAsNewVersionedRaw(
@@ -353,6 +453,37 @@ public class HostCalls {
      * @param maxLen the number of bytes to read
      * @return the decoded string, or empty if maxLen is zero
      */
+    /**
+     * The host's own error message, or {@code fallback} when it wrote none.
+     *
+     * <p>A call with an output buffer usually puts its failure reason there --
+     * engine/children.go writes {@code rec.Err}, AwaitPromise writes
+     * {@code rec.PromiseError} -- and a guest reporting the bare error code
+     * throws that away. IMPROVEMENT-PLAN 3.200 fixed this for the generated Go
+     * adapters; eleven wrappers here still did it.
+     *
+     * <p>Truncating at the first NUL is the whole correctness of this method.
+     * "The host wrote nothing" and "the host reported a length" are
+     * independent: on a bad-parameter refusal engine/imports.go returns
+     * errBadParam <em>before</em> the handler runs, so nothing is written, yet
+     * a length is still decoded from the sentinel's bits. readOutput clamps
+     * that to the buffer, so a naive isEmpty() check sees a buffer of zero
+     * bytes, decides the host "wrote a message", and returns 64KB of NULs as
+     * the error text -- strictly worse than the code it replaced. The host
+     * writes UTF-8 with no interior NUL, so stopping at the first one is
+     * exactly what it wrote.
+     *
+     * <p>Java clamps in readOutput and renders a negative length as "", so the
+     * out-of-bounds half of this never applied here -- but the empty-looking
+     * buffer half does.
+     */
+    private static String hostMessageOr(int len, String fallback) {
+        String raw = readOutput(len);
+        int nul = raw.indexOf('\0');
+        String msg = nul >= 0 ? raw.substring(0, nul) : raw;
+        return msg.isEmpty() ? fallback : msg;
+    }
+
     private static String readOutput(int maxLen) {
         if (maxLen <= 0) {
             return "";
@@ -436,6 +567,8 @@ public class HostCalls {
             reqOff, reqLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeCallErrCode(result);
         int responseLen = Memory.decodeCallResponseLen(result);
 
@@ -465,9 +598,21 @@ public class HostCalls {
      *         {@code false} to continue (replay)
      */
     public boolean cleatSleepMs(long timeoutMs) {
+        dispatchUpdates(); // dispatch point; see dispatchUpdates()
         long result = cleatSleepRaw(timeoutMs);
         int status = Memory.decodeSleepStatus(result);
-        return status == Memory.SLEEP_STATUS_SUSPEND;
+        if (status == Memory.SLEEP_STATUS_SUSPEND) {
+            // Unwind rather than return, which is what every other cleat SDK
+            // does (Go and Rust panic, Python raises). Returning `true` and
+            // asking the author to "propagate the suspension by returning
+            // Memory.SUSPEND_SENTINEL from the export" was unactionable: the
+            // author does not write the export. See IMPROVEMENT-PLAN 3.74.
+            //
+            // The boolean return is kept so replay reads naturally -- it is
+            // always false, because the suspending case no longer returns.
+            throw new SuspendSignal();
+        }
+        return false;
     }
 
     /**
@@ -550,17 +695,55 @@ public class HostCalls {
     }
 
     /**
-     * Register a deferred cleanup callback to run when the workflow exits.
+     * Record that a cleanup action exists. <strong>Does not run anything.</strong>
      * <p>
-     * Deferred callbacks are executed in LIFO order (last-registered,
-     * first-executed), analogous to Go's {@code defer} or Java's
-     * {@code try/finally}.  The returned defer ID can be used to cancel
-     * the deferred action before the workflow completes.
+     * This sends a <em>description</em> to the host and nothing else. The host
+     * adds it to the workflow's deferrals so it is visible in history, but
+     * there is no body attached and nothing anywhere executes one.
+     * <p>
+     * This javadoc used to describe "a deferred cleanup callback" executed "in
+     * LIFO order, analogous to Go's {@code defer}". None of that was true, or
+     * could be: there is no callback parameter. See IMPROVEMENT-PLAN 3.73.
+     * <p>
+     * Use {@link #deferFunc(Runnable)} for cleanup that actually runs.
      *
      * @param description a human-readable description of the cleanup action
      * @return a result containing the defer ID on success, or an error
      *         description on failure
      */
+    /**
+     * Register cleanup <em>with a body</em>, to run when the workflow finishes.
+     *
+     * <p>{@link #cleatDefer(String)} registers only a description: the host
+     * records that a defer exists and nothing anywhere runs it. This is the one
+     * with a {@link Runnable} attached. See IMPROVEMENT-PLAN 3.73.
+     *
+     * <p>The body runs in LIFO order when the entry point returns -- on the
+     * success path and on the error path, because a defer is for the run that
+     * did not finish the way it meant to. It does NOT run when the workflow
+     * suspends: a suspended workflow has not exited and its cleanup is still
+     * pending.
+     *
+     * @param body the cleanup to run. Exceptions it throws are swallowed so one
+     *             bad cleanup cannot stop the others.
+     * @return a result containing the defer ID on success, or an error
+     *         description on failure
+     */
+    public CleatResult<String> deferFunc(Runnable body) {
+        // Refused BEFORE the host call -- IMPROVEMENT-PLAN 3.35 phase 4.
+        // Registering here used to mint a real defer ID and write a durable
+        // `defer` event that nothing could ever run, because runDeferred drains
+        // the table before the first body starts.
+        if (Defer.inDeferPhase()) {
+            return CleatResult.err(Defer.deferPhaseRefusal("deferFunc"));
+        }
+        CleatResult<String> registered = cleatDefer("deferred function");
+        if (registered.isOk()) {
+            Defer.register(body);
+        }
+        return registered;
+    }
+
     public CleatResult<String> cleatDefer(String description) {
         int[] p = packStrings(description);
 
@@ -572,7 +755,7 @@ public class HostCalls {
         int deferIdLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("defer(description=\"" + description + "\") failed: host returned error code " + errCode + ". Check that the defer description is valid.");
+            return CleatResult.err(hostMessageOr(deferIdLen, "defer(description=\"" + description + "\") failed: host returned error code " + errCode + ". Check that the defer description is valid."));
         }
 
         String deferId = readOutput(deferIdLen);
@@ -641,6 +824,12 @@ public class HostCalls {
      * @return a result indicating success, or an error description
      */
     public CleatResult<Void> continueAsNew(String newInputJSON) {
+        // IMPROVEMENT-PLAN 3.35 phase 4. Before the host call: the workflow's
+        // result is already decided by the time defers run, so a recorded
+        // continuation is one the worker will never take.
+        if (Defer.inDeferPhase()) {
+            return CleatResult.err(Defer.deferPhaseRefusal("continueAsNew"));
+        }
         int[] p = packStrings(newInputJSON);
 
         long result = cleatContinueAsNewRaw(p[0], p[1]);
@@ -664,6 +853,12 @@ public class HostCalls {
      * @return a result indicating success, or an error description
      */
     public CleatResult<Void> continueAsNewVersioned(String newInputJSON, int newVersion) {
+        // IMPROVEMENT-PLAN 3.35 phase 4. Before the host call: the workflow's
+        // result is already decided by the time defers run, so a recorded
+        // continuation is one the worker will never take.
+        if (Defer.inDeferPhase()) {
+            return CleatResult.err(Defer.deferPhaseRefusal("continueAsNewVersioned"));
+        }
         int[] p = packStrings(newInputJSON);
 
         long result = cleatContinueAsNewVersionedRaw(p[0], p[1], newVersion);
@@ -697,7 +892,7 @@ public class HostCalls {
         int idLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("createPromise(name=\"" + name + "\") failed: host returned error code " + errCode + ". Check that the promise name is valid.");
+            return CleatResult.err(hostMessageOr(idLen, "createPromise(name=\"" + name + "\") failed: host returned error code " + errCode + ". Check that the promise name is valid."));
         }
 
         String promiseId = readOutput(idLen);
@@ -725,11 +920,13 @@ public class HostCalls {
             inOff, inLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeSimpleErrCode(result);
         int runIdLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("childWorkflow(name=\"" + name + "\") failed: host returned error code " + errCode + ". Check that the child workflow name is correct and the workflow definition exists.");
+            return CleatResult.err(hostMessageOr(runIdLen, "childWorkflow(name=\"" + name + "\") failed: host returned error code " + errCode + ". Check that the child workflow name is correct and the workflow definition exists."));
         }
 
         String runId = readOutput(runIdLen);
@@ -759,56 +956,29 @@ public class HostCalls {
             nameOff, nameLen,
             inOff, inLen,
             version,
+            // priority 0, which the Go SDK documents as the default and the
+            // highest ("0 = highest priority", cleat/runtime_children.go).
+            // Java's public API does not expose priority yet; adding an
+            // overload that does is an additive change and deliberately not
+            // bundled with fixing the arity, which is what stops the module
+            // linking at all.
+            0L,
             policyOff, policyLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeSimpleErrCode(result);
         int runIdLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("childWorkflowWithOptions(name=\"" + name + "\", version=" + version + ") failed: host returned error code " + errCode + ". Check that the child workflow name is correct.");
+            return CleatResult.err(hostMessageOr(runIdLen, "childWorkflowWithOptions(name=\"" + name + "\", version=" + version + ") failed: host returned error code " + errCode + ". Check that the child workflow name is correct."));
         }
 
         String runId = readOutput(runIdLen);
         return CleatResult.ok(runId);
     }
 
-    /**
-     * Start a child workflow in a different schema (cross-instance cooperation).
-     * Mirrors Go's ChildWorkflowInSchema.
-     *
-     * @param targetSchema     the PostgreSQL schema of the target cleat instance
-     * @param name             the child workflow definition name
-     * @param inputJSON        the input payload as a JSON string
-     * @param version          the explicit workflow definition version to use
-     *                         (0 = use parent's version / default resolution)
-     * @param parentClosePolicy parent close policy ("abandon", "terminate", "request_cancel")
-     * @return a result containing the child's run ID on success, or an error
-     *         description on failure
-     */
-    public CleatResult<String> childWorkflowInSchema(String targetSchema, String name, String inputJSON, long version, String parentClosePolicy) {
-        int[] p = packStrings(targetSchema, name, inputJSON, parentClosePolicy);
-        int schemaOff = p[0], nameOff = p[1], inOff = p[2], policyOff = p[3];
-        int schemaLen = p[4], nameLen = p[5], inLen = p[6], policyLen = p[7];
-
-        long result = cleatChildWorkflowInSchemaRaw(
-            schemaOff, schemaLen,
-            nameOff, nameLen,
-            inOff, inLen,
-            version,
-            policyOff, policyLen,
-            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        int runIdLen = Memory.decodeSimpleExtra(result);
-
-        if (errCode != 0) {
-            return CleatResult.err("childWorkflowInSchema(schema=\"" + targetSchema + "\", name=\"" + name + "\", version=" + version + ") failed: host returned error code " + errCode);
-        }
-
-        String runId = readOutput(runIdLen);
-        return CleatResult.ok(runId);
-    }
 
     /**
      * Wait for a child workflow to complete and retrieve its result.
@@ -822,6 +992,7 @@ public class HostCalls {
      *         error description on failure
      */
     public CleatResult<String> awaitChild(String runID) {
+        dispatchUpdates(); // dispatch point; see dispatchUpdates()
         int[] p = packStrings(runID);
 
         long result = cleatAwaitChildRaw(
@@ -837,7 +1008,7 @@ public class HostCalls {
         int resultLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("awaitChild(runID=\"" + runID + "\") failed: host returned error code " + errCode + ". Check that the run ID is valid.");
+            return CleatResult.err(hostMessageOr(resultLen, "awaitChild(runID=\"" + runID + "\") failed: host returned error code " + errCode + ". Check that the run ID is valid."));
         }
 
         String childResult = readOutput(resultLen);
@@ -866,7 +1037,7 @@ public class HostCalls {
         int resultLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("pollChild(runID=\"" + runID + "\") failed: host returned error code " + errCode + ". Check that the run ID is valid or the child has completed.");
+            return CleatResult.err(hostMessageOr(resultLen, "pollChild(runID=\"" + runID + "\") failed: host returned error code " + errCode + ". Check that the run ID is valid or the child has completed."));
         }
 
         String childResult = readOutput(resultLen);
@@ -890,6 +1061,7 @@ public class HostCalls {
      *         resolved value and timeout indicator
      */
     public CleatResult<AwaitPromiseResult> awaitPromiseMs(String promiseId, long timeoutMs) {
+        dispatchUpdates(); // dispatch point; see dispatchUpdates()
         int[] p = packStrings(promiseId);
 
         long result = cleatAwaitPromiseRaw(
@@ -901,7 +1073,7 @@ public class HostCalls {
         int resultLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("awaitPromise(promiseId=\"" + promiseId + "\") failed: host returned error code " + errCode + ". Check that the promise ID is valid.");
+            return CleatResult.err(hostMessageOr(resultLen, "awaitPromise(promiseId=\"" + promiseId + "\") failed: host returned error code " + errCode + ". Check that the promise ID is valid."));
         }
 
         String promiseResult = readOutput(resultLen);
@@ -947,6 +1119,7 @@ public class HostCalls {
      *         received signal name, payload, and timeout indicator
      */
     public CleatResult<AwaitSignalsResult> awaitSignalsMs(String[] signalNames, long timeoutMs) {
+        dispatchUpdates(); // dispatch point; see dispatchUpdates()
         // Serialize signal names as a JSON string array (matching Go adapter).
         StringBuilder sb = new StringBuilder("[");
         for (int i = 0; i < signalNames.length; i++) {
@@ -973,13 +1146,27 @@ public class HostCalls {
             Memory.OUTPUT_OFFSET, sigNameBufSize,
             payloadBufOffset, payloadBufSize);
 
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeAwaitErrCode(result);
         boolean timedOut = Memory.decodeAwaitTimedOut(result);
         int sigNameLen = Memory.decodeAwaitSigNameLen(result);
         int payloadLen = Memory.decodeAwaitPayloadLen(result);
 
         if (errCode != 0) {
-            return CleatResult.err("awaitSignals(names=" + namesJSON + ") failed: host returned error code " + errCode + ". Check that the signal names are valid.");
+            // Two buffers here, unlike the others, so the generic wrapper's
+            // implicit length does not apply. The signal NAME buffer sits at
+            // OUTPUT_OFFSET and is the one a reason would be written into, and
+            // its own clamp is preserved rather than falling back to
+            // OUT_BUF_SIZE -- without it an over-long reported length would read
+            // past the name region and into the payload buffer beside it.
+            //
+            // Every DurableAwaitSignals path in engine/signaller.go passes
+            // errCode 0, so in practice this fires only on errBadParam, where
+            // nothing is written and the fallback is returned. Wired anyway:
+            // "unreachable today" is a property of the host, not of this guest.
+            return CleatResult.err(hostMessageOr(Math.min(sigNameLen, sigNameBufSize),
+                "awaitSignals(names=" + namesJSON + ") failed: host returned error code " + errCode + ". Check that the signal names are valid."));
         }
 
         String sigName = Memory.readString(Memory.OUTPUT_OFFSET,
@@ -987,7 +1174,17 @@ public class HostCalls {
         String payload = Memory.readString(payloadBufOffset,
             Math.min(payloadLen, payloadBufSize));
 
-        return CleatResult.ok(new AwaitSignalsResult(sigName, payload, timedOut));
+        // Strip the reply envelope, if this is a request/reply signal, so the
+        // receiver reads its payload exactly as the sender passed it and gets
+        // the address separately rather than parsing it out. IMPROVEMENT-PLAN 3.220.
+        String replyTo = "";
+        String[] unwrapped = SignalEnvelope.decode(payload);
+        if (unwrapped != null) {
+            replyTo = unwrapped[0];
+            payload = unwrapped[1];
+        }
+
+        return CleatResult.ok(new AwaitSignalsResult(sigName, payload, timedOut, replyTo));
     }
 
     /**
@@ -1020,6 +1217,176 @@ public class HostCalls {
     public void registerUpdateHandler(String name) {
         int[] p = packStrings(name);
         cleatRegisterUpdateHandlerRaw(p[0], p[1]);
+    }
+
+    /**
+     * Register an update handler with an optional validator.
+     * <p>
+     * The validator returns null to accept, or a message to refuse. It runs
+     * first and must be read-only: a refusal costs nothing beyond the
+     * completion -- no state change, no durable work. That is the half of the
+     * API that makes an update different from a signal.
+     * <p>
+     * The name is registered with the host as well, which records it in the
+     * event history; the handler stays here, because only guest code can call
+     * it.
+     *
+     * @param name      the update name
+     * @param handler   receives the payload JSON, returns the result JSON
+     * @param validator receives the payload JSON, returns null or a refusal;
+     *                  may be null
+     */
+    public void registerUpdateHandler(String name,
+                                      java.util.function.Function<String, String> handler,
+                                      java.util.function.Function<String, String> validator) {
+        UPDATE_HANDLERS.put(name, new UpdateHandlerEntry(handler, validator));
+        registerUpdateHandler(name);
+    }
+
+    /**
+     * Deliver and run every update currently pending for this workflow.
+     * <p>
+     * The SDK already calls this before each suspension, so an ordinary
+     * workflow needs no update-specific code. It is exposed for workflows that
+     * want to service updates at additional points.
+     * <p>
+     * An update handler is a closure in guest memory, so only guest code can
+     * invoke it -- an arriving update cannot interrupt the workflow. And it
+     * must be asked for at a fixed PROGRAM POSITION rather than a moment in
+     * time, because replay re-executes the guest and matches host calls against
+     * the recorded history in order. See engine/updater.go.
+     * <p>
+     * The consequence, stated rather than hidden: an update is handled at the
+     * next dispatch point, not the instant it arrives.
+     */
+    public void dispatchUpdates() {
+        if (dispatchingUpdates) {
+            return;
+        }
+        dispatchingUpdates = true;
+        try {
+            while (true) {
+                CleatResult<String> polled = pollUpdate();
+                if (polled.isErr()) {
+                    return;
+                }
+                String envelope = polled.getValue();
+                if (envelope == null || envelope.isEmpty()) {
+                    return;
+                }
+                java.util.Map<String, Object> d = JsonHelper.parseObject(envelope);
+                Object name = d.get("name");
+                Object requestId = d.get("request_id");
+                if (!(name instanceof String) || !(requestId instanceof String)) {
+                    // The envelope is written by the host, so this is not a
+                    // caller error. Returning rather than continuing avoids
+                    // spinning on a delivery that decodes the same way next
+                    // time.
+                    return;
+                }
+                Object payload = d.get("payload");
+                runUpdate((String) name, payload instanceof String ? (String) payload : "",
+                    (String) requestId);
+            }
+        } finally {
+            dispatchingUpdates = false;
+        }
+    }
+
+    /**
+     * Apply one delivered update and report the outcome.
+     * <p>
+     * Every path completes the request. A handler that is not registered, a
+     * validator that refuses and a handler that throws are all answers the
+     * caller is entitled to -- leaving any of them uncompleted would leave the
+     * caller holding a promise nothing settles, which is the defect updates
+     * exist to end.
+     */
+    private void runUpdate(String name, String payload, String requestId) {
+        UpdateHandlerEntry entry = UPDATE_HANDLERS.get(name);
+        if (entry == null) {
+            completeUpdate(requestId, "", "cleat: no update handler registered for \"" + name + "\"");
+            return;
+        }
+        if (entry.validator != null) {
+            String refusal;
+            try {
+                refusal = entry.validator.apply(payload);
+            } catch (SuspendSignal e) {
+                throw e;
+            } catch (RuntimeException e) {
+                completeUpdate(requestId, "", String.valueOf(e.getMessage()));
+                return;
+            }
+            if (refusal != null && !refusal.isEmpty()) {
+                completeUpdate(requestId, "", refusal);
+                return;
+            }
+        }
+        String result;
+        try {
+            result = entry.handler.apply(payload);
+        } catch (SuspendSignal e) {
+            // A stop must propagate: the segment is ending, and swallowing it
+            // here would complete the request with a message while the host has
+            // already refused the work.
+            throw e;
+        } catch (RuntimeException e) {
+            completeUpdate(requestId, "", String.valueOf(e.getMessage()));
+            return;
+        }
+        completeUpdate(requestId, result == null ? "" : result, "");
+    }
+
+    /**
+     * Poll for the next pending update request.
+     * <p>
+     * Low-level: prefer {@link #dispatchUpdates()}, which pairs this with
+     * handler lookup, validation, and the guarantee that every delivered update
+     * is answered. Delivery is durable, so an update returned here is recorded
+     * as delivered whether or not you complete it.
+     *
+     * @return the delivery envelope JSON, or an empty result when none is
+     *         pending
+     */
+    public CleatResult<String> pollUpdate() {
+        long result = cleatPollUpdateRaw(Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+        // Ask before decoding: a stop is bit 31, which in this layout sits
+        // inside the flags word a decoder reads as an ordinary result.
+        Memory.throwIfStopped(result);
+
+        if (!Memory.decodePollSigFound(result)) {
+            return CleatResult.ok("");
+        }
+        int len = Memory.decodePollSigPayloadLen(result);
+        return CleatResult.ok(readOutput(len));
+    }
+
+    /**
+     * Record an update handler's outcome and settle the caller's promise.
+     * <p>
+     * A non-empty {@code errMsg} rejects; an empty one resolves. An empty
+     * {@code resultJSON} with an empty {@code errMsg} resolves -- an empty
+     * result is an outcome, not a missing one.
+     * <p>
+     * Low-level: prefer {@link #dispatchUpdates()}, which cannot forget to call
+     * this. An update delivered and never completed leaves its caller holding a
+     * promise nothing settles.
+     *
+     * @param requestId  the request id from {@link #pollUpdate()}, unchanged
+     * @param resultJSON the handler's result
+     * @param errMsg     the failure message, or empty on success
+     * @return a result indicating success, or an error description
+     */
+    public CleatResult<Void> completeUpdate(String requestId, String resultJSON, String errMsg) {
+        int[] p = packStrings(requestId, resultJSON, errMsg);
+        long result = cleatCompleteUpdateRaw(p[0], p[1], p[2], p[3], p[4], p[5]);
+        Memory.throwIfStopped(result);
+        int errCode = (int) (result & 0xFFFFFFFFL);
+        if (errCode != 0) {
+            return CleatResult.err("completeUpdate failed: host error code " + errCode);
+        }
+        return CleatResult.ok(null);
     }
 
     /**
@@ -1084,6 +1451,8 @@ public class HostCalls {
             inOff, inLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeCallErrCode(result);
         int responseLen = Memory.decodeCallResponseLen(result);
 
@@ -1118,6 +1487,8 @@ public class HostCalls {
             fnOff, fnLen,
             inOff, inLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeCallErrCode(result);
         int responseLen = Memory.decodeCallResponseLen(result);
@@ -1184,6 +1555,8 @@ public class HostCalls {
             fnOff, fnLen,
             inOff, inLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeCallErrCode(result);
         int callErrorCode = Memory.decodeCallErrorCode(result);
@@ -1337,27 +1710,43 @@ public class HostCalls {
      */
     public CleatResult<String> sendSignalAndWaitMs(
         String targetRunId, String signalName, String payload, long timeoutMs) {
-        int[] p = packStrings(targetRunId, signalName, payload);
-        int targetOff = p[0], sigOff = p[1], payOff = p[2];
-        int targetLen = p[3], sigLen = p[4], payLen = p[5];
+        // Composed from three durable primitives rather than being a host call
+        // of its own: a promise is the reply channel, its ID is the correlation
+        // ID, and answering is resolving it (IMPROVEMENT-PLAN 3.220).
+        // cleat_send_signal_and_wait was inert engine-side -- it never
+        // delivered the signal it then waited for -- so this is the first
+        // version that works at all.
+        CleatResult<String> promise = createPromise("__reply:" + signalName);
+        if (promise.isErr()) {
+            return CleatResult.err("sendSignalAndWait: create reply promise: " + promise.getError());
+        }
+        String replyTo = promise.getValue();
 
-        long result = cleatSendSignalAndWaitRaw(
-            targetOff, targetLen,
-            sigOff, sigLen,
-            payOff, payLen,
-            timeoutMs,
-            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        int responseLen = Memory.decodeSimpleExtra(result);
-
-        if (errCode != 0) {
-            String errMsg = readOutput(responseLen);
-            return CleatResult.err(errMsg);
+        CleatResult<Void> sent = signalWorkflow(
+            targetRunId, signalName, SignalEnvelope.encode(replyTo, payload));
+        if (sent.isErr()) {
+            return CleatResult.err("sendSignalAndWait: send signal \"" + signalName
+                + "\" to \"" + targetRunId + "\": " + sent.getError());
         }
 
-        String response = readOutput(responseLen);
-        return CleatResult.ok(response);
+        CleatResult<AwaitPromiseResult> awaited = awaitPromiseMs(replyTo, timeoutMs);
+        if (awaited.isErr()) {
+            return CleatResult.err("sendSignalAndWait: await reply to signal \""
+                + signalName + "\": " + awaited.getError());
+        }
+        // Returning an error on timedOut is correct even though awaitPromise
+        // reports timedOut for a SUSPENSION as well as a real timeout. The host
+        // distinguishes them and this code does not have to: engine/promises.go
+        // sets session.suspendErr before returning, and engine/executor.go:264
+        // treats a workflow error as a failure only when suspendErr is nil --
+        // ":315 deliberately lets a suspension win over the error that
+        // accompanied it". There is nothing in the result to check: the engine
+        // signals suspension host-side, not through a sentinel.
+        if (awaited.getValue().timedOut) {
+            return CleatResult.err("sendSignalAndWait: no reply to signal \"" + signalName
+                + "\" from workflow \"" + targetRunId + "\" within " + timeoutMs + "ms");
+        }
+        return CleatResult.ok(awaited.getValue().result);
     }
 
     /**
@@ -1391,17 +1780,20 @@ public class HostCalls {
      * @return a result indicating success, or an error description on failure
      */
     public CleatResult<Void> replyToSignal(String correlationId, String response) {
-        int[] p = packStrings(correlationId, response);
-        int cidOff = p[0], respOff = p[1];
-        int cidLen = p[2], respLen = p[3];
-
-        long result = cleatReplyToSignalRaw(
-            cidOff, cidLen,
-            respOff, respLen);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        if (errCode != 0) {
-            return CleatResult.err("replyToSignal(correlationId=\"" + correlationId + "\") failed: host returned error code " + errCode + ". Check that the correlation ID is valid.");
+        // correlationId is AwaitSignalsResult.replyTo, which is the reply
+        // promise's ID, so replying is resolving that promise. An ID matching
+        // no promise is an error rather than a silent success, which is what
+        // makes a stale address visible instead of leaving the sender
+        // suspended until its timeout. IMPROVEMENT-PLAN 3.220.
+        if (correlationId == null || correlationId.isEmpty()) {
+            return CleatResult.err("replyToSignal: empty correlation ID. Pass "
+                + "AwaitSignalsResult.replyTo from the signal being answered; it is empty "
+                + "when the sender used signalWorkflow and is not waiting for a reply.");
+        }
+        CleatResult<Void> settled = resolvePromise(correlationId, response);
+        if (settled.isErr()) {
+            return CleatResult.err("replyToSignal(correlationId=\"" + correlationId
+                + "\"): " + settled.getError());
         }
         return CleatResult.ok(null);
     }
@@ -1426,28 +1818,120 @@ public class HostCalls {
      */
     public CleatResult<java.util.List<AwaitSignalsResult>> awaitSignalsWithQuorumMs(
         String[] signalNames, int minCount, int maxRejections, long timeoutMs) {
+        final long deadline = this.now() + timeoutMs;
+        return quorumOver(
+            signalNames,
+            minCount,
+            maxRejections,
+            () -> deadline - this.now(),
+            (names, waitMs) -> this.awaitSignalsMs(names.toArray(new String[0]), waitMs));
+    }
+
+    /**
+     * The quorum loop itself, over an injected {@code awaitSignals}.
+     * <p>
+     * Split out of {@link #awaitSignalsWithQuorumMs} so it can be TESTED
+     * without a host. Every method on this class calls an {@code extern "C"}
+     * import that exists only inside a cleat WASM runtime, so before this
+     * extraction no test in this language could reach the logic at all --
+     * which is why cleat#1132, one defect written five times, stayed live in
+     * four SDKs after Go was fixed. The shared cases live in
+     * {@code tests/conformance/quorum_cases.json} and every SDK runs them
+     * (cleat#1136).
+     * <p>
+     * {@code remainingMs} is injected for the same reason and is not a clock
+     * abstraction -- tests hand it a constant so the deadline never fires,
+     * leaving the host's own {@code timedOut} as the only source of a timeout.
+     *
+     * @param signalNames   the caller's name set; NOT modified
+     * @param minCount      distinct names required
+     * @param maxRejections rejections tolerated ({@code -1} to disable)
+     * @param remainingMs   milliseconds left before the caller's deadline
+     * @param awaitSignals  awaits one signal from the given (narrowed) set
+     * @return the collected results, or the first error
+     */
+    static CleatResult<java.util.List<AwaitSignalsResult>> quorumOver(
+        String[] signalNames,
+        int minCount,
+        int maxRejections,
+        java.util.function.LongSupplier remainingMs,
+        java.util.function.BiFunction<java.util.List<String>, Long,
+            CleatResult<AwaitSignalsResult>> awaitSignals) {
+
+        // A quorum of N over a set of M names is unsatisfiable when N > M, and
+        // it used to spin to the timeout and report "got k/N signals" -- a
+        // message describing a slow sender rather than a caller asking for
+        // something arithmetic forbids. Once names narrow it is guaranteed to
+        // fail, so it is refused here as the programming error it is.
+        if (minCount > signalNames.length) {
+            return CleatResult.err(
+                "awaitSignalsWithQuorum: quorum of " + minCount + " over "
+                + signalNames.length + " name(s) ["
+                + String.join(", ", signalNames)
+                + "] is unsatisfiable; a quorum counts DISTINCT names, so it "
+                + "cannot exceed the size of the set");
+        }
+
         java.util.List<AwaitSignalsResult> results = new java.util.ArrayList<>();
-        long deadline = this.now() + timeoutMs;
         int rejectionCount = 0;
 
+        // COPIED, not aliased. `remaining` narrows below and `signalNames`
+        // belongs to the caller -- a workflow may still be holding that array.
+        java.util.List<String> remaining =
+            new java.util.ArrayList<>(java.util.Arrays.asList(signalNames));
+
         while (results.size() < minCount) {
-            long remainingMs = deadline - this.now();
-            if (remainingMs <= 0) {
+            long waitMs = remainingMs.getAsLong();
+            if (waitMs <= 0) {
                 return CleatResult.err(
-                    "quorum timeout waiting for signals [" + String.join(", ", signalNames) + "]: got " + results.size() + "/" + minCount + " signals");
+                    "quorum timeout waiting for signals ["
+                    + String.join(", ", signalNames) + "]: got "
+                    + results.size() + "/" + minCount + " signals");
             }
 
-            CleatResult<AwaitSignalsResult> signalResult = this.awaitSignalsMs(signalNames, remainingMs);
+            CleatResult<AwaitSignalsResult> signalResult =
+                awaitSignals.apply(new java.util.ArrayList<>(remaining), waitMs);
             if (signalResult.isErr()) {
-                return CleatResult.err("quorum signal error waiting for signals [" + String.join(", ", signalNames) + "]: " + signalResult.getError());
+                return CleatResult.err(
+                    "quorum signal error waiting for signals ["
+                    + String.join(", ", signalNames) + "]: "
+                    + signalResult.getError());
             }
             AwaitSignalsResult asr = signalResult.getValue();
             if (asr.timedOut) {
                 return CleatResult.err(
-                    "quorum timeout waiting for signals [" + String.join(", ", signalNames) + "]: got " + results.size() + "/" + minCount + " signals");
+                    "quorum timeout waiting for signals ["
+                    + String.join(", ", signalNames) + "]: got "
+                    + results.size() + "/" + minCount + " signals");
+            }
+
+            // A name outside the requested set has not been asked for, and
+            // counting it would reinstate the defect through the other door:
+            // narrowing what we ASK for is only half the fix if we accept
+            // whatever arrives.
+            //
+            // A well-behaved host returns one of the names it was given, so
+            // this is unreachable through the engine's own await. It is here
+            // because the fix must not rest on that politeness.
+            if (!remaining.contains(asr.signalName)) {
+                return CleatResult.err(
+                    "awaitSignalsWithQuorum: awaited [" + String.join(", ", remaining)
+                    + "] and received '" + asr.signalName + "', which is not among "
+                    + "them; a quorum counts distinct names and cannot count this one");
             }
 
             results.add(asr);
+
+            // Narrow the set: this name has voted, and a quorum counts VOTERS.
+            //
+            // Without this, the full `signalNames` went to every await, so
+            // three deliveries of one name satisfied a quorum of three with the
+            // other two never sent (cleat#1132).
+            //
+            // A rejection narrows too. A voter that votes no has voted, and
+            // leaving it in the set would let one rejector trip maxRejections
+            // alone -- the same defect wearing the other outcome.
+            remaining.remove(asr.signalName);
 
             // Check for rejection if maxRejections >= 0.
             if (maxRejections >= 0 && asr.payload != null && !asr.payload.isEmpty()) {
@@ -1458,7 +1942,9 @@ public class HostCalls {
                         rejectionCount++;
                         if (rejectionCount > maxRejections) {
                             return CleatResult.err(
-                                "quorum exceeded max rejections (" + maxRejections + ") while waiting for signals [" + String.join(", ", signalNames) + "]");
+                                "quorum exceeded max rejections (" + maxRejections
+                                + ") while waiting for signals ["
+                                + String.join(", ", signalNames) + "]");
                         }
                     }
                 } catch (Exception e) {
@@ -1512,6 +1998,12 @@ public class HostCalls {
             targetOff, targetLen,
             sigOff, sigLen,
             payOff, payLen);
+
+        // The host refuses new work in a defer segment and marks the refusal with
+        // bit 31 (IMPROVEMENT-PLAN 3.302). Ask BEFORE decoding: decodeSimpleErrCode
+        // reads the low byte, where a stop is 0 -- an ordinary success for a
+        // fire-and-forget call, so the guest would report the send as done.
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
@@ -1591,6 +2083,12 @@ public class HostCalls {
 
         long result = cleatSendRaw(svcOff, svcLen, opOff, opLen, reqOff, reqLen);
 
+        // The host refuses new work in a defer segment and marks the refusal with
+        // bit 31 (IMPROVEMENT-PLAN 3.302). Ask BEFORE decoding: decodeSimpleErrCode
+        // reads the low byte, where a stop is 0 -- an ordinary success for a
+        // fire-and-forget call, so the guest would report the send as done.
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
             return CleatResult.err("cleatSend(service=\"" + service + "\", operation=\"" + operation + "\") failed: host returned error code " + errCode + ". Check that the service and operation names are valid.");
@@ -1620,6 +2118,12 @@ public class HostCalls {
         int svcLen = p[3], opLen = p[4], reqLen = p[5];
 
         long result = scheduleInvokeRaw(svcOff, svcLen, opOff, opLen, reqOff, reqLen, delayMs);
+
+        // The host refuses new work in a defer segment and marks the refusal with
+        // bit 31 (IMPROVEMENT-PLAN 3.302). Ask BEFORE decoding: decodeSimpleErrCode
+        // reads the low byte, where a stop is 0 -- an ordinary success for a
+        // fire-and-forget call, so the guest would report the send as done.
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
@@ -1678,11 +2182,54 @@ public class HostCalls {
 
         long result = cleatRunDetachedRaw(nameOff, nameLen, inOff, inLen);
 
+        // The host refuses new work in a defer segment and marks it with bit 31
+        // (IMPROVEMENT-PLAN 3.111). Before decoding: this is a simple-result
+        // layout in which bit 31 is not a field, so a stop decoded field-first
+        // is errCode 0 -- a SUCCESS, and the guest goes on to do the work the
+        // segment exists to prevent.
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeSimpleErrCode(result);
         if (errCode != 0) {
             return CleatResult.err("runDetached failed with code " + errCode);
         }
         return CleatResult.ok(null);
+    }
+
+    /**
+     * Start a detached workflow and return its run ID.
+     * <p>
+     * Identical to {@link #runDetached(String, String)} except that the run ID
+     * the host already computes is handed back, so the caller has a handle to
+     * the run -- to poll it, signal it, or record it somewhere durable.
+     * {@code runDetached} computes the same ID and discards it.
+     * <p>
+     * The started workflow is NOT a child: this workflow does not await it, is
+     * not its parent, and completing or being cancelled does not affect it.
+     *
+     * @param workflowName the workflow definition name to start
+     * @param inputJSON    the input JSON for the detached workflow
+     * @return the run ID of the started workflow, or an error description
+     */
+    public CleatResult<String> startDetached(String workflowName, String inputJSON) {
+        int[] p = packStrings(workflowName, inputJSON);
+        int nameOff = p[0], inOff = p[1];
+        int nameLen = p[2], inLen = p[3];
+
+        long result = cleatStartDetachedRaw(
+            nameOff, nameLen,
+            inOff, inLen,
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        // Before decoding, for the reason runDetached above gives.
+        Memory.throwIfStopped(result);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int runIdLen = Memory.decodeSimpleExtra(result);
+        if (errCode != 0) {
+            return CleatResult.err(hostMessageOr(runIdLen, "startDetached(name=\"" + workflowName + "\") failed: host returned error code " + errCode + ". Check that the workflow name is correct."));
+        }
+        return CleatResult.ok(readOutput(runIdLen));
     }
 
     // ========================================================================
@@ -1712,30 +2259,6 @@ public class HostCalls {
     // State operations (scoped for virtual objects)
     // ========================================================================
 
-    /**
-     * Set a key-value pair in the workflow's durable state.
-     * <p>
-     * If a virtual object scope has been set via
-     * {@link #setScope(String, String)}, the key is automatically prefixed.
-     *
-     * @param key   the state key
-     * @param value the state value (typically a JSON string)
-     * @return a result indicating success, or an error description on failure
-     */
-    public CleatResult<Void> setState(String key, String value) {
-        String scoped = scopedKey(key);
-        int[] p = packStrings(scoped, value);
-        int keyOff = p[0], valOff = p[1];
-        int keyLen = p[2], valLen = p[3];
-
-        long result = cleatSetStateRaw(keyOff, keyLen, valOff, valLen);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        if (errCode != 0) {
-            return CleatResult.err("setState(key=\"" + key + "\") failed: host returned error code " + errCode + ". Check that the key is valid and state operations are available.");
-        }
-        return CleatResult.ok(null);
-    }
 
     /**
      * Record a side-effect result for deterministic replay.
@@ -1755,137 +2278,26 @@ public class HostCalls {
             p[0], p[1],
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
+        // Bit 31 before any field. IMPROVEMENT-PLAN 3.300: a stop decodes here as
+        // errCode=0 with extra=0 -- an empty SUCCESSFUL response, so the guest
+        // would return "" and carry on.
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeSimpleErrCode(result);
         int outLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("sideEffect(...) failed: host returned error code " + errCode + ". Check that the input is valid.");
+            return CleatResult.err(hostMessageOr(outLen, "sideEffect(...) failed: host returned error code " + errCode + ". Check that the input is valid."));
         }
 
         String output = readOutput(outLen);
         return CleatResult.ok(output);
     }
 
-    /**
-     * Get a value from the workflow's durable state by key.
-     * <p>
-     * If a virtual object scope has been set, the key is automatically prefixed.
-     *
-     * @param key the state key
-     * @return a result containing the state value on success, or an error
-     *         description on failure (including if the key is not found)
-     */
-    public CleatResult<String> getState(String key) {
-        String scoped = scopedKey(key);
-        int[] p = packStrings(scoped);
 
-        long result = cleatGetStateRaw(p[0], p[1], Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
-        int errCode = Memory.decodeSimpleErrCode(result);
-        int valueLen = Memory.decodeSimpleExtra(result);
 
-        if (errCode != 0) {
-            return CleatResult.err("getState(key=\"" + key + "\") failed: host returned error code " + errCode + ". Check that the key exists and state operations are available.");
-        }
 
-        String value = readOutput(valueLen);
-        return CleatResult.ok(value);
-    }
-
-    /**
-     * Delete a key from the workflow's durable state.
-     * <p>
-     * If a virtual object scope has been set, the key is automatically prefixed.
-     *
-     * @param key the state key to delete
-     * @return a result indicating success, or an error description on failure
-     */
-    public CleatResult<Void> deleteState(String key) {
-        String scoped = scopedKey(key);
-        int[] p = packStrings(scoped);
-
-        long result = cleatDeleteStateRaw(p[0], p[1]);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        if (errCode != 0) {
-            return CleatResult.err("deleteState(key=\"" + key + "\") failed: host returned error code " + errCode + ". Check that the key is valid and state operations are available.");
-        }
-        return CleatResult.ok(null);
-    }
-
-    /**
-     * Atomically increment a numeric state value by the given delta.
-     * <p>
-     * If a virtual object scope has been set, the key is automatically prefixed.
-     * If the key does not exist, it is created with the delta as its initial value.
-     *
-     * @param key   the state key
-     * @param delta the amount to add (may be negative to decrement)
-     * @return a result containing the new value after increment, or an error
-     *         description on failure
-     */
-    public CleatResult<Long> incrState(String key, long delta) {
-        String scoped = scopedKey(key);
-        int[] p = packStrings(scoped);
-
-        long result = cleatIncrStateRaw(p[0], p[1], delta);
-
-        int errCode = (int) (result & 0xFFL);
-        if (errCode != 0) {
-            return CleatResult.err("incrState(key=\"" + key + "\", delta=" + delta + ") failed: host returned error code " + errCode + ". Check that the key is valid for numeric operations.");
-        }
-
-        long newValue = result >>> 8;
-        return CleatResult.ok(newValue);
-    }
-
-    /**
-     * Check whether a key exists in the workflow's durable state.
-     * <p>
-     * If a virtual object scope has been set, the key is automatically prefixed.
-     *
-     * @param key the state key
-     * @return {@code true} if the key exists in state, {@code false} otherwise
-     */
-    public boolean hasState(String key) {
-        String scoped = scopedKey(key);
-        int[] p = packStrings(scoped);
-
-        long result = cleatHasStateRaw(p[0], p[1]);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        if (errCode != 0) {
-            return false;
-        }
-        return Memory.decodeSimpleExtra(result) != 0;
-    }
-
-    /**
-     * List state keys matching the given prefix.
-     * <p>
-     * If a virtual object scope has been set, the prefix is automatically
-     * prefixed.  The returned keys include the scope prefix.
-     *
-     * @param prefix the key prefix to match
-     * @return a result containing the matching keys as a JSON array string,
-     *         or an error description on failure
-     */
-    public CleatResult<String> listState(String prefix) {
-        String scoped = scopedKey(prefix);
-        int[] p = packStrings(scoped);
-
-        long result = cleatListStateRaw(p[0], p[1], Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
-
-        int errCode = Memory.decodeSimpleErrCode(result);
-        int listLen = Memory.decodeSimpleExtra(result);
-
-        if (errCode != 0) {
-            return CleatResult.err("listState(prefix=\"" + prefix + "\") failed: host returned error code " + errCode + ". Check that state operations are available.");
-        }
-
-        String listJson = readOutput(listLen);
-        return CleatResult.ok(listJson);
-    }
 
     // ========================================================================
     // awaitAllChildren
@@ -1924,7 +2336,7 @@ public class HostCalls {
         int resultLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("awaitAllChildren(runIDs=" + idsJson + ") failed: host returned error code " + errCode + ". Check that the run IDs are valid.");
+            return CleatResult.err(hostMessageOr(resultLen, "awaitAllChildren(runIDs=" + idsJson + ") failed: host returned error code " + errCode + ". Check that the run IDs are valid."));
         }
 
         String response = readOutput(resultLen);
@@ -1973,11 +2385,123 @@ public class HostCalls {
         int resultLen = Memory.decodeSimpleExtra(result);
 
         if (errCode != 0) {
-            return CleatResult.err("awaitAnyChild(runIDs=" + idsJson + ") failed: host returned error code " + errCode + ". Check that the run IDs are valid.");
+            return CleatResult.err(hostMessageOr(resultLen, "awaitAnyChild(runIDs=" + idsJson + ") failed: host returned error code " + errCode + ". Check that the run IDs are valid."));
         }
 
         String childResult = readOutput(resultLen);
         return CleatResult.ok(childResult);
+    }
+
+    // ========================================================================
+    // cron
+    // ========================================================================
+
+    /**
+     * Create a recurring workflow trigger from a cron expression.
+     * <p>
+     * Returns the schedule ID, which {@link #deleteCron(String)} takes.
+     * Mirrors Go's {@code ScheduleCron(workflowName, cronExpr, timezone, inputJSON)}.
+     * <p>
+     * {@code timezone} is optional: {@code ""} means the engine's default. The
+     * host reads it as a payload rather than as a required string, which is
+     * what makes the empty value legal rather than a bad-parameter error.
+     *
+     * @param workflowName the workflow definition name to trigger
+     * @param cronExpr     a standard 5-field cron expression
+     * @param timezone     an IANA timezone name, or "" for the engine default
+     * @param inputJSON    the JSON input handed to each triggered run
+     * @return a result containing the schedule ID, or an error description
+     */
+    public CleatResult<String> scheduleCron(String workflowName, String cronExpr, String timezone, String inputJSON) {
+        int[] p = packStrings(workflowName, cronExpr, timezone, inputJSON);
+
+        long result = cleatScheduleCronRaw(
+            p[0], p[4],
+            p[1], p[5],
+            p[2], p[6],
+            p[3], p[7],
+            Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        // Ask BEFORE decoding. A cron schedule is new work with the longest
+        // reach of anything in this family -- it registers a RECURRING trigger,
+        // so a workflow that kept going after a refusal would leave something
+        // starting fresh runs indefinitely. decodeSimpleErrCode reads the low
+        // byte, where a stop is 0, and the length as 0: an empty SUCCESSFUL
+        // response carrying an empty schedule ID.
+        Memory.throwIfStopped(result);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int resultLen = Memory.decodeSimpleExtra(result);
+        if (errCode != 0) {
+            // Read the BUFFER, not the code. The host writes its own message
+            // there on failure -- engine/schedules.go writes rec.Err into the
+            // id buffer and returns packSimpleResult(1, written) -- so a guest
+            // that prints the bare code throws away the only thing that says
+            // what went wrong. That is IMPROVEMENT-PLAN 3.200, fixed there for
+            // the generated Go adapters.
+            //
+            // Note this does NOT match what most of this file does: 11 of the
+            // 20 wrappers here with an output buffer still report a bare code.
+            // The seven that read it are cleatCall, cleatCallHeartbeat,
+            // cleatFetch, pluginCall, pluginCallStreaming, jsonParse and
+            // jsonStringify. The remaining 11 are tracked separately.
+            String msg = readOutput(resultLen);
+            if (msg.isEmpty()) {
+                return CleatResult.err("scheduleCron(workflowName=\"" + workflowName + "\", cronExpr=\"" + cronExpr
+                    + "\") failed: host returned error code " + errCode + ".");
+            }
+            return CleatResult.err(msg);
+        }
+        return CleatResult.ok(readOutput(resultLen));
+    }
+
+    /**
+     * Remove a previously registered cron schedule by its ID.
+     * <p>
+     * There is no stop-bit check here, and that is deliberate rather than an
+     * omission: {@code DeleteCron} does not call {@code stopBeforeNewWork}
+     * host-side, because removing a schedule is not new work. Verified against
+     * {@code engine/schedules.go} on 2026-09-07; {@code ScheduleCron} is the
+     * only one of the three that can be refused.
+     *
+     * @param scheduleID the schedule ID returned by scheduleCron
+     * @return a result indicating success, or an error description
+     */
+    public CleatResult<Void> deleteCron(String scheduleID) {
+        int[] p = packStrings(scheduleID);
+        long result = cleatDeleteCronRaw(p[0], p[1]);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        if (errCode != 0) {
+            return CleatResult.err("deleteCron(scheduleID=\"" + scheduleID
+                + "\") failed: host returned error code " + errCode
+                + ". Check that the schedule ID exists.");
+        }
+        return CleatResult.ok(null);
+    }
+
+    /**
+     * List all registered cron schedules, as a JSON array.
+     * <p>
+     * See {@link #deleteCron(String)} for why there is no stop-bit check here
+     * either.
+     *
+     * @return a result containing the JSON array of schedules, or an error
+     */
+    public CleatResult<String> listCrons() {
+        long result = cleatListCronsRaw(Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        int errCode = Memory.decodeSimpleErrCode(result);
+        int resultLen = Memory.decodeSimpleExtra(result);
+        if (errCode != 0) {
+            // The host's message, not the code -- see scheduleCron above.
+            String msg = readOutput(resultLen);
+            if (msg.isEmpty()) {
+                return CleatResult.err("listCrons() failed: host returned error code " + errCode + ".");
+            }
+            return CleatResult.err(msg);
+        }
+        return CleatResult.ok(readOutput(resultLen));
     }
 
     // ========================================================================
@@ -2057,6 +2581,8 @@ public class HostCalls {
             reqOff, reqLen,
             heartbeatIntervalMs,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeCallErrCode(result);
         int responseLen = Memory.decodeCallResponseLen(result);
@@ -2159,6 +2685,8 @@ public class HostCalls {
             nreOff, nreLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
 
+        Memory.throwIfStopped(result);
+
         int errCode = Memory.decodeCallErrCode(result);
         int responseLen = Memory.decodeCallResponseLen(result);
 
@@ -2212,6 +2740,8 @@ public class HostCalls {
             hdrOff, hdrLen,
             bodyOff, bodyLen,
             Memory.OUTPUT_OFFSET, Memory.OUT_BUF_SIZE);
+
+        Memory.throwIfStopped(result);
 
         int errCode = Memory.decodeCallErrCode(result);
         int responseLen = Memory.decodeCallResponseLen(result);
@@ -2324,6 +2854,13 @@ public class HostCalls {
         int keyOff = p[0], keyLen = p[1];
 
         long result = cleatAcquireLockRaw(keyOff, keyLen, ttlMs);
+
+        // The host refuses new work in a defer segment and marks the refusal with
+        // bit 31 (IMPROVEMENT-PLAN 3.301). Ask BEFORE decoding: this layout puts
+        // `acquired` at bit 8 and errCode in the low byte, so a stop decodes as
+        // errCode=0, acquired=false -- an ordinary "someone else holds it", and
+        // the workflow takes its did-not-get-the-lock branch and runs on.
+        Memory.throwIfStopped(result);
 
         int errCode = (int) (result & 0xFFL);
         if (errCode != 0) {
@@ -2454,16 +2991,43 @@ public class HostCalls {
         public final boolean timedOut;
 
         /**
-         * Construct a new await-signals result.
+         * The address to answer this signal at, or empty for a one-way signal.
+         * <p>
+         * Non-empty only when the sender used
+         * {@link HostCalls#sendSignalAndWaitMs(String, String, String, long)}
+         * and is suspended waiting for a reply; pass it to
+         * {@link HostCalls#replyToSignal(String, String)}. A signal sent with
+         * {@link HostCalls#signalWorkflow(String, String, String)} leaves it
+         * empty, which is how a receiver tells a request that wants an answer
+         * from a one-way notification. IMPROVEMENT-PLAN 3.220.
+         */
+        public final String replyTo;
+
+        /**
+         * Construct a new await-signals result with no reply address, for a
+         * one-way signal.
          *
          * @param signalName the received signal name
          * @param payload    the signal payload
          * @param timedOut   whether the wait timed out
          */
         public AwaitSignalsResult(String signalName, String payload, boolean timedOut) {
+            this(signalName, payload, timedOut, "");
+        }
+
+        /**
+         * Construct a new await-signals result.
+         *
+         * @param signalName the received signal name
+         * @param payload    the signal payload
+         * @param timedOut   whether the wait timed out
+         * @param replyTo    the address to answer at, or empty
+         */
+        public AwaitSignalsResult(String signalName, String payload, boolean timedOut, String replyTo) {
             this.signalName = signalName;
             this.payload = payload;
             this.timedOut = timedOut;
+            this.replyTo = replyTo;
         }
 
         @Override

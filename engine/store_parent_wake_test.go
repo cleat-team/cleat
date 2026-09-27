@@ -57,39 +57,48 @@ func TestFinalizeWorkflowSegment_ParentWake(t *testing.T) {
 				t.Fatalf("FinalizeWorkflowSegment (child done): %v", err)
 			}
 
-			// Parent should have next_wake_at <= now (woken atomically).
+			// The parent must now be CLAIMABLE. That is what "woken" means, and
+			// asserting it directly is what keeps this test off the clock.
 			//
-			// next_wake_at is set by `now()` evaluated on the PostgreSQL
-			// server (inside finalize_workflow_status), and compared here
-			// against time.Now() on whatever host runs `go test`. Those are
-			// two different clocks: in this sandbox, `docker exec ...
-			// SELECT now()` reads consistently ~50-100ms ahead of the host
-			// clock. A zero-tolerance comparison made this test fail
-			// deterministically despite the underlying atomic-wake logic
-			// being correct (verified independently with a direct SQL
-			// reproduction of this exact sequence against
-			// finalize_workflow_status). clockSkewTolerance is generous
-			// enough to absorb realistic client/server clock disagreement
-			// while still catching the actual bug this test guards against:
-			// the parent staying at its pre-wake, one-hour-in-the-future
-			// next_wake_at because finalize_workflow_status's parent-wake
-			// UPDATE didn't run or didn't match.
-			const clockSkewTolerance = 2 * time.Second
-			parentNextWake := queryWorkflowNextWakeAt(t, store, parentID)
-			if parentNextWake.After(time.Now().Add(clockSkewTolerance)) {
-				t.Errorf("parent next_wake_at was not updated: got %v, want <= now (+%v clock-skew tolerance)", parentNextWake, clockSkewTolerance)
-			}
-			if time.Since(parentNextWake) > 5*time.Second+clockSkewTolerance {
-				t.Errorf("parent next_wake_at too old: %v ago", time.Since(parentNextWake))
-			}
-
-			// Parent should still be "ready" (not accidentally finalized).
+			// This used to read next_wake_at back and compare it against
+			// time.Now() with a 2s `clockSkewTolerance`, because next_wake_at is
+			// written by now() on the database server and the comparison ran on
+			// the host -- two clocks, ~50-100ms apart in this sandbox. A
+			// tolerance does not fix that, it only sets a threshold for how much
+			// disagreement is unremarkable. The mssql leg was observed failing in a
+			// full-suite run; which of the two clock assertions tripped was not
+			// captured, and the honest statement is that both depend on how long the
+			// host takes to get from the finalize to the read. Widening the tolerance
+			// again would only move that dependency further out, so it is removed.
+			//
+			// Every dialect's claim predicate is `next_wake_at <= <server now>`
+			// (mssql_lifecycle.go SYSUTCDATETIME, mysql_lifecycle.go NOW(6),
+			// postgres now()), so both sides of THAT comparison are the server's
+			// own clock and the skew is gone by construction rather than absorbed.
+			// It is also the stronger claim: next_wake_at <= now was only ever a
+			// proxy for "a worker can pick this up", and the child is finished, so
+			// the parent is the only workflow left to claim.
 			parentAfter, err := store.GetWorkflowByID(ctx, parentID)
 			if err != nil {
 				t.Fatalf("GetWorkflowByID (parent): %v", err)
 			}
+			// Checked before the claim, which would itself move it to running.
 			if parentAfter.Status != "ready" {
 				t.Errorf("parent status = %q, want ready", parentAfter.Status)
+			}
+
+			woken, err := store.ClaimWorkflow(ctx, "worker-2")
+			if err != nil {
+				t.Fatalf("ClaimWorkflow (parent after child completed): %v", err)
+			}
+			if woken == nil {
+				// The pre-wake next_wake_at is an hour out, so this is exactly
+				// the symptom of finalize_workflow_status's parent-wake UPDATE
+				// not running or not matching -- the bug this test guards.
+				t.Fatalf("no workflow claimable after child completed: parent %s was not woken", parentID)
+			}
+			if woken.ID != parentID {
+				t.Fatalf("ClaimWorkflow returned %s, want woken parent %s", woken.ID, parentID)
 			}
 		})
 	}

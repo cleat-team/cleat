@@ -8,12 +8,16 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"html/template"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/google/uuid"
 )
@@ -24,8 +28,25 @@ type providerEndpoints struct {
 	tokenURL    string
 	userinfoURL string
 	scope       string
+	// userEmailsURL is where to ask whether an address the provider reported
+	// is one it VOUCHES for. Empty for every provider whose userinfo answer is
+	// already authoritative about that -- see the GitHub entry below, which is
+	// the only one that sets it. cleat#2340.
+	userEmailsURL string
 }
 
+// endpoints holds each provider's PUBLIC OAuth URLs. No secret is stored here:
+// the client ID and secret come from tenant configuration at request time.
+//
+// gosec's G101 reports one HIGH-severity "potential hardcoded credentials"
+// finding per entry -- three as of 2026-09-04, one for each provider block. It
+// is matching the field NAME `tokenURL` against its credential-name pattern,
+// not looking at the value, and every value here is a documented endpoint
+// published by Google, GitHub and Okta. Three findings, one cause, no secret.
+//
+// Verified before this comment was written rather than assumed: the only
+// `%s`-bearing entries are Okta's, where the host is the tenant's own Okta
+// domain, and nothing in this map is read as a credential.
 var endpoints = map[string]providerEndpoints{
 	"google": {
 		authURL:     "https://accounts.google.com/o/oauth2/v2/auth",
@@ -37,7 +58,15 @@ var endpoints = map[string]providerEndpoints{
 		authURL:     "https://github.com/login/oauth/authorize",
 		tokenURL:    "https://github.com/login/oauth/access_token",
 		userinfoURL: "https://api.github.com/user",
-		scope:       "read:user",
+		// user:email is REQUIRED, not optional, and its absence was the
+		// first half of the cleat#2340 defect. GitHub's /user returns `email`
+		// only when the account has made an address public, and null
+		// otherwise -- so for a private-email account (the common case) the
+		// only address available is the one /user/emails reports, and reading
+		// that endpoint at all needs this scope. Without it the call is a
+		// 404/403 and the login has no address it can vouch for.
+		userEmailsURL: "https://api.github.com/user/emails",
+		scope:         "read:user user:email",
 	},
 	"okta": {
 		authURL:     "https://%s/oauth2/v1/authorize",
@@ -47,26 +76,93 @@ var endpoints = map[string]providerEndpoints{
 	},
 }
 
+// validProviders is no longer the list of IdPs cleat supports -- `oidc` covers
+// any of them. It is the list of provider KINDS. The three named entries are
+// sugar over the same path: their endpoints are known so they need no discovery
+// round trip, but nothing else about them is special. cleat#1582.
 var validProviders = map[string]bool{
 	"google": true,
 	"github": true,
 	"okta":   true,
+	"oidc":   true,
 }
 
-// oauthConfigRow represents a row from the oauth_config table.
+// providerOIDC is the generic kind, configured with an issuer URL instead of
+// an entry in the endpoints table.
+const providerOIDC = "oidc"
+
+// resolveEndpoints produces the endpoint set for a configured provider.
+//
+// ONE function for both kinds, called by both handlers, because the failure
+// this design is avoiding is login and callback disagreeing about where the
+// token endpoint is. For google/github/okta it reads the hardcoded table; for
+// `oidc` it performs discovery, which is a network call and can fail.
+//
+// The scope for a discovered issuer is the OIDC minimum plus email. `openid`
+// is what makes the request an OIDC one at all and is what causes an ID token
+// to be issued.
+func (p *Plugin) resolveEndpoints(ctx context.Context, provider string, cfg *oauthConfigRow) (providerEndpoints, error) {
+	if provider != providerOIDC {
+		ep, ok := endpoints[provider]
+		if !ok {
+			return providerEndpoints{}, fmt.Errorf("no endpoints for provider %q", provider)
+		}
+		return providerEndpoints{
+			authURL:       formatProviderURL(ep.authURL, cfg.Domain),
+			tokenURL:      formatProviderURL(ep.tokenURL, cfg.Domain),
+			userinfoURL:   formatProviderURL(ep.userinfoURL, cfg.Domain),
+			scope:         ep.scope,
+			userEmailsURL: formatProviderURL(ep.userEmailsURL, cfg.Domain),
+		}, nil
+	}
+
+	if strings.TrimSpace(cfg.Issuer) == "" {
+		return providerEndpoints{}, fmt.Errorf("provider %q requires an issuer URL in oauth_config.issuer", providerOIDC)
+	}
+	doc, _, err := p.discover(ctx, cfg.Issuer)
+	if err != nil {
+		return providerEndpoints{}, err
+	}
+	return providerEndpoints{
+		authURL:     doc.AuthorizationEndpoint,
+		tokenURL:    doc.TokenEndpoint,
+		userinfoURL: doc.UserinfoEndpoint,
+		scope:       "openid email profile",
+	}, nil
+}
+
+// oauthConfigRow represents a row from the oauth_config table, plus the
+// tenant secret that used to be one of its columns.
 type oauthConfigRow struct {
 	TenantID     uuid.UUID
 	Provider     string
 	ClientID     string
-	ClientSecret string
+	ClientSecret plugin.Secret
 	RedirectURL  string
 	Domain       string
+	Issuer       string
 	Enabled      bool
+}
+
+// OAuthClientSecretName is the tenant-secret name an oauth_config row's
+// client secret is stored under. cleat#1992.
+//
+// ONE NAME PER (TENANT, PROVIDER), not per config id like
+// datadogexport.DatadogAPIKeySecretName: oauth_config's own primary key is
+// (tenant_id, provider), so a tenant already has at most one row per
+// provider. Keying by provider alone preserves that -- there is no second
+// config of the same provider a fixed name could collide with.
+//
+// EXPORTED for the same reason DatadogAPIKeySecretName is: a caller seeding
+// or verifying an oauth_config secret (a test, tests/plugin-harness)
+// computes the name the same way rather than reimplementing the scheme.
+func OAuthClientSecretName(provider string) string {
+	return "oauthprovider.client_secret." + provider
 }
 
 // RegisterRoutes registers HTTP handlers for the OAuth flow and session
 // management.
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("oauth-provider: nil mux")
 	}
@@ -90,29 +186,53 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 // tenantID extracts the tenant UUID from the OAuth session in the request
-// context. Returns the zero UUID if no session is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
+// context, and whether a session was present. A session's TenantID can
+// legitimately be uuid.Nil -- the seeded default tenant -- so callers must
+// check ok, not compare the UUID to uuid.Nil, to tell "no session" apart
+// from "authenticated as the default tenant".
+func (p *Plugin) tenantID(r *http.Request) (uuid.UUID, bool) {
 	info, ok := SessionFromContext(r.Context())
 	if !ok {
-		return uuid.Nil
+		return uuid.Nil, false
 	}
-	return info.TenantID
+	return info.TenantID, true
 }
 
 func (p *Plugin) getConfig(ctx context.Context, tenantID uuid.UUID, provider string) (*oauthConfigRow, error) {
 	var cfg oauthConfigRow
-	err := p.db.QueryRow(ctx, plugin.Rebind(`
-			SELECT tenant_id, provider, client_id, client_secret, redirect_url,
-			       COALESCE(domain, '') AS domain, enabled
+	// Scoped by the tenant this call is FOR, not by whatever the request
+	// context happens to carry. cleat#1512. Both callers reach here on paths
+	// where the request is not necessarily tenant-authenticated -- handleLogin
+	// accepts ?tenant_id= precisely because a login is unauthenticated -- so
+	// the value in hand is the only reliable one.
+	ctx = plugin.ForTenant(ctx, tenantID)
+	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
+			SELECT tenant_id, provider, client_id, redirect_url,
+			       COALESCE(domain, '') AS domain, COALESCE(issuer, '') AS issuer, enabled
 			FROM oauth_config
 			WHERE tenant_id = $1 AND provider = $2 AND enabled = true
-		`, p.dialect), tenantID, provider).Scan(
-		&cfg.TenantID, &cfg.Provider, &cfg.ClientID, &cfg.ClientSecret,
-		&cfg.RedirectURL, &cfg.Domain, &cfg.Enabled,
+		`, p.dialect), tenantID, provider),
+		&cfg.TenantID, &cfg.Provider, &cfg.ClientID,
+		&cfg.RedirectURL, &cfg.Domain, &cfg.Issuer, &cfg.Enabled,
 	)
 	if err != nil {
 		return nil, err
 	}
+
+	// client_secret moved into tenant secrets, cleat#1992. Same ctx: it is
+	// already ForTenant-marked above, and plugin.Secrets reads the tenant
+	// from ctx the identical way plugin.ForTenant marks it for SQL.
+	secret, err := p.secrets.Get(ctx, OAuthClientSecretName(provider))
+	if err != nil {
+		// errors.Is(err, plugin.ErrSecretNotFound) survives this wrap, so a
+		// caller can still tell "this provider has no client secret set" (an
+		// operator misconfiguration) apart from "the secret lookup itself
+		// failed" (an infrastructure problem) -- see handleLogin/
+		// handleCallback, cleat-review's item (4) on cleat#2295.
+		return nil, fmt.Errorf("oauth-provider: client secret for %s/%s: %w", tenantID, provider, err)
+	}
+	cfg.ClientSecret = plugin.Secret(secret)
+
 	return &cfg, nil
 }
 
@@ -148,11 +268,23 @@ func (p *Plugin) extractSession(r *http.Request) *SessionInfo {
 
 	tokenHash := sha256Hex(token)
 
-	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
+	// CROSS-TENANT, and this one is not a convenience. cleat#1512.
+	//
+	// The lookup is BY TOKEN HASH and its output is the tenant: this is the
+	// call that discovers which tenant the caller belongs to. There is no
+	// tenant to scope it by, and there cannot be one, because finding it is the
+	// point. A policy calling cleat.assert_tenant_set() would RAISE here and
+	// take session authentication with it.
+	//
+	// Not a leak: the predicate is a SHA-256 token hash, so seeing another
+	// tenant's row requires already holding that tenant's session token.
+	err := plugin.ScanRow(p.db.QueryRow(
+		plugin.AcrossAllTenants(r.Context(), "oauth session lookup: the token hash identifies the tenant, so there is none to scope by"),
+		plugin.Rebind(`
 			SELECT id, tenant_id, user_email, expires_at
 			FROM oauth_sessions
 			WHERE token_hash = $1 AND (expires_at IS NULL OR expires_at > now())
-		`, p.dialect), tokenHash).Scan(&sessionID, &tenantID, &userEmail, &expiresAt)
+		`, p.dialect), tokenHash), &sessionID, &tenantID, &userEmail, &expiresAt)
 	if err != nil {
 		return nil
 	}
@@ -176,6 +308,10 @@ func formatProviderURL(template, domain string) string {
 // ---- GET /oauth/{provider}/login ----
 
 func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if p.pgOnly(w) {
+		return
+	}
+
 	provider := r.PathValue("provider")
 	if !validProviders[provider] {
 		p.writeError(w, http.StatusBadRequest, "invalid provider")
@@ -183,8 +319,8 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get tenant ID from context (main auth middleware) or query param.
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := p.tenantID(r)
+	if !ok {
 		tidStr := r.URL.Query().Get("tenant_id")
 		if tidStr != "" {
 			var err error
@@ -193,17 +329,78 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 				p.writeError(w, http.StatusBadRequest, "invalid tenant_id")
 				return
 			}
+			ok = true
 		}
 	}
-	if tid == uuid.Nil {
+	if !ok {
 		p.writeError(w, http.StatusBadRequest, "tenant_id required")
 		return
 	}
 
+	// cleat#2340: /login is exempt from auth.HostBindingMiddlewareWithMux
+	// (it has to be, cleat#2319 -- an anonymous caller carries no credential
+	// for that middleware to bind a tenant from), so nothing else enforces
+	// Host against the tenant this handler resolves for itself. Without
+	// this, --require-host-match protects every other route but not the one
+	// that starts a login: ?tenant_id=<victim> from an attacker-controlled
+	// host would otherwise mint a credential for a tenant the request's Host
+	// doesn't own. p.hostResolver is built unconditionally by the worker
+	// (see plugin.Environment.HostResolver's doc comment), so nil here only
+	// happens in a test building an Environment by hand -- treated as "can't
+	// check" rather than "check passed", refusing rather than silently
+	// skipping the binding --require-host-match promised.
+	if p.requireHostMatch {
+		if p.hostResolver == nil {
+			p.logger.Error("oauth: --require-host-match is set but no host resolver was provided")
+			p.writeError(w, http.StatusInternalServerError, "host binding is misconfigured")
+			return
+		}
+		host := auth.NormalizeHost(r.Host)
+		bound, err := p.hostResolver.TenantForHost(r.Context(), host, tid)
+		if err != nil {
+			p.logger.Error("oauth: host binding check", "error", err)
+			p.writeError(w, http.StatusInternalServerError, "host binding check failed")
+			return
+		}
+		if !bound {
+			p.writeError(w, http.StatusBadRequest, "tenant_id does not match the requested host")
+			return
+		}
+	}
+
 	cfg, err := p.getConfig(r.Context(), tid, provider)
 	if err != nil {
-		p.logger.Error("oauth: config lookup", "provider", provider, "error", err)
-		p.writeError(w, http.StatusInternalServerError, "oauth config not found")
+		// errors.Is(err, plugin.ErrSecretNotFound) distinguishes "this
+		// provider has no client secret set" (an operator setup step was
+		// skipped) from every other lookup failure, and that distinction is
+		// worth the operator's attention -- but only in the log, not the
+		// response: this handler is UNAUTHENTICATED (handleLogin accepts
+		// ?tenant_id= from anyone), so an operator-actionable message
+		// naming cleat's internal secret scheme and the cleatctl command
+		// that fixes it would hand an anonymous caller detail about cleat's
+		// own tooling (cleat-review's item (4) on cleat#2295).
+		//
+		// THE STATUS WAS A SECOND CHANNEL FOR THE SAME BIT, and this branch is
+		// where cleat#2368 closed it. It answered 500 here, while a configured
+		// pair ended at the redirect this handler closes with (302) -- so an
+		// anonymous caller supplying ?tenant_id=<guess> could read "this
+		// (tenant, provider) pair IS configured" off the status alone, which
+		// is the enumeration surface #2368 is about. It now answers the same
+		// 302, at a same-origin relative path so a caller cannot turn this
+		// into an open redirect, and harmless for a pair that cannot complete
+		// a login.
+		//
+		// WHAT THIS DOES NOT CLOSE, recorded because it is inherent to the
+		// feature rather than an oversight: a login that succeeds for a
+		// configured pair must hand the browser the provider's authorize URL,
+		// so that response necessarily carries something an unconfigured pair
+		// cannot produce, and the Location header still separates the two.
+		// Closing that would mean not logging in at all -- cleat#2368's option
+		// (B). The owner chose (A), which closes the cheapest channel and
+		// leaves this one recorded rather than unnoticed.
+		p.logger.Error("oauth: config lookup", "provider", provider, "error", err,
+			"secret_not_found", errors.Is(err, plugin.ErrSecretNotFound))
+		http.Redirect(w, r, "/", http.StatusFound)
 		return
 	}
 
@@ -225,21 +422,42 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 	h := sha256.Sum256([]byte(codeVerifier))
 	codeChallenge := base64.RawURLEncoding.EncodeToString(h[:])
 
+	// Resolve endpoints BEFORE writing the session row. For `oidc` this is a
+	// network call to the issuer, and a failure here means no login is
+	// possible -- writing the row first would leave a usable state value
+	// behind for a flow that never started.
+	ep, err := p.resolveEndpoints(r.Context(), provider, cfg)
+	if err != nil {
+		p.logger.Error("oauth: resolve endpoints", "provider", provider, "error", err)
+		p.writeError(w, http.StatusBadGateway, "provider discovery failed")
+		return
+	}
+
+	// Mint a nonce for OIDC. It goes out on the authorize request and must
+	// come back inside the signed ID token; storing it here is what lets the
+	// callback tell this login apart from a replayed one.
+	nonceBytes := make([]byte, 32)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		p.writeError(w, http.StatusInternalServerError, "failed to generate nonce")
+		return
+	}
+	nonce := hex.EncodeToString(nonceBytes)
+
 	// Store state + code_verifier in oauth_sessions with 5-minute expiry.
 	sessionID := uuid.New()
 	sessionExpiresAt := time.Now().Add(5 * time.Minute)
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
-			INSERT INTO oauth_sessions (id, tenant_id, provider, state, code_verifier, expires_at)
-			VALUES ($1, $2, $3, $4, $5, $6)
-		`, p.dialect), sessionID, tid, provider, state, codeVerifier, sessionExpiresAt)
+	// ForTenant: tid is known here but the request is unauthenticated by
+	// definition -- it may have come from ?tenant_id= -- so nothing has put it
+	// in the context carrier the policy reads. cleat#1512.
+	_, err = p.db.Exec(plugin.ForTenant(r.Context(), tid), plugin.Rebind(`
+			INSERT INTO oauth_sessions (id, tenant_id, provider, state, code_verifier, nonce, expires_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`, p.dialect), sessionID, tid, provider, state, codeVerifier, nonce, sessionExpiresAt)
 	if err != nil {
 		p.logger.Error("oauth: store state", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to initialize login")
 		return
 	}
-
-	ep := endpoints[provider]
-	authURL := formatProviderURL(ep.authURL, cfg.Domain)
 
 	v := url.Values{}
 	v.Set("client_id", cfg.ClientID)
@@ -249,13 +467,26 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 	v.Set("scope", ep.scope)
 	v.Set("code_challenge", codeChallenge)
 	v.Set("code_challenge_method", "S256")
+	if provider == providerOIDC {
+		v.Set("nonce", nonce)
+	}
 
-	http.Redirect(w, r, authURL+"?"+v.Encode(), http.StatusFound)
+	// The authorize endpoint may already carry a query string -- a discovered
+	// one legitimately can. Appending "?" unconditionally would corrupt it.
+	sep := "?"
+	if strings.Contains(ep.authURL, "?") {
+		sep = "&"
+	}
+	http.Redirect(w, r, ep.authURL+sep+v.Encode(), http.StatusFound)
 }
 
 // ---- GET /oauth/{provider}/callback ----
 
 func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
+	if p.pgOnly(w) {
+		return
+	}
+
 	provider := r.PathValue("provider")
 	if !validProviders[provider] {
 		p.writeError(w, http.StatusBadRequest, "invalid provider")
@@ -277,13 +508,23 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	var tid uuid.UUID
 	var storedProvider string
 	var codeVerifier sql.NullString
+	var storedNonce sql.NullString
 	var sessionID uuid.UUID
 
-	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
-			SELECT id, tenant_id, provider, code_verifier
+	// CROSS-TENANT and deriving, like the token-hash lookups. cleat#1512.
+	//
+	// An OAuth callback arrives from the identity provider carrying only
+	// `state`, on a request that is not authenticated and has no tenant. The
+	// row is what says which tenant this flow belongs to, so there is nothing
+	// to scope the lookup by. The UPDATE further down, which runs after tid is
+	// known, is scoped with ForTenant rather than inheriting this.
+	err := plugin.ScanRow(p.db.QueryRow(
+		plugin.AcrossAllTenants(r.Context(), "oauth callback: the state parameter identifies the tenant, so there is none to scope by"),
+		plugin.Rebind(`
+			SELECT id, tenant_id, provider, code_verifier, nonce
 			FROM oauth_sessions
 			WHERE state = $1 AND expires_at > now()
-		`, p.dialect), state).Scan(&sessionID, &tid, &storedProvider, &codeVerifier)
+		`, p.dialect), state), &sessionID, &tid, &storedProvider, &codeVerifier, &storedNonce)
 	if err != nil {
 		p.logger.Error("oauth: state lookup", "error", err)
 		p.writeError(w, http.StatusBadRequest, "invalid or expired state")
@@ -303,19 +544,49 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	cfg, err := p.getConfig(r.Context(), tid, provider)
 	if err != nil {
-		p.logger.Error("oauth: config lookup", "provider", provider, "error", err)
+		// errors.Is(err, plugin.ErrSecretNotFound) distinguishes "this
+		// provider has no client secret set" (an operator setup step was
+		// skipped) from every other lookup failure, and that distinction is
+		// worth the operator's attention -- but only in the log, not the
+		// response, so an operator-actionable message naming cleat's internal
+		// secret scheme and the cleatctl command that fixes it does not hand
+		// a caller detail about cleat's own tooling (cleat-review's item (4)
+		// on cleat#2295).
+		//
+		// This route is unauthenticated because it is EXEMPT from plugin auth,
+		// not because it reads a tenant from the query string -- that
+		// justification sat on both handlers and describes only handleLogin.
+		// Here tid comes from the oauth_sessions row the state parameter
+		// selects (the CROSS-TENANT lookup above), so the caller cannot choose
+		// whose config is read, and any pair this branch could probe,
+		// handleLogin already probes directly.
+		//
+		// The uniform TEXT closes the STRING oracle only; the STATUS here
+		// still discriminates (500 here, the 200 JSON finishLogin returns on
+		// success). This branch is NOT cleat#2368's fix -- that issue closed
+		// the login route's status. It is not the same oracle either: a caller
+		// reaches this only with a state row, and production mints one only
+		// after a login already cleared getConfig (the INSERT in handleLogin),
+		// so any pair this branch could probe, handleLogin already answered.
+		p.logger.Error("oauth: config lookup", "provider", provider, "error", err,
+			"secret_not_found", errors.Is(err, plugin.ErrSecretNotFound))
 		p.writeError(w, http.StatusInternalServerError, "oauth config not found")
 		return
 	}
 
-	ep := endpoints[provider]
-	tokenURL := formatProviderURL(ep.tokenURL, cfg.Domain)
+	ep, err := p.resolveEndpoints(r.Context(), provider, cfg)
+	if err != nil {
+		p.logger.Error("oauth: resolve endpoints", "provider", provider, "error", err)
+		p.writeError(w, http.StatusBadGateway, "provider discovery failed")
+		return
+	}
+	tokenURL := ep.tokenURL
 
 	// Exchange authorization code for tokens with PKCE code_verifier.
 	data := url.Values{}
 	data.Set("code", code)
 	data.Set("client_id", cfg.ClientID)
-	data.Set("client_secret", cfg.ClientSecret)
+	data.Set("client_secret", cfg.ClientSecret.Reveal())
 	data.Set("redirect_uri", cfg.RedirectURL)
 	data.Set("grant_type", "authorization_code")
 	data.Set("code_verifier", codeVerifier.String)
@@ -339,6 +610,7 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 	var tokenResult struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
+		IDToken      string `json:"id_token"`
 		ExpiresIn    int    `json:"expires_in"`
 		Error        string `json:"error"`
 		ErrorDesc    string `json:"error_description"`
@@ -357,8 +629,49 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate the ID token whenever one came back.
+	//
+	// Userinfo remains authoritative for identity -- it is the path every
+	// provider here has always used -- but a token that fails validation is a
+	// HARD failure, not something to shrug off and fall back from. A validator
+	// that can be skipped on error is the permissive validator
+	// docs/enterprise-identity-decision.md warns about, and skipping it is
+	// indistinguishable from a forged token succeeding.
+	//
+	// The verification claim and the subject come out of the same validated
+	// token, which is the only place either is cryptographically attested:
+	// `email_verified` says the issuer proved the address belongs to the
+	// account, and `sub` is the account. cleat#2340.
+	var identity resolvedIdentity
+	if tokenResult.IDToken != "" && provider == providerOIDC {
+		claims, err := p.validateIDToken(r.Context(), tokenResult.IDToken, cfg.Issuer, cfg.ClientID, storedNonce.String)
+		if err != nil {
+			p.logger.Error("oauth: id_token validation", "provider", provider, "error", err)
+			p.writeError(w, http.StatusUnauthorized, "id_token validation failed")
+			return
+		}
+		identity.Email = claims.Email
+		identity.EmailVerified = bool(claims.EmailVerified)
+		identity.Subject = normalizeSubject(claims.Subject)
+	}
+
 	// Fetch user info from the provider.
-	userinfoURL := formatProviderURL(ep.userinfoURL, cfg.Domain)
+	//
+	// userinfo_endpoint is RECOMMENDED rather than required by OIDC Discovery,
+	// so a conforming issuer may publish none. When that happens the validated
+	// ID token is the only identity available, and it has already passed
+	// signature, issuer, audience, expiry and nonce -- so it is a sound source
+	// here, unlike the unvalidated case this code is careful never to reach.
+	userinfoURL := ep.userinfoURL
+	if userinfoURL == "" {
+		if identity.Email == "" {
+			p.logger.Error("oauth: no identity source", "provider", provider)
+			p.writeError(w, http.StatusBadGateway, "issuer publishes no userinfo endpoint and returned no usable id_token")
+			return
+		}
+		p.finishLogin(w, r, tid, provider, sessionID, identity, tokenResult.ExpiresIn)
+		return
+	}
 	userReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, userinfoURL, nil)
 	if err != nil {
 		p.writeError(w, http.StatusInternalServerError, "failed to create userinfo request")
@@ -376,17 +689,191 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 
 	var userInfo struct {
 		Email string `json:"email"`
-		Login string `json:"login"` // GitHub uses "login" instead of "email"
+		// EmailVerified is a verificationFlag, not a bool: the claim is
+		// optional and some issuers emit it as a string. An unreadable value
+		// must read as unverified rather than turning this decode into a 502
+		// -- see that type's doc comment for why the direction matters.
+		EmailVerified verificationFlag `json:"email_verified"`
+		Sub           string           `json:"sub"` // OIDC's stable account id
+		ID            int64            `json:"id"`  // GitHub's, which is numeric
 	}
 	if err := json.NewDecoder(userResp.Body).Decode(&userInfo); err != nil {
 		p.writeError(w, http.StatusBadGateway, "failed to parse userinfo response")
 		return
 	}
 
-	email := userInfo.Email
-	if email == "" {
-		email = userInfo.Login
+	// The address, source by source, with the verification claim that belongs
+	// to whichever source supplied it.
+	//
+	// GitHub is a case of its own, and it is the case cleat#2340 item 1 is
+	// about. Until this change the fallback here was `userInfo.Login`, and
+	// `login` is a GitHub USERNAME -- user-changeable, not an address, and
+	// never proved to belong to anyone. An allowlist keyed on it would have
+	// admitted whoever registered the name next. It is deleted rather than
+	// demoted, because there is now a real source for a GitHub address:
+	// /user/emails, which labels each address verified or not, and the scope
+	// that lets us read it (user:email, in the endpoints table).
+	if provider == "github" {
+		verified, verr := p.githubVerifiedEmail(r.Context(), tokenResult.AccessToken, ep.userEmailsURL)
+		if verr != nil {
+			// Not fatal: an address we could not confirm is exactly the
+			// unverified case below, and the login still has the /user
+			// address (if any) to be labelled with. Logged because it is the
+			// difference between "this account has no verified address" and
+			// "we could not ask", and only one of those is the user's
+			// problem.
+			p.logger.Warn("oauth: github verified-email lookup", "error", verr)
+		}
+		switch {
+		case verified != "":
+			identity.Email = verified
+			identity.EmailVerified = true
+		case userInfo.Email != "":
+			// GitHub returns this only for accounts with a PUBLIC profile
+			// email, and publishes no claim about it here. Carried so the
+			// session row has a label; not eligible to match an allowlist
+			// row, because nothing has vouched for it.
+			identity.Email = userInfo.Email
+			identity.EmailVerified = false
+		}
+		if userInfo.ID != 0 {
+			identity.Subject = strconv.FormatInt(userInfo.ID, 10)
+		}
+	} else if userInfo.Email != "" {
+		// Source precedence is unchanged from before this change -- userinfo
+		// first, the ID token only as a fallback -- and the verification flag
+		// travels with the source that supplied the address rather than being
+		// OR-ed across both. An issuer that marks the address verified in the
+		// userinfo response and unverified in the token (or vice versa) is
+		// saying the same thing twice; picking either one is a choice, and
+		// picking the source we actually use keeps the answer explainable.
+		identity.Email = userInfo.Email
+		identity.EmailVerified = bool(userInfo.EmailVerified)
 	}
+
+	// The subject ladder for the OIDC-shaped providers. userinfo's `sub` is
+	// accepted because it arrives over TLS from the endpoint the operator's own
+	// config names, carrying an access token minted moments ago at that same
+	// endpoint -- and the validated ID token's `sub`, when there is one, wins,
+	// since that is the copy with a signature behind it.
+	if identity.Subject == "" {
+		identity.Subject = normalizeSubject(userInfo.Sub)
+	}
+
+	p.finishLogin(w, r, tid, provider, sessionID, identity, tokenResult.ExpiresIn)
+}
+
+// finishLogin turns a verified identity into a session row and a response.
+//
+// Extracted so the two ways a callback can arrive here -- via userinfo, or via
+// a validated ID token when the issuer publishes no userinfo endpoint -- write
+// the session exactly the same way. A second copy of this is how the two paths
+// would drift on something like clearing the nonce. The allowlist gate below is
+// a third reason: a check that ran on one path and not the other would be an
+// authentication bypass reachable by choosing an issuer whose discovery
+// document omits userinfo_endpoint.
+func (p *Plugin) finishLogin(
+	w http.ResponseWriter, r *http.Request,
+	tid uuid.UUID, provider string, sessionID uuid.UUID,
+	id resolvedIdentity, expiresIn int,
+) {
+	// The guard is on the ADDRESS and stays on the address. An identity with a
+	// subject but no address is still refused here, exactly as it was before
+	// the subject became an allowlist key, because relaxing this would admit
+	// logins that fail today on every deployment -- with no operator opt-in,
+	// on a change whose entire purpose is to narrow who gets in. A tenant whose
+	// issuer publishes no address must keep using an issuer that does; a tenant
+	// whose issuer publishes an address but no email_verified claim can admit
+	// people with a subject row (see identityAllowed).
+	if id.Email == "" {
+		p.logger.Error("oauth: no email resolved", "provider", provider, "tenant", tid)
+		p.writeError(w, http.StatusBadGateway, "provider returned no usable identity")
+		return
+	}
+
+	// ForTenant with the tid the state lookup above derived. The UPDATE below
+	// addresses the row BY ID with no tenant predicate, so the policy is what
+	// keeps a state collision from writing another tenant's session, and the
+	// allowlist read below is scoped the same way for the same reason.
+	ctx := plugin.ForTenant(r.Context(), tid)
+
+	// The allowlist gate. cleat#2340 item 2, unconditional since cleat#2371.
+	//
+	// BEFORE the token is minted and before the UPDATE, so a refused login
+	// leaves no trace on the session row: the row keeps its state and its
+	// expiry and is swept by the ordinary abandoned-row path. A gate placed
+	// after the write would refuse the response while still having minted a
+	// usable token_hash, which is the failure mode this ordering exists to
+	// make impossible.
+	//
+	// It FAILS CLOSED, with no opt-in. An oauth_config.allowlist_enabled column
+	// used to gate this block, defaulting false; cleat#2371 removed it on the
+	// owner's decision, so a (tenant, provider) pair with no rows in
+	// oauth_allowed_identities denies every login for that pair until an
+	// operator writes one. "There is no list" and "this person is not on the
+	// list" are deliberately the same answer: a second column saying which of
+	// the two it is can only disagree with the table it is meant to describe,
+	// and nothing reading that table could tell the difference either.
+	admit, allowed, aerr := p.identityAllowed(ctx, tid, provider, id)
+	if aerr != nil {
+		p.logger.Error("oauth: allowlist lookup", "provider", provider, "tenant", tid, "error", aerr)
+		p.writeError(w, http.StatusInternalServerError, "failed to evaluate the identity allowlist")
+		return
+	}
+	if !allowed {
+		// Operator-actionable in the LOG, not the response. The caller may
+		// be anyone who reached this callback -- handleLogin accepts
+		// ?tenant_id= -- so the response names neither the table nor the
+		// row that would fix it (the same reasoning as handleCallback's
+		// secret_not_found branch, cleat#2295). The log carries exactly
+		// what an operator needs to write the INSERT: the identity, its
+		// kind, and whether the address was even eligible to match.
+		p.logger.Warn("oauth: identity refused by the tenant's allowlist",
+			"provider", provider, "tenant", tid,
+			"email", id.Email, "email_verified", id.EmailVerified,
+			"subject", id.Subject)
+		p.writeJSON(w, http.StatusForbidden, map[string]any{
+			"error":   "identity not authorized",
+			"code":    "identity_not_allowlisted",
+			"message": "this tenant restricts which identities may sign in with " + provider + "; contact your cleat administrator",
+		})
+		return
+	}
+
+	// Mint the credential the client will actually use. cleat#2340.
+	//
+	// AFTER THE ALLOWLIST, and that ordering is the point: a refused login
+	// mints nothing, so a refusal leaves no key behind to expire, to sweep, or
+	// to revoke. Minting first and refusing after would hand a credential to
+	// someone the tenant's own list just turned away.
+	//
+	// The identity tag names the allowlist ROW that admitted this person, not
+	// the address they happened to present. Design item 4 revokes a person's
+	// live keys when their allowlist row is deleted, and only a tag naming that
+	// row can be found by the deletion; oauthIdentityTag is shared with the
+	// revoke path so the two renderings cannot drift apart.
+	if p.mintOAuthAPIKey == nil {
+		// NIL MEANS THIS HOST CANNOT MINT (see the field's doc comment).
+		// Refusing is the entire point of that convention: completing the
+		// login with a credential nothing recorded would authenticate nothing,
+		// and would surface much later as a 401 from core auth rather than as
+		// a login failure here.
+		p.logger.Error("oauth: this host wired no API key minter, so no login can complete",
+			"provider", provider, "tenant", tid)
+		p.writeError(w, http.StatusInternalServerError, "login is not available on this deployment")
+		return
+	}
+
+	identityTag := OAuthIdentityTag(provider, admit.Type, admit.Value)
+	// A VALUE, never nil: an OAuth-minted key always expires. See oauthKeyExpiry.
+	keyExpiresAt := oauthKeyExpiry(expiresIn)
+
+	// THE MINT ITSELF IS DELIBERATELY LATER -- after the session row is
+	// written, below. Both remaining steps can fail, and a key minted before
+	// them would be live and unheld if one did: the caller never receives it,
+	// nothing revokes it, and it authenticates until its expiry passes. The
+	// nil-minter guard above stays here, because it is a check with no side
+	// effect, and refusing before writing anything beats refusing after.
 
 	// Generate a 32-byte hex session token.
 	sessionToken, err := generateSessionToken()
@@ -395,43 +882,205 @@ func (p *Plugin) handleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Hash the session token for at-rest storage.
+	// Hash the session token for at-rest storage. token_hash is what
+	// middleware/extractSession actually looks a caller up by; session_token
+	// itself is not stored at all (see the comment below the ctx line).
 	tokenHash := sha256Hex(sessionToken)
 
 	var expiresAt *time.Time
-	if tokenResult.ExpiresIn > 0 {
-		t := time.Now().Add(time.Duration(tokenResult.ExpiresIn) * time.Second)
+	if expiresIn > 0 {
+		t := time.Now().Add(time.Duration(expiresIn) * time.Second)
 		expiresAt = &t
 	}
 
+	// session_token/access_token/refresh_token are NOT persisted, cleat#2295
+	// (closes cleat#2156's ask for these three; client_secret, the fourth
+	// field #2156 named, is handled in getConfig via plugin.Secrets and is
+	// unaffected by this).
+	//
+	// cleat-review found that sealing them via plugin.Payloads (the design
+	// this replaced) broke every login on any deployment that had not set
+	// --encryption-key-file -- which is every deployment shipped so far --
+	// because a nil Payloads makes Seal fail closed. The owner's fix (#2295,
+	// #2296): since nothing reads these three back (session lookup is by
+	// token_hash, below, not by session_token; access_token/refresh_token
+	// have no read path at all), storing them in any form -- plaintext or
+	// sealed -- protects nothing and only grows the blast radius of a table
+	// dump. Write NULL. A future caller that needs to read a provider access
+	// or refresh token back must add real storage for it, not resurrect
+	// these columns.
+	//
 	// Update the pre-inserted state row with the actual session data and clear
-	// the PKCE fields.
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+	// the PKCE fields. The nonce is cleared with them: it is single-use by
+	// definition, and a spent nonce left in the row is a replay waiting for a
+	// state collision.
+	_, err = p.db.Exec(ctx, plugin.Rebind(`
 			UPDATE oauth_sessions
-			SET session_token = $1, token_hash = $2, user_email = $3,
-			    access_token = $4, refresh_token = $5, expires_at = $6,
-			    state = NULL, code_verifier = NULL
-			WHERE id = $7
-		`, p.dialect), sessionToken, tokenHash, email, tokenResult.AccessToken,
-		tokenResult.RefreshToken, expiresAt, sessionID)
+			SET session_token = NULL, token_hash = $1, user_email = $2,
+			    access_token = NULL, refresh_token = NULL, expires_at = $3,
+			    state = NULL, code_verifier = NULL, nonce = NULL
+			WHERE id = $4
+		`, p.dialect), tokenHash, id.Email, expiresAt, sessionID)
 	if err != nil {
 		p.logger.Error("oauth: create session", "error", err)
 		p.writeError(w, http.StatusInternalServerError, "failed to create session")
 		return
 	}
 
+	// The mint, last of the fallible steps that PRECEDE delivery -- see the note
+	// where identityTag is computed. Everything above has already succeeded, so
+	// a key created here is one the caller is about to be handed.
+	//
+	// ONE FAILURE THIS DOES NOT REMOVE, stated rather than implied because the
+	// first version of this comment claimed the reorder removed all of them. If
+	// the client disconnects while the page is being written, the key IS
+	// minted, is never delivered, and stays live until it expires -- exactly the
+	// condition the reorder exists to narrow. No ordering closes it: a page that
+	// shows a secret once cannot hand over one that does not exist yet. The
+	// answer is the sweep (design item 7, cleat#2340), which collects an OAuth-minted key by
+	// its expiry and its oauth_identity tag, and this is why the key carries
+	// both.
+	rawKey, err := p.mintOAuthAPIKey(ctx, plugin.MintOAuthAPIKeyRequest{
+		TenantID:      tid,
+		Description:   "OAuth login as " + identityTag,
+		ExpiresAt:     keyExpiresAt,
+		OAuthIdentity: identityTag,
+	})
+	if err != nil {
+		p.logger.Error("oauth: mint an API key for the admitted identity",
+			"provider", provider, "tenant", tid, "error", err)
+		p.writeError(w, http.StatusInternalServerError, "failed to mint a credential")
+		return
+	}
+
+	// Reaching this line now means the allowlist admitted this identity: the
+	// gate above is unconditional since cleat#2371, and it returns before here
+	// on both a lookup error and a refusal. So this line needs no "was there a
+	// list" key -- there always was one, and it said yes. The refusal case has
+	// its own Warn, which is where the identity an operator must add is
+	// recorded.
 	p.logger.Info("oauth: session created",
 		"provider", provider,
 		"tenant", tid,
-		"email", email,
+		"email", id.Email,
+		// Which allowlist ROW admitted this login. An operator reading a
+		// login through to why it was allowed needs to know whether it was
+		// the address or the subject that matched -- the two are separate
+		// rows they may have written months apart.
+		"admitted_as", admit.Type,
 	)
 
-	p.writeJSON(w, http.StatusOK, map[string]any{
-		"session_token": sessionToken,
-		"user_email":    email,
-		"expires_at":    expiresAt,
-	})
+	// THE CREDENTIAL IS THE MINTED KEY, NOT sessionToken. session_token was
+	// never usable outside this plugin's own two admin endpoints -- core auth
+	// is the outermost middleware and 401s a 64-hex value it cannot find in
+	// tenant_api_keys before this plugin sees the request (design v1 section 1).
+	// The session row above is kept for the login-flow bookkeeping and audit
+	// trail; token_hash is what its own endpoints still read, and retiring that
+	// is a separate, smaller cleanup this change does not propose.
+	p.writeOAuthKeyPage(w, id.Email, rawKey, keyExpiresAt)
 }
+
+// oauthKeyExpiryMax bounds how long a minted key can live, and is also what a
+// provider that reports no lifetime gets.
+//
+// THE CAP IS THE POINT. An IdP is free to report a days-long expires_in, and a
+// key minted to match it would be a days-long credential for a browser login
+// that ended seconds ago. The floor is the same number for a different reason:
+// expires_in absent (GitHub commonly omits it) must not become "no expiry",
+// because a permanent key is exactly what a login-derived credential must
+// never be -- and the sweep selects on `expires_at < now()`, so a key with no
+// expiry is never collected.
+const oauthKeyExpiryMax = 24 * time.Hour
+
+// oauthKeyExpiry returns when a key minted for this login stops authenticating.
+// Always a real time, never nil: see oauthKeyExpiryMax.
+func oauthKeyExpiry(expiresIn int) time.Time {
+	d := oauthKeyExpiryMax
+	if expiresIn > 0 {
+		if reported := time.Duration(expiresIn) * time.Second; reported < d {
+			d = reported
+		}
+	}
+	return time.Now().Add(d)
+}
+
+// writeOAuthKeyPage serves the page that hands the minted key to the person who
+// just logged in.
+//
+// IT SHOWS THE KEY ONCE, and that is a deliberate choice between the two
+// delivery shapes design v3 allows ("postMessage with an exact targetOrigin, or
+// shows it once"). The postMessage arm needs a targetOrigin that is computed
+// server-side and taken from the request NEVER -- and nothing in this plugin's
+// configuration names the origin a client application would be listening from.
+// Inventing one from the request's Host is precisely the mistake the design
+// forbids, and getting it wrong posts a live credential to whoever opened the
+// window. Showing the key removes the question rather than guessing at it.
+//
+// The headers are v3's hardening list, and each has a job here rather than
+// being boilerplate: no-store and no-referrer keep a credential out of a disk
+// cache and out of any Referer sent by a later navigation; DENY and
+// frame-ancestors 'none' stop this page being framed so a clickjack can read
+// the key out of it; default-src 'none' means the page cannot load or run
+// anything at all -- there is no script here, which is the point, and no
+// postMessage to send it to.
+func (p *Plugin) writeOAuthKeyPage(w http.ResponseWriter, email, rawKey string, expiresAt time.Time) {
+	h := w.Header()
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
+	h.Set("Pragma", "no-cache")
+	h.Set("Referrer-Policy", "no-referrer")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("X-Frame-Options", "DENY")
+	// style-src carries 'unsafe-inline' because the page is one self-contained
+	// document with a small inline stylesheet; nothing else is allowed to load.
+	h.Set("Content-Security-Policy",
+		"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; "+
+			"form-action 'none'; frame-ancestors 'none'")
+
+	if err := oauthKeyPage.Execute(w, struct {
+		Email     string
+		Key       string
+		ExpiresAt string
+	}{
+		// html/template escapes every one of these into its context, so a
+		// provider-supplied address cannot inject markup into a page that is
+		// displaying a live credential.
+		Email:     email,
+		Key:       rawKey,
+		ExpiresAt: expiresAt.UTC().Format(time.RFC3339),
+	}); err != nil {
+		// The headers are already written by now if anything has been, so this
+		// cannot become an error response. Log it: a half-sent page means the
+		// person did not get their key, and the log is where that is visible.
+		p.logger.Error("oauth: writing the key page failed after the response began", "error", err)
+	}
+}
+
+// oauthKeyPage is parsed once at init rather than per request, so a template
+// error is a startup failure instead of a login failure.
+var oauthKeyPage = template.Must(template.New("oauth-key").Parse(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Signed in</title>
+<style>
+ body { font: 16px/1.5 system-ui, sans-serif; margin: 3rem auto; max-width: 42rem; padding: 0 1rem; }
+ code { display: block; word-break: break-all; padding: .75rem; margin: .75rem 0;
+        background: #f4f4f5; border: 1px solid #d4d4d8; border-radius: 4px; }
+ .muted { color: #52525b; font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>Signed in</h1>
+<p>Signed in as <strong>{{.Email}}</strong>.</p>
+<p>Your API key is shown below. <strong>It is shown once and cannot be retrieved
+again</strong>; store it somewhere safe before closing this page.</p>
+<code>{{.Key}}</code>
+<p class="muted">It stops working at {{.ExpiresAt}} (UTC).</p>
+</body>
+</html>
+`))
 
 // ---- GET /oauth/sessions ----
 
@@ -442,7 +1091,7 @@ func (p *Plugin) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Query(plugin.ForTenant(r.Context(), session.TenantID), plugin.Rebind(`
 			SELECT id, provider, user_email, created_at, expires_at
 			FROM oauth_sessions
 			WHERE tenant_id = $1
@@ -468,7 +1117,7 @@ func (p *Plugin) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		var entry sessionEntry
 		var userEmail sql.NullString
 		var expiresAt sql.NullTime
-		if err := rows.Scan(&entry.ID, &entry.Provider, &userEmail, &entry.CreatedAt, &expiresAt); err != nil {
+		if err := plugin.ScanRow(rows, &entry.ID, &entry.Provider, &userEmail, &entry.CreatedAt, &expiresAt); err != nil {
 			p.logger.Error("oauth: scan session row", "error", err)
 			continue
 		}
@@ -501,7 +1150,7 @@ func (p *Plugin) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	rows, err := p.db.Exec(plugin.ForTenant(r.Context(), session.TenantID), plugin.Rebind(`
 			DELETE FROM oauth_sessions
 			WHERE id = $1 AND tenant_id = $2
 		`, p.dialect), id, session.TenantID)

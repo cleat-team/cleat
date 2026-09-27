@@ -99,7 +99,7 @@ func TestRunVersions_DispatchGC(t *testing.T) {
 	store := &mockStore{
 		listWorkflowDefsFn: func(_ context.Context, name string) ([]engine.WorkflowDef, error) {
 			return []engine.WorkflowDef{
-				{Name: "wf", Version: 1, Deprecated: true, CreatedAt: time.Now().Add(-90 * 24 * time.Hour)},
+				{Name: "wf", Version: 1, DisabledAt: engine.RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now().Add(-90 * 24 * time.Hour)},
 			}, nil
 		},
 		getActiveInstanceCountsByVersionFn: func(_ context.Context) (map[string]int, error) {
@@ -151,7 +151,7 @@ func TestRunDeploy_DispatchPlugin(t *testing.T) {
 	defer db.Close()
 
 	stdout, stderr := captureOutputs(t, func() {
-		runDeploy(context.Background(), &mockStore{}, db, []string{"plugin", "dispatch-plugin", path})
+		runDeploy(context.Background(), &mockStore{}, db, []string{"plugin", "dispatch-plugin", "1.0.0", path})
 	})
 	if !strings.Contains(stdout, "Deployed plugin dispatch-plugin") {
 		t.Errorf("expected deploy plugin via dispatch, got stdout: %s, stderr: %s", stdout, stderr)

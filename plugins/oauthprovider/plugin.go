@@ -6,6 +6,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/cleat-team/cleat/plugin"
@@ -34,6 +35,63 @@ type Plugin struct {
 	logger     *slog.Logger
 	httpClient *http.Client
 	dialect    plugin.Dialect
+	secrets    plugin.Secrets
+
+	// hostResolver and requireHostMatch back handleLogin's Host-bound tenant
+	// check (cleat#2340) -- see plugin.Environment.HostResolver's doc comment
+	// for why both are needed (a nil resolver alone can't distinguish "host
+	// binding is off" from "nothing to check against").
+	hostResolver     plugin.DomainResolver
+	requireHostMatch bool
+
+	// mintOAuthAPIKey is how finishLogin turns an admitted identity into a
+	// usable credential. cleat#2340.
+	//
+	// THE HOST OWNS THE KEY; this plugin only asks for one. plugin.Environment
+	// carries it as a function rather than this package importing auth, so the
+	// cleat_sk_ format, the hash and the table stay in one place -- the failure
+	// cleat#866 was, where a key written by one path was looked up by another
+	// that disagreed about where it lived.
+	//
+	// NIL MEANS THIS HOST CANNOT MINT, and finishLogin REFUSES the login rather
+	// than completing without a credential. A nil in production would mean the
+	// worker stopped wiring it (main.go's pluginEnv), which is why a boot test
+	// observes the wiring and a unit test cannot.
+	mintOAuthAPIKey func(ctx context.Context, req plugin.MintOAuthAPIKeyRequest) (string, error)
+
+	// revokeExpiredOAuthAPIKeys asks the HOST to soft-disable the OAuth-minted
+	// keys whose expiry has passed; Run's ticker calls it. cleat#2340 design v2
+	// §(7).
+	//
+	// A HOST FUNCTION RATHER THAN A STATEMENT IN background.go, and the reason
+	// is a grant rather than taste: this plugin's cross-tenant statements run
+	// under `SET LOCAL ROLE cleat_sweep`, which holds no privilege on
+	// admin.tenant_api_keys -- so §(7)'s UPDATE written here fails with 42501 on
+	// every tick and disables nothing. Background.go's sweepExpiredOAuthKeys
+	// carries the detail.
+	//
+	// NIL MEANS THIS HOST HAS NO KEY STORE (cleattest, the embedded runner), and
+	// unlike the mint above that is not a reason to refuse anything: the sweep
+	// is bookkeeping, and skipping it degrades a count rather than an
+	// authentication.
+	revokeExpiredOAuthAPIKeys func(ctx context.Context) (int64, error)
+
+	// OIDC discovery + JWKS cache for the generic `oidc` provider (cleat#1582).
+	// Reached through p.cache() rather than directly: several tests construct a
+	// Plugin without calling Init, and a nil map there would panic inside a
+	// login rather than fail a check.
+	oidcOnce sync.Once
+	oidc     *oidcCache
+}
+
+// cache returns the OIDC discovery cache, creating it on first use.
+func (p *Plugin) cache() *oidcCache {
+	p.oidcOnce.Do(func() {
+		if p.oidc == nil {
+			p.oidc = newOIDCCache()
+		}
+	})
+	return p.oidc
 }
 
 // Info returns plugin metadata for discovery and documentation.
@@ -58,10 +116,50 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.db = env.DB
 	p.mux = env.Mux
 	p.dialect = env.Dialect
+	p.secrets = env.Secrets
+	p.hostResolver = env.HostResolver
+	p.requireHostMatch = env.RequireHostMatch
+	p.mintOAuthAPIKey = env.MintOAuthAPIKey
+	p.revokeExpiredOAuthAPIKeys = env.RevokeExpiredOAuthAPIKeys
 	p.httpClient = &http.Client{
-		Timeout: 30 * time.Second,
+		// cleat#1565: every outbound request goes through the egress guard.
+		// Nil in tests that build an Environment directly, which falls back to
+		// the default transport -- TestEveryPluginRoutesItsEgressThroughTheGuard
+		// is what keeps that from being how production works.
+		Transport: env.HTTPTransport,
+		Timeout:   30 * time.Second,
+	}
+
+	// cleat#2340: OAuth login is Postgres-only for 0.3.0 (a minted credential
+	// can't be revoked on mysql/mssql yet -- auth.RevokeAPIKeyByHash doesn't
+	// exist there, same limitation auth.TenantStore.RevokeAPIKey already has).
+	// Logged once here, at the dialect the WORKER is running, not per tenant
+	// config -- oauth_config rows can be added after this without a restart,
+	// so this can only ever say "this deployment can't", never "nobody uses
+	// this yet". handleLogin/handleCallback refuse per-request rather than
+	// failing Init: every bundled plugin initializes on every boot against
+	// one flat --plugin-config with no reliable "am I configured" signal, and
+	// an Init-time refusal would stop every mysql/mssql worker from starting
+	// whether or not anyone uses OAuth (see #2202's email-plugin incident).
+	if p.dialect != plugin.DialectPostgres {
+		p.logger.Info("oauth-provider: OAuth login is Postgres-only in this release; "+
+			"/login and /callback will refuse on this dialect",
+			"dialect", p.dialect)
 	}
 
 	p.logger.Info("oauth-provider: initialized")
 	return nil
+}
+
+// pgOnly refuses the request with 501 if the worker isn't running Postgres,
+// and reports whether it did -- callers return immediately when true. See
+// Init's dialect-log comment for why this refuses per-request instead of at
+// Init.
+func (p *Plugin) pgOnly(w http.ResponseWriter) bool {
+	if p.dialect == plugin.DialectPostgres {
+		return false
+	}
+	p.writeError(w, http.StatusNotImplemented,
+		"OAuth login is only supported on the postgres dialect in this release")
+	return true
 }

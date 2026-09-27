@@ -10,11 +10,11 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 )
 
-func (s *MSSQLStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (s *MSSQLStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	var out int
 	err := withRollbackGuaranteedRetry(ctx, "reap stale instances", mssqlTxRetries, mssqlTxRetryDelay, func() error {
 		var err error
-		out, err = s.reapStaleInstancesOnce(ctx, timeout)
+		out, err = s.reapStaleInstancesOnce(ctx, timeout, limit)
 		return err
 	})
 	if err != nil {
@@ -23,20 +23,33 @@ func (s *MSSQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 	return out, nil
 }
 
-func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Duration) (int, error) {
+func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: begin: %w", err)
 	}
 	defer tx.Rollback()
 
+	// See PostgresStore.ReapStaleInstances: a workflow reaped mid-defer-phase
+	// goes back to 'terminating', because its terminal outcome is already
+	// decided and calling it 'ready' would undo the distinction D6 created the
+	// status to make.
+	// TOP (@p3) inside the subquery, because SQL Server's UPDATE TOP takes no
+	// ORDER BY and the order is the point -- see the interface doc.
 	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1
-		WHERE status = 'running'
-		  AND heartbeat_at < DATEADD(SECOND, @p1, SYSUTCDATETIME())
-		  AND tenant_id = @p2
-	`, -int(timeout.Seconds()), s.tenantID)
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
+		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
+		    reclaim_count = reclaim_count + 1
+		WHERE id IN (
+		    SELECT TOP (@p3) id FROM workflow_instances
+		    WHERE status = 'running'
+		      AND heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME())
+		      AND tenant_id = @p2
+		    ORDER BY heartbeat_at
+		)
+	`, -timeout.Milliseconds(), s.tenantID, reapLimitArg(limit))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}
@@ -44,11 +57,80 @@ func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Du
 	return int(n), tx.Commit()
 }
 
+// PingDB satisfies DBPinger: a bounded round trip with no workflow-specific
+// query, so a worker with nothing in flight still has a way to prove it can
+// reach the database. See DBPinger's doc comment for why this exists.
+func (s *MSSQLStore) PingDB(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
+// StaleSetShape satisfies DBStallDetector. Same tenant scoping and same
+// status='running' population as ReapStaleInstances.
+//
+// cleat-review on cleat#2006 (2026-09-24): this used to run over s.db
+// directly, with no SESSION_CONTEXT set. Under the shipped RLS security
+// policies (fn_tenant_filter -- see tenantSessionConnector's doc), a
+// statement with no session context matches no rows -- so this reported
+// Running: 0, err: nil on every SQL Server call, silently, and the
+// suspected-stall detector could never fire on that dialect. It needs a
+// transaction with the context set explicitly, the same as every other
+// RLS-scoped read in this file -- see beginTxWithContext's doc.
+func (s *MSSQLStore) StaleSetShape(ctx context.Context, timeout, missedBeatTimeout time.Duration) (StaleSetShape, error) {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return StaleSetShape{}, fmt.Errorf("stale set shape: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var shape StaleSetShape
+	var oldest, newest sql.NullTime
+	var noRecentHeartbeat int
+	missedBeatMillis := -missedBeatTimeout.Milliseconds()
+	staleMillis := -timeout.Milliseconds()
+	err = tx.QueryRowContext(ctx, `
+		SELECT
+		    COUNT(*),
+		    COUNT(CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME()) THEN 1 END),
+		    COUNT(DISTINCT CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME()) THEN assigned_to END),
+		    MIN(CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME()) THEN heartbeat_at END),
+		    MAX(CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME()) THEN heartbeat_at END),
+		    COUNT(CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p2, SYSUTCDATETIME()) THEN 1 END),
+		    CASE WHEN MAX(heartbeat_at) < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME()) THEN 1 ELSE 0 END,
+		    COUNT(DISTINCT assigned_to)
+		FROM workflow_instances
+		WHERE status = 'running' AND tenant_id = @p3
+	`, missedBeatMillis, staleMillis, s.tenantID,
+	).Scan(&shape.Running, &shape.MissedBeat, &shape.MissedBeatDistinctAssignedTo,
+		&oldest, &newest, &shape.Stale, &noRecentHeartbeat, &shape.DistinctAssignedTo)
+	if err != nil {
+		return StaleSetShape{}, fmt.Errorf("stale set shape: %w", err)
+	}
+	shape.NoRecentHeartbeat = noRecentHeartbeat != 0
+	if oldest.Valid {
+		shape.MissedBeatOldest = oldest.Time
+	}
+	if newest.Valid {
+		shape.MissedBeatNewest = newest.Time
+	}
+	if err := tx.Commit(); err != nil {
+		return StaleSetShape{}, fmt.Errorf("stale set shape: commit: %w", err)
+	}
+	return shape, nil
+}
+
+// GetQueryState reads one key of a workflow's query state.
+//
+// Tenant-predicated for the reason on TerminateWorkflow: the id comes from the
+// URL path of two separate handlers (cmd/cleat-worker/server.go's
+// handleGetWorkflow and handleGetQueryState).
+// This one is a read, so the consequence is disclosure rather than damage --
+// query state is whatever the workflow chose to publish about itself.
 func (s *MSSQLStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
 	var value sql.NullString
 	err := s.db.QueryRowContext(ctx, `
-		SELECT JSON_VALUE(query_state, '$.' + @p2) FROM workflow_instances WHERE id = @p1
-	`, workflowID, key).Scan(&value)
+		SELECT JSON_VALUE(query_state, '$.' + @p2)
+		FROM workflow_instances WHERE id = @p1 AND tenant_id = @p3
+	`, workflowID, key, s.tenantID).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -56,6 +138,23 @@ func (s *MSSQLStore) GetQueryState(ctx context.Context, workflowID, key string) 
 		return "", fmt.Errorf("get query state: %w", err)
 	}
 	return value.String, nil
+}
+
+// ListQueryState returns every key a run published. See the PostgreSQL
+// implementation for why this reads the whole column rather than using SQL
+// Server's JSON functions.
+func (s *MSSQLStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	var raw sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT query_state FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2`,
+		workflowID, s.tenantID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list query state: %w", err)
+	}
+	return decodeQueryState(raw)
 }
 
 func (s *MSSQLStore) GetEventCount(ctx context.Context, workflowID string) (int, error) {
@@ -120,6 +219,10 @@ func (s *MSSQLStore) updateStickyWorkerOnce(ctx context.Context, workflowID, wor
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
+		-- No AND tenant_id, and not an omission: SQL Server bounds this with a
+		-- session-context security policy, as Postgres does with FOR ALL RLS.
+		-- MySQL has neither and states the predicate in SQL. See the note on
+		-- PostgresStore.UpdateStickyWorker before filing the asymmetry.
 		UPDATE workflow_instances SET sticky_worker_id = @p2 WHERE id = @p1
 	`, workflowID, workerID)
 	if err != nil {
@@ -142,6 +245,7 @@ func (s *MSSQLStore) clearStickyWorkerOnce(ctx context.Context, workflowID strin
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
+		-- No AND tenant_id, for the same reason as updateStickyWorkerOnce above.
 		UPDATE workflow_instances SET sticky_worker_id = NULL WHERE id = @p1
 	`, workflowID)
 	if err != nil {
@@ -167,41 +271,163 @@ func (s *MSSQLStore) releaseWorkflowConcurrencyKeysOnce(ctx context.Context, wor
 	if err != nil {
 		return fmt.Errorf("release workflow concurrency keys: %w", err)
 	}
+	// A registered queue's slot lives in queue_holders; release it with the bare
+	// keys so a finished run frees its queue slot the same way it frees a mutex.
+	_, err = tx.ExecContext(ctx, `DELETE FROM queue_holders WHERE workflow_id = @p1 AND tenant_id = @p2`, workflowID, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("release workflow concurrency keys: queue holders: %w", err)
+	}
 	return tx.Commit()
 }
 
+// TerminateWorkflow marks a workflow terminated.
+//
+// `AND tenant_id` here, and on the five other statements this commit touched,
+// is load-bearing rather than defensive; the reasoning is the same as
+// ClaimDueSchedule's and is written out there. What is different about this
+// group is WHERE THE ID COMES FROM. The schedule and definition statements key
+// on a name the tenant chose; these key on a generated workflow id that
+// arrives from outside -- every one of them is reachable from an HTTP handler
+// that takes the id straight out of the URL path
+// (cmd/cleat-worker/app.go:handleDeadLetterTerminate, handleWorkflowRetry;
+// server.go's query, signal and cancel routes).
+//
+// 3.77 argued that a generated id needs no predicate because a UUID cannot be
+// guessed. That argument covers the plumbing statements, whose ids the engine
+// read back from a row it had already scoped, and it does not cover these:
+// unguessability is a claim about what an attacker knows, and a workflow id
+// travels -- through logs, support tickets, a URL, a user who has since left
+// the tenant. Knowing one is enough to terminate somebody else's workflow on a
+// cleat_admin connection, which is every multi-tenant SQL Server deployment.
+//
+// Each handler resolves its store through apiServer.scopedStore, so the
+// authenticated tenant was already on the store at every one of these sites
+// and simply was not reaching the SQL.
+//
+// Since 3.92 a terminate that matches no row returns ErrWorkflowNotFound and
+// does not run the parent-close cascade. See preemptivelySettleOnce.
+//
+// TERMINATE IS ASYNCHRONOUS WHEN THE WORKFLOW OWES CLEANUP (D6, and
+// IMPROVEMENT-PLAN 3.75 step 2) -- see PostgresStore.TerminateWorkflow for the
+// whole story. A workflow with registered defers goes to 'terminating' here,
+// carrying its outcome in pending_terminal_status, and is finalized by
+// FinalizeDeferPhase once its cleanup has run.
+// TerminateWorkflow force-terminates a workflow, recording 'terminated'.
 func (s *MSSQLStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	return withRollbackGuaranteedRetry(ctx, "terminate workflow", mssqlTxRetries, mssqlTxRetryDelay, func() error {
-		return s.terminateWorkflowOnce(ctx, workflowID, reason)
+		return s.preemptivelySettleOnce(ctx, workflowID, reason, statusTerminated)
 	})
 }
 
-func (s *MSSQLStore) terminateWorkflowOnce(ctx context.Context, workflowID, reason string) error {
+// CancelWorkflow stops a workflow pre-emptively and records 'cancelled'.
+// cleat#1153. See the PostgresStore method for why this shares a body with
+// TerminateWorkflow rather than repeating the two-phase transition.
+func (s *MSSQLStore) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
+	return withRollbackGuaranteedRetry(ctx, "cancel workflow", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.preemptivelySettleOnce(ctx, workflowID, reason, statusCancelled)
+	})
+}
+
+func (s *MSSQLStore) preemptivelySettleOnce(ctx context.Context, workflowID, reason, finalStatus string) error {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
-		return fmt.Errorf("terminate workflow: begin: %w", err)
+		return fmt.Errorf("%s workflow: begin: %w", finalStatus, err)
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET status = 'terminated',
-		    error_msg = @p2,
-		    completed_at = GETDATE(),
-		    assigned_to = NULL,
-		    generation = generation + 1
-		WHERE id = @p1
-	`, sql.Named("p1", workflowID), sql.Named("p2", reason))
+	// Does this workflow owe a defer phase? See deferPhaseOwed. UPDLOCK holds
+	// the row for the UPDATE that follows, so the status this reads is the
+	// status that gets marked.
+	var curStatus string
+	var hasDefers, compacted int
+	err = tx.QueryRowContext(ctx, `
+		SELECT w.status,
+		       CASE WHEN EXISTS(SELECT 1 FROM event_history e
+		                        WHERE e.workflow_id = w.id AND e.event_type = 'defer')
+		            THEN 1 ELSE 0 END,
+		       CASE WHEN w.compaction_state IS NOT NULL THEN 1 ELSE 0 END
+		FROM workflow_instances w WITH (UPDLOCK, ROWLOCK)
+		WHERE w.id = @p1 AND w.tenant_id = @p2
+	`, sql.Named("p1", workflowID), sql.Named("p2", s.tenantID)).Scan(&curStatus, &hasDefers, &compacted)
+	if errors.Is(err, sql.ErrNoRows) {
+		// Not wrapped, for the same reason the RowsAffected == 0 arm below is
+		// not: withRollbackGuaranteedRetry must see it plainly rather than
+		// retry a lookup that will keep answering the same thing.
+		return ErrWorkflowNotFound
+	}
 	if err != nil {
-		return fmt.Errorf("terminate workflow: %w", err)
+		return fmt.Errorf("%s workflow: read: %w", finalStatus, err)
+	}
+
+	// cleat#1975 (D3): settled is final. See PostgresStore.TerminateWorkflow's
+	// doc comment for the dead-letter exception. Not a rollback-guaranteed
+	// class (isMSSQLRollbackGuaranteed only checks deadlock/snapshot errors),
+	// so withRollbackGuaranteedRetry returns it on the first attempt.
+	if isSettledStatus(curStatus) && !(finalStatus == statusTerminated && curStatus == statusDeadLettered) {
+		return adminErrorf(ErrAdminStateConflict,
+			"workflow %s: already settled (status=%s); refusing to write %s over it",
+			workflowID, curStatus, finalStatus)
+	}
+
+	if deferPhaseOwed(curStatus, hasDefers == 1, compacted == 1) {
+		// Phase 1 of the two-phase transition: mark, do not finalize. See
+		// PostgresStore.TerminateWorkflow for why next_wake_at moves and why
+		// nothing is released here.
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = @p4,
+			    pending_terminal_status = @p6,
+			    defer_phase_deadline = DATEADD(SECOND, @p5, SYSUTCDATETIME()),
+			    error_msg = @p2,
+			    next_wake_at = SYSUTCDATETIME(),
+			    assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = @p1 AND tenant_id = @p3
+		`, sql.Named("p1", workflowID), sql.Named("p2", reason), sql.Named("p3", s.tenantID),
+			sql.Named("p4", statusTerminating), sql.Named("p5", int(deferPhaseTimeout.Seconds())), sql.Named("p6", finalStatus)); err != nil {
+			return fmt.Errorf("%s workflow: mark defer phase: %w", finalStatus, err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("%s workflow commit: %w", finalStatus, err)
+		}
+		return nil
+	}
+
+	res, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = @p4,
+		    error_msg = @p2,
+		    completed_at = SYSUTCDATETIME(),
+		    completed_by = assigned_to, assigned_to = NULL,
+		    generation = generation + 1,
+		    pending_terminal_status = NULL,
+		    defer_phase_deadline = NULL
+		WHERE id = @p1 AND tenant_id = @p3
+	`, sql.Named("p1", workflowID), sql.Named("p2", reason), sql.Named("p3", s.tenantID), sql.Named("p4", finalStatus))
+	if err != nil {
+		return fmt.Errorf("%s workflow: %w", finalStatus, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("%s workflow: rows affected: %w", finalStatus, err)
+	}
+	if n == 0 {
+		// Not wrapped, so withRollbackGuaranteedRetry's
+		// isMSSQLRollbackGuaranteed check sees it plainly and returns rather
+		// than retrying a lookup that will keep answering the same thing.
+		return ErrWorkflowNotFound
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("terminate workflow commit: %w", err)
+		return fmt.Errorf("%s workflow commit: %w", finalStatus, err)
 	}
-	// Best-effort cleanup.
-	s.ClearStickyWorker(context.Background(), workflowID)
-	if err := s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID); err != nil {
-		s.log().WarnContext(context.Background(), "release concurrency keys failed", "workflow_id", workflowID, "error", err)
-	}
+	releaseWorkflowResources(s.log(), s, workflowID)
+	// IMPROVEMENT-PLAN 3.79. Terminate is a terminal transition, and the close
+	// policy is what stops a closed parent leaving orphans behind. Every other
+	// terminal path enforces it -- FinalizeWorkflowSegment for done/failed, and
+	// adminForceResolve, which is an operator verb on an unclaimed workflow
+	// exactly like this one. This path did not, so terminating a parent left
+	// its TERMINATE children running while force-completing the same parent
+	// failed them, with nothing recording why the two differed.
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(finalStatus))
 	return nil
 }

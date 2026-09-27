@@ -5,7 +5,7 @@ package engine
 import (
 	"context"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 func (b *wasmtimeBackend) registerCleatPluginCall(linker *wasmtime.Linker) error {
@@ -13,7 +13,7 @@ func (b *wasmtimeBackend) registerCleatPluginCall(linker *wasmtime.Linker) error
 		return nil
 	}
 
-	return linker.FuncWrap("env", "plugin_call", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "plugin_call", func(caller *wasmtime.Caller,
 		pluginNamePtr, pluginNameLen,
 		funcNamePtr, funcNameLen,
 		inputPtr, inputLen,
@@ -45,7 +45,7 @@ func (b *wasmtimeBackend) registerCleatPluginCallStreaming(linker *wasmtime.Link
 		return nil
 	}
 
-	return linker.FuncWrap("env", "plugin_call_streaming", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "plugin_call_streaming", func(caller *wasmtime.Caller,
 		pluginNamePtr, pluginNameLen,
 		funcNamePtr, funcNameLen,
 		inputPtr, inputLen,
@@ -77,9 +77,35 @@ func (b *wasmtimeBackend) registerCleatCreatePromise(linker *wasmtime.Linker) er
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_create_promise", func(caller *wasmtime.Caller,
-		namePtr, nameLen, promiseIDPtr, promiseIDMaxLen int32, ttlMs int64) int64 {
-		_ = ttlMs
+	// Four i32 parameters, no trailing ttlMs.
+	//
+	// This registration used to declare a fifth parameter, `ttlMs int64`, and
+	// discard it with `_ = ttlMs`. Nothing ever passed it. ABI.md 2.34 specifies
+	// `(param i32 i32 i32 i32) (result i64)`, and every guest agrees: the Go
+	// generator (wasm/generator.go, name + promise_id_out), the Rust SDK
+	// (crates/cleat-sdk/src/host_calls.rs), the Java SDK (HostCalls.java) and
+	// AssemblyScript (packages/cleat-as/assembly/host-calls.ts, whose comment
+	// spells the signature out). wazero's registration in engine/imports.go is
+	// four as well.
+	//
+	// Since an arity mismatch is a hard link error, the extra parameter meant a
+	// guest that called cleat_create_promise could not instantiate on the
+	// wasmtime backend at all -- which is every guest the worker runs. Measured
+	// 2026-09-01 through the production path (wasm.NeededEnvImports ->
+	// registerAllImports -> linker.Instantiate):
+	//
+	//	incompatible import type for `env::cleat_create_promise`
+	//	types incompatible: expected type `(func (param i32 i32 i32 i32) (result i64))`,
+	//	                       found type `(func (param i32 i32 i32 i32 i64) (result i64))`
+	//
+	// The WIT interface (python-sdk/wit/cleat.wit) does carry a `ttl-ms: u64`,
+	// which is presumably where the parameter came from, but that is the
+	// component path: wasm.RewriteWitImports rewrites import *names* only, and
+	// the canonical lowering of `func(name: string, ttl-ms: u64) -> string`
+	// would be (i32, i32, i64, i32) -- neither this shape nor wazero's. So the
+	// fifth parameter never matched any real guest on any path.
+	return b.hostFunc(linker, "env", "cleat_create_promise", func(caller *wasmtime.Caller,
+		namePtr, nameLen, promiseIDPtr, promiseIDMaxLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
@@ -98,7 +124,7 @@ func (b *wasmtimeBackend) registerCleatAwaitPromise(linker *wasmtime.Linker) err
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_await_promise", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_await_promise", func(caller *wasmtime.Caller,
 		promiseIDPtr, promiseIDLen int32, timeoutMs int64,
 		resultPtr, resultMaxLen int32) int64 {
 		h := b.handler
@@ -119,7 +145,7 @@ func (b *wasmtimeBackend) registerCleatAcquireLock(linker *wasmtime.Linker) erro
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_acquire_lock", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_acquire_lock", func(caller *wasmtime.Caller,
 		keyPtr, keyLen int32, ttlMs int64) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -139,7 +165,7 @@ func (b *wasmtimeBackend) registerCleatReleaseLock(linker *wasmtime.Linker) erro
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_release_lock", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_release_lock", func(caller *wasmtime.Caller,
 		keyPtr, keyLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -159,7 +185,7 @@ func (b *wasmtimeBackend) registerCleatResolvePromise(linker *wasmtime.Linker) e
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_resolve_promise", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_resolve_promise", func(caller *wasmtime.Caller,
 		idPtr, idLen, valPtr, valLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -183,7 +209,7 @@ func (b *wasmtimeBackend) registerCleatRejectPromise(linker *wasmtime.Linker) er
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_reject_promise", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_reject_promise", func(caller *wasmtime.Caller,
 		idPtr, idLen, errPtr, errLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)

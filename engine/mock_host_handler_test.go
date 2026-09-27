@@ -10,7 +10,9 @@ package engine
 
 import (
 	"context"
+	"strconv"
 	"sync"
+	"time"
 
 	"github.com/tetratelabs/wazero/api"
 )
@@ -112,10 +114,6 @@ func (h *mockHostHandler) ChildWorkflowWithOptions(ctx context.Context, m api.Mo
 	h.record("ChildWorkflowWithOptions", name, inputJSON, parentClosePolicy)
 	return h.ret
 }
-func (h *mockHostHandler) ChildWorkflowInSchema(ctx context.Context, m api.Module, targetSchema, name, inputJSON string, version int64, priority int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64 {
-	h.record("ChildWorkflowInSchema", targetSchema, name, inputJSON, parentClosePolicy)
-	return h.ret
-}
 func (h *mockHostHandler) AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64 {
 	h.record("AwaitChild", runID)
 	return h.ret
@@ -160,6 +158,15 @@ func (h *mockHostHandler) Random(ctx context.Context) int64 {
 	h.record("Random")
 	return h.ret
 }
+
+// ServeWasiSleep records the call and returns 0 so a test using this mock never
+// blocks. The zero is a choice, not a convenient stub value: a mock that really
+// slept would make every test using it as slow as whatever a guest asks for.
+// The call is recorded so a test that IS about sleeping can assert it happened.
+func (h *mockHostHandler) ServeWasiSleep(ctx context.Context, durationMs int64) time.Duration {
+	h.record("ServeWasiSleep", strconv.FormatInt(durationMs, 10))
+	return 0
+}
 func (h *mockHostHandler) CreatePromise(ctx context.Context, m api.Module, name string, promiseIDPtr, promiseIDMaxLen uint32) int64 {
 	h.record("CreatePromise", name)
 	return h.ret
@@ -179,6 +186,14 @@ func (h *mockHostHandler) PluginCallStreaming(ctx context.Context, m api.Module,
 func (h *mockHostHandler) RegisterUpdateHandler(ctx context.Context, m api.Module, name string) int64 {
 	h.record("RegisterUpdateHandler", name)
 	return h.ret
+}
+
+func (h *mockHostHandler) DurablePollUpdate(ctx context.Context, m api.Module, outPtr, outMaxLen uint32) int64 {
+	return 0
+}
+
+func (h *mockHostHandler) DurableCompleteUpdate(ctx context.Context, m api.Module, requestID, result, errMsg string) int64 {
+	return 0
 }
 func (h *mockHostHandler) SendSignalAndWait(ctx context.Context, m api.Module, targetRunID, signalName, payload string, timeoutMs int64, responsePtr, responseMaxLen uint32) int64 {
 	h.record("SendSignalAndWait", targetRunID, signalName, payload)
@@ -272,6 +287,10 @@ func (h *mockHostHandler) RunDetached(ctx context.Context, m api.Module, name, i
 	h.record("RunDetached", name, inputJSON)
 	return h.ret
 }
+func (h *mockHostHandler) StartDetached(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64 {
+	h.record("StartDetached", name, inputJSON)
+	return h.ret
+}
 func (h *mockHostHandler) Fetch(ctx context.Context, m api.Module, method, url, headersJSON, body string, responsePtr, responseMaxLen uint32) int64 {
 	h.record("Fetch", method, url, headersJSON, body)
 	return h.ret
@@ -296,3 +315,7 @@ func (h *mockHostHandler) JsonStringify(ctx context.Context, m api.Module, input
 	h.record("JsonStringify", input)
 	return h.ret
 }
+
+// SetDeferPhase satisfies HostHandler. The flag it would set is only read when
+// events are recorded, which these mocks do not do.
+func (h *mockHostHandler) SetDeferPhase(_ context.Context, _ bool) int64 { return 0 }

@@ -57,9 +57,9 @@ type stubWasmBackend struct{}
 func (b *stubWasmBackend) Execute(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage, session HostHandler) (*ExecResult, error) {
 	return nil, nil
 }
-func (b *stubWasmBackend) Close(ctx context.Context) error { return nil }
-func (b *stubWasmBackend) Name() string                    { return "stub" }
-func (b *stubWasmBackend) PerExecution() WasmBackend       { return &stubWasmBackend{} }
+func (b *stubWasmBackend) Close(ctx context.Context) error        { return nil }
+func (b *stubWasmBackend) Name() string                           { return "stub" }
+func (b *stubWasmBackend) PerExecution(time.Duration) WasmBackend { return &stubWasmBackend{} }
 
 func TestWithWorkflowState(t *testing.T) {
 	ws := &stubWorkflowState{version: 3}
@@ -106,29 +106,6 @@ func TestWithDefVersion(t *testing.T) {
 	}
 }
 
-func TestWithUpdateHandler(t *testing.T) {
-	called := false
-	fn := func(name, payload string) (string, error) {
-		called = true
-		return "ok-" + name, nil
-	}
-	opt := WithUpdateHandler(fn)
-	e := NewEngine(nil, nil, opt)
-	if e.updateHandler == nil {
-		t.Fatal("WithUpdateHandler did not set updateHandler")
-	}
-	res, err := e.updateHandler("test", "body")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if res != "ok-test" {
-		t.Errorf("got %q, want %q", res, "ok-test")
-	}
-	if !called {
-		t.Error("handler was not called")
-	}
-}
-
 func TestWithPluginCallObserver(t *testing.T) {
 	o := func(pluginName, functionName string, d time.Duration, err error) {
 	}
@@ -146,15 +123,6 @@ func TestWithSchema(t *testing.T) {
 	e := NewEngine(nil, nil, opt)
 	if e.schema != want {
 		t.Errorf("WithSchema: got %q, want %q", e.schema, want)
-	}
-}
-
-func TestWithPeerSchemas(t *testing.T) {
-	want := []string{"peer1", "peer2"}
-	opt := WithPeerSchemas(want)
-	e := NewEngine(nil, nil, opt)
-	if len(e.peerSchemas) != 2 || e.peerSchemas[0] != "peer1" {
-		t.Errorf("WithPeerSchemas: got %v, want %v", e.peerSchemas, want)
 	}
 }
 
@@ -708,10 +676,16 @@ func TestIsDefinitelyNonRetryable_RetryableTrue(t *testing.T) {
 	}
 }
 
-func TestIsDefinitelyNonRetryable_PatternMatch(t *testing.T) {
-	err := errors.New("something went wrong with connection refused")
-	if !isDefinitelyNonRetryable(err, []string{"connection refused"}) {
-		t.Error("should be non-retryable when error matches pattern")
+func TestIsDefinitelyNonRetryable_CodeMatch(t *testing.T) {
+	// The declaration names a CODE, and matches the code the service gave --
+	// not words in its message. Rewritten from a substring test when the
+	// matching channel changed; see isDefinitelyNonRetryable for why.
+	err := NewTransientError("service", "", &ServiceError{
+		Code:    "CONNECTION_REFUSED",
+		Message: "something went wrong",
+	})
+	if !isDefinitelyNonRetryable(err, []string{"CONNECTION_REFUSED"}) {
+		t.Error("should be non-retryable when the service's code matches a declaration")
 	}
 }
 
@@ -729,17 +703,25 @@ func TestIsDefinitelyNonRetryable_NoInterface(t *testing.T) {
 	}
 }
 
-func TestIsDefinitelyNonRetryable_NoInterface_PatternMatch(t *testing.T) {
+func TestIsDefinitelyNonRetryable_PlainErrorMatchesNoDeclaration(t *testing.T) {
+	// A plain error carries no service code, so no declaration can match it --
+	// deliberately. It is classified by the status rules the forwarder applies,
+	// which is a sounder answer than searching its text for a caller's word.
 	err := errors.New("plain error with fatal signal")
-	if !isDefinitelyNonRetryable(err, []string{"fatal"}) {
-		t.Error("plain error should be non-retryable when pattern matches")
+	if isDefinitelyNonRetryable(err, []string{"fatal"}) {
+		t.Error("a plain error matched a declaration by its text; the substring channel " +
+			"is gone, and matching prose is what it was removed for")
 	}
 }
 
-func TestIsDefinitelyNonRetryable_BothRetryableAndPattern(t *testing.T) {
-	err := &retryableError{retryable: true}
-	if !isDefinitelyNonRetryable(err, []string{"retryable error"}) {
-		t.Error("pattern match should make it non-retryable even though Retryable()=true")
+func TestIsDefinitelyNonRetryable_ADeclaredCodeOverridesRetryableTrue(t *testing.T) {
+	// A service may report a failure as retryable while the CALLER has declared
+	// that code must not be retried -- the caller knows whether its own
+	// operation is safe to repeat, and that judgement wins.
+	retry := true
+	err := &ServiceError{Code: "DUPLICATE_CHARGE", Retry: &retry}
+	if !isDefinitelyNonRetryable(err, []string{"DUPLICATE_CHARGE"}) {
+		t.Error("a caller's declaration did not override the service's retryable=true")
 	}
 }
 

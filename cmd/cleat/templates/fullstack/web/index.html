@@ -1,0 +1,33 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>cleat full-stack scaffold</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 34rem; margin: 3rem auto; padding: 0 1rem; }
+  input, button { font: inherit; padding: .4rem .6rem; }
+  #status { margin-top: 1rem; padding: .6rem .8rem; background: #f4f4f5; border-radius: 4px; }
+  code { background: #f4f4f5; padding: .1rem .3rem; border-radius: 3px; }
+</style>
+
+<h1>Submit an order</h1>
+
+<!--
+  DELIBERATELY NO FRAMEWORK AND NO BUILD STEP.
+
+  The cleat playbooks say your front-end framework "stays rope" -- unchanged,
+  unowned, not reimplemented. A scaffold that picked React or Svelte would
+  contradict that and impose a toolchain on a Go project. What this file
+  demonstrates is the API CONTRACT: start a run, then poll published state.
+  Replace it wholesale with whatever you actually build.
+
+  In production, serve your bundle from your own backend, which calls cleat with
+  the key (see README.md, "Authentication"). cleat is the API, not your bundler.
+-->
+
+<p>
+  <input id="item" value="widget" aria-label="item">
+  <button id="go">Submit</button>
+</p>
+
+<div id="status">idle</div>
+
+<script src="/app.js"></script>

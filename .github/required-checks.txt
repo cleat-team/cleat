@@ -1,4 +1,4 @@
-# The status checks required to merge into `develop`, as of 2026-08-07.
+# The status checks required to merge into `develop`, as of 2026-09-23.
 #
 # WHY THIS FILE EXISTS
 #
@@ -35,6 +35,13 @@
 #
 #   scripts/check-workflow-guards.py --verify-against-api
 #
+# `scripts/check-required-contexts.py` checks this list against tiers.yaml's
+# `required_contexts` block in both directions, so the two copies cannot drift
+# apart from each other -- and since cleat#1937 its DEFAULT run also attempts
+# the live diff above and says so when it cannot. That is the check that would
+# have caught `Web Dashboard`, which gated every merge from 2026-09-17 while
+# appearing in neither this file nor that block.
+#
 # When you add or remove a required check, change it in both places in the same
 # PR. The API is the one that actually gates; this file is the one that is
 # reviewable.
@@ -45,6 +52,7 @@
 AssemblyScript Tests
 Blobstore S3 Round-Trip
 Build
+Closing References
 Cluster Integration Tests
 Contributor License Agreement
 Cross-Language WASM E2E
@@ -58,7 +66,6 @@ Lint
 lint-go
 Test Go (commands) on 1.26
 Test Go (core) on 1.26
-Test Go (engine) on 1.26
 Test Go (integrity) on 1.26
 Test Go (internal) on 1.26
 Test Go (manifests) on 1.26
@@ -74,6 +81,7 @@ Tier 1 Gate
 Tier 2 Gate
 Validate branch name
 Vulnerability Check
+Web Dashboard
 
 # NOT required, and deliberately recorded here so the absence is a decision
 # rather than an oversight:
@@ -85,6 +93,17 @@ Vulnerability Check
 #                                failure carries. Same reasoning that applied
 #                                to `Test MySQL`/`Test SQL Server` before they
 #                                were made required on 2026-08-07.
+#   Test Go (engine) on 1.26  -- removed from the test-go matrix and from
+#                                branch protection 2026-09-23 (cleat#2082).
+#                                `./engine/...` under -race caught 0 data
+#                                races in 7 PR failures since 09-21; every
+#                                catch was skip-ledger bookkeeping or a real
+#                                failure Tier 1 Gate (required, all three
+#                                dialects, no -race) also caught. -race now
+#                                runs on a schedule (`Engine Race Detector`,
+#                                every 4 hours on develop) rather than gating
+#                                every PR; a red run there opens or updates an
+#                                issue instead of blocking a merge.
 #   Coverage                  -- the only job in the repo with job-level
 #                                `continue-on-error: true`, which is exactly
 #                                why it must not be required. Guard 2 below

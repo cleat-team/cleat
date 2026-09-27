@@ -8,6 +8,26 @@ organised by symptom with diagnosis steps and fixes.
 
 ---
 
+
+## "the database schema is behind this worker"
+
+A worker refused to start because the database has not been migrated to the version
+of the binary. A worker no longer migrates on start (cleat#2117). Run the migration as
+a deploy step and start the worker again:
+
+```bash
+cleat-worker --migrate-only --db "$CLEAT_DATABASE_URL" [--migrate-db "$MIGRATOR_DATABASE_URL"]
+```
+
+The message says how many migrations are missing and which. "the database has no
+schema_migrations table" means the database has never been migrated. A message naming
+a plugin ("the database's plugin schema is behind") is the same problem for a plugin's
+tables, and the same fix. For a single node or development, `--migrate-on-start` makes
+the worker migrate itself. If a `--migrate-only` run is already in progress, wait for it.
+
+The opposite case is not an error: a schema *ahead* of the binary starts, with a
+warning, so that a rolling upgrade does not wedge on the workers it is replacing.
+
 ## Table of Contents
 
 1. [WASM Build Failures](#1-wasm-build-failures)
@@ -136,7 +156,7 @@ See the [Python SDK documentation](../python-sdk/README.md) for setup instructio
 ### Symptom: Worker fails to start -- "no database connection string found"
 
 ```
-Error: no database connection string found: set --db, DATABASE_URL, or CLEAT_DATABASE_URL
+Error: no database connection string found: set --db, CLEAT_DATABASE_URL, or CLEAT_DATABASE_URL
 ```
 
 **Diagnosis: How to confirm**
@@ -146,7 +166,7 @@ The worker has no configured database URL. Check the credential resolution order
 ```bash
 # Check each source:
 echo "CLI flag:  $CLEAT_DB_URL"        # --db flag
-echo "Env var 1: $DATABASE_URL"         # environment variable
+echo "Env var 1: $CLEAT_DATABASE_URL"         # environment variable
 echo "Env var 2: $CLEAT_DATABASE_URL"   # environment variable
 ```
 
@@ -159,7 +179,7 @@ Set the database connection string via one of:
 cleat-worker --db "postgres://user:pass@host:5432/cleat?sslmode=require"
 
 # Environment variable:
-export DATABASE_URL="postgres://user:pass@host:5432/cleat?sslmode=require"
+export CLEAT_DATABASE_URL="postgres://user:pass@host:5432/cleat?sslmode=require"
 
 # Or for cleat-specific override:
 export CLEAT_DATABASE_URL="postgres://user:pass@host:5432/cleat?sslmode=require"
@@ -373,8 +393,15 @@ divergence error includes:
 3. **Inspect the event history** for the failed workflow to compare what was
    recorded vs what was replayed:
    ```bash
-   cleatctl events get --workflow-id <id>
+   cleatctl --db "$CLEAT_DB" replay <workflow-id> --entry-point <entry-point>
    ```
+   `cleatctl replay` loads the recorded history and replays it, printing the events as it goes. The
+   raw history is served as a JSON array at `GET /api/workflows/<id>/history`, and `cleatctl debug`
+   has an interactive `events` command.
+
+   **There is no `cleatctl events` subcommand**, and this step used one until 2026-09-25. It is not
+   in the `switch` in `cmd/cleatctl/main.go`; `events` exists only *inside* the `cleatctl debug`
+   REPL, which is why the command looked plausible.
 
 4. **Verify that all external communication uses `h.DurableCall()`**.
    Direct HTTP, database, or file I/O during execution will not be recorded in
@@ -437,12 +464,65 @@ This can happen when:
 
 2. **Workflow definitions were garbage collected.**
    If the version GC removed older versions, in-flight instances cannot find
-   their WASM binary. Check `cleatctl versions list` and adjust the GC
-   retention policy:
+   their WASM binary. Check `cleatctl versions list`.
+
+   **Version GC is opt-in, and its retention is configurable.** Three flags,
+   added in cleat#1315; before that the policy was compiled in and unreachable
+   from any interface, and this step told you to adjust it with
+   `cleat-worker --gc-min-versions 5 --gc-max-age 60d` — two flags that have
+   never existed on any binary.
+
    ```bash
-   cleat-worker --gc-min-versions 5 --gc-max-age 60d
+   cleat-worker --version-gc-interval 24h --version-gc-min-versions 5 --version-gc-max-age 1440h
    ```
-   See [version_gc.go](engine/version_gc.go) for GC configuration.
+
+   | flag | default | meaning |
+   |---|---|---|
+   | `--version-gc-interval` | **0 — off** | how often the sweep runs. 0 disables it entirely |
+   | `--version-gc-min-versions` | 3 | versions retained per workflow regardless of age or activity |
+   | `--version-gc-max-age` | 720h (30d) | age at which a **deprecated** version becomes eligible |
+
+   **`--version-gc-interval` defaults to 0 on purpose**, for the same reason
+   `--completed-workflow-retention-days` does: GC deletes workflow definitions
+   permanently, and this failure — an in-flight instance that cannot find its
+   WASM binary — is what that costs. An operator opts in having decided how
+   long their own replays need old versions reachable.
+
+   **So if a version disappeared, ask which of three things ran**, because the
+   answer changes what you do next:
+
+   ```bash
+   cleatctl versions gc --dry-run                       # report only
+   cleatctl versions gc --min-versions=5 --max-age=720h # with a policy
+   ```
+
+   ```
+   POST /api/versions/gc?dry_run=true&min_versions=5&max_age=720h
+   ```
+
+   plus the scheduled sweep, if `--version-gc-interval` is set. The worker logs
+   `version gc swept` on every pass **including the ones that remove nothing**,
+   with the policy it used — so "the sweep ran and found nothing" and "the sweep
+   is disabled" are distinguishable in the log rather than both being silence.
+
+   Both manual surfaces **refuse** a policy they cannot parse rather than
+   falling back to the default, including `0`: the sweep treats a zero
+   `min_versions` or `max_age` as unset and substitutes 3 and 30 days, so
+   accepting 0 would run under a policy you did not ask for and report success.
+   `--max-age=7` is refused too — a bare number is 7 **nanoseconds** to Go, not
+   seven days.
+
+   Re-derive rather than trusting this paragraph; an earlier version of it named
+   one caller when there were two:
+
+   ```bash
+   git grep -n GarbageCollectVersions -- '*.go' | grep -v _test
+   ```
+
+   Three non-test hits now: the definition, `cmd/cleatctl/versions.go`, and
+   `cmd/cleat-worker/setup.go`'s `runVersionGCSweep`. `engine/version_handler.go`
+   reaches it through the same definition. A hit anywhere else means a fourth
+   caller nobody has documented.
 
 3. **Rollback scenario.**
    If you need to replay an instance against a different version after a
@@ -464,10 +544,11 @@ A long-running workflow with thousands of events takes minutes to replay.
 
 **Diagnosis: How to confirm**
 
-Check the event count for the workflow:
+Check the event count for the workflow. There is no `cleatctl` subcommand for this (see the note in
+the replay step above), but the history is served as a JSON array, so:
 
 ```bash
-cleatctl events count --workflow-id <id>
+curl -s "http://localhost:8080/api/workflows/<id>/history" | jq 'length'
 ```
 
 If the event count exceeds 1000, compaction may help.
@@ -648,12 +729,17 @@ claims. If workers are fighting over instances, check the sticky worker fast pat
 2. **Reduce the number of workers**: If too many workers are polling the same
    queue, reduce the worker count or increase the poll interval.
 
-3. **Check the reaper interval**: The reaper reclaims instances with stale
-   heartbeats every 30 seconds. If instances are being claimed and then quickly
-   released, the heartbeat interval (default 5s) may be too long for your
-   workload:
+3. **Check the reaper interval**: The reaper runs every
+   `max(--heartbeat, 10s)` -- 10 seconds at the default, not 30. If instances
+   are being claimed and then quickly released, note that lowering the
+   heartbeat below 5s does **not** speed reclaim: the window is
+   `max(2 x --heartbeat, 10s)` and the 10-second floor makes every value at or
+   below 5s identical. To shorten reclaim you must lower the floor's effect,
+   which `--reclaim-timeout` cannot do either -- it is refused below
+   `2 x --heartbeat`. To LENGTHEN it, which is the case a database failover
+   needs:
    ```bash
-   cleat-worker --heartbeat 2s
+   cleat-worker --heartbeat 5s --reclaim-timeout 5m
    ```
 
 See [Execution Engine: Claim Loop](explanation/execution-engine.md#claim-loop)
@@ -669,9 +755,16 @@ reaper: reclaimed instances from worker dead-worker-123 (stale heartbeat)
 
 **Diagnosis: How to confirm**
 
-The reaper reclaims instances where `heartbeat_at` is older than 30 seconds
-(6x the default 5s heartbeat interval). This indicates the worker stopped
-sending heartbeats.
+The reaper reclaims instances where `heartbeat_at` is older than
+`--reclaim-timeout`, or when that is unset, `max(2 x --heartbeat, 10s)` -- **10
+seconds** at the defaults, which is 2x the 5s heartbeat and not 30s/6x as this
+page previously said.
+
+This indicates the worker stopped sending heartbeats, which is **not** the same
+as the worker being dead: the heartbeat is written to the same database the
+workflow's events are, so a database failover silences every worker at once and
+makes every run reclaimable ten seconds in. If that is what you are seeing, see
+`--reclaim-timeout` in [tuning](operations/tuning.md).
 
 **Fix: How to resolve**
 
@@ -721,9 +814,13 @@ Monitor cache metrics:
 
 **Fix: How to resolve**
 
-1. **Adjust cache limits**: Configure the maximum entries and total bytes:
+1. **Adjust cache limits**: Configure the maximum entries and total size.
+   The flags are `--wasm-cache-max-entries` and `--wasm-cache-max-mb`; this
+   step named `--wasm-cache-size` and `--wasm-cache-bytes`, neither of which
+   exists, and the worker rejects unknown flags at startup (cleat#1311). Note
+   the unit: megabytes, not a size suffix.
    ```bash
-   cleat-worker --wasm-cache-size 500 --wasm-cache-bytes 2GB
+   cleat-worker --wasm-cache-max-entries 500 --wasm-cache-max-mb 2048
    ```
 
 2. **GC old versions**: Remove deprecated workflow versions that are no longer
@@ -754,9 +851,14 @@ A workflow that should complete in seconds is taking minutes.
    takes 50-100 ms for standard Go modules. If you see long load times, check
    the `wasm_bytes` column size in `workflow_defs`.
 
-3. **Profile with `cleat build --bench`**:
+3. **Profile with `cleat-bench`**: it's a separate binary (`cmd/cleat-bench`)
+   that profiles a workflow already deployed to a database, by name -- not a
+   source package path, so build and deploy it first (see
+   [Deploying workflows](how-to/deploy-workflows.md)):
    ```bash
-   cleat build --bench ./workflows/my-workflow/
+   cleat build -o ./out ./workflows/my-workflow/
+   cleat deploy --db "$CLEAT_DATABASE_URL" --name my-workflow ./out/my-workflow.wasm
+   cleat-bench --db "$CLEAT_DATABASE_URL" --workflow my-workflow --count 100
    ```
 
 **Fix: How to resolve**
@@ -810,8 +912,9 @@ These codes are emitted by the `cleat build` pipeline's static analyser
 | E018 | Error | `math/rand/v2` import | `h.Random()` |
 | E020 | Error | Durable calls in `init()` | Move to entry point |
 | E021 | Error | Non-deterministic map iteration | Sort keys before iterating |
-| W001 | Warning | Map iteration in non-critical path | Use sorted keys |
+| E021 | **Error** | Map iteration (`range` over a map) | Use sorted keys |
 | W002 | Warning | Float in control flow | Use `math.Float64bits()` |
+| W003 | Warning | Entry point takes a single `string`, so it receives the whole input JSON | Add a second parameter, or take a struct |
 
 See the full [Go Workflow Constraints](workflow-go-constraints.md#4-complete-error-code-reference)
 reference for detailed explanations of each code.
@@ -832,6 +935,20 @@ These codes classify runtime errors for retry decisions. They appear in the
 | `ErrTimeout` | `"timeout"` | Execution exceeded its deadline |
 | `ErrAmbiguous` | `"ambiguous"` | Call outcome unknown after crash; caller should check the external service before retrying |
 | `ErrRetriesExhausted` | `"retries_exhausted"` | All retry attempts were exhausted |
+| `ErrResultRejected` | `"result_rejected_by_store"` | The store refused the workflow result as it was written |
+| `ErrOperator` | `"operator"` | An operator force-failed the workflow (`POST /api/admin/instances/:id/force-fail`) without supplying an `error_code`; not derived by the engine |
+
+**This table was missing `ErrResultRejected` until 2026-09-25**, while
+`namedErrorCodes` (`engine/errors.go`) carried it — which matters because that list is what
+restricts an operator-supplied `error_code`, so the doc understated the set an operator may name.
+The authoritative list is that variable, not this table; keep the two in step by hand, since
+`ErrorCode` has no iota range to derive one from the other (`String()`'s default case exists
+precisely because `ErrorCode(99)` is a legal value).
+
+**Force-fail's `error_code` is restricted to this set** (cleat#1977, D5):
+`POST /api/admin/instances/:id/force-fail` with no `error_code` records
+`"operator"`; one naming a code from this table is stored as given; any other
+value is rejected with 400 before the row is touched.
 
 **Retry behaviour:**
 

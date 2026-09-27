@@ -1,0 +1,1 @@
+test-go/commands	2	^TestRequireHostMatchBootsAsTheAppRoleAndServesOnEveryDialect/(mysql|mssql)$	dialect-gated per SUBTEST: PostgreSQL runs, MySQL and SQL Server skip in this PostgreSQL-only job -- two. Measured by NAME with only CLEAT_TEST_POSTGRES set.

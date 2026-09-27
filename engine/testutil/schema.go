@@ -79,28 +79,306 @@ func SetupFullSchema(t *testing.T, db *sql.DB, dialect Dialect) {
 	SetupMinimalSchema(t, db, dialect)
 }
 
+// postgresCleanupTables is the set of tables CleanupPostgresTestData clears.
+//
+// Child tables first, because of the foreign keys. Kept in the same order as
+// mysqlCleanupTables and mssqlCleanupTables so the three can be diffed by eye --
+// they had drifted, and TestCleanupTableListsAgree now fails if they do again.
+var postgresCleanupTables = []string{
+	// Schema-qualified, and it must be. The table is admin.tenant_api_keys;
+	// unqualified, the name resolves through search_path ("$user", public) and
+	// what it finds depends on the database rather than on the schema. Measured
+	// 2026-09-04 across the three local instances: to_regclass returned NULL on
+	// one (so existingTables dropped the entry and cleanup skipped it) and a
+	// stray public./cleat. copy on the other two (so the DELETE hit a decoy).
+	// On none of them did the real table get cleared -- the entry 2.60d added
+	// here to stop tenant_api_keys accumulating had been inert since it landed.
+	// TestCleanupPostgresTestDataClearsAdminTenantAPIKeys is the regression.
+	"admin.tenant_api_keys",
+	"workflow_tags",
+	"workflow_routing",
+	"workflow_update_requests",
+	"workflow_promises",
+	"workflow_signals",
+	"concurrency_keys",
+	"queue_holders",
+	"idempotency_keys",
+	"event_history",
+	"workflow_memory_samples",
+	"workflow_memory_stats",
+	"workflow_schedules",
+	"workflow_instances",
+	"workflow_defs",
+	"plugin_defs",
+}
+
 // CleanupPostgresTestData deletes all rows from the cleat test tables.
 // Call before and after tests to ensure isolation from parallel tests.
+//
+// PostgreSQL only, despite having been called with MySQL and SQL Server
+// handles for a long time -- see CleanupAllTestData.
 func CleanupPostgresTestData(t *testing.T, db *sql.DB) {
 	t.Helper()
-	tables := []string{
-		"workflow_update_requests",
-		"workflow_promises",
-		"workflow_signals",
-		"concurrency_keys",
-		"idempotency_keys",
-		"event_history",
-		"workflow_memory_samples",
-		"workflow_memory_stats",
-		"workflow_schedules",
-		"workflow_instances",
-		"workflow_defs",
-	}
-	for _, table := range tables {
-		if _, err := db.Exec("DELETE FROM " + table); err != nil {
-			t.Logf("cleanup: delete from %s: %v", table, err)
+
+	// Only the tables this database actually has. SetupMinimalSchema creates a
+	// subset, so the full list is not present everywhere -- which is what the
+	// existence check is for, and is exactly what SQL Server's cleanup has
+	// always done. Without it, widening this list to match the other dialects
+	// fails every minimal-schema test on `relation "tenant_api_keys" does not
+	// exist`.
+	//
+	// This stays correct for the schema-qualified entry: to_regclass returns
+	// NULL for a missing schema as readily as for a missing table, so a
+	// minimal-schema database drops admin.tenant_api_keys from the list rather
+	// than erroring on it.
+	present := existingTables(t, db, DialectPostgres, postgresCleanupTables)
+
+	for _, table := range present {
+		if _, err := db.Exec("DELETE FROM " + table); err != nil { //nolint:gosec // G202: `table` comes from postgresCleanupTables, a package-level literal list, filtered through existingTables. Not caller input.
+			t.Fatalf("cleanup: delete from %s: %v\n\n"+
+				"This used to be a t.Logf, so a cleanup that did nothing was "+
+				"indistinguishable from one that worked, and the fixtures it "+
+				"failed to remove surfaced later as an unrelated test failing "+
+				"on a duplicate key. See IMPROVEMENT-PLAN 2.60d.", table, err)
 		}
 	}
+	assertTablesEmpty(t, db, present, func(s string) string { return s })
+}
+
+// assertTablesEmpty proves the deletes above actually removed the rows.
+//
+// An error is not the only way cleanup fails, and it is not the way that has
+// cost the most here. A DELETE issued on a connection whose rows are hidden
+// from it removes nothing and reports no error: PostgreSQL row-level security
+// filters the delete to the caller's tenant, and SQL Server applies its
+// security policy to every principal including sysadmin (§3.37, where
+// CleanupMSSQLTestData deleted nothing, reported success, and rows accumulated
+// until a later fixture collided on a primary key -- the 141-failure signature
+// in §2.71's residual).
+//
+// So the check is not "did the statement error" but "is the table empty now".
+//
+// Note what that question can and cannot tell you, because the failure message
+// used to overstate it. "Not empty now" is the OBSERVATION; "the delete removed
+// nothing" is one INFERENCE from it, and a concurrent writer inserting after a
+// delete that worked perfectly produces the same observation. The message names
+// both and gives the discriminator, because sending a reader to row-level
+// security -- the deepest subsystem here -- for a missing `-p 1` is the more
+// expensive of the two wrong turns. cleat#1013.
+// One round trip for all of them, because this runs on the order of a hundred
+// times per suite.
+//
+// quote adapts the identifier to the dialect; the caller supplies it because
+// SQL Server needs bracketed, schema-qualified names and the other two do not.
+func assertTablesEmpty(t *testing.T, db *sql.DB, tables []string, quote func(string) string) {
+	t.Helper()
+	leftover, err := nonEmptyTables(db, tables, quote)
+	if err != nil {
+		t.Fatalf("cleanup: verifying tables are empty: %v", err)
+	}
+	if len(leftover) > 0 {
+		t.Fatalf("after cleanup, %s still holds rows.\n\n"+
+			"TWO causes produce this, and they need different fixes:\n\n"+
+			"1. The DELETE removed nothing and reported no error, because the "+
+			"rows are not visible to this connection -- PostgreSQL row-level "+
+			"security filters the delete to the caller's tenant, and SQL Server "+
+			"applies its security policy to every principal including sysadmin. "+
+			"Fix: use a connection that can see every tenant's rows. See "+
+			"IMPROVEMENT-PLAN 3.37 and 2.60d.\n\n"+
+			"2. The DELETE worked and ANOTHER PACKAGE wrote these rows "+
+			"afterwards. Two database-backed packages in one `go test` "+
+			"invocation run concurrently by default, against one database, and "+
+			"this cleanup is unqualified -- so they interleave. Fix: `-p 1`.\n\n"+
+			"WHICH ONE: cause 1 is deterministic and cause 2 is not, so re-run "+
+			"the same command with `-p 1`. If it passes, it was cause 2 and no "+
+			"security policy is involved. Note that `-p 1` does NOT help across "+
+			"two concurrent `go test` PROCESSES, which is cause 2 wearing a "+
+			"disguise it cannot fix.\n\n"+
+			"This message named cause 1 alone until cleat#1013, where cause 2 "+
+			"was what happened: `go test ./engine/ ./cmd/cleat-worker/` without "+
+			"`-p 1` produced exactly this, and `-p 1` removed it. A reader sent "+
+			"to investigate row-level security for a missing flag loses hours to "+
+			"the deepest subsystem here for a problem in the command line.",
+			strings.Join(leftover, ", "))
+	}
+}
+
+// CleanupAllTestData deletes every row from the tables the given dialect's
+// cleanup knows about, dispatching to the right one.
+//
+// It exists because CleanupPostgresTestData was being called with MySQL and
+// SQL Server handles -- the name says PostgreSQL, the SQL it issued was
+// dialect-neutral, and so the mistake was invisible until the PostgreSQL
+// cleanup grew a PostgreSQL-specific query (`current_schema()`) and the MySQL
+// and SQL Server runs failed with "FUNCTION cleat.current_schema does not
+// exist". Prefer this in anything that loops over dialects.
+func CleanupAllTestData(t *testing.T, db *sql.DB, dialect Dialect) {
+	t.Helper()
+	switch dialect {
+	case DialectPostgres:
+		CleanupPostgresTestData(t, db)
+	case DialectMySQL:
+		CleanupMySQLTestData(t, db)
+	case DialectMSSQL:
+		CleanupMSSQLTestData(t, db)
+	default:
+		t.Fatalf("CleanupAllTestData: unknown dialect: %s", dialect)
+	}
+}
+
+// existingTables filters candidates down to the tables this database has,
+// preserving the caller's order (which is foreign-key order, so it matters).
+//
+// SQL Server's cleanup has always done this, one table at a time against
+// sys.tables. PostgreSQL and MySQL did not, which is why their lists could
+// only ever contain tables present in *every* schema variant -- and why the
+// PostgreSQL list had silently drifted four tables behind the other two:
+// tenant_api_keys, workflow_tags, workflow_routing and plugin_defs exist in
+// the migrated schema but not in SetupMinimalSchema's subset, so adding them
+// without this check fails every minimal-schema test.
+//
+// One query, not one per table: cleanup runs on the order of a hundred times
+// per suite.
+func existingTables(t *testing.T, db *sql.DB, dialect Dialect, candidates []string) []string {
+	t.Helper()
+
+	have := make(map[string]bool)
+
+	switch dialect {
+	case DialectPostgres:
+		// to_regclass, not information_schema.tables filtered by
+		// current_schema(). The question is "would an unqualified DELETE FROM
+		// <t> resolve", and that is decided by the whole search_path, not by
+		// the first entry on it. Filtering on current_schema() answered a
+		// different question and answered it wrongly wherever the tables live
+		// somewhere else on the path: existingTables returned nothing, cleanup
+		// deleted nothing, and -- because assertTablesEmpty verifies only the
+		// tables it was given -- nothing noticed. That is the silent no-op
+		// this whole item exists to remove, reintroduced by the check meant to
+		// support it. Caught by the Cluster job, where leftover rows surfaced
+		// as `CreateSchedule: duplicate key value violates unique constraint`.
+		// One round trip, N columns -- not one query per table. Cleanup runs on
+		// the order of a hundred times per suite, so a per-table query turned
+		// ~15 statements into ~1500 and made the engine suite visibly slower.
+		// The names are compile-time constants in this package, not input.
+		exprs := make([]string, 0, len(candidates))
+		dest := make([]any, 0, len(candidates))
+		found := make([]bool, len(candidates))
+		for i, c := range candidates {
+			exprs = append(exprs, fmt.Sprintf("to_regclass('%s') IS NOT NULL", c))
+			dest = append(dest, &found[i])
+		}
+		if err := db.QueryRow("SELECT " + strings.Join(exprs, ", ")).Scan(dest...); err != nil {
+			t.Fatalf("cleanup: resolving table names: %v", err)
+		}
+		for i, c := range candidates {
+			if found[i] {
+				have[c] = true
+			}
+		}
+	case DialectMySQL:
+		// MySQL has no search_path: a connection has exactly one default
+		// database, so this is the same question.
+		rows, err := db.Query(
+			`SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE()`)
+		if err != nil {
+			t.Fatalf("cleanup: listing tables: %v", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				t.Fatalf("cleanup: scanning table names: %v", err)
+			}
+			have[name] = true
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("cleanup: reading table names: %v", err)
+		}
+	case DialectMSSQL:
+		// Schema-aware, not name-alone. sys.tables is keyed on name, so an
+		// unqualified lookup happily finds a table in another schema that an
+		// unqualified DELETE would then fail to resolve -- the trap
+		// CleanupMSSQLTestData records for admin.tenant_api_keys. Candidates
+		// here are unqualified, so they mean dbo.
+		rows, err := db.Query(`SELECT t.name FROM sys.tables t
+			JOIN sys.schemas s ON t.schema_id = s.schema_id
+			WHERE s.name = 'dbo'`)
+		if err != nil {
+			t.Fatalf("cleanup: listing tables: %v", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				t.Fatalf("cleanup: scanning table names: %v", err)
+			}
+			have[name] = true
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("cleanup: reading table names: %v", err)
+		}
+	default:
+		t.Fatalf("existingTables: unsupported dialect %s", dialect)
+	}
+
+	present := make([]string, 0, len(candidates))
+	for _, c := range candidates {
+		if have[c] {
+			present = append(present, c)
+		}
+	}
+
+	// None of them present means the schema is not where this connection can
+	// see it, not that there is nothing to clean. Returning an empty list
+	// would make cleanup a silent no-op and the emptiness check vacuous --
+	// both would report success having done nothing, which is precisely the
+	// failure 2.60d is about.
+	if len(present) == 0 {
+		t.Fatalf("cleanup: none of the %d expected tables are visible to this "+
+			"connection.\n\nThe schema is not on this connection's search path. "+
+			"Cleaning nothing and reporting success is how fixtures leak into "+
+			"the next test; see IMPROVEMENT-PLAN 2.60d.", len(candidates))
+	}
+	return present
+}
+
+// nonEmptyTables returns "<table>=<count>" for every table that still has rows.
+//
+// Split out from assertTablesEmpty so the check itself can be tested: a helper
+// whose only failure path is t.Fatalf cannot be shown to fire without failing
+// the test that proves it. See TestNonEmptyTablesSeesRowsCleanupMissed.
+func nonEmptyTables(db *sql.DB, tables []string, quote func(string) string) ([]string, error) {
+	if len(tables) == 0 {
+		return nil, nil
+	}
+
+	parts := make([]string, 0, len(tables))
+	for _, table := range tables {
+		// The table names are compile-time constants in this package, not
+		// input, so there is nothing here to inject.
+		parts = append(parts, fmt.Sprintf(
+			"SELECT '%s' AS t, COUNT(*) AS n FROM %s", table, quote(table)))
+	}
+
+	rows, err := db.Query(strings.Join(parts, " UNION ALL "))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var leftover []string
+	for rows.Next() {
+		var name string
+		var n int
+		if err := rows.Scan(&name, &n); err != nil {
+			return nil, err
+		}
+		if n > 0 {
+			leftover = append(leftover, fmt.Sprintf("%s=%d", name, n))
+		}
+	}
+	return leftover, rows.Err()
 }
 
 // CleanupTestData deletes test data matching the given runID pattern
@@ -119,13 +397,45 @@ func CleanupTestData(t *testing.T, db *sql.DB, dialect Dialect, runID string) {
 	default:
 		t.Fatalf("cleanup test data: unknown dialect: %s", dialect)
 	}
-	_, _ = db.Exec(`DELETE FROM event_history WHERE workflow_id LIKE `+p, runID)
-	_, _ = db.Exec(`DELETE FROM workflow_signals WHERE workflow_id LIKE `+p, runID)
-	_, _ = db.Exec(`DELETE FROM workflow_promises WHERE workflow_id LIKE `+p, runID)
-	_, _ = db.Exec(`DELETE FROM concurrency_keys WHERE workflow_id LIKE `+p, runID)
-	_, _ = db.Exec(`DELETE FROM idempotency_keys WHERE workflow_id LIKE `+p, runID)
-	_, _ = db.Exec(`DELETE FROM workflow_update_requests WHERE workflow_id LIKE `+p, runID)
-	_, _ = db.Exec(`DELETE FROM workflow_instances WHERE id LIKE `+p, runID)
+	// These seven are exactly the tables a workflow ID can select rows in: six
+	// carry a workflow_id column and workflow_instances carries it as `id`.
+	// The other eight tables the blanket cleanups clear are keyed by name or
+	// tenant (workflow_defs, plugin_defs, workflow_schedules, workflow_tags,
+	// tenant_api_keys, workflow_memory_stats) or by a surrogate id unrelated
+	// to any workflow (workflow_routing, workflow_memory_samples), so they
+	// cannot be scoped this way at all. Measured 2026-08-31 against the
+	// PostgreSQL schema; this is a complete list, not a partial one.
+	deletes := []struct{ table, where string }{
+		{"event_history", "workflow_id LIKE " + p},
+		{"workflow_signals", "workflow_id LIKE " + p},
+		{"workflow_promises", "workflow_id LIKE " + p},
+		{"concurrency_keys", "workflow_id LIKE " + p},
+		{"idempotency_keys", "workflow_id LIKE " + p},
+		{"workflow_update_requests", "workflow_id LIKE " + p},
+		{"workflow_instances", "id LIKE " + p},
+	}
+
+	names := make([]string, 0, len(deletes))
+	for _, d := range deletes {
+		names = append(names, d.table)
+	}
+	present := make(map[string]bool)
+	for _, n := range existingTables(t, db, dialect, names) {
+		present[n] = true
+	}
+
+	for _, d := range deletes {
+		if !present[d.table] {
+			continue
+		}
+		// Errors were discarded here with `_, _ =`, so a cleanup that failed
+		// outright was indistinguishable from one that worked -- the same
+		// defect IMPROVEMENT-PLAN 2.60d records for the blanket cleanups,
+		// which this helper did not get when they were fixed.
+		if _, err := db.Exec("DELETE FROM "+d.table+" WHERE "+d.where, runID); err != nil { //nolint:gosec // G202: d.table and d.where come from the `deletes` literal declared in this function; runID is bound as an argument.
+			t.Fatalf("cleanup: delete from %s where %s: %v", d.table, d.where, err)
+		}
+	}
 }
 
 // TestDB opens a database connection for the given dialect using environment
@@ -155,7 +465,10 @@ func TestDB(t *testing.T, dialect Dialect) *sql.DB {
 	var configured bool
 	switch dialect {
 	case DialectPostgres:
-		dsn = PostgresTestDSN()
+		// Tagged so this process can tell its own sessions from another
+		// process's -- see foreign_sessions.go. PostgreSQL is the only one of
+		// the three that does not tell the server our pid by itself.
+		dsn = tagPostgresDSN(PostgresTestDSN())
 		driverName = "postgres"
 		configured = os.Getenv("CLEAT_TEST_POSTGRES") != "" || os.Getenv("CLEAT_TEST_DB") != ""
 	case DialectMySQL:
@@ -200,7 +513,74 @@ func TestDB(t *testing.T, dialect Dialect) *sql.DB {
 		return nil
 	}
 	SetupMinimalSchema(t, db, dialect)
+	SampleForeignSessionsAtStart(dialect)
+	// Order matters: refuse BEFORE arranging the at-failure report. If another
+	// client was already here, this run's failures are not evidence about this
+	// run, so there is nothing worth reporting on them (cleat#982).
+	RefuseIfForeignSessionsAtStart(t, dialect)
+	ReportForeignSessionsOnFailure(t, dialect)
 	return db
+}
+
+// ReportForeignSessionsOnFailure arranges for the identity of every OTHER
+// client process attached to this test database to be printed if -- and only
+// if -- the test fails.
+//
+// This is cleat#982's missing datum. That issue is four failures of the shape
+// "the row was not there", and the one mechanism measured as sufficient to
+// produce all of them is a second process running the unqualified
+// `DELETE FROM` that every cleanup helper issues. Whether that is what actually
+// happened was never established, because the connections are gone by the time
+// anyone reads the failure. The instrument built for it fired zero times in
+// eight runs -- the right instrument, never pointed at the event.
+//
+// Registering on FAILURE is what makes it affordable enough to leave on
+// permanently, and leaving it on permanently is the point: the flake is rare,
+// load-dependent, and has never been reproduced on demand, so the only way to
+// catch it is to already be watching. A passing test pays one t.Cleanup
+// closure and runs no query at all.
+//
+// It reports; it does not fail. A foreign session is not by itself wrong --
+// two suites can legitimately share a server -- and a test that failed for an
+// unrelated reason should not acquire a second, confusing failure. What it
+// removes is the guesswork: the next time this family appears, the failure says
+// whether anyone else was there.
+func ReportForeignSessionsOnFailure(t *testing.T, dialect Dialect) {
+	t.Helper()
+	t.Cleanup(func() {
+		if !t.Failed() {
+			return
+		}
+		foreign, basis, ok := ForeignSessions(dialect)
+		switch {
+		case !ok:
+			// Say this plainly and never as an all-clear. The first version of
+			// this printed "no other client process was attached" when the
+			// query had not run at all, which is the reassuring sentence and
+			// was evidence of nothing.
+			t.Logf("cleat#982 probe (%s): COULD NOT TELL who else was attached when this "+
+				"test failed -- %s", dialect, basis)
+		case len(foreign) == 0:
+			t.Logf("cleat#982 probe (%s): no other client process was attached to this "+
+				"test database when this test failed.\n  basis: %s\n"+
+				"  at the first TestDB call in this process: %s\n"+
+				"  (this is a sample, not a watch: a process that attached, wiped and left "+
+				"between those two points is invisible to both)",
+				dialect, basis, ForeignSessionsAtStart(dialect))
+		default:
+			t.Logf("cleat#982 probe (%s): %d OTHER client process session(s) were attached to "+
+				"this test database when this test failed.\n"+
+				"  basis: %s\n"+
+				"  at the first TestDB call in this process: %s\n"+
+				"  %s\n\n"+
+				"  Every cleanup helper here is an unqualified DELETE FROM across every table, so a "+
+				"second process running this suite deletes this one's fixtures mid-test. That is "+
+				"measured as SUFFICIENT to produce failures of the shape \"the row was not there\". "+
+				"It is not proof that it is what happened -- a reader can be attached and harmless -- "+
+				"but it is the fact cleat#982 could never recover after the fact.",
+				dialect, len(foreign), basis, ForeignSessionsAtStart(dialect), strings.Join(foreign, "\n  "))
+		}
+	})
 }
 
 // redactDSN strips the password from a DSN so it can appear in test output.
@@ -223,6 +603,30 @@ func redactDSN(dsn string) string {
 // callers that need a second, differently-privileged connection to the same
 // test database (see OpenPostgresRLSTestDB) can derive it without
 // duplicating the env var precedence.
+//
+// The returned DSN carries application_name, and that is load-bearing rather
+// than decoration. The #982 gate identifies our own PostgreSQL sessions by
+// application_name and nothing else, because PostgreSQL does not hand the
+// client's pid to the server (see tagPostgresDSN). A caller that opens a
+// connection from an untagged DSN is therefore reported as a stranger, and
+// that is not hypothetical: a scratch-database admin connection in
+// plugins/kvstore -- which has to attach to some OTHER database to run
+// DROP DATABASE, since you cannot drop the one you are attached to -- failed
+// Test Go (plugins) on cleat#1498, a PR touching only migration/.
+//
+// The tag sits HERE, in the constructor, rather than at the call sites,
+// because 13 files build connections from this function and every one of them
+// would otherwise have to remember. Three sites inside this package already
+// wrapped the result in tagPostgresDSN; the wrap is idempotent (it returns the
+// DSN unchanged when application_name is already set), so those keep working.
+//
+// This is deliberately NOT a new exemption in the gate's predicate. The gate
+// has now refused three legitimate connections -- an autovacuum worker
+// (cleat#1478), a sibling package binary (cleat#1483), and this -- and each
+// time the tempting fix was to widen what it ignores. Widening is how the
+// sibling fix came to swallow the probe's own positive control. Making our
+// connections identifiable keeps the predicate narrow: anything still
+// untagged really is someone else.
 func PostgresTestDSN() string {
 	dsn := os.Getenv("CLEAT_TEST_POSTGRES")
 	if dsn == "" {
@@ -231,7 +635,7 @@ func PostgresTestDSN() string {
 	if dsn == "" {
 		dsn = "postgres://localhost:5432/cleat?sslmode=disable"
 	}
-	return dsn
+	return tagPostgresDSN(dsn)
 }
 
 // PostgresRLSTestRole is a fixed, low-privilege PostgreSQL role used by
@@ -258,7 +662,7 @@ const PostgresRLSTestRole = "cleat_rls_test_role"
 // PostgresRLSTestRole. This role only ever exists inside ephemeral test
 // databases (CLEAT_TEST_DB/CLEAT_TEST_POSTGRES), never a real deployment,
 // so a hardcoded password is fine.
-const postgresRLSTestPassword = "cleat-rls-test-role-password"
+const postgresRLSTestPassword = "cleat-rls-test-role-password" //nolint:gosec // G101: a fixed login password for a role that only ever exists inside ephemeral test databases, never a real deployment. The comment above explains why that is fine.
 
 // SetupPostgresRLSRole ensures PostgresRLSTestRole exists and can perform
 // ordinary DML (SELECT/INSERT/UPDATE/DELETE) against every table in the
@@ -273,17 +677,76 @@ const postgresRLSTestPassword = "cleat-rls-test-role-password"
 func SetupPostgresRLSRole(t *testing.T, db *sql.DB) {
 	t.Helper()
 	stmts := []string{
+		// CREATE first, catch the collision -- not IF NOT EXISTS, which is
+		// check-then-act and therefore a race.
+		//
+		// A PostgreSQL role is CLUSTER-wide, not per-database, so every package
+		// that wants it contends on one object however many databases are in
+		// play. Two sessions both saw "not exists" and both issued CREATE ROLE;
+		// the loser got
+		//
+		//   pq: duplicate key value violates unique constraint
+		//       "pg_authid_rolname_index" (23505)
+		//
+		// in CI's `Test Go (commands)` entry, which runs ./cmd/... with
+		// packages in parallel. Intermittent by nature: it passed for hours
+		// after the caller that made it reachable landed (cleat#1209).
+		//
+		// Both conditions are caught because PostgreSQL raises either
+		// depending on where in the create the collision is detected:
+		// duplicate_object (42710) from the command's own check, or
+		// unique_violation (23505) from the index, which is what CI hit.
 		`DO $$
 		BEGIN
-			IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '` + PostgresRLSTestRole + `') THEN
-				CREATE ROLE ` + PostgresRLSTestRole + ` LOGIN PASSWORD '` + postgresRLSTestPassword + `' NOSUPERUSER NOCREATEDB NOCREATEROLE;
-			END IF;
+			CREATE ROLE ` + PostgresRLSTestRole + ` LOGIN PASSWORD '` + postgresRLSTestPassword + `' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+		EXCEPTION
+			WHEN duplicate_object OR unique_violation THEN
+				-- Another session created it first. That is the outcome this
+				-- wanted; nothing to do.
+				NULL;
 		END $$;`,
 		`GRANT USAGE ON SCHEMA public TO ` + PostgresRLSTestRole,
 		`GRANT USAGE ON SCHEMA cleat TO ` + PostgresRLSTestRole,
 		`GRANT EXECUTE ON FUNCTION cleat.assert_tenant_set() TO ` + PostgresRLSTestRole,
 		`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ` + PostgresRLSTestRole,
 		`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ` + PostgresRLSTestRole,
+
+		// ONE FUNCTION IN admin, NOT THE SCHEMA'S CONTENTS. This role exists to
+		// model a worker that RLS actually applies to, and a worker calls
+		// admin.in_flight_workflow_ids() -- migration 073, cleat#1528 -- so a
+		// test that cannot is modelling something else. USAGE on the schema is
+		// required to reach any function in it; the EXECUTE grant is named
+		// rather than `ON ALL FUNCTIONS`, because admin also holds
+		// admin.drop_tenant, and a blanket grant here would hand this role the
+		// capability cleat#1365 was filed to take away from tenant roles.
+		// MEMBERSHIP IN cleat_sweep, WITH INHERIT FALSE -- and the inheritance
+		// half is the point, not boilerplate. beginTenantTx issues
+		// `SET LOCAL ROLE cleat_sweep` for a plugin.AcrossAllTenants sweep
+		// (cleat#1490), which requires membership; without it every
+		// cross-tenant plugin test fails with "permission denied to set role".
+		//
+		// WITH INHERIT FALSE because a plain GRANT applies the sweep's
+		// `USING (true)` policy to this role PASSIVELY -- PostgreSQL matches a
+		// `TO role` policy on membership alone, no SET ROLE needed. Measured:
+		// plain GRANT let the role read all 400000 rows of a 400-tenant table
+		// with no error and the correct number of policies; WITH INHERIT FALSE
+		// returned its own 1000. A test harness that granted it the easy way
+		// would make every tenant-isolation test in this package unable to
+		// fail.
+		`DO $$ BEGIN
+			IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'cleat_sweep') THEN
+				EXECUTE 'GRANT cleat_sweep TO ` + PostgresRLSTestRole + ` WITH INHERIT FALSE';
+			END IF;
+		END $$;`,
+		`GRANT USAGE ON SCHEMA admin TO ` + PostgresRLSTestRole,
+		`DO $$ BEGIN
+			IF EXISTS (
+				SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+				WHERE n.nspname = 'admin' AND p.proname = 'in_flight_workflow_ids'
+			) THEN
+				EXECUTE 'GRANT EXECUTE ON FUNCTION admin.in_flight_workflow_ids() TO ` + PostgresRLSTestRole + `';
+			END IF;
+		END $$;`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -314,7 +777,31 @@ func PostgresRLSDSN(superuserDSN string) (string, error) {
 func OpenPostgresRLSTestDB(t *testing.T, superuserDB *sql.DB) *sql.DB {
 	t.Helper()
 	SetupPostgresRLSRole(t, superuserDB)
-	dsn, err := PostgresRLSDSN(PostgresTestDSN())
+
+	// Connect to the database superuserDB is actually on, not to whatever
+	// PostgresTestDSN names.
+	//
+	// Those were the same database until SuiteTestDB existed, so deriving the
+	// DSN from the environment worked by coincidence. It is wrong in two ways
+	// once a caller is on a per-suite database: the returned connection lands
+	// in a DIFFERENT database from the one SetupPostgresRLSRole just granted
+	// on -- PostgreSQL grants are per-database, the role is only cluster-wide
+	// -- and every write through it goes to the shared database, which is the
+	// cross-package interference the per-suite databases exist to remove.
+	//
+	// Measured: after cmd/cleat-worker moved to SuiteTestDB, its
+	// TestTenantIsolationOverHTTP_Postgres kept failing in concurrent runs
+	// because this function was still pointing it at the shared database.
+	// cleat#1013.
+	var dbName string
+	if err := superuserDB.QueryRow(`SELECT current_database()`).Scan(&dbName); err != nil {
+		t.Fatalf("reading the database superuserDB is connected to: %v", err)
+	}
+	base, err := swapDatabaseName(PostgresTestDSN(), dbName)
+	if err != nil {
+		t.Fatalf("building a DSN for %s: %v", dbName, err)
+	}
+	dsn, err := PostgresRLSDSN(base)
 	if err != nil {
 		t.Fatalf("derive RLS test role DSN: %v", err)
 	}

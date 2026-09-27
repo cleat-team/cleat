@@ -1,0 +1,126 @@
+{
+  "what": "Behavioural cases for await_signals_with_quorum, shared by every SDK.",
+  "why": [
+    "cleat#1132 was one defect written five times: every SDK passed the FULL name",
+    "set to await_signals_ms on every iteration, so a quorum counted deliveries",
+    "rather than distinct voters. Five copies of one algorithm cannot share an",
+    "implementation, so the fix is a sweep -- but the reason it went wrong five",
+    "times identically, and stayed wrong, is that nothing compared the SDKs.",
+    "This file is that comparison: one table, consumed by each SDK's own test",
+    "runner, so the next divergence fails somewhere rather than nowhere."
+  ],
+  "how": [
+    "Each case drives the SDK's quorum loop against a scripted host and asserts",
+    "what the loop ASKED FOR on each iteration -- awaited_sets -- not only what",
+    "it returned. The narrowing is the mechanism; a test that checks only the",
+    "outcome passes against an implementation that fails for an unrelated reason.",
+    "",
+    "host modes, and both are needed:",
+    "  polite   -- delivers a queued name only while that name is still awaited,",
+    "              which is what the engine's own DurableAwaitSignals does. This",
+    "              exercises the NARROWING: a repeated name is never handed over",
+    "              a second time, so the quorum fails as a timeout.",
+    "  impolite -- delivers whatever is queued, ignoring the awaited set. This",
+    "              exercises the OUT-OF-SET GUARD. A fix that rests only on the",
+    "              polite case is a fix that rests on the host's manners.",
+    "",
+    "error_kind is a semantic tag, never a message. The five SDKs word their",
+    "errors differently and always will; each test maps a kind to its own",
+    "substring. Asserting the string here would make this file a translation",
+    "table instead of a behavioural one."
+  ],
+  "error_kinds": {
+    "unsatisfiable": "min_count exceeds the size of the name set -- arithmetic forbids it",
+    "timeout": "the deadline passed, or the host reported timed_out, short of quorum",
+    "out_of_set": "the host delivered a name that is no longer awaited",
+    "rejections": "more than max_rejections payloads carried {\"rejected\": true}"
+  },
+  "cases": [
+    {
+      "name": "one_name_voting_repeatedly_does_not_satisfy_a_quorum",
+      "why": "The defect itself: three deliveries of alpha satisfied a quorum of three with beta and gamma never sent.",
+      "signal_names": ["alpha", "beta", "gamma"],
+      "min_count": 3,
+      "max_rejections": -1,
+      "host": "impolite",
+      "deliveries": ["alpha", "alpha", "alpha"],
+      "expect": {
+        "outcome": "error",
+        "error_kind": "out_of_set",
+        "awaited_sets": [["alpha", "beta", "gamma"], ["beta", "gamma"]]
+      }
+    },
+    {
+      "name": "against_a_polite_host_the_repeated_name_is_never_delivered_again",
+      "why": "Same queue, a host that only delivers what is awaited. It must fail as a TIMEOUT: reaching the out-of-set guard here would mean the set had not narrowed.",
+      "signal_names": ["alpha", "beta", "gamma"],
+      "min_count": 3,
+      "max_rejections": -1,
+      "host": "polite",
+      "deliveries": ["alpha", "alpha", "alpha"],
+      "expect": {
+        "outcome": "error",
+        "error_kind": "timeout",
+        "awaited_sets": [["alpha", "beta", "gamma"], ["beta", "gamma"]]
+      }
+    },
+    {
+      "name": "three_distinct_names_satisfy_a_quorum_of_three",
+      "why": "The partner case. Without it, 'three copies do not satisfy' is also true of an implementation that never satisfies a quorum at all.",
+      "signal_names": ["alpha", "beta", "gamma"],
+      "min_count": 3,
+      "max_rejections": -1,
+      "host": "polite",
+      "deliveries": ["beta", "gamma", "alpha"],
+      "expect": {
+        "outcome": "ok",
+        "result_names": ["beta", "gamma", "alpha"],
+        "awaited_sets": [["alpha", "beta", "gamma"], ["alpha", "gamma"], ["alpha"]]
+      }
+    },
+    {
+      "name": "a_quorum_larger_than_its_name_set_is_refused_rather_than_timing_out",
+      "why": "Arithmetic forbids it, so it is a caller error, not a slow sender. It used to spin to the deadline and report 'got 0/4 signals'. awaited_sets is empty: the refusal must happen before any await.",
+      "signal_names": ["alpha", "beta"],
+      "min_count": 4,
+      "max_rejections": -1,
+      "host": "polite",
+      "deliveries": [],
+      "expect": {
+        "outcome": "error",
+        "error_kind": "unsatisfiable",
+        "awaited_sets": []
+      }
+    },
+    {
+      "name": "narrowing_does_not_edit_the_callers_name_set",
+      "why": "The narrowing must copy. The caller's collection may still be held by the workflow, and editing it in place is a defect the outcome cannot show.",
+      "signal_names": ["alpha", "beta", "gamma"],
+      "min_count": 2,
+      "max_rejections": -1,
+      "host": "polite",
+      "deliveries": ["beta", "alpha"],
+      "expect": {
+        "outcome": "ok",
+        "result_names": ["beta", "alpha"],
+        "awaited_sets": [["alpha", "beta", "gamma"], ["alpha", "gamma"]],
+        "caller_set_unchanged": true
+      }
+    },
+    {
+      "name": "a_rejecting_voter_has_voted_and_leaves_the_set",
+      "why": "A rejection narrows too. max_rejections is 1 and alpha rejects twice, so an implementation that does NOT narrow counts two rejections and fails with kind 'rejections'. One that narrows never asks for alpha again, so the impolite second delivery is refused by the out-of-set guard instead. The two kinds are the discriminator: this case cannot be passed by accident.",
+      "signal_names": ["alpha", "beta", "gamma"],
+      "min_count": 3,
+      "max_rejections": 1,
+      "host": "impolite",
+      "deliveries": ["alpha", "alpha"],
+      "payloads": {"alpha": "{\"rejected\": true}"},
+      "expect": {
+        "outcome": "error",
+        "error_kind": "out_of_set",
+        "awaited_sets": [["alpha", "beta", "gamma"], ["beta", "gamma"]]
+      }
+    }
+  ]
+}

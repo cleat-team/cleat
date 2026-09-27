@@ -1094,9 +1094,8 @@ func TestChildWorkflowTypedFallsBackToChildWorkflow(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDurableCallTypedWithHeartbeatMarshalsAndUnmarshals(t *testing.T) {
-	progressCalled := false
 	h := NewHostCalls(HostCallsOptions{
-		DurableCallWithHeartbeat: func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error) {
+		DurableCallWithHeartbeat: func(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error) {
 			if service != "svc" || operation != "op" {
 				t.Errorf("unexpected service/operation: %s.%s", service, operation)
 			}
@@ -1105,10 +1104,6 @@ func TestDurableCallTypedWithHeartbeatMarshalsAndUnmarshals(t *testing.T) {
 			}
 			if heartbeatInterval != time.Second {
 				t.Errorf("unexpected heartbeatInterval: %v", heartbeatInterval)
-			}
-			if onProgress != nil {
-				onProgress(`{"pct":50}`)
-				progressCalled = true
 			}
 			return `{"result":"ok"}`, nil
 		},
@@ -1121,28 +1116,23 @@ func TestDurableCallTypedWithHeartbeatMarshalsAndUnmarshals(t *testing.T) {
 		Result string `json:"result"`
 	}
 	var resp MyResp
-	err := h.DurableCallTypedWithHeartbeat("svc", "op", MyReq{Data: "hello"}, &resp, time.Second, func(s string) {
-		progressCalled = true
-	})
+	err := h.DurableCallTypedWithHeartbeat("svc", "op", MyReq{Data: "hello"}, &resp, time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if resp.Result != "ok" {
 		t.Errorf("expected result 'ok', got %q", resp.Result)
 	}
-	if !progressCalled {
-		t.Error("expected onProgress to be called")
-	}
 }
 
 func TestDurableCallTypedWithHeartbeatNilResult(t *testing.T) {
 	h := NewHostCalls(HostCallsOptions{
-		DurableCallWithHeartbeat: func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error) {
+		DurableCallWithHeartbeat: func(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error) {
 			return `{"result":"ok"}`, nil
 		},
 	})
 	// Passing nil result should not panic or error.
-	err := h.DurableCallTypedWithHeartbeat("svc", "op", map[string]string{"key": "val"}, nil, time.Second, nil)
+	err := h.DurableCallTypedWithHeartbeat("svc", "op", map[string]string{"key": "val"}, nil, time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error with nil result: %v", err)
 	}
@@ -1158,7 +1148,7 @@ func TestDurableCallTypedWithHeartbeatFallsBackToDurableCall(t *testing.T) {
 		Result string `json:"result"`
 	}
 	var resp MyResp
-	err := h.DurableCallTypedWithHeartbeat("svc", "op", map[string]string{}, &resp, time.Second, nil)
+	err := h.DurableCallTypedWithHeartbeat("svc", "op", map[string]string{}, &resp, time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1334,12 +1324,20 @@ func TestDurableCallTypedWithOptionsDelegates(t *testing.T) {
 		},
 	})
 
-	err := h.DurableCallTypedWithOptions(CallOptions{Timeout: time.Second}, "svc", "op", map[string]string{}, nil)
+	// The marker is Retry because cleat#1424 removed MaxResponseSize, which
+	// this test used for the same purpose. What is asserted is DELEGATION --
+	// that the options reach the hook unchanged -- so any distinguishable
+	// value serves; it was never a claim that either field did anything.
+	marker := &RetryPolicy{MaxAttempts: 7}
+	err := h.DurableCallTypedWithOptions(CallOptions{Retry: marker}, "svc", "op", map[string]string{}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if capturedOpts.Timeout != time.Second {
-		t.Errorf("expected timeout 1s, got %v", capturedOpts.Timeout)
+	if capturedOpts.Retry == nil {
+		t.Fatalf("the hook received CallOptions with a nil Retry; the options did not survive delegation")
+	}
+	if capturedOpts.Retry.MaxAttempts != 7 {
+		t.Errorf("expected the delegated Retry.MaxAttempts to be 7, got %d", capturedOpts.Retry.MaxAttempts)
 	}
 }
 
@@ -1569,33 +1567,34 @@ func TestRejectPromiseNotInitialized(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRunDetachedDelegates(t *testing.T) {
-	var fnCalled bool
-	var hc HostCalls
-	hc = NewHostCalls(HostCallsOptions{
-		RunDetached: func(fn func(h HostCalls) error) error {
-			fnCalled = true
-			return fn(hc)
+	var gotName, gotInput string
+	hc := NewHostCalls(HostCallsOptions{
+		RunDetached: func(name, inputJSON string) error {
+			gotName, gotInput = name, inputJSON
+			return nil
 		},
 	})
 
-	err := hc.RunDetached(func(h HostCalls) error {
-		return nil
-	})
-	if err != nil {
+	if err := hc.RunDetached("reconcile", `{"id":7}`); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !fnCalled {
-		t.Error("expected RunDetached function to be called")
+	if gotName != "reconcile" || gotInput != `{"id":7}` {
+		t.Errorf("RunDetached passed (%q, %q), want (\"reconcile\", `{\"id\":7}`)",
+			gotName, gotInput)
 	}
 }
 
-func TestRunDetachedNotInitialized(t *testing.T) {
+func TestRunDetachedNotInitializedReturnsAnError(t *testing.T) {
+	// This test previously asserted the opposite -- "expected no error when not
+	// initialized" -- and so encoded the defect as the contract. RunDetached
+	// took a closure, which cannot cross the ABI, so in every compiled workflow
+	// the field was nil, the method returned nil, and nothing was started. A
+	// caller had no way to tell that from success.
 	h := NewHostCalls(HostCallsOptions{})
-	err := h.RunDetached(func(h HostCalls) error {
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("expected no error when not initialized, got: %v", err)
+	err := h.RunDetached("reconcile", "{}")
+	if err == nil {
+		t.Fatal("RunDetached returned nil with no runtime wired; an uninitialized " +
+			"host call must report failure rather than silently start nothing")
 	}
 }
 
@@ -1823,99 +1822,6 @@ func TestSagaAddParallelCompensatesOnFailure(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// DurableCallWithOptions — Timeout paths
-// ---------------------------------------------------------------------------
-
-func TestDurableCallWithOptions_TimeoutFires(t *testing.T) {
-	started := make(chan struct{})
-	h := NewHostCalls(HostCallsOptions{
-		DurableCall: func(_, _, _ string) (string, error) {
-			close(started)
-			time.Sleep(10 * time.Second)
-			return "ok", nil
-		},
-		DurableSleep: func(ms int64) {},
-	})
-
-	_, err := h.DurableCallWithOptions(CallOptions{Timeout: 5 * time.Millisecond}, "svc", "op", `{}`)
-	if err == nil {
-		t.Fatal("expected timeout error, got nil")
-	}
-	var timeoutErr *CallTimeoutError
-	if !errors.As(err, &timeoutErr) {
-		t.Fatalf("expected *CallTimeoutError, got %T: %v", err, err)
-	}
-	if timeoutErr.Service != "svc" || timeoutErr.Operation != "op" {
-		t.Errorf("unexpected service/operation: %s.%s", timeoutErr.Service, timeoutErr.Operation)
-	}
-	if timeoutErr.Timeout != 5*time.Millisecond {
-		t.Errorf("expected timeout %v, got %v", 5*time.Millisecond, timeoutErr.Timeout)
-	}
-}
-
-func TestDurableCallWithOptions_TimeoutDoesNotFire(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{
-		DurableCall: func(_, _, _ string) (string, error) {
-			return "quick_result", nil
-		},
-		DurableSleep: func(ms int64) {},
-	})
-
-	resp, err := h.DurableCallWithOptions(CallOptions{Timeout: time.Second}, "svc", "op", `{}`)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if resp != "quick_result" {
-		t.Errorf("expected %q, got %q", "quick_result", resp)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// DurableCallWithOptions — StartToCloseTimeout paths
-// ---------------------------------------------------------------------------
-
-func TestDurableCallWithOptions_StartToCloseTimeoutFires(t *testing.T) {
-	started := make(chan struct{})
-	h := NewHostCalls(HostCallsOptions{
-		DurableCall: func(_, _, _ string) (string, error) {
-			close(started)
-			time.Sleep(10 * time.Second)
-			return "ok", nil
-		},
-		DurableSleep: func(ms int64) {},
-	})
-
-	_, err := h.DurableCallWithOptions(CallOptions{StartToCloseTimeout: 5 * time.Millisecond}, "svc", "op", `{}`)
-	if err == nil {
-		t.Fatal("expected timeout error, got nil")
-	}
-	var timeoutErr *CallTimeoutError
-	if !errors.As(err, &timeoutErr) {
-		t.Fatalf("expected *CallTimeoutError, got %T: %v", err, err)
-	}
-	if timeoutErr.Timeout != 5*time.Millisecond {
-		t.Errorf("expected timeout %v, got %v", 5*time.Millisecond, timeoutErr.Timeout)
-	}
-}
-
-func TestDurableCallWithOptions_StartToCloseTimeoutDoesNotFire(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{
-		DurableCall: func(_, _, _ string) (string, error) {
-			return "fast_result", nil
-		},
-		DurableSleep: func(ms int64) {},
-	})
-
-	resp, err := h.DurableCallWithOptions(CallOptions{StartToCloseTimeout: time.Second}, "svc", "op", `{}`)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if resp != "fast_result" {
-		t.Errorf("expected %q, got %q", "fast_result", resp)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // DurableCallWithOptions — host-side DurableCallWithRetry delegation
 // ---------------------------------------------------------------------------
 
@@ -2031,101 +1937,6 @@ func TestDurableCallJSONWithOptions_NotInitialized(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "not initialized") {
 		t.Errorf("expected 'not initialized' error, got: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// DurableCallTypedWithOptions — Timeout path
-// ---------------------------------------------------------------------------
-
-func TestDurableCallTypedWithOptions_TimeoutFires(t *testing.T) {
-	started := make(chan struct{})
-	h := NewHostCalls(HostCallsOptions{
-		DurableCall: func(_, _, _ string) (string, error) {
-			close(started)
-			time.Sleep(10 * time.Second)
-			return "ok", nil
-		},
-		DurableSleep: func(ms int64) {},
-	})
-
-	err := h.DurableCallTypedWithOptions(CallOptions{Timeout: 5 * time.Millisecond}, "svc", "op", map[string]string{"k": "v"}, nil)
-	if err == nil {
-		t.Fatal("expected timeout error, got nil")
-	}
-	var timeoutErr *CallTimeoutError
-	if !errors.As(err, &timeoutErr) {
-		t.Fatalf("expected *CallTimeoutError, got %T: %v", err, err)
-	}
-	if timeoutErr.Timeout != 5*time.Millisecond {
-		t.Errorf("expected timeout %v, got %v", 5*time.Millisecond, timeoutErr.Timeout)
-	}
-}
-
-func TestDurableCallTypedWithOptions_TimeoutDoesNotFire(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{
-		DurableCall: func(_, _, _ string) (string, error) {
-			return `{"result":"ok"}`, nil
-		},
-		DurableSleep: func(ms int64) {},
-	})
-
-	type MyResult struct {
-		Result string `json:"result"`
-	}
-	var res MyResult
-	err := h.DurableCallTypedWithOptions(CallOptions{Timeout: time.Second}, "svc", "op", map[string]string{"k": "v"}, &res)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if res.Result != "ok" {
-		t.Errorf("expected result 'ok', got %q", res.Result)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// DurableCallTypedWithOptions — StartToCloseTimeout path (no retry)
-// ---------------------------------------------------------------------------
-
-func TestDurableCallTypedWithOptions_StartToCloseTimeoutFires(t *testing.T) {
-	started := make(chan struct{})
-	h := NewHostCalls(HostCallsOptions{
-		DurableCall: func(_, _, _ string) (string, error) {
-			close(started)
-			time.Sleep(10 * time.Second)
-			return "ok", nil
-		},
-		DurableSleep: func(ms int64) {},
-	})
-
-	err := h.DurableCallTypedWithOptions(CallOptions{StartToCloseTimeout: 5 * time.Millisecond}, "svc", "op", map[string]string{}, nil)
-	if err == nil {
-		t.Fatal("expected timeout error, got nil")
-	}
-	var timeoutErr *CallTimeoutError
-	if !errors.As(err, &timeoutErr) {
-		t.Fatalf("expected *CallTimeoutError, got %T: %v", err, err)
-	}
-}
-
-func TestDurableCallTypedWithOptions_StartToCloseTimeoutDoesNotFire(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{
-		DurableCall: func(_, _, _ string) (string, error) {
-			return `{"result":"ok"}`, nil
-		},
-		DurableSleep: func(ms int64) {},
-	})
-
-	type MyResult struct {
-		Result string `json:"result"`
-	}
-	var res MyResult
-	err := h.DurableCallTypedWithOptions(CallOptions{StartToCloseTimeout: time.Second}, "svc", "op", map[string]string{}, &res)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if res.Result != "ok" {
-		t.Errorf("expected result 'ok', got %q", res.Result)
 	}
 }
 
@@ -2475,7 +2286,7 @@ func TestDurableCallWithHeartbeatFallbackToDurableCall(t *testing.T) {
 		},
 	})
 
-	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", time.Second, nil)
+	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2487,13 +2298,13 @@ func TestDurableCallWithHeartbeatFallbackToDurableCall(t *testing.T) {
 func TestDurableCallWithHeartbeatDelegates(t *testing.T) {
 	var capturedInterval time.Duration
 	h := NewHostCalls(HostCallsOptions{
-		DurableCallWithHeartbeat: func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error) {
+		DurableCallWithHeartbeat: func(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error) {
 			capturedInterval = heartbeatInterval
 			return "hb_ok", nil
 		},
 	})
 
-	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", 500*time.Millisecond, nil)
+	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", 500*time.Millisecond)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

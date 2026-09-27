@@ -40,12 +40,16 @@ func TestMySQLStore_ClaimWorkflow_NilWhenEmpty(t *testing.T) {
 func TestMySQLStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		// Step 1: SELECT FOR UPDATE — return one ID.
-		{match: "SELECT id FROM", data: [][]driver.Value{{"wf-1"}}, consume: true},
+		// Step 1: SELECT FOR UPDATE — return one candidate.
+		// Five columns since cleat#1116: the candidate select carries the
+		// registered flag alongside the key. NULL key and hash here, which is
+		// the ordinary run and means no INSERT IGNORE is attempted -- the
+		// acquisition path has its own database-backed tests.
+		{match: "SELECT w.id, w.tenant_id", data: [][]driver.Value{{"wf-1", "t-1", nil, nil, false}}, consume: true},
 		// Step 3: SELECT after update — return full workflow row.
 		// Columns: id, def_name, def_version, status, input, assigned_to,
 		//          next_wake_at, tenant_id, created_at, error_code, error_op,
-		//          generation, priority, trace_id
+		//          generation, priority, trace_id, pending_terminal_status
 		{match: "COALESCE(priority", data: [][]driver.Value{{
 			"wf-1",                  // id
 			"test-wf",               // def_name
@@ -61,6 +65,7 @@ func TestMySQLStore_ClaimWorkflow_ReturnsFirst(t *testing.T) {
 			int64(1),                // generation
 			int64(0),                // priority
 			"",                      // trace_id
+			"",                      // pending_terminal_status
 		}}},
 	}, []mockExecResult{
 		// Step 2: UPDATE
@@ -103,7 +108,7 @@ func TestMySQLStore_ClaimWorkflow_BeginError(t *testing.T) {
 
 func TestMySQLStore_ClaimWorkflow_SelectError(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "SELECT id FROM", err: errors.New("SELECT failed")},
+		{match: "SELECT w.id, w.tenant_id", err: errors.New("SELECT failed")},
 	}, nil)
 	defer db.Close()
 
@@ -124,7 +129,6 @@ func TestMySQLStore_ClaimWorkflow_SelectError(t *testing.T) {
 func TestMySQLStore_CompleteWorkflow_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "SET status = 'done'", affected: 1},
-		{match: "UPDATE idempotency_keys SET result", affected: 1},
 	})
 	defer db.Close()
 
@@ -209,22 +213,6 @@ func TestMySQLStore_CompleteWorkflow_UpdateError(t *testing.T) {
 	}
 }
 
-func TestMySQLStore_CompleteWorkflow_IdempotencyUpdateFails(t *testing.T) {
-	// Idempotency UPDATE is best-effort. When it fails, the error is logged
-	// but CompleteWorkflow still succeeds.
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "SET status = 'done'", affected: 1},
-		{match: "UPDATE idempotency_keys SET result", err: errors.New("idempotency update failed")},
-	})
-	defer db.Close()
-
-	store := NewMySQLStore(db)
-	err := store.CompleteWorkflow(testCtxMySQL, "wf-1", "worker-1", 0, `{}`, nil)
-	if err != nil {
-		t.Fatalf("CompleteWorkflow should succeed even when idempotency update fails: %v", err)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // AppendEventHistoryBatch
 // ---------------------------------------------------------------------------
@@ -283,8 +271,13 @@ func TestMySQLStore_AppendEventHistoryBatch_BeginError(t *testing.T) {
 }
 
 func TestMySQLStore_AppendEventHistoryBatch_ExecError(t *testing.T) {
+	// cleat#2333 dropped INSERT IGNORE for a real INSERT ... ON DUPLICATE KEY
+	// UPDATE (INSERT IGNORE unconditionally discarded a completing re-flush of
+	// an AwaitChild/AwaitPromise/AwaitAllChildren row -- see mysql_events.go's
+	// doc comment on this statement) -- so the mock now matches on
+	// "INSERT INTO event_history", not the old "INSERT IGNORE INTO" spelling.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "INSERT IGNORE INTO event_history", err: errors.New("insert failed")},
+		{match: "INSERT INTO event_history", err: errors.New("insert failed")},
 	})
 	defer db.Close()
 
@@ -500,57 +493,16 @@ func TestMySQLHeartbeat_Error(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// BatchHeartbeat
-// ---------------------------------------------------------------------------
-
-func TestMySQLBatchHeartbeat(t *testing.T) {
-	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances", affected: 5},
-	})
-	n, err := store.BatchHeartbeat(testCtxMySQL, "worker-1")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat: %v", err)
-	}
-	if n != 5 {
-		t.Errorf("expected 5, got %d", n)
-	}
-}
-
-func TestMySQLBatchHeartbeat_Zero(t *testing.T) {
-	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances", affected: 0},
-	})
-	n, err := store.BatchHeartbeat(testCtxMySQL, "worker-1")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("expected 0, got %d", n)
-	}
-}
-
-func TestMySQLBatchHeartbeat_Error(t *testing.T) {
-	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances", err: errors.New("update failed")},
-	})
-	_, err := store.BatchHeartbeat(testCtxMySQL, "worker-1")
-	if err == nil {
-		t.Fatal("expected error from exec failure, got nil")
-	}
-	if !strings.Contains(err.Error(), "batch heartbeat") {
-		t.Errorf("expected 'batch heartbeat', got: %v", err)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // GetChildResult
 // ---------------------------------------------------------------------------
 
 func TestMySQLGetChildResult_Done(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
-		queryRowOk("COALESCE(result, '{}')", `{"output":"ok"}`, "done"),
+		queryRowOk("COALESCE(result, '{}')", `{"output":"ok"}`, "done", nil),
 	}, nil)
-	result, done, err := store.GetChildResult(testCtxMySQL, "child-1")
+	_outcome, err := store.GetChildResult(testCtxMySQL, "child-1")
+	result := _outcome.Result
+	done := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -564,9 +516,11 @@ func TestMySQLGetChildResult_Done(t *testing.T) {
 
 func TestMySQLGetChildResult_NotDone(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
-		queryRowOk("COALESCE(result, '{}')", "{}", "running"),
+		queryRowOk("COALESCE(result, '{}')", "{}", "running", nil),
 	}, nil)
-	result, done, err := store.GetChildResult(testCtxMySQL, "child-1")
+	_outcome, err := store.GetChildResult(testCtxMySQL, "child-1")
+	result := _outcome.Result
+	done := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -582,7 +536,8 @@ func TestMySQLGetChildResult_NotFound(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
 		{match: "COALESCE(result, '{}')"},
 	}, nil)
-	_, done, err := store.GetChildResult(testCtxMySQL, "nonexistent")
+	_outcome, err := store.GetChildResult(testCtxMySQL, "nonexistent")
+	done := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -595,7 +550,7 @@ func TestMySQLGetChildResult_Error(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
 		{match: "COALESCE(result, '{}')", err: errors.New("query error")},
 	}, nil)
-	_, _, err := store.GetChildResult(testCtxMySQL, "child-1")
+	_, err := store.GetChildResult(testCtxMySQL, "child-1")
 	if err == nil {
 		t.Fatal("expected error from query failure, got nil")
 	}

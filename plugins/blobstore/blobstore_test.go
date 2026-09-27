@@ -182,7 +182,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	switch {
 	case strings.Contains(query, "SELECT c.sha256, i.content_type, i.size, i.expires_at"):
 		return c.queryBlobByKey(args)
-	case strings.Contains(query, "SELECT i.key, i.sha256, i.size, i.content_type"):
+	case strings.Contains(query, `SELECT i."key", i.sha256, i.size, i.content_type`):
 		return c.queryListBlobs(query, args)
 	case strings.Contains(query, "tenant_api_keys") && strings.Contains(query, "tenant_id"):
 		return c.queryTenantLookup(args)
@@ -430,7 +430,7 @@ func (c *fakeConn) queryListBlobs(query string, args []driver.NamedValue) (drive
 	}
 
 	// Optional prefix filter.
-	hasPrefix := strings.Contains(query, "AND i.key LIKE")
+	hasPrefix := strings.Contains(query, `AND i."key" LIKE`)
 	if hasPrefix && len(args) >= 2 {
 		prefixVal, err := argAny(args, 2)
 		if err == nil {
@@ -575,7 +575,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore, *fakeCl
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 	return p, handler, store, clock
 }
 

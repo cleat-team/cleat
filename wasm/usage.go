@@ -12,6 +12,7 @@ package wasm
 import (
 	"go/ast"
 	"go/token"
+	"go/types"
 	"strings"
 
 	"github.com/cleat-team/cleat/internal/analyzer"
@@ -25,6 +26,65 @@ const GoTarget = "go"
 // PythonTarget identifies the Python WASM compilation target.
 // Used by the Go build system to dispatch to the componentize-py pipeline.
 const PythonTarget = "python"
+
+// sdkHelperImports maps an SDK helper method to the host functions it makes on
+// the caller's behalf. Keyed by "Type.Method".
+//
+// This exists because collectHostCallsCalls finds imports by spotting HostCalls
+// methods in workflow code. A helper that makes the call itself is invisible to
+// that, and the failure is silent: the module builds, imports nothing, and dies
+// at run time with "the HostCalls runtime was not initialized" -- the same
+// symptom as cleat#1005, from the opposite direction.
+var sdkHelperImports = map[string][]string{
+	"Saga.AddStepCall": {"cleat_call"},
+
+	// Saga.Run's own LogKV. The steps' calls are closures the workflow wrote,
+	// so they need nothing here.
+	"Saga.Run": {"cleat_log"},
+
+	// Selector.Select calls five HostCalls methods -- DurableSleep, Now,
+	// AwaitSignals, PollSignal and AwaitChild -- and this list is the union of
+	// what each of those needs, including the update-dispatch imports the
+	// composites pull in.
+	//
+	// Spelled out rather than derived, to match hostFunctions and
+	// compositeRequires, which are hand lists for the same reason: the tables
+	// are the contract and a source-derived TEST is what keeps them honest.
+	// TestEverySDKHelperHasItsImports is that test for this row, and it fails
+	// with the missing import named if Select grows a sixth call.
+	"Selector.Select": {
+		"cleat_sleep",
+		"cleat_now",
+		"cleat_await_signals",
+		"cleat_poll_signal",
+		"cleat_await_child",
+		"cleat_poll_update",
+		"cleat_complete_update",
+		"cleat_log",
+	},
+
+	// AddTimer only reads the clock, and an unwired clock is not a lesser
+	// version of this bug: Now() returns 0, so the deadline is computed from
+	// the epoch and has already passed.
+	"Selector.AddTimer": {"cleat_now"},
+}
+
+// sdkHelperKey renders a selection as "Type.Method", or "" when the receiver is
+// not a named SDK type. Pointer receivers are unwrapped, so *Saga keys as Saga.
+func sdkHelperKey(sel *types.Selection, method string) string {
+	if sel == nil {
+		return ""
+	}
+	t := sel.Recv()
+	if ptr, ok := t.(*types.Pointer); ok {
+		t = ptr.Elem()
+	}
+	named, ok := t.(*types.Named)
+	if !ok || named.Obj() == nil {
+		return ""
+	}
+	return named.Obj().Name() + "." + method
+}
 
 // HostFunction identifies a host function that can be imported from the
 // WASM host environment (e.g., "cleat_call", "cleat_sleep").
@@ -43,15 +103,47 @@ var hostFunctions = []HostFunction{
 	{"cleat_call", "DurableCallJSON"},
 	{"cleat_call", "DurableCallWithOptions"},
 	{"cleat_call", "DurableCallJSONWithOptions"},
+	// ...and cleat_call_retry, because these are the ergonomic forms that carry
+	// a RetryPolicy. Without these two lines the import is never wired for
+	// them, so cleat/runtime.go's host-retry branch is unreachable and every
+	// Go retry policy silently becomes an SDK-level loop that suspends once per
+	// backoff -- N segments where Rust's identical policy is one, and not
+	// dead-letterable where Rust's is. IMPROVEMENT-PLAN 3.88.
+	//
+	// A guest that uses these WITHOUT a RetryPolicy pays one unused import
+	// entry; the host registers only what a module asks for
+	// (wasmtimeBackend.skipIfNotNeeded), so the cost is the import list, not a
+	// host function that runs.
+	{"cleat_call_retry", "DurableCallWithOptions"},
+	{"cleat_call_retry", "DurableCallJSONWithOptions"},
 	{"cleat_call_heartbeat", "DurableCallWithHeartbeat"},
 	// Sleep
 	{"cleat_sleep", "DurableSleep"},
 	{"cleat_sleep", "DurableSleepMs"},
 	// Signals
 	{"cleat_await_signals", "DurableAwaitSignals"},
+	// IMPROVEMENT-PLAN 3.224: this row was missing, so a Go workflow calling
+	// h.SignalWorkflow(...) compiled with no cleat_signal_workflow import at all.
+	// Rust, Java and AssemblyScript all bound it; Go alone did not. The engine
+	// half has always worked -- SignalWorkflow is the one signalling path that
+	// does call DeliverSignal (engine/signaller.go) -- so this was the engine
+	// able to deliver a signal between workflows and no Go guest able to ask.
+	{"cleat_signal_workflow", "SignalWorkflow"},
+	// IMPROVEMENT-PLAN 3.224, same omission: a Go workflow calling
+	// h.ScheduleInvoke(...) compiled with no cleat_schedule_invoke import.
+	// The three methods of IMPROVEMENT-PLAN 3.226: a public Go method and a
+	// host export with no path between them. Every other SDK -- Python, Rust,
+	// Java, AssemblyScript -- exposes all three; Go was the only one that did
+	// not, which is what settled whether they were meant to be callable from a
+	// workflow at all.
+	{"cleat_send", "DurableSend"},
+	{"cleat_resolve_promise", "ResolvePromise"},
+	{"cleat_reject_promise", "RejectPromise"},
+	{"cleat_schedule_invoke", "ScheduleInvoke"},
 	{"cleat_await_signals", "AwaitSignals"},
 	// Defer
 	{"cleat_defer", "DurableDefer"},
+	{"cleat_defer", "DurableDeferFunc"},
 	// Logging
 	{"cleat_log", "DurableLog"},
 	{"cleat_log", "LogKV"},
@@ -75,15 +167,22 @@ var hostFunctions = []HostFunction{
 	{"cleat_min_version", "MinVersion"},
 	// State
 	{"set_query_state", "SetQueryState"},
-	// State mutation methods (all map to set_query_state import)
-	{"set_query_state", "SetState"},
-	{"set_query_state", "DeleteState"},
-	{"set_query_state", "IncrState"},
 	// Promises
 	{"cleat_create_promise", "CreatePromise"},
 	{"cleat_await_promise", "AwaitPromise"},
 	// Update handlers
 	{"cleat_register_update_handler", "RegisterUpdateHandler"},
+	{"cleat_poll_update", "PollUpdate"},
+	{"cleat_complete_update", "CompleteUpdate"},
+	// Virtual object scope. Absent from this table until 2026-09-09, which is
+	// exactly why the Go SDK took no lock: HostCallsImpl.SetScope set three
+	// local fields against a host call that was never generated, so
+	// cleat_set_scope was not in the binary at all (IMPROVEMENT-PLAN 3.223,
+	// #984). ClearScope shares the set_scope import -- clearing is the
+	// documented empty-pair call, not a separate export.
+	{"cleat_set_scope", "SetScope"},
+	{"cleat_set_scope", "ClearScope"},
+	{"cleat_get_scope", "GetScope"},
 	{"plugin_call", "PluginCall"},
 	{"plugin_call_streaming", "PluginCallStreaming"},
 	// Fetch / HTTP methods (all map to durable_call import)
@@ -91,14 +190,30 @@ var hostFunctions = []HostFunction{
 	{"cleat_call", "DurableFetchJSON"},
 	{"cleat_call", "FetchGet"},
 	{"cleat_call", "FetchGetJSON"},
-	// Detached execution (no WASM import needed, but tracked so it's not silently ignored)
-	{"", "RunDetached"},
+	// Detached execution. This row carried an EMPTY import name until the Go
+	// signature changed -- tracked deliberately, because it took a closure and
+	// a closure cannot cross the ABI. The consequence was that RunDetached
+	// worked under localdev and cleattest, which populate the field directly,
+	// and silently did nothing in every compiled workflow: the unwired branch
+	// returned nil. A test double succeeding where production is a no-op is the
+	// same shape as the signal defects in 0b/0c. The signature now matches the
+	// host call and every other SDK, so the import is real.
+	//
+	// The empty-name row is described rather than quoted on purpose:
+	// sdk_import_names_test.go scans this whole FILE for row literals, so a
+	// literal in a comment is counted as a row and disagrees with the row count
+	// taken from the slice itself.
+	{"cleat_run_detached", "RunDetached"},
+	// cleat#1154: the same work, returning the run id. Separate import name
+	// because arity is part of an import's type -- see ABI.md 2.24a.
+	{"cleat_start_detached", "StartDetached"},
 	// Heartbeat variants
 	{"cleat_call_heartbeat", "DurableCallTypedWithHeartbeat"},
 	// Time
 	{"cleat_now", "Now"},
 	// Random
 	{"cleat_random", "Random"},
+
 	// Lock/concurrency key operations
 	{"cleat_acquire_lock", "AcquireLock"},
 	{"cleat_acquire_lock", "AcquireLockMs"},
@@ -167,8 +282,107 @@ func AnalyzeUsage(result *analyzer.AnalysisResult, cr *closure.Result) *UsageInf
 	return info
 }
 
-// collectRequirements scans the target package's source files for
-// //cleat:require directives and adds the listed host functions to info.Used.
+// compositeRequires maps an SDK wrapper method to the imports its
+// implementation needs.
+//
+// It is deliberately NOT part of hostFunctions. That table is bidirectional:
+// info.Funcs is built from it, and every entry emits an adapter FIELD named
+// FieldName implemented by ImportName's body. Adding a wrapper there invents a
+// field -- {"cleat_call", "DurableCallWithHeartbeat"} emitted a
+// DurableCallWithHeartbeat closure carrying a heartbeatIntervalMs parameter
+// that cleat_call's body never reads, and the generated guest failed to compile
+// with "declared and not used". Wrappers are SDK-level; they need the inner
+// IMPORT wired and no field of their own.
+//
+// Why any of this is needed: AnalyzeUsage scans the user's AST for
+// h.<Method>(...) and does not follow into the SDK, so a wrapper implemented in
+// terms of another host call contributes no import. The inner adapter field
+// then stays nil and HostCallsImpl's nil branch returns a zero value -- in a
+// compiled workflow, with no build or deploy error. h.NewUUID() returned
+// 00000000-0000-4000-8000-000000000000 in every workflow, and a body of
+// h.Log(...) plus h.Call(...) compiled with no host calls wired at all. See #775.
+//
+// TestEveryCompositeHostCallHasAnImportRow derives this from the SDK source and
+// fails when a wrapper is added without an entry.
+var compositeRequires = map[string][]string{
+	// NowMs is not a composite in the h.Method(...) sense -- it invokes the
+	// `now` CLOSURE FIELD directly, exactly as Now() does -- which is why
+	// TestEveryCompositeHostCallHasAnImportRow does not see it: that scan looks
+	// for h.<Uppercase>(, and this calls h.now(). Without a row here a workflow
+	// whose only host call is h.NowMs() compiled with ZERO host functions and
+	// the method returned 0, an epoch timestamp, silently.
+	//
+	// cleat_now is enough: info.Funcs is hostFunctions filtered by Used, so
+	// marking the import used pulls in {"cleat_now", "Now"} and the emitted Now
+	// field is what populates h.now. IMPROVEMENT-PLAN 3.234.
+	"NowMs":                  {"cleat_now"},
+	"NewUUID":                {"cleat_random"},
+	"NewUUIDv7":              {"cleat_random", "cleat_now"},
+	"UUID":                   {"cleat_workflow_id"},
+	"Log":                    {"cleat_log"},
+	"Call":                   {"cleat_call"},
+	"AwaitCondition":         {"cleat_await_signals", "cleat_now", "cleat_complete_update", "cleat_log", "cleat_poll_update"},
+	"AwaitSignalsWithQuorum": {"cleat_await_signals", "cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	// Delegates to AwaitPromise, which is the dispatch point, so it reaches the
+	// update imports too. Merged into the existing row rather than added as a
+	// second one -- a duplicate map key does not override, it fails to compile,
+	// which is how this was caught.
+	"AwaitPromiseMs": {"cleat_await_promise", "cleat_poll_update", "cleat_complete_update", "cleat_log"},
+
+	// SendSignalAndWait and ReplyToSignal are composites, not host calls:
+	// the reply channel is a promise and its ID is the correlation ID, so
+	// request/reply needs no ABI of its own (IMPROVEMENT-PLAN 3.220). Each
+	// row is the transitive set its method actually reaches -- send, create
+	// the reply promise, await it; reply by resolving it.
+	"SendSignalAndWait": {"cleat_create_promise", "cleat_signal_workflow", "cleat_await_promise", "cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	// DispatchUpdates polls, runs the handler, and completes -- plus DurableLog
+	// on the two paths where the host hands back something this SDK cannot use.
+	"AwaitChildTyped": {"cleat_complete_update", "cleat_log", "cleat_poll_update"},
+	"DispatchUpdates": {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	// completeOrLog is runUpdate's single exit: it completes the request and
+	// calls DurableLog when the completion itself fails. Those four call sites
+	// discarded the error with `_ =` until IMPROVEMENT-PLAN 3.245, so there was
+	// nothing here to declare -- adding the log is what gave this method an
+	// inner import, and TestEveryCompositeHostCallHasAnImportRow caught it on
+	// the same commit.
+	//
+	// Reached only through DispatchUpdates, whose row above already carries
+	// both names, so this is belt-and-braces rather than a live gap. It is
+	// declared anyway because the guard's question is per-method: a future
+	// caller reaching completeOrLog by another route would otherwise compile
+	// with cleat_log unwired and log nothing.
+	"completeOrLog": {"cleat_complete_update", "cleat_log"},
+	// EVERY SUSPENSION POINT IS A DISPATCH POINT, so each one transitively
+	// needs the update imports. This is not bookkeeping: without these rows the
+	// closure analysis omits cleat_poll_update from a workflow whose only
+	// suspension is a sleep, and the call the SDK makes there fails to link.
+	//
+	// The cost is real and worth naming -- a workflow that never uses updates
+	// still imports both calls, because the dispatch point is unconditional.
+	// See cleat.HostCallsImpl.DispatchUpdates for why it has to be.
+	"DurableSleep":                  {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	"DurableSleepMs":                {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	"AwaitSignals":                  {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	"AwaitPromise":                  {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	"AwaitChild":                    {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	"AwaitAllChildren":              {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	"AwaitAnyChild":                 {"cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	"ReplyToSignal":                 {"cleat_resolve_promise"},
+	"PollSignals":                   {"cleat_poll_signal"},
+	"ChildWorkflowWithOptions":      {"cleat_child_workflow"},
+	"DurableCallWithHeartbeat":      {"cleat_call"},
+	"DurableCallTypedWithHeartbeat": {"cleat_call"},
+	// DurableCallWithOptions sleeps between retry attempts, so a workflow that
+	// sets a RetryPolicy and never calls DurableSleep itself would compile with
+	// cleat_sleep unwired and back off for no time at all.
+	"DurableCallWithOptions":      {"cleat_sleep", "cleat_poll_update", "cleat_complete_update", "cleat_log"},
+	"DurableCallTypedWithOptions": {"cleat_call", "cleat_call_retry", "cleat_sleep", "cleat_complete_update", "cleat_log", "cleat_poll_update"},
+	"DurableCallJSONWithOptions":  {"cleat_sleep", "cleat_complete_update", "cleat_log", "cleat_poll_update"},
+}
+
+// collectRequirements scans the workflow's package AND every non-stdlib
+// package it imports for //cleat:require directives, adding the listed host
+// functions to info.Used.
 //
 // Directive format:
 //
@@ -176,30 +390,78 @@ func AnalyzeUsage(result *analyzer.AnalysisResult, cr *closure.Result) *UsageInf
 //
 // The directive names HostCallsOptions field names (not import names). They
 // are resolved to import names via the hostFunctions table.
+//
+// IT READ THE TARGET PACKAGE ALONE UNTIL cleat#1617, and that is the whole
+// defect. A library that makes host calls on the caller's behalf is exactly
+// the thing that needs this directive -- the workflow's own source never
+// mentions the call, so no amount of scanning the workflow finds it -- and the
+// library is by definition an IMPORTED package. So the directive was ignored
+// in precisely the case it exists for.
+//
+// cleat/dagrun had written one, correctly naming what it needs, sitting in the
+// one place that could not act on it. `cleat build` exited 0, the module
+// imported neither cleat_child_workflow_with_options nor cleat_await_any_child,
+// and the workflow died on its first task with "the HostCalls runtime was not
+// initialized". A reader checking "does dagrun declare its imports?" found a
+// line saying yes.
+//
+// WHY EVERY NON-STDLIB PACKAGE AND NOT JUST THE cleat SDK. A user's own helper
+// package, in their own module, is invisible to the old scan for the identical
+// reason -- LoadPackages retains only what matched the build pattern. Scoping
+// this to cleat's module would fix cleat's SDK and leave every user who splits
+// workflows across two packages with the same silent failure.
+//
+// The direction is safe: a directive can only ADD an import, and only one that
+// is already in the hostFunctions table. An import nothing calls costs a line
+// in the module; a missing one is a workflow that dies at run time.
 func collectRequirements(result *analyzer.AnalysisResult, info *UsageInfo) {
 	fieldToImport := make(map[string]string)
 	for _, hf := range hostFunctions {
 		fieldToImport[hf.FieldName] = hf.ImportName
 	}
 
-	for _, file := range result.TargetPkg.Files {
-		for _, cg := range file.Comments {
-			for _, c := range cg.List {
-				text := c.Text
-				const prefix = "//cleat:require "
-				if !strings.HasPrefix(text, prefix) {
-					continue
-				}
-				rest := text[len(prefix):]
-				for _, field := range strings.Split(rest, ",") {
-					field = strings.TrimSpace(field)
-					if importName, ok := fieldToImport[field]; ok {
-						info.Used[importName] = true
+	scan := func(pkg *analyzer.Package) {
+		if pkg == nil {
+			return
+		}
+		for _, file := range pkg.Files {
+			for _, cg := range file.Comments {
+				for _, c := range cg.List {
+					text := c.Text
+					const prefix = "//cleat:require "
+					if !strings.HasPrefix(text, prefix) {
+						continue
+					}
+					rest := text[len(prefix):]
+					for _, field := range strings.Split(rest, ",") {
+						field = strings.TrimSpace(field)
+						if importName, ok := fieldToImport[field]; ok {
+							info.Used[importName] = true
+						}
 					}
 				}
 			}
 		}
 	}
+
+	scan(result.TargetPkg)
+	for _, pkg := range result.ImportedPkgs {
+		scan(pkg)
+	}
+}
+
+// fieldImports is the FieldName -> imports lookup the usage scan runs on.
+//
+// Package-level so a test can exercise the real lookup rather than a rebuilt
+// copy of it: a test that constructs its own map and then checks the map
+// contains what it just put there cannot fail, which is what the first version
+// of TestEveryHostFunctionRowReachesTheUsageScan did.
+func fieldImports() map[string][]string {
+	m := make(map[string][]string, len(hostFunctions))
+	for _, hf := range hostFunctions {
+		m[hf.FieldName] = append(m[hf.FieldName], hf.ImportName)
+	}
+	return m
 }
 
 // collectHostCallsCalls walks a function body and records which HostCalls
@@ -209,11 +471,21 @@ func collectHostCallsCalls(fd *analyzer.FuncDecl, info *UsageInfo) {
 		return
 	}
 
-	// Build a map from field name to import name for quick lookup.
-	fieldToImport := make(map[string]string)
-	for _, hf := range hostFunctions {
-		fieldToImport[hf.FieldName] = hf.ImportName
-	}
+	// Field name to imports. A SLICE, because the relation is one-to-many and a
+	// map[string]string silently keeps only the last row.
+	//
+	// DurableCallWithOptions and DurableCallJSONWithOptions each have two rows
+	// -- {cleat_call, ...} and {cleat_call_retry, ...} -- and cleat_call is
+	// declared first, so the flattened map dropped it. A workflow whose only
+	// durable call was h.DurableCallWithOptions then linked no cleat_call and
+	// emitted no DurableCall field, and HostCallsImpl's own implementation
+	// delegates to h.DurableCall -- which was nil. The call failed at RUN time
+	// with "the HostCalls runtime was not initialized", a message that names
+	// the entry point and points away from the binding. cleat#1005.
+	//
+	// It was invisible in any workflow that also called h.DurableCall for its
+	// own reasons, because that marked the import used by another route.
+	fieldToImport := fieldImports()
 
 	ast.Inspect(fd.Ast.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
@@ -234,10 +506,35 @@ func collectHostCallsCalls(fd *analyzer.FuncDecl, info *UsageInfo) {
 				info.Used["plugin_call"] = true
 				info.Used["plugin_call_streaming"] = true
 			}
+			// SDK helpers that make a host call the workflow never writes.
+			//
+			// Saga.AddStepCall takes a StepCall -- data -- and builds the
+			// DurableCall closures inside the SDK, which is the whole point:
+			// it is the one form that can be parameterised without tripping
+			// E009 or the durable-leaf check (cleat#1131). But this scan finds
+			// imports by looking for HostCalls methods in WORKFLOW code, and
+			// AddStepCall's receiver is *Saga, so nothing here saw it: the
+			// module built clean, imported no cleat_call, and would have failed
+			// at RUN time on the first step.
+			//
+			// Saga.AddStep does not need a row, because the user writes the
+			// closure and its h.DurableCall is visible to the scan above. This
+			// is the first SDK API where the durable call is not in user code.
+			if analyzer.SDKDurableHelper(sel) {
+				for _, importName := range sdkHelperImports[sdkHelperKey(sel, selExpr.Sel.Name)] {
+					info.Used[importName] = true
+				}
+			}
 			return true
 		}
 		fieldName := selExpr.Sel.Name
-		if importName, ok := fieldToImport[fieldName]; ok && importName != "" {
+		for _, importName := range fieldToImport[fieldName] {
+			if importName != "" {
+				info.Used[importName] = true
+			}
+		}
+		// Wrappers implemented over another host call. See compositeRequires.
+		for _, importName := range compositeRequires[fieldName] {
 			info.Used[importName] = true
 		}
 
@@ -257,4 +554,24 @@ func collectHostCallsCalls(fd *analyzer.FuncDecl, info *UsageInfo) {
 // Count returns the number of used host functions.
 func (u *UsageInfo) Count() int {
 	return len(u.Funcs)
+}
+
+// AllUsage returns a UsageInfo naming every host function this package knows
+// how to generate an adapter for.
+//
+// Exported for engine/guest_buffer_matches_the_host_test.go, which asserts that
+// every adapter allocating an output buffer also grows it (cleat#1312). That
+// check has to see ALL of them: generating from one fixture's usage would
+// silently exempt whatever that fixture happens not to call, which is the shape
+// of gap the test exists to close.
+func AllUsage() *UsageInfo {
+	u := &UsageInfo{Used: map[string]bool{}, Children: map[string]bool{}}
+	for _, fn := range hostFunctions {
+		if u.Used[fn.ImportName] {
+			continue
+		}
+		u.Used[fn.ImportName] = true
+		u.Funcs = append(u.Funcs, fn)
+	}
+	return u
 }

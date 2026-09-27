@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -84,10 +85,17 @@ func (s *execSession) ScheduleCron(ctx context.Context, m api.Module, workflowNa
 				written, _ := s.writeResult(ctx, m, idPtr, rec.Err, idMaxLen)
 				return packSimpleResult(1, written)
 			}
-			written, _ := s.writeResult(ctx, m, idPtr, rec.CronScheduleID, idMaxLen)
-			return packSimpleResult(0, written)
+			written, writtenEC := s.writeOut(ctx, m, idPtr, rec.CronScheduleID, idMaxLen)
+			return packSimpleResult(writtenEC, written)
 		}
 		s.exitReplay()
+	}
+
+	// A fresh schedule_cron is new work with the longest reach of any call in
+	// this family: it registers a RECURRING trigger, so a terminated workflow
+	// would keep starting new runs on a cron schedule indefinitely.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
 	}
 
 	scheduleID, err := s.createCronSchedule(ctx, workflowName, cronExpr, timezone, inputJSON)
@@ -111,8 +119,8 @@ func (s *execSession) ScheduleCron(ctx context.Context, m api.Module, workflowNa
 		written, _ := s.writeResult(ctx, m, idPtr, err.Error(), idMaxLen)
 		return packSimpleResult(1, written)
 	}
-	written, _ := s.writeResult(ctx, m, idPtr, scheduleID, idMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, idPtr, scheduleID, idMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 // createCronSchedule does the live half of ScheduleCron: validate, enforce the
@@ -180,9 +188,12 @@ func (s *execSession) createCronSchedule(ctx context.Context, workflowName, cron
 		DefName:        workflowName,
 		CronExpression: cronExpr,
 		Input:          json.RawMessage(inputJSON),
-		Enabled:        true,
-		NextRunAt:      NextCronTimeIn(cronExpr, time.Now(), loc),
-		Timezone:       tz,
+		// No retirement field: after cleat#1702 a LIVE schedule is the zero
+		// value (DisabledAt nil), which is the one upside of the polarity
+		// change -- `Enabled: true` used to be mandatory here, and forgetting
+		// it created a schedule that never fired.
+		NextRunAt: NextCronTimeIn(cronExpr, time.Now(), loc),
+		Timezone:  tz,
 	}); err != nil {
 		return "", fmt.Errorf("schedule_cron %q: %w", workflowName, err)
 	}
@@ -214,8 +225,23 @@ func (s *execSession) DeleteCron(ctx context.Context, m api.Module, scheduleID s
 	var err error
 	if store := s.engine.workflowStore; store != nil {
 		// Deleting a schedule that is not there is the success a retry should
-		// see, and the stores already report no error for zero rows.
+		// see: workflow execution is at-least-once, so a replayed delete of a
+		// schedule the first attempt already removed must not fail the
+		// workflow.
+		//
+		// This used to hold by accident. The stores discarded the statement
+		// result, so zero rows matched was indistinguishable from one and
+		// every delete reported success -- including a delete of a name that
+		// never existed, which is what cleat#1297 fixed for the HTTP API.
+		// Now that the store reports it, the idempotence is DELIBERATE and
+		// stated here, which is where it belongs: the store's job is to say
+		// what happened, and the caller's job is to decide what it means.
+		// The same not-found that is a 404 to an operator who mistyped a name
+		// is a success to a retry that already did the work.
 		err = store.DeleteSchedule(ctx, scheduleID)
+		if errors.Is(err, ErrScheduleNotFound) {
+			err = nil
+		}
 	} else {
 		err = fmt.Errorf("no workflow store configured: workflow %s cannot delete schedule %q", s.workflowID, scheduleID)
 	}
@@ -258,8 +284,8 @@ func (s *execSession) ListCrons(ctx context.Context, m api.Module, outPtr, outMa
 				written, _ := s.writeResult(ctx, m, outPtr, rec.Err, outMaxLen)
 				return packSimpleResult(1, written)
 			}
-			written, _ := s.writeResult(ctx, m, outPtr, rec.CronResult, outMaxLen)
-			return packSimpleResult(0, written)
+			written, writtenEC := s.writeOut(ctx, m, outPtr, rec.CronResult, outMaxLen)
+			return packSimpleResult(writtenEC, written)
 		}
 		s.exitReplay()
 	}
@@ -281,8 +307,8 @@ func (s *execSession) ListCrons(ctx context.Context, m api.Module, outPtr, outMa
 		written, _ := s.writeResult(ctx, m, outPtr, err.Error(), outMaxLen)
 		return packSimpleResult(1, written)
 	}
-	written, _ := s.writeResult(ctx, m, outPtr, listJSON, outMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, outPtr, listJSON, outMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 func (s *execSession) listCronSchedules(ctx context.Context) (string, error) {
@@ -304,7 +330,12 @@ func (s *execSession) listCronSchedules(ctx context.Context) (string, error) {
 			CronExpr:     schedules[i].CronExpression,
 			Timezone:     scheduleTimezoneOrDefault(schedules[i].Timezone),
 			Input:        string(schedules[i].Input),
-			Enabled:      schedules[i].Enabled,
+			// Still `enabled`, and still inverted from the column: this view
+			// is the guest-visible shape of list_crons, versioned with the
+			// WASM ABI rather than with the entity contract. cleat#1702
+			// converted workflow_schedules.enabled to disabled_at; an SDK
+			// compiled before that change still reads this field.
+			Enabled: !schedules[i].Disabled(),
 		})
 	}
 	out, err := json.Marshal(views)

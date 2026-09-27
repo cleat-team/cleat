@@ -29,6 +29,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -176,9 +177,18 @@ func TestGetAllowedSignalCallersIsScopedToTenant(t *testing.T) {
 				t.Fatalf("tenant B cannot read its own allowed callers: %v", got)
 			}
 
+			// cleat#2227: GetAllowedSignalCallers now matches DeliverSignal's own
+			// contract exactly -- a foreign-tenant workflow and a genuinely
+			// nonexistent one are indistinguishable, and both loud
+			// (ErrWorkflowNotFound) rather than both silent. This used to assert
+			// a silent (nil, nil) here; the property under test -- tenant A
+			// cannot read tenant B's allowed_signals -- still holds, it now
+			// surfaces as an error instead of an empty list, so there is no new
+			// existence oracle: the error is identical for "foreign" and "does
+			// not exist" on every dialect.
 			got, err := storeA.GetAllowedSignalCallers(ctx, runB)
-			if err != nil {
-				t.Fatalf("GetAllowedSignalCallers(A, B's workflow): %v", err)
+			if !errors.Is(err, ErrWorkflowNotFound) {
+				t.Fatalf("GetAllowedSignalCallers(A, B's workflow) err = %v, want ErrWorkflowNotFound", err)
 			}
 			if len(got) != 0 {
 				t.Errorf("tenant A read tenant B's signal authorization list: %v", got)

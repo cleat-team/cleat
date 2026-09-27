@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
@@ -14,7 +13,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("feature-flags: nil mux")
 	}
@@ -37,13 +36,6 @@ func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 
 func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
-}
-
-// tenantID extracts the tenant UUID from the request context. Returns the
-// zero UUID if no tenant is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
 }
 
 // ---- types ----
@@ -87,23 +79,14 @@ type evaluateRequest struct {
 // ---- POST /features/flags ----
 
 func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("feature-flags: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req createFlagRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 	if req.Key == "" {
@@ -126,7 +109,7 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 	id := uuid.New()
 	now := time.Now()
 
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(`
+	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
 			INSERT INTO feature_flags (tenant_id, id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		`, p.dialect), tid, id, req.Key, req.Name, req.Description, req.Enabled,
@@ -161,8 +144,8 @@ func (p *Plugin) handleCreate(w http.ResponseWriter, r *http.Request) {
 // ---- GET /features/flags ----
 
 func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -186,7 +169,7 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 		// See plugin.JSONColumn: SQL Server returns JSON columns as strings,
 		// which database/sql will not scan into json.RawMessage.
 		var rules plugin.JSONColumn
-		if err := rows.Scan(&f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
+		if err := plugin.ScanRow(rows, &f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
 			&f.Enabled, &rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt); err != nil {
 			// Not a continue: skipping the row turned a driver-level type
 			// mismatch into a silently short list, which is how this went
@@ -209,8 +192,8 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 // ---- GET /features/flags/{id} ----
 
 func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -225,11 +208,11 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	var f flagJSON
 	// See plugin.JSONColumn: SQL Server returns JSON columns as strings.
 	var rules plugin.JSONColumn
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at
 			FROM feature_flags
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid).Scan(&f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
+		`, p.dialect), id, tid), &f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
 		&f.Enabled, &rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "feature flag not found")
@@ -248,8 +231,8 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 // ---- PUT /features/flags/{id} ----
 
 func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -261,17 +244,8 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("feature-flags: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req updateFlagRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 
@@ -338,11 +312,11 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	var f flagJSON
 	// See plugin.JSONColumn: SQL Server returns JSON columns as strings.
 	var rules plugin.JSONColumn
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at
 			FROM feature_flags
 			WHERE id = $1 AND tenant_id = $2
-		`, p.dialect), id, tid).Scan(&f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
+		`, p.dialect), id, tid), &f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
 		&f.Enabled, &rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt)
 	if err != nil {
 		p.logger.Error("feature-flags: re-fetch after update", "id", id, "error", err)
@@ -362,8 +336,8 @@ func (p *Plugin) handleUpdate(w http.ResponseWriter, r *http.Request) {
 // ---- DELETE /features/flags/{id} ----
 
 func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -396,23 +370,14 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 // ---- POST /features/evaluate ----
 
 func (p *Plugin) handleEvaluate(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("feature-flags: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
-		return
-	}
-	defer r.Body.Close()
-
 	var req evaluateRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		p.writeError(w, 400, "invalid request body")
+	if !plugin.ReadJSONBody(w, r, &req) {
 		return
 	}
 	if req.Key == "" {
@@ -424,11 +389,11 @@ func (p *Plugin) handleEvaluate(w http.ResponseWriter, r *http.Request) {
 	var f flagJSON
 	// See plugin.JSONColumn: SQL Server returns JSON columns as strings.
 	var rules plugin.JSONColumn
-	err = p.db.QueryRow(r.Context(), plugin.Rebind(`
+	err := plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
 			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage, created_at, updated_at
 			FROM feature_flags
 			WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2
-		`, p.dialect), tid, req.Key).Scan(&f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
+		`, p.dialect), tid, req.Key), &f.ID, &f.TenantID, &f.Key, &f.Name, &f.Description,
 		&f.Enabled, &rules, &f.RolloutPercentage, &f.CreatedAt, &f.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "feature flag not found")

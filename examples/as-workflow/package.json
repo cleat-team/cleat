@@ -9,7 +9,7 @@
     "clean": "rm -rf dist/"
   },
   "devDependencies": {
-    "assemblyscript": "^0.27.0",
+    "assemblyscript": "^0.28.19",
     "@cleat/sdk": "file:../../packages/cleat-as",
     "@cleat/transform": "file:../../packages/cleat-as/transform"
   }

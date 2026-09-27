@@ -45,7 +45,7 @@ class CleatEntryTransformer {
   // ---------------------------------------------------------------
   // AssemblyScript transformer hook - called after all sources are parsed
   // ---------------------------------------------------------------
-  afterParse(parser) {
+  async afterParse(parser) {
     // Use this.program (set on the prototype by AS) instead of parser.program,
     // because AS 0.27.32+ does not set parser.program.  The parser argument
     // is still valid for parser.parseFile() calls in _injectWrappers.
@@ -79,8 +79,44 @@ class CleatEntryTransformer {
 
       if (durableLeaves.size === 0) continue;
 
-      // Compute transitive closure of durable functions
-      const durableFunctions = this._computeDurableClosure(callGraph, durableLeaves);
+      // Scope for both checks: what the workflow can REACH. cleat#1799.
+      //
+      // durableLeaves is already {functions calling h.*} + {@cleatEntry
+      // functions}, which are exactly the right roots for a forward walk.
+      //
+      // The backward walk is kept for a source that declares no entry point,
+      // where the forward one would have only leaf callers to start from and
+      // would stop checking whatever calls them.
+      const hasEntry = source.statements.some(st => this._isDurableEntryFunc(st));
+      const durableFunctions = hasEntry
+        ? this._computeReachable(callGraph, durableLeaves)
+        : this._computeDurableClosure(callGraph, durableLeaves);
+
+      // The THREADING scope is the INTERSECTION, and neither closure alone
+      // works -- both obvious answers are wrong, in opposite directions.
+      //
+      //   the callers closure alone flags the boundary that SUPPLIES h: a
+      //     harness that constructs a HostCalls and calls the workflow;
+      //   durableFunctions alone flags helpers that NEED no h. Measured here:
+      //     substituting it made SIX pure helpers in examples/as-workflow --
+      //     extractStringField, extractI64Field, extractRawArray, indexOf,
+      //     isDigit, parseI64 -- fail E005 on an UNMODIFIED example, taking
+      //     the control build from green to seven diagnostics.
+      //
+      // E005 asks "can this function obtain the h it needs?", which is only a
+      // meaningful question for a function that BOTH participates in the
+      // workflow and reaches a host call.
+      //
+      //   isDigit   forward yes, backward no   -> excluded, needs no h
+      //   a harness forward no,  backward yes  -> excluded, supplies h
+      //   a durable helper missing h           -> in both, reported
+      //
+      // The Python checker had the identical pair; see cleat#1813/#1816, where
+      // the intersection is pinned from both sides by two tests.
+      const reachesHost = this._computeDurableClosure(callGraph, durableLeaves);
+      const threadingScope = hasEntry
+        ? new Set([...durableFunctions].filter(f => reachesHost.has(f)))
+        : reachesHost;
 
       // Validate all functions in the durable closure for forbidden APIs
       for (const stmt of source.statements) {
@@ -91,7 +127,7 @@ class CleatEntryTransformer {
       }
 
       // Verify that functions in the durable closure have access to 'h'
-      this._verifyThreading(source, durableFunctions, callGraph);
+      this._verifyThreading(source, threadingScope, callGraph);
     }
 
     // E001-E005 were `console.error` and nothing else, so `cleat build` on a
@@ -118,6 +154,37 @@ class CleatEntryTransformer {
         );
       }
     }
+
+    // cleat#2145: emit the entry-point list this transform itself just
+    // computed (Phase 1, above) into a sidecar manifest next to the .wasm
+    // `cleat build` is about to produce. This is authoritative in the sense
+    // that matters -- it is not a second, separate guess at what the AST
+    // contains, it IS the AST walk that decides which functions get
+    // renamed and exported below (Phase 2/3). The syntax-variety misses a
+    // source-level regex is prone to (a decorator split across lines, an
+    // aliased import) cannot happen here, because this code already parsed
+    // the real AST to find them.
+    //
+    // Written unconditionally (even when empty) so "manifest missing" means
+    // only one thing downstream -- an old @cleat/transform that predates
+    // this mechanism -- and never "zero @cleatEntry functions", which is a
+    // separate, later validation error (cleat build's metadata Validate()).
+    //
+    // Written directly with Node's fs, not via this.writeFile. asc's own
+    // writeFile (assigned onto this transform's prototype -- see the class
+    // doc comment) silently returned false here every time this was tried,
+    // for a reason that did not reproduce against a standalone reimplementation
+    // of its own resolve/mkdir/write sequence -- that sequence, run outside
+    // the transform, succeeds. Writing it here directly sidesteps whatever
+    // about the transform-hook calling context asc's writeFile does not like,
+    // and resolves against the same baseDir asc itself uses (this.baseDir,
+    // default "."), so the manifest lands in the same place asc's own writes
+    // (workflow.wasm, .js, .d.ts) do: dist/, where build_as.go expects it.
+    const allNames = [];
+    for (const { entries } of sourceEntries) {
+      for (const entry of entries) allNames.push(entry.funcName);
+    }
+    this._writeEntryPointManifest(allNames);
 
     if (sourceEntries.length === 0) return;
 
@@ -197,9 +264,67 @@ class CleatEntryTransformer {
     const paramTypes = [];
     const callArgs = ["h"];
 
+    const paramDefaults = [];
+
     for (const p of userParams) {
       const pName = p.name && p.name.text ? p.name.text : "_";
-      const pType = p.type && p.type.text ? p.type.text : "string";
+      // THE DECLARED DEFAULT, AS SOURCE TEXT. cleat#1065.
+      //
+      // AssemblyScript supports `note: string = "FALLBACK"`, and this transform
+      // discarded it: the generated wrapper calls the inner function with EVERY
+      // argument explicitly, so AS's own default never fires, and an absent key
+      // bound the getter's zero ("" for a string) instead. Measured by driving
+      // _generateWrappers with a defaulted parameter -- the emitted wrapper did
+      // not mention the default at all.
+      //
+      // Source text rather than the parsed value, because a default is an
+      // arbitrary expression and only its text reproduces it faithfully. The
+      // shape was confirmed against a REAL asc run, not a mock: the initializer
+      // carries {kind, range, literalKind, value} and range.source.text yields
+      // exactly `"FALLBACK"` and `7` for the two cases below. A mock could not
+      // have answered this -- cleat#1067 is in this file because a mock was
+      // built to satisfy the implementation rather than to model the parser.
+      let pDefault = null;
+      const init = p.initializer;
+      if (init && init.range && init.range.source &&
+          typeof init.range.source.text === "string") {
+        pDefault = init.range.source.text.slice(init.range.start, init.range.end);
+      }
+      paramDefaults.push(pDefault);
+      // The declared type. `name.identifier.text` first, `.text` second --
+      // the same order this file already uses for type names at the
+      // _typeName helper below.
+      //
+      // This site read `.text` ALONE: `p.type && p.type.text ? ... : "string"`.
+      // An AssemblyScript type node has no `text` property -- its keys are
+      // kind/range/isNullable/currentlyResolving/name/typeArguments -- so the
+      // condition was always false and every parameter silently became
+      // "string". Measured 2026-09-09 by dumping the node during a real build:
+      // p.type.text was undefined and p.type.name.identifier.text was
+      // "string", "string", "i32".
+      //
+      // Effect: a multi-parameter entry point failed to compile for any
+      // non-string parameter, because the wrapper bound it with getString --
+      //   ERROR TS2322: Type '~lib/string/String' is not assignable to 'i32'
+      // -- and _getDeserializeCode's i32/u32/i64/u64/f64/f32/bool branches
+      // were unreachable, including its own "Unsupported type" throw. The
+      // fallback answered first, every time.
+      //
+      // Throw rather than default to a type. No default can be correct for a
+      // parameter whose type could not be read, and picking one is exactly
+      // what hid this: a wrong answer that compiles for the common case.
+      const pTypeNode = p.type;
+      const pType =
+        (pTypeNode && pTypeNode.name && pTypeNode.name.identifier &&
+          pTypeNode.name.identifier.text) ||
+        (pTypeNode && pTypeNode.text);
+      if (!pType) {
+        throw new Error(
+          "[@cleat/transform] could not read the declared type of parameter '" +
+          pName + "' in '" + funcName + "'. This is a transform bug, not a " +
+          "problem with your workflow -- please report it."
+        );
+      }
 
       paramNames.push(pName);
       paramTypes.push(pType);
@@ -217,6 +342,7 @@ class CleatEntryTransformer {
       innerName,
       paramNames,
       paramTypes,
+      paramDefaults,
       callArgs,
       retTypeStr,
       isVoid,
@@ -486,8 +612,53 @@ class CleatEntryTransformer {
   }
 
   // ---------------------------------------------------------------
+  // Functions reachable FORWARD from the durable roots: everything an
+  // entry point, or a function that calls the host, can itself call.
+  //
+  // This is the scope both checks need. Determinism is a property of what a
+  // workflow EXECUTES, so the question is "what does the entry reach?", not
+  // "who reaches into this?".
+  //
+  // Answering it backwards was cleat#1799, and it was wrong in BOTH directions
+  // at once, measured 2026-09-17 on a copy of examples/as-workflow:
+  //
+  //   a helper the workflow CALLS, doing Date.now()   0 diagnostics, .wasm written
+  //   a CALLER of the workflow, doing Date.now()      E002, build refused
+  //
+  // The first is the miss this issue was filed for. The second was not in the
+  // report and is the more damaging half: it is a test harness or a __main__
+  // driver being told its code is non-deterministic. Python's checker had the
+  // identical pair (cleat#1813 / #1816), where a mock-driven harness produced
+  // 22 false PY010s on a shipped example and refused its documented build.
+  //
+  // Note callGraph.callers maps a function to its CALLEES despite the name;
+  // walking it forward is what makes this the callee closure.
+  // ---------------------------------------------------------------
+  _computeReachable(callGraph, roots) {
+    const reachable = new Set();
+    const queue = Array.from(roots);
+
+    while (queue.length > 0) {
+      const func = queue.shift();
+      if (reachable.has(func)) continue;
+      reachable.add(func);
+      for (const callee of (callGraph.callers[func] || [])) {
+        if (!reachable.has(callee)) queue.push(callee);
+      }
+    }
+
+    return reachable;
+  }
+
+  // ---------------------------------------------------------------
   // Compute the transitive closure of durable functions: starting from
   // durable leaves, traverse callers until fixed point.
+  //
+  // RETAINED ONLY as the no-entry fallback -- see afterParse. A source with no
+  // @cleatEntry gives the forward walk nothing but its leaf callers to start
+  // from, which would stop checking any function that calls one. Keeping the
+  // backward walk there leaves such files behaving exactly as they did, rather
+  // than trading cleat#1799's false positives for a silent new false negative.
   // ---------------------------------------------------------------
   _computeDurableClosure(callGraph, durableLeaves) {
     const durableFuncs = new Set(durableLeaves);
@@ -612,10 +783,6 @@ class CleatEntryTransformer {
       "awaitSignalsWithQuorum", "awaitSignalsWithQuorumMs",
       "signalWorkflow", "resolvePromise", "rejectPromise", "cleatSend",
       "scheduleInvoke", "scheduleInvokeMs",
-      // There is no "registerQueryHandler" here (removed 2026-08-09; see
-      // docs/determinism.md, "Why there is no RegisterQueryHandler").
-      "runDetached", "setState", "getState", "deleteState", "incrState",
-      "hasState", "listState", "awaitAllChildren",
       "currentRunId", "cleatFetch", "fetchGet", "acquireLock",
       "acquireLockMs", "releaseLock", "scheduleCron", "deleteCron",
       "listCrons",
@@ -628,7 +795,6 @@ class CleatEntryTransformer {
   // ---------------------------------------------------------------
   _injectWrappers(parser, sourceEntries) {
     for (const { source, entries } of sourceEntries) {
-      const needsImport = !this._hasCleatSdkImport(source);
       const needsJsonImport = this._hasMultiParamEntries(entries);
       const wrapperCode = this._generateWrappers(entries);
 
@@ -648,11 +814,37 @@ class CleatEntryTransformer {
           return null;
         };
 
-        // Insert @cleat/sdk import at the TOP of the source if needed
-        if (needsImport) {
-          let importLine = 'import { HostCalls, Memory, SUSPEND_SENTINEL, isWorkflowSuspended, resetWorkflowSuspended';
+        // Insert the @cleat/sdk import at the TOP of the source. Always --
+        // including when the author already imports from "@cleat/sdk".
+        //
+        // This was guarded by `if (!this._hasCleatSdkImport(source))` until
+        // 2026-09-02, and the guard never fired. Measured with a probe on the
+        // real AS parser: for a source whose first line is
+        // `import { HostCalls, cleatEntry } from "@cleat/sdk"`, the detector
+        // returned FALSE. It probes four property paths for an import's module
+        // name and the AS AST matches none of them.
+        //
+        // So every generated wrapper has resolved Memory, SUSPEND_SENTINEL,
+        // isWorkflowSuspended, resetWorkflowSuspended and runDeferred *because
+        // the detector was broken*. A future asc that exposes one of those
+        // property paths would have started suppressing this import and broken
+        // every wrapper whose author had not happened to import all five by
+        // hand -- a latent break with no test in front of it.
+        //
+        // Detection is not worth fixing. A working detector would have to
+        // inject only the names the author left out, name by name, which is
+        // strictly more machinery for no benefit. Injecting unconditionally is
+        // what already happens, and duplicate-importing the same symbol from
+        // the same module is fine: TestASTransform/compiles_when_the_user_
+        // imports_the_same_symbols compiles a workflow that imports all five
+        // itself.
+        {
+          let importLine = 'import { HostCalls, Memory, SUSPEND_SENTINEL, isWorkflowSuspended, resetWorkflowSuspended, runDeferred';
           if (needsJsonImport) {
-            importLine += ', JsonParser, JsonVal';
+            // TYPE_* accompany JsonParser: the generated multi-parameter
+            // binder compares typeOf() against them by NAME rather than by
+            // literal, so they must be in scope wherever JsonParser is.
+            importLine += ', JsonParser, JsonVal, TYPE_STRING, TYPE_NUMBER, TYPE_BOOL';
           }
           importLine += ' } from "@cleat/sdk";\n';
           parser.parseFile(
@@ -691,28 +883,22 @@ class CleatEntryTransformer {
     }
   }
 
+
   // ---------------------------------------------------------------
-  // Check if a source already imports from @cleat/sdk
+  // cleat#2145: write the entry-point sidecar manifest, one name per line,
+  // to dist/cleat-entry-points.txt relative to this.baseDir (asc's own
+  // --baseDir, default "."). Throws on failure rather than swallowing it --
+  // a manifest that silently fails to write is worse than a loud build
+  // error, because build_as.go's "no manifest" message would then blame an
+  // out-of-date @cleat/transform for a write that this transform's own
+  // version actually attempted and lost.
   // ---------------------------------------------------------------
-  _hasCleatSdkImport(source) {
-    if (!source.statements) return false;
-
-    for (const stmt of source.statements) {
-      if (!stmt) continue;
-
-      // Probe various property paths used by different AS versions
-      const modName =
-        stmt.moduleName ||
-        (stmt.internalNamespace && stmt.internalNamespace.text) ||
-        (stmt.from && (typeof stmt.from === "string" ? stmt.from : stmt.from.text)) ||
-        (stmt.module && (typeof stmt.module === "string" ? stmt.module : stmt.module.text));
-
-      if (modName === "@cleat/sdk") return true;
-
-      if (stmt.namespace && stmt.namespace.text === "@cleat/sdk") return true;
-    }
-
-    return false;
+  _writeEntryPointManifest(names) {
+    const base = this.baseDir || ".";
+    const dir = path.resolve(base, "dist");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "cleat-entry-points.txt");
+    fs.writeFileSync(file, names.map(n => n + "\n").join(""), "utf-8");
   }
 
   // ---------------------------------------------------------------
@@ -759,6 +945,62 @@ class CleatEntryTransformer {
       code += this._generateSingleWrapper(entry);
     }
 
+    // Only for a module that actually has a workflow in it. A source with no
+    // @cleatEntry must produce NO exports at all -- asserted by
+    // TestASTransform/no_entry_no_wrapper, which this failed when the export
+    // was emitted unconditionally.
+    if (entries.length > 0) {
+      code += this._generateDeferRunnerExport();
+    }
+
+    return code;
+  }
+
+  // ---------------------------------------------------------------
+  // Generate the host's kill-path defer entry point
+  //
+  // IMPROVEMENT-PLAN 3.35 phase 4 / 3.73 piece 4. The wrapper above drains
+  // the defer table when a workflow returns, which covers every workflow that
+  // gets to return. A workflow the HOST killed -- execution fence, instruction
+  // limit, memory ceiling -- never reaches it, and its cleanup would simply
+  // never happen. `runGuestDefersAfterKill` in engine/backend_wasmtime.go
+  // looks up this export by name and calls it.
+  //
+  // Emitted once per source that has at least one entry point, because it is
+  // one export for the whole module rather than one per workflow. Emitting it
+  // per entry would be a duplicate-export compile error the moment a module
+  // declares two workflows.
+  //
+  // This has no error handling, and cannot have any: the SDK builds with
+  // `--runtime stub`, which has no exceptions, so there is nothing to catch. A
+  // defer body that aborts traps the instance -- which is a guest already
+  // being torn down, so the trap costs nothing beyond the remaining bodies.
+  // The Go equivalent recovers; this one has no equivalent to recover with.
+  // ---------------------------------------------------------------
+  _generateDeferRunnerExport() {
+    let code = "";
+    code += `// ---- Host-called defer entry point ----\n`;
+    code += `// Called by the host for a workflow it killed, and for a defer\n`;
+    code += `// segment, neither of which reaches the drain in the wrappers above.\n`;
+    code += `// Returns how many bodies ran.\n`;
+    code += `// Idempotent: the table is drained before the first body runs, so a\n`;
+    code += `// guest that already ran its defers returns 0 here.\n`;
+    code += `//\n`;
+    code += `// resetWorkflowSuspended() first, and it is load-bearing rather than\n`;
+    code += `// tidy. This is a HOST ENTRY POINT, and the flag means "the thing\n`;
+    code += `// currently running asked to suspend" -- so every entry from the host\n`;
+    code += `// must start with it clear, which is why Step 3 of each workflow\n`;
+    code += `// wrapper does the same. Without it the flag arrives already set from\n`;
+    code += `// the segment that just ended (a defer segment stops the body's call\n`;
+    code += `// by setting exactly this flag), runDeferred reads it after the FIRST\n`;
+    code += `// body as "that body suspended", and stops -- running one defer and\n`;
+    code += `// silently dropping the rest. Measured 2026-09-03 on a two-defer\n`;
+    code += `// fixture: defers_run=1, operations [second], the first cleanup gone.\n`;
+    code += `// See engine/as_defer_segment_e2e_test.go.\n`;
+    code += `export function __cleat_run_deferred(): i64 {\n`;
+    code += `  resetWorkflowSuspended();\n`;
+    code += `  return <i64>runDeferred(new HostCalls());\n`;
+    code += `}\n\n`;
     return code;
   }
 
@@ -771,6 +1013,7 @@ class CleatEntryTransformer {
       innerName,
       paramNames,
       paramTypes,
+      paramDefaults,
       callArgs,
       retTypeStr,
       isVoid,
@@ -821,8 +1064,39 @@ class CleatEntryTransformer {
       } else {
         code += `  const _result: string = ${innerName}(h);\n`;
       }
-    } else if (paramNames.length === 1) {
-      // Single additional param -- pass the raw JSON string
+    } else if (
+      paramNames.length === 1 &&
+      (paramTypes[0] === "string" || paramTypes[0] === "String") &&
+      !(paramDefaults && paramDefaults[0])
+    ) {
+      // Single additional param -- pass the raw JSON string.
+      //
+      // GATED ON THE TYPE AND THE DEFAULT, not on the count alone (cleat#1065).
+      // This branch assigns argsJson to the parameter, so it is only correct
+      // when that parameter is a string that wants the whole payload. It used
+      // to fire on `paramNames.length === 1` by itself, which produced two
+      // separate defects:
+      //
+      //   1. A lone NON-STRING parameter did not compile AT ALL. The wrapper
+      //      emitted `const count: string = argsJson;` and passed it to a
+      //      function declaring i32, so asc reported
+      //      "Type '~lib/string/String' is not assignable to type 'i32'"
+      //      against generated/cleat-wrappers.ts -- a line the author never
+      //      wrote. Go's equivalent fast path has always been gated on the
+      //      type; AssemblyScript's was gated on the count.
+      //
+      //   2. A lone parameter with a declaration-site DEFAULT silently ignored
+      //      it. Defaults are honoured by _getDeserializeCode, which only the
+      //      named-extraction branch below calls, so `note: string = "X"`
+      //      bound the raw payload instead of "X" -- defeating the optional
+      //      mechanism for exactly the one-parameter case.
+      //
+      // Both are strictly additive to fix: case 1 could not compile, so no
+      // workflow can depend on it, and case 2 could not have been relied on
+      // either, since the declared default was never reachable. The
+      // documented lone-STRING behaviour is unchanged, and
+      // tests/conformance/entry_point_binding_cases.json's "lone string
+      // parameter" row asserts it stays that way.
       code += `  const ${paramNames[0]}: string = argsJson;\n`;
       if (isVoid) {
         code += `  let _result: string = "";\n`;
@@ -831,7 +1105,12 @@ class CleatEntryTransformer {
         code += `  const _result: string = ${innerName}(h, ${paramNames[0]});\n`;
       }
     } else {
-      // Multiple additional params -- parse JSON and extract each field
+      // Named extraction: every param bound by name from the payload.
+      //
+      // Reached by multi-parameter entries, and -- since cleat#1065 -- also by
+      // a SINGLE parameter that is not a bare string or that declares a
+      // default. Both need the parse; only a lone defaultless string can skip
+      // it.
       code += `  // ---- Parse argsJson for multi-param entry ----\n`;
       code += `  let _parser = new JsonParser();\n`;
       code += `  let _parsed: JsonVal | null = _parser.parse(argsJson);\n`;
@@ -842,7 +1121,8 @@ class CleatEntryTransformer {
       code += `  }\n\n`;
       code += `  // Extract named params\n`;
       for (let i = 0; i < paramNames.length; i++) {
-        code += this._getDeserializeCode(paramNames[i], paramTypes[i], funcName);
+        code += this._getDeserializeCode(paramNames[i], paramTypes[i], funcName,
+          paramDefaults ? paramDefaults[i] : null);
       }
       if (isVoid) {
         code += `  let _result: string = "";\n`;
@@ -860,6 +1140,26 @@ class CleatEntryTransformer {
     code += `  if (isWorkflowSuspended()) {\n`;
     code += `    return SUSPEND_SENTINEL;\n`;
     code += `  }\n\n`;
+
+    // ------------------------------------------------------------------
+    // Step 4b: Run guest-side defer bodies (IMPROVEMENT-PLAN 3.73)
+    //
+    // AFTER the suspension check, and that order is the whole point. A
+    // suspended workflow has not exited; its defers are still pending, and
+    // firing them at the first cleatSleep would release locks a workflow that
+    // is about to continue still holds.
+    //
+    // The other SDKs get this ordering for free, because they suspend by
+    // unwinding and the drain sits on a path the unwind skips. AssemblyScript
+    // has no exceptions, so the entry point returns normally either way and
+    // the guard has to be written out. An unguarded drain here compiles, runs,
+    // and is wrong.
+    //
+    // The return value is deliberately discarded: the workflow's result is
+    // already decided by the time this runs, and a defer cannot change it.
+    // ------------------------------------------------------------------
+    code += `  // ---- Step 4b: Run deferred cleanup (not on the suspend path) ----\n`;
+    code += `  runDeferred(h);\n\n`;
 
     // ------------------------------------------------------------------
     // Step 5: Write result to output buffer and return
@@ -902,24 +1202,119 @@ class CleatEntryTransformer {
   // Generate deserialization code for a single parameter based on type
   // Used by the multi-parameter branch to select the correct JSON getter
   // ---------------------------------------------------------------
-  _getDeserializeCode(pname, ptype, funcName) {
+  // The JsonVal type a parameter of `ptype` must have when present. Throws for
+  // anything _getDeserializeCode cannot bind, so the two lists cannot drift.
+  _expectedJsonType(ptype, pname, funcName) {
+    if (ptype === "string" || ptype === "String") return "TYPE_STRING";
+    if (ptype === "bool" || ptype === "boolean") return "TYPE_BOOL";
+    if (["i32", "u32", "i64", "u64", "f64", "f32"].indexOf(ptype) !== -1) return "TYPE_NUMBER";
+    throw new Error(
+      "[@cleat/transform] Unsupported type '" + ptype +
+      "' for parameter '" + pname + "' in function '" + funcName +
+      "'. Supported types: string, i32, u32, i64, u64, f64, f32, bool"
+    );
+  }
+
+  // Refuse a WRONG-TYPED argument; an ABSENT one still binds zero. cleat#1067.
+  //
+  // The getters collapse both into a zero value: getString returns "" for a
+  // missing key AND for {"note": 42}, so a caller who sent the wrong type was
+  // indistinguishable from one who sent nothing, and the workflow ran on the
+  // zero value either way. Measured 2026-09-09 -- present "hi" gave length 2,
+  // absent gave 0, and {"note": 42} also gave 0.
+  //
+  // Only the wrong-typed half changes. Absent must keep binding zero: it is how
+  // an AS workflow expresses an optional parameter, since AS has no
+  // Python-style defaults and this transform rejects composite types at compile
+  // time. That matches the Go contract pinned by cleat#1061, and Go, Rust and
+  // Java already refuse a wrong-typed argument -- AS was alone in accepting one.
+  //
+  // typeOf() returns -1 for an absent key, so `!= -1` is the present test and
+  // the next comparison is the type check. Named constants rather than the
+  // literals 1/2/3, so renumbering them in json.ts cannot silently invert it.
+  _typeGuard(pname, ptype, funcName) {
+    const expect = this._expectedJsonType(ptype, pname, funcName);
+    return (
+      `  const _t_${pname}: i32 = _parser.typeOf(_parsed, "${pname}");\n` +
+      `  if (_t_${pname} != -1 && _t_${pname} != ${expect}) {\n` +
+      this._makeErrorReturn(`parameter ${pname} has the wrong JSON type`) +
+      `  }\n`
+    );
+  }
+
+  // A DECLARED DEFAULT MAKES A PARAMETER OPTIONAL. cleat#1065.
+  //
+  // `pdefault` is the default's source text, or null. When present, an ABSENT
+  // key binds it instead of the getter's zero value.
+  //
+  // WHY THIS IS THE MECHANISM AND NOT A NEW SYNTAX. The contract decided on
+  // cleat#1065 is "an absent declared parameter is an error, unless the
+  // parameter is declared optional". Python spells that with a parameter
+  // default and Rust with Option<T>/#[serde(default)]; AssemblyScript has
+  // neither nullable primitives nor a tag convention, but it DOES have default
+  // parameter values -- the same spelling as Python. So the mechanism already
+  // existed in the language and was being discarded here.
+  //
+  // `_t_<name> == -1` is the absence test the type guard above already emits;
+  // typeOf returns -1 for a missing key. Reusing it means absence has ONE
+  // definition in this wrapper rather than two that can disagree.
+  //
+  // ADDITIVE. Without a default the emitted code is unchanged, so an absent
+  // parameter still binds zero until the contract flips.
+  _getDeserializeCode(pname, ptype, funcName, pdefault) {
     // Map AS types to the correct JsonParser getter
+    const g = this._typeGuard(pname, ptype, funcName);
+    const hasDefault = !(pdefault === null || pdefault === undefined);
+    const orDefault = (expr) =>
+      !hasDefault ? expr : `_t_${pname} == -1 ? (${pdefault}) : (${expr})`;
+
+    // AN ABSENT DECLARED PARAMETER IS AN ERROR. cleat#1065 step 4.
+    //
+    // Without a default, absence used to bind the getter's zero value -- ""
+    // for a string, 0 for a number, false for a bool -- which CANNOT TELL
+    // "sent zero" from "sent nothing", permanently, for every caller. The
+    // workflow runs, the result is plausible, and nothing records that the
+    // value is not the one that was sent.
+    //
+    // The information is the CALLER'S, and a declared default is the workflow
+    // author saying absence is meaningful. So absence is refused unless that
+    // declaration is present, which is the same rule Python has always had and
+    // the one Rust gets from Option<T>.
+    //
+    // It reuses `_t_<name> == -1` rather than introducing a second absence
+    // test, for the reason the comment above gives: one definition of absence
+    // in this wrapper cannot disagree with itself.
+    //
+    // NOT the lone-string fast path, which never reaches this function: a
+    // single defaultless string parameter receives the whole payload rather
+    // than a value looked up by name, so "absent" does not apply to it.
+    const requirePresent = hasDefault
+      ? ""
+      : `  if (_t_${pname} == -1) {\n` +
+        this._makeErrorReturn(
+          `entry point parameter ${pname} is absent from the start payload. ` +
+          `An absent declared parameter is an error (cleat#1065): it cannot be told ` +
+          `apart from one sent as the zero value, and that distinction belongs to the ` +
+          `caller. Send ${pname}, or give it a default to declare it optional.`
+        ) +
+        `  }\n`;
+    const g2 = g + requirePresent;
     if (ptype === "string" || ptype === "String") {
-      return `  let ${pname}: string = _parser.getString(_parsed, "${pname}");\n`;
+      return g2 + `  let ${pname}: string = ${orDefault(`_parser.getString(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "i32") {
-      return `  let ${pname}: i32 = <i32>_parser.getNumber(_parsed, "${pname}");\n`;
+      return g2 + `  let ${pname}: i32 = ${orDefault(`<i32>_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "u32") {
-      return `  let ${pname}: u32 = <u32>_parser.getNumber(_parsed, "${pname}");\n`;
+      return g2 + `  let ${pname}: u32 = ${orDefault(`<u32>_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "i64") {
-      return `  let ${pname}: i64 = <i64>_parser.getNumber(_parsed, "${pname}");\n`;
+      return g2 + `  let ${pname}: i64 = ${orDefault(`<i64>_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "u64") {
-      return `  let ${pname}: u64 = <u64>_parser.getNumber(_parsed, "${pname}");\n`;
+      return g2 + `  let ${pname}: u64 = ${orDefault(`<u64>_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "f64") {
-      return `  let ${pname}: f64 = _parser.getNumber(_parsed, "${pname}");\n`;
+      return g2 + `  let ${pname}: f64 = ${orDefault(`_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "f32") {
-      return `  let ${pname}: f32 = <f32>_parser.getNumber(_parsed, "${pname}");\n`;
+      return g2 + `  let ${pname}: f32 = ${orDefault(`<f32>_parser.getNumber(_parsed, "${pname}")`)};\n`;
     } else if (ptype === "bool" || ptype === "boolean") {
-      return `  let ${pname}: bool = _parser.getBool(_parsed, "${pname}");\n`;
+      return g2 + `  let ${pname}: bool = ${orDefault(`_parser.getBool(_parsed, "${pname}")`)};\n`;
     } else {
       // Unknown type — throw a compile-time error from the transformer
       throw new Error(

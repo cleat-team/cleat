@@ -34,13 +34,20 @@ package engine
 //  4. The same post-commit cleanup a normal terminal write does: sticky
 //     worker, concurrency keys, parent close policy.
 //
-// force-complete also clears error_msg / error_code / error_op. A workflow
-// that has already failed can be force-completed -- that is a repair an
-// operator is entitled to make -- and leaving the old failure on a row now
-// marked done produces a state nothing else in the engine can create, which
-// every reader of those columns would have to know to ignore. The reverse is
-// not symmetric: force-fail leaves result alone, because a result that was
-// genuinely produced is still a fact about the run.
+// force-complete also clears error_msg / error_code / error_op, so a row it
+// marks done never carries a stale failure from a prior segment -- a state
+// nothing else in the engine can create, which every reader of those columns
+// would have to know to ignore. The reverse is not symmetric: force-fail
+// leaves result alone, because a result that was genuinely produced is still
+// a fact about the run.
+//
+// SUPERSEDED 2026-09-22 (cleat#1975, D3): this used to go on to say a workflow
+// that has already failed can be force-completed as a repair "an operator is
+// entitled to make". Settled is final now -- adminForceResolve refuses with
+// ErrAdminStateConflict on a workflow that is already 'failed' (or any other
+// settled status), so that repair path no longer exists. The clearing above
+// still runs on every force-complete; it is just no longer reachable from a
+// row that was already terminal.
 //
 // # Tenant scoping
 //
@@ -63,7 +70,111 @@ import (
 const (
 	adminActionForceComplete = "force_complete"
 	adminActionForceFail     = "force_fail"
+	adminActionReReplay      = "re_replay"
 )
+
+// reReplayableStatuses are the terminal statuses a workflow can be re-replayed
+// out of: it stopped with work left, and resetting it to 'ready' resumes from
+// recorded history rather than starting over.
+//
+// 'done' is excluded deliberately. Replay would walk a complete history to its
+// end and finalize again, doing nothing but writing a second terminal
+// transition. An operator who wants a finished workflow to run again wants a
+// new run -- which is what the dead-letter reprocess path does
+// (cmd/cleat-worker/app.go), from the definition and input rather than from
+// history. The two are different operations and this is the one that preserves
+// completed steps.
+//
+// 'cancelled' is excluded for a third reason (owner decision D4, 2026-09-22).
+// It is reached ONLY by an explicit pre-emptive cancel from the run's own
+// owner (POST /api/workflows/:id/cancel with preemptive:true) -- nothing in
+// the engine writes it -- so re-replaying one would override a deliberate
+// choice. Nothing is lost by refusing: the owner can start a new run with the
+// same input. 'terminated' stays re-replayable even though an operator imposes
+// that one too, because it records "stop this run", often with the intent to
+// fix something and redrive it; a pre-emptive cancel records "do not run this",
+// which fixing and redriving would contradict.
+//
+// The non-terminal statuses are excluded because the dispatcher already owns
+// them: re-replaying a 'ready' or 'running' workflow would bump its generation
+// out from under whichever worker holds it.
+var reReplayableStatuses = []string{"failed", "terminated", "dead_lettered"}
+
+// ErrAdminOpNotImplemented marks an admin operation the store genuinely does
+// not implement, as opposed to one that failed.
+//
+// The distinction is the whole reason it exists: cmd/cleat-worker mapped every
+// error from these methods to 500, so "this endpoint was never built" and "the
+// database is broken" were the same answer to a caller.
+//
+// **No store in this repo returns it any more.** It was introduced for
+// AdminReReplay, which was a stub on all three dialects; that body landed with
+// IMPROVEMENT-PLAN 3.20's third piece, so force-complete, force-fail and
+// re-replay are all real now. The error and handleAdminOpError's 501 branch are
+// kept because WorkflowStore is a public interface: an out-of-tree store that
+// implements some of it and not the rest has the same problem this solved, and
+// 501 is still the honest answer for it.
+var ErrAdminOpNotImplemented = errors.New("not implemented")
+
+// The four classes an admin operation's failure falls into, for the HTTP layer
+// to choose a status code from.
+//
+// They exist because the layer above used to choose by SUBSTRING. store_admin's
+// own comment said so out loud -- "the HTTP layer maps them to 404 and 409 by
+// substring (handleAdminOpError), so the wording is load-bearing" -- which made
+// an operator-facing sentence and a status code the same artefact. Two things
+// went wrong with that:
+//
+//   - Re-replaying a workflow in the wrong status, and re-replaying one with an
+//     unresolved ambiguous call, are both refusals the caller can act on. Their
+//     messages match none of the patterns, so both were 500: "the server broke"
+//     for an operation the server declined on purpose.
+//   - `strings.Contains(msg, "not found")` claims any error whose text happens
+//     to contain those words. A driver reporting a missing relation is a 500
+//     dressed as a 404, and nothing in the code says so.
+//
+// A message is for a person reading a log; a sentinel is for a program choosing
+// a response. Keeping them separate means rewording an error cannot silently
+// change an API's status code.
+var (
+	// ErrAdminBadRequest: the request itself is wrong, and re-sending it
+	// unchanged will fail the same way. 400.
+	ErrAdminBadRequest = errors.New("bad request")
+
+	// ErrAdminNotFound: no such workflow in the caller's tenant. 404.
+	ErrAdminNotFound = errors.New("workflow not found")
+
+	// ErrAdminGenerationMismatch: the workflow moved on between the caller
+	// reading it and asking to change it. 409.
+	ErrAdminGenerationMismatch = errors.New("generation mismatch")
+
+	// ErrAdminStateConflict: the workflow exists and the request is
+	// well-formed, but the workflow's current state does not permit the
+	// operation -- a done workflow cannot be re-replayed, a history with an
+	// unresolved ambiguous call must be reconciled first, an audit row was
+	// taken by a concurrent writer. 409, because retrying after changing the
+	// workflow's state is exactly what the caller should do.
+	ErrAdminStateConflict = errors.New("workflow state conflict")
+)
+
+// adminErrorf builds an admin error that carries both a message written for an
+// operator and a class written for the HTTP layer, without either constraining
+// the other. The message is formatted exactly as given -- no class name is
+// appended -- so these errors read the same in a log as they always have.
+func adminErrorf(class error, format string, args ...any) error {
+	return classifiedError{err: fmt.Errorf(format, args...), class: class}
+}
+
+// classifiedError reports BOTH its message error and its class to errors.Is
+// and errors.As, so wrapping one loses neither: the HTTP layer asks for the
+// class, and a caller unwrapping for a driver error underneath still finds it.
+type classifiedError struct {
+	err   error
+	class error
+}
+
+func (c classifiedError) Error() string   { return c.err.Error() }
+func (c classifiedError) Unwrap() []error { return []error{c.err, c.class} }
 
 // adminForce is one force-resolve request: the terminal state to write, and
 // the audit event to record beside it.
@@ -73,6 +184,12 @@ type adminForce struct {
 	errorMsg  string // force-fail only
 	errorCode string // force-fail only
 	operator  string
+
+	// replaced is the terminal outcome this action is about to erase, read
+	// before the statement that erases it. Set by AdminReReplay only:
+	// force-complete and force-fail WRITE an outcome rather than clearing one,
+	// so there is nothing they lose. cleat#1185.
+	replaced *AdminReplacedOutcome
 }
 
 // reason is the human-readable detail stored on the audit event.
@@ -99,20 +216,22 @@ func (a adminForce) auditEvent(step int) EventRecord {
 		Action:   a.action,
 		Operator: a.operator,
 		Reason:   a.reason(),
+		Replaced: a.replaced,
 	})
 	rec.TimestampMs = time.Now().UnixMilli()
 	return rec
 }
 
 // adminNotFound and adminGenerationMismatch are the two outcomes a zero-row
-// UPDATE has to be resolved into. The HTTP layer maps them to 404 and 409 by
-// substring (handleAdminOpError), so the wording is load-bearing.
+// UPDATE has to be resolved into. Each carries its class, so the HTTP layer
+// reads the class and not the sentence; the sentences are unchanged.
 func adminNotFound(action, workflowID string) error {
-	return fmt.Errorf("admin %s: workflow %s not found", action, workflowID)
+	return adminErrorf(ErrAdminNotFound, "admin %s: workflow %s not found", action, workflowID)
 }
 
 func adminGenerationMismatch(action, workflowID string, stored, requested int64) error {
-	return fmt.Errorf("admin %s: generation mismatch for workflow %s: stored generation is %d, request carried %d",
+	return adminErrorf(ErrAdminGenerationMismatch,
+		"admin %s: generation mismatch for workflow %s: stored generation is %d, request carried %d",
 		action, workflowID, stored, requested)
 }
 
@@ -128,8 +247,9 @@ func adminGenerationMismatch(action, workflowID string, stored, requested int64)
 // ones whose worker is gone -- there is no concurrent writer and this never
 // fires.
 func adminAuditCollision(action, workflowID string, step int) error {
-	return fmt.Errorf("admin %s: audit event for workflow %s step %d was displaced by a concurrent writer; "+
-		"the force-resolve was rolled back rather than applied without an audit record",
+	return adminErrorf(ErrAdminStateConflict,
+		"admin %s: audit event for workflow %s step %d was displaced by a concurrent writer; "+
+			"the force-resolve was rolled back rather than applied without an audit record",
 		action, workflowID, step)
 }
 
@@ -151,12 +271,74 @@ func (s *PostgresStore) AdminForceFail(ctx context.Context, workflowID string, g
 	})
 }
 
+// Every direct terminal UPDATE below clears pending_terminal_status and
+// defer_phase_deadline, and that is not tidiness. A force-resolve can land on a
+// workflow that is in its defer phase, and a marker left behind outlives the
+// row's new status: ExpireDeferPhases sweeps on `pending_terminal_status IS NOT
+// NULL AND defer_phase_deadline < now()`, so past the deadline it would apply
+// the OLD recorded outcome over the operator's. Force-complete a terminating
+// workflow, watch it become 'terminated' five minutes later.
+//
+// The same clearing is on TerminateWorkflow's one-phase arm and the parent-close
+// plain TERMINATE arm, for the same reason. IMPROVEMENT-PLAN 3.112 and 3.114.
 func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string, generation int64, a adminForce) error {
+	// Coerce, as the workflow completion paths do. This writes the same
+	// jsonb column, from a result an OPERATOR supplied, so it is the one
+	// place the string is least likely to be well-formed JSON. Uncoerced,
+	// a force-complete with a bare value failed with a database syntax
+	// error naming 22P02 rather than telling the operator their result was
+	// not an object.
+	a.result = coerceResultJSON(ctx, s.log(), workflowID, a.result)
+
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("admin %s: begin: %w", a.action, err)
 	}
 	defer tx.Rollback()
+
+	// Does this workflow owe a defer phase? cleat#1152, and the query is
+	// TerminateWorkflow's verbatim -- same predicate, same FOR UPDATE holding
+	// the row for the UPDATE below, so the status read is the status marked.
+	//
+	// deferPhaseOwed is false for 'terminating', so force-resolving a workflow
+	// that is ALREADY in its defer phase takes the one-phase arm below and
+	// clears the marker, cutting the cleanup short. That is not an oversight:
+	// it is exactly what a second TerminateWorkflow does, and the alternative
+	// -- restarting the phase clock on every operator action -- is the one
+	// deferPhaseOwed's comment rejects.
+	var curStatus string
+	var hasDefers, compacted bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT w.status,
+		       EXISTS(SELECT 1 FROM event_history e
+		              WHERE e.workflow_id = w.id AND e.event_type = 'defer'),
+		       w.compaction_state IS NOT NULL
+		FROM workflow_instances w
+		WHERE w.id = $1 AND w.tenant_id = $2
+		FOR UPDATE
+	`, workflowID, s.tenantID).Scan(&curStatus, &hasDefers, &compacted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return adminNotFound(a.action, workflowID)
+	}
+	if err != nil {
+		return fmt.Errorf("admin %s: read: %w", a.action, err)
+	}
+
+	// cleat#1975 (D3): settled is final. Unlike preemptivelySettle, a
+	// force-resolve has no dead-letter exception -- force-complete and
+	// force-fail refuse on every settled status, with none of terminate's
+	// carve-outs. This also retires the "force-complete repairs an earlier
+	// force-fail" case TestAdminForceComplete_ClearsAnEarlierFailure asserted:
+	// that repair went through a settled row exactly like the bug this refuses.
+	if isSettledStatus(curStatus) {
+		return adminErrorf(ErrAdminStateConflict,
+			"admin %s: workflow %s is already settled (status=%s); refusing to overwrite a finished run",
+			a.action, workflowID, curStatus)
+	}
+
+	if deferPhaseOwed(curStatus, hasDefers, compacted) {
+		return s.adminForceMark(ctx, tx, workflowID, generation, a)
+	}
 
 	var res sql.Result
 	if a.action == adminActionForceComplete {
@@ -164,14 +346,16 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 			UPDATE workflow_instances
 			SET status = 'done', result = $3, completed_at = now(),
 			    error_msg = NULL, error_code = NULL, error_op = NULL,
-			    assigned_to = NULL, generation = generation + 1
+			    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
+			    pending_terminal_status = NULL, defer_phase_deadline = NULL
 			WHERE id = $1 AND tenant_id = $2 AND generation = $4
 		`, workflowID, s.tenantID, a.result, generation)
 	} else {
 		res, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
 			SET status = 'failed', error_msg = $3, error_code = $4, error_op = 'admin_force_fail',
-			    completed_at = now(), assigned_to = NULL, generation = generation + 1
+			    completed_at = now(), completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
+			    pending_terminal_status = NULL, defer_phase_deadline = NULL
 			WHERE id = $1 AND tenant_id = $2 AND generation = $5
 		`, workflowID, s.tenantID, a.errorMsg, a.errorCode, generation)
 	}
@@ -193,10 +377,78 @@ func (s *PostgresStore) adminForceResolve(ctx context.Context, workflowID string
 		return fmt.Errorf("admin %s: commit: %w", a.action, err)
 	}
 
-	// Best-effort post-commit cleanup, matching CompleteWorkflow / FailWorkflow.
-	_ = s.ClearStickyWorker(context.Background(), workflowID)
-	_ = s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
-	s.enforceParentClosePolicy(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
+	forcedStatus := statusFailed
+	if a.action == adminActionForceComplete {
+		forcedStatus = statusDone
+	}
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(forcedStatus))
+	return nil
+}
+
+// adminForceMark is phase 1 for a force-resolve: record the operator's outcome
+// and let the defer phase run, rather than applying the outcome now. cleat#1152.
+//
+// The operator's outcome goes into pending_terminal_status and the payload
+// columns go in with it. FinalizeDeferPhase applies `status =
+// pending_terminal_status` and does NOT touch result or error_msg, so writing
+// them here is what makes force-COMPLETE expressible in a mechanism built for
+// terminate, which only ever needed a reason string.
+//
+// No releaseWorkflowResources and no enforceParentClosePolicy, for the reason
+// TerminateWorkflow's mark arm gives: both belong to the terminal transition,
+// and this workflow is not terminal yet. Releasing here is the defect the
+// two-phase path exists to fix -- the host dropping the locks the defer was
+// going to release, in the wrong order.
+func (s *PostgresStore) adminForceMark(ctx context.Context, tx *sql.Tx, workflowID string, generation int64, a adminForce) error {
+	var res sql.Result
+	var err error
+	deadline := int(deferPhaseTimeout.Seconds())
+	// Coerced again, and not redundantly. Every caller today reaches here via
+	// adminForceResolve, which coerces first, so this is a no-op on valid JSON
+	// (coerceResultJSON returns early). But TestEveryResultWriteIsCoerced
+	// asserts the property PER WRITER rather than per call path, and it is
+	// right to: the coercion has to travel with the function that writes the
+	// column, or the next caller of this one inherits a raw string and a
+	// database syntax error naming the driver instead of the missing call.
+	a.result = coerceResultJSON(ctx, s.log(), workflowID, a.result)
+	if a.action == adminActionForceComplete {
+		res, err = tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = $5, pending_terminal_status = 'done', result = $3,
+			    error_msg = NULL, error_code = NULL, error_op = NULL,
+			    defer_phase_deadline = now() + ($6 * interval '1 second'),
+			    next_wake_at = now(), assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = $1 AND tenant_id = $2 AND generation = $4
+		`, workflowID, s.tenantID, a.result, generation, statusTerminating, deadline)
+	} else {
+		res, err = tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = $6, pending_terminal_status = 'failed',
+			    error_msg = $3, error_code = $4, error_op = 'admin_force_fail',
+			    defer_phase_deadline = now() + ($7 * interval '1 second'),
+			    next_wake_at = now(), assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = $1 AND tenant_id = $2 AND generation = $5
+		`, workflowID, s.tenantID, a.errorMsg, a.errorCode, generation, statusTerminating, deadline)
+	}
+	if err != nil {
+		return fmt.Errorf("admin %s: mark defer phase: %w", a.action, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("admin %s: rows affected: %w", a.action, err)
+	}
+	if n == 0 {
+		return s.adminResolveMiss(ctx, tx, workflowID, generation, a.action)
+	}
+	if err := s.adminAppendAudit(ctx, tx, workflowID, a); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("admin %s: commit: %w", a.action, err)
+	}
 	return nil
 }
 
@@ -218,7 +470,43 @@ func (s *PostgresStore) adminResolveMiss(ctx context.Context, tx *sql.Tx, workfl
 	return adminGenerationMismatch(action, workflowID, stored, requested)
 }
 
+// assertHistoryReadable refuses to let an admin operation append to a history
+// this worker cannot decrypt. It runs inside the transaction that holds the
+// operation's status change, so returning an error rolls that change back too:
+// nothing is written.
+//
+// Why it lives HERE and not in each operation: every admin verb that appends an
+// event does it through adminAppendAudit, so a check at the one shared point
+// covers force-complete, force-fail, re-replay and retry, and covers the next
+// verb somebody adds without their having to remember it. The audit event is
+// sealed under THIS worker's key, and on a worker with the wrong key that
+// leaves a history sealed under two keys, which no single worker can read
+// again -- every single-key worker then refuses to re-replay, retry or resolve
+// the run. The first version of cleat#2311 checked only the three verbs that
+// happened to load the history already, and force-fail and force-complete
+// (which do not) answered 200 and did exactly that.
+// TestEveryAdminAppendGoesThroughTheReadabilityCheck keeps it structural.
+//
+// Only meaningful where a payload key ring is configured: with none, nothing is
+// decrypted on read and nothing can fail, so the read is skipped rather than
+// spent on every admin call.
+func (s *PostgresStore) assertHistoryReadable(ctx context.Context, tx *sql.Tx, workflowID, op string) error {
+	if s.encryption == nil || !s.encryptSensitivePayloads {
+		return nil
+	}
+	if _, err := s.readEventHistoryTx(ctx, tx, workflowID); err != nil {
+		if errors.Is(err, ErrPayloadDecryption) {
+			return adminHistoryUnreadable("admin "+op, workflowID)
+		}
+		return fmt.Errorf("admin %s: check the history is readable: %w", op, err)
+	}
+	return nil
+}
+
 func (s *PostgresStore) adminAppendAudit(ctx context.Context, tx *sql.Tx, workflowID string, a adminForce) error {
+	if err := s.assertHistoryReadable(ctx, tx, workflowID, a.action); err != nil {
+		return err
+	}
 	var step int
 	if err := tx.QueryRowContext(ctx,
 		`SELECT COALESCE(MAX(step), -1) + 1 FROM event_history WHERE workflow_id = $1 AND tenant_id = $2`,
@@ -264,11 +552,51 @@ func (s *MySQLStore) AdminForceFail(ctx context.Context, workflowID string, gene
 }
 
 func (s *MySQLStore) adminForceResolve(ctx context.Context, workflowID string, generation int64, a adminForce) error {
+	// Coerce, as the workflow completion paths do. This writes the same
+	// jsonb column, from a result an OPERATOR supplied, so it is the one
+	// place the string is least likely to be well-formed JSON. Uncoerced,
+	// a force-complete with a bare value failed with a database syntax
+	// error naming 22P02 rather than telling the operator their result was
+	// not an object.
+	a.result = coerceResultJSON(ctx, s.log(), workflowID, a.result)
+
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("admin %s: begin: %w", a.action, err)
 	}
 	defer tx.Rollback()
+
+	// Does this workflow owe a defer phase? cleat#1152. FOR UPDATE holds the
+	// row for the UPDATE that follows, as on the other two dialects.
+	var curStatus string
+	var hasDefers, compacted bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT w.status,
+		       EXISTS(SELECT 1 FROM event_history e
+		              WHERE e.workflow_id = w.id AND e.event_type = 'defer'),
+		       w.compaction_state IS NOT NULL
+		FROM workflow_instances w
+		WHERE w.id = ? AND w.tenant_id = ?
+		FOR UPDATE
+	`, workflowID, s.tenantID).Scan(&curStatus, &hasDefers, &compacted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return adminNotFound(a.action, workflowID)
+	}
+	if err != nil {
+		return fmt.Errorf("admin %s: read: %w", a.action, err)
+	}
+
+	// cleat#1975 (D3): settled is final. See the PostgreSQL sibling for why
+	// there is no dead-letter exception here.
+	if isSettledStatus(curStatus) {
+		return adminErrorf(ErrAdminStateConflict,
+			"admin %s: workflow %s is already settled (status=%s); refusing to overwrite a finished run",
+			a.action, workflowID, curStatus)
+	}
+
+	if deferPhaseOwed(curStatus, hasDefers, compacted) {
+		return s.adminForceMark(ctx, tx, workflowID, generation, a)
+	}
 
 	var res sql.Result
 	if a.action == adminActionForceComplete {
@@ -276,14 +604,16 @@ func (s *MySQLStore) adminForceResolve(ctx context.Context, workflowID string, g
 			UPDATE workflow_instances
 			SET status = 'done', result = ?, completed_at = NOW(6),
 			    error_msg = NULL, error_code = NULL, error_op = NULL,
-			    assigned_to = NULL, generation = generation + 1
+			    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
+			    pending_terminal_status = NULL, defer_phase_deadline = NULL
 			WHERE id = ? AND tenant_id = ? AND generation = ?
 		`, a.result, workflowID, s.tenantID, generation)
 	} else {
 		res, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
 			SET status = 'failed', error_msg = ?, error_code = ?, error_op = 'admin_force_fail',
-			    completed_at = NOW(6), assigned_to = NULL, generation = generation + 1
+			    completed_at = NOW(6), completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
+			    pending_terminal_status = NULL, defer_phase_deadline = NULL
 			WHERE id = ? AND tenant_id = ? AND generation = ?
 		`, a.errorMsg, a.errorCode, workflowID, s.tenantID, generation)
 	}
@@ -305,9 +635,67 @@ func (s *MySQLStore) adminForceResolve(ctx context.Context, workflowID string, g
 		return fmt.Errorf("admin %s: commit: %w", a.action, err)
 	}
 
-	_ = s.ClearStickyWorker(context.Background(), workflowID)
-	_ = s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
-	s.enforceParentClosePolicy(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
+	forcedStatus := statusFailed
+	if a.action == adminActionForceComplete {
+		forcedStatus = statusDone
+	}
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(forcedStatus))
+	return nil
+}
+
+// adminForceMark is MySQL's phase 1 for a force-resolve. See the PostgreSQL
+// sibling for why the payload columns are written here and why neither
+// releaseWorkflowResources nor enforceParentClosePolicy runs. cleat#1152.
+func (s *MySQLStore) adminForceMark(ctx context.Context, tx *sql.Tx, workflowID string, generation int64, a adminForce) error {
+	var res sql.Result
+	var err error
+	deadline := int(deferPhaseTimeout.Seconds())
+	// Coerced again, and not redundantly. Every caller today reaches here via
+	// adminForceResolve, which coerces first, so this is a no-op on valid JSON
+	// (coerceResultJSON returns early). But TestEveryResultWriteIsCoerced
+	// asserts the property PER WRITER rather than per call path, and it is
+	// right to: the coercion has to travel with the function that writes the
+	// column, or the next caller of this one inherits a raw string and a
+	// database syntax error naming the driver instead of the missing call.
+	a.result = coerceResultJSON(ctx, s.log(), workflowID, a.result)
+	if a.action == adminActionForceComplete {
+		res, err = tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = ?, pending_terminal_status = 'done', result = ?,
+			    error_msg = NULL, error_code = NULL, error_op = NULL,
+			    defer_phase_deadline = DATE_ADD(NOW(6), INTERVAL ? SECOND),
+			    next_wake_at = NOW(6), assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = ? AND tenant_id = ? AND generation = ?
+		`, statusTerminating, a.result, deadline, workflowID, s.tenantID, generation)
+	} else {
+		res, err = tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = ?, pending_terminal_status = 'failed',
+			    error_msg = ?, error_code = ?, error_op = 'admin_force_fail',
+			    defer_phase_deadline = DATE_ADD(NOW(6), INTERVAL ? SECOND),
+			    next_wake_at = NOW(6), assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = ? AND tenant_id = ? AND generation = ?
+		`, statusTerminating, a.errorMsg, a.errorCode, deadline, workflowID, s.tenantID, generation)
+	}
+	if err != nil {
+		return fmt.Errorf("admin %s: mark defer phase: %w", a.action, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("admin %s: rows affected: %w", a.action, err)
+	}
+	if n == 0 {
+		return s.adminResolveMiss(ctx, tx, workflowID, generation, a.action)
+	}
+	if err := s.adminAppendAudit(ctx, tx, workflowID, a); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("admin %s: commit: %w", a.action, err)
+	}
 	return nil
 }
 
@@ -375,11 +763,49 @@ func (s *MSSQLStore) AdminForceFail(ctx context.Context, workflowID string, gene
 }
 
 func (s *MSSQLStore) adminForceResolveOnce(ctx context.Context, workflowID string, generation int64, a adminForce) error {
+	// Coerce, as the PostgreSQL and MySQL arms of this function do, and as
+	// the workflow completion paths do. Same jsonb-equivalent column, same
+	// operator-supplied string.
+	a.result = coerceResultJSON(ctx, s.log(), workflowID, a.result)
+
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("admin %s: begin: %w", a.action, err)
 	}
 	defer tx.Rollback()
+
+	// Does this workflow owe a defer phase? cleat#1152. UPDLOCK/HOLDLOCK is
+	// SQL Server's FOR UPDATE -- the other two dialects spell it that way.
+	var curStatus string
+	var hasDefers, compacted bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT w.status,
+		       CASE WHEN EXISTS(SELECT 1 FROM event_history e
+		                        WHERE e.workflow_id = w.id AND e.event_type = 'defer')
+		            THEN 1 ELSE 0 END,
+		       CASE WHEN w.compaction_state IS NOT NULL THEN 1 ELSE 0 END
+		FROM workflow_instances w WITH (UPDLOCK, HOLDLOCK)
+		WHERE w.id = @p1 AND w.tenant_id = @p2
+	`, workflowID, s.tenantID).Scan(&curStatus, &hasDefers, &compacted)
+	if errors.Is(err, sql.ErrNoRows) {
+		return adminNotFound(a.action, workflowID)
+	}
+	if err != nil {
+		return fmt.Errorf("admin %s: read: %w", a.action, err)
+	}
+
+	// cleat#1975 (D3): settled is final. See the PostgreSQL sibling for why
+	// there is no dead-letter exception here. Not a rollback-guaranteed class,
+	// so the retry wrapper returns it on the first attempt.
+	if isSettledStatus(curStatus) {
+		return adminErrorf(ErrAdminStateConflict,
+			"admin %s: workflow %s is already settled (status=%s); refusing to overwrite a finished run",
+			a.action, workflowID, curStatus)
+	}
+
+	if deferPhaseOwed(curStatus, hasDefers, compacted) {
+		return s.adminForceMark(ctx, tx, workflowID, generation, a)
+	}
 
 	var res sql.Result
 	if a.action == adminActionForceComplete {
@@ -387,14 +813,16 @@ func (s *MSSQLStore) adminForceResolveOnce(ctx context.Context, workflowID strin
 			UPDATE workflow_instances
 			SET status = 'done', result = @p3, completed_at = SYSUTCDATETIME(),
 			    error_msg = NULL, error_code = NULL, error_op = NULL,
-			    assigned_to = NULL, generation = generation + 1
+			    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
+			    pending_terminal_status = NULL, defer_phase_deadline = NULL
 			WHERE id = @p1 AND tenant_id = @p2 AND generation = @p4
 		`, workflowID, s.tenantID, a.result, generation)
 	} else {
 		res, err = tx.ExecContext(ctx, `
 			UPDATE workflow_instances
 			SET status = 'failed', error_msg = @p3, error_code = @p4, error_op = 'admin_force_fail',
-			    completed_at = SYSUTCDATETIME(), assigned_to = NULL, generation = generation + 1
+			    completed_at = SYSUTCDATETIME(), completed_by = assigned_to, assigned_to = NULL, generation = generation + 1,
+			    pending_terminal_status = NULL, defer_phase_deadline = NULL
 			WHERE id = @p1 AND tenant_id = @p2 AND generation = @p5
 		`, workflowID, s.tenantID, a.errorMsg, a.errorCode, generation)
 	}
@@ -416,9 +844,66 @@ func (s *MSSQLStore) adminForceResolveOnce(ctx context.Context, workflowID strin
 		return fmt.Errorf("admin %s: commit: %w", a.action, err)
 	}
 
-	_ = s.ClearStickyWorker(context.Background(), workflowID)
-	_ = s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
-	s.enforceParentClosePolicy(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
+	forcedStatus := statusFailed
+	if a.action == adminActionForceComplete {
+		forcedStatus = statusDone
+	}
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(forcedStatus))
+	return nil
+}
+
+// adminForceMark is SQL Server's phase 1 for a force-resolve. See the
+// PostgreSQL sibling for the reasoning. cleat#1152.
+func (s *MSSQLStore) adminForceMark(ctx context.Context, tx *sql.Tx, workflowID string, generation int64, a adminForce) error {
+	var res sql.Result
+	var err error
+	deadline := int(deferPhaseTimeout.Seconds())
+	// Coerced again, and not redundantly. Every caller today reaches here via
+	// adminForceResolve, which coerces first, so this is a no-op on valid JSON
+	// (coerceResultJSON returns early). But TestEveryResultWriteIsCoerced
+	// asserts the property PER WRITER rather than per call path, and it is
+	// right to: the coercion has to travel with the function that writes the
+	// column, or the next caller of this one inherits a raw string and a
+	// database syntax error naming the driver instead of the missing call.
+	a.result = coerceResultJSON(ctx, s.log(), workflowID, a.result)
+	if a.action == adminActionForceComplete {
+		res, err = tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = @p5, pending_terminal_status = 'done', result = @p3,
+			    error_msg = NULL, error_code = NULL, error_op = NULL,
+			    defer_phase_deadline = DATEADD(SECOND, @p6, SYSUTCDATETIME()),
+			    next_wake_at = SYSUTCDATETIME(), assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = @p1 AND tenant_id = @p2 AND generation = @p4
+		`, workflowID, s.tenantID, a.result, generation, statusTerminating, deadline)
+	} else {
+		res, err = tx.ExecContext(ctx, `
+			UPDATE workflow_instances
+			SET status = @p6, pending_terminal_status = 'failed',
+			    error_msg = @p3, error_code = @p4, error_op = 'admin_force_fail',
+			    defer_phase_deadline = DATEADD(SECOND, @p7, SYSUTCDATETIME()),
+			    next_wake_at = SYSUTCDATETIME(), assigned_to = NULL,
+			    generation = generation + 1
+			WHERE id = @p1 AND tenant_id = @p2 AND generation = @p5
+		`, workflowID, s.tenantID, a.errorMsg, a.errorCode, generation, statusTerminating, deadline)
+	}
+	if err != nil {
+		return fmt.Errorf("admin %s: mark defer phase: %w", a.action, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("admin %s: rows affected: %w", a.action, err)
+	}
+	if n == 0 {
+		return s.adminResolveMiss(ctx, tx, workflowID, generation, a.action)
+	}
+	if err := s.adminAppendAudit(ctx, tx, workflowID, a); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("admin %s: commit: %w", a.action, err)
+	}
 	return nil
 }
 

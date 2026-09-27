@@ -46,7 +46,9 @@ package engine
 import "C"
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"unsafe"
 
 	"github.com/cleat-team/cleat/wasm"
@@ -65,9 +67,9 @@ func (b *wasmtimeBackend) dispatchDurableCallString(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.DurableCall(ctxWithMem(context.Background(), buf), nil, svc, op, req, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
 
-	setResultString(results, nresults, response)
+	setResultCallOutcome(results, nresults,
+		decodeCallOutcome(packed, buf, extractStringFromPacked))
 	return nil
 }
 
@@ -91,9 +93,9 @@ func (b *wasmtimeBackend) dispatchDurableCallRetry(
 	buf := make([]byte, 65536)
 	packed := b.handler.DurableCallWithRetry(ctxWithMem(context.Background(), buf), nil,
 		svc, op, req, maxAttempts, initialInterval, backoffCoeff, maxInterval, nonRetryable, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
 
-	setResultString(results, nresults, response)
+	setResultCallOutcome(results, nresults,
+		decodeCallOutcome(packed, buf, extractStringFromPacked))
 	return nil
 }
 
@@ -113,9 +115,9 @@ func (b *wasmtimeBackend) dispatchDurableCallHeartbeat(
 	buf := make([]byte, 65536)
 	packed := b.handler.DurableCallWithHeartbeat(ctxWithMem(context.Background(), buf), nil,
 		svc, op, req, heartbeatInterval, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
 
-	setResultString(results, nresults, response)
+	setResultCallOutcome(results, nresults,
+		decodeCallOutcome(packed, buf, extractStringFromPacked))
 	return nil
 }
 
@@ -302,43 +304,6 @@ func (b *wasmtimeBackend) dispatchPollSignal(
 	return nil
 }
 
-// dispatchSendSignalAndWait handles (string,string,string,u64) -> string.
-func (b *wasmtimeBackend) dispatchSendSignalAndWait(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 4 || b.handler == nil {
-		return nil
-	}
-	target := readStrArg(args, 0, nargs)
-	sigName := readStrArg(args, 1, nargs)
-	payload := readStrArg(args, 2, nargs)
-	timeoutMs := int64(readU64Arg(args, 3, nargs))
-
-	buf := make([]byte, 65536)
-	packed := b.handler.SendSignalAndWait(ctxWithMem(context.Background(), buf), nil,
-		target, sigName, payload, timeoutMs, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
-
-	setResultString(results, nresults, response)
-	return nil
-}
-
-// dispatchReplyToSignal handles (string,string) -> u64.
-func (b *wasmtimeBackend) dispatchReplyToSignal(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil {
-		return nil
-	}
-	correlationID := readStrArg(args, 0, nargs)
-	response := readStrArg(args, 1, nargs)
-	r := b.handler.ReplyToSignal(context.Background(), nil, correlationID, response)
-	setResultU64(results, nresults, uint64(r))
-	return nil
-}
-
 // dispatchSignalWorkflow handles (string,string,string) -> u64.
 func (b *wasmtimeBackend) dispatchSignalWorkflow(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
@@ -372,9 +337,9 @@ func (b *wasmtimeBackend) dispatchChildWorkflow(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.ChildWorkflow(ctxWithMem(context.Background(), buf), nil, name, input, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
 
-	setResultString(results, nresults, response)
+	setResultCallOutcome(results, nresults,
+		decodeCallOutcome(packed, buf, extractStringFromSimplePacked))
 	return nil
 }
 
@@ -431,9 +396,9 @@ func (b *wasmtimeBackend) dispatchChildWorkflowWithOptions(
 	buf := make([]byte, 65536)
 	packed := b.handler.ChildWorkflowWithOptions(ctxWithMem(context.Background(), buf), nil,
 		name, input, version, priority, policy, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
 
-	setResultString(results, nresults, response)
+	setResultCallOutcome(results, nresults,
+		decodeCallOutcome(packed, buf, extractStringFromSimplePacked))
 	return nil
 }
 
@@ -564,6 +529,43 @@ func (b *wasmtimeBackend) dispatchRegisterQueryHandler(
 // durable-messaging interface
 // ---------------------------------------------------------------------------
 
+// dispatchPollUpdate handles () -> string.
+//
+// The component signature returns the envelope directly rather than writing
+// into a guest buffer, so "nothing pending" is the empty string. A component
+// guest therefore cannot misread a not-found as a delivery, which is the same
+// property the result<> calls have.
+func (b *wasmtimeBackend) dispatchPollUpdate(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if b.handler == nil {
+		return nil
+	}
+	buf := make([]byte, 65536)
+	packed := b.handler.DurablePollUpdate(ctxWithMem(context.Background(), buf), nil, 0, 65536)
+	// found=false packs as 0, and extractStringFromSimplePacked then yields "".
+	envelope := extractStringFromSimplePacked(packed, buf)
+	setResultString(results, nresults, envelope)
+	return nil
+}
+
+// dispatchCompleteUpdate handles (string,string,string) -> u64.
+func (b *wasmtimeBackend) dispatchCompleteUpdate(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if int(nargs) < 3 || b.handler == nil {
+		return nil
+	}
+	requestID := readStrArg(args, 0, nargs)
+	result := readStrArg(args, 1, nargs)
+	errMsg := readStrArg(args, 2, nargs)
+	r := b.handler.DurableCompleteUpdate(context.Background(), nil, requestID, result, errMsg)
+	setResultU64(results, nresults, uint64(r))
+	return nil
+}
+
 // dispatchDurableSend handles (string,string,string) -> u64.
 func (b *wasmtimeBackend) dispatchDurableSend(
 	args *C.wasmtime_component_val_t, nargs C.size_t,
@@ -653,9 +655,9 @@ func (b *wasmtimeBackend) dispatchPluginCall(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.PluginCall(ctxWithMem(context.Background(), buf), nil, pluginName, funcName, input, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
 
-	setResultString(results, nresults, response)
+	setResultCallOutcome(results, nresults,
+		decodeCallOutcome(packed, buf, extractStringFromPacked))
 	return nil
 }
 
@@ -673,9 +675,9 @@ func (b *wasmtimeBackend) dispatchPluginCallStreaming(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.PluginCallStreaming(ctxWithMem(context.Background(), buf), nil, pluginName, funcName, input, 0, 65536)
-	response := extractStringFromPacked(packed, buf)
 
-	setResultString(results, nresults, response)
+	setResultCallOutcome(results, nresults,
+		decodeCallOutcome(packed, buf, extractStringFromPacked))
 	return nil
 }
 
@@ -774,100 +776,6 @@ func (b *wasmtimeBackend) dispatchUUID(
 // durable-stream-state interface
 // ---------------------------------------------------------------------------
 
-// dispatchSetState handles (string,string) -> u64.
-func (b *wasmtimeBackend) dispatchSetState(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil {
-		return nil
-	}
-	key := readStrArg(args, 0, nargs)
-	val := readStrArg(args, 1, nargs)
-	r := b.handler.SetState(context.Background(), nil, key, val)
-	setResultU64(results, nresults, uint64(r))
-	return nil
-}
-
-// dispatchGetState handles (string) -> string.
-func (b *wasmtimeBackend) dispatchGetState(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil {
-		return nil
-	}
-	key := readStrArg(args, 0, nargs)
-
-	buf := make([]byte, 65536)
-	packed := b.handler.GetState(ctxWithMem(context.Background(), buf), nil, key, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
-
-	setResultString(results, nresults, response)
-	return nil
-}
-
-// dispatchDeleteState handles (string) -> u64.
-func (b *wasmtimeBackend) dispatchDeleteState(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil {
-		return nil
-	}
-	key := readStrArg(args, 0, nargs)
-	r := b.handler.DeleteState(context.Background(), nil, key)
-	setResultU64(results, nresults, uint64(r))
-	return nil
-}
-
-// dispatchIncrState handles (string,u64) -> u64.
-func (b *wasmtimeBackend) dispatchIncrState(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 2 || b.handler == nil {
-		return nil
-	}
-	key := readStrArg(args, 0, nargs)
-	delta := int64(readU64Arg(args, 1, nargs))
-	r := b.handler.IncrState(context.Background(), nil, key, delta)
-	setResultU64(results, nresults, uint64(r))
-	return nil
-}
-
-// dispatchHasState handles (string) -> u64.
-func (b *wasmtimeBackend) dispatchHasState(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil {
-		return nil
-	}
-	key := readStrArg(args, 0, nargs)
-	r := b.handler.HasState(context.Background(), nil, key)
-	setResultU64(results, nresults, uint64(r))
-	return nil
-}
-
-// dispatchListState handles (string) -> string.
-func (b *wasmtimeBackend) dispatchListState(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 1 || b.handler == nil {
-		return nil
-	}
-	prefix := readStrArg(args, 0, nargs)
-
-	buf := make([]byte, 65536)
-	packed := b.handler.ListState(ctxWithMem(context.Background(), buf), nil, prefix, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
-
-	setResultString(results, nresults, response)
-	return nil
-}
-
 // ---------------------------------------------------------------------------
 // durable-extended-lifecycle interface
 // ---------------------------------------------------------------------------
@@ -899,37 +807,12 @@ func (b *wasmtimeBackend) dispatchSideEffect(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.SideEffect(ctxWithMem(context.Background(), buf), nil, result, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
-
-	setResultString(results, nresults, response)
-	return nil
-}
-
-// ---------------------------------------------------------------------------
-// durable-extended-children interface
-// ---------------------------------------------------------------------------
-
-// dispatchChildWorkflowInSchema handles (string,string,string,u64,u64,string) -> string.
-func (b *wasmtimeBackend) dispatchChildWorkflowInSchema(
-	args *C.wasmtime_component_val_t, nargs C.size_t,
-	results *C.wasmtime_component_val_t, nresults C.size_t,
-) *C.wasmtime_error_t {
-	if int(nargs) < 6 || b.handler == nil {
-		return nil
-	}
-	schema := readStrArg(args, 0, nargs)
-	name := readStrArg(args, 1, nargs)
-	input := readStrArg(args, 2, nargs)
-	version := int64(readU64Arg(args, 3, nargs))
-	priority := int64(readU64Arg(args, 4, nargs))
-	policy := readStrArg(args, 5, nargs)
-
-	buf := make([]byte, 65536)
-	packed := b.handler.ChildWorkflowInSchema(ctxWithMem(context.Background(), buf), nil,
-		schema, name, input, version, priority, policy, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
-
-	setResultString(results, nresults, response)
+	// result<string, call-failure>, not a bare string: decodeCallOutcome tests
+	// the stop sentinel by mask BEFORE reading any field, so a refusal reaches
+	// the component guest as the `suspended` case rather than as a response the
+	// service could also have produced. setResultString discarded those bits.
+	setResultCallOutcome(results, nresults,
+		decodeCallOutcome(packed, buf, extractStringFromSimplePacked))
 	return nil
 }
 
@@ -952,9 +835,9 @@ func (b *wasmtimeBackend) dispatchFetch(
 
 	buf := make([]byte, 65536)
 	packed := b.handler.Fetch(ctxWithMem(context.Background(), buf), nil, method, url, headers, body, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
 
-	setResultString(results, nresults, response)
+	setResultCallOutcome(results, nresults,
+		decodeCallOutcome(packed, buf, extractStringFromSimplePacked))
 	return nil
 }
 
@@ -1003,9 +886,12 @@ func (b *wasmtimeBackend) dispatchScheduleCron(
 	buf := make([]byte, 65536)
 	packed := b.handler.ScheduleCron(ctxWithMem(context.Background(), buf), nil,
 		workflowName, cronExpr, timezone, input, 0, 65536)
-	response := extractStringFromSimplePacked(packed, buf)
-
-	setResultString(results, nresults, response)
+	// result<string, call-failure>, not a bare string: decodeCallOutcome tests
+	// the stop sentinel by mask BEFORE reading any field, so a refusal reaches
+	// the component guest as the `suspended` case rather than as a response the
+	// service could also have produced. setResultString discarded those bits.
+	setResultCallOutcome(results, nresults,
+		decodeCallOutcome(packed, buf, extractStringFromSimplePacked))
 	return nil
 }
 
@@ -1061,6 +947,122 @@ func (b *wasmtimeBackend) dispatchComponentDefault(
 	return nil
 }
 
+// ---------------------------------------------------------------------------
+// wasi:clocks/wall-clock and wasi:random/random  (cleat#1410)
+// ---------------------------------------------------------------------------
+
+// dispatchWasiWallClockNow handles wasi:clocks/wall-clock#now() -> datetime.
+//
+// Backed by the same durable clock cleat's own `durable-now` returns, so a
+// Python guest's time.time() and its h.now() agree and a replay reproduces
+// both. Before this a guest read the HOST's clock: measured, two executions of
+// one workflow id with the durable clock pinned returned 1.7895622924e9 and
+// 1.7895622951e9 seconds while h.now() returned the pinned value both times.
+func (b *wasmtimeBackend) dispatchWasiWallClockNow(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if b.handler == nil {
+		return nil
+	}
+	setResultDatetime(results, nresults, b.handler.Now(context.Background()))
+	return nil
+}
+
+// dispatchWasiWallClockResolution handles
+// wasi:clocks/wall-clock#resolution() -> datetime.
+//
+// One millisecond, because that is the durable clock's unit. Shadowed rather
+// than left to wasmtime for the same reason as now(): the real one reports the
+// HOST's resolution, which is a property of the machine a workflow happens to
+// be replayed on. A guest that scales a measurement by the reported resolution
+// would then compute different numbers on two workers.
+func (b *wasmtimeBackend) dispatchWasiWallClockResolution(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	setResultDatetime(results, nresults, 1)
+	return nil
+}
+
+// dispatchWasiRandomU64 handles wasi:random/random#get-random-u64() -> u64.
+func (b *wasmtimeBackend) dispatchWasiRandomU64(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if b.handler == nil {
+		return nil
+	}
+	setResultU64(results, nresults, uint64(b.handler.Random(context.Background())))
+	return nil
+}
+
+// maxWasiRandomBytes bounds get-random-bytes.
+//
+// A component list is a vec of wasmtime_component_val_t -- one 16-byte val per
+// byte returned, not a byte buffer -- so a guest asking for 1 GiB would ask the
+// host for 16. The guest supplies the length, so this is a host-side bound on a
+// guest-controlled allocation rather than a policy about entropy.
+//
+// 1 MiB is far above any real use: CPython seeds its Mersenne Twister from
+// 2500 bytes and os.urandom callers ask for tens.
+const maxWasiRandomBytes = 1 << 20
+
+// dispatchWasiRandomBytes handles
+// wasi:random/random#get-random-bytes(len: u64) -> list<u8>.
+//
+// THIS IS THE ONE THAT MATTERS AND IT IS NOT THE OBVIOUS ONE. CPython seeds
+// random.random()'s Mersenne Twister from os.urandom at import, so a guest
+// whose get-random-bytes is still live has a non-deterministic
+// random.random() -- while get-random-u64, the function that looks like the
+// RNG, is shadowed and every check of it passes. Shadowing the scalar alone is
+// a slice that compiles, registers, and achieves nothing observable.
+//
+// The bytes come from the same seeded source as cleat's durable-random, drawn
+// eight at a time, so they reproduce on replay for the same reason it does.
+func (b *wasmtimeBackend) dispatchWasiRandomBytes(
+	args *C.wasmtime_component_val_t, nargs C.size_t,
+	results *C.wasmtime_component_val_t, nresults C.size_t,
+) *C.wasmtime_error_t {
+	if b.handler == nil {
+		return nil
+	}
+	if int(nargs) < 1 {
+		return nil
+	}
+	requested := readU64Arg(args, 0, nargs)
+	n := int(requested)
+	// `int` is 64-bit here, so a length above 2^63 arrives NEGATIVE rather
+	// than large. Both bounds are needed and the negative one is the easy
+	// mistake -- `n > max` alone lets 2^63 through as a negative length.
+	if n < 0 || n > maxWasiRandomBytes {
+		n = maxWasiRandomBytes
+		// TRUNCATION IS NEVER SILENT. A short read of an entropy buffer is the
+		// kind of thing that behaves for years and then does not, so it is
+		// logged even though no real guest reaches it: CPython seeds from 2500
+		// bytes and os.urandom callers ask for tens.
+		//
+		// TRAPPING WOULD BE MORE HONEST AND IS NOT DONE HERE. A callback
+		// reports failure by returning a wasmtime_error_t, and no dispatcher
+		// in this package has ever returned one -- so it would be the first
+		// use of wasmtime_error_new in the tree, with ownership semantics
+		// nothing here establishes and no way to exercise it from a real
+		// guest. Recorded rather than silently preferred; if a guest is ever
+		// found asking for more than this, trap instead of raising the bound.
+		slog.Warn("wasi get-random-bytes truncated",
+			"requested", requested, "returned", n)
+	}
+	out := make([]byte, n)
+	ctx := context.Background()
+	for i := 0; i < n; i += 8 {
+		var word [8]byte
+		binary.BigEndian.PutUint64(word[:], uint64(b.handler.Random(ctx)))
+		copy(out[i:], word[:])
+	}
+	setResultListU8(results, nresults, out)
+	return nil
+}
+
 // -- WIT module/function -> cbType map ---------------------------------------
 
 // witTypeMap maps WIT module-name / function-name pairs to their cbType,
@@ -1087,11 +1089,9 @@ var witTypeMap = map[string]map[string]cbType{
 		"durable-poll-cancellation": cbTypePollCancellation,
 	},
 	"cleat:host-calls/durable-signals": {
-		"durable-await-signals":        cbTypeAwaitSignals,
-		"durable-poll-signal":          cbTypePollSignal,
-		"durable-send-signal-and-wait": cbTypeSendSignalAndWait,
-		"durable-reply-to-signal":      cbTypeReplyToSignal,
-		"durable-signal-workflow":      cbTypeSignalWorkflow,
+		"durable-await-signals":   cbTypeAwaitSignals,
+		"durable-poll-signal":     cbTypePollSignal,
+		"durable-signal-workflow": cbTypeSignalWorkflow,
 	},
 	"cleat:host-calls/durable-children": {
 		"durable-child-workflow":              cbTypeChildWorkflow,
@@ -1110,6 +1110,8 @@ var witTypeMap = map[string]map[string]cbType{
 	},
 	"cleat:host-calls/durable-handlers": {
 		"durable-register-update-handler": cbTypeRegisterUpdateHandler,
+		"durable-poll-update":             cbTypePollUpdate,
+		"durable-complete-update":         cbTypeCompleteUpdate,
 		"durable-register-query-handler":  cbTypeRegisterQueryHandler,
 	},
 	"cleat:host-calls/durable-messaging": {
@@ -1133,20 +1135,9 @@ var witTypeMap = map[string]map[string]cbType{
 		"get-scope": cbTypeGetScope,
 		"uuid":      cbTypeUUID,
 	},
-	"cleat:host-calls/durable-stream-state": {
-		"set-state":    cbTypeSetState,
-		"get-state":    cbTypeGetState,
-		"delete-state": cbTypeDeleteState,
-		"incr-state":   cbTypeIncrState,
-		"has-state":    cbTypeHasState,
-		"list-state":   cbTypeListState,
-	},
 	"cleat:host-calls/durable-extended-lifecycle": {
 		"continue-as-new-versioned": cbTypeContinueAsNewVersioned,
 		"side-effect":               cbTypeSideEffect,
-	},
-	"cleat:host-calls/durable-extended-children": {
-		"child-workflow-in-schema": cbTypeChildWorkflowInSchema,
 	},
 	"cleat:host-calls/durable-fetch": {
 		"fetch": cbTypeFetch,
@@ -1159,6 +1150,98 @@ var witTypeMap = map[string]map[string]cbType{
 }
 
 // -- register cleat WIT functions in component linker -------------------------
+
+// wasiDeterminismVersion is the WASI Preview 2 version componentize-py's
+// guests import.
+//
+// IT IS PART OF THE NAME, AND A WRONG ONE FAILS SILENTLY. The linker matches
+// the import name EXACTLY, so registering `wasi:clocks/wall-clock@0.2.0`
+// against a guest importing `@0.2.9` shadows nothing, returns no error, and
+// leaves the guest on the host's real clock -- with every "registration
+// succeeded" check passing. That is the empty green cleat#1410 is named after.
+//
+// It is also a property of the componentize-py BUILD rather than of cleat, so
+// a toolchain bump un-shadows a working implementation with nothing failing.
+// TestAPythonGuestsWasiImportsAreAllShadowed is what makes that loud: it walks
+// a freshly compiled guest's import section and fails if it imports a
+// wall-clock or random interface this list does not name.
+const wasiDeterminismVersion = "@0.2.9"
+
+// wasiDeterminismInterfaces are the WASI interfaces cleat shadows so a
+// component guest's clock and entropy are the workflow's rather than the
+// host's.
+//
+// NOT monotonic-clock, deliberately. cleat#1386 measured why: realtime is the
+// workflow's and may jump, monotonic is the runtime's and must advance
+// smoothly, and a durable-sourced monotonic clock ran 3 GC cycles instead of
+// 17 and reached a 256 MB heap against a 32 MB limit. It is also the interface
+// whose functions return resource-typed pollables, so leaving it alone is both
+// correct and the cheap option -- which is a coincidence worth stating, since
+// the cheap reason would otherwise look like the whole reason.
+//
+// The two `insecure` interfaces are included because CPython does not promise
+// which it uses and "insecure" is a statement about entropy quality, not about
+// determinism. A guest reaching randomness through either must replay.
+var wasiDeterminismInterfaces = map[string]map[string]cbType{
+	"wasi:clocks/wall-clock" + wasiDeterminismVersion: {
+		"now":        cbTypeWasiWallClockNow,
+		"resolution": cbTypeWasiWallClockResolution,
+	},
+	"wasi:random/random" + wasiDeterminismVersion: {
+		"get-random-bytes": cbTypeWasiRandomBytes,
+		"get-random-u64":   cbTypeWasiRandomU64,
+	},
+	"wasi:random/insecure" + wasiDeterminismVersion: {
+		"get-insecure-random-bytes": cbTypeWasiRandomBytes,
+		"get-insecure-random-u64":   cbTypeWasiRandomU64,
+	},
+	"wasi:random/insecure-seed" + wasiDeterminismVersion: {
+		"insecure-seed": cbTypeWasiRandomU64,
+	},
+}
+
+// registerWasiDeterminismImports shadows the WASI interfaces a guest would
+// otherwise satisfy from the host's real clock and entropy.
+//
+// MUST RUN AFTER add_wasip2 AND INSIDE THE allow_shadowing BRACKET. Both are
+// already true at the one call site; this comment exists because the ordering
+// is invisible at a glance and reversing it produces no error, only a guest
+// that keeps the real clock.
+func (b *wasmtimeBackend) registerWasiDeterminismImports(linker *C.wasmtime_component_linker_t) error {
+	root := C.wasmtime_component_linker_root(linker)
+	if root == nil {
+		return fmt.Errorf("component linker root is nil")
+	}
+	for iface, funcs := range wasiDeterminismInterfaces {
+		nameBytes := []byte(iface)
+		var sub *C.wasmtime_component_linker_instance_t
+		if err := C.wasmtime_component_linker_instance_add_instance(
+			root, (*C.char)(unsafe.Pointer(&nameBytes[0])), C.size_t(len(iface)), &sub); err != nil {
+			return fmt.Errorf("shadow %s: %s", iface, componentErrorMessage(err))
+		}
+		for fnName, fnType := range funcs {
+			fnBytes := []byte(fnName)
+			cbID := registerCB(b, fnType)
+			if err := C.wasmtime_component_linker_instance_add_func(
+				sub, (*C.char)(unsafe.Pointer(&fnBytes[0])), C.size_t(len(fnName)),
+				C.wasmtime_component_func_callback_t(C.goComponentCallback),
+				C.cbid_as_env(C.uintptr_t(cbID)), nil); err != nil {
+				return fmt.Errorf("shadow %s.%s: %s", iface, fnName, componentErrorMessage(err))
+			}
+		}
+	}
+	return nil
+}
+
+// componentErrorMessage extracts and frees a wasmtime error's message.
+func componentErrorMessage(err *C.wasmtime_error_t) string {
+	var msg C.wasm_byte_vec_t
+	C.get_error_message(err, &msg)
+	s := C.GoStringN(msg.data, C.int(msg.size))
+	C.wasm_byte_vec_delete(&msg)
+	C.wasmtime_error_delete(err)
+	return s
+}
 
 func (b *wasmtimeBackend) registerCleatComponentImports(linker *C.wasmtime_component_linker_t) error {
 	root := C.wasmtime_component_linker_root(linker)

@@ -37,8 +37,16 @@ var wazeroInitOnce sync.Once
 type Runtime struct {
 	wazeroRuntime wazero.Runtime
 	// stdout/stderr are NOT goroutine-safe — they are shared across callers
-	// of InstantiateModuleNamed. Concurrent execution must use the
-	// wazeroBackend.Execute() path, which uses per-backend buffers.
+	// of InstantiateModuleNamed.
+	//
+	// This used to say "concurrent execution must use the
+	// wazeroBackend.Execute() path, which uses per-backend buffers". That type
+	// was deleted in #459 and the last caller of the per-execution variant
+	// (instantiateModuleNamedWithWriters) went with the component decomposition
+	// path in IMPROVEMENT-PLAN 3.65, so the variant is gone too. Concurrent
+	// execution now means the wasmtime backend, which does not touch these at
+	// all. What remains true is the warning itself: anything that instantiates
+	// through this Runtime concurrently races on them.
 	stdout           bytes.Buffer
 	stderr           bytes.Buffer
 	callTimeout      time.Duration // per-call WASM execution timeout (0 = none)
@@ -98,10 +106,15 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 	r := &Runtime{wazeroRuntime: rt, callTimeout: 30 * time.Second, MemoryLimitPages: memoryLimitPages, fuelLimit: instructionLimit}
 
 	// WASI is required by Go wasip1 modules for goroutine/stack management.
-	// We build WASI with clock_time_get and random_get stubbed out so that
-	// workflow code calling time.Now() or crypto/rand through WASI panics
-	// instead of silently breaking determinism. Workflows must use h.Now()
-	// and h.Random() (imported as cleat_now / cleat_random).
+	//
+	// This comment used to say clock_time_get and random_get were "stubbed out
+	// so that workflow code calling time.Now() or crypto/rand through WASI
+	// panics". Neither was true: the next two statements export the standard
+	// WASI functions, random_get was never touched, and nothing panicked.
+	// cleat#1300. Determinism for those two is applied to the GUEST's module
+	// config in InstantiateModuleNamed, which is where wazero reads the clock
+	// from -- imports/wasi_snapshot_preview1/clock.go resolves it from the
+	// CALLING module's sys context, not from this one's.
 	wasiBuilder := rt.NewHostModuleBuilder(wasi_snapshot_preview1.ModuleName)
 	wasi_snapshot_preview1.NewFunctionExporter().ExportFunctions(wasiBuilder)
 	// Register reset_adapter_state, which is required by core modules
@@ -112,11 +125,30 @@ func NewRuntime(ctx context.Context, memoryLimitPages uint32, instructionLimit u
 	wasiBuilder.NewFunctionBuilder().WithFunc(
 		func(ctx context.Context, m api.Module) {},
 	).Export("reset_adapter_state")
-	// Instantiate WASI with a fake Sys context that returns fixed (zero) time.
-	// This prevents the wazero nil pointer panic in clock_time_get (which
-	// accesses mod.Sys for walltime/nanotime) while keeping the Go WASM
-	// runtime's GC/goroutine scheduler from accessing real wall clock time.
-	// Workflow logic uses h.Now() (cleat_now) for deterministic time.
+	// Instantiate WASI with a Sys context so clock_time_get has something to
+	// read rather than panicking on a nil mod.Sys.
+	//
+	// IT DOES NOT MAKE THE GUEST DETERMINISTIC and never did -- the guest is a
+	// different module instance and supplies its own sys context. Keeping the
+	// zero values here because this module's clock is never consulted by
+	// anything; moving them onto the guest is what would be wrong, since a
+	// monotonic clock that returns zero makes the Go runtime throw
+	// "fatal error: nanotime returning zero" before user code runs (measured,
+	// cleat#1300). The guest's real configuration is in InstantiateModuleNamed.
+	// Compiled TWICE, deliberately. The first compile is the stock surface and
+	// exists only to read each function's declared signature; applyWasiPolicyWazero
+	// then re-exports the refused ones as traps carrying those exact types, and
+	// the second compile is the module the guest actually links against. See
+	// applyWasiPolicyWazero for why a transcribed signature would be a
+	// link-time break rather than a refusal. cleat#1381.
+	stockWasi, err := wasiBuilder.Compile(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("host: compiling WASI module: %w", err)
+	}
+	applyWasiPolicyWazero(wasiBuilder, stockWasi)
+	if err := stockWasi.Close(ctx); err != nil {
+		return nil, fmt.Errorf("host: closing the stock WASI module: %w", err)
+	}
 	wasiCompiled, err := wasiBuilder.Compile(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("host: compiling WASI module: %w", err)
@@ -197,19 +229,7 @@ func (r *Runtime) InstantiateModuleNamed(ctx context.Context, compiled wazero.Co
 		WithStdout(&r.stdout).
 		WithStderr(&r.stderr).
 		WithStartFunctions()
-	return r.wazeroRuntime.InstantiateModule(ctx, compiled, config)
-}
-
-// instantiateModuleNamedWithWriters is like InstantiateModuleNamed but uses
-// the provided writers for stdout/stderr capture instead of the Runtime's
-// shared buffers. This is used by wazeroBackend.Execute() so that concurrent
-// workflow executions each have independent buffers.
-func (r *Runtime) instantiateModuleNamedWithWriters(ctx context.Context, compiled wazero.CompiledModule, name string, stdout, stderr *bytes.Buffer) (api.Module, error) {
-	config := wazero.NewModuleConfig().
-		WithName(name).
-		WithStdout(stdout).
-		WithStderr(stderr).
-		WithStartFunctions()
+	config = withDeterministicClockAndEntropy(ctx, config)
 	return r.wazeroRuntime.InstantiateModule(ctx, compiled, config)
 }
 
@@ -247,7 +267,27 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 			}
 			close(done)
 		}()
-		start.Call(ctx)
+		// The returned error is reported, not discarded. errCh is read in
+		// three places below, but until this it was only ever WRITTEN on
+		// panic -- and wazero signals a trap by returning an error, not by
+		// panicking. So the common failure was thrown away while the rare one
+		// was caught, `close(done)` still fired, and InitModule returned nil
+		// for a module whose _start had trapped: a guest that failed to
+		// initialise reported success, and the first export call afterwards
+		// failed somewhere unrelated.
+		//
+		// exit(0) is NOT a failure and must not be reported as one. A Go
+		// wasip1 _start runs main() and terminates via proc_exit, which wazero
+		// surfaces as *sys.ExitError -- the normal path for every Go guest.
+		// Only a non-zero exit code, or any other error, means initialisation
+		// actually failed.
+		if _, err := start.Call(ctx); err != nil {
+			var exitErr *sys.ExitError
+			if errors.As(err, &exitErr) && exitErr.ExitCode() == 0 {
+				return
+			}
+			errCh <- fmt.Errorf("host: _start failed: %w", formatWasmCallError(err))
+		}
 	}()
 
 	// Exponential backoff: check module liveness at increasing intervals.
@@ -275,8 +315,34 @@ func (r *Runtime) InitModule(ctx context.Context, mod api.Module) error {
 			// by this point, and the remaining init is non-critical.
 			select {
 			case <-done:
-				// _start completed normally; runtime is fully initialized.
-				return nil
+				// _start finished -- which includes finishing by failing, so
+				// errCh must be drained before this is called success.
+				//
+				// Listing `<-done` and `<-errCh` as sibling cases is not enough.
+				// The goroutine sends on errCh (buffered, cap 1) and only then
+				// runs the deferred close(done), so on a trap BOTH cases are
+				// ready at once and Go picks uniformly at random: roughly half
+				// the time this returned nil for a guest whose _start had
+				// trapped, which is the exact bug the error plumbing was added
+				// to fix.
+				//
+				// It reproduced as a ~5% flake in
+				// TestInitModuleReportsATrappingStart -- 3 failures in 60 runs
+				// under `-cpu 1`, measured 2026-09-01, and once in CI on an
+				// unrelated docs PR. It did not reproduce at all with the
+				// default GOMAXPROCS on an idle machine, because the trap then
+				// reaches errCh before the first 100µs backoff elapses and the
+				// select above catches it. The window only opens when the
+				// poller reaches this point first.
+				//
+				// The send happens-before the close, so a non-blocking receive
+				// here sees any error that exists.
+				select {
+				case err := <-errCh:
+					return err
+				default:
+					return nil
+				}
 			case err := <-errCh:
 				return err
 			case <-time.After(5 * time.Millisecond):
@@ -325,6 +391,30 @@ func (e *wasmTrapError) Error() string { return e.msg }
 
 // Unwrap preserves the original error so errors.Is/errors.As still work.
 func (e *wasmTrapError) Unwrap() error { return e.cause }
+
+// GuestReturnedError marks a failure the guest reported deliberately, by
+// calling cleat_complete with a non-empty error, as opposed to a trap.
+//
+// The distinction is not cosmetic. A trap means the module faulted -- an
+// unreachable, a bad memory access, an exhausted limit -- and the reader
+// should be looking at the runtime. A guest-returned error means the workflow
+// ran correctly and said it had failed, and the reader should be looking at
+// their own error text. Before this type existed both arrived as a plain
+// error, so resolveWasmTrap labelled every one of them "wasm trap:" and sent
+// readers hunting a memory fault that never happened.
+//
+// It carries no message of its own: the backend has already built one, and
+// wrapping would add a prefix. This exists to be found with errors.As.
+// See IMPROVEMENT-PLAN.md 3.23.
+type GuestReturnedError struct {
+	Err error
+}
+
+func (e *GuestReturnedError) Error() string { return e.Err.Error() }
+
+// Unwrap exposes the guest's own error, so errors.Is and errors.As reach
+// it through the GuestReturnedError wrapper.
+func (e *GuestReturnedError) Unwrap() error { return e.Err }
 
 // formatWasmCallError formats an error from a wazero function call into a
 // human-readable WASM stack trace.
@@ -444,7 +534,7 @@ func (r *Runtime) CallExportWithSuspend(ctx context.Context, mod api.Module, exp
 
 	fn := mod.ExportedFunction(exportName)
 	if fn == nil {
-		return "", false, fmt.Errorf("host: export %q not found", exportName)
+		return "", false, fmt.Errorf("host: export %q not found: %w", exportName, ErrExportNotFound)
 	}
 
 	mem := mod.Memory()

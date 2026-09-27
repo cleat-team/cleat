@@ -34,27 +34,162 @@ a property CI checks rather than a sentence someone wrote.
 Most expensive recurring failure in this project: **a green result that measured nothing.** Check
 these before believing any test outcome.
 
-**An unset DSN skips its dialect silently and the suite still prints `ok`.** Measured 2026-08-06
-on the same tree, same command:
+**An unset DSN skips its dialect silently and the suite still prints `ok`.** Measured 2026-09-03,
+`go test ./engine/` on one tree, each configuration run twice in opposite orders:
 
-| | tests run | skipped | wall |
+| `CLEAT_TEST_*` set | passed | skipped | wall (two runs) |
 |---|---|---|---|
-| no `CLEAT_TEST_*` set | 2544 | 166 | 16s |
-| all three dialects set | 3846 | 4 | 60s |
+| none | 3462 | **876** | 158s, 148s |
+| postgres only | 3813 | **581** | 182s, 163s |
+| all three | 4510 | **4** | 206s, 222s |
 
-Both printed `ok`. **Check the wall-clock delta** — roughly 20s means Postgres only, roughly 60s
-means all three. A green engine run that took 16 seconds tested no database at all.
+All three printed `ok`. **Check what failed and what skipped, not the clock:**
 
-**Build and test with CGO on — the default.** `CGO_ENABLED=0` does not skip a check. It removes
-`NewWasmtimeBackend` (behind `//go:build cgo`) from the binary entirely and silently runs
-everything on wazero, the fallback with the known bug tail. **An engine result obtained that way
-is not evidence about the engine.** If a genuine toolchain failure forces it, say so in the PR
-rather than leaving the reader to assume wasmtime was exercised.
+    go test ./engine/ -count=1 -json > /tmp/t.json
+    grep '"Action":"fail"' /tmp/t.json | grep -c '"Test":'    # test failures; must be 0
+    grep '"Action":"fail"' /tmp/t.json | grep -vc '"Test":'   # PACKAGE failures; must also be 0
+
+**Read the skip NAMES, not the skip count.** This line used to say `# 4 means all three
+dialects ran`, and 4 was correct on 2026-09-03. It is 7 now and rising, because the suite
+grows: a census of a growing population is guaranteed to go wrong, and the only question is
+when. Worse, a stale one inverts — a reader who sees 7 against a documented 4 concludes
+something is broken on a run that is fine.
+
+What you actually need is a predicate, and it does not drift: **no remaining skip is
+dialect-gated.** That was true at 4, is true at 7, and will be true at 12.
+
+    grep '"Action":"skip"' /tmp/t.json |
+      python3 -c 'import sys,json; [print(" ", json.loads(l)["Test"]) for l in sys.stdin if "Test" in json.loads(l)]'
+
+Every name it prints should be an environmental precondition you can point at — a toolchain
+that is not installed, a fixture that needs a binary. A name mentioning postgres, mysql,
+mssql or a dialect means a DSN did not take, whatever the count is. See cleat#986: four of
+five counts in this file had drifted when checked, and every one of them was a census.
+
+**That third line is not decoration, and this file shipped without it.** A package that does
+not compile emits a **package-level** fail event carrying no `"Test"` field, so a count keyed
+on `'"Test":'` cannot see it. Measured 2026-09-07 on a two-package module, one compiling and
+one not:
+
+| | |
+|---|---|
+| fail events **with** a `"Test"` field | **0** — the check above says "must be 0", and it is |
+| fail events **without** one | 1 — the package that did not compile |
+| pass events with a `"Test"` field | 1 |
+
+So the documented check reports a clean run on a tree where a package never built. Worse than
+a skip, because a skip at least appears in the skip count: **a package that does not compile
+contributes nothing to any of the three numbers.** It reads cleanest exactly where it measured
+least, which is this section's whole subject, in this section's own command. Reported by the
+cleat-ports session after WS-3 lost a lint run to it; verified here before being written down.
+
+That column is exact, reproducible, and machine-independent: both orderings gave an identical
+876 / 581 / 4.
+
+**The wall-clock check this file used to recommend is dead — do not use it.** It read "roughly 20s
+means Postgres only, roughly 60s means all three", off a 2026-08-06 measurement of 16s and 60s.
+A no-DSN run now takes about 150s, so a run that tested *no database at all* clears the old
+"all three" threshold by 2.5× — the exact false green this section exists to prevent. And the gap
+between adjacent configurations (~19s from none to postgres-only) is now the same size as
+run-to-run variance on one configuration (postgres-only measured 182s and 163s), so the clock
+cannot separate them even in principle. The suite grew about 8% in test functions over that
+month; the wall times grew tenfold, most of it machine and load.
+
+**A DSN that is set but does not connect looks exactly like one that works.** Setting the variable
+is what stops a test skipping. Connecting is a separate question, and neither the skipped count
+nor the clock asks it — those tests fail on connect instead of skipping. Writing this section I
+reconstructed all three DSNs from memory, got the database name and two passwords wrong, and
+measured a tidy 876 → 581 → 4 progression whose final `4` matched the old table exactly. It was
+1086 connection failures wearing the right costume, and the matching `4` read as corroboration.
+**So count failures too**, or probe first:
+
+    go test ./engine/ -run TestPluginMigrations_AllDialects -count=1
+
+**The command this file gave here until 2026-09-04 was `-run TestTenantIsolationAcrossDialects`,
+and no such test exists.** It was named only here, never in the tree
+(`grep -rn TestTenantIsolationAcrossDialects --include='*.go' .` → nothing). A `-run` pattern that
+matches nothing is not an error: `go test` prints `ok … [no tests to run]` and **exits 0**. So the
+probe returned a green with a wrong password, against a nonexistent database, and with no DSN set
+at all — all three measured. The command this file offered as the cure for "a green result that
+measured nothing" was itself one, for as long as anyone ran it.
+
+That generalises past this one name. **Before trusting any `-run` probe, check that it selects
+something:**
+
+    go test ./engine/ -run <name> -count=1 -v 2>&1 | grep -c '^=== RUN'
+    # 0 means the pattern matched nothing. TestTenantIsolationAcrossDialects: 0.
+    # TestPluginMigrations_AllDialects: 4 (the parent and its three dialect subtests).
+
+`TestPluginMigrations_AllDialects` replaces it because it has the property a probe needs and the
+old name only implied: `BootstrapScratchDB` distinguishes configured-but-unreachable (`Fatal`)
+from nothing-configured (`Skip`), so a DSN that is **set and does not connect fails** rather than
+skipping. Negative control, measured 2026-09-04, under a second per run:
+
+| DSN varied | result |
+|---|---|
+| all three good | `ok` |
+| postgres password wrong | `FAIL … password authentication failed for user "cleat" (28P01)` |
+| mysql password wrong | `FAIL` |
+| mssql password wrong | `FAIL` |
+
+A probe with no negative control is a claim, not a check — the same rule this file states for
+`gh pr checks` watchers, which is where it was learned the first time.
+
+The DSNs are written down in `WORKSTREAM.md`, under "Sandboxes, databases, and shared files" —
+every port, with the credential matrix, because the credentials are port-specific and a probe that
+varies only the port answers the wrong question. Read them rather than rebuilding them from memory.
+(They were in `WS3-STATUS.md` and `PARALLEL-WORKSTREAMS.md`; both were retired 2026-09-04.)
+
+**Build and test with CGO on — the default.** `CGO_ENABLED=0` does not skip a check. It swaps
+`NewWasmtimeBackend` for the `//go:build !cgo` stub in `engine/backend_wasmtime_stub.go`, which
+returns `ErrWasmtimeCGOUnavailable`, so **there is no backend left at all** — `cleat-worker`
+logs "wasmtime is the only WASM backend cleat has, there is no fallback" and exits 1
+(`cmd/cleat-worker/main.go:790`). **An engine result obtained that way is not evidence about the
+engine.** If a genuine toolchain failure forces it, say so in the PR rather than leaving the
+reader to assume wasmtime was exercised.
+
+Note what that does *not* do: `CGO_ENABLED=0 go build ./...` still exits 0 (measured
+2026-08-30). Nothing tells you at build time; the failure is at worker startup. This paragraph
+used to say a CGO-less build "silently runs everything on wazero" — that stopped being true
+when the wazero backend was deleted, and it is the opposite of what happens now.
 
 **Use `-p 1` when running more than one database-backed package in one invocation.**
-`engine/testutil`'s `CleanupPostgresTestData` is an unqualified `DELETE FROM` across eleven
-tables. Run concurrently against one database, packages delete each other's fixtures mid-test and
-the failures look like unrelated flakes.
+`engine/testutil`'s `CleanupPostgresTestData` issues an **unqualified `DELETE FROM`** over
+`postgresCleanupTables`, and that list includes `workflow_instances`. Run concurrently against
+one database and packages delete each other's fixtures mid-test; the failures look like
+unrelated flakes.
+
+The length of the list is not the point and this used to give it as eleven, which was wrong by
+four when checked (cleat#986). What makes it dangerous is that the DELETE carries no `WHERE`
+and the list reaches the table every test depends on. Ask that, rather than counting:
+
+    python3 -c "
+    import re
+    src = open('engine/testutil/schema.go').read()
+    body = re.search(r'postgresCleanupTables\s*=\s*\[\]string\{(.*?)\n\}', src, re.S).group(1)
+    print('workflow_instances in the list:', 'workflow_instances' in body)
+    "
+
+I first published a `grep -c '\"'` here and it answered **16** against a list of **15** — a
+comment inside the block carries a quoted name. A census got the census wrong, in the
+paragraph explaining why not to publish one.
+**And `-p 1` does not help across two `go test` PROCESSES.** It serialises packages within one
+invocation, so two concurrent runs against one instance both obey it and both wipe the same
+tables. `CleanupMSSQLTestData` is the same shape. See cleat#982, where that is the leading
+explanation for four SQL Server failures that would not reproduce alone.
+
+**You no longer have to guess whether that is what happened.** Every test that gets its database
+from `testutil.TestDB` now prints, *if and only if it fails*, who else was attached at that
+moment -- by client process id on MySQL and SQL Server, which report it without being asked, and
+by a tagged `application_name` on PostgreSQL, which does not. A passing test runs no query. So
+read the tail of a database-backed failure before assuming it is about your change:
+
+    cleat#982 probe (mssql): 2 OTHER client process session(s) were attached ...
+
+`pgrep` is not a substitute and was the first thing tried: it sees processes on this machine
+rather than connections to *this database*, and cleat#982 lost a candidate to exactly that
+difference -- a concurrent `go test` was spotted, assumed relevant, then eliminated because it
+was pointed at different ports.
 
 **A skip that hides a crash is not a skip.** `t.Skipf("... crashed")` and
 `t.Skipf("... compatibility issue")` are failures wearing a skip's clothing, and they make a
@@ -62,15 +197,858 @@ regression invisible forever. A skip is legitimate only for a genuine environmen
 (a toolchain that is not installed, a DSN that is not set).
 
 **"No pending checks" also matches "checks never started."** Guard `gh pr checks` wait-loops on a
-total count, not on the absence of pending. The repo runs 41 checks.
+total count, not on the absence of pending.
 
-**A merge's own `develop` run can be cancelled by the next merge** landing seconds later, and
+**But do not hardcode that total, because it is path-dependent.** Measured 2026-09-01, after
+every check had settled:
+
+| PR | touches | checks |
+|---|---|---|
+| #504 | `CLAUDE.md` only | 46 |
+| #500 | docs + `engine/` | 46 |
+| #503 | `engine/` + `cmd/` | **50** |
+
+The four `{AssemblyScript,Java,Python,Rust} SDK Integration` jobs are the whole of the gap; they
+trigger only on some paths. `Benchmarks` and `Coverage` report `skipping` on a normal PR, so a
+green run shows two fewer passing than the total. Re-derive with
+`gh pr checks <pr> | grep -c .`, and diff two PRs with `comm -23` over the sorted name column to
+see which jobs a path triggers.
+
+**"After every check had settled" is load-bearing, and I got it wrong writing this.** The first
+draft of the table above said #504 ran 45, because I ran `grep -c .` 25 seconds after pushing —
+before the 46th check had been registered. A total sampled while checks are still being created is
+itself a "checks never started" reading, and it is the more dangerous kind, because it looks like
+a settled fact rather than a pending state. If you are recording a total, take it from a PR whose
+checks have all finished, not from one you are still watching.
+
+A fixed floor is therefore weaker than it looks: gate at 46 and a PR that should run 50 passes the
+moment its 46th check settles, with four SDK jobs not yet queued — which is precisely the
+"checks never started" case this paragraph is about. **The reliable arbiter is the branch policy,
+not a count.** `gh pr merge` refuses while required checks are outstanding, and
+`gh pr view <pr> --json mergeStateStatus` reports `BLOCKED` rather than `CLEAN`. On
+2026-08-31 that refusal was the only thing that caught a watcher reporting green over six
+pending checks.
+
+**Both halves of that were observed live on 2026-09-08, in one run, and the second is the
+direction this file did not have.**
+
+The first: a watcher on `cleat-ports#50` sampled `total` at **4**, repeatedly, and later at
+**5**. The fifth check registered mid-run, so the total a watcher reads is not stable *within a
+single run* — the table above was measured across *settled* PRs and describes that hazard
+without ever catching it moving.
+
+**State what was and was not observed, because the difference is this section's whole subject.**
+Observed: `total=4` on samples 1-3 and `total=5` at settle. NOT observed: a four-of-four-passing
+sample. `pending` was 2 while the total read 4, so the dangerous state — a complete-looking set
+that is merely the registered subset — did not occur on this run. The floor was never actually
+fooled here; what was demonstrated is that the quantity it gates on moves underneath it.
+
+**That state HAS now been observed, on cleat#1673, 2026-09-16 — the paragraph above no longer
+has to reason about it hypothetically.** A watcher resumed sampling immediately after a job
+re-run and its first sample read
+
+    [try=1 total=23 pending=0 fail=0] OPEN UNKNOWN
+    [try=2 total=52 pending=1 fail=0] OPEN BLOCKED
+    ...
+    [try=7 total=52 pending=0 fail=0] OPEN CLEAN
+
+**23 of the eventual 52 checks registered, every one of them already `pass` or `skipping`, nothing
+pending and nothing failing.** By every count the parse can take, that is a complete green set. It
+is less than half the run.
+
+Note where it came from, because it is reachable on purpose and not only by luck of timing: the
+window opened when a re-run began re-registering checks, so *anything that restarts jobs* — a
+re-run, a push, a body edit — reopens it. A watcher that starts or resumes near one of those is
+sampling into exactly this state rather than merely risking it.
+
+**What refused it was `mergeStateStatus`, which read `UNKNOWN` rather than `CLEAN`.** The
+two-consecutive-samples rule would have refused independently one sample later, when `pending`
+went back to 1 — so both halves of the recommendation above were load-bearing and either alone
+would have sufficed here. A gate written on `pending == 0 && fail == 0`, with or without a floor,
+merges at sample 1.
+
+A floor does not help, and this is the clearest argument against tuning one: 23 clears any floor
+low enough to be portable, and the correct total was not knowable at that moment by anything
+sampling the PR. Keep the floor for a total of zero and gate on the state field.
+
+**A THIRD way, and it is the one that looks most settled: a CONFLICTING pr runs only the checks
+that do not need a merge commit, and they all pass.** Measured 2026-09-16 on cleat#1695, the same
+PR before and after a rebase, identical content:
+
+| | checks registered | all passing | `mergeStateStatus` |
+|---|---|---|---|
+| conflicting with `develop` | **7** | yes | `DIRTY` |
+| after one rebase | **51** | (pending) | `BLOCKED` then `CLEAN` |
+
+The seven were `CodeQL`, its five `Analyze (…)` matrix legs, and `Contributor License Agreement`.
+Engine, Tier 1, Multi-DB and cross-language did not run at all.
+
+**The mechanism, and it is not a path filter.** A `pull_request` workflow runs against the MERGE
+COMMIT, `refs/pull/N/merge`. A conflicting PR has no such ref, so none of them can start. What
+survives is exactly the `pull_request_target` and head-ref checks — and those have no reason to
+fail, so the set that remains is small, complete and green.
+
+So this one does not look early the way `total=23 pending=0` does. It looks **finished**. `total=7
+pending=0 fail=0` is a settled green set by every count a parse can take, on a PR that cannot be
+merged at all.
+
+The repair is a rebase, and the conflict that caused it here is worth knowing because it will
+recur: three PRs had landed while the branch was open, each APPENDING a §3.x section to the end of
+`IMPROVEMENT-PLAN.md`. The block scheme in `scripts/section-blocks.sh` keeps the NUMBERS disjoint —
+3.329, 3.330 and 3.261 do not collide — and does nothing about the TEXT colliding at end-of-file.
+Two streams appending sections will conflict in git however well the numbers are allocated.
+
+**And the INVERSE was observed the same day, which together with the above means the count is not
+a weak proxy for mergeability — it is not a proxy for it at all.** On cleat#1355, `total=82`,
+`pending=0`, `fail=0`, all 32 of 32 required contexts enumerated individually against
+`branches/develop/protection` with SUCCESS as their latest run — and `BLOCKED` for fifty
+consecutive samples.
+
+| | cleat#1673 | cleat#1355 |
+|---|---|---|
+| `total` | 23 of an eventual 52 | 82, complete |
+| `pending` / `fail` | 0 / 0 | 0 / 0 |
+| truth | not yet registered | genuinely not mergeable |
+| `mergeStateStatus` | `UNKNOWN` | `BLOCKED` |
+
+The same predicate `pending == 0 && fail == 0` merges in both — early in one, and in the other
+something GitHub is refusing. Opposite errors, one gate catching both.
+
+**cleat#1355's cause is the cancelled twin already described under "A PR can read all-green and
+still refuse to merge", and it is worth following the diagnosis rather than only citing it,**
+because the check that found it is not the one a careful reader reaches for. Enumerating the
+required contexts is what both sessions did and it cannot work here: every required context is
+present and its LATEST run is success. Measured on `431737a0`:
+
+    gh api --paginate "repos/<o>/<r>/commits/<FULL-40-char-sha>/check-runs?per_page=100" \
+      --jq '.check_runs[].conclusion' | sort | uniq -c
+    # 55 cancelled, 1 neutral, 6 skipped, 59 success   (re-derived 2026-09-16)
+
+Two run sets created **one second apart** — 03:47:40Z and 03:47:41Z — so the ruleset evaluates the
+cancelled member of each pair while `gh pr checks` reports only the newest per name. The repair is
+a new SHA, not a re-run.
+
+**Both halves of that command carry a trap, and this file published both of them.** It used to
+give a name-based detector — `gh run list --commit <sha> … | sort | uniq -d` — beside a
+`?per_page=100` conclusion count reading *37 cancelled*. Measured 2026-09-16 against this same
+`431737a0` as known-positive and `cab6353741afd57203d338f06b79b24334baee34` (cleat#1699, merged
+cleanly) as negative control, there are **three** ways it says "no twin" (cleat#1703):
+
+| | what it does | why it is silent |
+|---|---|---|
+| an **abbreviated** SHA | `gh run list --commit` returns **0 runs** | `head_sha=` is an exact string match, not a prefix resolve — `total_count` is 0, not an error |
+| **`uniq -d` on names** | reports `CLA Assistant` as a twin | `pull_request_target`'s `closed` type fires a legitimate second run at merge |
+| **`?per_page=100`** | reported 38 cancelled of **121** | the page cap truncates, and nothing says so |
+
+The first is the expensive one, because **the sibling endpoint resolves a prefix perfectly well** —
+`…/commits/<abbrev>/check-runs` and `…/commits/<full>/check-runs` both return 49 on cleat#1699's
+head — so nothing in the surrounding practice teaches you that the other one cannot. And every
+place this was written, here included, spelled the argument `<sha>`, which is what
+`git log --oneline` and `git rev-parse --short` hand you.
+
+The second is the one that lands where it hurts. Correlating `merged_at` against CLA run times on
+four PRs merged 2026-09-16 — #1695, #1698, #1700, #1699 — the second run starts **2 to 3 seconds
+after the merge**, every time, and both members are `success`. So a name-only detector reports a
+twin on a healthy PR at *precisely* the last sample a watcher polling to `MERGED` takes. It is
+invisible on an open PR, which is why cleat#1688 recorded "plus one `pull_request_target` for CLA
+Assistant" — singular, and correct, because those PRs had not merged.
+
+**Prefer the conclusion over the name**: it names the hazard instead of a proxy for it, resolves an
+abbreviated SHA, and has no benign-duplicate class. Non-zero `cancelled` is the hazard — 55 on the
+known-positive, 0 on the control.
+
+The second, and it is the mirror image: **a floor tuned to one repo is not a floor in another.**
+That watcher was carried over from this repo with its 40 hardcoded, and `cleat-ports` runs
+**five** checks (`gh pr checks <pr> --repo cleat-team/cleat-ports | grep -c .`). A floor of 40
+in a five-check repo can never be satisfied, so the loop cannot report a false green — it runs
+to timeout reporting nothing at all.
+
+**That one was caught by reading before arming, not by observation, and the distinction is
+recorded rather than smoothed over.** The floor was lowered to 4 before the watcher was started,
+so the timeout never happened; what is measured is the check count, and the consequence follows
+from the loop's exit condition rather than from a run. A prediction and a measurement are not
+the same evidence, and this file is the wrong place to blur them.
+
+That failure is nastier than the one above, because **a watcher that never finishes looks like
+patience rather than a bug.** A false green is at least an answer someone can check; a loop still
+sampling at attempt 200 invites "CI must be slow tonight". Same root cause — a count treated as a
+constant when it is a property of the repo and the path — and it is the reason the floor should be
+a sanity bound rather than the gate. Gate on `mergeStateStatus == CLEAN`, held across two
+consecutive samples; keep the floor only to catch a total of zero.
+
+**And parse that output with `awk -F'\t'`, because check names contain spaces.** The total-count
+guard above is necessary but not sufficient: it does not help if the *pending* count is itself
+silently zero. `gh pr checks` is tab-delimited with names like `Tier 1 Gate` and
+`Test Go (engine) on 1.26`, so the natural-looking
+
+    pend=$(echo "$out" | grep -cE '^\S+\s+pending')     # blind to 40 of 46 checks
+
+cannot match them — `^\S+` takes `Tier`, `\s+` takes the space, and the next token is `1`, not
+`pending`. Measured 2026-08-31 on #500, **40 of the 46 names contain a space**
+(`gh pr checks <pr> | awk -F'\t' '$1 ~ / /' | grep -c .`); the six it can still see are `Build`,
+`CodeQL`, `Lint`, `lint-go`, `Benchmarks` and `Coverage`, none of which are the ones that matter.
+`Tier 1 Gate` and `Test Go (engine) on 1.26` are both in the blind 40 — so the count does not
+degrade, it reads zero for exactly the checks worth waiting on. That reported #500 as green with
+six still running; `gh pr merge` refusing with "the base branch policy prohibits the merge" was
+the only thing that caught it. Use
+
+    pend=$(echo "$out" | awk -F'\t' '$2=="pending"' | grep -c .)
+    fail=$(echo "$out" | awk -F'\t' '$2!="pass" && $2!="pending" && $2!="skipping"' | grep -c .)
+
+The general rule this is an instance of: **a verification script needs its own negative control.**
+Before trusting a new watcher, run its parse once against a PR that has known-pending checks and
+confirm the count is non-zero. A loop that cannot see the state it looks for does not fail —
+it prints a confident green, which is the same failure this file's whole "Is this result real?"
+section is about.
+
+**And a negative control is not enough — it needs a KNOWN-POSITIVE too.** The rule above asks
+"can it see the state it looks for". This one asks the harder question: **"does it report a case
+that is genuinely broken?"** Those come apart, because *"it passes when everything is fine"* is
+satisfied by every broken version of a guard.
+
+Measured 2026-09-05 on one new guard (#749), which shipped three bugs, all found this way, all
+**permissive** — each made the guard pass a tree it should have failed:
+
+  * It parsed `go test` **to end of line**, so a `-run` on a continuation line read as
+    *unfiltered* — and unfiltered means "selects everything". The step the guard existed to
+    protect is itself line-continued.
+  * It treated any `./...` as covering any module. `./...` is module-relative, so an unfiltered
+    run in one module vouched for a test in another.
+  * It walked the tree with `rglob`, descending into `.claude/worktrees/` — a whole second copy
+    of the repo — and attributed a test to a module that exists only in a scratch checkout.
+
+All three passed a green tree and a negative control. What found them was declaring one case
+already known to be broken — a test that no CI job selected — and checking the guard said so. It
+did not, three times. The third is the one to watch for, because it is not a parsing mistake: it
+is a scope mistake, and it makes the guard **more** likely to pass as the working tree gets
+messier. Prefer `git ls-files` over `rglob`/`find` for anything that reasons about "the repo".
+
+The same defect has an over-reporting sign, and it is the cheaper one to have: a checker that
+greps for `go test` without excluding comment lines reports a line of prose as an invocation, and
+sends you chasing a defect that is not there (measured 2026-09-05, #748). Neither direction
+models the difference between a command and text that looks like one. Join line-continuations and
+drop comments **before** asking any question about a shell command in a workflow.
+
+**And the known-positive is MANDATORY, not advisory, for a probe you wrote BECAUSE you already
+suspected a bug.** The rule above is stated for guards. Applied to a probe it is the one people
+skip, and it is where it is most needed — because there the mis-aiming is *correlated with the
+thing being looked for*.
+
+A guard is written before anyone knows what is broken, so its blind spots fall where they fall. A
+probe written **for** a suspicion is built around that suspicion: the roles, the connection, the
+statement are all chosen to expose it, and whatever is left unconsidered is left unconsidered *for
+the same reason the bug was hard to see*. Its clean result is therefore worth less than a guard's,
+exactly when it feels worth more.
+
+Measured 2026-09-11 on cleat#1285/#1286. The question was whether `ReadOnlyDB` scopes a statement
+by tenant the way `SQLDBAdapter` does. The probe ran `SELECT count(*)` through both adapters, same
+non-superuser connection, same tenant in context, against a freshly-migrated table:
+
+| | first probe, empty table | after seeding one row |
+|---|---|---|
+| `SQLDBAdapter` | `err=<nil>` | `err=<nil>` |
+| `ReadOnlyDB` | **`err=<nil>`** | `cleat.tenant_id is not set … (P0001)` |
+
+The first column reads as "no gap here". The gap was real, and the probe could not see it:
+**a policy `USING` clause is a row-level predicate, so against zero rows it is never evaluated**,
+`cleat.assert_tenant_set()` never fires, and a read succeeds whether the policy is correct, wrong,
+or **absent**. Same empty green as connecting as a superuser, reached through a different door —
+and note the direction: the empty table hid a bug rather than inventing one.
+
+So **"the policy fails closed" means fails closed when there is something to filter.** A read-side
+assertion over an empty table is a decoration. A write-side one still fires, because `WITH CHECK`
+is evaluated per row being inserted — which is why the sibling test in #1280 was unaffected and
+gave no warning that its neighbour was empty.
+
+What caught it was the probe disagreeing with a plain reading of the code — `ReadOnlyDB.Query`
+calls `Inner.QueryContext` directly, so it cannot be setting anything. That is the two-derivations
+rule working as specified, **not** a counter-example to *"instrument rather than read the code"*:
+either derivation could have been the wrong one, and the disagreement is what had to be resolved.
+It is a thin thing to rely on, and the known-positive removes the need to:
+
+    -- before believing a clean probe, make the bug real and confirm the probe reports it
+    INSERT INTO <table> (tenant_id, …) VALUES ('<a DIFFERENT tenant>', …);
+
+Seed the row the policy is supposed to **exclude**, never one it would admit — a row belonging to
+the tenant under test makes the predicate fire and still passes against a broken policy. Thirty
+seconds before, rather than an afternoon after.
+
+**A count answers "did this go up". It never answers "is anything still missing".** Same day,
+same family: a `-run` pattern was widened to select a test that was running nowhere, and the fix
+was verified by counting that test's subtests, 0 before and 24 after. That is proof about one
+test and silent about its siblings — a sibling guard was still selected by nothing, because the
+pattern `TestHostCalls` stops matching one character into `TestHostCallTable…`: `s` against `T`.
+A widened pattern that fixes one name can leave the next one out, and the count cannot say so.
+
+**Use `-list`, which answers directly what a pattern selects, and diff the SET rather than
+comparing counts:**
+
+    go test ./... -list '<pattern>'      # what does this pattern actually select?
+
+`-run` answers that only by implication, and is silent when the answer is "less than you think".
+This is the same shape as **"No pending checks" also matches "checks never started"** — earlier in
+this same section, not two sections up as this line said until #755. Cite a rule here by its
+quoted phrase, which `grep` finds; a positional reference rots the moment anything is inserted
+between, and this one was wrong the day it was written.
+
+**These are one rule, and naming it is cheaper than meeting it a fifth time.** A check can tell
+you whether it is **consistent with itself**. It cannot tell you **what it is not looking at**.
+Every fix above is the same move: a *second, deliberately different* reading of the same source,
+chosen so that it goes wrong in the opposite direction.
+
+| what the check answers about itself | the second reading that answers what it misses |
+|---|---|
+| "does it pass when the tree is fine?" | a **known-positive** — a case already proven broken |
+| "does `-run` run what I meant?" | **`-list`**, which names the set it selects |
+| "does the extractor parse without error?" | a **looser parse** of the same file, over-matching on purpose |
+
+The right-hand column is not the more correct one. The loose parse is deliberately wrong and would
+make a bad extractor; its only job is to **disagree**, so the difference can be examined. A strict
+parse that runs clean and a loose parse that finds nothing more is evidence. A strict parse alone
+is a claim.
+
+The fourth instance arrived the same day, and is the one that shows the cost. `rust_surface()`
+matched `pub fn <name>(`, and a Rust generic method is `pub fn <name><T: …>(`, so **ten of
+seventy-one methods on `HostCalls` were invisible to it**. Nothing failed, nothing was skipped, no
+count went down. Coverage was reported as **61/61 = 100% when it was 63/71 = 88.7%** — and that
+100% had been written into four places in `IMPROVEMENT-PLAN.md` and repeated to the user before
+anyone read the same file a second way (#753). And one host call is reachable **only** through
+methods the scan could not see: the `cleat_call_retry` extern is referenced from exactly one place
+in the SDK, inside `cleat_call_with_host_retry<T, R>`, which is generic — so a fixture exercised
+it and neither metric counted it.
+
+**Watch the direction, because it is not random.** All four of these inflate rather than break: a
+smaller surface is a smaller denominator, so a method the scan cannot see *raises* the percentage;
+an under-selecting `-run` reduces the failures available to find; a permissive guard passes a tree
+it should fail. **The measurement errors that survive are the ones that flatter the number** —
+nobody re-derives a figure that looks good. That is the same asymmetry as the UTC-offset error in
+*Ground rules for changes* below, which inflated a count "in the direction that flattered the
+finding — which is why it was not questioned."
+
+**The fifth instance is the sharpest, and it is one line of source.** A scan for binding names
+scored the AssemblyScript SDK as *having* `cleat_register_query_handler` — by matching this, at
+`packages/cleat-as/assembly/host-calls.ts:391`:
+
+    // There is no import_cleat_register_query_handler here (removed 2026-08-09).
+
+An explicit denial, read as a confirmation. A second scan got the right answer only because `\b`
+cannot match after the `_` in `import_cleat_` — not a mechanism anyone chose, and not one that
+survives a rename. The two agreeing would have proved nothing; their *disagreeing* is the only
+reason anybody looked, and it is why #757 publishes no binding counts until they reconcile. This
+is the "grep a retraction satisfies" trap under *Build*, one level up, and worse: that line is the
+**only** occurrence of `register_query_handler` in the file
+(`grep -c register_query_handler packages/cleat-as/assembly/host-calls.ts` → 1). The sole evidence
+the scan had was a sentence denying the thing it recorded.
+
+So when a check and the thing it checks agree, ask what a differently-wrong reading would say
+before recording the agreement as a result.
+
+**The mechanism under all of them: a tool applied to a format it does not model.** Four separate
+failures on 2026-09-05, plus one already recorded above from 2026-08-31 — one shape —
+
+| the read | the format it did not model | what models it |
+|---|---|---|
+| `cmd \| tail; echo $?` | a pipeline's exit status is the *last* command's | redirect, or `${PIPESTATUS[0]}` |
+| `grep -oE '"Output":"[^"]*"'` | a JSON string can contain `"` | a JSON decoder |
+| `grep -cE '^\S+\s+pending'` | a tab-delimited table whose fields contain spaces | `awk -F'\t'` |
+| `pub fn <name>(` | a declaration can carry generics | a parse that admits them |
+| a name scan over `.ts` | source contains prose *about* names | anchor to where the artifact lives |
+| `` `[^`]{10,600}` `` | a rejected literal leaves the scan mid-string | pair first, filter after |
+| `grep --include=*.go` (unquoted) | **zsh eats the glob and grep never runs** | quote it; see the zsh/bash section |
+
+"Check your regex" is the weak form of this. The strong form is that **a text search cannot tell a
+thing from a sentence about the thing**, and neither can a line-oriented read of a structured
+format. When the answer matters, read it with something that knows the shape.
+
+**That last row is a different failure from the four above it, and the difference is the reason it
+is here.** Every other row MISSES what it aimed at, which is bad and visible: a count comes out
+low and you go looking. A bound applied *while pairing delimiters* does something worse — it
+**re-phases the rest of the file and consumes an unrelated statement as a delimiter.**
+
+Measured 2026-09-10, surveying `cmd/` for SQL that reaches an RLS table.
+`cmd/cleatctl/replay.go` holds exactly two backtick literals: a 698-character usage string, then a
+303-character `SELECT`. With `` `[^`]{10,600}` `` the first is rejected for length — and the regex
+resumes *inside* it, so its closing backtick pairs with the SELECT's opening one and the statement
+is swallowed as a delimiter. The bound excluded nothing it was aimed at and hid something it was
+not.
+
+**And it is worse than a substitution: the bounded read FABRICATES a literal.** Pairing the usage
+string's closing backtick with the SELECT's opening one makes the *Go source between them* look
+like a string. Both readings return exactly ONE match from that file, at the same count, and the
+contents are unrelated:
+
+    bounded DURING pairing   1 match, 225 chars, `)\n}\n\n// loadWorkflowInstance loads a sin…`
+    paired THEN filtered     1 match, 303 chars, `SELECT id, def_name, def_version, min_versi…`
+
+A closing paren, a brace, a blank line and a comment, reported as string data. So the scan did not
+drop a statement and keep the rest — it returned something that is not a literal at all, and every
+count-based sanity check agrees with itself.
+
+**What surfaced it was comparing CONTENTS rather than totals.** Seeing 1 and 1 and concluding the
+bound was harmless is the obvious reading, and it is wrong.
+
+Two scans of that population, run independently, disagreed at 6 against 12; five separate
+narrowings were found reconciling them, and **every one had been written as a parsing
+convenience** — a length bound, a 60-character proximity rule, `…Context`-only call forms,
+backticks-only, and anchoring on the call site at all. That last one is the least visible: a query
+living in a `[]struct{label, query string}` executed later in a loop is invisible to a call-site
+scan **by construction**, and it held nine of the seventeen.
+
+Neither session found its own. The correct total, 17, came out of the disagreement — which is the
+case for two derivations that CAN disagree rather than one that gets checked. Cite it with the
+command, and pair before you filter:
+
+    # WRONG: the bound is inside the pairing
+    re.finditer(r'`([^`]{10,600})`', src)
+    # RIGHT: pair, then discard
+    [m for m in re.finditer(r'`([^`]*)`', src) if 10 <= len(m.group(1)) <= 600]
+
+**And the portable version of that, which needs no parser: anchor to where the artifact lives, not
+to what it is called.** "Extract the declarations" requires a tool per language. `^` does not. A
+retraction is prose in a body and can never sit at a declaration site; a changelog row recording a
+removal cannot start a heading line. That one move covers every row above — and it is applicable
+to a file you have never seen, which "write a real parser" is not.
+
+**The unifying question, and it is the one to ask before recording any confirmation: could this
+check have disagreed?** Every trap above is a check that was going to say yes whatever the truth
+was. Four ways that happens — the first two measured 2026-09-08, the third 2026-09-10, the fourth
+2026-09-16 — and none looks like a weak check at the time. **The first two are checks that could
+not see far enough. The third never ran at all. The fourth ran, passed, and was never consulted.**
+
+**1. A documented failure mode absorbs every instance of its symptom, including the ones it does
+not explain.** `401 invalid or revoked API key` from the port harness has *four* causes — a stale
+key file, another session rewriting that file, your worker stopped by a stranger's `worker.sh
+ensure`, and your tests reaching a stranger's worker on a shared default port. The Makefile
+documents the first one completely and correctly. So the first one is what every 401 gets read as.
+
+I had the disconfirming evidence in hand and did not use it: the key file's mtime had no
+corresponding row of that age in my own database, which only another writer explains. I ran that
+query, read "no matching row" as staleness, and stopped. **A sufficient explanation terminates
+the search** — and a documented hazard is worse than an undocumented one here, because it supplies
+a ready, plausible, locally-correct story at exactly the moment you are confused enough to take
+it.
+
+So a documented failure mode needs **a stated way to tell it apart from its neighbours**, not just
+a description of itself. cleat-ports#69 does that: one discriminator for all four —
+*does the process serving my API port have my DSN?* — answered by `pgrep -fl cleat-worker`.
+
+**2. Corroboration from a shared scope is one derivation run twice.** cleat#1009 reported that the
+engine's `error_code` is never returned to any client. Two sessions checked independently: every
+JSON tag in `cmd/cleat-worker/` enumerated, `map[string]any` responses separately ruled out, and
+only three tags mentioning error or code — `error_code` and `error_message`, both fields of the
+ForceFail *request*, and a bare `error`. Careful work, and both agreed.
+
+Both were wrong. `handleGetWorkflow` builds no response struct — it serialises
+`engine.WorkflowInstance` whole, and that type's `error_code` tag lives in `engine/`, one package
+away from where both scans looked. The field is returned; a live HTTP response shows it.
+
+The agreement proved nothing because **both derivations had the same denominator**. This file
+already records that trap for *numbers* — two export counts agreeing at 55 while differing on six
+members — and it works identically on conclusions. **"Independent" has to mean differently scoped,
+not separately performed.** When a second party confirms, ask what they *searched*, not whether
+they agreed.
+
+**And the worst version has no shared scope to compare, because the claim travelled through
+CHAT.** Measured 2026-09-11, two sessions, three wrong theories, several hours — about a rule as
+small as how a `Closes` keyword closes an issue.
+
+One session concluded "the squash message comes from the commit, so a body-only keyword never
+fires" and sent it to the other. The other restated it in stronger form and sent it back. Both
+then cited the other's version as support. **Each was holding disconfirming evidence the whole
+time** — one had a merge whose keyword sat in *both* places, so it could not discriminate; the
+other had a body-only success and read it as consistent with a commit rule, having never checked
+where the keyword actually was.
+
+The rule above says to ask what a confirming party *searched*. Here there was nothing to ask
+about: no scan, no scope, no artefact. Two stale readers of one checkout can at least both name
+the ref. **A claim passed through conversation leaves nothing to point at**, so the usual
+tell — "we were both reading the same thing" — is absent.
+
+The clause that catches it: **when a peer confirms something you told them, that is not evidence.
+Ask whether their case could have come out the other way.** If it could not, the count of
+independent observations is still one.
+
+What settled it was one case where the two hypotheses DISAGREE — a PR carrying an *invalid*
+keyword in its body and a *valid* one in its commit. It closed by hand: the commit did not fire.
+Every earlier case had the keyword in both places or in neither, which is precisely why two
+sessions could build opposite rules on the same pile and each feel corroborated. **Before
+believing a rule, find the case that separates its candidates; a case consistent with both is not
+evidence for either.**
+
+**3. A check whose SETUP destroys the state it is measuring.** This is the hardest of the three to
+spot, because the setup is where you are being careful — the damage is done by the part of the
+procedure you added on purpose.
+
+Measured 2026-09-10, twice, by two sessions, in opposite directions, within an hour. The question
+both times: *does this test re-run when the fixture it reads changes?* — a shared JSON table at the
+repo root, read at runtime by consumers in several languages (cleat#1136).
+
+| | how the cache was cold before the "measurement" | what was concluded |
+|---|---|---|
+| one session | the previous step had already changed another tracked file | "the change was noticed" |
+| the other | the first run used `-count=1`, which writes no cache entry | "the change was noticed" |
+
+Both readings were of a run that was going to re-run regardless. **An experiment about caching must
+begin from a WARM cache and change exactly one thing** — and the sting is in the setup: any
+`-count=1`, `clean`, or `--rerun-tasks` there destroys the state under test. Those are exactly the
+flags careful practice tells you to add, so **the more disciplined the habit, the more reliably it
+erases the evidence.**
+
+Done properly, one change at a time from a warm cache, the answer is a fact about Go worth knowing
+on its own: **`go test` caches on files opened INSIDE the package directory, and a fixture read
+through `..` is invisible to it.**
+
+| change | `go test` (no `-count=1`) |
+|---|---|
+| nothing | `ok (cached)` |
+| a file the test read, **outside** the package dir | `ok (cached)` — not noticed |
+| a file the test read, **inside** the package dir | `ok 0.205s` — re-ran |
+
+So a test whose fixture lives outside its package silently passes against an edited fixture. CI is
+sound here only because `ci.yml` passes `-count=1` to every matrix package; a local `go test ./...`
+is not, and **the tell is the word `(cached)` where a duration should be**.
+
+Three build systems concealed that same fact three ways in one afternoon, and none of the three
+reports anything wrong. Gradle hid it in the **duration** — `BUILD SUCCESSFUL in 578ms` against a
+real 3s, on a deliberately corrupted fixture. Go hides it in a **parenthesis**. pytest does not
+cache at all.
+
+**Note which of those was caught and how**, because it is the argument for what follows: the gradle
+staleness was real and was spotted, from the duration alone. The verdict said `SUCCESSFUL` and was
+useless; the one field nobody reads was the only one telling the truth.
+
+**The remedy generalises past caching, and it is the one thing to take from this item: print the
+PRECONDITIONS beside every row of a result table, not just the verdict.**
+
+    B [stream=WS-1 patched=1 MERGE_HEAD=yes] exit=0 want=0
+
+Those three bracketed fields are what separate *the check ran and allowed it* from *the check never
+looked*. A verdict column alone has no way to say "I did not run" — which is this whole section's
+subject, and the reason every trap in it reads as a pass.
+
+**And when a precondition cannot be established, the result is `UNMEASURED` — never a verdict, and
+never silence.** Printing preconditions beside the verdict is half of it; the other half is having
+somewhere honest to put a row whose preconditions failed. A verdict column with no such value forces
+every row into pass or fail, and an unrunnable check then reports the reassuring one.
+
+Paid for on 2026-09-11, auditing which child tables survive a retention sweep on SQL Server. The
+first run reported **4 of 4 clean**. Two of the six tables had failed to seed — one on a duplicate
+key, one on a NOT NULL column — and a table with no row in it counts zero afterwards for the same
+reason a correctly-cleaned one does:
+
+    workflow_promises          UNMEASURED (seed failed: duplicate key ...)
+    workflow_update_requests   UNMEASURED (seed failed: NULL into 'update_name' ...)
+    seeded and verified: 4 of 6
+
+Those two lines are the entire reason the number was not published. With the seeds repaired the
+answer was **6 of 6 orphaned** (cleat#1265) — the audit was wrong by a third, in the flattering
+direction, and nothing but the explicit `UNMEASURED` rows distinguished "clean" from "never looked".
+
+The same run then produced the mirror image: a sweep that deleted **0** rows, because the store was
+built on a plain pool that sets no session context, so every child "survived" trivially. That is why
+the shipped test asserts the **parent row is gone** before believing any child count. Two failure
+modes, opposite mechanisms, one observable — everything looks fine.
+
+Three rules follow, and the third is the one that is easy to skip:
+
+- **A check that cannot establish its precondition reports `UNMEASURED`**, with the reason, and is
+  excluded from the denominator rather than counted as a pass.
+- **State the denominator next to the verdict** — `6 of 6`, not `all clean`. A fraction whose
+  numerator and denominator both come from the same failed setup is visibly wrong; "all" is not.
+- **The remedy for a failed precondition is nearly always one more read, and the cost of skipping it
+  is not bounded by anything.** One extra `SELECT` against a published finding that was wrong by a
+  third; one re-read of `closingIssuesReferences` against a CI cycle spent "fixing" a PR that had
+  already parsed its keyword correctly.
+
+That remedy was paid for rather than thought up: cleat#1162 collected **three more empty greens in
+one sitting**, each from a different mechanism and none reporting anything wrong — a clean merge
+runs no pre-commit hook at all; `git reset --hard` silently reverted the test's own sandbox
+registration, so the hook skipped for "unknown stream"; and an already-merged `HEAD` staged nothing,
+so the commit failed with "nothing to commit". Read that issue before writing a test harness for a
+guard.
+
+**4. A CONDITION THAT NEVER DECIDES ANYTHING CANNOT BE OBSERVED TO BE WRONG.** The first three are
+checks that gave the wrong answer. This one gives the *right* answer every time, because something
+else is answering. It is the hardest to find because there is no bad outcome to notice — and the
+place to look is not the checks you doubt, it is **the ones that have never yet refused anything**.
+
+Four instances, 2026-09-16, three of them inside one PR (cleat#1723):
+
+| the check | why its verdict was right | what was actually deciding |
+|---|---|---|
+| a self-test for an unterminated `/*` | exit 2, as asserted | the **vacuity** check — a swallowed file leaves 0 tables |
+| a self-test for a dialect-specific hint | it errored, as asserted | the error fired; only its *explanation* was wrong |
+| a watcher's "nothing pending, nothing red" | never merged early | `mergeStateStatus` refusing first, every time |
+| a scan for quoted identifiers | reported 0, and 0 was correct | the tree happens to put every name on one line |
+
+**Two remedies, and they are different.**
+
+**Assert on the TEXT, not only on the status.** The first two above are caught by nothing else:
+disable the check under test and the case *still exits 2*, because a second, correct mechanism
+supplies the expected status. That is much harder to see through than a bare wrong answer — every
+part of the run looks like the thing you meant to test, because every part of it *is*, except the
+part nobody asserted on. A status-only self-test certifies a guard that has lost exactly the check
+it is named after.
+
+**Gate on a quantity the run cannot shrink.** "Nothing pending, nothing red" is a numerator whose
+denominator the run supplies as it goes. Reconstructed on cleat#1718's head, stepping through every
+`started_at`/`completed_at` instant:
+
+    final check-run count on the SHA:                    49
+    2026-09-16T21:15:27Z  present=2, all complete, none red   <- the predicate ACCEPTS
+    required contexts SUCCESS at that instant:          0 of 32
+
+**A 24-second window where "all green" is true of 4% of the run.** The fixed denominator is
+published, and the two endpoints that serve it disagree:
+
+    gh api repos/<o>/<r>/branches/develop/protection --jq '.required_status_checks.contexts | length'
+    # 32
+    gh api repos/<o>/<r>/rules/branches/develop --jq '[.[]|select(.type=="required_status_checks")]|length'
+    # 0 -- and an empty required list makes every PR trivially complete
+
+**The reassuring endpoint is the one that returns nothing**, which is this section's whole subject
+arriving through an API.
+
+**Read that list a line at a time.** 29 of the 32 names contain a space — `Test Go (core) on 1.26`
+— so a whitespace split does not return 32, and it is worth being exact about what it *does*
+return, because the two obvious ways of asking disagree:
+
+    N=$(gh api repos/<o>/<r>/branches/develop/protection --jq '.required_status_checks.contexts[]')
+    printf '%s\n' "$N" | grep -c .              # 32   -- the answer
+    printf '%s\n' "$N" | tr ' ' '\n' | grep -c . # 112  -- every whitespace token
+    python3 -c "import sys;print(len(set(sys.stdin.read().split())))" <<<"$N"   # 56 -- unique ones
+
+Python's `set(...split())` is what produced **56** here, and a raw token count gives **112**. Same
+trap as `awk -F'\t'` above; note it **inflates** the denominator, making the gate look stricter
+than it is. This paragraph shipped saying "a whitespace split reports 56" without saying which
+split, in the section that exists to say which command produced a number.
+
+**That direction is not luck, and it is the reason to re-derive a number that pleases you.** Every
+instrument error on 2026-09-16 flattered its own conclusion: the `split()` inflated a denominator,
+a line-anchored grep returned a zero that agreed with a correct conclusion, a mutation that never
+applied returned a red that agreed with a wrong one, and a guard's own count read 100 of 121. Errors
+that embarrass get fixed the first time anyone looks. **The ones that survive are the ones nobody
+had a reason to check.**
+
+**A THIRD REMEDY, AND IT IS THE ONE THAT SCALES: GIVE "I COULD NOT LOOK" ITS OWN EXIT STATUS.** The
+two above are things to remember while writing a check. This one is a property the check carries
+afterwards, so it protects the person who did not write it.
+
+    0   passed
+    1   a finding
+    2   could not establish what was being measured
+
+`0` and `2` must not be the same status, because a check that measured nothing agrees with every
+tree, correct or not. `1` and `2` must not be the same status either, because they send the next
+person to different places: `1` says *go and look at the thing I named*, `2` says *the check is
+broken, the subject may be fine*.
+
+Two guards arrived at this on 2026-09-16, hours apart, in different repos and on different
+subjects:
+
+| guard | what `2` distinguishes |
+|---|---|
+| `cleat-ports/scripts/check-go-toolchain-pin.py` | "no pins found" and "could not read cleat's `go.work` floor" agree with every workflow file |
+| `scripts/check-doc-comment-reattachment.py` | under a shallow clone an unresolvable ref compared nothing |
+
+**The honest form of that convergence is narrower than it first looked, and the narrowing is the
+finding.** Neither author had seen the other's guard. But one of them already held a rule from
+2026-09-13 (cleat#1445) that *a guard needs a third outcome*, written after a dashboard guard's
+SKIP branch caught three of its own defects in a sitting. So "a check needs a third thing to say"
+was a prior, not a discovery. What both arrived at independently is that the third outcome needs
+its own **exit status** — because a message is read by a person and a status is read by a harness.
+That distinction is the part worth writing down, and it would have been lost inside the stronger
+claim.
+
+**The second guard's author measured this by walking into it.** Its `UNMEASURED` originally exited
+`1`. The sequence matters more than the pair: a full SHA was **fabricated** rather than read from
+`git rev-parse`, so it did not resolve, so the guard reported `UNMEASURED` and exited `1` — and the
+harness line `rc=1 (want 1)` printed it as a pass. **The second defect made the first one
+invisible.** A conflated exit status does not merely lose information; it launders another error
+into a green.
+
+**How to apply.** Any check that reads something it does not control — a remote ref, another repo's
+file, a tool that may be absent, a clone that may be shallow — needs the third status. Say which it
+is in the message (`UNMEASURED:` is enough, with a second line saying *this is a failure of the
+check, not a finding about the tree*). Both `1` and `2` should fail CI; the distinction is not
+whether to stop, it is where to send the person who has to fix it. A self-test that builds its own
+fixtures cannot be unmeasured and should exit `0`/`1` only — the third status belongs to the checks
+that reach outside themselves, not to every script.
+
+**5. A MECHANISM THAT EXISTS AND IS WIRED TO NOTHING READS AS DONE.** Four instances on
+2026-09-16/17, by three different authors, and the reason it belongs beside §4 is that §4 is about a
+condition whose verdict is supplied by something else — this is about a mechanism with no verdict at
+all. Both present as finished work.
+
+| the mechanism | what it was wired to |
+|---|---|
+| `isDeadlockError`, `isLockWaitTimeout` in `mysql_store.go` | **zero production callers** — with their own unit tests |
+| `isMSSQLDuplicateKey` | used elsewhere in its package, **not on the start path that needed it** |
+| `check-skips.sh --self-test` | did not exist; the flag exits 2 on a usage error (cleat#1742) |
+| `stale_entries` in the baseline ratchet | never computed, so a grant covering nothing was invisible (cleat#1746) |
+
+The engine could recognise MySQL 1213, 1205 and SQL Server 2627 and **acted on none of them**, which
+is how one racer under an idempotency key got a raw `500` on two dialects (cleat#1753, fixed in
+cleat#1755). The classifiers were not missing. They were unreferenced.
+
+**Why this is worse than an absent mechanism.** A missing one is a gap someone will eventually
+notice and fill. A present one answers the question *"does this codebase handle X?"* with **yes** —
+to a grep, to a reviewer, and to its own author six weeks later. It also carries unit tests, which
+is the strongest possible signal of doneness and says nothing whatever about reachability.
+
+**How to apply.** When a defect's fix looks like *"add a classifier for this error"*, first check
+whether the classifier is already there and simply unreferenced — it was, in three of the four above.
+And when adding one, the reachability question is separate from the correctness question: a unit
+test proves it classifies, a caller proves it runs. See §1673 for the same shape recorded about a
+backend method with no callers, and *"uncalled in testing is not unreachable"* — this is its inverse
+and the commoner one.
+
+**One measurement worth carrying with it, because it decides how a regression test for this class is
+written.** cleat#1755's race is milliseconds wide, and the first version used a single round of
+eight racers:
+
+    one round of 8 racers    4 failures in 10 runs   (~40% detection)
+    six rounds, same test   10 failures in 10 runs
+
+**A regression test that catches its own defect 40% of the time is a green that reads as coverage.**
+The rounds are not belt-and-braces; the detection rate is the argument for them, and it was measured
+rather than assumed.
+
+**A merge's own `develop` run could be cancelled by the next merge** landing seconds later, and
 `cancelled` is not `success`. Verifying `develop` after merging means verifying the *current
 head*, which contains your commit — not your own SHA.
+
+That cancellation was fixed in two halves — #634 scoped `cancel-in-progress` to pull requests,
+#661 gave each push its own concurrency group — so it should no longer happen. The reading skill
+outlives the defect, and it is one line:
+
+    gh run view <run-id> --json jobs --jq '.jobs | length'
+
+**A `cancelled` run with zero jobs never started.** It was evicted from a concurrency queue
+before any runner picked it up; a run killed mid-flight has jobs, each with a `cancelled`
+conclusion. The two look identical in `gh run list` and have completely different causes, and
+telling them apart is what separated the two halves above: of 22 cancelled `Tier 1 Gate` runs on
+2026-09-03, the 17 before #634 had jobs (one exception) and all 5 after it had none. Measured
+2026-09-04; see IMPROVEMENT-PLAN §3.100.
+
+**Read it as zero versus non-zero, never as a count.** The number grows while a run proceeds, so
+it is only final once the run is. The same run sampled twenty minutes apart gave `1` and then `3`
+here, and the `1` went into a table before this sentence was written.
+
+**"Should no longer happen" is true of `develop` and false of a PR, and the trigger is one you
+reach for constantly: EDITING THE PR BODY.** `ci.yml` fires on
+`types: [opened, synchronize, reopened, edited]`, and `edited` is the activity type a **title,
+body or base change** produces — it is there deliberately, because a retargeted PR would otherwise
+never trigger the workflow at all (see the comment above the line). PR runs share one concurrency
+group per ref and supersede, by design. So `gh pr edit --body-file` while checks are running
+cancels the in-flight run and starts a fresh one.
+
+Measured 2026-09-10 on #1158, by doing it. A push at 17:57:59 created **9** runs; a body edit
+**thirteen seconds later** created **7** more against *the same SHA*, and the in-flight members of
+the first set were cancelled where they stood:
+
+    gh run list --branch <branch> --limit 30 --json createdAt,conclusion,status \
+      --jq 'group_by(.createdAt)[] | "\(.[0].createdAt) count=\(length)"'
+
+| | |
+|---|---|
+| runs at 17:57:59, sha `64204be9` | 9 — the ones still running were cancelled |
+| runs at 17:58:12, sha `64204be9` | 7 — the live set, same SHA |
+| steps in the cancelled `Layer 1 — SDK` job | **every one `success`** |
+| its job conclusion | `cancelled` |
+
+Note the two counts differ, so this is not a clean "one set replaces another": the trigger and the
+path filters between them are not identical, and a run that had already finished stays finished.
+Do not read the pair as a constant — re-derive it with the command above.
+
+**That last pair is what makes it expensive.** `gh pr checks` reports a cancelled job as `fail`,
+and any watcher whose parse is `$2!="pass" && $2!="pending" && $2!="skipping"` — the one this file
+recommends, correctly — counts it as a failure and prints RED. So a body edit produces a red PR
+whose failing job has no failing step, which reads exactly like a real breakage and sends you into
+a log that says `ok`. The discriminator is the `jobs | length` line above plus the job's own
+`conclusion` field:
+
+    gh api repos/<owner>/<repo>/actions/jobs/<job-id> --jq '.conclusion'   # cancelled, not failure
+    gh api repos/<owner>/<repo>/actions/jobs/<job-id> --jq '.steps[].conclusion' | sort -u
+
+All-`success` steps under a non-success job means the job was killed, not that it failed. The
+practical rule is cheaper than the diagnosis: **get the body right before pushing, and if you must
+edit it, do so before the checks start or after they settle.**
 
 **When a schema migration lands, recreate your test databases.** `CREATE TABLE IF NOT EXISTS`
 never adds a column, so a long-lived database keeps its old shape and dozens of tests fail on a
 missing column. Drop and recreate; do not debug the code.
+
+**`go build ./...` and `go vet ./...` cover ONE MODULE, and this repo has seven.** From the root
+they see 58 packages and none of `cleat/`, `cleat/backendkit/`, `examples/`,
+`benchmarks/workflows/`, `tests/cross-language/` or `tests/plugin-harness/`. Measured 2026-09-14 by
+breaking `cleat/embedded/runner.go` on purpose with an undefined identifier:
+
+| | |
+|---|---|
+| `go build ./...` | **exit 0 — misses it** |
+| `go vet ./...` | **exit 0 — misses it** |
+| `go build ./cleat/embedded/` | exit 1 |
+| `go test ./cleat/embedded/` | exit 1 |
+
+Both root-level gates report success on a tree with a package that does not compile. This is not
+the `-json` package-failure case and not a test-file import cycle: the package is simply **not in
+the pattern**. Build every MODULE, not every package:
+
+    for d in $(git ls-files '*go.mod' | xargs -n1 dirname | sort); do
+      (cd "$d" && go build ./... && go vet ./...) || echo "FAILED: $d"
+    done
+
+It bites hardest where a change is deliberately made in two places — `cleat/embedded/runner.go`
+mirrors a `cmd/cleat-worker` path (cleat#1565) — because the root gate covers exactly the half you
+were already thinking about.
+
+**A PR can read all-green and still refuse to merge, and `gh pr checks` cannot see why.** Two run
+sets on one SHA — a double trigger, where `cancel-in-progress` kills one of each pair — leave a
+**cancelled twin beside each successful check**. `gh pr checks` reports the newest per NAME and
+shows only the success; the ruleset evaluates the other one. Measured 2026-09-14 on cleat#1546:
+50 pass, 0 pending, 0 fail, no missing required context, no unresolved threads, and
+`mergeStateStatus` stably `BLOCKED` — against 54 success and **37 cancelled** check runs on the SHA.
+
+**The required-vs-reported `comm` check does not catch this**, which matters because that is the
+remedy this file gives two paragraphs up for a *missing* context. Here every required context is
+present and passing. The tell is a `cancelled` conclusion on the SHA:
+
+    gh api --paginate "repos/<o>/<r>/commits/<FULL-40-char-sha>/check-runs?per_page=100" \
+      --jq '.check_runs[].conclusion' | sort | uniq -c
+
+No `cancelled` line means one clean set. The repair is a new SHA — rebase and one
+`--force-with-lease` — not a re-run, which risks a third set that cancels the good one.
+
+**This said `gh run list --commit <sha> … | uniq -d` until 2026-09-16, and a duplicated workflow
+NAME is the wrong tell in two directions** (cleat#1703, measured; the long form is under *"cleat#1355's
+cause is the cancelled twin"* above). It over-reports, because `CLA Assistant` runs a second time
+at merge by design. And it under-reports to **nothing at all** if the SHA is abbreviated, since
+`gh run list --commit` filters on `head_sha=` as an exact string. Use the full 40 characters, and
+ask about the conclusion rather than the name.
+
+**And `gh pr merge` exits 0 whether it QUEUED or REFUSED.** Never for "merged". With `--squash` it
+prints only `! The merge strategy for develop is set by the merge queue`; bare it prints nothing.
+The same command queued the same PR without complaint once it went `CLEAN`. Poll to `MERGED` or
+read the queue; the exit status distinguishes nothing. The only thing that says *why* is an API
+call allowed to refuse in words:
+
+    gh api -X PUT repos/cleat-team/cleat/pulls/<pr>/merge -f merge_method=squash
+    # 405: ... 22 of 32 required status checks are cancelled.
+
+**MySQL's affected-row count is rows CHANGED, not rows MATCHED.** So "0 rows affected" does not
+mean "no such row", and any liveness or existence check built on it reports live things as dead.
+Measured 2026-09-14: an `UPDATE` setting a column to the value it already held returned
+`ROW_COUNT() = 0`. A heartbeat written twice inside one clock tick therefore looked exactly like a
+row somebody had deleted. Where the distinction matters, ask separately — a `SELECT 1` on the zero
+path, not a verdict.
+
+**MySQL binds `?` by APPEARANCE; `$N` and `@pN` bind by NUMBER.** A statement whose placeholder
+numbering disagrees with its text order binds correctly on two dialects and silently swaps the
+arguments on the third. Write the numbers in the order the placeholders appear, and prefer
+`Dialect.placeholder(n)` (`engine/query_builder.go`) over hand-written `$N`, which also carries
+`nowExpr()` and `intervalExpr()` — three helpers that already existed when this was learned by
+writing a fourth.
 
 ---
 
@@ -82,19 +1060,592 @@ red, put it back. This catches a test that *cannot* fail; it does not catch one 
 it. Twice this has caught a test passing for the wrong reason, which is why "it went red" is not
 enough on its own — check that it went red *for the reason you expect*.
 
+**And before either of those: check it went red AT ALL, because a falsification that prints
+nothing is not a falsification that passed.** Measured 2026-09-08 while proving a regression test
+for cleat#995. The mutation removed a struct field, which left a local variable unused, so the
+package did not compile:
+
+    cmd/cleat-worker/server.go:1756:2: declared and not used: loc
+    FAIL    github.com/cleat-team/cleat/cmd/cleat-worker [build failed]
+
+The output was filtered with `grep -E '_test.go:[0-9]+:|^---'`, which matches **test** failures.
+A build failure produces neither, so the command printed nothing and was read as "the test still
+passes" — the conclusion being that the fix was unnecessary.
+
+This is the `-json` trap in *Is this result real?* arriving through the plainest possible door.
+There it is a package-level fail event carrying no `"Test"` field, invisible to a count keyed on
+`'"Test":'`. Here it is a compile error invisible to a grep keyed on `_test.go:`. **A filter that
+can only see one kind of failure reports the other kind as success**, and silence is the most
+convincing form that report takes.
+
+The cheap discipline: on a falsification, read the last few lines unfiltered, and satisfy yourself
+the test **ran**. `go test` prints `ok` for a pass and `[build failed]` for a mutation that did not
+compile, and those are the two cases a filter is most likely to render identically.
+
+A mutation that does not compile is also telling you something: the thing you removed was load
+bearing enough that the surrounding code stopped making sense without it. Rewrite the mutation to
+keep the tree compiling — assign the zero value rather than deleting the line — and the
+falsification becomes possible again.
+
+**And the mirror of that: "it stayed red" is not enough either.** A fix that does not change the
+symptom has not been shown to be unnecessary; it has been shown not to be *sufficient*. Before
+concluding a change is inert, check whether the failing step **moved** — not just whether it still
+fails. #777 needed two fixes in the child-spawn path (#781), and the second was implemented, tested,
+judged ineffective and reverted, because the workflow still failed. It still failed because the
+*first* defect was unfixed at that moment, and the test happened to be a three-child fan-out
+failing at step 3 either way — so the step number was identical before and after, and the reasoning
+felt sound. It was then re-derived from scratch hours later and turned out to be correct as
+written. The artefact discarded here is a correct fix, discarded with evidence in hand, which makes
+this more expensive than a test that passes for the wrong reason.
+
+That rule has a second edge, and it is the mechanism that catches you while you are being
+careful: **a falsification has two steps, and only one of them announces failure.** Applying the
+revert is loud — the suite goes red and you read the message. Restoring afterwards is silent, so a
+restore that does not restore looks exactly like a fix that does not work. `git checkout -- <file>`
+restores from the *index*, and a revert applied with `git checkout <commit> -- <file>` is staged
+there, so the "restore" puts the broken version straight back and the suite stays red. The reading
+that follows is "my fix does not work", and the artefact discarded is again a correct fix. Verify
+the restore the same way you verify the revert: `git diff` against the **commit**, not against the
+index, and rebuild before believing the second result.
+
+**And the version with no signal at all is a TIMEOUT, which skips the restore entirely.** Measured
+2026-09-10, falsifying the scheduler fixes in cleat#1138. The falsification ran as one command —
+mutate, `go build`, `go test`, `cp <backup> <file>` — and the `go test` leg exceeded the harness's
+two-minute limit. SIGTERM, so the `cp` never ran and the tree kept the mutation. Nothing announced
+it: the output ended with the falsification's evidence, which is exactly what a *successful*
+falsification looks like.
+
+**And the failure that ran alongside it taught the larger lesson, by fooling me twice.** A full
+suite was running against that tree, and reported a **package-level `engine` failure with zero
+test failures**. I read that as the mutation's doing — the signature matches, and `engine_test`
+imports every plugin, so a plugin that does not build takes `engine` down with it. That mechanism
+is real; I reproduced it deliberately in a separate worktree, appending one non-compiling function
+to `plugins/scheduler/background.go` and running a match-nothing `-run` in `engine/`:
+
+| | |
+|---|---|
+| fail events **with** a `"Test"` field | **0** |
+| fail events **without** one | **1** — `github.com/cleat-team/cleat/engine` |
+
+**It was not what happened.** Re-run on a clean tree with no mutation anywhere, `engine` failed
+the same way again, and the run's own output says why:
+
+    panic: test timed out after 25m0s
+    FAIL    github.com/cleat-team/cleat/engine      1500.883s
+
+Both suite runs were **timeouts**, and `grep -c 'build failed'` over either one returns **0**. The
+mutation was innocent, and the reproduction I had performed corroborated a conclusion it did not
+support — a mechanism that *can* produce a signature is not evidence that it *did*.
+
+**So the rule this file already gives is necessary and not sufficient.** "PACKAGE failures must
+also be 0" is right, and a package-level failure with zero test failures has **at least two**
+causes that the count cannot separate:
+
+| cause | what it means | what to do |
+|---|---|---|
+| the package did not build | a real breakage, possibly in another package | fix the code |
+| the package ran out of time | says nothing about correctness | raise `-timeout`, or split the run |
+
+They are indistinguishable in the three numbers, and the suite grows, so the second gets more
+likely over time on a `-p 1` run over several packages. **Read the package's own output before
+concluding anything** — one names `build failed`, the other `panic: test timed out`:
+
+    grep -c 'build failed' /tmp/t.json          # non-zero: something did not compile
+    grep -o 'panic: test timed out after [0-9a-z]*' /tmp/t.json | head -1
+
+Both were checked against a known case of each, which is the only way to know a discriminator
+discriminates: on the timed-out run, `build failed` is 0 and the timeout line is present; on the
+deliberately-broken-build run, `build failed` is 1 and the timeout line is empty.
+
+Two rules follow. **Check the restore by CONTENT, as its own step** — never as the last clause of
+a long command:
+
+    diff -q <backup> <file> && echo restored || cp <backup> <file>
+
+And **do not run a suite and a falsification against one working tree at the same time.** Use a
+`git worktree` for whichever is the longer of the two.
+
+**And the version of that with NO signal at all: `git stash` on a clean tree stashes nothing and
+exits 0.** Measured 2026-09-08, reproduced independently in a second clone:
+
+| | |
+|---|---|
+| working tree clean | yes |
+| `git stash` exit status | **0** |
+| stash entries before / after | **0 / 0** |
+
+So the `stash` → `checkout` → `checkout back` → `stash pop` sequence, used to run a test on another
+branch, pops **whatever was already on the stack**. Here that was a parked WIP from another branch:
+86 files and 1987 deletions applied onto an unrelated feature branch, with no conflict, because
+there was nothing to conflict with. The `git stash drop` that followed then dropped *that* entry,
+correctly and as documented — `stash@{0}` is exactly what it says it drops.
+
+This is the paragraph above one layer up, and **strictly worse, because the failure is silent by
+design**. A `checkout --` restore that does not restore at least leaves a tree someone may notice.
+A stash that stashed nothing leaves nothing to notice at all.
+
+**Check that the push created an ENTRY, not that the command succeeded:**
+
+    before=$(git stash list | wc -l)
+    git stash push -m "why"          # read its output: "No local changes to save"
+    [ "$(git stash list | wc -l)" -gt "$before" ] || echo "nothing was stashed"
+
+Recovery, if it has already happened: `git fsck --unreachable | grep commit`, match the stash by its
+message, and `git stash store -m "<original description>" <sha>` puts it back. Untracked files the
+stash carried reappear in the working tree — move them aside rather than deleting them, since they
+belong to whoever parked the stash.
+
+**The general rule, which this file now records three instances of: the operation reports success
+without doing the thing.** Gating on "no pending checks" rather than a check *total*; reading a
+background job's output file rather than its completion; and this. **This is the sharpest of the
+three, because success is the CORRECT report** — nothing went wrong, and nothing happened.
+
+**A probe that does not fire is a measurement, not a dead end.** Chasing the same defect, a
+temporary print in `recordEvent`'s persist branch never printed while rows were demonstrably being
+written. That was read as a failed experiment; it was in fact the strongest available signal —
+the writer was somewhere else entirely, which was true and load-bearing. An absence is data.
+
+**When output disagrees with expectation, instrument the function that produced it.** The same
+defect survived five hypotheses, each argued from reading the code and each killed by measurement:
+a field set after the checksum, missing columns, the chain, a late response overwriting the row,
+the batch path. What resolved it was one `fmt.Fprintf` inside `computeEventChecksum` printing its
+own inputs and result, which showed the writer chaining from `prev=""` in one line. Reading code
+predicts which input differs; instrumenting shows it.
+
 **Watch which layer is holding the test up.** An assertion can pass because of a layer other than
 the one under test: a fence test passed with its SQL guard deleted because a Go-level rollback
 covered for it; a cross-tenant assertion passed against a wide-open security policy because the
 store's own SQL carried `tenant_id = ?`. Break the specific layer and watch.
+
+**The sharpest form is a test whose NAME asserts the mechanism.**
+`TestFinalizeDeferPhaseIsFencedOnTheClaimAndOnTheMarker` (§3.112) stayed green with the marker
+predicate deleted. What refused the repeated finalize it pointed at was the finalize clearing
+`assigned_to`, so the ordinary fence no longer matched — the predicate in the name had nothing to
+do with it. Three cases in one test, three different things doing the refusing, and the name
+attributed all three to one.
+
+**And when a falsification comes back green, the obvious repair is usually the wrong one.** "It
+did not go red, so the line is dead code" would have deleted a predicate that has a real case:
+a claimed workflow that owes no defer phase, where the fence *is* satisfied and only the marker
+stops a `status = NULL` write over a running workflow. Once that case was written, the same
+falsification failed — with a NOT NULL violation where `ErrFenceLost` was expected, which is a
+refusal by database constraint rather than by the code under test. **A falsification that stays
+green is telling you which case you did not write, not which line to remove.**
+
+**There is a second reading of a green falsification, and it costs you a change rather than a
+test: the fix was never needed.** Measured 2026-09-10 on cleat#1138. Reverting a
+`now()` → `SYSUTCDATETIME()` "fix" in a plugin left every test green. The first suspicion was that
+the mutation had not applied — it had. `plugin.Rebind` already rewrites `now()` for MSSQL, so the
+fix was redundant and the causal story written around it was wrong.
+
+The rule above sends you looking for a case you did not write. That is right when the reverted line
+is load-bearing and wrong when it is not, and **the green alone cannot tell those apart.** Ask
+both: *which case have I not written*, and *what already handles this*.
+
+The second is answered by reverting **one part of a multi-part fix at a time**. Reverting only the
+`now()` passed; reverting only the `enabled = true` failed. That pair identified a single real
+defect inside what had been committed as two, and no whole-fix revert could have — reverting both
+together goes red, which reads as confirmation of the whole thing.
+
+**The cause of that one generalises past SQL: a scan of source text cannot see a rewrite applied at
+runtime.** The defect list came from grepping SQL literals for non-portable constructs, and 80 of
+them were `now()` — every one already rewritten by `Rebind` before reaching a database. The literal
+is not the artifact; the string that is *executed* is. Same shape as the "tool applied to a format
+it does not model" table below, with the twist that the format was read correctly and the wrong
+**pipeline stage** was measured. Where a rewrite layer exists, run the check on its output.
 
 **When you fix something, fix the prose that describes it — not just the status marker.** A ✅ on
 a heading over a stale body is worse than no marker at all, because it stops the next reader from
 checking. Four separate sessions were lost to one sentence describing a build tag that had
 already been removed; three of them concluded that a working feature was broken.
 
+**And the cheap prevention, which is one word: write a justification in the PAST tense and it
+survives its own fix.** The sweep above is a discipline you have to remember at exactly the moment
+you are pleased to be finished. This is a habit that makes most of the sweep unnecessary.
+
+Two justifications for two changes, measured against each other on 2026-09-11:
+
+| | tense | after the change it justifies |
+|---|---|---|
+| `ReleaseConcurrencyKey takes only the key and deletes the row unconditionally` | present | **false** |
+| `until this flag there was no command that made one` | past | still true |
+
+Both sentences explain why a change is needed. The first states the defect as a **standing fact
+about the system**; the second states it as **the reason the change exists**. Only the second is
+still true once the change lands, and neither author chose the tense deliberately — one came out
+clean by luck of phrasing, which is the argument for making it a rule rather than a preference.
+
+The first is not hypothetical: it sat in `engine/concurrency_key_reentrancy_test.go` as the
+file-level justification for a rule about re-entrancy, was an accurate description of cleat#1188
+months before anyone filed it, and became a lie the moment #1194 fixed it — in the same PR, which
+nobody noticed until a second session read the file.
+
+**The sweep is still right when a fix changes behaviour**, and it is one command: grep the package
+for the function name and read every comment that mentions it, not only the ones you edited.
+
+    git grep -n '<FunctionName>' -- '<pkg>/*.go' | grep -E '//|\*'
+
+**That pattern over-matches on purpose and you should leave it that way.** The `\*` also catches
+every pointer receiver, so `ReleaseConcurrencyKey` returns 36 lines in `engine/` where only a
+handful are prose. A sweep you run once after a behaviour change wants the loose reading — the
+tight one is where a stale comment hides. Run against develop before #1194, this command surfaces
+`concurrency_key_reentrancy_test.go:23` as its second hit.
+
+Stale prose is not dead weight. It is a confident, well-formed, wrong answer to the next reader's
+question, and nothing fails.
+
 **Any number you write down carries a date and the command that re-derives it.** If you cannot
 write the command, do not write the number. Every count in this repo's docs was wrong when
 checked — linter totals, finding counts, skip counts, branch counts, all of them.
+
+**And the ones that rot are a PREDICTABLE class, not bad luck: a count of a growing
+population is guaranteed to be wrong.** Measured across this file on 2026-09-08 (cleat#986),
+using the commands the file itself published:
+
+| claim | as written | re-derived | |
+|---|---:|---:|---|
+| tables `CleanupPostgresTestData` deletes | 11 | **15** | drifted |
+| skips when all three dialects run | 4 | **7** | drifted |
+| engine exports | 50 | **52** | drifted |
+| `IMPROVEMENT-PLAN` §3.x headings | 99 | **235** | drifted |
+| the `comm -3` difference between the two export derivations | six | **6** | **held** |
+
+Four of five wrong, and the fifth names the mechanism. The one that held is a **set
+difference** — three workflow-API names against three plugin names. It describes a
+relationship in the design, so it cannot drift as the tree grows. The four that rotted are
+censuses: tables in a list, skips in a suite, exports in a file, headings in a document. Each
+grows with ordinary work.
+
+**So a count of a growing population is a proxy for a predicate, and the predicate is what a
+reader needs.** The skip line is the clearest case: "4 means all three dialects ran" was true
+on one day, and today it makes a clean run look broken. *"No remaining skip is
+dialect-gated"* was true at 4, is true at 7, and will be true at 12. Replace the census with
+the question it stands for, keep the command, and drop the number. Three such replacements
+are in this file — the skip check, the cleanup-table warning, and the unmarked-heading scan —
+and each is written out where it is used rather than summarised here.
+
+**And when the value moves faster than a reader arrives, carry ONLY the command.** A date
+plus a command is enough for a fact that changes monthly. It is not enough for one that
+changes hourly, because the reader takes the number and skips the command — that is what
+the number is *for*. Two instances, both measured 2026-09-06, both by the author of this
+paragraph:
+
+  * The engine's export count moved **three times in one day** — 58 → 52 when #767 removed
+    the durable-state family, → 50 when #843 removed the two inert signal calls. Each value
+    was correct when measured and stale within hours. Two of the three were written into
+    documentation before they aged out.
+  * `finalize_workflow_status` is `CREATE OR REPLACE`d by four migrations. A design doc
+    cited 004 as authoritative, which had been true that morning; 043 (#844) and 044 (#846)
+    both landed the same afternoon, so it shipped four behind.
+
+**The rule this generalises — and it is the one that failed, not the number rule: a live
+query has to be RE-RUN, not remembered.** The *Project state* section below already says to
+find the highest-numbered migration that defines a routine before concluding anything. That
+was done. The answer was then written down, which converted a live query into a stale fact
+and reintroduced exactly the defect the instruction exists to prevent. **Running a check
+once and recording its output is not the same as having the check.** Where the answer moves,
+publish the query and let the reader run it:
+
+    # not "004_fix_finalize_workflow_status_fence.sql", but:
+    python3 - <<'EOF'
+    import re, glob, os
+    def strip(s):
+        s = re.sub(r'/\*.*?\*/', '', s, flags=re.S)
+        return '\n'.join(re.sub(r'--.*$', '', l) for l in s.split('\n'))
+    for f in sorted(glob.glob('migrations/postgres/*.sql')):
+        if re.search(r'CREATE\s+(OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE)\s+\S*<routine>',
+                     strip(open(f).read()), re.I):
+            print(os.path.basename(f))     # the LAST line is authoritative
+    EOF
+
+Strip comments first, or a header quoting a `CREATE` counts as a definition — the same
+"a text search cannot tell a thing from a sentence about the thing" trap as *Build* above.
+
+**And the command has to answer the question you think it does.** A command that runs clean is
+not a command that is right. `git log --date=iso` prints a *local* time with an offset —
+`2026-09-03 14:20:48 -0400` — and pasting that clock reading into a UTC comparison moves the
+window four hours:
+
+    gh run list ... --jq '[.[] | select(.createdAt > "2026-09-03T14:20:48Z")]'   # wrong by 4h
+
+`gh` compares strings, so nothing errors; it silently answers about a different window. That one
+inflated a measured count from 5-of-24 to 11-of-36 and the conclusion from "a fifth" to "roughly
+a third", in the direction that flattered the finding — which is why it was not questioned. Use
+`%cI`, which carries the offset, and convert:
+
+    git log -1 --format=%cI <sha>                    # 2026-09-03T14:20:48-04:00
+    python3 -c "import datetime,sys; print(datetime.datetime.fromisoformat(sys.argv[1])
+      .astimezone(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'))" "$(git log -1 --format=%cI <sha>)"
+
+**What caught it was checking the story, not the number.** The mechanism being claimed — eviction
+from a queue — can only produce runs with zero jobs, and six of the eleven had one job. A number
+that supports your conclusion is the one to re-derive, not the one to keep.
+
+**And `grep` in an interactive shell here is not the `grep` your script gets.** It is a shell
+function wrapping **ugrep 7.5.0**; a script with `#!/usr/bin/env bash` gets `/usr/bin/grep` (BSD),
+and CI gets GNU grep. Confirm with `type grep`, which reports the function, then `grep --version`.
+
+Two independent divergences, both measured 2026-09-04, same directory and same `LANG`:
+
+**1. `-c` combined with `-o` means different things.** ugrep counts *matches*, BSD grep counts
+*lines*. On `§[0-9]+\.[0-9]+` over `IMPROVEMENT-PLAN.md`:
+
+| | ugrep | BSD |
+|---|---|---|
+| `grep -oE ... \| wc -l` | 819 | 819 |
+| `grep -cE ...` | 731 | 731 |
+| `grep -coE ...` | **819** | **731** |
+
+The pattern is not the problem and neither tool is wrong; `-co` is simply underspecified. Write
+`-o \| wc -l` when you mean matches and `-c` when you mean lines, and never combine them. No
+tracked script or doc currently does (`grep -rn 'grep -[a-z]*c[a-z]*o\b' --include='*.sh'`).
+
+**2. A multibyte character inside a bracket expression parses differently.** On
+`IMPROVEMENT[- ]PLAN[^§0-9]{0,3}§?[0-9]+\.[0-9]+` over `--include='*.go'`: ugrep **399**,
+`/usr/bin/grep` **1379**, Python `re` **1379**. The interactive tool is the outlier, which is the
+wrong way round — every number derived by hand is measured with the one that disagrees.
+
+Plain-ASCII patterns were checked rather than assumed, and agree: `^### [0-9]+\.[0-9]+ `,
+`^\| [0-9]+\.[0-9]+ \|`, and a `✅|FIXED|DONE` alternation all return identical counts under both.
+
+So the rule above — write the command that re-derives the number — needs one more clause: **run it
+the way the reader will run it.** For any pattern with non-ASCII or `{n,m}`, check it under
+`bash -c '...'` before writing the number down, or compute it in Python, whose `re` is the same
+everywhere. A guard that greps for something exotic should not be a shell script at all.
+
+This surfaced as a script reporting 1627 citations where the identical pipeline pasted into the
+terminal reported 546 — and neither was right. A survey in Python found 2354, because the pattern
+missed four of the six forms a citation actually takes. Three tools, three answers, one command.
+
+**And it is not only `grep` — the interactive SHELL here is zsh, and every script gets bash.**
+`#!/usr/bin/env bash` at the top of a harness script, `shell: /usr/bin/bash -e {0}` in a GitHub
+Actions `run:` block, and the zsh you are typing into are three different languages for the cases
+below. A command pasted from a script into the terminal, or typed at the terminal and then pasted
+into a script, changes meaning without changing text.
+
+Three divergences, all measured 2026-09-11, all hit in one evening — two by me and one by the
+cleat-ports session:
+
+| written | zsh | bash |
+|---|---|---|
+| `v="echo hello world"; $v` | `command not found: echo hello world` | `hello world` |
+| `spec="a b c"; set -- $spec; echo $#` | **1** | **3** |
+| `ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)`, sourced as `./scripts/env.sh` | the **parent** of the project | the project |
+| `grep -rn 'pat' --include=*.go dir/` | `no matches found: --include=*.go`, **grep never runs** | searches `dir/` |
+
+The first two are one fact: **zsh does not word-split an unquoted parameter expansion.** The third
+is separate — `BASH_SOURCE` does not exist in zsh, so `dirname ""` is `.` and the `/..` climbs one
+level too far. That third row only diverges when the script is sourced through a SUBDIRECTORY
+path; sourced as `./env.sh` both shells answer `.` and the bug hides.
+
+**Watch which of those is dangerous, because it is not the noisy one.** Rows 1 and 2 fail loudly:
+a `127`, or a blank argument that comes back as an API error. Row 3 fails **silently and
+plausibly** — a real, absolute, wrong path. It sent a build to `<home>/.port-results/...` instead
+of `<home>/ports-wt-210/.port-results/...`, where nothing errored and the artifact simply was not
+where the worker reads.
+
+Row 1 has its own trap, and it is worth naming because the output invites the wrong conclusion.
+Running five repository guards as `for g in "python3 scripts/check-x.py" ...; do $g; done` returned
+`127` for all five under zsh. That reads as *five guards failing*; it is *five guards that never
+ran*. A non-zero exit from a check you have not confirmed executed is not evidence about the tree
+— it is the "checks never started" case from *Is this result real?*, one layer down.
+
+**Row 4 is row 1's failure with the noise removed, and it is the one to internalise.** Measured
+2026-09-11 by me and independently by the cleat-ports session. zsh expands `--include=*.go` itself,
+finds no file of that literal name, and kills the command before `grep` runs. Bare, it is loud — it
+aborts the rest of the command list, and in the peer's run **two following `echo` markers never
+printed**, so in a block that greps first and interprets afterwards, what vanishes is the part that
+would have reported the problem.
+
+Add `| head` and it goes silent *and successful*:
+
+| state | stdout | stderr | exit |
+|---|---|---|---|
+| never ran (glob eaten by zsh) | empty | `no matches found: --include=*.go` | **0** |
+| ran, matched nothing | empty | empty | **0** |
+| ran, matched something | lines | empty | **0** |
+
+Exit status cannot separate the first two — `| head` supplies the 0 — and the stderr line that could
+is phrased as a *report about the search*: "no matches found" is what a search says when it
+searched. Attending to stderr is not enough, because the sentence agrees with the wrong reading.
+
+**The generalisable part is not the zsh bug.** You add `| head` when you expect output that might be
+long — that is, when you are confident the command works. The habit that tidies the output is the
+habit that conceals the failure, and it is applied in proportion to your confidence that there is
+nothing to conceal. Every tracked occurrence in an *executable* file is already quoted — restricted to `'*.sh' '*.py'`
+the unquoted pattern matches nothing, and the positive control is that the quoted pattern matches
+one file, `scripts/check-dead-exports.sh`. So the exposure is entirely in commands typed or pasted
+at a prompt, where a human reads the result and moves on.
+
+(Restrict it to executables deliberately. Run the same search over `'*.md'` and it matches this
+section, because prose *about* the hazard contains the hazard — the "a text search cannot tell a
+thing from a sentence about the thing" row, three hundred lines up, biting the paragraph that cites
+it. I published the wider command here first and it was false the moment it was committed.)
+
+Two clauses that follow, and they apply well beyond this row:
+
+- **Before believing a blank, make the same command produce a non-blank on a case whose answer you
+  already know.** This is the control the whole *Is this result real?* section asks for, and it is
+  the only one that separates "never ran" from "ran and found nothing".
+- **Publish the pattern with any universal negative** — "no callers outside `_test.go`", not "no
+  callers" — so the next reader can disagree with the pattern rather than only with the conclusion.
+  A bare "zero callers" is unfalsifiable by anyone who does not already suspect it. It is also
+  frequently wrong in the *other* direction: the same blank reads as "this claim is stale, delete
+  the claim" and as "this mechanism is dead, delete the mechanism", and both edits feel like tidying.
+
+One thing that is **not** a control, recorded because it was mistaken for one: a peer nearly deleted
+an accurate section of `plugin-security.md` on an empty grep for `.For(ctx` — the live call site is
+`.For(w.ctx, …)` — and what stopped them was that the deletion *felt disproportionate to the
+evidence*. A sense of proportion scales with the size of the edit, not the strength of the evidence,
+so it guards the rare large edit and abandons the common small one. That is luck with a plausible
+name, and it was correctly refiled as such.
+
+The rule is the same one the paragraph above gives for patterns, and it covers all four rows:
+**run anything that mimics the harness through `bash -c '...'`.** Not for patterns only — for any
+loop, any `set --`, any `source` of a script that resolves its own path.
+
+**Search the tracker before writing a fix for a defect you found by reading code.** Not before
+starting to look — before starting to *build*. On 2026-09-08 I found the API-created-schedule
+`next_run_at` bug by reading `handleCreateSchedule`, fixed it, and merged it as #998. It was
+already cleat#995, filed 30 minutes earlier by another session that had a verified fix in hand and
+claimed it three minutes after my merge landed. One `gh issue list` would have caught it.
+
+Claiming on the issue is the other half and it only works if the next person reads it first, so the
+order is: search, claim, then build. **Claim outright or not at all** — "I might pick this up
+later" has produced duplicate work here more than once.
+
+**And when you resolve WHO claimed it, the resolver must be able to answer UNKNOWN.** Claiming only
+works if the next reader can tell whose claim it is, and every mechanism for that is *optional at
+the point of writing*: a comment need not be signed, a commit need not carry a `Claude-Session`
+trailer. Three ways of getting the resolution wrong, all measured 2026-09-16, and **all three fail
+open** — each returns a confident answer where it should return none.
+
+**1. A resolver with no UNKNOWN branch falls through to the nearest id it can find.** Mine
+attributed cleat#1715's claim to the wrong session by adjacency: it found the claim, found no marker
+on it, and resolved the claimant from the closest trailer-bearing artifact, which belonged to
+somebody else. The branch that would have said *"I cannot tell"* was never written, so it could
+never fire — the *"condition that never decides anything"* case above, arriving in attribution.
+
+**UNKNOWN is not the edge case here; it is the usual answer.** Measured across the ten open issues
+on 2026-09-16, resolving two ways:
+
+| how the claimant is resolved | result |
+|---|---|
+| any `Claude-Session` id **present in the thread** | a confident id for **10 of 10** issues |
+| the marker **on the claim comment itself** | a marker on **4 of 19** claim comments; UNKNOWN for 15 |
+
+So the honest resolver declines four times out of five, and the presence-based one never declines at
+all. **A resolver that answers every time is not a resolver, it is a lookup of who talks most** —
+the peer's id appears in nearly every thread because the peer comments in nearly every thread.
+
+**And I had a known-positive in hand: #1717.** My user had told me WS-1 took it. The presence scan
+returns the peer's id. One case whose answer I already knew, disagreeing with the instrument — which
+is the only thing that separates "this resolver works" from "this resolver has never been asked
+anything it could get wrong". Hold one back before believing any attribution.
+
+A confident wrong name is worse than silence, because it is actionable: "claimed, claimant unknown"
+sends you to ask, and a wrong name sends you to the wrong person.
+
+**2. "No marker found" and "a marker I could not parse" are different answers, and a pattern
+cannot tell you which it gave.** The trailer appears in two forms in this tree —
+`https://claude.ai/code/session_…` and a bare `session_…` — so a scan anchored on the URL reports
+the bare form as an absence. That is not a uniform 1% miss. **The bare form is one participant's
+consistent habit**: all 6 of its occurrences, over 4 commits and six days, are one session. The scan
+does not lose a little of everyone; it loses one person entirely, and the person it loses is the one
+whose habit differs.
+
+**3. The inverse invents participants.** A bare substring scan over the same text finds five ids
+that do not exist, in 22 occurrences — `session_context`, `session_context_test`, `session_token`,
+`session_connect_attrs`, and **`session_01`, which is a real id truncated**: `74b6bcd0`'s message
+says it is dropping a literal `"session_01..."` ellipsis from a doc comment. A commit message *about*
+a truncated session id, counted as a sixth session, sitting beside five whose every digit checks out.
+
+**One anchor is wrong in neither direction: anchor at the FIELD NAME and stay permissive about the
+value.** `^Claude-Session:` cannot match `session_connect_attrs`, which has no field name in front
+of it, and does not care which form the value takes. Over every commit message in `develop`'s
+history:
+
+    B=$(git log --format=%B origin/develop)
+    grep -cE '^Claude-Session:' <<<"$B"                                       # 741 — the answer
+    grep -cE '^Claude-Session:[[:space:]]*https://claude\.ai/code/' <<<"$B"   # 735 — loses 6
+    grep -oE 'session_[A-Za-z0-9_]+' <<<"$B" | sort -u | grep -c .            # 10 — invents 5
+
+The tight pattern was chosen to defeat the false positive, and bought the false negative with it.
+Both were written by people being careful.
+
+**That `--format=%B` is load-bearing, and dropping it turns the correct pattern into a total false
+negative.** `git log` indents the body by four spaces, so the field anchor matches nothing at all:
+
+| over all of `develop`, 2026-09-16 | |
+|---|---|
+| `git log --format=%B \| grep -cE '^Claude-Session:'` | **741** |
+| `git log \| grep -cE '^Claude-Session:'` | **0** |
+| `git log \| grep -cE 'Claude-Session:'` | 741 |
+
+A zero there reads as *"nobody in this repo uses session trailers"*, which is a conclusion someone
+would act on. It is the most convincing form of the trap because the pattern is the right one —
+only the text it was pointed at is wrong. Before believing this or any blank, make the same command
+return a non-blank on a case whose answer you already know.
+
+**Count distinct VALUES, never lines.** Those 741 lines are 554 commits and 5 sessions, and **121
+of the 554 carry the trailer more than once** — a squash concatenates its constituents' bodies, so
+a commit carrying it three times is one session committing three times. A per-line count reads
+close to a quarter of this history as multi-session collaborations. `.githooks/prepare-commit-msg` cannot dedupe
+them and should not: it exits early on `SOURCE=squash` by design, because the trailer belongs on the
+commits being squashed.
+
+**The mechanism that would make all of this unnecessary does not exist, and the obvious candidate is
+a trap worth not re-discovering.** `CLAUDE_CODE_SESSION_ID` is exported to hooks, so
+`prepare-commit-msg` could stamp it — but it is a UUID, and **0 of those 741 trailers use that
+form**. The variable carrying the id the trailers actually use is `CLAUDE_CODE_BRIDGE_SESSION_ID`,
+whose presence depends on how the session was launched. A hook keyed on the obvious name would
+produce a well-formed marker that resolves to nothing, and every scan above would pass it. Writing
+the trailer is the author's job; the hook adds `Signed-off-by` and nothing else.
+
+**And this is not a discipline that survives deciding to have it.** cleat#1724 — which added the
+fourth entry under *"could this check have disagreed?"*, written by an author who had spent that
+afternoon measuring exactly this absence — merged without a trailer. Five of my six merges that day
+lacked one. That is the argument for recording the *resolver* rule rather than chasing the markers:
+**plan for the marker to be missing, because the person most aware of it is still missing it.**
+
+**SUPERSEDED 2026-09-17: commits now carry `Claude-Stream:`, not `Claude-Session:`.** Everything
+measured above stands and is why the replacement exists — the id form did not fail because people
+were careless with it, it failed because **a session id does not survive a host restart and a
+stream does.** After the 2026-09-16 reboot every `session_…` mapping recorded here named a session
+that no longer existed, three PRs could not be attributed at all, and one session merged two PRs it
+had not authored on the strength of a dead id. The new form:
+
+    Claude-Stream: WS-1        # closed set: WS-1, WS-2, WS-3, WS-4,
+                               #             coordinator, cleat-review
+                               # anchor greps at ^Claude-Stream: , as before
+
+`WS-4` is a fourth delivery stream, added 2026-09-23 by owner decision to shorten the 0.3.0 critical path. Its IMPROVEMENT-PLAN block is `3.500–599` (`scripts/section-blocks.sh`).
+
+`cleat-review` is a review session rather than a delivery stream, added 2026-09-17. The set had no
+value for one, and the nearest was actively wrong: two of its PRs went out trailered `coordinator`,
+which is not "unattributed" — it is attributed to someone else. The coordinator session then found
+a red PR carrying its own name that it had not opened, and declined to touch 80 files of WASM host
+ABI on that basis, which was the correct call and cost a round trip to establish. Same failure
+class as the dead-id incident above, reached from the other direction: there, a session merged what
+it had not authored; here, a session nearly debugged what it had not written.
+
+**Adding a value is a CI change, and the new participant cannot land it under its own name.** That
+is the price of an enumerated set and it is worth paying — the check exists to catch a typo, and an
+open set catches nothing.
+
+It is still a **claim, not a record** — any session can type any stream name, exactly as any session
+could type any id. The gain is stability under restart, and the fact that each session can assert
+its value from its own evidence rather than resolve an id the harness may not expose to it. The
+`CLAUDE_CODE_SESSION_ID`-is-a-UUID trap above is unchanged and is the reason the hook still cannot
+stamp it.
+
+**And it answers a different question from the reflog, which is the thing to keep straight.** The
+trailer says *who worked*; the reflog says *where*. The failure mode to design against is not a
+session stamping the wrong stream on purpose — it is a session stamping the **right** one for a
+commit produced in another stream's working tree, which is exactly what happened on 2026-09-16.
+The trailer would have been true and still would not have answered the question anyone was asking.
+Only the reflog is unforgeable by typing; only the trailer names a person. See `WORKSTREAM.md`,
+*Shared files, and the protocol for each*.
 
 **One PR, one thing.** Every PR that bundled a second concern was harder to review than the two
 would have been apart.
@@ -127,7 +1678,9 @@ faster than reading the remaining sites.
 - `internal/` — Non-public support packages (analyzer, callgraph, closure, plugingen,
   telemetry, transform)
 - `cleat/` — Public Go API (cleattest, embedded, localdev, wasmtest, ai, backendkit)
-- `plugins/` — 21 built-in plugins (llm, slacknotify, pagerdutyalert, scheduler, etc.)
+- `plugins/` — built-in plugins (llm, slacknotify, pagerdutyalert, scheduler, etc.);
+  `ls -d plugins/*/ | wc -l`. This said 21 and was 22 before cleat#1569 added one — a
+  census of a growing population, drifting exactly as this file's own rule predicts.
 - `web/` — Svelte 5 admin dashboard
 - `crates/` — Rust SDK + Java SDK
 - `python-sdk/` — Python SDK
@@ -151,27 +1704,164 @@ faster than reading the remaining sites.
 - WASM workflows are compiled with the standard Go toolchain (`--target go`, default)
 - Tests use `go test`, fuzz tests, and behavioral test suites
 
-### Two WASM backends
+### One WASM backend, and a wazero runtime that is not it
 
-- **wasmtime** (`engine/backend_wasmtime.go`) — via CGo. **The backend of record.** Preferred
-  automatically whenever CGO is available (`cmd/cleat-worker/main.go`), and
-  `engine.WasmtimeLanguages` is the single source of truth for which guest languages run on it.
-  Membership there means *verified to load and execute*, not *ought to*.
-- **wazero** (`engine/backend_wazero.go`) — pure Go. **The CGO-less fallback and nothing else**
-  (settled 2026-08-05). It carries a real bug tail — do not treat a wazero-only failure as
-  evidence about the engine as a whole.
+**wasmtime** (`engine/backend_wasmtime.go`, `//go:build cgo`) is the only `WasmBackend` cleat
+has. `engine.WasmtimeLanguages` is the single source of truth for which guest languages run on
+it, and membership there means *verified to load and execute*, not *ought to*.
 
-They are not equivalent, and the difference is safety-relevant: **wazero cannot be fenced for a
-compute-bound guest.** Measured three ways, all failing — `WithCloseOnContextDone` breaks all
+There is no second backend and no fallback. `engine/backend_wazero.go` was **deleted** in #459
+(2026-08-10) — this file described it as "the CGO-less fallback" for twenty days after it
+stopped existing. Confirm with `ls engine/backend_wazero.go`.
+
+**wazero has not left the tree, though, and the distinction matters.** `engine.Runtime`
+(`engine/runtime.go`) is still a wazero runtime, and it still executes guest code on these
+paths:
+
+- `cleat/wasmtest`, `cmd/cleat run_embedded`, `cmd/cleatctl replay`, `cmd/cleatctl debug`,
+  `cmd/cleat-bench` — all call `engine.NewRuntime`. **Dev and CLI tooling, all of it.**
+- `RunDefer`, but only when the engine registers *no backends at all* — which is those same
+  tools. The worker calls `RunDefer` too (`cmd/cleat-worker/setup.go:480`) and never reaches
+  this path, because it registers wasmtime.
+- `RunDeferCompiled`, which is wazero by signature — it takes a `wazero.CompiledModule`, so no
+  backend can serve it. **It currently has no callers**, and is listed in
+  `scripts/deadexports-baseline.txt`.
+
+Re-derive: `grep -rn "NewRuntime(" --include="*.go" . | grep -v _test.go`
+
+**This section used to describe the `RunDefer` bullet as an unfenced hazard, quoting a comment
+that said "the CGO-less build, where wazero is the only runtime there is. Unfenced, and
+unavoidably so" at `engine/executor.go:706`.** Every part of that was wrong by 2026-09-01: the
+comment had already been rewritten in the tree, line 706 is now unrelated `continue_as_new`
+code, and #503 closed the case that made it dangerous. Confirm the quote is gone with
+`grep -n 'CGO-less build, where wazero is the only runtime' engine/executor.go`.
+
+What made it dangerous was **guest-controlled**: `wasm.DetectLanguage` returns the guest's own
+`cleat.metadata` Language field verbatim, so a module declaring `"tinygo"` — or `"GO"`, since
+the lookup is exact — matched no backend and fell through to wazero. `Engine.resolveBackend`
+now fails closed on exactly that, distinguishing "this engine does no routing" from "this
+engine routes but not for this language". Read its doc comment for the measurements.
+
+So "wazero is gone" is still wrong, but the reason has changed. **wazero cannot be fenced for a
+compute-bound guest** — measured three ways, all failing: `WithCloseOnContextDone` breaks all
 execution, fuel only decrements on function entry, and closing the module has no effect on a
-tight loop. A runaway guest on wazero is not stopped. Resource limits and determinism enforcement
-differ too. When changing execution paths, check both, and treat wasmtime as the behaviour of
-record.
+tight loop. That now bounds *developer tooling*, not anything a worker runs: a runaway guest
+under `cleatctl replay` or `cleat run` is not stopped.
+
+**"wazero removal, part 2" was decided against on 2026-09-01 — do not start it.** See
+IMPROVEMENT-PLAN.md §3.56. The safety case was gone once #503 made routing fail closed, and
+removal would force `cleat` onto CGO (ending pure-Go cross-compilation for the CLI) while
+breaking exported API — `engine.Runtime`, `engine.NewRuntime`, `wasmtest.WasmTestEnv.Runtime()`.
+The parked WIP stash and the `REMEDIATION-PLAN-2026-08-09.md` section describing it are
+superseded.
+
+The price of keeping two implementations is that something must compare them, because the host
+ABI is written twice — `engine/imports.go` for wazero, `engine/wasmtime_hostfuncs*.go` for
+wasmtime. `engine/hostabi_runtime_parity_test.go` does. It found a real defect on its first run:
+`cleat_create_promise` was registered on wasmtime with a parameter no guest passed, so durable
+promises could not link on the worker at all (§3.55). **Note what a name-only comparison would
+have said** — both sides register the same names, and did then too.
+
+**This paragraph described a gap that no longer exists, and that is the more expensive kind of
+error than a stale number.** It read: the test filters both sides on the `cleat_` prefix
+(citing `engine/hostabi_runtime_parity_test.go:114` and `:332`), so it compares 55 names while
+`plugin_call`, `plugin_call_streaming` and `set_query_state` are *never compared*.
+
+All of that was true, and stopped being true on 2026-09-05 when the filter was removed. `:114`
+is now a blank line and `:332` an unrelated `switch`. A session reading this would go to close a
+hole that is closed — and the paragraph was persuasive precisely because it was specific.
+
+The textual check is not what settles it, and that is worth noting here because it is this
+file's own trap: `grep -c 'strings.HasPrefix(name, "cleat_")'` over that test returns **2**,
+which reads like a live filter and is two comments *describing* the removed one. What settles
+it is behavioural — adding a real filter makes the test fail, so a filter cannot already be
+there.
+
+**What replaced it is a test, which is why this is worth reading as a pattern rather than a
+correction.** `TestParityCoversEveryRegisteredHostFunction` fails if the filter returns in any
+form. Verified 2026-09-08 by putting a `strings.HasPrefix(name, "cleat_")` back:
+
+    the runtime parity check does not compare 3 of 52 registered host functions:
+    plugin_call, plugin_call_streaming, set_query_state
+
+A prose warning about a guard's blind spot rots the moment someone fixes it, and rots *silently*,
+because nothing re-reads the prose. A test that asserts the blind spot is absent cannot: it goes
+red when the blind spot returns, and it stays green — saying nothing, correctly — when it does
+not. **Prefer converting a gap into a failing test over describing it here.**
+
+**The two counts still answer different questions**, and that part survives — but state it as a
+predicate, not a census, because the census is what rotted twice already. **Exactly three exports
+are unprefixed** (`plugin_call`, `plugin_call_streaming`, `set_query_state`), and **the parity test
+compares every export rather than a prefixed subset**, which is what the deleted paragraph got
+wrong. Both were true at 50, are true at 54, and will be true at the next value. The total itself
+is a live query and is given below; do not carry it in prose, including from here.
+
+**This paragraph said 58 and 55 until 2026-09-06, and it is the sharpest example of its own
+rule.** The section exists to warn that a count in prose rots, and its count rotted: six exports
+went with the durable-state family (§3.216), and two more with the inert signal calls (§3.220) a
+few hours after this very paragraph was corrected to 52. It then rotted a third time, upward:
+`cleat_poll_update` and `cleat_complete_update` arrived with workflow updates (#868), so the run
+is 58 → 52 (#767) → 50 (#843) → 52 (#868) → **54** (measured 2026-09-13) — five values in eight
+days, every one correct when written. The paragraph above said 52 for five of those days, which is
+the fifth time this passage has been stale about its own subject; it now states a predicate rather
+than a number, which is the only repair that survives the next export. Note the direction: the first two
+were removals and the third an addition, so "the number only goes down" is not available as a
+sanity check either. Nothing failed any of the three times, because **no test asserts these
+numbers**. `ABI.md` stayed correct over the whole period, 52 through 54 —
+`scripts/check-doc-consistency.sh` reports it agreeing with `engine/imports.go` on every host call
+with an empty set difference — so the drift has been in this file alone, every time. That is no longer luck: since #952, `scripts/check-doc-consistency.sh` compares the
+two SETS on every CI run and fails on either difference, which is the same "convert it into a
+failing test" move as the parity filter above. Nothing yet checks the numbers in *this* file, so
+re-derive before quoting, including from here.
+
+    grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sed 's/.*Export("//;s/")//' | sort -u | grep -c .
+
+**Do not put `cleat_` inside that pattern when you want the export total.** Three exports are
+unprefixed — the same three above — and all three are workflow API, so a prefix-anchored scan
+silently drops the plugin calls. A pattern that can only return names of the shape
+it assumes cannot test the assumption; it encodes the conclusion. That error produced a **55** on
+2026-09-05 whose digits matched a differently-derived 55 — the workflow-facing target, the export
+total less two handshake calls and one deliberately unbindable one — with **six** members
+different, three in each direction.
+
+**The collision is not a coincidence of that one day: it recurred at 49, and again at 47 within
+hours**, both derivations moving together as exports were removed, still differing on the same six
+members.
+Which is the point — the number agreeing tells you nothing, and will keep telling you nothing. Two derivations agreeing on a number while disagreeing on more than a tenth of its
+membership is the 876/581/4 costume from this file's opening section (IMPROVEMENT-PLAN §3.213).
+Re-derive the difference rather than the totals — this runs, and prints six lines:
+
+    E=$(grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sed 's/.*Export("//;s/")//' | sort -u)
+    comm -3 <(grep '^cleat_' <<<"$E") \
+            <(grep -v -e '^cleat_poll_work$' -e '^cleat_complete$' \
+                      -e '^cleat_register_query_handler$' <<<"$E")
+
+The six are `cleat_poll_work`, `cleat_complete` and `cleat_register_query_handler` on one side,
+`plugin_call`, `plugin_call_streaming` and `set_query_state` on the other. **Compare the sets, not
+the counts** — the same instruction as "diff the SET rather than comparing counts" under the
+`-list` rule, and this is what it looks like when nobody does. **One prefix assumption produced
+all three errors above**: a wrong denominator, a stale doc number, and a guard that has never
+compared three of the names it exists to compare.
 
 **"Which backend runs this" and "which code path inside that backend runs this" are different
-questions.** The wasmtime backend has three execution paths — core module, native component, and
-decomposition — and they have had three different answers about limits. Tell the limit story
-about the second question, not the first.
+questions.** The wasmtime backend has **two** execution paths — core module and native
+component — and they had different answers about limits until IMPROVEMENT-PLAN §3.31 wrote the
+story down for each. Tell the limit story about the second question, not the first.
+
+There were three. Decomposition was deleted in #528 (2026-09-01) after being measured against
+the only Component Model binary in the repo: the native path reached CPython and ran guest
+code, while decomposition failed at instance 81 of 85. A second, mirror implementation on
+wazero failed at instance 8. Confirm with `grep -rn "func.*ExecuteComponent" --include="*.go" .`
+— exactly one line, `ExecuteComponentCGo`.
+
+**Two things went wrong writing that one-line command, both worth the warning.** The first
+version was `grep -rn "ExecuteComponent\b"`, which returns a hit: a comment in
+`engine/wasmtime_options.go` explaining that the function it names was deleted. A grep a
+*retraction* satisfies is the §1.1 trap, in a file that documents the §1.1 trap. The second was
+`func.*ExecuteComponent(` — anchoring on the open paren, which does not follow the name in
+`ExecuteComponentCGo(`, so it matched nothing at all and the "only X should match" claim beside
+it was false in the other direction. **Run the command and read its output before writing the
+sentence about what it prints.**
 
 ---
 
@@ -197,6 +1887,103 @@ Key conventions:
 - **`IMPROVEMENT-PLAN.md`** — the item backlog. Each `§` heading carries a status marker; the
   marker is the source of truth, not any summary table derived from it. Read the body too — it
   has been stale under a fixed heading more than once.
+
+  **A heading with *no* marker is a defect, and it costs more than a wrong one.** §1.1 and §1.2
+  — the two highest-severity items in the document — carried no marker until 2026-09-01 while
+  their bodies had recorded the fixes as done for weeks. A scan for open work reported a
+  closed data-loss bug as the project's top outstanding item, and a session went into
+  re-deriving what the body already said. "No marker" is indistinguishable from "not started",
+  so it is read as the latter. Prose in the heading (`— fixed in 9fc2a81`) counts; nothing at
+  all does not.
+
+  **The predicate is "every heading carries a status", not a ratio.** This said "87 of 99" on
+  2026-09-01; it is 235 headings now, so both halves were wrong within days and the ratio told
+  a reader nothing they could act on. What is actionable is the list of headings with no status
+  at all, which is short and is the thing to fix:
+
+      python3 - <<'EOF'
+      import re
+      hs = [l.rstrip() for l in open('IMPROVEMENT-PLAN.md')
+            if re.match(r'^### [0-9]+\.[0-9]+ ', l)]
+      MARKERS = set('✅🟢🟡🔴🔶🔵🔷⬛⬜⚪❌')
+      WORDS = (r'fixed|done|open|wontfix|declined|superseded|parked|deferred|'
+               r'partly|partially|core fixed|shipped')
+      word = re.compile(r'—[^A-Za-z]*(?:' + WORDS + r')', re.I)
+      def marked(l):
+          return any(c in MARKERS for c in l) or word.search(l)
+      for l in hs:
+          if not marked(l):
+              print(l[:110])
+      EOF
+
+  Two on 2026-09-08; the same two on 2026-09-16 (§2.8, §2.12), out of 295 headings.
+
+  **The OR in this scan was never a redundancy, and the fix is the `[^A-Za-z]*`.** Counted over
+  every heading on 2026-09-16, with the clauses that used to be here:
+
+      emoji clause AND word clause     0
+      emoji clause only              282
+      word clause only                11
+      neither                          2
+
+  Zero overlap is not bad luck, it is the construction. The word clause read
+  `—\s*(?:\*\*)?\s*(?:fixed|…)`, which allows *nothing* between the em-dash and the marker
+  word — so any symbol there defeated it, a recognised marker and an unrecognised one alike.
+  The fallback was therefore guaranteed to be absent in precisely the case it existed for: a
+  heading whose symbol the emoji class does not know. Allowing non-letters between the two
+  takes the overlap from 0 to 238, so from here either clause can fail alone without changing
+  an answer.
+
+  **A hand-picked RANGE fails the same way a hand-picked list does**, which is what this note
+  used to say and it was wrong. `\U0001F300-\U0001FAFF` plus four literals misses `⬛` U+2B1B
+  — whose neighbour `⬜` U+2B1C *is* in the literals — and §2.23 carries one today, classified
+  correctly only because the same heading also carries a `✅`.
+
+  **The symbol set is still a LIST, and widening it to a Unicode CATEGORY was the wrong
+  repair — it trades a loud failure for a silent one.** This scan *prints* the unmarked
+  headings, so the two directions are not symmetric:
+
+  | the matcher is | a real marker | prose |
+  |---|---|---|
+  | too **narrow** | missed → a spurious LINE APPEARS | correct |
+  | too **wide** | correct | read as a marker → a true line **VANISHES** |
+
+  Category `So` is far wider than the markers: `✓` U+2713, `✔`, `✗`, `™`, `©`, `°`, `★` and
+  `⚠` are all `So`. A heading reading *"a 30° window"* or *"✓ checked"* would count as
+  carrying a status and drop silently out of the report — in the one scan whose subject is
+  checks that read cleanest where they measured least. (Found by WS-2 in review, after I had
+  shipped the category test and argued in this very file that the scan fails loud.)
+
+  So the category is used to **detect**, not to match: `--self-test` reports any `So`
+  character in a heading that is not a known marker, and fails naming it. A new status symbol
+  is then added on purpose, and a `✓` written in prose is caught the first time. The list is
+  only safe because the *other* clause is now a real fallback — `— ⬛ **SUPERSEDED**` is
+  carried by the word clause whatever the set contains, which is exactly what was untrue
+  before `[^A-Za-z]*`.
+
+  Re-derive all of it — the four counts, the codepoints, and the claim that the replacement
+  changes no verdict on any real heading — with `scripts/check-plan-markers.py --self-test`,
+  which CI runs.
+
+  **This scan fails LOUD in both clauses, and that is a property to preserve rather than a
+  fact to rely on.** It PRINTS the unmarked headings, so a marker it cannot parse adds a
+  spurious line rather than deleting a true one — which holds only while the symbol set stays
+  narrow, per the table above. "A scan that silently stops matching reports zero unmarked headings — which reads
+  exactly like success" is true of a scan that COUNTS closed sections, and
+  `scripts/archive-closed-sections.py` has exactly that shape with a third marker vocabulary of
+  its own (`✅|🟢|FIXED|DONE|CLOSED|GUARDED|fixed in`, and no SUPERSEDED, DECLINED, WONTFIX,
+  PARKED or DEFERRED). Checked on 2026-09-16: **zero** headings carry a close-word that
+  vocabulary cannot see, so the two disagree about nothing today. That is a measurement with a
+  date on it, not a property — the archiver is where a missed marker would fail silently, so it
+  is the one to re-check when the vocabulary moves.
+
+  **When a section names the files it will change, those names go stale too, and in the
+  direction that fools you.** §1.1's `Files:` bullet pointed at
+  `migrations/*/003_procedures.sql`. The fix shipped as `004_fix_finalize_workflow_status_fence.sql`,
+  which *redefines* the procedure — so 003 still contains the original unguarded body, exactly
+  as the bug report described. Checking the claim against the file the claim named confirmed
+  the bug, and the confirmation was worthless. For anything defined by `CREATE OR REPLACE`,
+  find the highest-numbered migration that defines it before concluding anything.
 - **`WORKSTREAM.md`** — what is being worked on now, by whom, and in which sandbox.
 - **`BRANCH-TRIAGE.md`** — assessment of unmerged remote branches. Its method
   (`git rev-list --left-right --count`) cannot see through a squash-merge, so it has reported

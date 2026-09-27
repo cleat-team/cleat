@@ -3,8 +3,11 @@ package notifications
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,6 +22,7 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"github.com/google/uuid"
 )
 
@@ -238,21 +242,13 @@ func TestRegisterHostFunctions_Valid(t *testing.T) {
 
 func TestMigrations(t *testing.T) {
 	p := &Plugin{}
-	migrations := p.Migrations()
-	if len(migrations) == 0 {
-		t.Fatal("expected at least one migration")
-	}
-	for i, m := range migrations {
-		if m.Version == 0 {
-			t.Errorf("migration %d: version must be non-zero", i)
-		}
-		if m.Up == "" {
-			t.Errorf("migration %d: Up SQL is empty", i)
-		}
-		if m.Down == "" {
-			t.Errorf("migration %d: Down SQL is empty", i)
-		}
-	}
+	// One shared predicate for what a migration must do, rather than a copy per
+	// plugin -- thirteen plugins carried their own and they had already drifted
+	// (cleat#1513). The copy that stood here rejected a TenantScoped migration
+	// by construction, in BOTH halves: v2 declares a table for the runtime to
+	// put a policy on and carries no SQL in either direction, because there is
+	// none to write and no policy an author could drop. cleat#1512.
+	plugintest.AssertMigrationsDoSomething(t, p.Migrations())
 }
 
 // ===========================================================================
@@ -404,7 +400,7 @@ func TestProcessDeliveries_QueryError(t *testing.T) {
 		logger: discardLogger(),
 	}
 
-	attempted, succeeded, failed, err := p.processDeliveries(context.Background())
+	attempted, succeeded, failed, err := p.processDeliveries(context.Background(), context.Background())
 	if err == nil {
 		t.Fatal("expected error from processDeliveries with failing db, got nil")
 	}
@@ -519,8 +515,9 @@ func TestRouteHandlers_NoAuth(t *testing.T) {
 
 func TestRouteHandlers_DBError(t *testing.T) {
 	p := &Plugin{
-		logger: discardLogger(),
-		db:     &engine.SQLDBAdapter{DB: sql.OpenDB(&erroringConnector{})},
+		logger:  discardLogger(),
+		db:      &engine.SQLDBAdapter{DB: sql.OpenDB(&erroringConnector{})},
+		secrets: plugintest.NewFakeSecrets(),
 	}
 	t.Cleanup(func() { p.db.(*engine.SQLDBAdapter).DB.Close() })
 
@@ -530,7 +527,7 @@ func TestRouteHandlers_DBError(t *testing.T) {
 	}
 
 	t.Run("create webhook with db error", func(t *testing.T) {
-		body := bytes.NewReader([]byte(`{"url":"https://example.com/hook","events":["test"]}`))
+		body := bytes.NewReader([]byte(`{"url":"https://example.com/hook","events":["test"],"secret":"test-secret"}`))
 		req := authedRequestForTest("POST", "/webhooks", body)
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
@@ -646,8 +643,9 @@ func TestHandleCreateWebhook_InvalidID(t *testing.T) {
 
 func TestHandleCreateWebhook_NoFieldsToUpdate(t *testing.T) {
 	p := &Plugin{
-		logger: discardLogger(),
-		db:     &engine.SQLDBAdapter{DB: sql.OpenDB(&recordingConnector{})},
+		logger:  discardLogger(),
+		db:      &engine.SQLDBAdapter{DB: sql.OpenDB(&recordingConnector{})},
+		secrets: plugintest.NewFakeSecrets(),
 	}
 	t.Cleanup(func() { p.db.(*engine.SQLDBAdapter).DB.Close() })
 
@@ -657,7 +655,7 @@ func TestHandleCreateWebhook_NoFieldsToUpdate(t *testing.T) {
 	}
 
 	// First create a webhook so we have a valid ID.
-	body := bytes.NewReader([]byte(`{"url":"https://example.com/hook","events":["test"]}`))
+	body := bytes.NewReader([]byte(`{"url":"https://example.com/hook","events":["test"],"secret":"test-secret"}`))
 	req := authedRequestForTest("POST", "/webhooks", body)
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)
@@ -739,7 +737,7 @@ func TestHandleCreateWebhook_EventsNil(t *testing.T) {
 	p, store := setupTestPlugin(t)
 	handler := buildHandler(t, p, store)
 
-	body := bytes.NewReader([]byte(`{"url":"https://example.com/hook"}`))
+	body := bytes.NewReader([]byte(`{"url":"https://example.com/hook","secret":"test-secret"}`))
 	req := authedRequestForTest("POST", "/webhooks", body)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -758,6 +756,70 @@ func TestHandleCreateWebhook_EventsNil(t *testing.T) {
 	}
 	if len(events) != 0 {
 		t.Errorf("expected empty events list, got %v", events)
+	}
+}
+
+// TestHandleCreateWebhook_MissingSecret is cleat#1992/#2172's pin for owner
+// decision (b): a signing secret is now REQUIRED, not optional -- a POST with
+// no secret at all is rejected outright, the same shape as a missing url.
+func TestHandleCreateWebhook_MissingSecret(t *testing.T) {
+	p, store := setupTestPlugin(t)
+	handler := buildHandler(t, p, store)
+
+	body := bytes.NewReader([]byte(`{"url":"https://example.com/hook"}`))
+	req := authedRequestForTest("POST", "/webhooks", body)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing secret, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleCreateWebhook_EmptySecret is TestHandleCreateWebhook_MissingSecret's
+// sibling: an explicit empty string is not a secret either.
+func TestHandleCreateWebhook_EmptySecret(t *testing.T) {
+	p, store := setupTestPlugin(t)
+	handler := buildHandler(t, p, store)
+
+	body := bytes.NewReader([]byte(`{"url":"https://example.com/hook","secret":""}`))
+	req := authedRequestForTest("POST", "/webhooks", body)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty secret, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestHandleUpdateWebhook_CannotClearSecret is owner decision (b)'s PUT-side
+// pin: once a webhook has a secret, PUT can rotate it but can no longer clear
+// it back to unsigned. Without this, `{"secret":""}` on an existing webhook
+// would silently un-sign every future delivery.
+func TestHandleUpdateWebhook_CannotClearSecret(t *testing.T) {
+	p, store := setupTestPlugin(t)
+	handler := buildHandler(t, p, store)
+
+	createBody := bytes.NewReader([]byte(`{"url":"https://example.com/hook","secret":"initial-secret"}`))
+	req := authedRequestForTest("POST", "/webhooks", createBody)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var created map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	id := created["id"].(string)
+
+	updateBody := bytes.NewReader([]byte(`{"secret":""}`))
+	req = authedRequestForTest("PUT", "/webhooks/"+id, updateBody)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 clearing the secret, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	secrets := p.secrets.(*plugintest.FakeSecrets)
+	if v, err := secrets.ForTenant(testTenantID.String()).Get(context.Background(), WebhookSecretName(uuid.MustParse(id))); err != nil || v != "initial-secret" {
+		t.Errorf("secret after a rejected clear: got (%q, %v), want (\"initial-secret\", nil) -- unchanged", v, err)
 	}
 }
 
@@ -817,8 +879,8 @@ func TestHandleUpdateWebhook_Secret(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("failed to decode: %v", err)
 	}
-	if resp["secret"] != plugin.RedactedPlaceholder {
-		t.Errorf("expected secret to be redacted as %q, got %q", plugin.RedactedPlaceholder, resp["secret"])
+	if resp["secret_configured"] != true {
+		t.Errorf("expected secret_configured=true, got %v", resp["secret_configured"])
 	}
 }
 
@@ -910,14 +972,14 @@ func TestDeliverNon2xxResponse(t *testing.T) {
 	now := time.Now().UTC()
 	store.mu.Lock()
 	store.configs = append(store.configs, &testWebhookCfg{
-		tenantID:  testTenantID,
-		id:        webhookID,
-		url:       mockSrv.URL,
-		secret:    "test-secret",
-		events:    `["test.event"]`,
-		enabled:   true,
-		createdAt: now,
-		updatedAt: now,
+		tenantID:         testTenantID,
+		id:               webhookID,
+		url:              mockSrv.URL,
+		secretConfigured: true,
+		events:           `["test.event"]`,
+		enabled:          true,
+		createdAt:        now,
+		updatedAt:        now,
 	})
 	past := now.Add(-1 * time.Hour)
 	deliveryID := uuid.New()
@@ -932,11 +994,12 @@ func TestDeliverNon2xxResponse(t *testing.T) {
 		createdAt:     past,
 	})
 	store.mu.Unlock()
+	p.secrets.(*plugintest.FakeSecrets).Seed(testTenantID.String(), WebhookSecretName(webhookID), "test-secret")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	attempted, succeeded, failed, err := p.processDeliveries(ctx)
+	attempted, succeeded, failed, err := p.processDeliveries(ctx, ctx)
 	if err != nil {
 		t.Fatalf("processDeliveries: %v", err)
 	}
@@ -977,14 +1040,14 @@ func TestDeliverNetworkError(t *testing.T) {
 	now := time.Now().UTC()
 	store.mu.Lock()
 	store.configs = append(store.configs, &testWebhookCfg{
-		tenantID:  testTenantID,
-		id:        webhookID,
-		url:       "http://127.0.0.1:1/webhook",
-		secret:    "test-secret",
-		events:    `["test.event"]`,
-		enabled:   true,
-		createdAt: now,
-		updatedAt: now,
+		tenantID:         testTenantID,
+		id:               webhookID,
+		url:              "http://127.0.0.1:1/webhook",
+		secretConfigured: true,
+		events:           `["test.event"]`,
+		enabled:          true,
+		createdAt:        now,
+		updatedAt:        now,
 	})
 	past := now.Add(-1 * time.Hour)
 	deliveryID := uuid.New()
@@ -999,11 +1062,12 @@ func TestDeliverNetworkError(t *testing.T) {
 		createdAt:     past,
 	})
 	store.mu.Unlock()
+	p.secrets.(*plugintest.FakeSecrets).Seed(testTenantID.String(), WebhookSecretName(webhookID), "test-secret")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	attempted, succeeded, _, err := p.processDeliveries(ctx)
+	attempted, succeeded, _, err := p.processDeliveries(ctx, ctx)
 	if err != nil {
 		t.Fatalf("processDeliveries: %v", err)
 	}
@@ -1044,14 +1108,14 @@ func TestDeliverMaxRetriesNon2xx(t *testing.T) {
 	now := time.Now().UTC()
 	store.mu.Lock()
 	store.configs = append(store.configs, &testWebhookCfg{
-		tenantID:  testTenantID,
-		id:        webhookID,
-		url:       mockSrv.URL,
-		secret:    "test-secret",
-		events:    `["test.event"]`,
-		enabled:   true,
-		createdAt: now,
-		updatedAt: now,
+		tenantID:         testTenantID,
+		id:               webhookID,
+		url:              mockSrv.URL,
+		secretConfigured: true,
+		events:           `["test.event"]`,
+		enabled:          true,
+		createdAt:        now,
+		updatedAt:        now,
 	})
 	past := now.Add(-1 * time.Hour)
 	deliveryID := uuid.New()
@@ -1066,11 +1130,12 @@ func TestDeliverMaxRetriesNon2xx(t *testing.T) {
 		createdAt:     past,
 	})
 	store.mu.Unlock()
+	p.secrets.(*plugintest.FakeSecrets).Seed(testTenantID.String(), WebhookSecretName(webhookID), "test-secret")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	attempted, succeeded, failed, err := p.processDeliveries(ctx)
+	attempted, succeeded, failed, err := p.processDeliveries(ctx, ctx)
 	if err != nil {
 		t.Fatalf("processDeliveries: %v", err)
 	}
@@ -1108,14 +1173,14 @@ func TestDeliverMaxRetriesNetworkError(t *testing.T) {
 	now := time.Now().UTC()
 	store.mu.Lock()
 	store.configs = append(store.configs, &testWebhookCfg{
-		tenantID:  testTenantID,
-		id:        webhookID,
-		url:       "http://127.0.0.1:1/webhook",
-		secret:    "test-secret",
-		events:    `["test.event"]`,
-		enabled:   true,
-		createdAt: now,
-		updatedAt: now,
+		tenantID:         testTenantID,
+		id:               webhookID,
+		url:              "http://127.0.0.1:1/webhook",
+		secretConfigured: true,
+		events:           `["test.event"]`,
+		enabled:          true,
+		createdAt:        now,
+		updatedAt:        now,
 	})
 	past := now.Add(-1 * time.Hour)
 	deliveryID := uuid.New()
@@ -1130,11 +1195,12 @@ func TestDeliverMaxRetriesNetworkError(t *testing.T) {
 		createdAt:     past,
 	})
 	store.mu.Unlock()
+	p.secrets.(*plugintest.FakeSecrets).Seed(testTenantID.String(), WebhookSecretName(webhookID), "test-secret")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	attempted, _, failed, err := p.processDeliveries(ctx)
+	attempted, _, failed, err := p.processDeliveries(ctx, ctx)
 	if err != nil {
 		t.Fatalf("processDeliveries: %v", err)
 	}
@@ -1158,13 +1224,169 @@ func TestDeliverMaxRetriesNetworkError(t *testing.T) {
 }
 
 // ===========================================================================
+// deliver — a secret failure is retried/failed, not silently skipped
+// ===========================================================================
+//
+// cleat-review on #2198 (cleat#1992/#2172): before this, both branches below
+// returned a bare error from deliver, and processDeliveries only logged it
+// and `continue`d -- the delivery row was never touched, so it stayed
+// 'pending' forever, was retried every tick with no attempt_count and no
+// response_body, and GET .../deliveries had no way to say why. Both now go
+// through retryOrFail like every other failure mode.
+
+func TestDeliverNoSecretConfigured(t *testing.T) {
+	p, store := setupTestPlugin(t)
+
+	webhookID := uuid.New()
+	now := time.Now().UTC()
+	store.mu.Lock()
+	store.configs = append(store.configs, &testWebhookCfg{
+		tenantID: testTenantID,
+		id:       webhookID,
+		url:      "http://127.0.0.1:1/webhook",
+		// secretConfigured left false: no secret was ever written for this
+		// row through the admin route, which today's handleCreateWebhook
+		// refuses to allow -- but deliver must not assume that guarantee
+		// holds forever, so this exercises the row shape directly.
+		secretConfigured: false,
+		events:           `["test.event"]`,
+		enabled:          true,
+		createdAt:        now,
+		updatedAt:        now,
+	})
+	past := now.Add(-1 * time.Hour)
+	deliveryID := uuid.New()
+	store.deliveries = append(store.deliveries, &testDelivery{
+		id:            deliveryID,
+		webhookID:     webhookID,
+		eventType:     "test.event",
+		payload:       []byte(`{"msg":"hello"}`),
+		status:        "pending",
+		attemptCount:  0,
+		nextAttemptAt: &past,
+		createdAt:     past,
+	})
+	store.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	attempted, succeeded, failed, err := p.processDeliveries(ctx, ctx)
+	if err != nil {
+		t.Fatalf("processDeliveries: %v", err)
+	}
+	if attempted != 1 {
+		t.Errorf("expected 1 attempted, got %d", attempted)
+	}
+	if succeeded != 0 {
+		t.Errorf("expected 0 succeeded, got %d", succeeded)
+	}
+	if failed != 0 {
+		t.Errorf("expected 0 failed (should retry, not fail, on attempt 1), got %d", failed)
+	}
+
+	store.mu.RLock()
+	d := findTestDelivery(store.deliveries, deliveryID)
+	store.mu.RUnlock()
+	if d == nil {
+		t.Fatal("delivery not found")
+	}
+	if d.status != "retrying" {
+		t.Errorf("expected status 'retrying' when secret_configured=false, got %q -- "+
+			"a secret failure must go through retryOrFail like any other delivery failure", d.status)
+	}
+	if d.attemptCount != 1 {
+		t.Errorf("expected attempt_count 1, got %d", d.attemptCount)
+	}
+}
+
+func TestDeliverSecretGetError(t *testing.T) {
+	p, store := setupTestPlugin(t)
+
+	webhookID := uuid.New()
+	now := time.Now().UTC()
+	store.mu.Lock()
+	store.configs = append(store.configs, &testWebhookCfg{
+		tenantID: testTenantID,
+		id:       webhookID,
+		url:      "http://127.0.0.1:1/webhook",
+		// secretConfigured is true, but nothing is Seed()ed into FakeSecrets
+		// below -- reproducing a retired or undecryptable secret, where the
+		// row promises a secret exists but the store cannot produce it.
+		secretConfigured: true,
+		events:           `["test.event"]`,
+		enabled:          true,
+		createdAt:        now,
+		updatedAt:        now,
+	})
+	past := now.Add(-1 * time.Hour)
+	deliveryID := uuid.New()
+	store.deliveries = append(store.deliveries, &testDelivery{
+		id:            deliveryID,
+		webhookID:     webhookID,
+		eventType:     "test.event",
+		payload:       []byte(`{"msg":"hello"}`),
+		status:        "pending",
+		attemptCount:  0,
+		nextAttemptAt: &past,
+		createdAt:     past,
+	})
+	store.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	attempted, succeeded, failed, err := p.processDeliveries(ctx, ctx)
+	if err != nil {
+		t.Fatalf("processDeliveries: %v", err)
+	}
+	if attempted != 1 {
+		t.Errorf("expected 1 attempted, got %d", attempted)
+	}
+	if succeeded != 0 {
+		t.Errorf("expected 0 succeeded, got %d", succeeded)
+	}
+	if failed != 0 {
+		t.Errorf("expected 0 failed (should retry, not fail, on attempt 1), got %d", failed)
+	}
+
+	store.mu.RLock()
+	d := findTestDelivery(store.deliveries, deliveryID)
+	store.mu.RUnlock()
+	if d == nil {
+		t.Fatal("delivery not found")
+	}
+	if d.status != "retrying" {
+		t.Errorf("expected status 'retrying' when the secret store returns an error, got %q -- "+
+			"a secret failure must go through retryOrFail like any other delivery failure", d.status)
+	}
+	if d.attemptCount != 1 {
+		t.Errorf("expected attempt_count 1, got %d", d.attemptCount)
+	}
+}
+
+// ===========================================================================
 // processDeliveries — deliver function returns error (webhook config missing)
 // ===========================================================================
 
-func TestProcessDeliveries_DeliverError(t *testing.T) {
+// TestProcessDeliveries_OrphanedDeliveryIsNotAttempted replaces what used to
+// be TestProcessDeliveries_DeliverError. cleat#2220 added an INNER JOIN
+// webhook_config to queryDueDeliveries (background.go), so a delivery row
+// whose webhook_id matches no config at all is now excluded at the SQL level
+// -- processDeliveries never sees it, and deliver() is never called for it.
+// That is the scenario this fixture builds (a delivery with no matching
+// config), so the correct assertion is now that the sweep skips it entirely,
+// not that deliver() errors on it. See TestDeliverMissingConfig below for
+// coverage of deliver()'s own defense-in-depth lookup failing the same way,
+// which this rewrite would otherwise have dropped.
+func TestProcessDeliveries_OrphanedDeliveryIsNotAttempted(t *testing.T) {
 	p, store := setupTestPlugin(t)
 
-	// Create a delivery row but no matching webhook config.
+	// Create a delivery row but no matching webhook config. In steady state
+	// this cannot happen -- migrations.go v7's ON DELETE CASCADE removes a
+	// webhook's deliveries in the same operation that removes its config --
+	// but the JOIN is what makes that invariant load-bearing rather than
+	// merely assumed, so it is worth pinning directly.
 	now := time.Now().UTC()
 	past := now.Add(-1 * time.Hour)
 	store.mu.Lock()
@@ -1183,21 +1405,101 @@ func TestProcessDeliveries_DeliverError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	attempted, succeeded, failed, err := p.processDeliveries(ctx)
+	attempted, succeeded, failed, err := p.processDeliveries(ctx, ctx)
 	if err != nil {
 		t.Fatalf("processDeliveries: %v", err)
 	}
 
-	// The deliver function returns an error (webhook not found), so the delivery
-	// is not counted as succeeded or failed — it's skipped.
-	if attempted != 1 {
-		t.Errorf("expected 1 attempted, got %d", attempted)
+	if attempted != 0 {
+		t.Errorf("expected 0 attempted (orphaned delivery filtered by the join), got %d", attempted)
 	}
 	if succeeded != 0 {
 		t.Errorf("expected 0 succeeded, got %d", succeeded)
 	}
 	if failed != 0 {
 		t.Errorf("expected 0 failed, got %d", failed)
+	}
+}
+
+// TestDeliverMissingConfig calls deliver() directly rather than through
+// processDeliveries, so it still exercises deliver()'s own
+// "SELECT ... FROM webhook_config WHERE id = $1 AND deleted_at IS NULL"
+// lookup failing for a webhook_id with no matching row -- the defense-in-depth
+// layer queryDueDeliveries' INNER JOIN (cleat#2220) now normally screens out
+// before deliver() is ever reached. See
+// TestProcessDeliveries_OrphanedDeliveryIsNotAttempted above for the join
+// itself.
+func TestDeliverMissingConfig(t *testing.T) {
+	p, _ := setupTestPlugin(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	d := deliveryRow{
+		ID:           uuid.New(),
+		WebhookID:    uuid.New(), // No config exists for this webhook_id.
+		EventType:    "test.event",
+		Payload:      json.RawMessage(`{"msg":"hello"}`),
+		AttemptCount: 0,
+	}
+
+	outcome, err := p.deliver(ctx, ctx, d)
+	if err == nil {
+		t.Fatal("deliver: expected an error for a webhook_id with no matching config, got nil")
+	}
+	if outcome != "" {
+		t.Errorf("deliver: expected empty outcome on error, got %q", outcome)
+	}
+	if !strings.Contains(err.Error(), "lookup webhook config") {
+		t.Errorf("deliver: expected error mentioning the config lookup, got %q", err)
+	}
+}
+
+// TestDeliverSoftDeletedConfig is the backstop half of coordinator's #2233
+// item 7 -- lower priority than the handleListWebhooks list assertion, but
+// asked for alongside it: TestDeliverMissingConfig above proves deliver()
+// refuses a webhook_id with NO config row at all, which is a different SQL
+// path from a config row that EXISTS but carries deleted_at. Both go through
+// the same "AND deleted_at IS NULL" filter (background.go's deliver), but a
+// row that exists and merely fails the filter is the actual shape a
+// soft-deleted webhook takes, and is what this test seeds.
+func TestDeliverSoftDeletedConfig(t *testing.T) {
+	p, store := setupTestPlugin(t)
+
+	webhookID := uuid.New()
+	now := time.Now().UTC()
+	store.configs = append(store.configs, &testWebhookCfg{
+		tenantID:         testTenantID,
+		id:               webhookID,
+		url:              "https://example.com/soft-deleted",
+		secretConfigured: true,
+		events:           `["test.event"]`,
+		enabled:          false,
+		createdAt:        now,
+		updatedAt:        now,
+		deletedAt:        &now,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	d := deliveryRow{
+		ID:           uuid.New(),
+		WebhookID:    webhookID,
+		EventType:    "test.event",
+		Payload:      json.RawMessage(`{"msg":"hello"}`),
+		AttemptCount: 0,
+	}
+
+	outcome, err := p.deliver(ctx, ctx, d)
+	if err == nil {
+		t.Fatal("deliver: expected an error for a soft-deleted webhook's config, got nil")
+	}
+	if outcome != "" {
+		t.Errorf("deliver: expected empty outcome on error, got %q", outcome)
+	}
+	if !strings.Contains(err.Error(), "lookup webhook config") {
+		t.Errorf("deliver: expected error mentioning the config lookup, got %q", err)
 	}
 }
 
@@ -1218,14 +1520,14 @@ func TestProcessDeliveries_WithMockServer(t *testing.T) {
 	now := time.Now().UTC()
 	store.mu.Lock()
 	store.configs = append(store.configs, &testWebhookCfg{
-		tenantID:  testTenantID,
-		id:        webhookID,
-		url:       mockSrv.URL,
-		secret:    "secret",
-		events:    `["test"]`,
-		enabled:   true,
-		createdAt: now,
-		updatedAt: now,
+		tenantID:         testTenantID,
+		id:               webhookID,
+		url:              mockSrv.URL,
+		secretConfigured: true,
+		events:           `["test"]`,
+		enabled:          true,
+		createdAt:        now,
+		updatedAt:        now,
 	})
 	past := now.Add(-1 * time.Hour)
 	deliveryID := uuid.New()
@@ -1240,11 +1542,12 @@ func TestProcessDeliveries_WithMockServer(t *testing.T) {
 		createdAt:     past,
 	})
 	store.mu.Unlock()
+	p.secrets.(*plugintest.FakeSecrets).Seed(testTenantID.String(), WebhookSecretName(webhookID), "test-secret")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	attempted, succeeded, failed, err := p.processDeliveries(ctx)
+	attempted, succeeded, failed, err := p.processDeliveries(ctx, ctx)
 	if err != nil {
 		t.Fatalf("processDeliveries: %v", err)
 	}
@@ -1316,14 +1619,14 @@ func TestSendWebhook_NilPayloadDefaults(t *testing.T) {
 	now := time.Now().UTC()
 	store.mu.Lock()
 	store.configs = append(store.configs, &testWebhookCfg{
-		tenantID:  testTenantID,
-		id:        webhookID,
-		url:       "https://example.com/hook",
-		secret:    "",
-		events:    `["test.event"]`,
-		enabled:   true,
-		createdAt: now,
-		updatedAt: now,
+		tenantID:         testTenantID,
+		id:               webhookID,
+		url:              "https://example.com/hook",
+		secretConfigured: false,
+		events:           `["test.event"]`,
+		enabled:          true,
+		createdAt:        now,
+		updatedAt:        now,
 	})
 	store.mu.Unlock()
 
@@ -1467,7 +1770,7 @@ func (*scanErrorConn) QueryContext(_ context.Context, query string, _ []driver.N
 			}},
 		}, nil
 	}
-	return &fakeRows{columns: []string{"url", "secret"}}, nil
+	return &fakeRows{columns: []string{"url", "tenant_id", "secret_configured"}}, nil
 }
 
 func TestProcessDeliveries_ScanError(t *testing.T) {
@@ -1480,7 +1783,7 @@ func TestProcessDeliveries_ScanError(t *testing.T) {
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
 
-	attempted, succeeded, failed, err := p.processDeliveries(context.Background())
+	attempted, succeeded, failed, err := p.processDeliveries(context.Background(), context.Background())
 	if err != nil {
 		t.Fatalf("processDeliveries: %v", err)
 	}
@@ -1541,14 +1844,14 @@ func TestSendWebhook_DBInsertError(t *testing.T) {
 	now := time.Now().UTC()
 	store.mu.Lock()
 	store.configs = append(store.configs, &testWebhookCfg{
-		tenantID:  testTenantID,
-		id:        webhookID,
-		url:       "https://example.com/hook",
-		secret:    "",
-		events:    `["test"]`,
-		enabled:   true,
-		createdAt: now,
-		updatedAt: now,
+		tenantID:         testTenantID,
+		id:               webhookID,
+		url:              "https://example.com/hook",
+		secretConfigured: false,
+		events:           `["test"]`,
+		enabled:          true,
+		createdAt:        now,
+		updatedAt:        now,
 	})
 	store.mu.Unlock()
 
@@ -1584,5 +1887,182 @@ func TestSendWebhook_DBInsertError(t *testing.T) {
 	}
 	if _, ok := out["delivery_id"]; !ok {
 		t.Fatal("expected delivery_id in output")
+	}
+}
+
+// ===========================================================================
+// cleat#1992 known-positives: the webhook signing secret moved into tenant
+// secrets. These mirror pagerdutyalert's TestTriggerIncidentLifecycle,
+// TestRoutingKeyRotationTakesEffectWithoutARestart and
+// TestTenantBCannotReadTenantAsRoutingKeyThroughTheRoute -- same shape, this
+// plugin's own signing/delivery path.
+// ===========================================================================
+
+// TestWebhookSecretSetViaRouteIsUsedByDelivery is the first known-positive:
+// a secret set through the admin route (not seeded directly into the store)
+// is what the delivery loop actually signs with, read back through
+// p.secrets.ForTenant -- not merely "some non-empty signature was sent".
+func TestWebhookSecretSetViaRouteIsUsedByDelivery(t *testing.T) {
+	p, store := setupTestPlugin(t)
+	handler := buildHandler(t, p, store)
+
+	var receivedSig string
+	var receivedPayload []byte
+	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedSig = r.Header.Get("X-Webhook-Signature")
+		receivedPayload, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockSrv.Close()
+
+	id := createTestWebhook(t, handler, mockSrv.URL, "route-set-secret")
+
+	now := time.Now().UTC()
+	past := now.Add(-1 * time.Hour)
+	deliveryID := uuid.New()
+	store.mu.Lock()
+	store.deliveries = append(store.deliveries, &testDelivery{
+		id:            deliveryID,
+		webhookID:     id,
+		eventType:     "test.event",
+		payload:       []byte(`{"msg":"hello"}`),
+		status:        "pending",
+		attemptCount:  0,
+		nextAttemptAt: &past,
+		createdAt:     past,
+	})
+	store.mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, succeeded, _, err := p.processDeliveries(ctx, ctx); err != nil {
+		t.Fatalf("processDeliveries: %v", err)
+	} else if succeeded != 1 {
+		t.Fatalf("expected 1 succeeded delivery, got %d", succeeded)
+	}
+
+	mac := hmac.New(sha256.New, []byte("route-set-secret"))
+	mac.Write(receivedPayload)
+	wantSig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	if receivedSig != wantSig {
+		t.Errorf("delivery signed with %q, want the secret set via the admin route (%q)", receivedSig, wantSig)
+	}
+}
+
+// TestWebhookSecretRotationTakesEffectWithoutARestart is the second
+// known-positive: PUTting a new secret over an existing webhook changes what
+// the VERY NEXT delivery signs with, same *Plugin throughout, no re-Init.
+func TestWebhookSecretRotationTakesEffectWithoutARestart(t *testing.T) {
+	p, store := setupTestPlugin(t)
+	handler := buildHandler(t, p, store)
+
+	var receivedSig string
+	var receivedPayload []byte
+	mockSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedSig = r.Header.Get("X-Webhook-Signature")
+		receivedPayload, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockSrv.Close()
+
+	id := createTestWebhook(t, handler, mockSrv.URL, "before-rotation")
+
+	deliverOnce := func(payload string) {
+		t.Helper()
+		now := time.Now().UTC()
+		past := now.Add(-1 * time.Hour)
+		store.mu.Lock()
+		store.deliveries = append(store.deliveries, &testDelivery{
+			id:            uuid.New(),
+			webhookID:     id,
+			eventType:     "test.event",
+			payload:       []byte(payload),
+			status:        "pending",
+			attemptCount:  0,
+			nextAttemptAt: &past,
+			createdAt:     past,
+		})
+		store.mu.Unlock()
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, succeeded, _, err := p.processDeliveries(ctx, ctx); err != nil {
+			t.Fatalf("processDeliveries: %v", err)
+		} else if succeeded != 1 {
+			t.Fatalf("expected 1 succeeded delivery, got %d", succeeded)
+		}
+	}
+
+	deliverOnce(`{"n":1}`)
+	mac := hmac.New(sha256.New, []byte("before-rotation"))
+	mac.Write(receivedPayload)
+	if want := "sha256=" + hex.EncodeToString(mac.Sum(nil)); receivedSig != want {
+		t.Fatalf("before rotation: signed %q, want %q", receivedSig, want)
+	}
+
+	// Rotate. Same process, same *Plugin, no restart.
+	updateBody := `{"secret":"after-rotation"}`
+	req := authedRequest("PUT", "/webhooks/"+id.String(), bytes.NewReader([]byte(updateBody)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	deliverOnce(`{"n":2}`)
+	mac = hmac.New(sha256.New, []byte("after-rotation"))
+	mac.Write(receivedPayload)
+	if want := "sha256=" + hex.EncodeToString(mac.Sum(nil)); receivedSig != want {
+		t.Errorf("after rotation: signed %q, want %q -- rotation did not take effect without a restart", receivedSig, want)
+	}
+}
+
+// TestTenantBCannotReadTenantAsWebhookSecretThroughTheRoute is the third
+// known-positive: tenant B, authenticated as itself, cannot reach tenant A's
+// webhook -- or learn whether it has a secret configured -- through the
+// admin route, by ID or by list.
+func TestTenantBCannotReadTenantAsWebhookSecretThroughTheRoute(t *testing.T) {
+	p, store := setupTestPlugin(t)
+	handler := buildHandler(t, p, store)
+
+	const realSecret = "tenant-a-webhook-secret"
+	id := createTestWebhook(t, handler, "https://example.com/hook", realSecret)
+
+	tenantBID := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+	tenantBKeyHash := sha256.Sum256([]byte("tenant-b-api-key"))
+	store.mu.Lock()
+	store.apiKeys[fmt.Sprintf("%x", tenantBKeyHash)] = tenantBID.String()
+	store.mu.Unlock()
+	tenantBRequest := func(method, target string) *http.Request {
+		req := httptest.NewRequest(method, target, nil)
+		req.Header.Set("Authorization", "Bearer tenant-b-api-key")
+		return req
+	}
+
+	req := tenantBRequest("GET", "/webhooks/"+id.String())
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("tenant B GET tenant A's webhook: expected 404, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realSecret) {
+		t.Errorf("tenant B GET response leaked tenant A's real secret: %s", rec.Body.String())
+	}
+
+	req = tenantBRequest("GET", "/webhooks")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tenant B LIST: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), realSecret) || strings.Contains(rec.Body.String(), id.String()) {
+		t.Errorf("tenant B LIST response contained tenant A's webhook or secret: %s", rec.Body.String())
+	}
+
+	// And through p.secrets directly: tenant B's own scope cannot read tenant
+	// A's secret under the name the route uses, even knowing the webhook id.
+	secrets := p.secrets.(*plugintest.FakeSecrets)
+	if _, err := secrets.ForTenant(tenantBID.String()).Get(context.Background(), WebhookSecretName(id)); err == nil {
+		t.Error("tenant B's Secrets scope could read tenant A's webhook secret")
 	}
 }

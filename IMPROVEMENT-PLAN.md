@@ -18,9 +18,11 @@ Effort is given in solo+AI sessions (a session ≈ half a day of your attention)
 
 ## Handover, 2026-08-04
 
-Work is now split across three concurrent sessions — see **`PARALLEL-WORKSTREAMS.md`** for
-who owns which paths, the reserved migration ranges, the per-sandbox database, and the three
-cross-stream couplings. Read that before this file; then read only your own items below.
+Work is now split across three concurrent sessions — see **`WORKSTREAM.md`** for who owns which
+paths, the per-sandbox database, and the cross-stream couplings. Read that before this file; then
+read only your own items below. (It absorbed `PARALLEL-WORKSTREAMS.md`, which this line used to
+name, on 2026-09-04. The *reserved migration ranges* it also used to name are retired: take the
+next free number above the dialect's high-water mark.)
 
 Four things worth knowing before you start, none of which are derivable from the code:
 
@@ -360,7 +362,8 @@ the code.
    The residual worth keeping is a *different* pair: `engine/testutil/mssql_schema.go`
    hand-writes its tables independently of `migrations/mssql/001_schema.sql` and defines none
    of the seven security policies, so no MSSQL test has a tenant backstop. That is recorded in
-   PARALLEL-WORKSTREAMS.md's third cross-stream coupling and belongs to WS-2.
+   PARALLEL-WORKSTREAMS.md's third cross-stream coupling (that file was retired
+   2026-09-04; the couplings are in WORKSTREAM.md) and belongs to WS-2.
 
 **Process note for future sessions.** Two commits had to be rewound because `git add -A` was
 run while subagents were mid-edit; one nearly shipped a call site an agent had *deliberately*
@@ -373,1091 +376,49 @@ same defect class this plan exists to fix.
 For each item: **write the failing test first, watch it fail, then fix.** A passing unit test
 is not evidence here; that is precisely how these survived.
 
-### 1.1 Unfenced terminal side effects — data loss (~2 sessions)
+### 1.1 Unfenced terminal side effects — data loss — ✅ **FIXED** (heading marker added 2026-09-01)
 
-`finalize_workflow_status` fences the status `UPDATE` on `assigned_to` + `generation`, then
-runs the terminal block **unconditionally**, gated only on `p_final_status IN ('done','failed')`.
-A zombie worker that correctly lost the fence still executes
-`DELETE FROM event_history WHERE workflow_id = p_workflow_id` and injects its stale result
-into the parent's `await_child` event.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-- Repro chain (confirmed): `ClaimWorkflows` bumps `generation`; `ReapStaleInstances` does not.
-  A→stall→reap→B claims→A finishes→A wipes B's live history.
-- Fix: capture `ROW_COUNT`/`@@ROWCOUNT` from the fenced `UPDATE`; skip the entire terminal
-  block if zero. All three dialects.
-- Files: `migrations/postgres/003_procedures.sql:20-118`,
-  `migrations/mysql/003_procedures.sql:13-108`, `migrations/mssql/003_procedures.sql:17+`
-- Test: two-worker race harness (see 2.2).
+### 1.2 Systemic unchecked `RowsAffected` — ✅ **FIXED** (heading marker added 2026-09-01)
 
-**Done in `8d44300` + `f9bce35`, with one lesson worth keeping.** The first test written for
-this — `TestFinalizeWorkflowSegment_ZombieWriterFence`, which drives the real store against a
-real PostgreSQL — passes *whether or not the SQL guard exists.* Confirmed by deleting the
-guard, reinstating the original bug in full, and re-running: still `ok`.
-
-The reason is that `FinalizeWorkflowSegment` returns `ErrFenceLost` **before** `tx.Commit()`,
-so the deferred `tx.Rollback()` discards everything the procedure did inside that transaction,
-`DELETE` included. That is a real fix and a sound one — but it is a *Go-layer* fix, and it
-means the SQL guard could be stripped from all three dialects without a single test noticing.
-
-`TestFinalizeWorkflowStatus_SQLFenceGuard` closes the gap by calling the procedure directly on
-a plain `*sql.DB`, outside any transaction, where the guard is the only thing standing between
-a stale worker and the delete. With the guard removed it reports
-`event_history was corrupted … got []` — the whole history gone.
-
-The general form: **an end-to-end test can pass because of a layer other than the one you
-think you are testing.**
-
-**The same gap existed on SQL Server, and was not noticed when it was closed for MySQL.**
-`TestFinalizeWorkflowStatus_SQLFenceGuard` and its `_MySQL` counterpart were added; the
-`_MSSQL` one was not, so the §1.1 fix shipped for three dialects with proof for two.
-Confirmed the hard way rather than assumed: with
-`IF @rows_updated > 0 AND` stripped from `migrations/mssql/004_*.sql`,
-`TestFinalizeWorkflowSegment_ZombieWriterFence/mssql` **still passes** — the Go-layer
-rollback covers for the missing SQL guard exactly as documented for the other two dialects.
-`TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL` catches it, reporting
-`event_history was corrupted … got []`.
-
-**And the MSSQL integration tests never installed the procedures they exercise.**
-`setupMSSQLIntegrationTest` called `SetupMSSQLFullSchema` but not `applyMSSQLProcedures`, so
-`TestMSSQLIntegration_FinalizeWorkflowSegment_{Done,Suspend}` passed only because some other
-test had created `finalize_workflow_status` in the same database via `MSSQLBackend.Setup` —
-and `CREATE PROCEDURE` persists, so after the first full run against any database the
-dependency was invisible. On a **fresh** database a filtered run fails with
-`Could not find stored procedure 'finalize_workflow_status'`. CI never saw it: it creates a
-fresh database and runs the whole suite, so the installing test always goes first.
-
-That is the same shape as everything else in this document — a test that passes because of
-something other than the thing it names — and it is why this was found by pointing a real
-SQL Server at a filtered run rather than by reading the setup helper. The only way to know which layer is holding is to break the specific
-one and watch. This is the same defect class as the `tee` without `pipefail` and the mock that
-discarded its argument — a green result produced by something other than the thing under test.
-
-### 1.2 Systemic unchecked `RowsAffected` (~1 session)
-
-Same anti-pattern in Go: fenced `UPDATE`, error checked, `RowsAffected()` never inspected,
-then unconditional post-commit cleanup — `ClearStickyWorker`,
-`ReleaseWorkflowConcurrencyKeys`, `enforceParentClosePolicy`. A stale writer can release a
-concurrency key the legitimate owner depends on, or terminate live children off a phantom
-completion.
-
-- Files: `engine/store_lifecycle.go:302-491` (`CompleteWorkflow`, `FailWorkflow`,
-  `MoveToDeadLetterQueue`, `ContinueAsNew`)
-- Fix: check `RowsAffected()`, return a typed `ErrFenceLost`, and make callers in
-  `cmd/cleat-worker/setup.go` handle it rather than fire-and-forget.
-
-**Store half done. Caller half: one live bug found and fixed, one still open.**
-
-All twelve store sites (the four methods above × three dialects) now inspect `RowsAffected`
-and return `ErrFenceLost` before any post-commit cleanup. That much was already true when
-this section was written.
-
-The caller half turned out to contain a defect of a different shape than the one described
-above, and a worse one. The concern here was a caller that *ignores a fence it genuinely
-lost*. What was actually in the tree was a caller passing fence arguments that **cannot match
-any row**, so its write was always skipped — with the error discarded, that is a write that
-never happens and never reports:
-
-```go
-// cmd/cleat-worker/server.go, concurrency-key conflict path
-s.store.FailWorkflow(context.Background(), runID, "", 0, "concurrency key conflict: "+key, "", "", nil)
-s.writeError(w, 409, "workflow already running with key "+concurrencyKey)
-```
-
-`FailWorkflow` is the *owning worker's* terminal write, fenced on
-`assigned_to = $2 AND generation = $7`. The run was inserted by `StartNewRun` moments earlier
-as `'ready'` with `assigned_to` NULL, and `NULL = ''` is NULL rather than true — so no
-`(workerID, generation)` this caller could pass will ever match. **The client is told 409
-"workflow already running with key X" and the run executes anyway.** The HTTP layer is the
-only enforcement point for `Cleat-Concurrency-Key`; `ClaimWorkflows` does not consult
-`concurrency_keys`. Against a real PostgreSQL:
-
-```
-run conflict-rejected-… was rejected with 409 but a worker claimed and will execute it
-(status="running" assigned_to="worker-after-conflict"); the concurrency key is not enforced
-```
-
-Fixed by rejecting with `TerminateWorkflow`, which matches on `id` alone — the existing
-unowned-writer primitive, already present in all three dialects and on `ShardedStore` — and
-by answering 5xx rather than 409 when that write fails, since a 409 whose rejection did not
-apply is the same lie the fenced no-op told.
-
-- Tests: `engine/fence_lost_callers_test.go` (real PostgreSQL: the run is claimed and
-  executed after the 409; and `FailWorkflow` on an unclaimed run returns `ErrFenceLost` and
-  leaves the row `'ready'`), `cmd/cleat-worker/concurrency_conflict_test.go` (which store
-  call the handler chooses — the half the DB tests cannot see). All four were confirmed to
-  fail with the fix removed; the store-behaviour one was confirmed against a deliberately
-  permissive fence, since it passes both before and after and would otherwise be decoration.
-
-**The same shape in `cmd/cleat-bench` — fixed, and it was overstating throughput by ~1.7×.**
-`main.go` called `CompleteWorkflow`/`FailWorkflow` with `("", 0)` at five sites and discarded
-the result with an explicit `_ =`. The benchmark never claimed the runs it started, so every
-terminal write matched zero rows.
-
-Measured on PostgreSQL 16, 20 executions at concurrency 5, `examples/as-workflow`:
-
-| | fresh | replay | end state |
-|---|---|---|---|
-| before | 66.0/s, avg 15.1 ms | 54.1/s, avg 18.5 ms | **40 runs `ready`** — none completed |
-| after | 39.7/s, avg 25.2 ms | 32.0/s, avg 31.3 ms | 40 runs `done` |
-
-The benchmark had never completed a single run in its history, and reported the latency of
-an execution whose terminal write was a no-op `UPDATE` matching nothing — cheaper than one
-that writes a row.
-
-The fix takes ownership through the sticky path (`UpdateStickyWorker` with a per-iteration
-worker ID, then `ClaimStickyWorkflows`) so each goroutine claims the run it just started, and
-passes the resulting `(workerID, generation)` to the terminal write. Part of the delta is
-therefore the claim round-trip — which a real worker performs anyway — and part is the
-`UpdateStickyWorker` write, which is bench scaffolding a worker does not do. The rest is the
-completion write that was previously skipped. **Numbers from before this fix are not
-comparable to numbers after it**, and any published figure taken from this tool before
-2026-08-04 was measuring an incomplete path.
-
-**The 16 fire-and-forget sites in `cmd/cleat-worker/setup.go` — fixed.** `FailWorkflow`,
-`MoveToDeadLetterQueue` and `ReleaseWorkflow` passed correct fence arguments and discarded
-the return. Not data loss: the store skips the write correctly. Two things were wrong anyway.
-
-A lost fence was **invisible** — nothing logged it, so a worker losing every race looked
-identical to one doing its job. And `RecordWorkflowFailed` was emitted *before* the store
-call, so a workflow another worker went on to complete successfully was still counted as
-failed: **the failure counter disagreed with the database, and the disagreement grew with
-exactly the thing that causes lost fences** — workers stalling and being reaped.
-
-Folded into `recordTerminalFailure` / `writeTerminalFailure` / `releaseWorkflow`, which log
-the lost fence at debug and record the metrics only when the write applied. The precedent is
-the two sites that already handled `ErrFenceLost` (the `ContinueAsNew` and
-`FinalizeWorkflowSegment` paths): debug-log and return, having done nothing.
-
-`releaseOrFail` deliberately does *not* route through `recordTerminalFailure`: it never
-recorded the failed/duration pair and has no start time to report a duration from. It keeps
-its dead-letter counter, now conditional on the write applying.
-
-- Tests: `cmd/cleat-worker/terminal_failure_test.go`, asserting on the published
-  `cleat_workflows_failed_total` rather than an internal counter — what an operator sees. It
-  fails against the old ordering with
-  `cleat_workflows_failed_total{…,workflow_name="fence-lost-wf"} 2`. Includes a positive
-  control (a write that applied *is* counted, so the first test cannot pass by recording
-  nothing at all), an assertion that the write receives `(w.id, wf.Generation)` rather than
-  `("", 0)` — the §263 defect, which nothing else would catch — and the dead-letter routing
-  that used to live inline at each site.
-
-### 1.3 residual — a cancelled heartbeat call was reported as retryable — ✅ **FIXED** (WS-2, 2026-08-04)
-
-The hardcoded `""` was fixed by `c26c332`; the missing end-to-end test landed in #264. This is
-what was left underneath, and it is a behaviour defect rather than a dead call site.
-
-Both call paths detect cancellation. `freshCall` reports it as `callErrorUnknown`, with a
-comment saying why: *"Not retryable: the workflow was cancelled, so repeating the call is the
-one thing the caller must not do."* `callerrors.go` agrees, naming a cancelled workflow as the
-first of the three canonical non-retryable cases.
-
-`freshCallWithHeartbeat` cancelled the in-flight call's context and then fell through to its
-**generic** error branch, which returns `callFailureCode` — `callErrorUnavailable`, documented
-as *"Retryable"*. So a workflow cancelled during a long call was told the call was worth trying
-again, and a guest branching on `Retryable()` would re-issue the call it had just been
-cancelled out of.
-
-The recorded event was the durable half of the same defect:
-
-```
-callErrorCode = 2, want 0 (callErrorUnknown, non-retryable)
-recorded Err  = "context canceled", want "workflow cancelled"
-recorded ErrNonRetryable = false
-```
-
-Replay reads retryability off the event via `recordedFailureCode`. An event carrying the raw
-context error with `ErrNonRetryable` unset replays as an ordinary retryable failure — so the
-same step was non-retryable on the first run and retryable on the replay of it. That is
-precisely the divergence `recordedFailureCode` was introduced to prevent (§2.35); this path
-routed around it by never recording the classification at all.
-
-Fixed by tracking why the call context was cancelled and reporting a cancellation on both the
-guest-visible code and the recorded event. `cancelledCallError` is now a shared constant, since
-two paths produce it and replay compares against what was written.
-
-**Also:** `PollCancellation` errors were discarded at both sites. Failing open is right — a
-database blip must not abort a workflow that has not been cancelled, and the poll repeats on
-the next tick — but it was *silent*, so a persistently failing poll made cancellation quietly
-stop working with nothing to see. Now logged at both sites, with
-`TestDurableCallWithHeartbeat_PollErrorDoesNotCancel` pinning the fail-open behaviour so the
-guard cannot be flipped by accident.
-
-Three tests, watched failing before the fix: the cancellation case, an uncancelled control (so
-the cancellation branch cannot be reached unconditionally and pass for the wrong reason), and
-the poll-error case.
-
-### 1.3 Cancellation is dead end-to-end (~1 session)
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 1.3 Cancellation is dead end-to-end — ✅ **FIXED**, and this section was stale
 
-**The original entry, kept because the plan being wrong is itself the finding:**
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-> `PollCancellation(ctx, "")` — hardcoded empty string at all three call sites. The store does
-> `WHERE id = $1`, so it never matches. `RequestCancellation` sets a flag nothing observes.
->
-> - Files: `engine/durablecalls.go:51`, `engine/heartbeats.go:58`, `engine/signaller.go:121`
-> - Fix: pass `s.engine.workflowID` — exactly as `PollSignal` already does twelve lines away
->   at `engine/signaller.go:133`.
-> - **Also fix the mock**, or this recurs: `engine/host_test.go:2014` declares the parameter
->   `_ string` and discards it, which is why 2,560 engine tests passed against dead code.
-> - Test: cancellation e2e (see 2.3).
+### 1.4 Crash-recovery: write-ahead intent — ✅ **FIXED** (heading corrected 2026-09-01)
 
-**Correction, 2026-08-04.** Both prescribed fixes had already landed in `c26c332`, which also
-added `TestCancellationObservedEndToEnd` and `TestCancellationNotObservedForDifferentWorkflow`
-(`engine/host_dispatch_test.go:659`). All three call sites pass `s.engine.workflowID`;
-`mockCancellationStore` now captures every ID it is polled with and the tests assert on it.
-The section was never updated, so §1.3 sat at the top of a workstream as its "start here" item
-while being done.
-
-This is the same failure mode as the `CGO_ENABLED=0` note in `CLAUDE.md` — **fixed by the same
-commit, and also left in place afterwards.** `c26c332` is worth auditing for a third.
-
-What was genuinely missing was the test the entry asked for. Everything covering cancellation
-supplied its own `SignalStore`, so the workflow ID was whatever the mock chose to accept —
-including, for as long as it was there, `""`. `TestCancellationObservedEndToEnd` is a good test
-but is not end-to-end despite the name: it drives `s.DurableCall` directly against an in-memory
-store, with no database and no compiled module.
-
-Added in `engine/cancellation_e2e_test.go`, against a real `PostgresStore` and a real workflow
-compiled to WASM on wasmtime:
-
-- **`TestCancellationEndToEnd`** — operator cancels via the same store method the worker's HTTP
-  handler calls, then `place_order` runs. Asserts on the `ServiceCaller`, not the result string:
-  cancellation exists to stop side effects. Proven to fail by restoring the `""`, which produced
-  **6 side effects including `payments.Charge` and `shipping.CreateShipment`** on a cancelled
-  workflow.
-- **`TestCancellationGuestAPIEndToEnd`** — the guest-facing `h.PollCancellation()`
-  (`engine/signaller.go:121`), which `examples/subscription` and `examples/travel` branch on and
-  which had no end-to-end coverage at all, because no fixture called it. New fixture:
-  `testdata/cancelpoll`.
-- Both have **`_NotCancelled` controls**, without which either would pass against an engine that
-  refuses every call for any reason.
-- **`TestCancellationUnknownWorkflowIDIsNotSilent`** — pins the mechanism. `CheckCancellation`
-  returns `sql.ErrNoRows` for an ID matching no row and every call site guards on
-  `err == nil && cancelled`, so an ID that does not resolve reports "not cancelled" and the
-  workflow proceeds. The `""` was not failing loudly; it was missing quietly. **This guard is
-  still live and is the residual risk in this section** — see below.
-
-**Two things found by running it that reading would not have given:**
-
-1. **The two cancellation checks mask each other.** Breaking `signaller.go`'s poll left the
-   side-effect count at 0, because `freshCall`'s own pre-call check still refused the call. Only
-   the assertion on the cancellation *reason* failed. A test asserting solely on side effects
-   cannot distinguish "the guest handled its cancellation" from "the engine aborted the guest".
-2. **The wasmtime `t.Skip` in the older tests is the wrong category.** By
-   `scripts/check-skips.sh`'s own taxonomy this is case (c) — always satisfiable in this repo,
-   since CGO is on by default — so it must be `t.Fatal`. The new tests use `t.Fatalf`; the
-   pre-existing ones in `host_test.go` still skip, which means a `CGO_ENABLED=0` run reports
-   them green without exercising the primary backend. Not changed here: they are not this
-   section's files and the baseline is shared. **Worth its own item.**
-
-**Not covered: the heartbeat path.** `engine/heartbeats.go:58` cancels an *in-flight* call via
-`cancelCall()`. Both new tests check cancellation *before* a call goes out; neither interrupts
-one in progress, which is the "assert it actually stops within N seconds" half of §2.3. The call
-site passes the right ID, so the §1.3 defect is not present there, but nothing exercises it
-end-to-end. It needs a heartbeat-enabled call and a concurrent cancel — a different harness, not
-another case in this file.
-
-**Residual, still open:** the `err == nil && cancelled` guard at all three call sites. A poll
-that errors — unresolvable ID, dropped connection, RLS returning no row — is indistinguishable
-from "not cancelled", and the workflow proceeds to perform side effects. Making it loud is a
-behaviour change (a transient DB blip would start halting workflows), so it needs the same
-decision WS-1's §1.1 trap needs: establish what a failed *check* should do before changing what
-it returns. Not attempted here.
-
-### 1.4 Crash-recovery: the detector works, nothing writes what it detects (~2–3 sessions)
-
-> **Blocker found and fixed first, 2026-08-04 — ordinary event writes were being
-> discarded.** Before wiring intent writes into the call path it is worth knowing that
-> until `ddac7d1` the path's *ordinary* writes did not reach the database at all on the
-> connection cleat ships.
->
-> `flushEvent` wrote through `e.db` directly and its quota path opened an unscoped
-> transaction; neither set `cleat.tenant_id`. `event_history`'s RLS policy is
-> `tenant_id = assert_tenant_set()`, which raises on the unset setting, so as `cleat_app`
-> — unprivileged, `NOBYPASSRLS`, mandatory since `c26c332` — every insert was rejected and
-> `engine/lifecycle.go:179` logged it and continued. A worker ran three durable calls,
-> failed three flushes, and finished with status `done`, a result, and **zero rows in
-> `event_history`**.
->
-> Not total, which is why it survived: `adaptive_flush.go` already set the context with a
-> `WITH cfg AS (SELECT set_config(...))` CTE, so events persisted once a workflow's rate
-> pushed the flusher into batch mode, and not below it. And no test could see it, because
-> every database test in `engine/` connects as the owner, which on PostgreSQL is a
-> superuser and exempt from RLS — §1.10's shape applied to a code path instead of a policy.
->
-> **This reorders the phases.** B–F are all about making a crash *observable*. A workflow
-> with no persisted events has nothing to replay from, so a crash re-executed every side
-> effect it had already performed — a larger contract violation than the one §1.4 exists to
-> fix, sitting underneath it. Regression tests in `engine/flush_rls_test.go`, with an
-> owner-connection control.
->
-> **Found by building the §2.4 harness, not by reading `flush.go`.** The plan's own
-> instruction — do not start the intent work before the crash harness exists — turned out
-> to be right for a reason it did not anticipate.
->
-> **Measured, three ways.** `tests/crash` kills a worker during the third of three durable
-> calls and counts what the external service was asked to *do* — not what it received:
->
-> | | Reserve | Charge | Ship | events durable at crash |
-> |---|---|---|---|---|
-> | fix reverted | **2** | **2** | 2 | **0** |
-> | with the flush fix | 1 | 1 | **2** | 2 |
-> | + idempotency keys (phase B) | 1 | 1 | **1** | 2 |
->
-> Row one is what shipped: a crash re-executed two charges that had **already completed
-> successfully**. Row two is the documented at-least-once contract — only the interrupted
-> call is retried. Row three is phase B: the duplicate request is still *sent*, and the
-> service does not act on it twice.
->
-> This is the reason the harness uses three calls rather than one: with a single call every
-> row reads "2" and the cases are indistinguishable.
-
-**Phase B — idempotency keys: ✅ done.**
-
-`DurableCallIdempotencyKey` (`engine/idempotency.go`) derives
-`base32(sha256(workflowID || 0x00 || runID || 0x00 || step))`. Every input is deterministic
-on replay, so a resumed workflow derives the same key the original run used. All five
-durable-call sites route through one `callService` helper — deriving the key per call site
-is how the step number and the recorded event drift apart.
-
-**Deviation from `docs/durable-call-intent-design.md` §4, deliberately.** The design adds
-the key as a parameter to `ServiceCaller.Call`, and names the cost: *"a breaking change for
-external callers and plugin authors. That is the main expense of this tier."* Implemented
-instead as an **optional** `IdempotentCaller` interface: same mechanism, no existing
-implementation stops compiling. The trade is that a caller which could honour keys but has
-not been updated silently does not — so `CallerHonoursIdempotencyKeys` makes that
-detectable, and the crash test asserts the service actually received keys before trusting
-its result. If the interface is ever collapsed into `ServiceCaller`, nothing here forecloses
-it.
-
-Tests: key stability **across a real replay** (run to completion, truncate the history to
-two events as a crash would leave it, resume, require the resumed steps' keys to match the
-original run's) — proven to fail by making the derivation non-deterministic. Plus retry
-attempts sharing one key, per-step/run/workflow distinctness, the NUL-separator ambiguity
-case, and the fallback for plain callers.
-
-**Cross-stream:** `cmd/cleat-worker/setup.go` is WS-3's. `dbServiceCaller` now implements
-`IdempotentCaller` and sends the `Idempotency-Key` header, because the engine-side mechanism
-is inert without a caller that implements it — and shipping a mechanism nothing calls is the
-exact §1.4 shape this phase exists to avoid. Additive: `Call` is unchanged in behaviour.
-
-> **Sharpened 2026-08-02 by empirical test, not grep.** The original framing here — "the
-> whole feature is dead" — was too coarse. The *read* side is live and correct: a
-> `pendingSentinel` in history is caught at `engine/durablecalls.go:150` and reported to the
-> workflow as `[AMBIGUOUS] call outcome unknown at step N …`. `TestPendingSentinelDetection`
-> now proves this for steps 0–4, with step 5 correctly showing no ambiguity because that
-> workflow discards the call result with `_`.
->
-> The gap is the *write* side. Nothing calls `flushCallIntent` before dispatching a real
-> external call, so in an actual crash **no sentinel is ever written and the detector has
-> nothing to find.** Detection is real but unreachable in production. ~~The fix is to wire the
-> intent write into `freshCall` / `freshCallWithRetry` / `freshCallWithHeartbeat` — the
-> detector needs no changes.~~
->
-> **Correction, 2026-08-04 — that prescription is wrong, and following it would break every
-> workflow that makes a durable call.** Full analysis and a replacement design in
-> [`docs/durable-call-intent-design.md`](docs/durable-call-intent-design.md). In short:
->
-> 1. Every completion path — `insertEventSQL` and both adaptive-flush batches — carries
->    `ON CONFLICT … DO UPDATE … WHERE event_history.response = '' AND event_history.error IS NULL`.
->    `flushCallIntent` writes `error = pendingSentinel`, which is not NULL, so the completion
->    is a **silent no-op** and the sentinel persists. Every replay then reports `[AMBIGUOUS]`
->    forever.
-> 2. The intent row's checksum is computed over a record with an empty `Err` while the row
->    stores `pendingSentinel`, so in the exact crash window this feature exists to handle,
->    replay fails checksum verification instead of reporting ambiguity.
-> 3. Both functions read the previous checksum from the database rather than `s.lastChecksum`,
->    which diverges under the adaptive flusher.
->
-> None of these can appear until the code has a caller, which is why 48 test references are
-> all green. **The 350 lines are not a head start.** This is the second time the plan's own
-> prescribed fix has been wrong in the details; §2.26 was the first.
->
-> The design doc's recommendation is **Phase A only for now**: delete the two writer
-> functions, keep the detector, correct `docs/durable-calls.md:66` ("the write-side wiring
-> will follow" reads as routine), and drop the baseline entries. Best value when this becomes
-> a priority is deterministic **idempotency keys**, which need no schema change, cost no extra
-> write, and make duplicates impossible rather than merely visible. Do not start the intent
-> work before the 2.4 crash harness exists — building the fix before the observation is how
-> this happened.
->
-> Note also that both ambiguity and replay divergence are reported *inside the workflow
-> result string*, not as a Go error from `Engine.Replay`. Any future test or operator
-> tooling must check the result, not just `err`. Two separate test suites got this wrong.
-
-`flushCallIntent` / `completeCallEvent` implement a real write-ahead-intent pattern so a
-crash mid-external-call is detectable on replay as `[AMBIGUOUS]`. 48 test references,
-**5 non-test references — all of which are its own definition and error strings.**
-The live paths (`freshCall`, `freshCallWithHeartbeat`, `freshCallWithRetry`) call
-`caller.Call(...)` directly and record only after return.
-
-- Files: `engine/flush.go:182-282`; call sites `engine/durablecalls.go:40-108`, `:200-276`,
-  `engine/heartbeats.go:20-89`
-- Decide first: wire it in, or delete it. Shipping ~350 lines of tested-but-dead durability
-  code is worse than either, because it reads as finished.
-- Test: crash-recovery e2e (see 2.4).
-
-#### 1.4 phase D — write-ahead intent — ✅ **DONE** (WS-2, 2026-08-05)
-
-Migration `020` on all three dialects adds `event_history.intent_at`. **An event is pending iff
-`intent_at IS NOT NULL AND checksum IS NULL`**, and the ordering that is the entire feature is
-
-    commit intent  ->  dispatch  ->  commit outcome
-
-A crash between the first and third leaves a pending row, which replay reports as ambiguous
-instead of calling the service a second time.
-
-**The three defects that made the deleted implementation unwirable are gone by construction, and
-each is checked:**
-
-- The sentinel is not in the `error` column, so the completion path's
-  `WHERE response = '' AND error IS NULL` guard no longer refuses to overwrite it. `error` means
-  only "the call failed".
-- A pending row carries **no checksum at all**, so `VerifyWorkflowEvents` skips it rather than
-  reporting corruption in the exact crash window this exists to handle.
-  `TestCallIntent_PendingRowIsNotCorruption` fails if the intent write stores one.
-- The chain is computed from `s.lastChecksum`, not from a database read, so it does not diverge
-  under the adaptive flusher.
-
-**The guarantee is observed from inside the call.** `TestDurableCall_CommitsIntentBeforeDispatch`
-reads the workflow's history back through the store *while the call is in flight* and requires
-the pending row to be visible. An implementation that wrote the intent afterwards would satisfy
-every after-the-fact assertion and fails this one — proved by moving the write below the
-dispatch, which fails all three dialects.
-
-**Reachable from the shipped artifact, not only from an embedder.** `--write-ahead-intent-ops`
-takes `service.operation` pairs. Without it the engine-side mechanism would be exactly what §1.4
-is about: durability code that is tested, believed and unreachable. Cross-stream —
-`cmd/cleat-worker/{config,setup}.go` is WS-3's, same justification as phase B's `dbServiceCaller`.
-
-**A design-doc claim was wrong and is corrected there rather than worked around.** §5 said
-`--no-per-step-flush` "defeats this entirely" and required rejecting the combination at startup.
-That holds for an implementation routing the intent through `flushEvent`; this one writes through
-the store and never consults `noPerStepFlush`. `TestDurableCall_IntentSurvivesNoPerStepFlush`
-asserts the two are orthogonal on all three dialects. No startup check was added.
-
-**Deviation on policy declaration.** The design leaves open whether semantics are declared at the
-call site or on the service. The call site would need a new argument on the `DurableCall` host
-function and every SDK that binds it — an ABI change, and `wasm/` and the SDKs are WS-3's. The
-engine-level registration is the half that can be built without one, and forecloses nothing.
-
-**Five falsifications, each failing only its own test:** the ordering, the pending row's absent
-checksum, the detector, the completion fence, and the `pending` expression in `LoadEventHistory`.
-The fence one corrected the test rather than confirming it — MySQL's `RowsAffected` counts rows
-*changed*, not matched, so re-completing with identical values reported 0 whether or not the
-guard was in the `WHERE` clause, and the assertion would have passed against a store with no
-fence at all. The second completion now carries a different outcome, so all three dialects
-discriminate.
-
-**T3, the crash scenario, is done (2026-08-05)** and is the evidence this phase existed for.
-`TestCrashWithWriteAheadIntentDoesNotRepeatTheCall` SIGKILLs a real worker with the third of
-three durable calls committed at the service and unanswered, on the same fixture as §2.4's
-test, and differs from it in exactly one flag:
-
-| | Ship | what recovery did |
-|---|---|---|
-| at-least-once (§2.4's test) | **2** | repeated a call that may already have happened |
-| `--write-ahead-intent-ops payments.Ship` | **1** | did not repeat it |
-
-The pending row is asserted to exist *before* the crash, not after, so the claim is about
-ordering rather than outcomes. Non-vacuity: with the flag removed the test fails at that
-assertion — no pending row exists — and the sibling test pins `Ship=2` for the same fixture.
-
-**It also found §3.22**, which is the reason the test records the workflow's terminal state
-rather than asserting it: the ambiguity is detected, reported to the guest, reported back by
-the guest — and then overwritten by a second completion, so the workflow reads as `done`.
-
-#### 1.4 phase E — automatic resolution — ✅ **DONE** (WS-2, 2026-08-05)
-
-Detection on its own converts a rare silent duplicate into a rare permanent failure, which for
-some workloads is worse: a workflow that learns its outcome is unknown, and has no way to find
-out, is stuck. `AmbiguityResolver` is the way out, and it costs nothing when unused.
-
-When replay finds a pending intent row the engine asks the resolver about **the idempotency key
-the original attempt actually sent** — derived through `DurableCallIdempotencyKey`, the same
-call `callService` makes, so the resolver is looking up something that really happened. If the
-resolver answers, the outcome is written over the pending row and replay carries on as though
-the call had returned normally. Which it did: the crash lost the answer, not the effect.
-
-**The resolution is persisted, and that is the load-bearing part.** A resolution that is used
-but not recorded means the next replay finds the row still pending and asks again — and a
-service that answers differently the second time, or is unreachable, makes the same step
-resolve one way on one replay and another way on the next. `ResolveCallIntent` exists
-separately from `CompleteCallIntent` for exactly one reason: it runs during replay, where the
-session is reading history rather than building it and holds no checksum chain, so the previous
-checksum is read from the row before it, inside the same transaction. That is safe here in a
-way it was not for the deleted `flushCallIntent` — everything before a pending row is persisted
-by definition, because the crash that created the row happened after them.
-
-**Every way of declining leaves the ambiguity exactly as it was** — reported, not resolved, and
-above all not repeated: no resolver configured, a resolver with no record, a resolver that
-errored, and a resolution that could not be recorded. The last is the interesting one and has
-its own test: using it would be the determinism bug described above.
-
-Falsified two ways: never consulting the resolver, and using its answer without persisting it.
-Both fail on all three dialects.
-
-**Still open in phase E:** the typed error. The design asks for a structured value carrying
-step, service, operation and key; today the detail is a formatted string inside the workflow
-result. That is §3.22 step 3.
-
-Three different things are called "ErrAmbiguous", and keeping them apart is what says how much
-of this needs an ABI change — which is less than this entry previously claimed.
-
-1. **`engine.ErrorCode.ErrAmbiguous`, value 5** (`engine/errors.go`). Host-side, stored in the
-   `error_code` column, present since the first commit. `NewAmbiguousError` is declared and
-   called from nothing but its own test.
-2. **`cleat.CallErrorCode`**, the guest ABI enum. Has no ambiguous member; 5 there is
-   `CallErrorPermissionDenied`. This is what a workflow author's `switch e.Code` reads, and an
-   ambiguous call arrives as `[0]`, Unknown. Adding a member is possible — the wire field is 32
-   bits and 6 is free — but every SDK carries its own copy (`python-sdk/cleat_sdk/host_calls.py`
-   has a literal `{0..5}` dict), and those are WS-3's.
-3. **`engine/callerrors.go`**, which redeclares only the three of the guest enum the engine can
-   actually select.
-
-An earlier revision of this entry said the design's "`ErrAmbiguous` already exists as error
-code 5" does not hold in this tree. **That was wrong** — it holds exactly, for (1). The claim
-was checked against (3), a different enum. What is true is narrower: the code exists, and
-nothing populates it, because the ambiguity never reaches the host as a failure at all.
-
-**Still open in the phase:** E (the resolution hook and a typed `ErrAmbiguous` carrying step,
-service, operation and key — today ambiguity is reported inside the workflow result *string*)
-and F (admin force-resolve for a pending step, whose prerequisite §3.20 now exists). §3.22
-should be fixed before either: both are about delivering an answer that this discards. `pendingSentinel` is still detected alongside `Pending` because
-`tests/integrity` exercises it directly; retiring it belongs with E.
-
-### 1.5 Primary WASM backend has no hang protection (~1–2 sessions) — fixed for wasmtime, **still open for every deployment**
-
-> **Re-opened and re-closed 2026-08-04 by §2.28.** The epoch-interruption fix below is real
-> and tested, but it lives behind `//go:build cgo` and the shipped Dockerfile built with
-> `CGO_ENABLED=0`, so no container had it: measured on the wazero backend the containers
-> actually ran, a workflow with a 2-second budget ran for 2m35s and returned **success**.
-> The image now builds with CGO on a glibc base and a `--verify-backend` build step keeps it
-> that way. Go guests are fenced in deployments; non-Go guests on wazero still are not.
-> Read §2.28 for the residual.
-
-
-> **Raise this to the top of Phase 1.** wasmtime is the primary backend — it is the standard
-> engine and materially more reliable than wazero, which is retained only as a fallback for
-> languages wasmtime cannot host. So the engine with no execution bound is the one actually
-> running production work. When the workflows are agent-generated, an unbounded loop is a
-> routine occurrence, not a corner case, and there is currently no way to stop one.
-> Together with 1.3 (cancellation) this is the emergency brake, and neither half works.
-
-`wasmtime.NewEngine()` with no `Config` — no fuel, no epoch interruption, no `StoreLimits`.
-`engine/executor.go:122` concedes the post-execution deadline check never runs because
-`fn.Call` never returns. The one limiter (`fuelMeter`) is wazero-only and defaults to
-unlimited, and `cmd/cleat-worker/main.go:704` prefers wasmtime whenever CGO is available.
-
-- Files: `engine/backend_wasmtime.go:69`, `cmd/cleat-worker/config.go:78`
-- Fix: `NewConfig()` + `SetEpochInterruption(true)`, ticker goroutine calling
-  `IncrementEpoch`, `SetEpochDeadline` per invocation. Make the instruction-limit flag
-  backend-agnostic.
-- Test: resource-exhaustion (see 2.5).
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 1.6 Generation not bumped on reap or terminate — ✅ **FIXED** (marker added 2026-08-06)
 
-`ReapStaleInstances` (`engine/store_lifecycle.go:615-633`) and `TerminateWorkflow`
-(`engine/db.go:1056-1076`) clear `assigned_to` but leave `generation`. Weakens the token to
-defence-in-depth-in-name-only. Bump it in both.
-
-**Status added 2026-08-06 — the work was done, the marker never was.** This heading read as
-open planned work ("~0.5 session") long after it shipped, which is the inverse of the stale-✅
-problem and just as misleading: an auditing agent reported it as "status genuinely
-indeterminate from the document alone". Verified against the tree on 2026-08-06 — both paths
-bump `generation` on all three dialects:
-
-- terminate: `engine/db.go:1086`, `engine/mysql_ops.go:1177`, `engine/mssql_operations.go:192`
-- reap: `engine/store_lifecycle.go:732`, `engine/mysql_lifecycle.go:721`,
-  `engine/mssql_operations.go:35`
-
-Re-derive with `grep -rn "generation = generation + 1" engine/*.go | grep -v test` (18 sites,
-including `store_admin.go`'s six from §3.20's force-resolve).
-
-### 1.7 Tenant isolation not enforced at the HTTP layer — 🔶 **CORE FIXED 2026-08-04**
-
-`defaultTenantID := "00000000-0000-0000-0000-000000000000"` at
-`cmd/cleat-worker/main.go:159`, used process-wide. Callers authenticate per-tenant; every
-request is then served from one hardcoded scope. Real RLS exists underneath and is bypassed.
-
-**Fixed.** Handlers now resolve a per-request store through `scopedStore`/`storeFor`
-(`cmd/cleat-worker/server.go`) instead of using the process-wide `apiServer.store`, across all
-45 call sites. Every backend already had the scoping this needed and none of it was being
-asked for: Postgres sets `cleat.tenant_id` in `beginTxWithRLS`, SQL Server hands out a
-per-tenant pool whose connector calls `sp_set_session_context`, MySQL routes to a per-tenant
-database. All three cache pools, so the cost is a struct allocation and a map lookup.
-
-Failure is closed: with `--require-auth` on, a handler reached without a tenant is refused
-rather than defaulted — the fallback *was* the bug. With auth off the process-wide store is
-returned deliberately, and `TestAuthOffStillServesDefaultTenant` guards that side so the fix
-cannot be over-applied into a 401 for every single-tenant deployment. That is the same trap
-§1.1/§1.2 carry in WS-1's list: the naive fix converts silent corruption into spurious
-failure on the legitimate path.
-
-Two cross-tenant **writes** that scoping the store does not close, because they take a tenant
-as an *argument* rather than reading one:
-
-- `handleStartWorkflow` read `tenant_id` straight from the request body. Any authenticated
-  caller could start a workflow in any tenant by naming it in the JSON. The authenticated
-  tenant is now authoritative, and a disagreeing body value is refused rather than silently
-  overridden — a caller that asked for another tenant is either misconfigured or probing, and
-  quietly writing somewhere other than where they asked is its own bug.
-- `handleDeadLetterReprocess` passed `engine.DefaultTenantUUID` literally, so a tenant
-  retrying its own dead-lettered workflow moved that run into the default tenant's scope.
-
-**Found on the way.** The sharded startup path built `store` as a `ShardedStore` over all
-shards but assigned `factory` the *first shard's* factory (`if i == 0`). Harmless while the
-factory served background work; once handlers open stores from it, every tenant-scoped
-request would have been narrowed to shard 0 — reads that silently miss data and report
-success. `cmd/cleat-worker/sharded_factory.go` opens one store per shard and wraps them.
-
-**The test that mattered failed first, for the right reason.** The DB-backed test
-(`tenant_isolation_db_test.go`) initially showed both tenants seeing both rows. Not a defect
-in the fix: PostgreSQL bypasses RLS **unconditionally for superusers**, and
-`CLEAT_TEST_POSTGRES` conventionally points at one — the postgres image's `POSTGRES_USER`
-bootstrap role is a superuser. This is exactly the gap `migrations/postgres/005_app_role.sql`
-was written to close, reproduced live. Rebuilt on `testutil.OpenPostgresRLSTestDB`
-(NOSUPERUSER, non-owning) it passes, and fails again with the fix reverted.
-
-The general lesson is worth keeping: **a tenant-isolation test that connects as a superuser
-proves nothing and looks green.** Any future backend's isolation test must assert the
-connecting role is subject to RLS before asserting anything about tenants.
-
-**Still open on §1.7:**
-
-- ~~MySQL and SQL Server isolation tests.~~ **Both written.** MySQL passes against a live
-  8.4 (`tenant_isolation_mysql_test.go`), and is kept as a separate test rather than folded
-  into a shared multi-dialect one on purpose: MySQL has no row-level security at all, so its
-  isolation is entirely structural — a per-tenant *database* — and a shared test would read
-  as though it had the same backstop the other two do. It does not, which means on MySQL a
-  bug in the HTTP layer is the whole of the exposure. Reverting the fix fails it with
-  `Table 'cleat_00000000_0000_0000_0000_000000000000.workflow_instances' doesn't exist` —
-  the defect stated in one line, the request served from the default tenant's database.
-
-  SQL Server is written but **skipped, blocked on §2.71** — see below. Unskipping it is that
-  item's acceptance test.
-- The ~89 unaudited `MySQLStore` `s.tenantID` call sites (see the `requireTenant` note
-  elsewhere in this plan). Scoping the store does not audit them.
-- ~~Whether the shipped deployment actually connects as `cleat_app` rather than a
-  superuser.~~ **Checked 2026-08-04 — it does.** `docker-compose.cluster.yml` gives every
-  worker `--db=postgres://cleat_app:...` with a separate superuser `--migrate-db`, and
-  `deploy/postgres/900-app-role.sh` refuses to proceed if `cleat_app` turns out to be a
-  superuser or to hold `BYPASSRLS`. Worth stating because it is the precondition for
-  everything above: the HTTP fix and the RLS policies are *both* no-ops on Postgres against a
-  superuser connection. Single-node local runs pointed at `postgres://cleat:cleat@…` do get
-  the superuser bypass, which is acceptable for single-tenant development but means a local
-  run is not evidence about isolation.
-
-- ~~Also: `migrations/mysql/` and `migrations/mssql/` have **zero** RLS policies against
-  Postgres's seven.~~ **Half wrong — corrected 2026-08-04 against a live SQL Server 2022
-  (CU26).** Only **MySQL** has zero. `migrations/mssql/001_schema.sql:405-458` defines
-  **seven** `CREATE SECURITY POLICY` statements (`TenantFilter_Defs`, `_Instances`,
-  `_EventHistory`, `_Signals`, `_Schedules`, `_Tags`, `_Routing`) over an inline TVF keyed on
-  `SESSION_CONTEXT(N'tenant_id')` — the same seven tables Postgres covers.
-
-  Applied to a scratch database and exercised, they are real and **fail closed**: with two
-  rows under different tenants, each tenant sees exactly its own, and with no session context
-  set the table reads as **empty** rather than as everything. `sa` does not bypass them —
-  SQL Server filter predicates have no owner exemption, so MSSQL needs no equivalent of
-  Postgres's `FORCE ROW LEVEL SECURITY`.
-
-  This changes §1.7's scope materially. MSSQL does not need a policy migration written; it
-  needs the *session context actually set per request*, which is the same `defaultTenantID`
-  defect above. **MySQL is the only backend with no database backstop** — and it cannot get
-  the same one, because MySQL has no row-level security feature at all (`CREATE POLICY` is a
-  syntax error on 8.4). Its isolation has to come from the application layer or from
-  per-tenant databases, which is what `buildTenantDSN`/`NewMySQLStoreFactory` already gesture
-  at. Decide which before writing anything.
-
-  > **DECIDED, 2026-08-06 — the rule is "multi-tenancy requires database-enforced RLS."**
-  > PostgreSQL and SQL Server qualify and are supported multi-tenant. **MySQL is documented
-  > single-tenant-only.** This closes §1.7's residual as a product decision rather than
-  > leaving it as open engineering.
-  >
-  > A mechanism for MySQL does exist and was prototyped before deciding, so the decision is
-  > against a measured alternative rather than an assumed one. MySQL refuses a user variable
-  > in a view (`ERROR 1351: View's SELECT contains a variable or parameter`), but a view over
-  > a stored function that reads the session variable works, and `WITH CASCADED CHECK OPTION`
-  > enforces the write side. Measured on MySQL 8.4, 50k rows, all four properties held:
-  >
-  >   * SELECT isolation — each tenant sees only its own rows
-  >   * cross-tenant INSERT — refused, `ERROR 1369: CHECK OPTION failed`
-  >   * UPDATE reassigning `tenant_id` — refused, same error
-  >   * DELETE of another tenant's row — 0 rows affected
-  >
-  > Renaming the physical tables and giving the views the original names would even leave the
-  > existing SQL untouched. **The cost is what kills it: 200 full scans took 0.368 s against
-  > the table and 2.238 s through the view — 6.1×**, because the stored function is evaluated
-  > per row and cannot be hoisted (it reads session state, so it is not deterministic). For
-  > comparison, SQL Server's native predicate costs **+20%** on the same shape of query
-  > (§3.37). Paying 6× on every scan to emulate a feature the engine does not have is a worse
-  > product than saying plainly which engines support the feature.
-  >
-  > Re-derive: the probe is not checked in — it was a scratch database, dropped after
-  > measuring. The mechanism is four statements (function, view, `WITH CHECK OPTION`, session
-  > variable) and takes about ten minutes to rebuild if anyone wants to challenge the number.
-
-  Corollary worth stating: because MSSQL RLS reads as empty rather than erroring when no
-  tenant is set, a missing session context on that backend is invisible in exactly the way a
-  passing test cannot see. Any §1.7 test must assert *rows returned for the right tenant*,
-  not merely "no error".
-- ~~Also: the new admin API has no ownership check tying `workflowID` to the caller's tenant.~~
-  ✅ **FIXED 2026-08-04.** `callerOwnsTarget` in `cmd/cleat-worker/api_admin.go` now gates all
-  three destructive routes: it loads the workflow, compares `TenantID` against
-  `auth.TenantIDFromContext`, and answers **404 rather than 403** — 403 would confirm the
-  workflow exists, making the endpoint an oracle for valid IDs. Checked once at the router
-  rather than in each handler, so a route added later cannot inherit the gap by omission.
-
-  The check was previously left out for a documented reason: an unconditional ownership check
-  "would 404 the success-path tests", whose mock store returns no workflow. That is a fixture
-  shortcoming deciding a security question, so the fixtures were fixed instead.
-
-  Note what the *existing* admin tests could not catch: none of them put a tenant on the
-  request, so `TenantIDFromContext` returns false and the new check short-circuits. They all
-  passed before and after the fix. The regression tests set a caller tenant explicitly and
-  assert **the store is never reached** — status code alone would accept a handler that
-  applied the operation and then returned 404. With the check removed, the audit log shows
-  exactly the shape of the bug:
-
-  ```
-  WARN admin: force-complete workflow workflow_id=wf-owned-by-a operator=bbbbbbbb-…
-  ```
-
-  Tenant B's operation on tenant A's workflow, recorded faithfully and not prevented.
-- Test: multi-tenant isolation (see 2.6).
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 1.8 MySQL never worked — fixed in `9fc2a81`
 
-The most severe defect found so far, and the clearest illustration of the thesis.
-
-`engine/mysql_lifecycle.go` passed a zero `time.Time{}` as `p_next_wake_at`.
-`go-sql-driver/mysql` encodes that as MySQL's legacy `0000-00-00 00:00:00` sentinel, which
-the default `sql_mode` rejects — `NO_ZERO_DATE` and `STRICT_TRANS_TABLES` have been on by
-default since 5.7.
-
-It is the *normal* path, not an edge case. `cmd/cleat-worker/setup.go:1704`:
-
-```go
-finalStatus := "done"
-var nextWakeAt time.Time        // zero
-if suspended != nil {
-    finalStatus = "ready"
-    nextWakeAt = suspended.SuspendUntil
-}
-```
-
-Every workflow that finishes normally takes it. Verified against a real MySQL 8.4 with the
-fix reverted:
-
-```
-Error 1292 (22007): Incorrect datetime value: '0000-00-00'
-for column 'p_next_wake_at' at row 1
-```
-
-**On MySQL, no workflow could reach a terminal state.** Postgres and SQL Server accept a
-year-1 timestamp, so nothing else surfaced it.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 1.9 The shipped schema was not the tested schema — fixed in `e13c2c8`
 
-Same shape as 1.8, on the deployment artifact rather than a code path.
-
-`docs/explanation/postgresql-schema.md` called the root `schema.sql` "the canonical
-schema"; `docker-compose.cluster.yml` mounted it into `initdb.d`. No Go code read it — and
-none reads `migrations/postgres/` either, because **no migration runner exists**. Every
-test built its schema through `engine/testutil`, so the artifact users deploy was covered
-by nothing at all.
-
-Verified against a live PostgreSQL 16, applying `schema.sql` exactly as documented:
-
-```
-ERROR:  function finalize_workflow_status(...) does not exist
-policies: 0        rls_tables: 0
-```
-
-`FinalizeWorkflowSegment` calls that function on every workflow completion with no
-fallback. **A database built the documented way could not complete a single workflow**, had
-no tenant isolation whatsoever, and had none of the `admin.*` tables the Admin API from
-\#217 depends on.
-
-`schema.sql` was a strict subset — it contained no table the migrations lack — so it is
-deleted rather than repaired. Two hand-maintained copies *is* the defect.
-
-`engine/schema_bootstrap_test.go` now builds a scratch database from the shipped files
-alone and asserts the engine's requirements. It found a second defect on its first run:
-`003_procedures.sql` had the same 42P13 return-type bug as 004, so re-applying the set —
-what an operator upgrading a deployment does, and what the docs promise is safe — failed.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 1.11 No worker could start against PostgreSQL — fixed in `HEAD`
 
-`cleat-worker` runs `migration.Runner` and `plugin.RunMigrations` at boot and exits if
-either fails. Both failed, for two independent reasons, and neither had a single test.
-
-**`SET search_path` leaked out of the migration file and broke the runner's own
-bookkeeping.** `2a70373` added `SET search_path = public;` to the four
-`migrations/postgres/*.sql` files, to stop the objects landing in a schema named after the
-connecting role (1.9). A bare `SET` is *session*-scoped, so it outlived the transaction the
-file ran in and changed name resolution for the runner's next statement — an unqualified
-`INSERT INTO schema_migrations` on the connection that had just created that table under
-the previous `search_path`:
-
-```
-[migration] applying 001_schema.sql
-ERROR: relation "schema_migrations" does not exist (42P01)
-```
-
-That aborted the transaction, rolled `001` back and failed the boot. Every worker in
-`docker-compose.cluster.yml` crash-looped. `SET LOCAL` is not available as a fix: the same
-files are applied by `docker-entrypoint-initdb.d` through psql, where each statement is its
-own implicit transaction and a `LOCAL` setting would be discarded immediately. The runner
-now schema-qualifies its tracking table, which makes it independent of anything the
-migration files do to `search_path`, and resets `search_path` before returning the
-connection to the pool.
-
-**Four workers applied migrations simultaneously.** `CREATE TABLE IF NOT EXISTS` is not
-atomic against another session creating the same table, so the compose cluster produced
-`duplicate key value violates unique constraint "pg_type_typname_nsp_index"`,
-`relation "tenant_api_keys" does not exist`, and
-`type "plugin_migrations" already exists`. Both runners now take a `pg_advisory_lock` for
-the duration of a run. PostgreSQL only, deliberately: MySQL and SQL Server have
-equivalents but no multi-worker topology is shipped for them, and untested locking would
-be worse than none.
-
-Why it survived: `migration/` had **no test file at all**, and nothing anywhere ran the
-runner against `migrations/postgres/`. The two halves of the bootstrap were each covered
-alone — `engine/schema_bootstrap_test.go` applies the files with psql semantics, and the
-runner's logic was exercised by nothing — so the seam between them was unobserved. This is
-the same shape as 1.9: an artifact that ships is verified by a path that does not.
-
-Both fixes were falsified before being kept. Reverting the qualification reproduces the
-verbatim boot failure in all four new tests; removing the lock makes three of four
-concurrent runners fail with the exact constraint names seen in CI. New coverage:
-`migration/runner_test.go` (5 tests, from nothing) and
-`plugin/migration_concurrency_test.go`. End-to-end, four workers now boot against one
-database, exactly one applies the migrations, and all four report healthy.
-
-**Plugin tables were created in the wrong schema.** Found immediately after, because the
-fix above let the workers boot and so changed what the cluster job's database contained.
-`plugin.RunMigrations` applies each plugin's DDL unqualified (`CREATE TABLE kv_store ...`)
-on a pooled connection whose `search_path` is the default `"$user", public` — so on the
-configuration cleat ships (`POSTGRES_USER=cleat`, and `001_schema.sql` creates a schema
-called `cleat`) all 27 plugin tables landed in the role's schema rather than `public`. The
-run now happens on a pinned connection with `search_path = public`, reset on release.
-
-`TestPluginMigrations_AllDialects` could not see this, for a reason worth recording: it
-asserted "RunMigrations created these tables" while running against the shared
-`CLEAT_TEST_DB` database, where the tables already existed. It was passing on evidence it
-had not produced. Pointed at a database built from `migrations/postgres/` and nothing else,
-it failed on all 27 tables — the assertion only became real once the precondition did.
-
-**The cluster CI job could not tell a running cluster from no cluster.** It started the
-compose file, slept 10 seconds and ran the tests. Every worker was crash-looping and the
-only symptom was three unrelated-looking store tests failing. `.github/workflows/ci.yml`
-now waits for each service's healthcheck and fails on any restart count above zero.
-
----
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 1.12 Two CI workflows had never run — fixed in `HEAD`
 
-`ai-pr-review.yml` and `release-notes-check.yml` failed on every push, on every branch, for
-as long as the branch history shows. Not a flaky job: a **startup failure**, which produces
-a run with no jobs at all.
-
-Both files were unparseable YAML. In each, a block indented *less* than its enclosing
-block scalar ended that scalar early, and the following text was then read as YAML:
-
-- `ai-pr-review.yml` — a JS template literal inside `script: |` continued at 10 spaces
-  where the scalar was at 12.
-- `release-notes-check.yml` — a here-document body written at column 0 inside `run: |`.
-  `<<-` is not a fix, since it strips tabs only; the step now builds the comment with
-  `printf` and posts it with `--body-file`.
-
-So the repository advertised an automated first-pass code review and a release-notes gate,
-and had neither. This is the sharpest instance of the pattern this document keeps
-recording: not a check that was wrong, a check that never executed.
-
-Nothing inside a workflow can catch this — there are no jobs to run the check in. The lint
-job now parses every file under `.github/workflows/` and fails on any that does not load or
-has no `jobs:` key. Falsified against the two files as they stood at `4de8f69`: the guard
-reports both.
-
-**Correction, 2026-08-07.** "and had neither" was right. "Fixed in `HEAD`" was wrong about
-**both** files, and the heading should be read as describing the parse error only.
-
-Making each file *parse* made it run. It did not make either one do its job, and in both
-cases the reason it did nothing was never the reason anyone fixed. Both are now deleted
-rather than repaired a second time: `release-notes-check.yml` in §1.12a, `ai-pr-review.yml`
-in §1.12b.
-
-The generalisation, which is the part worth carrying forward: **a startup failure hides
-every other defect in the file behind it.** Nobody can find the four reasons a check is
-inert while the check is not running at all — so fixing the parse error feels like the
-repair, and the repo gets a green check and a false belief instead of a red one and a true
-one. When a workflow starts running for the first time, that is the moment to ask what it
-actually does, not the moment to close the item.
-
----
-
-### 1.12a The release-notes gate did nothing after it parsed either — deleted 2026-08-07
-
-Parsing was the first of four reasons `release-notes-check.yml` never gated anything. The
-other three each sufficed alone:
-
-- **Its trigger label could not exist.** The job did nothing unless the PR carried a label
-  named `[FEATURE]` or `[BUGFIX]`. Neither is among the repository's twelve labels, and no
-  PR has ever carried any label at all:
-
-      gh label list --limit 100
-      gh pr list --state all --limit 200 --json number,labels \
-        --jq '[.[] | select(.labels | length > 0)] | length'    # 0, 2026-08-07
-
-- **Nothing could ever have applied them.** The auto-labeler removed in PR #366 (`a21de13`,
-  itself never having applied a label) defined only `area/*` names —
-  `git show a21de13^:.github/labeler.yml`. No workflow, template or human convention in this
-  repository has ever produced a `[FEATURE]` label.
-
-- **It read labels; the PR template asks for a checkbox.** `.github/PULL_REQUEST_TEMPLATE.md`
-  offers a `[FEATURE]` tickbox under "Change type". Ticking it edits the PR *body*, which the
-  label query at the top of the job never reads. So even full compliance with the template
-  could not arm the check.
-
-And the job carried `continue-on-error: true`, so the `exit 1` at the end was unreachable as
-an outcome regardless.
-
-The Release notes section of the PR template is kept — it is useful guidance, and it is now
-honestly unenforced rather than appearing to be a gate. Enforcing it would mean keying on
-something that exists, the natural candidate being the branch prefix that
-`Validate branch name` already requires; that is a policy change, not a repair, and is not
-made here.
-
----
-
-### 1.12b The AI PR review posted only failure notices — deleted 2026-08-07
-
-Removed at the owner's request: no GitHub-side AI review. Recorded here because of what
-looking at it turned up, which is §1.12a's shape a second time.
-
-`ai-pr-review.yml` parsed and ran after §1.12. Its last 29 completed runs all report
-`success`, and every one of them posted the same comment:
-
-    ## AI Review
-    AI review unavailable (API error). A human reviewer must review this PR.
-
-    gh run list --workflow=ai-pr-review.yml --limit 30 \
-      --json conclusion,status --jq '[.[] | select(.status=="completed")] |
-      group_by(.conclusion) | map({c: .[0].conclusion, n: length})'
-
-Two independent reasons it reported success while doing nothing: `continue-on-error: true`
-at job level, so failure was not an available outcome; and the script catches a non-ok API
-response and substitutes that fallback text, so the step exits 0 even without it.
-
-The API key was unset or invalid. **Supplying one would not have made it work**, and that is
-the finding:
-
-    git diff origin/main...HEAD > /tmp/pr.diff
-
-The base branch is `develop`. That command diffs from `merge-base(main, HEAD)`, so for any
-PR into develop it emits the whole accumulated develop-to-main delta alongside the change
-under review — 370 commits, 1089 files, 241502 lines, measured 2026-08-07:
-
-    git rev-list --count origin/main..origin/develop
-    git diff origin/main...origin/develop | wc -l
-
-The script then truncates to the first 50000 **characters**. A working key would have
-produced a confident review of the first few files of an unrelated diff, on every PR — worse
-than the failure notice, because it would look like a review. The three checks a reader
-would apply to judge it (does it run? does it report success? did it post something?) all
-answered yes.
-
-`/code-review ultra` remains available and is user-triggered.
-
----
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 1.13 Multi-DB CI was green without ever connecting to PostgreSQL — fixed in `HEAD`
 
-The `test-plugin-migrations` job in `.github/workflows/multi-db-ci.yml` declares a
-`postgres:16` service and sets `CLEAT_TEST_POSTGRES` to it. The job runs directly on the
-runner, not in a container, so it does not share the service network — and unlike the mysql
-and mssql services beside it, the postgres service published no port. It was unreachable
-for the workflow's entire existence.
-
-The job was green throughout, because `testutil.TestDB` responded to an unreachable
-database with `t.Skipf`. Identical in shape to the `test-go` job's missing `ports:` (fixed
-earlier this session) and to `DURABLE_TEST_DB` in `cmd/cleat-worker/auth_test.go`: **a skip
-that is indistinguishable from a pass.**
-
-Two changes. The service now publishes 5432. And `testutil.TestDB` distinguishes the two
-cases it had been conflating: with no DSN configured it still skips, but when a DSN *is*
-configured and cannot be reached it fails, with the DSN (password redacted) in the message.
-Asking for a database and not getting one is a broken configuration, not an absent one.
-
-Falsified both ways: with an unreachable DSN set the test now fails and names it; with the
-environment unset it still skips.
-
----
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 1.10 RLS was bypassed in every shipped configuration — fixed in `HEAD`
 
-Every tenant-scoped table has row-level security enabled and `FORCE`d, and for
-`GetWorkflowByID` and `ListWorkflows` those policies are the **only** tenant isolation
-there is: neither carries an application-level `tenant_id` filter. PostgreSQL never applies
-RLS to a superuser, and every configuration cleat shipped connected as one —
-`docker-compose.cluster.yml` as `POSTGRES_USER=cleat`, CI and local development as
-`postgres`. The policies were present, correct, tested, and bypassed in practice by every
-connection that had ever run against them.
-
-Demonstrated on one database, two roles, same query:
-
-```
-owner (superuser) sees: 2          -- both tenants' rows
-as cleat_app, tenant a: 1 rows: a
-as cleat_app, tenant b: 1 rows: b
-```
-
-Four parts:
-
-1. **`005_app_role.sql`** creates `cleat_app`: owns nothing, no DDL rights,
-   `NOSUPERUSER NOBYPASSRLS`, granted only DML plus `EXECUTE`. Ownership matters as much
-   as superuser — an owner is exempt from its own policies unless `FORCE` is set, so a role
-   that owns nothing is subject to them unconditionally rather than depending on a flag a
-   later change could clear. The attributes are re-asserted on every run, so a role someone
-   granted `SUPERUSER` to while debugging is corrected rather than preserved.
-
-2. **No credential in the repository.** The role is created `NOLOGIN` and without a
-   password; the deployment supplies one.
-   `deploy/postgres/900-app-role.sh` does that for the compose file from
-   `CLEAT_APP_PASSWORD` and *fails* when it is unset, so a missing password stops the
-   deployment instead of quietly leaving it on a superuser connection. It then re-reads
-   `pg_roles` and refuses if the role came out with `rolsuper` or `rolbypassrls`.
-
-3. **`--migrate-db`.** `cleat_app` cannot run migrations, by design, and workers migrate at
-   boot. The runtime and schema DSNs are now separate; `--migrate-db` defaults to `--db`,
-   so an unsplit deployment is unaffected.
-
-4. **A startup check.** `engine.CheckRLSEnforced` reports every way the runtime connection
-   escapes RLS: superuser, `BYPASSRLS`, RLS switched off on a table that has policies, or
-   ownership without `FORCE` — plus a database with *no* policies, which would otherwise
-   pass every other check while isolating nothing. `--rls-check=auto` (default) refuses to
-   start when `--require-auth` is set and warns otherwise; `require` always refuses; `off`
-   skips.
-
-Falsified from both sides, against the same database: the check reports the bypass on the
-superuser connection every configuration used, and reports nothing on an unprivileged one.
-A test that could only ever return one answer would fail one of the two. End to end, a real
-worker refuses to start on the superuser DSN with the reason and the remedy, and starts
-healthy on `cleat_app` logging `row-level security is enforced on this connection`.
-
-**Found on the way:** `cmd/cleat-worker/main.go` counted API keys with
-`SELECT COUNT(*) FROM tenant_api_keys`, unqualified. The table is `admin.tenant_api_keys`
-and every other PostgreSQL caller says so; the default `search_path` does not include
-`admin`, so this always failed with 42P01 and the only trace was a warning. The
-auto-generated startup key was therefore **never created on any PostgreSQL deployment**,
-while `--require-auth` defaults to true — a fresh cluster had no key and no way in. Now
-qualified per-dialect, and logged at ERROR: if that read fails, the auth middleware reads
-the same table on every request, so the API is unusable rather than merely missing a
-convenience.
-
----
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ## Phase 2 — The seam test suite
 
@@ -1480,4438 +441,272 @@ Note on 2.2–2.6: these need real databases and process control, so they belong
 nightly/pre-merge job, not the fast unit lane. Accept the runtime. They are the only tests
 that would have caught anything found today.
 
-### 2.8 results — 89 findings, and one that changes a support claim
-
-`scripts/check-test-only-code.sh` runs `staticcheck -checks=U1000 -tests=false ./...`.
-Excluding `_test.go` files is the whole trick: anything reachable only from a test then
-reads as unused. It cost one command and found 89 entries, 55 of them functions.
-
-U1000 does not flag exported identifiers in library packages, so a public API with no
-internal caller is correctly ignored. Everything below is unexported.
-
-Two clusters matter.
-
-**`(*Engine).flushCallIntent` and `(*Engine).completeCallEvent`** (`engine/flush.go:186`,
-`:221`) — item 1.4, found automatically. The read side of crash recovery is live and
-correct; it searches for a sentinel that nothing writes.
-
-**SQL Server transient-error handling is entirely disconnected.** `mssqlRetry`
-(`engine/mssql_retry.go:12`) plus the classification family in `engine/mssql_errors.go` —
-`isMSSQLDeadlock`, `isMSSQLDuplicateKey`, `isMSSQLSnapshotError`, `isMSSQLTimeout`,
-`isMSSQLRetryable`, `isMSSQLConnectionError`, `mapMSSQLError` — have **no production
-caller.** `engine/mssql_retry_test.go` covers this code thoroughly: deadlock retry,
-exponential backoff, context cancellation, retry exhaustion, roughly a dozen cases, all
-passing. They pass because they are the only callers.
-
-The consequence is a support claim: **on SQL Server, a deadlock is a hard error today.**
-Nothing retries it. MySQL has the same shape in `engine/mysql_store.go` with
-`isDuplicateKeyError` and `isLockWaitTimeout`. Given that Phase 4 positions MySQL and SQL
-Server as the differentiator no competitor covers, this needs wiring before that claim is
-made in public.
-
-This is the thesis in one artifact: **a passing test suite is not evidence that code runs.**
-Coverage measures what tests reach, and tests reached all of this.
-
-The guard is baselined rather than zeroed — 89 pre-existing entries are recorded in
-`scripts/deadcode-baseline.txt` and new ones fail the build. Clearing the backlog is
-follow-up work; the point is to stop it growing.
-
----
-
 ### 2.10 `TestIntegrationWorkflowMaxDuration` never tested the duration limit — FIXED
 
-Both defects are closed, and both open questions the plan raised are answered. The headline
-finding is that **there was no `DurableCall` ABI bug**: the fixture was malformed and the
-host was right to refuse it. What made that take so long to see is a real defect, and it is
-fixed too.
-
-**What actually happened.** `testdata/basic`'s `LongRunning` looped on
-`h.DurableCall("noop", "", "")` — an **empty operation name**. Service and operation names
-are validated against `[a-zA-Z0-9._-]+` (`engine/memory.go` `validServiceName`), so the
-host rejected every call on the spot and the loop body never ran. The fixture now calls
-`h.DurableCall("noop", "Noop", "{}")` and loops as intended.
-
-**Why it read as an ABI failure.** The refusal was returned as the raw `errBadParam`
-sentinel, `0xFFFFFFFF_00000001`. That value is fine for a decoder reading a low byte, but
-`cleat_call`'s guest adapter splits the word 24/32/8, so the sentinel lands across all
-three fields at once:
-
-```
-responseLen   = 0xFFFFFF     (16 MB, against a 64 KB response buffer)
-callErrorCode = 0xFF000000   (4278190080 — not a cleat.CallErrorCode at all)
-errCode       = 1
-```
-
-So a malformed argument surfaced as `[4278190080] cleat_call: error 1 (0=unknown
-1=timeout ...)` — a **retryable timeout**, carrying a `Code` matching no enum member, so
-every `switch e.Code` on the guest falls through. The oversized `responseLen` was contained
-only by the generated `callErrorMessage`'s bounds check; that check was all that stood
-between this and a 16 MB out-of-range read.
-
-Fixed by `badParamDurableCall` (`engine/memory.go`), which encodes the refusal in the
-layout the caller actually decodes: `responseLen=0`, `callErrorCode=CallErrorInvalidRequest`,
-`errCode=1`. Applied to the five host functions whose guest adapter uses that layout —
-`cleat_call`, `cleat_call_retry`, `cleat_call_heartbeat`, `plugin_call`,
-`plugin_call_streaming` — on **both** backends.
-
-The message the author reads was wrong in the same way, and separately. The generated
-`callErrorMessage` was handed `errCode` — the bits 0-7 "did it fail" flag, which is 1 for
-essentially every failure — but printed it against a legend enumerating **`CallErrorCode`**
-values. So the two halves of the same error contradicted each other:
-
-```
-before:  durable call noop.Noop: [4278190080] cleat_call: error 1 (... 1=timeout ...)
-after:   durable call noop.Noop: [4]          cleat_call: error 4 (... 4=invalid ...)
-```
-
-The three durable-call adapters now pass `callErrorCode`, pinned by
-`TestHostAdapterReportsCallErrorCodeNotErrCode` and verified end-to-end through a real WASM
-guest. Note the legend is pasted into ~20 other adapter defs where there is no
-`callErrorCode` field at all — for those it is decorative and misleading, and removing it is
-cosmetic follow-up rather than a correctness fix.
-
-**A second, independent defect found on the way: empty payloads were refused.**
-`readWasmStringValidated` treats length 0 as invalid, and every caller turns that into
-`errBadParam`. But emptiness is a property of a payload, not a defect in it. A durable call
-that takes no arguments could not be made at all. `readWasmPayload` / `wasmtimeReadPayload`
-now accept a zero length (still rejecting negative lengths and out-of-range pointers), and
-the durable-call family uses them for request payloads. Names and keys keep the strict rule.
-
-**The duration limit now has an honest test.** The workload is a new fixture,
-`testdata/spin`: a pure arithmetic loop that allocates nothing and never enters the host.
-`LongRunning` is the wrong workload even when fixed — each durable call records an event
-costing ~2.9 KB of host memory, so spinning one for a second means ~170k calls and ~500 MB
-of heap. Epoch interruption instruments loop backedges, so it fires on a pure loop just the
-same. The test asserts the trap *type* (`wasmtime.Interrupt`) rather than matching
-substrings, and — the assertion that would have caught the original bug — that execution
-actually ran for essentially the whole budget, rather than returning early. Verified by
-falsification: with a short workload it fails with `got nil after 159ms`.
-
-Two incidental fixes were needed to get there:
-
-- `engine/executor.go` rebuilt trap errors from `resolveWasmTrap`'s enriched string with
-  `%s`, discarding the cause, so `errors.Is`/`errors.As` stopped working for exactly the
-  errors carrying the most information. `wasmTrapError.Unwrap` exists to preserve that
-  chain; one layer was throwing away what the other kept. Both sites now wrap properly.
-- The test no longer touches PostgreSQL. It inserted `workflow_defs` / `workflow_instances`
-  rows that `Execute` never read, which put it in the "needs a database" class for nothing.
-
-**Answering the two open questions.**
-
-1. *Is the `cleat_complete` closure warning the same defect?* **No, and it never could be.**
-   `cleat_complete` and `cleat_poll_work` are emitted unconditionally by `GenerateImports`
-   (`wasm/generator.go`) and are absent from the `hostFunctions` table `AnalyzeUsage` walks,
-   so `usage.Used` can never contain them — the warning fires on every Go-target build.
-   Confirmed independently: it fires on `testdata/spin`, which uses **zero** host functions.
-   Runtime host-function registration does not consult the closure at all; it rescans the
-   built binary (`wasm.NeededEnvImports`, `engine/backend_wasmtime.go`). The warning is a
-   universal false positive. Silencing it is cosmetic follow-up, not a correctness issue.
-2. *Is the wazero `clock_time_get` nil-pointer panic the same bug?* **No — two bugs.** It
-   does not reproduce on `LongRunning` at any iteration count, with or without the bad
-   arguments. It reproduces only under `CGO_ENABLED=0`, inside the Go wasip1 allocator
-   (`mallocgc` → `nanotime1`) during a **successful** `PluginCall` in a different workflow.
-   It is the same panic `TestPluginCalls_Wasm_Go` and `TestPluginCalls_MultiDB` already skip
-   on, and therefore the same thing `scripts/skip-budget.txt` records as
-   `plugin-harness/multi-db 1`. wazero `v1.11.1-0.20260508161934-e6dd6c0c144f`.
-
----
-
-### 2.11 Three store tests failed against a database live workers were mutating — fixed; one part still open
-
-`TestClaimWorkflow`, `TestClaimSkipLocked` and `TestListWorkflows_ByStatus` failed in the
-cluster CI job with `ClaimWorkflow returned nil`, `first claim returned 10, want 3` and
-`expected at least 1 result`.
-
-The instrumentation added for this (`describeClaimState`) answered it on its first
-failure, which is the whole argument for adding it rather than guessing:
-
-```
-claim state: workflow_instances total=10 ready=0 ready+due=0 running=10
-claim state:   task_queue="default" status="running" count=10
-first claim returned 10, want 3
-```
-
-The job ran `go test ./engine/...` against the cluster's *own* database, so the store
-tests -- which create rows and then assert on exactly those rows -- shared a table with
-four live workers claiming from it. The tests are correct; the setup was not. They assume
-exclusive ownership of the table, which nothing sharing a database with a running cluster
-can have. The job now gets a database of its own.
-
-Two further findings fell out of that:
-
-- **`go test ./engine/...` runs two packages in parallel against one database.** `engine`
-  and `engine/testutil` each build the schema in, and wipe rows from, whichever database
-  they are given. On the cluster's already-migrated database this was invisible; against a
-  fresh one they raced on the DDL in `001_schema.sql` (a duplicate key on
-  `pg_extension_name_index`, and a deadlock) and deleted each other's fixtures. The job
-  now runs with `-p 1`.
-
-- **A claim for 3 returned 10 — still unexplained.** All ten rows were left `running`, so
-  one statement updated all of them. The suspected mechanism is that PostgreSQL
-  re-evaluates an UPDATE's WHERE clause against the new version of a concurrently-modified
-  row (EvalPlanQual), and re-evaluating `id IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)`
-  re-executes the sublink. `ClaimWorkflows` and `ClaimStickyWorkflows` now select
-  candidates in a CTE, which is evaluated once.
-
-  **The suspected mechanism has now been ruled out, and the observation is still
-  unexplained.** Investigated as "Start here" item 3; see the correction below.
-
-#### Correction — the EvalPlanQual explanation is wrong
-
-The CTE was introduced on the theory that an EvalPlanQual recheck re-executes the
-`id IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)` sublink, letting a claim for n update
-more than n. That is not what PostgreSQL does. Two independent reasons, on 16.14:
-
-- **The sublink is executed once.** It is uncorrelated, so the planner pulls it up into a
-  semi-join. `EXPLAIN (ANALYZE, VERBOSE)` of the old form shows the candidate subquery as
-  the *outer* side of a nested loop, `loops=1`, unique-ified through a HashAggregate, with
-  a primary-key index scan on the inner side at `loops=n`. The UPDATE visits exactly the
-  candidate rows. EvalPlanQual can only keep or drop a row the UPDATE already visits — it
-  cannot add rows to the update set. Same plan shape at 10, 400 and 5010 candidate rows.
-- **The candidates are already locked.** The sublink's `LockRows` node takes `FOR UPDATE`
-  on them before the outer UPDATE reaches them, so no concurrent transaction can modify
-  those rows mid-statement. There is nothing for EvalPlanQual to fire on.
-
-Empirically, against the old form: **24,000 claims**, 12 concurrent claimers, 10 disrupting
-transactions committing mid-claim — including ones mutating `status`, which the sublink's
-own WHERE clause reads — over candidate sets of 40, 400 and 5010 rows. The largest number
-of rows any single claim ever returned was exactly the limit. This covers the scenario 2.11
-listed as untried ("a competing UPDATE inside an explicit transaction that commits
-mid-claim") and the two it listed as already tried.
-
-Per the plan's own instruction, the CTE is **not** upgraded to "fixed". It stays, because
-it is evaluated once by construction rather than by argument, but the comments in
-`store_lifecycle.go` and `claim_limit_concurrency_test.go` that asserted the false
-mechanism are corrected. A plausible-sounding wrong explanation in a comment is worse than
-no explanation: it stops the next person looking.
-
-**What actually caused "asked for 3, got 10" is still unknown.** Ruled out: the SQL in
-either form; `ShardedStore` (the test builds a plain `NewPostgresStore`, and its truncation
-predates the failure); a retry wrapper (there is none). If it recurs, capture the statement
-and its plan rather than reasoning from the row count.
-
-**A recurrence is now capturable, and no longer strands rows.** Nothing in the claim path
-checked the invariant, so an over-claim was indistinguishable from a normal claim and the
-instruction above could not be followed — the evidence was gone by the time anyone looked.
-`enforceClaimLimit` (`engine/claim_limit.go`) is wired into all six claim entry points
-(`ClaimWorkflows` and `ClaimStickyWorkflows` × three dialects) via each store's
-`finishClaim`. On violation it logs at ERROR with dialect, worker, limit, returned count and
-the excess IDs, and **releases the excess back to `ready`** rather than truncating it away.
-
-Truncation is the part that matters: silently dropping the excess is exactly what made §2.17
-a bug rather than a nuisance — the rows stay `running` with `assigned_to` set, held by a
-worker that will never execute them, until the lease expires.
-
-This is a backstop for a defect believed fixed, not a fix, and it is deliberately cheap: a
-length comparison on a path that already allocates a slice per claim. `limit <= 0` is not
-enforced, since no caller means "claim zero rows" by it.
-
-- Tests: `engine/claim_limit_invariant_test.go`. The decision is unit-tested including the
-  2.11 shape (limit 3, ten rows) and an assertion that the log line carries what a diagnosis
-  would need. The release is tested against a real PostgreSQL by claiming ten rows and
-  handing `finishClaim` a limit of 3 — the trigger is not reproducible (24,000 attempts
-  failed to make the SQL over-claim), so what is tested is the recovery. With the release
-  replaced by truncation it fails with seven rows left `status="running"
-  assigned_to=worker-over-claim`.
-
----
-
-### 2.12 The conditional-skip audit — 231 → 184, and three defects behind the skips
-
-Two guards now exist, both shaped after `scripts/check-test-only-code.sh`:
-
-- **`scripts/check-skips.sh`** — every skip site in the tree is baselined as
-  `<package><TAB><enclosing func><TAB><count>`. A new skip, or a growing count, fails the
-  lint job. A count that *falls* never fails; it prints a note to tighten the baseline.
-- **`scripts/check-skip-budget.sh`** — the runtime half, since a static scan cannot see
-  that a skip *fired*. Per-job ceilings in `scripts/skip-budget.txt`, checked against
-  `go test -json` output. A missing report, or one with no test results at all, fails:
-  a job that died before producing output has skipped everything.
-
-The three `Warn on skipped tests` steps are gone. A warning on a green job is not a signal
-— the multi-DB Postgres bug (1.13) emitted one for its entire existence.
-
-**The grep in §1 undercounted, in both directions.** 225 included four prose comments
-discussing `t.Skipf`, and missed the two `unavailable := t.Skipf` sites where the skip is
-taken as a *function value* — which is the shape of the already-fixed `TestDB` pattern
-itself — plus five in `engine/testutil/`, which is not a `_test.go` file but decides
-whether every database-backed test in the repo runs. Real total: 231. The guard counts all
-three forms.
-
-**Three defects were behind skips, each found by converting one.**
-
-1. **MySQL had no unauthenticated-query rejection at all.** `TestUnauthenticatedQueryRejection`'s
-   type switch had no `case *MySQLStore`, so the MySQL subtest fell to `default:` and
-   skipped — unconditionally, every run, including in `multi-db-ci.yml`'s `test-mysql` job,
-   which exists to test MySQL. Writing the case proved the gap against a real MySQL 8.4:
-   `GetActiveInstanceCountsByVersion` with an empty `tenantID` returned **no error**,
-   just an empty result. `MSSQLStore` has had this check since it was written
-   (`setSessionContext`); MySQL had **90 references to `s.tenantID` and not one guard**.
-   Since MySQL also has zero RLS policies (1.7), nothing else was scoping the query.
-   `requireTenant` added and applied to that one method. **The other ~89 call sites are
-   not audited** — that is 1.7, and the helper's doc comment says so explicitly rather
-   than letting its presence imply the problem is solved.
-
-2. **33 skips that could not mean what they said.** `engine/backend_wasmtime_test.go` and
-   `..._limits_test.go` are `//go:build cgo`; the `!cgo` stub returning "requires CGO" is
-   unreachable from them. So `t.Skipf("wasmtime backend not available")` could only fire
-   on a genuine init failure of the **primary** backend — silently deleting the whole
-   suite, including the four regression tests for the runaway-workflow hang (1.5). Now
-   `t.Fatalf`.
-
-3. **`TestVetPython` was vacuous in every environment.** `runVetPython` exits 0 when it
-   finds violations, so the test's `if err != nil { skip }` never meant "vet found the
-   violation" — it meant `cleat_sdk` was unimportable, which it always was, because
-   `findPythonSDKDir()` resolves relative to a cwd that is never the repo root under
-   `go test`. The non-skip branch asserted nothing either. It now sets `PYTHONPATH` and
-   asserts `PY002` is present; deliberately breaking the expectation was confirmed to fail it.
-
-**Found on the way, not fixed — these are the honest leftovers.**
-
-- **Six of the seven `tests/` suites are run by nothing.** `tests/cluster`, `integrity`,
-  `upgrade`, `soak`, `scale` and `cross-language` are named by no workflow file. The
-  `cluster` CI job runs `./engine/...`, not `tests/cluster/`; `e2e-cross-language.yml`
-  runs `./engine/...` with a `-run` filter, not `tests/cross-language/`. Only
-  `tests/plugin-harness` is actually executed. Note this contradicts `f4322e3`'s claim
-  that `tests/integrity` and `tests/cross-language` "now actually execute" — they execute
-  if run, and nothing runs them.
-- **`check-ci-package-coverage.sh` exempted `tests` on the stated grounds that its suites
-  are "driven by their own dedicated CI jobs".** That was an assertion, not a check, and
-  it was false — the same rot the guard exists to catch, inside the guard's own exemption
-  list. It now verifies the claim, with the six unwired suites baselined.
-- **`plugin-harness-ci.yml`'s `test-multi-db` job is entirely vacuous.** It provisions
-  PostgreSQL, MySQL and SQL Server, sets all three DSNs, and runs exactly one test —
-  `TestPluginCalls_MultiDB` — whose first statement is an unconditional `t.Skip` for a
-  wazero v1.11.1 nil-Sys panic. Budgeted at 1 so it is recorded rather than breaking the
-  build; drop to 0 when the skip goes.
-- **`Makefile`'s `test-cluster` ran `./internal/host/...`**, a path dead since `3eeb74e`.
-  Repointed at `./engine/...` with `-p 1`, matching the CI job.
-- **`TestMySQLStoreFactory` gates on `CLEAT_TEST_MYSQL` and then ignores its value**,
-  hardcoding `tcp(127.0.0.1:3306)`. Harmless in CI, but the same config-drift family.
-- **`plugins/scheduler`'s `TestNextRun_Feb29NonLeapYear`** is not environment-conditional
-  at all: `nextRun`'s one-year search window cannot find a Feb 29 more than a year out.
-  A real scheduler gap wearing a skip's clothing.
-
-**What did not change, deliberately.** The 112 `mysql` and 112 `mssql` dialect subtests
-that skip in the `engine` job are correct: that job configures PostgreSQL only. A skip is
-allowed to mean "nobody asked for this" and nothing else — that is the whole rule, and
-the budget of 347 records those rather than hiding them.
-
-Budgets: core 0, engine 347, cluster 347, wasm 1, internal 0, plugins 1, support 2,
-commands 4, fuzz 1, plugin-harness/multi-db 1.
-
-**Two were wrong on the first CI run, in a way worth recording.** Both were seeded from a
-local machine and both failed for the same underlying reason — a budget is a claim about
-an environment, and the environment used to measure it was not the one it describes.
-
-- `engine` was seeded at 343 from a darwin machine that had **cargo installed**. The four
-  `TestRustWorkflow*` tests passed there and skip on the runner, which installs Rust only
-  for the `internal` matrix entry. The measuring environment was *richer* than CI, so the
-  budget was too tight. Corrected to 347.
-- `cluster` was seeded at 0 on the reasoning that a job bringing up four workers and a
-  database has provisioned everything its tests need. That was wrong about *which* tests
-  it runs: it executes `go test ./engine/...`, which carries the entire MySQL and SQL
-  Server suite, and the job configures neither. Corrected to 347. Cluster health is
-  asserted by the healthcheck and restart-count steps, not by the skip count.
-
-Neither run had a single test *failure* — `passed=2984 failed=0` in both. The guard did
-exactly what it was built to do on its first outing, which was to disagree with a number
-somebody had asserted without observing.
-
----
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.13 Empty-string payloads were refused across the rest of the ABI — FIXED
 
-`readWasmStringValidated` treats a zero length as invalid and every caller turns that into
-`errBadParam`, so any parameter whose emptiness is meaningful was unreachable from a guest.
-2.10 fixed the durable-call family; this closes the rest. 15 parameters on each backend, 30
-call sites, all verified against the handler code rather than assumed.
-
-**Three documented behaviours were unreachable.** These are the real bugs, not tidiness:
-
-| host function | parameter | what could not be asked for |
-|---|---|---|
-| `cleat_set_scope` | `objectType` + `instanceKey` | clearing the scope (`scope.go` `freshSetScope`) |
-| `cleat_list_state` | `prefix` | listing every key — `HasPrefix(k, "")` is true for all `k` |
-| `cleat_child_workflow_in_schema` | `targetSchema` | the local-schema fallback (`children.go`) |
-
-**And one live backend divergence.** `cleat_child_workflow_in_schema`'s `parentClosePolicy`
-was guarded by an inline `policyLen > 0` on wazero and read unconditionally on wasmtime, so
-the same guest call succeeded on one backend and was refused on the other. Its sibling
-`cleat_child_workflow_with_options` guarded it on both, which is what makes this a slip
-rather than a decision.
-
-`readOptionalServiceName` / `wasmtimeReadOptionalServiceName` handle the name-shaped cases:
-they relax *only* emptiness, so a non-empty value still has to pass the `[a-zA-Z0-9._-]+`
-check. The payload-shaped cases use the existing `readWasmPayload` / `wasmtimeReadPayload`.
-
-The remaining 12 parameters are payloads whose handlers store or forward them opaquely:
-`cleat_log` message (`DurableLog` does not read it at all), `cleat_set_state` /
-`set_query_state` value, `cleat_uuid` seed (concatenated into a hash input),
-`cleat_side_effect` result (compared with `!=` on replay, so `""` round-trips),
-`cleat_resolve_promise` value, `cleat_reject_promise` errMsg, the three signal payloads,
-`cleat_send` / `cleat_schedule_invoke` requestJSON, `cleat_defer` description, and
-`cleat_fetch` body / headersJSON.
-
-Two things checked specifically because they looked like they could break, and did not:
-
-- Signal payloads reach a JSONB column, but `engine/store_signals.go` already wraps a
-  non-JSON payload with `if !json.Valid(...)`, so `""` becomes the valid JSON literal `""`.
-- `cleat_fetch`'s `headersJSON` is never unmarshalled — because **there is no production
-  implementation of the `Fetcher` interface in this repo at all**. Only test stubs
-  implement it, and nothing in `cmd/`, `cleat/` or `plugins/` wires one. So the earlier
-  claim that "a GET with no body is impossible" was true but moot: the whole `cleat_fetch`
-  path is unimplemented in production. The ABI boundary is fixed regardless, so a future
-  `Fetcher` starts from a correct contract — but that implementation should guard its own
-  `json.Unmarshal(headersJSON)` against `""`.
-
-**Four tests asserted the bug as the contract** and were updated, not worked around: the two
-`cleat_log` empty-message tests now assert acceptance, and the `cleat_side_effect` and
-`cleat_defer` rows were removed from the all-zero-argument error tables (as `cleat_list_state`
-was). Every other `errBadParam` assertion still holds, because those calls fail on an earlier,
-still-required name parameter before reaching the relaxed one.
-
-New ABI-level tests drive the *registered host function* with a real `execSession` behind it
-for all three unreachable behaviours, and all three fail against the unfixed readers. That
-level matters: `TestSetScopeEmptyClears` had asserted the clear-scope path for a long time by
-calling `execSession.SetScope` directly, and passed throughout, because the gap was in the
-seam between wrapper and handler rather than in either one. See 2.16.
-
----
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.14 `cleat_json_parse` / `cleat_json_stringify` panicked on the primary backend — FIXED
 
-A nil-pointer dereference, reachable from real guest code: the Rust SDK calls
-`cleat_json_parse` (`crates/cleat-sdk/src/host_calls.rs`).
-
-`engine/wasmtime_hostfuncs_core.go` passed a literal `nil` for the `api.Module` argument
-and `engine/lifecycle.go` immediately called `m.Memory()` on it. The `nil` was not the bug —
-it is the wasmtime convention, documented on `writeResult` in `engine/flush.go`: the memory
-travels in the context instead. The bug is that these two handlers were the **only** ones
-that read their own input out of guest memory rather than being handed a decoded string,
-so they were the only ones that reached for `m` on a path where it is deliberately nil.
-
-Fixed by removing the anomaly rather than patching around it. `JsonParse` and
-`JsonStringify` now take `input string`, each backend's wrapper reads it the way every
-other wrapper already does, and output goes through the context-aware `writeResult`. wazero
-was unaffected throughout (it passes a real module) and stays that way.
-
-**Why nothing caught it.** `TestClosure_JsonParse` and `TestClosure_JsonStringify` existed
-and passed. They installed `mockHostHandler`, whose `JsonParse` returns a canned `0` without
-touching memory, wrote an input into guest memory, and then asserted only that the result
-was `0` — which is what the mock returns unconditionally. They would have passed if the
-function did nothing at all, and they did pass while every real call crashed. Both are
-deleted and replaced by tests that drive the real `execSession` through the same
-registration path and assert on the bytes written back, on **both** backends. Verified by
-falsification in the honest direction: the new wasmtime test panics against the unfixed
-handler.
-
----
-
-### 2.15 Durable call failures are all classified as retryable timeouts — ✅ **FIXED** (with a bounded residual, 2.35)
-
-`cleat.CallErrorCode` exists "so callers can distinguish retryable from non-retryable errors
-without string-matching" (`cleat/runtime.go`). It cannot currently do that. Every failure
-path in `engine/durablecalls.go` and `engine/heartbeats.go` packs `callErrorCode = 1`,
-which the guest enum reads as `CallErrorTimeout` — **retryable** — whether the underlying
-cause was a service error, a replay divergence, a cancellation or an ambiguous result.
-`engine/plugins.go` packs `0` (`CallErrorUnknown`) throughout instead.
-
-So a permanent failure is reported to workflow authors as a transient one.
-
-**Fixed 2026-08-04.** The failures the *engine* produces are now classified honestly, and the
-one that cannot be is documented rather than guessed at.
-
-Non-retryable now (`CallErrorUnknown`), where all three used to say "timeout, try again":
-
-| Failure | Why retrying is wrong |
-|---|---|
-| Workflow cancelled | Repeating the call is the one thing the caller must not do |
-| Replay divergence | A bug in the workflow code; the same call diverges again |
-| Ambiguous outcome | The call **may already have succeeded** — retrying risks a duplicate side effect |
-| No plugin registry configured | A deployment problem; no amount of retrying supplies one |
-
-A call the *service* failed keeps reporting as retryable (`CallErrorUnavailable`), deliberately:
-the previous hardcoded `CallErrorTimeout` was retryable too, so nothing branching on
-`Retryable()` changes behaviour. What changed is that it stops claiming the call timed out when
-the engine has no idea what happened.
-
-**A separate defect found on the way.** `DurableCallWithRetry` returned
-`packDurableCallResult(0, 0, 0)` when the context was cancelled mid-backoff. The generated
-guest adapter branches on `errCode != 0`, so an abandoned retry loop reached the workflow as a
-**successful call with an empty response**. It now returns the context error with a nonzero
-`errCode`.
-
-### 2.35 The call error class is not persisted, so replay cannot recover it — 🔶 **PARTLY FIXED**
-
-> **Residual sharpened 2026-08-04 by reading the call sites, not the type.** The entry below
-> says the seven `ErrorCode` values have no path into history. True, but the reason is more
-> specific than "nobody supplies them", and there is a live trap in it.
->
-> `CleatError` *does* participate in retry classification — it implements `RetryableError`, and
-> `isDefinitelyNonRetryable` honours it through `errors.As`. So the plumbing is not missing. What
-> collapses the taxonomy is the implementation:
->
-> ```go
-> func (e *CleatError) Retryable() bool { return e.Code == ErrTransient }
-> ```
->
-> Seven values, one bit, and **everything that is not `ErrTransient` reads non-retryable** —
-> including `ErrUnknown`, which is the zero value, so a `CleatError` built without a `Code` is
-> silently non-retryable.
->
-> ~~**The trap is `ErrTimeout`.** It reads non-retryable, while the doc comment on the
-> constructor immediately above it says `NewTransientError` creates a retryable error "(DB
-> connection, **timeout**)". So the package documents timeouts as the canonical retryable case
-> and classifies `NewTimeoutError` as non-retryable. An external caller gets the opposite of
-> the documented behaviour, silently.~~
->
-> **Wrong — retracted the same day, and kept here because it went out in a commit message
-> before I checked.** The two are different concepts, not one concept classified two ways. The
-> const block says so directly:
->
-> ```go
-> ErrTransient  // retryable (DB connection, timeout)
-> ErrTimeout    // execution timeout
-> ```
->
-> `ErrTransient` covers a *network or database* timeout, which is retryable. `ErrTimeout` is
-> the *workflow execution* timeout — the run exceeded its budget — and retrying that is exactly
-> wrong. `TestCleatError_Retryable` already asserts it, deliberately, in a subtest named
-> "timeout is not retryable". The classification is correct and there is nothing to fix.
->
-> I reached the wrong conclusion by reading the two doc comments and not the word *execution*
-> in the second. The tell I ignored was the existing test: a behaviour with a subtest asserting
-> it is a decision, and the first question is what the decision was for, not whether it looks
-> odd next to its neighbour.
->
-> **In-repo only three of the six constructors are ever produced:** `NewPermanentError` and
-> `NewTransientError` (`cmd/cleat-worker/setup.go`, the shipped `ServiceCaller`) and
-> `NewCancelledError` (`engine/mssql_errors.go:229`). `NewTimeoutError`, `NewAmbiguousError` and
-> `NewRetriesExhaustedError` have no non-test caller. That is *not* a dead-code finding —
-> `scripts/check-test-only-code.sh` deliberately does not flag exported identifiers in library
-> packages, and says so — but it does mean the effective in-repo taxonomy is three-valued, and
-> that the three unused codes have never been exercised against a real retry decision.
->
-> **What actually survives**, once the retraction above is taken out: the observations are
-> right and the conclusion drawn from them was not. `Retryable()` does collapse seven values to
-> one bit; `ErrUnknown`, the zero value, does read non-retryable — which is the conservative
-> choice for a durable engine and defensible rather than defective; and three of the six
-> constructors do have no in-repo producer, which is explicitly *not* a dead-code finding.
->
-> None of that is a new defect. It is a more precise restatement of what this entry already
-> said: **the full code has no path into history.** That remains the real residual, and it is
-> schema work — persisting `error_code` per event so replay can recover the classification
-> rather than re-deriving one bit of it. There is no cheap version hiding underneath.
-
-
-The constraint that bounds §2.15, and it is a real one rather than an excuse.
-
-A recorded call failure is replayed from `EventRecord.Err` — a bare string. If the fresh path
-derived a classification the replay path cannot, **the same step would be retryable on the
-first run and non-retryable on the replay of it**: a determinism bug in the engine, introduced
-in the name of better error reporting. So every *recorded* failure — a plain call failure,
-retries exhausted, a plugin function erroring — has to use one constant on both paths, and
-does. `TestFreshAndReplayAgreeOnRecordedFailure` drives both and requires them to match.
-
-The same constraint forces the streaming plugin family to a single code: every stream failure,
-whether a missing registry, a blocked guard or the function itself erroring, is recorded by
-`recordStreamError` and comes back through one replay site that cannot tell them apart.
-
-**The fix is to persist the code alongside the event** (a column, or a field in the `payload`
-JSONB). Once it round-trips, classification at the `ServiceCaller` boundary becomes possible —
-a caller that knows a 404 from a connection reset can say so, and replay will agree.
-
-Deliberately **no mechanism was added ahead of that**. An interface nothing can call yet is
-how `engine/flush.go` accumulated 350 lines of durability code that had never run (§1.4,
-`docs/durable-call-intent-design.md`).
-
-**Update (2026-08-04): the constraint was hiding a live contradiction, and that half is
-fixed.**
-
-Re-reading the call path to scope this turned up something the section had missed. There *is*
-already a machine-readable signal a `ServiceCaller` can send — `RetryableError`
-(`engine/types.go:301`), a duck-typed `Retryable() bool` that any error may implement — and
-`isDefinitelyNonRetryable` (`engine/helpers.go:89`) already honours it. `DurableCallWithRetry`
-calls it at `durablecalls.go:249` and **breaks out of the retry loop** when it says the error
-is not worth retrying.
-
-And then reported `callFailureCode` — `callErrorUnavailable`, which `cleat.CallError.Retryable()`
-says **is** retryable.
-
-So the engine stopped retrying *because the error was non-retryable*, and then told the
-workflow the call was retryable. A workflow branching on `err.Retryable()`, which is precisely
-what the guest SDK offers, goes on to retry a call the engine has already decided against. For
-a non-idempotent operation a caller marks non-retryable, that is a duplicate side effect.
-Demonstrated before fixing:
-
-```
-engine stopped retrying because the error is non-retryable; it reported code 2, Retryable()=true
-```
-
-This could not be fixed without the persistence this section is about — that part of the
-original diagnosis was exactly right. Classifying on the fresh path alone would make the same
-step non-retryable on the first run and retryable on the replay of it.
-
-**What landed.** `EventRecord.ErrNonRetryable`, round-tripped through the `payload` JSONB
-(`error_non_retryable`, written only when true). Both paths now go through one function,
-`recordedFailureCode`, so they cannot drift.
-
-Three deliberate choices:
-
-- **A bool, not a code.** It is the only part of a classification the engine can populate
-  today, and a code field's zero value would collide with `callErrorUnknown`, which is a real
-  class. The bool's zero value is instead exactly the pre-2.35 behaviour.
-- **No migration.** `payload` is JSONB. Adding a key changes checksums only for newly written
-  events; existing rows keep their stored payload and still verify.
-- **`callErrorUnknown`, not `callErrorInvalidRequest`.** Both are non-retryable, which is the
-  bit that matters — but the engine does not know *why* the caller declined the retry, and
-  `InvalidRequest` would tell the author their request was malformed, a claim nothing supports.
-
-Backward compatibility is asserted, not assumed: `TestLegacyFailureReplaysAsRetryable` drives a
-payload with no such key and requires `callFailureCode`, because every call failure in every
-existing `event_history` was written that way and upgrading must not change the retry behaviour
-of workflows already in flight. `TestFreshAndReplayAgreeOnNonRetryableFailure` replays *the
-event the fresh run actually recorded* rather than a hand-written literal — a literal would let
-the test agree with itself while the writer and reader disagreed. Each of the three arms was
-verified by breaking it.
-
-**Update: the worker's caller now classifies.** With the persistence in place, the
-`ServiceCaller` boundary was unblocked, and `dbServiceCaller` (`cmd/cleat-worker/setup.go`) —
-the only `ServiceCaller` that runs in production — now returns `engine.NewPermanentError` /
-`engine.NewTransientError` instead of bare `fmt.Errorf`. No new type: `CleatError` already
-implements `Retryable()`, which is what `isDefinitelyNonRetryable` consults.
-
-The case that mattered: **`service %s.%s not configured: no endpoint registered`**. A workflow
-calling a service that does not exist burned its entire retry budget on a deployment mistake,
-with backoff, and was then told the failure was retryable — so a workflow with its own retry
-wrapper went round again, forever. It now fails on the first attempt and says so.
-
-Classified as permanent: unconfigured service, malformed `http.fetch` request (bad JSON,
-missing URL, invalid method), and 4xx from bench-svc except 408 and 429. Transient: connection
-failures, response-read failures, and every 5xx. Error messages are byte-identical to before,
-because operators grep them and `DurableCallWithRetry`'s `nonRetryableErrors` patterns match on
-substrings.
-
-Two things pinned deliberately. `TestHTTPFetchNetworkFailureStaysRetryable` guards the
-over-eager direction — marking a failed connection permanent would turn every transient blip
-into a failed workflow. `TestHTTPFetchStatusIsNotAnError` pins that `http.fetch` reports the
-status *in its response*, so a 404 is a successful call that returned 404 and is not classified
-at all.
-
-**Still open: the richer taxonomy, and plugins.** `Retryable()` is one bit; `ErrorCode` carries
-seven values that still have no path into the event history, because
-`EventRecord.ErrNonRetryable` is a bool by design (see above). The streaming plugin family (`recordStreamError`) remains
-single-coded, and `PluginError` is still a bare string on replay.
-
----
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.16 Most wasmtime closure tests cannot see a handler defect — FIXED
 
-Generalising the previous item. 34 of the 48 `TestClosure_*` tests in
-`engine/backend_wasmtime_test.go` follow the shape that hid 2.14: call the host function
-with valid arguments and assert the result is `0`, against `newClosureSetup`'s
-`mockHostHandler{ret: 0}`.
-
-They are not worthless — a wrapper that wrongly rejected its arguments would return
-`errBadParamInt64` and trip the assertion, so they do cover registration, the import
-signature, and the wrapper's validation on the happy path. What they cannot cover is the
-**handler**, because the mock replaces it. Any defect on the far side of that boundary —
-2.14's nil dereference being the extreme case — is invisible to them.
-
-The fix is not to rewrite all 34. It is to decide, per host function, whether its handler
-behaviour is worth a test that drives the real `execSession`, as
-`json_hostfuncs_cgo_test.go` now does, and to stop treating the `TestClosure_*` family as
-evidence that a host function *works*. It is evidence that it is *wired up*.
-
-**Resolution (2026-08-04).** Kept the family and made "wired up" an assertable claim
-instead of an unasserted one. `mockHostHandler` now records every call — method name and
-the string arguments the wrapper decoded out of guest memory — and `closureSetup.expectCall`
-asserts the wrapper reached the handler *exactly once*, as the *expected method*, carrying
-the strings the test wrote. 36 assertion sites converted.
-
-This is deliberately narrower than driving the real `execSession`, which stays the right
-tool for handler *behaviour* (§2.14's JSON pair, §2.18's ID functions). What it does cover
-is the seam these wrappers exist to implement, and it now fails on all three ways that seam
-breaks. Verified by injecting each defect against the new assertions:
-
-| Injected defect | Result |
-| --- | --- |
-| wrapper returns without calling the handler | `want exactly 1 host-handler call to HasState, got 0` |
-| `keyLen-1` when decoding the argument | `HasState received string args ["cleat_has_stat"] … do not include "cleat_has_state"` |
-| wrong handler method wired up (`DeleteState` for `HasState`) | `host handler saw DeleteState, want HasState` |
-
-A fourth attempt — deleting the `h.HasState(...)` call outright — left `key` unused and
-failed to *compile*, which proves nothing about the assertion. That trap is worth naming:
-a revert that breaks the build is an inconclusive check, not a passing one.
-
-**It immediately found 10 live defects — in the tests themselves.** Ten call sites passed a
-byte length that did not match the string literal they had just written into guest memory,
-so the handler was receiving truncated or NUL-padded arguments: `{"p":"load"}` sent as 11
-bytes, `{"in":"put"}` as 14, `["run-1","run-2"]` as 19, `cleanup-task` as 13. Every one had
-been wrong since the test was written and passed the whole time, because `got == 0` is what
-the mock returns no matter what arrives. That is the §2.16 shape producing bad tests rather
-than hiding bad code, and it is the more insidious direction — those tests were *reporting*
-coverage of argument decoding while feeding the decoder inputs nobody had checked.
-
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.17 `ShardedStore` claims `limit` from *every* shard and strands the excess — ✅ **FIXED**
 
-**Regression coverage extended to a real database, 2026-08-04.** The guard for this was
-`TestShardedClaimWorkflows_DoesNotOverClaim`, which runs entirely against `mockShardStore`:
-its claim function returns exactly the budget it is handed and increments a counter the test
-itself maintains. §2.17's evidence, though, was a *database* observation — rows left
-`running` with no executor.
-
-`TestShardedClaimWorkflows_DoesNotOverClaim_RealDB` closes that gap: three real
-`PostgresStore`s on separate pools, the real claim SQL under `FOR UPDATE SKIP LOCKED`
-contention, and the assertion §2.17 actually made — how many rows the database is left
-holding, not how long the returned slice is. Reinstating the bug reproduces the original
-numbers exactly:
-
-```
-a claim for 2 left 6 row(s) 'running' in the database but returned 2 --
-4 row(s) are claimed by a worker that will never run them
-```
-
-**Honest scope.** The mock test also fails against that mutation, so this is not filling a
-hole the old test left for the classic bug. What it adds is that the assertion is tied to row
-state rather than to a counter the test controls, and that the real store is exercised
-respecting the budget it is given — the shape of §2.11's still-unexplained "asked for 3, got
-10", which a mock returning exactly `l` cannot represent. The three shards share one database,
-so it exercises the fan-out and row state, not cross-database routing.
-
-Found while investigating 2.11. This is a real over-claim, in production-wired code
-(`cmd/cleat-worker/main.go`), and it is not the one 2.11 was chasing.
-
-`ShardedStore.ClaimWorkflows` and `ClaimStickyWorkflows` fan out to every shard
-concurrently, passing each the **full** limit, then truncate the merged slice:
-
-```go
-wfs, err := sh.Store.ClaimWorkflows(ctx, workerID, limit)   // every shard, full limit
-...
-if len(all) > limit { all = all[:limit] }                   // return value respects it
-```
-
-The return value respects the limit, which is why nothing noticed. But the rows beyond it
-have already been updated to `status='running'` with `assigned_to` set to this worker, in
-their own shards, in committed transactions. Truncating the slice does not release them:
-they are claimed by a worker that will never run them, and stay that way until the lease or
-heartbeat reaper takes them back.
-
-With S shards and limit L, one poll can strand up to `(S-1)*L` workflows. Demonstrated by
-`TestShardedClaimWorkflows_OverClaimsAcrossShards`: 3 shards, limit 2 — **claimed 6,
-returned 2, stranded 4**. A single-shard deployment cannot hit it, which is presumably how
-it survived.
-
-Note that `ClaimWorkflows`'s own doc comment describes the correct behaviour — "Iterates
-through shards collecting workflows until limit is reached or shards exhausted" — which is
-not what the code does.
-
-Options, none of them free:
-
-1. **Sequential with a decreasing budget**, which is what the doc comment already claims.
-   Correct and simple; serialises the fan-out on a hot polling path.
-2. **Apportion the limit** across shards up front. Keeps the parallelism; under-claims when
-   ready work is skewed towards one shard.
-3. **Release the excess** after truncation. Keeps both, but needs an unclaim path and is
-   racy against the reaper.
-
-**Fixed 2026-08-04 with option 1**, plus a rotating start.
-
-The latency objection to sequential does not survive being looked at. Claims stop as soon as
-the budget is spent, so **when work is available the first shard usually fills it and the loop
-does one round-trip — fewer than the fan-out made**. The serial walk only happens when the
-shards are empty, which is exactly when claim latency does not matter. The parallel fan-out was
-optimising the case that matters least, and paying for it with stranded work in the case that
-matters most.
-
-Option 2 (apportion up front) under-claims under skew: a worker with capacity 10 across 5
-shards asks each for 2 and gets 2 when only one shard has work. Option 3 (release the excess)
-needs an unclaim path and races the reaper.
-
-The one thing sequential does introduce is unfairness — a fixed starting shard drains shard 0
-first and starves the tail under sustained load. `claimCursor` rotates the starting shard per
-call; `TestShardedClaimWorkflows_RotatesStartingShard` covers it.
-
-Both `ClaimWorkflows` and `ClaimStickyWorkflows` now go through one `claimAcrossShards` helper,
-which also **errors** if a shard returns more than its budget rather than truncating. Truncating
-is what hid this for its whole existence, and the excess is already committed in that shard.
-
-`TestShardedClaimWorkflows_DoesNotOverClaim` asserts on what reached the *stores*, not on what
-was returned — the returned slice was correct throughout, which is precisely why the defect was
-invisible. Restoring the fan-out:
-
-```
---- FAIL: TestShardedClaimWorkflows_DoesNotOverClaim/ClaimWorkflows
-    6 rows were claimed in the shard databases but only 2 were returned:
-    4 workflows are 'running' with no executor until the reaper takes them back
---- FAIL: TestShardedClaimWorkflows_DoesNotOverClaim/ClaimStickyWorkflows
-    (the same)
---- FAIL: TestShardedClaimWorkflows_RotatesStartingShard
-```
-
----
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.18 Six wasmtime host functions fetch the guest memory and throw it away — ✅ **FIXED (and it was 18, not 6)**
 
-> **Confirmed empirically, then fixed across the whole class.** A closure test with the real
-> `execSession` installed shows `cleat_workflow_id` returning raw result
-> `0x0000000000000000` — errCode 0, zero bytes written. Success by every signal except the
-> one that matters.
->
-> **The count in the heading was wrong.** Auditing all four `wasmtime_hostfuncs*.go` files
-> rather than just `_core.go` found **31 wrappers with an out-parameter, 19 of them missing
-> `ctxWithMem`**. Eighteen were fixed; the nineteenth, `cleat_poll_work`, is a true negative
-> — it copies into `buf` itself and never calls a handler.
->
-> Fixing only the six named here would have repeated §2.14's mistake exactly: fix the known
-> instances, leave the siblings, wait for the next round to find them. That has now happened
-> twice (§2.14 → §2.18), so the fix is the class, not the list.
->
-> **Guard added**, because runtime coverage cannot close this cheaply — most of these
-> handlers need a live engine, store and session to reach their write path, which is
-> precisely why the existing closure tests settle for `mockHostHandler` (§2.16).
-> `TestWasmtimeWrappersPassGuestMemory` is a source-level invariant instead: any wrapper with
-> an out-length parameter must either pass `ctxWithMem` or write into `buf` directly. It
-> covers all 31 today and every wrapper added later. Verified non-vacuous by reverting one
-> wrapper and watching it name the regression.
->
-> Note on method: a first pass tried to decide which handlers write by transitively chasing
-> `writeResult` through the call graph. It returned "18 of 18 affected", which is not a
-> result — a depth-6 walk through shared helpers implicates nearly everything, including
-> error-only paths. That was discarded in favour of the empirical test plus a uniform rule.
->
-> The original framing is kept below.
-
-#### Original framing
-
-Found while assessing PR #208 for salvage (see the salvage register below), and verified
-directly against `develop`. **This is the same defect as §2.14, in six more places.** §2.14
-fixed `cleat_json_parse` / `cleat_json_stringify`; nobody checked whether the pattern
-repeated. It does.
-
-`writeResult` (`engine/flush.go:17`) writes through one of two channels: a raw buffer
-carried in the context under `wasmMemBufKey{}`, or `m.Memory()`. On the wasmtime backend
-`m` is **always** `nil` — memory travels in the context. So a wasmtime wrapper that does not
-call `ctxWithMem` cannot write anything, and `writeResult` returns `(0, nil)` — no error.
-
-`engine/wasmtime_hostfuncs_core.go` gets this right for the two functions §2.14 touched:
-
-```go
-callCtx := ctxWithMem(context.Background(), buf)          // line 365, cleat_json_parse
-return h.JsonParse(callCtx, nil, input, ...)
-```
-
-and wrong for six others. `registerCleatWorkflowID` is the clearest case — it fetches the
-buffer purely to test the error, then discards it:
-
-```go
-_, _, err := callerMemBuf(caller)                          // line 111: buf dropped on the floor
-if err != nil {
-    return errBadParamInt64
-}
-return h.WorkflowID(context.Background(), nil, uint32(idPtr), uint32(idMaxLen))
-```
-
-The handler then does `written, _ := s.writeResult(ctx, m, ...)` with `ctx` empty and `m`
-nil, gets `0`, and returns `packSimpleResult(0, 0)` — **errCode 0, length 0. Success, no
-bytes.** Affected, all in `engine/wasmtime_hostfuncs_core.go`:
-
-| line | host function | guest sees |
-|---|---|---|
-| 97 | `cleat_uuid` | empty string |
-| 113 | `cleat_workflow_id` | empty string |
-| 129 | `cleat_run_id` | empty string |
-| 229 | `cleat_get_state` | empty value — indistinguishable from "unset" |
-| 310 | `cleat_list_state` | empty key list |
-| 343 | `cleat_fetch` | empty response body |
-
-`cleat_get_state` is the one to worry about: an empty read is not obviously wrong to a
-workflow, so this corrupts state-machine logic silently rather than failing.
-
-**Why no test caught it — this is §2.16 again.** `TestClosure_UUID`, `TestClosure_WorkflowID`
-and friends (`engine/backend_wasmtime_test.go:1950-2100`) install
-`b.handler = &mockHostHandler{ret: 0}` and assert only `got != 0`. The mock returns a canned
-value without touching memory, so the assertion is vacuous — exactly the shape §2.14
-documented for the JSON pair. §2.16 is now less a hypothesis than a confirmed generator of
-defects; it should be promoted above the remaining Phase 2 work.
-
-Fix: `callCtx := ctxWithMem(context.Background(), buf)` at all six sites, and port the
-`json_hostfuncs_cgo_test.go` pattern — real `execSession`, assert on the bytes written — to
-cover them. The patch applies cleanly to `develop` today.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.19 `WorkflowID` / `RunID` decode the wrong half of the result word — ✅ **FIXED**
 
-> **Fixed.** `wasm/adapter_metadata.go` now generates `uint32(uint64(result) >> 32)` for both,
-> matching the thirteen sibling entries and `decodeExportResult` in `engine/memory.go:259`,
-> which is unambiguous: `errCode = low 32, actualLen = high 32`.
->
-> `Version` and `MinVersion` keep `uint32(result)` and are **not** defects — those host
-> functions return a plain value, not a packed length/errCode word.
->
-> `TestWasmtimeIDResultLayout` pins the ABI contract on the host side, so flipping the layout
-> fails a test rather than silently un-fixing the generated adapter. The masking noted below
-> is real and was the reason to do both halves in one change.
->
-> The original framing is kept below.
-
-#### Original framing
-
-Independent of §2.18, same two functions, and it would still bite after §2.18 is fixed.
-
-`packSimpleResult` (`engine/memory.go:247`) packs the written length into the **high** 32
-bits and the error code into the low bits:
-
-```go
-v = uint64(extra[0]) << 32
-return int64(v | uint64(errCode))
-```
-
-Every generated adapter in `wasm/adapter_metadata.go` decodes that correctly —
-`uint32(uint64(result) >> 32)` — at thirteen call sites. Two do not:
-
-```go
-"idLen := uint32(result)",                    // lines 338 and 346
-"return unsafe.String(&idBuf[0], int(idLen))",
-```
-
-`uint32(result)` takes the **low** half, which is the error code. On success that is 0, so
-the guest builds a zero-length string: `WorkflowID()` and `RunID()` return `""` on the
-Go target regardless of what the host wrote. The file's own thirteen-to-two split is the
-proof — no reasoning about the ABI is needed, just contrast.
-
-Fix is two characters of shift, but it should land with a guest-level assertion, not just a
-host-level one; §2.18 and §2.19 mask each other, and fixing either alone leaves
-`WorkflowID()` still returning `""`. That mutual masking is probably why neither was noticed.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.20 Child-workflow spawning inserts an event with no `tenant_id` — ✅ **CONFIRMED and FIXED**
 
-> **Reproduced, then fixed.** Driving the real `PostgresStore` through
-> `testutil.OpenPostgresRLSTestDB` (a role that is neither superuser nor table owner)
-> against PostgreSQL 16.14, `StartChildWorkflowAtomic` fails outright:
->
-> ```
-> start child workflow atomic: insert event:
-> pq: new row violates row-level security policy for table "event_history" (42501)
-> ```
->
-> Rejected, not defaulted — the schema reasoning below held. A raw-SQL A/B isolated the
-> cause to the single column: the `store_children.go` form is rejected, the
-> `store_event_write.go` form with `tenant_id` supplied returns `INSERT 0 1`, everything
-> else identical.
->
-> **It is live in the shipped multi-tenant configuration.** `StartChildWorkflowAtomic`
-> calls `setRLSOnTx(tx)` at `store_children.go:55` — it activates the tenant GUC on the
-> very transaction whose next insert omits the column. `migrations/postgres/005_app_role.sql:68`
-> makes `cleat_app` `NOSUPERUSER … NOBYPASSRLS` and non-owning, `deploy/postgres/900-app-role.sh`
-> raises if it ever gains an exemption, and `ci.yml:810` connects cluster workers as it.
->
-> **Correction to the caveat below:** it says "an owner connection … inserts the zero-UUID
-> successfully." That is wrong. `FORCE ROW LEVEL SECURITY` exists precisely to apply RLS to
-> the table owner, so an owner connection with `cleat.tenant_id` set is rejected too. Only a
-> **superuser** bypasses, forced or not. The exemption is narrower than this entry claimed.
->
-> **Why CI never saw it** — the two halves miss each other. Test DSNs point at `postgres`,
-> a superuser, so RLS is a no-op in every existing test; and the one deployment that does
-> enforce RLS has no child-workflow coverage at all (`grep -rl child tests/cluster/` is
-> empty).
->
-> Fix: `tenant_id` added as `$9`, matching the sibling insert. Safe — `setRLSOnTx` already
-> refuses an empty `tenantID`, so the insert is unreachable with one. Regression test at
-> `engine/store_children_rls_test.go`, verified to fail against the unfixed code and pass
-> with the fix. The `engine` package is green.
->
-> The original framing is kept below.
-
-#### Original framing
-
-`StartChildWorkflowAtomic` (`engine/store_children.go`) does two inserts in one transaction.
-The first passes `tenant_id` (`$7 = s.tenantID`, line 70). The second, into `event_history`
-at line 91, **omits the column entirely**:
-
-```go
-INSERT INTO event_history (workflow_id, step, event_type, child_name, child_input,
-                           run_id, created_at, checksum)
-```
-
-Every other `event_history` insert in the engine passes it — `engine/store_event_write.go:46`
-and `:86`, `engine/flush.go:41`. This one site is the outlier.
-
-The consequence is more severe than "the row gets the default zero-UUID". `event_history`
-carries `FORCE ROW LEVEL SECURITY` (`migrations/postgres/001_schema.sql:549`) and the policy
-is declared `FOR ALL USING (tenant_id = cleat.assert_tenant_set())` with **no explicit
-`WITH CHECK`** (line 515). PostgreSQL reuses the `USING` expression as the `WITH CHECK`
-expression when the latter is omitted, so the insert does not quietly land as zero-UUID —
-**it is rejected**, the transaction aborts, and child-workflow spawning fails outright for
-any connection using a real tenant role.
-
-Two caveats before treating this as a P0. It bites only where RLS is actually in force —
-a non-owner tenant role with `cleat.tenant_id` set; an owner connection or single-tenant
-deployment inserts the zero-UUID successfully and merely leaves an unattributed row. And
-this is reasoned from the schema, not from a run. **Confirm it with an actual RLS-enabled
-child spawn before ranking it** — that reproduction is the first task, not the fix. Note
-§1.10 records that RLS was bypassed in every shipped configuration until recently, which
-would explain how this survived: the enforcement that exposes it is new.
-
-The fix is one column and one parameter. The test is the valuable part, and there is
-currently no test that spawns a child workflow under an RLS-enforcing connection.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.21 `applyPostgresSchemaFile` races itself, and its doc comment says it cannot — ✅ **FIXED**
 
-> **Reproduced deliberately, then fixed.** Eight goroutines applying the schema to one
-> database fail without serialisation and pass with it. Fixed with a session-level advisory
-> lock on a pinned `*sql.Conn` — pinned because advisory locks belong to a *session*, and
-> `database/sql` hands out arbitrary pooled connections, so locking via `db` can take the
-> lock on one connection and fail to release it on another.
->
-> **The race has more than one symptom.** This entry records only
-> `duplicate key value violates unique constraint "pg_extension_name_index"`, from
-> `CREATE EXTENSION`. The reproduction also produces
-> `pq: tuple concurrently updated (XX000)`, from `CREATE OR REPLACE FUNCTION`. Same
-> non-atomic-DDL cause, different loser. Anyone matching on the first string alone will
-> conclude the second is a new bug.
->
-> That nearly cost something: the non-vacuity check was `grep -c "duplicate key value"`,
-> which returned 0 and briefly looked like the test had gone vacuous. The test was fine —
-> the *check* was too narrow. **Grep for FAIL, not for a remembered error string.**
->
-> Doc comment corrected, per this entry's own instruction — it now says the file is safe to
-> reapply *sequentially* and explicitly not concurrently.
->
-> The original framing is kept below.
-
-#### Original framing
-
-Caught flaking CI on the docs PR that recorded §2.18–§2.20. Same commit, three Multi-DB CI
-runs, **success / failure / success** — so it is a flake, and the kind that erodes exactly
-the signal Phase 0 spent effort restoring.
-
-```
-kvstore_multidb_test.go:36: apply migrations/postgres/001_schema.sql:
-  pq: duplicate key value violates unique constraint "pg_extension_name_index" (23505)
-```
-
-`engine/testutil/schema.go:73-79` claims the file is safe to reapply:
-
-> All statements in it are idempotent (CREATE ... IF NOT EXISTS, CREATE OR REPLACE,
-> DROP POLICY IF EXISTS ... CREATE POLICY), so it is safe to call more than once against
-> the same database
-
-That is true **sequentially and false concurrently**, which is the only way CI runs it.
-PostgreSQL's `IF NOT EXISTS` forms are not atomic: two sessions both observe the object
-missing, both insert the catalog row, and one loses on the unique index.
-`CREATE EXTENSION IF NOT EXISTS pgcrypto` (`migrations/postgres/001_schema.sql:24`) is the
-one that lost here, but `CREATE TABLE IF NOT EXISTS` has the same hazard.
-
-`go test ./plugins/...` compiles and runs distinct packages in parallel (`-p` defaults to
-NumCPU), and every one of them points at the same `CLEAT_TEST_POSTGRES` database, so several
-call `applyPostgresSchemaFile` at once against one server. Nothing serialises them.
-
-Options: take a Postgres advisory lock around the apply (`pg_advisory_lock` on a fixed key,
-released on close) — smallest change, keeps one shared database; or give each package its
-own database; or apply the schema once in the workflow before the test step and stop
-applying it per-package. The advisory lock is probably right: it is three lines, needs no CI
-change, and matches the existing "one shared DB" assumption.
-
-Whatever the fix, **correct the doc comment**. A comment asserting a safety property the
-code does not have is worse than no comment, and it is why the failure reads as mysterious
-rather than obvious.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.22 `flushCallIntent` omits `tenant_id` too — ✅ **FIXED** (latent, no production caller)
 
-Found by auditing every PostgreSQL insert into an RLS-protected table after §2.20, on the
-theory that a defect shape appearing twice is worth grepping for rather than waiting for.
-`engine/flush.go:202` had the identical omission — `event_history` insert, no `tenant_id`,
-with `e.tenantID` available and used twice elsewhere in the same file.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-It is **latent, not live**: `flushCallIntent` has no production caller. Every reference is
-either its own definition or `flush_test.go`. Wired up as-is it would have reproduced
-§2.20's failure exactly.
+### 2.23 `StartChildWorkflowInSchema` — same omission, but a one-line fix would be a false fix — ✅ **FIXED**, and ⬛ **SUPERSEDED 2026-09-02: the feature was removed (§3.78)**
 
-Worth noting how it would have been caught, which is to say not at all: the five
-`TestFlushCallIntent_*` tests **pass identically before and after** adding the column. They
-assert the call returns `nil` against a mock, never the SQL. That is §2.16's pattern for the
-third time — a test suite that cannot distinguish the fix from the defect.
-
-The rest of the audit came back clean. All other inserts into the eight RLS-protected tables
-(`store_lifecycle.go`, `store_signals.go`, `store_promises.go`, `store_versioning.go`,
-`adaptive_flush.go`, `db.go`, and the remaining `store_event_write.go` sites) pass
-`tenant_id` correctly. `workflow_defs` is the deliberate exception — its policy also admits
-the zero-UUID default tenant, so the omissions in `store_deployment.go:161` and
-`versioned_loader.go:176` are by design, not defects.
-
-### 2.23 `StartChildWorkflowInSchema` — same omission, but a one-line fix would be a false fix — ✅ **FIXED**
-
-`engine/store_children.go:169` omits `tenant_id` from its `<targetSchema>.workflow_instances`
-insert, with `s.tenantID` available and unused — superficially §2.20 again. **It is not, and
-patching the column alone would be worse than leaving it.**
-
-The function calls `s.db.QueryRowContext` directly: no transaction, no `setRLSOnTx`, so
-`cleat.tenant_id` is never set on the session. If the target schema's table carries the same
-policy, `cleat.assert_tenant_set()` raises *"cleat.tenant_id is not set"* **regardless of
-whether the column is supplied**. Adding `tenant_id` would look like a fix, change nothing,
-and retire the entry.
-
-Severity is genuinely unknown and should not be guessed at. Nothing in this repository
-creates `workflow_instances` outside `public` — all five migrations open with
-`SET search_path = public`, and the RLS policies are attached to the public tables only. So
-whether the target schema's table even has a `tenant_id` column or a policy depends on
-provisioning that lives outside this repo. Either it has both (the insert fails), or it has
-neither (the insert succeeds and cross-schema children are simply unattributed). Establish
-which before ranking.
-
-One thing that is settled: there is no session-variable leak. `setRLSOnTx` uses
-`set_config(..., true)`, which is transaction-local, and this function opens no transaction —
-so a pooled connection cannot carry a previous tenant's value into it.
-
-The real question underneath is a design decision, not a mechanical one: **which tenant owns
-a cross-schema child** — the parent's, or the target schema's? Until that is answered there
-is no correct value to pass. Reachable from `engine/children.go:230` whenever a workflow
-requests a target schema.
-
-**Resolution (2026-08-04).** The design question was answered by the project owner: the child
-belongs to the **target schema's** tenant. The motivating case is two microservices, and the
-child runs as part of the destination service, so it is the destination's workflow.
-
-Both halves of the analysis above held up when finally exercised. Reverting to the original
-code against a real peer schema fails with
-
-```
-pq: cleat.tenant_id is not set -- tenant context required for RLS-scoped query (P0001)
-```
-
-— i.e. exactly as predicted, the missing column was never the operative problem, and a
-column-only patch would have changed nothing.
-
-**The mapping.** Peer schemas are configured by name alone (`--peer-schemas`), with no tenant
-attached, so the engine has no direct way to learn the destination's tenant. It does have a
-convention: `admin.create_tenant_role` names each tenant's schema
-`'tenant_' || replace(tenant_id::text, '-', '_')`. `tenantIDForSchema` inverts that. Where it
-succeeds, `StartChildWorkflowInSchema` opens a transaction, sets `cleat.tenant_id` to the
-**target** tenant, and writes that value into the column.
-
-**Where it fails — an operator-chosen name like `svc_billing` — nothing is written**, and the
-destination table's own `DEFAULT` applies. This is deliberate. Writing the *parent's* tenant
-would be the false fix in its second form: it makes the insert succeed while filing one
-service's workflow under another service's tenant, which is a silent cross-tenant
-misattribution in a system whose entire isolation story is `tenant_id`. If the destination
-enforces RLS, the insert is refused instead — the correct outcome for "we cannot say who this
-belongs to".
-
-**On coverage — this is the part worth keeping.** The only existing tests
-(`TestGap_StartChildWorkflowInSchema{,_Error}`) use a mock DB matching on the string
-`"gen_random_uuid"`. They never touch a database, so they could not observe tenant
-attribution at all, and passed throughout. Writing a real one exposed why: **nothing in the
-repo provisions a peer schema.** Every migration pins `SET search_path = public`, and
-`admin.create_tenant_role` creates `tenant_<uuid>` as an empty namespace whose grants all
-point back at `public.*`. So the cross-schema feature writes to
-`<schema>.workflow_instances`, a table this project never creates. The new test builds one by
-hand — tables, `FORCE ROW LEVEL SECURITY`, and the same fail-closed policy — which is the
-only way to run this path at all today.
-
-The regression test is verified against **both** wrong implementations: the original (fails
-with the `assert_tenant_set` error above) and the plausible false fix (fails with *"child was
-attributed to the PARENT tenant"*). A test that only caught the first would have ranked the
-false fix as correct.
-
-**Still open:** peer-schema provisioning itself. `GetChildResultInSchema` reads back from the
-peer schema with no tenant context either, and would hit the same wall against an
-RLS-enforcing destination; it is untested for the same reason. Neither the `k8s/`, `charts/`
-nor compose deployments configure `--peer-schemas`, so the feature has no end-to-end exercise
-anywhere.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.24 The wasmtime epoch ticker races `Close` — ✅ **FIXED**
 
-Found the honest way: it failed CI on PR #227, on a change that has nothing to do with
-wasmtime.
-
-```
-panic: object has been closed already
-  wasmtime-go.(*Engine).IncrementEpoch
-  engine.(*wasmtimeBackend).startEpochTicker.func1
-```
-
-`Close` did `close(b.epochStop)` and then called `b.engine.Close()` immediately. Closing the
-channel is a *request* to stop, not an acknowledgement that the goroutine has stopped: one
-already committed to the `case <-ticker.C` branch goes on to call `IncrementEpoch` on a
-freed engine. The window is a single scheduling quantum once every `epochTickInterval`
-(50ms), which is why it reads as a rare flake rather than a bug.
-
-Fixed with an `epochDone` channel the goroutine closes as it returns, and a `<-b.epochDone`
-join in `Close` before `engine.Close()`.
-
-**Note on the test, because the first one was worthless.** It called `NewWasmtimeBackend`,
-`Close`, then checked whether `epochDone` was closed — and **passed with the join removed**.
-Once `epochStop` closes, the real goroutine almost always gets scheduled and exits before the
-check runs, so it measured scheduler luck, not ordering. The replacement stands a stub
-backend in for the ticker so the wait is directly observable: `Close` must block, then
-return once the test closes `epochDone`. Verified to fail without the join.
-
-That is the second vacuous assertion caught in this session by the same habit of removing
-the fix and re-running. Both would have passed review.
-
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.25 Nothing prevents a red PR from merging into `develop` — ✅ **FIXED** 2026-08-04
 
-`develop` has branch protection enabled, and it enforces almost nothing:
-
-```console
-$ gh api repos/cleat-team/cleat/branches/develop/protection --jq 'has("required_status_checks")'
-false
-$ gh api repos/cleat-team/cleat/branches/develop/protection --jq 'has("required_pull_request_reviews")'
-false
-$ gh api repos/cleat-team/cleat/rulesets
-[]
-```
-
-No required status checks, no required reviews, no rulesets. `gh pr merge` will merge a PR
-whose entire test suite is failing, and **`mergeStateStatus == CLEAN` carries no CI
-information at all** — it reports the absence of conflicts, and reads CLEAN while every job
-is still red or has not started.
-
-This is the structural version of the Phase 0 finding. §0 is about CI reporting green while
-the `engine` package does not compile — a signal that lies. This is about the signal not
-being *connected to anything* even when it tells the truth. Both have the same effect:
-merges are gated by whoever is watching, not by the pipeline.
-
-**How it surfaced.** A merge-on-green watcher merged PR #227 on the condition
-`pending == 0 && fail == 0 && total > 30`. It fired at 31 checks when the full set for that
-PR was 42, because GitHub registers checks progressively and `pending == 0` routinely means
-"not created yet" rather than "finished". The next PR made the pattern unmistakable —
-`pending` was 0 at *every* poll while the total climbed 20 → 30 → 31 → 32 → 34 → 36. The
-merge happened to be fine (all six workflow runs on the merge commit succeeded), but that
-was luck.
-
-**Resolution.** `develop` now requires 16 status checks, with `enforce_admins: true` — a hard
-gate that binds the repository owner too. Verified live after applying:
-
-```console
-$ gh api repos/cleat-team/cleat/branches/develop/protection \
-    --jq '{contexts: (.required_status_checks.contexts|length), enforce_admins: .enforce_admins.enabled, strict: .required_status_checks.strict}'
-{"contexts":16,"enforce_admins":true,"strict":false}
-```
-
-Required: `Lint`, `lint-go`, the eight `Test Go (<pkg>) on 1.26` matrix jobs,
-`Cluster Integration Tests`, `Build`, `Fuzz Tests`, `Vulnerability Check`,
-`Developer Certificate of Origin`, `Validate branch name`.
-
-Deliberately **not** required: everything that reaches an external registry — Java/TeaVM,
-the Plugin Harness layers, MySQL/SQL Server, and the Rust/Python/AssemblyScript SDK
-integrations. The Maven Central 403 that reddened `Layer 2 — WASM Integration` earlier the
-same day would otherwise have blocked every merge until a third party recovered, with no
-second maintainer to unblock it. `Benchmarks` and `Coverage` are excluded for a harder
-reason: they are skipped or push-to-main only, and a required check that never runs blocks
-its PR forever. `strict: false` so a busy day does not force a rebase per PR.
-
-**One trap, caught before it bit.** Required contexts are **check-run (job) names, not
-workflow names.** The workflow is called "Branch Naming Check"; the context is
-`Validate branch name`. Requiring the former — under `enforce_admins: true` — would have made
-every PR in the repository permanently unmergeable, including by the owner. It was caught by
-diffing the proposed list against the check-runs actually present on three real PRs of
-different shapes (docs-only, code, CI-config), which is the check to repeat before adding any
-context: path filters can skip jobs, so a docs-only PR is the one that finds the gap.
-
-Automation that merges should still gate on **workflow runs for the head SHA** rather than
-the check-name rollup — GitHub is now the real gate, but a watcher that reports honestly is
-still worth having:
-
-```sh
-SHA=$(gh pr view "$PR" --json headRefOid -q .headRefOid)
-runs=$(gh run list -c "$SHA" --limit 100 --json status,conclusion,name)
-busy=$(echo "$runs" | jq '[.[] | select(.status != "completed")] | length')
-```
-
-and require the run count to hold steady across several consecutive polls. Do not hardcode
-an expected total: path filters mean different PRs trigger different workflows (#227 saw 36
-checks, #229 saw 42), so any fixed threshold either fires early or never fires.
-
-
-### 2.26 The SQL Server error classifier matched error numbers as substrings — ✅ **FIXED** (wiring still OPEN)
-
-**This corrects §2.8's recommendation.** §2.8 found `mssqlRetry` and the whole
-`engine/mssql_errors.go` classification family had no production caller, and concluded they
-should be wired in before the MySQL/SQL Server support claim is made publicly. Wiring them
-**as they stood would have been worse than leaving them dead.** The classifier was wrong in
-both directions at once.
-
-**Wrong direction 1 — permanent errors classified as retryable.** Every predicate matched
-the decimal error number as a bare substring of the error text, and SQL Server error text
-carries workflow IDs, row numbers, column names and interpolated business data:
-
-```go
-strings.Contains(msg, "258")    // isMSSQLTimeout
-strings.Contains(msg, "3960")   // isMSSQLSnapshotError
-strings.Contains(msg, "2627")   // isMSSQLDuplicateKey
-```
-
-Verified against the old implementation:
-
-| Error | Classified as | Retryable? |
-| --- | --- | --- |
-| `permission denied for workflow "wf-2589abc"` | timeout (258) | **yes** |
-| `Invalid column name 'col3960'.` | snapshot conflict (3960) | **yes** |
-| `invalid column value at row 26270` | duplicate key (2627) | — |
-| `workflow input rejected: amount 2601 exceeds limit` | duplicate key (2601) | — |
-
-`isMSSQLConnectionError` was broader still: `strings.Contains(msg, "connection")` made
-`invalid connection string: missing database` — a configuration error that fails identically
-on every attempt — retryable. Had `mssqlRetry` been wired up, each of these would be retried
-until the budget was exhausted, converting a clear failure into a slow one and consuming the
-retry budget a real deadlock needed.
-
-**Wrong direction 2 — real errors missed.** This only became visible on testing against the
-type the driver actually returns. `mssql.Error{Number: 258}` renders as
-`mssql: Wait operation timed out.` — the digits `258` appear **nowhere** in the text. So the
-substring matcher missed genuine server-reported timeouts and in-memory OLTP write conflicts
-(41302 and friends) entirely, while catching fabricated ones. It also missed
-`driver.ErrBadConn`, `io.ErrUnexpectedEOF` and `*net.OpError`, none of which mention
-"connection" in their text.
-
-**Why the tests did not catch it.** `engine/mssql_errors_test.go` feeds only `fmt.Errorf`
-strings — never an `mssql.Error`. The tests and the implementation shared the same wrong
-model, that a SQL Server error *is* text, so they agreed with each other perfectly. This is
-the §2.16 shape in a different package: a test that confirms the implementation rather than
-the requirement.
-
-**The fix.** Classify on `mssql.Error.Number` via `errors.As`, on `driver.ErrBadConn` /
-`net.OpError` / `net.Error.Timeout()` for transport faults, and on `errors.Is` for context
-errors. Text matching survives only as a fallback for errors that lost their type through a
-wrapper, and every remaining phrase is distinctive — no bare numbers, no bare `"connection"`
-or `"duplicate"`. `context.Canceled` is now explicitly **not** retryable: cancellation is a
-decision, not a fault.
-
-**The wiring — first increment done, 2026-08-04.** The distinction below is what made it
-possible to wire anything at all without a per-transaction idempotency audit:
-
-- **Deadlock (1205) and snapshot conflict (3960, 41301–41325)** guarantee the server rolled
-  the transaction back. Replaying is sound even when the work is not idempotent.
-- **Timeout (258) and dropped connections** leave the outcome *unknown* — the commit may have
-  succeeded with only the acknowledgement lost. Blindly replaying a non-idempotent statement
-  can double-apply it, which for a workflow engine means a duplicated side effect.
-
-So `mssqlRetry` cannot simply be wrapped around all 113 `ExecContext`/`QueryContext` sites,
-and it should not be wrapped around the transaction boundaries either without deciding, per
-transaction, which of those two categories it tolerates.
-
-**The way through is to only retry the rollback-guaranteed set.** If the server has
-definitively undone the transaction, replaying it is sound *whether or not the work is
-idempotent* — so that retry needs no per-transaction analysis and is safe at any boundary.
-Unknown-outcome errors stay hard failures, exactly as before. `withRollbackGuaranteedRetry`
-in `engine/mssql_retry.go` is that narrower wrapper; `mssqlRetry` itself remains unwired and
-correctly still baselined, because it gates on `isMSSQLRetryable`, which includes the
-unknown-outcome class.
-
-Wired into `ClaimWorkflows` and `ClaimStickyWorkflows` — the highest-contention transactions
-in the engine and where a deadlock is most likely. Budget is 2 retries at 20ms/40ms
-(`mssqlTxRetries`/`mssqlTxRetryDelay`): at most 60ms of added latency on a path that
-previously failed outright. A deadlock victim claimed nothing, so the replay is a clean
-retry.
-
-**The count in this section was wrong.** There are ~20 transaction boundaries in the MSSQL
-store, not 8.
-
-**Second increment, 2026-08-04:** the five terminal writes — `CompleteWorkflow`,
-`FailWorkflow`, `MoveToDeadLetterQueue`, `ContinueAsNew`, `FinalizeWorkflowSegment` — now use
-the same wrapper. A deadlock on any of them previously lost the workflow's terminal write and
-surfaced to the worker as an ordinary error, which `recordTerminalFailure` then reports and
-drops (§1.2). These are the highest-consequence boundaries after the claim: the claim losing
-a race costs one poll cycle, a terminal write losing one costs the record of the workflow
-having finished.
-
-Wrapping them does **not** disturb the fence. `ErrFenceLost` is returned before the commit
-and is not an `mssql.Error`, so it falls through the rollback-guarantee check and is returned
-on the first attempt — retrying it would be actively wrong, since the fence is lost because
-another worker legitimately owns the workflow and that does not change on a second attempt.
-`TestWithRollbackGuaranteedRetry_DoesNotRetryFenceLost` pins that, and the pre-existing
-`TestFinalizeWorkflowSegment_ZombieWriterFence/mssql` covers the refactor end to end.
-
-Post-commit cleanup is inside the retried closure and that is safe: a rollback-guaranteed
-error means the commit failed, so the function returned before reaching the cleanup.
-
-**Third increment, 2026-08-04 — every MSSQL boundary outside §2.60's files.** `mssql_operations.go`
-(6), `mssql_deployment.go` (1), `mssql_schedules.go` (3) and the remaining `mssql_lifecycle.go`
-boundaries (`ReleaseWorkflow`, `RequestCancellation`, `Heartbeat`, `StartNewRun`,
-`enforceParentClosePolicy`). Two are worth calling out on consequence rather than volume:
-`ReleaseWorkflowConcurrencyKeys`, where a lost deadlock leaves a concurrency key held until
-its TTL and blocks every later run using that key, and `TerminateWorkflow`, where one leaves
-a run that the HTTP layer already answered 409 for still runnable — the §1.2 defect fixed in
-#263, reachable again through a different door.
-
-**Still to do:** `mssql_events.go` and `mssql_signals_promises.go` (9 boundaries), which
-§2.60 (#283) is changing. Do those after it lands rather than into a conflict.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.50 Parent close policy fails silently on all three dialects — ✅ **FIXED**
 
-Found while wiring §2.26. `enforceParentClosePolicy` is what applies a *closing* parent's
-policy to its children: `TERMINATE` children are failed, `REQUEST_CANCEL` children get the
-cancellation flag. It discarded every error it produced.
-
-- **PostgreSQL** (`store_lifecycle.go`): neither `tx.ExecContext`'s nor `tx.Commit`'s return
-  value is assigned, in either of its two transactions.
-- **MySQL** (`mysql_lifecycle.go`): same, and it does not use a transaction at all — two bare
-  `s.db.ExecContext` calls with the results dropped.
-- **MSSQL**: same shape; **fixed** here, since a retry wrapper is meaningless on a function
-  that cannot see its own failures.
-
-The function is void and its callers treat it as best-effort post-commit cleanup, so nothing
-downstream notices either. When it fails — a deadlock against a worker claiming one of those
-children is the obvious way — **the children of a terminated parent keep running**, and there
-is no log line, no metric and no error anywhere in the system.
-
-This is the §1.2 shape one level further out: not an unchecked `RowsAffected`, but an
-unchecked everything.
-
-**All three dialects fixed, 2026-08-04.** Each checks its errors and logs what it could not
-do, naming the consequence rather than the statement — *"children of a closed parent are
-unaffected by its close policy"*. MSSQL additionally retries on a rollback-guaranteed error
-(§2.26); PostgreSQL and MySQL have no equivalent retry infrastructure and a deadlock there is
-still a hard failure, now at least a visible one. **MySQL also gains the transaction it never
-had**: two bare `s.db.ExecContext` calls meant TERMINATE children could be failed while
-REQUEST_CANCEL children went unflagged, with nothing to indicate a partial application.
-
-**The feature itself was never tested, and it works.** Nothing in the repo exercised parent
-close policy on any dialect — the only existing references assert this SQL is *absent* on the
-fence-lost path, which says nothing about whether it does the right thing when it should run.
-`TestEnforceParentClosePolicy` now covers all three policies at once against every configured
-backend, so a change that handles one and breaks another cannot pass. Confirmed able to fail:
-pointing the TERMINATE predicate at a policy name that matches nothing fails on all three with
-`TERMINATE child status = "ready", want "failed"`.
-
-**Observation, not yet a claim:** no dialect's `TerminateWorkflow` calls
-`enforceParentClosePolicy`. The policy is applied by `CompleteWorkflow`, `FailWorkflow`,
-`MoveToDeadLetterQueue`, `ContinueAsNew` and `FinalizeWorkflowSegment` — so a parent that is
-*terminated* leaves its children running whatever their policy says. Whether that is a defect
-depends on a contract this repo does not document anywhere: there is no user-facing
-description of parent close policy at all. Worth settling before changing behaviour.
-
-**Validated against a real server, which is the check this section says was never made.**
-`TestMSSQLDeadlock_ClassifiedFromTheRealDriverError` provokes a genuine deadlock — two
-transactions taking row locks in opposite order — and asserts on the error the driver
-actually returns rather than a fabricated one:
-
-```
-driver error: Number=1205 Message="Transaction (Process ID 75) was deadlocked on lock
-resources with another process and has been chosen as the deadlock victim. Rerun the transaction."
-```
-
-`isMSSQLDeadlock`, `isMSSQLRetryable` and `isMSSQLRollbackGuaranteed` all classify that
-correctly. The original defect was a classifier and a test that shared the same wrong model,
-so the classification is now pinned to reality at one end and the retry policy unit-tested at
-the other.
-
-**Evidence the wiring is real, not merely present:** twelve entries left
-`scripts/deadcode-baseline.txt` — `isMSSQLRollbackGuaranteed`, `isMSSQLDeadlock`,
-`isMSSQLSnapshotError`, `hasNumber`, `mssqlErrNumber`, `mssqlSnapshotConflictNumbers` and the
-five error-number constants are now reachable from production code. `mssqlRetry`,
-`isMSSQLRetryable`, `isMSSQLTimeout`, `isMSSQLConnectionError` and `isMSSQLDuplicateKey`
-remain baselined, which is the correct outcome for the path deliberately left unwired.
-
-The §2.8 support position is now narrower: **on SQL Server a deadlock on the claim path is
-retried; everywhere else it is still a hard error.**
-
----
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.27 Two of the three deployment manifests crash-loop on an undefined flag — ✅ **FIXED**
 
-Phase 2's row 2.7 said "all three are currently broken". Two are. The third is not, and the
-difference matters, so it is recorded rather than rounded off.
-
-**Confirmed, by running the binary with each manifest's own arguments:**
-
-| Manifest | Flags it passes | `cleat-worker` exit |
-|---|---|---|
-| `k8s/deployment.yaml` | `--namespace=default` | **2** — `flag provided but not defined: -namespace` |
-| `charts/cleat/templates/deployment.yaml` | `--tenant-id=…`, `--namespace=…` | **2** — `flag provided but not defined: -tenant-id` |
-| `docker-compose.cluster.yml` | all defined | 1 — parses, starts, then fails on the bogus DSN I gave it |
-
-Go's `flag` package treats an unknown flag as fatal: usage to stderr, `os.Exit(2)`. In
-Kubernetes that is a CrashLoopBackOff on every pod of both deployments, permanently. Not an
-edge case, not a misconfiguration — the manifests as committed cannot start the binary they
-name.
-
-**Provenance.** `--namespace` was real once; `dfa8702` deleted the namespace concept from
-the store interface and removed the flag, and neither manifest followed. `--tenant-id` is
-different: **no commit has ever registered it in `cmd/cleat-worker`.** The chart shipped a
-`worker.tenantId` value, documented as "Tenant ID for RLS and isolation", that has never
-reached a running process. Tenancy is resolved per request via `--tenant-resolver`
-(default `single-tenant`); the chart does not expose it, which is a real gap but a separate
-one — filed, not silently invented here.
-
-**The test** is `tests/manifests/manifests_test.go`, wired into the `test-go` matrix as
-`manifests` with a skip budget of 0. It builds `cmd/cleat-worker`, reads the flag set from
-`--help`, and checks every `args:`/`command:` entry in all three manifests against it.
-
-Reading `--help` rather than scanning the source for `flag.String(...)` was not stylistic. I
-wrote the source scan first; compared against the real binary it **missed five flags that
-exist** (`max-body-size`, `memory-hard-limit`, `memory-soft-limit`, `rate-limit`,
-`rate-limit-per-tenant`). A check built on it would have failed manifests that work. The
-binary's usage output is what the container actually gets.
-
-**Verified non-vacuous** against three injected defects:
-
-| Injected | Result |
-|---|---|
-| The real bug — manifests as committed | fails, naming `--namespace` and `--tenant-id` |
-| `args:` renamed so the extractor finds nothing | fails: "extracted only 0 flags … the manifest's arg block is no longer being read" |
-| `--db` line deleted, so the wrong block is read | fails: "…does not include `--db` — the arg block being read is not the worker's" |
-
-The last two matter because this test's whole failure mode is silence: a regex that stops
-matching turns it green. That is §2.16 in a different costume.
-
-**What this does not cover.** Row 2.7 asks that the manifests be *started* and the worker
-reach ready. That still needs a cluster — `helm`, `kubectl` and `kind` are all absent
-locally, and per the standing constraints `docker-compose.cluster.yml` cannot be exercised
-here at all. This covers the failure that was shipped; the boot test remains open.
-
----
-
-### 2.28 The execution-time fence does not exist in any deployment — ✅ **FIXED for Go WASM**, residual gap below
-
-Found by doing what 2.7 asks and actually booting `docker-compose.cluster.yml` (all five
-containers healthy in under 20s, zero restarts — the compose file is fine). The finding was
-in the first worker's startup log:
-
-```
-"msg":"wasmtime backend unavailable, using legacy wazero for Go WASM",
-"error":"wasmtime backend requires CGO"
-```
-
-**The chain.** `engine/backend_wasmtime.go` is `//go:build cgo`. `Dockerfile:21` builds with
-`CGO_ENABLED=0`. All three manifests run `cleat-worker:latest` from that Dockerfile. So the
-backend CLAUDE.md calls *"the primary backend … the standard engine … the behaviour of
-record"* is compiled out of every container in every deployment path.
-
-**And CI tests the other one.** The `test-go` matrix does not set `CGO_ENABLED`, so CGO is on
-and `TestWasmtimeBackend_InfiniteLoop_GoStartPath`, `TestIntegrationWorkflowMaxDuration` and
-the rest of the wasmtime suite all run. This is §1.9's shape — *the shipped X was not the
-tested X* — moved from the schema to the execution engine. The protection is tested in the
-configuration nobody ships and absent from the one everybody ships.
-
-**Measured, not inferred.** `testdata/spin` (a pure arithmetic loop that never enters the
-host) under `WithDefaultWorkflowTimeout(2 * time.Second)`, wazero backend, `CGO_ENABLED=0`:
-
-| iterations | elapsed | error |
-|---|---|---|
-| 1,000 | 499ms | nil |
-| 100,000,000 | 628ms | nil |
-| 100,000,000,000 | **2m35s** | **nil** |
-
-A workflow with a two-second budget ran for **two and a half minutes** and was reported as a
-**success**. The fence did not fire late; it did not fire. `executor.go:271` puts the
-deadline on `execCtx` and passes it to `CallExport`, but wazero only observes context
-cancellation when the guest calls back into the host, and this guest never does. In a worker
-there is no `go test -timeout` to end it: the goroutine holds its concurrency slot until the
-process dies, so ten runaway workflows wedge a `--concurrency=10` worker completely.
-
-This is item **1.5**, which was raised to the top of Phase 1 and then fixed for wasmtime only.
-It should be read as still open for every deployed configuration.
-
-**The obvious fix does not work.** wazero has `WithCloseOnContextDone(true)`, absent at
-`engine/runtime.go:93`, which makes it interrupt guest code on cancellation. Setting it makes
-*every* execution fail — 1,000 iterations included — with `wasm trap: exit(code=0)` in ~500ms.
-It is not a fence firing; it breaks execution outright, presumably against the suspend/resume
-protocol in `Runtime.CallExportWithSuspend`. Tried, measured, reverted. **Not committed.**
-
-**So the fix is real design work, not a one-liner,** and there are two routes that should be
-costed against each other rather than picked by reflex:
-
-1. Make wazero interruptible — understand the `CloseOnContextDone` interaction with suspend,
-   or bound the guest some other way. Keeps the deployment story unchanged.
-2. Ship the backend that already works — build the image with CGO so containers get wasmtime
-   and the epoch fence that is already tested. Changes the base image and binary linkage.
-
-Either way the invariant worth adding afterwards is that **a backend without a working
-execution fence must not be selectable in production**, so this cannot recur silently.
-
-A regression test is written and parked at
-`scratchpad/backend_wazero_fence_test.go.pending` — the wazero half of
-`TestIntegrationWorkflowMaxDuration`, with a bounded wait so a regression names the defect
-instead of hanging the package. It is deliberately **not** committed: it fails today, and
-landing a known-red test would put CI back in the state Phase 0 just dug it out of.
-
-#### Resolution — route 2, ship the backend that already works
-
-Chosen over making wazero interruptible, because the wasmtime fence exists and is tested and
-the alternative meant inventing a second mechanism.
-
-**Alpine was the actual blocker, not CGO.** Building the existing image with `CGO_ENABLED=1`
-fails at link time: `undefined reference to fstat64`, `ftruncate64`. Those are glibc LFS
-symbols musl does not export, and `wasmtime-go` ships a prebuilt glibc `libwasmtime.a`. So
-the Dockerfile's `CGO_ENABLED=0` was not a preference — Alpine made it the only option that
-compiled, and the comment above it ("a fully static binary, no libc dependency") described
-the consequence as though it were the goal. Builder and runtime are now `bookworm` /
-`bookworm-slim`.
-
-**Verified on the shipped artifact, not the build log:**
-
-```
-$ docker run --rm cleat-worker:latest --verify-backend
-verify-backend: OK: wasmtime backend available          # exit 0
-
-$ docker run -d --network … cleat-worker:latest --db=… ; docker logs …
-"msg":"wasmtime backend registered for Go WASM","instance_timeout":30000000000
-```
-
-**The guard.** `--verify-backend` constructs a real wasmtime engine and exits 0/1, and the
-Dockerfile runs it as a build step, so a future `CGO_ENABLED=0` or musl base fails the build
-instead of shipping silently. It is asserted in both directions — `verify_backend_cgo_test.go`
-requires 0, `verify_backend_nocgo_test.go` requires non-zero *and* that the message names
-`CGO_ENABLED=0`. A guard that only ever reports OK is not a guard, which is §2.16's lesson.
-
-Also removed: the cluster job's `CGO_ENABLED=0 go build -o cleat-worker` step. Nothing ran the
-binary — the cluster runs containers — and sitting directly above the image build it read as
-though `CGO_ENABLED=0` were the shipped configuration. That belief is what let this survive.
-
-**The cost, stated plainly.** The image goes from **69.7 MB to 231 MB** (the binary alone is
-55 MB, mostly `libwasmtime.a`). That is a 3.3× increase and it is the price of the fence. If
-it matters, the runtime layer is the cheaper half to attack — a distroless base would save
-~50 MB, but the compose healthcheck shells out to `wget`, so that is a change with its own
-tail.
-
-#### Residual: non-Go guests are still unfenced
-
-The log line reads *"wasmtime backend registered for **Go WASM**"*. Modules in the languages
-wazero is retained for still execute on wazero, where the fence still does not fire. This is
-narrower than before — Go is the common case and is now bounded — but it is not zero, and the
-parked test above stays parked for exactly this reason. Closing it needs route 1 after all,
-for those guests only.
-
----
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.29 Resource exhaustion, end to end against the shipped image — ✅ **DONE**
 
-Phase 2 row 2.5, and the test that closes the loop on §2.28. #237 was merged on the strength
-of a log line and a `--verify-backend` exit code; neither shows that a runaway workflow is
-actually *killed* in a container.
-
-**Observed against the running cluster:**
-
-```
-execution time limit exceeded (29.999847291s wall-clock budget; configure with --wasm-instance-timeout)
-    0: 0x1b7d4f - <unknown>!main.Spin
-Caused by:
-    wasm trap: interrupt          <- epoch interruption
-```
-
-The worker held `restarts=0` and `/healthz 200` throughout, and completed an ordinary
-workflow immediately afterwards. That second part is the half a fence test usually forgets:
-terminating a runaway workflow by wedging or crashing the worker would satisfy every other
-assertion.
-
-**Verified non-vacuous against the real defect,** by rebuilding the pre-#237 image
-(`git show ff7e759^:Dockerfile`), pointing worker-1 at it, and re-running. The worker logged
-`wasmtime backend unavailable, using legacy wazero` and the test failed with:
-
-> workflow spin-runaway-… was still "running" after 1m30s — a runaway workflow was not
-> terminated, so it is holding a worker's concurrency slot indefinitely
-
-Not a stubbed backend or a deleted line: the actual image that shipped until today.
-
-**Where it lives, and why not `tests/cluster`.** That suite is run by *nothing at all*
-(`UNWIRED_SUITES` in `scripts/check-ci-package-coverage.sh`), so a test added there would
-never execute. `tests/exhaustion` is its own package, wired into ci.yml's cluster job — which
-already builds the image and brings the cluster up, and until now put no work through it. Its
-existing steps prove the cluster *comes up*; this is the first that proves it *runs
-anything*.
-
-Two things this cost, worth knowing before extending it:
-
-- It needs `__entry_point` in the instance input. The definition's `entry_points` array does
-  not resolve it, and without it the workflow fails instantly with "cannot determine entry
-  point" — which resembles a fence firing closely enough to fool a looser assertion. The test
-  asserts on the limit message and on elapsed time for that reason.
-- The existing `tests/cluster` fixtures insert mock WASM (`"mock-wasm-v1"`), so nothing in the
-  repo had run real WASM through a worker container before this.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.30 The event checksum chain is rebuilt from scratch on every write — ✅ **FIXED**
 
-Found by pointing a real database at `tests/integrity`, which is in `UNWIRED_SUITES` and had
-therefore never run. `VerifyWorkflowEvents` recomputes the checksum chain over the whole
-history in step order. `appendEventsInTx` built it two different ways from that:
-
-- **It restarted the chain at every call.** `prevChecksum` was a fresh `var prevChecksum
-  string` per invocation, so the first event of a second write chained from `""` rather than
-  from the previous event's stored checksum. The single-event path passed `""`
-  unconditionally, so `AppendEventHistory` never chained at all.
-- **It chained in slice order, not step order.** Verification reads `ORDER BY step`, so a
-  batch handed over in any other order persisted a chain that could not be reproduced.
-
-The first one reaches production. `cmd/cleat-worker/setup.go:1669` computes
-`newEvents = resultHistory[len(history):]` and hands *only that segment* to
-`FinalizeWorkflowSegment`, which calls the same helper — so **every workflow that suspends and
-resumes** (sleep, await-signal, timer) had a broken chain from its second segment onward, and
-`VerifyWorkflowEvents` reported it as corrupt. A verifier that cries corruption on healthy
-data is worse than no verifier: it is the noise a real corruption would hide in.
-
-Fixed in all three dialects: `chainOrder` walks the batch in step order, and a new
-`previousStoredChecksum` seeds from the row immediately preceding the batch — the row, not the
-last row *with* a checksum, because that is precisely what the verifier chains from.
-
-**Why it survived.** The eight existing `VerifyWorkflowEvents` tests in
-`engine/db_regression_test.go` drive sqlmock: they supply both the stored checksum and the row
-it is recomputed from, so the two can never disagree. Nothing wrote a chain and read it back.
-The replacement tests in `engine/store_event_chain_test.go` use a real database, and all three
-fail on the pre-fix tree:
-
-```
-verify events: workflow chain-...: step 1: checksum mismatch
-    (expected 3ae6e6ebac5922fd, got 261d761d2ec3f10b)
-step 1 was written by a second call, so its checksum must chain from step 0's
-stored checksum, not from an empty string
-```
-
-`TestAppendEventHistory_ChainDetectsTampering` is the counterweight: the fix must not buy
-agreement by weakening what verification catches, so it rewrites a persisted event's `payload`
-and requires the mismatch to still be reported.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.31 `tests/integrity` had never run — ✅ **DONE**
 
-Thirty tests covering replay determinism, checksum-chain verification, WAL corruption
-detection, compaction and the durable-call ambiguity detector — including
-`TestPendingSentinelDetection`, the only evidence that the detector kept in 1.4 Phase A
-actually works. All of it in `UNWIRED_SUITES`, run by no job.
-
-Run locally with no database it reports `ok 5.074s`. **All thirty tests skip.** That is the
-whole result: a green line with nothing behind it.
-
-Pointed at a real PostgreSQL, 22 of the 30 failed at once, every one of them on
-`workflow_instances_def_name_def_version_fkey`. The suite built its own schema with
-`CREATE TABLE IF NOT EXISTS`, and the `workflow_instances` it invented had no foreign key to
-`workflow_defs` — so the fixture and production had diverged, and nothing ran to notice. The
-same shape `engine/fault_test.go` documents in its own history.
-
-The helper now takes its connection from `engine/testutil`, which builds the schema from
-`migrations/postgres/` and *fails* rather than skips when `CLEAT_TEST_DB` is set but
-unreachable. Sixty lines of hand-rolled DDL deleted.
-
-What the remaining eight failures were, once the schema was real:
-
-| Failure | Cause |
-|---|---|
-| 3 × checksum mismatch | A real engine defect — §2.30 |
-| `TestConcurrentStatusUpdates` | Passed a hardcoded `generation = 0` to `CompleteWorkflow` after `ClaimWorkflow` had bumped it, so it counted the fence *working* as an error |
-| `TestWalCorruption_PayloadTampering` | Tampered with the `operation` column, which the checksum does not cover — §2.32 |
-
-**Wired into the `test-go` matrix**, which already provides both things it needs: a PostgreSQL
-service, and CGO (via `-race`) for the wasmtime backend. Budget `test-go/integrity 0`, and
-that number is load-bearing: with CGO off, seven tests skip on "wasmtime backend requires
-CGO", so a nonzero count means the job stopped testing the primary backend.
-
-Final: **68 pass, 0 skip, 0 fail** (67s, CGO on, live PostgreSQL 16).
-
-Five suites remain in `UNWIRED_SUITES`: `cluster`, `cross-language`, `scale`, `soak`,
-`upgrade`. On this evidence, assume each contains failures rather than coverage.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.32 The checksum covers `payload`; every SQL consumer reads the shadow columns — ✅ **FIXED**
 
-`event_history` stores each event twice: in the individual columns (`service`, `operation`,
-`request`, `response`, …) and again in a `payload` JSONB. `LoadEventHistory` scans the columns
-first and then overwrites them from `payload` whenever it is non-NULL, so **`payload` is
-authoritative** and it is the only copy `computeEventChecksum` covers.
-
-Consequence: `UPDATE event_history SET operation = 'something-else'` is undetectable.
-`VerifyWorkflowEvents` reports the workflow clean, replay is unaffected — and every SQL
-consumer that reads the columns (the admin dashboard, `cleatctl`, ad-hoc queries, metrics)
-shows the altered value. An integrity checker that certifies a row whose displayed contents
-are a lie is doing half the job.
-
-`TestWalCorruption_PayloadTampering` asserted the opposite and could never have passed; it now
-tampers with `payload`, and carries a second assertion pinning the gap so that closing this
-item forces the test to be updated rather than leaving a stale claim.
-
-**Not a drop-in fix.** Extending the checksum to the shadow columns invalidates every checksum
-already stored, so it needs a migration or a versioned checksum. The alternatives are to have
-verification compare columns against `payload` (cheap, no migration, detects divergence
-without changing the chain), or to stop writing the duplicates at all and treat `payload` as
-the sole record. The third is the real fix and the largest.
-
-**Taken: the second.** `engine/store_event_shadow.go` adds `verifyShadowColumns`, called from
-`VerifyWorkflowEvents` after the chain check. It rebuilds each row from its columns, applies
-`populateFromPayload` to a copy, and compares. Because `populateFromPayload` only assigns keys
-the payload actually carries, the two records can differ *only* where payload disagrees with a
-column — so the comparison needs no per-event-type knowledge and no migration, and every
-checksum already stored stays valid.
-
-`TestWalCorruption_PayloadTampering`'s pinning assertion did exactly what it was put there to
-do: closing this item failed it, and it has been inverted rather than deleted.
-
-**Two deliberate limits, both asserted rather than assumed.**
-
-- **Only unencrypted, unredacted fields.** `Request`, `Response`, `Err`, `SignalPayload`,
-  `ChildInput`, `NewInput`, `PluginInput`, `PluginOutput`, `PromiseResult` and `PromiseError`
-  pass through `decryptAndRedactEventRecord` and `RedactOnRead` on the column path, while the
-  payload path is decrypted but *never redacted*. Comparing those two would report a
-  divergence for every redacted field in the database. The 14 fields covered are metadata —
-  `service`, `operation`, `signal_names`, `child_name`, `plugin_name`, … — which is exactly
-  the set a dashboard displays.
-- **Only keys the payload carries.** `eventRecordToPayload` omits several when empty
-  (`duration_ms` on a call), and `populateFromPayload` cannot overwrite a key that is not
-  there. Tampering with a column whose payload counterpart was omitted is still invisible. The
-  headline case from this section, `operation` on a call event, is always present.
-  `TestVerifyWorkflowEvents_ShadowCheckIsNotVacuous` asserts the payload actually carries
-  `operation` and `service`, so if the writer ever stops populating them the detection test
-  cannot start passing vacuously.
-
-Verified by removing the call and re-running: `VerifyWorkflowEvents accepted an event whose
-operation column no longer matches its payload`. `TestVerifyWorkflowEvents_ShadowCheckSurvives\
-CleanHistory` drives one event of every shape that carries mirrored metadata as the
-false-positive guard — a verifier that fails on untampered data would be worse than the gap it
-closes. Full `./engine/` and `./tests/integrity/` suites pass against PostgreSQL 16.
-
-**Still open: the underlying duplication.** `payload` remains authoritative and the columns
-remain a second copy that nothing keeps in sync at write time. This detects divergence; it does
-not prevent it. Treating `payload` as the sole record is still the real fix, and it is still
-the largest — `populateFromPayload` has ten call sites across the three dialects.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.33 `tests/upgrade` had never run either — ✅ **DONE**
 
-Eight tests, and **all eight failed** the first time a database was pointed at them. Four
-distinct causes, none of them subtle:
-
-1. **Five `INSERT INTO workflow_defs` statements had a syntax error.** A missing `)` after the
-   column list, and a fifth value for a four-column insert:
-   ```sql
-   INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points
-       VALUES ($1, 1, $2, '{old_entry}', 'default')
-   ```
-   `pq: syntax error at or near "VALUES"`. Nothing compiles SQL in a string literal, and
-   nothing ever executed it.
-2. **Three "no data loss" assertions compared JSONB formatting.** `input::text` returns
-   PostgreSQL's normalised rendering — `{"key": "value"}`, with a space — which never equalled
-   the Go literal `{"key":"value"}`. They now let PostgreSQL do the comparison
-   (`input = $2::jsonb`) and read the text only for the failure message.
-3. **The rolling-restart tests passed a hardcoded `generation = 0`** after `ClaimWorkflow` had
-   bumped it, so every completion lost the fence. Same defect as `tests/integrity`'s
-   `TestConcurrentStatusUpdates`: the test counted the fence *working* as a worker error.
-4. **An order dependency between packages.** The rolling tests insert instances with
-   `def_name='test'` but nothing in the package creates that definition. They passed on a
-   machine where another suite had already made the row and failed on a fresh database —
-   verified by deleting the row and re-running. `testDB` now seeds it.
-
-**Two of the tests were vacuous even with the fence bug in place.** `TestRollingWorkerRestart`
-logged `0/50 workflows completed` and passed: it asserted only that the workers did not error.
-`TestRollingRestartNoDuplicateExecution` reported `0 workflows processed, 0 total executions,
-0 duplicates` — and "no duplicates" is also what you get when nothing runs. Both logs are now
-assertions, and the first drains any remaining work and requires every workflow to reach
-`done`, which is the property a rolling restart is supposed to have.
-
-`testDB` moved to `engine/testutil` for the same reasons as §2.31.
-
-Result: **8 pass, 0 skip, 0 fail**, wired into the `test-go` matrix with budget
-`test-go/upgrade 0`. Before: `50/50` and `30 executions` where it had been `0/50` and `0`.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.34 `tests/scale` — ✅ **DONE**
 
-Cheapest of the three. 15 of 16 passed once the schema was real; the one failure was the same
-generation fence, with an extra defect underneath it:
-
-```go
-for wfID := range workCh {
-    wf, err := store.ClaimWorkflow(ctx, workerID)   // claims *some* workflow
-    ...
-    store.AppendEventHistoryBatch(ctx, wfID, events)          // writes to a different one
-    store.CompleteWorkflow(ctx, wfID, workerID, 0, ...)       // and completes it, ungenerationed
-}
-```
-
-The channel is a work counter, not an assignment — `ClaimWorkflow` decides what this worker
-gets. The loop wrote to `wfID` while holding `wf`, so every completion was against a workflow
-the worker did not own, and the hardcoded `0` lost the fence on top of that. It now uses
-`wf.ID` and `wf.Generation`.
-
-`testDB` moved to `engine/testutil` and seeds `('test', 1)`, as in §2.31 and §2.33.
-
-**16 pass, 0 skip, 0 fail**, ~23s. Budget `test-go/scale 0`. The throughput numbers stay
-logged rather than asserted, so it does not become a benchmark gate that fails on a slow
-runner; what it asserts is correctness under concurrency.
-
-### Where the unwired suites stand
-
-| Suite | State |
-|---|---|
-| `integrity` | ✅ wired — §2.31 |
-| `upgrade` | ✅ wired — §2.33 |
-| `scale` | ✅ wired — §2.34 |
-| `cluster` | ✅ wired — §2.36 |
-| `cross-language` | ✅ wired — §2.37 |
-| `soak` | 🔶 open, and unwired twice over: gated behind the `soak_test` build tag, so `go vet ./tests/soak/...` reports no packages at all |
-
-Across all five suites: **110 tests that no job had ever run**, of which **42 failed** the
-first time real infrastructure appeared, and two of those were live defects in production code
-(§2.30, and the `docker compose` call in §2.36). None of it was visible from a green CI.
-
-**Follow-up, and it matters:** the new matrix entries create new check-run contexts
-(`Test Go (integrity) on 1.26`, `… (upgrade) …`, `… (scale) …`) that are **not** in the
-required-status-check list configured in §2.25. Until they are added, a failure in any of them
-does not block a merge — which is the same defect as everything above, one level up. Add them
-once each has produced a real check-run to name.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.36 `tests/cluster` — ✅ **DONE**
 
-Eleven tests: worker registration, workflow spread across queues, failover when a worker
-dies, PostgreSQL kill-and-restart, full cluster restart, replay determinism, WASM version
-isolation, and scale-up. **All eleven failed** the first time they were pointed at the
-running cluster.
-
-| Cause | Count |
-|---|---|
-| Missing `workflow_defs` row → FK violation | 10 |
-| A `workflow_defs` INSERT with the same missing `)` as §2.33 | 1 |
-
-Behind those, once the schema was satisfied, four more:
-
-1. **`docker-compose`, not `docker compose`.** `helpers.go` shelled out to the hyphenated v1
-   binary in three places. It is gone from current GitHub runners and from Docker Desktop, and
-   ci.yml's cluster job has used the v2 plugin form throughout — so the first thing this suite
-   would have done on a runner is fail to find the command.
-2. **The tests raced the live workers.** They inserted on `queue-1/2/3`, which is exactly what
-   the three compose workers serve, then claimed and expected to win.
-   `TestFullClusterRestart` released a workflow and asserted it could claim it back;
-   `cleat-worker-1` got there first. They now use `queue-cluster-tests-{1,2,3}`, which no
-   worker serves — these are store-level tests running against the cluster's database, and the
-   live workers' behaviour is `tests/exhaustion`'s job.
-3. **`generation = 0` again**, in `CompleteWorkflow` and four `ReleaseWorkflow` calls. Fifth
-   suite in a row.
-4. **`ListWorkflows(Status: "running", Limit: 1000)`** in the scale test returned every running
-   workflow in the cluster, so under a full run the test's own rows fell outside the limit and
-   were never released — and the release error was discarded.
-
-**Three tests could not fail.** This is the part worth keeping:
-
-| Test | What it printed, and passed |
-|---|---|
-| `TestKillWorkerMidExecution` | `Note: no worker-1 workflows were reclaimed by remaining workers (may be timing)` |
-| `TestKillPostgresAndRestart` | `No workflows to claim after restart (may have been consumed by another worker)` |
-| `TestScaleUpWorkers` | `Note: 3 workers claimed 0 vs 1 worker claimed 50 (may be fewer due to timing)` |
-
-Each is the exact output a completely broken failover, recovery or claim path produces. All
-three are assertions now. The scale test asserts that **no work went missing** — every released
-workflow is claimed again — rather than that three workers are faster than one, which is not
-something to assert on a shared runner.
-
-Result: **11 pass, 0 skip, 0 fail**, 4.2s. Wired into ci.yml's cluster job, after the
-exhaustion step, since `TestKillPostgresAndRestart` restarts the database.
-
-**One more thing the first CI run caught.** The cluster job sets `CLEAT_TEST_DB` to a separate
-`cleat_tests` database, deliberately, so that `./engine/...` does not share a table with four
-live workers. This suite wants the opposite — it restarts the postgres container and asserts on
-failover, so it has to be looking at the database the cluster actually runs on. Against
-`cleat_tests` every test failed with `relation "workflow_defs" does not exist`: nothing builds a
-schema there until `engine/testutil` does, and this package does not use it. The step overrides
-the variable, with the reason recorded next to it.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.37 `tests/cross-language` — ✅ **DONE**, and it passed as written
 
-Seven tests, and the only one of the five suites with **nothing wrong with it**. It covers the
-thing that is hardest to get right and easiest to break silently: a workflow executed under one
-language runtime and then *replayed* under another from the recorded history, in both
-directions, plus divergence detection across the boundary.
-
-`7 pass, 0 skip, 0 fail` on the first run. It had simply never been run — no workflow file
-named it.
-
-The `Cross-Language E2E` workflow already installs Rust, Python, AssemblyScript and Java, then
-runs `-run "TestRust|TestPython|TestAssemblyScript|TestJava" ./engine/...`, which never touches
-`tests/cross-language/`. Wiring it there is one step, because that job is the only one with the
-toolchain the suite needs.
-
-Skip budget `e2e-cross-language 0`, and the number is the point: without cargo all seven skip,
-so a nonzero count means the toolchain setup stopped working and the suite quietly went back to
-testing nothing — the state it was already in.
-
-**It runs but does not gate.** `Cross-Language E2E` is deliberately outside the required-check
-list (§2.25) because it pulls from external registries — the same reasoning as the Maven
-exclusion. Recorded rather than quietly accepted: a crates.io outage should not block every
-merge, and the cost is that a regression here surfaces on `develop` rather than on the PR.
-
-### What the five suites cost, and what they were worth
-
-**110 tests that no job had ever run.** 42 failed the first time real infrastructure appeared.
-Two were live defects in production code — the event checksum chain (§2.30) and the
-`docker-compose` v1 call (§2.36). The rest were fixtures that had drifted from the schema,
-`generation = 0` in five separate suites, four SQL statements that had never been executed, and
-five assertions that were `t.Log` calls printing the exact output a total failure produces.
-
-The one suite with nothing wrong with it is the one testing the hardest thing.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.38 `tests/soak` tested `math/rand` — ✅ **DONE**
 
-The sixth suite, and the worst of them. It was unwired twice over: gated behind the
-`soak_test` build tag, so `go vet ./tests/soak/...` reported *no packages at all* and
-`go test ./...` never compiled it.
-
-Wiring it up would have been a mistake, because the suite did not test cleat. It opened a
-database, pinged it, and then discarded the handle:
-
-```go
-_ = db // used only for connectivity check; actual workload uses in-memory simulation
-```
-
-The "workload" underneath that comment was:
-
-```go
-time.Sleep(time.Duration(rand.Intn(50)) * time.Millisecond)
-success := rand.Float64() > 0.05 // 95% success rate
-```
-
-So the error rate it checked against its 10% threshold was a hardcoded 5% coin flip — the
-threshold was chosen to sit above the constant on the line above it. The `workflowType` it
-selected was passed into the goroutine and never referenced. `EventsPerWorkflow` was set and
-never read. The `memSamples` field was documented as "RSS (read from `/proc/self/status`)"
-and only ever fed `MemStats.Alloc`. The memory-leak check was a `t.Logf("WARNING: %v")`.
-
-An hour of that asserts that Go's scheduler and `math/rand` work. Scheduling it weekly would
-have produced a green **Soak Test** badge for an engine nothing had soaked — worse than
-leaving it unwired, because the badge is a claim.
-
-**What it does now.** The workload drives the real `PostgresStore` lifecycle — insert, claim,
-append the event mix, complete — at bounded concurrency, continuously, and re-verifies the
-checksum chain (§2.30) on one workflow in every hundred. Every error counted is an error the
-store returned. Measured against PostgreSQL 16: **37,804 workflows in 60s, 37,765 reaching
-`done`, 377 chain-verified, 0 errors**, with heap and goroutines flat.
-
-Four things had to be got right, and each was verified by breaking it:
-
-- **`NewPostgresStore(db, soakQueue)`.** `ClaimWorkflows` filters on `task_queue = ANY($2)`,
-  the store's own queue list, and the no-argument constructor polls `"default"` only. Without
-  the queue the claim returns `nil` forever — and a `nil` claim means "another worker got it
-  first", which is not an error. Removing it: **51,012 successes, 0 completions, 0.000% error
-  rate.** The suite would have run for an hour and reported perfect health having executed
-  nothing. That is why the final assertion counts rows in `'done'` from the database rather
-  than trusting the workload's own counters; only `CompleteWorkflow` puts them there.
-- **The leak windows.** The original monotonic-run check fired on 5 consecutive increases —
-  probability 1/5! per window, near-certain to fire by chance across the ~120 windows of an
-  hour, which is why its memory arm had been demoted to a log line. Replaced with a windowed
-  median comparison. The first version pinned the baseline at samples 5..9, which made
-  sensitivity depend on run length: an injected 4KB-per-workflow leak (140 MB over 30s) was
-  **not caught**. Anchoring the baseline to a *fraction* of the run gives a linear leak the
-  same lever arm at any duration; the same injected leak then fails at 3.7x. An injected
-  parked goroutine per workflow fails at 2.0x.
-- **The error threshold** dropped from 10% to 1%. Against a healthy database every one of
-  these operations should succeed; 10% existed to clear a simulated coin flip and would have
-  let one workflow in twelve fail unnoticed.
-- **`-timeout`.** The obvious spelling, `-timeout="${SOAK_DURATION}"`, kills the binary at the
-  exact moment the test stops its workload, so the panic races the assertions and a passing
-  run reports as a hang. The workflow computes it (`+25% and 15 minutes`) and the *test itself*
-  refuses to start if the harness timeout does not exceed its duration — caught in the first
-  millisecond rather than hours later. The computation is also bounded by the job's own budget,
-  because GitHub-hosted runners cancel a job at 360 minutes and a 24h dispatch would otherwise
-  burn 5.5 hours before being killed and reported as `cancelled`.
-
-Scheduled weekly (Mondays 06:00 UTC) plus `workflow_dispatch`, with skip budget `soak 0`.
-Deliberately not a PR gate: an hour per pull request would be absurd, and a leak detector is a
-trend instrument that should not block a merge on one noisy run.
-
-**`UNWIRED_SUITES` is now empty.** Every suite under `tests/` is run by a workflow.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.39 The DB-backed suites cannot share a database concurrently — ✅ **FIXED**
 
-`go test ./tests/integrity/... ./tests/upgrade/... ./tests/scale/...` produced **17 failures**.
-Run one at a time, all three passed. CI never hit it — each is a separate matrix job with its
-own database — but the obvious local command gave a screen of red that meant nothing, which is
-its own kind of false signal.
-
-**The first diagnosis recorded here was wrong**, and is kept rather than quietly replaced.
-It said `ClaimWorkflow` does not care which suite inserted a row, so `tests/scale` claims
-`tests/integrity`'s workflows. That is true, and it is *not* what caused most of the failures.
-Giving every suite its own `task_queue` fixed **one** test. The other sixteen kept failing, and
-the actual error said so plainly:
-
-```
-apply migrations/postgres/001_schema.sql: pq: deadlock detected (40P01)
-append events in tx: increment event_count: pq: deadlock detected (40P01)
-```
-
-`testutil.TestDB` called `applyPostgresSchemaFile` on **every** invocation — 24 times for
-`tests/integrity` alone — and each application takes `ACCESS EXCLUSIVE` on tables another
-package is reading and writing at that moment. The advisory lock already in place serialises
-schema application against schema application, which is not the collision that bites: it is DDL
-against *DML*, from a different process, that deadlocks.
-
-**Both fixes were needed, and each was verified to be load-bearing** by running without it:
-
-- **`applyPostgresSchemaFile` now fingerprints the schema file** (SHA-256, recorded in a
-  `cleat_test_schema` table) and skips the DDL when that exact file has already been applied.
-  Fixes the 16 deadlocks. Also takes `tests/integrity` from **22.7s to 5.8s**, because applying
-  the full schema 24 times was never doing anything the first application had not.
-- **Per-suite `task_queue`** (`queue-integrity-tests`, `queue-upgrade-tests`,
-  `queue-scale-tests`) in the store constructor and the inserts. Fixes
-  `TestMaxConcurrentWorkflows`, which without it still failed on 2 of 2 runs *after* the
-  fingerprint fix. `tests/soak` already did this, which is why it was never affected.
-
-Three consecutive concurrent runs green. Tests that add their own columns (all
-`IF NOT EXISTS`) or drop objects they created are unaffected — the fingerprint tracks the
-schema *file*.
-
-### 2.40 `lint-go` ran one linter and advertised ten — 🔶 **PARTLY FIXED**
-
-`ci.yml`'s header listed `errcheck, gosimple, govet, ineffassign, staticcheck, unused,
-misspell, unconvert, gocyclo, gofmt`. `.golangci.yml` disables eight of them, and `gofmt` was
-never enabled — it is not in golangci-lint's default set, so listing it under `disable:` was a
-no-op. The job ran **`govet` and nothing else**, and `cmd/cleat-worker/config.go` sat
-unformatted on `develop` with CI green.
-
-Fixed: a `gofmt` step of its own (not via golangci-lint, whose config excludes `_test.go` from
-every linter and would have left most of the repo out), `misspell` actually enabled, and the
-header corrected to describe the job that exists.
-
-**The backlog is now measured rather than asserted.** The old note — "the engine refactoring
-introduced hundreds of pre-existing issues" — was true when written and had since become
-unfalsifiable: no way to tell which linters were still hundreds and which had quietly become
-tractable. Measured against the repo's own exclusions, with golangci-lint's default caps
-removed (`max-issues-per-linter` and `max-same-issues` silently truncate — `errcheck` reads as
-50 with them on and 307 with them off):
-
-| linter | issues | |
-|---|---|---|
-| `misspell` | **0** | enabled |
-| `ineffassign` | 8 | see below |
-| `gosimple` | 9 | |
-| `unused` | 16 | |
-| `staticcheck` | 17 | |
-| `unconvert` | 23 | |
-| `gocyclo` | 28 | |
-| `gosec` | 193 | |
-| `errcheck` | 307 | |
-
-**`ineffassign`'s eight are worth reading before enabling it, because three are real
-defects** — the shape being *a fallback that is computed and then never used*:
-
-- ~~`cmd/cleat/dev.go:387`~~ — **fixed, see §2.41.** This one was not merely dead: the unread
-  `moduleDir` was the fingerprint of a filter that was never written, and its absence made
-  `cleat dev --watch` unusable.
-- `cmd/cleat/main.go:901` — the transform-file candidate search finds an alternative,
-  assigns `transformFile`, and nothing reads it afterwards; only the `found` flag survives.
-  So the fallback locates the file and then ignores it.
-- `cmd/cleat/main.go:852` — `asDir = dir`, likewise never read.
-
-  **Both are in `runVetAS`, and chasing them turned up §2.42 and §2.43.** They are not
-  independent: the function never runs the validation those variables were resolved for. See
-  §2.43 — and note that the reason it could not have been fixed earlier is §2.42, where the
-  validation it would have called turned out never to have run at all.
-
-Three more are trailing `argIdx++` at the end of a block (`plugins/scheduledbackup/commands.go`,
-`routes.go`, `plugins/webhookingest/host_functions.go`). Those are dead but *defensive* —
-removing them would make adding the next clause a silent bug — so enabling `ineffassign` means
-`//nolint` on them, not deleting them.
-
-The eighth, `cmd/cleatctl/checkdb.go:125`, turned out to be benign and is fixed here anyway:
-`healthy = false` is never read, because everything after the ping check keys off
-`len(issues) > 0`. Behaviour was correct — the same branch also appends to `issues` — but a
-future check that set `healthy` without appending would have silently failed to fail. Now
-there is one source of truth.
-
----
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.41 `cleat dev --watch` rebuilt itself forever — ✅ **FIXED**
 
-Chased down from the first of §2.40's three dead fallbacks, and it was the interesting kind:
-the unread variable was not the bug, it was the *evidence* of the bug.
-
-`buildDevRun` writes its generated runner as `cleat_dev_*.go` **into the module directory** —
-it has to, so `go run` can resolve the workflow package import through `go.mod`. Whenever the
-workflow package *is* the module root (a standalone workflow module: the common shape for
-`cleat dev`), that directory is inside the tree `runDevWithWatch` is watching. The watch loop
-matched every `*.go`. So: build writes a `.go` file → fsnotify reports a `.go` file → 200 ms
-debounce fires → build writes another.
-
-`runDevWithWatch` resolved `moduleDir` and defaulted it — the obvious reason being to exclude
-exactly these files — and then never used it. `buildDevRun` re-derives the module dir for
-itself, so the binding was pure residue of a filter that never got written.
-
-**Measured on a standalone module, nobody touching anything, 25 seconds:**
-
-| | before | after |
-|---|---|---|
-| rebuilds | **76** | 1 |
-| abandoned `cleat_dev_*.go` in the user's source dir | **34** | 0 |
-
-Two further defects fell out of reproducing it:
-
-- **A data race.** `rebuildAndRun` runs on a `time.AfterFunc` goroutine, so two closely-spaced
-  edits overlap on `currentCmd`/`currentTmpPath`: both read the old temp path, one wins the
-  write, and the loser's generated file is orphaned with nothing left holding its path. That
-  is why 76 rebuilds left 34 files rather than 1. Now under a mutex.
-- **Ctrl-C left a file behind every time.** The deferred cleanup never runs on a signal, and
-  Ctrl-C is how a watch session normally *ends*. Now handled, exiting 130.
-
-The regression test is a pair, and only works as a pair:
-
-- `TestDevWatch_SkipsTheFileItGenerates` runs the real generator and filters its real output,
-  so it pins the coupling that actually broke rather than asserting the constant equals
-  itself. Restoring the old `HasSuffix(".go")` filter fails it.
-- `TestDevWatch_RebuildsOnUserSources` is the non-vacuity half. A filter returning `false` for
-  everything satisfies the first test while turning `--watch` into a silent no-op; verified
-  that this fails it.
-
----
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.42 The AssemblyScript determinism checks had never run — ✅ **FIXED**
 
-Found while chasing §2.40's second and third dead fallbacks (`runVetAS`). The transform
-carries determinism checks numbered **E001–E005** — `Math.random()`, `Date.now()`,
-`console.log()`, `process.*`, missing-HostCalls. On real AssemblyScript source, all of them
-were inert.
-
-**Two independent reasons, either one sufficient.**
-
-1. **The walker could not read AssemblyScript.** `_walkStatements` enumerated child
-   properties by ESTree/Babel name. AssemblyScript's AST uses different ones, and for the
-   node that matters most it has no such property at all:
-
-   | transform looked for | AssemblyScript has |
-   |---|---|
-   | `node.callee` (the call test itself) | `node.expression` |
-   | `callee.object` | `expression.expression` |
-   | `consequent` / `alternate` | `ifTrue` / `ifFalse` |
-   | `declaration` | `declarations` (array) |
-   | `init` | `initializer` |
-
-   `node.callee` was never truthy on a real parse, so every call graph came back empty,
-   `_findDurableLeaves` returned an empty set, and `if (durableLeaves.size === 0) continue`
-   skipped validation for every file. Measured on `examples/as-workflow`: `place_order`
-   calls `h.cleatCall` seven times and its recorded callee set was `[]`.
-
-2. **Violations were `console.error` and nothing else.** Even when a diagnostic did fire,
-   nothing consumed it. Verified before the fix: `Math.random()` inside a `@cleatEntry`
-   function → **asc exit 0, no diagnostic, a deployable `.wasm` produced.**
-
-**Why no test caught it.** `detects_math_random` hands `_validateDurableFunction` a synthetic
-AST literal built in the shape the walker assumed, and calls it directly — bypassing
-`afterParse`, the call graph, and the durable-leaf gate. It asserted the diagnostic *string*
-was producible, which was true the whole time. The fixture agreed with the bug.
-
-**Fixed.** The walk is now shape-agnostic — it visits every own property rather than a list
-of names, so it cannot miss a node kind the way a name list rots when AssemblyScript adds
-one. Skipping the back-references (`node.range.source.statements` is the whole file) and a
-cycle guard are the cost. Violations are collected and thrown at the end of `afterParse`,
-which is what makes `asc` fail. `CLEAT_AS_ALLOW_NONDETERMINISM=1` downgrades them to loud
-warnings so a false positive cannot block anyone.
-
-**Two further defects fell out of it, both found only by running the thing:**
-
-- **Entry points were not in the durable closure.** It was seeded only from functions making
-  an `h.*` call, so a `@cleatEntry` workflow that happens not to call the host was never
-  validated — exactly the workflow whose only nondeterminism is a bare `Math.random()`. An
-  entry point *is* durable; it now seeds the closure.
-- **E005 false positive, caught on a real example.** The first real run failed the
-  `examples/widget-store-as` build: `checkoutWorkflow` is a hand-written raw ABI export
-  taking `(argsPtr, argsLen, outPtr, maxOutLen)` that does `let h = new HostCalls()` in its
-  body. It has host access, it just did not receive it from a caller. E005 exists to catch a
-  durable helper that *cannot* reach the host, so it now also accepts one that constructs its
-  own.
-
-**Verified:** E001/E002/E003 each fail the build with a real `line:column` (location never
-resolved before either — `Range.start` is a character offset, and the code tested
-`range.start.line !== undefined`, which was never true). The escape hatch lets a build
-through while still printing. All three AS projects in the repo build clean. The new
-`rejects_nondeterminism` test was confirmed to fail under each of the three fixes reverted
-separately.
-
-**Not verified, and left open:** I could not construct a *compilable* true positive for E005.
-The obvious fixture — a durable helper referencing `h` without receiving it — is rejected by
-AssemblyScript's own type checker first. E005 may be unreachable in code that compiles at
-all. It is left enabled, since the false positive above is fixed and it costs nothing, but
-nobody should treat it as a check known to work.
-
-**Also still open:** the durable closure propagates *upward* only (callers of a durable
-function become durable). A pure helper called *by* a workflow, making no host calls of its
-own, is not validated — so `Math.random()` inside it is still missed. Downward propagation is
-the obvious fix but risks false positives across the SDK, and I had no evidence about how
-noisy it would be.
-
----
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.43 `cleat vet --lang as` cannot fail — ✅ **FIXED** (WS-3, 2026-08-04)
 
-> **Renamed.** This entry said `cleat vet --target assemblyscript`. There is no `--target`
-> flag on `vet`; it is `--lang`, and the value is `as` (`cmd/cleat/main.go:137`). `--target` is
-> `cleat build`'s flag. Minor, but the command as written never existed, so anyone trying to
-> reproduce the defect from this heading would have got an unrelated error.
-
-**Fixed by making `runVetAS` compile the project.** It now runs
-
-```
-npx asc assembly/index.ts --runtime stub --transform @cleat/transform --noEmit
-```
-
-and propagates the exit status. `--noEmit` performs the whole compilation — parse, transform,
-diagnostics — without writing a `.wasm`, so vet gets exactly the checks build gets, and the
-two agree about what compiles. Everything else in the invocation mirrors
-`runBuildAssemblyScript` for that reason.
-
-This was only possible because of §2.42: the transform's E001–E005 determinism checks used to
-be `console.error` and nothing else, so even `cleat build` exited 0 on a violation. They throw
-from `afterParse` now, and that throw is what fails `asc`.
-
-**A missing toolchain is now an error, not a pass.** `cleat build` already exits 1 when npx is
-absent, so there is precedent; and a vet that returns 0 because it could not look is precisely
-the defect being fixed. Same for a missing `package.json` or `assembly/index.ts`, both of
-which used to return 0.
-
-**Tests:** `cmd/cleat/vet_as_test.go`. The load-bearing assertion is the exit code on a
-*violating* workflow — a test that only checked a clean project passes would have been
-satisfied by the old always-0 implementation, which is the trap. Confirmed against the old
-behaviour: three of four subtests fail, and "accepts a deterministic workflow" passes either
-way, exactly as predicted.
-
-No CI job is affected: `scripts/ci-check.sh` is the only caller of `cleat vet`, and it runs
-`--lang go`.
-
-**§2.40 residual, measured after this change.** `cmd/cleat` is now clean under `ineffassign`
-— the two dead fallbacks this entry describes were two of its eight findings. Four unique
-findings remain repo-wide in non-test code, and enabling the linter needs each addressed:
-
-| file | assignment |
-|---|---|
-| `internal/closure/threading.go:42` | `usesGlobalH` |
-| `plugins/scheduledbackup/commands.go:211` | `argIdx` |
-| `plugins/scheduledbackup/routes.go:420` | `argIdx` |
-| `plugins/webhookingest/host_functions.go:87` | `argIdx` |
-
-The three `argIdx` ones are the defensive trailing increments §2.40 says to keep and annotate
-with `//nolint` rather than delete — removing one makes adding the next clause a silent bug.
-Neither `internal/` nor `plugins/` is WS-3's, so this is left measured rather than done.
-
----
-
-#### Original entry
-
-### 2.43 `cleat vet --target assemblyscript` cannot fail — 🔴 **was OPEN**
-
-The remaining two of §2.40's three dead fallbacks are both in `runVetAS`, and they are
-symptoms of the same thing: **the function never vets anything.**
-
-- `cmd/cleat/main.go:852` — `asDir = dir` is computed and never read.
-- `cmd/cleat/main.go:901` — the transform-file candidate search finds an alternative, assigns
-  `transformFile`, and only the `found` flag survives.
-- `nodePath` is resolved and then discarded with `_ = nodePath`.
-
-The comment says "Run the AS transform's vet validation via Node.js" — no node process is
-ever started. Every path returns 0, after printing a line that reads like a check ran. The
-three dead assignments are the residue of the validation that was going to use them.
-
-Now that §2.42 makes the transform's checks real, the fix is available in a way it was not
-before: run `asc --noEmit` with the transform and let it fail. Left open here because it
-needs a decision about requiring `node_modules`/`asc` for `cleat vet`, which changes the
-command's contract.
-
----
-
-PR #208 (`fix/wasm-build-replace-propagation`) was closed without merging on 2026-08-03.
-Recorded here so nothing below has to be rediscovered from scratch.
-
-- **PR:** https://github.com/cleat-team/cleat/pull/208 (closed, not deleted — the diff is
-  still readable on GitHub)
-- **Head SHA:** `df1119a14adaab9d6ec730f30c2de1f28dc1f540`
-- **Merge base:** `1e10460`
-
-**Why it was closed rather than merged.** 19 commits that add the dispatcher model, remove
-it, restore it, then revert parts of the revert, plus three `chore: trigger CI re-run`
-commits and a merge of `develop`. `mergeable: CONFLICTING`. By the time it was assessed it
-was 19 ahead / 9 behind, missing #215–#223, and its last CI run was 31 pass / 2 fail — the
-two failures being MySQL and SQL Server, the backends it modified. Most importantly, its
-headline fix had already landed independently: `git diff develop...df1119a -- wasm/build.go
-wasm/exports.go` is **empty**. The replace-directive propagation the branch was named for is
-on `develop` verbatim via `c26c332`.
-
-Three agents assessed the diff by area. §2.18, §2.19 and §2.20 above came out of that and
-are recorded as defects in their own right — those are the real yield, and none of them
-needs the branch.
-
-**Worth rebuilding (not worth cherry-picking):**
-
-1. **Real `AdminForceComplete` / `AdminForceFail` / `AdminReReplay` bodies.** The largest
-   coherent chunk of work in the PR: ~445 lines across `engine/db.go`, `mysql_ops.go`,
-   `mssql_operations.go`, each with a generation check, not-found-vs-stale disambiguation,
-   an `admin_action` audit event in the same transaction, and post-commit
-   `ClearStickyWorker` / `ReleaseWorkflowConcurrencyKeys`. #217 landed the interface,
-   the event type and every mock; `engine/store_admin_stubs.go` is still literal
-   `"not implemented yet"`. **Do not port as written:** the inserts use columns `op`,
-   `err` and `timestamp_ms`, none of which exist — the schema has `operation`, `error` and
-   `created_at`. The MSSQL variant also drops the `tenant_id` filter from its `UPDATE`
-   while the MySQL sibling keeps it, which is precisely the ownership gap §1.7 says to
-   close first. There were no tests for any of the three bodies.
-2. **Plugin `StartWorkflow` capability gating** (`plugin/plugin.go`, `plugin/registry.go`,
-   `plugins/{eventtriggers,jobqueue,scheduler}/plugin.go`). Applies cleanly; three genuine
-   tests. The three plugin declarations are *required*, not optional — those plugins call
-   `env.StartWorkflow` today (`plugins/eventtriggers/publish.go:138`,
-   `plugins/jobqueue/background.go:154`, `plugins/scheduler/background.go:154`) and would
-   break under the gate without them. Related latent hazard worth fixing alongside:
-   `InitAll` does `pluginEnv := env` (`plugin/registry.go:81`), so every ReadOnly/ReadWrite
-   plugin shares one `*Environment`. Harmless today because nothing mutates per-plugin
-   fields — the capability feature is exactly what would make it load-bearing, which is why
-   the branch added a `shallowCopy()`.
-3. **`--migration-lock-timeout` + retry** (`migration/runner.go`, ~79 lines). Adds
-   `maxMigrationRetries = 3`, `runMigrationWithRetry` (1s delay, honours ctx cancellation)
-   and per-dialect lock timeouts — Postgres `SET LOCAL lock_timeout`, MySQL
-   `SET SESSION innodb_lock_wait_timeout`, MSSQL `SET LOCK_TIMEOUT`. Real tests:
-   `TestRunMigrationWithRetry_SuccessAfterFailures` counts actual attempts,
-   `TestLockTimeoutSQL_*` assert exact per-dialect SQL. Needs a rebase (`develop`'s runner
-   grew a `trackingTable()` helper), a 4th `NewRunner` param at both call sites
-   (`cmd/cleat-worker/main.go:550,593`), and a decision on the default — 0, i.e. today's
-   behaviour, opt-in.
-4. **`--latency-histogram-buckets`.** Absent from `develop`, applies cleanly, wraps 8
-   latency histograms and correctly leaves execution-duration histograms alone. 13 of its
-   14 tests are genuine — real `sdkmetric.ManualReader` assertions on observed bucket
-   bounds. Two catches: the `metrics.go` hunk smuggles in an unrelated
-   `cleat_canary_routing_total` counter that must be dropped, and full wiring needs a
-   `prometheus.Config.LatencyHistogramBuckets` field that does not exist yet.
-5. **`cleat build --dump-ir`** + `internal/closure` `DebugInfo`. Useful for answering "why
-   was this function pulled into the durable closure". The `internal/closure` half applies
-   cleanly; the `cmd/cleat/main.go` half collides with the already-landed `--version` flag
-   and needs one more bool threaded through `runBuild`. `TestDebugInfoPopulated` checks real
-   `Tag`/`Reasons` content. Lowest priority of the five.
-
-**Deliberately dropped, with reasons — do not resurrect:**
-
-- *Replace-directive propagation, the dispatcher model, `--version` on `cleat build`,
-  `ABIVersion: 1`, idempotent upsert-deploy, `>=` version-compat, `prompts/cto-agent.md`* —
-  all already on `develop`, byte-identical, via `c26c332` / `9cb5d01` / `6f6cdf1` / #216.
-- *Admin route gating.* #208 registers `/api/admin/instances/` only when the flag is on;
-  `develop` (`cmd/cleat-worker/app.go:79-85`) always registers and gates destructive
-  operations at request time. `develop`'s design is better — it keeps read-only admin
-  inspection working with the flag off, where #208 would 404 the whole namespace.
-- *Canary version routing* (`canary_weight` column + `ResolveVersionWithCanary` /
-  `SetCanaryWeight`, Postgres-only). `develop` already has the strictly more general
-  `workflow_routing` table with full CRUD (`engine/store_versioning.go:108-224`, mirrored
-  in MySQL and MSSQL): N-way weighted routing, versus #208's binary stable/canary split.
-  Adding `canary_weight` would be a second, weaker concept for the same job. **But there is
-  a real gap underneath it:** `resolveChildVersion` (`engine/children.go:58-131`) has no
-  routing case at all — its `stable` branch calls `ResolveVersionByTag` and nothing ever
-  consults `workflow_routing`. Worth fixing by wiring the existing `PickVersionByRouting`
-  in — no new column, no new migration.
-- *Cumulative WASM allocation limit.* Superseded by a better-integrated equivalent on
-  `develop`: `WithWasmCumulativeAllocationMax` (`engine/engine.go:92`) plus
-  `tryClaimCumulativeAllocation`, already flag-wired and tested. #208's version calls
-  `wasm.ReadMemoryInitialPages`, which does not exist on `develop`, and its
-  `cumulative_alloc_test.go` collides by name with `develop`'s.
-- *`ARCHITECTURE.md` edits.* Stale and self-contradictory — the diff *reverts* the correct
-  wasip1 description back to TinyGo while adding a TinyGo-deprecation note two paragraphs
-  later, and lists the Admin API as "incoming" after #217 shipped it. Salvage only the note
-  that cleat-238 (`--dump-ir`) and cleat-241 (canary routing) remain unbuilt.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.60 Per-step event flush never ran on MySQL or SQL Server — ✅ **FIXED** (WS-2, 2026-08-04)
 
-Same shape as §1.4's RLS blocker, on a different axis. `engine/flush.go`'s `insertEventSQL`
-is hand-written PostgreSQL — `$N` placeholders, `ON CONFLICT`, and since the RLS fix
-`set_config`. `cmd/cleat-worker/main.go` opens whatever the `--db` DSN produces and
-`setup.go:1580` passes it to `engine.WithDB` unconditionally, under the comment *"Always
-provide DB so per-step flush and adaptive flusher work."* `flushEvent`'s only guard is
-`e.db == nil`.
-
-So on the other two dialects **every per-step flush failed at parse time**, and
-`engine/lifecycle.go:180` logged it and carried on. Measured live on all three, with
-PostgreSQL as the control:
-
-| dialect | before | error |
-|---|---|---|
-| postgres | PASS | — (control) |
-| mysql | FAIL | `Error 1064 … near 'CONFLICT (workflow_id, step) DO UPDATE SET …'` |
-| mssql | FAIL | `'set_config' is not a recognized built-in function name` |
-
-Nothing was lost outright — `FinalizeWorkflowSegment` appends the whole segment through the
-dialect-correct store path at segment end. What was lost is the reason per-step flush
-exists: surviving a crash **mid**-segment. A MySQL or SQL Server deployment silently got the
-behaviour `docs/durable-calls.md` attributes to `--no-per-step-flush` ("higher throughput,
-weaker crash safety") without setting the flag, and with nothing observable from outside.
-
-Fixed with an unexported `perStepEventFlusher` interface. `MySQLStore` and `MSSQLStore`
-implement it; `PostgresStore` deliberately does not, so the primary dialect keeps the path it
-has always had.
-
-**The judgement call worth reviewing is `event_count`.** The store append maintains it, but
-`FinalizeWorkflowSegment` appends the same events again — idempotently for rows, but its
-increment is unconditional. Counting in the per-step path too would count every event twice:
-`GetEventCount` doubles and `--max-events-per-workflow` trips at half the configured limit,
-and neither symptom looks like a flush bug. So `flushEventForStep` passes
-`incrementCount=false`, matching PostgreSQL's raw insert, which has never touched
-`event_count` either. `TestPerStepFlushDoesNotDoubleCountEvents` pins it; flipping the flag
-fails it on both dialects.
-
-**Found by trying to write §1.4 phase D's migration.** Phase D adds a column to
-`event_history` in three dialects; standing up the three dialects to do that is what surfaced
-this. The plan's instruction not to build the fix before the observation held again, for a
-reason it did not anticipate — for the second time in two sessions.
-
-#### 2.60a Local SQL Server on Apple Silicon — the §1.7 blocker is removable
-
-`PARALLEL-WORKSTREAMS.md` records that §1.7 was deliberately skipped in every recent session
-because verifying an RLS migration needs a live MySQL and SQL Server, and *"the first task in
-§1.7 is not the migration — it is standing up MySQL and MSSQL you can actually test against."*
-
-`mcr.microsoft.com/mssql/server:2022-latest` cannot do it on arm64. It is amd64-only and
-QEMU rejects its address mapping outright:
-
-```
-/opt/mssql/bin/sqlservr: Invalid mapping of address 0x4005353000 in reserved
-address space below 0x400000000000
-```
-
-**`mcr.microsoft.com/azure-sql-edge:latest` runs natively on arm64** and is a real SQL Server
-engine — `Microsoft Azure SQL Edge Developer (RTM) - 15.0.2000.1574 (ARM64)`. Against it the
-repo's MSSQL engine tests are **296 pass / 2 fail / 0 skip**, and both failures are the
-`finalize_workflow_status` procedure that `engine/testutil` never defines — the gap already
-recorded under Phase 0's caveat 4. `sp_set_session_context` is present, so §2.71's fix is
-testable here too.
-
-```
-docker run -d --name cleat-ws2-mssql -e ACCEPT_EULA=1 \
-  -e MSSQL_SA_PASSWORD='CleatTest123!' -p 1434:1433 \
-  mcr.microsoft.com/azure-sql-edge:latest
-
-CLEAT_TEST_MSSQL='sqlserver://sa:CleatTest123!@localhost:1434?database=cleat&encrypt=disable'
-```
-
-Two caveats, both load-bearing. `encrypt=disable` is required: Edge's self-signed certificate
-has a negative serial number and current Go rejects it (`x509: negative serial number`) — an
-opaque TLS handshake failure, not an auth error. And Edge is a **15.0/2019-era subset**, not
-SQL Server 2022; it is enough to run this repo's suite and to stop writing MSSQL migrations
-blind, but a green run on Edge is not a claim about 2022. CI still has the real thing.
-
-#### 2.60b The engine suite is not deterministic against MySQL or SQL Server — ✅ **FIXED** (WS-2, 2026-08-04)
-
-> ~~**Four MySQL engine tests fail on `develop`.** Surfaced by running the engine suite
-> against a live MySQL for the first time. Verified pre-existing: they fail identically on a
-> stashed tree. Not fixed here — they are unrelated to the flush path and each wants its own
-> diagnosis.~~
->
-> ~~`TestCascadeDelete/mysql` — `Error 1170: BLOB/TEXT column 'sticky_worker_id'…`, a
-> `engine/testutil` schema defect. `TestDeliverSignal/mysql` — MySQL's `JSON` column
-> normalises whitespace; the test compares bytes. `TestPollAndClaimSignal/mysql`,
-> `TestPollSignal_NonDestructive/mysql` — `Error 3140: Invalid JSON text`. The first is a
-> test-schema bug; the other three are the same question, whether a signal payload must be
-> JSON, which PostgreSQL's `TEXT` accepts and MySQL's `JSON` does not.~~
->
-> **Wrong, and kept here on purpose.** Two errors. *(a)* PostgreSQL's column is `JSONB`, not
-> `TEXT` — all three dialects require JSON, so the dialects did not "disagree" about the
-> requirement at all; see §2.60c for what the difference actually was. *(b)* "Verified
-> pre-existing" was the worse mistake. The stashed-tree comparison was run against a database
-> those same tests had already populated, so it established only that both trees hit the same
-> accumulated state. On a **freshly created** MySQL database `develop`'s engine suite is
-> **green**. There were never four deterministic failures to fix.
-
-What is actually there is worse than four broken tests, because it does not show up as a
-stable red. Four consecutive full runs against live MySQL and SQL Server produced four
-different failure sets:
-
-| run | failures |
-|---|---|
-| 1 | `TestCascadeDelete/mysql`, `TestDeliverSignal/mysql`, `TestPollAndClaimSignal/mysql`, `TestPollSignal_NonDestructive/mysql` |
-| 2 | `TestMySQLIntegration_LoadDAGSpec`, `TestGetPendingUpdateRequests/mysql`, `TestCompleteUpdateRequest/mysql` |
-| 3 | `TestFinalizeWorkflowSegment_ZombieWriterFence/mssql` — repeated three times, identical each time, so the non-determinism is between runs that change the database, not run-to-run coin-flipping |
-| 4 (fresh DBs) | `TestTenantIsolation_ConcurrencyKeys/mysql` |
-
-Both of the last two **pass in isolation, on the same database, immediately before and after
-failing in the full suite** — and the fence test passed *with* a change applied and failed
-*without* it, which is the inverted result that rules out attributing any of this to the code
-under test.
-
-**The mechanism.** `engine/testutil` holds two independent hand-written MySQL schemas —
-`schema.go`'s `DialectMySQL` block and `mysql_schema.go` — plus a third definition in
-`migrations/mysql/001_schema.sql`. All use `CREATE TABLE IF NOT EXISTS` against one shared
-database, so **whichever test runs first defines the tables for the whole package**, and Go's
-ordering decides which. Rows also accumulate: `CleanupPostgresTestData` is PostgreSQL-only
-and `truncateAll` does not reach everything on SQL Server, so reaping and tenant-isolation
-tests see other suites' leftovers.
-
-This is §2.39's shape — schema DDL racing another package's DML against one shared database —
-on the two dialects that never got §2.39's fix. PostgreSQL has the advisory lock *and* the
-content fingerprint that makes the apply run once; MySQL and SQL Server have neither.
-
-**Three real divergences were found underneath it and are fixed** (`engine/testutil/schema.go`,
-each one this file's MySQL block disagreeing with the shipped migration):
-`workflow_instances.sticky_worker_id` and `concurrency_keys.workflow_id` declared `TEXT` where
-the migration says `VARCHAR(255)`, so the indexes this same file creates over them cannot be
-built; and `workflow_update_requests.tenant_id` missing the migration's `DEFAULT`, so an
-insert that omits it fails against a schema the product never ships.
-
-**Fixed by collapsing to one definition per dialect.** `SetupMinimalSchema` and
-`SetupFullSchema` now both route to the single schema for that dialect: the real migration file
-for PostgreSQL, `SetupMySQLFullSchema` for MySQL, `SetupMSSQLFullSchema` for SQL Server. 368
-lines of duplicated DDL deleted.
-
-The index creation had to move with them, and that turned out to be the actual seam: the
-dedicated files created **no** indexes and the `schema.go` arms created eight, so which entry
-point a test called changed the schema it got, on top of which test ran first. `SetupFullSchema`
-is kept as an alias rather than deleted — roughly forty call sites use it, and the
-minimal/full distinction is precisely the line the duplication grew along.
-
-**Three full runs against freshly created MySQL and SQL Server databases: green, green,
-green.** That is the evidence for the fix, and it is deliberately not a single run — a single
-green run on these dialects was never evidence, which is the part worth inheriting and why the
-original wrong diagnosis above is struck through rather than deleted.
-
-The fingerprint treatment `applyPostgresSchemaFile` has is *not* part of this and is still
-worth doing: it would stop the DDL re-running per test, which is a cost and a DDL-versus-DML
-deadlock risk (§2.39) rather than a correctness problem now that there is only one schema to
-apply.
-
-#### 2.60d `CleanupPostgresTestData` is an unqualified `DELETE FROM` on eleven tables — 🔴 **OPEN**
-
-```go
-for _, table := range tables {
-	if _, err := db.Exec("DELETE FROM " + table); err != nil {
-		t.Logf("cleanup: delete from %s: %v", table, err)
-	}
-}
-```
-
-No `WHERE`, no tenant qualification, and a failure is `t.Logf` rather than `t.Fatalf` — so a
-cleanup that silently does nothing is indistinguishable from one that worked. Every package
-that points at the same `CLEAT_TEST_DB` shares those eleven tables, and Go runs packages in
-parallel by default, so one suite's cleanup deletes another suite's live rows mid-run. This is
-what made `tests/crash` need a database of its own (§2.4) rather than a fix here.
-
-**Two things make it worse than it reads.** The name says Postgres, but the SQL is
-dialect-neutral, so `store_backends_test.go` calls it with the MySQL and SQL Server handles too
-and wipes those databases as thoroughly. And it is the most likely remaining source of the
-cross-suite state that §2.60b's schema collapse only half addressed — the collapse fixed *which
-schema* you get, not *whose rows* are in it.
-
-**Direct evidence, 2026-08-04.** After §2.60b landed, the engine suite is green on freshly
-created MySQL and SQL Server databases and still fails on a *reused* one —
-`TestFinalizeWorkflowSegment_ZombieWriterFence/mssql` and
-`TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL`, both of which pass again the moment the
-database is dropped and recreated. §2.60b fixed *which schema* you get; this is *whose rows*
-are in it, and it is the whole of what remains.
-
-Fixing it properly means deciding what test isolation is: a database per package (what
-`tests/crash` does, and it works), a tenant per package with tenant-scoped deletes, or
-transactions rolled back per test. That is a bigger decision than the ~40 call sites suggest,
-which is why it is recorded rather than done here. The cheap intermediate step — make the
-failure a `Fatalf` — is not obviously right either, because several callers currently rely on
-the delete failing harmlessly on tables their dialect does not have.
-
-#### 2.60c A non-JSON signal payload was accepted on PostgreSQL and rejected elsewhere — ✅ **FIXED** (WS-2, 2026-08-04)
-
-All three schemas require `workflow_signals.payload` to hold valid JSON, each saying so
-differently: PostgreSQL `JSONB`, MySQL `JSON`, SQL Server `NVARCHAR(MAX)` with
-`CHECK (ISJSON(payload) = 1)`. Only `PostgresStore.DeliverSignal` knew — it wrapped a non-JSON
-payload in quotes on the way in, and `decodeSignalPayload` unwrapped it on the way out.
-`MySQLStore` and `MSSQLStore` did neither, at six sites between them.
-
-So `DeliverSignal(ctx, wf, "sig", "payload-1")` — reachable from the worker's signal endpoint —
-succeeded on PostgreSQL and failed outright on the other two:
-
-```
-Error 3140 (22032): Invalid JSON text: "Invalid value." at position 0
-```
-
-Fixed by extracting `encodeSignalPayload` and applying it, with `decodeSignalPayload`, on all
-three stores.
-
-**A second defect fell out of it.** The PostgreSQL wrapping was `` `"` + payload + `"` ``,
-which produces invalid JSON the moment the payload contains a quote or a backslash — and is
-then rejected by the very column the wrapping exists to satisfy. `encodeSignalPayload` uses
-`json.Marshal`. Demonstrated by restoring the concatenation:
-
-```
-DeliverSignal("he\"llo") on postgres:   pq: invalid input syntax for type json (22P02)
-DeliverSignal("C:\\path\\to") on postgres: pq: invalid input syntax for type json (22P02)
-```
-
-So this was not only a cross-dialect inconsistency; PostgreSQL was rejecting ordinary payloads
-too. `TestSignalPayloadRoundTripsOnEveryDialect` covers six payload shapes across all three
-dialects and was watched failing on each half of the fix separately.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.70 Multi-DB CI ran entirely on wazero — ✅ **FIXED** (WS-3, 2026-08-04)
 
-### 2.70 Multi-DB CI ran entirely on wazero — ✅ **FIXED** (WS-3, 2026-08-04)
-
-`multi-db-ci.yml` prefixed all four of its test steps with `CGO_ENABLED=0`. Because
-`NewWasmtimeBackend` is behind `//go:build cgo`, that does not skip a check — it compiles the
-primary backend out and runs everything on the fallback. The workflow whose stated purpose is
-validating MySQL and SQL Server *under workflow execution* was never executing a workflow on
-the engine of record.
-
-Measured rather than argued — `go test -list` against `./engine/`:
-
-| | tests compiled in |
-|---|---|
-| `CGO_ENABLED=0` | 2401 |
-| CGO on | 2557 |
-
-The **156-test difference** is the entire `TestClosure_*` family — the real WASM
-host-function paths — plus 28 wasmtime-specific tests, including the four §1.5
-runaway-workflow regressions. None of them had ever run in this workflow.
-
-The failure mode is this repo's signature shape — a green signal attached to nothing:
-
-```
-$ CGO_ENABLED=0 go test -count=1 -run 'Wasmtime' ./engine/
-ok  	github.com/cleat-team/cleat/engine	0.370s
-```
-
-That `ok` is what multi-DB CI reported. Zero tests matched, because the file defining them is
-`//go:build cgo`. Counting the §1.5 runaway-workflow regressions specifically: `-run
-InfiniteLoop` executes **0** tests under `CGO_ENABLED=0` and **2** with CGO on. A suite that
-cannot run cannot fail, and reports success either way.
-
-Fixed by hoisting `CGO_ENABLED: 1` to a workflow-level `env:` and deleting the four inline
-prefixes. **Set explicitly, not merely removed:** Go defaults `CGO_ENABLED` to 1 only when a C
-compiler is present and to 0 otherwise, so relying on the default silently reinstates the same
-failure on a runner without gcc. Pinned to 1, that case fails loudly instead.
-
-Timeouts raised (300s→900s on the two full-engine jobs, 600s→900s on `MultiBackend`) because
-the step now runs 156 more tests, several of which compile WASM modules. Not tuning — a
-timeout here would present as a test failure and send the next reader down the wrong path.
-
-Verified locally against the live MySQL 8.4 and SQL Server 2022 stood up for §1.7, with
-`go env CGO_ENABLED` confirmed as `1` first: full `./engine/...` green apart from the two
-port-hardcoded factory tests noted below; `TestPluginMigrations` green; both
-`*_MultiBackend` plugin tests green across all three backends; wasmtime suites confirmed
-executing rather than skipping.
-
-Two caveats stated rather than buried:
-
-- The two failures in the local `./engine/...` run are `TestMySQLStoreFactory` and
-  `TestMySQLIntegration_FactoryOpenStore`, which ignore `CLEAT_TEST_MYSQL` and hardcode
-  `tcp(127.0.0.1:3306)` (already recorded above as config drift). They fail only because the
-  WS-3 sandbox runs MySQL on `3308`; CI publishes `3306`, so they pass there. **This means
-  the CI-green claim for that one step is inferred, not observed** — the honest boundary of
-  what was verified locally.
-- `ci.yml:145` (`go vet ./...`), `ci.yml:629` (`go build ./cmd/...`) and
-  `ecosystem-ci.yml:24` (`go install ./cmd/cleat`) still pass `CGO_ENABLED=0`. Not touched
-  here: they are build/vet steps, not execution tests, so the wazero substitution does not
-  apply the same way. They are worth a separate look — `ci.yml:731` already carries a comment
-  about a CGO-less binary that "read as though `CGO_ENABLED=0` were the shipped
-  configuration, which is the belief that let 2.28 survive," so the hazard was recognised in
-  that file and missed in this one.
-
----
-
-### 2.71 MSSQL session context is cleared by connection pooling — 🔶 **PARTLY FIXED** (found by WS-3, fixed by WS-1, 2026-08-04)
-
-`MSSQLStoreFactory` gives each tenant a pool whose wrapped connector runs
-`sp_set_session_context`. The doc comment at `engine/mssql_store.go:270-272` says this happens
-"on every new connection, so RLS is enforced automatically."
-
-It happens once per connection, and does not survive the connection being recycled.
-`database/sql` calls `ResetSession` when a connection is returned to the pool, `go-mssqldb`
-issues `sp_reset_connection`, and that clears `SESSION_CONTEXT`. Measured directly against
-SQL Server 2022 with `SetMaxOpenConns(1)`, so the reacquired connection is provably the same
-one:
-
-```
-same connection, right after setting: 11111111-1111-1111-1111-111111111111
-after return to pool and re-acquire:  <NULL>
-```
-
-**Consequence.** With the shipped schema's seven filter predicates in place and no session
-context, every tenant-scoped *read* matches nothing. Writes are unaffected — the write paths
-call `setSessionContext(tx)` inside their own transaction (`mssql_lifecycle.go:521`,
-`mssql_events.go:407`, `mssql_signals_promises.go:92`). Reads such as `ListWorkflows` and
-`GetWorkflowByID` rely on the connector alone, and `ListWorkflows`'s own
-`WHERE tenant_id = @p1` returns the right rows only for RLS to then discard them.
-
-It fails **closed**, so this is a correctness and availability defect rather than a leak. But
-on SQL Server with the real schema, tenant-scoped reads return nothing.
-
-**Why no test caught it.** `engine/testutil/mssql_schema.go` hand-writes its `CREATE TABLE`
-statements and defines **none** of the seven `CREATE SECURITY POLICY` statements the real
-migration carries. Every MSSQL test in the repo therefore runs against a schema with no
-tenant backstop, where a cleared session context has no observable effect. Same shape as the
-PostgreSQL superuser trap in §1.7: the mechanism under test is absent from the test
-environment, and its absence looks like success.
-
-**Fix direction** (not taken here — `engine/mssql_store.go` and `engine/testutil/` belong to
-other workstreams, and cross-stream coupling #3 says coordinate before touching the MSSQL
-path): establish the session context per transaction as the write paths already do, or
-re-apply it on `ResetSession`. Separately, the MSSQL test schema should apply the real
-migration so the policies exist, or every future isolation test on that backend will pass
-without meaning anything.
-
-#### The connection half — fixed, and it was worse than described
-
-Measured against a real SQL Server 2022 rather than reasoned about, and the first
-measurement corrected the diagnosis. The session context was not merely lost *after* a busy
-period: it was absent from **every** query, including the first one on a brand-new pool.
-
-`getOrCreateTenantPool` calls `PingContext` when it builds the pool. That returns the
-connection to the pool, so the very first application query is already being handed a
-recycled connection and has already been through `sp_reset_connection`. "Tenant-scoped reads
-sometimes return nothing" is really "tenant-scoped reads never work".
-
-```
-session context on a fresh connection = "", want "11111111-1111-1111-1111-111111111111"
-```
-
-Fixed by wrapping the driver connection in `tenantSessionConn`, whose `ResetSession` lets the
-driver do its own reset first — that *is* the `sp_reset_connection` that clears the context —
-and then re-applies `sp_set_session_context`. An error there is returned rather than
-swallowed, so `database/sql` discards the connection: one whose tenant could not be
-established must never serve a query.
-
-The wrapper forwards the optional interfaces go-mssqldb's `*Conn` implements (`Prepare`,
-`Close`, `Begin`, `PrepareContext`, `BeginTx`, `Ping`, `IsValid`, `CheckNamedValue`).
-`QueryerContext` and `ExecerContext` are deliberately not claimed: the driver does not
-implement them either, and claiming them would break the fallback `database/sql` relies on.
-
-Two existing tests asserted `Connect` returns the *identical* connection object. That is an
-identity assertion the fix necessarily breaks, and it pinned an implementation detail rather
-than a behaviour; they now assert the wrapper carries the right connection and the right
-tenant.
-
-- Tests: `engine/mssql_session_context_test.go`. `SetMaxOpenConns(1)` makes the reuse
-  provable — a pass cannot come from a fresh connection being opened instead. A second test
-  interleaves two tenants' pools so that a reset hook which cached one tenant, or read from
-  a shared variable, would pass the first test and fail this one. Both confirmed to fail with
-  the re-apply removed.
-
-#### The schema half — now observable, and the missing tables are recorded
-
-`engine/testutil/mssql_schema.go` hand-writes 334 lines of `CREATE TABLE` and defines none of
-the seven security policies. Pointing it at the real migration is the right fix and is **not**
-a small change: it switches RLS on for every MSSQL test in the repo, and any test that does
-not establish a session context will start returning nothing. That is the point — but it is a
-test-suite migration, not a one-liner, and `engine/testutil/` is WS-2's.
-
-Rather than block on that, MSSQL now gets the shape PostgreSQL already uses for exactly this
-problem: leave the default test schema alone and give the tests that care about RLS a scope
-where it is genuinely switched on — the analogue of `testutil.OpenPostgresRLSTestDB`.
-`engine/mssql_rls_enforcement_test.go` reads `fn_tenant_filter` and the seven
-`CREATE SECURITY POLICY` statements **out of the real migration** and applies them, so the
-predicate under test is the shipped one and cannot drift from it. It drops them again on
-cleanup, and drops any left by an interrupted earlier run before it starts — a filter
-predicate left behind blanks every later MSSQL test in the binary.
-
-That closes the verification gap without the suite-wide migration: `TestMSSQLTenantIsolation_UnderRealSecurityPolicies`
-fails with the §2.71 fix reverted, reporting the production symptom rather than a mechanism —
-`round 0: tenant A got <nil> for its own workflow`.
-
-**One thing this nearly got wrong, which is worth keeping.** The cross-tenant half of the
-test was first written as "tenant A's *store* must not return tenant B's workflow". That
-assertion passes against a **wide-open filter predicate**, because `MSSQLStore`'s own SQL
-carries `tenant_id = @p` and the Go layer does the filtering regardless of what RLS does —
-the same "a test can pass because of a layer other than the one you think you are testing"
-defect as §1.1's first fence test. Caught by making the predicate permissive and watching the
-test stay green. It now runs the cross-tenant check as a raw statement on the tenant's own
-pool, where no Go-level filter exists and the policy is the only thing that can hide the row;
-with a permissive predicate that fails with
-`tenant A's connection can see the other tenant's workflow … (1 row(s))`.
-
-**Still open:** the test schema is missing two tenant-scoped tables the shipped schema has —
-`workflow_routing` and `workflow_tags` — so their policies cannot be applied at all. That set
-is now asserted rather than assumed, so a *new* divergence fails the test instead of being
-tolerated silently. Pointing `engine/testutil/` at the real migration remains the real fix.
-
-#### Where the switch stands, 2026-08-05 — written, and the blocker is now named
-
-Branch `fix/mssql-test-schema-real-2`, draft PR #333. `engine/testutil` builds the MSSQL schema
-from `migrations/mssql/{001,010,011,020}.sql`, fingerprinted so it applies once per database —
-001 is not re-appliable, because its own security policies bind `fn_tenant_filter` and its
-`CREATE OR ALTER FUNCTION` then fails on the second call.
-
-**What the switch bought on the way**, all merged: §3.16, §3.17, §3.18, §3.19 — four production
-defects the hand-written schema's missing constraints had hidden.
-
-**Correction to the previous note in this section.** It said a single failure "moved" between
-`TestClaimWorkflow/mssql` and `TestFailWorkflow/mssql` and that the trigger was unexplained.
-The trigger is now explained and it was measurement error: those runs were against a database
-**poisoned by an earlier version of `mssql_rls_enforcement_test.go`**, which installed the
-seven policies and dropped them on cleanup. That was correct while the test schema had none and
-became destructive the moment the schema provided them — and because the fingerprint says "these
-files have been applied", nothing ever reinstalled them. A database in that state runs every
-later test without a backstop, forever. Two guards now exist: that file asserts the policies
-instead of installing them, and `applyMSSQLSchemaFile` fails loudly if the fingerprint matches
-while the policies are gone, which is the state that cost an hour to recognise.
-
-**The real blocker, which is exactly what this residual predicted.** With the policies genuinely
-live, a fresh database gives **141** failures, and they are one cause:
-
-```
-setupTestData: CreateSchedule: mssql: Violation of PRIMARY KEY constraint 'pk_workflow_schedules'
-store A expected 3 active instances, got 6
-```
-
-`CleanupMSSQLTestData` deletes on a plain pool with **no session context**, so the filter
-predicate hides every row it is trying to delete and it removes nothing. Rows accumulate across
-tests: primary-key collisions in fixtures, and counts that are multiples of what the test
-inserted. The residual's own sentence — *"turning them on suite-wide fails every test that
-builds a store on a plain pool — that is the point"* — describes this precisely.
-
-**The decision that unblocks it** is what to do about administrative access under RLS, and it
-is a real choice rather than a patch:
-
-- have the test cleanup toggle the policies (`ALTER SECURITY POLICY … WITH (STATE = OFF)`)
-  around its deletes — supported, but global state that only works because `./engine/...` runs
-  with `-p 1`;
-- give `fn_tenant_filter` an escape hatch — a sentinel session-context value that means
-  "administrative" — which changes the *shipped* predicate and therefore what production
-  enforces;
-- have every raw-SQL fixture and cleanup set a session context, which is the honest answer and
-  the largest, since it means every such site learns which tenant it is acting as.
-
-PostgreSQL sidesteps this because cleanup runs as the owning superuser, which RLS exempts;
-SQL Server has no equivalent exemption, which is why the same suite shape works there and not
-here.
-
-**One exception, as of 2026-08-04.** `cmd/cleat-worker/tenant_isolation_mssql_test.go` was
-written and shipped skipped against this item; unskipping it was the recorded acceptance
-test, and it now passes. It sidesteps the shared helper entirely — it applies
-`migrations/mssql/001_schema.sql` to a dedicated database of its own, and asserts the
-policies are enabled *before* asserting anything about tenants, so it cannot pass against a
-schema without RLS. So there is now exactly one MSSQL test that observes a security policy
-enforcing tenant isolation end-to-end, through the HTTP layer.
-
-That does not close the schema half. One test carrying its own migration is a workaround for
-a shared helper that lacks the policies, not a replacement for fixing it: every *other* MSSQL
-test in the repo still runs without a backstop. `scripts/skip-baseline.txt` drops this entry
-from 2 skip sites to 1, the remaining one being the ordinary "CLEAT_TEST_MSSQL not set"
-guard.
-
----
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.72 Two languages ran on wasmtime because a parser was broken — ✅ **FIXED** (WS-3, 2026-08-04)
 
-`readImportSection` (`wasm/metadata.go`) advanced past an import descriptor's **kind byte**
-and left its payload unread. For a function import the payload is a type index, so the next
-iteration read that index as the following import's module-name length. The parser
-desynchronised after the *first* import, and every module with two or more failed:
-
-```
-AssemblyScript   readImportSection err=corrupt WASM import 1: field name overflows section
-Java (TeaVM)     readImportSection err=corrupt WASM import 2: name overflows section
-```
-
-Both fixtures parse cleanly with an independent parser — 3 and 7 imports, `env.abort` present
-in the AssemblyScript one, `teavm.*` in the Java one, which are exactly the two patterns
-`detectLanguageFromImports` looks for. **Those branches had never once been reached.**
-
-Invisible because both callers read an error as "cannot tell": `NeededEnvImports` falls back
-to registering every host function (safe, but the optimisation never applied), and
-`detectLanguageFromImports` returns `""`, which `DetectLanguage` turns into its `"go"` default.
-
-**The trap, and why the fix is two changes in one commit.** AssemblyScript and TeaVM Java
-reached the wasmtime backend *because* of this bug — misidentified as `"go"`, they matched the
-only entry in the backend map. Fixing the parser alone would have identified them correctly,
-matched nothing, and silently dropped both onto wazero. A bug fix that downgrades two
-languages onto the fallback runtime is worse than the bug, and nothing in the suite would have
-said so. `cmd/cleat-worker/backend_routing.go` now states the routed set explicitly, and
-`TestRealFixturesRouteToWasmtime` asserts detection *and* destination together — verified to
-fail with the parser fixed and the list left at `{"go"}`.
-
-**Also fixed: the discarded component error.** `backend_wasmtime.go` had
-`if result, err := b.ExecuteComponentCGo(...); err == nil`, throwing the error away. Every
-native-component failure surfaced only as whatever the decomposition fallback happened to
-report — typically an unresolved-import error, which reads like "wasmtime cannot run this
-component" when the cause was something else entirely. It is now logged and attached to the
-fallback's error.
-
-**What that revealed, for whoever takes §2.28's residual further:**
-
-- **Rust loads and executes on wasmtime today.** `place_order` from `examples/rust-workflow`
-  ran and returned the guest's own `{"error": "EOF while parsing a value at line 1 column 0"}`
-  from a nil input. `wasm/metadata.go:353-355` routes it away deliberately — *"so Rust modules
-  fall through to the default runtime instead of crashing in wasmtime"* — which does not
-  reproduce now. Same shape as the stale `CGO_ENABLED=0` note in `CLAUDE.md`: a reason that
-  was true when written and outlived its cause. **Not moved**, because `tests/cross-language`
-  is one of the six suites this plan records as run by no CI job, so there is no signal to
-  regress against. Wire that up first; the routing change is then one line in
-  `wasmtimeLanguages`.
-> **CORRECTION, 2026-08-06.** Points (1) and (2) in the bullet below are **no longer true**
-> and have not been since #296: the wasmtime headers were vendored into
-> `engine/wasmtimeinc` so the build tag could be dropped, and `engine/component_cgo.go` now
-> carries only `//go:build cgo`. `grep -rn wasmtime_component_cgo` finds the string nowhere
-> outside past-tense narrative, and `engine/engine.go:341` lists python in
-> `WasmtimeLanguages`. Only point (3), `componentGetFunc`'s nil parent export index, is still
-> open — see §3.31. **This paragraph is why the correction is here rather than a deletion:**
-> it sat unchanged under a heading marked fixed and misled three sessions into reading the
-> decomposition fallback's error as the state of Python-on-wasmtime, then a fourth on
-> 2026-08-06 into reporting a working feature as broken.
-
-- **Python is closer than it looks, and blocked by three separate things.** With the native
-  component path enabled, the component *compiles and links* on wasmtime. Its failures are
-  (1) `engine/component_cgo.go` sits behind the `wasmtime_component_cgo` build tag, which
-  **no build, CI job, Makefile or Dockerfile sets** — every build gets the stub; (2) it needs
-  `CGO_CFLAGS=-I<wasmtime-go>/build/include`, documented at `component_cgo.go:26` and
-  automated nowhere; (3) `componentGetFunc` passes `nil` as the parent export index, so it
-  resolves only flat top-level exports and cannot reach functions nested inside an exported
-  interface, which is how componentize-py emits them. Probing export names, `run` was found
-  and called — it trapped in execution rather than being missing. That trap is inconclusive:
-  the probe passed a nil `HostHandler`, so host calls could not work. What it does establish
-  is that the wall is not wasmtime's component support.
-
-**Method note.** None of this was visible by reading. The parser looked correct, the language
-branches looked correct, and the routing looked correct; the fixtures were the only thing that
-disagreed. Every claim above came from executing against checked-in toolchain output.
-
-#### 2.72 follow-up — one routing table, and Rust moved onto wasmtime (2026-08-04)
-
-The routing decision existed **twice**, and the two copies disagreed:
-
-| | registered for wasmtime |
-|---|---|
-| `cmd/cleat-worker` | `go` |
-| `cleat/wasmtest` | `go, assemblyscript, python, java` |
-
-So the test harness ran Python on a backend the worker never sends it to, and neither routed
-Rust. A harness whose routing differs from the worker's is exercising a configuration nobody
-runs — which is worse than exercising the wrong one loudly, because it looks like coverage.
-
-Now single: `engine.WasmtimeLanguages` / `engine.RunsOnWasmtime`, with both consumers reading
-from it. `cmd/cleat-worker/backend_routing.go` forwards rather than re-listing, so the two
-cannot drift again.
-
-**Python removed from the harness's list.** It fails on wasmtime — its component reaches the
-decomposition path and dies on `incompatible import type for env::abort`, reproduced through
-`cleat/wasmtest` with a real `HostHandler`, so not a probe artefact. Nothing caught the
-mismatch because nothing ran it: `plugin-harness-ci.yml` installs no Python toolchain, so
-`TestPluginCalls_Wasm_Python` skips and that registration had never once been exercised.
-
-**Rust moved onto wasmtime**, and the sequencing is the point. It could not be justified
-before, because `tests/cross-language` built `wasm32-wasip1` while `cleat build --target rust`
-ships the `wasm32-unknown-unknown` cdylib (`build_rust.go:34`) — so the suite covered an
-artifact no user runs, and could not have tested the claim that kept Rust out:
-
-> wasmtime-go v44 still crashes on fn.Call for Rust cdylib core modules
-
-That claim was structurally uncheckable by the only suite that would have checked it, because
-the suite never built a cdylib. It does not reproduce. With the suite switched to the shipped
-target, all seven of its tests pass on wasmtime — including both cross-replay directions,
-executing under one runtime and replaying the recorded history under the other.
-
-**Correction to a first draft of this entry:** `TestPluginCalls_Wasm_Rust` was cited as
-additional coverage. It is not, in CI. `plugin-harness-ci.yml` installs no Rust toolchain at
-all, so that test skips there and only passes locally. `tests/cross-language` is the whole of
-the gate.
-
-**And the gate needed a toolchain fix nobody had needed before.** Every workflow installs
-`wasm32-wasip1` only — five of them — while `cleat build --target rust` has always required
-`wasm32-unknown-unknown` (`build_rust.go:34`). Pointing the suite at the shipped target made
-CI fail with `error[E0463]: can't find crate for 'std'`, after passing locally on a machine
-that happened to have both targets installed. A local pass on a richer toolchain than the
-runner's is not evidence the job works, which is the same lesson the `test-go/engine` skip
-budget records from the other direction.
-
-Worth someone's attention, not fixed here: **no CI job installs the target `cleat build
---target rust` needs**, so that build path — the one users actually invoke — is exercised
-nowhere. And `tests/plugin-harness/wasm_plugin_test.go` skips on
-`"wasmtime-go compatibility issue with this WASM module"`, a skip that would swallow precisely
-the regression this section is about.
-
-Same shape as the stale `CGO_ENABLED=0` note in `CLAUDE.md`: a reason that was true when
-written, outlived its cause, and stayed because the thing that would have contradicted it was
-pointed somewhere else.
-
-**Where each language now runs:** wasmtime for `go`, `assemblyscript`, `java`, `rust`; wazero
-for `python` alone, until the native component path (§2.72 above) is buildable.
-
-**Observed, not chased:** `TestPluginCalls_Wasm_Go` skips locally while the AS, Java and Rust
-siblings pass. Not investigated, and not caused by this change — Go's routing is unaltered —
-but a Go-path test skipping in the harness for the primary language is worth someone's
-attention.
-
-#### Python: one blocker removed, one left, and it is a stale fixture
-
-**Removed.** `registerEnvStubs` registered `env.abort` unconditionally as
-`(msg, file, line, col i32)` — AssemblyScript's shape. A Linker holds one definition per
-`(module, name)`, so a core module importing a *no-argument* abort, which is what the modules
-inside a componentize-py component do, was rejected at instantiation:
-
-```
-incompatible import type for `env::abort`
-expected type `(func)`, found type `(func (param i32 i32 i32 i32))`
-```
-
-The comment on that registration argued the mismatch was benign because
-`DefineUnknownImportsAsTraps` would cover the other signature and "the first registration
-wins". The first registration does win — that is the defect. Instantiation fails before any
-trap-default can apply. `env.abort` is now registered with the type the module declares, read
-from `Module.Imports()`, so both toolchains are served from one linker.
-
-Measured effect on the checked-in Python component: instantiation advances from **instance 15
-(module 3)** to **instance 81 (module 10)**.
-
-**Left.** At instance 81 it fails on a different mismatch:
-
-```
-incompatible import type for `env::cleat_call`
-expected type `(func (param i32 i32 i32 i32 i32 i32 i32))`
-found type `(func (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64))`
-```
-
-The module wants a 7-parameter `cleat_call` with no result. Both backends implement the same
-8-parameter, `i64`-returning ABI — `engine/wasmtime_hostfuncs.go:24` and
-`engine/imports.go:118` agree — so this is not a backend difference. **The checked-in
-`call_all_plugins.wasm` predates the current host ABI.** It is a 19 MB artifact that no CI job
-rebuilds, because no workflow installs `componentize-py`.
-
-So Python-on-wasmtime cannot be settled with the fixture in the tree, and the next step is not
-a code change: it is getting `componentize-py` into a CI job so the component is rebuilt
-against the ABI the host actually implements. Until then the honest position is that the abort
-blocker is fixed and verified, and what lies past it is unknown.
-
-The abort fix is covered by `engine/wasmtime_abort_arity_test.go`, which builds its modules
-from WAT rather than depending on that fixture — deliberately, so the regression test does not
-inherit the staleness that blocks the thing it is testing.
-
-**Correction, 2026-08-04, and it improves the picture.** The paragraph above concluded that
-Python could not be settled because the checked-in fixture is stale. That is true of the
-*fixture* and false as a statement about the repo: `e2e-cross-language.yml` installs
-`componentize-py` and `engine/python_wasm_e2e_test.go` builds a component **fresh** on every
-run. There has been a real signal all along.
-
-It was invisible. `TestPythonWasmEndToEnd` has been **failing on `develop`** while the workflow
-reported success, because the step running it pipes `go test` into `tee` without
-`set -o pipefail` — so `tee`'s exit status is the step's. The very next step in the same file
-carries that fix, with a comment explaining exactly this hazard. It was applied to one step
-and not the other.
-
-What the hidden failure says, on a freshly built component rather than the stale fixture:
-
-```
-instantiate instance 41 (module 4, 3 args, imports: [env GOT.mem GOT.func]):
-  incompatible import type for `env::abort`
- (native component path first failed: wasmtime component CGo fast path not built)
-```
-
-That is this section's `env::abort` defect, and nothing further — the `env::cleat_call` ABI
-skew is an artefact of the stale checked-in fixture, not of Python. So the abort fix and the
-missing `pipefail` ship together: one makes the failure visible, the other fixes it.
-
-Also worth keeping: `componentize-py`'s `componentize` step cannot run on macOS/arm64 here. It
-dies with `EXC_GUARD / GUARD_TYPE_MACH_PORT — SET_EXCEPTION_BEHAVIOR on mach port`, which is
-its embedded wasmtime installing a mach exception handler into a guarded port. Not OOM, which
-was the first guess and was wrong. Linux runners have no such guard, so CI is the place this
-gets exercised, and now it is the place it will be seen.
-
-**What the now-visible signal actually says.** With the `env::abort` fix in place, a freshly
-built component gets further and stops somewhere else:
-
-```
-before: instantiate instance 41 (module 4): incompatible import type for `env::abort`
-after:  instantiate instance 52 (module 8): undefined element: out of bounds table access
-```
-
-Eleven instances further in. So the abort defect was real and is fixed, and **Python still
-does not run on wasmtime** — it now fails in the decomposition path's table/element handling.
-`backend_wasmtime.go` already has a retry for exactly that string ("Element segment / table
-errors can result from adapter-provided tables conflicting with our placeholders"), and it
-does not rescue this case. That is where the next attempt should start.
-
-**The test was asking for the wrong thing.** `engine/python_wasm_e2e_test.go` had an
-unconditional `if true` block registering `WithBackend("python", wt)` — forcing Python onto
-wasmtime, which is a configuration the product does not use and Python does not survive. It
-now registers `WasmtimeLanguages`, so it exercises what ships, and Python runs on wazero as it
-does in the worker. When the component path can instantiate a Python component, adding
-`"python"` to that one list switches this test over with no edit to it.
-
-The sequence is worth keeping as a unit: a step without `pipefail` hid a failing test; the
-test was failing because it forced a routing the product had already rejected; and the routing
-had been rejected for a reason that was itself only half-diagnosed until the abort fix moved
-the error. Four layers, each concealing the next.
-
-#### Decision: Python stays on wazero — ✅ **SETTLED 2026-08-04**
-
-Not an open item. The point of the work above was to find out *why* Python was on the fallback
-runtime, and that is now known to the instance: it stops at `undefined element: out of bounds
-table access` instantiating an inner core module, eleven instances past where the `env::abort`
-defect used to mask it.
-
-**Correction — "wazero runs Python correctly" was wrong, and CI said so within the hour.**
-That sentence stood here and in the comment on `engine.WasmtimeLanguages`. It was inferred
-from the product's routing, not from anything that ran. With the routing corrected so Python
-actually reaches wazero, `TestPythonWasmEndToEnd` fails there too:
-
-```
-wasmtime: instantiate instance 52 (module 8): undefined element: out of bounds table access
-wazero:   instantiate instance 8 (module 1): module[__main_module__] not instantiated
-```
-
-**Python is on wazero because that is where the product sends it, not because it is known to
-work there.** The honest statement of the outcome: four of five languages run on wasmtime, and
-the fifth runs on a backend where its one end-to-end test does not currently pass either.
-
-That test is now skipped and recorded — `skip-baseline` 1→2 sites, `e2e-cross-language` budget
-0→1 — rather than left failing or left hidden. Deleting it would lose the only thing in CI
-that builds a Python component at all. Unskipping it is the acceptance test for whichever
-instantiation path is fixed first.
-
-Note the sequencing, because it is the whole lesson of this entry: the claim was written, and
-the mechanism that would have contradicted it (`pipefail`) was fixed in the same change. The
-correction arrived one CI run later. Had the `pipefail` fix not been part of this work, the
-false claim would have sat in the source comment indefinitely, with a green workflow behind
-it.
-
-Two candidates remain for whoever wants to revisit, and neither is urgent:
-
-- The `undefined element` retry in `backend_wasmtime.go` ("adapter-provided tables conflicting
-  with our placeholders") is keyed on this exact error and does not rescue this case.
-- The native component path in `engine/component_cgo.go`, behind the `wasmtime_component_cgo`
-  build tag that no build sets, needs `CGO_CFLAGS` pointing at wasmtime-go's vendored headers
-  and a `componentGetFunc` that can resolve exports nested inside an interface instance.
-
-Adding `"python"` to `engine.WasmtimeLanguages` is the whole of the switch when one of those
-lands; `engine/python_wasm_e2e_test.go` reads that list, so it moves over with no edit.
-
-> **CORRECTION, 2026-08-06 — this landed.** #296 vendored the headers into
-> `engine/wasmtimeinc` and dropped the tag, so the build-tag and `CGO_CFLAGS` halves of the
-> second bullet are done; `componentGetFunc`'s nested-export bug is what remains (§3.31).
-> `"python"` **is** in `engine.WasmtimeLanguages` (`engine/engine.go:341`) and has been since
-> #296. See the longer correction at §1.5 for why this is annotated rather than deleted.
->
-> Separately, and found on 2026-08-06: the reason Python skipped on developer machines was
-> never this code path at all. `componentize-py` cannot run on macOS — its embedded wasmtime
-> installs a mach exception handler into a guarded port and the process dies with
-> `EXC_GUARD / GUARD_TYPE_MACH_PORT`, a Darwin kernel guard with no Linux equivalent. The
-> Linux CI runners were always fine. `scripts/docker/python-toolchain.Dockerfile` removes the
-> asymmetry by running the toolchain in a container, which is how
-> `TestRunBuild_PythonTarget_WasmRoundtrip` was made to execute for the first time on a Mac.
-> Note that the engine's Python tests need **`wasm-tools` as well**, checked separately, so
-> installing `componentize-py` alone leaves them skipping with a different message.
-
----
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 2.73 Plugin-harness CI ran on wazero too, and a skip was hiding the cost — ✅ **FIXED** (WS-3, 2026-08-04)
 
-`plugin-harness-ci.yml` set `CGO_ENABLED: "0"` in **all four** jobs. Same defect §2.70 fixed in
-`multi-db-ci.yml`: `NewWasmtimeBackend` is behind `//go:build cgo`, so this did not skip a
-check, it removed the primary backend and ran everything on wazero.
-
-**Here it had a visible cost.** `TestPluginCalls_Wasm_Go` skipped unconditionally on
-*"wazero v1.11.1 nil Sys context panic"* — and that panic only happens because the job forced
-wazero. Measured both ways before changing anything:
-
-| | |
-|---|---|
-| CGO on | **PASS** |
-| CGO off | `invalid memory address or nil pointer dereference (recovered by wazero)` |
-
-So the primary language had no WASM integration coverage, guarded by a skip describing a bug
-in a runtime the product does not use for Go. CGO is now pinned to `"1"` in every job and the
-skip is gone; `skip-baseline` drops that entry 2 sites → 1.
-
-**`cleat build --target rust` is now exercised.** It was exercised nowhere:
-`TestPluginCalls_Wasm_Rust` is the only test that runs it, and this job installed no Rust, so
-it skipped. Worse, its guard checked for **`wasm32-wasip1`** while `build_rust.go:34` compiles
-for `wasm32-unknown-unknown` — so the check was for a target the build does not use. A machine
-with wasip1 and not unknown-unknown passed the guard and then failed inside cargo; one with
-unknown-unknown and not wasip1 skipped a build that would have worked. Guard corrected, and
-the job now installs the right target.
-
-**Not fixed, and the skip stays: Layer 3.** `TestPluginCalls_MultiDB` carries the same
-wazero-panic skip, but removing it does *not* pass with CGO on — postgres succeeds and the
-other two dialects fail on migration handling that has nothing to do with wazero:
-
-```
-mysql: RunCoreMigrations: execute 003_procedures.sql: Error 1064 ... near 'DELIMITER //
-mssql: RunCoreMigrations: execute 001_schema.sql: Could not create constraint or index
-```
-
-The MySQL one is the `DELIMITER` idiom that `splitMySQLDelimited` handles in
-`engine/store_backends_procedures_test.go` and this runner does not; the MSSQL one has the
-shape of the `GO` batch-separator problem. So that skip was concealing two real defects behind
-a third, and `plugin-harness/multi-db` keeps its budget of 1 until they are fixed.
-
----
-
-**Method note for Phase 3.** Every "already on develop" verdict above was settled by
-diffing against `develop` and by `git apply --check`, not by reading commit messages — the
-mistake §0.2's correction calls out. Three of the four highest-value findings (§2.18, §2.19,
-§2.20) are defects on `develop` that the PR happened to touch, not features the PR added.
-Assessing a stale branch for salvage turned out to be a decent defect-finding technique in
-its own right, because it forces a line-by-line read of code nobody has looked at recently.
-
----
-
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ## Phase 3 items — round 2 (2026-08-05)
 
 ### 3.10 Idempotency keys are global across tenants — ✅ **FIXED** (WS-1, 2026-08-05)
 
-Found while auditing the ~89 unaudited `MySQLStore` `s.tenantID` call sites (§1.7 / §2.12).
-The audit's premise is that MySQL has no RLS, so a missing Go-level tenant filter is an
-unbacked cross-tenant leak. This one is worse than a missing filter: **there is nothing to
-filter on.**
-
-`idempotency_keys` is keyed by `key_hash` alone on every dialect —
-`key_hash BYTEA NOT NULL PRIMARY KEY` (postgres), `PRIMARY KEY (key_hash)` (mysql),
-`CONSTRAINT pk_idempotency_keys PRIMARY KEY (key_hash)` (mssql) — and the table has **no
-`tenant_id` column at all**. The hash is `sha256.Sum256([]byte(idempotencyKey))`, with the
-tenant nowhere in it (`store_lifecycle.go:634`, `mssql_lifecycle.go:741`, and the MySQL
-equivalent).
-
-So an `Idempotency-Key` is global. Measured on postgres, mysql and mssql:
-
-```
-tenant B's first use of its own idempotency key "order-…" reported already-existing:
-  tenant A's key collided with it. B's workflow was never started
-tenant B was handed tenant A's workflow ID "idem-a-…" for its own idempotency key
-  -- a cross-tenant information leak on a user-supplied value
-tenant B has no workflow after StartNewRun returned "idem-a-…"
-```
-
-**Two impacts.** Tenant B receives tenant A's workflow ID — a cross-tenant information leak
-on a value the client supplies. And tenant B's workflow is **silently never started**, while
-the API answers `200 {"already_started": "true"}`. `Idempotency-Key` is a request header, so
-this is the expected outcome of two customers both choosing `order-123`, not an attack.
-
-Note that PostgreSQL's RLS cannot help here either: there is no tenant column to filter on.
-This is the one tenancy defect in the set that all three backends share equally.
-
-**The fix, and the decision in it.** Two options, differing only on upgrade:
-
-- **Add `tenant_id` and make the primary key `(key_hash, tenant_id)`.** Existing rows take
-  the default tenant, so single-tenant deployments keep deduplicating across the upgrade.
-  Migration in WS-1's range, three dialects. **Recommended.**
-- **Put the tenant into the hash.** One line per dialect, no migration — but every existing
-  key stops matching, so a retried request after the upgrade starts a *second* workflow.
-  That is precisely what idempotency exists to prevent, so the cheaper fix is the wrong one.
-
-A failing three-dialect test is on `bugfix/mysql-tenant-scoping-audit`
-(`engine/idempotency_tenant_test.go`), committed without a PR because it is red by design.
-
-#### Resolution — the column, and what the existing test could not see
-
-Fixed as recommended: `migrations/{postgres,mysql,mssql}/010_idempotency_keys_tenant_id.sql`
-adds `tenant_id` defaulting to `DefaultTenantUUID` and widens the primary key to
-`(key_hash, tenant_id)`; the three `StartNewRun` idempotency paths carry
-`AND tenant_id = ?` on both lookups and the tenant on the insert. The hash is unchanged, so
-keys written before the upgrade still match.
-
-**The failing test was failing for the wrong reason on PostgreSQL.** As committed on
-`bugfix/mysql-tenant-scoping-audit` it called `setupTestData`, which inserts under
-`DefaultTenantUUID`, against a store scoped to tenant A — and `PostgresBackend.SetupForTenant`
-returns a genuinely RLS-enforcing connection, which rejected the write:
-
-```
-setupTestData: StartNewRun ready: start new run: pq: new row violates
-row-level security policy for table "workflow_instances" (42501)
-```
-
-So the postgres arm died in setup, one layer above the property, and the "measured on
-postgres, mysql and mssql" line above was true of the *defect* but not of that test: only its
-MySQL and SQL Server arms had ever reached the assertion. Dropping the two fixture calls (the
-test deploys its own definitions) makes all three arms reproduce it. Two further corrections
-the fix surfaced:
-
-- The test asserted on `WorkflowInstance.TenantID`. Only `MySQLStore` selects `tenant_id`
-  into that field; `PostgresStore` leaves it to RLS and `MSSQLStore` filters in SQL, so on
-  those two it is `""` for every workflow and the assertion passed or failed for reasons
-  unrelated to tenancy. It now identifies B's workflow by its input payload and adds the
-  assertion that actually matters — neither store can read the other tenant's workflow at all.
-- Both tenants deployed a definition of the same name, which collides on a primary key that
-  has no tenant in it. Recorded separately as §3.12.
-
-**Proof it can fail** (removing the fix and re-running, on all three dialects at once):
-with the `AND tenant_id = ?` deleted from the three lookups, every arm reports
-`tenant B's first use of its own idempotency key reported already-existing` and
-`tenant B was handed tenant A's workflow ID`. With the migration dropped instead,
-`migration.TestIdempotencyTenantMigrationPreservesExistingKeys` reports
-`column "tenant_id" does not exist (42703)` / `Invalid column name 'tenant_id'`.
-
-**The upgrade path is tested, not asserted.** `migration/idempotency_tenant_test.go` drives the
-real `Runner` over the real files — 001 alone, then 001 + 010 — against a scratch database
-with a pre-upgrade key already in it, and checks that the key survives, lands on the default
-tenant, no longer blocks a second tenant, and still deduplicates within one. That is the
-whole difference between the two candidate fixes, so it is the thing worth a test.
-It runs on PostgreSQL and SQL Server; **its MySQL arm is skipped**, because the Runner cannot
-parse `migrations/mysql/001_schema.sql` at all — §3.13, found by this test.
-
-**A skipped 010 is loud, not silent.** Migration versions 6–15 were used by the numbering
-`eb6b082` folded into 001, so a develop-tracking database migrated before that commit may
-already have version 10 recorded and would skip this file. `StartNewRun` then names a column
-that does not exist and every idempotent start errors, rather than quietly mis-scoping.
-
-**Residual: PostgreSQL has no RLS policy on this table.** The seven policies in 001 cover the
-tenant-scoped tables; `idempotency_keys` was not among them because it had no tenant column to
-filter on. It has one now, so a policy is possible — but every access path would have to set
-`cleat.tenant_id` first, and three do not: the pre-transaction lookup, the insert (which runs
-before `setRLSOnTx`), and `cmd/cleat-worker/setup.go`'s expiry sweep, which has no tenant
-context at all. Fail-closed policies would turn all three into errors. That is a separate
-change to the transaction structure, not a line in a migration, and it is left open here
-rather than half-done.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 3.11 Four unscoped queries — ✅ **FIXED** (WS-1, 2026-08-05), and it was three dialects, not one
 
-From the same audit: 109 statements in the MySQL store touch tenant-scoped tables, 16 carry
-no `tenant_id` reference, and most of those 16 are false positives — `ClaimWorkflows`'
-`UPDATE ... WHERE id IN (...)` is scoped transitively by its candidate `SELECT`. **Read the
-enclosing function before believing the grep.**
-
-The four that survive that reading:
-
-| method | why it matters |
-|---|---|
-| `GetWASMLength` | `WHERE name = ? AND version = ?` — def names are user-chosen and collide across tenants, so this returns another tenant's WASM size |
-| `QueueDepth` | counts `workflow_instances` across every tenant |
-| `DeleteExpiredEvents` | **deletes** `event_history` across every tenant |
-| `GetAllowedSignalCallers` | reads authorization data by workflow ID with no tenant scope |
-
-None has a database backstop on MySQL (§1.7: zero RLS policies). Severity is bounded by the
-HTTP layer's per-tenant scoping since §1.7, which is defence in depth working — but that is
-the only thing standing between these and a leak.
-
-#### Resolution — measured per dialect, because the answer differs per method
-
-The audit read the MySQL store, so the item was written as a MySQL item. All four statements
-are unscoped in the PostgreSQL and SQL Server stores too; what differs is what sits
-underneath, and that turned out to vary by *method* rather than by dialect. Measured with two
-tenants and real rows rather than reasoned about:
-
-| method | postgres | mysql | mssql |
-|---|---|---|---|
-| `QueueDepth` | scoped — runs in `beginTxWithRLS` | **counted 5 of 5** | **counted 5 of 5** |
-| `GetWASMLength` | **errored for everyone** (below) | **read the other tenant's 8 bytes** | **read the other tenant's 8 bytes** |
-| `GetAllowedSignalCallers` | scoped by RLS | **read the other tenant's list** | **read the other tenant's list** |
-| `DeleteExpiredEvents` | scoped — runs in `beginTxWithRLS` | **deleted the other tenant's history** | **deleted the other tenant's history** |
-
-All four now carry an explicit `tenant_id` predicate on MySQL and SQL Server. On PostgreSQL
-the two that already ran inside an RLS transaction are left alone — the policy is the filter
-there, and a redundant predicate would only obscure that — and the two that did not now do.
-
-**`GetWASMLength` on PostgreSQL was not a leak; it was a silent cache bug.** It ran on `s.db`
-with no `cleat.tenant_id` set, so on the role the engine is meant to run as
-(`005_app_role.sql`, §1.10) the policy could not be evaluated and every call failed with
-`invalid input syntax for type uuid: "" (22P02)`. Its one caller is `Worker.loadWASM`, which
-uses the length as a cache-freshness check on **every cache hit** and treats an error as
-"keep serving the cache". So on PostgreSQL a redeployed definition was never picked up by a
-worker with a warm cache: the staleness check could not fire, and the error path even records
-a cache *hit* metric. Running it in an RLS transaction restores it.
-
-**`GetWASMLength`'s tenant scope depends on §3.12.** Until a definition records the tenant
-that deployed it, every definition is the default tenant's and the predicate matches nothing
-useful — the two arms of this test that cover it only pass with §3.12's writer fix in place.
-Two defects that had to be fixed in the same direction to make either observable.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 3.18 SQL Server rejects the JSON the other two dialects require — ✅ **FIXED** (WS-1, 2026-08-05), floor raised to 2022
 
-The third thing the §2.71 measurement found, and the first that cannot be fixed without
-choosing something. It blocks the schema switch: with the shipped MSSQL schema in place, five
-subtests still fail, all of them this.
-
-`ISJSON(expression)` with no second argument returns 1 **only for a JSON object or array**. A
-JSON scalar — `"payload-1"`, `123`, `true` — returns 0. Measured directly:
-
-```
-ISJSON('"payload-1"') = 0
-ISJSON('{}')          = 1
-```
-
-§2.60c made all three stores encode a non-JSON signal payload with `json.Marshal`, which turns
-`payload-1` into the scalar `"payload-1"`. PostgreSQL's `JSONB` and MySQL's `JSON` both accept
-a scalar, so that fix is correct there — but the value it produces is exactly what SQL Server's
-shipped `CHECK (ISJSON(payload) = 1)` refuses. So `DeliverSignal` and `CreateUpdateRequest`
-fail on a SQL Server built from `migrations/mssql/001_schema.sql`, and §2.60c is only
-two-thirds fixed. The test schema's missing CHECK constraint is why it read as complete.
-
-**Why this is a decision and not a patch.** `ISJSON(payload, VALUE) = 1` accepts scalars and
-is the obvious repair — but the second argument requires **SQL Server 2022**, and `README.md`
-and `docs/reference/database-backends.md` both promise **2017+**. Fixing it that way silently
-raises the floor. The options:
-
-| | what it costs |
-|---|---|
-| `ISJSON(payload, VALUE)` in a migration | Requires SQL Server 2022; contradicts the documented 2017+ support unless that claim changes too |
-| Drop the CHECK on those two columns | Keeps 2017; SQL Server loses a backstop the other two get from their column types. The engine already guarantees valid JSON through `encodeSignalPayload`, so the constraint is defence in depth rather than the only guard |
-| Encode scalars as an object or array | Keeps both the constraint and 2017 — but changes the stored format on every dialect, needs a migration for existing rows, and changes `decodeSignalPayload` |
-
-Not chosen here. Any of them is a product call about what cleat supports, and the first and
-third change behaviour beyond the defect.
-
-#### Resolution — 2022+, and now it is the claim CI tests
-
-The owner chose the first option. `migrations/mssql/011_json_scalar_payloads.sql` changes both
-constraints to `ISJSON(payload, VALUE) = 1`, which accepts every value PostgreSQL's JSONB and
-MySQL's JSON accept — measured on the 2022 container: a string scalar and a number scalar pass,
-an object and an array pass, and `payload-1` is still refused, so the guard is not traded for a
-no-op. `README.md` and `docs/reference/database-backends.md` say 2022+.
-
-Worth stating plainly, because it was the argument for choosing this way: the 2017+ claim was
-**true in the code and tested nowhere**. The shipped SQL used only 2016/2017-era features, so
-it was not already broken — but `multi-db-ci.yml`, the compose files and the docs' own examples
-have only ever run 2022, and nothing anywhere asserts a version. The repo now promises what it
-verifies. A server older than 2022 fails migration 011 with `Incorrect syntax near 'VALUE'`,
-which is a better answer than silently rejecting every signal.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 3.19 `CreateUpdateRequest` was §2.60c's defect, one table over — ✅ **FIXED** (WS-1, 2026-08-05)
 
-§2.60c established that `workflow_signals.payload` must hold valid JSON on all three dialects
-and that only `PostgresStore` knew; it extracted `encodeSignalPayload` and applied it
-everywhere. It did not reach `workflow_update_requests.payload`, the sibling column with the
-same requirement, where each store was wrong in a different way:
-
-| store | what it did with a non-JSON payload |
-|---|---|
-| `PostgresStore` | wrapped with `` `"` + payload + `"` `` — the concatenation §2.60c itself identifies as producing invalid JSON when the payload contains a quote or a backslash |
-| `MySQLStore` | nothing; `Error 3140` |
-| `MSSQLStore` | nothing; CHECK constraint violation |
-
-So `CreateUpdateRequest(ctx, wf, "name", "payload-1", …)` succeeded on PostgreSQL and failed on
-the other two, and a payload containing a quote failed on all three. Found by pointing
-`engine/testutil`'s MSSQL schema at the shipped migration (§2.71) — the only place the
-constraint exists.
-
-**And the readers disagreed too**, which the test caught rather than accommodating.
-`PostgresStore` unwraps with `payload #>> '{}'`; the other two returned the quoted form. The
-same call therefore answered differently per backend. `encodeSignalPayload`/`decodeSignalPayload`
-are now `encodeJSONPayload`/`decodeJSONPayload` and both halves are applied on all three, so
-`GetPendingUpdateRequests` returns what the caller passed in everywhere.
-
-
-
-**The §2.71 switch is written and waiting on this.** `engine/testutil`'s MSSQL schema pointing
-at the shipped migration works — the fingerprint-once shape from §3.16's note, the
-hand-written DDL retained unreachable for the review diff — and takes the suite from 95 failing
-subtests to 5. Those five are this item. The branch is `fix/mssql-test-schema-real`, unpushed;
-it is ~60 lines and has been re-derived twice, so re-deriving it is cheap if it is lost. Two
-smaller things also fall out of the switch when it lands:
-
-- one fixture inserts a `tenant_api_keys` row for a tenant absent from `admin.tenants`, which
-  the shipped schema has a foreign key for;
-- `TestMSSQLTenantIsolation_UnderRealSecurityPolicies` asserts that exactly
-  `[workflow_routing workflow_tags]` are missing from the test schema. Under the real schema
-  nothing is missing, so it fails **because the drift is closed** — the assertion becomes "no
-  tables are missing".
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 3.17 Completing a workflow wrote JSON `null` into `query_state`, and SQL Server refused it — ✅ **FIXED** (WS-1, 2026-08-05)
 
-The second thing the §2.71 measurement found, after §3.16 removed the first. Twelve sites
-across all three stores read:
-
-```go
-qsJSON, _ := json.Marshal(queryState)
-if qsJSON == nil {
-    qsJSON = []byte("{}")
-}
-```
-
-`json.Marshal` of a nil map returns the four bytes `null`, **not nil**, so the guard never
-fired and `null` is what reached the database — for every workflow with no query handlers,
-which is most of them.
-
-PostgreSQL's `JSONB` and MySQL's `JSON` accept it, because a JSON null is valid JSON: the row
-goes in and the query state reads back as `null` instead of `{}`. SQL Server's shipped schema
-does not — `CHECK (ISJSON(query_state) = 1)` and `ISJSON('null')` is `0` — so **`CompleteWorkflow`,
-`FailWorkflow` and `ContinueAsNew` all failed outright** on a SQL Server built from
-`migrations/mssql/001_schema.sql`:
-
-```
-The UPDATE statement conflicted with the CHECK constraint
-"ck_workflow_instances_query_state"
-```
-
-13 of the 29 subtests still failing after §3.16 were this. Fixed with one helper,
-`marshalQueryState`, at all twelve sites.
-
-**The test is three-dialect on purpose.** Asserting only that SQL Server stops erroring would
-leave PostgreSQL and MySQL writing `null` forever, so
-`TestCompleteWorkflowStoresAnObjectForEmptyQueryState` reads the column verbatim on each
-dialect — the store's `GetQueryState` takes a key and returns one entry, which cannot tell an
-empty object from a JSON null. With the fix reverted: postgres and mysql report
-`query state stored as null (raw "null"), want {}`, and mssql reports the constraint
-violation. The `empty map` and `a handler` cases pass either way, which is the shape of the
-defect: only the nil case was wrong, and only the nil case is common.
-
-`ck_workflow_instances_query_state` is now in the test schema too, with a repair step for the
-`null`s an existing test database already holds.
-
-**Still open from the same measurement** (counts from the 29 remaining after §3.16):
-
-- 6 × `ck_workflow_signals_payload` and 2 × `ck_workflow_update_requests_payload` — the same
-  family, different columns. §2.60c covers signal payloads and was fixed on 2026-08-04, so
-  read that before assuming this is the same thing.
-- 1 × `fk_api_keys_tenant` — a fixture inserting an API key for a tenant that does not exist
-  in `admin.tenants`, which the shipped schema has a foreign key for and the test schema does
-  not.
-- `TestMSSQLTenantIsolation_UnderRealSecurityPolicies` asserts that exactly
-  `[workflow_routing workflow_tags]` are absent from the test schema. Under the real schema
-  nothing is absent, so that assertion fails **because the drift is closed** — it needs to
-  become "no tables are missing" as part of the switch.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 3.16 `CreateSchedule` could not create a schedule on SQL Server — ✅ **FIXED** (WS-1, 2026-08-05)
 
-Found by measuring the §2.71 residual rather than by reading code: pointing `engine/testutil`'s
-MSSQL schema at the shipped `migrations/mssql/001_schema.sql` and running the engine suite
-produced 95 failing subtests, and the single largest cause was not row-level security at all.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-`json.RawMessage` is a `[]byte`, and go-mssqldb binds a `[]byte` as `VARBINARY`. So
-`workflow_schedules.input` received the *binary rendering* of the JSON rather than the JSON,
-and the shipped schema refuses it:
+### 3.15 Signal authorization consults a list nothing can write — 🟢 **THE WRITER EXISTS** (WS-1, 2026-09-02); the default stays off, for a different reason
 
-```
-setupTestData: CreateSchedule: mssql: The INSERT statement conflicted with the
-CHECK constraint "ck_workflow_schedules_input" ... column 'input'
-```
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-`CONSTRAINT ck_workflow_schedules_input CHECK (ISJSON(input) = 1)` has been in
-`001_schema.sql` all along, so **every scheduled workflow on a SQL Server built from the
-shipped schema failed to be created.** `StartNewRun` had the same shape and was written
-correctly — `CAST(@p4 AS NVARCHAR(MAX))` with `string(input)` — which is what the fix copies.
+### 3.78 Cross-schema child workflows, removed — ✅ **DONE** (WS-1, 2026-09-02, D8)
 
-**Why nothing caught it:** `engine/testutil`'s hand-written MSSQL schema declares no CHECK
-constraint on that column. The malformed value went in, the suite stayed green, and the defect
-was visible only on a database built from the file that ships. That is the §2.71 schema
-residual expressed as one concrete production failure, which is the argument for closing it.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-The constraint is now in the test schema too, with a repair step for rows an existing test
-database already holds (`ALTER TABLE ADD CONSTRAINT` validates existing rows and would fail on
-them). `TestMSSQLCreateSchedule_SurvivesTheShippedInputConstraint` applies the shipped
-constraint to the one table it is about rather than relying on the shared schema, and fails on
-all three input shapes with the fix reverted.
+### 3.77 Names are per-tenant — D7, and it is three tables rather than one — ✅ **DONE 2026-09-03; all three tables**
 
-#### What the §2.71 measurement says about the remaining work
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-Worth recording so the next session does not repeat it. Pointing the MSSQL test schema at the
-real migration is a **suite migration**, as the residual says, but the failures are not what
-the residual predicts:
+### 3.86 SQL Server's cross-tenant exemption is per-connection, and the statements that lean on it have no predicate of their own — 🟢 **31 STATEMENTS FIXED across schedules, tags, definitions, the control plane and the claim path (§3.91); the gate is in place and the remaining 27 are an allowlist with reasons, not a backlog** (WS-1, 2026-09-03)
 
-- **95 failing subtests** from an empty database, before this fix.
-- The dominant cause was §3.16 above, not a missing session context.
-- A second cause is in the harness rather than the tests: `001_schema.sql` is **not
-  re-appliable**, though its header claims to be. The seven security policies bind
-  `dbo.fn_tenant_filter`, so the file's own `CREATE OR ALTER FUNCTION` fails the second time
-  with `Cannot ALTER 'dbo.fn_tenant_filter' because it is being referenced by object
-  'TenantFilter_Defs'`. The migration Runner never sees this because it applies each file once
-  and records the version; a test helper that runs on every `Setup` call sees it immediately.
-  Whoever does the switch needs the fingerprint-once shape `applyPostgresSchemaFile` already
-  uses.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-Re-measure after §3.16 lands: the number that matters is what is left once the schedule defect
-is gone.
+### 3.12 One tenant's deploy silently replaces another's workflow code — 🔵 **OVERWRITE CLOSED; THE NAMESPACE DECISION IS MADE** (WS-1, 2026-08-05; D7 2026-09-02)
 
-### 3.15 Signal authorization consults a list nothing can write — 🔶 **DEFAULT TURNED OFF** (WS-1, 2026-08-05), feature still absent
-
-Found while scoping `GetAllowedSignalCallers` for §3.11: the method reads
-`workflow_instances.allowed_signals`, and **nothing in the product ever writes that column.**
-Searched the whole tree, every language, excluding tests: the only writes are two raw
-`UPDATE`s inside test files. There is no store method, no API endpoint, no CLI verb, no SDK
-call.
-
-What consumes it is not optional. `cmd/cleat-worker/setup.go` installs the check whenever
-`--require-signal-auth` is set, and that flag **defaults to `true`**:
-
-```go
-callers, err := w.store.GetAllowedSignalCallers(ctx, targetWorkflowID)
-if len(callers) == 0 {
-    return fmt.Errorf("signal auth denied: workflow %s has no allowed callers configured", ...)
-}
-```
-
-`docs/reference/worker-config.md` documents the empty list as "deny all (fail-secure)" and
-tells operators to "add `"*"` (wildcard) to `allowed_signals`" to permit external callers —
-an instruction there is no way to follow.
-
-So on a default deployment every cross-workflow signal, every plugin-originated signal and
-every external HTTP signal is denied, and the documented way to allow one does not exist. The
-only coverage is `TestWithSignalAuthCheck`, which passes a stub closure and asserts the option
-plumbing — the §1.3 shape exactly: the test cannot see the defect because it replaces the
-thing that has it.
-
-**The fix is a decision, not a patch.** Either signal authorization gets a way to populate the
-list (store method, API, and something in the SDKs), or `--require-signal-auth` defaults to
-`false` until it does. Flipping the default is one line and turns a silently-broken security
-feature into an absent one; adding a writer is the feature it was always supposed to be. Not
-taken here because it is a product call rather than a defect fix.
-
-#### Resolution — the default is off, and the denial is now observed rather than read
-
-Taken the second way, on the owner's instruction to use judgement. `--require-signal-auth`
-defaults to `false`; `docs/reference/worker-config.md` says plainly that the flag is not usable
-yet and why; `CHANGELOG.md` carries it as a breaking upgrade note. **The feature is still
-absent** — this makes that honest rather than making it work.
-
-Before changing a security default I verified the denial rather than trusting the code path,
-which meant giving the production wiring a name: the check was an anonymous closure inside
-`newWorker`, so the only thing testable was `engine.TestWithSignalAuthCheck`, which passes a
-*stub* closure and asserts the option plumbing — a test that replaces the thing under test.
-`signalAuthCheckFor(store)` is now a named function, and three tests drive it against a real
-PostgreSQL store:
-
-- a workflow created through the ordinary path denies every caller, with the empty-list reason.
-  That is the defect, pinned: as long as nothing can write the column, this is what enabling
-  the flag does;
-- the flag's default is `false`;
-- the mechanism still enforces a list that *is* present — caller listed, caller absent,
-  wildcard, empty list — set with raw SQL, because that remains the only way to set it. That
-  guards against the check rotting while it is unreachable, so whoever adds a writer inherits
-  something that works.
-
-**Still open:** the writer. A store method, an API endpoint and SDK surface, at which point the
-default goes back to `true`. The tests above are written so that the first one fails when that
-lands, which is the signal to revisit them.
-
-### 3.12 One tenant's deploy silently replaces another's workflow code — 🔶 **OVERWRITE CLOSED, NAMESPACE STILL SHARED** (WS-1, 2026-08-05)
-
-Found while fixing §3.10: the two-tenant test could not deploy a definition of the same name
-from both stores, and the reason it could not turned out to be worse than the inconvenience.
-
-`workflow_defs`' primary key is `(name, version)` on every dialect — `PRIMARY KEY (name,
-version)` (postgres, mysql), `CONSTRAINT pk_workflow_defs PRIMARY KEY (name, version)`
-(mssql) — with no tenant in it, and definition names are chosen by whoever deploys. All three
-`DeployWorkflowDef` implementations upsert on that key (`ON CONFLICT (name, version) DO
-UPDATE`, `ON DUPLICATE KEY UPDATE`, `MERGE ... WHEN MATCHED THEN UPDATE`), so the second
-tenant to deploy a given name does not collide — it **overwrites**.
-
-Measured on postgres, mysql and mssql, with a per-tenant store apiece (the harness §1.7 and
-§2.71 use, including PostgreSQL's genuinely RLS-enforcing connection). Tenant A deploys
-`shared-def-name` v1, tenant B deploys its own v1 of the same name, then A reads its
-definition back:
-
-```
-postgres  B deploy err = <nil>   A reads back: wasm_bytes = [1 2 3 4]   (B's bytes)
-mysql     B deploy err = <nil>   A reads back: wasm_bytes = [1 2 3 4]   (B's bytes)
-mssql     B deploy err = <nil>   A reads back: wasm_bytes = [1 2 3 4]   (B's bytes)
-```
-
-So this is not an information leak, it is code replacement: tenant B decides what tenant A's
-workflows execute, by picking a name. Two things make it reachable rather than theoretical:
-
-- **`PostgresStore.DeployWorkflowDef` hardcodes the default tenant.**
-  `store_deployment.go:161` is a literal `tenantID := "00000000-0000-0000-0000-000000000000"`,
-  ignoring `s.tenantID` — so on PostgreSQL every definition every tenant deploys is written as
-  the default tenant's. `MSSQLStore`'s `MERGE` does not name `tenant_id` in its INSERT column
-  list at all and takes the column default, which is the same value. Only `MySQLStore` passes
-  `s.tenantID`.
-- **The RLS policy on this table admits the default tenant by design**:
-  `tenant_id = cleat.assert_tenant_set() OR tenant_id = '00000000-…'`, presumably for shared
-  definitions. Combined with the line above, every definition is a shared definition.
-
-Not investigated here: whether the HTTP layer's §1.7 ownership checks constrain which names a
-tenant may deploy. That bounds the severity and does not change the store-level finding.
-
-The fix is not only a wider primary key: `(name, version, tenant_id)` without correcting the
-two writers above would put every definition in one tenant anyway. Expect a migration in
-WS-1's range, the two writer fixes, and a decision about what "shared definition" should mean
-now that it is the accidental default.
-
-#### Resolution — the overwrite is closed, the namespace is not
-
-The bounded half is done, chosen over the full redesign because the key change reaches three
-foreign keys per dialect and ~96 query sites and wants its own review:
-
-- **A definition records its owner.** `PostgresStore.DeployWorkflowDef` uses `s.tenantID`
-  instead of the hardcoded default, and `MSSQLStore`'s `MERGE` names `tenant_id` in both its
-  INSERT and its UPDATE. `MySQLStore` already did.
-- **A deploy over someone else's definition is refused**, with an error wrapping
-  `engine.ErrWorkflowDefOwnedByAnotherTenant`, in a transaction that locks the row (and the
-  gap it would occupy) first. On PostgreSQL the guard is repeated in SQL, because under RLS
-  the conflicting row is invisible to the read and the INSERT hits the primary key instead —
-  so `23505` is mapped to the ownership error rather than surfacing as `duplicate key value
-  violates unique constraint`, which says nothing about what went wrong.
-- **What is not fixed:** two tenants still cannot each hold `order-processor`, and one
-  tenant's definition is still readable by name from another. The namespace is shared; taking
-  a name is now loud instead of silent.
-
-**The soft edge, stated rather than buried.** Every definition in every existing database is
-owned by the default tenant, so refusing those outright would break the first redeploy after
-the upgrade for every tenant at once. A default-tenant definition is therefore *adopted* by
-the first tenant to redeploy it. Until that happens, a tenant other than its creator can still
-take it over. `CHANGELOG.md` carries this as a breaking upgrade note.
-
-**Proven able to fail:** with the three writers reverted to `develop`'s, all three dialects
-report `tenant B deployed over tenant A's definition "order-processor" and was told it
-succeeded`, and postgres and mssql additionally report the owner as the default tenant. MySQL
-passes the ownership half unchanged, which is the asymmetry recorded above.
-
-**Two things the fix turned up in the test suite, both of which were the tests depending on
-the defect:**
-
-- Eight `TestTenantIsolation_*` fixtures deployed *one* `*WorkflowDef` to both tenants' stores.
-  That only ever worked because the second deploy overwrote the first. They now give tenant B
-  its own definition, which is what a multi-tenant deployment has to do until the key changes.
-  None of their assertions moved.
-- `TestMSSQLStore_StartNewRun_TenantID` inserted a `workflow_defs` row with an explicit NULL
-  `tenant_id`. `migrations/mssql/001_schema.sql` declares that column `NOT NULL DEFAULT '000…'`
-  and always has — the row the test inserted could not exist in a real database. It passed
-  because `engine/testutil`'s MSSQL schema left the column nullable: the §1.9 drift class
-  again, found by reading the column back rather than by reading the schema.
-
-**Residual, and it is the same shape as §3.11:** a definition's *contents* are still readable
-across tenants by name — `LoadWASM`, `GetWASMLength`, `LoadDAGSpec` and `LoadWorkflowConfig`
-key on `(name, version)` with no tenant. PostgreSQL's RLS policy for this table admits the
-default tenant deliberately, so pre-upgrade definitions stay globally readable by design; on
-MySQL and SQL Server there is nothing underneath at all. Closing that is the same work as
-putting the tenant in the key.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 3.13 No cleat-worker can bootstrap a MySQL schema — ✅ **FIXED** (WS-1, 2026-08-05)
 
-Found by §3.10's migration test, which could not build a "before" state for MySQL.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-`migration.Runner` splits MySQL files on every `;` (`splitSQL`, `runner.go:415`) with no
-regard for what the semicolon is inside. Line 7 of `migrations/mysql/001_schema.sql` is
+### 3.30 What wazero is for — ✅ **DECIDED 2026-09-01: it stays, scoped to CLI and dev tooling**
 
-```
--- CREATE INDEX has no IF NOT EXISTS in MySQL 8.0; re-runs error harmlessly.
-```
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-so the runner sends `re-runs error harmlessly.` as a statement:
+### 3.31 The execution-limit story, per backend — ✅ **WRITTEN** (WS-3, 2026-08-05; closed 2026-09-01)
 
-```
-migration 001_schema.sql: execute: Error 1064 (42000): You have an error in your
-SQL syntax; ... near 're-runs error harmlessly.
-```
-
-`cmd/cleat-worker/main.go:561` runs this Runner at boot and `os.Exit(1)`s on failure, so a
-worker pointed at a MySQL database that has not already been schema'd by some other means
-cannot start — the same shape as §1.11, on the other dialect. It has been invisible because
-every MySQL test path in the repo builds its schema from `engine/testutil`'s Go copy instead,
-which is exactly the divergence §1.9 is about: **the shipped schema is still not the tested
-schema on MySQL.**
-
-`003_procedures.sql` is very likely unapplicable too, for a second reason: it uses
-`DELIMITER //`, which is a client directive rather than a server statement, and its procedure
-bodies contain semicolons that `splitSQL` would cut. Not yet confirmed — 001 fails first.
-
-The fix is comment- and string-aware splitting (or `multiStatements=true` and no splitting at
-all), plus running the real files against a scratch MySQL database in CI so this cannot
-recur. `migration/idempotency_tenant_test.go`'s MySQL arm is skipped pointing here, and that
-skip is the acceptance test for this item.
-
-#### Resolution — and the second reason, which was worse
-
-`splitSQL` now tracks the four things a semicolon can be inside — a line comment (`--` with
-the whitespace MySQL requires, and `#`), a block comment, a quoted string (both backslash and
-doubled-quote escapes), and a backtick identifier — and honours `DELIMITER`, which is what the
-file is asking the client to do. It is not a SQL parser and does not try to be; it knows
-enough to find statement boundaries and leaves the rest to the server.
-
-**The `DELIMITER` half was confirmed, and it is the more serious of the two.**
-`003_procedures.sql` creates `finalize_workflow_status` — the procedure the engine calls on
-every workflow completion, with no fallback. Its body is full of semicolons, so the old
-splitter cut it into fragments and then sent `DELIMITER //` to a server that has never heard
-of it. So even with 001 fixed, a MySQL deployment would have come up without the one procedure
-it cannot run without.
-
-**Tested three ways, deliberately:**
-
-- `migration.TestRunner_AppliesShippedMySQLMigrations` runs the real Runner over the real
-  `migrations/mysql/` against a scratch database and checks the tables, the composite
-  idempotency key from §3.10, and `finalize_workflow_status`. `TestRunner_SecondMySQLRunAppliesNothing`
-  covers the restart-against-a-migrated-database path separately, because "applies nothing on
-  a fresh database" and "re-applies on a live one" fail in different directions.
-- `TestSplitSQL` is a table of twelve cases against the pure function, which had **no unit
-  tests at all** — most of why this survived, since reproducing it needed nothing but calling
-  the function with a string that is checked into this repo. Reverting the function body to
-  the old one-liner fails seven of them.
-- `TestSplitSQL_ShippedMySQLFiles` runs the splitter over the real files with no database and
-  asserts the properties that matter: no fragment is pure prose (MySQL answers an empty query
-  with 1065), no fragment is a `DELIMITER` directive, and nothing containing `CREATE
-  PROCEDURE` has lost its `END`. That is the check that would have caught this on a laptop
-  with nothing installed.
-
-**And it now runs in CI, which was the actual gap.** `multi-db-ci.yml`'s `test-mysql` and
-`test-mssql` jobs ran `./engine/...` only; they are the only jobs with live MySQL and SQL
-Server, so a migration test could not run anywhere that had a server to run it against. Both
-now run `./migration/...` too. Without that, this fix would have been guarded by a test that
-skips in every job — which is the shape of the problem, not a fix for it.
-`migration/idempotency_tenant_test.go`'s MySQL arm is unskipped, as this item's acceptance
-test required.
-
-**Not done, and small:** `tests/plugin-harness/testdb.go` carries a *second*, independent
-statement splitter (dollar-quote and `GO` aware) that applies the same migration files. It
-copes with the shipped MySQL files today — verified against a live MySQL 8.4 — so this is
-duplication rather than a defect, but two splitters means the next one to drift does so
-silently.
-
-### 3.30 What wazero is for — 🔶 **ANSWERED, and the answer is smaller than expected** (WS-3, 2026-08-05)
-
-Raised because Python moving onto wasmtime (§2.72) emptied the set of languages wazero was
-retained for. The question was whether it still has a stated, tested role.
-
-Read off the tree rather than reasoned about. Three things still reach it:
-
-1. **CGO-less builds.** `NewWasmtimeBackend` is behind `//go:build cgo`, so a
-   `CGO_ENABLED=0` binary has no wasmtime at all and everything runs on wazero. This is the
-   one legitimate remaining role. The shipped image is not in it — §2.28 moved the Dockerfile
-   to a glibc base with CGO on, and `--verify-backend` fails the build if that regresses.
-2. **`setup.go`'s `needsWazeroRuntime`**, which is `w.wasmtimeBackend == nil ||
-   !runsOnWasmtime(DetectLanguage(wasmBytes))`. The second clause is now dead for every
-   input: all five languages route to wasmtime, and `DetectLanguage` returns `"go"` when it
-   cannot tell. So it reduces to case 1.
-3. **Every deferred callback, unconditionally** — see §3.32. That is not a role, it is a
-   defect, and it is the one place an unfenced backend still executes guest code on a
-   fully-configured production worker.
-
-**So the answer:** wazero is the CGO-less fallback and nothing else, plus one path that
-reaches it by accident. `CLAUDE.md` has been corrected — it claimed wazero was "retained as a
-fallback for the languages that do not work under wasmtime", and that set is empty.
-
-Not proposed here: deleting it. A pure-Go build is a real distribution story and the CGO-less
-path is the only thing keeping it available. What should not survive is §3.32.
-
-### 3.31 The execution-limit story, per backend — 🔶 **PARTLY WRITTEN** (WS-3, 2026-08-05)
-
-The item asked for the limit story to be written and tested per *backend* rather than per
-language, on the grounds that §1.5 was a correct fix that reached no deployment for weeks
-because it sat behind a build tag the shipped image did not set.
-
-Writing it down is what found the gaps, so here it is in full. The wasmtime backend has
-**three** execution paths, not one, and they had three different answers:
-
-| path | entered when | fence before | fence now |
-|---|---|---|---|
-| core module (`Execute`) | Go, AssemblyScript, Java, Rust | caller's budget | unchanged |
-| native component (`ExecuteComponentCGo`) | any Component Model guest, i.e. Python | **backend default, caller's budget dropped** | caller's budget |
-| decomposition (`ExecuteComponent`) | native path fails for a non-limit reason | caller's budget | unchanged |
-| defers (`RunDefer`) | every deferred callback, on every path | **none — wazero** | **still none, §3.32** |
-
-The component-path defect: `ExecuteComponentCGo` passed `context.Background()` to
-`configureStore`, which takes the tighter of ctx's deadline and the backend's configured
-timeout. With no ctx deadline to reconcile against, every component guest silently got the
-backend-wide 30s default. Measured on a Python component that never returns: **a 2s budget
-ran for 32.9s**. The fence was firing the whole time, on the wrong deadline, which is why it
-did not look broken from outside.
-
-Two things fell out of fixing it, both of which would have undone it:
-
-- **The fallback handed a runaway guest a second budget.** `Execute` falls back from the
-  native path to decomposition on any error, so an interrupted guest was started again from
-  scratch and the effective bound became a multiple of the configured one. Limit traps no
-  longer fall back.
-- **`resourceLimitError` could not see a component-path limit at all.** It matched
-  `*wasmtime.Trap`, and the Component Model C API returns no trap code — only a rendered
-  message (`wasmtimeinc/wasmtime/error.h`). An exhausted budget arrived as a bare
-  `wasm trap: interrupt` under a page of guest backtrace.
-
-**What is still unwritten:** the *decomposition* path's fence is inherited rather than
-verified — it passes ctx correctly, but nothing exercises a runaway guest through it, because
-every component that reaches it today fails to instantiate for other reasons. And defers are
-§3.32.
-
-The generalisable finding, which is the one worth carrying: **"which backend runs this" and
-"which code path inside that backend runs this" are different questions, and the limit story
-has to be told about the second.** Both defects above sat inside the backend that CLAUDE.md
-calls the behaviour of record.
-
-#### 3.31 addendum — the decomposition path has never successfully run anything (2026-08-05)
-
-Chased because writing the table above raised the question "what actually reaches decomposition
-now?", and the answer turns out to be stronger than "not much".
-
-Three facts, each checked rather than reasoned:
-
-1. **Decomposition is entered only for Component Model binaries.** `Execute` gates the whole
-   branch on `isComponentWasm`, which tests for the `0d 00 01 00` version/layer at offset 4.
-2. **Python is the only producer of one.** The four build targets are `build_as.go`,
-   `build_java.go`, `build_python.go` and `build_rust.go`; AssemblyScript, TeaVM Java and the
-   Rust cdylib all emit core modules. Scanning every `.wasm` tracked in the repo for the
-   component magic returns exactly two files, both the same Python fixture
-   (`tests/plugin-harness/testdata/pythonworkflow/call_all_plugins.wasm` and its
-   `.component.wasm` twin).
-3. **Python components fail decomposition.** The stale fixture failed there at instance 15,
-   then 81 after the `env::abort` arity fix; a component built fresh fails at instance 52
-   (§2.72). No Python component has ever come out the other side.
-
-Put together: **the ~600 lines of hand-rolled shared-everything dynamic linking in
-`backend_wasmtime.go` — the GOT.mem/GOT.func routing, the placeholder tables, the
-"instance with the most exports is the CPython runtime" heuristic, the multi-pass instantiation
-loop and its `undefined element` retry — have never successfully executed a workflow.** It is
-not dead code in the `check-test-only-code.sh` sense, because it is wired and reached; it is
-something rarer, code that is reached and has never once succeeded.
-
-Since 2026-08-05 it is also no longer the path Python takes, so it is now reached only when the
-native component path fails first.
-
-**Not proposing deletion**, and the reason matters: the native path has one known limit —
-`componentGetFunc` passes a nil parent export index, so it resolves only top-level exports and
-cannot reach a function nested inside an exported interface (§2.72). A component shaped that
-way would fall through to decomposition today. Deleting decomposition without first fixing that
-would turn a bad error message into a hard failure.
-
-So the honest disposition is: **fix `componentGetFunc`, then delete the decomposition path**,
-in that order, and the §3.31 gap above ("the decomposition path's fence is inherited rather
-than verified") resolves by deletion rather than by a test. Writing a fence test for it first
-would be work spent on code that is on its way out — which is worth saying explicitly, because
-"add the missing test" is the reflex the rest of this document encourages.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 3.32 Every deferred callback runs on wazero, unfenced — ✅ **FIXED** (WS-3, 2026-08-05)
 
-`Engine.RunDefer` does not consult `backendForWasm`. It reaches straight for `e.rt`, the
-wazero Runtime, and when that is nil — which is exactly the case when wasmtime is handling
-execution — it constructs a *fresh wazero Runtime* for the defer.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-So every deferred callback in cleat runs on wazero, whatever the routing table says, on a
-fully-configured production worker where the workflow it belongs to just ran on wasmtime.
-wazero only observes context cancellation when the guest calls back into the host (§2.28), so
-a defer that loops without doing so is never stopped: it holds its worker slot until the
-process dies. A defer body is ordinary guest code — it can loop exactly like a workflow body
-can, and `--concurrency=N` runaway defers wedge a worker just as thoroughly.
+### 3.35 What `defer` is supposed to be — 🟢 **ALL FIVE PHASES DONE: every terminal transition is resolved, two by building and one by decision (D10)** (WS-3, 2026-08-05; phases 2–4 landed 2026-09-02; phase 5 closed 2026-09-04)
 
-**Demonstrated, not read.** `cmd/cleat-worker/defer_backend_test.go` drives the real
-`w.runDefers` with a defer export that never returns, against a 1s wasmtime budget. It is
-still running 20 seconds later. The test is skipped and recorded (`test-go/commands` budget
-6 → 7); unskipping it is the acceptance test.
-
-**Worth keeping from writing that test**, because it is this repo's recurring failure mode in
-miniature: the first version declared the defer export with no parameters and **passed in
-0.01s with the fix reverted**, having never executed the guest. `CallExport` rejected it with
-`expected 0 params, but passed 4`, and `runDefers` logs defer failures without propagating
-them — so a test that ran nothing was indistinguishable from a test that proved something.
-The fixture's logger discards output, which is what hid the rejection.
-
-**Why it is recorded rather than fixed.** Routing defers through a backend is not a one-line
-change. Defers today execute with **no `HostHandler` in ctx** — `runDeferCompiledWithRT` never
-calls `withHandler` — so a defer that makes a host call is already broken, and it fails
-differently on the two backends. What a defer body is allowed to do wants deciding before the
-routing changes, or the fix will silently convert one failure mode into another. That decision
-is the work item; the fence follows from it.
-
-**Also fixed while in there** (`cmd/cleat-worker/setup.go`, both defer and workflow paths):
-`rt.Metrics = w.Metrics` executed *before* the `if err != nil` check on `engine.NewRuntime`,
-which returns `(nil, err)` on four paths. Every one of them was a nil dereference rather than
-the logged failure the code below it intended. The tell was the `if rt != nil { rt.Close() }`
-guard inside the error branch — written to handle a case it could never reach.
-
-#### 3.32 progress — the net exists, and one option is eliminated (2026-08-05)
-
-Two things that were prerequisites for fixing this, both done.
-
-**No test had ever executed a defer body.** The three `TestRunDefers_*` in `flush_test.go` each
-pass `wasmBytes = nil` and say so — *"wasmBytes is nil so RunDefer is not invoked; verify no
-panic"* — so they cover the sorting and the nil guards and stop exactly where the guest begins.
-`TestClosure_CleatDefer` covers the host function a workflow uses to *register* a defer, not
-running one. So the change this item asks for would have been made against nothing.
-`engine/defer_execution_test.go` closes that: a defer that returns cleanly, one that traps
-(the trap is the cheapest proof the body was entered — it needs no host handler and no
-output-ABI agreement, both of which a defer lacks), a missing export, and a wrong-signature
-export. Each verified to fail when the WAT it runs is changed to remove the condition.
-
-Two of those cases are not hypothetical. A defer whose export has the wrong signature is
-rejected before it runs with `expected 0 params, but passed 4`, and `runDefers` logs that and
-moves on — so a workflow author's cleanup silently never happens, and from outside it is
-indistinguishable from cleanup that ran. That is the same shape as this item and it now has a
-test.
-
-**"Just fence wazero" is dead, and that is now measured rather than assumed.** Three mechanisms
-have been tried against a guest that never calls into the host:
-
-| mechanism | result |
-|---|---|
-| `WithCloseOnContextDone(true)` | breaks *every* execution with `wasm trap: exit(code=0)` (§2.28) |
-| fuel metering (`fuelMeter`) | only decrements in `Before`, a function-entry hook — a tight loop inside one function never trips it |
-| `mod.CloseWithExitCode` from a watchdog goroutine | **no effect**: still running 25s after the close, measured 2026-08-05 |
-
-The third was the last plausible one, because `fuelMeter`'s own comment says closing the module
-is how it stops a guest — true only for a guest that keeps calling functions. So there is no
-way to bound a compute-bound wazero guest, and **routing to wasmtime is the only fix**, not one
-option among several.
-
-**What remains, and its cost.** Routing needs a non-nil `HostHandler`: `handlerFromContext` does
-an unchecked type assertion, so a defer reaching the wasmtime backend without one panics rather
-than failing. `HostHandler` has **54 methods**. So the work is either a rejecting
-implementation of all 54 (mechanical, but 54 methods of new production surface, and it makes
-"defers may not make host calls" explicit and permanent) or passing the live `execSession`,
-which `executor.go` already has in scope at all three call sites — but `cmd/cleat-worker`'s own
-`runDefers` has no session at all, so that route does not cover both callers.
-
-Worth noting for whoever takes it: the two defer paths already disagree. `invokeDefersOnTrap`
-runs defers on the **live module with the session's handler present**, so host calls from a
-defer work there; `runDefers` runs them on a fresh module with no handler, where the same call
-panics and is swallowed. Whatever is decided should make those two agree, because today
-whether your defer can call a service depends on which way the workflow failed.
-
-#### 3.32 resolution — option 1, the fence without the contract (2026-08-05)
-
-`Engine.RunDefer` now asks `backendForWasm` and, when a backend serves the guest, runs the
-defer through it. That is the whole fix; the analysis above is what made it a one-screen
-change rather than a guess.
-
-**Measured on the acceptance test this item named:** against a 1s budget,
-`TestDefersRunOnTheFencedBackend` went from *still running after 20s* to returning in
-**1.00s**. It is unskipped, and `test-go/commands` drops 7 → 6.
-
-**The handler question is left open on purpose, and §3.35 is where it is answered.** Defers
-still run with no `HostHandler`, exactly as before, so a defer that makes a host call still
-fails. What changed is only *how*: it used to panic on an unchecked type assertion and be
-swallowed; it now arrives as a recovered error that `runDefers` logs. That is a statement about
-today's implementation and not a rule — a defer is meant to be a destructor with the context to
-clean up, and §3.35 designs that. Verified rather than assumed — a defer body calling
-`cleat_workflow_id` with a nil handler returns
-
-```
-host: wasmtime panic in "cleat_defer_defer-1": runtime error: invalid memory address or nil pointer dereference
-```
-
-which is recovered by the `fn.Call` guard, not a process kill. That is what made option 1
-viable: the 54-method rejecting handler and the live-session route are both still open, and
-both are now decisions about *what a defer may do* rather than prerequisites for bounding it.
-
-**Two details worth keeping:**
-
-- `PerExecution()`, not the backend itself. `Execute` stores the handler on the backend
-  struct, so calling it on the shared root would race a concurrent workflow.
-  `executeWithBackend` already took this precaution; RunDefer had to as well.
-- `cmd/cleat-worker`'s `runDefers` registers backends again. That line was added and reverted
-  once — on its own it changed nothing, because RunDefer performed no lookup, and shipping it
-  would have read as a fix without being one. It does something now.
-
-**Still true, and still 3.32's open tail:** `RunDeferCompiled` takes a pre-compiled wazero
-module and cannot route, and the CGO-less build has no backend to route to. Both fall back to
-the unfenced path, which for a build with no wasmtime in it is unavoidable rather than a gap.
-
-### 3.35 What `defer` is supposed to be — 📐 **DESIGN, not yet implemented** (WS-3, 2026-08-05)
-
-Written because §3.32 fenced the defer path and the fence made an uncomfortable question
-visible: *bounded doing what, exactly?* The implementation turned out to be much further from
-the intent than the fence discussion suggested, and the intent had never been written down.
-
-**The intent, as stated by the author:** a defer in a durable execution system is a destructor.
-Two properties, both load-bearing: it is **guaranteed to run**, and it has **access to the full
-context of the workflow** so it can do the cleanup it exists to do. Releasing a lock,
-compensating a saga step and notifying a service are all "cleanup" only if the cleanup code can
-see what was acquired, what was done, and to whom.
-
-#### What the implementation does instead
-
-Three findings, each verified against the tree rather than inferred.
-
-1. **In the embedded (in-process Go) runner, defer closures never run.** `DurableDeferFunc(fn)`
-   appends to `cleat/embedded/runner.go`'s `deferFuncs []func()` at line 508, and that field has
-   **no reader anywhere in non-test code**. The caller gets a defer ID and no cleanup. Not a
-   degraded path — an absent one.
-2. **In WASM, a defer cannot have context by construction.** `RunDefer` compiles the module and
-   instantiates it *fresh*: new linear memory, so the workflow body never ran in it and nothing
-   it captured exists; no `HostHandler` in ctx, so no durable calls, no lock release, no
-   notification; and `nil` input.
-3. **The four call sites disagree.** Only `executor.go:643` invokes defers on the live instance
-   with the session. `executor.go:355` runs `invokeDefersOnTrap` *and* `runDefers`
-   unconditionally — the comment says "fall back" but there is no conditional, so each defer
-   body executes **twice**. The success path runs them from `cmd/cleat-worker` *after*
-   `FinalizeWorkflowSegment`, by which point the instance is gone.
-
-So today: "full context" holds on one error path, "guaranteed to run" holds nowhere, and on the
-common paths a defer can only execute code that depends on nothing.
-
-#### The insight that makes this tractable
-
-A fresh instance is **not** the problem. In a durable execution engine the workflow's state
-*is* its event history; a resumed workflow always starts from a fresh instance and reconstructs
-itself by replay. A defer running in a new instance is therefore ordinary, provided it runs in a
-**replayed** instance rather than a virgin one.
-
-And replay gives the hard part away for free: **replay re-runs the workflow body, so it
-re-registers the defer closures on the way through.** `DurableDeferFunc(fn)` starts working not
-because anything resurrects a closure, but because the closure is *rebuilt* — the same way every
-other piece of guest state is.
-
-The machinery is already there and already deterministic. `DurableDefer` is replay-matched
-(`engine/durablecalls.go:368`): on replay it returns the **recorded** `DeferID` rather than
-minting a new one, so IDs are stable across replays, and registration is a durable event
-(`EventTypeDefer`) that survives a crash. `TestDurableDeferReplayMatch` and
-`TestDurableDeferReplayPastEnd` already pin that behaviour. Nothing connects it to execution.
-
-#### Proposed design: a defer is a replayed continuation, not a callback
-
-Run defers as a **second execution phase of the same workflow**:
-
-1. Instantiate fresh and **replay the recorded history** to the terminal step. Guest state is
-   reconstructed exactly as it is for any resumption; defer closures re-register as a
-   side effect; recorded durable calls return their recorded results and do not re-fire.
-2. Invoke `cleat_defer_<id>` in **LIFO order**, with the live `execSession` in ctx. Host calls
-   now work, because there is a session — the defer can release the lock it took.
-3. Record the defer's own host calls as **new events after the workflow's terminal step**, in a
-   distinguishable phase, so a retried defer replays deterministically like anything else.
-
-This gets all three properties at once, and each from a mechanism that already exists: full
-context from replay, host access from the session, and the execution fence for free, because
-step 1–3 is an ordinary backend execution rather than a bespoke path.
-
-**Guaranteed-to-run then becomes a durability question, not an execution one.** Registration is
-already durable. If the defer phase is recorded as its own unit of work, a worker that dies
-mid-defer leaves a resumable record and the reaper re-runs it — the same shape as §1.4's
-crash-recovery and §3.20's force-resolve. That is the only way "guaranteed" can be true across a
-`kill -9`: no in-process callback survives one, in any language.
-
-#### Decisions this needs, with recommendations
-
-These are the author's to make; the design changes shape depending on them.
-
-| decision | options | recommendation |
-|---|---|---|
-| At-most-once or exactly-once? | best-effort, or retried until success | **Exactly-once**, retried. "Guaranteed" is the stated intent, and it is what makes defer worth more than a `finally` block. |
-| Does a failing defer fail the workflow? | yes / no / record-and-continue | **Record and continue**, but surface it — a failed cleanup must be visible, which is what §3.32's logging fix started. |
-| When do defers run? | on failure only / success too / cancellation and termination too | **All terminal transitions.** A destructor that skips the success path is not a destructor. |
-| What may a defer body do? | anything / no new defers, no children, no continue-as-new | **Restricted**: no registering defers, no `continue_as_new`. Child workflows are arguable. |
-| Replay cost | full replay per defer phase / reuse compaction | **Reuse compaction state** (`buildFullHistoryFromCompaction` already exists) — otherwise a long workflow pays its whole history again to release one lock. |
-| Timeout | workflow budget / own budget | **Its own budget.** The workflow's remaining budget is often zero exactly when defers matter. |
-
-#### Cost, and what it touches
-
-The replay is the cost: reconstructing state means re-executing the workflow body. Compaction
-bounds it, and the alternative — persisting guest memory — is far worse. Everything else is
-wiring: `engine/executor.go` (phase), `engine/durablecalls.go` (step numbering for defer-phase
-events), `cmd/cleat-worker/setup.go` (stop running defers post-finalization), and a migration if
-the defer phase gets its own durable state. **Migration range 030–039 is unused and reserved for
-WS-3.**
-
-Cross-stream: the exactly-once half overlaps §1.4 (WS-2). Worth agreeing the record shape once
-rather than inventing a second one.
-
-#### What to do in the meantime
-
-§3.32's fence is orthogonal and stands on its own: an unbounded defer should not hold a worker
-slot under any semantics. It should land with **neutral framing** — it bounds today's
-implementation and says nothing about what a defer may do — rather than describing "defers
-cannot make host calls" as a contract, which is an accident of the current implementation and
-is exactly what this design reverses.
-
-The embedded runner's dropped closures (finding 1) should be fixed regardless of which way this
-goes: today that API silently does nothing.
-
-### 3.36 errcheck's 283 findings, triaged — 🔶 **1 real defect found, handed to WS-1** (WS-3, 2026-08-05)
-
-The companion to §3.33. `PARALLEL-WORKSTREAMS.md` singles errcheck out as **"the class that
-produced §1.2 and §2.50"** — both real defects, both literally a discarded error return — so
-the question is not whether 283 is a lot but which of them are that class again.
-
-| discarded call | n | verdict |
-|---|---|---|
-| `tx.Rollback` | 152 | **54% of the total.** `defer tx.Rollback()` after a commit returns `ErrTxDone` by design. The idiom, not a finding |
-| `(*json.Encoder).Encode` | 22 | HTTP response writes. A failed write usually means the client left; worth a debug log, not an error |
-| `p.db.Exec` | 18 | **database writes, discarded** — plugins/eventtriggers (7), scheduledbackup (6), webhookingest (5) |
-| `s.ClearStickyWorker` | 14 | see below |
-| `json.Unmarshal` | 14 | proceeding on zero values after a parse failure; worth a pass of its own |
-| `fs.Parse` | 13 | `flag.ExitOnError` already exits. Noise |
-| `s.ReleaseWorkflowConcurrencyKeys` | 12 | **see below — this is the real one** |
-| `w.Write`, `srv.Shutdown`, `db.Exec`, `Row.Scan`, and ~20 others | 38 | long tail; the `Row.Scan` and `ExecContext` members belong with the write group |
-
-**The finding: a failed lock release is invisible on every path but one.**
-
-`ReleaseWorkflowConcurrencyKeys` releases a workflow's concurrency keys — its locks — after a
-terminal transition, and `ClearStickyWorker` clears its worker affinity. Neither logs
-internally on any dialect; both return an error. The callers do three different things:
-
-| caller | treatment |
-|---|---|
-| `engine/db.go:1097` (Postgres) | checked, logged at warn ✅ |
-| `engine/store_lifecycle.go:268-269, 335-336, 393-395` (Postgres) | `_ =`, silent |
-| `engine/mysql_lifecycle.go:271-272, 326-327, 518-519, …` | bare call, silent |
-| `engine/mssql_lifecycle.go:334-335, 398-399, 455-456, …` | bare call, silent |
-
-So the same cleanup gets three treatments, and on MySQL and SQL Server a lock that fails to
-release does so **without a word**. A concurrency key exists to stop two workflows running at
-once; one that is never released blocks its successors until the TTL expires — and §3.34 has
-just finished showing what TTL arithmetic on these keys was doing. This is §2.50's shape
-exactly ("parent close policy fails silently on all three dialects"), one call over.
-
-**Suggested fix, and why it is small:** each dialect repeats the same three-line block
-(`ClearStickyWorker`, `ReleaseWorkflowConcurrencyKeys`, `enforceParentClosePolicy`) at four to
-five sites. Collapsing it into one `bestEffortTerminalCleanup(ctx, workflowID)` per store fixes
-every site at once, logs consistently, and makes the three dialects structurally identical —
-which is the property §1.1 and §2.60 both wished for. `enforceParentClosePolicy` already
-returns nothing and logs internally after §2.50, so only the two error-returning calls need
-handling.
-
-**Handed to WS-1** rather than patched here: `engine/mysql_*.go` and `engine/mssql_*.go` are
-theirs and had three commits land in them today. Same treatment as §3.34, which they picked up
-within the hour.
-
-**Why errcheck still should not be enabled yet.** 152 `tx.Rollback` findings would have to be
-suppressed first, and blanket-suppressing the single most common shape in the codebase to turn
-on a linter is how a guard becomes decoration. The honest sequence is: exclude `tx.Rollback` by
-rule (errcheck supports an exclude list), fix the ~30 write-and-lock findings, then enable and
-see what is left. That is a session, and it is a session with a known payoff, which is more
-than could be said before this table existed.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 3.34 A concurrency key's TTL means three different things — ✅ **FIXED** (WS-1, 2026-08-05; found by WS-3)
 
-Found by chasing an intermittent, and the intermittent is the least of it.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-**Sub-second TTLs silently become zero on two of three dialects.** PostgreSQL
-(`engine/db.go`) and SQL Server (`engine/mssql_signals_promises.go`) both build the expiry
-from `int(ttl.Seconds())`, which truncates. Measured, not read:
+### 3.39 Re-acquiring a concurrency key you already hold answers differently per dialect — ✅ **FIXED** (2026-08-31)
 
-```
-ttl=1ns    -> interval "0 seconds"
-ttl=500ms  -> interval "0 seconds"
-ttl=999ms  -> interval "0 seconds"
-ttl=1s     -> interval "1 seconds"
-```
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-So `AcquireConcurrencyKey(ctx, key, wf, 500*time.Millisecond)` acquires a key that is already
-expired, and the next caller takes it. For a mutual-exclusion primitive that is the failure
-that matters: two workflows holding the same key at once, with nothing logged.
+### 3.40 The crash harness migrated a database it never reads — ✅ **FIXED** (2026-08-31)
 
-**And the three dialects disagree about whose clock decides:**
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-| dialect | expiry | clock |
-|---|---|---|
-| PostgreSQL | `now() + '<int seconds>'` | database |
-| SQL Server | `int(ttl.Seconds())` | database |
-| MySQL (`engine/mysql_ops.go`) | `time.Now().Add(ttl)` | **application** |
+### 3.41 Status-marker audit — ✅ **DONE** (2026-08-31)
 
-MySQL keeps sub-second precision, which is better, and computes on the host clock, which
-makes it the one dialect where app/database clock skew changes whether a lock is held. Two
-behaviours across three backends, in a locking primitive — the shape §1.1 and §2.60 both had.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-**The intermittent that led here**, recorded because it has a name this time:
-`TestAcquireConcurrencyKey_Expired` failed once in a full-suite run and passed in the three
-that followed, and passes individually on all three dialects. It acquires with a 1 ns TTL —
-which is 0 seconds on two dialects and 1 ns on the third — then sleeps 10 ms and asserts the
-key can be re-acquired. It is asserting behaviour that differs per backend, using a sleep, so
-it is the same "races for a precondition instead of stating it" shape as the two gates fixed
-in #329. Fixing the truncation is what makes the test statable.
+### 3.42 The four disabled linters, re-measured — ✅ **MEASURED, none enabled** (2026-08-31)
 
-**Not fixed here.** `engine/db.go`, `engine/mysql_ops.go` and `engine/mssql_signals_promises.go`
-are WS-1's, and the fix is a decision about the primitive rather than a patch: whether TTLs are
-sub-second at all, and whether expiry belongs on the database clock (defensible, and what two
-dialects do) or the application's. Whichever way it goes, all three should agree.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-#### Resolution — the TTL is exactly what was asked for, on the database's clock
+### 3.43 Post-commit cleanup dropped its errors at 38 of 40 calls — ✅ **FIXED** (2026-08-31)
 
-Both halves of WS-3's question, decided the same way for the same reason.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-**Sub-second TTLs are real, and are not rounded in either direction.** The guest API is
-specified in milliseconds — `engine/locking.go` passes `time.Duration(ttlMs)*time.Millisecond`
-straight from the WASM caller — so truncating to whole seconds contradicts the contract callers
-are written against. That settles WS-3's "whether TTLs are sub-second at all": they already
-are, at the only layer a user sees.
+### 3.44 Child-workflow checksums were chained off an RLS-blocked read — ✅ **FIXED** (2026-08-31)
 
-**The database's clock owns expiry**, on all three. Every predicate that reads `expires_at`
-already compares it against the database clock (`expires_at < now()`, `> SYSUTCDATETIME()`,
-`<= NOW(6)`). MySQL computed the value on the application's and tested it against the
-database's, which is the skew WS-3 identified; workers on different hosts also have to agree
-about whether a lock is held.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-  postgres  now() + make_interval(secs => $3)                 -- fractional seconds
-  mysql     DATE_ADD(NOW(6), INTERVAL ? MICROSECOND)
-  mssql     DATEADD(MICROSECOND, @us, DATEADD(SECOND, @s, …))  -- split so DATEADD's
-                                                                 int argument cannot
-                                                                 overflow on a long TTL
+### 3.45 A guest-supplied string chose the execution runtime — ✅ **FIXED** (2026-09-01)
 
-**Demonstrated, not reasoned about.** With the fix reverted, a 500 ms lock is stored *in the
-past* — `a 500ms lock was stored already expired (-6.397ms remaining)` on PostgreSQL,
-`-8.18ms` on SQL Server — and `TestConcurrencyKeyExcludesWhileHeld` shows the consequence
-directly: a second workflow acquires a key the first is holding.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-**No sleeps.** WS-3 noted that the intermittent which led them here asserts per-backend
-behaviour through a 10 ms sleep. These tests read the stored expiry back and do arithmetic
-against the database's own clock, and check exclusion by having a *second* workflow contend —
-neither needs a race to be observable.
+### 3.46 A dropped Unmarshal turned "unreadable" into "you declared nothing" — ✅ **FIXED** (2026-09-01)
 
-### 3.39 Re-acquiring a concurrency key you already hold answers differently per dialect — 🔴 **OPEN**
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-> **Renumbered from §3.35 on 2026-08-06.** `§3.35` had been allocated twice — to this item and
-> to WS-3's defer design, which is the one that keeps the number because two other passages
-> cite it by section. WS-1 had already used §3.37 and §3.38, so this moved to §3.39. Anything
-> written before 2026-08-06 that cites "§3.35" for concurrency-key re-entrancy means this
-> section.
+### 3.47 Audit: every Postgres raw-pool read against an RLS table — ✅ **AUDITED + 2 FIXED** (2026-09-01)
 
-Found while writing §3.34's exclusion test, by contending a key against itself and getting
-disagreement:
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-| dialect | `AcquireConcurrencyKey(key, wf)` when *wf itself* already holds `key` |
-|---|---|
-| MySQL | **true** — `return ownerID == workflowID` (`engine/mysql_ops.go`) |
-| PostgreSQL | **false** — `ON CONFLICT DO NOTHING` returns no rows (`engine/db.go`) |
-| SQL Server | **false** — the `WHERE NOT EXISTS` guard matches, so nothing is inserted |
+### 3.48 `assert_tenant_set` missed the empty string — ✅ **FIXED** (2026-09-01)
 
-So the same primitive is re-entrant on one backend and not on the other two, and neither
-behaviour is written down anywhere. It matters in both directions: a workflow that re-acquires
-its own lock is told it failed on two dialects (and may block itself or leak the lock until the
-TTL runs out), while on the third it succeeds and a matching release count becomes the
-caller's problem.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-Not fixed here for the reason §3.34 was handed over in the first place — it is a decision about
-what the primitive means, not a patch. The choice is between "re-entrant, and document it" and
-"never re-entrant, and return false consistently". §3.34's test deliberately contends with a
-*second* workflow so that it asks about mutual exclusion rather than about this.
+### 3.49 A fault that never reached the database reported itself as active — ✅ **FIXED** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.50 SQL Server's `plugin_deps` has never round-tripped — ✅ **FIXED** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.51 The one JSON column SQL Server did not validate — ✅ **FIXED** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.53 JSON-column parity is now a checked invariant, not a sweep — ✅ **FIXED** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.52 InitModule discarded the error it had a channel for — ✅ **FIXED** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 3.37 SQL Server has no administrative access under RLS — ✅ **FIXED** (WS-1, 2026-08-06)
 
-> Numbering note: §3.35 is used twice already — WS-3's "What `defer` is supposed to be" and
-> WS-1's concurrency-key item above. Skipping to 3.37 rather than adding to that.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
-SQL Server applies a security policy to **every** principal. Not "every principal except the
-owner", the way PostgreSQL exempts a superuser — every one, sysadmin and `dbo` included.
-Measured, not read: connected as `sa` with no session context, a table holding three rows reads
-as empty.
+### 3.33 gosec's 283 findings, triaged — 🟢 **ENABLED 2026-09-04; 3 fixed, G115 + G306 excluded, 17 //nolint'd** (WS-3, 2026-08-05)
 
-So there was no connection that could see across tenants. Not for a support query, not for a
-cross-tenant backfill, and not for test teardown — which is where it surfaced, as §2.71's
-blocker. `CleanupMSSQLTestData` issues `DELETE` on a plain pool, the filter predicate hides
-every row it means to delete, and it removes nothing **and reports no error**, so teardown
-believes it ran. Rows accumulate until a later fixture collides on a primary key. That is the
-141-failure signature recorded in §2.71's residual.
-
-PostgreSQL never hit this, and not because its policies are weaker. `005_app_role.sql` spends
-its entire header arguing the *opposite* case — keeping `cleat_app` `NOSUPERUSER`,
-`NOBYPASSRLS` and owning nothing, so the application is subject to the policies
-unconditionally. That design has two halves. SQL Server inherits the restricted half for free
-and cannot inherit the privileged half at all, because the predicate is the only place an
-exemption can live there.
-
-**Fix:** `migrations/mssql/012_admin_role.sql` creates an empty `cleat_admin` database role and
-adds `OR IS_ROLEMEMBER(N'cleat_admin') = 1` to `fn_tenant_filter`.
-
-**Why role membership and not a sentinel session-context value.** A magic `tenant_id` would be
-assumable by anything that can call `sp_set_session_context` — which is the application itself,
-on every connection it opens. One bad code path or one injected value and tenancy is off. Role
-membership is granted once by a DBA and cannot be assumed by a connection at runtime.
-
-Three properties make it hard to acquire by accident, all verified against SQL Server 2022:
-
-| property | consequence |
-|---|---|
-| the role ships with **no members** | applying 012 changes nothing until a deployment grants it |
-| `db_owner` does not confer it — `sa` reads `IS_ROLEMEMBER = 0` and stays filtered | "the app connects as sa" does not silently lose isolation |
-| `dbo` **cannot** be added — SQL Server refuses with *"Cannot use the special principal 'dbo'"* | membership requires a user someone created on purpose |
-
-The second is the one that decided the design. Had `sa` been exempt, this migration would have
-disabled tenant isolation for the default deployment the moment it applied, which is worse than
-the gap it closes.
-
-**Cost, measured rather than asserted** (50k rows, 300 queries, two interleaved rounds):
-
-| predicate | point lookup | full scan |
-|---|---|---|
-| session context only | ~340 µs | 3.38 / 3.40 ms |
-| **+ `IS_ROLEMEMBER` (shipped)** | ~350 µs | 4.06 / 4.10 ms — **+20%** |
-| role checked first | ~350 µs | 4.49 / 4.52 ms — +33% |
-| role in a scalar subquery | ~350 µs | 8.96 / 9.07 ms — +166% |
-
-`IS_ROLEMEMBER` is evidently not folded to a per-query constant; the cost tracks rows scanned
-(~14 ns/row). Point lookups — the store's dominant access pattern, by workflow ID — show no
-measurable difference. The 20% lands on full scans of tenant-filtered tables, i.e. an
-unqualified `ListWorkflows`. Two rewrites were tried and both were worse, so the form shipped
-is the cheapest of the three; nobody needs to re-measure this. Accepted because the alternative
-is having no administrative path at all.
-
-**Tests:** `migration/mssql_admin_role_test.go`, four of them, against a scratch database
-migrated by the real Runner. Only one asserts the new capability; the other three assert that
-nothing else moved, and they pass with or without the fix **by design** — they are guards, not
-regression tests. Falsification check: with the `OR` clause removed, exactly
-`TestMSSQLAdminRoleSeesAndDeletesAcrossTenants` goes red (`saw 0 rows across two tenants, want
-3`) and the three guards stay green.
-
-**This unblocks §2.71 but does not complete it.** The schema switch still needs
-`CleanupMSSQLTestData` to take an admin connection, and the harness needs to create the login —
-which should fail closed the way `005_app_role.sql` does, shipping no credential. Draft #333
-stays draft until that lands.
-
-### 3.38 `TestAdminForceResolve_*` failed once after an all-dialect run — 🔶 **OBSERVED, not reproduced** (WS-1, 2026-08-06)
-
-Recorded because it cost twenty minutes to rule out of §3.37 and would cost the next person the
-same. Three tests failed in a PostgreSQL-only run of `./engine/...`:
-
-```
-TestAdminForceResolve_AuditCollisionRollsBack
-TestAdminForceResolve_RefusesAnotherTenant
-TestAdminForceResolve_RefusesAnotherTenant/postgres
-```
-
-It is **not** a code defect in anything on this branch — the same command gives 0 failures both
-on clean `develop` and with §3.37's changes applied. The one failing run is distinguished only
-by what preceded it: a full three-dialect `go test ./engine/ ./migration/ ./cmd/cleat-worker/`
-against the same shared `cleat` database.
-
-So the hypothesis is cross-run state in the shared database rather than test ordering within a
-run. Stated as a hypothesis on purpose: one failing observation against two passing ones does
-not establish a mechanism, and the failure was not captured under a debugger. What it does
-establish is that these tests are not independent of what ran before them, which for an
-admin/tenant test is worth knowing on its own.
-
-Anyone who sees this in CI should suspect the preceding job's residue before suspecting their
-diff.
-
-### 3.33 gosec's 283 findings, triaged — 🔶 **2 fixed, 281 classified** (WS-3, 2026-08-05)
-
-`PARALLEL-WORKSTREAMS.md` calls gosec "unreviewed security findings in a codebase whose last
-two days have been tenancy defects" and says an unreviewed 283 is worse than a reviewed 283
+`PARALLEL-WORKSTREAMS.md` — retired 2026-09-04, quoted here from history — calls gosec
+"unreviewed security findings in a codebase whose last two days have been tenancy defects" and says an unreviewed 283 is worse than a reviewed 283
 with 280 suppressions. This is the review. It does **not** enable the linter — G115 alone
 would block that — but it replaces a number with a distribution, which is what the decision
 needs.
@@ -5949,310 +744,118 @@ session on its own and should not be folded into a lint sweep — but "229 integ
 the WASM boundary layer, unreviewed" is a more useful thing to carry forward than "283 gosec
 findings".
 
+**One slice of G115 now has a mechanism instead of a sweep, 2026-09-04 (WS-3).** CLAUDE.md's
+ruling on this backlog is that the defects here have never been overflows — "in every case the
+value meant the wrong thing on one side of the boundary, which a property test over that
+boundary would find faster than reading the remaining sites". The component bridge is the
+boundary where that is cheapest to check and worst to get wrong.
+
+A host call's result word carries the response length, and the two layouts disagree about where:
+`packDurableCallResult` at bits 40-63, `packSimpleResult` at 32-63. `component_callbacks.go` has
+one extractor per layout and **25 dispatchers each pick one by hand**. Pick wrong and nothing
+errors — a bit-32 length read at bit 40 is zero for any response under 256 bytes, so the guest
+receives an empty *successful* response. That shipped once, for one of the 25;
+`TestComponentShortStringResultsAreNotTruncated` is its regression test.
+
+`engine/component_pack_extract_parity_test.go` covers the other 24 and every one added later. It
+resolves 23 of the 25 pairings by following delegation through the AST, and **found no mismatch**
+— its value is the next one, not a live bug.
+
+**Both sides are measured rather than declared**, which is the part worth copying. A table saying
+"`packSimpleResult` means 32" would be a third copy of the thing under test and would agree with
+a shift that had changed underneath it — the §1.1 trap. Instead the test packs a distinctive
+length and finds where it landed, and hands each extractor words built at each candidate shift to
+see which it honours. Nothing in the test states a shift.
+
+It fails rather than passing quietly when it stops measuring: fewer than 20 dispatchers parsed,
+fewer than 15 pairings compared, both extractors reading the same bit, or any handler it cannot
+resolve. `PollCancellation` and `PollSignal` build their word inline instead of calling a packer
+and are listed as named exceptions with the reason, because an unresolvable site is exactly where
+the next mispairing would hide.
+
+Proven able to fail: mispairing `dispatchDurableDefer` reports "extracts the length from bit [40],
+but its handler DurableDefer writes it at bit 32".
+
+
+#### ENABLED, 2026-09-04 (WS-3)
+
+The triage above ends "it does **not** enable the linter". It does now. `gosec` moved from
+`disable` to `enable` in `.golangci.yml`, and the tree is green across all seven first-party
+modules with **zero** findings.
+
+**Re-measured first, because the 2026-08-05 table was not re-derivable** — golangci-lint was
+not installed when it was written. On v1.64.7, the version `lint-go` pins:
+
+| | 2026-08-05 | 2026-08-31 | **2026-09-04** |
+|---|---|---|---|
+| total | 283 | 693 | **671** |
+| production (non-`_test.go`) | — | 272 | **253** |
+| production excluding G115 | — | 39 | **40** |
+
+    GOTOOLCHAIN=go1.25.11 golangci-lint run --timeout=15m -c gosec-only.yml ./... \
+      > out.txt 2> err.txt
+    grep -c 'level=error' err.txt      # MUST be 0 -- see the toolchain trap below
+    grep -c '(gosec)' out.txt
+
+**The toolchain is part of the command.** golangci-lint v1.64.7 cannot read export data from
+Go 1.27 and exits 3 having found **nothing**: `internal error in importing "internal/goarch"
+… export data version 4 is greater than maximum supported version 2`. That is a tidy zero
+that looks exactly like a clean tree. `GOTOOLCHAIN=go1.25.0` fails differently and just as
+quietly (`go.work requires go >= 1.25.11`). Both were hit writing this. Check stderr for
+`level=error`, never the count alone — the same rule `.golangci.yml` already records for the
+`--disable-all` trap that produced "a tidy table of four zeroes".
+
+**What it took to reach zero**, and the reasoning lives in `.golangci.yml` beside each:
+
+* **G115 excluded** (213 of the 253). Not a deferral — a decision that predates this work.
+  CLAUDE.md rules that these have never been overflows, and #485 landed the property tests
+  that cover the boundary properly. Reading 213 conversion sites is the sweep that ruling
+  exists to prevent.
+* **G306 excluded** (23), scoped to gosec rather than re-adding a global test exclusion,
+  which is the move `.golangci.yml` explicitly asks for. 0644 on `cleat init` scaffolding,
+  generated code and build outputs is intended; 0600 would be wrong, not safer. **This is the
+  one exclusion taken on breadth rather than on having read every site**, and its cost is
+  recorded there: a future credential written to disk would not be flagged.
+* **Test files excluded, for gosec only** (418 of 671, 140 of them surviving the two rules
+  above). What gosec finds in `_test.go` here is test DSNs, harnesses shelling out to
+  docker/cargo/npx, and 0644 fixtures — all properties of being a test. The cost, also
+  recorded: a real credential committed in a test file has nothing else catching it.
+* **17 `//nolint:gosec` at the site with the reason**, matching how ineffassign, gosimple and
+  staticcheck were handled. All 17 were read, not pattern-matched: G202 concatenates only
+  compile-time constants (`statusTerminating`, `deferPhaseOwedSQL`, `sqlPlaceholders`, and two
+  in-package literal table lists in `testutil/schema.go`); G204 uses a fixed binary with array
+  args and no shell; G602 is guarded by a `len < 8` early return in the same function; G108 is
+  the pprof separation this section already documents.
+
+**One new finding, and it was real** — `examples/widget-store-as/host/main.go` built an
+`http.Server` with no `ReadHeaderTimeout` (G112). Fixed rather than suppressed. Note what that
+says about the 2026-08-05 table calling G112/G114 "the only two actionable findings … Fixed":
+that pass measured the root module, and this one was in `examples/`, a separate module that
+`lint-go` also covers. **A count is scoped to what was walked**, and the earlier row did not
+say what it had walked.
+
+**Negative control, because a green from a linter is the easiest false green in this repo.**
+A file with a deliberate `rand.Intn` was dropped into `engine/` and the run went red on it:
+
+    engine/zz_gosec_probe.go:9:42: G404: Use of weak random number generator … (gosec)
+
+so the zero above is gosec running and finding nothing, not gosec not running. Removed after.
+
+**Still open:** G115 is not fixed, it is ruled out of scope, and this section's earlier
+paragraph on it stands — "229 integer conversions in the WASM boundary layer, unreviewed" is
+still the honest description of what excluding it means, at 213.
+
 ### 3.20 `AdminForceComplete` / `AdminForceFail` were stubs — ✅ **FIXED** (WS-2, 2026-08-05, #297)
 
-> Recovered heading, added 2026-08-06. This section's body had been appended into §3.33's
-> body with no heading of its own, so `§3.20` could not be found by section number even
-> though three other places cite it — including WS-2's status doc and the round-2 sequencing
-> table, which named it as WS-2's "start here" item. The content below was always here; only
-> the heading was missing.
-
-`AdminForceComplete` and `AdminForceFail` returned `"admin force-complete: not implemented
-yet"` on all three dialects. `cmd/cleat-worker/api_admin.go` routed
-`POST /api/admin/instances/{id}/force-{complete,fail}` to them behind the `X-Confirm` guard
-and the ownership check §1.7 added, so an operator trying to unstick a workflow got a **500
-from an endpoint whose route, confirmation header and authorization were all real** — the one
-part that was missing was the operation.
-
-Every existing test passed throughout, because all seven of them supply a `mockStore` whose
-`adminForceCompleteFn` returns `nil`. §2.17's shape again: the tests ran one layer above the
-thing that was broken.
-
-**What shipped.** Real bodies for both operations on all three dialects
-(`engine/store_admin.go`), each doing four things in one transaction:
-
-1. A terminal status write fenced on **generation but not on `assigned_to`** — the workflow
-   being force-resolved usually has no live owner to match, which is the whole reason the
-   operation exists. Generation is what makes a stale operator request fail instead of
-   resolving a workflow that has moved on.
-2. A **generation bump**, so the write fences off a worker that still believes it owns the
-   run. `ReapStaleInstances` bumps for the same reason. Tested: after a force-complete the
-   previous owner's `CompleteWorkflow` returns `ErrFenceLost` and does not overwrite the
-   operator's result.
-3. An **`admin_action` audit event appended through `appendEventsInTx`**, in the same
-   transaction — so the audit record joins the checksum chain rather than sitting beside it.
-4. The post-commit cleanup a normal terminal write does: sticky worker, concurrency keys,
-   parent close policy.
-
-**Three things found while building it, none of which was the stub.**
-
-- **The handlers applied the operation to the wrong store.** `callerOwnsTarget` checked
-  ownership against the caller's tenant-scoped store and then every handler called
-  `engine.ForceComplete(..., s.store, ...)` — the process-wide one. A force-resolve
-  authenticated as tenant B ran against the default tenant's scope. Invisible until now
-  because both stores answered `not implemented yet`, and because `newTestAPIServer` serves
-  every tenant from one mock, so the two stores are the same object in every existing test.
-  `callerOwnsTarget` now returns the store it checked against.
-- **`eventRecordToPayload` has no `admin_action` arm**, so the audit event's payload would
-  have been `{}` — and `computeEventChecksum` hashes payload alone. Who forced a workflow and
-  what they did to it would have sat entirely outside the checksum, editable in the columns
-  afterwards with `VerifyWorkflowEvents` still reporting the workflow clean. Note that
-  `verifyShadowColumns` does **not** catch this and looks like it would: `populateFromPayload`
-  only overwrites keys the payload carries, so a key the payload omits inherits the column's
-  value and always compares equal. An empty payload reads as agreement. The unit test is what
-  holds that arm up; removing the arm leaves every database test green.
-- **The audit append can be silently displaced.** Every dialect's event append is an upsert
-  that leaves an existing row alone, so if a concurrent writer takes the step number between
-  the `MAX(step)+1` read and the insert, the audit event vanishes and the status change
-  commits without it. The whole force-resolve is rolled back instead.
-
-**Tenant scoping is explicit on all three dialects**, including PostgreSQL where RLS would
-cover it. That is deliberate and is what makes the cross-tenant test mean anything: engine
-tests connect as the owner, RLS is bypassed for superusers, so a PostgreSQL-only enforcement
-would let the test pass against a store with no filter at all. The unmerged version of this
-code in #208 dropped the `tenant_id` filter from the MSSQL `UPDATE` while keeping it on
-MySQL, which is the gap this note existed to warn about.
-
-**Every test was proved able to fail** by reverting the specific mechanism: the tenant filter,
-the generation bump, the payload arm, the not-found/mismatch disambiguation, the collision
-check, the scoped store, and the status-code mapping — eight reverts, each failing only its
-own test. Two of those reverts corrected the work rather than confirming it: the collision
-test was initially passing because the confirm lookup was tenant-scoped and returned "no
-rows" for the planted row, never reaching the comparison it was meant to exercise (the lookup
-is now by primary key, which is the right scope for "is the row at this step mine"); and the
-payload arm's justification named `verifyShadowColumns`, which turned out not to detect it.
-
-**Also.** `result` is JSON-typed on every dialect (JSONB / JSON / `ISJSON` check), so a
-non-JSON result is now rejected as a 400 rather than surfacing as three different driver
-errors reported as 500; an omitted result means JSON `null`. And `ErrAdminOpNotImplemented`
-separates 501 from 500, so the one operation that genuinely is not built says so.
-
-**`AdminReReplay` is still a stub, deliberately**, and now answers **501** rather than 500.
-It is not the same size as the other two: resetting a workflow to `ready` means it replays
-its recorded history and continues, so it needs the replay semantics §1.4 phases D–F are
-about — not a fourth `UPDATE`. Taking it before those is how the write-ahead intent work got
-built before the observation that would have judged it.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 3.14 `examples/dag` is red on `develop`, and no CI job runs it — ✅ **FIXED**
 
-**Two of the three claims in that heading were wrong, and the third was half wrong.**
-
-It was not the example. `cleat/cleattest` never wired `AwaitAnyChild` into
-`HostCallsOptions`, so the hook was nil for every `TestEnv` and
-`cleat/runtime_children.go` returned its "the HostCalls runtime was not initialized"
-message — which is about workflow context and says nothing about the harness. The
-diagnosis below took that message at face value. `plugins/dag/dag.go` is the only caller
-of `AwaitAnyChild` in the repo, so all six tests failed on it; and no external SDK user
-could test a workflow using that call either. So this was the shipped public test harness,
-not example code, and "low severity" was wrong.
-
-"No CI job runs it" was also wrong. **The Tier 2 Gate runs `./examples/...`** — the six
-failures were recorded in `tier2.known_failures`, which is exactly the mechanism working.
-What is true is the narrower claim: nothing in `.github/workflows/` runs `examples/` other
-than `as-workflow` *outside* the tier gates, and the gate's known-failure list meant these
-six were red-but-permitted rather than unwatched.
-
-Fixing them emptied `tier2.known_failures` for the first time, and the gate is what forced
-it — a stale entry fails the gate in the same way a new failure does.
-
-`TestEveryHostCallIsWired` in `cleat/cleattest` is the mechanism, and it found **19 more**
-unwired host calls: seven that hard-error the same way (`ResolvePromise`, `RejectPromise`,
-`ScheduleCron`, `DeleteCron`, `ListCrons`, `ContinueAsNewWithVersion`, `DurableDeferFunc`)
-and twelve with real fallbacks. `AwaitAnyChild` and `PollChild` were simply the two someone
-happened to write an example against.
-
-Of those seven, **one is left** as of 2026-08-08 (`DurableDeferFunc`, still waiting on the
-question of when its closures drain). `ResolvePromise`, `RejectPromise` and
-`ContinueAsNewWithVersion` were wired the same day. The three cron calls took longer and
-were the more interesting case: the guard's own note said mocking them would be *inventing*
-a specification, because `cleat.HostCalls` declared three methods **the engine did not
-implement anywhere** — an AssemblyScript guest that called one failed at instantiation with
-`unknown import`. That is now built (#430, #431, #432): the host calls exist on both
-backends, journaled and replayed, and `cleattest` validates against the engine's own
-`ValidateCronExpr` / `ValidateTimezone` rather than rules invented in a harness. Delivery is
-at-least-once; see `tiers.yaml`, `workflow-callable-cron`, which also records that Python
-still cannot make these calls.
-
-A second defect was hiding behind the first: `dag.go` discarded `completedRunID` on the
-error path, so a failed child reported `dag: await any child failed: <message>` without
-naming which of the tasks failed.
-
-<details><summary>The original entry, kept because its diagnosis is the thing worth
-learning from</summary>
-
-Noticed while sweeping `go test ./...` for §3.12 regressions, and confirmed against a clean
-`develop` worktree at `2ee62d0` so it is not that change:
-
-```
---- FAIL: TestDAGExecuteDiamond
-    pipeline_test.go:80: Execute failed: dag: await any child failed:
-    durable: AwaitAnyChild can only be called from within a workflow function
-    (the HostCalls runtime was not initialized)
-```
-
-Six tests, all in `examples/dag`, all the same cause. `.github/workflows/` runs
-`examples/as-workflow` and nothing else under `examples/`, and no job runs `./...`, so
-nothing has ever reported this. Low severity — it is example code, not the engine — but it is
-the §2.31/§2.33 pattern once more: a suite that exists, fails, and is watched by nobody.
-Either wire it into a job or say in the tree that examples are not tested.
-
-</details>
-
-Two things that are **not** defects and are recorded so the next sweep does not re-derive them:
-
-- `tests/exhaustion` used to fail hard locally with `cluster database unreachable … this test
-  requires docker-compose.cluster.yml to be up`, even with nothing configured — that was
-  tiers.yaml's blocker on gating it (fixed 2026-08-07, see tier2.gated_by). `clusterDB()` now
-  applies §2.12's distinction itself: `CLEAT_TEST_POSTGRES`/`CLEAT_TEST_DB` unset skips (nobody
-  asked), set-but-unreachable still fails naming the redacted DSN. It runs in the `cluster` job
-  (ci.yml's "Cluster Integration Tests"), which sets `CLEAT_TEST_DB` explicitly for this step,
-  so a skip there can only mean that override stopped taking effect — see
-  `scripts/skip-budget.txt`'s `cluster/exhaustion` entry (budget 0).
-- `tests/plugin-harness` fails when the repo is entered through `/localssd/rcownie/cleat`,
-  the symlink `PARALLEL-WORKSTREAMS.md` tells all three streams to use:
-
-  ```
-  cleat build (go) failed:
-  directory /localssd/rcownie/cleat/cmd/cleat outside main module or its selected dependencies
-  ```
-
-  The harness shells out to `go run <projectRoot>/cmd/cleat`, and the Go toolchain rejects a
-  module path reached through a symlink. From `/Users/Shared/localssd/rcownie/cleat` the same
-  suite passes. Worth knowing before someone spends a session on a phantom regression.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ### 3.22 An ambiguous call is erased, not reported — ✅ **FIXED** (WS-2, 2026-08-05)
 
-Found by building §1.4's T3 crash scenario. Not an intent-path defect: intent is only what made
-it visible, by producing the first workflow in this repo that *should* end in failure after a
-crash.
-
-> **Correction, and then a correction of the correction — 2026-08-05.**
->
-> This entry first said the mechanism was "a second `cleat_complete` with status 0 overwrites
-> the first with status 1", inferred from two probe lines. It was then retracted as wrong,
-> because instrumenting `Engine.Replay`'s boundary showed **one** execution returning
-> `err == nil` with a 233-byte result rather than two competing completions.
->
-> **The retraction was the error.** That observation is exactly what the original hypothesis
-> predicts: one execution, `err == nil`, and the 233 bytes *are* the `{"error":…}` payload.
-> A single instrumented boundary could not distinguish the two accounts, and it was read as
-> though it could. There are two `cleat_complete` calls, and the second does win — not by
-> overwriting a variable, but by winning a precedence check. See step 3 below, now read off the
-> generator and the backend rather than inferred from probes.
-
-**What actually happens**, end to end, each step measured:
-
-1. The engine detects the pending intent row and returns
-   `[AMBIGUOUS] call outcome unknown at step 2 …` to the guest with `errCode = 1`. Correct.
-2. The guest's adapter maps that to a `cleat.CallError`; the fixture returns it. Correct.
-3. **The guest reports the failure correctly and the host then discards the report.** The
-   generated `cleatDispatch` error branch calls `cleatCompleteImport(1, errPtr, errLen)`
-   (`wasm/exports.go:560`) — status 1, the failure — and *then returns the same error as its
-   `[]byte` result*. Generated `main()` (`wasm/build.go:174`) unconditionally re-reports that
-   return value:
-
-   ```go
-   result := cleatDispatch(entryName, args)
-   resultPtr, resultLen := stringPtr(string(result))
-   cleatCompleteImport(0, resultPtr, resultLen)   // no branch on whether it failed
-   ```
-
-   The host binding keeps both, correctly, in separate variables
-   (`engine/wasmtime_hostfuncs.go:70-75`). `engine/backend_wasmtime.go:582` then checks
-   `completeResult` **first**, so the status-0 report wins and `Execute` returns a success.
-   `Engine.Replay` returns `err == nil`, and the worker takes the success path.
-
-   Two things make this a defect rather than a design choice. The same file gets it right 100
-   lines later: `backend_wasmtime.go:684`, the non-Go direct-export path, returns
-   `fmt.Errorf("host: export %q failed: %s", …)`. So does wazero (`engine/runtime.go:531`).
-   **Go-on-wasmtime — the primary backend for the primary language — is the one path that
-   collapses the distinction**, and it is the path every Go workflow in production takes.
-4. **That JSON is malformed.** `wasm/exports.go:579` emits
-   `[]byte("{\"error\":\"" + encodeJSONString(__e.Error()) + "\"}")` while
-   `encodeJSONString` **already wraps its argument in quotes** (`exports.go:229-241`, and its
-   own doc comment says so). The result is doubled quotes:
-
-   ```
-   {"error":""durable call payments.Ship: [0] [AMBIGUOUS] call outcome unknown at step 2: …""}
-   ```
-
-   Line 376 uses the same helper correctly, which is why this is a one-line defect and not a
-   design problem.
-5. `FinalizeWorkflowSegment` replaced any result that is not valid JSON with `{}` — **silently,
-   in a two-line conditional with no log statement, in all three stores.** The workflow is
-   stored `done`, `result = {}`, `error_msg = ''`.
-
-So the operator gets a clean success for a charge that may or may not have happened, and there
-is no record of the ambiguity anywhere: not in the result, not in the error, not in the log.
-
-**Fixed here (step 5).** `coerceResultJSON` in `engine/store_lifecycle.go`, used by all three
-stores, still replaces an unstorable result — failing the terminal write would lose a whole
-workflow over a formatting defect — but now logs at ERROR with the workflow ID and the
-discarded value, truncated. The empty case stays silent because an entry point with no return
-value produces it on every successful run. `TestCoerceResultJSON` covers it, including the
-exact malformed string above, and fails if the log line goes away.
-
-**Fixed (step 4).** `wasm/exports.go` now wraps the *key* only, because `encodeJSONString`
-supplies the value's quotes — the same way the `__r` branch four lines below has always used it.
-The adjacent unmarshal-error emission had the same class of defect by a different route
-(raw concatenation of `err.Error()` with no escaping at all, and a `json.Unmarshal` error
-routinely contains quotes), so both are fixed together.
-
-`wasm/error_json_test.go` executes the emitted expressions rather than pattern-matching the
-emitted text — the defect was in what the code *evaluated to*. That is now this fix's only
-cover, and deliberately so: once step 3 landed, the crash path stopped depending on the
-emission at all (the failure is carried by `completeErr`, and the `{"error":…}` bytes it used
-to ride on are discarded). A test that had to go through a crash to observe a JSON-encoding
-defect was the wrong instrument anyway.
-
-**Cross-stream:** `wasm/` is WS-3's. Two lines, in the error-encoding path rather than the
-component work they are in the middle of.
-
-**Fixed (step 3).** `engine/backend_wasmtime.go` checks `completeErr` before `completeResult`,
-and returns it as an error rather than as a result — which is what the direct-export branch 100
-lines below it (every non-Go guest) and the wazero backend (`runtime.go:531`) already did.
-**No ABI change was needed**, contrary to what this entry claimed for a day: the wire format was
-never involved. Both completions already crossed it, in the right order, with the right status
-bits. The host was choosing the wrong one.
-
-Measured on `TestCrashWithWriteAheadIntentDoesNotRepeatTheCall`, before and after:
-
-```
-before   status="done"    error_msg=""
-                          result={"error": "durable call payments.Ship: [0] [AMBIGUOUS] …"}
-after    status="failed"  error_msg="… host: export "three_charges" failed: durable call
-                                     payments.Ship: [0] [AMBIGUOUS] call outcome unknown at
-                                     step 2: … Check the external service before retrying."
-                          result=""
-```
-
-`guestErrorText` (`engine/guest_error.go`) decodes what the guest encoded: every Go guest passes
-its message through `encodeJSONString` before `cleat_complete`, so the raw bytes are a quoted,
-escaped JSON literal, and formatting that into `error_msg` verbatim leaves the escapes in front
-of the operator. The `_start` panic recovery writes a plain Go string into the same variable, so
-the pass-through fallback is load-bearing rather than defensive.
-
-**The blast radius was the point, not a side effect.** This was never specific to ambiguity:
-*every* Go workflow that returned an error was being stored `done`. Two existing tests asserted
-that behaviour and were rewritten to assert the failure instead — `TestEngineReplayDivergence`
-(which had tolerated the error with a `t.Logf("expected if divergence bails out")`) and
-`TestCancellationEndToEnd`. Neither lost an assertion; the substance moved from `result` to
-`err`. A cancelled workflow and a diverging replay now end `failed` rather than `done`.
-
-Traps were never affected and still are not: fuel and epoch exhaustion reach the resource-limit
-check, because a trapped guest never reaches `cleat_complete` at all. It was specifically the
-guest that stopped cleanly and *said* it had failed that was not believed.
-
-**Regression cover.** `TestGuestReturnedErrorIsAFailureNotAResult` runs `basic.PlaceOrder` with
-an empty cart — a workflow that returns an error before touching a durable call, so no service,
-database or crash is involved in reproducing it. Restoring the old precedence fails it with
-`result = {"error":"cart is empty"}` and a nil error, which is the defect stated exactly.
-
-**Cross-stream:** `engine/backend_wasmtime.go` is WS-3's. The change is a swapped precedence
-and a comment; neither in-flight WS-3 branch touches the file.
-
-Phase E's *resolver* half has since landed, which shrinks how often this matters: an ambiguity
-a resolver can settle never reaches the workflow as an error at all.
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
 
 ## Phase 3 — Put falsification in the loop
 
@@ -6286,12 +889,26 @@ for attention at the seams, and it went unspent there.
   The whole module table also still uses pre-refactor `internal/` paths.
 - `docs/review-status.md` — declares the project production-ready off an audit of 11 plugins
   and pre-refactor paths.
-- `specs/CleatClaim.tla` — uses `=====` as decorative separators, which is TLA+'s module
-  terminator. First one is at line 53 of 495, so 89% of the spec is outside the module. No
-  `.cfg` files exist for any spec and TLC never runs in CI. Either fix + run them, or move
-  them to `docs/` as design notes.
-- `benchmarks/comparative/results/` contains only `template.md`. The Temporal and DBOS
-  harnesses are written — **run them.** Real head-to-head numbers would be a genuine asset.
+- `specs/CleatClaim.tla` — **fixed in cleat#1996.** Parses under SANY and checks clean under
+  TLC (`make tla`, wired into CI on `specs/**` and its named implementers), with a real
+  `.cfg`. **cleat#2034 (2026-09-23) found that "checks clean" had been true and unsound at
+  the same time** — a `.cfg` `CONSTRAINT` on its clock silently made every liveness property
+  vacuous (WF/SF withdrawn, verdict unchanged). Fixed with a self-clamping clock, an `SF`
+  fairness upgrade and a `FleetEventuallyStable` assumption; the fix then surfaced a real
+  `ReapProgress` gap (fixed) and a real `NoStarvation` gap (not fixable the same way — see
+  `specs/CleatClaim.md`'s "Bounds and state count" for both, split out of `specs/README.md`
+  in cleat#2044). `specs/CleatRunLifecycle.tla` —
+  **new in cleat#1997**, modelling every writer of
+  `workflow_instances.status`. `specs/CleatQueueAdmission.tla` — **fixed in cleat#2000** the
+  same way, and directly replaces (and, since its replacement landed, deletes)
+  `specs/CleatConcurrencyKeys.tla`, which this bullet used to count among "the other three"
+  unmaintained specs. The remaining two (`CleatSignals.tla`, `CleatStateMachine.tla`) are
+  marked not-maintained in `specs/README.md` rather than fixed, superseded by the model
+  issues in cleat#1998-#1999.
+- Head-to-head numbers still do not exist. `benchmarks/comparative/` was removed from this
+  repo in favour of [cleat-bench](https://github.com/cleat-team/cleat-bench), which already
+  has the runners, seven workload specs and the AWS infrastructure — **run them there.**
+  Real head-to-head numbers would be a genuine asset.
 
 **Positioning decision** (needs you, not an agent):
 
@@ -6339,47 +956,9646 @@ Untrack, extend `.gitignore`. This is also why line-counting tools report nonsen
 
 ---
 
-### 3.23 A guest that returned an error is reported as a "wasm trap" — 🔴 **OPEN** (WS-2, found 2026-08-05)
+### 3.23 A guest that returned an error is reported as a "wasm trap" — ✅ **FIXED** (2026-08-31)
 
-`resolveWasmTrap` (`engine/dwarf_trap.go:19`) prefixes `wasm trap: ` onto **any** non-empty
-message reaching `executor.go:151`, and `executor.go` wraps that again. An operator whose
-workflow simply returned an error now reads:
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.24 An ambiguous outcome is classified `unknown` — ✅ **FIXED** (2026-08-31)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.54 Every released `cleat-worker` binary was dead on arrival — ✅ **FIXED** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.55 Durable promises could not link on the worker — ✅ **FIXED** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.56 The host ABI is written twice, and now something checks it — ✅ **FIXED** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.57 macOS gets a working `cleat-worker` back, via Homebrew — ✅ **FIXED** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.59 Durable promises: linking was tested, meaning was not — ✅ **FIXED** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.58 The release path was only ever exercised by a release — ✅ **FIXED** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.60 §3.52's fix left a 50/50 race that discarded the error it connected — ✅ **FIXED** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.61 The output-buffer ABI, as a property rather than 31 tests — ✅ **FIXED** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.62 `cleat_poll_work` wrote to guest pointers it never checked — ✅ **FIXED** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.63 A cleanup pass was bounded per defer, not in total — ✅ **FIXED** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.64 A defer body ran twice after a trap — ✅ **FIXED** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.65 The component decomposition path, deleted — ✅ **DONE** (2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.66 A defer registered before the workflow suspended never ran — ✅ **FIXED** (WS-3, 2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.67 A `cleat_sleep` at the replay frontier never resumes — ✅ **FIXED** (WS-3, 2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.68 Replay released a virtual-object scope the workflow had already cleared — ✅ **FIXED** (WS-3, 2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.69 A third instance of the replay/fresh state class, found by a property test — ✅ **FIXED** (WS-3, 2026-09-01)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.71 A workflow killed by the memory limit was recorded as having succeeded — ✅ **FIXED** (WS-3, 2026-09-02)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.72 The engine suite poisoned its own database — ✅ **FIXED** (WS-3, 2026-09-02)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.73 Four SDKs document a `defer` that runs cleanup, and cannot run it — ✅ **ALL FOUR DONE** (WS-3, 2026-09-02)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.74 Java workflows could not suspend — ✅ **FIXED** (WS-3, 2026-09-02)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.75 The durable record for a resumable defer phase — 🟢 **DONE 2026-09-04: two transitions built (§3.112, §3.114), the third declined (D10)** (WS-2, 2026-09-02)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.76 MySQL's TerminateWorkflow released nothing — ✅ **FIXED** (WS-3, 2026-09-02)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.80 A closed parent's children keep their concurrency slots — ✅ **FIXED** (WS-2, 2026-09-02)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.79 `TerminateWorkflow` does not enforce the parent close policy — ✅ **FIXED** (WS-2, 2026-09-02)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.81 The defer segment — 🟢 **MECHANISM BUILT, MEASURED, AND NOW USED BY EVERY TERMINAL TRANSITION THAT TAKES ONE** (WS-3, 2026-09-02; closed 2026-09-04)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.83 The sentinel §3.81 specified would collide with a real response — 🟢 **THE REMAINDER IS DONE: all four SDKs and all four call paths landed by 2026-09-04** (WS-3, 2026-09-02)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.84 A defer segment is stopped on `cleat_call` only; four other paths still start new work — ✅ **FIXED** (WS-3, 2026-09-02)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.85 `--max-quota-events` killed the worker process, and the cap never counted the workflow — ✅ **FIXED** (WS-3, 2026-09-02)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.87 The Rust SDK cannot suspend: `catch_unwind` never catches, and the host has been masking the trap — ✅ **FIXED** (WS-3, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.88 §3.75's two pre-build re-derivations: the inventory is clean, the dead-letter question changed — ✅ **steps 1 and 2 DONE; step 3 (§3.75) DONE 2026-09-04 — §3.112 and §3.114 built two of the three transitions this section's inventory named, and D10 declined the third** (WS-3, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.89 Resolving an ambiguous call broke the checksum chain above it — ✅ **FIXED** (WS-2, 2026-09-02)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.113 The Python SDK discards the host's result on fire-and-forget calls, so a refusal is reported as success — 🟢 **FIXED 2026-09-04 by §3.201**; the finding was real, most of its evidence table was not (WS-1, 2026-09-04)
+
+Filed 11:41, fixed 13:02 the same day — `15f83ca` to `e4de0a4`, 81 minutes. The marker stayed 🔴
+after that and was the **only** 🔴 left in the plan, so a scan for open work reported an
+already-closed item as the project's top outstanding defect. That is §1.1's failure mode with the
+sign flipped: not a ✅ over a stale body but a 🔴 over a fixed one, and it costs the same session.
+
+**The defect was real.** `execSession.SignalWorkflow` (`engine/signaller.go:266`) returns
+`errSignalAuthRequiredInt` when `signalAuthCheck` refuses the send; the SDK returned `None` on the
+refusal and `None` on success. WS-2 took it as **§3.201**, which is wider than this entry measured
+— it found `SetState` and `DeleteState` discarding a non-determinism report, the worse half — and
+closed it with one helper rather than thirteen edits.
+
+**The close condition, re-verified 2026-09-04 against `develop` at `699c010`.**
+`_check_host_result` (`python-sdk/cleat_sdk/host_calls.py:437`) masks bit 31 first, then reads the
+low-byte error code; twelve call sites pass their result to it. `errSignalAuthRequiredInt` is
+`-4294967294` = `0xFFFFFFFF_00000002`, so the mask misses and `err_code` is 2 — a refused signal
+now raises. Falsified by deleting the `_raise_if_stopped(r)` line from that helper: three tests go
+red, and red *the right way* — the stop is reported as `CallErrorUnavailable (code 2)` rather than
+raising `SuspendSentinel`, which is the misdecode the ordering exists to prevent, not merely an
+absent check.
+
+    cd python-sdk && python3 -m pytest tests/test_host_result_binding.py -q   # 7 passed
+
+#### What this entry got wrong, and the instrument that caused it
+
+Its scan classified a call site by whether the result was **bound to a variable it could name**:
+
+    binds = bool(re.search(r'\bresult\s*=|\bres\s*=|\brc\s*=', body))
+
+Binding is not using. `return _import_cleat_schedule_cron(...)` hands the word to the caller and
+`resp = _import_side_effect(...)` binds it under a name the pattern does not list; both were
+reported as discards. The only shape that truly throws a result away is a bare `ast.Expr` whose
+value is an `_import*` call, so run that over the same file at the same commit:
+
+    HC=$(mktemp)   # not a fixed /tmp name: a stale one from an earlier session
+                   # overwrote this very file while this entry was being written
+    git show 15f83ca:python-sdk/cleat_sdk/host_calls.py > "$HC"
+    python3 -c "
+    import ast,pathlib,sys
+    cls=[n for n in ast.parse(pathlib.Path(sys.argv[1]).read_text()).body
+         if isinstance(n,ast.ClassDef) and n.name=='HostCalls'][0]
+    print(sorted({f.name for f in cls.body if isinstance(f,ast.FunctionDef)
+      for n in ast.walk(f) if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call)
+      and isinstance(n.value.func,ast.Name) and n.value.func.id.startswith('_import')}))" "$HC"
+
+That prints the 14 methods that genuinely discarded, at the commit the table was written from.
+Intersect it with the table's nine rows and **four of its eight `NO` rows are wrong**:
+`side_effect`, `schedule_cron`, `send_signal_and_wait` and `acquire_lock` all used their result
+when the row was written. Two of
+those four name methods that **do not exist** — they are `send_signal_and_wait_ms` and
+`acquire_lock_ms` — so those rows were not measured at all, by that command or any other. The four
+rows that were right, `send`, `schedule_invoke`, `reply_to_signal` and `signal_workflow`, are the
+finding, and they are what §3.201 fixed.
+
+The body filter compounds it. `'_import_cleat_' in body` cannot match `_import_side_effect`, so the
+command cannot produce the `side_effect` row the table shows above it. §3.201 found that half
+independently while re-deriving the same scan.
+
+**A regex over source cannot tell "the result went nowhere" from "the result went somewhere under a
+name I did not guess", and that distinction is the entire finding.** The AST walk is now a
+structural guard — `TestNoScalarHostCallDiscardsItsResult` in
+`python-sdk/tests/test_host_result_binding.py` — so a fourteenth discarding call site fails on
+arrival rather than when someone thinks to write a test for it.
+
+#### §3.111's remaining seven are no longer blocked
+
+This entry's operative claim was that guarding them host-side would set a bit the Python SDK does
+not read. It reads it now. §3.201 also corrected the shape: **the seven are not uniform.** Four
+return `u64`/`s64` — `durable-signal-workflow`, `durable-send`, `durable-acquire-lock`,
+`durable-schedule-invoke` — and three return `string`: `durable-send-signal-and-wait`,
+`side-effect`, `durable-schedule-cron`. For those three a `string` has nowhere to put a sentinel, so
+`result<string, call-failure>` *is* the right rule and a signature change *is* the fix — §3.110's
+situation, and the opposite of what this entry concluded. Split the seven before touching the rule.
+
+That split is now the shape of what is left. Measured 2026-09-04 on `develop` at `699c010`, the
+four scalar calls are guarded and the three string ones are not:
+
+    for f in SignalWorkflow SendSignalAndWait DurableSend SideEffect AcquireLock \
+             ScheduleCron DurableScheduleInvoke; do
+      echo -n "$f "; sed -n "/func (s \*execSession) $f(/,/^}/p" engine/*.go \
+        | grep -c callSuspendSentinel
+    done
+    # 19:55 -- SignalWorkflow 1  SendSignalAndWait 0  DurableSend 1  SideEffect 0
+    #          AcquireLock 1  ScheduleCron 0  DurableScheduleInvoke 1
+    # 20:30 -- all seven 1, after §3.300
+
+**That reading was true when taken and false nineteen minutes later.** §3.300 (`1d70483`, 20:14)
+guarded the three string-returning calls; the paragraph above was measured at about 19:55 and
+merged at 20:2x, so it shipped describing a remainder that no longer existed. §3.111 is now
+complete: all seven return the sentinel.
+
+The measurement is left standing rather than rewritten, because the failure it illustrates is not
+in the number. **A dated measurement stays true; a dated *remainder* does not.** "Four of seven are
+guarded" is a fact about 19:55 and still is. "The remainder is one WIT change gating three calls"
+was a claim about the future of a shared frontier, and a peer stream closed it while this entry was
+in review. When writing about what is left on something two other streams are also working, date
+the measurement and re-derive the remainder at merge, not at authoring — this file's own
+stale-marker rule, applied to the sentence rather than to the heading.
+
+The rule correction itself has landed: `TestTheThreeStopSurfacesAgree` no longer demands
+`result<string, call-failure>` of a scalar-returning stop site — `witCallOutcomeFuncs` reports a
+third category, and the reasoning is on the `"AcquireLock"` entry of `stopSurfaces` in
+`engine/stop_correspondence_guard_test.go` (named rather than cited by line, because a line number
+into a living file is a dead citation with a delay). §3.201 supplied the case this entry deferred
+it for — `durable-acquire-lock`, which returns `s64`.
+
+#### One citation to this entry is left for its owner
+
+§3.400's **A8** row — "packed result's errCode ≡ what the guest observes" — records its gap as
+"open: `extractStringFromPacked` drops it, so a refusal reaches Python as a success (WS-2,
+§3.113)". Two things about that are now stale and **neither is edited here, because §3.400 is
+WS-3's**. The citation points at a closed entry; and `extractStringFromPacked`
+(`engine/component_cgo.go:746`) has **no production callers** — every reference to it outside its
+own definition is in a `_test.go` file:
+
+    grep -rn "extractStringFromPacked(" --include="*.go" . | grep -v _test.go   # 1 line, the func decl
+
+The gap A8 names may well still be real by another route; what is not real is the mechanism the row
+attributes it to. For WS-3 to re-derive when they next touch that table.
+
+### 3.111 A defer segment could still call a service through `cleat_call_heartbeat` — 🟢 **FIXED 2026-09-04** (WS-1, 2026-09-04)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.108 The Tier 1 Gate ran on Go's 10-minute default and the engine suite outgrew it — 🟢 **FIXED 2026-09-03** (WS-1, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.101 Terminate and signal told the caller which workflow ids are real — 🟢 **FIXED 2026-09-03** (WS-1, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.99 The admin API answered 404 to its rightful owner on two of three dialects — 🟢 **FIXED 2026-09-03** (WS-1, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.95 `cleatctl restore-workflow` is removed — 🟢 **DECIDED AND DONE 2026-09-03; the three questions below were answered by deleting the thing that raised them** (WS-1, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.92 §3.86 scoped the terminate and left the cascade — 🟢 **FIXED 2026-09-03, symptom and root; found by the gate's allowlist demanding a reason, not by its scan** (WS-1, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.91 The ordinary claim path took every tenant's work on SQL Server — 🟢 **FIXED 2026-09-03; the `-claim-across-tenants` flag was decorative on this dialect** (WS-1, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.90 `--wasm-instance-timeout` is charged for time the guest spends blocked in the host — ✅ **FIXED** (WS-3, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.94 Execution limits are process-wide, and one of them is compiled into the guest — 🟢 **FIXED 2026-09-03: all six steps shipped** (WS-3, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.96 A recorded plugin stream error replayed as a success — ✅ **FIXED** (WS-2, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.97 `EventRecord.CreatedAt` comes back on one dialect of three — ✅ **FIXED 2026-09-03 in §3.102**, which turned out to be the smaller half of the defect (WS-2, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.100 A merge's own verification is cancelled by the next merge — 🟢 **FIXED 2026-09-04; the 2026-09-03 fix was half of one** (WS-1, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.98 The database payload carried none of four fields the replay path reads — ✅ **FIXED** (WS-2, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.102 Nine read paths, four different answers about the same row — ✅ **FIXED** (WS-2, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.103 The `EventStream` abstraction had no callers, and one of its two implementations read across tenants — ✅ **FIXED by deletion** (WS-2, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.104 A defer segment could still make an outbound HTTP request — ✅ **FIXED** (WS-2, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.105 The Java SDK could not run a defer segment, because it never decoded the stop sentinel — ✅ **FIXED, both halves; `java` is in `deferSegmentLanguages`** (WS-2, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.106 The AssemblyScript SDK could not run a defer segment either, and its stop cannot unwind — ✅ **FIXED, both halves; a defect found in the second one** (WS-2, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.107 The Rust SDK decodes the defer-segment stop sentinel — ✅ **FIXED, both halves; `rust` is in `deferSegmentLanguages`** (WS-2, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.109 Three tests ran in no job at all, and the tier-1 gate was building tier-2 toolchains — ✅ **FIXED** (WS-2, 2026-09-03)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.110 A stop was not expressible on the component ABI, and neither was a failure — ✅ **FIXED: the WIT says it in the type, and `python` is in `deferSegmentLanguages`** (WS-2, 2026-09-04)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.112 Terminate ran no defers, and released the locks the defers were for — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.114 A closing parent pre-empted every child's cleanup at once — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.200 A Go guest was told "error 1 (timeout)" for every plugin failure, and the host's real message was in the buffer beside it — 🟢 **FIXED 2026-09-04**; the remaining 18 adapters closed 2026-09-05 (WS-1)
+
+Found by WS-2 while dumping every plugin key in every language for §3.306, and handed over as
+ABI-adjacent. Same host, same 10 plugins, same 17 calls:
+
+| guest | what it reported |
+|---|---|
+| Rust / AS / Java | `plugin function pgvector/upsert not registered. Check that...` |
+| Go | `plugin_call: error 1 (0=unknown 1=timeout 2=transient ...)` |
+
+WS-2 posed two candidates — the host wrote no response bytes, or the length failed
+`callErrorMessage`'s bounds check — and deliberately did not guess between them. **It was
+neither.** The host writes the text and the guest decodes the length correctly. The Go adapter
+then discards it:
+
+```go
+responseLen := uint32(uint64(result) >> 40)
+errCode := uint32(result & 0xFF)
+if errCode != 0 {
+	return "", fmt.Errorf("plugin_call: error %d (0=unknown 1=timeout ...)", errCode)
+}
+return unsafe.String(&responseBuf[0], int(responseLen)), nil
+```
+
+`responseLen` is computed and then unused on the error branch; `responseBuf` is never read there.
+The host side is `engine/plugins.go`:
+
+```go
+written, _ := s.writeResult(ctx, m, responsePtr, errStr, responseMaxLen)
+return packDurableCallResult(int(written), callFailureCode, 1)
+```
+
+**Three things were wrong at once, which is why the symptom looked like a length bug.**
+
+1. *The message is discarded.* Nothing reads `responseBuf` on the failure path.
+2. *The printed number comes from a different field than the legend describes.*
+   `packDurableCallResult` is `responseLen<<40 | callErrorCode<<8 | errCode`, so `result & 0xFF`
+   is `errCode` — which the host hardcodes to literal `1` on **every** failure path. Simulating
+   the packer with `callErrorCode` varied over 0/2/3/5 prints `1` every time. The legend beside
+   it enumerates `CallErrorCode`, which lives at bits 8–39.
+3. *The real classification is discarded too.* `callFailureCode = callErrorUnavailable = 2`,
+   never decoded.
+
+So "why is it 1 for a not-registered plugin" has a flat answer: **it is 1 for everything.** Not a
+timeout, not a classification — a constant.
+
+**This is a mechanism, not a bug, and the scope is the finding.** 20 of the 23 adapters in
+`wasm/adapter_metadata.go` print that legend; three call `callErrorMessage`. Those three —
+`DurableCall`, `DurableCallWithRetry`, `DurableCallWithHeartbeat` — are exactly the calls named in
+§2.10. **The fix was applied to the report's examples and never generalised.**
+
+The set that legend can *ever* be right for is decidable, because only one packer carries a
+`CallErrorCode`:
+
+    grep -rn 'packDurableCallResult(' --include='*.go' engine/ | grep -v _test.go
+
+reaches `durablecalls.go`, `heartbeats.go` and `plugins.go` — five adapters. The three above, plus
+`PluginCall` and `PluginCallStreaming`. **Those two are this fix.** Both now decode
+`callErrorCode` from bits 8–39 and pass the buffer to `callErrorMessage`, which is what the other
+three have done since §2.10.
+
+**Still open: the other 13.** `packSimpleResult`, `packAwaitChildResult`, `packAwaitPromiseResult`,
+`packAwaitSignalsResult` and `packAcquireLockResult` each carry an `errCode` and **no
+`callErrorCode` field at all** — so `DurableAwaitSignals`, `DurableDefer`, `DurableDeferFunc`,
+`PollSignal`, `ChildWorkflow`, `ChildWorkflowWithOptions`, `AwaitChild`, `AwaitAllChildren`,
+`PollChild`, `AwaitAnyChild`, `CreatePromise`, `AwaitPromise` and `SideEffect` print a legend for
+a field that does not exist. That is a different defect with a different fix — `hostErrMessage`,
+or no legend — and it is not taken here. `wasm/generator.go` already says so in
+`hostErrMessage`'s doc comment, which warns that printing the `CallErrorCode` legend beside a
+simple-result code "would describe a rejected cron expression as a timeout". **That comment
+describes the live defect in thirteen other calls.** Five more adapters —
+`ContinueAsNew`, `ContinueAsNewWithVersion`, `AcquireLock`, `AcquireLockMs`, `ReleaseLock` — print
+the legend with no output buffer at all, so they have nothing better to print and need the legend
+removed rather than replaced.
+
+## The other 18, closed 2026-09-05
+
+The open half above is done. Every adapter now either reads the host's message or reports a bare
+code; no adapter prints the `CallErrorCode` legend inline.
+
+**The classification had to be done per call, and two of my assumptions above were wrong.**
+
+*First*, the split was 13-with-buffer and 5-without, but the boundary that matters is not "does the
+legend apply" — it is "did the host write something to read". Checked against the host rather than
+inferred: `AwaitChild`'s replay path is `writeResult(ctx, m, resultPtr, rec.Err, resultMaxLen)`
+then `packAwaitChildResult(written, 1)`; `SideEffect`'s is an `errMsg` then
+`packSimpleResult(1, written)`; `AwaitPromise`'s is `rec.PromiseError` then
+`packAwaitPromiseResult(written, false, 1)`. **In each case the reason is in the buffer and the
+guest was returning before reading it** — the same defect as `PluginCall`, on a different packer.
+
+*Second*, I expected several of these error branches to be dead. `CreatePromise`'s handler returns
+`packSimpleResult(0, written)` on every path, so from the handler alone `errCode` is never
+non-zero. **That reasoning stops one layer too early.** `engine/imports.go` returns `errBadParam`
+= `0xFFFFFFFF_00000001` from **64 sites** when it cannot read a guest string, before the handler
+runs at all. Its low byte is 1, so the branch is reachable for every one of these calls — and
+every such failure printed "error 1", which the legend reads as a **timeout** rather than a bad
+parameter.
+
+`hostErrMessage` is safe on exactly those paths, and not by accident: it bounds-checks the length
+against the buffer, so `errBadParam`'s `0xFFFFFFFF` decodes to a length no buffer satisfies and it
+returns "no detail reported by the host" instead of reading out of range.
+
+**The sharpest single case is `AwaitPromise`.** `packAwaitPromiseResult(written, false, 1)` is a
+*rejected promise* — an ordinary application outcome, carrying `rec.PromiseError`. A Go guest was
+told `error 1 (1=timeout)`. The rejection reason was in the buffer the whole time.
+
+The five with no output buffer — `ContinueAsNew`, `ContinueAsNewWithVersion`, `AcquireLock`,
+`AcquireLockMs`, `ReleaseLock` — have nothing to read, so they report the bare code with the
+legend removed rather than a legend for an enum they do not carry.
+
+`ScheduleCron` and `ListCrons` already used `hostErrMessage`, which is what makes this the house
+pattern rather than a new one — and `hostErrMessage`'s doc comment had described the defect in the
+other 18 since it was written.
+
+Two guards, both falsified by restoring the legend on `AwaitChild` alone, which reddens both while
+the other 17 stay green: `TestNoAdapterPrintsTheCallErrorCodeLegendForAnotherLayout` and
+`TestAdaptersWithAnOutputBufferReportWhatTheHostWroteThere`.
+
+**One thing this did not get: nothing in `./wasm/` compiles generated code.** A wrong buffer name
+would pass every test in that package. Verified instead by checking that each buffer and length
+identifier used in an error branch is also used elsewhere in the same adapter, where it compiles
+today — 15 of 15, zero mismatches. A test that builds a workflow exercising every host call would
+be strictly better and does not exist; `examples/dag` does not currently build, for an unrelated
+reason (the HostCalls threading verifier rejects four of its functions).
+
+**Falsification.** Reverting `adapter_metadata.go` and keeping the test reddens
+`TestDurableCallAdaptersReportTheHostsMessageNotJustACode` on `PluginCall` and
+`PluginCallStreaming` — both assertions, both adapters, naming the discarded message — and
+`TestPluginCallDecodesCallErrorCodeFromTheRightBits` on the shift. **`DurableCall`,
+`DurableCallWithRetry` and `DurableCallWithHeartbeat` stay green in the same run**, which is the
+negative control: the test discriminates the two broken adapters from the three correct ones
+rather than merely firing.
+
+**Why the existing guard did not catch it.** `TestHostAdapterReportsCallErrorCodeNotErrCode`
+(§2.10) pins exactly this property — its doc comment describes a call that "reported Code 4
+(invalid request) and then said 'error 1', which the legend reads as a *timeout*". Its assertion
+is a substring match on `callErrorMessage("cleat_call", ...)`. **The comment states the general
+rule and the assertion names one call**, so it stayed green while two other adapters on the same
+layout carried the same defect. This is CLAUDE.md's "a test whose NAME asserts the mechanism"
+in its other form: here the *comment* asserted the mechanism and the test checked an instance.
+
+**Follow-up, same day — the fix prefixed what `callErrorMessage` already names.** Wrapping its
+result in `fmt.Errorf("plugin_call: %s", ...)` doubles the call name on the fallback path
+(`plugin_call: plugin_call: error 2 (...)`) and, on the success path, prepends a name the other
+guests do not print. The second half is the one that matters: this section exists to make a Go
+guest report what Rust, AS and Java report, and `plugin_call: blobstore: no tenant context`
+against their `blobstore: no tenant context` is still a divergence — a smaller one than
+`error 1`, but the same kind. Measured by WS-2 on the harness: `llm.chat_stream` read
+`plugin_call_streaming: plugin_call_streaming: no plugin stream registry configured`. Fixed by
+returning `callErrorMessage`'s result verbatim; the fallback keeps the call name because
+`callErrorMessage` puts it there itself, which is exactly why the wrapper must not. Pinned by
+`TestPluginAdaptersDoNotPrefixWhatCallErrorMessageAlreadyNames`. **This decides the question for
+the remaining 13 too** — whatever `hostErrMessage` does about prefixing will do it for all of
+them at once, so settling it here is cheaper than unpicking it later.
+
+CLAUDE.md records that all four prior defects at this boundary were "the value meant the wrong
+thing on one side of the boundary", and none was an overflow. This is a fifth, and it is that
+exactly — twice over: a length that was read and dropped, and a code read from the wrong field.
+
+### 3.203 §2.26's last two files were deferred pending §2.60, which landed a month earlier — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+§2.26 wrapped the MSSQL store's transaction boundaries in `withRollbackGuaranteedRetry` one file
+at a time, and its last paragraph reads:
+
+> **Still to do:** `mssql_events.go` and `mssql_signals_promises.go` (9 boundaries), which
+> §2.60 (#283) is changing. Do those after it lands rather than into a conflict.
+
+**§2.60 landed as #283 at 2026-08-04T22:23 and the deferral was never lifted.** The instruction
+was correct when written — the paragraph is dated 17:27 the same day, five hours before the thing
+it was waiting for. It then outlived its own precondition by a month. Same shape as §3.113: a
+marker that was accurate when filed and stopped being accurate without anyone editing it.
+
+Three boundaries wrapped: `AppendEventHistoryBatch`, `SetAllowedSignalCallers` and
+`PollAndClaimSignal`, each split into a `…Once` body the way `CompactHistory` and
+`DeleteExpiredEvents` already were. `PollAndClaimSignal` returns `(string, bool, error)` and the
+wrapper takes `func() error`, so its results are captured in the closure.
+
+**Retrying `PollAndClaimSignal` cannot claim a signal twice**, and the reason is the wrapper's
+whole design rather than anything about this call: `withRollbackGuaranteedRetry` gates on
+`isMSSQLRollbackGuaranteed` — deadlock victim (1205), snapshot conflicts (3960, 41301–41325) —
+where SQL Server has definitively undone the transaction, so the claiming `DELETE` did not happen.
+A double claim needs the commit to have *succeeded*, which is the unknown-outcome case that
+wrapper excludes by construction and `mssqlRetry` does not. **Do not substitute `mssqlRetry` here.**
+
+## The "9 boundaries" was counting something else, and it reproduces exactly
+
+Not recorded as "9 was wrong", because it was not — it answered a different question than the
+sentence around it asks. Measured at `f0074d46`, the commit that wrote the line:
+
+| file, at `f0074d46` | `BeginTx` | `s.db.ExecContext` |
+|---|---|---|
+| `mssql_signals_promises.go` | 1 | 8 |
+| `mssql_events.go` | 1 | 0 |
+
+**1 + 8 = 9 is `mssql_signals_promises.go` alone**, counting every DB write site rather than every
+transaction boundary. The sentence attributes the 9 to both files, so on its own terms the figure
+should have been 10.
+
+The units matter more than the total. **No bare `s.db.ExecContext` is wrapped anywhere in the
+MSSQL store**, including in the files §2.26 declared done — `mssql_deployment.go` still has 7 and
+`mssql_schedules.go` 8. Single-statement autocommit calls were consistently out of scope for every
+increment, so reading the 9 as work-remaining would reopen every finished file. Re-derive with:
+
+    for f in engine/mssql_*.go; do case "$f" in *_test.go) continue;; esac
+      printf "%-34s BeginTx=%s dbExec=%s wrapped=%s\n" "$(basename $f)" \
+        "$(grep -c BeginTx $f)" "$(grep -c 's\.db\.ExecContext' $f)" \
+        "$(grep -c 'withRollbackGuaranteedRetry(' $f)"; done
+
+This is WS-3's correction, and it generalises past this number: **check what a stale count was
+counting, not only whether it reproduces.** Two counts went wrong the same way on 2026-09-04 —
+§3.33's "only two actionable findings" was true of the root module and missed a G112 in
+`examples/`, and a gosec comment claimed 0 findings where the config actually run gave 67. A count
+is scoped to what was walked, and the scope is the part nobody writes down.
+
+## The guard is structural, and it is the part that outlives the fix
+
+`TestEveryMSSQLTransactionBoundaryIsRetried` walks every `engine/mssql_*.go` with `go/ast` and
+fails on any function that opens **and commits** a transaction without being reached through
+`withRollbackGuaranteedRetry`. A set-membership baseline would not have caught the original
+defect, because the deferred boundaries were never in a baseline to begin with.
+
+It fired on its first run, on a false positive worth keeping in the definition: keying on
+`BeginTx` alone flags `beginTxWithContext`, which opens a transaction and hands it back, and
+`tenantSessionConn.BeginTx`, a driver passthrough. Neither commits. **A boundary is a function
+that opens and commits**; its callers are checked on their own.
+
+Deliberately structural rather than behavioural. Proving a retry happens needs a live deadlock,
+which `engine/mssql_deadlock_test.go` does for the paths it covers — and which skips wherever
+`CLEAT_TEST_MSSQL` is unset, so it cannot be the thing that stops a boundary being added
+unwrapped.
+
+**Falsified:** removing the wrapper from `AppendEventHistoryBatch` alone reddens the guard naming
+that function, with the other two still passing.
+
+`engine/mssql_tenant_predicate_test.go`'s allowlist caught the refactor within seconds — its entry
+keyed on `PollAndClaimSignal` and the unscoped statement had moved to `pollAndClaimSignalOnce`.
+Renamed rather than deleted, matching `compactHistoryOnce` and `deleteExpiredEventsOnce` from
+§2.26's earlier increments, which is evidence the split follows the house pattern.
+
+Verified 4623 pass / 0 fail / 6 skip on `./engine/ -p 1` with all three dialects connected.
+**The first attempt at that run reported 825 failures** because the DSNs were reconstructed from
+memory and named a database `cleat_test` that does not exist — the exact failure CLAUDE.md's
+"Is this result real?" section describes itself committing. The DSNs are written down in
+`WORKSTREAM.md`; read them. The probe used afterwards has a negative control: the good DSN passes
+`TestPluginMigrations_AllDialects` and a wrong password fails it.
+
+### 3.204 Locks, promises and side effects could not be compiled from any Go WASM workflow — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+Four host calls generated Go that does not compile. **Not a subtle failure mode — `cleat build`
+exits 1** on any workflow that touches them:
 
 ```
-host: workflow <id>: execution failed: wasm trap: host: export "three_charges" failed: <their error>
+h.AcquireLock("k", time.Second)
+  gen_host_adapter.go: undefined: ttl_ms
+  gen_host_adapter.go: unknown field AcquireLockMs in struct literal of type cleat.HostCallsOptions
+
+h.AwaitPromise(id, 5*time.Second)
+  undefined: promise_idPtr, promise_idLen, timeout_ms, resultOutBuf
+
+h.SideEffect(func() (string, error) { ... })
+  cannot use func(fn func() (string, error)) (string, error) as
+  func(computedResult string) (string, error) value in struct literal
 ```
 
-Two `host:` prefixes and a claim of a trap where there was none — the guest stopped cleanly and
-*said* it had failed. The label sends a reader looking for a memory fault instead of at their
-own error text.
+Distributed locks, durable promises and side effects are three of the primitives a durable
+workflow engine exists to provide. All three were unusable from Go, the tier-1 guest language.
 
-**This was latent until §3.22.** Before it, a guest-returned error never reached this path — it
-was returned as a success — so everything arriving here genuinely was a trap and the
-unconditional prefix was right. §3.22 introduced a second class of error to a function that
-labels all of them the same, so this is that change's debt, not a pre-existing defect.
+**Found while writing the test §3.200 said was missing**, which is the whole reason to write the
+test a report admits it did not do rather than filing the gap and moving on.
 
-Not fixed there because the fix belongs in `engine/executor.go`, which is WS-3's *and* is
-touched by their in-flight `fix/ws3-defers-on-fenced-backend`. `engine/dwarf_trap.go` is
-unowned, but `resolveWasmTrap` takes a `string`, so the "is this actually a trap" question can
-only be asked at the executor call site. Shape: a sentinel error type from the backend, checked
-with `errors.As` before the trap envelope is applied.
+## Three independent causes
 
-### 3.24 An ambiguous outcome is classified `unknown` — 🔴 **OPEN** (WS-2, found 2026-08-05)
+**1. `adapterDefs` had an entry for a field that does not exist.** `AnalyzeUsage` keys `info.Used`
+by *ImportName*, so once `cleat_acquire_lock` is used, **every** `hostFunctions` row sharing that
+import contributes a struct field — and `AcquireLockMs` is not a field on `cleat.HostCallsOptions`.
+`HostCallsImpl.AcquireLockMs` reaches the host through `opts.AcquireLock`, so the entry was never
+needed. Removed. The other two multi-row imports, `cleat_defer` and `cleat_sleep`, are both real
+fields and are fine:
 
-`engine.ErrAmbiguous` (`engine/errors.go:30`) has existed since the first commit and
-`NewAmbiguousError` is called by nothing but its own test. A workflow that ends because it could
-not determine whether a charge happened is stored with `error_code = 'unknown'` — the same value
-as every other engine-produced failure — so nothing can query for the one class that needs a
-human to go and look at the external service.
+    grep -c '"AcquireLockMs": {' wasm/adapter_metadata.go   # 0
 
-Unblocked by §3.22 and cheap: `cmd/cleat-worker/setup.go:1703-1707` already does
-`errors.As(err, &ce); errorCode = ce.Code.String()`. What is missing is the engine wrapping the
-ambiguous failure as `*CleatError{Code: ErrAmbiguous}` on its way out, so the existing path
-carries it. That is also the shape §2.35's residual wants, and it needs no ABI change.
+**2. The import spec and the adapter spec had to agree on parameter names, and nothing made them.**
+For a scalar the generator emits the *import's* name as the call argument, and for a string it
+emits `<importName>Ptr`/`<importName>Len`. The import specs were snake_case and the adapters
+camelCase, so five names never resolved: `ttl_ms`, `promise_id`, `timeout_ms`, `result_out`,
+`promise_id_out`. Renamed to match the adapters, which is the convention the working calls already
+used (`timeoutMs` in `cleat_send_signal_and_wait`).
 
-Separate and genuinely blocked on the SDKs: a guest-visible `CallErrorAmbiguous`. The guest
-enum (`cleat.CallErrorCode`) has no ambiguous member, so a workflow author's `switch e.Code`
-sees `[0]`, Unknown. Value 6 is free and the wire field is 32 bits, but every SDK carries its
-own copy of the enum — `python-sdk/cleat_sdk/host_calls.py` has a literal `{0..5}` dict — and
-those are WS-3's. Worth doing; not what stands between an ambiguous crash and an operator being
-told about it.
+**3. Two adapters declared a closure the options struct will not accept.**
+`HostCallsOptions.AwaitPromise` is `func(promiseID string, timeout time.Duration)` and the adapter
+declared `timeoutMs int64`. `HostCallsOptions.SideEffect` is `func(computedResult string)` — the
+SDK's `HostCallsImpl.SideEffect` calls the closure itself and passes the computed string on — and
+the adapter declared `fn func() (string, error)`.
+
+## Why every existing test passed
+
+**Nothing compiled generated code.** Every test in `./wasm/` inspects the generated source *as a
+string*, so an identifier that does not exist and a closure of the wrong type both pass.
+
+And the gap was known. `TestRunBuild_GoTargetBuildDir` in `cmd/cleat` runs the whole pipeline —
+analyze, `BuildOutputs`, `PrepareBuildDir` — and stops one step short, saying so in its own
+comment: *"Verify the build directory setup for the go target without requiring actual go build to
+compile."* It then asserts the generated files **exist**. Four broken host calls sat behind that
+sentence.
+
+§3.200 recorded the same gap from the other side and, having recorded it, did not close it: "a
+wrong buffer name would pass every test in that package… a test that builds a workflow exercising
+every host call would be strictly better and does not exist." Its substitute check — is each
+identifier used elsewhere in the same adapter — reported **15 of 15 clean**, because
+`AwaitPromise` used `resultOutBuf` consistently in both branches of an adapter that had never
+compiled. **A consistency check cannot see a name that is consistently wrong.**
+
+## The test
+
+`TestGeneratedAdapterCompilesForEveryHostCall` runs the real pipeline over
+`testdata/allhostcalls`, a workflow calling every `HostCalls` method, then invokes the Go
+compiler for `wasip1/wasm` on the result. All 37 `adapterDefs` fields are exercised — asserted,
+not assumed, by the companion test below — and 53 host functions reach the adapter.
+
+`TestEveryHostCallIsExercisedByTheCompileFixture` keeps it honest — a call the fixture never makes
+is a call nobody compiles. It caught three on its first run (`DurableCallWithHeartbeat`,
+`DurableDeferFunc`, `RegisterUpdateHandler`), which were then added.
+
+**Falsified:** restoring `ttl_ms` alone fails the compile test with
+`gen_host_adapter.go:388:53: undefined: ttl_ms` — the generator's own output, not a proxy for it.
+
+**CI caught two things this section's own reasoning had missed.**
+
+`engine/stop_correspondence_guard_test.go`'s `stopSurfaces` table named `"AcquireLockMs"` as a Go
+adapter, so removing the entry made that guard fail with *`stopSurfaces["AcquireLock"] names Go
+adapter "AcquireLockMs", which is not in adapterDefs`*. The table is right to notice — it
+cross-references three surfaces — and the entry is now `{"AcquireLock"}` with the reason recorded
+beside it.
+
+And the test shipped with a `-short` skip, one paragraph below a comment saying it must never
+learn to skip. `scripts/check-skips.sh` rejected it, and its taxonomy names the error exactly:
+this is case (c), *"the precondition is always satisfiable in this repo"*. There is no
+environmental question to ask, so a skip here is a decision not to run the test. Removed rather
+than baselined.
+
+The test must not learn to skip. `wasip1` ships with the standard toolchain, so there is no
+environmental precondition to detect; a skip here restores exactly the blind spot the test removes.
+**It has no skip at all** — the `-short` guard this sentence used to claim lived for about an hour
+before CI rejected it, and the paragraph above records why. Confirm with
+`grep -n 'testing.Short' cmd/cleat/generated_adapter_compiles_test.go` → nothing.
+### 3.205 The Python end-to-end test's coverage was one host call wide — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+The Python half of §3.204. `TestPythonWasmEndToEnd` compiles
+`python-sdk/examples/durable_call_workflow.py`, which calls `h.call()` and nothing else. Passing
+it means **"Python can make a durable call"**, not "the Python host-call surface builds" — so a
+binding that does not exist, or does not accept what the SDK passes it, reaches users rather than
+CI. `cleat_sdk.HostCalls` has **73** public methods; one was covered.
+
+**Python is better defended than the Go side was, and that was deliberate.** `tiers.yaml` puts
+python in `tier1.languages`, and `.github/workflows/tier1-gate.yml` installs `componentize-py`
+with a comment saying exactly why:
+
+> python is tier 1 (D2), so this is a tier-1 precondition rather than a convenience — without it
+> `TestPythonWasmEndToEnd` and `TestPythonComponentExecutionFence` skip, and the gate fails on the
+> skip rather than letting the run go quietly green.
+
+The gap was never the toolchain. It was the fixture.
+
+## Three guards, in two places, for two different costs
+
+`python-sdk/tests/test_all_host_calls_fixture.py` — **no toolchain, runs everywhere**:
+
+1. every public `HostCalls` method appears in the fixture;
+2. every `h.<name>` in the fixture is a real `HostCalls` method (a typo would otherwise sit there
+   looking like coverage);
+3. every call **binds** to the real signature, via `inspect.signature().bind`.
+
+`engine/python_all_host_calls_test.go` — **needs `componentize-py`**, and builds the fixture for
+real through `python-sdk/scripts/build_wasm.py`, the same path `TestPythonWasmEndToEnd` uses. Its
+prerequisite handling is copied from that test deliberately, including the `toolchainRequired`
+escalation: a job declaring `python` in `CLEAT_REQUIRE_TOOLCHAINS` **fails** rather than skips.
+
+Both halves use AST rather than text. A `grep` for `h.<name>(` would count names inside this
+fixture's own docstrings, which name host calls.
+
+**Guard 3 is the one worth having, and it found a defect in the fixture on its first run.**
+`componentize-py` cannot catch an arity error — Python binds arguments at call time, so a wrong
+call count compiles into the component happily and fails only when the workflow runs. This fixture
+is never run. `h.log_kv("m", k="v")` was wrong; `log_kv(self, message: str, *kvs: Any)` takes
+positional pairs. Without guard 3 that line would have looked like coverage forever.
+
+**Falsified, each separately:** deleting `h.release_lock("k")` fails guard 1 naming it; adding
+`h.nonexistent_call("x")` fails guard 2 naming it; dropping `acquire_lock`'s second argument fails
+guard 3 with `missing a required argument: 'ttl_seconds'`.
+
+## Verified locally, in the container the repo already provides
+
+    docker --context desktop-linux run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
+      cleat-py-toolchain go test ./engine/ -run TestPythonAllHostCallsWorkflowCompiles -count=1
+
+    --- PASS (1.71s).  Build SUCCESS, 17.94 MB component, all 73 calls.
+
+**This section first said the fixture "has not been compiled on this machine", and that hedge was
+wrong in an instructive way.** `componentize-py` does die here with exit `-9`, and the control was
+sound — the *existing* `durable_call_workflow.py` dies identically, so it is the environment rather
+than the fixture. **But "environmental" is not "unavoidable", and stopping at the first
+correct-sounding answer is what made it look like one.**
+
+`scripts/docker/python-toolchain.Dockerfile` has documented the cause and the fix since 2026-08-06,
+in its header: componentize-py's embedded wasmtime "installs a mach exception handler into a
+guarded port and the process dies with EXC_GUARD / GUARD_TYPE_MACH_PORT. That guard is a Darwin
+kernel feature with no Linux equivalent, which is why the Linux CI runners have always been able to
+build Python components while a developer's Mac could not." Deterministic, platform-specific, and
+already solved. The image was prebuilt on this machine.
+
+So the diagnosis in the first draft — memory pressure, a sandbox limit — was wrong, and it was
+passed to WS-2 as agreement with their own signal-9 report rather than checked against the tree.
+
+**Two caveats, both from the Dockerfile and both already paid for by someone.**
+`--context desktop-linux` is not optional on a Mac that also runs colima: colima cannot bind-mount
+these paths and **says nothing**, so `-v "$PWD":/src` yields an *empty* directory and the run fails
+with `go: go.mod file not found`, which reads as a broken checkout. Sanity-check the mount before
+believing any failure from this image. And two warnings — `wasm-tools component decompose not
+available` and `metadata stamping failed (non-fatal)` — appear identically when building
+`durable_call_workflow.py`, so they are pre-existing rather than anything this fixture introduced.
+That control is the only reason they are not recorded here as a finding.
+
+The calls sit in `_exercise_every_host_call`, which the entry point reaches only when its request
+says so. `continue_as_new`, `extend_timeout` and `release_lock` would change a running workflow's
+fate, and this file is on the compile path, not the behaviour path.
+
+### 3.208 The Java host-call surface: 8 of 70 compiled, now all 70 — 🟢 **FIXED 2026-09-05**; surface corrected 68→70 by #753 (WS-1, 2026-09-05)
+
+Second tier-2 row of §3.206. `examples/java-workflow` and the plugin-harness fixture between them
+called **8 of 68** `cleat.HostCalls` methods.
+
+`crates/cleat-java/src/test/java/cleat/AllHostCallsCompileTest.java` calls all 68. Like Rust, it
+**compiled with one fixable error** and no SDK defect — `RetryPolicy` is a nested
+`HostCalls.RetryPolicy` and needs qualifying, which is a fixture mistake, not an SDK one.
+
+**It lives in the SDK's own test source set rather than in a new example crate, and that choice is
+the useful part.** `gradle test` in `crates/cleat-java` is already the **required** `Java Tests`
+check, so the surface is compiled by a job that exists, on a toolchain CI already provisions, with
+no TeaVM step, no new workflow wiring and no `tiers.yaml` exclusion. The Rust equivalent (§3.207)
+needed all four because it had to build a `cdylib` for `wasm32-wasip1`.
+
+`exerciseEveryHostCall` is never invoked — each call would trap without a host, and
+`continueAsNew` and `releaseLock` would change a running workflow's fate. `javac` accepting the
+calls is the assertion; the `@Test` makes the JVM load and verify the bytecode, and fails visibly
+if the method is deleted rather than silently dropping the coverage.
+
+**This is a compile check and not a behaviour check, and the distinction is load-bearing for
+Java specifically.** It says every method exists with the signature a workflow can call. It says
+nothing about the TeaVM WASM codegen — which is exactly where the Java-specific defects have been:
+§3.303 found 16 of 17 plugin calls failing while all five language tests passed, and #455 fixed a
+Java workflow returning JSON-in-a-string. The plugin-harness tests cover that path; this covers the
+one nothing covered.
+
+**Falsified:** adding `h.noSuchHostCall("x")` fails `compileTestJava` with
+`error: cannot find symbol … method noSuchHostCall(String)`.
+
+**Verified the test actually ran, rather than trusting `BUILD SUCCESSFUL`.** The first run printed
+that and nothing else, which is what an up-to-date task also prints. `--rerun-tasks` plus the XML
+report:
+
+    build/test-results/test/TEST-cleat.AllHostCallsCompileTest.xml
+    tests="1" skipped="0" failures="0" errors="0"
+
+Coverage after §3.207 and this: **rust 63/71, java 70/70** (both corrected 2026-09-05 by #753 —
+the surface scans under-counted). AssemblyScript (11/66) is the remaining
+tier-2 row; go and python reach 37/37 and 73/73 when §3.204 and §3.205 land.
+
+### 3.209 The AssemblyScript host-call surface: 11 of 66 compiled, now all 66 — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+Last tier-2 row of §3.206. `examples/as-workflow`, `examples/widget-store-as` and the
+plugin-harness fixture between them called **11 of 66** `HostCalls` methods.
+
+`packages/cleat-as/assembly/__compile__/all-host-calls.ts` calls all 66, type-checked by
+`asc --noEmit`. As with Rust (§3.207) and Java (§3.208), **no SDK defect** — three for three on
+the hand-written SDKs, against four uncompilable host calls in the one SDK whose adapter is
+generated (§3.204). The pattern is now well enough evidenced to state: **the Go breakage was a
+property of code generation, not of breadth.**
+
+**It began as an as-pect spec and that was wrong, for a reason worth keeping.** as-pect
+*instantiates* the module it compiles, and the host imports are not callable in that runner —
+`LinkError: Import "env" "cleat_call": function import requires a callable`. The package's other
+specs say so in their own header: they test "pure functions and constants that do not require
+`@external` host function imports". So the fixture lives in `assembly/__compile__/`, outside the
+spec directory, and is type-checked rather than run. **The compile was already the assertion; the
+harness was adding an instantiation nobody wanted.**
+
+Wired through `package.json` rather than through a workflow: `test` now runs
+`check:host-calls && asp`. The **required** `AssemblyScript Tests` job already does `npm ci &&
+npm test`, so the surface is compiled by a job that exists with **no change to
+`.github/workflows/`** — the same move as §3.208's, which used `gradle test` in the required
+`Java Tests` job. Only §3.207 needed workflow-adjacent wiring, because only Rust had to build a
+`cdylib` for `wasm32-wasip1`.
+
+**The coverage script found the one method a hand-written fixture missed.** After the first pass it
+read 65/66, uncovered: `childWorkflowWithOptions` — declared across a single long line with a
+defaulted `options` parameter, which the signature extraction I was reading from had skipped while
+the surface extraction caught it. **Two extractors disagreeing is what surfaced it**; one alone
+would have reported 65 as complete.
+
+**Falsified:** adding `h.noSuchHostCall("x")` fails with
+`ERROR TS2339: Property 'noSuchHostCall' does not exist on type 'assembly/host-calls/HostCalls'`,
+and `asc` exits 1 where the clean fixture exits 0.
+
+Coverage after §3.207–§3.209: **rust 63/71, java 70/70, assemblyscript 66/66** (rust and java
+corrected by #753; the earlier 61/61 and 68/68 came from surface scans that under-counted, so
+"all five SDKs at 100%" was never true). Go and Python
+reach 37/37 and 73/73 when §3.204 and §3.205 land, which completes compile coverage for all five
+SDKs. **What remains unmeasured is execution** — see §3.210.
+
+### 3.211 A guard can be in the tree, green, and selected by no CI pattern at all — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+The host-call execution harness (§3.210's remedy, plan item A1) was committed to
+`tests/plugin-harness/`, passed locally, and **ran nowhere in CI.** The Layer 2 step in
+`plugin-harness-ci.yml` selects its tests by name:
+
+    go test ... ./... -run 'TestPluginCalls_Wasm'
+
+and `TestHostCallsGo` does not match that. So the guard existed, was green, and was not run — in the
+PR whose entire subject is the difference between a call that compiles and a call that runs.
+
+**This is the mirror of the trap CLAUDE.md already carries, and the harder direction of it.** That
+one is `TestTenantIsolationAcrossDialects`: a `-run` pattern naming a test that does not exist,
+where `go test` prints `ok … [no tests to run]` and exits 0. Here the test *does* exist, the file
+*is* committed, and the selector silently excludes it. **A reader checking "is it in the tree" gets
+yes**, and every question that gets asked about a new guard — is it written, does it pass, can it
+fail — returns the right answer. The one that does not get asked is whether anything runs it.
+
+Measured both ways rather than assumed, which is the whole of the fix:
+
+    cd tests/plugin-harness
+    go test ./... -run 'TestPluginCalls_Wasm'               -v | grep -c '^=== RUN   TestHostCallsGo/'   # 0
+    go test ./... -run 'TestPluginCalls_Wasm|TestHostCalls' -v | grep -c '^=== RUN   TestHostCallsGo/'   # 24
+
+**The general rule, which is not the same as the `-run`-matches-nothing rule:** where a job selects
+tests by name, adding a test file is not adding a test. Count the subtests the job's own pattern
+selects, before and after. `grep` for the test's name in the workflow is not enough either — an
+alternation that names it can still be wrong, and the count is what settles it.
+
+Two things this did *not* fail on, both of which read as verification and are not:
+
+  * `go vet ./...` and `go test .` both passed — they compile and run the package directly, which is
+    a different question from what a job's `-run` selects.
+  * The skip budget is unaffected. A test that never runs does not skip, so `check-skip-budget.sh`
+    is blind to it by construction. This file's whole "is this result real?" discipline is about
+    skips; **a test that is not selected is a third state next to pass and skip**, and nothing in
+    the tree currently counts it.
+
+**Where it runs, and why that is not settled.** Layer 2 rather than `Cross-Language WASM E2E`.
+WS-3's C1 recommended E2E because it installs every guest toolchain and the alternatives install
+none — but Layer 2 already installs Rust, Python with `componentize-py`, Java and Gradle, and
+already runs this module, which is its own Go module and so is not reached by a pattern from the
+repo root. With only the Go reference in place, the job that already runs the module is the smaller
+change. When B2 and C2 add the other four languages this should be re-decided on measurement, and
+per WS-2 the deciding term will not be toolchain install: **a Python invocation is ~0.93s and does
+not amortise**, so cost scales with invocation count rather than fixture count and the two jobs
+diverge as fixtures land.
+
+`.github/workflows/` is WS-3's file; adding there follows WORKSTREAM.md's protocol — another stream
+may when leaving the mechanism unwired would be worse — and the comment says so at the change.
+
+### 3.214 Go's state reads never reach the host, and the docs promise they do — 🟢 **CLOSED 2026-09-05 by §3.216**, which removed the feature rather than repairing it (WS-1, 2026-09-05)
+
+**Resolved by removal, not by repair.** §3.216 deleted the whole state family on the same day: the
+question below — whether the guest-local read was a deliberate scratchpad or a data-loss bug — was
+answered by establishing that a run-scoped key-value API is equivalent to a local variable in every
+SDK, so neither reading justified keeping it. The analysis is kept because the *evidence* is what
+decided the removal, and because the shape it describes recurs.
+
+`HostCallsImpl` in `cleat/runtime_workflow.go` offers `SetState`, `GetState`, `HasState`,
+`IncrState`, `ListState` and `DeleteState`. **None of them is a host binding.**
+
+- `SetState` writes `h.stateMap`, a `map[string]interface{}` **inside the guest**, and then
+  one-way-persists through `set_query_state`.
+- `GetState` reads that map and nothing else. So do `HasState`, `IncrState` and `DeleteState`.
+- Every write to `stateMap` is the guest's own, and the map is only ever created empty. **No path
+  anywhere populates it from the host.**
+
+The host side is not missing. `cleat_get_state`, `cleat_has_state`, `cleat_incr_state`,
+`cleat_list_state` and `cleat_delete_state` are all exported by `engine/imports.go`, implemented,
+and tested — `engine/lifecycle_test.go:686` exercises the host's `GetState` directly. **Rust and
+AssemblyScript bind all six**, as real declarations rather than wrappers:
+
+| | rust `pub fn`, `host_calls.rs` | AS `@external`, `host-calls.ts` |
+|---|---|---|
+| `cleat_set_state` | 244 | 412 |
+| `cleat_get_state` | 247 | 424 |
+| `cleat_delete_state` | 250 | 436 |
+| `cleat_incr_state` | 253 | 446 |
+| `cleat_has_state` | 256 | 457 |
+| `cleat_list_state` | 259 | 467 |
+
+**Only Go cannot read them.**
+
+Those Rust line numbers were first written as `194,243,247,253`, and two of the four pointed at
+**comments** — `// cleat_set_scope` and `// cleat_set_state` — rather than at declarations. Cited
+before being opened. It is the same failure as counting a name in prose as a binding, in a section
+about exactly that, so the numbers above were taken from
+`grep -nE '^\s+pub fn cleat_(set|get|has|incr|list|delete)_state\('` rather than from a search for
+the name.
+
+    grep -n 'stateMap' cleat/runtime_workflow.go       # every write guest-side; no host read
+    grep -n 'setQueryState' cleat/runtime_workflow.go  # the family's only host call, write-only
+
+## What that means at runtime
+
+Within one execution of one instance, set-then-get works, because the map is still there. Across a
+`continue_as_new`, or in any second instance, `GetState` returns `durable: state not found for
+key: <k>` for a key **the host is holding**. `IncrState` is a read-modify-write over a map that
+starts empty, so it restarts from zero rather than continuing.
+
+**This is worse than a missing method, which is why it is filed separately from §3.213's count.**
+An absent method fails at compile time, at the desk of the person writing the workflow. This one
+compiles, passes its tests, works in development against a single instance, and returns the wrong
+answer later on a different instance. §3.213's matrix records Go at 35 of 55 and a reader will take
+that as "Go supports fewer features"; for this family the truth is that Go has the method and it
+means something else.
+
+## The existing test cannot fail on this
+
+`TestHostCallsImpl_StateOperations` (`cleat/runtime_behavioral_test.go:1765`) does
+`SetState` then `GetState` on **one** `HostCallsImpl` and asserts the value comes back. A
+`map[string]interface{}` satisfies that. So does a correct host binding. The test cannot
+distinguish them, and it is green today for the same reason it would be green if the feature were
+deleted and replaced with a local cache — which is what it is.
+
+That is this repo's most familiar shape: an assertion held up by a layer other than the one under
+test. The falsification is cheap and has not been written: set state, cross an instance boundary,
+read it back.
+
+## The documented contract is durable, stated three times, with no caveat
+
+This section first left intent open, on the strength of `docs/determinism.md:173` presenting
+`SetQueryState` as "the mechanism that actually fits how cleat runs". **That passage is about query
+state, which is a different API**, and reading it as though it covered `SetState`/`GetState` was a
+conflation, not a finding. The docs on the state family are not ambiguous:
+
+| where | what it says |
+|---|---|
+| `docs/reference/sdk-api.md:31` | `StateManager` — **durable key-value state** |
+| `docs/reference/sdk-api.md`, StateManager | "Full key-value state management scoped to the current workflow." |
+| `docs/migration/from-restate.md:23` | maps Restate's `ctx.get`/`ctx.set`/`ctx.clear` to `get_state()`/`set_state()`/`delete_state()`, "Similar key-value state" |
+| `docs/migration/from-temporal.md:22` | Memo / Search Attributes → "Use Cleat's state API" |
+
+No caveat exists anywhere. Searched:
+
+    git grep -n -i "state.*not durable\|in-memory state\|state.*per-execution\|state is local" -- 'docs/**' '*.md'
+
+The Restate row is the sharpest of the four, because **Restate's virtual-object state is durable
+across invocations — that is the entire point of it** — and the migration guide tells a Restate
+user their `ctx.get` ports to `get_state()`. In Go it ports to a map lookup that returns not-found
+on the second invocation.
+
+**And the design doc draws exactly the distinction Go's implementation collapses.**
+`docs/contributor/design/cleat-execution-design.md:1152`:
+
+> `SetQueryState` merges the key-value pair into a JSON object (`query_state`) … **`SetQueryState`
+> is NOT recorded in the event history — it is derived state, not durable state.**
+
+So the architecture separates derived, queryable state from durable state on purpose. Go's
+`SetState` is implemented **on top of `set_query_state`** — the mechanism that doc classifies as
+not durable — while `GetState` reads a guest-local map. Go's durable state API is therefore not
+durable in either direction: the read never consults the host, and the write goes to the store the
+design explicitly says is derived.
+
+## So this is a defect against a written contract, not an undocumented design choice
+
+That resolves what this section originally declined to guess at, and it resolves it the less
+comfortable way. The remaining question is only which repair:
+
+1. **Bind the five host calls Go cannot reach**, making the docs true. `cleat_get_state`,
+   `cleat_has_state`, `cleat_incr_state`, `cleat_list_state` and `cleat_delete_state` are exported,
+   implemented, tested, and bound by Rust and AssemblyScript already.
+2. **Change the docs and rename the methods**, making the code true — and accept that
+   `from-restate.md` is inviting a migration that silently loses state.
+
+Option 2 is a product decision to ship a weaker feature than the reference SDKs offer and than the
+docs promise; it is not a smaller version of option 1. **Either way `tiers.yaml` has to say which**,
+because right now the manifest grants support that the Go implementation does not provide.
+
+What is not open: whether the current state is acceptable. An undocumented divergence from a
+written contract, whose only test cannot detect it, is not a documented gap in the sense the
+release rule means.
+
+Found by WS-3 while re-deriving §3.213's Go figure of 35, and confirmed here independently. It is
+the mirror of §3.207: there a strict extractor missed generics and **inflated** Rust's coverage;
+here a loose scan of Go method names finds nine methods that exist and would **credit bindings that
+do not**. Anchoring on the import table rather than on method names is what makes 35 correct.
+### 3.216 The durable-state family is removed — 🟢 **DONE 2026-09-05** (WS-1, 2026-09-05)
+
+`cleat_set_state`, `cleat_get_state`, `cleat_delete_state`, `cleat_incr_state`, `cleat_has_state`
+and `cleat_list_state` are gone, with the `cleat:host-calls/durable-stream-state` component
+interface and every SDK wrapper. This closes §3.214, which asked whether Go's guest-local reads
+were a bug or a design, by removing the feature both readings were about.
+
+**The count is 58 → 52 exports total, of which 49 are `cleat_`-prefixed**, and saying which is not
+pedantry: `plugin_call`, `plugin_call_streaming` and `set_query_state` carry no prefix, so both
+numbers are true and will be quoted interchangeably forever unless a doc commits. A `grep 'cleat_'`
+over this surface undercounts by three, which is the defect that produced §3.213's wrong
+denominator and the blind spot in the runtime parity guard (#759). Flagged here by the
+conformance-port session, which reached 55 where this branch reached 58 and chased the difference
+rather than assuming one of us was wrong.
+
+    grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sort -u | grep -c .   # 52
+    grep -oE '\.Export\("cleat_[^"]+"\)' engine/imports.go | sort -u | grep -c .   # 49
+
+**And the blind spot covers half of the only surface cleat has ever proved in practice.**
+`testdata/clew-lifecycle/workflow.go` is a real workflow from the one workload cleat has carried,
+preserved as test data. It uses **four** host calls out of ~55:
+
+    h.DurableLog       3 sites   -> cleat_log
+    h.SetQueryState    1 site    -> set_query_state      UNPREFIXED
+    h.PluginCall       1 site    -> plugin_call          UNPREFIXED
+    h.SignalWorkflow   1 site
+
+**Two of the four are among the three unprefixed exports.** So "#759's parity guard compared 55 of
+58 names and never saw `plugin_call`" is not an abstract tidiness point — the guard was blind to
+half the calls the only real user actually made. A prefix-derived surface omits three names, and
+those three are not a random three.
+
+Found by the conformance-port session while establishing whether §3.215's signal overwrite was
+hypothetical. **It is not, and the first version of this paragraph named the wrong evidence.** It
+cited `h.SignalWorkflow(parent, "child_done", taskID)` at line 235 of the fixture as the affected
+fan-in. With access to `cleat-team/clew` the same session established that **nothing consumes
+`child_done`** — the parent fans in via `AwaitAllChildren`/`AwaitAnyChild`, so that signal is
+advisory and §3.215 does not hurt it. Recorded rather than quietly replaced, because "the shape is
+present in the code" and "the shape is load-bearing" are different claims and only the second is
+evidence.
+
+The real instances are worse. `workflows/leafphase/workflow.go:404` and
+`workflows/review/workflow.go:452` each run
+
+    received := 0
+    for received < len(pending) {
+        signal := h.AwaitSignals([]string{"agent_result"}, timeout)
+
+— N concurrent tasks, each replying with **one signal under the same name**, counted in and matched
+by a `task_id` the application puts in the payload because it had to solve that problem itself. The
+workflow is careful and correct; the storage layer cannot deliver what it asks for.
+
+See §3.215 for why the consequence is a hang and not only a lost payload.
+
+## The comparison that decided it
+
+| engine | state scoped beyond one workflow? |
+|---|---|
+| **Temporal** | No. Workflow state is local variables made durable by replay. Memo and Search Attributes are per-execution visibility metadata. |
+| **DBOS** | No framework API. Durable state is your own tables inside `@DBOS.transaction`; `setEvent`/`getEvent` is `set_query_state`, which `from-dbos.md:17` maps correctly. |
+| **Restate** | **Yes** — virtual objects have keyed state durable across invocations. |
+
+The repo's own migration guides had already voted. References to the state family:
+`from-restate.md` **6**, `from-temporal.md` **0**, `from-dbos.md` **0**. Only the guide for the one
+engine that has the feature had any use for it.
+
+    for f in docs/migration/from-*.md; do
+      echo "$f $(grep -cE 'get_state|set_state|GetState|SetState' "$f")"; done
+
+## Why a run-scoped key-value API is worse than none
+
+Measured before deciding, not assumed: cleat's state was rebuilt from that run's event history, and
+`s.stateStore` was **never seeded from persistence** — for every SDK, not just Go. So it did not
+persist across `continue_as_new` or between instances for anybody.
+
+**Within a run it was therefore exactly equivalent to a local variable**, because replay
+re-executes the workflow and rebuilds either one. That equivalence is not a theory: it is why a Go
+guest-local map passed a set-then-get probe indistinguishably from the real host calls (§3.214),
+and why `TestHostCallsImpl_StateOperations` was green for as long as it existed.
+
+So the API offered nothing a variable did not, while carrying Restate's names and shape. A reader
+coming from Restate would find `set_state`/`get_state` where they expected keyed cross-invocation
+state and get a per-run scratchpad, with no doc saying so. **That is confusion with no benefit, and
+it is a worse failure mode than absence** — absence fails at compile time, at the desk of whoever
+is writing the workflow.
+
+## What survives, and why none of it is this feature
+
+- **`set_query_state`.** The queryable-state mechanism and the DBOS `setEvent` equivalent, which
+  `docs/contributor/design/cleat-execution-design.md:1152` explicitly calls "derived state, not
+  durable state". Untouched.
+- **`set_scope` / `get_scope` / `clear_scope`.** These call `AcquireConcurrencyKey`, so they give
+  at most one workflow per `objectType:instanceKey`. **That is virtual-object mutual exclusion
+  without virtual-object state**, and it stands on its own merits. Checked rather than assumed —
+  `scopedKey()` had exactly six callers and all six were state methods, so the question "does
+  scoping still have a purpose" had to be answered from the engine, not the SDK.
+- **`EventCodeStateMutation = 16`, retired rather than removed.** The compaction decoder has no
+  `default:` case, so an unknown code falls through and yields a record with only the common fields
+  set. Deleting the arm would make any history recorded before today decode **silently** into empty
+  state records rather than failing loudly. The number is reserved and must never be reused.
+
+Also removed: `cleat/virtualobject.go` — six of its eight methods were state accessors and nothing
+outside its own test used it — and the `VirtualObjectDef` registry, which had no callers at all.
+
+## Docs corrected, not just updated
+
+`from-restate.md` is the one that mattered. It described the gap as **ergonomic** — Restate scopes
+automatically, "cleat requires explicit `set_scope()` calls" — and showed a worked example calling
+`h.get_state("items", list)` inside a scope. **That example never worked**: two invocations for one
+key are two workflow runs with two histories, so nothing was shared. The gap was not ergonomic and
+the workaround was not a workaround.
+
+`sdk-api.md` no longer says "durable key-value state" in two places. ABI.md loses §2.28-§2.33,
+which are left vacant per the §2.21 precedent.
+
+## What this does not do
+
+Cross-instance shared state, of the kind Restate's virtual objects provide, **still does not exist
+in cleat for any language** — it never did. This removes an API that implied otherwise; it does not
+add the capability. If that capability is ever wanted it is engine work — persisting state keyed by
+scope and seeding `stateStore` at session start — and a much larger change than these six calls.
+### 3.218 A promise the store refused was reported as created, and the workflow then hung — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+`CreatePromise` (`engine/promises.go`) logged a store failure and continued, returning `errCode 0`
+to the guest. The obvious reading is that history and the promise store end up disagreeing. The
+actual consequence is worse and is a hang:
+
+1. `s.recordEvent(rec)` writes `EventTypeCreatePromise` **before** the store call, so history
+   already asserts the promise exists.
+2. The store refuses. The error is logged and execution continues.
+3. The guest receives a promise ID and `errCode 0` and proceeds.
+4. The later `AwaitPromise` calls `GetPromise`, which finds nothing, so **neither** the `resolved`
+   nor the `rejected` branch is taken.
+5. Control falls through to "Record await and suspend".
+
+The workflow then waits for a promise **no external caller can ever resolve**, because the row they
+would resolve against was never written. Nothing errors, and the log line is the only trace.
+
+**The ABI always had somewhere to put this.** `cleat_create_promise` returns `errCode` in bits 0-31
+(ABI.md 2.34). The failure was not unreportable; it was unreported. The fix returns
+`packSimpleResult(1, …)` with the store's own message in the output buffer.
+
+## A test asserted the defect
+
+`TestCreatePromiseFreshStoreError` read:
+
+    // Store error is logged, not surfaced. Function should still succeed.
+    if result != 0 {
+        t.Errorf("expected 0 (error is logged, not surfaced), got %d", result)
+    }
+
+That is the third instance in one day of a test **codifying** wrong behaviour rather than
+specifying right behaviour, after `TestHostCallsImpl_StateOperations` (§3.216) and the
+`AwaitAllChildren` row (#758). All three share a shape worth naming: **they assert the code as
+written and justify neither half**, so they cannot fail on the thing they appear to cover, and they
+make the defect look deliberate to the next reader. `engine/children_test.go:806` already carries
+that lesson in its own words — "It asserted the code as written and justified neither half, which
+is why it held the defect in place rather than catching it."
+
+The assertion is now inverted, with the old text quoted in place so the change is legible.
+
+## Not settled here
+
+This fixes the reporting, not the ordering. The event is still recorded before the store write, so a
+crash between the two leaves history asserting a promise the store never received — and on that
+path there is no error to return, because nothing failed. Making the two atomic is a larger change
+and is not attempted here.
+
+Also unaddressed: **every other swallowed store error on this pattern.** This section fixes
+`CreatePromise` because that is where the hang was traced. Whether `recordEvent`-then-store appears
+elsewhere with the same swallow is an open question and a cheap sweep.
+
+Found by the conformance-port session while running a three-dialect SQL comparison. The dialect
+question it started from turned out to be latent — `CreatePromise`'s conflict handling differs
+across the three stores (`DO NOTHING` / `INSERT IGNORE` / plain insert) but promise IDs are freshly
+generated UUIDs, so a duplicate is unreachable in practice. **The swallowed error sitting two lines
+away was the live defect, and it is dialect-independent.** Worth recording as a method note: the
+sweep's value was not the answer to the question it asked.
+
+### 3.220 `SendSignalAndWait` never sends the signal it then waits for — 🟢 **CLOSED 2026-09-06: composed in all five SDKs, host calls removed** (WS-1, 2026-09-05)
+
+Found while wiring signal consumption for §3.215, and deliberately not fixed there: it is a
+different defect and a different change.
+
+`execSession.SendSignalAndWait` (`engine/signaller.go`) does, in order: the replay check, the
+`stopBeforeNewWork` guard, the signal-authorization check, a `PollSignal` against `targetRunID`,
+and then — finding nothing — records an `await_signals` event and suspends. **There is no
+`DeliverSignal` call anywhere in the function.** Compare `SignalWorkflow` immediately below it,
+which does call `s.engine.signalStore.DeliverSignal(ctx, targetRunID, signalName, payload)`.
+
+    grep -n "signalStore.DeliverSignal" engine/signaller.go
+    # one hit, line 304, inside SignalWorkflow
+
+Anchor on `signalStore.DeliverSignal`, not on `DeliverSignal`. The bare name now has two hits,
+because the second is a comment in `SendSignalAndWait` explaining that it does not call it — a
+grep a *denial* satisfies, which is the §1.1 trap, and the first draft of this section reported
+"one hit" off a command that returns two.
+
+So the `payload` argument is accepted, passed through authorization, and dropped. A workflow
+calling `send_signal_and_wait` waits for a reply to a message that was never sent, until its
+timeout.
+
+**The poll is also aimed oddly, and the two facts are probably one bug.** It reads
+`targetRunID`'s queue for `signalName` — the queue it would have written to had it sent — rather
+than this workflow's queue for a reply. Written as a request/response, the target replies to the
+*caller*; written as a send, the delivery goes to the target and there is nothing to poll. The
+function reads like the second half of a design whose first half is missing.
+
+**This is why §3.215 left this path non-consuming** while moving both `DurableAwaitSignals` paths
+onto consume-after-record. Consuming here would delete a row on a guess about whose delivery it is,
+and the two candidate answers imply different rows.
+
+Whoever fixes it should decide the semantic first, because the two readings need different code:
+
+| reading | what is missing |
+|---|---|
+| fire-and-wait-for-reply | the `DeliverSignal` to the target, and the poll should be on the caller's own queue with a correlation id |
+| the target writes back under the same name | the `DeliverSignal`, and the poll is right but must consume |
+
+`ReplyToSignal` is the other half to look at: it records a `signal_received` event and also calls
+no store method, so a reply is durable in the replier's history and invisible to anyone else.
+
+**Note what a name-based scan says about all of this: nothing.** `SendSignalAndWait` registers,
+dispatches, has tests, and appears in every SDK's surface list. Its being wired end to end is what
+the parity guards check, and it is wired — to a function that does not do the thing.
+
+---
+
+#### The decision (2026-09-06): the reply address is a promise ID
+
+The repo owner chose composition over a repaired host call. `SendSignalAndWait` is now an SDK
+composite over `CreatePromise` + `SignalWorkflow` + `AwaitPromise`, and `ReplyToSignal` is
+`ResolvePromise`. **No new engine mechanism was needed**, which is only true because §3.233 had
+just landed: settling by promise ID alone (#813) made an ID a globally unique token any holder
+can settle, #818 made a settle that matches no row report `ErrPromiseNotFound` instead of
+succeeding silently, and the settle wakes the creator. Those three properties are exactly a reply
+channel. §3.233 recorded settle-by-ID as a design question with a cost; this is the payment.
+
+**Both reference systems agree, and neither has the primitive.** This repo's own
+`docs/migration/from-dbos.md` maps the whole of DBOS's communication surface — `send`, `recv`,
+`setEvent`, `getEvent` — and all four are one-way; DBOS composes request/reply by putting the
+requester's workflow ID in the message. Temporal's signals are likewise one-way. Neither
+migration guide mentions `SendSignalAndWait` or `ReplyToSignal` at all
+(`grep -rn 'SendSignalAndWait\|ReplyToSignal' docs/migration/` → nothing), so no one porting
+from either would look for them. **In both systems the reply address is data, not protocol** —
+which is the argument for making it a promise ID rather than inventing a correlation namespace.
+
+The rejected option was a correlation-ID signal delivered to the caller's queue. It needs the
+caller's workflow ID to reach the replier — by encoding it into the ID, making it a parseable
+capability token, or by a mapping table, a new durable object with its own lifecycle — and it
+rebuilds inside the signal table what `workflow_promises` already does.
+
+#### Three implementations that disagreed, replaced by one
+
+Nothing about this was a single broken function. The pair had three implementations and no two
+matched:
+
+| environment | `SendSignalAndWait` | how a reply arrived |
+|---|---|---|
+| engine (real guest) | inert — never called `DeliverSignal` | nothing |
+| `cleattest` (Go) | spliced `_correlation_id` into the payload object | in-memory Go channel |
+| `cleat/embedded` (Go) | returned a canned `{"status":"delivered"}` without waiting | nothing |
+| `cleat-sdk` `test.rs` (Rust) | minted `corr-<target>-<name>-<n>` | private channel map |
+| `cleat-test` (Rust) | minted `corr-<target>-<name>-<n>` | private channel map |
+| `local_host.py` (Python) | returned a canned `{"status":"signal_sent", …}` without sending | nothing |
+
+**Six implementations, no two alike, and not one of them could work in production.** The count is
+the finding. Each was written to make a test pass in one environment, and because the real host
+call was inert there was never anything to disagree with -- so nothing pulled them together. Three
+of the six returned a constant.
+
+So a workflow that passed under `cleattest` could not work in production, and `embedded`'s
+version satisfied any assertion trivially. **Two shipped tests asserted those fakes**:
+`TestSendSignalAndWait` checked `resp == '{"status":"delivered"}'` — a constant, unreachable by
+any real reply — and embedded's `TestReplyToSignal` polled the response back as an inbound signal
+named by the correlation ID. Both are now round-trip tests.
+
+The composite is one implementation for all three, because `CreatePromise`, `SignalWorkflow`,
+`AwaitPromise` and `ResolvePromise` already behave the same way in each. That is the substantive
+argument for composition over a fourth implementation, and it is worth more than the ABI saving.
+
+#### The envelope, and why it wraps rather than splices
+
+The reply address travels under a reserved key, `cleat_reply_to`, in a two-key envelope whose
+other key carries the caller's payload **as a JSON string**. `AwaitSignals` and `PollSignals`
+strip it, so a receiver reads `SignalResult.Payload` unchanged and gets the address in a new
+`SignalResult.ReplyTo` field, empty for a one-way signal.
+
+Wrapping rather than splicing is the correction of a real failure mode in the `cleattest`
+version: splicing a key requires the payload to *be* a JSON object, and for a bare scalar, an
+array, or an empty string that code silently sent **no correlation ID at all** — so the receiver
+had nothing to reply to and the sender waited out its whole timeout with no error anywhere.
+`TestSignalEnvelopeRoundTripsAnyPayload` covers those shapes.
+
+The decoder requires **exactly** the two keys with a non-empty address, because auto-stripping
+offers every inbound payload to it: an over-matching decoder would hand a receiver a truncated
+payload plus an address pointing at no promise. `TestSignalEnvelopeDoesNotMisreadAnOrdinaryPayload`
+is the negative control, and it earns its place — deleting the key-count check alone makes
+`{"cleat_reply_to":"p1","payload":"x","extra":1}` read as an envelope, silently discarding
+`extra`. It also covers a payload that merely *mentions* the key, which is this file's recurring
+lesson: a text match cannot tell a thing from a sentence about the thing. The discriminator is
+the object's shape, not the presence of a string.
+
+#### What the guards caught, in the direction that matters
+
+Two guards from #820/#823 failed on this change, both on their **second** direction — the one
+that reports a check no longer describing anything:
+
+  * `TestEveryClosureBackedMethodIsWiredOrTracked` reported `unwiredClosureMethods` as having two
+    entries that no longer describe an unwired method, and named both. The list is now empty.
+    Its own comment predicted this: *"delete this entry when 3.220 lands."*
+  * `TestEveryCompositeHostCallHasAnImportRow` reported all four new call edges —
+    `SendSignalAndWait → CreatePromise / SignalWorkflow / AwaitPromise` and
+    `ReplyToSignal → ResolvePromise` — as reaching imports no `compositeRequires` row granted.
+    Without those rows a guest calling only `SendSignalAndWait` would compile with the imports
+    missing, which is §3.234's defect (`h.NowMs()` → epoch 0) exactly.
+
+Neither is a failure this change would have found by testing; both were found by a guard failing
+because its exemption stopped being true. That is the case for writing the remedy into the
+failure message.
+
+#### A stale mock caught on the way
+
+`cleattest`'s `resolvePromiseImpl` returned nil unconditionally, under a comment reading *"Matches
+the engine: engine/promises.go logs rather than returns a store error, and the store's UPDATE
+matching no rows is not an error in SQL. A harness that failed here would let a test assert a
+failure mode production cannot produce."* Both halves were true when written; **#818 made the
+"failure mode production cannot produce" the documented one**, and `engine/promises.go:280` turns
+any store error into `packSimpleResult(1, 0)`. The mock was left more permissive than production,
+held there by a test named `TestResolvePromise_UnknownIDIsNotAnError`. Both are inverted, and the
+public `TestEnv.ResolvePromise` driver keeps the no-op contract with a paired test saying so, so
+the two paths cannot be confused again. `cleat/embedded` had no way to settle a promise at all —
+`CreatePromise` and `AwaitPromise` and nothing else — so a promise created there could only ever
+time out; `ResolvePromise`/`RejectPromise` are now wired.
+
+This is the §3.218 shape once more: my own fix changed the engine, and the mock that models the
+engine was not brought along. It surfaced only because a reply address became a promise ID, which
+made "a stale reply address" and "an unknown promise" the same case.
+
+#### "Byte for byte" was wrong, and the property that matters had no test
+
+The Go, Rust and Python envelope modules each claimed the three encoders "must agree byte for
+byte". They do not. `encoding/json` HTML-escapes `<`, `>` and `&` by default; `serde_json` and
+`json.dumps` do not, so one payload takes two shapes:
+
+    GO={"cleat_reply_to":"p1","payload":"{\"q\":\"a\u003cb\u0026c\u003ed\"}"}
+    PY={"cleat_reply_to":"p1","payload":"{\"q\":\"a<b&c>d\"}"}
+
+The pinned literal contains no HTML characters, so it passed and the claim went unchecked. A
+payload with `&` in it -- a query string -- differs between a Go sender and a Python one.
+
+**Interop is not broken**: both decode to the identical string, because the consumer is a JSON
+parser. So the pin guards STRUCTURE -- key names, key order, compact separators, which is a real
+Python hazard since `json.dumps` defaults to `", "`. It is not byte identity, and describing it as
+such sends the next reader chasing a difference that is correct.
+
+The property cross-language request/reply actually depends on -- *every decoder accepts every
+other encoder's output* -- **had no test in any SDK**. It does now, in all three, with both forms
+pinned and an `assert_ne` on the pair: without that, the test would still pass if the escaped
+literal had been written unescaped by mistake, since both would decode fine and nothing about
+escape handling would be proved. That is the known-positive rule from CLAUDE.md applied to a
+fixture rather than to a guard.
+
+**How the difference was nearly lost.** The first attempt to display Go's bytes used
+`echo "$(cat file)"`, and zsh's `echo` interprets `\u003c`, rendering it as `<` -- which made Go's
+output look identical to Python's and contradicted a correct earlier measurement. The file was
+right throughout; the display was not. Resolved by comparing `encodeSignalEnvelope` against
+`json.Marshal` directly rather than trusting either rendering. Same rule as the rest of this
+section: a tool applied to a format it does not model.
+
+#### A defer-segment orphan the composition introduces
+
+Composing costs one thing the single host call did not. `SendSignalAndWait` in a defer segment now
+creates the reply promise **before** the refusal: of its three callees only `SignalWorkflow` calls
+`stopBeforeNewWork`, so `CreatePromise` succeeds, the send is refused, and the composite returns an
+error having left a pending promise row nobody will ever await. The old host call was refused
+before any state changed.
+
+    for f in CreatePromise AwaitPromise ResolvePromise SignalWorkflow; do
+      awk "/func \(s \*execSession\) $f\(/,/^}$/" engine/promises.go engine/signaller.go \
+        | grep -c stopBeforeNewWork; done
+    # 0 0 0 1
+
+It is garbage rather than corruption — a row in `workflow_promises` that stays `pending` — and the
+ordering cannot simply be swapped, because the envelope needs the promise ID before the send. The
+cheap fix is to reject the promise when the send fails, which works even in a defer segment
+precisely because `RejectPromise` is not refusable. Not done in either SDK yet; it is a small
+change and it should land in both at once, since the behaviour is identical in Go and Rust.
+
+#### Not done here
+
+**All five SDKs now compose it**, as of 2026-09-06: Go (#825), Rust (#828), Python (#831), Java
+(#834) and AssemblyScript. Rust dropped its `extern`s, Java its `@Import`s and AssemblyScript its
+`@external`s, so **no guest imports either name any more**. Python still declares WIT bindings for
+both and simply no longer calls them; removing those means editing generated `_wit/` bindings,
+`wit/cleat.wit` and `WitToEnvImport`, so it belongs with the export removal.
+
+Python's WIT declarations went on 2026-09-06 as well, so **no guest of any language imports either
+name now**. The bindings were not hand-edited: `python-sdk/cleat_sdk/_wit/` says "not intended for
+manual editing", so the two functions were removed from `wit/cleat.wit` and componentize-py was
+re-run in Docker against the edited world. The regenerated `durable_signals.py` differs from the
+committed one by **exactly the two deletions and nothing else**.
+
+That last part is narrower than it looks. No available componentize-py reproduces the committed
+bindings: 0.13/0.16/0.17/0.18 cannot parse the current world at all (they reject
+`backoff-coefficient-100x`), and 0.19/0.20/0.25 each add a `Raises:` docstring line — a 35-line
+diff across 7 files. That docstring belongs to `durable-send-signal-and-wait`, the only
+`result<...>` function in the interface, so it leaves *with* the function and regenerating this one
+file is clean. Regenerating the whole tree would have been a toolchain bump wearing a signal change.
+
+**The engine's two exports are gone as of 2026-09-06**, which closes this item. The precondition
+was every SDK dropping the import first, because a module importing a name the engine does not
+export fails at *instantiation*, not at the call. Exports went from 52 to 50, and `ABI.md` moved
+with them — both give 50 with an empty set difference. ABI 2.14 and 2.15 are marked removed rather
+than reused, so an older document's "2.16" still means `cleat_signal_workflow`.
+
+Removing them took out: the two `.Export` registrations, their wasmtime `hostFunc` registrations,
+the two `execSession` methods, two `HostFunctions` interface entries, two Component Model
+dispatchers with their `cbType` constants and callback-table rows, and eleven tests of the removed
+behaviour. Two guards that had been *carrying* the pair reported themselves stale and were removed
+by name — `sdkStopSiteExemptions` for all three SDKs and `stopSurfaces["SendSignalAndWait"]` —
+each of which had said in its own text that it would go when the export did. The engine's stop-site
+count fell 16 → 15.
+
+#### The crash that reported four failures
+
+Removing the pair segfaulted the engine test binary, and the interesting part is what that looked
+like: `go test ./engine/` reported **4 failures**, which is a plausible number for a change this
+size. It had run **676 of 2978 tests** before dying, so 77% of the package was never measured.
+
+The cause was a real defect the removal walked into. `cgotestDispatchStr` guards a missing
+dispatcher —
+
+    if dispatch == nil {
+        return fmt.Errorf("cgotestDispatchStr: no dispatcher for method %d", method)
+    }
+
+— under a comment saying *"a missing key yields a nil func value, and calling it segfaults rather
+than failing a test … an unknown method must be an error, not a crash."* Its twin
+`cgotestDispatchU64` had no such check, and `cleat_reply_to_signal` was index 18 in **that** map.
+The comment stated the rule for both; only one obeyed it. `cgotestDispatchU64` now has the guard.
+
+The lesson is not "add nil checks". It is that **a crash in a test helper does not fail a test, it
+stops measuring** — and the truncated run still exits 1 with a believable failure list, so it reads
+like an ordinary red rather than a stopped one. After the fix the same command ran 4587 tests. If a
+failure count looks small for the size of a change, check how many tests ran.
+
+Every import removal was verified by diffing the **sets**, never the counts —
+`removed: [cleat_reply_to_signal, cleat_send_signal_and_wait]`, `added: []` — and each SDK's floor
+in `tests/plugin-harness/sdk_import_names_test.go` moved only after that check. Rust and Java went
+45 -> 44; **AssemblyScript's floor did not move and should not**, because that SDK declares more
+imports than the others (49 -> 47) and 47 still clears 45. A floor exists to catch the extractor
+breaking, not to freeze a count.
+
+#### A falsification that stays green because the code is REDUNDANT, not because the test is weak
+
+Porting to AssemblyScript produced a new variant of the "it stayed red / it stayed green" rules
+above. Removing `if (obj.objKeys.length !== 2) return null;` from `decodeSignalEnvelope` left the
+whole AS suite green. So did removing the `else { return null; }` that rejects an unknown key.
+Removing **both** failed, with `a non-envelope was read as an envelope`.
+
+Neither line is dead and the test is not weak: the two guards independently cover the same case,
+so a one-line falsification can never move it. The reading "it stayed green, so that line does
+nothing" would have deleted a real guard — the same wrong repair the fence-predicate case warns
+about, arrived at by a different route. **Before concluding a line is inert, check whether another
+line covers the case you are testing with.**
+
+This is worth separating from the Java result on the same day, which looked identical and was not:
+there, deleting the key-count check left 288 tests green because Java had **no negative control at
+all**. Same symptom, opposite cause — redundancy in one, absence in the other — and only writing
+the missing test told them apart. Removing them is a separate change with the §3.216 shape (SDK imports first, then
+the engine export — a module importing a name the engine does not export fails at
+instantiation, not at the call). Until then the ABI is unchanged and those four SDKs keep the
+inert behaviour described above.
+
+### 3.221 Every child result was lost to a brace scan that did not model strings — 🟢 **FIXED 2026-09-05** (WS-1, 2026-09-05)
+
+Reported by the conformance-port session as #778: `AwaitAllChildren` returns a `ChildResult` per
+child with the right `RunID`, an **empty** `Result`, no error, and a workflow that reports success.
+`AwaitAnyChild` returns the same children's results correctly.
+
+**It is not in the engine.** `parseChildResultArray`, emitted into every Go guest from
+`wasm/adapter_component.go`, split the array into objects with
+
+    open  := strings.Index(json[i:], "{")
+    close := strings.Index(json[i+open:], "}")
+
+A child's result is itself a JSON object, so the outcome the engine marshals is
+
+    {"run_id":"child-a","result":"{\"tag\":\"child-0\"}"}
+
+and the first `}` after the opening brace is **the escaped one inside the result value**. Run
+verbatim on that input rather than read:
+
+    obj[0] = {"run_id":"child-a","result":"{\"tag\":\"child-0\"}
+
+Each object is cut before the closing quote of its own `result`. `extractJSONString` then reads an
+unterminated string and returns `""` — correctly; it is escape-aware and was never the problem.
+`run_id` survives only because it sits before the cut. An error message containing a brace was
+dropped the same way, which is worse: the one thing that could have reported the failure.
+
+`AwaitAnyChild` is unaffected because it returns a **single** object and never splits — same engine
+read (`GetChildResult`), same bytes, different parser. That asymmetry is what made it look like one
+await path being broken.
+
+**The host half was verified separately rather than inferred from the guest symptom.**
+`TestAwaitAllChildrenCarriesEachChildsResult` drives `freshAwaitAllChildren` against a store with
+three completed children and asserts the recorded event's `Response` carries each payload; it
+passes, and goes red on all three when the fake store returns `("", true, nil)`. The `Response` is
+the assertion target because it is the durable artifact — `replayAwaitAllChildren` hands those same
+bytes back on every future replay.
+
+**Why a name scan could not see it, which is the transferable part.** The existing coverage was
+
+    TestWriteManualJSONHelpers:  strings.Contains(code, "func parseChildResultArray")
+
+satisfied by a function that is emitted and wrong. There was also no engine-level test over
+`AwaitAllChildren` with completed children at all: the coverage was dispatch and linker
+registration — that the call is *reachable*, not that it *answers*. Same shape as §3.215(d), where
+a store method was implemented in four dialects, tested, and called by nothing.
+
+The replacement, `wasm/adapter_json_helpers_exec_test.go`, **compiles and runs** the emitted
+helpers. It substitutes only the `cleat.ChildResult` type name so the throwaway program needs no
+dependencies — the parser bodies are byte-identical to what a guest gets — and it fails loudly if
+the helpers ever reference anything else in that package.
+
+**Scope checked rather than assumed**: only the Go SDK hand-rolls this. Rust's
+`await_all_children` returns the raw JSON string, and the AssemblyScript extern does too, so both
+leave parsing to a real decoder. `python-sdk`'s is on the local-host path, not the guest. One
+mechanism in one place, not a sweep.
+
+**Postscript, and it is the same defect one layer up.** The first version of this fix broke every
+Go guest build:
+
+    ./gen_host_adapter.go:8:2: "strings" imported and not used
+
+`patchAdapterImports` (`wasm/build.go`) decided whether the generated adapter needs `"strings"` with
+
+    if !strings.Contains(content, "strings.") { return }
+
+and the comment this fix added to `parseChildResultArray` — prose explaining that the code *was*
+`strings.Index(json, ...)` — satisfied it. **A retraction read as a use**, in the fix for a scanner
+that could not tell a brace from a brace inside a string, written by someone who had spent the day
+citing that exact rule. It is now a `go/parser` walk for a `strings.X` selector, because comments
+are not in the AST.
+
+The guard's known-positive is `TestPatchAdapterImportsIgnoresProse`: a file whose only mention of
+the package is a comment, and a second whose only mention is inside a string literal. Both go red
+under the substring check and green under the parser one, while a file with a real call stays green
+under both. Neither existing check could have caught it — the generator tests assert on emitted
+*text* and never compile it, and the guard's happy path (a file that really does use `strings`) kept
+passing the whole time.
+
+### 3.223 The Go SDK's `Scoper` never reaches the host, so it takes no lock — ✅ **FIXED 2026-09-09** (WS-1; documented 2026-09-05, closed by cleat#984)
+
+Started as a stale-comment cleanup and turned into a parity gap. **The first version of this
+section was wrong in the flattering direction and is corrected below rather than preserved.**
+
+`docs/reference/sdk-api.md` lists `Scoper` among the SDK interfaces, which prompted "does this
+still exist after §3.216 deleted the state family?" It does, and the ENGINE half is entirely live:
+`freshSetScope` (`engine/scope.go`) takes a concurrency key `vo:<objectType>:<instanceKey>` and
+releases it on clear or replace, with replay bookkeeping split deliberately between releasing and
+forgetting.
+
+**So I wrote a comment saying "on a worker the engine takes a concurrency key" — and did not check
+that a Go guest can ask it to.** It cannot.
+
+    grep -n "Scope" cleat/runtime.go            # Scoper interface, no HostCallsOptions field
+    grep -n "SetScope" wasm/usage.go            # no row in hostFunctions
+    grep -n "SetScope" wasm/adapter_metadata.go # no adapter def
+
+`HostCallsImpl.SetScope` sets three local fields and returns. There is nothing to generate a call
+to `cleat_set_scope`, so the host is never told and **no lock is taken**. Combined with §3.216
+removing the state calls the prefix used to prefix, the Go SDK's three `Scoper` methods are now a
+local variable with an interface around it.
+
+**Confirmed by compilation, which is stronger than the greps above.** The conformance-port session
+built a Go workflow whose entire body is `h.SetScope(obj, key)` plus one log, and read the produced
+binary:
+
+    imports wired:   cleat_complete, cleat_log, cleat_poll_work
+    adapter fields:  DurableLog
+
+So it is not merely that the lock is not taken — **`cleat_set_scope` is not in the binary at all**,
+and `HostCallsImpl.SetScope` sets its three fields against a host call that was never generated.
+The static reading and the compiled artifact agree, which is the pair worth having: the tables say
+it cannot be wired, and the binary shows it was not.
+
+**Go is alone in this.** Verified at declaration and call sites, not by name search:
+
+| SDK | binding |
+|---|---|
+| Rust | `pub fn cleat_set_scope` (`crates/cleat-sdk/src/host_calls.rs:195`), called at `:943`, `:988` |
+| Java | `@Import(module = "env", name = "cleat_set_scope")` (`crates/cleat-java/.../HostCalls.java:266`) |
+| AssemblyScript | `@external("env", "cleat_set_scope")` (`packages/cleat-as/assembly/host-calls.ts:582`), called at `:2053`, `:2117` |
+| Python | a stub only (`python-sdk/cleat_sdk/host_calls.py:3275`) — **not verified as wired** |
+| **Go** | **nothing** |
+
+**Fixed 2026-09-09.** `wasm/generator.go` gained `importDefs` entries for both calls,
+`wasm/usage.go` the three `hostFunctions` rows (`SetScope`, `ClearScope`, `GetScope` —
+`ClearScope` maps to `cleat_set_scope`, since clearing *is* the empty pair),
+`wasm/adapter_metadata.go` the two `adapterDefs`, and `cleat/runtime.go` the
+`HostCallsOptions` fields. `HostCallsImpl` now calls through when wired.
+
+**Verified with the same instrument that established the gap.** This section concluded
+from a compiled binary, not from tables — which matters, because the tables are exactly
+what a fix edits, so a table-reading test would pass on a tree where the generator still
+emitted nothing. `TestACompiledGoWorkflowImportsTheScopeCalls` builds the fixture and
+reads its import section: both `cleat_set_scope` and `cleat_get_scope` are present.
+
+**The obvious behavioural test was vacuous, and it was measured to be so rather than
+reasoned about.** Running the fixture and checking `SetScope`/`GetScope`/`ClearScope`
+return sensible values passes *with the wiring removed* — `HostCallsImpl` still keeps a
+local mirror, so the mirror answers every assertion. That version was written first and
+went green on an unwired tree, which is this section's own defect reappearing inside its
+fix: local fields standing in for a host call that was never made.
+`TestACompiledGoWorkflowActuallyReachesTheHostForScope` asserts the
+`EventTypeScopeAcquired` records instead, which only `freshSetScope` can write after it
+takes the concurrency key, and that one does go red when unwired.
+
+One thing deliberately **not** changed: `SetScope` still cannot report a host error, so a
+concurrency-store failure leaves the local mirror untouched and returns the previous scope.
+Rust is identical — `set_scope(...) -> String`, discarding `_err_code` — and diverging in
+one SDK would be worse than the shared gap. Tracked separately.
+
+So virtual-object mutual exclusion works from three SDKs and silently does not from the one this
+repo's own examples are written in.
+
+**This is an instance of a larger, measured gap.** `cleat build` picks a Go guest's imports by
+scanning the user's AST against `wasm/usage.go`'s `hostFunctions` table, so an export with no row
+there can never be wired. Re-derive:
+
+    python3 - <<'EOF'
+    import re
+    u=open('wasm/usage.go').read(); i=u.index('var hostFunctions = []HostFunction{'); j=u.index('\n}', i)
+    rows=re.findall(r'\{"([^"]+)",\s*"([^"]+)"\}', u[i:j])
+    imports={r[0] for r in rows}
+    e=set(re.findall(r'\.Export\("([^"]+)"\)', open('engine/imports.go').read()))
+    print(len(e), len(imports), sorted(e-imports))
+    EOF
+
+Measured 2026-09-05: the engine exports **52**, the table names **35** distinct imports across
+**53 rows** and **51 method names** (many-to-one is normal — `cleat_call` alone serves nine
+methods), and **17 exports have no row at all**. Excluding D12's three non-workflow calls, **14
+workflow-facing exports are unreachable from a Go guest**: `cleat_fetch`, `cleat_get_scope`,
+`cleat_json_parse`, `cleat_json_stringify`, `cleat_reject_promise`, `cleat_reply_to_signal`,
+`cleat_resolve_promise`, `cleat_run_detached`, `cleat_schedule_invoke`, `cleat_send`,
+`cleat_send_signal_and_wait`, `cleat_set_scope`, `cleat_signal_workflow`, `cleat_uuid`.
+
+**That list is not 14 defects and must not be reported as such.** Some are plausibly
+external-only by design — promises are normally resolved by an API caller, not by the workflow that
+created them. Each needs triage against whether the SDK exposes a public method for it, which is
+the discriminator: `Scoper` is a defect precisely because the method is public, documented, and
+inert. Triage is not done here.
+
+**It is the import-space half of the conformance session's #775**, which measured the same
+mechanism in method-space and found ten public methods with no row — `h.NewUUID()` returning
+`00000000-0000-4000-8000-000000000000` in every compiled workflow because `cleat_random` is never
+wired. The two counts are different denominators of one defect and neither subsumes the other:
+`NewUUID` is missing from the table as a METHOD, and `cleat_uuid` is missing as an IMPORT.
+
+**Two method notes worth keeping.**
+
+The first count I derived for the table was **53**, from a regex that also matched unrelated
+`{"x", "Y"}` pairs elsewhere in the file; a tighter one gave **35**. Both were "right" about what
+they matched and neither was the number I wanted, which is *distinct imports*. Parsing the
+`hostFunctions` block by its delimiters rather than grepping the file resolved it — and the three
+figures (53 rows, 51 methods, 35 imports) are all true of the same table.
+
+And the earlier claim about `cleat/embedded` survives, sharpened: its `setScope` does not touch the
+in-memory lock map that its own `AcquireLock` uses.
+
+    sed -n '/func (e \*execution) setScope/,/^}/p' cleat/embedded/runner.go | grep -c 'locks'   # 0
+    grep -c 'e\.locks' cleat/embedded/runner.go                                                 # 3
+
+The first command I wrote there was `grep -c concurrencyKey` → **0**, which invited "the runner has
+no locking, so of course scope takes none." A looser read found `// lock state (in-memory
+concurrency keys)`. **The strict grep flattered the conclusion I was already writing** — the same
+direction as the engine-side error at the top of this section, twice in one change.
+
+### 3.224 Seven public Go SDK methods compile to nothing, and the build says OK — 🟡 **1 FIXED, 1 CLEAN, 5 NEED DECISIONS 2026-09-06** (WS-1, 2026-09-05)
+
+§3.223 measured that **17 of the engine's 52 exports have no row** in `wasm/usage.go`'s
+`hostFunctions` table, and said explicitly that the number was **not** a defect count and that the
+triage was undone. This is the triage, and it splits 7 / 7.
+
+## Proven by compiling, not by reading the table
+
+A probe workflow whose entire body is four calls:
+
+    h.DurableLog("probe start")
+    h.SignalWorkflow("00000000-...-0001", "ping", "{}")
+    h.RunDetached(func(hh cleat.HostCalls) error { return nil })
+    h.SetScope("obj", "key")
+
+built with `cleat build --target go`. The output:
+
+      Generating WASM imports (2 host functions used)... OK
+      ...
+      Wrote /tmp/probeout/probe.wasm (3.1 MB)
+
+    gen_wasm_imports.go:  cleat_log, cleat_complete, cleat_poll_work
+    gen_host_adapter.go:  one field, DurableLog
+
+`cleat_complete` and `cleat_poll_work` are the wasip1 handshake, so **one** of the four calls was
+wired. `SignalWorkflow`, `RunDetached` and `SetScope` produced no import, no adapter field, and no
+diagnostic. **The build succeeded.** The only warnings it printed were about the two handshake
+imports being present and *not* in the computed closure — noise pointing the opposite way from the
+actual problem.
+
+## The triage: 7 of the 17 are not defects
+
+| import | why it is fine |
+|---|---|
+| `cleat_json_parse`, `cleat_json_stringify`, `cleat_send`, `cleat_resolve_promise`, `cleat_reject_promise` | no public `HostCalls` method exists for them at all — nothing can be broken |
+| `cleat_fetch` | `DurableFetch` and `FetchGet` are wired, to `cleat_call`. The fetch import is a path this SDK does not take |
+| `cleat_uuid` | `UUID(seed)` is computed **locally** in the Go SDK, and the algorithm is identical to the host's — same `workflowID + ":" + seed`, same SHA-256, same version/variant bits, same format string (`cleat/runtime_workflow.go:189` vs `engine/lifecycle.go:223`). Duplication, not divergence |
+
+`cleat_uuid` is worth dwelling on, because I predicted it was the worst of the 17 and it turned out
+to be one of the harmless ones. I had linked it to `h.NewUUID()` returning the all-zeros UUID
+(#775). Wrong: `NewUUID` goes through `Random()` → `cleat_random`, which is what #786 fixes.
+`cleat_uuid` serves the *seeded* `UUID(seed)`, which never calls the host. **The two were unrelated
+and I connected them because both had "uuid" in the name.**
+
+## The other 7 are real, and each has a public, documented method wired to nothing
+
+| import | method | note |
+|---|---|---|
+| `cleat_signal_workflow` | `SignalWorkflow` | **the worst of the seven** — see below |
+| `cleat_run_detached` | `RunDetached` | fire-and-forget child execution, unreachable |
+| `cleat_schedule_invoke` | `ScheduleInvoke` | unreachable |
+| `cleat_set_scope` | `SetScope` | §3.223 |
+| `cleat_get_scope` | `GetScope` | §3.223 |
+| `cleat_send_signal_and_wait` | `SendSignalAndWait` | also inert engine-side (§3.220) |
+| `cleat_reply_to_signal` | `ReplyToSignal` | also inert engine-side (§3.220) |
+
+**`SignalWorkflow` is the worst because the engine implements it fully.** It is the one signalling
+path that does call `DeliverSignal` (`engine/signaller.go:304`) — the half of §3.220 that is *not*
+broken. So the engine can deliver a signal from one workflow to another, and a Go workflow cannot
+ask it to.
+
+The last two are broken at both ends: unreachable from the guest **and** inert in the engine. Fixing
+either end alone changes nothing observable, which is worth knowing before someone starts.
+
+## Go is the only SDK missing these
+
+Verified at declaration and call sites rather than by name count — Rust `pub fn` externs with call
+sites, Java `@Import`, AssemblyScript `@external`:
+
+    crates/cleat-sdk/src/host_calls.rs:188   pub fn cleat_signal_workflow(   (called :918)
+    crates/cleat-java/.../HostCalls.java:185 @Import(module="env", name="cleat_signal_workflow")
+    packages/cleat-as/.../host-calls.ts:328  @external("env", "cleat_signal_workflow")
+
+Rust, Java and AssemblyScript bind all seven. **The gap is Go's alone** — which is the opposite of
+the assumption most people bring, since Go is the language this repo's examples are written in and
+the one `--target go` is the default for.
+
+## Why this survived
+
+The host-call execution harness covers `wave1Calls` — 24 method names resolving to 23 imports
+(`tests/plugin-harness/hostcall_harness_test.go:37`). Every one of them is in the table, so every
+one of them wires. **The harness cannot find a call that is missing from the table, because it only
+runs calls that are in it.** These seven sit in the untested remainder, and nothing distinguishes
+"we have not got to it yet" from "it does not work".
+
+## Fixing one takes FOUR pieces, not three
+
+This section said three — a `hostFunctions` row, an `adapterDefs` entry, and the SDK's
+`HostCallsOptions` field plus delegation. **That is wrong, and adding only those produces a guest
+that does not compile:**
+
+    ./gen_host_adapter.go:21:14: undefined: cleatSignalWorkflowImport
+
+`GenerateImports` emits the `//go:wasmimport` declarations from a **third** table — `importDefs` in
+`wasm/generator.go` — and a field whose import has no entry there generates a call to a function
+that was never declared. So:
+
+| piece | file | what it does |
+|---|---|---|
+| `importDefs` | `wasm/generator.go` | declares the `//go:wasmimport` stub |
+| `hostFunctions` | `wasm/usage.go` | makes the AST scan request that import, and names the field |
+| `adapterDefs` | `wasm/adapter_metadata.go` | emits the closure that calls it |
+| `HostCallsOptions` + delegation | `cleat/runtime.go` | lets the SDK method reach the closure |
+
+The fourth was already present for all seven, which is why they look like table omissions rather
+than missing features. Found by doing it: #790 wired `SignalWorkflow` and hit the missing
+`importDefs` entry on the first build.
+
+## Triage of the seven, after attempting them
+
+Three of the seven are **not** recipe cases, and finding that out is why the recipe should be
+attempted per method rather than applied in bulk.
+
+**`SignalWorkflow` — fixed (#790).** Clean: SDK signature matches the ABI exactly. Before, a guest
+whose only host call was `h.SignalWorkflow(...)` imported nothing but the wasip1 handshake.
+
+**`ScheduleInvoke` — clean, not yet done.** `ScheduleInvoke(service, operation, requestJSON string,
+delayMs int64) error` against `cleat_schedule_invoke: (ptr,len x3, i64) -> i64`. Signature matches,
+error return exists, nothing to decide.
+
+**`RunDetached` — NOT a wiring omission. It is a signature mismatch, and the SDKs disagree about
+what the feature is.**
+
+    Go SDK    RunDetached(fn func(h HostCalls) error) error        cleat/runtime_workflow.go:269
+    engine    cleat_run_detached(name, inputJSON)                  engine/imports.go:735
+    Rust SDK  run_detached(name: &str, input_json: &str)           crates/cleat-sdk/.../host_calls.rs:1131
+
+A closure cannot cross the WASM ABI, so the Go method **cannot** be wired to that import at all —
+and its unwired branch is `return nil`, a silent success. Worse, the Rust method's doc comment says
+*"Mirrors Go's RunDetached"*, which it does not: it takes a name and input, and Go takes a
+function. Anyone porting between the two reads that comment and is misled.
+
+Fixing it is a public API decision — almost certainly changing Go's signature to `(name,
+inputJSON)` to match every other SDK, which is a breaking change to an exported method. **Not a
+table row, and not to be done silently.**
+
+**`SetScope` / `GetScope` — the signature cannot express the outcomes.** `freshSetScope`
+(`engine/scope.go`) has three: success, an error from the concurrency-key store
+(`packSimpleResult(1, 0)`), and — when the scope is **held by another workflow** — a *suspension*,
+with a five-second retry. The SDK method is
+
+    SetScope(objectType, instanceKey string) (previousScope string)
+
+No error return. So wiring it as-is would silently swallow a store failure, and the "held by
+another workflow" case is the *normal* one for a mutual-exclusion primitive — it is what the
+feature is for. **The store-failure half of that is closed by §3.407** — not by changing the
+signature, but by having the host suspend, as it already did for contention, so the swallowed
+errCode no longer decides anything. The signature question remains open and is now only about
+whether a guest should be *told*. Also a signature change, and it needs deciding alongside §3.223's question of what
+scope means in this SDK at all.
+
+**`SendSignalAndWait` / `ReplyToSignal` — blocked on §3.220.** Both are inert engine-side too, so
+wiring the guest half alone changes nothing observable. §3.220 needs a reply protocol decided
+first.
+
+**So the seven are: one fixed, one clean and pending, two needing a public API decision, one pair
+needing a design decision, and two blocked.** The count in this section's title was right about
+what compiles to nothing; it was silent about the fact that fixing them is four different kinds of
+work.
+
+### 3.225 Nothing compiled the generated adapter, and an eighth method turned up when something did — 🟢 **GUARD ADDED 2026-09-06**; the method it found was closed by #786 (WS-1, 2026-09-06)
+
+Two failures on 2026-09-05, hours apart, both one-line compile errors in generated code, both
+caught only by CI:
+
+  * **#780** — a comment mentioning `strings.Index` made `patchAdapterImports` inject an import
+    nothing referenced; every guest build failed with `"strings" imported and not used`.
+  * **#786** (conformance-port session) — a wrapper row invented a closure field carrying a
+    parameter the inner import's body never reads; **eleven** CI jobs failed with
+    `declared and not used: heartbeatIntervalMs`.
+
+**Neither was visible to a unit test, and #786's own new unit test passed throughout.** It asserted
+that each wrapper ends up with the right *import* — true after the broken change; the *field* was
+the problem. Third instance in one day of a guard measuring the legible half of a two-halved thing
+(cf. §3.223's engine-versus-guest, and the port session's payload-carriage-versus-column-persistence
+in #777).
+
+The generator's tests assert on emitted **text** — `strings.Contains(code, "func parseChildResultArray")`
+— and the emitted file is only really checked by *building a guest*, which happens in integration
+jobs, for one fixture, using whichever calls that fixture happens to make.
+
+`TestEveryAdapterDefCompiles` (`wasm/adapter_compiles_test.go`) closes that: it builds a synthetic
+`UsageInfo` naming **every** `adapterDefs` and `hostWrapperDefs` entry, runs the real
+`PrepareBuildDir`, and compiles the result for `wasip1`. Covering every def rather than a fixture's
+subset is the point — the failure mode is one field in isolation, so a fixture that does not use
+that field cannot see it. Known-positive: giving `DurableLog`'s def a parameter its body never
+reads turns it red (with a signature mismatch rather than an unused-variable error, since that
+field's type is pinned by `HostCallsOptions` — either way, generated code that does not compile).
+
+## What it found on its first run
+
+`DurableCallTypedWithOptions` has an adapter definition and **no `hostFunctions` row**, so no build
+can ever emit it. Verified the way §3.224's seven were — by compiling a workflow whose only host
+call is that method:
+
+    Generating WASM imports (0 host functions used)... OK
+    gen_wasm_imports.go: cleat_complete, cleat_poll_work
+
+Zero. Only the wasip1 handshake. It is public (`cleat/runtime.go:64`), has a `HostCallsOptions`
+field, a `HostCallsImpl` method, a `hostWrapperDefs` entry, and appears in `cleat/localdev`.
+
+**That makes it an eighth instance of §3.224, and the worst of them.** The other seven are
+signalling, scoping and scheduling. This one is a **durable call** — the operation the system
+exists to provide. A durable call that silently does not happen leaves the workflow proceeding as
+though the external effect occurred.
+
+## Closed by #786, and the assertion is live
+
+`compositeRequires` (added by #786) covers `DurableCallTypedWithOptions`, so the call now happens.
+Proven on the branch by the port session, not recalled:
+
+    before:  Generating WASM imports (0 host functions used)  -> cleat_complete, cleat_poll_work
+    after:   Generating WASM imports (14 host functions used) -> cleat_call, cleat_call_retry,
+                                                                 cleat_sleep, ...
+
+The guard's reachability check is therefore an assertion (`t.Errorf`), not a report — but it had to
+learn to read **both** tables first, and the distinction is the one #786 exists to make.
+`hostFunctions` is bidirectional: a row requests an import **and** emits a field named `FieldName`
+implemented by that import's body. `compositeRequires` only requests imports, for SDK-level
+wrappers that must *not* get a field. **Checking `hostFunctions` alone reported
+`DurableCallTypedWithOptions` as unreachable when it is reachable through the second table** —
+so the first version of this assertion would have been a false positive on a fixed tree.
+
+Falsified by deleting `{"cleat_log", "DurableLog"}` from `hostFunctions`: red, naming `DurableLog`.
+
+**It is fixed by wiring the fallback, which is not the same as fixed properly, and the difference is
+a live determinism defect that #786 made reachable.**
+
+`HostCallsImpl.DurableCallTypedWithOptions` (`cleat/runtime.go:1177`) checks its own
+`HostCallsOptions` field first and only falls through to an SDK implementation over
+`DurableCallWithOptions` when that field is nil. `compositeRequires` wires the **fallback's**
+imports; it does not emit the field. **Measured, on a guest compiled from a workflow whose only
+host call is that method with a `Timeout` set:**
+
+    Generating WASM imports (14 host functions used)... OK
+    imports:  cleat_call, cleat_call_retry, cleat_sleep, cleat_complete, cleat_poll_work
+    grep -c DurableCallTypedWithOptions gen_host_adapter.go   ->  0
+
+Zero. No field is emitted, so `h.durableCallTypedWithOptions` is nil in every compiled Go guest and
+**the fallback is the path that runs.** That fallback is:
+
+    ch := make(chan callResult, 1)
+    go func() { ... h.DurableCallWithOptions(...) ... }()
+    select {
+    case r := <-ch:                     // the durable call finished
+    case <-time.After(opts.Timeout):    // WALL CLOCK, inside a workflow
+        return &CallTimeoutError{...}
+    }
+
+The durable call records its event whichever branch wins, because the goroutine makes it before the
+select resolves. **So the original run and the replay can take different branches**: on replay the
+call returns from history immediately, `<-ch` wins, and the workflow receives the response where the
+original received `CallTimeoutError`. Different branch, different subsequent host calls.
+
+**One of two things is true and which one is not measured.** Either the timer can preempt a
+blocking `//go:wasmimport` under wasip1 — in which case the divergence above is real — or it
+cannot, in which case `opts.Timeout` never fires and is **silently ineffective**. Both are defects;
+this section does not claim to know which. What it does claim, and has measured, is that the
+fallback is what a Go guest runs.
+
+Note the direction: this was harmless while the method was unreachable (§3.224's eighth instance).
+**Making it reachable is what made the hazard live**, which is the ordinary cost of fixing a wiring
+gap and an argument for emitting the field rather than wiring the fallback. Emitting it is a
+`hostFunctions` row plus an `adapterDefs` entry — the §3.224 recipe — and removes the question
+entirely, because the direct path has no goroutine and no `time.After`.
+
+`cleat vet` will not help: its rules scan the user's workflow code, and this `go` statement is in
+the SDK. That is a **scope** the tool does not have rather than a rule it is missing, and it is the
+second instance of the same limit — E003 told authors to use `h.Now()` for deterministic time and
+could not see that `h.Now()` was itself the broken clock (#776, #787).
+
+## It is not one obscure method: `DurableCallWithOptions` is the same, and it is mainstream
+
+Checked because the fix looked like a one-line recipe and the port session asked what would enforce
+`opts.Timeout` afterwards. **The answer widened the defect rather than the fix.**
+
+`HostCallsImpl.DurableCallWithOptions` (`cleat/runtime.go:1013`) has the identical shape — field
+check first, then a fallback that spawns a goroutine and selects it against
+`time.After(opts.Timeout)`. And it is in `hostWrapperDefs`, not `adapterDefs`, so **no field is
+emitted for it either.** Measured on a guest whose only host call is
+`h.DurableCallWithOptions(CallOptions{Timeout: 5 * time.Second}, ...)`:
+
+    Generating WASM imports (5 host functions used)... OK
+    emitted adapter fields:  DurableCallWithRetry, DurableSleep, DurableSleepMs
+
+No `DurableCallWithOptions`. So the fallback runs for **every Go workflow that calls
+`DurableCallWithOptions` with a timeout** — a documented, mainstream API, not the obscure typed
+variant this section started from. `DurableCallJSONWithOptions` is in the same map and worth
+checking the same way.
+
+## So do NOT emit the field — the ABI has nowhere to put the deadline
+
+Emitting a field for these delegates to `cleat_call` or `cleat_call_retry`, and **neither carries a
+per-call deadline**:
+
+    cleat_call        (svc, op, req, resp)                                    engine/imports.go:158
+    cleat_call_retry  (svc, op, req, maxAttempts, initialIntervalMs,
+                       backoffCoefficient100x, maxIntervalMs,
+                       nonRetryableErrorsJSON, resp)                          engine/imports.go:324
+
+Retry policy, not a deadline. `cleat_await_signals` is the only call in this family that takes a
+`timeoutMs`. So emitting the field would **silently drop `opts.Timeout`** — trading a determinism
+defect for a quieter dropped-option one, which is worse.
+
+The real fix is a host-side deadline, and **it is a semantics decision before it is a signature
+one** — a distinction worth stating because "add a `timeoutMs` parameter" looks like the whole job
+and is not. `cleat_await_signals` already carries `timeoutMs`, so a deadline can cross the ABI
+today; the open question is what it *means* on the host. A durable call's timeout has to be
+**replayable**: the second execution must reach the same verdict as the first, or the divergence
+this section is about has simply been rebuilt somewhere new. That points at recording the timeout
+*outcome* in the call event rather than re-evaluating a deadline against a fresh clock.
+
+**And the guest-visible clock is not currently fit for it.** Measured by the conformance-port
+session while writing the replay-determinism test: `h.Now()` does **not advance across a
+suspension** — 3ms observed across a 3000ms sleep, because it returns the previous event's
+timestamp and the sleep event is stamped when the sleep *begins*. A host-side deadline needs a clock
+that moves; anything built on the current one would measure the wrong interval. Related, and also
+still open after #787: `seedNowMs` takes the session seed from `replayHistory[0]` on a resume and
+from the wall clock on a first execution, so a workflow whose **first** action reads the clock still
+diverges (109ms measured). #787 fixed events after the first, which is what made the replay test
+possible; it did not close that leg.
+
+**Recorded here rather than attempted**, because it is a different size of change from §3.224's
+seven and needs those two answers first.
+
+
+## Resolved 2026-09-13: the option was removed, and the unmeasured half is now measured
+
+"One of two things is true and which one is not measured" above has an answer. **`opts.Timeout`
+never fires.** The timer cannot preempt a blocking `//go:wasmimport` under wasip1, so the
+divergence this section worried about was never reachable -- the defect was the quieter one, a
+silently ineffective option, which is cleat#1006.
+
+Measured with one slow call and one short timeout, each row carrying a control that proves the
+delay was really in the path:
+
+| path | `Timeout` | `StartToCloseTimeout` |
+|---|---|---|
+| compiled WASM (`cleat build --target go`), 2s call vs 50ms timeout | inert, returned at 2.00s | inert |
+| `cleat/cleattest`, 400ms call vs 20ms timeout | inert, returned at 400ms | inert |
+| `cleat/localdev`, 400ms call vs 20ms timeout | inert, returned at 401ms | inert |
+| hand-built `HostCalls`, `DurableCallWithOptions` nil | **fires at 21ms** | **fires at 20ms** |
+
+The last row is the positive control and it is `cleat/runtime_test.go` and nothing else, which is
+why every test of this field was green for as long as the field existed. Note the two middle rows:
+`cleattest` and `localdev` are the two things that DO populate the import this section is about,
+and both discard the option -- `cleattest` takes it as `_`, `localdev` reads only `Retry`. So
+emitting the adapter field would not have been the fix either; the option had no honest reader
+anywhere.
+
+Both fields are removed as of cleat#1006, along with `CallTimeoutError`, which nothing could
+produce once they were gone. A host-reported timeout still arrives, as `*CallError` with
+`Code == CallErrorTimeout`.
+
+**What survives from this section is its conclusion, not its worry.** A real per-call deadline is
+still a semantics decision before a signature one, still needs a replayable outcome recorded in the
+call event, and still needs a guest clock that advances across a suspension. Removing the field
+does not build any of that -- it stops claiming it.
+
+
+
+### 3.227 `ci-check.sh` had a blocking step that could never pass, so it always exited 1 — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
+
+Found by finally running it, after a day in which **six separate scope gaps** cost a CI round each
+— `go vet` not seeing `testdata/`, `cargo check` being lib-only, `pytest` not being the linter,
+`ruff` never run, a `\b` grep that cannot match after an underscore, and `gofmt` not being covered
+by build-vet-test. The conclusion recorded at the time was *"the defence is a single local script
+mirroring the lint job, not six commands someone remembers."*
+
+**That script already existed.** `scripts/ci-check.sh` runs gofmt, `go vet`, `ruff`,
+`cargo clippy --all-targets`, `pytest`, `npm test` and the cargo builds — exactly the six. The
+problem was never that it was missing.
+
+    run_step "cleat vet (go) ./... (blocking)" \
+        go run ./cmd/cleat vet --lang go --json ./...
+
+`./...` from the repo root has **no workflow entry points** — the root module is the engine, not a
+workflow — so this printed
+
+    Error loading package: no workflow entry points found in ./...
+
+on every run, and being **blocking**, took the whole script to exit 1. So anyone who ran it saw it
+fail immediately on a step unrelated to their change, concluded it was broken, and stopped.
+
+**This is the second time this file has rotted into always-failing**, and its own header describes
+the first: until 2026-08-09 it tested `./durable/...` and built `crates/durable-*`, five steps
+pointing at paths that no longer existed, *"so it exited 1 at the first test step and had done for
+months, while its header claimed to run the full pipeline."* The preflight added then catches a
+path that **disappears**. It cannot catch a target that was **never valid**, which is what this
+was — and the distinction is the transferable part: rot-detection that watches for things going
+away is blind to things that never worked.
+
+Fixed by pointing it at `./testdata/basic`, the smallest package with real entry points, which
+vets clean (3 entry points, 9 durable leaves, OK). A second step,
+`shellcheck scripts/*.sh benchmarks/*.sh`, failed on a glob matching nothing — there are no shell
+scripts under `benchmarks/` — so it reported a filesystem error rather than a finding.
+
+**What is still not clean, recorded rather than changed:** on a machine without `pip`, `ruff` or
+`shellcheck` the script still fails those steps with exit 127. That is arguably right — install the
+tools — but combined with the blocking defect above it is why the script was unusable, and a reader
+cannot tell "tool absent" from "check failed" in the summary. Whether a missing toolchain should
+report as a distinct outcome is a design question about someone else's script, and this repo is
+strict about skips for good reason, so it is left as an observation.
+
+**And a finding on the way, not pursued:** `cleat vet ./examples/dag` **fails** with three errors
+of the form *"extractText is reachable from a workflow entry point (it calls durable SDK methods)
+but does not have a HostCalls parameter."* A shipped example that the project's own linter rejects
+is either a broken example or a false positive in `cleat vet`, and which it is has not been
+established here.
+
+### 3.228 Six of the eight Go example workflows do not build — 🟢 **ALL EIGHT BUILD, AND A TEST NOW SAYS SO 2026-09-06** (WS-1, 2026-09-06)
+
+Found by pulling on §3.227's loose end: `ci-check.sh`'s vet step failed, and one of the things it
+could have been pointed at was `./examples/dag`, which turned out to fail too.
+
+Swept every example directory containing `.go` files, each into a **fresh** output directory:
+
+| example | `cleat build --target go` |
+|---|---|
+| `saga-temporal-port` | OK |
+| `subscription` | OK |
+| `datapipeline` | returns `*PipelineResult`; an entry point must return a string |
+| `onboarding` | returns `*Profile`; an entry point must return a string |
+| `travel` | returns `*BookingResult`; an entry point must return a string |
+| `dag` | `Verifying HostCalls threading... 4 error(s)` — **not an example defect**, see §3.229 |
+| `fooddash` | `Verifying HostCalls threading... 1 error(s)` — **not an example defect**, see §3.229 |
+| `event-driven` | `E003: time.Now() ... breaking determinism` |
+| ~~`third-party-plugin`~~ | excluded — it is a plugin, not a workflow, so "no entry points" is correct |
+
+**Two of eight.** Three distinct causes — and this section said **all six are defects in the
+examples**, which is wrong about two of them. Four are: three struct-pointer returns (#801) and one
+`time.Now()` (#802), all now fixed. `dag` and `fooddash` turned out to be **false positives in the
+threading check**, corrected in §3.229. Kept here as written rather than quietly edited, because
+the mistake is the same one this file keeps recording: a category assigned to a group after
+checking some of it.
+
+## Cause 1: three examples return a struct pointer, and an entry point must return a string
+
+**The string return type is deliberate, not a codegen limitation.** It is what works across all
+five language SDKs — a WASM entry point hands back bytes, and `string` is the one shape every SDK
+can express identically. So this is an **example defect**, not a missing feature, and the three
+failures line up exactly with it:
+
+| example | entry point | builds |
+|---|---|---|
+| `saga-temporal-port` | `TransferMoney(h, TransferDetails) error` | **yes** |
+| `subscription` | `ManageSubscription(h, SubscriptionInput) (string, error)` | **yes** |
+| `datapipeline` | `RunPipeline(h, PipelineInput) (*PipelineResult, error)` | no |
+| `travel` | `BookTravel(h, BookingInput) (*BookingResult, error)` | no |
+| `onboarding` | `RegisterUser(h, SignupInput) (*Profile, error)` | no |
+
+Note that a struct **input** is fine — `TransferDetails`, `SubscriptionInput` and `PipelineInput`
+are all structs, and two of those build. It is only the return.
+
+**What is a defect on the tooling side is how the violation is reported.** `GenerateExports`
+declares `var __r string` (`wasm/exports.go:731`) and emits `return []byte(__r)` (`:794`), so a
+non-string return produces
+
+    ./gen_wasm_exports.go:340:28: cannot convert __r (variable of type *BookingResult) to type []byte
+
+a Go type error in **generated code the author never wrote**, naming a variable absent from their
+source and a file they did not create. The rule is real and the diagnostic should state it:
+*"entry point RunPipeline returns *PipelineResult; an entry point must return string, (string,
+error) or error, because that is the shape every language SDK can express."* `cleat vet` is the
+natural place, since it already refuses E001-E007 before the build gets this far.
+
+## Cause 2 and 3 are in the examples themselves
+
+`dag` and `fooddash` fail HostCalls threading — functions reachable from an entry point that call
+durable SDK methods without an `h cleat.HostCalls` parameter. `event-driven` uses `time.Now()`
+inside a workflow and is rejected by the project's own E003, the rule that exists for exactly that.
+
+**`examples/dag`'s doc comment names the command that fails on it:**
+
+    // Build:
+    //	cleat build -o /tmp/out ./examples/dag/
+
+## Closed
+
+All eight build, and `TestEveryGoExampleBuilds` (`cmd/cleat`) compiles every one on every run —
+about seven seconds wall clock, in parallel. Four fixes and two tooling defects:
+
+| | |
+|---|---|
+| #801 | `datapipeline`, `travel`, `onboarding` returned a struct pointer |
+| #802 | `event-driven`: `time.Now()`, and a struct return hidden behind it |
+| #805 | `fooddash`: three more struct returns, hidden behind a threading error |
+| #800 | `cleat vet` now rejects a non-string entry-point result up front |
+| #807 | the threading check credits HostCalls in a parameter's struct field (§3.229) |
+| #809 | the build gate no longer fails on pre-transform reports; auto-threading no longer renames the SDK import (§3.229, §3.230) |
+
+**Which directories are workflows is decided by building them**, not by a pattern: there is no
+`//cleat:entry` marker to look for — `IsEntryPoint` says an entry point is an exported non-method
+function whose first parameter is `cleat.HostCalls` — so the test treats the tool's own
+"no workflow entry points found" as "not a workflow". `third-party-plugin` is the one such
+directory. A floor of five guards the vacuous case, because "every example built" is also what a
+run that built nothing reports.
+
+## Why this rotted: they are valid Go, and nothing compiles them to WASM
+
+`cd examples && go build ./... && go vet ./...` is **clean**. So every Go job in CI is happy. The
+only CI reference to `examples/` is `examples/as-workflow`, which is AssemblyScript
+(`.github/workflows/ci.yml:1126`); tier2-gate mentions `./examples/...` only in a comment about how
+that gate was falsified. **No job runs `cleat build` on a Go example**, so the one command the
+examples document is the one nobody runs.
+
+## A methodological note, because the first version of this section was wrong
+
+The first sweep reused **one** output directory for all nine builds. `cleat build` copies the
+source into the build directory and does not clear it, so each example inherited the previous one's
+files, and the errors were things like `toJSON redeclared in this block` naming files from a
+different example. **It reported nine failures out of nine**, and "every Go example is broken" was
+one sentence from being written down.
+
+What caught it was reading an error rather than counting: `travel`'s failure named `billing.go`,
+`pipeline.go` and `signup.go`, and `ls examples/travel/` shows only `booking.go` and `README.md`. A
+failure citing files that are not there is a harness fault, not a finding — and the corrected sweep
+gives two passes, so the wrong number was wrong in the direction that made the finding look
+bigger.
+
+### 3.229 The HostCalls threading check rejects two working patterns, one of them a first-party SDK's own — 🟢 **BOTH FIXED 2026-09-06** (WS-1, 2026-09-06)
+
+§3.228 found six Go examples that do not build and called all six example defects. **Four were**
+— three struct-pointer returns (#801) and one `time.Now()` (#802). **The other two are not**, and
+this section is the correction.
+
+`dag` and `fooddash` fail `VerifyThreading` (`internal/closure/threading.go`) with
+
+    X is reachable from a workflow entry point (it calls durable SDK methods) but does not
+    have a HostCalls parameter. Add 'h cleat.HostCalls' as the first parameter, or declare a
+    package-level 'var h cleat.HostCalls' that this function can reference.
+
+Both reach HostCalls perfectly well. The check credits four routes — a first parameter of type
+`cleat.HostCalls` (phase 1), a method whose receiver struct has a HostCalls field (phase 3), a
+reference to a package-level `var h` (phase 0), or a threaded caller that *passes* HostCalls as an
+argument (phase 2). Neither of these is any of those.
+
+## `examples/dag`: HostCalls arrives in a struct PARAMETER's field
+
+    func extractText(ctx *dagplugin.TaskContext) (string, error) {
+        result, err := ctx.H.DurableCall("docproc", "Extract", string(data))
+
+`TaskContext.H` is `cleat.HostCalls` (`cleat/dagrun/dagrun.go:59`). Phase 3 credits a struct with a
+HostCalls field only when it is the **receiver**; here it is a **parameter**. Four task bodies, four
+errors.
+
+**This is the `dagrun` package's designed shape, and its own doc comment names this exact caller:**
+
+    // TaskContext.H is passed through to every user-written task body ... That means
+    // TaskContext cannot be narrowed to a small interface without breaking real callers
+    // (see examples/dag, which calls ctx.H.DurableCall).
+
+So `cleat vet` rejects the pattern a first-party cleat SDK package documents itself as requiring.
+
+## `examples/fooddash`: the remedy the message suggests is already there
+
+`order.go:36` declares `var h cleat.HostCalls`. `validateMenuItems` does not reference it; its
+callee `lookupMenuItem` does (`:313`, `h.DurableCallTyped`). Phase 0 credits **users** of the
+global, not every function in a package that has one — but once a package-level `h` exists, every
+function in that package can reach the host without taking anything, so the requirement is
+satisfiable by adding a reference that would be dead code.
+
+**The error tells the author to do something already done.**
+
+## Both are fixed, and the second was not the defect it looked like
+
+**`dag`** — phase 3b credits a HostCalls field on a **parameter**, symmetric with phase 3's rule for
+receivers (#807).
+
+**`fooddash`** — and here the diagnosis above was wrong in an instructive way. The section proposed
+crediting every function in a package with a global `h`, and warned that doing so "makes the
+threading guarantee vacuous for that package". **Both the proposal and the warning were beside the
+point**, because `internal/transform` *already* auto-threads every durable function in such a
+package — referencers and pass-throughs alike — and rewrites their call sites.
+
+`internal/closure`'s own test says so:
+
+    // validateAndReserve and processPayment are pass-through functions in the closure that
+    // don't reference the global var h directly, so they are correctly reported as
+    // unthreaded BEFORE the transform runs. After the transform they get h added as a
+    // parameter.
+
+So the check is right and the **build gate** was wrong: `cmd/cleat` exited 1 on a pre-transform
+report, rejecting packages the very next stage was designed to fix. `dropAutoThreaded` now filters
+errors for functions the transform gave an `h` to, and fails on the remainder.
+
+**Changing the check, as this section proposed, would have broken that test and been the wrong
+layer.** The measurement that settled it was bypassing the gate and watching the transform
+auto-thread `validateMenuItems` and ten others — the finding was in what happened *after* the point
+where I had stopped looking.
+
+## What the earlier framing got right and wrong
+
+## Why this is filed rather than fixed
+
+Widening the check is a design decision with a real downside on each side. Crediting any function
+in a package that declares a global `h` makes the threading guarantee vacuous for that package.
+Crediting any parameter whose type has a HostCalls field is closer to right — it is how `dagrun`
+works — but it is a new rule about transitive reachability through struct fields, and getting it
+wrong in the permissive direction silently removes a guard rather than loudly breaking a build.
+
+**Note which direction this one errs, because it is the opposite of the day's other findings.**
+Nearly every measurement error recorded in this file **flatters** — a circular denominator reading
+100%, a guard that cannot see the thing it guards. This one is a **false positive**: it reports
+work that is not needed. That makes it cheap in consequence and expensive in trust, because the
+remedy it names is either impossible (`dag`) or already present (`fooddash`), and an author who
+follows the message and sees no change learns to disbelieve the tool.
+
+**Neither example has been shown to run.** They compile as Go and their host access is coherent,
+but nothing in CI builds a Go example to WASM (§3.228), so "these two are fine" means "the check's
+objection does not hold", not "these examples work".
+
+### 3.230 Auto-threading renamed the SDK import and broke every reference to it — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
+
+Found underneath §3.229: with the threading gate bypassed, the transform auto-threaded eleven
+functions in `examples/fooddash` and the result did not compile.
+
+    ./order.go:133:10: undefined: cleat
+    ./order.go:141:10: undefined: cleat
+    ... 19 references in that file
+
+`ensureHostCallsImport` ran this on the SDK import, **unconditionally**:
+
+    if imp.Name == nil || imp.Name.Name != "durable" {
+        imp.Name = ast.NewIdent("durable")
+    }
+
+including when it was **unaliased**, which is the normal spelling. Every existing `cleat.X`
+reference in the file then failed to compile. `addHostCallsParam` and `isHostCallsField` hardcoded
+`"durable"` to match.
+
+**`durable` was the SDK's package name before the 2026-06-01 rename** (commit `3eeb74e`, "promote
+internal packages to public"). The transform kept it for three months.
+
+The fix threads the file's **own** local name through: `ensureHostCallsImport` returns it and never
+renames an existing import, `addHostCallsParam` qualifies with it, `isHostCallsField` compares
+against it. A newly added import is unaliased, because the package is named `cleat` and an alias
+would be noise in a file the user reads.
+
+## Why nothing caught it for three months
+
+Auto-threading engages **only** for a package that declares a global `var h` — `needsH` is populated
+solely under `hasGlobalH`. And for exactly those packages, the threading check rejected the build
+first (§3.229). **So the transform's output was never compiled by anything.** Two defects in series,
+each hiding the other, and neither reachable without fixing the one in front.
+
+That is the same shape as §3.228's `event-driven` (E003 hid a struct return) and #805's `fooddash`
+(a threading error hid three), but a layer deeper: not a linter halting on the first error, but a
+*stage* halting before the stage that would have failed.
+
+**The test that catches it has to compile.** `TestBuildAutoThreadedPackage` runs `cleat build` on
+`testdata/autothread` end to end — the check reports, the gate filters, the transform threads, and
+the emitted Go has to build. Falsified both ways: removing the gate filter gives "cleat build
+failed", and restoring the `durable` rename gives `./order.go:29:7: undefined: cleat`. **No unit
+test on any single stage would have seen either**, which is the argument for having one test that
+crosses all of them.
+
+There is also a unit test on `dropAutoThreaded`, because a filter that removes too much would let a
+genuine threading error through, and that failure is silent.
+
+### 3.231 All four promise host calls reported success when there was no promise store — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
+
+The conformance-port session found that `cmd/cleat-worker/setup.go` never called
+`engine.WithPromiseStore` — so on a real deployment the store was **always** nil, `workflow_promises`
+had never held a row, and every `AwaitPromise` hung forever (their #812). Verified independently
+before building on it: `grep -n "With.*Store" cmd/cleat-worker/setup.go` lists `WithSignalStore`,
+`WithWorkflowStore`, `WithChildWorkflowStore` and `WithConcurrencyKeyStore`, and no promise store.
+
+**This section is the engine half, and it is a correction to §3.218 — my own fix.** §3.218 made
+`CreatePromise` report a store *failure* instead of logging it, and its comment says
+
+    The failure was not unreportable, it was unreported.
+
+**It left the missing-store branch reporting success**, one line above that sentence. All four calls
+had the same shape:
+
+    if s.engine.promiseStore != nil { ... }
+
+| call | with no store, before |
+|---|---|
+| `CreatePromise` | skipped the insert, returned **success** with a promise ID |
+| `AwaitPromise` | fell past the store check and **suspended forever** |
+| `ResolvePromise` | returned **0**, and even *with* a store logged an error and returned 0 |
+| `RejectPromise` | identical |
+
+So §3.218 guarded the legible half: the branch that had an error object in hand. The branch with no
+object at all — which was the one every shipped worker took — stayed silent. **That is the same
+asymmetry as §3.223's "the engine is where the mechanism is legible": a failure that produces
+something to report gets reported, and an absence does not.**
+
+All four now report `errCode 1` and name the missing option. `cleat_resolve_promise`'s adapter
+already decodes `errCode := uint32(result)` and turns non-zero into an error, so — again — the ABI
+had somewhere to put it.
+
+## Six tests asserted the defect, one by name
+
+`TestAwaitPromiseReplayAwaitThenFreshNoStore` set `s.engine.promiseStore = nil` **deliberately**,
+commented *"Fresh path with no promiseStore -> suspend"*, and asserted the hang. So did
+`TestAwaitPromiseFreshNilStore`, which went on to check the deadline encoding of a suspend that
+should never happen. Four more asserted `result == 0` from `CreatePromise`, `ResolvePromise` and
+`RejectPromise` on a session with no store.
+
+**Three others were repaired rather than inverted, and the distinction matters.**
+`TestAwaitPromise_FreshPending`, `TestAwaitPromiseReplayDivergence` and
+`TestAwaitPromiseReplayPastEnd` reached the suspend path *by having no store*, while being named for
+pending promises and replay divergence. They now use a pending `mockPromiseStore`: same assertion,
+correct reason. A test that reaches its outcome through an unrelated defect is not wrong about the
+outcome — it is wrong about what it is testing, and inverting it would have thrown away real
+coverage.
+
+That is the sixth, seventh, eighth and ninth test found codifying a defect in this run.
+
+### 3.234 `h.NowMs()` compiled to nothing and returned epoch 0 — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
+
+Found while doing §3.226's triage — classifying the public Go methods that sit outside the coverage
+guard's denominator, so the guard fix would be mechanical rather than a judgement call.
+
+Of **29** such methods, **23** are in `hostFunctions`, `compositeRequires`, or both: legitimate SDK
+wrappers with no adapter definition of their own. **Six were in neither table.** Three are the
+scope trio (§3.223, local-only by construction), two are §3.220's inert signal-reply pair, and one
+was new.
+
+    // a workflow whose only host call is h.NowMs()
+    Generating WASM imports (0 host functions used)... OK
+    imports:         cleat_complete, cleat_poll_work
+    adapter fields:  (none)
+
+`NowMs` finds `h.now == nil`, logs to a guest's stdout, and **returns 0**. Every workflow using it
+gets an epoch timestamp. Same family as #775's `h.NewUUID()` returning the all-zeros UUID, and
+arguably worse: a zero UUID looks wrong, a zero timestamp looks like a date.
+
+## Why the composite guard could not see it
+
+`TestEveryCompositeHostCallHasAnImportRow` (#786) walks the SDK for methods that call another
+`h.X(...)` and checks the wrapper ends up with the inner method's import. Its pattern is
+
+    \bh\.([A-Z]\w*)\(
+
+**`NowMs` calls `h.now()`** — the closure *field*, lowercase, exactly as `Now()` does. It is not a
+composite in that sense at all, so the scan does not consider it. `Now` has a `hostFunctions` row;
+`NowMs` had nothing.
+
+The generalisation, found by asking the question the guard does not: **a `HostCallsImpl` method that
+invokes a closure field, makes no `h.Uppercase(` call, and appears in neither table.** Seven exist:
+
+| method | verdict |
+|---|---|
+| `SetScope`, `GetScope`, `ClearScope` | touch only *local* value fields, no closure — §3.223, inert by construction |
+| `HandleUpdate` | falls back to locally registered handlers and errors clearly; not in the public `HostCalls` interface |
+| `NowMs` | **the defect**, fixed here |
+| `ReplyToSignal`, `SendSignalAndWait` | invoke real closure fields that are never wired — §3.220 |
+
+## The fix, and why `compositeRequires` is the right table
+
+`"NowMs": {"cleat_now"}`. A `hostFunctions` row would *emit a field* named `NowMs`
+(#786's lesson), and `HostCallsOptions` has no such field, so it would not compile. Marking the
+import is enough because `info.Funcs` is `hostFunctions` filtered by `Used` — so `cleat_now` being
+used pulls in `{"cleat_now", "Now"}`, and the emitted `Now` field is what populates `h.now`.
+
+Verified by compiling: `cleat_now` imported, `Now` field emitted. Falsified by removing the row:
+red with `imports wired: []`.
+
+## The guard this wants — written, and its blocker since cleared
+
+The rule above — *every method invoking a closure field must be named by a table* — is mechanical
+and would have caught this. It shipped as `TestEveryClosureBackedMethodIsWiredOrTracked` (#823)
+with the two methods it could not yet be green on, `ReplyToSignal` and `SendSignalAndWait`,
+carried in an `unwiredClosureMethods` map whose entries read *"delete this entry when 3.220
+lands."*
+
+**3.220 landed on 2026-09-06 and the guard collected on that promise itself.** Both methods became
+composites over promises, stopped touching a closure field, and the guard went red — not on a new
+defect, but on its own exemptions no longer describing anything, naming both and saying "delete
+them". The list is now empty. The list-may-only-shrink property is what turned a note-to-self into
+a check that reported its own obsolescence, and it is the argument for writing the remedy into a
+failure message rather than into a comment.
+
+### 3.239 Workflow updates, implemented end to end — 🟢 **DONE 2026-09-06** (WS-1, 2026-09-06)
+
+Closes the substantive half of [#849](https://github.com/cleat-team/cleat/issues/849). §3.238 stopped
+a stranded update hanging its caller; this makes updates actually work.
+
+#### What was there before
+
+Nothing on the path. Three independent breaks, all recorded on #849:
+
+1. **No guest entry point, in any SDK.** Both SDKs registered handlers into a map read only by a
+   test harness — Go's `HandleUpdate` was reached from `cleattest` alone, Python's
+   `_handle_update` had zero callers. `cleat_register_update_handler` recorded a *name* and there
+   was no way to ask a running guest to run one.
+2. **The worker never called `engine.WithUpdateHandler`**, so `DispatchUpdate` returned
+   `no update handler configured for this engine`.
+3. **Delivery was a 5s ticker over `w.inflight`**, populated only for the lifetime of one segment.
+
+Note the ordering trap that made 3 dangerous to fix alone: with 2 unfixed, a scheduling fix would
+have completed each request with that error and **rejected** the caller's promise. A fix verified
+by "the request is no longer pending" would have read as success while delivering nothing.
+
+#### The design, and the constraint that forced it
+
+An update handler is a **closure in guest memory**. Only guest code can call it, so an arriving
+update cannot interrupt the workflow — something in the guest has to ask.
+
+And it has to ask at a fixed **program position**, not at a moment in time, because replay
+re-executes the guest and matches host calls against history in order. The constraint is hard
+rather than stylistic: `recordEvent` **appends** (`s.history = append(s.history, rec)`), so an
+event can only ever land at the frontier. There is no way to insert a delivery into the middle of
+an existing history — which is why an update cannot be dispatched at handler-registration time, as
+the first design attempt proposed: on every segment after the first, registration is replayed from
+deep inside history that is already written.
+
+So: **dispatch points**. The SDK calls `DispatchUpdates()` immediately before each suspension
+(`DurableSleep`, `AwaitSignals`, `AwaitPromise`, `AwaitChild`, `AwaitAllChildren`,
+`AwaitAnyChild`), and exports it for workflows that want more. Two new host calls carry it:
+
+| call | replaying | fresh |
+|---|---|---|
+| `cleat_poll_update` | return `history[stepCount]` if it is `update_received`, else not-found. **The table is never consulted** | read the table, record `update_received`, return it |
+| `cleat_complete_update` | replay the `update_completed` event and settle **nothing** | record it, complete the row, settle the caller's promise |
+
+`DurableAwaitSignals`' shape exactly, for the same reason.
+
+**Record before settle, not after.** A crash between the two leaves the event in history and the
+row still `pending`, so the next replay finds the delivery there and never re-reads the table —
+at-least-once delivery with idempotent replay. The other order loses the update entirely.
+
+**The handler re-runs on every replay, and that is the point.** The durable facts are its input and
+its output, not its execution; re-running it is what rebuilds the state it mutated.
+
+The cost, stated rather than hidden: an update is handled at the next dispatch point, not on
+arrival. A workflow in a tight loop of durable calls with no suspension does not service updates
+until it suspends.
+
+#### What else this needed
+
+- `CreateUpdateRequest` now wakes the workflow (`next_wake_at = now()`), like `DeliverSignal`. Not
+  optional: a suspended workflow reaches no dispatch point, so without it the request waits for
+  something else to wake the workflow — for one waiting on a signal, possibly never. Three dialects.
+- The 5s ticker and `dispatchPendingUpdates` are **deleted**, along with the three tests that
+  covered them. #849 named those tests as the reason this went unnoticed: each built the
+  precondition by hand (`w.inflight.Store(...)`, `WithUpdateHandler(...)`) and so asserted the
+  function worked *given* a state that never held when the ticker fired.
+- `engine.WithUpdateHandler` and `Engine.DispatchUpdate` are **removed**. They were exported API
+  with no caller anywhere outside their own four tests — the option existed so the worker could
+  configure an update handler, and the worker never did. They were briefly kept and documented as
+  "an embedder hook that is not the workflow-update path", which is a fair description and still
+  leaves two exported names that read as the update path and are not. The names were the whole
+  problem, so the names are gone.
+
+#### The other SDKs
+
+Rust, Java and AssemblyScript followed in the core-ABI shape; Python is the component path. Every
+one of the `absentToken` exemptions this section created is gone, and **the mechanism worked on
+its first real use**: adding each binding failed `TestEverySDKCoversEveryHostStopSite` until the
+exemption was removed and the method added to that SDK's refusable-call list. The only exemptions
+left are the three that predate this work.
+
+Python needed three things the others did not, all worth recording:
+
+  * **`result` is a WIT keyword**, so `durable-complete-update`'s parameter is `outcome`.
+    componentize-py refuses the file otherwise, with the column of the offending token.
+  * **`dispatch_updates` must be a no-op when there is no host.** Go guards on a nil closure;
+    Python's non-WASM import is a stub that *raises*, and dispatch runs before every suspension —
+    so without the guard any local run that slept died inside a dispatch it never asked for.
+    Caught by two existing stop tests, not by anything new.
+  * **`json.dumps` needs `separators=(",", ":")`.** Its default `", "` / `": "` would make the
+    Python harness's envelope differ from every other SDK's for no reason — the same trap §3.220
+    hit.
+
+Regenerating the bindings also surfaced **pre-existing docstring drift in four unrelated generated
+files**: they still described a `DurableCallWithHeartbeat` limitation that §3.111 removed. The
+generated artefacts had not been regenerated when the WIT prose changed. Docstrings only — verified
+no signature changed before copying, rather than after.
+
+#### Two guards this change had to repair, both silent
+
+**The stop-correspondence guard caught the new calls immediately** — both consult
+`stopBeforeNewWork` and were not declared stop surfaces. That one worked as designed.
+
+**The compaction fuzzer could not reach them, and had already rotted twice.**
+`parseFuzzEvents` clamped its type byte with a literal `% 30`; the new codes are 34 and 35. The
+comment above that line documented the *previous* instance (`% 27` left three cron codes unfuzzed,
+fixed 2026-08-09) as though it were the last — but `AwaitAnyChild` (31), `PollChild` (32) and
+`AdminAction` (33) had been added since and were unreachable in exactly the same way. **Six event
+types unfuzzed across two occurrences, neither of which failed anything**, because an unreachable
+code makes the fuzzer explore *less* and nothing measures that. The bound is now derived from
+`codeToEventType`.
+
+That was not sufficient either. `compaction_fuzz_test.go` also carried
+`UpdatePayload`/`UpdateResponse`/`UpdateError` as exempt "dead fields with nothing to lose" — prose
+that stopped being true the moment these events began carrying a handler's input and result.
+Removing the exemptions changed nothing observable: deleting `rec.UpdatePayload = ce.Request` from
+compaction left the fuzz test **green**, because `FuzzCompactionEquivalence` run without `-fuzz`
+executes only its seed corpus and no seed produces those codes. `TestCompactionPreservesTheUpdateEvents`
+asserts the round trip directly and fails on that deletion. **A fuzzer finds cases nobody thought
+of; it does not assert the case you already know about.**
+
+### 3.236 The plugin harness stripped the tenant RLS policies off a shared SQL Server database — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
+
+`tests/plugin-harness`'s `RunCoreMigrations` split each migration file on `GO` and executed the
+batches on a bare connection, with no transaction. Running its MSSQL arm against a database that
+already carried the schema left **7 of 9 tenant SECURITY POLICYs permanently dropped**, and every
+tenant-scoped MSSQL test in the repo afterwards ran with no RLS backstop.
+
+Reproduced in one command, twice, against a database freshly built from the shipped migrations:
+
+    # before: 9    after: 2 -- TenantFilter_Promises, TenantFilter_Settings
+    go test ./tests/plugin-harness/ -run TestPluginCalls_MultiDB -count=1
+
+#### The mechanism was written down in advance
+
+`migrations/mssql/001_schema.sql` drops the seven base policies at the *top*, before the
+`CREATE OR ALTER` of the function they are schemabound to, and recreates them at the bottom. Its
+header explains why that is safe and names the single condition:
+
+> The condition: that atomicity is the runner's, not this file's. Applying this file by hand —
+> sqlcmd, a GUI, **any tool that treats GO as a real batch separator and autocommits each batch** —
+> does leave tenant-scoped tables unfiltered from here to the CREATE SECURITY POLICY block at the
+> end.
+
+`RunCoreMigrations` was that tool. And it is worse than the header's warning, which describes a
+*window*: 001 never reaches the recreate block on a re-run, because migration 031 adds
+`TenantFilter_Promises` — which 001 predates and therefore does not drop, and which holds a hard
+dependency on `dbo.fn_tenant_filter`. So `CREATE OR ALTER FUNCTION` fails, the seven drops before
+it are already committed, and the loss is permanent. The two survivors are exactly the two 001
+does not know about.
+
+#### Why CI could not see it, and a developer always could
+
+`plugin-harness-ci.yml:354` points `CLEAT_TEST_MSSQL` at `database=master` on a fresh SQL Server
+container. The migrations are applied exactly **once**, so there is never a second application to
+fail. A developer following CLAUDE.md and setting all three DSNs has the opposite: a long-lived
+database that already carries the schema. **This whole class of defect — anything that only goes
+wrong on re-application — is invisible to a CI that starts from an empty container every time.**
+
+The MSSQL arm of `OpenTestDB` creates a `SCHEMA`, not a database (MySQL gets its own database),
+so this ran against the shared `cleat` database in `dbo`.
+
+#### Fixed
+
+One transaction per migration file, which restores the atomicity 001's header depends on. The
+re-run still fails — that is a separate defect, [§3.237](#3237) — but it now fails the way 001's
+header calls "the OLD ordering failed safely", leaving the database as it was found.
+
+#### The regression test's first version passed the falsification
+
+Worth recording, because it is CLAUDE.md's "a falsification that stays green is telling you which
+case you did not write", and the flaw was invisible by inspection. The test measured the policy
+count after one application and compared it against the count after a second. Backing the
+transaction out left it **green**: on an already-migrated database the *first* application is the
+damaging one, so the test compared 2 against 2 and found them equal. The `before == 0` vacuity
+guard did not fire, because 2 is not 0.
+
+What it needed was not a delta but an **absolute** — the set of policies the migrations bind,
+parsed from the migrations — asserted after *both* applications. Two known-positives now fail
+without the fix, where the first version failed on neither:
+
+| starting state | without the transaction |
+|---|---|
+| fresh database | `RE-APPLYING … left 2 of the 9 … standing` |
+| already-stripped database | `after applying … carries 2 of the 9 …` + the drop-and-recreate instruction |
+
+The parse is anchored at line start (`^CREATE SECURITY POLICY dbo\.`) for the reason this document
+keeps re-learning: unanchored, it also matches 001's own header, which *discusses* the statement in
+prose. Measured 2026-09-06 — unanchored returns 16 distinct "names", 7 of them fragments of English
+sentences; anchored returns the 9 that exist.
+
+### 3.240 `TestPythonWasmAbiBoundary` compared two hardcoded lists in the same file — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+The test's stated job is to catch a Python SDK that imports a host function the engine does not
+register — which is not a degradation but a hard failure, since a guest importing an unregistered
+name does not instantiate at all.
+
+It never read either side. `pythonExpectedImports` was a literal in
+`engine/python_wasm_e2e_test.go`, and so was `registeredImportNames()` in the same file, carrying
+the comment:
+
+    // This list must stay in sync with the Export("...") calls in registerHostFunctions
+    // in imports.go. When adding new host functions, add them here too.
+
+Nothing read `imports.go`. Nothing read the Python SDK. The test asked whether the file agreed
+with itself, and it always did.
+
+**It had rotted in both directions, and reported green throughout.** Measured 2026-09-07:
+
+| | count | what |
+|---|---|---|
+| named by both lists, not exported | **8** | the six durable-state calls ([§3.216](#3216)) and the two inert signal calls ([§3.220](#3220)) |
+| exported, named by `registeredImportNames` | missing **13** | including `cleat_poll_update` and `cleat_complete_update`, added days earlier |
+
+The first row is the exact condition the test exists to detect: eight names it asserted a Python
+workflow needs and the engine does not have. Had the Python SDK really still imported them, every
+Python workflow would have failed to instantiate and this test would have said fine.
+
+It did not — the SDK had dropped all eight — so **no live defect, only a guard that could not
+have found one.** Confirming that took care of its own, because the sole occurrence of
+`cleat_send_signal_and_wait` in `host_calls.py` is a *retraction*:
+
+    # There is no _import_cleat_send_signal_and_wait or
+    # _import_cleat_reply_to_signal here (removed 2026-09-06, ...)
+
+A name scan reads that as a confirmation. It is the [§3.213](#3213) AssemblyScript trap verbatim,
+in a second SDK.
+
+**Both sides are now derived.** The engine side calls `wazeroCleatABI`, which instantiates the
+host module and enumerates `ExportedFunctionDefinitions()` — the real registration, already used
+by `engine/hostabi_runtime_parity_test.go`. The Python side is read out of `host_calls.py` twice,
+in two ways chosen to fail in opposite directions:
+
+- **strict** — line-anchored, accepting an alias only where an `import ... as _import_X` can
+  legally appear. A comment line begins with `#` and cannot match.
+- **loose** — the alias token anywhere at all, prose included. Wrong by construction; its only
+  job is to disagree.
+
+The test fails if they differ, naming which reading saw what. Both returned the same 44 names,
+and a third reading — Python's own `ast` module over the same file, collecting `alias.asname` —
+returned the identical 44. Two readings agreeing is evidence; the strict one alone was a claim.
+
+**The alias is not the ABI name**, which a single reading would have got wrong: six aliases drop
+the `cleat_` prefix (`_import_uuid`, `_import_fetch`, `_import_side_effect`, `_import_get_scope`,
+`_import_set_scope`, `_import_continue_as_new_versioned`). Treating the alias as the name reports
+six phantom gaps. The mapping rule is validated by its own output rather than asserted: applied
+to all 44 it lands every one on a real engine export, with nothing missing.
+
+**Five real Python SDK gaps fell out**, held in `pythonUnboundBaseline` as shrink-only so that
+closing one is noticed. `cleat_await_any_child`, `cleat_poll_child`, `cleat_json_parse`,
+`cleat_json_stringify`, `cleat_run_detached` — things a Go workflow can do and a Python one
+cannot. Three further unbound names are in the baseline and are not gaps: `cleat_poll_work` and
+`cleat_complete` are the worker handshake, and `cleat_register_query_handler` is deliberately
+unbindable.
+
+**Four known-positives, one per mechanism** — because the broken version passed too, so "it
+passes" was never evidence:
+
+| control | result |
+|---|---|
+| add a Python binding the engine does not export | fails, names `cleat_not_a_real_host_call` |
+| add a retraction *comment* naming a phantom alias | fails as a strict/loose **disagreement** — not counted as a binding |
+| add an engine export with no Python binding | fails, names it as beyond the baseline |
+| break the strict regex so it matches nothing | fails on the floor, rather than passing vacuously |
+
+The third is the widen-detector; the fourth is the [§3.213](#3213) lesson made mechanical — an
+extractor that sees less inflates every metric built on it, and with zero names "every Python
+import is registered" is vacuously true.
+
+**A note on method, since it cost a rewrite.** Restoring after known-positive four with
+`git checkout HEAD -- engine/python_wasm_e2e_test.go` discarded the entire uncommitted change,
+because the file's committed state was the *old* test. CLAUDE.md's "a falsification has two steps,
+and only one of them announces failure" applies to an uncommitted rewrite as much as to a reverted
+fix: the revert is loud, the restore is silent. Commit before falsifying, or restore from a copy.
+
+**This was a single instance, not a sweep.** Every other Go test file holding ten or more literal
+`cleat_` names uses them as fixtures that make a real call, so a stale name fails to link;
+`grep -rn "must stay in sync" engine/*_test.go wasm/*_test.go` now returns only this section's own
+quotation of the comment that was removed.
+### 3.246 The OAuth middleware refused every bearer token that was not its own, so no API key worked — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+Reported by WS-3 as #912 after the `cleat-ports` suite went from 70 passing to failing every test.
+**Green on `dc543263`, broken on `bf199c23`** — a regression on `develop`, not in a branch.
+
+`plugins/oauthprovider`'s middleware intercepts any `Authorization: Bearer …`, looks the token up
+in `oauth_sessions`, and returned **401 `{"error":"invalid session"}`** when it was absent. A cleat
+API key is presented exactly that way (`auth/middleware.go:48`: *"Supports: Authorization: Bearer
+cleat_sk_<key>"*), so it never reached `auth.Middleware`.
+
+It became live when [§3.315](#3315) linked all 20 bundled plugins: `cmd/cleat-worker/main.go:747`
+wraps the whole handler chain in **every** plugin implementing `HasMiddleware`. `--require-auth`
+defaults to true, so a default deployment served an API where **no key worked at all** — the same
+practical outcome as §3.66, by a different route.
+
+**The middleware was correct in isolation and its own tests passed**, because they exercise it with
+OAuth tokens. It only becomes wrong sitting in front of a handler that accepts a *different* bearer
+scheme, which is exactly what linking it did. The general form is worth naming: **a middleware
+cannot ask a database "is this token mine?" — only "is this token a live session of mine?" — and a
+NO to the second was read as a NO to the first.**
+
+**The fix is not the obvious fall-through-on-error, and the difference matters.** Falling through on
+any lookup failure fixes #912 but also stops this plugin refusing a token that IS its own and is
+expired or revoked. The two schemes do not collide, so they can be told apart by shape:
+`generateSessionToken` emits the hex of 32 random bytes — 64 lowercase hex characters — and an API
+key carries a `cleat_sk_` prefix. `looksLikeSessionToken` gates the lookup, so:
+
+| token | before | after |
+|---|---|---|
+| `cleat_sk_…` | **401 invalid session** | falls through; `auth.Middleware` decides |
+| 64-hex, live session | session injected | session injected |
+| 64-hex, expired or unknown | 401 | **401** — still this plugin's business |
+
+Nothing is loosened. The middleware only ever *adds* `SessionInfo`, grants nothing on its own, and
+sits outside `auth.Middleware`, which still refuses a request carrying no valid credential.
+
+**Four existing tests had to change, and what they revealed is the point.** They authenticated with
+`"valid-mw-token"`, `"expired-mw-token"`, `"nonexistent-token"` — strings no production path can
+issue. Under a shape gate they fall through, so they were updated to real 64-hex tokens. A test
+whose fixture could never occur in production is a test that cannot see a defect about token shape,
+which is the defect that happened.
+
+`TestAFreshlyGeneratedSessionTokenLooksLikeOne` ties the predicate to the generator it describes,
+in both directions: 20 freshly generated tokens must be accepted, and `cleat_sk_…`, a 63-character
+hex string and a 64-character non-hex string must all be refused. Without it, a change to
+`generateSessionToken` would silently stop this plugin recognising its own sessions.
+
+**Falsified**: removing the gate returns the exact symptom, `401 {"error":"invalid session"}`.
+
+**Swept, and it is not a class.** Three plugins implement `Middleware` — `oauthprovider`,
+`ratelimiter`, `auditlog`. Only this one rejects on a credential decision; `ratelimiter` answers 429
+on a rate decision and consumes no shared auth header, `auditlog` never rejects. Re-derive with
+`grep -rln "func (p \*Plugin) Middleware(" plugins/`.
+
+**The standing lesson, which is WS-3's and worth recording as theirs:** linking 19 dormant plugins
+activated 19 sets of assumptions that had never been tested against each other. Three separate
+problems came out of that one change — the shared config blob, `email`'s unconditional Init failure,
+and this — and none of them is a defect in the plugin that carries it.
+### 3.257 The all-dialect plugin test asserted tables exist, not that a row can be written — 🟢 **FIXED 2026-09-08** (WS-1, 2026-09-08)
+
+cleat#963, routed by WS-3. This is why [§3.255](#3255) could happen: `TestPluginMigrations_AllDialects`
+runs every plugin's migrations on every dialect and then asserts `tableExists`. That passed
+throughout — the table *was* there. It was the INSERT that could not succeed.
+
+**"The schema was created" and "the schema is usable" are different claims**, and an existence check
+only answers the first. It is the same split as *the value round-trips* versus *the value is
+honoured*, and *the reader is live* versus *the writer exists* — and a guard that asserts existence
+passes for every one of them.
+
+**The mechanism, not the sweep.** A loose regex over `plugins/*/migrations.go` reported 13 plugins
+with per-dialect asymmetry, and the first checked precisely was already compensated. **That number
+was never a finding.** The new check asks each *real* database what it did with the DDL and reports
+**two**:
+
+    audit_events.id         mysql requires a value, mssql supplies one   (audit-log)
+    event_subscriptions.id  mysql requires a value, mssql supplies one   (event-triggers)
+
+The property asserted is not "does plugin X's INSERT work" — that needs a write path per plugin and
+only covers statements someone has already written. It is:
+
+> the three dialects must **agree** about which columns a writer must supply.
+
+If they agree, a statement that works on one works on all, which is exactly the invariant §3.255
+broke. `information_schema` is the oracle because it sees identity columns, generated columns and
+defaults that a pattern over SQL text cannot.
+
+Both current asymmetries are compensated and were **verified at source rather than taken on report**:
+audit-log supplies `uuid.NewString()` on every dialect (§3.255), and event-triggers carries a
+MySQL-specific INSERT at `queries.go:41` listing `id` where the other two omit it. The second is the
+weaker shape — the statement that must supply the value and the schema that requires it are in
+different files with nothing tying them together.
+
+**The guard read a stale schema, and falsifying it is what showed that.** Removing the MySQL default
+from `audit_events.timestamp` did *not* redden the test: `RunMigrations` records applied versions and
+skips them, and the MySQL and SQL Server backends hand back the **shared** test database whose plugin
+tables some earlier run created. So the mutated DDL never ran. That is CLAUDE.md's *"when a schema
+migration lands, recreate your test databases"* — and **a guard reporting agreement from a stale
+schema is cleat#963 one level up.** Fixed with a scratch database per dialect; the mutation then
+fails as it should.
+
+**What the baseline does not assert, said rather than implied:** it compares *schemas*, so an entry
+means "the dialects disagree and I have read the code that compensates". Deleting event-triggers'
+MySQL INSERT would not redden this test. Where that matters the compensation needs its own write
+test — audit-log has one (§3.255, which drives `recordAudit` against a real MySQL), event-triggers
+does not, and that gap is named here rather than left implicit.
+
+`./engine/` 4685 pass / 0 fail / 7 skip.
+
+### 3.255 Audit logging recorded nothing on MySQL, and the empty table looked like a quiet system — 🟢 **FIXED 2026-09-08** (WS-1, 2026-09-08)
+
+cleat#958, found by WS-3 running the `samples-go` port against a second and third dialect.
+
+`plugins/auditlog/middleware.go` inserted without an `id`, relying on a database-side default. Two
+of three dialects have one:
+
+| dialect | `audit_events.id` | rows after a full port run |
+|---|---|---:|
+| postgres | `UUID PRIMARY KEY DEFAULT gen_random_uuid()` | 18,657 |
+| mssql | `UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID()` | 473 |
+| **mysql** | `CHAR(36) NOT NULL`, **no default** | **0** |
+
+Reproduced directly before changing anything:
+
+    insert WITHOUT id -> Error 1364 (HY000): Field 'id' doesn't have a default value
+    insert WITH id    -> <nil>
+
+**Not "fewer rows" — the table had never held one on that dialect.** The error is logged and
+swallowed: the request succeeds, the middleware returns, the worker carries on. The only symptom is
+an empty audit table, which is indistinguishable from an audit log for a quiet system. That is the
+one failure mode audit logging exists not to have, because the absence of an entry is read as
+evidence the event did not happen.
+
+**Fixed by supplying the id, not by adding a MySQL default.** The narrower fix works; this one
+removes the class. Three databases no longer have to agree about UUID generation for one statement
+to succeed, it needs no MySQL 8.0.13+ for `DEFAULT (uuid())`, and a fourth dialect gets it right on
+day one. `github.com/google/uuid` was already imported in the same file.
+
+**The fake was the reason nothing caught it, and that is the more useful half.** The behavioural
+tests use a driver double that **invented** an id with `uuid.New()` while reading the caller's other
+arguments by ordinal. *A double that supplies what the database will not is indistinguishable from a
+database that supplies it* — so a statement MySQL rejects looked fine. It now parses the id the
+caller actually sends and refuses anything that is not a UUID, so reverting the fix reddens the
+fake-backed suite too.
+
+**And the first version of the new test was weaker than it looked.** It issued the `INSERT` itself,
+which asserts the shipped DDL accepts *a statement I wrote* — it would have passed unchanged with
+the plugin regressed. It now drives `recordAudit`, and because that logs and swallows, the assertion
+is on the **row count**, which is also the honest shape: an operator's only signal was an empty
+table. Falsified: reverting gives *"the plugin recorded 0 audit rows on MySQL, want 1"*.
+
+Two fixture problems were fixed rather than worked around: the DDL names its indexes after the
+table, so a renamed table collided (`Error 1061`), and the shared test database already held a copy
+whose shape this test would then have been asserting against. It builds a scratch **database** from
+the shipped `UpMySQL` migration.
+
+**The port suite passes on all three dialects on top of a subsystem that worked on two**, which is
+WS-3's observation and worth keeping: coverage of the engine said nothing about this, and nothing in
+either port asserts anything about audit events.
+
+### 3.254 A routing-rule removal reported success for a rule that never existed — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+cleat#946's **second half**. #948 fixed the first — `ShardedStore` routed the removal by rule ID
+while rows are placed by workflow name, so it deleted from the wrong shard — and left this: **the
+removal reported success either way.**
+
+No implementation checked rows-affected. A `DELETE` matching nothing succeeds, so the store returned
+nil and `handleRemoveRoutingRule` answered `200 {"status":"removed"}` for a rule that never existed.
+`PickVersionByRouting` runs on every workflow start, so an operator tearing down a canary was told
+it was gone while it went on shifting live traffic.
+
+**I duplicated #948 before noticing it.** The issue was unassigned, I self-assigned and built the
+whole fix — including a `tryEachShard` rewrite — and found the merge conflict only at rebase. The
+sharding half is theirs; this entry is what their fix did not cover, rebuilt on top of it rather
+than forced over it.
+
+**The two halves interact, and that is the part worth a test.** #948 has `ShardedStore` ask **every**
+shard, and `forEachShard` **returns on the first error**. The moment a store starts returning
+`ErrRoutingRuleNotFound` — which n−1 shards legitimately do — a naive pass-through aborts the walk
+at shard 0 and never reaches the holder, **reintroducing #948's defect by way of fixing the
+reporting**. The sentinel is swallowed per shard and re-raised only if no shard claimed the row.
+
+`TestTheNotFoundSentinelDoesNotAbortTheShardWalk` puts the rule on the **last** shard on purpose, so
+a pass-through fails deterministically rather than depending on where the rule happens to sit.
+Falsified: passing it through fails with *"the walk stopped early"*.
+
+**The reporting half needed real databases.** Every mock in the suite returns nil, which is why
+nothing saw this — a Go nil has no opinion about how many rows were touched. Neutering the check
+makes all three dialects go silent again.
+
+The handler now answers **404**: a rule ID naming nothing is a bad request path, not a server fault.
+
+`./engine/` 4674 pass / 0 fail; `cmd/cleat-worker` green; gofmt clean.
+
+### 3.253 Python's `run_detached` ran the work inline and called it detached — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+`HostCalls.run_detached(fn)` took a callable and executed it with `fn(self)`. It made **no host call
+at all**, while its docstring said *"the host would ensure the detached execution continues even if
+the parent workflow is cancelled"*. The work ran inside the caller and was cancelled with it — the
+one thing the method existed to prevent.
+
+Left open by [§3.252](#3252) as a public API decision rather than a wiring change. **Breaking
+changes were authorised on 2026-09-07**, so it is now
+`run_detached(name: str, input_json: str)`, wired to `cleat_run_detached` and matching Rust's
+`run_detached(name, input_json)`.
+
+**Go was already fixed.** `cleat/runtime_workflow.go` takes `(name, inputJSON)` and returns an
+error when unwired, carrying a comment that describes the closure version as previous — and Go's
+row in [§3.241](#3241)'s parity matrix never listed `cleat_run_detached`. Checked before writing
+anything, which is why this entry is Python-only.
+
+**There is no mechanical migration, and that is the honest thing to say about it.** The old
+signature's whole point was to run *local code*; the host cannot run local code. A caller passing a
+function has to name a deployed workflow instead. The docstring says so rather than implying a
+rename.
+
+**A test asserted the defect, and passed for as long as it existed.**
+`test_run_detached_executes_fn` passed a function and checked it had been **executed** — which is
+precisely the behaviour that made the method a silent no-op. It now asserts the call is *recorded*
+and that nothing runs inline. A test can pin a defect as firmly as a feature, and this one did.
+
+**Five layers, and the guards found the two I would have missed.** WIT, regenerated bindings,
+`WitToEnvImport`, `HostCalls`, `LocalHostCalls`, plus the fixture, the README and the local-host
+test. `TestEveryImportedWitFunctionHasAnEnvMapping` and both Python baselines were the checks that
+made the set complete rather than my memory of it — the rewrite row went into
+`durable-extended-lifecycle` because that is where the WIT declares it, a distinction that cost a CI
+round trip in §3.252.
+
+Falsified in both directions: removing the `_import_` alias makes the engine-side guard report
+`cleat_run_detached` unbound; removing the rewrite row makes the harness guard report it unreached.
+
+**Python's unreached set is now `cleat_json_parse` and `cleat_json_stringify` — and neither is a
+gap.** Every real capability gap in every SDK is closed:
+
+| SDK | real gaps |
+|---|---|
+| rust | 0 |
+| java | 0 |
+| assemblyscript | 0 |
+| python | **0** |
+| go | 3 — `cleat_fetch`, `cleat_get_scope`, `cleat_set_scope` |
+
+`python-sdk` 458 pass / 1 skip; `./engine/` 4662 pass / 0 fail; `tests/plugin-harness` green;
+`./wasm/` green.
+
+### 3.251 Rust and Java reported a bare error code where the host wrote a message — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+[§3.200](#3200)'s defect in two more SDKs, and the follow-up [§3.244](#3244) named as its own
+prerequisite: fixing these in Rust *first* would have added fifteen more out-of-bounds reads.
+
+A call with an output buffer usually puts its failure reason there — `engine/children.go` writes
+`rec.Err`, `AwaitPromise` writes `rec.PromiseError`, `SideEffect` writes its `errMsg` — and a guest
+reporting the bare `errCode` throws away the only thing that says what went wrong. **15 of 22 Rust
+wrappers and 11 of 20 Java wrappers did.**
+
+Now 13 and 11. The two Rust holdouts are `json_parse` and `json_stringify`, which return
+`Option<String>` and have **no error channel at all** — nothing to improve, and excluded for a
+reason rather than missed.
+
+**The obvious implementation is wrong, and it is worse than what it replaces.** "Read the buffer,
+fall back if empty" returns **65536 NUL characters** as the error text on a bad-parameter refusal:
+`errBadParam` is returned *before* the handler runs so nothing is written, yet a length is still
+decoded from the sentinel's bits — 4294967295 — which clamps to the whole zeroed buffer, and
+`is_empty()` is false. Measured before shipping it:
+
+    decoded len = 4294967295   returned len = 65536   is fallback? = false   all NUL? = true
+
+`host_message_or` therefore **truncates at the first NUL**. The host writes UTF-8 with no interior
+NUL and an unwritten buffer is zeroed, so "up to the first NUL" is exactly what it wrote.
+Falsified: removing the truncation fails with *"an unwritten buffer with a bogus length must fall
+back, not return 65536 NUL bytes"*.
+
+**A helper rather than an edit per site, because the return shapes differ.** The first attempt
+rewrote each branch to `return Err(...)` and did not compile: these wrappers return
+`(String, Option<String>)`, `(String, bool, Option<String>)`, `Result<_, CallError>` and more.
+Wrapping the `format!` each site already had preserves every signature and makes the diff show
+exactly what was kept.
+
+**`await_signals_ms` was skipped by the sweep for a mechanical reason, not a principled one** — two
+buffers and an `as u32` cast the extractor's pattern did not match. Wired by hand, reading the
+signal-NAME buffer with its own clamp preserved: without it an over-long reported length reads past
+the name region into the payload buffer beside it. Java's equivalent had the same shape and the same
+fix.
+
+**Not covered end-to-end, and that is stated rather than papered over.** The plugin harness drives
+no error through any of these paths — in an in-memory environment they succeed or suspend — so the
+recorded outcomes are unchanged and nothing else in the tree would notice a mis-wiring.
+
+What *is* checked is the property the bulk edit could actually get wrong:
+`every_error_branch_reads_the_same_buffer_as_its_success_path`. A wrapper reading a **neighbouring**
+buffer still compiles, still returns a `String`, and reports another call's data as this call's
+error message.
+
+**Falsifying that guard took three attempts, and the failures are the interesting part.** Pointing a
+branch at an undeclared name did not compile, so the test never ran and the empty output read as a
+pass. Inserting a decoy buffer landed *inside* a `vec![0u8; N]` macro, because the pattern stopped
+at the semicolon within it. Only the third — a correctly placed second buffer — compiled and made
+the guard report `create_promise: error branch reads decoy_buf, success path reads id_buf`.
+
+**Every wrapper except `await_signals_ms` has exactly one buffer today**, so the mismatch is
+currently structurally impossible; the guard earns its keep when the next two-buffer wrapper is
+added. That is worth saying plainly rather than implying it catches something live.
+
+clippy clean on all three crates; `gradle test` clean; `tests/plugin-harness` green.
+
+### 3.250 A backed-off worker now says when runnable work exists — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+The visibility half of [§3.249](#3249), implemented after WS-3's user decided against a behavioural
+change. `ClaimWorkflows` uses `FOR UPDATE SKIP LOCKED`, so "nothing to run" and "every candidate was
+locked" arrive at the dispatch loop identically, and the second backs off to 6 × `pollInterval`
+while the work sits there.
+
+**`CountRunnableWorkflows` on `WorkflowStore`, and the cost objection is answered by WHERE it is
+paid.** The information needs a query, and a query on every idle poll is the objection that ruled
+out the behavioural fix — the idle poll is this loop's most common path. So it is asked only when
+`idleTicks == maxIdleTicks`: one query per six poll intervals, in the only state where the answer
+changes what anyone would do. A briefly-idle worker does not need to know; one fully backed off for
+minutes with runnable rows does.
+
+`TestTheRunnableCountIsAskedOnlyAtFullBackoff` pins that, and it is the test that protects the
+design rather than the behaviour. `idleTicks` resets only on a parent wake or a `NOTIFY`, so
+`== maxIdleTicks` is true **exactly once** per idle streak. Measured: **22 claim cycles, 1 count
+query.** Falsified both ways — `>=` in place of `==` gives **17**, and removing the call gives 0.
+A regression to `>=` would put a query on the hot path while every other test still passed.
+
+**The predicate must match the claim's, and the two ways to get it wrong are opposite:**
+
+- drop `task_queue` and it **over-reports** — rows a worker is correctly declining read as work it
+  is failing to claim. This was the one flaw in cleat#923 as filed, and it is now WS-3's note on
+  the issue.
+- drop the tenant scoping and it over-reports across tenants, which on SQL Server is not
+  hypothetical: `dbo.fn_tenant_filter` is off for the admin role, so `AND tenant_id` **is** the
+  whole of the scoping there ([§3.91](#391)).
+
+Asserted by **agreement with the claim** rather than by reading the SQL, because the SQL differs per
+dialect — PostgreSQL leans on RLS inside `beginTxWithRLS`, MySQL and SQL Server carry an explicit
+predicate. Agreement is the invariant; the spelling is not. Falsified per clause: dropping
+`task_queue` fails the blindness test, dropping the status predicate fails the agreement test.
+
+**A deliberate interface addition with four implementers** — `PostgresStore`, `MySQLStore`,
+`MSSQLStore`, `ShardedStore` (which sums across shards, because the claim walks all of them). Named
+as a decision rather than left as drift: unlike the options [§3.889](#3889) is about, this one has a
+production caller in `cmd/cleat-worker/setup.go` from the first commit. The alternative — logging
+the backoff state alone — was rejected because a genuinely idle worker emits the identical line: it
+makes the *state* visible without making the *distinction* visible, which is the entire point.
+
+**One test failure was its own fault, and the harness had already said so.** The task-queue test's
+raw `UPDATE` matched zero rows, and the count "failed to move" — because SQL Server's filter
+predicate hides every row from a connection with no tenant session context. `pluginDepsBackends`
+carries `prepareRawAccess` for exactly this, with a comment saying the test would otherwise "report
+a failure that is really its own". It now also asserts `RowsAffected() > 0`, so a fixture that moves
+nothing fails as a fixture rather than as a finding.
+
+`maxIdleTicks` moved from a function-local `const` to package scope so the test binds to the real
+value rather than a copy of it.
+
+`./engine/` on all three dialects: 4651 pass / 0 fail / 7 skip.
+
+### 3.248 Nothing pinned that a dispatch point wires the update imports — 🟢 **GUARDED 2026-09-07** (WS-1, 2026-09-07)
+
+A workflow that registers an update handler and then waits **never names the imports it needs**.
+`AwaitSignals` calls `DispatchUpdates`, which calls the `pollUpdate` and `completeUpdate` *closure
+fields* — so nothing in such a workflow's own source mentions `PollUpdate` or `CompleteUpdate`, and
+the wiring rests entirely on a `compositeRequires` row in `wasm/usage.go`.
+
+Remove that row and `DispatchUpdates` returns at its `h.pollUpdate == nil` guard: the workflow
+accepts updates forever and handles none, **silently**. No error, no log, no failed call — the
+guard exists precisely because a guest compiled before updates existed must not crash.
+
+**This was the first thing worth checking when WS-3 reported #910**, a delivery failure that looked
+exactly like it. Ruling it out took a hand-built fixture and a temporary test row, because nothing
+in the tree pinned it. #910 turned out to be a timing artefact — the workflow had completed 0.31s
+before the update was created — but the elimination cost more than it should have.
+
+`testdata/updatedispatch` is that fixture, made permanent as a row of
+`TestEachRewiredMethodWiresItsImport`. Its shape is the real one: register a handler, then wait in
+slices so there is a dispatch point to service it, and **never call `DispatchUpdates` explicitly**.
+
+**The fixture shipped in [§3.247](#3247) already, unreferenced**, with a doc comment describing a
+test row that did not exist — a comment that was false about the tree the moment it landed. This
+adds the row it names.
+
+**Falsified**: dropping `AwaitSignals`'s `compositeRequires` row fails with *"a workflow whose only
+host call is h.AwaitSignals(...) wires no cleat_poll_update import; it would compile and be unable
+to act."*
+
+### 3.247 The update request key used a NUL separator, which PostgreSQL refuses inside JSONB — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+Reported by WS-3 as #914, on a run that had already proved delivery works — the caller's promise
+came back `resolved` and the handler ran. Then the workflow failed:
+
+    finalize workflow: append events: step 2:
+    pq: unsupported Unicode escape sequence (22P05)
+
+`updateRequestKey` joined the update name and the promise ID with a literal `\x00`. That key is
+recorded as `UpdateRequestID` on the `update_received` event, `store_events.go` puts it in the
+event payload, and `event_history.payload` is **JSONB** on PostgreSQL.
+
+**The precise mechanism matters, because the obvious statement of it is wrong.** PostgreSQL does
+not reject a raw NUL *byte* here — the byte never reaches it. `json.Marshal` escapes a NUL to the
+six characters `\u0000`, so what the engine sends is valid JSON *text*. PostgreSQL rejects that
+**escape**, because `jsonb` cannot represent the codepoint even escaped. Credit to WS-3 for
+separating the two questions: their first probe asked about a raw byte, which never occurs, and got
+`ISJSON = 0` from SQL Server — the right answer to the wrong question.
+
+**Unconditional** — the NUL is the separator, not a property of the data — so it was every update
+that reached a dispatch point.
+
+**The ordering is what makes it harmful.** `runUpdate` settles the caller's promise *before* the
+segment finalizes, so the caller was told the update succeeded and *then* the workflow failed and
+the state the handler produced was discarded. A caller polling that promise is told the update
+landed when it was thrown away.
+
+**Dialect-divergent, and measured rather than assumed** — the input is what `json.Marshal` really
+produces, `{"k":"a\u0000b"}`, not a raw byte:
+
+| dialect | storage model | result |
+|---|---|---|
+| **postgres** | `jsonb`, a parsed representation | **`ERROR: unsupported Unicode escape sequence (22P05)`** |
+| mysql | `JSON`, parsed but permits the codepoint | accepted |
+| mssql | `NVARCHAR` + `ISJSON()`, a text check | accepted, `ISJSON` = 1 |
+
+Three storage models, three answers, one input. The escape is well-formed JSON text, so a validator
+that checks *text* passes it and a type that must *represent* the value cannot.
+
+So a single-dialect test on MySQL would have passed while the primary backend was broken — and the
+two that accept it were silently storing a NUL in a column the third validates. WS-3 explicitly
+declined to guess this, citing [§3.245](#3245), where reading `001_schema.sql` and concluding gave
+the wrong answer about a CHECK that lived in `037`.
+
+**The fix is not a rarer separator.** `UpdateName` is chosen by the workflow author and can contain
+anything, so no delimiter is safe — a rarer one moves the collision rather than removing it. The
+key is now **length-prefixed**, which is unambiguous for every possible input:
+
+    "add"   + "p-1"  ->  "3:addp-1"
+    "a:b"   + "p-1"  ->  "3:a:bp-1"
+    "3:add" + "p-1"  ->  "5:3:addp-1"
+
+`splitUpdateRequestKey` is the only reader, so the encoding was free to change. It still accepts the
+NUL form: those keys cannot exist on PostgreSQL — the write that would have persisted one is the
+write that failed — but MySQL and SQL Server accepted them, so a workflow suspended mid-update on
+either has one in its history and must still replay. The two forms cannot be confused, because a
+length-prefixed key never contains a NUL.
+
+**The test that would have caught it, and did not exist.**
+`TestAnUpdateDeliveryEventPersists` writes the delivery event through a real store on all three
+dialects. Falsified by restoring the NUL, it reproduces both failure modes at once:
+
+    postgres  append one event: exec step 0: pq: unsupported Unicode escape sequence (22P05)
+    mysql     the persisted request key contains a NUL: "bump\x0001234567-..."
+    mssql     the persisted request key contains a NUL: "bump\x0001234567-..."
+
+**This is the third defect in one feature traceable to one missing test**, with [§3.245](#3245) and
+WS-3's withdrawn #910. `WithUpdateStore` had exactly one test, against a fake whose
+`GetPendingUpdateRequests` ignores its `workflowID` argument, and the end-to-end update tests run
+against `cleattest.NewTestEnv()` — no engine, no store, no guest. **A Go string holds a NUL
+happily; only a database objects.** Every assertion about this path was being held up by the layer
+that could not fail.
+
+### 3.245 A failed update could not be recorded as failed, so the caller's promise never settled — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+Reported by WS-3 as #908 against the stranded-update sweep. It is wider than that: **every** failing
+update, not only stranded ones.
+
+`workflow_update_requests.result` is JSONB on PostgreSQL and JSON on MySQL, and `""` is not valid
+JSON. Every failing update completes with an empty result **by construction** —
+`cleat/runtime_updates.go` passes `""` on all three failure paths (no handler registered, validator
+refusal, handler error) and `cmd/cleat-worker/setup.go:2667` passes it for a stranded one.
+
+So the `UPDATE` errored, the row stayed `pending`, and the caller's promise was never settled —
+[§3.238](#3238)'s defect restored on the failure path, reaching every caller whose update was
+refused. In the stranding sweep the error also skipped `RejectPromise` via `continue`, and the
+summary logged `count: len(updates)` a line below the ERROR, so it reported success.
+
+**All four call sites discarded the error with `_ =`**, which is why it was silent in the guest as
+well as in the log. They now go through `completeOrLog`, which cannot recover — the row is the
+host's and the next poll redelivers — but turns a silent hang into something a worker log shows.
+
+**Confirmed by measurement rather than by reading**, since the claim is about a database:
+
+    SELECT ''::jsonb   ->   pq: invalid input syntax for type json (22P02)
+
+**Fixed at the store layer, not at the four callers.** `jsonOrNull` renders `""` as SQL NULL in all
+three dialects. The column is nullable everywhere and `GetPendingUpdateRequests` already reads it
+back through `COALESCE(..., '')`, so NULL round-trips to `""` and nothing above the store sees a
+difference. Fixing the callers would have left the next one to rediscover it.
+
+**Why nothing caught it: `CompleteUpdateRequest` had four test doubles and no test.**
+`fakeUpdateStore`, `stubWorkflowStore`, `mockCollectMetricsStore`, `mockGCStore` — every appearance
+in the suite was a mock implementing the interface. A double accepts `""` happily, because a Go
+string has no opinion about JSON; only a database does. That is CLAUDE.md's *"watch which layer is
+holding the test up"*: the assertion passed on the strength of the layer that could not fail.
+
+`TestAFailedUpdateCompletesAndSettlesTheCallersPromise` runs against real databases on all three
+dialects, and asserts the row actually leaves `pending` — an `UPDATE` matching zero rows also
+returns nil.
+
+**A claim in the first draft was wrong, and the falsification caught it.** I wrote that SQL Server
+*accepted* `""`, having read `migrations/mssql/001_schema.sql`, which CHECKs `payload` and not
+`result`. The constraint is added by `037_json_column_checks.sql`. All three dialects refuse it,
+each in its own way:
+
+    postgres  pq: invalid input syntax for type json (22P02)
+    mysql     Error 3140 (22032): Invalid JSON text: "The document is empty."
+    mssql     conflicted with CHECK constraint "ck_workflow_update_requests_result"
+
+Reading the first migration and concluding is exactly what the *Project state* section warns
+against, and it was a paragraph I had quoted earlier the same day.
+
+### 3.244 The Rust SDK read past its own buffer whenever the host refused a bad parameter — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+`memory::read_string(ptr, len)` takes a raw pointer and does
+`slice::from_raw_parts(ptr, len as usize)`. It bounds nothing. All 40 call sites in
+`host_calls.rs` passed it a length the **host** reported.
+
+On the success path that is fine — the host wrote that many bytes. On a **bad-parameter refusal**
+it is not. `engine/imports.go` returns `errBadParam` = `0xFFFFFFFF_00000001` from **54 sites**,
+*before the handler runs*, so nothing has been written to the buffer at all — and the guest decodes
+a length out of the very bits carrying the sentinel:
+
+| layout | decoded length | buffer | overrun |
+|---|---|---|---|
+| `decode_simple_result` | 4,294,967,295 | 65,536 | ~65,535× |
+| `decode_cleat_call_result` | 16,777,215 | 65,536 | ~256× |
+
+Any wrapper that reads its buffer on the error path — which is the **right** thing to do, since the
+host's real message is usually there — therefore read far out of bounds. Seven did:
+`cleat_call`, `cleat_call_heartbeat`, `cleat_fetch`, `plugin_call`, `plugin_call_streaming`, and
+`schedule_cron` / `list_crons`.
+
+**Two of those seven are mine, from [§3.242](#3242), merged hours earlier.** That PR argued at
+length that reading the buffer is correct and that following the file's majority would be "the easy
+call and the wrong one". It was right about that and wrong about the read: it cited
+[§3.200](#3200), which says in as many words that `hostErrMessage` *"bounds-checks the length
+against the buffer, so `errBadParam`'s `0xFFFFFFFF` decodes to a length no buffer satisfies"* — I
+read that sentence, quoted the section, and did not apply it.
+
+**Guest-reachable, not theoretical.** `cleat_schedule_cron` alone returns `errBadParam` from 4
+sites in its own wrapper, on a workflow name, cron expression, timezone or input that fails
+validation — all guest-supplied.
+
+**Java was already safe**, which is why this is Rust-only: `readOutput` has always clamped with
+`Math.min(maxLen, OUT_BUF_SIZE)` and returns `""` for a non-positive length, and
+`decodeSimpleExtra` renders `0xFFFFFFFF` as `-1`. Go's `hostErrMessage` bounds-checks. Rust was the
+one SDK with no bound anywhere.
+
+**Fixed as a mechanism rather than at the seven sites.** `memory::read_result(buf: &[u8], len: u32)`
+takes the **slice**, so the capacity travels with the data and there is no second argument to get
+wrong; it is entirely safe code, because these buffers are ordinary `Vec<u8>` and reading them back
+never needed `unsafe` at all. All 40 sites converted; `host_calls.rs` now contains zero
+`read_string` calls.
+
+`read_string` itself is kept, deliberately: `cleat-macro`'s generated entry point calls it on
+`(args_ptr, args_len)` handed in by the host, where there is no slice to bound against. That is a
+different situation from reading back a guest-allocated buffer, and conflating them is what the
+guard exists to prevent.
+
+**Falsified in both directions**, because a clamp has two ways to be wrong and only one of them is
+the bug being fixed:
+
+| control | result |
+|---|---|
+| remove the clamp | `read_result_clamps_a_bogus_length_to_the_buffer` panics on a slice-index |
+| clamp to the whole buffer always | `read_result_does_not_round_a_short_length_up` fails — a short length must not be rounded up, or every success gains thousands of NULs |
+| reintroduce one `read_string` | the guard names the file and line |
+
+The second is the one worth having: it fails a "fix" that passes the first.
+
+The sentinel test asserts against `errBadParam`'s **real value** rather than a made-up large number,
+so it stays true only while the engine's constant does.
+
+`tests/plugin-harness` on all three dialects: 145 pass / 0 fail / 2 skip, unchanged — the Rust
+harness drives 27 host calls through the converted reads.
+
+**Still open, and this was the prerequisite for it:** 15 of 22 Rust and 11 of 20 Java wrappers
+still report a bare error code where the host wrote a message ([§3.200](#3200)'s defect in two more
+SDKs). Fixing those in Rust *requires* this change first, or it would have added 15 more
+out-of-bounds reads.
+
+**A citation error went out with [§3.242](#3242) and is corrected here.** Four merged files and a
+plan section cited "IMPROVEMENT-PLAN 3.258" for the host-message defect. **There is no §3.258.** I
+had run `sed -n '3250,3268p' IMPROVEMENT-PLAN.md`, read the passage about `hostErrMessage` at
+**line** 3258, and written it down as a **section** number. The real section is [§3.200](#3200),
+whose heading — *"A Go guest was told 'error 1 (timeout)' for every plugin failure, and the host's
+real message was in the buffer beside it"* — is the thing I was describing all along.
+
+A number that looks like a section number and came from a line-numbered tool is the same shape as
+this file's `TestTenantIsolationAcrossDialects`: a name that existed only in prose, cited
+confidently, matching nothing. **Check that a `§` you cite resolves to a heading** — one grep, and
+it would not have shipped:
+
+    grep -c '^### 3\.258 ' IMPROVEMENT-PLAN.md     # 0
+
+The same pass corrected two denominators that [§3.242](#3242) itself had made stale within the
+hour: the Rust and Java wrapper counts read "of the 20" and "of the 18", the totals *before* cron
+added two wrappers to each.
+
+### 3.243 Java's executed host-call coverage skipped its own fixture, so 8/70 was not a fact about Java — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+`scripts/sdk-host-call-coverage.py` reported java at **8/70 executed** against rust's 27/70 and
+go's 26/45. That gap was not about Java.
+
+`tests/plugin-harness/testdata/hostcallsjava/` exists, is built and executed by `TestHostCallsJava`,
+and exercises two dozen host calls. It was simply **not in java's `EXECUTED` globs**, where go, rust
+and assemblyscript all list their own:
+
+| SDK | lists its own `hostcalls*` fixture |
+|---|---|
+| go | ✅ | 
+| rust | ✅ |
+| assemblyscript | ✅ |
+| **java** | ❌ — only `javaworkflow/**` and `saga-java-port/**` |
+
+Adding it moves java from **8 to 26**, with **no Java code changed at all**. So this is a
+measurement correction, not an improvement, and the distinction is the whole entry: the number was
+never a statement about the SDK's coverage. It was a statement about which files the scan opened,
+and it read as the former.
+
+**Found because [§3.242](#3242) made it visible.** Binding cron in Rust *and* Java raised rust's
+executed count 25 → 27 and left java's at 8. Two SDKs, the same two calls wired into the same
+harness, one number moving — which is the shape that says the instrument is wrong rather than the
+subject.
+
+**Fixed as a mechanism, not a sweep.** `check_hostcall_fixtures_are_counted()` walks
+`tests/plugin-harness/testdata/hostcalls*` and requires each SDK's `EXECUTED` entry to cover its own
+fixture. A per-SDK list of globs is exactly the kind of thing that gets four entries right and omits
+the fifth, and nothing in the output says which happened. **Anchored on the fixture directory
+existing**, not on a name appearing in the script, so a comment cannot satisfy it.
+
+Known-positives, both directions: removing java's glob reports java; removing rust's reports rust.
+The check is general, not fitted to the case that prompted it.
+
+**One stale sentence went with it.** The rust entry's `why` read *"22 of the 24 wave-1 arms make a
+call ... the two cron arms have no Rust binding"* — true when written, false the moment §3.242
+landed an hour earlier. Corrected to 24 of 24, with the old claim and its expiry recorded rather
+than silently overwritten.
+
+### 3.242 The cron family is bound in Rust and Java — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-07)
+
+`tiers.yaml` holds `workflow-callable-cron` at **tier 2** for one stated reason: *"rust and java
+SDKs declare no cron surface at all"*. Both now do.
+
+`cleat_schedule_cron`, `cleat_delete_cron` and `cleat_list_crons` are declared in
+`crates/cleat-sdk/src/host_calls.rs` and `crates/cleat-java/.../HostCalls.java`, with safe wrappers
+mirroring Go's `ScheduleCron(workflowName, cronExpr, timezone, inputJSON) -> (scheduleID, error)`.
+
+**Only `ScheduleCron` checks the stop bit, and that asymmetry is measured rather than copied.**
+`engine/schedules.go` calls `stopBeforeNewWork` in `ScheduleCron` and in neither of the other two —
+a cron schedule is new work with the longest reach of anything in this family, since it registers a
+*recurring* trigger, while deleting and listing are not new work. Verified 2026-09-07 by reading
+all three handlers; AssemblyScript already had it this way.
+
+**The error branches read the OUTPUT BUFFER, which is deliberately not what the rest of either file
+does.** `engine/schedules.go` writes its message into the id buffer and returns
+`packSimpleResult(1, written)`, so a guest printing the bare code discards the only thing that says
+what went wrong — [§3.200](#3200), fixed there for the generated Go adapters. Measured across both
+SDKs on 2026-09-07, counting only `read_string`/`readOutput` **inside** the error branch:
+
+| SDK | wrappers with an output buffer | read it on error | report a bare code |
+|---|---|---|---|
+| rust | 20 | 5 | **15** |
+| java | 18 | 7 | **11** |
+
+Following the majority would have been the easy call and the wrong one. **The first measurement of
+this said 20 of 20 read the buffer**, because the detector looked for `read_string` anywhere after
+`err_code != 0` — and every one of these reads the buffer on the *success* path, immediately below.
+The corrected detector matches braces. That is this document's recurring shape again, and again in
+the flattering direction: the wrong answer said the SDK was already doing the right thing
+everywhere.
+
+The remaining 26 are a real defect and are **not** fixed here — one PR, one thing.
+
+**Proven by execution, not by declaration.** `ScheduleCron` and `ListCrons` are wave-1 calls, so
+both SDKs already had rows asserting the *gap*: `statusUnsupported`, "no cleat_schedule_cron
+import". Java's row said, in as many words, that the day Java gained the binding somebody would
+have to decide the right answer. The answer is that the call reaches the host and is refused by it,
+which is a different fact from having no binding. Recorded with `CLEAT_HOSTCALL_RECORD=1`:
+
+    RECORD  ScheduleCron  error  no workflow store configured: workflow <run-id> cannot schedule "harness-workflow"
+    RECORD  ListCrons     error  no workflow store configured: workflow <run-id> cannot list schedules
+
+**Byte-identical between Rust and Java**, which is the strongest thing this pair can say: two SDKs
+that spell the import differently encoded four arguments into the same host answer. The rows assert
+the tail rather than the whole string, because the host's text embeds the run ID; the substring
+chosen is the one that proves the *argument* crossed — `harness-workflow` is what the fixture
+passed, coming back inside a message the host composed.
+
+**Falsified.** Reverting the Rust error branch to a bare code fails the row with *"status error as
+expected, but the detail changed"* — so the row asserts the host's message specifically, not merely
+that something failed. Restored from a saved copy and re-verified, not with `git checkout`.
+
+**[§3.241](#3241)'s baseline worked on its first real use.** Applying the bindings turned that test
+red with *"sdkUnreachedBaseline[\"rust\"] names 3 host export(s) this SDK now reaches"*, naming all
+three, for Rust and Java both. The shrink-only direction is the half that is easy to get wrong,
+because nothing else notices an improvement.
+
+`tests/plugin-harness` on all three dialects: 145 pass / 0 fail / 2 skip. `cargo clippy
+--all-targets -- -D warnings` clean; `gradle test` clean.
+
+**What this does NOT do: it does not move `workflow-callable-cron` to tier 1.** That entry gives
+two reasons for its tier, and this closes one. The gate coverage it asks for is a real cron
+end-to-end on each SDK — `engine.TestPythonCronEndToEnd` is the model — and the harness rows here
+run against an env with no workflow store, so they prove the binding and the boundary, not the
+scheduling. Changing `tiers.yaml` is a separate decision with its own evidence.
+
+### 3.241 Nothing checked whether an SDK can reach every host call — 🟢 **GUARDED 2026-09-07** (WS-1, 2026-09-07)
+
+`TestEverySDKImportIsAHostExport` checks that every name an SDK imports exists on the host. That
+direction fails loudly — the guest does not instantiate. **Nothing checked the reverse**, and the
+reverse fails silently: the capability simply does not exist in that language, and nothing
+anywhere says so.
+
+The two are not redundant. **An SDK that binds nothing passes the forward test perfectly.**
+
+`TestEverySDKReachesEveryHostExport` adds the reverse, reusing the same five extractors — which
+are now a shared `sdkImportSources` table, so a fix to a parse improves both directions. Measured
+2026-09-07, over the 49 workflow-facing exports (52 less the worker handshake pair and the
+deliberately unbindable `cleat_register_query_handler`):
+
+| SDK | cannot reach | what |
+|---|---|---|
+| **assemblyscript** | **0** | full parity |
+| rust | 3 | `cleat_schedule_cron`, `cleat_list_crons`, `cleat_delete_cron` |
+| java | 3 | the same cron trio |
+| python | 5 | but only **3** are gaps — the same `json` caveat as Go, see below |
+| go | 6 | but only **3** are gaps — see below |
+
+**AssemblyScript, not Go, is the only SDK at full parity.** That is not what anyone would have
+guessed, and it is the reason this direction was worth checking. It is also the one row here that
+no existing document states.
+
+**The raw count overstates Go, and saying "6" would have been the flattering-direction error this
+document keeps recording.** Three of Go's six are reached another way and adding the host call
+would be redundant:
+
+- `cleat_json_parse` / `cleat_json_stringify` — `encoding/json` is in the standard library. The
+  host call exists for guests whose language has no JSON. Verified pure rather than assumed:
+  `JsonParse` and `JsonStringify` in `engine/lifecycle.go` unmarshal, re-marshal and write the
+  result — no `recordEvent`, no store, nothing durable — so a guest using its own JSON diverges
+  from nothing.
+
+  **The same applies to Python, which this section originally got wrong.** It listed all five of
+  Python's as real gaps, saying "unlike Go's, none of these has a native or composed substitute".
+  Python has the `json` module — `host_calls.py` imports it three times — so two of the five are
+  the same non-gap they are in Go. Python's real count is **3**:
+  `cleat_await_any_child`, `cleat_poll_child`, `cleat_run_detached`.
+
+  The error is worth recording rather than quietly fixing, because it ran the *opposite* way to
+  this document's usual one: it made the project look worse rather than better, which is why
+  nothing about it felt like it needed re-deriving. A number that flatters goes unchecked; so, it
+  turns out, does one that indicts.
+- `cleat_uuid` — already durable as `SideEffect(func() string {...})`, and Go binds
+  `cleat_side_effect`. Worth stating precisely, because the near-miss is a determinism bug: a
+  native `uuid.New()` is **not** replay-safe. The host call is a convenience over the safe form,
+  not the only safe form.
+
+Go has **no real gaps left**. `cleat_get_scope` / `cleat_set_scope` were the last two and were
+bound on 2026-09-09 ([§3.223](#3223), cleat#984); the `sdkUnreachedBaseline` entry shrank
+accordingly rather than being re-labelled.
+
+**This said "three real gaps", counting `cleat_fetch`, until 2026-09-08. Go reaches durable HTTP.**
+`DurableFetch`, `DurableFetchJSON`, `FetchGet` and `FetchGetJSON` all map to `cleat_call`
+(`wasm/usage.go:119-123`, whose own comment says "all map to durable_call import"), issuing
+`DurableCall("http", "fetch")`. **Both** `ServiceCaller` implementations intercept that pair
+*before* any plugin lookup — `cmd/cleat-worker/setup.go:155`, the production worker, with
+idempotency-key support, and `cleat/embedded/runner.go:394` — and
+`cmd/cleat-worker/service_caller_errors_test.go` drives it against a live `httptest` server. It is
+durable and replayable through the `cleat_call` event rather than `EventTypeFetch`.
+
+The reason it survived is the one this section already names, in its third form. The parenthetical
+*"`net/http` in a guest is neither durable nor replayable"* is **true**, and answers whether a
+**native** substitute exists. It sat under a heading asserting no **composed** one does either —
+a different claim, never separately checked. Worse, the tree offers false corroboration: there is
+no `http` plugin in `plugins/` and nothing registers that name, so the obvious check agrees with
+the wrong answer. The interception lives in the `ServiceCaller`, above the registry, where a
+search for a plugin cannot find it.
+
+So the sentence above about a number that indicts going unchecked has a companion: **a true
+sentence filed under the wrong question is not checked either**, because re-deriving it confirms
+it. What settles this one is not a better grep but a different question — not "is there an http
+plugin" but "what handles `cleat_call` before the registry".
+
+**The cron trio was already known, and this test did not discover it.** `tiers.yaml` holds
+`workflow-callable-cron` at **tier 2 for exactly this reason** — "rust and java SDKs declare no
+cron surface at all", with tier 1 requiring only `[go, python]` — and §3.170's coverage table
+already recorded rust at 52/55 naming the same three. Re-deriving it independently is
+corroboration, not a finding, and presenting it as new would be its own kind of inflation.
+
+What is new is that it is now **guarded**. The gap was recorded in two places that a code change
+cannot fail, so nothing stopped a third SDK from drifting the same way, or these three from
+widening to four. The baseline is shrink-only and lives next to the extractors, so the next
+regression is a red test rather than a paragraph someone has to remember to re-read.
+
+The one substantive addition to what tiers.yaml says: **nothing composes cron.** Unlike
+request/reply after [§3.220](#3220), there is no combination of other host calls that schedules
+one, so the gap cannot be worked around in-language.
+
+Held per-SDK in `sdkUnreachedBaseline`, shrink-only, each entry carrying its reason.
+
+**Known-positives**, because the empty-baseline version passed for four of five SDKs:
+
+| control | result |
+|---|---|
+| add a host export bound by no SDK | all **5** SDKs report it as widening |
+| put a name in a baseline the SDK does reach | fails, demanding the baseline shrink |
+| break an extractor | the floor fires — and note a broken extractor here reports the ABI as *unreachable*, the opposite direction from the forward test |
+
+**The new test was selected by no CI job**, and `-list` is what showed it. The workflow's term was
+`EverySDKImportIsAHostExport`, which stops matching one character into
+`TestEverySDKReachesEveryHostExport` — `I` against `R`. Exactly the `TestHostCalls` /
+`TestHostCallTable…` case this document already records. Widened to `EverySDK`:
+
+    cd tests/plugin-harness && go test . -list 'EverySDK' ./...   # 2, was 1
+
+### 3.238 A pending update request outlived the workflow it was for, and its promise never settled — 🟢 **FIXED 2026-09-06** (WS-1, 2026-09-06)
+
+The smaller half of [#849](https://github.com/cleat-team/cleat/issues/849)'s suggested direction.
+`POST /api/workflows/:id/update/:name` returns `202` and a `promise_id`. An update is dispatched
+only while its workflow is mid-segment, so a request still pending when the workflow reaches a
+terminal status can never be handled — and the caller is left holding a `promise_id` for a promise
+nothing will ever settle, against a workflow that no longer exists. The wait was permanent and
+silent.
+
+`Worker.failStrandedUpdates` now completes each such request with a reason and rejects its promise
+with the same reason, from all three terminal paths: a successful terminal finalize, a terminal
+failure (`recordTerminalFailure`), and the defer phase applying its recorded outcome
+(`finishDeferPhase`).
+
+**Composed, not added to the store.** `GetPendingUpdateRequests`, `CompleteUpdateRequest` and
+`RejectPromise` are all already on `engine.WorkflowStore`, so this needed no SQL and no
+per-dialect work — a new store method would have been four implementations (postgres, mysql,
+mssql, `ShardedStore`) to express something the existing three already say. Same reasoning as
+§3.220's composites.
+
+**The test drives the terminal path, not the helper**, because the defect being guarded is a
+*missing call*: the helper could be perfect and every caller still hang. Removing the
+`recordTerminalFailure` call site fails it with `the stranded update was completed 0 times, want
+1`; removing the rejection alone fails it with `the update's promise was rejected 0 times`. A
+negative control asserts the path is silent when nothing is pending, which is almost every
+workflow — a version that wrote unconditionally would pass the other two.
+
+#### What this deliberately does NOT fix, and what is still broken underneath
+
+**Updates are still never delivered.** This makes a stranded request answer rather than hang; it
+does not make the feature work. Three independent breaks, in the order they have to be fixed —
+recorded on #849 with the greps:
+
+1. **No guest entry point, in any SDK.** Both SDKs register handlers into a map (Go
+   `cleat/runtime_promises.go:91`, Python `python-sdk/cleat_sdk/host_calls.py:2333`) and the only
+   thing that ever reads either is a **test harness** — Go's `HandleUpdate` is reached only from
+   `cleattest`, and Python's `_handle_update` has zero callers. `cleat_register_update_handler` is
+   a real host call the engine records, but no WASM export exists that would let the host ask a
+   running guest to run one.
+2. **The worker never calls `engine.WithUpdateHandler`.** Three references in the tree outside
+   tests: the definition, its doc comment, and the error string naming it. So `DispatchUpdate`
+   returns `no update handler configured for this engine`.
+3. **Delivery is a 5s ticker over `w.inflight`**, which is populated only for the lifetime of one
+   segment (#849's own finding).
+
+Note the ordering trap: fixing 3 alone converts a silent hang into a silent *rejection*, because
+2 makes `DispatchUpdate` fail and `dispatchPendingUpdates` then completes the request with that
+error and rejects the promise. **A fix for 3 verified by "the request is no longer pending" would
+read as success while delivering nothing.**
+
+This is the `RegisterQueryHandler` shape (removed 2026-08-09, "it recorded a handler name but
+nothing in the worker ever routed an external query to it") — and it is the whole story here
+rather than a parallel. Whether to implement updates end-to-end or stop advertising the API is a
+product decision; the `202` is untouched here for the same reason.
+
+### 3.237 `migrations/mssql/001_schema.sql` cannot be re-applied once migration 031 has run — 🟢 **FIXED 2026-09-07** (WS-1, 2026-09-06)
+
+Split out of [§3.236](#3236), which fixed the damage this causes but not the failure itself.
+
+001 drops the seven policies it owns by name, then `CREATE OR ALTER`s `dbo.fn_tenant_filter`.
+Migration 031 adds `TenantFilter_Promises` and 042 adds `TenantFilter_Settings`; both are
+schemabound to that function and neither is in 001's drop list, because 001 predates them. So a
+second application of 001 fails:
+
+    Cannot ALTER 'dbo.fn_tenant_filter' because it is being referenced by object 'TenantFilter_Promises'
+
+**The obvious repair is wrong.** Making 001's drop list dynamic — "drop every policy whose
+predicate references `fn_tenant_filter`" — would drop `TenantFilter_Promises` and
+`TenantFilter_Settings` *without recreating them*, because the migrations that create those are
+031 and 042 and they are already recorded as applied. That turns a loud failure into a quiet loss
+of two policies, which is the same shape as §3.236 with a smaller number.
+
+The real answer is that nothing should re-apply a recorded migration. `engine/testutil` uses
+`migration.Runner`, which records what it has applied and skips it; `tests/plugin-harness` has its
+own loop that re-applies everything unconditionally. Moving it onto the Runner is the fix, and the
+complication to measure first is `schemaPrefix` — plugin-harness prepends a per-file
+`SET search_path` / `USE` and pins one connection, which the Runner does not do.
+
+**Correction, same day: the blast radius above is wrong, and it was wrong in the direction that
+makes it look smaller.** This does not affect only `TestPluginCalls_MultiDB/mssql`. It fails any
+migration run against an MSSQL database that already carries the schema while its
+`schema_migrations` does not record it — and when that database is the shared test one, it takes
+**552 of `./engine/`'s tests** with it, every `/mssql` subtest, all reporting:
+
+    apply mssql migrations from …/migrations: migration 001_schema.sql: execute:
+    mssql: Cannot ALTER 'dbo.fn_tenant_filter' because it is being referenced by
+    object 'TenantFilter_Promises'
+
+Measured 2026-09-06 on clean `develop`; `cleat.dbo.schema_migrations` had 0 rows against 48 tables
+and 9 policies. The cure is CLAUDE.md's, unchanged: drop and recreate, then 4611 pass / 0 fail.
+
+The narrow claim was made from the one failing test that was in front of me, and generalised
+without being checked against anything else — which is this document's own "a count answers 'did
+this go up', it never answers 'is anything still missing'" in the shape of a blast radius.
+
+CI stays green on all of it for the reason §3.236 gives: a fresh container never has a second
+application to fail.
+
+**Fixed 2026-09-07 (#890).** `tests/plugin-harness/testdb.go`'s `runCoreMigrations` now calls
+`migration.NewRunner(...).Run(ctx)` — the same call `engine/testutil` makes — instead of its own
+read-dir-and-exec loop. The Runner records applied versions in `schema_migrations` and skips them,
+so a second call is a no-op and 001 is never applied twice. **Two implementations of "apply the
+shipped migrations" was the defect**, not a detail of either of them; the alternative repairs all
+kept both loops and tried to make the second one survive re-application.
+
+The `schemaPrefix` complication the paragraph above says to measure first turned out to be real
+for exactly one dialect:
+
+| dialect | what the old loop's prefix did | under the Runner |
+|---|---|---|
+| postgres | `SET search_path TO public` | `schemaName` is hardcoded `"public"`, so the prefix was already a no-op |
+| mssql | nothing — `schemaPrefix` returns `""` for it | unchanged |
+| mysql | `USE <db>`, on a pinned `*sql.Conn` | **needed work** |
+
+MySQL's current database is a per-connection property and the Runner uses the pool, so the fix
+pins it for the run: `db.SetMaxOpenConns(1)` plus one `USE`, restored by `defer`. That is the
+smallest change that keeps the per-test database guarantee the pinned connection used to give.
+`schemaPrefix` and `setSearchPath` had no callers left afterwards and are deleted.
+
+**The regression test got stronger, not weaker.**
+`TestReapplyingTheCoreMigrationsLeavesTheTenantPoliciesStanding` (#853) was written expecting the
+second application to *fail*, and asserted only that the failure left the nine policies standing.
+It now asserts the second application **succeeds**. That is the sharper claim: "it does not damage
+anything" has become "it does not even try", and a regression to re-applying fails on the error
+rather than on a policy count.
+
+Known-positive, measured 2026-09-07 — deleting the rows from `schema_migrations` before the second
+call forces the Runner to re-apply, and the test reports it:
+
+    re-applying the core migrations failed: apply mssql migrations from ../../migrations:
+    migration 001_schema.sql: execute: mssql: Cannot ALTER 'dbo.fn_tenant_filter' because it is
+    being referenced by object 'TenantFilter_Promises'
+
+Verified on all three dialects against an already-migrated database — the condition that used to
+fail — with `tests/plugin-harness` at 139 pass / 0 fail / 2 skip (`TestBlobstore_S3` and
+`TestPluginCalls_Wasm_Python`, both environmental). MSSQL policy count stayed at 9.
+
+**And the first run of that suite was measured against two DSNs reconstructed from memory**, which
+reported postgres and mysql failing with `28P01` / `1045` — this file's opening section exactly,
+caught only because the errors were authentication rather than schema. WS-1's rows are 5432/3306/
+1433 with `postgres:postgres` and `root:cleat`; read them from WORKSTREAM.md.
+
+### 3.201 The Python SDK discarded the host's answer on 13 calls, so a refusal read as a success — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.202 A stop read as a timeout on `await_signals`, so a Python defer segment ran on — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.401 The scale suite's wall-clock thresholds measured the CI host, not cleat — 🟢 **FIXED 2026-09-04** (WS-3, 2026-09-04)
+
+`tests/scale/latency_test.go` carried two wall-clock assertions: `p50 > 100ms` and
+`p99 > 500ms`. The second failed on develop at `491a0f7` (#720) with
+**P99 623.876463ms over a P50 of 2.676839ms**, one failure in the scale job's last 20 develop
+runs.
+
+The thresholds are **removed, not widened** — CLAUDE.md: *"If an assertion depends on wall-clock
+time, remove the timing rather than widening it."*
+
+#### The hypothesis that had to be refuted first
+
+Removal is the cheap answer, and the cheap answer is wrong if the number means something. The
+opening read of that failure was that it did: two near-identical outliers (623.876ms and
+625.203ms) over a 2.7ms median look like a **fixed stall** — a lock wait, a retry backoff, a pool
+timeout — rather than a slow machine, and a fixed stall deserves its own section rather than a
+deleted line. That is the right instinct and it is worth writing down that it did not survive
+contact with more than one run.
+
+Three measurements over the scale job's last 20 develop runs. Re-derive all three with
+`scripts/scale-latency-history.py`:
+
+1. **The magnitude is not fixed.** `TestLatencyP99`'s P99 across those runs is a continuum over
+   three orders of magnitude with no cluster anywhere, least of all at 624ms:
+
+       4.4, 4.8, 5.2, 5.2, 5.9, 6.0, 6.4, 6.5, 7.3, 13.7, 14.5, 15.1, 15.2, 16.2,
+       18.4, 27.1, 33.0, 92.1, 377.4, 623.9   (ms; median 14.1, max 44x the median)
+
+2. **The "near-identical pair" recurs at other magnitudes.** `b35c52f`'s top two were 377.4ms and
+   387.9ms — the same shape at 60% of the size. Four goroutines are in flight at once, so
+   whatever is in flight during one host stall window all records that window's length. The pair
+   is a signature of the concurrency, not of a constant in the code.
+
+3. **The sequential test shows the same tail.** `TestLatencyP50` runs one goroutine — no lock
+   contention, no pool competition, and no retry path anywhere in `AppendEventHistory`, which
+   `BeginTx → setRLS → SELECT prev checksum → INSERT → UPDATE → Commit` with no loop. Its Max was
+   **219.3ms on the failing run** and 126.9ms on `b35c52f`, and across the 20 runs it correlates
+   with the concurrent test's Max at **Pearson r = 0.937**.
+
+(3) is the one that settles it. No lock, backoff or pool timeout inside the code under test can
+slow down a single goroutine that contends with nothing; a slow host slows down both tests, which
+is exactly what the correlation says happened. The tail is a per-run property of the runner, and
+any fixed threshold under ~700ms sits below its noise floor.
+
+#### What replaced them
+
+Not nothing, and not a bigger number. Both tests now call `assertAllSampled`, which fails if any
+slot in the fixed-size latency slice was never written. That closes a real hole the thresholds
+never looked at: in `TestLatencyP99` a goroutine that fails its INSERT calls `t.Errorf` and
+returns **without writing `latencies[idx]`**, and a zero left behind sorts to the FRONT, pulling
+both the median and the P99 down. A run that measured fewer samples than it claimed would report
+itself as *faster*, not as broken.
+
+Falsified before landing: mutating one goroutine to skip its record produced
+`1 of 200 samples were never recorded`, with `Min: 0s` in the logged distribution above it —
+red for the stated reason, not for a neighbouring one.
+
+`TestLatencyUnderConcurrency` in the same file already worked this way — it measures, logs, and
+asserts nothing about the clock. The other two now match it, so the file is internally consistent
+for the first time.
+
+#### What this does not fix
+
+The scale job stays a **required** status check while `./tests/scale/...` is tier 2, which is a
+separate defect — see §3.402. Removing a flaky assertion makes that gate quieter; it does not
+make it correct.
+### 3.402 Five required checks gated tier-2 code, and nothing in the tree said so — 🟢 **CLOSED 2026-09-05; both packages now tiered** (WS-3, 2026-09-04)
+
+Branch protection on `develop` lists 32 required status contexts. That list lives in
+GitHub, this repo's tier claims live in `tiers.yaml`, and **nothing compared them.** The
+reported symptom was one context — `Test Go (scale) on 1.26` gating `./tests/scale/...`,
+which `tiers.yaml` puts in tier 2, whose contract says "may fail". Measuring it found
+five, plus two packages in no tier at all.
+
+#### What is actually required, measured 2026-09-04
+
+Re-derive with `scripts/check-required-contexts.py --report`:
+
+| required context | runs | tier |
+|---|---|---|
+| `Test Go (plugins) on 1.26` | `./plugins/...` | **2** |
+| `Test Go (manifests) on 1.26` | `./tests/manifests/...` | **2** |
+| `Test Go (scale) on 1.26` | `./tests/scale/...` | **2** |
+| `Test Go (support) on 1.26` | `./migration/...` | **2** (mixed with three tier-1 packages) |
+| `Cluster Integration Tests` | `./tests/cluster/...` | **2** |
+| `Test Go (support) on 1.26` | `./monitoring/...`, `./packaging/...` | **none** |
+
+And the mirror image, which is *not* a hole but reads like one: **`Test Go (crash)` is the
+only matrix entry that is not required**, and it runs a tier-1 package. `./tests/crash/...`
+is in `tier1.packages`, and the required `Tier 1 Gate` runs that whole list, so it is
+covered — by a different context than the one whose name suggests it.
+
+#### The contract was already stricter than its own prose
+
+`tier2.contract` says "must run; may fail, against `known_failures`". `known_failures` is
+**empty**, and `scripts/tier2-gate.sh` fails on any failure not in it, and `Tier 2 Gate` is
+required. So tier 2 is enforced as must-pass today, by a mechanism independent of the five
+contexts above. "May fail" is a door, not a state: it opens one test at a time, and only
+with an item reference and an owner.
+
+That is the honest reading of the reported defect. It is not that scale is special. It is
+that **tier 2 is gated as must-pass in two independent ways and the manifest described
+neither**, so any of its packages going red blocks the queue while `tiers.yaml` says it is
+permitted to fail.
+
+#### What changed
+
+**The enforcement was not loosened.** Tempting, and wrong: the prose was the inaccurate
+half. Loosening the gates to match the sentence would delete real coverage to make a
+sentence true.
+
+1. `tier2.contract` now describes what is enforced, with the empty list and the required
+   gate named.
+2. `tiers.yaml` gains a **`required_contexts:` block** — all 32, each mapped to its
+   workflow and job id, each classified `tier1` / `tier2` / `undeclared` / `infra`, and
+   every non-tier-1 entry carrying a `why_required` that has to argue for itself.
+3. `scripts/check-required-contexts.py` enforces it, wired into `Lint`.
+
+On **`Test Go (scale)`** specifically: it stays tier 2 and stays required. Tier 1 is not
+available to it — tier 1 means green on every dialect, and every file in `tests/scale`
+calls `engine.NewPostgresStore` against `testutil.DialectPostgres`, so there is nothing
+for the other two to run. Promoting it would mean granting tier 1 to a Postgres-only
+package, which is the sort of claim `tiers.yaml` exists to refuse. It is defensible as a
+required check only because §3.401 removed its wall-clock assertions; requiring a green
+from an assertion the runner controls is how a gate teaches people to re-run instead of
+read.
+
+#### What the guard cannot do, and one thing it caught in itself
+
+It cannot see branch protection. Reading it needs admin scope, which `GITHUB_TOKEN` does
+not have — the same limitation `tier2.gated_by` already records. `--check-live` does the
+diff for a caller who has the scope (run 2026-09-04: *"32 contexts, declared list matches
+exactly"*), and `--report` prints the command for anyone else.
+
+Its third check — "is this `covers:` claim true?" — resolves a context against the
+`test-go` matrix, so it can only reach `Test Go (...)` contexts. `covers:` on the other 21
+is a hand claim nothing verifies. **That limit was found by the negative control, not
+declared:** the self-test's first version asked check 3 to catch a relabelled `Tier 2
+Gate` and printed `MISSED`. A guard shipped without one would have carried the gap
+silently.
+
+#### Closed 2026-09-05 — both packages assigned, and the guard had a hole
+
+`./monitoring/...` → **tier 1**, `./packaging/...` → **tier 2**. Decided on what they are, not
+on where they sit in the matrix:
+
+* `monitoring/prometheus` (1734 LOC, 1 test, 0.25s, no DSN) is imported by
+  `cmd/cleat-worker/main.go`, `cmd/cleat-worker/setup.go` and `cleat/backendkit/metrics.go`, so
+  it **ships inside the worker** and is reachable from the public Go API. A break already failed
+  the tier-1 gate at *compile* time through `./cmd/...`; what tier 1 adds is that its own test
+  now runs there.
+* `packaging/homebrew` (141 LOC, 3 tests) has **zero runtime imports** — it asserts the Homebrew
+  formula pins a tagged tarball, builds the worker with CGO, and runs it in its test block.
+  Real, and not a product support claim, so tier 2.
+
+Verified rather than assumed: `scripts/tier2-gate.sh` ran green with the new entry
+(`ran=1546 pass=1534 fail=0 skip=12, 0 regressions`) and its JSON shows all three
+`TestFormula*` tests actually executing, so the new pattern is not matching nothing.
+`scripts/tier-gate.sh` **refused to run locally** — `wasm-tools` is not on PATH and it fails
+closed rather than printing a green that measured nothing — so the tier-1 half is verified by
+running `./monitoring/...` directly (`ok, 0.200s`) plus CI.
+
+**`Test Go (crash)` stays unrequired, decided rather than left.** `./tests/crash/...` is tier 1
+and the required `Tier 1 Gate` runs the whole list, so correctness is gated. What is genuinely
+non-blocking is narrower than "the crash tests": the matrix job runs `go test -race` and the
+gate does not, so a **data race** in them would not stop a merge. Judged not worth a required
+context; recorded because "the only one of twelve that is not required" reads as an oversight
+and has now sent two readers chasing it.
+
+#### The guard shipped with a hole, and assigning the tiers is what exposed it
+
+`check-required-contexts.py` checked a stale `covers: tier1` and a stale `covers: tier2`, and
+**not** a stale `covers: undeclared`. So the moment the two packages got tiers, the
+`Test Go (support)` entry went on claiming they had none — and the guard passed. It printed
+`OK, 32 required contexts declared and consistent` over a manifest whose own header still said
+"IN NO TIER".
+
+That is the failure mode this script's docstring is about, in the script itself. It is also a
+particular shape worth naming: **an `undeclared` label rots by being *fixed*.** The other two
+labels rot when someone changes a tier; this one rots when someone closes the gap it exists to
+report, which is exactly when nobody is looking for it.
+
+Fixed, with a seventh self-test case (`a context still marked undeclared after its packages got
+a tier`), which fails against the pre-fix script and passes after.
+
+#### And a second hole: the list already existed somewhere else
+
+`.github/required-checks.txt` has held the same 32 context names since 2026-08-07, and
+`scripts/check-workflow-guards.py` reads it. **The `required_contexts` block shipped in #729 as a
+second hand-maintained copy of that list, and nothing compared them.** Found while wiring §3.403,
+not by any guard.
+
+That is the exact shape `.golangci.yml` refuses for `unused`: *"one class of finding two
+mechanisms with two baselines, which is the shape that let the routing tables in 2.72 drift
+apart."* The irony is not incidental — this block exists because branch protection and
+`tiers.yaml` were two uncompared copies of one fact, and closing that gap introduced a third
+copy.
+
+They were identical when checked (32 = 32, empty symmetric difference), so nothing had drifted
+yet. Check 5 now asserts equality in both directions, with the two failure modes named
+separately: a context only in the file is undeclared here, and a context only here is **not
+checked against the workflow jobs at all**, since `check-workflow-guards.py` reads the file.
+
+Its self-test case drops a context **and decrements `total`**, so only check 5 fires —
+WORKSTREAM.md's protocol: *"A falsification that fires two assertions proves neither."*
+
+The division of labour is now explicit rather than accidental: the `.txt` is the list of *which*
+contexts are required, and the `tiers.yaml` block is *what each one covers and why*.
+
+
+### 3.403 Nothing in CI looked for committed credentials — 🟢 **FIXED 2026-09-05** (WS-3, 2026-09-05)
+
+Enabling gosec (§3.33, #731) excluded G306 and every `_test.go`, and both exclusions carry a
+written note that they stop catching a credential written to disk or committed in a test.
+Nothing else covered it — measured 2026-09-05, `grep -rilE "gitleaks|trufflehog|secret.scan"
+.github/ scripts/` returned **nothing**. gosec's G101 was never that tool: it fired three times
+on this tree and was wrong all three (a usage string, an ephemeral test-role password, a
+localhost default DSN).
+
+`gitleaks` v8.30.1 now runs in `Lint`, pinned, against `.gitleaks.toml`.
+
+#### What the measurement found, and why it decided the design
+
+| scan | findings | what they are |
+|---|---|---|
+| `gitleaks dir .` (working tree) | **7** | all placeholders — `cleat_sk_testvalidkey123`, `tok_abc123def456`, `cleat_sk_abc123...` (a docs example, ellipsis and all), two `a1b2c3d4e5f6g7h8` idempotency keys, `incident_abc123`, and a JWT in `engine/redact_test.go` that exists *so the redaction test has one to redact* |
+| `gitleaks git .` (1234 commits) | **16**, 9 unique locations | 8 the same placeholders, and **one real 64-hex `cleat_sk_` agent key** in `clew-agent.json`, plus its copy in `cmd/cleatctl/revokeapikey_test.go` until #480 removed it |
+
+**The gate scans the working tree, never the history**, and that is the load-bearing decision
+rather than a default. The real historical key is **known and closed**: public since `1dcf116`
+(2026-06-06), and measured 2026-08-30 it is absent from the production database, so every
+lookup's `WHERE key_hash = ? AND revoked_at IS NULL` misses it and revocation is a no-op. There
+is a standing decision not to rewrite history for it — that would invalidate the `v0.2.0` tag,
+`main` and every clone, and GitHub serves unreferenced blobs by SHA until support purges them,
+so the rewrite would not even un-expose it.
+
+So a history scan is permanently red on something nobody intends to fix. The only ways to green
+it are to baseline a real-looking credential — the one entry that should never be easy to add —
+or to leave the check red, which trains people to ignore it. A tree scan fails on anything
+**new**, which is the actual goal.
+
+#### The allowlist is by VALUE, not by rule and not by path
+
+Seven regexes matching the exact placeholder strings. Disabling the `generic-api-key` rule, or
+excluding `auth/` and `plugins/`, would each also hide the next real secret in the same file.
+
+**Falsified, because an allowlist is exactly the thing that can silently pass everything.** Two
+secrets were planted — one in a new file, and one appended to `auth/middleware_test.go`, the
+same file as an allowlisted placeholder, specifically to test that the allowlist is value-scoped
+and not file-scoped:
+
+    generic-api-key    auth/middleware_test.go:639
+    generic-api-key    zz_probe_secret.go:4
+
+Both caught; removed; re-scan clean. A third probe, `AKIAIOSFODNN7EXAMPLE`, was **not** flagged
+— that is gitleaks' own default allowlist for the canonical AWS documentation key, which is
+correct, and is recorded here so the next person does not use it as a probe and conclude the
+scanner is broken.
+
+#### The first version of the CI step failed, and local verification could not have caught it
+
+`go install` then bare `gitleaks` -> **`gitleaks: command not found`, exit 127**, *after* the
+install succeeded. `go install` writes to `$(go env GOPATH)/bin`, which is not on `PATH` in the
+`lint` job. What made it look safe is that `lint-go` two jobs down does exactly this with
+`golangci-lint` and works; both jobs run `actions/setup-go@v7`, so the difference is not the
+obvious one and was not worth chasing.
+
+**Locally it could not fail**, because every local run invoked the binary by absolute path out of
+`$(go env GOPATH)/bin` — so the local command and the CI command were different commands, and
+only the one that was never run locally was wrong. Now `"$(go env GOPATH)/bin/gitleaks"` in CI
+too, which does not depend on whatever the PATH difference is and makes the two identical.
+
+Verified by extracting the step's `run:` block straight out of the parsed YAML and executing
+*that*, rather than a hand-retyped approximation of it: `bash -n` clean, then `no leaks found`,
+exit 0.
+
+#### What it does not cover
+
+History, deliberately, per the above. And the scan is ~10s over 320 MB, so it is cheap enough
+that the cost is not the reason for any future narrowing.
+
+### 3.301 A defer segment could still take a distributed lock — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.302 A defer segment could still fire three fire-and-forget calls — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.300 A defer segment could still reach the three string-returning calls — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+Archived — full text in [`IMPROVEMENT-PLAN-CLOSED.md`](IMPROVEMENT-PLAN-CLOSED.md).
+
+### 3.303 Five assertion-shaped skips in the plugin harness reported a broken Java/Python build as a pass — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+`tests/plugin-harness/wasm_plugin_test.go` decoded the Java/TeaVM result with two
+`t.Skipf`s. A module returning the wrong shape — the exact defect class #455 fixed for
+`examples/saga-java-port` — was reported as SKIP, which CI reads as a pass. Three more
+skips in the build helpers had the same shape: two `reading cleat build output` reads
+that happen *after* a build the same function has already declared successful, and a
+Python `produced no .wasm` whose Java twin (`buildJavaWorkflowWasm`) already used
+`t.Fatalf`. All five are now `t.Fatalf`. Baseline 214 → 209 skip sites
+(`scripts/check-skips.sh`).
+
+**The falsification target originally proposed for this does not work, and the way it
+fails is the interesting part.** The plan said to revert #455 and watch the new assertion
+go red. #455 touched `crates/cleat-java/src/main/java/cleat/{HostCalls,JsonHelper}.java`,
+`examples/saga-java-port/.../MoneyTransfer.java`, `engine/java_workflow_e2e_test.go` and
+`tiers.yaml` — and its two SDK edits are **javadoc only**:
+
+    git show 115b421 -- crates/cleat-java/ | grep -E '^[+-]' | grep -vE '^(\+\+\+|---)' \
+      | sed 's/^[+-]//;s/^[[:space:]]*//' | grep -vE '^(\*|/\*\*|\*/|$)'    # prints nothing
+
+None of it is an input to `TestPluginCalls_Wasm_Java`, which compiles
+`tests/plugin-harness/testdata/javaworkflow/`. Reverting #455 therefore leaves this test
+green — and a green falsification would have been read as "the new assertion is dead", the
+precise misreading CLAUDE.md's "a falsification that stays green is telling you which case
+you did not write" warns about. **A fix and a test can be about the same defect and still
+share no code.** Check that the revert reaches the test's build inputs before believing
+either outcome.
+
+What was falsified instead — the same defect, applied to the code this test actually
+compiles. Both perturbations were reverted; both went red on the intended line:
+
+| perturbation to `PluginHarnessWorkflow.callAllPlugins` | fires | message |
+|---|---|---|
+| return `Map` via `JsonHelper.parseObject` (i.e. #455's own fix, applied here) | outer | `not the JSON-encoded string the ABI contract requires: json: cannot unmarshal object into Go value of type string` |
+| return `"cleat-falsification-not-json"` | inner | `unwrapped to text that is not a JSON object: invalid character 'c'` |
+| `os.ReadDir(tmpDir + "/no-such-dir")` | ReadDir | `reading cleat build output <path>: ... no such file or directory` |
+
+Each fired on its own line, so the two decode assertions are independent rather than one
+assertion reached two ways. Under the old code all three printed SKIP.
+
+**Note what this workflow's return type says about #455.** It still returns a hand-built
+JSON `String`, the idiom #455's javadoc now argues against — so the double unwrap here is
+correct *for this workflow*, and the first row above is a shape change, not a bug fix.
+`grep -rn 'public static String.*HostCalls' --include='*.java' .` returns 10 lines
+(2026-09-04) — and they are not all workflows. Two are javadoc that #455 missed while
+rewriting the same example in `HostCalls.java`: `CleatEntry.java:26` and
+`TerminalError.java:14` still show `public static String placeOrder(...)` returning
+hand-built JSON. Read the output rather than the count; five of the ten are string
+literals inside `CleatEntryProcessorTest.java`.
+
+Two things seen while doing this and **not** fixed here, both needing their own change:
+
+- `TestPluginCalls_Wasm_Java`'s `expectedKeys` loop checks each key is *present*, not that
+  its value is a success. The raw result printed by the first perturbation above contains
+  `{"error":"plugin function pgvector/upsert not registered..."}` and
+  `{"error":"blobstore: no tenant context"}` under expected keys, and the test passes.
+  This is the same "only checked the field was PRESENT" trap #455's own commit message
+  confesses to. Some of those errors may be legitimate for an in-memory env; deciding
+  which is the work.
+- `TestPluginCalls_Wasm_AS` rewrites the checked-in
+  `tests/plugin-harness/testdata/asworkflow/dist/workflow.wasm` on every run, so any test
+  run leaves `git status` dirty. `testdata/javaworkflow/prebuilt/README.md` documents
+  having solved exactly this for Java by moving the fixture out of the build directory.
+### 3.305 A checked-in test fixture was rewritten by its own test, and was stale under the rewrite — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+`tests/plugin-harness/testdata/asworkflow/dist/workflow.wasm` is read by
+`wasm/import_section_test.go` and `cmd/cleat-worker/backend_routing_test.go`, neither of
+which can build it (a Go-only CI job has no `npx`). But `TestPluginCalls_Wasm_AS` compiles
+the same workflow on every run, and `asc` writes `dist/workflow.wasm` — so a test run
+overwrote the fixture and left `git status` dirty. Moved to `prebuilt/`, out of the
+build's reach, exactly as `javaworkflow/prebuilt/` already was for the same reason;
+`dist/` is now gitignored whole.
+
+`.gitignore` had reasoned about this case and got one step wrong. Its rule named only
+`dist/workflow.stamped.wasm`, on the grounds that "only dist/workflow.wasm is a fixture"
+— a true statement about **which file has readers** used to answer a question about
+**which files the build writes**.
+
+**The interesting part is what the overwrite was hiding.** Measured 2026-09-04:
+
+| | bytes | sha256 (16) |
+|---|---|---|
+| committed | 13369 | `36c46f1395c1092a` |
+| after one `TestPluginCalls_Wasm_AS` | 13672 | `17cb617f1563a736` |
+| after a second run | 13672 | `17cb617f1563a736` |
+
+The AS build is reproducible — unlike TeaVM, where `javaworkflow/prebuilt/README.md`
+records successive builds of unchanged source differing in hash. So the 303-byte gap was
+**age, not nondeterminism**: the committed fixture predated its own source or toolchain
+(`asc` inside the `^0.28.19` pin resolves to 0.28.20). Nothing had noticed, because every
+AS test run silently refreshed it in place.
+
+**That makes "move it" and "refresh it" one change rather than two.** Moving the stale
+bytes to `prebuilt/` would have frozen the staleness permanently, with the mechanism that
+had been concealing it now removed — strictly worse than leaving it. Both reader tests
+pass against either version, so the refresh changed no assertion; falsified by hiding the
+fixture, which fails exactly the `assemblyscript` subtest in each and nothing else.
+
+`workflow.js` and `workflow.d.ts` are generated glue with no reader
+(`grep -rn 'dist/workflow\.\(js\|d\.ts\)' --include='*.go' --include='*.md'
+--exclude-dir=node_modules .` finds none), so they are untracked rather than moved — the
+same call `.gitignore` already made for `examples/*/dist/`.
+
+### 3.306 The Go adapter decoded the host's error message and threw it away — 🟢 **FIXED by #730 (§3.200) 2026-09-04** (WS-2 found, WS-1 diagnosed and fixed)
+
+Found by dumping every key of `TestPluginCalls_Wasm_*`'s result. Same host, same 10
+registered plugins, same 17 calls, **five** guest languages — and one of them said something
+completely different:
+
+| guest | failed `blobstore.put` | failed `pgvector.upsert` |
+|---|---|---|
+| Rust, AssemblyScript, Java | `blobstore: no tenant context` | `plugin function pgvector/upsert not registered…` |
+| Python | `cleat call plugin:blobstore.put: [2] blobstore: no tenant context` | `cleat call plugin:pgvector.upsert: [2] plugin function pgvector/upsert not registered…` |
+| **Go**, before #730 | `plugin_call: error 1 (0=unknown 1=timeout …)` | `plugin_call: error 1 (0=unknown 1=timeout …)` |
+| **Go**, after #730 | `plugin_call: blobstore: no tenant context` | `plugin_call: plugin function pgvector/upsert not registered…` |
+
+**The Python row was measured 2026-09-05 and it settles the question the Go row raised.**
+Python carries the host's text *and* surfaces the classification, and it takes that number
+from the right place: `python-sdk/cleat_sdk/host_calls.py:305` formats
+`[{call_error_code}]`, which is the CallErrorCode field at bits 8-39 — the field Go's
+adapter was printing the *legend* for while reading `errCode` from bits 0-7. So `[2]` is
+`callErrorUnavailable` (`engine/callerrors.go`, `Retryable: true`), and `llm.chat_stream`
+answers `[0]`. Both are correct: `[2]` is `callFailureCode`, and the streaming path's `[0]`
+for a missing registry is deliberate — see the comment at `engine/plugins.go:431`, which
+matches the non-streaming path's answer for the same condition because "a worker with no
+registry is not a service that might succeed next time". **Python was never affected**, and
+the five guests had four different answers where only Python printed a classification at all.
+
+**"Could not be measured" was wrong, and worth reading twice.** This said
+`componentize-py` is killed with signal 9 building this workflow — true as a symptom, and
+useless as a conclusion. The cause is not memory pressure and not a sandbox limit:
+`scripts/docker/python-toolchain.Dockerfile` has documented it since 2026-08-06 —
+componentize-py's embedded wasmtime installs a mach exception handler into a guarded port,
+so the process dies with `EXC_GUARD` / `GUARD_TYPE_MACH_PORT`, a Darwin kernel feature with
+no Linux equivalent. It is deterministic, platform-specific, and **already solved in this
+repo**. The whole measurement above takes six seconds:
+
+    docker --context desktop-linux run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
+      cleat-py-toolchain go test ./tests/plugin-harness/ \
+      -run TestPluginCalls_Wasm_Python -count=1 -v
+
+`--context desktop-linux` is not optional on a Mac that also runs colima, and getting it
+wrong does not look like a mount problem: colima cannot bind-mount these paths and says
+nothing, so `-v "$PWD":/src` yields an *empty* directory and the run fails with `go: go.mod
+file not found`, which reads as a broken checkout. Sanity-check the mount before believing
+any failure, and check it is *this* tree rather than another checkout:
+
+    docker --context desktop-linux run --rm -v "$PWD":/src -w /src cleat-py-toolchain ls /src
+
+The general lesson is the one this section already carries in another form: **"environmental"
+is not the same as "unavoidable."** Establishing that a failure was not caused by my change
+is a control, not an answer, and stopping there left a row of this table blank for a day
+while the fix sat in the tree. (WS-1 hit the identical stop on §3.205 the same week and
+found the Dockerfile only when asked "don't you run componentize-py in docker?")
+
+**The mechanism.** The host wrote the text and the adapter decoded its length; the adapter
+then discarded both. `PluginCall`'s `ResultStmts` computed `responseLen` and never read
+`responseBuf` on the error branch. Three faults on one line: the message discarded
+(`engine/plugins.go:361` writes it, and the other guests read it); the number printed taken
+from `result & 0xFF`, which is `errCode` — **hardcoded to a literal 1 on every failure** —
+and printed against the **CallErrorCode** legend, whose field is bits 8-39
+(`packDurableCallResult` is `responseLen<<40 | callErrorCode<<8 | errCode`,
+`engine/memory.go:243`); and the real classification, `callFailureCode`, never read. So
+"why is it 1 for a not-registered plugin" had a flat answer: **it was 1 for everything.**
+
+**Fixed for the two adapters this finding pointed at**, `PluginCall` and
+`PluginCallStreaming`, by #730 (recorded as §3.200). They now decode `callErrorCode` from
+bits 8-39 and pass `responseBuf` to `callErrorMessage`, as the three §2.10 adapters have
+since §2.10. Measured on develop after #730:
+
+    grep -c '0=unknown 1=timeout' wasm/adapter_metadata.go   # 18, was 20
+    grep -c 'callErrorMessage' wasm/adapter_metadata.go      # 5, was 3
+
+**Both of those follow-ups are now closed by #734 (2026-09-05), and the counts above are
+frozen at #730 — re-derive before quoting them.** On develop at `fa6dd10` the first command
+returns **0**: the legend is gone from `wasm/adapter_metadata.go` entirely, and survives in
+exactly two places in non-test Go, both correct — `wasm/generator.go:427`, the
+`callErrorMessage` helper used by the five adapters whose result word really does carry a
+CallErrorCode, and an explanatory comment at `engine/memory.go:310`.
+
+    grep -rn '0=unknown' --include='*.go' . | grep -v _test.go | grep -c .   # 2, both intended
+    grep -c 'hostErrMessage' wasm/adapter_metadata.go                        # 15
+
+A zero from that first command deserves suspicion rather than belief: this file's struct
+literals defeat the obvious regex, so a grep over it can return zero for a pattern that was
+never going to match and "confirm" whatever was being claimed. What makes this zero real is
+that #734 exists and says so, not the zero itself. Cross-check against
+`wasm.AdapterFieldNames()`, which is exported for this.
+
+**What the 18 were, and why they were a *different* defect** — deliberately
+not taken in #730. `packDurableCallResult` is the only packer with a `CallErrorCode` field
+and it reaches exactly the five above. The other 18 sit over `packSimpleResult`,
+`packAwaitChildResult`, `packAwaitPromiseResult`, `packAwaitSignalsResult` and
+`packAcquireLockResult`, which have no such field at all, so there is nothing to decode:
+13 of them have an output buffer and want `hostErrMessage`; 5 (`ContinueAsNew`,
+`ContinueAsNewWithVersion`, `AcquireLock`, `AcquireLockMs`, `ReleaseLock`) have no buffer
+and want the legend **removed** rather than replaced. `hostErrMessage` already exists in
+`wasm/generator.go` for exactly this, and its doc comment warns the legend "would describe
+a rejected cron expression as a timeout" — describing what was then the live defect in 13
+other calls.
+
+#734 took both halves, and corrected two things this section had inferred rather than
+checked. The useful split was not "does the legend apply" but "did the host write something
+to read" — AwaitChild, SideEffect and AwaitPromise all write the reason into the buffer on
+the replay path and the guest returned before reading it, which is this section's own defect
+on a different packer. And branches that looked dead were not: `engine/imports.go` returns
+`errBadParam = 0xFFFFFFFF_00000001` from 64 sites before a handler runs, and its low byte is
+1, so every one of those failures printed "error 1" — read by the legend as a timeout rather
+than a bad parameter.
+
+**§2.10 is why this survived: comment general, test specific.**
+`TestHostAdapterReportsCallErrorCodeNotErrCode` pins this exact property and its doc
+comment states the general rule, but the assertion substring-matches one call name. That
+is the inverse of the trap CLAUDE.md names — there, a test's *name* claimed a mechanism its
+body did not check.
+
+**How it was first mis-diagnosed, because the mistake is reusable.** WS-2 reported the
+symptom with two candidate mechanisms — "the host wrote no response bytes" or "the length
+failed its bounds check" — and **both were wrong**, because both assumed `PluginCall` went
+through `callErrorMessage`. It did not; it had its own literal copy of the format string.
+The assumption came from
+
+    grep -rn '0=unknown 1=timeout' --include='*.go' . | grep -v wasm_plugin_test | head
+
+whose **first** hit is `wasm/generator.go:427` inside `callErrorMessage`, and whose 10th
+line is not its last. The string occurred **22 times in non-test Go across 3 files**, 20 of
+them in `wasm/adapter_metadata.go` — including the `PluginCall` entry that `head` cut off.
+The first hit was a plausible decoy: `callErrorMessage`'s `"%s: error %d"` with
+`callName="plugin_call"` renders byte-identically to the literal that actually produced it.
+**A `| head` on "who produces this string" answers "who produces it first in path order",
+and the two coincide only by luck.** Re-derive the shape, not the first line:
+
+    grep -rn '0=unknown 1=timeout' --include='*.go' . | awk -F: '{print $1}' | sort | uniq -c
+
+Refusing to name a mechanism is what kept the wrong one out of the record. Had the section
+asserted "the host wrote no response bytes", the search would have gone to `engine/` and
+the adapter line would have stayed unread.
+
+### 3.307 Five plugin tests checked that a key was present, not that the call worked — 🟢 **FIXED 2026-09-04** (WS-2, 2026-09-04)
+
+`TestPluginCalls_Wasm_{Go,Rust,AS,Python,Java}` each verified their 17 expected keys with
+
+    if _, ok := results[key]; !ok { t.Errorf("missing result key: %s", key) }
+
+so `{"error":"plugin function pgvector/upsert not registered…"}` under an expected key
+passed. Measured 2026-09-04: **16 of the 17 calls fail in every language**, and all five
+tests were green. The one that works is `llm.list_models` — which is also the only key any
+of them checked for success, in Go alone, behind two `if …; ok` guards that pass silently
+when the shape is unexpected.
+
+This is the same shape as the skips of §3.303 — a check that reports success without
+checking — and #455's own commit message confesses to the identical trap: *"my own shape
+assertion missed it because it only checked the field was PRESENT."* Known, written down,
+and still shipped in five more places.
+
+**The fix is not to demand success.** The failures are honest: the in-memory harness has
+no tenant context, does not register pgvector, and wires no plugin stream registry. So
+`assertPluginOutcomes` requires instead that every failure match a reason **written down
+with why**, and that `llm.list_models` keeps working. `pluginCallsThatMustSucceed` is the
+list meant to grow; `knownPluginFailures` is the one meant to shrink. A call that starts
+succeeding is an error telling you to lock it in, which is how the second list gets
+smaller rather than staler.
+
+Falsified four ways, each firing its own branch and no other:
+
+| perturbation | result |
+|---|---|
+| drop the `no tenant context` reason | **12** keys report `failed for a reason not in knownPluginFailures` in Go **and** 12 in Java — matching the 12 measured |
+| drop `llm.list_models` from `pluginCallsThatMustSucceed` | `llm.list_models now succeeds… add it` |
+| add `blobstore.put` to `pluginCallsThatMustSucceed` | `blobstore.put must succeed in this environment and did not` |
+| revert #730's `wasm/adapter_metadata.go` change | **Go alone** reddens, with `"plugin_call: error 1 ("` — Java and Rust stay green in the same run |
+
+That last one is a discriminating negative control rather than a mere trigger: this test
+now *depends* on #730, because Go's two bespoke reasons were deleted once it carried the
+host's text like every other guest. The perturbation proves a regression of #730 would be
+caught here, and that the other guests are not covering for it.
+
+**Those two Go entries were removed, not left harmless.** Before #730 `knownPluginFailures`
+carried `plugin_call: error ` and `plugin_call_streaming: error ` to keep the divergence
+visible; re-measured after #730, all 16 of Go's failures match the three host reasons and
+neither entry can fire. A dead reason in a list whose whole purpose is to shrink is exactly
+the rot the list exists to prevent, so the file now carries a comment saying why there is
+no Go-specific entry rather than an entry nothing matches.
+
+Also removed a duplicated `"llm.chat_stream"` from three of the five key lists (Go, Rust,
+Python) — 18 entries, 17 distinct, so one key was checked twice and the count in the log
+line never matched the list.
+
+### 3.308 `cleat build --target python` wrote its output into the user's source directory — 🟢 **FIXED 2026-09-05** (WS-2, 2026-09-05)
+
+`cmd/cleat/build_python.go` passed `--output <name>.wasm` — a bare **relative** name, with
+`outDir` playing no part in it. `python-sdk/scripts/build_wasm.py` resolves a relative
+`--output` against the **entry file's directory** (its "Resolve output path to absolute"
+block, because componentize-py runs with that directory as CWD), so the component landed
+beside the user's `.py` file along with the `<name>.wasm.component.wasm` backup copied next
+to it. `-o` was honoured only as the destination of a later copy, and the code that made
+that copy searched two places — `.` first, then the entry directory — which is the shape of
+a symptom worked around rather than a path anyone believed in.
+
+**Why it mattered here.** `tests/plugin-harness/testdata/pythonworkflow/` is *tracked*, so
+`TestPluginCalls_Wasm_Python` overwrote two committed 19 MB fixtures every time it ran —
+including on every run of `plugin-harness-ci.yml`, which installs componentize-py. It was
+invisible in CI because a runner's checkout is discarded, and invisible locally because the
+build could not run on a Mac at all (see the container recipe below).
+
+**Do not fix this by committing the new bytes.** componentize-py's output is not
+reproducible. Five consecutive builds of an unchanged source, `__pycache__` cleared between
+the fourth and fifth to rule out a warming cache:
+
+| run | size | sha256 (first 16) |
+|---|---|---|
+| 1 | 20482296 | — |
+| 2 | 20443810 | `e2ba0fb2a785a1d1` |
+| 3 | 20421353 | `01d2dd3bd94d4933` |
+| 4 | 20448164 | `3e082ea08494310d` |
+| 5 | 20398088 | `e05fa134b0f8c59a` |
+
+Five distinct digests, sizes moving in both directions. A committed copy cannot be kept
+current even in principle, which is what rules out the fix §3.305 used for the
+AssemblyScript fixture — move it out of the build's reach and refresh it. Re-derive with
+
+    docker --context desktop-linux run --rm -v "$PWD":/src -w /src -e CGO_ENABLED=1 \
+      cleat-py-toolchain go test ./tests/plugin-harness/ -run TestPluginCalls_Wasm_Python -count=1
+    shasum -a 256 tests/plugin-harness/testdata/pythonworkflow/call_all_plugins.wasm
+
+**And those particular bytes were worth protecting rather than regenerating**, which is the
+part that inverted the fix. `engine/imports.go:108` cites this fixture as the reason
+`RegisterQueryHandler` survives as a no-op host import: removing the import would break
+guests already compiled against it, and that file *is* the witness. Every SDK's public
+wrapper around the call was removed 2026-08-09, so the committed artifact carries **9**
+occurrences of `register_query_handler` and a fresh build carries **1**. The test was
+quietly replacing the evidence for an ABI decision with a guest that no longer witnesses it.
+Deleting the fixtures as unreferenced build output — no test loads them, only prose and that
+comment refer to them — was the first plan, and it was wrong for exactly this reason.
+
+    strings -a tests/plugin-harness/testdata/pythonworkflow/call_all_plugins.wasm \
+      | grep -c register_query_handler        # committed: 9, freshly built: 1
+
+**Fix.** Build into `os.MkdirTemp` via an absolute path, so the build script has nothing to
+re-root and `-o` receives the only copy. The two-place search is gone with it.
+
+**Not a sweep.** All four language targets build beside the source and copy to `-o`, but
+Rust writes into `target/`, Java into `build/` and AssemblyScript into `dist/` — all
+conventionally ignored. Python was the only one whose "beside the source" *is* the source
+directory.
+
+**Guard.** `plugin-harness-ci.yml` gains a `git diff --exit-code` over
+`tests/plugin-harness/testdata` after the WASM integration tests, scoped to the whole
+directory rather than to `pythonworkflow/` because the same defect in another language is
+the thing most worth catching — §3.305 already found one in the AssemblyScript fixture.
+Falsified both ways: with the fix reverted the guard exits 1 naming both files, with it
+applied the guard exits 0. **The test itself reports `ok` in both runs** — it never read
+those bytes, so nothing but the guard can see the difference.
+
+---
+
+### 3.404 The guest-execution harness's cost is set by fixture shape, not by call count — 🟢 **ANSWERED 2026-09-05** (WS-3, 2026-09-05)
+
+**Question (WS-1's C1).** Does executing wave 1 — the host calls whose result a guest must
+decode — fit the existing tier-2 jobs, or does it need its own? Answer wanted with measured job
+times, before A1 finalised the harness, because a bad answer would force sampling into the design
+as a retrofit.
+
+**Answer.** It fits an existing job. No new job, no sampling, at wave 1 and at
+wave 1 + wave 2 together — **provided the harness builds each guest once and invokes it N times.**
+One fixture per host call costs 3× as much and makes the job co-critical-path with `Tier 1 Gate`.
+That conditional is the whole finding: the cost driver is fixture shape, and the call count barely
+matters.
+
+#### The waves, re-derived
+
+24 wave 1 / 13 wave 2 / 37 total. (23/14 when first derived; `AcquireLock` was promoted after —
+see below.)
+
+`wasm.AdapterFieldNames()` returns names only, and the split needs `ReturnType` and `ResultStmts`,
+which are unexported. So the table was dumped from **inside** the package — a temporary
+`wasm/*_test.go` marshalling `adapterDefs` to JSON, removed after — rather than pattern-matched.
+That was not fastidiousness: the obvious regex over `wasm/adapter_metadata.go` returns **zero**
+entries, because the struct literal defeats it, and zero would have silently confirmed whatever
+was claimed.
+
+The discriminator has no middle. Every wave-1 entry shifts a length out of the packed result,
+reads an out buffer, or decodes a host message — most do all three. Every wave-2 entry does none
+of the three.
+
+#### The rule got better by being wrong about one row
+
+The first rule was *"does the error path read a buffer"*, and under it `AcquireLock` was wave 2.
+Recorded at the time as **the one placement I would defend least**, because it decodes
+`acquired := (result>>8)&0x1` — a bit the host computed — even though no length or buffer is
+involved.
+
+WS-1 promoted it and rewrote the rule to **"does the guest have to decode something the host
+computed"**, which is better generally. The case that separates the two rules is exactly this
+one: a guest that returns a constant `true` for `acquired` compiles, passes every
+compile-coverage check, and is silently wrong about holding a lock — the §3.200 class.
+
+**Its harness row is honest but weak, and #744's table says so.** Exercising `AcquireLock` twice
+in one invocation returns `first=true second=true`: the in-memory lock is re-entrant for the same
+holder, so the row cannot distinguish a decoded bit from a hardcoded one. Doing that needs a
+second holder, which one workflow invocation cannot provide. The same ceiling applies to any
+row whose value depends on another party's state.
+
+#### Measured job times
+
+Run `33973787289` (`Cross-Language E2E`, sha `fa6dd10a`, all green). Re-derive with
+
+    gh run list --workflow "<name>" --branch develop --status success --limit 5 \
+      --json databaseId,createdAt,updatedAt,headSha
+    gh api repos/:owner/:repo/actions/runs/<id>/jobs \
+      --jq '.jobs[] | .steps[] | "\(.name)\t\((.completed_at|fromdateiso8601)-(.started_at|fromdateiso8601))s"'
+
+| job | wall |
+|---|---|
+| Tier 1 Gate | **848s** — the critical path |
+| CI/CD Pipeline | 612s |
+| Cross-Language WASM E2E | **364s** — 20-minute timeout |
+| Tier 2 Gate | 269s — installs no guest toolchain |
+| Ecosystem CI | 82s — 4 jobs, 13–50s, SDK unit tests only, no host |
+
+#### The number that decided it, and it is not a build time
+
+Per-test durations in that run show each language's caching, and the caching is the underlying
+build tool's rather than the harness's — there is no `sync.Once` in `buildRustWasm`,
+`buildAssemblyScriptWasm` or `buildJavaWasm`, each shells out on every call. Rust looks free only
+because every test builds the *same* crate.
+
+Local measurements (this Mac, aarch64) separate build from execute, which the CI log cannot do —
+Go buffers `-v` output per test, so every line inside a test carries the same timestamp:
+
+| measurement | value |
+|---|---|
+| Rust, no-op rebuild | 0.03s |
+| Rust, rebuild after a one-line source edit | 1.21s |
+| AssemblyScript, `npm run build` (×2) | 1.05s, 0.86s — no caching |
+| Python, `componentize-py` build in `cleat-py-toolchain` (×2) | 1.82s, 1.54s |
+| **Python, execute a prebuilt 19.87 MB component, 5 consecutive in one process** | **995, 937, 934, 891, 935 ms** |
+
+**Python's per-invocation cost is flat and does not amortise.** One engine, one wasmtime backend,
+one already-built component, five executions — no downward trend. The build costs 1.8s once;
+every invocation after costs another 0.93s and no cache in the path touches it. This is the term
+that survives every shape change, and at wave 1 it is roughly half the added cost.
+
+Reproduce with a scratch test in `./engine/` that reads a prebuilt component, constructs
+`NewEngine(rt, caller, WithBackends(WasmtimeLanguages, wt))` once, and calls `engine.Execute(ctx,
+wasmBytes, "run", input)` in a loop, logging each duration.
+
+#### Costed, added to the 364s job
+
+| | shape B: one fixture per call | shape C: build once, invoke N |
+|---|---|---|
+| Python | 205s | 75s |
+| Java | 176s | 47s |
+| AssemblyScript | 51s | 14s |
+| Rust | 30s | 10s |
+| **added** | **~460s → 825s** | **~145s → ~510s** |
+
+Shape B is under the 1200s timeout but is 2.3× the job and lands within ~25s of `Tier 1 Gate`, so
+`Cross-Language E2E` becomes co-critical-path and wave 2 has nowhere to go. Shape C is 8.5
+minutes, stays 340s below the critical path, and leaves room for wave 2.
+
+**Shape C was not a new capability.** `examples/as-workflow` already exports 8 entrypoints from
+one module, `examples/rust-workflow` carries ~8 `#[cleat_entry]`, and the Java tree generates a
+`CleatEntryIndex`. Python differs in mechanism only: `componentize-py` takes one
+`--entry file.py:func`, and the component *"always exports `run` as the sole entry point, which
+dispatches to `@cleat_entry` functions"* (`engine/python_wasm_e2e_test.go:121`), so Python reaches
+shape C by dispatching on input inside one entry rather than by exporting 24 symbols. The cost
+profile is identical either way, because Python's cost is per-invocation and not per-export.
+A1 landed Go the same way — `buildGoHostCallWasm` called once outside the loop, dispatch inside a
+single `exercise_host_call` entry, **24 invocations plus the build in 3.6s** — so the harness is
+uniform across all five rather than Python being the exception.
+
+#### Which job — corrected 2026-09-05, after it landed somewhere else
+
+**This section named `Cross-Language WASM E2E` and the harness went to `Layer 2 — WASM
+Integration` (#744, #751).** The criteria were right and the job was wrong, so the criteria are
+kept and the name is corrected rather than the paragraph deleted.
+
+What the criteria asked for, and Layer 2 satisfies every one: it already installs Go, Rust with
+`wasm32-unknown-unknown`, Python + componentize-py, Java 17 and Gradle; it already runs
+`check-skip-budget.sh` at a budget of **0** (`scripts/skip-ledger.tsv`, key `plugin-harness/wasm`);
+its `Layer 2 — WASM Integration` context is already required; and `tiers.yaml` already declares it
+`covers: tier2` under `tier2.gated_by`. It gained `Setup Node` in #751, because
+`buildASHostCallWasm` skips rather than fails on a missing `npx` and the runner image shipping Node
+is not a promise the job was making.
+
+**The reason it had to be Layer 2 is stronger than the reason it could be, and this section did
+not have it.** The harness needs `NewTestPluginEnvInMemory`, which lives in the
+`tests/plugin-harness` module. `Cross-Language WASM E2E` runs `./engine/...` and
+`tests/cross-language`; it does not run that module at all. So the harness could not have gone
+where this section pointed without moving the environment it depends on.
+
+`Tier 2 Gate` remains ruled out for the reason given: it installs no guest toolchain, so putting
+the harness there costs 27s + 137s of setup to duplicate what another job already pays, more than
+doubling a 269s job to buy nothing.
+
+**What this cost.** Nothing, because A1 chose correctly without the section. But
+"host it in X" read as settled for four hours while X was not where it went, and a later reader
+reconciling the plan against CI would have found a job that runs none of it.
+
+#### On sampling, which is the part that was designed out rather than designed in
+
+§3.401's lesson was not that sampling is hard. It was that **a metric which silently loses samples
+reports itself as better** — an unrecorded latency stayed zero, zeros sort to the front, and a run
+that measured less looked faster. So the requirement handed to A1 was not "sample carefully" but
+"assert the count of calls actually invoked, and fail short."
+
+A1 implemented it as a guard that fails `invoked 23 of 24`, negative-controlled by making one
+subtest skip. **Worth recording what it does not catch**, because WS-1 checked rather than
+assumed: dropping a call from the list shrinks `invoked` and `len(wave1Calls)` together, so the
+count guard is blind to that, and a separate table-drift guard covers it — negative-controlled by
+dropping `AcquireLock`. Two guards, two different failures, neither covering the other.
+
+#### A committed Python fixture is off the table for good
+
+Two `componentize-py` builds of identical source produced **19,928,335** and **19,872,748**
+bytes. WS-2 had measured five builds with five distinct digests on their machine; this reproduces
+it on a different machine and a different architecture, which moves it from "an environment" to
+"the tool". Any harness that wants to compare Python must compare **outcomes**, never bytes.
+
+#### Two numbers here are soft, and are labelled soft
+
+* **Java's build/execute split is not measured.** CI totals are 6.6–8.3s per test; what fraction
+  is Gradle is unknown, so shape C's ~1s/invocation for Java is the weakest figure above. It does
+  not change the verdict — Java could be 3× that and shape C still fits — but it must not be
+  quoted as measured.
+* **The Python CI split (5.9s build / 3.0s execute) is a model**, not a measurement: the Mac's
+  1.8 : 0.93 ratio applied to the measured 8.9s CI total. It is the only modelled number in the
+  section.
+
+---
+
+### 3.309 `AwaitAllChildren` does not await — it records "child not completed" as the child's permanent outcome — 🟢 **FIXED 2026-09-05** (WS-2, 2026-09-05)
+
+Found while settling a question WS-1 raised for #744's B1: "AwaitAllChildren returns ok on a
+run ID that AwaitChild SUSPENDS on — either a real inconsistency or a design difference
+nobody has written down." It is the first, and the no-backend framing understates it. **The
+divergence is on the ordinary path, with a store configured and children genuinely running.**
+
+Three siblings, one of which does not do what its name says:
+
+| host function | child not complete | `engine/children.go` |
+|---|---|---|
+| `AwaitChild` | **suspends** | 299 |
+| `AwaitAnyChild` | **suspends** | 435 |
+| `AwaitAllChildren` | returns `{"error":"child not completed"}` with `errCode 0` | 504 |
+
+    grep -rn "packAwaitChildResultSuspend" --include='*.go' . | grep -v _test.go
+    # exactly two callers, and AwaitAllChildren is not one of them
+
+**Why "returns an error string" is not the defect.** `freshAwaitAllChildren` marshals those
+outcomes into the `EventRecord` it records at `children.go:521`, and `replayAwaitAllChildren` hands
+`rec.Response` back to the guest verbatim on every future replay. So "this child had not
+finished when I looked" is written into the workflow's permanent history **as the child's
+result**. The child then completes, and no replay will ever say so.
+
+The irony is local: the 30-line comment in that same function, three lines above the
+`else` that produces this, exists to explain why `context.Background()` is used rather than
+`ctx` — because cancelling those queries would write `"context canceled"` into permanent
+history and "a transient shutdown would become a durable wrong answer, which is a strictly
+worse failure than the one cancellation avoids." That is precisely what the `else` branch
+below it does, unconditionally, and not on shutdown.
+
+**Every specification of this call says it waits.** The implementation is alone:
+
+- `ABI.md` §2.53 — "Companion to `cleat_await_all_children` (§2.23), **which waits for all
+  of them**."
+- `ABI.md` §2.22, for the sibling — "If the child is not complete, the workflow should
+  suspend." §2.23 says nothing about the incomplete case at all.
+- `cleat/runtime.go:265` — "AwaitAllChildren **waits for all child workflows** identified by
+  runIDs **to complete**. ... Unlike calling AwaitChild in a loop, all children are awaited
+  concurrently." The stated difference is concurrency, not whether it waits.
+- `python-sdk/README.md:86` and `crates/cleat-sdk/README.md:132` — "await multiple children
+  concurrently".
+
+**What pins the current behaviour is a test that asserts it without justifying it.**
+`TestAwaitAllChildren_SomeRunning` (`engine/children_test.go:796`) sets `run-b` still
+running, asserts `errCode 0`, and asserts the outcome for `run-b` is exactly
+`"child not completed"`. The name states the scenario, not a mechanism, and no comment
+anywhere says why this sibling alone must not suspend. It reads as a test written to match
+the code.
+
+**The fix is two halves, and the second is why this is filed rather than fixed.**
+
+1. `freshAwaitAllChildren`: when any child is incomplete, record the event without a
+   response and suspend, as `AwaitChild` does at `children.go:287-299`.
+2. `replayAwaitAllChildren` **cannot currently replay such a record.** It has no equivalent
+   of `AwaitChild`'s "no cached result yet — fall through to fresh" path
+   (`children.go:238-246`); it serves `rec.Response` unconditionally, so a suspended record
+   would replay as an empty result. Half 1 without half 2 converts a durable wrong answer
+   into a durable empty one.
+
+**Fixed 2026-09-05, both halves, on the owner's decision.**
+
+Half 1, `freshAwaitAllChildren`: any child still running records the event **without a
+response** and suspends, with `pending` tracked in a slice beside `outcomes` rather than as a
+field on `childOutcome` — that struct is marshalled into the result the guest reads, so a new
+field would change the wire format for every caller. The no-store branch suspends too, which
+is the specific divergence that started this section: `AwaitChild` reaches its suspend on
+that same condition.
+
+Half 2, `replayAwaitAllChildren`: a record with an empty response falls through to fresh and
+re-checks, mirroring `AwaitChild`'s "no cached result, exitReplay to fresh". Checked **before**
+`advanceReplayStep` and without advancing `stepCount`, so the fresh execution overwrites the
+empty event at the same step; everything past that point keeps its existing order, and the
+four pre-existing replay tests (`Match`, `MismatchType`, `IDsMismatch`, `PastEnd`) still pass.
+An empty response cannot arise any other way — the completed path records `json.Marshal` of a
+slice, `"[]"` at its shortest — so no pre-existing history is reinterpreted.
+
+**Falsified one half at a time, which is what demonstrates "both halves or neither":**
+
+| perturbation | result |
+|---|---|
+| half 1 reverted (fresh does not suspend) | `TestAwaitAllChildren_SomeRunning` and `TestFreshAwaitAllChildren_NoStore` fail: `a still-running child must suspend: got 0x6300000000, want 0x4000000000000000` |
+| half 2 reverted (replay does not fall through) | **only** the replay test fails: `replay returned an EMPTY result -- the suspend record was served verbatim` |
+
+The second row is the argument for shipping them together: half 1 alone trades a durable
+wrong answer for a durable **empty** one, which is worse because empty reads as success.
+
+**Two tests asserted the old behaviour and were converted, not deleted.**
+`TestAwaitAllChildren_SomeRunning` asserted `errCode 0` with `"child not completed"` for the
+running child; `TestFreshAwaitAllChildren_NoStore` asserted `errCode 0` with
+`"no child workflow store"`. Both now assert the suspend, and each carries a comment saying
+what it asserted until 2026-09-05 and why that held the defect in place. A third test,
+`TestAwaitAllChildren_ReplayOfSuspendRecordFallsThroughToFresh`, is new and covers half 2.
+
+**A third test encoded the old behaviour, in another stream's work.** WS-1's host-call
+harness (#744/#749) carried `AwaitAllChildren` under "calls that succeed with no backend"
+with `status: statusOK` and the raw result `[{"run_id":"…","error":"child not completed"}]`,
+and its `why` said the fix "is not this PR's". It is now, so the row moves to the suspend
+section beside `AwaitChild` and `AwaitAnyChild` — the two calls it was flagged for
+disagreeing with. `TestHostCallTableCoversEveryWave1Call` still passes, so the move did not
+drop it from the table. That row is how this section began: WS-1 flagged the disagreement,
+WS-2 traced it off the no-backend path onto the ordinary one.
+
+Measured: `go test ./engine/` 0 failures; child/replay/suspend tests against a real
+PostgreSQL (`-p 1`, WS-2's 5433) 400 pass, 0 fail, with the DSN confirmed to connect by
+`TestPluginMigrations_AllDialects` rather than assumed; `TestHostCallsGo` and
+`TestHostCallTableCoversEveryWave1Call` pass.
+
+### 3.406 Three SDKs, three different amounts of the truth about the same host call — 🟢 **MEASURED 2026-09-05** (WS-3, 2026-09-05)
+
+C2. Rust and AssemblyScript fixtures through the host-call execution harness (§3.210), 24 wave-1
+calls each, one call per invocation, tables recorded from measurement rather than predicted.
+
+The one-line result: **`ListCrons` returns the host's message in Go, cannot be called at all from
+Rust, and arrives as `null` with the message already gone in AssemblyScript.** Every one of those
+three guests compiles. Compile coverage cannot see any of it, which was the argument for this
+round.
+
+#### 1. The Rust SDK cannot make two of the 24 calls
+
+    grep -c cron crates/cleat-sdk/src/host_calls.rs                      # 0
+    grep -c cleat_schedule_cron packages/cleat-as/assembly/host-calls.ts # non-zero
+    grep -oE 'Export\("[a-z_0-9]+"\)' engine/imports.go | sort -u | grep cron   # 3
+
+No `cleat_schedule_cron` import, no `cleat_list_crons`, and the string "cron" appears zero times
+in the file. The host exports both and the AssemblyScript SDK binds both, so this is a guest-side
+gap and not a host limitation.
+
+Recorded through a **new `statusUnsupported`** on the harness rather than as an error. The two are
+different facts: an error is a binding that ran and was refused, and this is a binding that does
+not exist. Collapsing them files a missing SDK feature under "the host said no", which is the
+distinction the whole harness exists to draw. It also reddens usefully — when Rust gains cron the
+row stops reporting `unsupported`, stops matching, and someone has to decide what the right answer
+is, rather than the gap closing silently.
+
+Falsified: making the fixture pretend the binding exists gives
+`rust/ListCrons: status ok, table says unsupported`.
+
+#### 2. The AssemblyScript SDK discards the host's message and prints its own legend
+
+`ScheduleCron` reports
+
+    failed: timeout (code 1)
+
+It is not a timeout. Patching `scheduleCron` to read the output buffer and re-recording shows what
+the host actually said:
+
+    no workflow store configured: workflow <uuid> cannot schedule "harness-workflow"
+
+which names the workflow *and* the schedule, and is strictly more than Go's own row asserts. Go
+gets that message; AssemblyScript throws it away and substitutes a wrong word.
+
+`packages/cleat-as/assembly/host-calls.ts` does this at **25 call sites**
+(`grep -c errorCodeName`), and `errorCodeName` is a six-entry legend —
+unknown / timeout / transient / not_found / invalid_request / permission_denied. That is
+`cleat_call`'s `callErrorCode` legend, applied to `decodeSimpleResult`'s `errCode` from a
+different result layout. **This is §3.200 in another language, and broader**: the Go defect was
+one adapter class, and `wasm/adapter_hostmessage_test.go`'s
+`TestNoAdapterPrintsTheCallErrorCodeLegendForAnotherLayout` exists precisely to stop the Go side
+doing it. Nothing checks this side.
+
+**Not fixed here** — one PR, one thing. The table row asserts the *wrong* text deliberately, so
+the day the SDK is fixed the row reddens and has to be rewritten to assert the host's message.
+That is how a known defect stays visible instead of being forgotten. Falsified by exactly that
+route: patching the SDK to carry the message reddens the row with `detail changed`.
+
+#### 3. Four AssemblyScript bindings lose the message by signature, not by choice
+
+`awaitAllChildren`, `awaitAnyChild`, `listCrons` and `sideEffect` all return `string | null`, so a
+failure arrives with the host's words already gone before the guest can see them. There is no bug
+to fix in a fixture here; the API has nowhere to put the text.
+
+Only `listCrons` is observed failing in this environment, so it is the only one the table can pin.
+Its recorded detail is written by the *fixture* and says so:
+`<no host message: listCrons returns string|null and discards it>`. Recording that as an ordinary
+error would have put invented text where the Go table puts the host's own words, and made the two
+tables look comparable when they are not.
+
+#### What the AssemblyScript table shows that the Go and Rust tables hide
+
+Go and Rust both report `1 child result(s)` for `AwaitAllChildren`. The AssemblyScript row reports
+the host's raw JSON:
+
+    [{"run_id":"00000000-0000-0000-0000-000000000001","error":"child not completed"}]
+
+**Both counts are green over a child result that is an error.** A count is a lossy rendering, and
+the two rows that use one cannot fail on the contents of what they counted.
+
+That `"error":"child not completed"` is **§3.309**, filed by WS-2 the same day and still open:
+`AwaitAllChildren` does not await, it records the not-yet-completed state as the child's permanent
+outcome. Two streams reached it independently and from opposite directions — WS-2 by reading the
+branch, this table by printing what the host returned instead of counting it. Worth noting which
+one would have caught it alone: WS-2's would, this one only because the row stopped summarising.
+
+The route to that row is worth recording too, because it is the same lesson from the other side.
+The fixture's first version counted commas to match Go's wording and returned **2** for that
+one-element array — the element is an object with a comma inside it. AssemblyScript has no JSON
+parser in scope there (the SDK's `jsonParse` is itself a host call, which would put a second call
+inside every measurement of this one), so there is no honest way to produce the count. It reports
+what it received instead. **A fixture that computes a wrong number and reports it confidently is
+the exact failure this harness exists to catch**, and the near-miss was in the harness's own
+fixture.
+
+#### What the three tables agree on, which is also evidence
+
+All four suspending calls produce byte-identical suspend reasons in all three languages, rendered
+arguments included — `await_signals(["harness-signal"], 10ms)` among them. Three SDKs encode the
+same values the same way on the wire: Go passes an `int64` of milliseconds, Rust a `Duration`,
+AssemblyScript a hand-built JSON string and an explicit `…Ms` variant. Reaching that agreement in
+AssemblyScript required `awaitSignalsMs`, `awaitPromiseMs` and `acquireLockMs`; the plain forms
+take **seconds** and would have rounded the harness's 10ms to 0 and asked a different question.
+
+Three caveats reproduce in all three languages and are recorded in every table rather than in one:
+`RunID` and `WorkflowID` return the **same value** in this environment, so no row can catch a guest
+that returns one for the other; the in-memory lock is **re-entrant for the same holder**, so
+`AcquireLock`'s `first=true second=true` still cannot distinguish a decoded bit from a hardcoded
+one; and `ChildWorkflowWithOptions` is indistinguishable from `ChildWorkflow` because the in-memory
+store ignores `Version`.
+
+#### Cost, against §3.404's model
+
+All three languages, 72 host-call executions, **5.3s** locally. Rust builds in 2.7s and executes
+in 0.17s; AssemblyScript is 3.65s end to end. Build-once-invoke-N held.
+
+#### What it did to the executed-coverage guard, and two calls that guard cannot see
+
+`scripts/sdk-host-call-coverage.py --check-executed` (§3.207) moved **rust 7 → 23** and
+**assemblyscript 7 → 25**, and *failed* on the rise until the baseline was recorded — the
+bidirectional ratchet landed in #749 hours before this, on the reasoning that a guard which only
+forbids shrinking cannot tell a stale baseline from an accurate one.
+
+**Two wave-1 calls this fixture exercises are invisible to both coverage metrics, and the reason
+is one character of regex.** `rust_surface()` matches `^\s{4}pub fn ([a-z_][a-z0-9_]*)\s*\(` —
+the name must be followed by `(`. A Rust generic method is `pub fn name<T: …>(`, so every generic
+method on `HostCalls` is excluded:
+
+    counted (surface) = 61
+    all `pub fn`      = 71
+    excluded (10): await_child_typed, child_workflow_typed, cleat_call_heartbeat_typed,
+                   cleat_call_typed, cleat_call_with_host_retry, cleat_call_with_retry,
+                   defer_func, plugin_call_streaming_typed, plugin_call_typed, side_effect_typed
+
+Two of those ten are the **only** Rust bindings for a wave-1 call: `cleat_call_with_retry` is the
+whole of `DurableCallWithRetry` (there is no string-in/string-out form) and `defer_func` is the
+whole of `DurableDeferFunc`. So this fixture calls them, the table asserts their outcomes, and
+both coverage numbers are computed as though neither existed. **The Rust surface of 61 understates
+by 10, and the direction is the dangerous one** — a smaller denominator makes coverage look
+*higher*, and an uncountable call reads as a call nobody needs to write.
+
+**Fixed in #753 (`26e6333e`), and the corrected numbers are worse than the section predicted.**
+Rust's surface is **71**, and compile coverage is **63/71 = 88.7%** — it was never 100%, and that
+100% had been quoted into four places and to the user before anyone read the file a second way.
+Executed coverage moved 23 → 25. Java's surface went 68 → **70**: the two members were
+`awaitSignalsWithQuorum` and `awaitSignalsWithQuorumMs`, whose return type
+`CleatResult<java.util.List<AwaitSignalsResult>>` fell outside a character class missing `.`. The
+77-versus-68 gap flagged above was therefore **2, not 9** — the other seven `public` lines are
+fields and constructors. Flagging it rather than asserting it was right; asserting it would have
+been wrong by seven.
+
+**One caveat this harness's Rust numbers still carry, and it is the same defect on the other
+side.** #753 fixed the *declaration* side. The *call* side still ends `\s*\(`, and
+`DurableCallWithRetry` calls `h.cleat_call_with_retry::<Value, Value>(..)` — a turbofish sits
+exactly where the pattern expects a paren. Measured over this fixture's globs alone: it credits
+**21** of the 24 arms, and `cleat_call_with_retry` is **not** among them. Two of the other three
+are the `unsupported` cron arms, which make no call at all.
+
+The total is nevertheless right today, and only by accident: `examples/rust-workflow` calls the
+same method in a matchable form, so the one turbofish site is credited by a neighbour. **Delete or
+rewrite that example and Rust's executed count drops by one, reading as a fixture regression
+rather than a scanner one.** Recorded next to `SDKS` with its known-positive — over this fixture's
+globs alone the strict pattern finds 0 for `cleat_call_with_retry` and a loosened one finds 1 —
+because "zero missed" is otherwise indistinguishable from a loose pattern that matches nothing.
+
+### 3.311 `TestBlobstore_S3` now exists, so Layer 4 runs a test for the first time — 🟢 **FIXED 2026-09-05** (WS-2, 2026-09-05)
+
+§3.310 found that `plugin-harness-ci.yml`'s Layer 4 ran `-run 'TestBlobstore_S3'` against a
+test that existed nowhere, so it printed `ok … [no tests to run]` and exited 0 while
+provisioning a MinIO service container and five `CLEAT_TEST_S3_*` variables that no Go code
+read. It was filed rather than resolved because the honest options were to write the test or
+delete the job, and which one is right is a product question. **The owner chose to write it.**
+
+    cd tests/plugin-harness && go test ./... -list 'TestBlobstore_S3' | grep -c '^Test'
+    # 1, was 0
+
+**What it covers that the existing S3 tests cannot.**
+`plugins/blobstore/blobstore_s3_backend_test.go` constructs the unexported `s3Backend` with a
+mock `RoundTripper`, so it asserts the plugin's own call sequence and can never observe how a
+real server answers it; it also lives in the **root** module, which Layer 4's
+`working-directory` cannot reach. This test drives the plugin's *registered host functions* —
+the surface a workflow reaches through `cleat_plugin_call` — with a genuine endpoint and a
+real SQL index underneath.
+
+**The load-bearing assertion is the one that reads the bucket directly.** `Config.Backend`
+defaults to `"memory"`, so a plugin that ignored or failed to parse the S3 config would still
+`put` and `get` successfully, out of a map, with nothing in object storage. Falsified by
+setting `"backend": "memory"` and re-running against real MinIO:
+
+| perturbation | result |
+|---|---|
+| `backend: "s3"` (as shipped) | PASS |
+| `backend: "memory"` | **put and get both still succeed**; fails only at `the blob is not in the bucket at cleat-test-harness/2849…: The specified key does not exist` |
+
+So a round-trip test would have been green with nothing reaching S3, which is what makes the
+`StatObject` check the test rather than an extra.
+
+**Two skips, both `check-skips.sh` case (a).** `CLEAT_TEST_S3_ENDPOINT` unset, and
+`CLEAT_TEST_POSTGRES` unset — blobstore stores its index in SQL, so the S3 backend cannot be
+exercised through the plugin without a database. Layer 4 provides both. Baseline updated:
+`tests/plugin-harness  TestBlobstore_S3  2`.
+
+**Two things it does not do, deliberately.** It does not call `RunCoreMigrations`: the
+engine's workflow tables are irrelevant here, and `033_completed_workflow_retention_indexes.sql`
+needs the `pg_trgm` extension, which would fail this test on a database lacking it for a
+reason having nothing to do with S3. `RunPluginMigrations` creates its own tracking table, so
+it stands alone. And the payload is random rather than fixed, so a repeat run against a
+shared bucket cannot pass by reading an object an earlier run left behind — the assertions
+are round-trip equality, so the outcome does not vary.
+
+Measured against MinIO on `localhost:9000` and WS-2's PostgreSQL 5433: PASS in 0.07s, and
+SKIP with an accurate message when the endpoint is unset.
+### 3.312 A Java host-call fixture, and the arity defect it found on its first run — 🟢 **FIXED 2026-09-05** (WS-2, 2026-09-05)
+
+Java was the weakest "bound but never executed" case in the tree: 8 host calls executed
+against a 70-method surface, every one of the 70 compile-checked, which is exactly why it read
+as covered. This adds the Java fixture to the host-call harness (§3.211's shape: one fixture,
+built once, invoked once per call, dispatching on `{"call":"<Name>"}`), bringing it to four
+languages over the 24 wave-1 calls.
+
+**It found a defect on its first run, and the defect is why compile-time coverage could not
+have found it.** `crates/cleat-java`'s `cleat_child_workflow_with_options` import declared
+**nine** parameters against the host's **ten** — no `priority`, the second `i64`
+(`engine/imports.go`, `(ptr,len x3, i64, i64, ptr,len, ptr,maxLen)`). The Java side compiled
+perfectly against a signature the host does not have.
+
+A WASM import whose arity disagrees does not fail at that call. **The module fails to
+instantiate**, so every one of the 24 calls died together:
+
+    incompatible import type for `env::cleat_child_workflow_with_options`
+    expected (i32 i32 i32 i32 i64 i32 i32 i32 i32) -> i64      [the guest's import]
+    found    (i32 i32 i32 i32 i64 i64 i32 i32 i32 i32) -> i64  [the host]
+
+So **any Java workflow that so much as referenced `childWorkflowWithOptions` could not run at
+all** — and nothing noticed, because TeaVM tree-shakes unreferenced imports and no Java test
+called it. Same defect class as §3.55, where `cleat_create_promise` was registered on wasmtime
+with a parameter no guest passed and durable promises could not link on the worker.
+
+Fixed by adding `priority` to the raw import and passing `0L`, which the Go SDK documents as
+the default and the highest (`cleat/runtime_children.go`, "0 = highest priority"). Exposing
+priority in Java's *public* API is additive and deliberately not bundled here — the arity is
+what stops the module linking.
+
+**Falsified both ways.** Reverting the SDK fix reddens every row with the instantiation error
+above; perturbing a single table row (`PollSignal` to `statusOK, "present=false"`) reddens
+that row alone, with the row's `why` printed beside it.
+
+**One cross-language divergence, recorded and NOT endorsed.** `PollSignal` is `ok` with
+`present=false` on Go and an **error** on Java — `CleatResult<String>` has no `present`
+channel, so "no signal pending" has nowhere to go but the error case, and a Java workflow
+cannot distinguish "not yet" from "broken". The row asserts the text so that a Java binding
+growing a `present` flag must change it.
+
+**Two rows are `statusUnsupported`.** `grep -rn cron crates/cleat-java/src/main/java/cleat/`
+returns nothing, while the host exports both cron functions and the AssemblyScript SDK binds
+them — a guest-side gap, not a host limitation, and the same position Rust is in.
+
+**Two things the fixture had to teach the shared harness.** Java exports the `@CleatEntry`
+name **verbatim** where Go, Rust and AssemblyScript snake_case theirs, so the fixture spells
+its entry `exercise_host_call` to match the one name `executeOneCall` asks for; getting that
+wrong builds cleanly and traps with `export "exercise_host_call" not found`. And Java returns
+the entry's value as a **JSON-encoded string** — a JSON string containing the object — where
+the other three return the object, so `executeOneCall` now unwraps exactly once, and only when
+the payload really is a JSON string, so a malformed object still fails rather than being
+massaged into shape. That is the Java SDK's ABI contract, the same one
+`TestPluginCalls_Wasm_Java` unwraps for and §3.303 turned from a skip into a failure.
+
+**Table conventions, per §3.211's lesson.** Every `why` says what the row would **catch**, not
+what it asserts — a `why` that restates the assertion is how a row goes green through the
+defect it points at. No row asserts a count. Three rows carry an explicit LIMITATION:
+`AcquireLock` cannot tell a decoded bit from a hardcoded `true` while the in-memory lock is
+re-entrant for one holder; `RunID` and `WorkflowID` are the same value in this environment;
+and Java's `sideEffect` takes an already-computed value rather than a closure, so its row does
+not prove replay suppression the way Go's can.
+
+`tests/plugin-harness/testdata/hostcallsjava/build/` is gitignored with the directory rather
+than after the first dirty `git status`, which is how §3.305 and §3.308 both started.
+
+**The first version of the harness change was wrong in review, and the way it was wrong is
+worth more than the fix.** Handling Java's wrapper by unwrapping *whenever the payload happened
+to be a JSON string* is one line shorter and made the harness blind in the other three
+languages: a Go SDK that regressed to returning a JSON-encoded string decoded cleanly and
+reported `ok`, where the day before it had failed as `undecodable result`. Measured on all
+three inputs — object, Java-wrapped, and Go-wrapped-by-mistake — the third was
+indistinguishable from correct. The comment sitting directly above that code said *"a tolerant
+decoder is how a harness stops being able to tell a wrong answer from a differently-shaped
+right one"*, so the principle was stated and then not applied to the line beneath it.
+
+The shape is now a parameter the caller states, enforced in **both** directions: a wrapped
+payload from an object language fails, and an unwrapped payload from Java fails too. The second
+half is not symmetry for its own sake — without it, the Java SDK silently dropping its wrapper
+would read as correct, which is the same defect one language over. Falsified both ways:
+
+| perturbation | result |
+|---|---|
+| Go call site claims `resultJSONWrapped` | `this SDK returns the outcome as a JSON-encoded string and this result is not one` |
+| Java call site claims `resultObject` | `this SDK returns the outcome object directly and this result is a JSON-ENCODED STRING` |
+
+**This is the same shape as §3.213's parity guard**, found by WS-1 in review: that one widened
+what it accepted by dropping a prefix filter, this one widened what it accepted to accommodate
+one language's real contract. Both are correct locally and lose a distinction globally, and
+neither is visible from inside the change — the tests stay green either way.
+
+---
+
+### 3.313 The README advertised a WASM backend that was deleted four weeks earlier — 🟢 **FIXED 2026-09-06** (WS-2, 2026-09-06)
+
+`README.md`'s "WASM workflows" bullet read *"wasmtime is the backend of record … wazero is a
+pure-Go, CGO-less fallback with no compute-bound fencing."* There is no second backend.
+`engine/backend_wazero.go` was deleted in #459 (2026-08-10); a `CGO_ENABLED=0` build gets the
+`//go:build !cgo` stub, constructs no backend at all, and `cleat-worker` exits 1 at startup.
+
+    ls engine/backend_wazero.go                                    # No such file or directory
+    grep -rn "there is no fallback" cmd/cleat-worker/main.go       # the exit
+
+**The direction of the error is the point.** It does not merely misdescribe an internal — it
+advertises, in the file a prospective user reads first, a *pure-Go deployment path that does not
+exist*, and it downgrades the CGO requirement from "the worker will not start" to "you lose some
+fencing". That is the one claim on which someone evaluating cleat against a competitor would
+form a portability judgement. It survived 28 days.
+
+**The correction it replaced was itself a correction, and went stale in one day.**
+`docs/explanation/security-model.md` carried a dated callout — *"Corrected 2026-08-09 … wazero is
+the CGO-less fallback only … Treat a wazero-only deployment as running without CPU/wall-clock
+enforcement"* — which was accurate when written and falsified the next day by #459. Its advice
+was the harmful half rather than its description: it told an operator to plan for a
+degraded-but-running mode that cannot exist. **A dated correction is not durable; it is a
+measurement, and it decays at whatever rate the thing it measured changes.** This one had a
+one-day half-life, and the date on it is what made it look safe.
+
+Both files now say wasmtime is the only backend, record what they said before, and separate the
+two questions that were being run together: *which backend runs a worker* (wasmtime, always) and
+*what still executes guest code on wazero* (`engine.Runtime`, on CLI and test paths only —
+`cleat run_embedded`, `cleatctl replay|debug`, `cleat-bench`, `cleat/wasmtest`, and `RunDefer`
+when no backend is registered, which is those same tools). Re-derive with
+
+    grep -rn "NewRuntime(" --include="*.go" . | grep -v _test.go
+
+**Writing that list, `cleat dev` went into it on the strength of its name and had to come out.**
+`cleat dev` does not use WASM at all — `buildDevRun` generates a Go runner and `go run`s it as a
+native subprocess. It is absent from the `NewRuntime` grep above, which is the check that caught
+it, and it is the tool whose name most suggests otherwise. Same lesson as the `-run` probe in
+CLAUDE.md: **the command answers, the name only implies.**
+
+Two further stale facts were corrected in `security-model.md` because they sit in lines being
+rewritten: wasmtime has **two** execution paths, not three — decomposition was deleted in #528
+(2026-09-01), and `engine/component_no_decomposition_test.go` guards it
+(`grep -rn "func.*ExecuteComponent" --include="*.go" .` → one line, `ExecuteComponentCGo`).
+
+**Still open, deliberately not in this PR** (one PR, one thing — but it is the same claim and
+should not be lost):
+
+  * `docs/explanation/architecture.md` carries the *identical* stale callout, plus two mermaid
+    sequence diagrams that label the **worker's** runtime `wazero WASM`, and a node
+    `WR[WASM Runtime wazero]` on the main architecture diagram. That is the primary picture a
+    reader forms of what a worker runs, and it names the wrong runtime.
+  * Its host-function count says 59. **It is 52** — measured 2026-09-06, on the develop this
+    branch is rebased onto:
+
+        python3 -c "import re;print(len(set(re.findall(r'\.Export\("([^"]+)"\)',
+          open('engine/imports.go').read()))))"      # 52 = 49 cleat_ + 3 unprefixed
+
+    **This paragraph said 58 in the first push of this PR, and 58 was right when measured.**
+    #767 landed on develop between that measurement and the rebase, removing the six-call
+    durable-state family (`cleat_{set,get,delete,incr,has,list}_state`): 58 − 6 = 52. The
+    number was not wrong through carelessness — it was wrong because a number is a
+    measurement with a timestamp, and this one aged out inside a single PR. CLAUDE.md's
+    stale 58/55 pair, and §3.213's, are the same casualty.
+  * `engine/backend_wasmtime_stub.go`'s doc comment still instructs *"callers that fall back to
+    wazero on error MUST check for `ErrWasmtimeCGOUnavailable`"*. There are no such callers.
+    A comment telling a future reader how to write code that must not exist.
+
+Other tracked files still match a wazero-as-fallback pattern. Measured 2026-09-06, after this
+PR's edits, with `/usr/bin/grep` under `bash -c` rather than the interactive shell's ugrep
+(CLAUDE.md, *"`grep` in an interactive shell here is not the `grep` your script gets"*) — **9**
+files:
+
+    git ls-files | xargs /usr/bin/grep -lniE \
+      'wazero (is|as) (a |the )?(pure-go, )?(cgo-less )?fallback|fall(s|ing)? back to wazero'
+
+and **18** if `|wazero backend` is added to the alternation, which pulls in dated historical
+records (`IMPROVEMENT-PLAN-CLOSED.md`, `REVIEW-2026-08-09.md`, `BRANCH-TRIAGE.md`) and retraction
+prose in CLAUDE.md, all correct as records. **The two counts are given together on purpose:** the
+first draft of this paragraph published the broad number beside the narrow command — 16 against a
+pattern that returns 9 — because the count was taken from one pattern and the command written
+from another. That is the failure this document keeps recording, committed while writing the
+section about it.
+
+**Note that this grep now matches the retractions too, including the two written here.** That is
+the trap CLAUDE.md names under *Build* — a text search cannot tell a thing from a sentence
+denying the thing — and it is unavoidable in prose, where a retraction has to quote what it
+retracts. The usable discriminator is position, not wording: in both files corrected here the
+stale text survives only inside a `>` blockquote or an HTML comment, never in a claim line.
+
+---
+
+### 3.314 Every doc that said a worker runs on wazero — a sweep, and three things it found — 🟢 **FIXED 2026-09-06** (WS-2, 2026-09-06)
+
+§3.313 fixed the README's wazero-as-fallback claim and the one doc it delegated to. This is the
+rest of the tree. **24 files changed** (`git diff --name-only develop.. | grep -v IMPROVEMENT-PLAN`);
+the classification mattered more than the count, because most wazero mentions are correct and
+rewriting them would have destroyed records.
+
+| class | treatment | examples |
+|---|---|---|
+| a worker's runtime named as wazero | rewritten to wasmtime, with a dated note | `SECURITY.md`, `docs/explanation/architecture.md`, `docs/worker-architecture.md` |
+| wazero named as *a backend* | rewritten; there is one backend | `ARCHITECTURE.md`, `ABI.md`, `tiers.yaml` |
+| original design documents | banner added, **body untouched** | `docs/contributor/design/*`, `docs/explanation/go-wasm-plan.md` |
+| dated historical records | left exactly as written | `CHANGELOG.md`, `REVIEW-2026-08-09.md`, `IMPROVEMENT-PLAN-CLOSED.md` |
+| wazero correct | left | plugin loader docs, `cleat/wasmtest` |
+
+**Rewriting a design document to match what was built destroys the only record of what was
+intended.** That is why the third row gets a banner instead of an edit — the distinction between
+"this is wrong" and "this was a plan" is not visible from the text alone, and a sweep that cannot
+make it will quietly launder history into documentation.
+
+#### Three diagrams said the worker ran wazero
+
+`docs/explanation/architecture.md` had `WR[WASM Runtime wazero]` on the main architecture diagram
+and `participant WZ as wazero WASM` in both the first-run and replay sequence diagrams. **A
+diagram is read faster and doubted less than a paragraph**, and these three were the primary
+picture a reader forms of what a worker executes. Grep for stale claims will not find a mermaid
+node label unless you go looking for one.
+
+#### The host-function count is 52, and it was 58 four days ago
+
+Every doc carrying it was wrong, by three different amounts (59, 58, 15, 14). Measured
+2026-09-06:
+
+    python3 -c "import re;print(len(set(re.findall(r'\.Export\(\"([^\"]+)\"\)',
+      open('engine/imports.go').read()))))"      # 52 = 49 cleat_ + 3 unprefixed
+
+58 → 52 is #767 (2026-09-05) removing the six-call durable-state family; 59 → 58 was #582. **This
+is why §3.313 shipped a wrong number in its own first push** — 58 was measured at `c5c30286` and
+was correct there; the rebase moved the tree underneath it.
+
+**And `ABI.md` still documents seven host calls that no longer exist** — the six `cleat_*_state`
+calls and `cleat_child_workflow_in_schema` (`grep -c cleat_set_state ABI.md engine/imports.go` →
+2 and 0). An SDK author who binds one gets a module that **fails to instantiate**, which is
+exactly the §3.312 Java failure: not an error at the call site, a dead module. Recorded in
+`ABI.md` and left for its own PR rather than folded into a sweep about runtime names.
+
+#### A limits table for a sandbox nothing runs
+
+`docs/contributor/plugins/plugin-security.md` documented `--plugin-memory-limit` and
+`--plugin-gas-limit`. **Neither flag exists.** Following that: `PluginLoader.LoadPlugin` has no
+non-test callers, the only two non-test `NewPluginLoader` calls pass a nil `*Runtime`, and
+`cmd/cleat-worker` constructs no loader — so no plugin module is compiled or instantiated on any
+path a workflow reaches.
+
+The wazero attribution there is **correct** — `PluginLoader` is genuinely wazero-typed — which is
+why a sweep keyed on "wazero is wrong" would have passed over it. It was found by checking the
+sentence *next to* the word, not the word. **A resource-limit table for an unwired path is the
+most flattering error available**: it reads as defence-in-depth and measures nothing, and no one
+re-derives a number that makes the system look safer.
+
+Both plugin docs now carry the measurement inline rather than being quietly deleted, so the gap
+cannot be closed by editing prose.
+
+#### What is deliberately still open
+
+  * `ABI.md`'s seven entries for removed host calls (above).
+  * WASM plugin execution is not wired; two contributor guides describe it as if it were.
+  * `engine/backend_wasmtime_stub.go`'s doc comment still tells callers how to fall back to
+    wazero. There are no such callers.
+  * `Engine.Execute`'s doc comment still says it decomposes Component Model binaries; the body
+    directly below says that path was deleted (#528).
+  * CLAUDE.md's own `58` / `55` export counts are now stale for the same reason as everything
+    above. Left for a PR against CLAUDE.md rather than smuggled into a docs sweep.
+
+---
+
+### 3.407 A failed scope acquisition was reported to the guest through a field no SDK decodes — ✅ **FIXED 2026-09-09** (cleat#1062)
+
+`freshSetScope` (`engine/scope.go`) returned `packSimpleResult(1, 0)` when `AcquireConcurrencyKey`
+returned an error. That errCode is decoded by nobody. Verified at the call sites, not by name
+search:
+
+| SDK | what it does with the result |
+|---|---|
+| Rust | `let (prev_len, _err_code) = memory::decode_simple_result(result);` — discarded by name |
+| AssemblyScript | reads `decoded.extra` for the length, never `decoded.errCode` |
+| Java | ignores `result` entirely and returns its own `_scopePrefix` mirror |
+| Python | `_import_set_scope` is a stub raising `NotImplementedError` |
+| Go | discards it deliberately (#1060), to match Rust rather than diverge alone |
+
+So a concurrency-key store failure returned to every guest as an ordinary success and the workflow
+continued believing it held the key — a mutual-exclusion violation of the one guarantee scope
+exists to provide.
+
+**The fix is not to report it better. It is to stop reporting it as the mechanism.** Three things
+already in the tree say so:
+
+  * **The contention branch, ten lines below, enforces host-side and tells the guest nothing.**
+    `!acquired` returns errCode **zero** — apparent success — and arms `s.suspendErr`. So
+    `freshSetScope` already contained a working answer to "this workflow must not proceed believing
+    it holds the scope", and the branch two lines above did not use it.
+  * **`replaySetScope` was already written for the retry that nothing produced.** On a replayed
+    `EventTypeScopeAcquired` carrying `Err` it declines to set the scope fields, calls
+    `exitReplay()` and re-enters `freshSetScope` — commented *"switch to fresh to retry
+    acquisition"*. Close to unreachable before this: the fresh path returned errCode 1, the guest
+    ignored it and ran to completion, so there was no suspension and no replay to arrive there. The
+    retry machinery was terminated at both ends with no wire between.
+  * **The sibling caller of the same store method puts the failure where guests already look.**
+    `freshAcquireLock` (`engine/locking.go`) returns `packAcquireLockResult(false, 1)` on a store
+    error — `acquired=false` **and** errCode 1. A guest checking `!acquired`, which is the entire
+    point of that API, is correct without reading the error code at all. `cleat_set_scope` has no
+    `acquired` field; its only "did I get it" channel was the errCode, which is why the same
+    oversight is a defect there and not in `acquire_lock`.
+
+So the store-failure branch now arms `suspendErr`, matching its neighbour. **No SDK signature
+changes and `ABI.md` is unchanged** — errCode 1 stays on the wire for anyone who later decides to
+read it. Reporting through the return value could not have fixed this on its own: it makes mutual
+exclusion contingent on five SDKs each choosing to check, and the host is the only party that can
+refuse. Same asymmetry as §3.223's *"the engine is where the mechanism is legible"*.
+
+The `Reason` deliberately names the store error and the scope key, because contention suspends too
+and a suspend reason was otherwise the only thing an operator would see — a documented failure mode
+needs a stated way to tell it apart from its neighbours (CLAUDE.md).
+
+## The test named for this path tested the happy path, and said so
+
+`TestSetScopeAcquisitionFailure` (`engine/host_dispatch_test.go`) set up `mockConcurrencyKeyStore`,
+which always returns `(true, nil)`, and carried the comment *"The mock always returns
+acquired=true, so this tests the happy path. For the failure path we'd need a different mock."* So
+the one test bearing the defect's name never entered the branch, and the defect survived under a
+green test that appeared to cover it. This is CLAUDE.md's *"the sharpest form is a test whose NAME
+asserts the mechanism"*, in its cheapest possible form: the test even documented the gap.
+
+Renamed to `TestSetScopeAcquisitionSucceeds` rather than deleted — a success control is worth
+keeping beside the failure tests — and the four in `engine/scope_acquire_failure_test.go` cover the
+branch it named. Both stores those tests need already existed in `locking_test.go`
+(`acquireErrorStore`, `acquireNotAcquiredStore`), which is the finding in miniature: the two callers
+of `AcquireConcurrencyKey` were given opposite treatments of the same two outcomes, and only one of
+them had been tested for either.
+
+**Falsification.** Removing the `suspendErr` assignment fails `TestSetScopeStoreFailureSuspends` at
+the intended line with the intended message, and leaves all three controls green — including the
+contention control, which confirms the mutation is specific to the branch changed rather than to
+non-acquisition generally. `TestSetScopeReplayOfRecordedFailureRetriesAcquisition` passes under the
+mutation too, and is reported as what it is: a characterisation of the pre-existing replay retry
+that this change makes reachable, not a regression test for the change.
+
+### 3.408 A guard keyed its baseline on a dialect PAIR, so a two-dialect run reported the same asymmetries as both new and closed — ✅ **FIXED 2026-09-09** (cleat#1087)
+
+`TestEveryDialectAgreesWhichColumnsAWriterMustSupply` compared dialects against a base picked by
+sort order — `sort.Strings(names); base := names[0]` — and rendered each finding as
+`"<table>.<col>: X requires a value, Y supplies one"`, naming **both**. `knownColumnAsymmetries`
+stored those rendered strings verbatim, so the baseline was keyed on whichever configured dialect
+sorted first: `mssql` with all three up, `mysql` without SQL Server.
+
+Measured 2026-09-09 in one environment, all three dialects available, varying only `CLEAT_TEST_MSSQL`:
+
+| | two dialects (pg + mysql) | three dialects |
+|---|---|---|
+| before | **FAIL** | pass |
+| after | pass | pass |
+
+The two-dialect failure reported the **same two asymmetries in both directions at once**:
+
+    dialects disagree about which columns a writer must supply:
+      audit_events.id: mysql requires a value, postgres supplies one (plugin audit-log)
+      event_subscriptions.id: mysql requires a value, postgres supplies one (plugin event-triggers)
+
+    knownColumnAsymmetries records 2 asymmetr(ies) that no longer exist:
+      audit_events.id: mysql requires a value, mssql supplies one (plugin audit-log)
+      event_subscriptions.id: mysql requires a value, mssql supplies one (plugin event-triggers)
+
+MySQL requires `audit_events.id`; PostgreSQL and SQL Server both supply it. That fact did not
+change. Only the counterpart named in the string did, and the baseline matched on the string.
+
+**The under-reporting half is the finding, and it is the one that would have been missed.** The
+over-report costs an hour. The stale report says *"Good news, and the list must shrink to match"*
+while pointing at two entirely correct entries — so the invited repair is to delete them, go green,
+and permanently retire a guard that exists because cleat#958 recorded zero audit events on MySQL
+for as long as it went unnoticed. The failing half looks like work to do; the passing half looks
+like progress. Same selection effect as the flattering-number class in CLAUDE.md.
+
+## Two changes, and the second is not cosmetic
+
+**Key on the requiring dialect, one entry per dialect that requires the value.** `columnAsymmetry`
+replaces the rendered string; which dialects *supply* it is derivable from what is configured and
+belongs in the rendering. Both original entries already said so in their own comments — one noted
+*"where Default and MSSQL omit it"* while the string could only name one of the two.
+
+**Scope the stale check to what this run actually measured.** Keying alone does not fix it. A run
+that did not configure a dialect gathered no evidence about it, so calling its baseline entry "no
+longer exists" is a claim about something unmeasured — the same defect one size smaller. Narrowed,
+**not removed**: an entry whose dialect *was* compared and whose asymmetry is gone must still be
+reported, or the list stops shrinking.
+
+The same question has a second axis, found by re-reading the fix rather than from any failure: a
+table **absent from some configured dialect is skipped whole**, so it produces no finding — which
+is indistinguishable from a closed asymmetry unless asked separately. The `missing` path is not
+hypothetical (its own comment records a 20-line false report in CI), so a baseline entry on such a
+table would have been called stale on the strength of a comparison that never ran. Both conditions
+now gate the stale check, for one reason: **report an entry as gone only where this run had the
+evidence to say so.** The general form is that the check was answering *"did we find this?"* when
+the question is *"did we look?"*
+
+## The skip that would have been the wrong fix
+
+Worth recording because it was proposed and is the natural reading of the failure output. The test
+already refuses it, in its own source, above the line:
+
+> Every configured dialect must be reachable: a skip here would compare two dialects and call it
+> agreement, which is the failure mode the whole test is about.
+
+A two-dialect comparison is a real comparison. This was a baseline-keying bug, not a
+skip-condition bug. **The error message is what misleads**: both assertions are written in the
+imperative and neither can express "the comparison ran under a configuration the baseline was not
+written for", so every reading of the output points away from the cause.
+
+## Three falsifications, because one direction is not enough
+
+The comparison is lifted into `compareRequiredColumns`, a pure function over
+`map[string]schemaFacts`, and tested with synthetic facts and no database — the only way to assert
+the two-dialect and three-dialect cases in the same run, on any machine.
+
+A stale check that reports **nothing ever** also removes the false positive, and it passes a green
+tree and a negative control identically. So each mutation is recorded with the tests it fails:
+
+| mutation | fails |
+|---|---|
+| put the counterpart back in the key (the original defect) | the two configuration-independence tests, plus three more |
+| drop the `configured[]` guard on the stale check | `…EntryForAnUnconfiguredDialectIsNotReportedStale`, and only that |
+| `if false &&` on the stale check — **the overshoot** | `…ClosedEntryIsStillReportedStale` |
+| drop the `compared[]` guard (the table axis) | `…SkippedTableIsNotEvidenceTheEntryClosed`, and only that |
+
+Each of the last three fails a **different** test, which is what shows the suite separates "too
+narrow" from "too broad" rather than merely noticing that something moved.
+
+---
+
+### 3.410 Terminating a workflow reaches its children and stops there — ✅ **FIXED 2026-09-09 by §3.412** (cleat#1108)
+
+`TestTerminateWorkflowEnforcesParentClosePolicy` proves the close-policy cascade fires at **one**
+level. Nothing addressed the level below — no test, no doc, no issue.
+
+It stops at one. Root → child → grandchild, every edge `parent_close_policy = TERMINATE`, terminate
+the root:
+
+| | postgres | mysql | mssql |
+|---|---|---|---|
+| root | `terminated` | `terminated` | `terminated` |
+| child | `failed` | `failed` | `failed` |
+| **grandchild** | **untouched** | **untouched** | **untouched** |
+
+#### The mechanism
+
+`enforceParentClosePolicy`'s TERMINATE arm sets `status = 'failed'` with a direct `UPDATE`. That
+does not go through `FailWorkflow`, and `FailWorkflow` is one of the four callers of
+`enforceParentClosePolicy` — so closing a child by cascade never triggers the cascade for *its*
+children.
+
+#### Why this is `MEASURED` and not `FOUND`
+
+Whether one level is *wrong* is a product question, for the reasons ports ISSUES 29 gives about the
+neighbouring `cancel` case: a subtree terminate is a recursive `UPDATE` per dialect, and a detached
+child must not inherit it. A comparable engine treats it as a choice — `durabletask-go` has
+`WithRecursiveTerminate(bool)` and tests both branches over a three-level tree. cleat already has
+the vocabulary (`parent_close_policy` is per child, so `TERMINATE` everywhere is `recurse=true` and
+`ABANDON` is `recurse=false`); what it lacks is the depth.
+
+#### A second reading, deliberately NOT measured
+
+The defer-phase arm sets `status = 'terminating'` rather than failing outright, and those children
+are finalised later through a path that **can** cascade again. If so, depth depends on whether an
+intermediate workflow happened to owe defers. **The fixture's children owe no defers**, so they take
+the direct arm and the test says nothing about it. Flagged in the test's own comment as a reading.
+
+#### Falsification — three mutations, each moving a different assertion
+
+| mutation | what went red |
+|---|---|
+| the grandchild is parented to the **root** instead of the child | the fixture control: "the tree is not three levels" |
+| `enforceParentClosePolicy` recurses into each terminated child (3 lines) | the depth assertion: "the grandchild WAS reached" |
+| `enforceParentClosePolicy` returns immediately | the cascade control: "the cascade did not fire at all and this test cannot say anything about depth" |
+
+The third is the one that matters. Without it, an engine whose cascade was broken outright would
+leave the grandchild untouched too, and the test would report "one level" while measuring zero —
+the same vacuity as a retry test whose budget is one attempt.
+
+---
+
+### 3.411 A terminate reaches a grandchild only when the child in the middle owed a defer phase — ✅ **FIXED 2026-09-09 by §3.412** (cleat#1108)
+
+§3.410 measured the plain case: terminate a root, its `TERMINATE` child is failed, the grandchild is
+untouched. It recorded a **reading** that the defer arm might behave differently and said someone
+should build the fixture. Built, and the reading holds — on all three dialects.
+
+Identical tree, identical policies, identical terminate. **One `defer` row in the middle** is the
+only difference:
+
+| the child in the middle | the grandchild |
+|---|---|
+| owes no defers | **untouched** — orphaned (§3.410) |
+| owes a defer phase | **`failed`** |
+
+#### Why, and it is one asymmetry
+
+`enforceParentClosePolicy` has two arms and they close a child by different mechanisms.
+
+- **Plain arm:** `UPDATE ... SET status = 'failed' WHERE parent_workflow_id = $1`. A bulk write. It
+  does not go through `FailWorkflow`, and `FailWorkflow` is one of the calls that *fires* the
+  cascade — so the recursion point is bypassed by the mechanism doing the closing.
+- **Defer arm:** `SET status = 'terminating'` with the outcome recorded. The child is claimed again,
+  runs its defers, and is finalised by `FinalizeDeferPhase` — which **does** call
+  `enforceParentClosePolicy` (`engine/store_defer_phase.go:78`; `ExpireDeferPhases` at `:142` too).
+
+So one arm terminates the subtree and the other terminates one level.
+
+#### Why this is worse than a flat one level
+
+One level is a contract. This is not: **the depth of a terminate is a property of whether a
+workflow in the middle happened to have deferred work** — its own code, invisible to whoever pressed
+terminate, and changing when that workflow gains or loses a `defer`. An operator cannot predict how
+much of a tree a terminate will close, and the same tree answers differently on different runs.
+
+The attribution is pinned rather than assumed: the test asserts the grandchild is **still untouched**
+after the terminate and before the defer phase completes, so the reach cannot be a two-level cascade
+being credited to the wrong mechanism.
+
+#### What this does not say
+
+Which arm is *right*. The defer arm's behaviour is arguably the intended one and the plain arm the
+defect; §3.410's framing — that a subtree terminate is a recursive `UPDATE` per dialect, and a
+detached child must not inherit it — is unchanged. What is settled is that they **disagree**, and
+that neither the code nor any document said so.
+
+
+---
+
+### 3.412 Closing a workflow now does what FailWorkflow does: release, then enforce its own close policy — ✅ **FIXED 2026-09-09** (cleat#1108)
+
+Fixes §3.410 and §3.411 together, because they are one defect seen from two sides.
+
+**The rule, decided by the owner:** closing a workflow must go through the path that enforces the
+close policy. `FailWorkflow`'s post-commit is exactly two calls — release the workflow's resources,
+then `enforceParentClosePolicy` on it. A child closed by the cascade got only the first.
+
+**Why it could not literally call `FailWorkflow`, which is the constraint that shaped the fix.**
+`FailWorkflow` fences on `WHERE id = $1 AND assigned_to = $2 AND generation = $7` and returns
+`ErrFenceLost` otherwise. The cascade closes children it does **not** own — often unclaimed, or held
+by another worker — and deliberately *breaks* their fence (`assigned_to = NULL`,
+`generation = generation + 1`) so the holder cannot overwrite the termination. Calling `FailWorkflow`
+would have returned `ErrFenceLost` for every child.
+
+So the **post-commit half** is applied to each closed child instead: `releaseTerminatedChildren` was
+already doing the release; `cascadeIntoClosedChildren` now does the enforce. One shared helper in
+`engine/workflow_cleanup.go`, three thin call sites, rather than three copies of the recursion — the
+drift that produced the original asymmetry.
+
+**Only the plain arm's children are passed.** A defer-owing child is excluded from
+`childrenClosedByTerminate` by construction and reaches its own children later through
+`FinalizeDeferPhase`, so nothing cascades twice.
+
+#### The depth bound is defensive and says so
+
+`parent_workflow_id` is only ever written at INSERT, to a row that already exists, so the graph is
+built in creation order and a workflow cannot become its own ancestor; continue-as-new *inherits* its
+predecessor's parent rather than pointing at it. **That is a reading of the schema, and a terminal
+path is the wrong place to discover it was wrong**, so `maxParentCloseDepth` (64) removes the
+possibility for one comparison. Hitting it logs an ERROR naming the workflows left running rather
+than failing silently.
+
+#### The tests were inverted, not replaced
+
+`TestTerminateCascadeDepthIsOneLevel` said in its own failure message to invert it rather than delete
+it if the grandchild was ever reached. It is now
+`TestTerminateCascadeReachesEveryDescendant`, and the history is in its header.
+
+`TestBothCloseArmsReachTheSameDepth` replaces §3.411's measurement and is **one test, not two, on
+purpose**: the disagreement survived because each arm looks correct from inside itself and nothing
+compared them. Two tests — one per arm, in separate files — is the arrangement that let it happen,
+since both passed. This builds both subtrees in one run and asserts the same outcome, with a control
+that each arm was actually taken.
+
+#### Falsification
+
+Removing the recursion from all three dialects — the pre-fix state — reddens both, each on its own
+assertion:
+
+| test | message |
+|---|---|
+| `…ReachesEveryDescendant` | *"the grandchild is `ready` and unflagged: the cascade stopped at one level and it is running with no parent"* |
+| `…BothCloseArmsReachTheSameDepth` | *"the two arms disagree on depth: plain-arm grandchild is `running` (reached=false), defer-arm grandchild is `failed` (reached=true)"* |
+
+The second reproduces the original asymmetry exactly, which is what shows the test is about the
+disagreement rather than about either arm.
+
+---
+
+### 3.413 The orphan-import scan judged the export wrapper's imports against the workflow's closure — ✅ **FIXED 2026-09-09** (cleat#1125)
+
+Every WASM build warned that `cleat_complete` and `cleat_poll_work` were orphaned imports, including
+builds of a workflow the toolchain itself reported as using **zero** host functions.
+
+- `wasm/generator.go` writes both into every shim unconditionally — *"Always include
+  `cleat_complete` — the export wrapper calls it"*. They are the **wrapper's**, not the workflow's.
+- `wasm/scan.go`'s `FindCleatOrphanedImports` compares every `cleat_`-prefixed import against
+  `usage.Used`, the **workflow's** computed closure, which cannot contain them by construction.
+
+Two halves each correct about what they own, with nothing reconciling them. The same shape as
+§3.410's cascade and as the `GetWorkflowByID` / `ListWorkflows` field asymmetry.
+
+#### A guard that never disagrees carries no information, in either direction
+
+Everything this file has recorded lately is a check that was too **quiet** — silent about a region,
+blind in its denominator. This one is too **loud**, and it is the same defect: the output does not
+depend on the input, so it can be produced without looking.
+
+**And the harm is not the noise.** A true `W003` — *"your single string parameter receives the ENTIRE
+input JSON"* — was emitted correctly and predicted the exact failure that surfaced two layers later
+as a result stored as `{}`. It went unread and was nearly filed as a cleat defect, because it
+arrived **third in a list whose first two entries are always wrong**. A channel whose first two
+entries are always wrong trains its readers to skip it, and what the noise stands in front of is the
+cost.
+
+#### Why the names live in one place
+
+A hand-maintained skip-list in `scan.go` reproduces the defect one level over: the generator stays
+free to add a third unconditional import, the scan does not know, and the warning returns with
+nobody having touched it. `normalizeImportName`'s variant map already has that weakness.
+
+`generatorEmittedImports` is the reconciliation, and
+`TestTheGeneratorEmitsExactlyTheImportsTheScanExempts` asserts the generator's emitted block declares
+exactly that set **in both directions** — a third import fails at authoring time, and an exemption
+covering nothing is reported as a grant waiting to cover something else.
+
+The exemption is also narrow: these names are skipped only when absent from the closure, which is the
+case the generator creates. A workflow that genuinely calls one has it in `Used` and never reaches
+the check.
+
+#### Falsification — three mutations, three distinct failure modes
+
+| mutation | what went red |
+|---|---|
+| remove the exemption (the pre-fix tree) | the bug's own case, reporting exactly the two warnings from #1125 |
+| `isGeneratorEmitted` returns true for everything | the control: *"expected exactly the one real orphan, got 0 — the generator exemption has swallowed the whole check"* |
+| generator gains a third unconditional import | the reconciliation test, naming `cleat_log` |
+
+The second is the one that matters. **Suppressing two warnings and deleting the scan produce
+identical output on the case being fixed** — only an import that *should* warn separates them.
+
+---
+
+### 3.416 A retention sweep an operator can trigger, with the window override that stops it being inert — ✅ **DONE 2026-09-10** (cleat#1130)
+
+Retention was unobservable from outside the engine. The window is integer **days** with `0` meaning
+disabled, the predicate is `completed_at < cutoff`, and nothing on the HTTP surface started a sweep —
+so an out-of-process observer could not produce a swept row without waiting a day or ageing
+`completed_at` in the database. Operators had the same problem from the other side: no way to see a
+configuration change take effect for up to `--retention-interval`.
+
+`POST /api/admin/retention/sweep`, beside `/api/admin/drain`, gated on `--enable-admin-api` so it
+inherits that exposure decision rather than making a new one.
+
+#### The override is the feature; the trigger alone would be inert
+
+`{"older_than": "5s"}` supplies a cutoff the flags cannot express. **Without it, an endpoint that
+ran the configured sweep would match nothing for any run completed today, on every call, and report
+success** — a feature that ships working and is provably inert. That is the sharpest form of the
+pattern this file has recorded all night: the operation reports success without doing the thing, and
+the report is the *correct* report.
+
+Proven rather than argued, against a real database, in one test with two halves:
+
+| request | a run completed moments ago |
+|---|---|
+| no override (configured 30-day window) | **survives** |
+| `{"older_than":"1ns"}` | **deleted** |
+
+The first half is not a formality. If both deleted, the configured window would be reaching live
+work; if neither did, the endpoint would be the button.
+
+#### What an override may not do
+
+**Enable an arm the configuration disabled.** `--completed-workflow-retention-days` deletes the
+`workflow_instances` row itself — status, result, error, def_name, not just step history — and is
+off by default for that reason; its own flag help calls it materially more destructive. A request
+body is not where a deployment's decision to leave it off gets reversed. Disabled arms are named in
+`skipped`.
+
+**That constraint was untested until a mutation found it.** Flipping the guard to
+`completedWorkflowRetentionDays > 0 || window > 0` was caught by nothing;
+`TestAnOverrideDoesNotEnableADisabledArm` now catches it.
+
+#### Counts are per arm and never summed
+
+Four arms — events, compaction state, completed workflows, dead-lettered — across three flags that
+default differently (30 on, 0, 0). One total would be a number meaning four things, and an operator
+could not tell *"nothing was old enough"* from *"that arm is off"*. `runRetentionSweep`'s own comment
+already refuses to sum two of them; this carries that to the API. Partial failure answers **207**,
+not 200, because the arms are independent and the counts beside a failure are real.
+
+#### Verification
+
+- End-to-end on live PostgreSQL, both halves.
+- Falsified: ignoring the override reddens *"the run survived a sweep with older_than=1ns"*; letting
+  the override enable a disabled arm reddens the new constraint test.
+- **0 skips added under CI's own `CLEAT_TEST_DB`**, checked rather than assumed.
+---
+
+### 3.417 Every UUID read from SQL Server was a different UUID, and nothing errored — ✅ **FIXED 2026-09-10** (cleat#1137)
+
+SQL Server returns `UNIQUEIDENTIFIER` in mixed-endian byte order. `uuid.UUID`'s `Scan` accepts those
+16 bytes **without error** and yields a different id — so every plugin reading an id from SQL Server
+got the wrong one, silently. `plugin.GUID` existed to swap them; what was open was how many sites
+still scanned into `uuid.UUID` directly.
+
+#### The count was 85, and every lexical reading undercounted
+
+`&x` is a **name**; the defect is a **type**. Four regex-shaped scans gave four answers — 6, 27, 13
+and 54 — and none of them was the question. Both documented readings fail in opposite directions:
+the narrow one **misses the confirmed bug** (the scheduler's fault was on struct *fields*), and the
+wide one **flags the fix**, because `dueSchedule` still has fields named `id`/`tenantID` typed
+`uuid.UUID` beside the new `plugin.GUID` locals.
+
+Resolved with `go/types`: **85 arguments across 15 plugins**. Confirmed by a second, differently
+traversed reading — every address-of expression whose operand is `uuid.UUID`, without looking at
+`Scan` at all — which returns 85 and reports **all 85 inside Scan calls, none outside**. Two
+traversals agreeing on the total *and* the membership.
+
+#### One abstraction, not 85 edits
+
+`plugin.ScanRow(rows, dest...)` substitutes a `GUID` for any `*uuid.UUID` destination, scans, and
+copies back on success only. Non-uuid destinations pass through untouched, so it applies to a whole
+`Scan` call rather than to selected arguments — which matters, because deciding per-argument is what
+a reader gets wrong.
+
+85 hand edits would be 85 chances to err on paths no test exercises, and would leave the next author
+free to write the 86th. *"A backlog of 200 similar findings is usually one missing abstraction"* —
+this is that. **59 call sites rewritten mechanically** from the same type information that found
+them, so the edit set and the finding set cannot disagree.
+
+#### Falsification
+
+| mutation | what went red |
+|---|---|
+| revert one call site to `rows.Scan` | the guard, naming `plugins/scheduler/routes.go:174` |
+| `ScanRow` stops substituting | `TestScanRowCorrectsMixedEndianBytes` |
+
+**The first falsification did not apply on its first attempt** — the regex required a trailing space
+and the call is `plugin.ScanRow(rows,` followed by a newline — and the guard's resulting pass was
+briefly read as a result. A falsification that does not apply is not a falsification that passed;
+the mutation is now checked to have changed the file before the outcome is read.
+
+`TestScanRowIsTheThingThatCorrects` is the control: it asserts a **direct** `uuid.UUID` scan of the
+same bytes produces the *wrong* id, so the fixture is known to reproduce the defect rather than
+being satisfied by any implementation.
+
+---
+
+### 3.418 Rebind could not tell SQL from a string inside SQL, so booleans were unsafe to add — ✅ **FIXED 2026-09-10** (cleat#1133)
+
+**Scope note first, because this is one of four parts and a reader will otherwise
+credit it with the rest.** cleat#1133 is 56 plugin SQL sites that fail on a dialect they
+can reach. This section covers the *rewriter*. Applying it at the adapter, the guard, and
+the 15 structural sites are separate.
+
+`plugin.Rebind` translates the primary dialect's spelling into the target's — `$N` to
+`?`/`@pN`, `now()` to `SYSUTCDATETIME()`. It did that with two regexes over the whole
+statement, and **a regex cannot tell SQL from a string that appears inside SQL**:
+
+    Rebind(`SELECT * FROM t WHERE label = 'costs $100' AND id = $1`, MSSQL)
+      -> SELECT * FROM t WHERE label = 'costs @p100' AND id = @p1
+                                                ^^^^ user-visible data, corrupted
+
+No shipped plugin has a `$N` inside a string literal (`grep -rnoE "'[^']*\$[0-9][^']*'"`
+over `plugins/` → nothing), so this was latent rather than live. **It was about to stop
+being latent, for two independent reasons**: the rewrite moves from the 166 call sites
+that opt in to the adapter, where it meets every plugin statement; and `TRUE`/`FALSE`
+joins the substitution list, which is a token that appears in ordinary English in ordinary
+columns — `WHERE note = 'set this to true'` is not exotic.
+
+So `Rebind` now scans, copying through every quoted region and comment untouched, in all
+four spellings the three dialects use (`'…'`, `"…"`, `` `…` ``, `[…]`) plus `--` and
+`/* */`. That is more code than two regexes, and it is what keeps the rewrite in the
+category of things an adapter may safely do.
+
+**A TEST ASSERTED THE CORRUPTION, AND ITS NAME ASSERTED THE FIX.** `query_test.go` carried:
+
+    name:    "mysql with dollar sign not a param",
+    query:   "SELECT '$1' as price FROM users",
+    want:    "SELECT '?' as price FROM users",
+
+The name is right and has always been right — `$1` inside quotes is a *price*, not a
+placeholder. The `want` then asserts it is rewritten anyway. The expectation was captured
+from what the implementation did rather than derived from what the name says, so it locked
+the defect in while the name went on describing the repair. This is the shape CLAUDE.md
+records for `TestFinalizeDeferPhaseIsFencedOnTheClaimAndOnTheMarker`, arriving through a
+golden value instead of a mechanism.
+
+**Booleans: 38 tokens, 17 contexts, two shapes.** Derived from SQL string literals reached
+via the Go parser, not from a text grep, because Go source is full of `true`:
+
+    go run scripts/… # or: parse plugins/**/*.go, keep BasicLits matching
+                     # ^\s*(SELECT|INSERT|UPDATE|DELETE|WITH), scan those for \b(TRUE|FALSE)\b
+
+  * `= true` / `= false` — 28
+  * a bare `true`/`false` in a `VALUES` list — 10
+
+**A regex keyed on `=\s*true` sees the first shape and is blind to the second**, which is
+why the scan was written against the literals rather than against an assumed spelling.
+MySQL needs no boolean rewrite at all — `TRUE`/`FALSE` are documented aliases for `1`/`0`
+— and does not get one.
+
+**Why this is a binding error and not a syntax error, which is why a parse sweep says it
+is fine.** T-SQL has no boolean type, so `enabled = true` resolves `true` as a *column
+name*. `SET PARSEONLY ON` accepts it; only `SET NOEXEC ON`, which binds, rejects it. That
+is 22 of #1133's sites and the reason §3.414's guard is lexical.
+
+**Verified on a live SQL Server 2022, with a negative control**, against the real
+`slack_config` table rather than a fixture built to fit the assumption (§3.415 is what
+happens without that discipline):
+
+| statement | result |
+|---|---|
+| shipped `Rebind` — `… AND enabled = true` | **REJECTED**: `mssql: Invalid column name 'true'.` |
+| this change — `… AND enabled = 1` | **ACCEPTED** |
+
+The control is load-bearing: without it, a server that accepts anything produces the same
+pass. This reproduces from the other direction the `Invalid column name 'true'` ×9 that a
+peer session attributed to `kafka-connect` in a four-minute worker log.
+
+**Idempotence is asserted, not argued** (`TestRebindIsIdempotent`), because the adapter
+will apply `Rebind` to statements whose call site already did: `@p1` contains no `$N`,
+`SYSUTCDATETIME()` does not match `now()`, `1` does not match `TRUE`.
+
+**What this fixes on its own: 8 sites** — the ones that already call `Rebind` and carry a
+boolean (`eventtriggers/publish.go`, `kafkaconnect/host_functions.go`,
+`oauthprovider/routes.go`, `pagerdutyalert/host_functions.go` ×2,
+`slacknotify/host_functions.go`, `webhookingest/host_functions.go`,
+`webhookingest/routes.go`). The other 48 wait on the adapter change and the structural work.
+
+### 3.419 Plugins had to remember to translate their own SQL, and 40 sites did not — ✅ **FIXED 2026-09-10** (cleat#1133)
+
+**cleat#1133, part 2 of 4.** §3.418 made the rewriter safe; this applies it. The guard and
+the 15 structural sites are separate.
+
+`plugin.Rebind` was opt-in at the call site. **166 sites called it and 40 did not**, so those
+40 sent PostgreSQL `$N` placeholders to MySQL and SQL Server, where they are not placeholders.
+
+**The tempting diagnosis is wrong and worth recording, because it would have produced a
+different fix.** "The dialect was not available at the plugin" is false: **19 of 21 plugins
+already hold a `plugin.Dialect` field**, and the only one that does not is `pgvector`
+(`grep -rlE '(dialect|Dialect)\s+plugin\.Dialect' --include='*.go' plugins/`). These sites had
+everything they needed. It was never a plumbing problem; it was a remembering problem, and the
+fix for a remembering problem is to stop requiring the memory.
+
+So `engine.SQLDBAdapter` and `engine.ReadOnlyDB` now rebind every statement on the way to the
+driver, along with their transaction types. Safe for the 166 sites that already do it
+themselves because Rebind is idempotent, which §3.418 asserts rather than argues.
+
+**SCOPE IS A DELIBERATE LINE, NOT A LIMIT WE RAN INTO.** The adapter handles the frequent,
+mechanical differences — placeholders, `now()`, boolean literals: 75 of the 90 token instances.
+It deliberately does **not** attempt `LIMIT`/`TOP`, `ON CONFLICT`/`MERGE` or
+`RETURNING`/`OUTPUT`. Those change the *shape* of the statement rather than a token in it —
+`LIMIT n` → `TOP n` moves to a different clause, and T-SQL's `OFFSET…FETCH` additionally
+requires an `ORDER BY`. A rewrite that ambitious buried in an adapter would be unreviewable.
+Plugins handle those 15 with conditional code on `Environment.Dialect`.
+
+**THE MULTI-DIALECT SUITE COULD NOT HAVE DETECTED THIS CHANGE, WHICH IS THE FINDING.** Every
+multi-backend plugin test built its adapter as:
+
+    p.db = &engine.SQLDBAdapter{DB: be.DB}          // be.Dialect, right there, dropped
+
+`PluginTestBackend` carries `DB` **and** `Dialect`. Six sites across four files took the first
+and dropped the second, so the plugin under test received its statements unrewritten on every
+backend — and the entire multi-dialect plugin suite would have passed identically with the
+adapter's rewrite present or absent. `tests/plugin-harness/harness.go:50` had the same omission
+**with the dialect in its own function signature**, which means the harness could not detect
+the class of defect it exists to catch.
+
+That is the shape this file keeps recording: not a check that is wrong, a check that is
+**silent** — and it is why part 2 is not finished by the adapter change alone.
+
+**A ZERO DIALECT IS A NO-OP THAT LOOKS LIKE A WORKING REWRITE**, which is why the constructors
+now take it as a *required parameter* rather than a settable field. `getPluginDB(db, pluginDB,
+dialect)` cannot be called with it omitted; the struct literal could be, and was, four times.
+
+**The guard covers where omission is definitely wrong, not everywhere.** There are ~235 adapter
+constructions in the tree and nearly all are single-backend PostgreSQL fixtures, where no
+rewrite is correct. Requiring the field universally would be a sweep that teaches people to
+type `Dialect: DialectPostgres` without meaning it. `TestEveryDialectSensitiveAdapterCarriesItsDialect`
+covers two cases: non-test code, and test files that use `NewPluginTestBackends`. It reports
+**11 dialect-sensitive constructions across 1102 tracked files**, and uses `git ls-files`
+rather than a walk — this checkout has fourteen worktrees under it, and a walk attributes
+their contents to the main tree, a scope error that makes a guard *more* likely to pass as the
+working tree gets messier.
+
+**Verified with a known-positive on a real site**, not only a synthetic one: reverting
+`kvstore_multidb_test.go:72` makes the guard fail naming that file and line. The synthetic
+control proves the AST matcher works; the real one proves the guard does.
+
+**`engine/testutil` cannot import `plugin` or `engine`** — both packages' own tests import
+`testutil`, so either would be an import cycle *in the test binary*. `go build` does not
+notice; `go vet` does. That is why `testutil.Dialect` is a duplicated type and why the fix is
+`plugin.Dialect(be.Dialect)` at six sites rather than a helper that hands out a configured
+`PluginDB`. `TestDialectConstantsAgree` compares the two constant **sets**, not their count.
+
+**A grep for the import path found two `engine/*.go` files mentioning `engine/testutil` and
+both were comments about it**, which would have made the cycle look pre-existing and settled.
+Checked before concluding.
+
+### 3.420 Three plugin statements were valid on PostgreSQL and nowhere else — ✅ **FIXED 2026-09-10** (cleat#1133)
+
+**cleat#1133, part 4 of 4.** §3.418 made the rewriter safe, §3.419 applied it at the adapter.
+These are the statements the adapter deliberately does not touch, because they change the
+*shape* of a statement rather than a token in it.
+
+| site | fault | rejected by |
+|---|---|---|
+| `eventtriggers/queries.go` **MSSQL arm** | `WHERE NOT processed` | SQL Server |
+| `eventtriggers/host_functions.go:74` | `NOT processed`, `LIMIT 1` | SQL Server |
+| `webhookingest/background.go:45` | `NOT e.processed`, `NOW() - INTERVAL '10 seconds'`, `LIMIT 100` | SQL Server **and MySQL** |
+
+**THE MSSQL ARM IS THE INSTRUCTIVE ONE.** In one literal, `LIMIT 100` had been translated to
+`OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY` and `NOW() - INTERVAL` to `DATEADD` — and
+`NOT processed` was left as written. Someone translated this arm carefully and stopped at the
+constructs they were thinking about. That is the failure the `plugin.Query` shape invites and
+which §3.414 records generally: naming what a variant is *for* narrows the reviewer to that
+purpose, and the rest of the literal inherits the primary dialect unexamined.
+
+**THE ERROR MESSAGE NAMES THE WRONG CONSTRUCT**, which is why nobody followed it here.
+Measured against SQL Server 2022, same table, three statements:
+
+| statement | server says |
+|---|---|
+| `WHERE NOT processed`, no `OFFSET/FETCH` | `Msg 4145` non-boolean type — **the cause** |
+| `WHERE NOT processed` **+** `OFFSET…FETCH` | `Msg 4145` near `'ORDER'` **and** `Msg 153` |
+| `WHERE processed = 0` + `OFFSET…FETCH` | succeeds |
+
+SQL Server reports **both**; the Go driver surfaces only the **last**. So the worker log says
+`Invalid usage of the option NEXT in the FETCH statement` — naming a clause that is correct
+T-SQL — while the defect is the boolean two lines above. A reader who trusts the message goes
+to the row-limit clause and finds nothing wrong.
+
+**That invalidates error-text census as a way to size this work**, and one was in use: a peer
+session's four-minute log survey grouped 163 errors into six categories. At least one category
+is a *consequence*, and `webhook-ingest` appears twice — once as non-boolean, once as
+`Error 1064` — which is **one statement seen from two dialects**, not two defects. Withdrawn by
+its author on cleat#1143 once reproduced. The useful output is **statement identity**, not
+error text.
+
+**Why the adapter does not do these.** A boolean *column* is not a boolean *literal*: rewriting
+`NOT x` would have to leave `NOT EXISTS`, `NOT IN`, `NOT LIKE`, `NOT NULL` and `NOT (a AND b)`
+alone. And `LIMIT n` → `TOP n` relocates a token to a different clause, while `OFFSET…FETCH`
+additionally requires an `ORDER BY`. Both belong in an explicit arm.
+
+**A COUNT I PUBLISHED AND HAD TO RETRACT, IN THE INFLATING DIRECTION.** I reported **5** bare
+boolean sites; it is **3**. The scan flagged every `NOT <col>` without asking which dialect arm
+it sat in — and `NOT processed` in a `Default` or `MySQL` arm is *correct for that dialect*. It
+also counted `WHEN NOT MATCHED` from `MERGE` statements, which is not a boolean at all.
+
+    A construct is only a defect if it can REACH a dialect that rejects it.
+
+For a `plugin.Query` that means asking which arm, **including the fallback**: `Query.For`
+returns `Default` for MSSQL when no MSSQL arm exists, so a `Default` arm is not automatically
+PostgreSQL-only. Re-derive arm-aware, never by matching the token alone.
+
+**Verified by execution, not by reading.** `TestEveryQueryArmRunsOnItsOwnDialect` and
+`TestTheBatchQueryRunsOnEveryDialect` run each arm against a real server of that dialect, on
+the schema built by the plugin's own migrations — not a fixture written to suit the query,
+which is what §3.415 cost. The webhookingest test also asserts the column *count* the caller
+scans, since a valid statement returning the wrong shape fails later, at `Scan`, in the same
+silent loop.
+
+**Falsifications, each red for its own reason:** reverting the boolean reddens `mssql`;
+reverting the interval reddens `mysql` with `Error 1064`. Two faults in one statement need two
+falsifications, or the second is only assumed.
+
+**THE REMAINING FOUR, DONE IN THE SAME PASS**, because they are the same decision applied to
+four more statements:
+
+| site | fault | arm written |
+|---|---|---|
+| `notifications/background.go` | `LIMIT 100` | `SELECT TOP 100` |
+| `eventstore/routes.go` | `LIMIT $4` — a **parameter**, not a literal | `OFFSET 0 ROWS FETCH NEXT $4 ROWS ONLY` |
+| `jobqueue/background.go` | `LIMIT 10` | `SELECT TOP 10` |
+| `blobstore/host_functions.go` | `ON CONFLICT DO NOTHING` | `INSERT … SELECT … WHERE NOT EXISTS` |
+
+`jobqueue`'s is `pollPending`, and it is the one that shows why a guard over `plugin.Query`
+*declarations* could never have closed this. §3.414 and §3.415 fixed the reaper's `UPDATE`,
+twice. This `SELECT` sits **eight lines above** one of the values they were fixing, as a raw
+literal, and was in neither. So after both repairs the reaper was correct and had nothing to
+reap on SQL Server, because no job could reach `running` there. **`plugin.Query` was never the
+boundary of the defect, only the boundary of the fix.** A check has to anchor on where SQL is
+*executed*, not where a dialect table is *declared*. Found by a peer session reading the file;
+confirmed here.
+
+`eventstore`'s is the one with a shape worth noting: the limit is a **parameter**, which rules
+out the usual `SELECT TOP n` (a variable needs `TOP (@p4)`), and the `$4` is deliberately left
+as `$4` in every arm — placeholders are the adapter's job, clause structure is the arm's.
+
+`blobstore`'s T-SQL arm uses `NOT EXISTS` rather than `MERGE`. `MERGE` is the textbook answer
+and the wrong one here: heavier, with documented concurrency caveats, for a best-effort
+reference count whose failure is already only logged.
+
+**ONE HELPER, NOT SIX COPIES.** `plugins/plugintest.RunEveryArm` runs each arm against a real
+server of its dialect, on the schema the plugin's own migrations build. It lives in its own
+package because the natural home cannot host it: `engine/testutil` is imported by `engine`'s
+and `plugin`'s own tests, so it can import neither — an import cycle **in the test binary**,
+which `go build` does not notice and `go vet` does. `plugins/*` are leaves, so a helper there
+can import everything it needs.
+
+**Falsifications, each red for its own reason and each naming an error a peer had measured in
+a live worker log:** reverting the eventtriggers boolean → `mssql`; reverting the webhookingest
+interval → `mysql`, `Error 1064`; reverting the jobqueue `TOP 10` → `mssql`,
+`Incorrect syntax near 'LIMIT'` — which was 61 of that log's errors, all attributed to
+`jobqueue: poll failed`.
+
+**Still open in #1133 after this:** `pgvector`'s six, which are PostgreSQL-only by declaration —
+it ships no `UpMySQL`/`UpMSSQL` migration arms, so its tables never exist elsewhere and its
+queries fail on a missing table either way. That the declaration is recorded and then never read
+is cleat#1157.
+
+### 3.421 A guard anchored on where SQL is executed, not where a dialect table is declared — ✅ **DONE 2026-09-10** (cleat#1133)
+
+**cleat#1133, part 3 of 4** — written last, because a guard is worth more once the tree it
+guards is clean. §3.418 made the rewriter safe, §3.419 applied it at the adapter, §3.420 fixed
+the seven statements it deliberately does not rewrite. This stops the class returning.
+
+**THE EXISTING GUARD WAS NECESSARY AND NOT SUFFICIENT, AND THE GAP HAS A PRICE ATTACHED.**
+`plugin/dialect_sql_test.go` (§3.414) checks that each **arm** of a `plugin.Query` is valid for
+the dialect it names. `jobqueue`'s `pollPending` is a raw literal carrying `LIMIT 10`, sitting
+**eight lines above** a `plugin.Query` that §3.414 and §3.415 both edited. Neither touched it,
+because neither was looking at call sites — so after two rounds of fixing, the reaper was
+correct and had nothing to reap on SQL Server, because no job could reach `running` there.
+
+    plugin.Query was never the boundary of the defect, only the boundary of the fix.
+
+So the unit here is the **execution site**: every string literal handed to `db.Query`, `db.Exec`
+or `db.QueryRow`. 135 of them.
+
+**WHAT IT CHECKS, AND WHY EACH IS NOT THE ADAPTER'S JOB.** `plugin.Rebind` handles `$N`, `now()`
+and boolean *literals* centrally. These change the *shape* of a statement rather than a token in
+it: `LIMIT`, `ON CONFLICT`, `RETURNING`, `INTERVAL '…'`, `ILIKE`, and a bare boolean *column*
+(`NOT processed`). The last is a **binding** error in T-SQL (Msg 4145), not a syntax error, so
+`SET PARSEONLY ON` reports it clean — a parse-based sweep cannot substitute for this.
+
+**THE EXEMPTION IS DERIVED, NOT LISTED**, which is the part worth reusing. A plugin that declares
+migrations and ships no `UpMySQL`/`UpMSSQL` arm has already said it is PostgreSQL-only —
+`plugin/migration.go`'s own doc names `pgvector` as the case. Its tables never exist elsewhere,
+so its SQL is only required to be valid PostgreSQL. That predicate lives in the code, so it
+cannot go stale: add a MySQL arm to `pgvector` and this guard begins requiring portable SQL of
+it on the same commit. One package is exempt today, and the guard prints which.
+
+An allowlist of names would have needed a hand-written reason per entry, and a reason nobody can
+falsify reads as review having happened.
+
+**THREE DEFECTS IN THE GUARD ITSELF, ALL FOUND BEFORE IT SHIPPED, ALL PERMISSIVE:**
+
+  * **RE2 has no lookahead.** `NOT\s+(?!EXISTS|IN|…)` does not compile, and `regexp.MustCompile`
+    *panics* rather than failing a vet — `go vet` passed on it. Rewritten as a match plus an
+    explicit operator set.
+  * **The dialect keys live in the ELEMENT literals.** `[]plugin.Migration{{Up: …}}` — the inner
+    literals carry no type, so `lit.Type` is nil for them and a scan keyed on the type name never
+    sees them. Every plugin therefore looked PostgreSQL-only and every package was skipped.
+  * That was caught **only** by the guard's own `checked == 0` assertion, which refuses to report
+    a pass when the scan matched nothing. Without it, the guard would have shipped green,
+    exempting the entire tree, and looked exactly like this one does.
+
+**A COUNT I PUBLISHED AND RETRACTED, IN THE INFLATING DIRECTION.** I reported **5** bare-boolean
+sites for §3.420; it was **3**. The scan flagged every `NOT <col>` without asking which dialect
+arm it sat in — and `NOT processed` in a `Default` or `MySQL` arm is *correct for that dialect*
+— and it counted `WHEN NOT MATCHED` from `MERGE`, which is not a boolean at all.
+
+    A construct is only a defect if it can REACH a dialect that rejects it.
+
+For a `plugin.Query` that means asking which arm, **including the fallback**: `Query.For` returns
+`Default` for MSSQL when no MSSQL arm exists, so a `Default` arm is not automatically
+PostgreSQL-only. Both mistakes are now in the guard's own control.
+
+**Controls, both directions.** `TestTheReachabilityGuardSeesEachConstruct` asserts each construct
+*is* flagged, and that nine lookalikes are *not* — `NOT EXISTS`, `NOT IN`, `NOT LIKE`,
+`IS NOT NULL`, `WHEN NOT MATCHED`, MySQL's unquoted `INTERVAL 10 SECOND`, `SELECT TOP`,
+`OFFSET…FETCH`, and `processed = 0`. It runs on synthetic strings, so it keeps working once the
+tree is clean, when a real-site mutation no longer exists to perform. **Also verified with a
+known-positive on a real site**: putting a raw `LIMIT` literal back into
+`notifications/background.go` makes the guard fail naming that file and line.
+### 3.422 A TTL assertion that a slow runner fails, in the test written to remove timing dependence — ✅ **FIXED 2026-09-10**
+
+`TestConcurrencyKeyTTLKeepsSubSecondPrecision/mssql/500ms` went red on `Test SQL Server`:
+
+    a 500ms lock was stored already expired (-163.188ms remaining): the next caller
+    takes it, and two workflows hold the same key
+
+**The implementation was correct.** A 500 ms TTL with a database-side round trip of about
+663 ms yields a negative remainder, and so does a *correct* implementation on a loaded
+runner. The check asserted a property of the machine.
+
+**THE SAME DEFECT, IN THE SAME TEST, AS THE ONE ITS OWN COMMENT DESCRIBES.** The lower bound
+used to be `remaining < ttl/2` and failed identically on 2026-08-07 (run 31145314648, *"a
+500ms lock expires in 202.46ms"*) with nothing wrong. It was replaced by `ttl - dbElapsed`,
+which needs no slack and no tuning, and the file carries a long comment on why guessing a
+fraction is wrong. **The `remaining <= 0` check three lines above was left timing-dependent in
+that same edit** — and it is the one that fired.
+
+The fix is the guard, not slack: `remaining <= 0 && dbElapsed < ttl`. If the round trip took
+longer than the TTL, a correct implementation *also* yields a negative remainder and the lock
+really has expired.
+
+**NOTHING IS LOST, AND THAT IS MEASURED RATHER THAN ARGUED.** Restoring the historical
+truncation defect on PostgreSQL (`float64(int(ttl.Seconds()))`) still reddens the test, and
+the two assertions divide the space exactly:
+
+| case | round trip | caught by |
+|---|---|---|
+| 500 ms | 9.7 ms | the zero check |
+| 999 ms | 3.8 ms | the zero check |
+| 1.5 s → 1 s | 3.9 ms | the **lower bound** — remainder is positive, so the zero check cannot see it |
+| 30 s | — | correctly passes; truncation is a no-op |
+
+A truncated TTL stores `expires_at == acquire time`, so `remaining ≈ -dbElapsed`, which is
+below `ttl - dbElapsed` for every positive `ttl` **at any speed**. The lower bound therefore
+catches truncation the zero check must skip.
+
+**And the slow runner was reproduced rather than reasoned about.** Inserting a 700 ms sleep
+between the acquire and the read-back, with a *correct* implementation:
+
+| | |
+|---|---|
+| guard removed (today's code) | **FAIL** — `-208.262ms remaining, database-side round trip 709.663ms` |
+| guard present | **PASS**, all four TTLs |
+
+That reproduces the CI failure's shape and magnitude locally, which is what distinguishes
+"this is a flaky test" from "this is a flake". The failure message now prints `dbElapsed`, so
+the next reader is not left to infer the round trip from the size of the negative number.
+
+### 3.423 A statement that reaches an RLS table with no tenant set, and why a tenant predicate does not save it — ✅ **DONE 2026-09-10** (cleat#1178)
+
+`PostgresStore.successorOfRun` issued `SELECT id FROM workflow_instances WHERE continued_from
+= $1` through `s.db.QueryRowContext` — no transaction, so no
+`set_config('cleat.tenant_id', …)`. That table is `ENABLE` + `FORCE ROW LEVEL SECURITY` with a
+fail-closed policy whose `USING` calls `cleat.assert_tenant_set()`, which `RAISE`s when the
+tenant is unset. Every continue-as-new chain with a successor errored (cleat#1177, fix in
+flight as cleat#1179). This is the guard that keeps the class at zero.
+
+**THE DECIDING VARIABLE IS A PROPERTY OF THE TRANSACTION, NOT OF THE SQL**, and the obvious
+criterion is wrong in the direction that makes a guard useless. Measured by cleat#1178 on a
+live database as `cleat_app`:
+
+    SELECT id FROM workflow_instances WHERE continued_from='…' AND tenant_id='2222…';
+    ERROR:  cleat.tenant_id is not set -- tenant context required for RLS-scoped query
+
+A policy is applied **in addition** to the query's own predicates, never instead of them. A
+guard keyed on "the SQL mentions `tenant_id`" passes both known faults, including the one it
+exists to prevent.
+
+**That is asserted, not just described.** Deleting `AND tenant_id = $3` from a statement that
+runs inside a proper RLS transaction leaves the guard **silent** — the second half of the
+known-positive, and the half that proves it is keyed on the right variable. The first half:
+unexempting `terminal_run.go:132` makes it report exactly that site; moving a safe `tx`
+statement onto `s.db` makes it report the new one.
+
+**WHY STATIC AND NOT AN INTEGRATION TEST.** A policy's `USING` is evaluated **per candidate
+row**, so the same check against an empty table returns `(0 rows)` and no error under every
+role — indistinguishable from working. Two sessions were caught by that on 2026-09-10. And CI
+could not find these anyway: every job hands the Go suite a superuser DSN, and a superuser
+bypasses RLS unconditionally, `FORCE` included.
+
+**THREE DEFECTS IN THE GUARD, ALL FOUND BY RUNNING IT, ALL IN THE OVER-REPORTING DIRECTION** —
+which is the cheaper direction to have, but a guard that reports non-faults gets switched off:
+
+  * **Filtering by filename cannot separate the dialects.** All three `successorOfRun`
+    implementations live in `terminal_run.go`, so a scan skipping `mysql_*`/`mssql_*` files
+    still scored the MySQL and MSSQL arms — neither of which has RLS. The **receiver type** is
+    the only thing that can separate them.
+  * **A statement can establish the tenant in its own SQL.** The adaptive flusher carries
+    `WITH cfg AS (SELECT set_config('cleat.tenant_id', …, true))` ahead of its `INSERT`
+    (`flush.go:102` explains why the CTE form is needed there). A guard looking only for
+    Go-level `setRLSOnTx`/`beginTxWithRLS` calls scores both flusher statements a fault.
+  * **A table name inside a string literal is not a reference to the table.**
+    `pg_total_relation_size('event_history')` takes the name and reads no rows, so no policy is
+    evaluated. Stripping quoted literals before matching handles that shape wherever it
+    appears, rather than exempting one call site.
+
+**MY CENSUS AND THE ISSUE'S DISAGREED ON MEMBERSHIP, AND THAT WAS THE USEFUL PART.** cleat#1178
+reports one live and one latent, scoped to `PostgresStore`. Scanning every receiver found nine
+more latent instances — `WorkflowLoader` ×6 and `FaultInjector` ×3 — all reaching RLS tables
+outside a transaction. **Neither type has a production constructor**: every call is in
+`engine/unit_test.go` and every one passes a `nil` db.
+
+    grep -rn 'NewWorkflowLoader(\|NewFaultInjector(' --include='*.go' . | grep -v 'func New'
+
+So they are excluded, by name and with that command recorded, rather than exempted — guarding
+them would add nine allowances for no safety. The live count is one, and it agrees with the
+issue.
+
+**Exemptions are required to stay LIVE, and that fired within minutes of being written.**
+An allowlist that may only shrink is the usual goal; one that *cannot outlive its cause* is the
+enforceable form. cleat#1179 merged while this branch was open, and the guard said so itself:
+
+    the exemption for terminal_run.go:132 no longer matches any statement. It has
+    been fixed or moved -- delete the entry rather than leaving an allowance whose
+    cause is gone
+
+Nobody had to remember. **A stale allowance is not inert**: `terminal_run.go:132` is now an
+ordinary line, and an exemption still naming it would silently cover whatever statement arrives
+there next.
+
+The entry is deleted, and the known-positive moved with it — re-breaking `successorOfRun` back
+to `s.db.QueryRowContext` now makes the guard report `terminal_run.go:156`. That is the stronger
+control: it shows the guard **protects the fix**, not merely that it once described the bug.
+
+**The RLS table list is read from `migrations/postgres/`, not written here.** Eleven today; a
+literal silently stops covering the twelfth. Comments are stripped first, or a header quoting
+an `ALTER TABLE … ENABLE ROW LEVEL SECURITY` counts as a declaration.
+
+### 3.424 A concurrency key was global across tenants — the second instance of a class that already had a written fix — ✅ **FIXED 2026-09-10** (cleat#1189)
+
+`concurrency_keys` was `PRIMARY KEY (key_hash)` with the hash computed from the key text alone
+— `digest(<key>, 'sha256')`, no tenant. **The key namespace was global while every operation on
+the table is tenant-scoped and the table is under RLS**, so the uniqueness dimension and the
+access dimension disagreed.
+
+The consequence is worse than a refusal. Tenant 2 could not acquire; could not *release*,
+because its `DELETE` carries `AND tenant_id = <its own>` and matched nothing; and could not
+*see* the blocking row, because RLS correctly hides another tenant's. **Blocked, unclearable
+and invisible** until the TTL ran out. The colliding names are the ones everyone picks —
+`nightly`, `sync`, `cleanup`.
+
+**THIS IS THE SECOND INSTANCE OF A CLASS THAT ALREADY HAD A WRITTEN FIX**, which is the part
+worth carrying. `idempotency_keys` had the identical shape and was repaired by migration 010;
+its post-mortem is quoted in `store_lifecycle.go:770` — two customers both choosing
+`order-123`, and the second handed the first's workflow ID with `alreadyExisted = true` while
+its own workflow was never started. Same client-supplied string, same global namespace, same
+outcome. **The sibling table was left behind**, and nothing existed to notice that.
+
+**Why not fold the tenant into the hash, which needs no migration at all.** Migration 010
+considered and rejected that for `idempotency_keys`: it changes every hash, so no existing key
+matches after the upgrade and a retried request starts a second workflow. The reasoning
+transfers with the consequence changed — here, existing locks would become invisible to their
+holders and a second workflow could acquire a key someone is still holding, a double-acquire
+window for the length of the TTL in a table whose whole purpose is mutual exclusion. Changing
+the key preserves every row, and `concurrency_keys` already carries `tenant_id NOT NULL`, so
+unlike 010 there is no column to add.
+
+**EACH DIALECT REFUSED FOR A DIFFERENT REASON, so the fix is not one change** — and a test
+running only on PostgreSQL would have reported the SQL Server path fixed:
+
+| dialect | how it refused | fix |
+|---|---|---|
+| postgres | `ON CONFLICT (key_hash) DO NOTHING` — conflict target was the whole key | conflict target |
+| mysql | `INSERT IGNORE`, which relies on the PRIMARY KEY | **migration alone** |
+| mssql | `WHERE NOT EXISTS (… key_hash = @p1 …)` — **no tenant predicate at all** | + `AND tenant_id` |
+
+MySQL needed one step the others did not: its `tenant_id` is `CHAR(36)` with no `NOT NULL`,
+while PostgreSQL and SQL Server both declare it `NOT NULL` with the all-zero default. A
+nullable column cannot sit in a primary key, and MySQL would silently coerce it and take the
+implicit `''` default — **a different tenant id from the one every other dialect uses**. The
+migration makes it `NOT NULL` with the matching default, explicitly, first.
+
+**Three falsifications, one per dialect, because there are three distinct fixes.** Reverting
+the PostgreSQL conflict target reddens postgres; removing the MSSQL tenant predicate reddens
+mssql naming the key; and reverting the *schema* in the live MySQL database — the migration
+being the entire fix there — reddens mysql. One falsification would have proved one third of
+this.
+
+**The test also asserts the mutex still excludes.** "Two tenants can hold it" is satisfied by a
+lock that excludes nobody, so the same test re-acquires as the *same* tenant and requires a
+refusal, and checks that one tenant's release does not free another's row.
+
+**AND THE DEFECT WAS ALREADY WRITTEN DOWN — AS A SPECIFICATION, IN THE TEST NAMED FOR THE
+PROPERTY IT VIOLATES.** `TestTenantIsolation_ConcurrencyKeys` failed on all three dialects after
+this fix, on an assertion that reads:
+
+    // Now storeA cannot acquire — key is held by storeB (PK conflict).
+    if acquired {
+        t.Error("storeA should not acquire iso-key while storeB holds it")
+    }
+
+and its Part 1 opened by stating the premise outright:
+
+    // concurrency_keys has PRIMARY KEY (key_hash) alone, so two tenants cannot
+    // simultaneously hold the same key name. The test works within this
+    // constraint, verifying tenant-scoped release isolation and sequential
+    // reuse across tenants.
+
+That is an accurate description of the schema, correctly attributing the mechanism, and it is
+**not a constraint** — it is this defect, recorded as a design property and then built around.
+*"The test works within this constraint"* is how a defect becomes a specification: the author
+saw it, described it precisely, and shaped the assertions to accommodate it.
+
+This is the same shape as §3.418's `"mysql with dollar sign not a param"`, where an expectation
+captured from the implementation sat under a name describing the fix — but a degree worse,
+because here the accommodation is *documented and reasoned about* rather than merely typed. A
+reviewer reading that comment would have found it persuasive.
+
+The assertion is now its own negation, the premise is rewritten, and every other assertion in
+that test was correct and is unchanged: a tenant must still exclude itself, and one tenant's
+release must not reach another's row.
+
+**A census, with two corrections to my own first pass — both over-reporting.** Scanning every
+tenant-scoped table for a primary key omitting `tenant_id` first reported ten. `workflow_schedules`
+and `workflow_tags` are **already fixed** (`036_workflow_schedules_tenant_in_key.sql`); my scan
+matched `ADD CONSTRAINT <name> PRIMARY KEY (...)` and missed the bare `ADD PRIMARY KEY (...)`
+form. **The final key is what matters, and migrations restate it in more than one syntax.** I
+nearly filed a fixed bug.
+
+Corrected, eight remain — and **a PK omitting `tenant_id` is not itself the defect**. The
+defect needs the key to be **derived from a client-supplied string**, so two tenants naturally
+choose the same value. `tenant_api_keys.key_id` and `workflow_routing.id` are generated. The
+remaining five (`event_history`, `workflow_instances`, `workflow_promises`, `workflow_signals`,
+`workflow_update_requests`) all reduce to one unanswered question: whether a **run ID** is
+client-supplied. `StartNewRun` generates a UUID when `runID == ""` but accepts one. That is
+recorded on cleat#1189 as a question, not a finding — the HTTP path has not been traced.
+
+---
+
+### 3.425 blobstore's expiry phase decremented `ref_count` on PostgreSQL only, for two different reasons — ✅ **FIXED 2026-09-10** (cleat#1148, cleat#1142)
+
+`cleanupExpired` phase 2 deletes expired and soft-deleted `blob_index` rows and subtracts one
+from `blob_content.ref_count` per row removed. Phase 3 then collects any content whose count
+reached zero. **Phase 2 performed no decrement at all on MySQL or SQL Server**, so phase 3 found
+nothing to collect on either, and blob storage grew without bound on both.
+
+Two dialects, two unrelated causes, one property.
+
+| | cause | symptom |
+|---|---|---|
+| SQL Server | a `DELETE` inside a CTE | one `ERROR` an hour, phase 3 unreachable |
+| MySQL | the `DELETE` ran **before** the `UPDATE` that counts its rows | **none** |
+
+**T-SQL requires a `WITH` body to be a `SELECT`.** The MSSQL arm was the PostgreSQL statement with
+`RETURNING` swapped for `OUTPUT` — the right token translation through a structural difference
+that does not survive it. Measured on SQL Server 2022, the server returns *two* errors and the Go
+driver surfaces only the last, so the log reads `Incorrect syntax near ')'` and points at the CTE's
+closing bracket rather than at the `DELETE` two lines above:
+
+    Msg 156 ... Incorrect syntax near the keyword 'DELETE'.
+    Msg 102 ... Incorrect syntax near ')'.
+
+The repair is `DELETE … OUTPUT DELETED.sha256 INTO @deleted` followed by an `UPDATE … FROM` over
+the table variable. That is two statements where PostgreSQL has one: a crash between them leaves
+the index rows gone and `ref_count` too high, which is *the leak this removes*, not a new failure
+mode. Stated in the code rather than papered over with a transaction inside a plugin query string.
+
+**The MySQL half is the one worth remembering, because nothing reported it.** The arm is valid SQL
+and the fault is the order of two `Exec` calls in `background.go`. Its subquery counts index rows
+matching the expiry predicate; the `DELETE` had just removed them, so the join was empty, the
+update touched nothing, and `affected` — reported as `expiredEntries` — was always 0. A comment
+above the branch stated the order plainly, and the order was the defect.
+
+Measured on live servers, same fixture, three contents at `ref_count` 3 / 1 / 2 with two of the
+first's three references expired and the second's sole reference soft-deleted:
+
+| | PostgreSQL | MySQL before | MySQL after | SQL Server before | SQL Server after |
+|---|---|---|---|---|---|
+| two of three refs expired | 3 → 1 | 3 → **3** | 3 → 1 | error | 3 → 1 |
+| sole ref soft-deleted | 1 → 0 | 1 → **1** | 1 → 0 | error | 1 → 0 |
+| nothing expiring | 2 → 2 | 2 → 2 | 2 → 2 | error | 2 → 2 |
+
+**A silent wrong answer is worse than a loud one**, and this pair is the clean demonstration.
+cleat-ports' worker-log check found the SQL Server half precisely because SQL Server complains.
+Nothing could have found the MySQL half that way; it took asking what the count *became*.
+
+**Why the existing arm test could not have caught it.** `RunEveryArm` (3.42x, cleat#1133 part 4)
+executes each dialect arm on a real server of that dialect and asks whether it is accepted. That
+finds the SQL Server half the moment the arm is listed — and it is structurally blind to the MySQL
+half, where both statements are accepted and the defect is which runs first. **A check on one
+statement cannot see a defect that lives between two.** The new test asserts the resulting
+`ref_count`, and additionally that the content whose last reference expired is *collected* — so
+phase 3 being reachable is part of what is pinned.
+
+**The regression test's first falsification was void, and the cause is worth the line.** It went
+red on all three dialects with `duplicate key value violates unique constraint` — leftover fixture
+rows, because the cleanup was registered with `t.Cleanup` while the pool is closed by
+`defer be.Cleanup()`. **`t.Cleanup` runs after the function's defers**, so every delete ran against
+a closed database, failed, and was discarded by a `_`. Two discoveries in one: the fixture leak,
+and that a cleanup whose errors are dropped cannot report its own failure. Now a `defer`, and the
+errors are checked. The rows it had already leaked were purged and counted — 1 index row and 1
+content row per dialect for the first content, 2 and 1 for the third, and **zero for the second on
+every dialect**, which is independent confirmation that the fix collected it.
+
+**And it passed locally on three dialects while failing CI on two, which is the sharper half.**
+`NewPluginTestBackends` opens a connection and applies *nothing*; the schema a test gets is
+whatever `plugin.RunMigrations` builds plus whatever the database already had. `cleanupExpired`'s
+phase 1 joins `workflow_instances` — an **engine** table, because a plugin runs inside the
+engine's database — which no plugin migration creates. My local MySQL and SQL Server had it from
+earlier engine-suite runs. CI's are fresh, and both failed at phase 1:
+
+    Error 1146 (42S02): Table 'cleat.workflow_instances' doesn't exist
+    mssql: Invalid object name 'workflow_instances'.
+
+PostgreSQL passed in both places because `TestDB` applies the schema and `MySQLTestDB` /
+`MSSQLTestDB` do not — an asymmetry invisible from the call site, which reads as one helper
+returning three equivalent backends. Fixed with `testutil.SetupMinimalSchema`, and **verified by
+reproducing the CI condition rather than by reasoning about it**: a fresh `cleat_bp` database on
+each of the three servers, where the pre-fix test fails on exactly mysql and mssql with exactly
+those two messages, and the fixed one passes twice in a row.
+
+**A fixture that depends on what an earlier test left behind is not a fixture**, and a local run
+cannot tell you it is doing that — the residue is invisible and it always helps.
+
+### 3.426 A failed child was reported to its parent as a success with an empty result — ✅ **FIXED 2026-09-11** (cleat#1115)
+
+A parent that spawned a child, awaited it, and branched on the error took the **success** branch
+when the child failed. The natural guest shape is silently wrong:
+
+```go
+result, err := h.AwaitChild(childID)
+if err != nil { /* never reached */ }
+```
+
+and an empty result is a plausible success value, so nothing downstream looks wrong either. **The
+parent was not denied the reason — it was told the opposite.**
+
+**The information never left the store.** `finalize_workflow_status` writes a failed run's message
+to `error_msg` (migration 053 routes the payload there on the `'failed'` branch);
+`GetChildResult` selected `COALESCE(result, '{}')` and `status`, tested
+`status == "done" || status == "failed"` as one condition, and returned
+`(resultJSON string, completed bool, err error)` — **a triple with nowhere to say "completed, and
+failed."** `err` is a *store* error. A failed child arrived as `("{}", true, nil)`.
+
+So this is one missing fact, not four bugs. Every caller was wrong the same way:
+
+| call site | what a completed child got |
+|---|---|
+| `AwaitChild` | `packAwaitChildResult(written, 0)` — the success flag |
+| `AwaitAnyChild` | `out.Result = result`, `out.Error` left empty |
+| `AwaitAllChildren` | `childOutcome{RunID: rid, Result: result}` |
+| `PollChild` | fell through to `completed` |
+
+The fix returns a `ChildOutcome{Completed, Failed, Result, Error}` from one query, so the child's
+status and its `error_msg` reach all four.
+
+**`PollChild` had a guess in place of the missing fact, and the guess was wrong in the other
+direction.** Its last branch read `pollResult{Status: "failed", Error: "child workflow failed
+(empty result)"}` — so a child that *succeeded and returned nothing* was reported as failed. That
+guess is removed rather than kept beside an answer it can contradict.
+
+**Its test stated the defect as a specification**, which is the same shape as §3.424's tenant
+comment: the mock in `TestPollChild_EmptyResult` carried the comment *"completed but empty result
+== failed"*. That is not a fact about a child; it is a description of the guess. Corrected, with
+`TestPollChild_ChildFailed` added for the case the guess stood in for.
+
+**The in-memory fake was MORE correct than every real store, and that is why nothing caught it.**
+`wasmtest.InMemoryChildWorkflowStore.GetChildResult` reported a registered child error as
+`("", true, fmt.Errorf(msg))` — the child's failure smuggled through the **store error** return.
+`AwaitChild`'s `err != nil` branch then did the right thing. So every test driven by the fake saw
+correct behaviour, produced by a mechanism the production path does not have. A fake that is right
+for the wrong reason cannot fail with the thing it stands in for. It now returns a failed outcome,
+and `SetError` — public API that nothing exercised — has a test.
+
+**Cancellation needs no third case, checked rather than assumed:** it is an **error code**, not a
+status (`WorkflowFilter.ErrorCode` says so, and no `status = 'cancelled'` exists in any dialect's
+migrations), so a cancelled child is a failed one.
+
+**Three fixture faults, all found by running rather than reading, and each void in a different
+way:**
+
+  * **Seeding through the wrong path.** The first version failed the child with
+    `FinalizeWorkflowSegment(..., "failed", marker)`. That path runs its payload through
+    `coerceResultJSON`, which replaces anything that is not valid JSON with `{}` — so the test read
+    `Err="{}"` and would have measured the coercion rather than the fix. The worker fails a run
+    through `FailWorkflow`, whose `errorMsg` reaches `error_msg` as written.
+  * **An order dependence that reads as a dialect problem.** `claimSpecific` loops on
+    `ClaimWorkflow` until the id matches, and every claim it discards *consumes* a workflow — so
+    claiming one child left the other claimed and unclaimable. It passed on PostgreSQL and MySQL,
+    where the order happened to suit, and failed on SQL Server. Both children are now claimed in
+    one pass.
+  * **A mechanical rewrite that hit a function it was not aimed at.** Updating ~17 mock
+    implementations with a regex on `return X, true, nil` also rewrote `StartNewRun`, which happens
+    to share the shape. Found by auditing every changed line for its **enclosing function** rather
+    than by trusting the pattern — the compiler caught two of the three, and the third was in a
+    branch the compiler accepted.
+
+**Both halves are falsified separately**, because either alone leaves the defect: making the store
+stop reporting `Failed` fails PostgreSQL only; making the session stop acting on it fails all three.
+### 3.427 A duplicate idempotency key with a different payload silently discarded the second request — ✅ **FIXED 2026-09-11** (cleat#1170)
+
+A second request presenting a key that was already held got `200`, `already_started`, and the
+first run's id. **Its own input was dropped without a word**, and the run behind that id carries
+somebody else's arguments:
+
+    call 1   Idempotency-Key: K   {"input":{"n":7}}     -> 201 {"id":"28e97a21-…"}
+    call 2   Idempotency-Key: K   {"input":{"n":999}}   -> 200 {"already_started":"true", …}
+    the run's stored input: {"n": 7}
+
+**This is quieter than the duplicate execution idempotency keys exist to prevent.** A duplicate
+execution at least leaves a row behind. A discarded request leaves nothing anywhere: the caller
+believes its request ran, and the only trace is a run it did not start.
+
+**The mechanism already existed one column over.** Migration 051 (cleat#1047) added `def_name` so
+a key reused for a *different workflow definition* is refused — cleat already fingerprints part of
+the request and compares it on replay. It simply stopped at the name. `input_digest` is the same
+migration, the same NULL-means-unknown rule, and the same refusal.
+
+**Not backfilled, and that is the one place this departs from 051.** 051 could derive `def_name`
+from the owning workflow because a name is a name. A digest is the output of a *specific function*,
+so computing it in SQL would be **a second derivation of the same value** — free to disagree with
+the Go one over JSON text rendering (PostgreSQL's `jsonb` output inserts a space after every `:`
+and `,`; MySQL and SQL Server do not) and to do so silently for an entire upgrade. Existing rows
+keep NULL, which reads as "unknown, allow" and degrades to the old behaviour rather than to a
+refusal a caller cannot act on.
+
+**The digest is a property of the VALUE, not of the bytes.** `IdempotencyInputDigest` canonicalises
+through `json.Unmarshal`/`json.Marshal` — which sorts map keys — before hashing, so reordered keys
+and added whitespace are the same request. A byte-wise digest would refuse a caller that merely
+reformatted its JSON, and **that refusal would look exactly like the feature working**, which is
+why the test carries it as a control rather than trusting the reasoning.
+
+**What the digest cannot see, stated rather than hidden.** `server.go` calls `engine.Redact` before
+the store sees the input, so a sensitive field arrives as `"[REDACTED]"` and two requests differing
+*only* in a secret digest equal and replay. Closing that means digesting before redaction, which
+means computing it in the handler and passing it down — a ninth parameter on a function that takes
+eight. Raised on the issue as a decision rather than taken quietly.
+
+**The refusal now returns 409, and so does the one that already existed.** `handleStartWorkflow`
+mapped *every* `StartNewRun` error to `500`, including a deliberate refusal — cleat#832's shape, a
+client error reported as a server fault, which sends an operator to look at cleat for a request
+cleat handled exactly right. Both cases carry a `detail` so a client can branch without parsing
+prose. **Fixing only the new one would have standardised the old one on 500 by omission**, at the
+moment the code path gained a second caller.
+
+**Executed on three databases, where the existing check could only be asserted about source.**
+`idempotency_def_scope_test.go` reads the three stores' text, for a reason that is sound — the
+behaviour is one comparison written out once per dialect, and what breaks is one store being edited
+and the others not. That is second best, and it is no longer necessary:
+`TestAKeyReusedForAnotherDefinitionIsRefused` runs the statements, and additionally pins the two
+refusals as **distinguishable by `errors.Is`**, which a single shared error would have satisfied
+every other way.
+
+**The source guard it replaces was generalised rather than deleted**, and it earned that: its
+patterns named the exact column list, so adding one column reported *"def_name is missing"* when
+def_name was right there. It now asserts that every lookup reads **both** discriminators and that
+the INSERT writes both — matched loosely, so the next column does not produce a false red.
+Known-positives, run in an isolated worktree so the suite in flight was untouched: dropping
+`input_digest` from one of MySQL's two lookups reports *"2 idempotency lookup(s); 2 read def_name
+and 1 read input_digest"*, and dropping it from SQL Server's INSERT reports *"does not WRITE
+input_digest"*.
+
+**The scheduler is exempted, and finding out why is the part worth keeping.** Its key is
+`cron:<tenant>:<schedule>:<scheduled instant>` by design, so two workers racing one firing derive
+the same key — and if the schedule's input was edited between their reads of the row, they present
+different payloads for the same firing. A refusal there is not a caller's mistake, and treating it
+as an error would be **worse than useless**: the existing branch leaves the schedule due, the retry
+reads the *new* input, and it mismatches the stored digest again for as long as the key lives —
+**30 days**. A schedule edited at the wrong moment would wedge. The scheduler now reads the refusal
+as the suppression it is. `runID` stays empty there, which `ClaimDueSchedule` already models:
+`last_run_id = CASE WHEN $5 = '' THEN last_run_id ELSE $5 END`.
+
+**A refusal is only correct where the caller can act on it**, and that is the line between the two
+callers of `StartNewRun`, not a property of the check.
+
+Falsified per layer: removing the PostgreSQL check fails postgres alone, returning
+`existed=true, err=<nil>` — the reported symptom exactly; removing the 409 mapping fails the HTTP
+test with `500`. The HTTP test carries its own control, because "a refusal returns 409" is
+otherwise satisfied by returning 409 for everything, which reports a genuine server fault as the
+caller's fault.
+
+### 3.428 The workflow-memory tables were tenant-scoped on PostgreSQL with nothing behind the predicate — ✅ **FIXED 2026-09-11** (cleat#1098)
+
+§3.x/cleat#1096 gave `workflow_memory_stats` and `workflow_memory_samples` a `tenant_id`, scoped
+all twelve statements, and bound both to `dbo.fn_tenant_filter` on SQL Server. **PostgreSQL got the
+column and the Go predicate and no policy** — a tenant-scoped table carrying one layer on the one
+dialect where a second was available.
+
+| dialect | Go predicate | database backstop |
+|---|---|---|
+| PostgreSQL | yes | **no** ← this item |
+| MySQL | yes | none exists |
+| SQL Server | yes | `TenantFilter_MemoryStats` / `_MemorySamples` |
+
+**It could not be done in #1096, and that is the whole shape of the work.** All four access sites
+read outside an RLS transaction — `RecordWorkflowMemorySample` on `s.db.BeginTx`, the other three
+straight onto `s.db.QueryContext`/`ExecContext`. `cleat.tenant_id` is set per **transaction** by
+`setRLSOnTx`, so a fail-closed `tenant_id = cleat.assert_tenant_set()` policy raises the moment any
+of them runs. The restructuring onto `beginTxWithRLS` is the change; the policy is what it buys.
+`QueueDepth` sits eighty lines away in the same file already doing it.
+
+`CleanupMemorySamples` needed more than a swapped opener: its def listing and its per-def `DELETE`s
+ran on **two unrelated connections**. One per-transaction setting cannot cover two connections, so
+they are now one transaction.
+
+**A policy nothing exercises is indistinguishable from no policy, so the proof is a PAIR.** The
+existing `TestTheMemoryProfileIsScopedToTenant` passed before this item — the Go predicate was
+doing all the work — so its passing afterwards says nothing on its own. Measured, same mutation
+(the Go predicate deleted from `LoadMemoryEstimates`) run twice:
+
+| | `TestTheMemoryProfileIsScopedToTenant/postgres` |
+|---|---|
+| policy dropped (the pre-fix state) | **FAIL** — tenant A's estimate reads `9000000`, want `1000000` |
+| policy present | **PASS** — the policy alone carried it |
+
+`9000000` is tenant B's sample arriving in tenant A's EWMA. That pair is the property SQL Server
+already had and PostgreSQL did not, and it is the one #1096 named as the reason a second layer
+earns its keep.
+
+`TestMemoryProfileRLS_LayerSeparation` pins both directions permanently, in the shape
+`engine/rls_gap_concurrency_and_update_requests_test.go` established: the policy filtering a query
+carrying **no tenant predicate at all** on a non-superuser connection, and the Go predicate
+filtering over a superuser connection the policy cannot reach. Both halves falsified; dropping the
+policy makes Layer 1 report both tables by name.
+
+**The guard extended itself, which is the argument for deriving a list rather than writing one.**
+`TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet` (§3.x, cleat#1178) reads its table set
+from `ENABLE ROW LEVEL SECURITY` in the migrations, so this migration brought both tables under it
+with no edit to the guard. On the pre-fix tree it now names **all six** offending statements —
+`db.go:945, 952, 969, 990, 1044, 1065` — each with the reason (`runs on a transaction from
+s.db.BeginTx, and RecordWorkflowMemorySample never calls setRLSOnTx`). A hand-written table list
+would have silently kept passing.
+
+**Scope is two tables, deliberately.** 031's header reasons about each table it declined —
+`idempotency_keys` is read before any RLS context exists, `admin.tenant_api_keys` before a tenant is
+known, `kv_store` and `feature_flags` are plugin-owned — and none of those reasons has changed. A
+blanket apply would make the migration a claim rather than a check.
+(`idempotency_keys` stopped being one of them on 2026-09-15: cleat#1534 reordered `startNewRun` onto
+RLS transactions and migration 083 gave the table its policy. The other three stand.) cleat#1097, the in-memory gauge,
+is a metric-labelling decision and stays where it is.
+
+### 3.429 `cleatctl deploy plugin` wrote to a table that has never existed — ✅ **FIXED 2026-09-11** (cleat#1226)
+
+Three statements against **`plugin_registry`**, a name no migration has ever created, so the command
+could not work at all. It was not a rename: `plugin_defs` is keyed `(name, version)` and has
+`config` rather than `metadata`, no `id`, and no `updated_at`, so every assumption about the shape
+was wrong too — including the one that mattered, **one row per name**.
+
+A correct writer already existed (`engine.PluginLoader.DeployPlugin`, upserting on `(name, version)`),
+so the work was an argument surface and a decision, not a deployment path.
+
+**The decision: require the version.** `cleatctl deploy plugin <name> <version> <wasm-file>`.
+
+It looks like taste and is not, because the column already has a consumer that **parses** it.
+`ResolvePlugin` compares versions as semver and *silently skips* a row it cannot parse
+(`if !semver.IsValid(v) { continue }`), so an invented default risks a plugin that is in the table,
+listed by `cleat plugin list`, and resolvable by nothing. Measured against the same
+`ensureVPrefix` + `golang.org/x/mod/semver`:
+
+| candidate | valid | verdict |
+|---|---|---|
+| `1.0.0` — what `cleat plugin install` already writes | yes | the existing convention |
+| `a3f9c2b1` — a content hash | **no** | deployed and permanently unresolvable |
+| `1` | yes | but `semver.Compare("v1","v1.0.0") == 0`: a **distinct primary key** that is the **same version** to the resolver |
+| auto-increment | yes | `plugin_cmd.go:416` picks the latest with `ORDER BY version DESC`, a TEXT sort where `"9" > "10"` |
+
+Requiring it is also the only option that adds no second convention: `cleat plugin uninstall
+<name> <version>` already takes this shape.
+
+**A non-semver version is refused at deploy time**, rather than accepted and skipped later. Taking
+one would move this exact defect — a write that reports success and produces something nothing can
+read — one step downstream.
+
+**Why every existing test passed.** All five `deployPlugin` tests drive a fake `driver.Connector`
+that returns a canned result for any query, so they accept SQL no database would — the same failure
+mode `plugins/*_dialect_arms_multidb_test.go` was built for, and the reason
+`TestEveryInlineStatementParsesOnPostgres` exists. They reported `Deployed plugin` for a statement
+naming a table that does not exist. They are kept, because they cover argument handling, refusals
+and output; what they cannot do is notice the write went nowhere.
+
+So the new test asserts the **round trip** against a real PostgreSQL: deploy, then *resolve*. It
+additionally pins the `(name, version)` model that the decision is about — a second version adds a
+row rather than replacing, both remain resolvable, and redeploying a version replaces its bytes
+without adding a row. Falsified two ways: pointing the writer back at `plugin_registry` kills the
+command at the deploy step, and writing under a different name lets the deploy *succeed* and the
+resolve fail — the sharper one, because it isolates exactly the property the old code's intent
+claimed and its effect did not have.
+
+**The three pins in `TestEveryInlineStatementParsesOnPostgres` are deleted**, and that is a check
+rather than bookkeeping: it fails in both directions, so a pin outliving its defect fails the run.
+
+**Found on the way, filed as cleat#1243:** an exact-version plugin constraint matches nothing.
+`parseConstraint` maps a bare or `=` version to `{Min: v, Max: v}` and `versionInRange` excludes the
+upper bound, so `ResolvePlugin(name, "1.0.0")` cannot return 1.0.0. Nothing in the tree passes an
+exact version — every internal caller uses `""` or a range — so the two broken forms are precisely
+the ones a human reaches for first. This test uses `^1.0.0` with a comment pointing at the issue,
+rather than quietly avoiding the form that fails.
+
+### 3.319 A release matched any row with the key, so one workflow freed another's lock — ✅ **FIXED 2026-09-11** (cleat#1188)
+
+`ReleaseConcurrencyKey` took only the key. Its statement carried `AND tenant_id` and no
+`workflow_id`, on all three dialects. Within one tenant, any workflow that knew a key string
+removed the row whoever held it — so B released A's lock, C then acquired it, and A carried on
+believing it held mutual exclusion. Nothing errored on any side.
+
+Reproduced on a scratch database before the fix: `DELETE 1` against a row the caller did not own,
+then a successful acquire by a third workflow, with the holder still `status='running'`.
+
+#### The hazard was already written down, in this package, as a comment
+
+`concurrency_key_reentrancy_test.go` explains why re-entrancy must keep returning false:
+
+> ReleaseConcurrencyKey takes only the key and has no hold count, so acquire+acquire+release
+> frees a lock the workflow still believes it holds.
+
+That is this defect, described accurately, in the tree, before it was filed. It was load-bearing
+for a *different* test's reasoning and was never turned into an assertion of its own. **A sentence
+in a test cannot fail.** The new test can, and the hold-count half of that sentence remains true
+and remains pinned where it was.
+
+**It appears twice in that file, and the second occurrence is worse than the first.** The file-level
+comment states it flatly — *"takes only the key and deletes the row unconditionally"*. The other is
+a **string literal inside the failure message of a different assertion**, printed only in the branch
+where re-entrancy misbehaves. So it is not merely an unasserted claim: it could not be *read* at all
+unless an unrelated assertion broke first. Both are corrected in this change, because a comment
+describing the pre-fix behaviour is worse than no comment — the rule this repo already applies to
+`✅` markers over stale bodies.
+
+**The obvious mechanical guard for this class does not work, and that is worth recording so nobody
+builds it.** The tempting predicate is *"a test's failure message names a production identifier the
+test never calls"*. It would not have caught this one: `concurrency_key_reentrancy_test.go:83` calls
+`ReleaseConcurrencyKey` as cleanup, so the identifier *is* called — it is just never the subject.
+The real predicate is *"this sentence states a property, and no assertion anywhere depends on that
+property holding"*, and neither of us has a mechanical form for it. Left as a stated open question
+rather than a weak guard: **a check that would not have caught the case that inspired it is worse
+than none, because it makes the class look handled.**
+
+#### The fourth route into one end state
+
+| | |
+|---|---|
+| §3.34 | a TTL truncated to whole seconds; the key was born expired — *"two workflows holding the same mutual-exclusion key, with nothing logged"* |
+| §3.39 | re-acquiring a key you already hold answered differently per dialect |
+| §3.318 (cleat#1189) | the key namespace was global across tenants |
+| this | a release matched a row it did not own |
+
+Each of the first three was fixed where it surfaced. What none of them asserted is the property
+itself, which is why the regression test here checks the *consequence* — C acquires — and not only
+the symptom. Asserting `released == false` alone would pass against a store that reported false and
+deleted the row anyway.
+
+#### Releasing a key you do not hold is still a success, deliberately
+
+`TestPostgresStore_ReleaseConcurrencyKey_NonExistent` has asserted that contract since before this
+change, and the contract is right rather than merely established: a key whose TTL has passed is
+already gone, the workflow releasing it has done nothing wrong, and an error there is one the guest
+cannot act on. The visible-error alternative was proposed and declined for that reason.
+
+What was missing was any *trace*. A release that freed a lock and one that matched nothing were the
+same event. `EventRecord.LockNotHeld` now distinguishes them, and `eventRecordToPayload` emits
+`lock_not_held` **only when true** — `computeEventChecksum` runs over that map, so an unconditional
+key would have rewritten the checksum of every release event in every existing history.
+
+#### Falsification
+
+Each dialect's predicate reverted alone, to the exact pre-fix statement:
+
+| reverted | result |
+|---|---|
+| postgres | `postgres` FAIL, `mysql` and `mssql` PASS |
+| mysql + mssql | both FAIL, `postgres` PASS |
+
+and both failures name both assertions — *"B released a key held by A"* and *"C acquired a key A
+still holds"*. **The first attempt at the postgres mutation was not faithful**: it deleted `$2` from
+the SQL while still passing three arguments, so the test went red on
+`pq: could not determine data type of parameter $2 (42P18)` — a red for the wrong reason, which is
+the outcome the "read *why* it failed" rule exists to catch. The mutation was rewritten to restore
+the pre-fix statement exactly.
+
+---
+
+### 3.320 A crash mid-retry granted a fresh MaxAttempts, because nothing was recorded until the call finished — ✅ **FIXED 2026-09-11** (cleat#1145)
+
+The host retry loop recorded an event only when the call *finished*. A failed attempt persisted
+nothing, so a worker lost mid-backoff replayed into a step with no history, restarted the policy at
+attempt 1, and spent the caller's whole budget a second time. `MaxAttempts` bounded attempts **per
+incarnation**, not per workflow, and a run that crashed repeatedly was bounded by nothing.
+
+Measured on the port harness before the fix, with the control that makes the number readable:
+
+| | attempts | crash | calls |
+|---|---:|---|---:|
+| control | 3 | no | **3** |
+| probe | 3 | mid-backoff | **4** |
+
+The unit test reproduces that exact pair, and its falsification message prints `Total across both
+incarnations: 4`.
+
+#### The fix is one event, and the constraint that shaped it is not in the issue
+
+`EventTypeCallAttemptFailed` is recorded before each backoff — only when another attempt follows, so
+a history ends on one **only** when the run was interrupted. That is the signal replay reads.
+
+The issue proposed "record the failed attempt" and stopped there. Three properties of this engine
+decide what that can mean, and none is obvious from the call site:
+
+* **`recordEvent` advances `stepCount`, and replay is positional** (`s.history[s.stepCount]`, then
+  `advanceReplayStep` increments). One event per step. A new event therefore shifts every
+  subsequent step in *new* histories — harmless, because old histories are replayed positionally
+  against themselves and never compared across versions, but it rules out any "extra event on the
+  same step" design.
+* **The compaction codec is a pair of exhaustive maps**, so a new type needs a code in both or it
+  round-trips as unknown.
+* **Attempts deliberately share one step** so every attempt carries one idempotency key. Resuming
+  therefore has to carry the *first* incarnation's step, or the key changes at exactly the moment a
+  duplicate is most likely. `freshCallWithRetry` takes `resumeStep` for that reason.
+
+#### Three guards caught what the tests did not
+
+The suite passed and then three existing guards failed — each about the *completeness* of adding an
+event type, which is precisely what a behavioural test cannot see:
+
+| guard | what it caught |
+|---|---|
+| `TestTheCarrierAuditCoversEveryEventTypeConstant` | the new type was in `eventTypeToCode` but in no audit list, so no field was checked against its payload arm |
+| `TestEveryEventRecordFieldTheDatabasePayloadMustCarryDoesCarry` | `Attempt` was carried unconditionally rather than guarded on non-zero |
+| `TestTheRequiredJavaGuardsCoverEveryHostStopSite` | the resume path adds an 18th `stopBeforeNewWork()` site |
+
+The third is the interesting one, and it is a case its own comment did not anticipate: the new site
+is a **second site for a call the Java SDK already guards**. Java needs no new method, because
+`javaCallsTheHostCanRefuse` covers the *call*, not the *site*. A count of sites and a list of
+methods are different things, and this is the case that separates them — recorded at the constant.
+
+#### Falsification
+
+Passing `0` instead of the spent count reddens both tests: *"a crash after attempt 1 of a 3-attempt
+policy made 3 further calls, want 2 — total across both incarnations: 4"*, which is the field
+measurement reproduced in a unit test.
+
+**The first attempt at that mutation did not compile** — removing the value left `spent` unused, and
+the filtered output printed nothing, which reads exactly like a pass. Caught by reading the
+unfiltered tail. The mutation was rewritten to keep the tree compiling (`_ = spent`), which is the
+repair CLAUDE.md prescribes for exactly this.
+
+#### What this does not change
+
+The **wait** is still worker-local (§3.317, cleat#1111): a resumed policy fires immediately rather
+than re-waiting the remainder of its backoff. That was a decision and it stands. This changes only
+which attempt it resumes at.
+
+---
+
+### 3.431 `RunDetached` discarded the run id it already computed — ✅ fixed
+
+**cleat#1154.** A workflow that starts a detached run got back nothing but a status, so it had no
+handle to what it started: it could not poll it, signal it, or record the id anywhere durable. The
+id was not missing — `engine/children.go` computes it from `StartChildWorkflow` and throws it away.
+
+#### Why a new host call rather than a wider one
+
+`cleat_run_detached` is **unchanged**, and both calls stay registered. A host call's arity is part
+of its import type, and a mismatch is a **hard link error** that stops a module instantiating at
+all — not a failure of the one call. §3.55 measured that here, through the production path:
+
+    incompatible import type for `env::cleat_create_promise`
+    types incompatible: expected type `(func (param i32 i32 i32 i32) (result i64))`,
+                           found type `(func (param i32 i32 i32 i32 i64) (result i64))`
+
+Every deployed binary imports the four-parameter form, including in-flight runs pinned to an older
+version that `tests/upgrade` exists to protect. So the capability arrives as `cleat_start_detached`,
+which is how `cleat_poll_update` and `cleat_complete_update` arrived in #868.
+
+`RunDetached` and `StartDetached` share one body (`runDetached`) rather than being two
+implementations, because a detached run's **replay** behaviour has to be identical whichever call
+the guest used: a workflow with `run_detached` events already in its history, recompiled to call the
+new one, must replay against that history. Both record and match `EventTypeRunDetached`, and on
+replay the id comes from the record — starting it again would be a second run.
+
+#### The test, and why "non-empty" would have proved nothing
+
+`TestStartDetachedReturnsTheIDThatAddressesTheRun` does the round trip the issue asked for: it takes
+the returned id back to the store and asserts the run behind it is the run that was started, on all
+three dialects.
+
+That is not fussiness. `children.go` mints a fallback id — `fmt.Sprintf("detached-%s-%d", name,
+s.stepCount)` — whenever the store call produces nothing, and that string is non-empty,
+well-formed, and **addresses nothing at all**. Falsified two ways, both red on all three dialects:
+
+| mutation | what the test said |
+|---|---|
+| stop writing the id (`wantID=false`) | *"wrote 0 bytes, so it reported success and handed back nothing"* |
+| skip the store, take the fallback | *"returned `detached-detached-reconcile-0`, which is the fallback id"* |
+
+A test asserting only that a non-empty string came back passes the second mutation.
+
+#### Three guards fired, and one had been covering a real defect
+
+| guard | what it caught |
+|---|---|
+| `check-doc-consistency.sh` | the export was registered and undocumented — red until `ABI.md` §2.24a |
+| `TestEverySDKReachesEveryHostExport` | named all four SDKs that could not reach the new call |
+| `TestTheThreeStopSurfacesAgree` | the stop site moved to the shared body, **and** the entry covering it was stale |
+
+The third is the one worth reading. `stopSurfaces["RunDetached"]` carried
+`adapterWhy: reasonNoGoAdapter` and `witWhy: reasonNotInTheComponentWorld`, and **both exemptions
+were true when written and false by now**: #806 gave Go a real signature and a `wasm/usage.go` row,
+and §3.253 added `durable-run-detached` to `cleat.wit` and wired the Python method. Neither change
+removed the exemption, and nothing failed — because an exemption is only ever consulted when
+something is missing.
+
+What it was covering was a live defect: the `RunDetached` Go adapter did **not** call
+`withSuspendCheck`, so a guest refused mid-segment read bit 31 as `errCode = 0x80000000` and got
+`cleat_run_detached: error 2147483648` instead of `ErrSuspend` — an ordinary error a workflow may
+well swallow, in the defer segment that refusal exists to protect. Fixed here, with the entry
+re-keyed to the shared body and both adapters named.
+
+#### Python is the one gap, and it is recorded rather than papered over
+
+Bound in Go, Rust, Java and AssemblyScript. **Not Python**, and the reason is structural rather than
+effort: `cleat_start_detached` returns a string, so its WIT cannot be the `-> u64` that
+`durable-run-detached` uses. A core-ABI guest receives the id through an out-pointer into its own
+linear memory; component dispatch writes into a **host** buffer, so out-pointers do not survive the
+crossing — the same defect `stopSurfaces` already records as OPEN for `durable-await-signals`, which
+is declared with out-pointers and has therefore never worked on a component.
+
+Declaring the `u64` form anyway would compile and be **worse than nothing**: the guest would read
+whatever happened to sit at `OUTPUT_OFFSET` and return it as a run id. So the entry is in
+`sdkUnreachedBaseline`, which is shrink-only, with that reasoning written at it.
+
+#### Stale prose corrected in passing
+
+Three comments described the old world and would have misled the next reader:
+
+- `engine/run_detached_stop_test.go` said *"Go guests cannot reach `cleat_run_detached` at all"*.
+  Measured false by generating the imports for `testdata/allhostcalls`: both detached calls are
+  emitted, with `cleat_fetch` as the negative control, which is not — matching its own baseline
+  entry.
+- `crates/cleat-sdk/src/host_calls.rs` documented Go's signature as `RunDetached(fn func(h
+  HostCalls) error)`, which #806 replaced.
+- `tests/plugin-harness/sdk_import_names_test.go` opened the Python baseline with a **count** of its
+  entries; three of them were bound within days and the sentence has been wrong ever since. Replaced
+  with a pointer to the list, per CLAUDE.md's rule about censuses of growing populations.
+
+---
+
+### 3.432 A `413` that named neither the limit nor which knob moves it — ✅ fixed
+
+**cleat#1332.** This server enforces **two** body ceilings — the configurable `--max-body-size` and
+the compile-time `signalMaxBodySize` — and all eight `413` sites in `cmd/cleat-worker/server.go`
+said only `"request body too large"`. A caller could not tell which one had refused them, what its
+value was, or whether anything they control would change it.
+
+**The expensive case is not the missing number.** It is an operator who raises `--max-body-size`,
+still gets `413` from `/signal`, and has nothing in the response to suggest that endpoint does not
+use the flag. `signalMaxBodySize` is a `const`; the flag does not move it.
+
+#### The doc named two of the three endpoints
+
+`docs/reference/worker-config.md` read *"Signal endpoints have a fixed 64 KB limit."* The constant
+guards **three** handlers — `handleSignal`, `handleCancel`, `handleWorkflowUpdate` — and the
+constant's own comment made the same omission, saying "signal and update endpoints". Cancel was
+missing from both while being the one most likely to be reached in practice: its field is a
+free-text `reason`.
+
+#### Eight sites, not the three the issue described
+
+The issue named three. There are eight, and five guard the *other* limit:
+
+| limit | sites |
+|---|---|
+| `signalMaxBodySize` (64 KB, const) | `handleSignal`, `handleCancel`, `handleWorkflowUpdate` |
+| `s.maxBodySize` (configurable) | `handleStartWorkflow`, `handleSetAllowedSignals`, `handleResolvePromise`, `handleRejectPromise`, `handleCreateSchedule` |
+
+Fixing only three would leave the other five silent while their neighbours name a limit, which is
+worse than uniform silence — a caller who learns the body carries the limit would reasonably read
+its absence as meaning something.
+
+#### Two helpers rather than one with a description parameter
+
+`bodyTooLargeConfigured` and `bodyTooLargeFixed`. One function taking a sentence would let the
+choice of limit and the sentence describing it drift apart at a call site, and **naming the wrong
+knob is worse than naming none**: a caller who learns the response identifies the knob will act on
+it.
+
+#### The test asserts the PAIRING, which is what makes it falsifiable
+
+Checking that *a* limit appears passes against a handler naming the wrong one. So each case pins
+the value **and** requires the other limit's knob to be absent. Falsified three ways, each red for
+its own reason:
+
+| mutation | what failed |
+|---|---|
+| swap the helper at the `cancel` site | all three assertions — wrong value, missing knob, *and* "contains the OTHER limit's knob" |
+| revert one site to the bare string | the completeness guard, at both its bare-string count and its per-helper floor |
+| shrink the general limit to 1 byte | the **control** — "an 53-byte body was refused with 413, so the oversized assertion below would prove nothing" |
+
+The control runs first in every case. Without it, "an oversized body is 413" passes equally against
+a handler that answers 413 to everything, which is exactly what a misconfigured `MaxBytesReader`
+produces.
+
+#### What this deliberately does not decide
+
+Whether `signalMaxBodySize` should track `--max-body-size` is a product call. The doc fix makes the
+asymmetry **visible**; a code change would paper over the question instead of putting it to whoever
+owns it.
+
+#### Not fixed here, and filed separately
+
+**Seven `MaxBytesReader` sites have no `MaxBytesError` branch at all** — three in `server.go`
+(`handleSetRoutingRule`, `handleSetWorkflowTag`, `handleCreateDefinition`) and four in
+`api_admin.go`. An oversized body there is a **400** whose text begins `"invalid JSON"`, for the
+same condition that is a 413 everywhere else. `handleCreateDefinition` is the WASM upload endpoint,
+where an oversized body is the most legitimate 413 in the API, and its ceiling is a *fourth*
+distinct value — `10*1024*1024` written inline. That is a status-code change on live endpoints and
+deserves its own decision.
+
+The completeness guard here is written to require a limit in every site that **does** return 413,
+not to require a 413 at every `MaxBytesReader` — so it does not fail for the reason it is not about.
+### 3.433 Dead-letter terminate discarded its decode error, erasing the failure it was recording — ✅ fixed
+
+**cleat#1337.** `handleDeadLetterTerminate` called `json.NewDecoder(r.Body).Decode(&req)` and threw
+the result away. A body it could not read left `req.Reason` empty, the terminate proceeded, and the
+caller got `200 {"status":"terminated"}`.
+
+#### The damage is not the missing note
+
+`TerminateWorkflow` writes `reason` into `workflow_instances.error_msg` **unconditionally, in both
+of its branches** — the defer-phase transition and the direct one. So an empty reason is an
+**overwrite**, not a no-op, and what it overwrites is the message recording why the run
+dead-lettered. Measured on one row by the session that filed the issue:
+
+| | |
+|---|---|
+| before | `dead_lettered`, `error_msg` 270 bytes — `"host: workflow a0493c8a-…: execution failed: …"` |
+| request | a **25-byte** truncated-JSON body → `200 {"status":"terminated"}` |
+| after | `terminated`, `error_msg` **0 bytes** |
+
+with a short-reason control landing in the column intact, so the zero means something.
+
+**Twenty-five bytes, against a 1 KB cap.** The issue was first framed as "over 1 KB or malformed",
+which reads as two symptoms of one limit and invites a fix that raises or documents the cap. Any
+decode failure does this; the cap is one way in, not the defect.
+
+#### It was the only one
+
+    grep -nE '^\s*json\.NewDecoder\([^)]*\)\.Decode\(' cmd/cleat-worker/*.go
+
+One hit. Every other request-body decode in the worker assigns the error and branches, usually to
+`400 "invalid JSON: …"`. A lone deviation from the file's own pattern, which is why the fix is to
+match the pattern rather than invent one.
+
+#### The naive fix is a regression, and that is the interesting part
+
+Branching on *every* error breaks a supported call: **a terminate with no body at all**.
+`TestHandleDeadLetterTerminate_Success` has posted a nil body and asserted `200` since before this
+handler had any error handling.
+
+`http.NoBody` decodes to exactly `io.EOF`; a truncated body decodes to `io.ErrUnexpectedEOF`, which
+`errors.Is(err, io.EOF)` does **not** match. Measured before relying on it, because the whole fix
+turns on those two being distinguishable:
+
+| body | error | `errors.Is(err, io.EOF)` |
+|---|---|---|
+| `""` | `EOF` | **true** |
+| `"   "` | `EOF` | **true** |
+| `{"reason": "trunc` | `unexpected EOF` | **false** |
+| `{"reason":"r"}` | `nil` | — |
+
+So the carve-out is `err != nil && !errors.Is(err, io.EOF)`, and it is load-bearing: replacing
+`io.EOF` with an unrelated sentinel turns both the new empty-body control **and** the pre-existing
+`TestHandleDeadLetterTerminate_Success` red.
+
+#### The test asserts the store is not reached, not that the status is non-200
+
+A handler that returned `400` *after* calling `TerminateWorkflow` would satisfy a status-only check
+and destroy the column just the same. Falsified by reinstating the original defect — and the first
+mutation attempt did not compile (`"io" imported and not used`, `undefined: err`), which is the
+trap CLAUDE.md names: a filtered read of that output looks like a pass. Rewritten to keep the tree
+compiling, all four bad-body cases go red with `status = 200 "terminated"` and *"TerminateWorkflow
+was called with reason ""*.
+
+Both controls stay green under that mutation, correctly — they are what stops "never reaches the
+store" being satisfied by a handler that reaches it never.
+
+#### 400 rather than 413, deliberately
+
+Whether an oversized body should be a `413` here is [§3.432](#3432)'s neighbour, cleat#1338, which
+covers **seven** other sites with this exact shape. Answering it for one endpoint would make that
+decision twice, and the second time by accident. If #1338 lands as 413, this site gets it with the
+others.
+
+---
+
+### 3.434 A generic function was classified as a workflow entry point, and one of them shipped — ✅ fixed
+
+**cleat#1313.** `IsEntryPoint` was purely structural: exported, not a method, first parameter
+`cleat.HostCalls`. A **generic** function matching that shape was classified as an entry point, so
+`testdata/generics` — the repository's own generics fixture — reported **3 entry points where it
+intends 1** and did not survive `cleat build`.
+
+#### Two functions, caught two different ways, and only one was caught at all
+
+| function | signature | what happened |
+|---|---|---|
+| `Process[T]` | `(h, item T) (T, error)` | `verifyEntryPointResults` rejected it — the **right refusal for the wrong reason**: the problem is that it is not an entry point, not that `T` is not a `string` |
+| `GenericLeaf[T]` | `(h, items []T) error` | returns `error` alone, so the result check cannot see it — classified as an entry point and **exported**, silently |
+
+The second is why the fix belongs in `IsEntryPoint` rather than in the result verifier. An entry
+point is exported with a concrete signature — `wasm/exports.go` declares `var __r string` and emits
+`return []byte(__r)` — so there is nothing to instantiate `T` with.
+
+Both fixture functions say what they are in their own doc comments: *"Process is a generic workflow
+helper … in the durable closure (called by EntryPoint)"* and *"GenericLeaf demonstrates a generic
+durable leaf"*.
+
+After: **1 entry point**, threading OK, `entry_point.wasm` (3.1 MB) written.
+
+#### Why five tests referencing the fixture all passed
+
+None ran the stage that fails. `wasm/generics_build_test.go` calls `BuildOutputs` directly, which
+skips `VerifyThreading`; the other four stop earlier. And no CI job runs `cleat build` on a **Go**
+example — `git grep 'cleat build' .github/workflows/` finds only `--target rust` and
+`--target python`.
+
+**The gap was already documented at the site.** `internal/closure/threading.go` says *"nothing in CI
+runs `cleat build` on a Go example"*, and saying so changed nothing for weeks. A comment cannot go
+red. That is the argument for the guard below over a better comment.
+
+#### The guard is a table of expected outcomes, not "they must all build"
+
+`testdata/errors` exists to be **rejected** — its package comment says it *"contains deliberately
+invalid workflow code to test the transformer's validation rules"*. A blanket must-build rule could
+only accommodate it by skipping it, which is how a fixture stops being checked.
+
+Kept as an entry with an expected *reason*, it becomes the guard's **known-positive**: the one case
+proving the test can report a failure at all. A version asserting only success passes equally
+against a checker that has stopped checking — the defect this issue is about, one level up.
+
+The population is **discovered** from `testdata/` rather than listed twice, so a new fixture that is
+not in the table fails rather than being silently uncovered, and an entry naming a fixture that no
+longer exists fails too.
+
+#### The first draft of the guard was wrong, and a fixture caught it
+
+It modelled "does this build" as "`VerifyThreading` returned no errors", and `testdata/autothread`
+went red. `VerifyThreading` reports the **pre-transform** state deliberately, and `cmd/cleat` calls
+`dropAutoThreaded` before deciding — failing on those once made `cleat build` reject packages the
+next stage was designed to repair ([§3.229](#3229)). The predicate is the CLI's whole decision, not
+its first half.
+
+#### Falsification
+
+| mutation | what failed |
+|---|---|
+| revert the generics exclusion | both guards — `Process is a workflow entry point returning T` |
+| wrong expected reason on `errors` | *"rejected, but not for the expected reason"* |
+| drop `spin` from the table | *"testdata/spin holds Go files and is not in goFixtureExpectations"* |
+
+**The third mutation was a no-op on its first attempt** — a `sed` with hardcoded whitespace that
+`gofmt` had realigned, so the file was unchanged and the test passed. That reads exactly like a
+guard that does not work. Re-run with an assertion that the edit applied, it fails as intended. A
+mutation that does not apply is not a falsification, and it fails in the flattering direction.
+
+#### Two measurement errors worth recording, both caught by controls
+
+- `cleat build … | tail` reported **exit 0**; `$?` after a pipeline is the last command's. Redirected,
+  it is 1 for generics and 0 for basic.
+- A sweep over `testdata/*/` reported **21 of 21 failing**, because the loop omitted the `./` prefix
+  and every invocation died as a bad package pattern rather than a build failure. Only a
+  known-good control from ninety seconds earlier caught it.
+
+#### Out of scope
+
+Replacing signature-based detection with an explicit marker. The issue raises it for the quieter
+half — *any* helper sharing the shape becomes a deployable entry point, generic or not — and that is
+an API decision for whoever owns the authoring surface. Excluding generics is provably safe because
+a generic function cannot have a concrete `string` result; a marker changes how every workflow is
+written.
+
+---
+
+### 3.435 `--size-report` multiplied the file's length by hardcoded constants and printed the products as measurements — ✅ fixed
+
+**cleat#1314.** `cleat build --size-report` is documented as *"output WASM binary size breakdown by
+package"*. It did not read the binary. Every line was `totalSize × a literal`:
+
+```go
+{"runtime", int64(float64(totalSize) * 0.15)},
+knownContributions := map[string]float64{"reflect": 0.25, "encoding/json": 0.12, ...}
+```
+
+The only input from the artifact was its length, so every binary ever built got the same answer in
+different absolute numbers — and the **Recommendations** block quoted the same literals back as
+findings: *"Remove \"reflect\" import: reduces binary ~25%"*.
+
+#### How wrong the headline number was
+
+Measured on two real artifacts with the new implementation:
+
+| | `testdata/basic` | `testdata/minimal-wf` |
+|---|---|---|
+| `reflect`, as the old report claimed | 25% | 25% |
+| `reflect`, measured | **4.9%** | **1.9%** |
+| `runtime` claimed / measured | 15% / **24.0%** | 15% / **35.6%** |
+| `encoding_json_v2` | 9.1% | **absent entirely** |
+
+An author acting on the old advice would do real work to reclaim a stated quarter of the binary and
+recover a twentieth of it — with no way to tell, because the next run reports the same percentage of
+a new total.
+
+#### A fourth consequence the issue did not list: the percentages could exceed 100%
+
+`accounted` starts at 0.20 and adds a constant per matching import. The constants sum to **1.43**,
+and an ordinary import set — `reflect`, `encoding/json`, `fmt`, `net/http`, `crypto/tls`, `time`,
+`os`, `strings` — reaches **1.08**. The remainder line is guarded by `if unaccounted > 0`, so at that
+point *"other (stdlib + deps)"* silently vanishes and the reader sees per-package rows summing to
+108% of a binary, with nothing indicating anything is wrong.
+
+#### Measuring it was feasible, and that was checked rather than assumed
+
+| probe | result |
+|---|---|
+| `go tool nm <artifact>.wasm` | **fails** — `unrecognized object file` |
+| Go symbol names present in the artifact | **3332**, incl. `runtime.mapaccess1`, `reflect.ArrayOf` |
+
+The toolchain route is closed; the data is in the binary. `wasm.AnalyzeSize` parses the code
+section for per-function body sizes and the custom `name` section for symbols, and joins them.
+**99.1%** of the code section attributes to real packages on a live artifact.
+
+#### The mangling is reported, not guessed at
+
+The Go linker encodes `/`, `:`, `(`, `)` and `*` all as `_`, so `internal/abi.NoEscape` appears as
+`internal_abi.NoEscape`. This does **not** invert it. `internal_runtime_math` is provably
+`internal/runtime/math`, but the inverse is ambiguous in general, and a size report that silently
+guesses at identifiers is the genre of defect being removed. The mangled form is printed and the
+header says so.
+
+Compiler-generated families — `type_.eq.[3]string`, `go_buildid`, `gcbits_*` — are counted as
+**unattributed** rather than invented into a package named `type_`.
+
+#### The honest fallback is the load-bearing part
+
+A binary with no name section yields no attribution, and the report says so:
+
+> Per-package breakdown unavailable: this binary carries no WASM name section, so its functions
+> cannot be attributed to packages.
+
+Falling back to the constants there would put the defect back in the one path nobody exercises.
+`TestAStrippedBinaryReportsNoBreakdownRatherThanAModel` pins it, including that the bytes are still
+reported as unattributed rather than dropped.
+
+#### Falsification
+
+The acceptance property is that **different inputs produce different outputs**, which the old
+implementation could not satisfy at any input — and which a test asserting *"the report mentions
+reflect"* would have passed against it unchanged.
+
+| mutation | what failed |
+|---|---|
+| drop the import offset on function indices | exact byte counts in two tests, plus *"attributed 72 bytes to \"wrong\""* |
+
+That mutation is the one this parser was most likely to get wrong, because function indices in the
+name section count imports first and ignoring them shifts every attribution by a constant — producing
+a plausible report rather than an error. The first attempt at it **did not compile** (`declared and
+not used: importedFuncs`) and was rewritten to keep the tree building.
+
+---
+
+### 3.436 A backup config's name reached `pg_dump -f` unvalidated — ✅ fixed
+
+**cleat#1305.** `plugins/scheduledbackup` checked a config's `name` only for non-emptiness, then
+interpolated it into a dump filename joined to `DumpDir` and passed to `pg_dump -f`. An
+**authenticated tenant** could direct a full **cross-tenant** database dump outside the dump
+directory, as the worker's OS user. The plugin is compiled into the shipped worker.
+
+#### The exploit is narrower than it first reads, and that shaped the fix
+
+The originating review gave `"name": "../../../../var/spool/cron/crontabs/root"` as writing a dump
+over the crontab. Run through the real expression, it does not:
+
+| name | resolves to |
+|---|---|
+| `../../../../var/spool/cron/crontabs/root` | `/var/lib/var/spool/cron/crontabs/root_2026….dump` |
+| `../../../../../../srv/www/html/leak` | `/srv/www/html/leak_2026….dump` |
+| `/etc/passwd` | `/var/lib/cleat/dumps/manual_/etc/passwd_2026….dump` |
+
+Three constraints: the `manual_` prefix eats one traversal level (`manual_..` is a literal directory
+name); the `_<timestamp>.dump` suffix is always appended, so no exact filename can be landed on; and
+a leading `/` does not escape, because `filepath.Join` treats it as relative.
+
+What remains is still HIGH: **a complete database dump written into any directory the worker's user
+can write, under an attacker-chosen prefix.** A web root, a shared volume, anywhere world-readable.
+That is a data-exfiltration primitive and an unbounded disk fill, not a tidiness bug.
+
+#### Two more doors than the issue named
+
+| | |
+|---|---|
+| `routes.go:322` — the **UPDATE** route | took a new name with no validation at all. Validating only on create leaves the hole open through a rename. |
+| `commands.go:94` — the **CLI command** | a third filename construction site, reading the name back out of `backup_config`. |
+
+So three construction sites — `background.go:172` (cron), `commands.go:94`, `routes.go:514` — and
+two of the three never pass through an HTTP handler.
+
+#### That is why the fix is two guards, not one
+
+**`ValidConfigName`** at both doors, matching the charset `engine/memory.go`'s `validServiceName`
+already enforces. `.` and `..` are rejected **explicitly**: both are made entirely of allowed
+characters, so a charset-only rule admits the exact payload — an allowlist that looks complete and
+is not.
+
+**`SafeDumpPath`** at the join, shared by all three sites. This is the half that covers **rows
+already stored** with a traversing name, which input validation cannot reach and which the cron
+sweep executes on a schedule with nobody watching. It compares against `base + separator`, so a
+sibling directory sharing the prefix — `/var/lib/cleat/dumps-evil` against `/var/lib/cleat/dumps` —
+is not accepted by a bare `HasPrefix`.
+
+A refused backup now records `failed` through `markBackupFailed` rather than leaving a
+`backup_history` row at `running` forever, which would read as a hung backup rather than a refused
+one.
+
+#### Falsification
+
+| mutation | what failed |
+|---|---|
+| drop the explicit `.`/`..` rejection, leaving the charset | `ValidConfigName("..") = true, want false` |
+| `HasPrefix(full, base)` without the separator | *"accepted a sibling directory sharing the dump directory's prefix"* |
+| revert the cron path to a bare `filepath.Join` | *"background.go:192 joins a filename to the dump directory directly"* |
+
+The third is the completeness guard: it reads the source, so a **fourth** call site added later
+fails rather than shipping unchecked — which is how three sites came to exist with one check.
+
+The control matters here more than usual: every assertion above is satisfied by a `SafeDumpPath`
+that refuses everything, which would break backups rather than secure them. `nightly`, `prod-db`,
+`tenant_42` and `v1.2.3-weekly` are asserted to pass, because a rename that starts failing for a
+legitimate name is a worse outcome for an existing operator than the bug.
+
+#### Credit where due
+
+This is **not** command injection. Arguments are array-passed via `exec.CommandContext`, and the
+database password is deliberately kept out of `argv` and passed through `PGPASSWORD`, with a comment
+explaining the `/proc/*/cmdline` reasoning. That part was already right.
+### 3.437 A panic in any plugin background goroutine killed the worker — ✅ fixed (the process-death half)
+
+**cleat#1304.** `cmd/cleat-worker/main.go` spawned each plugin's background loop in a bare goroutine
+with no `recover()`. An unrecovered panic in a goroutine cannot be caught by its parent, so **one
+panic in one plugin terminated the whole worker process**, taking every workflow in flight on it.
+
+Twelve plugins ship a `background.go` and none of them contains a `recover()`:
+
+    auditlog  blobstore  datadogexport  eventstore  eventtriggers  jobqueue
+    kafkaconnect  notifications  ratelimiter  scheduledbackup  scheduler  webhookingest
+
+**The asymmetry is the finding.** The worker is hardened against *its own* loops panicking —
+`withPanicRecovery` at `setup.go:875`, applied at `:1127` and `:3369` to every one — and was not
+hardened against the loops it runs **on behalf of third-party code**, which is the weaker trust
+assumption of the two.
+
+#### The suggested fix was not available as written
+
+The issue asked to route the spawn through `withPanicRecovery`. That is a method on `*Worker`, and
+both lines are inside `func main()`:
+
+    main.go:825   go func(bg plugin.HasBackground) { ... bg.Run(ctx) ... }
+    main.go:951   w := &Worker{
+
+**The Worker does not exist yet when the plugin loops start.** So `withPanicRecovery`,
+`healthTracker.recordPanic` and `Metrics.RecordBackgroundLoop` are all out of reach at the spawn
+site, and reaching them requires the plugin loops to be started *by* the Worker — a startup-ordering
+change whose risk is that something between those two lines assumes plugin background work is
+already running.
+
+So this fixes the half that needs no decision: **the process survives**. Health-tracker integration,
+metrics and watchdog restart are tracked separately, together with the backoff question the issue
+already raises — a loop that panics every iteration must not spin.
+
+#### Extracted into a named function so it can be tested
+
+`runPluginBackground` rather than an inline closure. A closure inside `main()` cannot be driven by a
+test, and **a guard nothing exercises is how the gap lasted** — the machinery to prevent this
+existed for a year and was applied everywhere except here.
+
+#### Falsification, and it is unusually blunt
+
+Removing the `recover` does not make the test fail. It **crashes the test binary**, exactly as it
+crashed the worker:
+
+    panic: plugin background loop exploded
+    …runPluginBackground(…)  main.go:1335
+    created by …TestAPluginBackgroundPanicDoesNotKillTheWorker in goroutine 25
+    FAIL  github.com/cleat-team/cleat/cmd/cleat-worker
+
+That is the defect reproduced verbatim, which is why the panicking case is driven through a real
+goroutine rather than called directly.
+
+Two further assertions, because surviving is not sufficient:
+
+- **the panic is logged with its stack and the plugin's name.** Recovering silently would pass the
+  test above and leave an operator with a plugin whose background work has stopped and nothing
+  saying so — trading a loud failure for a silent one, which is not obviously the better trade.
+- **the control**: an ordinary `Run` error still reaches the log and is *not* reported as a panic.
+  Without it, "the goroutine returns" is satisfied by a `runPluginBackground` that never calls `Run`.
+
+---
+
+### 3.438 `renovate.json` configured a bot that had never run; Dependabot now covers what ships — ✅ fixed
+
+**cleat#1321.** The issue asked for a `wasmtime-go` rule in `renovate.json`, on the argument that
+the config gave a grouping and a schedule to wazero — removed as the worker backend in #459 — and
+none to the only production WASM backend. The argument is right. **The fix it implies is a no-op.**
+
+    gh api "search/issues?q=repo:cleat-team/cleat+is:pr+author:app/renovate"   --jq .total_count  ->  0
+    gh api "search/issues?q=repo:cleat-team/cleat+is:pr+author:app/dependabot" --jq .total_count  -> 29
+
+Renovate has never opened a pull request in this repository. Adding a rule to that file would have
+changed nothing observable and read, to the next person, as the gap having been closed.
+
+#### What was actually running
+
+`.github/dependabot.yml` covered **`github-actions` only**. Every Go module, every npm package and
+every crate got updates solely when a Dependabot **security** alert fired — which needs an advisory
+to exist, to be in GitHub's database, and to match the pinned version's range. Routine patch
+releases, including ones that fix a problem before an advisory is published, arrived never.
+
+That is why #1033 (grpc, in `tests/cross-language`) and #1064 (vitest, in `web`) are the only
+non-Actions dependency PRs in the repository's history. Both are security updates, and both landed
+in directories the config did not mention — which is also the evidence that excluding a directory
+costs no advisory coverage.
+
+#### The decision, and what it covers
+
+`renovate.json` **deleted**, `dependabot.yml` extended to `gomod`, `npm`, `cargo` and `pip` across
+**11 directories**. wasmtime gets its own group rather than being batched, because burying it in a
+twenty-module PR is how its advisory cadence stops being visible — which is the issue's real point.
+
+Deliberately excluded: `examples/`, `testdata/`, `tests/`, `benchmarks/`, `cmd/cleat/templates/` —
+fixtures pinned on purpose, where a bump is churn rather than a release.
+
+#### The guard, because both failure directions are silent
+
+`scripts/check_dependabot_coverage.py`, wired into `lint`:
+
+| direction | why nothing would say so |
+|---|---|
+| an entry names a directory with no manifest | Dependabot skips it with no error — the `renovate.json` failure at entry scale |
+| a shipped manifest is in no entry | it gets security updates only, which looks like coverage until an advisory is late |
+
+`--self-test` runs **two known-positives** — doctored configs the guard must report — rather than a
+clean run, which every broken version of a guard also passes. Falsified against the real config
+both ways: dropping `/cleat` reports *"has a go.mod and is in no gomod entry"*; adding
+`/crates/does-not-exist` reports *"which has no Cargo.toml"*.
+
+It uses `git ls-files` rather than a filesystem walk, so `.claude/worktrees/` — a second copy of the
+repository — cannot contribute a manifest.
+
+#### Two stale claims corrected, and they were the same defect one level down
+
+`plugin-harness-ci.yml` and `tier1-gate.yml` both justified a pinned service-image digest with
+*"renovate.json extends config:recommended … so a newer digest arrives as a reviewable PR"*. That
+was never true, and measurably so: **no Dependabot PR has ever touched a file under
+`.github/workflows/`**, and the SQL Server digest has been unchanged since 2026-08-07. The pins are
+still right — they are the whole difference from `:latest` — but a human has to move them, and the
+comments now say so.
+
+#### One thing checked rather than assumed
+
+The guard imports `yaml`, and the step is placed **after** `Workflow files parse`, which installs
+pyyaml. The `Required-context guard` at step 4 also imports yaml and passes today, so pyyaml is
+evidently preinstalled on `ubuntu-latest` — but that install is the only thing in the file which
+*guarantees* it, and depending on a runner image's contents is how a guard stops running without
+failing. The `run:` block was extracted from the parsed YAML and executed verbatim before being
+relied on.
+
+### 3.439 The payload encoding was inferred at read time, and inference cannot work — ✅ fixed
+
+**cleat#1319.** `tryDecodeBase64` base64-decoded a stored `request`/`response` and fell back to the
+raw string when decoding **failed**. That is the wrong question. Plenty of ordinary text decodes
+successfully: `base64.StdEncoding` accepts any string whose length is a multiple of 4 whose bytes
+are all in `[A-Za-z0-9+/]` with valid padding, so **every four-character alphanumeric string
+decodes**.
+
+Publish the predicate, not the sample — the rule generates the set, and a sample can be argued with
+by choosing a different one:
+
+    "test" -> "\xb5\xeb-"   "user" -> "\xba\xc7\xab"   "true" -> "\xb6\xbb\x9e"
+    "abcd" -> "i\xb7\x1d"   "1234" -> "\xd7m\xf8"      "null" -> "\x9e\xe9e"
+
+#### Most rows were never at risk, and finding that out took a falsification
+
+The `payload` JSON column already records the encoding explicitly — `eventRecordToPayload` writes
+`request_b64`/`response_b64` — and `populateFromPayload` runs **after** the scanned columns on every
+read path. So wherever `payload` is present, the columns and `tryDecodeBase64` are shadowed.
+
+This was found by breaking the writer and watching the round-trip test **pass anyway**. A test that
+checks only that a value survives cannot see which of two paths delivered it.
+
+#### The exposure is real, ongoing, and confined to call intents
+
+Three writers in `store_intent.go` store `rec.Request` **raw** — there is no `tryEncodeBase64`
+anywhere in that file — and write **no `payload` column**. So every call intent lands in the
+vulnerable class by construction, on every durable call. Measured before the fix, identically on
+all three dialects:
+
+| request | read back |
+|---|---|
+| `true` | `\xb6\xbb\x9e` |
+| `null` | `\x9e\xe9e` |
+| `1234` | `\xd7m\xf8` |
+| `{"a":1}` | **intact** |
+
+JSON objects were never at risk: `{` and `"` are not in the base64 alphabet. A JSON **scalar** is —
+`true` and `null` are four characters drawn entirely from it. And these rows are what the ambiguity
+resolver reads **after a crash**, so the corruption surfaced during recovery.
+
+#### The column, and why NULL is a state rather than a gap
+
+`event_history.payload_encoding`, nullable, on all three dialects:
+
+| value | meaning |
+|---|---|
+| `NULL` | the row predates the column; the encoding is genuinely unknown, so the read keeps the historical guess |
+| `1` | base64 |
+| `0` | plaintext |
+
+**Deliberately not backfilled.** A backfill would have to answer, for every existing row, the exact
+question the column exists because nobody can answer. The ambiguity stays confined to rows that are
+genuinely ambiguous, and everything written from now on is unambiguous. `SMALLINT` rather than
+`BOOLEAN`: same storage, room for a future encoding without a second three-dialect migration.
+
+#### A `b64:` prefix was considered and rejected
+
+It does not remove the ambiguity, it **relocates** it — *"does this legacy value start with
+`b64:`"* is a rarer guess, still a guess, and still silently wrong when it lands. It also costs 8
+bytes per row on PostgreSQL and MySQL and **16 on SQL Server**, where these columns are UTF-16,
+against 0-1 byte for a nullable column that sits in a null bitmap the row already has.
+
+One thing that could have decided it and did not: the integrity checksum is computed over the
+**plaintext** record (`flush.go`, before `tryEncodeBase64`), so neither option disturbs replay.
+
+#### Falsification
+
+| mutation | what failed |
+|---|---|
+| intents stop recording the encoding | the corruption returns verbatim — `"true" -> "\xb6\xbb\x9e"` on all three dialects |
+| one read path reverts to `tryDecodeBase64` | the completeness guard names the file and line |
+
+The JSON-object case is the **control**: without it, "nothing was corrupted" is equally satisfied by
+a reader that stopped decoding altogether.
+
+---
+
+### 3.321 An update name was consumed for the life of the workflow, and the row's identity was its name — ✅ **FIXED 2026-09-13** (cleat#1416)
+
+**Decided by the repo owner: an update name is reusable. "An update is a request."**
+
+`workflow_update_requests` was `PRIMARY KEY (workflow_id, update_name)` on all three dialects, and
+completion is an `UPDATE … SET status = 'completed'` rather than a delete — so a workflow could
+accept each update name exactly **once in its entire lifetime**. cleat#1330 measured the three
+dialects answering the second request three different ways, one of them a `202` over a promise that
+could never settle; cleat#1392 made them agree on a `409` and said in its own commit message that
+the refusal would become *"unreachable rather than wrong"* if the name were later made reusable.
+It is, and it did.
+
+**What replaced the key, and why it is not `promise_id`.** The row needed an identity that survives
+a duplicated name. `promise_id` was the tempting reuse — it is already unique and already carried
+through the request key — and it is the wrong one: the column is nullable and means *"someone is
+waiting"*. `engine/updater.go` has an explicit branch for a request with no promise and three tests
+create one, so making it the key would render a caller-less request unrepresentable. A generated
+`request_id` was added instead, minted Go-side so all three dialects behave identically and the
+value exists before the INSERT.
+
+**The migrations backfill `request_id` from `update_name`, and that choice is load-bearing twice
+over.** Under the old primary key `(workflow_id, update_name)` is unique *by construction*, so the
+copy satisfies the new key without inventing anything — and it is what lets a workflow suspended
+mid-update across the upgrade complete against the right row with no special case, because the
+request key it replays carries the name and nothing else.
+
+**The risk was never "is the second request accepted".** That is the easy assertion. Two rows
+sharing a name is a state that could not previously exist, and every reader keyed on
+`(workflow_id, update_name)` silently addresses *one of them* in it. Measured on PostgreSQL against
+the migration with the old predicate still in place:
+
+    two pending rows, r1 and r2, both named "bump"
+    UPDATE ... WHERE workflow_id = ? AND update_name = 'bump' AND status = 'pending'
+    -> UPDATE 2
+
+One completion closes both. `DurableCompleteUpdate` then settles **one** promise, and the other
+caller holds a promise nothing will ever settle — not even `failStrandedUpdates`, which sweeps rows
+that are still `pending`, and that row now says `completed`. That is the exact failure
+`cleat/runtime_updates.go` names as the reason updates exist.
+
+Two sites had to change, and the second is the one that would have gone unnoticed:
+
+| site | keyed on | why it matters |
+|---|---|---|
+| `CompleteUpdateRequest`, ×3 dialects | `request_id` | the guest completing its own update |
+| `failStrandedUpdates` | `upd.RequestID` | the sweep whose whole job is that nobody is left waiting |
+
+**The request key gained a version marker rather than a third inferred field.** A v2 key is
+`<len>:<name>` followed by the promise id; v3 is `<len>:<name><len>:<requestID>` followed by it.
+Telling them apart by looking for digits-then-colon after the name means asking whether a *promise
+id* happens to start that way — arbitrary in the store's contract, and the tests alone use
+`"prom-1"`, `"promise-a"` and `""`. `u3:` costs three bytes and removes the question;
+`TestAPromiseIDCannotBeMistakenForAV3Marker` pins it.
+
+**Falsification.** Both guards, both restored by content against the commit as a separate step:
+
+| mutation | caught by |
+|---|---|
+| all three `CompleteUpdateRequest` predicates back to `update_name` | the three-dialect test, on **all three** — `2 requests named "bump" are still pending … want exactly 1` |
+| `failStrandedUpdates` back to `upd.UpdateName` | `completed [bump bump], want [ureq-a ureq-b]` |
+
+Note the first mutation's signature is `2 pending`, not `0` — the store matched on the name while
+the caller passed an id, so it matched *nothing*. The `0` case is the historical one and is what
+the raw-SQL measurement above shows. Both are failures and both are caught; recorded because the
+number differs from the story.
+
+**Migrations** `postgres/068`, `mysql/062`, `mssql/066`, each applied **twice** against a database
+built from the full set, because `SetupFullSchema` re-applies everything in tests.
+
+---
+
+### 3.322 A workflow result that succeeds on one backend can fail on another, and nothing said so — ✅ **FIXED 2026-09-13** (cleat#1025)
+
+**Decided by the repo owner: document the intersection. The contract for a workflow result is what
+all three dialects accept; cleat does not normalise them to agree.**
+
+`workflow_instances.result` is a different type per backend, and the type is the constraint —
+`JSONB`, `JSON`, and `NVARCHAR(MAX)` with `CHECK (ISJSON(...) = 1)`. Nothing upstream catches a
+violation: `coerceResultJSON` checks `json.Valid` and object shape and *reports* rather than
+rejects, so every divergent payload passes it. The rejection lands in `FinalizeWorkflowSegment`,
+**after the workflow body and its side effects have run** — the work is done and the record says
+`failed`.
+
+**Two of the three sources I was given were wrong, and re-measuring is what found it.**
+
+| claim | source | measured |
+|---|---|---|
+| MySQL rejects a lone surrogate with `3141` | cleat#1025 | **`3140`** |
+| SQL Server stores every divergent payload | a summary handed to me | **false** — it refuses nesting past **128** |
+| "PostgreSQL reorders keys; the other two preserve bytes" | same summary | **false** — MySQL reorders too; only SQL Server preserves |
+
+The issue itself said SQL Server was *"not established … likely a third answer, worth measuring"*.
+A contract document is precisely the artefact that must not infer that column, so it was measured.
+
+**The limits, measured 2026-09-13 on PostgreSQL 16.15, MySQL 8.4.11, SQL Server 16.0.4275.2:**
+
+    NUL escape        pg REJECTED 22P05   my accepted        ms accepted
+    lone surrogate    pg REJECTED 22P02   my REJECTED 3140   ms accepted
+    depth 100/101     pg ok / ok          my ok / REJECTED   ms ok / ok
+    depth 128/129     pg ok / ok          my REJECTED        ms ok / REJECTED
+    integer 2^64      pg exact            my 1.8446744073709552e19   ms exact
+
+So: no NUL escape, no unpaired surrogate, depth ≤ 100, integers exact only within ±(2^64−1) — and
+**not** "must fit `BIGINT`", which cleat#1022 originally said and which is wrong by a factor of two
+on the positive side, since `9223372036854775808` is past signed `BIGINT` and every backend keeps it.
+
+**Acceptance is not the whole contract.** A result accepted everywhere still reads back differently:
+`{"b":1,"a":2}` becomes `{"a": 2, "b": 1}` on PostgreSQL **and MySQL**, and `{"a":1,"a":2}` becomes
+`{"a": 2}` on both. Only SQL Server preserves bytes — the backend that validates least. So the
+contract also forbids depending on key order or on duplicate keys surviving.
+
+**The measurement had a silent-failure of its own worth recording**, because it is this repo's
+recurring shape and it produced a complete-looking table with one column measuring nothing:
+`dbo.TenantFilter_Instances` is a FILTER PREDICATE, so with no session context the seeded row is
+invisible, the `UPDATE` matches zero rows and **reports success**, and every SQL Server case read as
+"no rows". Nothing errored. `database/sql` made it worse by clearing the context between statements
+— it calls `ResetSession` when a connection returns to the pool and go-mssqldb implements that as
+`sp_reset_connection`. The fix is a held `sql.Conn`; the test carries a precondition that fails
+loudly if the row is not visible, so this cannot recur quietly.
+
+**The document is guarded rather than trusted.** `TestAWorkflowResultContractIsTheIntersection`
+asserts every row of both tables on all three dialects, so a backend changing its limits turns
+§7.4 red instead of stale. Falsified twice, each restored by content: claiming MySQL accepts depth
+101 fails with `REJECTED on mysql, want ACCEPTED`; claiming SQL Server normalises fails on both
+normalisation cases.
+
+---
+
+### 3.323 One boolean answered two questions, so replay re-invoked seven plugin functions live — ✅ **FIXED 2026-09-13** (cleat#1318)
+
+**Decided by the repo owner: split `FuncOptions.Idempotent` into two properties.** Not "drop the
+flag", not "re-classify against the existing one".
+
+`Idempotent` was documented as *"safe to re-invoke during replay"*, and `engine/plugins.go` acted on
+it literally: on replay it discarded `rec.PluginOutput` and called the function live. So a word that
+only promises **no new side effects** was licensing a determinism claim — **returns the same value
+on replay**. They come apart exactly where the wording is most inviting.
+
+Replay now re-invokes only when a registration sets **both**:
+
+    Idempotent          calling again has no additional effect
+    SameValueOnReplay   calling again returns what the first call returned
+
+**`SameValueOnReplay` is a claim about the WORLD, not the function**, and that framing is what makes
+each registration answerable. A perfectly deterministic function fails it if its inputs can change
+in between — which is why "read-only" was the wrong predicate and why four read-only functions were
+wrong.
+
+**The classification, one stated reason each rather than a bulk assignment:**
+
+| registration | Idempotent | SameValueOnReplay | why |
+|---|---|---|---|
+| `blobstore.get` | ✅ | ✅ | write-once keys — **a convention the plugin does not enforce** |
+| `llm.embed` | ✅ | ✅ | near-deterministic for a fixed model — **"near" is doing work** |
+| `llm.list_models` | ✅ | ❌ | a provider's catalogue is not stable over a run |
+| `pgvector.search` | ✅ | ❌ | reads a mutable index |
+| `featureflags.evaluate_flag` | ✅ | ❌ | a flag exists in order to be toggled |
+| `eventtriggers.await_event` | ❌ | ❌ | selects the latest UNPROCESSED event **and writes** `registerAwaiter` |
+| `webhookingest.await_webhook` | ❌ | ❌ | an await over mutable state |
+
+The two survivors are marked with what their claim rests on, because both are assertions rather
+than properties of the code — `blobGet` takes a key and no version, and every store it targets will
+overwrite that key. If either convention fails in a deployment, those are the next wrong entries
+and they will be wrong the same way.
+
+**Three findings that changed the work, each recorded on the issue:**
+
+- **The set was seven, not eight.** #1408 had already removed `pgvector.delete` — the headline case.
+- **Re-invocation saves nothing.** Every plugin call's output is recorded on the original run;
+  only the *replay* re-invocation skips recording. So the recorded value was always available and
+  re-invoking could only ever return something else. Reported before building rather than after.
+- **The manifest path was never connected**, and I had claimed the opposite when taking this on.
+  `HostFuncDef.Idempotent` reaches `plugingen`'s IR and is read by nothing outside tests, so
+  `idempotent: true` in a manifest has always produced a registration with the field unset. That is
+  a latent trap — the opposite is the natural assumption — so it is documented on the field.
+
+**Two adapters had to carry the split**, `engine/app.go` and `cmd/cleat-worker/setup.go`. Missing
+either would have left that path on the old meaning **silently**: the registry would read
+`SameValueOnReplay` as false and simply stop re-invoking, which looks exactly like the fix working.
+
+**Falsified three ways, each restored by content:**
+
+| mutation | caught by |
+|---|---|
+| `evaluate_flag` claims `SameValueOnReplay` | both allowlist tests, the second printing the recorded argument against it |
+| the scan regex stops matching | `matched no FuncOptions literals at all … every assertion built on this scan is vacuous` |
+| `MayReInvokeOnReplay` returns `Idempotent` alone | the behavioural test, at `(1, 2)` want `(0, 0)` |
+
+**The behavioural test is written to be positive**, because *"the live function did not run"* is an
+absence and an absence is what a broken harness reports too. The live function is registered to
+**return an error**, so "recorded output used" and "live call made" are two visible outcomes rather
+than a presence and a nothing — and a control asserts the live path is reachable in that harness, so
+the main case cannot pass vacuously.
+
+**Docs carried the advice that produced this.** `plugin-developer-guide.md` said *"Use
+`Idempotent: true` for read-only functions"* and, separately, recommended the flag to avoid storing
+large outputs — which never worked, since the output is recorded either way. Both corrected.
+
+---
+
+### 3.324 Three endpoints answered a duplicate call three different ways, and none of them was written down — ✅ **FIXED 2026-09-13** (cleat#1169)
+
+**Owner decision, 2026-09-10:** *"a standard policy of return-the-original-result, but with a
+standard extra flag in the result … Mostly they don't care, and shouldn't need separate code to
+handle the cached result."* The load-bearing clause is the last one: the property the old design
+lacked was **uniformity**, not information.
+
+**Refined by the owner 2026-09-13, and it changed the scope.** I proposed excluding `POST
+/api/schedules` because it takes no key and a name collision is not a retry. The answer:
+
+> if schedule stuff is creating something, then it ought to have the idempotency key, and the
+> associated idempotency replay policy should apply
+
+That **dissolves** the objection rather than trading it away. My argument was an artefact of
+schedules having no key to tell the two cases apart with; given one, `409 schedule_exists` keeps
+answering *someone else's name is in the way* and stops being conscripted to answer *I am retrying*.
+
+**Measured first, on `develop@32a8b90b`, because the issue's table is from 09-10 and #1247 landed
+since.** Three *different mistakes about one question*, not three arbitrary policies:
+
+    start       201 {"id":X}               -> 200 {"already_started":"true","workflow_id":X,"status":…}
+    reprocess   201 {"id":X}               -> 200 {"already_started":"true","workflow_id":X}
+    signal      200 {"status":"delivered"} -> 200 {"status":"already_delivered"}
+    schedules   201 {"status":"created"}   -> 409 {"detail":"schedule_exists"}
+
+`start` and `reprocess` changed status, shape **and** the identifier's field name. `signal` had the
+right status and shape but welded the marker into `status`, so one field carried *what happened* and
+*was this a replay*. `schedules` refused.
+
+**The rename was the expensive one, and its failure mode is an inversion rather than an error.** A
+caller reading only `id` gets nothing from a deduplicated response, concludes its retry started a
+**second** workflow, and may compensate, alert, or start a third. cleat's own DBOS port carries a
+shim for it, and its docstring records that the bug was found by a control rather than by reading.
+
+**The guard derives its population rather than listing it**, which is the point. #1167 was found by
+auditing endpoints one at a time; a hand-written list has the same defect — it covers what its
+author remembered. `TestEveryKeyBearingEndpointCarriesTheReplayFlag` reads the handlers that call
+`Header.Get("Idempotency-Key")` out of the source and requires each to set the flag, so a new
+endpoint is covered the day it is written. It found `handleStartWorkflow`, `handleSignal` and
+`handleDeadLetterReprocess` unaided.
+
+**Why that population and not the owner's rule.** *"Every endpoint that creates work"* is the right
+policy and cannot be decided by reading source — "creates work" is a judgement. Reading the header
+is the observable commitment, so a handler that creates work and does **not** read it is #1167's
+defect, caught by review; one that reads it and omits the flag is this one, caught mechanically.
+
+**Schedules is split out, and the split is safe because the guard grows into it.** It needs a store
+primitive that does not exist — idempotency is baked into `StartNewRun`, and
+`idempotency_keys.workflow_id` is `NOT NULL`, so a schedule name cannot go there without a migration
+and without disturbing cleat#1258's retention. Schedules does not read the header today, so it is
+legitimately outside the guard's population; the moment it gains one, the guard requires its flag
+with no edit.
+
+**One test got better by accident and it is worth recording.** `TestReprocessIsIdempotentUnderTheSameKey`
+asserted a literal `200` under the message *"a retry after a lost response must not create a second
+run"* — but the status code never established that; the id match and `starter.n == 1` did. It now
+asserts **status parity with the first call**, which is the actual contract and does not need editing
+the next time a status changes.
+
+**Flag design, stated because each part was a choice:** a **bool**, not the string `"true"`
+`already_started` used to be — a typed client reading that as a boolean gets a type error. Present
+on the **original as well as the replay**, because an absent field cannot be told from an old server
+that does not send one, so `absent means original` would be unreadable by exactly the cautious
+client most likely to check. And **not a response count**, which would mean storing how many times a
+key was replayed — new persistent state for a case the decision says callers mostly do not care
+about.
+
+---
+
+### 3.325 A tenant could not be deleted at all on SQL Server, and the manual cleanup reported success while deleting nothing — ✅ **FIXED 2026-09-15** (cleat#1635)
+
+`admin.drop_tenant` existed only on PostgreSQL, so `cleatctl drop-tenant` refused on SQL Server
+(`cmd/cleatctl/ported.go`) and there was no supported way to remove a customer's data on a tier-1
+dialect.
+
+**The issue was filed with two claims that turned out to be wrong, both mine.** They are recorded
+because the corrections are the useful part.
+
+*"There is no ordinary path to those rows."* Measured on SQL Server 2022, against the predicate
+`applyTenantScopingMSSQL` emits, two tenants seeded each under its own key:
+
+| session | rows visible |
+|---|---|
+| `sa`, `IS_SRVROLEMEMBER('sysadmin') = 1`, no session context | **0** |
+| `tenant_id` = the dropped tenant | **1** |
+| `cross_tenant` set to any non-empty string | **2** |
+
+The first row is real and is why the residue looked unreachable: SQL Server applies RLS to
+`sysadmin` and `db_owner` too, with no `BYPASSRLS` counterpart. But the predicate's `cross_tenant`
+disjunct admits, and so does the dropped tenant's own key — the predicate never consults
+`admin.tenants`, so a tenant being gone does not enter into it. The rows were always reachable.
+
+*"`admin.plugin_tables` does not exist on SQL Server."* It has existed since
+`migrations/mssql/001_schema.sql:117`. What is true is narrower: it carries the pre-066 two-column
+shape and has never had a producer on that dialect.
+
+**The defect that was actually left is a silent no-op, and it is worse than the one in the title.**
+A filter predicate hides rows from `DELETE` exactly as it hides them from `SELECT`, so the cleanup
+an operator reaches for after being refused by cleatctl:
+
+    DELETE FROM dbo.kv_store WHERE tenant_id = '<dropped tenant>';
+    -- (0 rows affected)
+
+No error, nothing deleted, and `(0 rows affected)` is indistinguishable from *already clean*. With
+the tenant key set first the identical statement reports `1 row affected`. Both directions
+measured, and pinned by `TestADeleteWithoutTheTenantKeyRemovesNothingOnSQLServer` — a
+characterisation test, so if a future SQL Server raises instead, it goes red and migration 074's
+header needs rewriting.
+
+**The table set is DERIVED rather than listed, and that is the design decision worth carrying.**
+PostgreSQL's `admin.drop_tenant` deletes from a hand-maintained list, and that list has drifted
+three times:
+
+| | added by | missing from `drop_tenant` until |
+|---|---|---|
+| `tenant_settings` | 039 | "twenty migrations", per its own comment in `droptenant.go` |
+| `workflow_defs` | 001 | #1201 |
+| `workflow_memory_{stats,samples}` | 056 | **still open as #1644**, found while writing this |
+
+A list cannot answer *"is there a tenant-owned table I do not know about"*; `sys.columns` can. So
+`migrations/mssql/074` deletes five foreign-key-ordered tables by name and then sweeps every
+remaining table carrying a `tenant_id` column — core, plugin, and anything a later migration adds,
+with nobody editing the procedure. It needs no plugin registry, because on SQL Server plugin
+tables live in `dbo` alongside the core ones.
+
+The test reads the same universe from a different place, so it can disagree with the procedure.
+Falsified twice, each on a fresh database built by the migration runner — removing the sweep, and
+removing the session-key set — and both times it named `dbo.mssql_drop_tenant_probe` **and**
+`dbo.workflow_memory_stats`, which is the #1644 class being caught on the dialect that has the
+derived sweep.
+
+**`SET QUOTED_IDENTIFIER ON` is in the migration on purpose.** A procedure captures that setting at
+CREATE time, and every table this one deletes from is bound to a `WITH SCHEMABINDING` predicate, so
+a `DELETE` compiled with it OFF fails with `Msg 1934`. Measured: created from `sqlcmd`, which
+leaves it OFF for a `-i` script, the procedure was unusable. The nine other procedures in
+`migrations/mssql/` carry no such SET and work only because go-mssqldb's login turns it on — a
+client default holding a schema decision up.
+
+**No "no such tenant" guard**, deliberately: the state this procedure most needs to work in is the
+one the issue describes — the `admin.tenants` row already deleted by hand, the data still there —
+and a guard on that row would refuse exactly the cleanup it exists to perform.
+
+Files: `migrations/mssql/074_a_dropped_tenants_rows_go_with_it.sql`,
+`cmd/cleatctl/droptenant_mssql.go`, `cmd/cleatctl/droptenant.go`, `cmd/cleatctl/ported.go`,
+`engine/a_tenant_can_be_dropped_on_sql_server_test.go`.
+
+---
+
+### 3.326 A dropped tenant's memory profile survived, and the list that missed it had already drifted twice — ✅ **FIXED 2026-09-15** (cleat#1644)
+
+`admin.drop_tenant` deleted from a hand-maintained array of seven core tables.
+`workflow_memory_stats` and `workflow_memory_samples` have carried `tenant_id` since migration 056
+(cleat#1040), neither has a foreign key to anything, and neither was named — so nothing deleted
+them and nothing cascaded them.
+
+**Measured** on a database built from `migrations/postgres/*.sql`, two tenants seeded, in migration
+066's own three-number shape:
+
+```
+SEEDED  stats A=1 B=1   samples A=1 B=1
+AFTER   stats A=1 B=1   samples A=1 B=1   admin.tenants A=0 B=1
+```
+
+`A=1` after is the bug. `B=1` says a fix must not become "delete everything". `admin.tenants A=0`
+says the drop genuinely ran — without it, a drop that silently did nothing produces the same
+surviving rows and reads as the same bug.
+
+What survived is not an implementation detail: `workflow_memory_samples` is keyed
+`(tenant_id, def_name)` and `def_name` is the tenant's own workflow name, so what outlived the
+tenant was a list of the workflows it ran and how much memory each used.
+
+**The two names are the small half.** The list has now drifted three times, and so has its twin in
+`cmd/cleatctl/droptenant.go`:
+
+| | added by | missing until |
+|---|---|---|
+| `tenant_settings` | 039 | "twenty migrations", per `droptenant.go`'s own comment |
+| `workflow_defs` | 001 | #1201 |
+| `workflow_memory_{stats,samples}` | 056 | this |
+
+Migration 056 named the mechanism, about a different guard: *"it answers 'is every statement
+against a KNOWN tenant-scoped table scoped?' and cannot answer 'is every table that should be
+tenant-scoped actually one?'"* `admin.drop_tenant` has that blind spot with the roles reversed.
+
+**So the durable half is two tests whose universe comes from `information_schema.columns`** — a
+derivation that can disagree with the lists rather than one that restates them:
+
+* `TestEveryTenantOwnedTableIsEmptiedByDropTenant` (engine) requires a **seed for every member of
+  the universe** before it checks emptiness. That ordering is the whole design: "zero rows
+  afterwards" is satisfied by a table that was never seeded, which is how cleat#1265 published
+  "4 of 4 clean" off a run where two of six seeds had failed. A new tenant-owned table fails in
+  the seed precondition, naming itself.
+* `TestThePreviewNamesEveryTenantOwnedTable` (cleatctl) compares `dropTenantTables` against the
+  same universe in both directions.
+
+**The preview was short by THREE, not two**, and the third is the argument for deriving rather than
+reading: `admin.tenant_egress_allow` is deleted correctly, by `ON DELETE CASCADE` from
+`admin.tenants`, and had never been counted. No amount of reading `admin.drop_tenant` finds it —
+nothing in the function names it. That matters because `drop-tenant` prints those counts twice,
+once as the thing the operator confirms and once as the audit record the command has instead of an
+audit table, so an uncounted table is deleted silently and recorded as not having existed.
+
+**Falsified five ways**, each restored by content as its own step:
+
+| mutation | which assertion fired |
+|---|---|
+| the two names removed from the array | emptiness, naming both tables |
+| a brand-new `tenant_id` table created in the database | the seed ratchet, naming it |
+| one seed redirected to a different tenant | the precondition, naming the table |
+| one entry removed from `dropTenantTables` | preview coverage |
+| a preview label transposed onto another table's query | the label/query agreement check |
+
+The second is the known-positive: the case the test exists for, and the one no previous guard
+could see.
+
+**Not derived the way SQL Server's is**, and deliberately. `migrations/mssql/074` (§3.325) sweeps
+`sys.columns` and carries no list at all. PostgreSQL cannot copy that as cheaply: `--schema`
+(cleat#1287) means an install's tables are not all in one known schema, and per-tenant
+`tenant_<uuid>` schemas hold tables with a `tenant_id` column belonging to *other* tenants — two
+were present on the test database while this was written. Rewriting how the most destructive
+routine in the schema chooses its tables is a change with a different risk profile from adding two
+names, and the tests close the drift class either way.
+
+Files: `migrations/postgres/082_a_dropped_tenants_memory_profile_goes_with_it.sql`,
+`engine/a_dropped_tenants_rows_all_go_with_it_test.go`,
+`cmd/cleatctl/the_preview_names_every_tenant_owned_table_test.go`,
+`cmd/cleatctl/droptenant.go`, `engine/drop_tenant_test.go`.
+### 3.327 A coverage guard compared two different questions, and only job ordering kept it green — ✅ **FIXED 2026-09-16** (found while landing §3.325)
+
+`TestEveryShippedTenantPolicyExistsInTheBuiltDatabase` parses
+`migrations/mssql/*.sql` for tables bound to **`dbo.fn_tenant_filter`**, then reads the built
+database with
+
+```sql
+SELECT DISTINCT t.name FROM sys.security_predicates sp JOIN sys.tables t ON ...
+```
+
+— **every** predicate, whatever function it calls. Two sides, two questions. That was harmless for
+as long as the schema had exactly one predicate function, which was true when the test was written
+and stopped being true with §3.216's plugin policies: `dbo.fn_plugin_tenant_filter` is installed
+from `plugin/migration.go` at plugin-migration time, so no file in `migrations/mssql` binds it and
+it cannot appear in the `want` set.
+
+The result is that on any database where plugin migrations have run, ~25 correct, deliberate plugin
+predicates were reported as *"the database has a tenant filter predicate on [...], which no
+migration binds one to"* — a schema disagreement that is not one.
+
+**It stayed green in CI on an ordering, not an invariant.** Every job that runs both sweeps
+`./engine/...` before `./plugins/...`, so the guard runs before the plugin tables exist. Nothing
+states that dependency and nothing enforces it; it failed twice locally the first time a database
+was reused, which is how it was found.
+
+**The fix is to make both sides name the same function**, and the anchor matters:
+`predicate_definition` reads `([dbo].[fn_tenant_filter]([tenant_id]))`, so the match is on
+`\[dbo\]\.\[fn_tenant_filter\]` — brackets included. A bare substring test for `fn_tenant_filter`
+is one rename away from also matching `fn_plugin_tenant_filter`; it does not today only because the
+`fn_` happens not to be adjacent. Brackets are where the catalogue puts an identifier's boundary,
+which is the same move as anchoring on a declaration site rather than on a name.
+
+**The narrowing is REPORTED, not applied silently.** A passing run now logs what it excluded and
+why. A guard that quietly shrinks its own population reads as covering more than it does — and this
+one shrank from "every predicate" to "the engine's predicate", which is the right scope and is
+worth seeing.
+
+**Falsified three ways**, the third being the one a careless fix would fail:
+
+| mutation | result |
+|---|---|
+| the pre-fix test, same database | RED — reports the plugin table as a disagreement |
+| a real engine policy dropped | RED — still names `workflow_tags`, so the guard is not blinded |
+| a **plugin** predicate added to `workflow_tags` while its engine policy is missing | RED — still names `workflow_tags` |
+
+The third is the axis test. A fix that excluded *tables which also carry a plugin predicate*,
+rather than *predicates on another function*, would pass the first two and fail this one silently —
+it would let a plugin predicate stand in for a missing engine policy on the same table.
+
+Files: `engine/mssql_policy_coverage_test.go`.
+
+---
+
+### 3.328 Nothing checked that a plugin table with a tenant column is declared TenantScoped — ✅ **FIXED 2026-09-16**
+
+`Migration.TenantScoped` is the **only** input to `applyTenantScoping`: a plugin table gets a
+row-level security policy because it is declared, and for no other reason. So a table carrying a
+`tenant_id` column and missing the declaration is tenant-owned data with no policy on any dialect,
+and nothing said so — the declaration is an opt-in, and an omitted opt-in is indistinguishable from
+a table that does not need one.
+
+**Nothing is wrong today, and that is why this is a guard rather than a fix.** Measured on develop:
+19 plugin directories, 26 tables carrying a `tenant_id` column, 26 declarations, matching per
+plugin with no gap in either direction. What was missing is anything that keeps it that way.
+
+Migration 056 states the shape, about a different guard:
+
+> so it answers "is every statement against a KNOWN tenant-scoped table scoped?" and cannot answer
+> "is every table that should be tenant-scoped actually one?"
+
+Every existing check is on the first side of that. `TestAPluginTableIsFilteredToItsTenantOnSQLServer`
+(cleat#1629) proves a **declared** table gets its policy;
+`TestEveryTenantScopedStatementNamesItsContext` (cleat#1640) proves a statement **names a
+context**. This is the second side.
+
+Cited by test name rather than by section number deliberately: three §-references written into the
+first draft of this entry — 3.216, 3.243, 3.324 — were all wrong, each naming a real section about
+something else, and each looked plausible enough to ship. A test name is greppable and moves with
+the thing it names.
+
+**The file set is the part that took the work.** `TestPluginDialectArmsDeclareTheSameColumns` scans
+`plugins/*/migrations.go`, and `plugins/pgvector` keeps its `Migration` literal in `plugin.go` — so
+it is outside that set entirely, and it is the plugin whose table is easiest to forget, being the
+only deliberately PostgreSQL-only one. That costs the older guard nothing, checked rather than
+assumed: pgvector declares only an `Up` arm, and that guard compares a table only when two or more
+arms declare it.
+
+It would have cost this guard its most likely finding. Measured by narrowing the set and re-running:
+
+| file set | verdict | population |
+|---|---|---|
+| `plugins/` (shipped) | PASS | **26 tables across 19 plugins** |
+| `plugins/*/migrations.go` | **PASS** | 25 tables across 18 plugins |
+
+Both green. The narrowed one simply covers one plugin fewer and says nothing about it — a check
+telling you it is consistent with itself while not looking at the thing most likely to be wrong.
+So `TestTheTenantScopedScanReachesEveryPlugin` asserts the scan's own scope, from a **different
+command** (`git grep -l TenantScoped:`) rather than a restatement of the glob, and falsifying it by
+narrowing the set names `plugins/pgvector/plugin.go` exactly.
+
+**A regex cannot read this and the neighbouring guard already paid to learn it.** A Go raw string
+cannot contain a backtick, so a MySQL arm with a reserved column name is written as
+`` `CREATE TABLE ...` + "`key`" + ` ...` ``, and a textual scan captures the first fragment and
+stops — which would silently drop the `tenant_id` column and score the table as needing no
+declaration. This reuses `evalStringExpr` and `createTableColumns` from
+`TestPluginDialectArmsDeclareTheSameColumns` (cleat#1291) rather than reimplementing them, and the
+fixture carries a concatenated case so that reading is exercised.
+
+My own first census of this question used a regex and reported **21** tables against 26
+declarations. The disagreement was the tell: a body captured with `.{0,4000}?\)` stops at the first
+`NVARCHAR(200)`.
+
+**Falsified three ways**: removing a real declaration (`kvstore.kv_store` — reported by name);
+narrowing the file set (pgvector — reported by path); and a `testdata` fixture carrying all three
+shapes at once, where the undeclared and concatenated tables must be reported and the declared one
+must not, so the scanner is shown to discriminate rather than to flag everything.
+
+Files: `plugin/every_plugin_tenant_table_is_declared_tenant_scoped_test.go`,
+`plugin/testdata/tenantscoped/undeclared.go`.
+
+### 3.258 `idempotency_keys` had no policy because one function read it too early — ✅ **FIXED 2026-09-15** (cleat#1534)
+
+**cleat#1534.** `idempotency_keys` has carried `tenant_id` since migration 010 and an explicit
+`AND tenant_id = $N` on every statement since. It never carried a policy. Migration 031 declined it,
+migration 061 repeated the decline, and both gave the same reason: the table is *read before any RLS
+context exists*. That was accurate, and it was about **one function**.
+
+`PostgresStore.startNewRun` reaches the table three times. Enumerated by parsing SQL literals rather
+than grepping — two derivations, 67 loose and 60 tight, with all 7 dropped rows inspected and none a
+statement:
+
+| | ran on | now |
+|---|---|---|
+| the live-key lookup | `s.db` — no transaction at all | `tx` from `beginTxWithRLS` |
+| `INSERT ... ON CONFLICT DO NOTHING` | `tx`, with `setRLSOnTx` **eleven lines later** | the same `tx` |
+| the concurrent re-read | `s.db`, after `tx.Rollback()` | `tx2`, its own RLS transaction |
+
+The PostgreSQL production surface is **eight** statements and five were already under
+`beginTxWithRLS`, so 031's stated reason was exactly right and exactly complete. Migration 083 is
+what the reorder buys — the same restructure-then-protect shape 061 used and named.
+
+#### The guard would have passed the broken tree
+
+`TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet` asked
+`functionEstablishesTenant(fn)` — a boolean over the **whole function body**, with a comment saying
+so deliberately, because `StartNewRun` legitimately did its idempotency_keys work first. The comment
+was right that a line window is wrong and wrong that a boolean is the alternative. It is **order-blind**
+(a statement before the call scores covered) and **transaction-blind** (`setRLSOnTx(tx1)` covers a
+statement on `tx2`), and `startNewRun` is both at once — it has two transactions in sibling scopes,
+**both named `tx`**, so name alone cannot separate them either.
+
+Measured against develop with `idempotency_keys` in the RLS set and no other change:
+
+| | faults named |
+|---|---|
+| guard as it was | **2** — `store_lifecycle.go:980`, `:1026` |
+| guard as it is now | **3** — and `:1013`, the INSERT |
+
+The one it missed is the statement its own comment pointed at. The guard now records *where* and
+*on which variable* the tenant was established and requires a match on both.
+
+#### It was also barely looking
+
+Widening it moved the examined count from **17 to 168** on an unchanged tree. The tx arm was gated on
+`!tenantSet && functionOpensRawTx`, a combination almost nothing in the store satisfies, so the guard
+had been very nearly a "no statement on the pool" check wearing a broader name. 19 of the 168 are
+still unreadable — non-literal SQL — and are counted as examined; that is cleat#1672, filed rather
+than folded in.
+
+#### The sweep is cross-tenant and stays cross-tenant
+
+`idempotencyCleanupLoop` deletes every tenant's expired keys on one tick, with no tenant predicate
+and wanting none. A fail-closed policy stops it dead — measured as `cleat_app` with no tenant set,
+`cleat.tenant_id is not set (P0001)`. It now enters `cleat_sweep` for the duration of its
+transaction, which is migration 077's shape. **Not** a fallback to the plain statement on failure:
+that would succeed exactly where it is not needed (a connection bypassing RLS) and fail silently
+into a warning everywhere else.
+
+#### Prose corrected in four places, none of which would have failed
+
+031, 050, 061 and this document each asserted the absence as a standing fact — 061 in the words
+"none of those reasons has changed". Each is now marked superseded rather than rewritten, because
+031's reasoning is what 083 had to answer. 050 also carried a census ("PostgreSQL's RLS covers 11
+tables"); it is dropped rather than corrected, since the predicate — *this table was not among them* —
+is what the sentence needed.
+
+### 3.259 The RLS guard counted 19 statements it could not read as examined, and one was a live fault — ✅ **FIXED 2026-09-16** (cleat#1672)
+
+`TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet` read a statement's SQL by taking the
+first argument that is an `*ast.BasicLit` matching `^\s*(SELECT|INSERT|UPDATE|DELETE|WITH)`. When
+that found nothing it returned `""`, the scan moved on — **and the statement had already been
+counted.** So the floor assertion, `stmts == 0`, was satisfied by statements the guard had no
+opinion about.
+
+#### It was hiding a live fault, which is why this is not tidiness
+
+`adaptive_flush.go:253` wraps its query in `fmt.Sprintf`, so the argument is an `*ast.CallExpr` and
+`sqlArgOf` returned `""`. The statement is
+
+    UPDATE workflow_instances wi SET heartbeat_at = now() FROM claims c WHERE ...
+
+on `af.db` — **the pool**, no transaction, no `set_config` — against a table that is `ENABLE` +
+`FORCE ROW LEVEL SECURITY` with a fail-closed policy. Measured, PostgreSQL 16.15, with a positive
+control:
+
+| connection | result |
+|---|---|
+| `cleat_app`, no transaction, no tenant — the production condition | `ERROR: cleat.tenant_id is not set … (P0001)` |
+| `cleat_app`, tenant set in a transaction | returns its row |
+
+Same role, same statement, same seeded row. It is reachable from `cmd/cleat-worker`. Filed as
+cleat#1677 and listed in `knownRLSFaults`, whose liveness check forces the entry out when the fix
+lands. **This guard exists for exactly that defect class** (cleat#1177, `successorOfRun`) and it
+walked the line, could not read it, and reported a clean run.
+
+#### The issue's own characterisation was wrong, and correcting it shrank the work
+
+cleat#1672 said the 19 were queries "built, held in a constant, or passed through a rewrite". True
+of six. The rest were readable all along:
+
+| class | n | why it was invisible |
+|---|---|---|
+| string concatenation | 3 | an `*ast.BinaryExpr` fails the `*ast.BasicLit` type assertion |
+| `fmt.Sprintf` | 1 | an `*ast.CallExpr`, same |
+| first line is a SQL comment | 3 | `^\s*(SELECT\|…)` does not match a leading `--` |
+| package constant | 4 | an `*ast.Ident` |
+| built at runtime | 5 | irreducible |
+| not DML at all | 3 | `SAVEPOINT`, `CREATE SCHEMA` — correctly not checked, wrongly indistinguishable from the above |
+
+`db.go:1028` is the sharpest: a complete `UPDATE workflow_instances` sitting in a plain literal,
+invisible because its first line is `-- No AND tenant_id, deliberately: RLS bounds this.`
+
+#### What changed
+
+`sqlTextOf` resolves literals, concatenations, package constants, function-local constants and
+`fmt.Sprintf` format strings. **A partial resolution is refused**: one unresolvable part makes the
+whole expression unreadable, because the missing half could be the `FROM` clause, which is the
+failure this file exists to prevent reintroduced as a convenience.
+
+`argKind` replaces the empty string with three outcomes — `argSQL`, `argNonSQL`, `argUnreadable` —
+because "not a statement to check" and "a statement I cannot read" were the same value.
+
+**19 unreadable-and-counted became 1 unreadable-and-reported.** The remaining one, `db.go:1900`
+(`CREATE SCHEMA IF NOT EXISTS ` + a runtime schema name), is in `knownUnreadableStatements`.
+
+Three maps, three invariants, kept apart on purpose: `knownRLSFaults` must shrink to zero,
+`statementsWithoutATenantByDesign` does not shrink (`flush.go:453` is the untenanted path, gated by
+`if e.tenantID != ""` and never reached by a worker), and `knownUnreadableStatements` shrinks toward
+the irreducible. Merging them would retire the "may only shrink" property that makes the first
+worth having.
+
+The floor now counts only statements the guard has an opinion about, and the log line states both
+numbers — `cleared 167 … could not read 1` — because a single figure was correct on every run and
+read as ordinary while the guard was near-blind.
+
+### 3.260 An expired idempotency key made the next start fail, on all three dialects — ✅ **FIXED 2026-09-16** (cleat#1671)
+
+A key whose TTL had passed, and whose row the sweeper had not yet collected, made the **next** start
+with that key return `sql.ErrNoRows` instead of starting a new run.
+
+#### The defect is neither the expiry filter nor the ON CONFLICT
+
+`RowsAffected() == 0` from the key insert has **two causes**, and the code assumed one:
+
+| cause | is there a winner to re-read? |
+|---|---|
+| a concurrent starter won the race | yes |
+| an expired row is still sitting there | **no** |
+
+Both report no rows affected, through three different idioms that all say nothing about expiry —
+`ON CONFLICT (key_hash, tenant_id) DO NOTHING`, `INSERT IGNORE`, and
+`INSERT … WHERE NOT EXISTS (key_hash AND tenant_id)`. The re-read that follows filters on
+`expires_at > now()`, so in the second case it looks for a row it cannot see.
+
+So the branch is entered because `ON CONFLICT` cannot tell *"another request won"* from *"a dead row
+is still there"*. A fix aimed at the filter or at the TTL does not touch it.
+
+#### All three dialects, and that is the point
+
+`store_lifecycle.go`, `mysql_lifecycle.go` and `mssql_lifecycle.go` each carry the same shape. The
+issue was filed as PostgreSQL; reading the other two to confirm the shape is what found them.
+cleat#1256 is this table's precedent for the one-dialect fix: the sweeper ran on PostgreSQL only, so
+a key was honoured forever on the other two for the life of the deployment.
+
+#### The fix, and the fix that would have been wrong
+
+Delete the row **before** the insert, scoped by expiry. That collapses the two causes: a conflict
+now means a **live** row, and the re-read's own filter will find it.
+
+Two rejected alternatives, both of which pass an expired-row test:
+
+- **Drop `expires_at > now()` from the re-read.** Makes the expired row visible and hands the caller
+  a workflow id whose key the TTL already retired — silently joining an expired run, which is worse
+  than the error.
+- **Delete by key alone.** Removes a *live* row a concurrent starter just wrote, so two callers each
+  get their own run for one key — the defect migration 010 exists to prevent, reintroduced by the
+  fix.
+
+#### Both arms, because one alone ships the second mistake
+
+| falsification | what went red |
+|---|---|
+| remove the delete | the expired-key test, with `sql: no rows in result set` |
+| keep it, drop its expiry scope | the **concurrency** test — `2 of 8 starters were told they started the run` |
+| remove it from MySQL only | the cross-dialect assertion, naming `mysql_lifecycle.go` |
+| remove it from SQL Server only | the same, naming `mssql_lifecycle.go` |
+
+The expired-row fixture is deterministic and needs no race: an expired row is invisible to the
+lookup and still collides with the insert. The concurrency arm is the one that is tempting to skip,
+and skipping it is exactly how the second mistake above ships green.
+
+#### The fix broke its own neighbour's fixture, and the neighbour said so
+
+`TestTheConcurrentIdempotencyRereadRunsWithTheTenantSet` (cleat#1534) reached the concurrent-re-read
+branch by seeding an **expired row** — invisible to the lookup, still colliding with the insert.
+This fix deletes the dead row before the insert, which removed that test's only way in. It did not
+go quietly green:
+
+    PRECONDITION FAILED: the start succeeded, so the INSERT did not conflict
+    and the concurrent re-read was never reached. Nothing below was measured.
+
+That is the whole argument for printing preconditions beside verdicts, demonstrated inside one PR: a
+test asserting only "no error" would have passed while measuring nothing, and the RLS coverage
+cleat#1534 added for that statement would have been silently gone.
+
+Rewritten to reach the branch through **real contention**, which is also more faithful: a raw
+transaction inserts the key and does not commit, the store's lookup cannot see it, and the store's
+insert blocks on the unique index. The test waits for that block to appear in `pg_locks` rather than
+sleeping — a conflicting insert waits on the inserting *transaction*, so `pg_locks.relation` is null
+and the waiting backend's own query text is what identifies it. Scoped to this database and this
+statement, because the engine suite shares a database and a bare `NOT granted` count is true of any
+contention anywhere in the instance.
+
+The precondition is then self-proving: the store can only return the competitor's workflow id by
+having re-read it, since its own lookup ran before that row was committed. Verified in both
+directions — reverting cleat#1534's `tx2` still produces `cleat.tenant_id is not set (P0001)`, and
+committing the competitor early makes the precondition fire rather than passing through the lookup.
+
+The cross-dialect check is a **source** assertion, the same shape as
+`TestEveryDialectRefusesAnIdempotencyKeyReusedForAnotherDefinition` beside it, and for the same
+reason: executing it needs all three databases, while what actually breaks is one store edited and
+the others not. It asserts order as well as presence — a delete placed after the insert would
+satisfy a contains-check and remove the row the insert just wrote.
+---
+
+### 3.329 Nothing asserted that a durable call's event is on disk before the call returns — ✅ **FIXED 2026-09-16** (cleat#1670)
+
+`recordEvent` blocks until its event is durable — a receive on the flusher's `done` channel on the
+batch arm, an inline `flushEvent` on the direct one — and `freshCall` records before it returns
+(`durablecalls.go:158` `callService`, `:175` `recordEvent`). That ordering is what **bounds** the
+crash window `docs/durable-calls.md` §2 describes: the window opens when the external service
+returns and closes when the flush commits, so it cannot outlive the host call. Once the guest
+resumes, the event is on disk.
+
+Nothing asserted it. Making the flush fire-and-forget is an obvious performance change — it takes a
+commit off the hot path — and it would extend that window across the guest's next durable step, its
+next sleep, and everything after, **with every existing test still green**.
+
+The nearest test is `tests/crash/crash_test.go`'s `TestEventsArePersistedDuringExecution`, which
+sleeps **two seconds** and says why: *"the adaptive flusher batches with an 8ms window, so this is
+generous by three orders of magnitude"*. Two seconds proves durability *eventually*; it cannot
+separate "durable before the call returned" from "durable within two seconds of it" — identical
+today, divergent after the change.
+
+**No clock in the test, deliberately.** "Durable within N ms" goes green on a machine that is merely
+fast. The direct arm asserts an ORDER from a counter both sides stamp, and it is sound both ways:
+
+|  | flush stamps | return stamps | verdict |
+|---|---|---|---|
+| synchronous | 1 | 2 | passes |
+| fire-and-forget | 2 | 1 | fails |
+
+The wait on `flushed` before comparing is load-bearing: without it a fire-and-forget flush leaves the
+stamp at zero, and `0 < returnSeq` is true — the check would pass the very thing it exists to catch.
+
+**The batch arm is tested separately and asserts the row, not a stand-in.** The instant `recordEvent`
+returns, the event must already be `SELECT`able. That arm matters more: its wait is a bare
+`if err := <-done`, whose own comment notes it *"was a select with one case and no default"*, and a
+reader asking why the hot path blocks on a batch would not be obviously wrong.
+
+**Falsified against the engine, not just against the harness** — both mutations on `lifecycle.go`,
+each restored by content:
+
+| mutation | result |
+|---|---|
+| direct flush spawned in a goroutine | RED — *"the flush completed at 2 and recordEvent returned at 1"* |
+| `<-done` replaced by a non-blocking discard | RED — *"event_history holds 0 rows … the instant recordEvent returned"* |
+
+**The exception is asserted as the exception.** `recordEvent` blocks and then *continues* on failure:
+`ErrFenceLost` at Debug, anything else at Error, checksum unadvanced, guest resumes with no durable
+event. The unqualified property is therefore false today — on purpose for the fence-lost case, where
+the claim was lost and this worker must not write. A test written without that qualifier fails
+against correct behaviour, which is the known-positive trap arriving from the other direction.
+
+**Two harness defects found by measuring rather than assuming**, both of which would have been read
+as engine defects:
+
+* The batch arm first reported 0 rows. Instrumenting `Flush` directly gave
+  `pq: invalid input syntax for type uuid: ""` — an empty tenant in the fixture, which `recordEvent`
+  logs and swallows. `<-done` had returned *after* the failed attempt, so the ordering held all
+  along.
+* The test first gated on `CLEAT_TEST_POSTGRES` alone. **CI sets `CLEAT_TEST_DB`**, so it would have
+  skipped in every job and reported `ok`. `testutil.TestDB` already gates on either and skips
+  itself; the private check is gone.
+
+Files: `engine/a_durable_calls_event_is_durable_before_the_call_returns_test.go`.
+
+---
+
+### 3.330 cleat's own spans were in a different trace from the transaction they orchestrated — ✅ **FIXED 2026-09-16** (cleat#1669)
+
+`WorkflowSpan` attached the caller's trace with `trace.WithLinks`. That does not make `Start` adopt
+it: the span opened as a **new root in a new trace-id**, with the caller reachable only by following
+a link. Meanwhile `plugin.SetTraceparentFromContext` sends the **inbound** trace-id downstream.
+
+So a collector held the caller's spans and the downstream service's spans correctly joined in one
+trace, and cleat — the thing in the middle that orchestrated both — in another. `WHERE trace_id = T`
+returned both ends and not the middle.
+
+**Measured before the change**, in-memory exporter, exact spans:
+
+```
+INBOUND  traceparent   00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01
+OUTBOUND traceparent   00-4bf92f3577b34da6a3ce929d0e0e4736-8f8109e582e314e2-01
+cleat's own spans       trace bd8e8ad6c644dfd249c381fea1b0d1c1   <- a different trace
+```
+
+`ContextWithRemoteSpanContext` makes `Start` adopt it. The per-worker tree underneath was always
+correct — `workflow.execute` over the `event.*` spans — and is unchanged; this attaches it to the
+right root.
+
+**The parent span-id is still fabricated, and that is §1597 rather than this.** The inbound parse
+keeps the trace-id and discards `parts[2]`, so there is no real caller span-id to name. A collector
+renders a parent it never receives as a second root *within* the trace — a far smaller loss than a
+missing trace. "Show me everything in this transaction" now answers; "what called what" across that
+one edge still does not.
+
+**Sampling is unchanged, and it is asserted rather than argued.** `TraceFlags(1)` is inert on a link
+and decisive on a parent — the default sampler is `ParentBased(AlwaysSample)` — so the same constant
+changed job. Hardcoding sampled preserves today's outcome exactly, because a root span under
+`ParentBased` already falls through to `AlwaysSample`. Forwarding the caller's real flags would be a
+behaviour change and is not available anyway: they are discarded at the inbound parse, which is the
+reason `SetTraceparent` already gives for hardcoding `01` outbound.
+
+**The link is dropped rather than kept beside the parent.** It would point at the same trace by a
+*different* fabricated span-id — `spanContextFromTraceID` mints a fresh random one per call — so it
+would be a self-referential edge to a second span that also does not exist.
+
+Four assertions, all on what a collector **receives** rather than on what the code appears to do,
+which is the distinction that earned its place here: the defect was invisible from the inbound parse
+the originating issue quoted, because `WithLinks` is three frames away from it.
+
+| assertion | what it stops |
+|---|---|
+| cleat's span carries the caller's trace-id | the defect itself |
+| the parent is marked **remote**, and is not the caller's real span-id | "joined the trace" confused with "started inside an ambient local span" |
+| a run with no inbound trace still gets a valid trace and no parent | scheduled and swept work becoming orphans |
+| a malformed inbound trace-id is not adopted | inventing a trace nobody is in |
+
+**Falsified** by reverting the one line to `WithLinks`: RED, naming both trace-ids.
+
+Section number taken by hand as 3.330 — `scripts/next-section-number.sh` reads `origin/develop` and
+returned 3.329, which is claimed by the still-open #1680. WORKSTREAM.md's protocol table describes
+exactly this case.
+
+Files: `internal/telemetry/tracing.go`,
+`internal/telemetry/a_workflow_span_joins_the_callers_trace_test.go`.
+
+---
+
+### 3.331 cleat named a parent span that does not exist, and §3.330 moved that lie somewhere it looks true — ✅ **FIXED 2026-09-16** (cleat#1669, corrected)
+
+`spanContextFromTraceID` invented a random span-id so the caller's trace could be attached. Before
+§3.330 that was invisible: cleat's spans sat in a trace of their own, so there was nothing in the
+tree to be wrongly parented. **Joining the caller's trace made it visible and worse** — every cleat
+span then hung off a span-id that does not exist and never will arrive, in a trace that otherwise
+looks complete.
+
+**A zero span-id still joins the trace.** That is the fact that makes the fabrication unnecessary,
+and it is documented SDK behaviour rather than a quirk — `otel/sdk@v1.44.0/trace/tracer.go:97`:
+
+```go
+// If there is a valid parent trace ID, use it to ensure the continuity of
+// the trace. Always generate a new span ID ...
+if !psc.TraceID().IsValid() { tid, sid = ...NewIDs(ctx) } else { tid = psc.TraceID() ... }
+```
+
+It branches on `psc.TraceID().IsValid()`, **not** `psc.IsValid()`. Measured:
+
+```
+                   trace-id                          parentValid  parentSpan
+workflow.execute   4bf92f3577b34da6a3ce929d0e0e4736  false        0000000000000000
+event.call         4bf92f3577b34da6a3ce929d0e0e4736  true         <workflow.execute>
+```
+
+Right trace, no parent, subtree intact, still sampled — `ParentBased` treats an invalid parent as a
+root and falls through to `AlwaysSample`, so the outcome is unchanged.
+
+**Four states, not two**, which is the framing that made the cheap fix visible:
+
+| | trace | parent | what a collector is told |
+|---|---|---|---|
+| before §3.330 | cleat's own | none | two unrelated traces |
+| after §3.330 | the caller's | **invented** | a parent that never arrives |
+| **now** | the caller's | none | cleat is a root *within* the transaction — true |
+| cleat#1597 | the caller's | the real caller | the actual edge |
+
+§3.330's comment said *"one fabricated parent is the honest minimum; two is noise"*. **That was
+wrong — the minimum is none**, and the sentence is corrected in place rather than left to be read.
+
+**The existing assertion was weak and could not have caught the regression it was written for.**
+`a_workflow_span_joins_the_callers_trace_test.go:91` asserted the parent is not the **caller's**
+span-id — which a freshly-invented **random** one also satisfies. Strengthened to assert the span-id
+is invalid at all, with distinct messages for the two ways it can become valid: the caller's real
+one means cleat#1597 landed and the test should be flipped, anything else means the phantom is back.
+
+**A pre-existing test had to be rewritten rather than made to pass.**
+`TestSpanContextFromTraceIDValid` asserted `sc.IsValid()`, which is false without a span-id — so it
+was, precisely, a test that a parent had been invented. It is now
+`TestSpanContextFromTraceIDCarriesATraceAndNoSpan`, pinning the valid trace-id and the absent
+span-id separately.
+
+**Falsified** by reinstating a fabricated span-id: both tests go red, naming it.
+
+This does **not** close cleat#1597, which remains gated by its author pending evidence that the
+missing caller→cleat edge is actually missed. What it removes is the falsehood; the edge is still
+absent and now says so.
+
+Files: `internal/telemetry/tracing.go`, `internal/telemetry/telemetry_test.go`,
+`internal/telemetry/a_workflow_span_joins_the_callers_trace_test.go`.
+### 3.261 A Python guest's clock and entropy were the host's, not the workflow's — ✅ **FIXED 2026-09-16** (cleat#1410)
+
+componentize-py's CPython satisfies `time.time()`, `random.random()` and `os.urandom()` through WASI
+Preview 2 interfaces — `wasi:clocks/wall-clock` and `wasi:random/random` — which cleat did not
+register on the component linker. So they reached the host's real clock and real entropy, and a
+replay diverged.
+
+#### The gate question was answered by running a guest, not by reading its imports
+
+Prior sessions established that `wasi:clocks/wall-clock@0.2.9` appears in a real guest's **import
+section**. That establishes *reachable*, not *used* — and the issue's own history records why the
+distinction matters: on the preview1 side, concluding "Go guests import `poll_oneoff` without
+calling it" from three zero-count runs made an OOM-killed workflow report `result="ok"`.
+
+Two executions of one workflow id, durable clock pinned to 2001-09-09T01:46:40Z:
+
+| | before | after |
+|---|---|---|
+| `h.now()` (cleat's own) | `1e12` / `1e12` | same |
+| `h.random()` (cleat's own) | identical | same |
+| `time.time()` | **1.7895622924e9 / 1.7895622951e9** | the pinned value |
+| `random.random()` | **0.367… / 0.357…** | reproducible |
+| `os.urandom(8)` | **715cc1e5… / fd6da07d…** | reproducible |
+
+**The first two rows are why the other three mean anything.** They are cleat's host calls, read by
+the same guest in the same two runs, and they were already stable — so the divergence was the guest
+reaching past cleat, not a harness that reproduces nothing.
+
+#### The work was the value layer, which is why the issue was retitled
+
+The linker seam already existed — `allow_shadowing` on, `add_wasip2` before cleat's own
+registration. What did not exist was any way to construct the values:
+
+| function | returns | constructor |
+|---|---|---|
+| `wall-clock.now()` | `datetime { seconds: u64, nanoseconds: u32 }` | a record — none, but `component_val_set_call_failed` is a worked example one level deeper |
+| `random.get-random-bytes(len)` | `list<u8>` | **none anywhere in the tree** |
+| `random.get-random-u64()` | `u64` | existed |
+
+A component list is a **vec of `wasmtime_component_val_t`, one full val per byte** — not a byte
+buffer — so it costs 16 host bytes per guest byte, and `get-random-bytes` is bounded host-side
+because the guest supplies the length.
+
+Ownership runs the opposite way to the neighbouring string helper's first impression: wasmtime
+converts a callback's results **by reference and then drops them recursively**, so every buffer is
+C-allocator heap because wasmtime frees it. Static storage would be a `free()` of a literal. That is
+recorded above `component_val_set_call_ok`, in a comment that notes it previously said the opposite.
+
+#### The one-function slice would have compiled, registered, passed and achieved nothing
+
+`get-random-u64` is the function that looks like the RNG. CPython seeds the Mersenne Twister from
+`os.urandom` at import, so shadowing the scalar alone leaves `random.random()` live while every
+check of the shadowed function passes.
+
+#### The version is part of the name, and a wrong one is silent
+
+Measured by setting `wasiDeterminismVersion` to `@0.2.0` against a guest importing `@0.2.9`:
+**registration returns no error** and the guest keeps the real clock. That is the known-positive for
+the tests — a case already proven broken, checked to confirm they report it — and they do, on both
+the clock and the entropy.
+
+A separate "the registered names match the guest's imports" guard was planned and **not built**: a
+mismatched name produces exactly that failure, because the tests assert the effect rather than the
+registration, so the guard would add a clearer message and no detection. The message went into the
+failure text instead, with the `wasm-tools` command that confirms it.
+
+#### Not shadowed: `monotonic-clock`
+
+cleat#1386 measured why — a durable-sourced monotonic clock ran 3 GC cycles instead of 17 and
+reached a 256 MB heap against a 32 MB limit. It is *also* the interface whose functions return
+resource-typed pollables, so leaving it alone is both correct and the cheap option; the coincidence
+is stated in the code, because the cheap reason would otherwise read as the whole reason.
+
+---
+
+### 3.332 The Python container recipe named a docker context that cannot connect on this machine — ✅ **FIXED 2026-09-16** (cleat#1694)
+
+Four live instruction files told a reader to run `docker --context desktop-linux …`. Measured
+today:
+
+| | |
+|---|---|
+| `docker --context desktop-linux ps` | **FAILS** — `failed to connect to the docker API at unix:///Users/rcownie/.docker/run/docker.sock` |
+| `docker run -v "$PWD":/src -w /src alpine:3` | `go.mod` **visible**, 63 entries |
+
+So the prescribed flag does not merely name the wrong runtime — **it cannot work here at all**,
+because Docker Desktop is not running. A reader following the recipe got a connection error, not a
+subtly wrong tree. The platform change behind it is §3.328's correction: this machine runs OrbStack
+and has no colima.
+
+**The fix is not deleting the flag.** `scripts/tier-gate.sh` said *"--context desktop-linux is the
+whole fix"*, and that explained a **real** defect: colima bind-mounts these paths as an empty
+directory *without failing*, so the run dies with `go.mod file not found` and reads as a broken
+checkout. Deleting the flag without replacing the reasoning loses why it was ever there, and the
+hazard returns for anyone who runs colima again.
+
+So the named runtime is replaced by **the property it was standing in for** — does your runtime
+actually bind-mount this path? — with the two runtime observations kept as dated evidence rather
+than as instructions:
+
+```
+docker run --rm -v "$PWD":/src cleat-py-toolchain test -f /src/go.mod
+```
+
+Verified against the real toolchain image, **with a negative control**: exit 0 on the repo path,
+non-zero on a path the runtime will not mount. A check that cannot fail would be worse than the
+instruction it replaces.
+
+This is the same move CLAUDE.md prescribes for counts, applied to configuration: publish the
+predicate, not the census. *"The instruction that was right in August could not work in
+September"* is exactly what a named-runtime instruction buys.
+
+**Scope was narrower than the issue's title, and that is measured rather than assumed.** The grep
+returns **16 lines across 6 files**, but two of those files are history, not instruction:
+
+* `IMPROVEMENT-PLAN-CLOSED.md` is an archive under WORKSTREAM.md R3 — editing it rewrites history.
+* all six `IMPROVEMENT-PLAN.md` hits sit inside **closed** sections (§3.205, §3.306, §3.308, each
+  🟢 **FIXED** and dated), which are history for the same reason.
+
+That leaves **four** live files, not the five a first pass suggests or the six the count implies.
+`engine/python_all_host_calls_test.go`'s mention is a doc comment rather than a code gate — checked
+— so nothing here changes behaviour.
+
+Files: `scripts/docker/python-toolchain.Dockerfile`, `scripts/tier-gate.sh`, `WORKSTREAM.md`,
+`engine/python_all_host_calls_test.go`.
+
+---
+
+### 3.333 The cancelled-twin detector answered "no twin" three ways — ✅ **FIXED 2026-09-16** (cleat#1703)
+
+`CLAUDE.md` published the detector twice and `WORKSTREAM.md`'s R9 candidacy test a third time, all
+in the name-based form:
+
+    gh run list --commit <sha> --json name --jq '.[].name' | sort | uniq -d
+
+Three failure modes, measured 2026-09-16 against `431737a0fc24f6571d72114cc3c02c39383263cb`
+(cleat#1355, `BLOCKED` for 50+ samples) as known-positive and
+`cab6353741afd57203d338f06b79b24334baee34` (cleat#1699, merged an hour earlier) as negative
+control. **All three report the safe answer**, which is the asymmetry *Is this result real?*
+already names — a measurement error that flatters is one nobody re-derives.
+
+| | what it does | why it is silent |
+|---|---|---|
+| an **abbreviated** SHA | returns **0 runs**, so `uniq -d` is empty | `head_sha=` is an exact string match; `total_count` is 0, not an error |
+| **`uniq -d` over names** | reports `CLA Assistant` as a twin | `pull_request_target`'s `closed` type fires a second run at merge, by design |
+| **`?per_page=100`** | 38 cancelled reported of **121** check runs | the page cap truncates and says nothing |
+
+**The first is the expensive one, and not because a prefix is an unreasonable thing to paste.** The
+sibling endpoint in the same API family resolves one perfectly well — `…/commits/<abbrev>/check-runs`
+and `…/commits/<full>/check-runs` both return 49 on cleat#1699's head — so the surrounding practice
+actively teaches that abbreviations are fine here. Every publication site spelled the argument
+`<sha>`, and `git log --oneline` and `git rev-parse --short` are what hand you one.
+
+**The second lands at the worst available moment.** Correlating `merged_at` against CLA run times
+for four PRs merged that day:
+
+| PR | `merged_at` | CLA runs on that head SHA | delta |
+|---|---|---|---|
+| #1695 | 16:01:30Z | 15:24:29Z, **16:01:33Z** | +3s |
+| #1698 | 16:08:30Z | 15:34:01Z, **16:08:33Z** | +3s |
+| #1700 | 16:41:38Z | 16:02:55Z, **16:41:41Z** | +3s |
+| #1699 | 17:36:12Z | 16:59:38Z, **17:36:14Z** | +2s |
+
+Four for four, both members `success`. So a watcher polling to `MERGED` sees a "twin" on the very
+last sample it takes — this session's own watcher printed `twin='CLA Assistant,'` on the line that
+read `MERGED`, and survived only because it happened to test `MERGED` first. The duplicate is
+invisible on an **open** PR, which is why cleat#1688's mechanism section recorded "plus one
+`pull_request_target` for CLA Assistant" — singular, and correct, because those three had not
+merged. A detector whose false positive appears only at the finish line is one you cannot discover
+by watching it work.
+
+**The fix is to ask about the conclusion rather than the name** — it names the hazard instead of a
+proxy for it, resolves an abbreviated SHA, and has no benign-duplicate class:
+
+    gh api --paginate "repos/<o>/<r>/commits/<FULL-40-char-sha>/check-runs?per_page=100" \
+      --jq '.check_runs[].conclusion' | sort | uniq -c
+
+| | known-positive `431737a0…` | control `cab63537…` |
+|---|---|---|
+| `cancelled` | **55** | none |
+| outcome | `BLOCKED` 50+ samples | merged |
+
+Run verbatim under `bash -c`, per *"run it the way the reader will run it"*.
+
+**What this does NOT claim.** The truncation was found on one SHA and the CLA correlation on four
+PRs from one day; neither is a claim about other repositories or other workflow sets. And
+cleat#1688's own body still carries the name-based form — it is not mine to rewrite, so the
+measurement went there as a comment instead.
+
+Files: `CLAUDE.md`, `WORKSTREAM.md`.
+
+### 3.262 A run's live token stream works on every worker — ✅ fixed in cleat#1639
+
+`GET /api/workflows/{id}/stream` (#1572) held its live tail in memory on the worker executing the
+run, so a request landing anywhere else got the durable history and then silence. Behind a load
+balancer with N workers that is roughly (N-1)/N of readers.
+
+**Routing was priced first, because the issue's own question 4 said the polling mode was redundant
+if routing was feasible.** It is not feasible, and the reason is a measurement rather than an
+effort estimate:
+
+| | |
+|---|---|
+| `admin.workers` columns (migration 076) | `worker_id, hostname, pid, concurrency, connection_budget, started_at, last_heartbeat_at` |
+| a port or scheme among them | **none** — "membership, and nothing else" |
+| `--api-addr` default | **empty**, and it is a BIND address (`:8080`) |
+
+So a worker can hold a live tail while serving no HTTP at all, and no dialable URL can be derived
+for one that does. Redirecting needs the client to reach an individual worker, which behind a load
+balancer is exactly what is not true; proxying would be cleat's first worker-to-worker link and
+would turn an honest degraded stream into a hard failure whenever the owning worker is unreachable.
+
+**The answer was already in the tree, and it is neither of the issue's two options.**
+`engine/store_notify.go` and `cmd/cleat-worker/notify.go` solve "one worker must learn promptly
+about another's work" as *poll for correctness, NOTIFY to collapse the latency where the dialect
+has it* — `mysql_store.go:70` and `mssql_store.go:181` already carry the disabled `notifyChannel`
+with that reasoning. This change lands the polling half, which is the correctness floor and works
+on all three dialects; NOTIFY is a follow-up, not a prerequisite.
+
+**One correction to the issue's costing, and it changed the design.** The issue priced this as
+"one query per reader per interval". The query the handler had was `LoadEventHistory` — the WHOLE
+history, 31 columns, decrypt and redact per row, no step predicate. Three runs, 20 reps, postgres
+16:
+
+| chunks in run | `LoadEventHistory` | `LoadStreamChunksAfter`, steady state |
+|---|---|---|
+| 100 | 2.46 / 3.25 / 3.06 ms | 0.95 / 1.12 / 0.75 ms |
+| 1000 | 12.49 / 9.54 / 10.91 ms | 1.91 / 0.68 / 1.19 ms |
+| 5000 | 42.55 / 39.53 / 44.74 ms | 1.05 / 0.87 / 1.24 ms |
+
+The full read is linear; the cursor read is **flat** — its spread within one history size is as
+large as its spread across all three. One reader polling the full read on a 5000-chunk run would
+spend ~17% of a core. It needs no new index: the primary key's own index,
+`event_history_pkey (tenant_id, workflow_id, step)` — the PK since cleat#2059 moved it there — is an
+exact prefix match, and `EXPLAIN` reports 2-3 buffers with execution at 0.016-0.018 ms. (This
+paragraph named `idx_event_history_tenant_wf`, a separate index over the same three columns; the PK
+move made it a duplicate and 001 no longer creates it.)
+
+**The number worth carrying forward is that execution is 2% of the cost.** A poll measures 0.7-1.9
+ms in Go against a 0.016 ms query, because `beginTxWithRLS` makes it BEGIN + `set_config` + SELECT
++ COMMIT — four round trips, one carrying data. At 1024 readers and 250ms that is ~4k polls/sec but
+~16k round trips/sec, so the ceiling is a connection-pool question, not a query-cost one.
+
+**Three things found while building it, none of them the subject:**
+
+- **`replay` had two definitions in `stream-tokens-to-a-client.md`, in consecutive sentences** —
+  provenance ("came from event_history") and novelty ("a re-sent token from a new one"). They
+  already disagreed before this change: history past a reconnecting reader's cursor is emitted
+  `replay: true` and that reader has never seen it. Resolved towards provenance, which is what the
+  code does, and the doc now says to dedupe on `step`.
+- **#1572 took a hub slot for a subscription that could never deliver.** It subscribed whenever a
+  hub existed rather than when this worker owned the run. Measured by reverting the condition:
+  `hub.Readers()` reads 1 for a reader of another worker's run.
+- **A refusal test that hangs reports the clock, not the guard.** The ceiling test used a bare
+  `<-done`; with the ceiling removed the handler streams forever, so falsification cost 362
+  seconds and produced `panic: test timed out` naming nothing. With a 5s `waitDone` it is 5.6
+  seconds and names the guard. Every test here whose subject is a refusal now uses it.
+
+**Falsified, ten mutations, each red for its own reason** — the durable tail never chosen, the
+cursor not carried, `?mode=live` ignored, the ceiling never refusing, the status never read, an
+unknown mode ignored, a non-executing reader subscribing anyway, an inclusive cursor (all three
+dialects), no event-type filter (all three), and `-1` clamped to 0.
+
+Re-derive the costing:
+
+    go test ./engine/ -run TestTheStreamChunkTailIsAnExclusiveCursorOnEveryDialect -count=1 -v
+---
+
+### 3.334 The test-only-code guard reported OK and exited 0 when it could not install staticcheck — ✅ **FIXED 2026-09-16** (cleat#1707)
+
+`scripts/check-test-only-code.sh` exists to catch a vacuous pass. It had one. With the tool
+uninstallable it printed its own error and then passed:
+
+    $ GOPROXY=off ./scripts/check-test-only-code.sh ; echo "exit=$?"
+    go: honnef.co/go/tools/cmd/staticcheck@2026.2.1: module lookup disabled by GOPROXY=off
+    ERROR: could not install honnef.co/go/tools/cmd/staticcheck@2026.2.1
+    OK: no new test-only code (0 known entries in the baseline).
+    exit=0
+
+**The author had already written the hazard down, in the same function.** Sixty lines below the
+defect, `scan()` carries a comment explaining that `exit` cannot work there — *"scan runs inside a
+command substitution, so exit would only leave the subshell and the caller would carry on with an
+empty result and report OK — a vacuous pass by the guard against vacuous passes"* — and a
+`SCAN_FAILED` sentinel built for exactly that. The install path a few lines up used a bare
+`exit 1`. So this is not a missing insight; it is one path that did not get the insight.
+
+**What decides it is a shell option, and that is what makes the blast radius small.** An `exit`
+inside `$( … )` ends only the subshell; whether the parent then stops depends on `-e`:
+
+| | parent after `v="$(f)"` where `f` exits 1 |
+|---|---|
+| `set -uo pipefail` (this script) | **continues, exits 0** |
+| `set -euo pipefail` | dies, exits 1 |
+
+A survey of every `scripts/*.sh` for a command-substituted function containing a bare `exit`
+returned exactly two: this one and `check-unreachable-main.sh`. **The second is not affected** —
+it sets `-e`, *and* its caller rejects an empty scan explicitly. It was checked rather than
+assumed, and the mechanism table above is why it could be cleared without a second fix.
+
+The repair is the sentinel the file already defines. `SCAN_FAILED` also moved above `scan()`,
+since under `set -u` a reference before assignment is fatal and the install path now uses it.
+
+**The regression test is a `--self-test`, following the convention of
+`check_migration_numbers.py` and `check-required-contexts.py`, wired in CI ahead of the real run.**
+Two details are load-bearing:
+
+  * **It forces the failure with an empty `GOMODCACHE` as well as `GOPROXY=off`.** Proxy-off alone
+    is not deterministic: where staticcheck is already in the module cache `go install` succeeds
+    offline, and the self-test would quietly stop exercising the path it exists to exercise —
+    passing, of course.
+  * **Both assertions are on PRESENCE.** A non-zero exit alone cannot separate *"the guard failed
+    for the right reason"* from *"the harness never started"*. The `ERROR: could not install` line
+    is the evidence the install path was reached; the exit status is only meaningful once it is
+    there. (The obvious control, `PATH=/nonexistent`, hides the shell itself and produces silence
+    that reads identically to success.)
+
+Falsified by restoring the bare `exit 1`: the self-test fails, names cleat#1707, and prints the
+captured `OK … exit=0`. The presence assertion still passed during that run, which is how the
+failure is known to be the mutation rather than a dead harness. Restore verified by content as its
+own step, per *Ground rules for changes*.
+
+Files: `scripts/check-test-only-code.sh`, `.github/workflows/ci.yml`.
+
+---
+
+### 3.335 One contract for the non-workflow entities, enforced by total coverage — ✅ **GUARD LANDED 2026-09-16** (cleat#1702)
+
+The design was approved by the repository owner on 2026-09-16: `created_at`, `updated_at`,
+`disabled_at TIMESTAMPTZ` as the single retirement spelling, and none of the four older ones. This
+section covers the **guard and its grandfather list**; the migrations that make members conform
+land one at a time after it, `workflow_schedules` last because it carries an API break.
+
+**The class is thirteen, not eleven, and the two missing ones were found by applying the issue's
+own rule instead of reading the list it produced.** The rule — *does the row carry `workflow_id`,
+and does it carry `expires_at`* — reproduces its own first claim exactly: two tables carry both,
+`concurrency_keys` and `idempotency_keys`. It then does **not** yield the stated membership. 17
+carry neither, against a list of eleven. Four of the six extra are correctly out (the run table,
+two stats tables, `admin.workers`). Two were missed:
+
+| | migration | shape |
+|---|---|---|
+| `admin.tenant_egress_allow` | 079 | `tenant_id`, `host`, `created_at` |
+| `public.tenant_domains` | 080 | `hostname`, `tenant_id`, `created_at` |
+
+**Note the migration numbers.** These are the two newest entities before `tenant_secrets` at 081,
+which *is* in the list. So this was not a stale corner — the list was assembled from what came to
+mind, and what came to mind omitted the most recent arrivals. The staging plan's "new entities
+conform immediately" would have started from a baseline that already excluded them. And it
+flatters: an undercount makes the conversion look 18% smaller than it is.
+
+**Membership cannot be derived structurally, and that is what decided the design.** It was tested
+rather than assumed: `admin.tenant_egress_allow` and `public.tenant_domains` are column-identical
+to `public.workflow_routing` and `public.workflow_tags`, both members. No predicate over columns
+separates them, so membership is a semantic judgement.
+
+A guard built on a *members list* is therefore only ever as complete as whoever wrote the list —
+and that list had already gone wrong by hand once. So the guard asserts **total coverage**: every
+table it finds in the migrations must be classified `member`, `exempt` or `not-an-entity`, and an
+unclassified table is an error. Entity number twelve inherits the rule without anyone rewriting the
+eleven, which was the stated requirement, and the specific omission above becomes impossible rather
+than merely corrected.
+
+**Two of the eight named in the issue are in the `admin` schema** — `admin.tenant_api_keys` and
+`admin.tenant_roles`. Addressed as bare names they resolve to nothing in `public` and a guard
+reports clean: the zero-members trap arriving through the *name* rather than through the count.
+The registry is qualified throughout.
+
+**Exit status is three-valued on purpose**: 0 conforming, 1 a violation, **2 the scan could not
+establish what it was measuring**. A guard that cannot parse its input must not be able to report
+what a clean tree reports.
+
+**Three things the falsification found that reading did not:**
+
+  * **A stale registry entry crashed the clause loop** with a `KeyError` instead of reporting the
+    stale name. Caught by the self-test on its first run — a guard that dies gives a traceback
+    where the finding should be.
+  * **Vacuity was checked after the ceiling**, so grandfathering the whole tree tripped the
+    ceiling and returned 1. Exit 2 means *this told you nothing*, and it was unreachable in the one
+    case it exists for. Reordered.
+  * **Alignment padding in the registry made two readers disagree.** The file was tab-aligned for
+    readability; `read_tsv` drops empty fields and read it correctly, while
+    `awk -F'\t' '$2=="member"'` returns **zero** rows, because `$2` is a padding tab. This is not
+    hypothetical — it silently emptied a mutation *during this guard's own falsification*, and the
+    resulting red was read as the mutation working. The file now uses exactly one tab and the guard
+    **refuses** consecutive tabs, so the trap is a check rather than a comment.
+
+That third one is the section's own subject turned on itself: a census that disagreed between two
+readers, inside the guard written to stop censuses disagreeing between two readers.
+
+**Coverage today: 17 of 40 clauses enforced** (10 members × 4 clauses, 23 grandfathered). The
+grandfather list was generated from the guard's own parse rather than typed, so it cannot disagree
+with what the guard checks, and its ceiling lives in `check-entity-contract.py` rather than in the
+list — growing it is an edit to a different file that a reviewer sees.
+
+**Scope limit, stated rather than left to be discovered:** the guard reads
+`migrations/postgres/` only. Postgres is the reference dialect for this contract and
+`TIMESTAMPTZ` is a Postgres spelling. A member that exists only in the MySQL or SQL Server
+migrations would not be seen. Nothing here claims otherwise.
+
+Files: `scripts/check-entity-contract.py`, `scripts/entity-contract.tsv`,
+`scripts/entity-contract-grandfathered.tsv`, `.github/workflows/ci.yml`.
+
+---
+
+### 3.336 A table defined in only one dialect was invisible, not unclassified — ✅ **FIXED 2026-09-16** (cleat#1719)
+
+§3.335's guard asserts total coverage over `migrations/postgres/` and states that limit. It bites
+once today: `admin.rls_predicate_form` exists only in `migrations/mssql/`, so the guard never saw
+it. Invisible is worse than unclassified — the whole design turns on an unknown table being an
+error, and this was the one place it could be silent instead.
+
+**The right verdict was already known, which is the argument for fixing it now.** It is a
+single-row config table — `only_row BIT`, `CHECK (only_row = 1)` — read from
+`engine/mssql_schedules.go:912` in dialect-specific code, because SQL Server has no equivalent of
+the Postgres predicate mechanism. `not-an-entity`. So the parity code could be verified against a
+case whose answer was settled rather than written alongside a judgement call.
+
+**Membership is compared on the BARE name, and that is the substantive finding.** MySQL cannot
+express a schema: it writes `CREATE TABLE IF NOT EXISTS tenants` where Postgres and SQL Server
+write `admin.tenants`, and `grep -c 'admin\.' migrations/mysql/*.sql` returns **0**. Comparing
+qualified names reports **twelve** differences — the same six tables in both directions — every one
+spurious, which would bury the one that is real.
+
+That is §3.335's schema-qualification trap arriving by the opposite route. There,
+`admin.tenant_api_keys` addressed bare found nothing. Here, qualifying what cannot be qualified
+manufactures gaps. Twice in one day in opposite directions, so the lesson is *schema qualification
+is dialect-dependent*, not either individual fix. Bare-name keying is sound only while bare names
+are unique, which the guard now asserts rather than assumes.
+
+**A correction to the census that prompted this, because it is the trap generalising.** The
+reported table counts were 25 / 24 / 24. They are **23 / 23 / 24**. The Postgres 25 counted two
+comments:
+
+    001_schema.sql:6           -- All CREATE TABLE statements include the final column set.
+    032_drop_tenant_...:22     -- ... rather than the CREATE TABLE text in
+
+`statements` and `text`, read as table names — in the same message that warned about a MySQL
+`guards` table coming from `-- CREATE TABLE IF NOT EXISTS guards idempotency.` A regex that cannot
+model SQL comments reads prose about a definition as a definition, in whichever dialect it is
+pointed at. Both guards strip comments before matching.
+
+**A second defect, which the fix itself exposed.** §3.335's staleness check compared the registry
+against Postgres tables only. Classifying `admin.rls_predicate_form` correctly then reported it as
+*"no longer exists"* — the guard refused the fix for the hole it had just reported. Staleness now
+spans every dialect.
+
+**And a prediction of mine that measurement killed.** I claimed §3.335's plain-and-quoted
+identifier pattern would match nothing in `migrations/mssql/`, parse to zero tables, and report
+clean — the zero-members trap a third time. **False.** Reverting the pattern still parses all 24,
+because no `CREATE TABLE` in this repo quotes its identifier in any dialect:
+
+    # NOT this -- it is line-anchored and cannot see a name on a continuation line:
+    #   grep -rhcE 'CREATE[[:space:]]+TABLE[^(]*[][`"]' migrations/$d/*.sql
+    python3 - <<'EOF'
+    import glob, re
+    pat = re.compile(r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([^\s(]+)", re.I)
+    for d in ("postgres", "mysql", "mssql"):
+        q = 0
+        for f in glob.glob("migrations/%s/*.sql" % d):
+            src = re.sub(r"/\*.*?\*/", "", open(f).read(), flags=re.S)
+            src = "\n".join(re.sub(r"--.*$", "", l) for l in src.split("\n"))
+            q += sum(1 for m in pat.finditer(src) if re.search(r'[\[\]`"]', m.group(1)))
+        print(d, "quoted identifiers:", q)
+    EOF
+    # 0, 0, 0 on 2026-09-16
+
+The widened pattern stays, because all three quotings are legal and a scan that cannot read one
+parses to nothing rather than failing. But it is **defensive, not a fix**, and the code comment
+says so. The first version of that comment asserted the bug was real; it had been reasoned from
+`[dbo].[x]` appearing in *queries* rather than checked against the migrations.
+
+**And the zero itself needed a second measurement before it meant anything.** The command first
+published for it was `grep -E 'CREATE[[:space:]]+TABLE[^(]*[][`"]'`, which is **line-anchored**, so
+it scores **0** on a file that does exactly what it looks for:
+
+| file | both define `[dbo].[workers]` | that grep |
+|---|---|---|
+| name on a continuation line | yes | **0** |
+| name on the same line | yes | 1 |
+
+So *"0 quoted identifiers"* and *"0 quoted identifiers I could see"* rendered identically. What
+turns the first into an answer is a separate check the instrument could not make about itself —
+**no `CREATE TABLE` in the tree puts its name on a later line**, 0 across all three dialects. Raised
+by a peer session scanning the same tree with a statement-aware parser and a positive control over
+all four quotings; the conclusion held and the instrument did not deserve to be believed alone.
+
+This is the same shape as the mutation check below, one level out: there the precondition is *did
+the mutation apply*, here it is **could this instrument have disagreed**. The guard's own parser
+does not share the defect — Python's `\s+` spans newlines, verified on the same two fixtures — so
+only the published command was blind, which is the worse place for it, because a command in a
+comment is what the next reader runs.
+
+**The widened pattern is a control rather than a hope, and that was checked rather than asserted.**
+Dropping the bracket and backtick alternatives fails four self-test cases, each reporting
+`parsed 0 tables` — the zero-members signature. So it cannot silently regress to matching nothing.
+
+**What caught the prediction was verifying the mutation applied before reading its result** — the same
+discipline §3.335 records, arriving one step earlier. The first falsification of that pattern
+returned exit 0 and the natural reading was "the trap is real and the guard now covers it". The
+mutation had applied; the prediction was simply wrong. An assertion that the anchor matched and
+the file changed is what separated the two.
+
+**And the inverse of that trap was found in the same function, twice.** `strip_sql_comments`
+modelled comments and not string literals — a tool applied to a format it does not model, which is
+what this guard exists to catch. Both demonstrated through `parse_tables`, the real consumer, not a
+proxy:
+
+| fixture | committed (two regexes) | this branch (a walk) |
+|---|---|---|
+| `DEFAULT 'see migration 064 -- nothing to sync'` | `disabled_at` **gone**, `errors=none` | all three columns |
+| `DEFAULT 'engine/*.go'` + a later `*/` | **NO TABLES**, unbalanced-paren error | both tables |
+
+**The first is the dangerous one and it points at §3.335's own subject.** `disabled_at` is the
+column cleat#1702's conversion adds to thirteen tables. The guard would have reported *"table X has
+no disabled_at"* — blaming the schema for a fault in its own parser — under precisely the
+migrations it exists to check.
+
+**The second was one unrelated edit from firing.** The old code applied the `/* */` rule first,
+over the whole file with `re.S`, before the per-line `--` rule ran, so a `/*` inside a line comment
+was unprotected. `migrations/postgres/072:18` and `migrations/mysql/070:62` each contain one, inert
+only because neither file contains a `*/`. Appending one ordinary block comment to 072 took its
+stripped length from **375 characters to 18**. A defect armed by an edit elsewhere in an unrelated
+file arrives with nothing connecting it to its cause.
+
+Neither fired today: old and new parses of all three dialects are **identical** in table names and
+column sets. Raised by a peer session; the fix is a walk that copies `'...'` and `$$...$$` bodies
+through verbatim, and two self-test cases pin it.
+
+**And a third defect in the same walk, dialect-independent: an unterminated `/*` swallowed the rest
+of the file and reported nothing.**
+
+    unterminated /*   ->  tables=['public.gadgets']   errors=[]
+
+`public.widgets` is simply absent. The loop exits on `i >= n` with `depth` still 1 and nothing
+downstream learns the walk ended inside a comment. That is worse than a wrong count under this
+section's own logic — a table missing from one dialect classifies as *"defined in only one
+dialect"* — and **Postgres and SQL Server both reject such a file**, so the guard would report a
+clean, complete schema for a migration the database will not run. Running off the end inside a
+comment is now an error.
+
+**The nesting comment beside it was wrong, and it was corrected by measurement rather than
+recall.** It claimed Postgres nests and SQL Server does not, and said counting was "harmless
+elsewhere". Run against live engines, `/* see engine/*.go */ SELECT 1 AS survived;`:
+
+| engine | result | nests? |
+|---|---|---|
+| postgres 16 | `ERROR: unterminated /* comment` | **yes** |
+| mysql 8.0 | `1` | **no** |
+| mssql 2022 | `Msg 113 … Missing end comment mark '*/'` | **yes** |
+
+Inverted for SQL Server, and it omitted the one dialect that actually does not nest. The second
+sentence was falsified by the case that started this: a comment whose *text* contains a glob is
+unnested in MySQL's reading and depth 2 to the counter, so it does not "close at depth 1 either
+way". Per-dialect counting would be airtight and is not worth it now that the residue is loud.
+A plain `/* … */` was run on each engine first as a positive control.
+
+**And the diagnosis that fix emits was itself wrong for one dialect.** It said *"Postgres and SQL
+Server both reject such a file"* unconditionally. True for those two; **false for MySQL, which is
+the dialect that produces it.** Measured directly:
+
+    /* see engine/*.go */ CREATE TABLE widgets (id INT PRIMARY KEY);
+    mysql 8.0     table created            -> the file is VALID
+    postgres 16   ERROR: unterminated /*   -> the file is rejected
+
+MySQL does not nest, so it closes that comment at the first `*/`. On a MySQL migration the file is
+fine and **the scanner is what disagrees with the engine** — and the message sent its author to
+audit a correct migration. A failure message that asserts a cause nobody checked is the same fault
+as a check that cannot fail, moved one step downstream: the run it fires on need not be the run it
+describes. The hint is now chosen by the directory being read, which also documents the residue
+left by not doing per-dialect counting, at the only place anyone will meet it.
+
+**The falsification of that fix is the clearest case in this section for asserting on TEXT and not
+only on status.** With the unterminated check disabled, both new self-test cases still exit 2 —
+*"parsed 0 tables"*, the right status for entirely the wrong reason. Only the assertion that the
+output says `never closed` tells them apart. A status-only self-test would have passed a guard that
+had lost the check.
+
+**A proxy disagreed with the real consumer while this was being checked, which is the section's own
+lesson once more.** The first faithful comparison scored columns with a line-oriented regex over
+the stripped text, and it reported `disabled_at` as *present* under the broken version — because
+the truncated line leaves `disabled_at` intact as a line, while `parse_tables` splits on top-level
+commas and glues it onto the previous column. Convenient instrument, wrong answer, in the direction
+that said there was no bug.
+
+Coverage: 23 Postgres tables, 23 MySQL, 24 SQL Server; 17 of 40 clauses enforced, unchanged — this
+adds membership reach, not clause reach. Clause checks remain single-dialect by design.
+
+Files: `scripts/check-entity-contract.py`, `scripts/entity-contract.tsv`,
+`.github/workflows/ci.yml`.
+
+---
+
+### 3.337 A condition that never decides anything cannot be observed to be wrong — ✅ **RECORDED 2026-09-16** (cleat#1723)
+
+Graduates the finding of cleat#1719/#1723 to `CLAUDE.md`, per WORKSTREAM R3. It is a fourth entry
+under *"could this check have disagreed?"*, and it differs from the three already there: those are
+checks that gave the **wrong** answer. This one gives the **right** answer every time, because
+something else is answering.
+
+Four instances in one day, three inside a single PR:
+
+| the check | why its verdict was right | what was actually deciding |
+|---|---|---|
+| self-test for an unterminated `/*` | exit 2, as asserted | the vacuity check — a swallowed file leaves 0 tables |
+| self-test for a dialect-specific hint | it errored, as asserted | the error fired; only its *explanation* was wrong |
+| a watcher's "nothing pending, nothing red" | never merged early | `mergeStateStatus` refusing first, every time |
+| a scan for quoted identifiers | reported 0, and 0 was right | the tree happens to put every name on one line |
+
+**Two remedies, and they are not the same one.** Assert on the **text**, not only the status —
+disable the check under test and the first two cases still exit 2, because a correct second
+mechanism supplies the expected status. And gate on a **denominator the run cannot shrink**: the
+reconstruction on cleat#1718's head found a 24-second window where 2 of an eventual 49 check-runs
+existed, both complete and non-red, with **0 of 32** required contexts green.
+
+**Where to look is the actionable half.** Not the checks you doubt — the ones that have never yet
+refused anything. The watcher's green-set assertion had run on every PR of this session with
+`mergeStateStatus` refusing ahead of it every single time.
+
+**A number in the new text was imprecise and was corrected before merge**, which is the section's
+own rule biting its own paragraph. It said "a whitespace split reports 56" without saying which
+split: `set(...split())` gives 56, a raw token count gives 112, and the answer is 32. All three
+commands are now published beside their results.
+
+Files: `CLAUDE.md`.
+
+---
+
+### 3.338 A resolver that answers every time is a lookup of who talks most — ✅ **RECORDED 2026-09-16** (cleat#1715)
+
+Graduates to `CLAUDE.md` the attribution lesson from mis-crediting cleat#1715's claim, per
+WORKSTREAM R3. It sits under *"Claim outright or not at all"*, because claiming only works if the
+next reader can resolve **whose** claim it is, and every marker that would let them is optional at
+the point of writing.
+
+**The measurement that makes it a rule rather than a resolution.** Resolving the claimant of the
+ten open issues two ways:
+
+| how the claimant is resolved | result |
+|---|---|
+| any `Claude-Session` id present in the thread | a confident id for **10 of 10** |
+| the marker on the claim comment itself | a marker on **4 of 19** claim comments; UNKNOWN for 15 |
+
+The honest resolver declines four times out of five; the presence-based one never declines. The
+known-positive was #1717, whose claimant I had been told independently — presence returns the wrong
+session for it.
+
+**Three scans, three ways to be wrong, and one anchor that is wrong in neither direction.** Measured
+over every commit message in `develop` at `b6e88452`:
+
+    B=$(git log --format=%B origin/develop)
+    grep -cE '^Claude-Session:' <<<"$B"                                       # 741 — the answer
+    grep -cE '^Claude-Session:[[:space:]]*https://claude\.ai/code/' <<<"$B"   # 735 — loses 6
+    grep -oE 'session_[A-Za-z0-9_]+' <<<"$B" | sort -u | grep -c .            # 10 — invents 5
+
+The 6 it loses are one participant's consistent habit, not a uniform miss rate. Among the 5 it
+invents is `session_01` — a real id, truncated, quoted in `74b6bcd0`'s own message as it removes a
+literal `"session_01..."` ellipsis from a doc comment.
+
+**Two further traps recorded with it.** `git log` indents bodies by four spaces, so the correct
+field anchor returns **0 of 741** if pointed at `git log` rather than `git log --format=%B` — a
+blank that reads as "nobody here uses session trailers". And a squash concatenates its
+constituents' bodies: 121 of the 554 trailered commits carry the marker more than once, every one a
+single id, which a per-line count reads as multi-session collaboration.
+
+**Why no hook fixes this.** `CLAUDE_CODE_SESSION_ID` is exported to hooks but is a UUID, and 0 of
+the 741 trailers use that form; the id they do use lives in `CLAUDE_CODE_BRIDGE_SESSION_ID`, whose
+presence depends on how the session was launched. A hook keyed on the obvious name emits a
+well-formed marker that resolves to nothing and passes every scan above.
+
+Files: `CLAUDE.md`.
+
+### 3.263 A worker that cannot serve a run releases it instead of destroying it — ✅ fixed in cleat#1710
+
+Both pre-flight checks in `executeWorkflow` ran **after** the claim and answered
+`recordTerminalFailure(..., engine.ErrPermanent, ...)`. So a worker that could not serve a run
+claimed it and killed it. A pool where 3 of 10 workers satisfy a workflow's `plugin_deps` did not
+run it at 30% throughput — it permanently failed roughly 70% of its runs, decided by claim races.
+
+**The predicate, which is the part worth keeping: a pre-flight check that fails on a WORKER-LOCAL
+fact must release, not terminate.** The discriminator is where the fact lives, not how serious it
+is:
+
+| | example | verdict |
+|---|---|---|
+| run-intrinsic | a malformed def, an undecodable input | terminate — wrong on every worker |
+| worker-local | `w.plugList`, `wfMeta` from the loaded binary | **release** — a sibling may serve it |
+
+The issue was filed against the plugin check alone. The version check one line above has the same
+shape and the same consequence — `wfMeta` is read from the binary *this worker* loaded, which
+during a rolling deploy is exactly as worker-local as its plugin list — so fixing one and leaving
+the other would have produced a guard that looks complete and is not. Both converted.
+
+**What happens when the satisfying worker never arrives, stated because the failure this replaces
+was at least visible.** The run does not circulate hot: `ReleaseWorkflow` writes `next_wake_at` on
+the **row**, so the backoff throttles the whole pool rather than one worker — a run nothing can
+serve costs one claim-and-release per interval *cluster-wide*, stays `ready`, keeps its history,
+and is visible to `ListWorkflows` and to a log line naming the unmet requirement.
+
+That quiescent stuck state is deliberate, and the argument against bounding it is already written
+down in this repo for `ReclaimCount` (`engine/store_types.go`): the count exists so an operator can
+*see* a loop and is deliberately not a bound, because "dead-lettering past a threshold would turn a
+node being redeployed into permanent failure of a workflow that did nothing wrong". A rollout
+window is precisely when a threshold would destroy the work it is meant to preserve. No counter and
+no threshold were added; a bound needs persisted per-run state, and §1702 is sequencing that shape.
+
+**The finding worth more than the fix: five behavioural tests of the new helper cannot see the
+bug.** They exercise `releaseForAnotherWorker`, and the defect lives at the *call site* —
+`executeWorkflow` needs a real WASM binary to reach either check, so no unit test reaches them.
+Measured by reintroducing the exact bug with the AST guard excluded:
+
+    F1b  the #1710 bug, AST guard excluded  ->  ok  (all five green)
+    F1   the #1710 bug, AST guard included  ->  FAIL "plugin_check" is passed to recordTerminalFailure
+
+So `TestNeitherPreflightCheckTerminatesTheRun` is the only thing standing between the repo and a
+silent regression, and it keys on the op strings because that is what such a regression has to
+carry. A test that cannot fail on the bug it was written for is the thing this plan keeps
+rediscovering; here it was five of them, and only the deliberately different reading caught it.
+
+Falsified: both checks reverted to terminating (red on the guard, green without it), the backoff
+removed, and the zero-backoff fallback removed.
+
+    go test ./cmd/cleat-worker/ -run TestNeitherPreflightCheckTerminatesTheRun -count=1
+
+### 3.339 A figure derived from the inputs cannot notice that the run skipped work — ✅ **FIXED 2026-09-17** (cleat#1730)
+
+`check-entity-contract.py`'s clause loop skipped any member missing from the reference
+dialect's parse, on a comment that was true only sometimes:
+
+    for table in members:
+        if table not in tables:
+            # Already reported as stale above.
+            continue
+
+`stale` is computed against the union of all three dialects' bare names, so a member whose
+Postgres `CREATE TABLE` the scan failed to read — while MySQL or SQL Server still defines it —
+is **not** stale, is skipped past every clause, and the guard exits 0.
+
+Measured by making `workflow_tags`'s Postgres CREATE unmatchable and leaving the siblings
+intact, with the mutation asserted applied before the result was read:
+
+| | clean | one member unparsed in Postgres |
+|---|---|---|
+| `tables parsed` | 23 | **22** |
+| `clauses enforced this run` | 17 of 40 | **17 of 40** |
+| verdict | `OK`, exit 0 | `OK`, exit 0 |
+
+**The second half is the one worth carrying.** `clauses enforced this run` existed to stop a
+run that agrees with every schema because it checked nothing — the §3.335 vacuity gate. It
+could not, because it was arithmetic over two TSV files:
+
+    enforced = len(members) * len(CLAUSES) - len(gf)
+
+Whether the loop evaluated a single column never reaches it. `CLAUDE.md` says to gate on a
+quantity **the run cannot shrink**; this gated on one **the run cannot touch**, which is the
+degenerate case — a restatement of the inputs wearing the costume of a measurement. The
+distinction is not academic: the figure is the only thing standing between a partial run and a
+green one, and it was inert.
+
+The repair is to count what the loop evaluated and report *that*; the arithmetic becomes an
+expectation to disagree with rather than the answer. A member absent here but present in a
+sibling is now named at exit 2. `ALTER_ADD_RE`/`ALTER_DROP_RE` also take the same `IDENT`
+alternation `CREATE_TABLE_RE` uses, and an ALTER naming an unparsed table is recorded rather
+than discarded — the widening closed a gap that discarded nothing (0 unattributable ALTERs in
+all three dialects at `b6e88452`), and the recording is the half that catches the form nobody
+thought of.
+
+**Three self-test cases, each falsified by reverting ONE part at a time.** Reverting the whole
+fix goes red and reads as confirmation of all of it; reverting one part at a time is what
+attributes each case to its own mechanism:
+
+    revert widening (ALTER_ADD_RE grammar)      exit=1  names its own case
+    revert recording (else: errors.append)      exit=1  names its own case
+    revert unparsed-member detection            exit=1  names its own case
+    restored                                    26/26 pass, rc=0
+
+**One branch is untested and says so in the source.** The `evaluated != expected` backstop is
+unreachable by any fixture — every current skip is either stale or unparsed — so by this repo's
+own rule it has never been observed to be wrong. It was observed deliberately by injecting a
+skip the `unparsed` list cannot see, and the injection and its output sit in the comment beside
+it, with instructions to delete the comment when someone makes it fixture-reachable. A recorded
+observation is weaker than a test and much stronger than a branch nobody has run.
+
+Found while prototyping a different fix. The original report (the `ALTER` identifier asymmetry)
+overstated its own impact in the flattering direction, and the correction is in cleat#1730's
+comments rather than silently edited away.
+
+Files: `scripts/check-entity-contract.py`.
+
+### 3.266 A guard printed a count it had never fetched, so the one context it could not see gated every merge for three days — ✅ **FIXED 2026-09-20** (cleat#1937)
+
+`scripts/check-required-contexts.py` is the guard over `tiers.yaml: required_contexts`, the
+in-tree record of what blocks a merge into `develop`. On 2026-09-17 `Web Dashboard` was added
+to branch protection. Every run of the guard between then and 2026-09-20 ended:
+
+    check-required-contexts: OK, 32 required contexts declared and consistent with
+    tiers.yaml and .github/workflows/.
+
+while GitHub required 33.
+
+**Nothing in that sentence is false, and it cannot be read correctly.** It means *32 things are
+declared and those 32 are internally consistent*. It reads as *32 is the number* — a numerator
+whose denominator the default path never fetched. The comparison against branch protection
+lived in `--check-live`, a separate mode, and the script said so about itself in its own
+docstring ("WHAT IT CANNOT CHECK ... whether the declared list still equals what GitHub
+actually requires"). A limitation written in a docstring does not reach the person reading the
+success line.
+
+So `Web Dashboard` gated every PR into `develop` as must-pass for three days with no `covers:`
+classification and no `why_required` — which is, word for word, the state §3.402 created this
+block to end: *"a tier-2 package held to must-pass is a fine thing to decide and a bad thing to
+discover."* The drift arrived through the one gap that section had recorded in itself and left
+open.
+
+#### The decision #1937 deferred, and how it was resolved
+
+The report stopped short of choosing whether `--check-live` should run by default, on the
+grounds that it needs network and admin scope. Resolved as: **the default run attempts the read
+and says which of the two happened.**
+
+* It **fails on a disagreement** — the live list and the declared one differing is a real
+  finding whoever is looking.
+* It **never fails on an inability to read.** `GITHUB_TOKEN` has no admin scope, so CI will
+  normally land here, as will a fork PR and an offline laptop. A guard that goes red because
+  the network was slow teaches people to re-run rather than to read; §3.401 removed a required
+  check's wall-clock assertions for exactly this reason.
+* When it cannot read it prints `NOT CHECKED`, names why (`gh: Bad credentials (HTTP 401)`,
+  `--no-live was passed`, `gh is not on PATH`), and prints the date the two lists were last
+  compared. **The count is never handed over unqualified.** That is the half that works with no
+  credentials at all, and it is the half that matters: the failure here was not that nobody
+  could check, it was that the output did not say nobody had.
+
+`fetch_live` and `diff_live` are split so the comparison is a pure function over two sets.
+`--self-test` falsifies it with literals on any machine — a self-test that skips when a
+credential is absent prints the same thing whether it worked or never ran, which is this
+script's own docstring about itself.
+
+#### Verified by putting the defect back
+
+The declaration was reverted to its pre-fix state (`tiers.yaml` and
+`.github/required-checks.txt` at `2b9adac1`, so `total: 32` still matched its own list and only
+the new check could fire) and the new guard run against live branch protection:
+
+    check-required-contexts: FAIL
+      required on develop but NOT declared in tiers.yaml: 'Web Dashboard'
+
+One finding, from the one check that is new. Restored, all four modes green:
+default-with-scope (`requires exactly these 33`), `--no-live`, `--check-live`
+(`33 contexts, declared list matches exactly`), and `--self-test` — 8 negative controls, 2 new
+ones for the live diff, and a positive control for each half.
+
+#### And the new output was wrong on its first CI run, in its own subject
+
+The `NOT CHECKED` block prints why the live list could not be read, taken from
+`gh`'s stderr. The first version took the LAST line. In the `Lint` job `GH_TOKEN`
+is not set at all, so `gh` answers with a four-line hint whose last line is a
+YAML fragment — and the guard printed:
+
+    check-required-contexts: NOT CHECKED -- whether branch protection on develop still
+      requires exactly these 33. Reading it needs admin scope, and this run did not read it:
+            GH_TOKEN: ${{ github.token }}
+
+A variable name where a reason belongs, in the paragraph this whole section is
+about. Fixed to prefer the line carrying an HTTP status and otherwise the first
+line, as `gh_error_reason`, which is pure and has four self-test cases — three
+of them built from the actual stderr shapes rather than invented. The third case
+puts the HTTP line **between** a preamble and a hint, so neither `lines[0]` nor
+`lines[-1]` satisfies it: reverting to either is red, which is what makes the
+case set pin a rule rather than a position.
+
+Worth recording rather than quietly amending: the defect was found because the
+change made the guard print something in CI that nobody had seen before. An
+output nobody reads cannot be wrong in a way anyone notices, which is most of
+why the original `OK, 32` survived three days.
+
+#### The second finding: the count was written down eleven times
+
+`grep -rn '32 required contexts\|32 contexts'` found the number asserted in nine workflow
+files, `docs/project/release-process.md`, and `tiers.yaml`'s own header — none of them
+generated, all of them wrong. `.golangci.yml` already records what two copies of one fact do
+("two mechanisms with two baselines, which is the shape that let the routing tables in 2.72
+drift apart"); eleven copies drift eleven ways.
+
+They are not guarded, they are **deleted**. The nine workflow comments said "There are 32
+required contexts on develop and every one of them has to report here" — the number was
+decorative and the sentence is true without it. `release-process.md` points at
+`tiers.yaml: required_contexts` instead of restating a total. The count now lives in exactly
+two places that cannot disagree: `required_contexts.total`, which check 4 compares against the
+length of the list below it, and the guard's own output, which computes it.
+
+Historical counts in `CLAUDE.md` and §3.402 are left alone. "0 of 32 required contexts green"
+is a record of a measurement on a date, not a claim about today, and rewriting it would destroy
+the evidence to tidy a number.
+
+Files: `scripts/check-required-contexts.py`, `tiers.yaml`, `.github/required-checks.txt`,
+`docs/project/release-process.md`, nine files under `.github/workflows/`.
+
+### 3.340 SQL Server's row-level security gets a write side, and DeliverSignal loses its existence oracle — ✅ **FIXED 2026-09-24** (cleat#2205, cleat#2218)
+
+**cleat#2205.** SQL Server's tenant RLS had `FILTER` predicates only. A `FILTER` predicate
+restricts what `SELECT`/`UPDATE`/`DELETE` can *see* — it says nothing about what a write
+*leaves behind*. Measured on a real database, connected as an ordinary login holding tenant A's
+session context:
+
+    INSERT INTO dbo.tenant_domains (..., tenant_id, ...) VALUES (..., B, ...)   succeeds, stamped B
+    UPDATE dbo.tenant_domains SET tenant_id = B WHERE hostname = <A's own row>  succeeds, row moves to B
+
+PostgreSQL does not have this gap — its policies carry `WITH CHECK`, enforced on the post-image
+of every write. `migrations/mssql/103_a_filtered_write_is_a_blocked_write.sql` is the SQL Server
+equivalent: it adds `BLOCK` predicates (`AFTER INSERT`, `AFTER UPDATE`, `BEFORE UPDATE`) to every
+table already carrying a `FILTER` predicate on `dbo.fn_tenant_filter`, reusing the same function
+rather than a second one so the admin-bypass form (`migrations/mssql/optional/
+cross_tenant_claim.sql`) keeps identical latitude on writes that it already has on reads. The
+table set is derived live from `sys.security_predicates`, not hand-listed, for the reason 075
+gives for doing the same. `engine/mssql_block_predicates_test.go` proves it two ways: a live
+guard (`TestEveryMSSQLFilterPredicateHasAMatchingBlockPredicate`) that fails if any FILTER-bound
+table is missing one of the three BLOCK operations, and a real-store test
+(`TestMSSQLBlockPredicatesRejectCrossTenantWrites`) proving a cross-tenant INSERT is refused, a
+tenant-moving UPDATE is refused, and legitimate same-tenant writes still succeed.
+
+**The blast radius was the finding, not the fix.** BLOCK evaluates `SESSION_CONTEXT('tenant_id')`
+on every write regardless of the caller's own tenant field, deterministically rather than only
+sometimes (FILTER let a query-optimizer short-circuit mask some cases). 34 pre-existing MSSQL
+tests relied on the exact write-side loophole this closes — raw/unscoped connections writing
+tenant-scoped rows with no session context, or a `*sql.DB` pool whose `sp_set_session_context`
+does not survive `database/sql`'s connection-checkout reset. Fixed across 9 test files by pinning
+a `*sql.Conn` and setting session context once per connection (the established pattern from
+`mssql_double_claim_test.go`), or by routing genuinely cross-tenant seeding through the
+`cleat_admin`-role admin-bypass pool where a single tenant's session context cannot satisfy a
+multi-tenant write. One latent bug surfaced in the same sweep: `workflow_promises.tenant_id`
+(`NVARCHAR(255)`, not `UNIQUEIDENTIFIER`) was seeded with `''` in a cascade-delete fixture, which
+FILTER's optimizer-masked evaluation never reached but BLOCK's unconditional one does
+(`CAST` of `''` to `UNIQUEIDENTIFIER` fails outright) — fixed to a real tenant UUID.
+
+One test, `TestAnInvisibleRowIsNotAMissingRow` (cleat#982's proof that a filtered write is not an
+invisible write), could no longer *produce* the invisible row it was written to detect — the
+INSERT it relies on is now refused outright. Converting its `t.Skip` to a permanent assertion
+would have been a skip that fires on every run, which `scripts/check-skips.sh` correctly flags
+as not a skip at all (CLAUDE.md, "a skip that hides a crash is not a skip"). Rewritten instead
+into a positive, permanent regression test: the INSERT must fail with a block-predicate error,
+and the row must not exist afterward — proving cleat#2205 closed the exact gap cleat#982 was
+about, rather than skipping past it.
+
+**cleat#2218.** `DeliverSignal` had an existence oracle, independent of the BLOCK predicates
+above and present on every dialect: `workflow_signals` carries a real FK to
+`workflow_instances(id)` (MySQL, MSSQL) — a nonexistent workflow id threw an FK error, while a
+workflow id that exists under a *different* tenant satisfied the FK and wrote an orphan row under
+the caller's own tenant, returning nil. Error-versus-nil told a caller which was true, reachable
+over HTTP through webhookingest's processed flag. Closed identically on Postgres, MySQL and SQL
+Server by gating the INSERT itself: `INSERT ... SELECT ... WHERE EXISTS (SELECT 1 FROM
+workflow_instances WHERE id = ? AND tenant_id = <caller>)`. A nonexistent id and a foreign-tenant
+id now take the identical path — the `EXISTS` is false either way, nothing is written, no error —
+so the two cases are indistinguishable from every side, not just the victim's.
+
+`engine/mssql_admin_login_control_plane_tenant_test.go`'s `DeliverSignal`/`DeliverSignalNonexistentID`
+cases prove it under SQL Server's `cleat_admin` bypass role specifically; a new dialect-independent
+test, `TestDeliverSignalToAnIDTheCallerCannotTouchWritesNothing`
+(`engine/a_signal_to_an_id_the_caller_cannot_touch_writes_nothing_test.go`), proves the same
+ForeignID/NonexistentID/OwnID trio through the ordinary tenant-scoped store on all three
+registered backends via `MultiTenantStoreBackend`. The doc comments on the interface and both
+dialect implementations (`engine/store_signals.go`, `engine/mssql_signals_promises.go`,
+`engine/mysql_store.go`) state the no-existence-oracle guarantee unconditionally now — no
+"except when" caveat survives.
+
+Re-derive the BLOCK predicate count live:
+
+    SELECT COUNT(DISTINCT target_object_id) FROM sys.security_predicates
+    WHERE predicate_definition LIKE '%fn_tenant_filter%' AND predicate_type_desc = 'BLOCK';
+
+Full `go test ./engine/... -count=1 -p 1` against a live SQL Server: run twice, zero test-level
+and zero package-level failures both times (one single-occurrence failure on the first full run,
+`TestACompletedRunReportsWhenItFinished/mssql`, did not reproduce across 5 isolated retries nor
+across a full second run — a flake, not a regression from this change).
+
+**"No error" did not survive review.** §3.341/cleat#2227, merged the same day, replaces it with
+a typed `ErrWorkflowNotFound`, identical for both cases, so the "no error" sentence above
+describes this PR's original mechanism rather than today's error contract — the oracle it
+closes is unaffected; what changed is only whether "not found" is silent or loud. See §3.341
+before citing this section's "no error" as current.
+
+Files: `migrations/mssql/103_a_filtered_write_is_a_blocked_write.sql`,
+`migrations/mssql/075_the_admin_bypass_is_opt_in.sql`, `migrations/mssql/optional/cross_tenant_claim.sql`,
+`engine/mssql_block_predicates_test.go`, `engine/a_signal_to_an_id_the_caller_cannot_touch_writes_nothing_test.go`,
+`engine/store_signals.go`, `engine/mysql_store.go`, `engine/mssql_signals_promises.go`,
+`engine/a_deleted_row_and_an_invisible_row_are_told_apart_test.go`, `docs/reference/multi-tenancy.md`,
+and the nine other MSSQL test files whose fixtures needed a pinned, session-context-set connection.
+
+### 3.341 DeliverSignal's silence outlived its reason — ✅ **FIXED 2026-09-24** (cleat#2227)
+
+**§3.340's own "no error" half became the next bug, inside the PR that shipped it.** cleat#2218
+closed `DeliverSignal`'s existence oracle by making a foreign-tenant id and a nonexistent id
+answer identically: `RowsAffected()==0` on the EXISTS-gated INSERT returned nil, same as success.
+That is correct for the oracle question -- a caller still learns nothing about *which* is true --
+but it also means a signal to a workflow that is genuinely gone, in the CALLER'S OWN tenant
+(purged, or never existed), is now indistinguishable from a signal that landed. Two real
+consumers depend on telling those apart, in two different ways. webhookingest's retry/dead-letter
+loop (`plugins/webhookingest/background.go`) treats nil as delivered and never dead-letters an
+event whose target does not exist -- a live bug, unaffected by cleat#2218's timing, that #2227
+fixes. eventtriggers' awaiter cleanup (`plugins/eventtriggers/publish.go`'s `signalAwaiters`)
+unregisters on the success path -- so a nil for "not found" was ALREADY being unregistered there,
+as a side effect of cleat#2218, not left registered: the actual `cleat#2213` leak predates
+cleat#2218 (a plain, non-nil error for "not found" before it, which the failure path does not
+unregister for) and was fixed by cleat#2218's nil by accident, at the cost of logging a delivery
+that never happened. cleat#2227 does not reopen or refix a leak here; it gives "not found" its
+own path so the SAME outcome (unregister) happens honestly, with its own log line, instead of by
+being mistaken for a delivery.
+
+**The fix is `ErrWorkflowNotFound` on `RowsAffected()==0`, on all three dialects**
+(`engine/store_signals.go`, `engine/mysql_store.go`, `engine/mssql_signals_promises.go`), loud
+again without reopening the oracle: foreign-tenant and nonexistent still return the *identical*
+error, so a caller learns "not found", never which reason. A plugin-visible
+`plugin.ErrWorkflowNotFound` sentinel carries this across the plugin/engine boundary (plugins
+cannot import `engine`), translated in `cmd/cleat-worker/main.go`'s `signalPluginWorkflow` and
+`signalPluginWorkflowWithAuth`. `eventtriggers.signalAwaiters` now unregisters the awaiter on
+`errors.Is(err, plugin.ErrWorkflowNotFound)` specifically, rather than only on success.
+`webhookingest` needed no code change: its retry/dead-letter path is already generic over any
+non-nil error, so restoring a real one restores full dead-letter-after-3-retries behaviour with
+nothing plugin-specific to write.
+
+**This is the residual §3.86 recorded and declined to fix**, back when the mechanism was a
+`MERGE` rather than an EXISTS-gated INSERT: "distinguishable from delivering to an id that
+exists nowhere (which still succeeds, creating a harmless orphan row under the caller's own
+tenant) ... Turning the refusal into a clean not-found is a change to an HTTP contract and
+belongs in its own PR" (`IMPROVEMENT-PLAN-CLOSED.md`). §3.215 then removed the orphan row
+entirely (the INSERT stopped being an upsert), and §3.340/cleat#2218 made the refusal silent
+instead of a 500 -- closer to "clean not-found" in spirit, but still not loud. cleat#2227 is
+that PR: the refusal is now a typed, caller-visible not-found, on the ordinary write path this
+time rather than as an HTTP status code.
+
+**Test contract inverted on purpose, and the inversion is the finding, not a regression.**
+`TestDeliverSignalToAnIDTheCallerCannotTouchWritesNothing`'s `ForeignID`/`NonexistentID`
+subtests (run per dialect: Postgres, MySQL, MSSQL) and
+`mssql_admin_login_control_plane_tenant_test.go`'s `DeliverSignal`, `DeliverSignalWake` and
+`DeliverSignalNonexistentID` subtests asserted `err == nil` under cleat#2218's contract; they
+now assert `errors.Is(err, ErrWorkflowNotFound)`. `OwnID` and the own-tenant positive controls in
+the admin-login file are unchanged and still must succeed -- without them, a `DeliverSignal` that
+had stopped writing ANYTHING would pass every inverted assertion too. The plugin-boundary
+equivalents in `cmd/cleat-worker/a_signal_plugin_workflow_is_tenant_scoped_test.go` (the
+cross-tenant case in each of its three tests: plain Postgres, sharded Postgres, MSSQL) were
+inverted the same way, to `errors.Is(err, plugin.ErrWorkflowNotFound)`.
+
+Falsified in two rounds, test files untouched each time. Reverting the three store files alone:
+9 leaf subtests in `engine` went red for the expected reason (`want ErrWorkflowNotFound, got
+<nil>`) -- the 6 dialect × case combinations above plus the 3 MSSQL-admin-login cases. Reverting
+them again with the plugin-boundary translation in place: the 3
+`a_signal_plugin_workflow_is_tenant_scoped_test.go` cross-tenant cases went red the same way
+(`want plugin.ErrWorkflowNotFound, got <nil>`). Every positive control stayed green in both
+rounds. `TestANotFoundAwaiterUnregistersInsteadOfLeaking`
+(`plugins/eventtriggers/a_not_found_awaiter_unregisters_instead_of_leaking_test.go`) was
+falsified the same way against `signalAwaiters` alone and carries its own negative control: an
+ordinary (non-sentinel) delivery error must NOT unregister the awaiter, only
+`ErrWorkflowNotFound` does.
+
+**cleat#2213's leak had a second, live path this section did not name: `--require-signal-auth`.**
+`engine.GetAllowedSignalCallers` was never touched by cleat#2218 -- it kept returning
+`(nil, nil)` for a missing workflow on all three dialects, which `signalPluginWorkflowWithAuth`
+read as "exists, but the caller is not on the list" and answered the ordinary auth-denied error,
+not `ErrWorkflowNotFound`. So with signal authorization on, `signalAwaiters` never took the
+not-found branch above for a purged workflow -- it retried the auth-denied error forever,
+continuously, independent of cleat#2218's timing. `GetAllowedSignalCallers` now returns
+`ErrWorkflowNotFound` for a missing row too, on all three dialects, closing that path the same
+way. The HTTP layer picks up the same fix: `cmd/cleat-worker/server.go`'s `handleSignal` maps it
+to 404 on the auth-check branch, and `handleGetAllowedSignals` (GET on the same resource
+`handleSetAllowedSignals`/PUT already 404'd on) now does too.
+
+**A second, narrower not-found path was found in review and closed the same way: a purge racing
+the EXISTS-gated INSERT itself.** The EXISTS check `deliverSignalTx` guards on is a plain,
+non-locking read, so a `DeleteCompletedWorkflows` purge committing in the gap between that read
+and the INSERT's own foreign-key check can turn a zero-rows not-found into a raw FK-violation
+error instead -- SQLSTATE 23503 on PostgreSQL, error 1452 on MySQL, error 547 on SQL Server.
+`isSignalsWorkflowFKViolationPG` / `isSignalsWorkflowFKViolation` /
+`isMSSQLSignalsWorkflowFKViolation` catch it on all three and map it to the same
+`ErrWorkflowNotFound`. This PR's first draft called the window "a few microseconds, not
+reproduced under a live race" -- wrong, found in review: a held-open purge (a transaction that
+deletes the row and does not commit) makes it deterministic rather than rare, and
+`engine/deliver_signal_purge_race_test.go` forces it directly on all three dialects rather than
+relying on timing. Falsifying each dialect's classifier separately found the three do not agree
+on mechanism: PostgreSQL's FK trigger genuinely blocks and needs the classifier (falsifying it
+turns the test red with a raw driver error); MySQL and SQL Server's `WHERE EXISTS(...)` blocks at
+the subquery itself under this same interleave and resolves via the ordinary
+`RowsAffected()==0` branch, never reaching their own classifiers at all -- recorded in that
+test's own comment rather than left as an unqualified "all three dialects" claim.
+
+**The four `ErrWorkflowNotFound`→404 HTTP mappings this added (`server.go`'s `handleSignal` on
+its auth-check, idempotent-delivery and plain-delivery branches, plus `handleGetAllowedSignals`)
+had no test of their own until review found the gap** -- the nearest existing coverage
+(`TestASignalForAnUnownedWorkflowNeverReachesTheStore`) exercises `callerOwnsTarget`, a check
+that runs before all four and never reaches any of them. `cmd/cleat-worker/signal_not_found_mapping_test.go`
+covers each directly, with a plain-error negative control (500, not 404) on the two branches that
+can distinguish "not found" from "some other store failure".
+
+Files: `engine/store_signals.go`, `engine/mysql_store.go`, `engine/mssql_signals_promises.go`,
+`plugin/plugin.go`, `cmd/cleat-worker/main.go`, `cmd/cleat-worker/server.go`,
+`plugins/eventtriggers/publish.go`,
+`engine/a_signal_to_an_id_the_caller_cannot_touch_writes_nothing_test.go`,
+`engine/mssql_admin_login_control_plane_tenant_test.go`, `engine/mssql_store_test.go`,
+`engine/unscoped_queries_tenant_test.go`, `engine/deliver_signal_purge_race_test.go`,
+`cmd/cleat-worker/a_signal_plugin_workflow_is_tenant_scoped_test.go`,
+`cmd/cleat-worker/signal_not_found_mapping_test.go`,
+`cmd/cleat-worker/a_purged_awaiter_unregisters_across_dialects_test.go`,
+`plugins/eventtriggers/a_not_found_awaiter_unregisters_instead_of_leaking_test.go`.
+
+### 3.342 Two plugin routes with no cleat credential had no body ceiling either — 🟡 **IN PROGRESS 2026-09-24** (cleat#2232)
+
+**"POST /slack/interactive" and "POST /ingest/{source_id}" are both exempt from `auth.Middleware`
+and `auth.HostBindingMiddleware` by design** — Slack's own servers and an inbound webhook sender
+carry no cleat API key to check — and until this issue that exemption was the whole of their
+protection. Every plugin route read its body with a bare `io.ReadAll(r.Body)` or
+`json.NewDecoder(r.Body)`, so an anonymous caller on either route could send an unbounded body and
+the plugin would buffer all of it before ever validating anything.
+
+**Design A, approved before this work started: bound the body at the host, not inside each
+plugin.** `plugin.HasRoutes.RegisterRoutes` now takes a `plugin.Router` (`Handle`/`HandleFunc`,
+matching `*http.ServeMux`'s method set structurally) instead of `*http.ServeMux` directly. The
+host's `pluginBodyLimitRouter` (`cmd/cleat-worker/plugin_body_limit.go`) implements `Router` over
+the same mux every plugin route already shared, wrapping every handler in
+`http.MaxBytesReader(w, r.Body, limit)` at registration time — `--plugin-max-body-size` (default 1
+MiB) unless the route declared its own ceiling via `plugin.MaxBody(limit, h)`
+(`plugin/body.go`), which blobstore's `PUT /blobs/{key...}` now does, sized by its own
+(previously unenforced) `max_blob_size` config field, defaulted to 10 MiB when unset.
+
+**All 26 plugin body-read sites converted to `plugin.ReadBody` / `plugin.ReadJSONBody`**, the
+same division cleat#1332/#1338 established for the core API's `decodeBody`/`readBody`: the host
+sets the ceiling, the helper translates the resulting `*http.MaxBytesError` into a 413 naming the
+limit, and a plugin route can no longer hand-roll that translation (or omit it) the way seven core
+handlers once did. Converting them changed observable behaviour at four sites that were asserting
+the pre-#2232 defaults on purpose — a generic body-read failure going from 500 to 400, and a fixed
+"invalid JSON body" message becoming "invalid JSON: %v" — and those four tests
+(`webhookingest_behavioral_test.go` ×2, `pagerdutyalert_behavioral_test.go`,
+`scheduledbackup_behavioral_test.go`) were updated to match the design's intent rather than left
+pinning the old behaviour.
+
+**Two guards, so a 27th site or a route that forgets to run through the adapter cannot repeat
+this silently.** `plugins/every_plugin_reads_its_body_through_the_helper_test.go` is an AST scan
+— not a grep, since 16 plugin files legitimately call `io.ReadAll` on an *outbound* response body
+(`resp.Body`, `tokenResp.Body`, ...) and a text ban cannot tell that apart from an inbound one —
+that flags any `io.ReadAll`/`json.NewDecoder` call whose argument is `<name>.Body` for a name
+bound to `*http.Request` in that file, discovered per file rather than hardcoded as `r`.
+`cmd/cleat-worker/body_limit_413_names_the_limit_test.go`'s existing
+`TestEveryBoundedBodyGoesThroughTheHelper` gained `boundPluginRequestBody` as a third allowed
+`MaxBytesReader` call site, alongside `decodeBody`/`readBody`.
+`TestPluginRouteBodyLimitAppliesOnBothAuthExemptRoutes`
+(`cmd/cleat-worker/plugin_route_body_limit_exempt_test.go`) rebuilds the real three-layer chain —
+`auth.Middleware` → `auth.HostBindingMiddleware` → `pluginBodyLimitRouter` — with the exempt-path
+list copied verbatim from `main.go`, since main()'s own wiring has no call site a test can reach
+(see `a_slack_interactive_route_is_exempt_test.go`'s doc comment), and asserts an anonymous
+oversized POST to each exempt route gets 413 before `plugin.ReadBody` accepts it, with a control
+proving the same anonymous request is accepted under the limit. `plugin/body_test.go` adds direct
+unit coverage of `MaxBody`/`MaxBodyLimit`'s round trip and `ReadBody`/`ReadJSONBody`'s three
+outcomes (under the limit, over it, and a genuine non-size read error that must stay 400).
+
+**PR #2273 opened, reviewed by cleat-review, and a second round of fixes landed on top of the
+above.** cleat-review found that a single `plugin.MaxBody` could not tell apart two different
+things a route means by "my own ceiling": a tighter cap that should still yield to a lower
+`--plugin-max-body-size` (slacknotify's fixed interactive-callback size), and a ceiling the
+*plugin's own config* owns and that the flag must not silently override in either direction
+(blobstore's `max_blob_size`) — a single constructor could only pick one behaviour, and had picked
+the one that makes blobstore's operator-configured 10 MiB shrink to a 1 MiB default flag, silently.
+
+**Two named constructors replaced the one.** `plugin.MaxBody(n, h)` keeps the original meaning,
+made precise: effective limit is `min(n, --plugin-max-body-size)`, and a 413 always names
+`--plugin-max-body-size` (whichever value actually bound). `plugin.MaxBodyFromConfig(n, knob, h)`
+is new: effective limit is `n` unconditionally, and a 413 names `knob` — blobstore's `PUT
+/blobs/{key...}` now uses this against `max_blob_size in --plugin-config`; slacknotify's `POST
+/slack/interactive` keeps `MaxBody` unchanged. **Guard rail, per cleat-review's final call:**
+`pluginBodyLimitRouter.Handle` PANICS at registration time if `MaxBodyFromConfig` is used on any
+of `pluginAuthExemptPatterns` — those three routes carry no cleat credential at all, so a plugin
+claiming an unconditional ceiling there is a plugin bug, not a runtime condition to degrade
+around; `RegisterRoutes`' caller in `main.go` has no `recover()`, so this refuses to boot rather
+than silently downgrading (an earlier version of this fix fell back to the default limit/knob
+instead of panicking — cleat-review's review changed that: "the only way to reach it is a plugin
+bug", so it should refuse loudly). Covered at the router level
+(`TestMaxBodyFromConfigOnAnExemptPatternPanicsAtRegistration`,
+`cmd/cleat-worker/plugin_body_limit_test.go`), with a control proving `MaxBodyFromConfig` on a
+non-exempt pattern (blobstore's actual shape) does not panic.
+
+**A shared `pluginAuthExemptPatterns` var (`cmd/cleat-worker/plugin_exempt_routes.go`) replaced
+four hand-copied literal lists** — main.go's two middleware call sites, the exempt-clamp check
+above, and the e2e test's own copy — so the list can no longer drift between them the way the
+un-shared copies could have.
+
+**A boot-time check closes the "nothing would say why" gap `HasRoutes`'s own doc comment named.**
+`warnAboutStalePluginRouteSignatures` (`cmd/cleat-worker/plugin_stale_routes_check.go`) logs an
+ERROR naming any loaded plugin whose concrete type has a `RegisterRoutes` method that does not
+satisfy `plugin.HasRoutes` — the pre-#2232 `*http.ServeMux` signature is exactly this — instead of
+the routes silently never registering.
+
+**`plugin.ReadJSONBody`'s empty-body handling reverted to strict (a 400, matching every
+pre-#2232 call site) and became opt-in via a new `plugin.ReadOptionalJSONBody`.** The original
+change made every one of ~26 call sites accept an empty body as a no-op, which was a real
+behaviour change at every site except one: `jobqueue`'s `POST /jobqueue/{queue_name}/jobs`, whose
+pre-#2232 code hand-rolled exactly this (`if len(body) > 0 { json.Unmarshal(...) }`) because a
+bare enqueue with no def_name/payload/input is a legitimate request. Only that call site now uses
+`ReadOptionalJSONBody`; every other site is back to 400 on empty.
+
+**Every new/changed assertion in this round was falsified by hand** (mutate the source, confirm
+the relevant test goes red for the expected reason, restore, confirm `diff` against the backup is
+empty) rather than only inspected — the min()-clamp test, the exempt-clamp guard rail (both the
+router-level and end-to-end test), the knob-threading test, the empty-body-is-400 test, and the
+stale-signature boot check all confirmed this way.
+
+Files (round 2, on top of the list below): `plugin/body.go`, `plugin/body_test.go`,
+`cmd/cleat-worker/plugin_body_limit.go`, `cmd/cleat-worker/plugin_body_limit_test.go`,
+`cmd/cleat-worker/plugin_exempt_routes.go`, `cmd/cleat-worker/plugin_stale_routes_check.go`,
+`cmd/cleat-worker/plugin_stale_routes_check_test.go`,
+`cmd/cleat-worker/plugin_route_body_limit_exempt_test.go`,
+`cmd/cleat-worker/a_slack_interactive_route_is_exempt_test.go`, `cmd/cleat-worker/main.go`,
+`plugins/blobstore/routes.go`, `plugins/slacknotify/slacknotify_new_test.go`,
+`plugins/jobqueue/routes.go`, `CHANGELOG.md`.
+
+**Remaining before this closes:** push the round-2 fixes, re-run the full verification loop, and
+send back to cleat-review.
+
+Files: `plugin/body.go`, `plugin/body_test.go`, `plugin/plugin_http.go`, `plugin/capabilities_test.go`,
+`cmd/cleat-worker/plugin_body_limit.go`, `cmd/cleat-worker/plugin_route_body_limit_exempt_test.go`,
+`cmd/cleat-worker/body_limit_413_names_the_limit_test.go`, `cmd/cleat-worker/config.go`,
+`cmd/cleat-worker/main.go`, `docs/reference/worker-config.md`,
+`plugins/every_plugin_reads_its_body_through_the_helper_test.go`,
+`plugins/blobstore/{plugin.go,routes.go}`, `plugins/slacknotify/{interactive.go,routes.go,slacknotify_new_test.go}`,
+and the routes.go of every other plugin listed in cleat#2232.
+### 3.343 scheduledbackup becomes operator-only, and the acceptance test it needed found four more defects — ✅ **FIXED 2026-09-24** (cleat#2247)
+
+**cleat#2058's decision 2 was that backup configuration is operator-only, not tenant-facing**: a
+tenant-triggered backup ran an unfiltered `pg_dump` against the deployment-wide DSN, so any
+tenant creating a `backup_config` row dumped every tenant's data on a schedule that tenant chose.
+Migration v4 drops `backup_config.tenant_id`/`backup_history.tenant_id` and their RLS policies on
+every dialect, flips both rows in `admin.plugin_tables` to `tenant_scoped = false`, and the
+tenant-facing HTTP API (`routes.go`) and the never-wired `plugin.HasCommands` CLI mechanism
+(`commands.go`) are deleted outright — `RegisterCommands`'s two commands had no caller anywhere in
+the tree (`grep -rn HasCommands` finds the interface and nothing that type-asserts against it), so
+nothing regresses by removing them. The only surface left is `cmd/cleatctl backup`
+(`cmd/cleatctl/backup.go`): `config-create`/`config-list`/`config-update`/`config-delete`, `run`
+(request-only — it sets `next_run_at = now()` and lets the existing background loop pick the
+config up within 60s, never invoking `pg_dump` itself) and `history`.
+
+**The v4 registry-flip UPDATE is keyed on `schema_name`/`table_name`, not `plugin_name`.**
+`plugin.PluginInfo.Name` for this plugin is `"scheduled-backup"` (a hyphen), not
+`"scheduledbackup"`, and `admin.plugin_tables`' primary key is
+`(plugin_name, schema_name, table_name)` — a WHERE clause naming the wrong `plugin_name` matches
+zero rows, leaves both rows `tenant_scoped = true`, and the next `admin.drop_tenant` for ANY
+tenant (not one with backup rows: the sweep loop reads every `tenant_scoped` row unconditionally)
+fails outright with `column "tenant_id" does not exist`. Caught by cleat-review against an
+earlier draft keyed on `plugin_name`; the shipped migration needs no plugin name at all and cannot
+go stale the same way twice. `TestSchedulerBackupV4RegistryFlipDoesNotBreakLaterDropTenant`
+(`a_v4_migration_leaves_drop_tenant_working_test.go`) reproduces the exact scenario.
+
+**`plugin.Migration` gained an `Irreversible` field**, distinct from `TenantScoped`/`SweepTables`
+(which describe a migration with no SQL to undo in the first place) and from `DialectSpecific`
+(which justifies a missing **Up** arm for one dialect, not a missing Down). v4 writes real SQL on
+every dialect and has no Down: reversing "backups are operator-only" would mean reinstating a
+`tenant_id` column with no source of truth for what value each row should get — a data-recovery
+decision, not a mechanical schema reversal. `plugintest.AssertMigrationsDoSomething`, the shared
+contract 13+ plugins' behavioral tests use, now accepts `Irreversible` as a third way a migration
+can legitimately have no Down, alongside its own self-test in `migrations_test.go`.
+
+**`TestBackupCommandWorksOnEveryDialect` (`cmd/cleatctl/backup_test.go`) drives the whole surface
+against real PostgreSQL, MySQL and SQL Server**, not by resemblance to `slack`'s or `quota`'s own
+"all three, $N rewritten through `d.rebind`" entries in `ported.go` — and it found three real
+defects a PREPARE-only check or a postgres-only test could not have:
+
+- **MySQL's `?` binds by APPEARANCE, not by number** (this file's own rule, arrived at again): `$7`
+  reused for both `created_at` and `updated_at` in `backupConfigCreateSQL`, and `$1` reused for
+  `next_run_at`/`updated_at` in `backupConfigRequestRunSQL`, both bind the same value twice on
+  Postgres/MSSQL and become two separate `?` slots on MySQL — `sql: expected 8 arguments, got 7`.
+  Fixed by giving each occurrence its own number and passing the value twice at the call site.
+- **`resolveConfigID` scanned a `*uuid.UUID` directly instead of through `plugin.ScanRow`**, so SQL
+  Server's mixed-endian `UNIQUEIDENTIFIER` bytes (cleat#1137) produced a DIFFERENT uuid the moment
+  one was read back and reused: `config-create` printed the correct id, and looking it straight back
+  up by `--name` returned an id that then matched no row at all. `google/uuid.UUID`'s own `Scan`
+  accepts the wrong bytes without error, so nothing short of running it against real SQL Server
+  surfaces this — `slack`'s and `quota`'s own tests sidestep the whole class by scanning tenant ids
+  as plain strings.
+- **`backup history`'s `LIMIT $N` is not valid T-SQL at all**: `mssql: Incorrect syntax near
+  'LIMIT'. (102)` — the subcommand could not run on SQL Server, not merely paginate wrong.
+  `backupHistoryListSQL`/`backupHistoryListByConfigSQL` are now `plugin.Query` with a real MSSQL
+  arm (`OFFSET 0 ROWS FETCH NEXT $N ROWS ONLY`).
+
+**A fourth defect was found by the test's own assertions, not by a dialect failure: migration v3's
+`ON DELETE CASCADE` on `backup_history.config_id` outlived the one caller that needed it.** v3
+added the cascade for cleat#2234 so `admin.drop_tenant` (which deletes `backup_config` before
+`backup_history` in its alphabetical sweep) would not fail on a tenant with backup history. Since
+v4 flips both tables to `tenant_scoped = false`, `admin.drop_tenant`'s sweep no longer touches
+either table at all — the cascade's original reason is gone, but the FK itself is not, and
+`cleatctl backup config-delete` (added after v4, cleat#2247) inherited it as an unintended side
+effect: deleting a config to stop it running silently erased every `backup_history` row that
+pointed at it, contradicting the command's own printed message ("its backup_history rows are
+unaffected"). Migration v5 replaces `ON DELETE CASCADE` with `ON DELETE SET NULL` — the history
+row survives with every other column intact, `config_id` nulled — and is fully reversible (a real
+Down restoring v3's cascade on all three dialects), unlike v4.
+
+**Files**: `plugins/scheduledbackup/{migrations,background,plugin,dumppath,cron}.go`,
+`cmd/cleatctl/{backup,main,ported,inline_statements_parse_test}.go`,
+`plugin/{plugin,a_cross_tenant_bypass_is_declared_test}.go`,
+`plugins/plugintest/{migrations,migrations_test}.go`, `docs/how-to/use-deployment-secrets.md`.
+Deleted: `plugins/scheduledbackup/{routes,commands}.go`.
+
+**Not built here, tracked as a follow-up**: a general cross-plugin invariant over
+`admin.plugin_tables` ("every `tenant_scoped` row names a table that still has a `tenant_id`
+column") would catch the registry-flip class for a future plugin the same way this migration's own
+regression test catches it for this one. No issue filed yet.

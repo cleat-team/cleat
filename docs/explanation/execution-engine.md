@@ -73,7 +73,7 @@ instance is claimed:
 
 1. **Load history**: All events for the instance are loaded from
    `event_history`, ordered by step number.
-2. **Compile WASM**: The module is compiled and instantiated in wazero.
+2. **Compile WASM**: The module is compiled and instantiated on the wasmtime backend.
 3. **Replay**: The entry point export is called. For each step:
    - If the event history has an event at this step, the cached response is
      returned to the WASM module -- the call is NOT re-executed.
@@ -213,6 +213,13 @@ db.SetMaxOpenConns(concurrency + 5)   // Allow headroom for heartbeats, etc.
 db.SetMaxIdleConns(5)
 db.SetConnMaxLifetime(5 * time.Minute)
 ```
+
+This is the **core** pool only. A worker also opens a plugin pool
+(`--max-plugin-connections`, default 10) and an adaptive-flusher pool
+(`--batch-flush-max-connections`, default 50 and **default-on**, PostgreSQL only), plus a
+per-shard pool when sharding is configured and a pool per tenant under
+`--tenant-isolation=role`. A default single-node worker opens 75, not 15 —
+`docs/operations/tuning.md` has the table and the gates. cleat#1470.
 
 ### Connection Failure Handling
 

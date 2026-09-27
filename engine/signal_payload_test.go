@@ -92,9 +92,9 @@ func TestSignalPayloadRoundTripsOnEveryDialect(t *testing.T) {
 					if !found {
 						t.Fatalf("PollSignal on %s: signal not found", d.name)
 					}
-					if !sameJSONOrString(got, tc.payload) {
+					if !sameJSONOrString(got.Payload, tc.payload) {
 						t.Errorf("round-trip on %s: sent %q, got back %q",
-							d.name, tc.payload, got)
+							d.name, tc.payload, got.Payload)
 					}
 				})
 			}

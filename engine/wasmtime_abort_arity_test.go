@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 // abortModuleWAT builds a module importing env.abort with the given parameter
@@ -70,7 +70,7 @@ func TestEnvAbortArityMatchesTheModule(t *testing.T) {
 			// Execute would go on to need a host session it does not have here.
 			linker := wasmtime.NewLinker(b.engine)
 			var cr, ce string
-			if err := b.registerAllImports(linker, &cr, &ce, false, abortImportType(module)); err != nil {
+			if err := b.registerAllImports(linker, &cr, &ce, false, module); err != nil {
 				t.Fatalf("registerAllImports: %v", err)
 			}
 

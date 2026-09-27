@@ -2,42 +2,16 @@ package engine
 
 import (
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/lib/pq"
 )
 
 // Gap coverage tests for PostgresStore methods not yet covered by existing tests.
 // Covers 14 uncovered methods with 33 test functions.
-
-// ---------------------------------------------------------------------------
-// BatchHeartbeat
-// ---------------------------------------------------------------------------
-
-func TestGap_BatchHeartbeat(t *testing.T) {
-	db := newNoopDB(t)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	n, err := store.BatchHeartbeat(testCtx, "worker-1")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat: %v", err)
-	}
-	if n != 0 {
-		t.Logf("BatchHeartbeat returned %d rows (expected 0 with noop driver)", n)
-	}
-}
-
-func TestGap_BatchHeartbeat_BeginError(t *testing.T) {
-	db := newMockDBWithErrors(t, nil, nil, fmt.Errorf("tx begin failed"), nil)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	_, err := store.BatchHeartbeat(testCtx, "worker-1")
-	if err == nil {
-		t.Fatal("expected error from BatchHeartbeat when BeginTx fails")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // CountEventHistory
@@ -246,8 +220,13 @@ func TestGap_GetAllowedSignalCallers_ErrNoRows(t *testing.T) {
 
 	store := NewPostgresStore(db)
 	callers, err := store.GetAllowedSignalCallers(testCtx, "wf-1")
-	if err != nil {
-		t.Fatalf("GetAllowedSignalCallers (no rows): %v", err)
+	// cleat#2227: a missing row now returns ErrWorkflowNotFound, matching
+	// DeliverSignal's own contract, instead of the (nil, nil) this test
+	// asserted before -- the getter and the setter now agree on what a
+	// missing workflow means. See store_signals.go's doc comment on
+	// GetAllowedSignalCallers.
+	if !errors.Is(err, ErrWorkflowNotFound) {
+		t.Fatalf("GetAllowedSignalCallers (no rows) err = %v, want ErrWorkflowNotFound", err)
 	}
 	if callers != nil {
 		t.Errorf("expected nil callers, got %v", callers)
@@ -288,76 +267,7 @@ func TestGap_GetChildCount_Error(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// GetChildResultInSchema
 // ---------------------------------------------------------------------------
-
-func TestGap_GetChildResultInSchema_Done(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "COALESCE(result", data: [][]driver.Value{{`{"ok":true}`, "done"}}},
-	}, nil)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	result, done, err := store.GetChildResultInSchema(testCtx, "target_schema", "child-run-id")
-	if err != nil {
-		t.Fatalf("GetChildResultInSchema: %v", err)
-	}
-	if !done {
-		t.Error("expected done=true")
-	}
-	if result != `{"ok":true}` {
-		t.Errorf("unexpected result: %q", result)
-	}
-}
-
-func TestGap_GetChildResultInSchema_Running(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "COALESCE(result", data: [][]driver.Value{{`{}`, "running"}}},
-	}, nil)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	result, done, err := store.GetChildResultInSchema(testCtx, "target_schema", "child-run-id")
-	if err != nil {
-		t.Fatalf("GetChildResultInSchema (running): %v", err)
-	}
-	if done {
-		t.Error("expected done=false for running workflow")
-	}
-	if result != "" {
-		t.Logf("result for running workflow: %q", result)
-	}
-}
-
-func TestGap_GetChildResultInSchema_NoRows(t *testing.T) {
-	db := newNoopDB(t)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	result, done, err := store.GetChildResultInSchema(testCtx, "target_schema", "nonexistent")
-	if err != nil {
-		t.Fatalf("GetChildResultInSchema (no rows): %v", err)
-	}
-	if done {
-		t.Error("expected done=false for missing workflow")
-	}
-	if result != "" {
-		t.Errorf("expected empty result, got %q", result)
-	}
-}
-
-func TestGap_GetChildResultInSchema_Error(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "COALESCE(result", err: fmt.Errorf("db error")},
-	}, nil)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	_, _, err := store.GetChildResultInSchema(testCtx, "target_schema", "child-run-id")
-	if err == nil {
-		t.Fatal("expected error from GetChildResultInSchema")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // GetWASMLength
@@ -407,6 +317,7 @@ func TestGap_LoadEventHistoryPaginated(t *testing.T) {
 				nil, nil, nil, nil, nil, nil, // deferDesc, deferID, childName, childInput, runID, newInput
 				nil, nil, nil, nil, nil, // pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr
 				nil,                // payload
+				nil,                // payload_encoding (NULL = pre-cleat#1319 row)
 				nil, nil, nil, nil, // promiseName, promiseID, promiseResult, promiseError
 				nil, // createdAt
 			}},
@@ -543,50 +454,28 @@ func TestGap_RetryWorkflow_BeginError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// StartChildWorkflowInSchema
 // ---------------------------------------------------------------------------
-
-func TestGap_StartChildWorkflowInSchema(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "gen_random_uuid", data: [][]driver.Value{{"child-run-123"}}},
-	}, nil)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	runID, err := store.StartChildWorkflowInSchema(testCtx, "target_schema", "parent-1", "child-wf", `{}`, 0, "ABANDON", 0)
-	if err != nil {
-		t.Fatalf("StartChildWorkflowInSchema: %v", err)
-	}
-	if runID != "child-run-123" {
-		t.Errorf("expected child-run-123, got %q", runID)
-	}
-}
-
-func TestGap_StartChildWorkflowInSchema_Error(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "gen_random_uuid", err: fmt.Errorf("insert failed")},
-	}, nil)
-	defer db.Close()
-
-	store := NewPostgresStore(db)
-	_, err := store.StartChildWorkflowInSchema(testCtx, "target_schema", "parent-1", "child-wf", `{}`, 0, "ABANDON", 0)
-	if err == nil {
-		t.Fatal("expected error from StartChildWorkflowInSchema")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // TerminateWorkflow
 // ---------------------------------------------------------------------------
 
+// TestGap_TerminateWorkflow asserts the not-found contract, not the absence of
+// an error.
+//
+// It used to require nil. newNoopDB reports zero rows affected for every
+// statement, and until 3.92 TerminateWorkflow ignored that and returned nil --
+// so "a terminate that matched nothing succeeded" was the behaviour this test
+// pinned. That is the defect, and the test encoded it.
 func TestGap_TerminateWorkflow(t *testing.T) {
 	db := newNoopDB(t)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
 	err := store.TerminateWorkflow(testCtx, "wf-1", "user requested")
-	if err != nil {
-		t.Fatalf("TerminateWorkflow: %v", err)
+	if !errors.Is(err, ErrWorkflowNotFound) {
+		t.Fatalf("TerminateWorkflow against a store that matches no rows returned %v, "+
+			"want ErrWorkflowNotFound", err)
 	}
 }
 
@@ -598,5 +487,60 @@ func TestGap_TerminateWorkflow_BeginError(t *testing.T) {
 	err := store.TerminateWorkflow(testCtx, "wf-1", "error")
 	if err == nil {
 		t.Fatal("expected error from TerminateWorkflow when BeginTx fails")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// isSignalsWorkflowFKViolationPG
+// ---------------------------------------------------------------------------
+
+// TestGap_IsSignalsWorkflowFKViolationPG pins the constraint-name check added
+// in review of cleat#2227/#2239: a bare SQLSTATE 23503 is not enough,
+// because workflow_promises (migrations/postgres/001_schema.sql) carries an
+// auto-named FK to workflow_instances(id) with the identical shape and code,
+// one CREATE TABLE below workflow_signals'. The known-positive uses the real
+// constraint name confirmed against a live schema (`SELECT conname FROM
+// pg_constraint WHERE conrelid = 'workflow_signals'::regclass AND contype =
+// 'f'`); the negative control is workflow_promises' own name, which a
+// bare-code check cannot tell apart from the one this function exists to
+// catch.
+func TestGap_IsSignalsWorkflowFKViolationPG(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "matching code and constraint",
+			err:  &pq.Error{Code: "23503", Constraint: "workflow_signals_workflow_id_fkey"},
+			want: true,
+		},
+		{
+			name: "matching code, sibling table's constraint (negative control)",
+			err:  &pq.Error{Code: "23503", Constraint: "workflow_promises_workflow_id_fkey"},
+			want: false,
+		},
+		{
+			name: "matching constraint name, wrong code",
+			err:  &pq.Error{Code: "23505", Constraint: "workflow_signals_workflow_id_fkey"},
+			want: false,
+		},
+		{
+			name: "not a pq.Error",
+			err:  fmt.Errorf("some other failure"),
+			want: false,
+		},
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isSignalsWorkflowFKViolationPG(tc.err); got != tc.want {
+				t.Errorf("isSignalsWorkflowFKViolationPG(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

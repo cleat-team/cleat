@@ -3,10 +3,8 @@ package engine
 import (
 	"context"
 	"database/sql"
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"time"
 )
 
 func (s *PostgresStore) AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error {
@@ -56,9 +54,15 @@ func (s *PostgresStore) appendEventsInTx(ctx context.Context, tx *sql.Tx, workfl
 				defer_description, defer_id, child_name, child_input, run_id, new_input,
 				plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 				promise_name, promise_id, promise_result, promise_error, payload,
-				created_at, checksum, tenant_id)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
-			ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error WHERE event_history.response = '' AND event_history.error IS NULL
+				created_at, checksum, tenant_id, payload_encoding)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
+			ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error,
+			promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,
+			checksum = EXCLUDED.checksum, payload = EXCLUDED.payload, payload_encoding = EXCLUDED.payload_encoding,
+			event_type = EXCLUDED.event_type
+			WHERE event_history.event_type IN ('await_child', 'await_promise', 'await_all_children')
+			  AND event_history.response IS NULL AND event_history.error IS NULL
+			  AND event_history.promise_result IS NULL AND event_history.promise_error IS NULL
 		`)
 		if err != nil {
 			return fmt.Errorf("append events in tx: prepare: %w", err)
@@ -111,28 +115,48 @@ func (s *PostgresStore) previousStoredChecksum(ctx context.Context, tx *sql.Tx, 
 }
 
 func (s *PostgresStore) appendOneEvent(ctx context.Context, tx *sql.Tx, workflowID string, rec EventRecord, prevChecksum string) error {
-	payload, _ := eventRecordToPayload(rec)
+	// The checksum is over the PLAINTEXT record, and stays that way:
+	// VerifyWorkflowEvents recomputes it from the decrypted record it loads.
 	checksum := computeEventChecksum(rec, prevChecksum)
-	_, err := tx.ExecContext(ctx, `
+	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
+	if err != nil {
+		// cleat#1317: encryption failures were counted nowhere, while their
+		// decryption twin has been counted since db.go:176. The asymmetry was
+		// not a decision -- RecordEncryptionError existed, was registered and
+		// described, and had no caller.
+		//
+		// Recorded HERE rather than inside encodeEventForStorage because that
+		// is a free function with no store receiver and therefore no Metrics.
+		// The error is already propagated with context; this only counts it.
+		s.recordEncryptionFailure(ctx)
+		return fmt.Errorf("append one event: step %d: %w", rec.Step, err)
+	}
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
 			duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 			defer_description, defer_id, child_name, child_input, run_id, new_input,
 			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 			promise_name, promise_id, promise_result, promise_error, payload,
-			created_at, checksum, tenant_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32)
-		ON CONFLICT (workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error WHERE event_history.response = '' AND event_history.error IS NULL
+			created_at, checksum, tenant_id, payload_encoding)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33)
+		ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error,
+			promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,
+			checksum = EXCLUDED.checksum, payload = EXCLUDED.payload, payload_encoding = EXCLUDED.payload_encoding,
+			event_type = EXCLUDED.event_type
+			WHERE event_history.event_type IN ('await_child', 'await_promise', 'await_all_children')
+			  AND event_history.response IS NULL AND event_history.error IS NULL
+			  AND event_history.promise_result IS NULL AND event_history.promise_error IS NULL
 	`, workflowID, rec.Step, rec.EventType,
-		nullStr(rec.Service), nullStr(rec.Op), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Request))), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Response))), nullStr(rec.Err),
+		nullStr(rec.Service), nullStr(rec.Op), nullStr(stored.Request), nullStr(stored.Response), nullStr(stored.Err),
 		nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
-		nullStr(rec.SignalName), nullStr(rec.SignalPayload),
+		nullStr(rec.SignalName), nullStr(stored.SignalPayload),
 		nullStr(rec.DeferDescription), nullStr(rec.DeferID),
-		nullStr(rec.ChildName), nullStr(rec.ChildInput), nullStr(rec.RunID), nullStr(rec.NewInput),
-		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(rec.PluginInput), nullStr(rec.PluginOutput), nullStr(rec.PluginError),
-		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(rec.PromiseResult), nullStr(rec.PromiseError),
-		nullStr(string(payload)),
-		time.UnixMilli(rec.TimestampMs),
-		checksum, s.tenantID)
+		nullStr(rec.ChildName), nullStr(stored.ChildInput), nullStr(rec.RunID), nullStr(stored.NewInput),
+		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(stored.PluginInput), nullStr(stored.PluginOutput), nullStr(rec.PluginError),
+		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(stored.PromiseResult), nullStr(stored.PromiseError),
+		stored.Payload,
+		eventCreatedAt(rec),
+		checksum, s.tenantID, stored.Encoding)
 	if err != nil {
 		return fmt.Errorf("append one event: exec step %d: %w", rec.Step, err)
 	}
@@ -141,20 +165,31 @@ func (s *PostgresStore) appendOneEvent(ctx context.Context, tx *sql.Tx, workflow
 
 // execEventStmt executes a prepared INSERT for a single event.
 func (s *PostgresStore) execEventStmt(ctx context.Context, stmt *sql.Stmt, workflowID string, rec EventRecord, prevChecksum string) error {
-	payload, _ := eventRecordToPayload(rec)
 	checksum := computeEventChecksum(rec, prevChecksum)
-	payloadArg := sql.NullString{String: string(payload), Valid: len(payload) > 0}
-	_, err := stmt.ExecContext(ctx, workflowID, rec.Step, rec.EventType,
-		nullStr(rec.Service), nullStr(rec.Op), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Request))), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Response))), nullStr(rec.Err),
+	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
+	if err != nil {
+		// cleat#1317: encryption failures were counted nowhere, while their
+		// decryption twin has been counted since db.go:176. The asymmetry was
+		// not a decision -- RecordEncryptionError existed, was registered and
+		// described, and had no caller.
+		//
+		// Recorded HERE rather than inside encodeEventForStorage because that
+		// is a free function with no store receiver and therefore no Metrics.
+		// The error is already propagated with context; this only counts it.
+		s.recordEncryptionFailure(ctx)
+		return fmt.Errorf("exec event stmt: step %d: %w", rec.Step, err)
+	}
+	_, err = stmt.ExecContext(ctx, workflowID, rec.Step, rec.EventType,
+		nullStr(rec.Service), nullStr(rec.Op), nullStr(stored.Request), nullStr(stored.Response), nullStr(stored.Err),
 		nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
-		nullStr(rec.SignalName), nullStr(rec.SignalPayload),
+		nullStr(rec.SignalName), nullStr(stored.SignalPayload),
 		nullStr(rec.DeferDescription), nullStr(rec.DeferID),
-		nullStr(rec.ChildName), nullStr(rec.ChildInput), nullStr(rec.RunID), nullStr(rec.NewInput),
-		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(rec.PluginInput), nullStr(rec.PluginOutput), nullStr(rec.PluginError),
-		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(rec.PromiseResult), nullStr(rec.PromiseError),
-		payloadArg,
-		time.UnixMilli(rec.TimestampMs),
-		checksum, s.tenantID)
+		nullStr(rec.ChildName), nullStr(stored.ChildInput), nullStr(rec.RunID), nullStr(stored.NewInput),
+		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(stored.PluginInput), nullStr(stored.PluginOutput), nullStr(rec.PluginError),
+		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(stored.PromiseResult), nullStr(stored.PromiseError),
+		stored.Payload,
+		eventCreatedAt(rec),
+		checksum, s.tenantID, stored.Encoding)
 	if err != nil {
 		return fmt.Errorf("exec event stmt: step %d: %w", rec.Step, err)
 	}

@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -48,16 +47,196 @@ func (s *MySQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 		return nil
 	}
 
-	// MySQL uses INSERT IGNORE instead of ON CONFLICT DO NOTHING.
-	// The unique key on (workflow_id, step) prevents duplicates.
+	// MySQL uses INSERT IGNORE. The unique key on (workflow_id, step) prevents
+	// duplicates.
+	//
+	// THIS COMMENT USED TO SAY "instead of ON CONFLICT DO NOTHING", AND
+	// POSTGRES DOES NOT DO NOTHING. flushAndNotify and retryBatchFlush in
+	// adaptive_flush.go run a CONDITIONAL UPSERT -- `ON CONFLICT ... DO UPDATE`
+	// with a WHERE that admits only a row still awaiting its result --
+	//
+	// It is named rather than quoted. This block used to transcribe the clause,
+	// and the transcription had rotted three ways before anyone looked: the
+	// cited adaptive_flush.go:384 had moved, the SET list was missing three
+	// columns, and the WHERE predated cleat#2333's rewrite of it. A copied
+	// statement is a second source of truth.
+	//
+	// so on Postgres a re-flush COMPLETES a row that was written without a
+	// result, while leaving finished rows immutable. INSERT IGNORE discards
+	// that write, as does MSSQL's INSERT ... SELECT ... WHERE NOT EXISTS. The
+	// three dialects therefore agree on the normal path -- CompleteCallIntent
+	// is a separate statement and is equivalent across all three -- and differ
+	// only on the RECOVERY path where a completion was lost and the step is
+	// flushed again. Postgres self-heals there; the other two do not.
+	//
+	// The WHERE clause's `response = ''` half was DEAD until cleat#2333: a
+	// pending row's response is stored as SQL NULL (nullStr("") never writes
+	// an empty string), so the guard never matched and this "self-heal" never
+	// actually fired for AwaitChild's suspend-then-complete pattern. Postgres
+	// silently behaved like this file's INSERT IGNORE -- a completing overwrite
+	// was accepted (0 rows affected, no error) but never applied, leaving a
+	// stale checksum in event_history forever. See flush.go's insertEventSQL
+	// doc for the write side and store_event_write.go's VerifyWorkflowEvents
+	// for how the stale checksum was later reported as corruption.
+	//
+	// Whether that divergence should be closed is open. What is not open is
+	// that the comment described a semantics Postgres has never had, so anyone
+	// reconciling the three from this file would have reconciled toward the
+	// wrong target. IMPROVEMENT-PLAN 3.219.
+	//
+	// cleat#2333 closed it for the completion direction, at least: INSERT
+	// IGNORE discards a re-flush unconditionally, response included, which is
+	// strictly worse than Postgres's pre-fix dead WHERE clause -- that at least
+	// left the stored response NULL where the row started NULL, and this drops
+	// even that. For AwaitChild, which has no CompleteCallIntent-style direct
+	// UPDATE and relies entirely on this INSERT to ever record its result,
+	// that meant the completing response never reached event_history on MySQL
+	// at all, so the checksum a later step chained from (in the worker's
+	// memory) never matched what a replay could recompute from storage -- the
+	// same "step N checksum mismatch" cleat#2333 reported on Postgres, reached
+	// by unconditionally discarding rather than by a guard that never fired.
+	//
+	// ON DUPLICATE KEY UPDATE cannot carry a WHERE clause the way Postgres's
+	// ON CONFLICT can, so the same "only complete a still-pending row" guard
+	// is written as a per-column IF(), each one reading the EXISTING row's
+	// response/error (unqualified, not VALUES()) to decide whether to accept
+	// the new row's value. A completed row (response or error already set)
+	// therefore stays immutable, exactly as the Postgres WHERE clause intends.
+	//
+	// THE GUARD IS FROZEN INTO A SESSION VARIABLE, @cleat_pending, RATHER
+	// THAN RE-DERIVED PER COLUMN. This replaces an ordering rule this comment
+	// used to state instead ("checksum and payload must be assigned before
+	// every column a guard inspects"), and the reason it had to change is
+	// event_type joining the SET list below (cleat#2333 review, point 4):
+	//
+	// MySQL evaluates assignments left-to-right within one ON DUPLICATE KEY
+	// UPDATE clause, and an unqualified column reference in a later
+	// assignment sees the value an earlier assignment in the SAME statement
+	// already wrote, not the row's original value. With a per-column IF()
+	// re-deriving `event_type IN (...) AND response IS NULL AND ...` from
+	// the live columns, EVERY assignment needs that expression evaluated
+	// against the SAME original row -- and there is no ordering that gives
+	// every column that. Placing event_type's own assignment before
+	// response/error/promise_result/promise_error would restore the ORIGINAL
+	// bug this file already fixed once (checksum's guard reading a
+	// just-written response and concluding a genuine completion was already
+	// done, found by TestAnAwaitStyleEventCompletesOnEveryDialect). Placing
+	// it after them -- the only place left, since it must also read the
+	// PRE-update response/error/promise_result/promise_error to decide
+	// whether IT should transition -- means its own guard would evaluate
+	// against the ALREADY-UPDATED (non-NULL) response/promise_result those
+	// earlier assignments just wrote, and conclude "not pending" on the
+	// very completion it exists to record. No single order threads both
+	// needles, because event_type is now both a column OTHERS guard on and a
+	// column that ITSELF needs the ORIGINAL values of the columns others
+	// mutate.
+	//
+	// `@cleat_pending := (...)` on the FIRST assignment computes the guard
+	// exactly once, against the row as it stood before this statement
+	// touched anything, and every other assignment (in ANY order, including
+	// event_type's) reads the frozen `@cleat_pending` rather than
+	// re-deriving it from columns that may have already changed. This is
+	// the "MySQL user-variable trick" a since-removed paragraph here said
+	// this file did not yet need; event_type joining the SET list is what
+	// changed that. Session variables are connection-scoped, but this is
+	// safe under a shared connection because @cleat_pending is written
+	// before it is ever read on every single execution of this statement --
+	// per row, via stmt.ExecContext in the loop below -- so no execution
+	// depends on state a previous one left behind, and none leaks past this
+	// statement's own SET list to anything else.
+	//
+	// promise_result/promise_error are in the guard and the SET list for
+	// the same reason response/error are there: AwaitPromise (promises.go)
+	// is the same suspend-then-complete same-step write AwaitChild is,
+	// except its outcome lives in those two columns instead. This is not
+	// primarily about LoadEventHistory -- it overlays from the payload blob
+	// afterwards (populateFromPayload, store_events.go), which
+	// payload = VALUES(payload) already keeps current -- it is about
+	// IMMUTABILITY: without promise_result/promise_error in the guard, a
+	// resolved promise's row stays "pending" by this test forever
+	// (response/error never carry its content on either write), so a later
+	// stray reflush would pass the guard and clobber its checksum/payload,
+	// reopening cleat#1379's corruption case for this event type.
+	//
+	// event_type = IF(@cleat_pending, VALUES(event_type), event_type) IS
+	// THE FIX for the empty-outcome residual this file's comment used to
+	// call out as merely documented, not closed (a hand-called
+	// resolve_promise(id, "") stores NULL in promise_result exactly like a
+	// still-pending row, so response/error/promise_result/promise_error IS
+	// NULL alone cannot tell them apart). AwaitPromise's pending write
+	// records event_type='await_promise'; its completing write records
+	// 'promise_resolved' or 'promise_rejected' -- unlike AwaitChild and
+	// AwaitAllChildren, whose event_type never changes between the two
+	// writes. Once this assignment lands, a completed promise's event_type
+	// no longer matches the IN (...) half of @cleat_pending's condition on
+	// any LATER re-flush, so @cleat_pending is false and the ENTIRE row is
+	// immutable on that later attempt regardless of what
+	// response/promise_result hold -- empty, NULL, or real content. See
+	// TestAPromiseStyleEventCompletesOnEveryDialect, which now asserts the
+	// stored EventType after completion and a resolve-with-"" case
+	// specifically. This was also, independently, a correctness bug on its
+	// own: AwaitPromise's OWN replay (promises.go) branches on
+	// `rec.EventType == EventTypePromiseResolved` vs `== EventTypeAwaitPromise`
+	// to decide "trust history" vs "re-check the promise store", so a stored
+	// event_type that never transitioned meant every replay of a completed
+	// await was re-querying the promise store instead of trusting the
+	// durable record -- confirmed against a real database, not inferred.
+	//
+	// event_type IN (...) is the other half of the guard and is not
+	// optional: see insertEventSQL's doc (flush.go) for
+	// TestACompletedIntentIsNotOverwrittenByALaterAppend, which failed
+	// without it -- a call intent completed with a genuinely empty response
+	// (store_intent.go's CompleteCallIntent) is bit-for-bit identical, in
+	// every column above, to a row from one of these three event types that
+	// has never been completed.
+	//
+	// payload_encoding IS NEW HERE, and it is not part of cleat#2333's fix --
+	// this statement never recorded it, on either side of that fix, and the
+	// gap predates this file's INSERT IGNORE removal entirely. It was
+	// invisible to TestEveryEventWriterThatStoresAPayloadRecordsItsEncoding
+	// (cleat#1319's guard) for the same reason the OTHER guard in this PR's
+	// diff (TestEveryEventHistoryWriteRoutesThroughTheEncoder) could not see
+	// this file: its own detector, `regexp.MustCompile("INSERT INTO
+	// event_history")`, does not match "INSERT IGNORE INTO event_history" --
+	// "IGNORE" sits between the two words it looks for. So on develop this
+	// statement was never scanned by either guard, not because it was
+	// correct, but because it never appeared. Dropping IGNORE for cleat#2333
+	// made the statement match `INSERT INTO event_history` for the first
+	// time, and TestEveryEventWriterThatStoresAPayloadRecordsItsEncoding
+	// immediately flagged what had been there all along: request/response are
+	// stored, base64-encoded, with no payload_encoding recorded, so any
+	// reader consulting that column on a row from this path has always had to
+	// guess (cleat#1319's exact complaint, on this file's rows specifically).
+	// Fixed here rather than filed separately, since the column is one
+	// PrepareContext away and the guard already states the fix
+	// (payloadEncodingFor(rec)) precisely. Guarded the same way payload is --
+	// only take the new value on a still-pending await_child/await_promise/
+	// await_all_children row -- so a completed row's encoding stays as
+	// immutable as its payload.
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT IGNORE INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
+		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request, response, error,
 			duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 			defer_description, defer_id, child_name, child_input, run_id, new_input,
 			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 			promise_name, promise_id, promise_result, promise_error, payload,
-			created_at, checksum, tenant_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			created_at, checksum, tenant_id, payload_encoding)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			-- MUST STAY FIRST: this is the only assignment on the LEFT of the
+			-- := that computes @cleat_pending; every other line below only
+			-- READS it. Move this line down (e.g. to re-sort the column list)
+			-- and every line above it in evaluation order reads an UNSET
+			-- session variable instead of the guard -- see this file's
+			-- "THE GUARD IS FROZEN INTO A SESSION VARIABLE" doc comment above
+			-- appendEventsInTxOpts for why no other ordering works.
+			checksum = IF(@cleat_pending := (event_type IN ('await_child','await_promise','await_all_children') AND response IS NULL AND error IS NULL AND promise_result IS NULL AND promise_error IS NULL), VALUES(checksum), checksum),
+			payload = IF(@cleat_pending, VALUES(payload), payload),
+			payload_encoding = IF(@cleat_pending, VALUES(payload_encoding), payload_encoding),
+			response = IF(@cleat_pending, VALUES(response), response),
+			error = IF(@cleat_pending, VALUES(error), error),
+			promise_result = IF(@cleat_pending, VALUES(promise_result), promise_result),
+			promise_error = IF(@cleat_pending, VALUES(promise_error), promise_error),
+			event_type = IF(@cleat_pending, VALUES(event_type), event_type)
 	`)
 	if err != nil {
 		return fmt.Errorf("append events in tx: prepare: %w", err)
@@ -94,9 +273,10 @@ func (s *MySQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(rec.PluginInput), nullStr(rec.PluginOutput), nullStr(rec.PluginError),
 			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(rec.PromiseResult), nullStr(rec.PromiseError),
 			payloadArg,
-			time.UnixMilli(rec.TimestampMs),
+			eventCreatedAt(rec),
 			checksum,
-			s.tenantID)
+			s.tenantID,
+			payloadEncodingFor(rec))
 		if err != nil {
 			return fmt.Errorf("append events in tx: exec step %d: %w", rec.Step, err)
 		}
@@ -145,8 +325,9 @@ func (s *MySQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
+		       payload_encoding,
 		       promise_name, promise_id, promise_result, promise_error,
-		       CAST(UNIX_TIMESTAMP(created_at) * 1000 AS UNSIGNED) AS timestamp_ms,
+		       created_at,
 		       (intent_at IS NOT NULL AND checksum IS NULL) AS pending
 		FROM event_history
 		WHERE workflow_id = ? AND tenant_id = ?
@@ -168,6 +349,13 @@ func (s *MySQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 		var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
 		var payload sql.NullString
 		var promiseName, promiseID, promiseResult, promiseError sql.NullString
+		// NullTime, so a row whose created_at is NULL does not fail the
+		// whole load. It needs parseTime=true on the DSN, which
+		// cleat-worker's --db help and docs/reference/database-backends.md
+		// already require and which mysql_ops.go already depends on -- no
+		// new requirement.
+		var createdAt sql.NullTime
+		var payloadEnc sql.NullInt16
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
@@ -175,15 +363,20 @@ func (s *MySQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
+			&payloadEnc,
 			&promiseName, &promiseID, &promiseResult, &promiseError,
-			&rec.TimestampMs, &rec.Pending); err != nil {
+			&createdAt, &rec.Pending); err != nil {
 			return nil, fmt.Errorf("scan history: %w", err)
+		}
+
+		if createdAt.Valid {
+			applyCreatedAt(&rec, createdAt.Time)
 		}
 
 		rec.Service = service.String
 		rec.Op = op.String
-		rec.Request = tryDecodeBase64(request.String)
-		rec.Response = tryDecodeBase64(response.String)
+		rec.Request = decodePayload(request.String, payloadEnc)
+		rec.Response = decodePayload(response.String, payloadEnc)
 		rec.Err = errMsg.String
 		rec.DurationMs = durationMs.Int64
 		rec.SignalNames = signalNames.String
@@ -244,7 +437,9 @@ func (s *MySQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
-		       promise_name, promise_id, promise_result, promise_error
+		       payload_encoding,
+		       promise_name, promise_id, promise_result, promise_error,
+		       created_at
 		FROM event_history
 		WHERE workflow_id = ? AND tenant_id = ?
 		ORDER BY step
@@ -266,6 +461,8 @@ func (s *MySQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 		var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
 		var payload sql.NullString
 		var promiseName, promiseID, promiseResult, promiseError sql.NullString
+		var createdAt sql.NullTime
+		var payloadEnc sql.NullInt16
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
@@ -273,14 +470,20 @@ func (s *MySQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
-			&promiseName, &promiseID, &promiseResult, &promiseError); err != nil {
+			&payloadEnc,
+			&promiseName, &promiseID, &promiseResult, &promiseError,
+			&createdAt); err != nil {
 			return nil, fmt.Errorf("scan history paginated: %w", err)
+		}
+
+		if createdAt.Valid {
+			applyCreatedAt(&rec, createdAt.Time)
 		}
 
 		rec.Service = service.String
 		rec.Op = op.String
-		rec.Request = tryDecodeBase64(request.String)
-		rec.Response = tryDecodeBase64(response.String)
+		rec.Request = decodePayload(request.String, payloadEnc)
+		rec.Response = decodePayload(response.String, payloadEnc)
 		rec.Err = errMsg.String
 		rec.DurationMs = durationMs.Int64
 		rec.SignalNames = signalNames.String
@@ -355,8 +558,9 @@ func (s *MySQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				       defer_description, defer_id, child_name, child_input, run_id, new_input,
 				       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 				       payload,
+				       payload_encoding,
 				       promise_name, promise_id, promise_result, promise_error,
-				       CAST(UNIX_TIMESTAMP(created_at) * 1000 AS UNSIGNED) AS timestamp_ms
+				       created_at
 				FROM event_history
 				WHERE workflow_id = ? AND tenant_id = ?
 				ORDER BY step
@@ -379,6 +583,8 @@ func (s *MySQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
 				var payload sql.NullString
 				var promiseName, promiseID, promiseResult, promiseError sql.NullString
+				var createdAt sql.NullTime
+				var payloadEnc sql.NullInt16
 
 				if err := rows.Scan(&rec.Step, &rec.EventType,
 					&service, &op, &request, &response, &errMsg,
@@ -386,17 +592,22 @@ func (s *MySQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 					&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 					&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 					&payload,
+					&payloadEnc,
 					&promiseName, &promiseID, &promiseResult, &promiseError,
-					&rec.TimestampMs); err != nil {
+					&createdAt); err != nil {
 					rows.Close()
 					errCh <- err
 					return
 				}
 
+				if createdAt.Valid {
+					applyCreatedAt(&rec, createdAt.Time)
+				}
+
 				rec.Service = service.String
 				rec.Op = op.String
-				rec.Request = tryDecodeBase64(request.String)
-				rec.Response = tryDecodeBase64(response.String)
+				rec.Request = decodePayload(request.String, payloadEnc)
+				rec.Response = decodePayload(response.String, payloadEnc)
 				rec.Err = errMsg.String
 				rec.DurationMs = durationMs.Int64
 				rec.SignalNames = signalNames.String
@@ -424,28 +635,28 @@ func (s *MySQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				// NOTE: On MySQL this block is a forward-compatibility guard only --
 				// encryption is not yet supported and will never be true.
 				if s.encryption != nil && s.encryptSensitivePayloads {
-					if decrypted, err := s.encryption.Decrypt([]byte(rec.Request)); err == nil {
+					if decrypted, err := s.encryption.Decrypt(tenantForAAD(s.tenantID), []byte(rec.Request)); err == nil {
 						rec.Request = string(decrypted)
 					}
-					if decrypted, err := s.encryption.Decrypt([]byte(rec.Response)); err == nil {
+					if decrypted, err := s.encryption.Decrypt(tenantForAAD(s.tenantID), []byte(rec.Response)); err == nil {
 						rec.Response = string(decrypted)
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.Err); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.Err); err == nil {
 						rec.Err = decrypted
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.SignalPayload); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.SignalPayload); err == nil {
 						rec.SignalPayload = decrypted
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.ChildInput); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.ChildInput); err == nil {
 						rec.ChildInput = decrypted
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.NewInput); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.NewInput); err == nil {
 						rec.NewInput = decrypted
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.PluginInput); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.PluginInput); err == nil {
 						rec.PluginInput = decrypted
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.PluginOutput); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.PluginOutput); err == nil {
 						rec.PluginOutput = decrypted
 					}
 				}
@@ -472,7 +683,7 @@ func (s *MySQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 					// Decrypt payload before populateFromPayload if encryption is enabled.
 					// NOTE: Forward-compatibility guard only on MySQL.
 					if s.encryption != nil && s.encryptSensitivePayloads {
-						if decrypted, err := s.encryption.DecryptJSON([]byte(payloadStr)); err == nil {
+						if decrypted, err := s.encryption.DecryptJSON(tenantForAAD(s.tenantID), []byte(payloadStr)); err == nil {
 							payloadStr = string(decrypted)
 						}
 					}
@@ -509,6 +720,22 @@ func (s *MySQLStore) CountEventHistory(ctx context.Context, workflowID string) (
 	var count int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM event_history WHERE workflow_id = ? AND tenant_id = ?`, workflowID, s.tenantID).Scan(&count)
 	return count, err
+}
+
+// IsHistorySwept reports whether DeleteExpiredEvents has ever swept this
+// workflow's event_history. cleat#2038.
+func (s *MySQLStore) IsHistorySwept(ctx context.Context, workflowID string) (bool, error) {
+	var sweptAt sql.NullTime
+	err := s.db.QueryRowContext(ctx,
+		`SELECT history_swept_at FROM workflow_instances WHERE id = ? AND tenant_id = ?`,
+		workflowID, s.tenantID).Scan(&sweptAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return sweptAt.Valid, nil
 }
 
 // ---------------------------------------------------------------------------

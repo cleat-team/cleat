@@ -13,6 +13,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"github.com/cleat-team/cleat/engine/testutil"
+	"github.com/cleat-team/cleat/internal/pgclusterlock"
 	"github.com/cleat-team/cleat/migration"
 )
 
@@ -101,6 +102,34 @@ func postgresDSN(t *testing.T) (dsn string, configured bool) {
 	dsn = testutil.PostgresTestDSN()
 	configured = os.Getenv("CLEAT_TEST_POSTGRES") != "" || os.Getenv("CLEAT_TEST_DB") != ""
 	return dsn, configured
+}
+
+// runMigrations applies r while holding the instance-wide migration lock, and
+// is how every migration in this package's tests must be run. cleat#1666.
+//
+// WHY A HELPER RATHER THAN A NOTE ASKING PEOPLE TO TAKE THE LOCK. cleat#1603
+// added the lock for exactly this contention and wired it into
+// engine/testutil only. This package builds its own scratch databases in
+// newScratchDB and ran migration.Runner directly, so it was on the
+// unprotected side -- while being the package whose CI failure the lock was
+// written from. Ten call sites is nine too many to keep right by convention,
+// which is why TestEveryMigrationRunInThisPackageTakesTheClusterLock exists
+// below and fails when a new one appears.
+//
+// ONLY POSTGRESQL CONTENDS. The objects that race are CLUSTER-wide -- roles,
+// created by six migrations -- and that is a PostgreSQL notion. A MySQL or
+// SQL Server run takes no lock and is not serialised against anything, which
+// is correct rather than an omission: maintenanceDSN would refuse their DSNs
+// anyway.
+func runMigrations(t *testing.T, ctx context.Context, r *migration.Runner, dialect migration.Dialect) error {
+	t.Helper()
+	if dialect != migration.DialectPostgres {
+		return r.Run(ctx)
+	}
+	dsn, _ := postgresDSN(t)
+	var err error
+	pgclusterlock.WithClusterMigrationLock(dsn, func() { err = r.Run(ctx) })
+	return err
 }
 
 // newScratchDB creates an empty database and returns a handle to it.
@@ -240,7 +269,7 @@ func TestRunner_AppliesShippedPostgresMigrations(t *testing.T) {
 	simulateExistingDeployment(t, db)
 
 	r := migration.NewRunner(db, migration.DialectPostgres, migrationsRoot(t))
-	if err := r.Run(context.Background()); err != nil {
+	if err := runMigrations(t, context.Background(), r, migration.DialectPostgres); err != nil {
 		t.Fatalf("Run against the shipped migrations failed: %v\n\n"+
 			"This is the code path every cleat-worker takes at boot. If it "+
 			"fails, no worker can start against a PostgreSQL deployment.", err)
@@ -279,7 +308,9 @@ func TestRunner_SecondRunAppliesNothing(t *testing.T) {
 	root := migrationsRoot(t)
 	ctx := context.Background()
 
-	if err := migration.NewRunner(db, migration.DialectPostgres, root).Run(ctx); err != nil {
+	if err := runMigrations(t, ctx,
+		migration.NewRunner(db, migration.DialectPostgres, root),
+		migration.DialectPostgres); err != nil {
 		t.Fatalf("first Run: %v", err)
 	}
 	var firstApplied string
@@ -288,7 +319,9 @@ func TestRunner_SecondRunAppliesNothing(t *testing.T) {
 		t.Fatalf("read applied_at: %v", err)
 	}
 
-	if err := migration.NewRunner(db, migration.DialectPostgres, root).Run(ctx); err != nil {
+	if err := runMigrations(t, ctx,
+		migration.NewRunner(db, migration.DialectPostgres, root),
+		migration.DialectPostgres); err != nil {
 		t.Fatalf("second Run: %v", err)
 	}
 	var secondApplied string
@@ -324,16 +357,31 @@ func TestRunner_ConcurrentRunsAreSerialised(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make([]error, runners)
 	start := make(chan struct{})
-	for i := 0; i < runners; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			<-start
-			errs[i] = migration.NewRunner(db, migration.DialectPostgres, root).Run(context.Background())
-		}(i)
-	}
-	close(start)
-	wg.Wait()
+
+	// The cluster lock is taken ONCE around the whole block, not inside each
+	// goroutine, and the difference is the entire point of this test.
+	//
+	// This test's subject is the runner's own per-database advisory lock, and
+	// it establishes it by making four runners collide deliberately. Taking
+	// the cluster lock per goroutine would serialise them EXTERNALLY, so they
+	// would never collide, and the test would pass while exercising nothing --
+	// a guard that cannot fail. Held once around the block, the four still
+	// race each other exactly as before, and the block as a whole no longer
+	// races migrations in other packages sharing this PostgreSQL instance,
+	// which is cleat#1666's contention rather than this test's.
+	dsn, _ := postgresDSN(t)
+	pgclusterlock.WithClusterMigrationLock(dsn, func() {
+		for i := 0; i < runners; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				errs[i] = migration.NewRunner(db, migration.DialectPostgres, root).Run(context.Background())
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+	})
 
 	for i, err := range errs {
 		if err != nil {
@@ -376,7 +424,9 @@ func TestRunner_LeavesSearchPathUnchanged(t *testing.T) {
 		t.Fatalf("show search_path: %v", err)
 	}
 
-	if err := migration.NewRunner(db, migration.DialectPostgres, migrationsRoot(t)).Run(context.Background()); err != nil {
+	if err := runMigrations(t, context.Background(),
+		migration.NewRunner(db, migration.DialectPostgres, migrationsRoot(t)),
+		migration.DialectPostgres); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
 

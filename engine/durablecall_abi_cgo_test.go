@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 func TestWasmtimeReadPayloadAcceptsEmptyButNotNegative(t *testing.T) {

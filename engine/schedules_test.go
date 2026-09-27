@@ -85,7 +85,7 @@ func TestScheduleCron_WritesTheScheduleTheGuestAskedFor(t *testing.T) {
 			if got.Timezone != "America/New_York" {
 				t.Errorf("timezone = %q, want America/New_York", got.Timezone)
 			}
-			if !got.Enabled {
+			if got.Disabled() {
 				t.Error("schedule was created disabled; a guest that asked for a cron expects it to run")
 			}
 			if !got.NextRunAt.After(time.Now().Add(-time.Minute)) {
@@ -442,7 +442,10 @@ func TestCronEventsSurviveCompaction(t *testing.T) {
 		{Step: 2, EventType: EventTypeListCrons, CronResult: `[{"schedule_id":"cron-abc123"}]`},
 	}
 
-	state := extractCompactionState(original)
+	state, extractErr := extractCompactionState(original)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	rebuilt := buildFullHistoryFromCompaction(nil, state)
 	if len(rebuilt) != len(original) {
 		t.Fatalf("rebuilt %d events, want %d", len(rebuilt), len(original))

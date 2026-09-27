@@ -1,0 +1,431 @@
+package engine
+
+// Layer-separation proof for cleat#1534:
+// migrations/postgres/083_an_idempotency_key_belongs_to_one_tenant.sql gives
+// idempotency_keys a fail-closed policy, which migrations 031 and 061 both
+// declined because startNewRun read the table before any RLS context existed.
+//
+// The commit carrying this file moves those reads onto transactions that have
+// the tenant set. Three properties have to hold together, and each of them can
+// be true while another is broken:
+//
+//	the store still works      startNewRun runs on a connection the policy
+//	                           APPLIES to -- before the reorder this raises
+//	the policy filters         a session seeing only its own rows, with no
+//	                           tenant predicate in the statement at all
+//	the sweep still crosses    the TTL delete reaching every tenant's expired
+//	                           keys, which a fail-closed policy stops dead
+//
+// Written as one test over one fixture because the fixture is what makes any of
+// them mean anything: a policy's USING is a row-level predicate, so against an
+// empty table it is never evaluated and every read succeeds whether the policy
+// is right, wrong, or absent. Both tenants' rows exist for all three.
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/cleat-team/cleat/engine/testutil"
+)
+
+// applyIdempotencyKeysRLSMigration states this test's dependency on 083's fix,
+// the way applyMemoryProfileRLSMigration does for 061 and
+// apply031RLSGapMigration does for its own.
+//
+// It used to re-apply 083 directly, "redundant with testutil.TestDB, which runs
+// the whole migrations/postgres/ directory, and kept anyway". Since the
+// cleat#2059 rebaseline that directory is three files and 083 is one of the
+// history it replaced; the policy lives in 001_schema.sql now. So the helper
+// asserts the policy is present instead of installing it -- see
+// assertRLSPolicyExists.
+func applyIdempotencyKeysRLSMigration(t *testing.T, db *sql.DB) {
+	t.Helper()
+	assertRLSPolicyExists(t, db, "idempotency_keys", "idempotency_keys_tenant_isolation")
+}
+
+func TestAnIdempotencyKeyBelongsToOneTenant(t *testing.T) {
+	adminDB := testutil.TestDB(t, testutil.DialectPostgres)
+	defer adminDB.Close()
+	testutil.SetupFullSchema(t, adminDB, testutil.DialectPostgres)
+	testutil.CleanupPostgresTestData(t, adminDB)
+	defer testutil.CleanupPostgresTestData(t, adminDB)
+	applyIdempotencyKeysRLSMigration(t, adminDB)
+
+	ctx := context.Background()
+	const tenantA = "f0000000-0000-4000-8000-00000000000a"
+	const tenantB = "f0000000-0000-4000-8000-00000000000b"
+	stamp := time.Now().UnixNano()
+	defA := fmt.Sprintf("idem-rls-a-%d", stamp)
+	defB := fmt.Sprintf("idem-rls-b-%d", stamp)
+	// ONE key string for both tenants. That collision is the whole subject of
+	// migration 010 -- "order-123" chosen by two customers -- and it is also
+	// what makes tenant B's row the row the policy has to EXCLUDE rather than
+	// one it would have admitted anyway.
+	sharedKey := fmt.Sprintf("order-%d", stamp)
+
+	appDB := testutil.OpenPostgresRLSTestDB(t, adminDB)
+	defer appDB.Close()
+	assertNotSuperuserBypass(t, appDB)
+
+	t.Cleanup(func() {
+		bg := context.Background()
+		for _, tenant := range []string{tenantA, tenantB} {
+			_, _ = adminDB.ExecContext(bg, `DELETE FROM idempotency_keys WHERE tenant_id = $1`, tenant)
+			_, _ = adminDB.ExecContext(bg, `DELETE FROM workflow_instances WHERE tenant_id = $1`, tenant)
+			_, _ = adminDB.ExecContext(bg, `DELETE FROM workflow_defs WHERE tenant_id = $1`, tenant)
+		}
+	})
+
+	// workflow_instances carries a foreign key to workflow_defs, so the
+	// definitions exist before the runs do. Seeded over the superuser
+	// connection: they are the fixture, not the thing under test.
+	for tenant, def := range map[string]string{tenantA: defA, tenantB: defB} {
+		if _, err := adminDB.ExecContext(ctx,
+			`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, tenant_id)
+			 VALUES ($1, 1, $2, 1, 0, $3)`,
+			def, []byte{0x00, 0x61, 0x73, 0x6d}, tenant); err != nil {
+			t.Fatalf("seed workflow_defs(%s): %v", tenant, err)
+		}
+	}
+
+	// --- The store, over a connection the policy applies to. ---
+	//
+	// THIS IS THE REGRESSION TEST FOR THE REORDER, and it is a write path, so
+	// it fires on an empty table: WITH CHECK is evaluated per row being
+	// inserted, unlike USING. Before the reorder the lookup and the INSERT ran
+	// with no tenant on their transaction and this fails with
+	//
+	//	cleat.tenant_id is not set -- tenant context required for RLS-scoped query
+	//
+	// appDB is neither superuser nor table owner, which is what makes that
+	// true. The same call over adminDB passes whatever the ordering is.
+	runs := map[string]string{}
+	for tenant, def := range map[string]string{tenantA: defA, tenantB: defB} {
+		store := NewPostgresStore(appDB).WithTenant(tenant)
+		id, existed, err := store.StartNewRunWithOptions(
+			ctx, "", def, 1, json.RawMessage(`{}`), sharedKey, tenant, 0, StartOptions{})
+		if err != nil {
+			t.Fatalf("StartNewRunWithOptions(%s) over a non-superuser connection: %v\n\n"+
+				"If this is \"cleat.tenant_id is not set\", startNewRun is reading "+
+				"idempotency_keys before establishing the tenant -- which is what "+
+				"cleat#1534 reordered and what migration 083's policy makes fatal.",
+				tenant, err)
+		}
+		if existed {
+			t.Fatalf("StartNewRunWithOptions(%s) reported the key already existed. Tenant %s is "+
+				"the first user of %q; if this is tenant B, it was handed tenant A's run.",
+				tenant, tenant, sharedKey)
+		}
+		runs[tenant] = id
+	}
+	if runs[tenantA] == runs[tenantB] {
+		t.Fatalf("both tenants were given the same run id %s for key %q", runs[tenantA], sharedKey)
+	}
+
+	// The fixture the two checks below depend on. Stated as a fraction rather
+	// than asserted as "clean": a count taken from a failed seed looks exactly
+	// like a count taken after correct filtering.
+	var seeded int
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT count(*) FROM idempotency_keys WHERE tenant_id IN ($1, $2)`,
+		tenantA, tenantB).Scan(&seeded); err != nil {
+		t.Fatalf("count seeded keys: %v", err)
+	}
+	if seeded != 2 {
+		t.Fatalf("PRECONDITION FAILED: %d of 2 idempotency keys seeded. Everything below "+
+			"passes trivially against a table with nothing in it to exclude.", seeded)
+	}
+
+	// --- Layer 1: the POLICY alone, with no tenant predicate anywhere. ---
+	conn, err := appDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire connection: %v", err)
+	}
+	defer conn.Close()
+	setSessionTenant(t, ctx, conn, tenantA)
+
+	var seenDefs []string
+	rows, err := conn.QueryContext(ctx, `SELECT def_name FROM idempotency_keys`)
+	if err != nil {
+		t.Fatalf("select from idempotency_keys with no tenant predicate: %v", err)
+	}
+	for rows.Next() {
+		var name sql.NullString
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			t.Fatalf("scan: %v", err)
+		}
+		seenDefs = append(seenDefs, name.String)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatalf("iterate: %v", err)
+	}
+	rows.Close()
+	if len(seenDefs) != 1 || seenDefs[0] != defA {
+		t.Errorf("a tenant A session selecting from idempotency_keys with NO WHERE tenant_id saw "+
+			"%v, want exactly [%s] of the 2 rows present.\n\nThe policy is not filtering this "+
+			"query, so the Go predicate is the only layer -- which is the state cleat#1534 "+
+			"exists to leave behind.", seenDefs, defA)
+	}
+
+	// --- Layer 2: the Go predicate alone, with the policy bypassed. ---
+	//
+	// adminDB is a superuser connection, so the policy cannot act on it. This
+	// is "policy removed" without dropping it, and the lookup's own
+	// `AND tenant_id = $2` is all that is left.
+	storeA := NewPostgresStore(adminDB).WithTenant(tenantA)
+	id, existed, err := storeA.StartNewRunWithOptions(
+		ctx, "", defA, 1, json.RawMessage(`{}`), sharedKey, tenantA, 0, StartOptions{})
+	if err != nil {
+		t.Fatalf("StartNewRunWithOptions(A, same key again): %v", err)
+	}
+	if !existed {
+		t.Fatalf("CONTROL FAILED: tenant A re-presenting its OWN key %q was given a NEW run %s. "+
+			"The lookup is finding nothing at all, so the check below cannot distinguish "+
+			"isolation from a query that never matches.", sharedKey, id)
+	}
+	if id != runs[tenantA] {
+		t.Errorf("tenant A re-presenting %q was handed run %s, want its own %s (tenant B holds %s). "+
+			"Over a superuser connection the policy is bypassed, so the Go-level tenant_id "+
+			"filter is not isolating on its own.", sharedKey, id, runs[tenantA], runs[tenantB])
+	}
+
+	// --- The TTL sweep still reaches every tenant. ---
+	//
+	// cmd/cleat-worker's idempotencyCleanupLoop has no tenant predicate and
+	// wants none. Under the tenant policy alone it cannot run at all; migration
+	// 083 gives it a second policy reached through cleat_sweep, which is
+	// migration 077's shape. Expired here rather than waiting out a TTL.
+	if _, err := adminDB.ExecContext(ctx,
+		`UPDATE idempotency_keys SET expires_at = now() - INTERVAL '1 hour' WHERE tenant_id = $1`,
+		tenantB); err != nil {
+		t.Fatalf("expire tenant B's key: %v", err)
+	}
+
+	sweepConn, err := appDB.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire sweep connection: %v", err)
+	}
+	defer sweepConn.Close()
+	tx, err := sweepConn.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin sweep tx: %v", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SET LOCAL ROLE cleat_sweep`); err != nil {
+		t.Fatalf("enter cleat_sweep: %v\n\nThe connecting role needs GRANT cleat_sweep ... WITH "+
+			"INHERIT FALSE; testutil.SetupPostgresRLSRole grants it and migration 077 grants "+
+			"it to cleat_app.", err)
+	}
+	res, err := tx.ExecContext(ctx,
+		`DELETE FROM idempotency_keys WHERE expires_at < now() AND tenant_id IN ($1, $2)`,
+		tenantA, tenantB)
+	if err != nil {
+		t.Fatalf("the cross-tenant sweep could not run: %v\n\nThis is the statement migration "+
+			"083's second policy exists for; a fail-closed policy alone raises here.", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		t.Fatalf("rows affected: %v", err)
+	}
+	// Committed, not rolled back: the survivor check below reads on a different
+	// connection and would see the table untouched otherwise -- a check that
+	// passes for a reason unrelated to the sweep.
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit sweep: %v", err)
+	}
+	// 1, not 2 and not 0. Tenant A's key is LIVE and must survive -- a sweep
+	// that took both would be reaching across tenants correctly and ignoring
+	// its own predicate, which `all clean` could not tell apart from this.
+	if n != 1 {
+		t.Errorf("the sweep deleted %d rows of the 2 present, want 1 -- tenant B's expired key "+
+			"and not tenant A's live one", n)
+	}
+	var survivors []string
+	srows, err := adminDB.QueryContext(ctx,
+		`SELECT def_name FROM idempotency_keys WHERE tenant_id IN ($1, $2)`, tenantA, tenantB)
+	if err != nil {
+		t.Fatalf("read survivors: %v", err)
+	}
+	for srows.Next() {
+		var name sql.NullString
+		if err := srows.Scan(&name); err != nil {
+			srows.Close()
+			t.Fatalf("scan survivor: %v", err)
+		}
+		survivors = append(survivors, name.String)
+	}
+	if err := srows.Err(); err != nil {
+		srows.Close()
+		t.Fatalf("iterate survivors: %v", err)
+	}
+	srows.Close()
+	if len(survivors) != 1 || survivors[0] != defA {
+		t.Errorf("after the sweep the table holds %v, want exactly [%s]", survivors, defA)
+	}
+}
+
+// TestTheConcurrentIdempotencyRereadRunsWithTheTenantSet covers the third of
+// startNewRun's three idempotency_keys statements, which the test above does
+// not reach.
+//
+// WHY IT NEEDS ITS OWN TEST. The re-read only runs when the INSERT ... ON
+// CONFLICT DO NOTHING affects no row, so an uncontended start never touches it.
+// Left untested it is the statement most likely to have been missed: it is the
+// one that ran on s.db AFTER a tx.Rollback(), so it is not covered by the
+// transaction the other two share and needed a second one of its own.
+//
+// THIS FIXTURE REPLACED AN EXPIRED-ROW ONE, AND THE REPLACEMENT IS THE POINT.
+// cleat#1534 reached this branch by seeding a row whose TTL had passed: it was
+// invisible to the lookup and still collided with the insert. cleat#1671 then
+// established that an expired row reaching this branch AT ALL is the defect --
+// there is no concurrent winner to re-read, so the caller got sql.ErrNoRows --
+// and the fix deletes the dead row before the insert. Which removed this test's
+// only way in, and the test said so rather than passing:
+//
+//	PRECONDITION FAILED: the start succeeded, so the INSERT did not conflict
+//	and the concurrent re-read was never reached. Nothing below was measured.
+//
+// That is the whole argument for writing preconditions beside verdicts. The
+// fixture stopped working inside the same PR that broke it, and a test asserting
+// only "no error" would have gone green while measuring nothing at all.
+//
+// HOW THE PATH IS REACHED NOW, deterministically and without a sleep. A raw
+// transaction inserts the key and does NOT commit. The store's lookup cannot
+// see an uncommitted row, so it finds nothing and proceeds; its insert then
+// BLOCKS on the unique index. Waiting for that block to appear in pg_locks is
+// what makes the ordering observable rather than assumed -- only once it is
+// visible does the raw transaction commit, and the store's insert resumes into
+// the conflict this branch exists for.
+//
+// The precondition is then self-proving: the store can only return the raw
+// transaction's workflow id by having re-read it, because its own lookup ran
+// before that row was committed.
+func TestTheConcurrentIdempotencyRereadRunsWithTheTenantSet(t *testing.T) {
+	adminDB := testutil.TestDB(t, testutil.DialectPostgres)
+	defer adminDB.Close()
+	testutil.SetupFullSchema(t, adminDB, testutil.DialectPostgres)
+	testutil.CleanupPostgresTestData(t, adminDB)
+	defer testutil.CleanupPostgresTestData(t, adminDB)
+	applyIdempotencyKeysRLSMigration(t, adminDB)
+
+	ctx := context.Background()
+	const tenant = "f0000000-0000-4000-8000-00000000000c"
+	stamp := time.Now().UnixNano()
+	def := fmt.Sprintf("idem-reread-%d", stamp)
+	key := fmt.Sprintf("order-reread-%d", stamp)
+	const winnerID = "wf-concurrent-winner"
+
+	appDB := testutil.OpenPostgresRLSTestDB(t, adminDB)
+	defer appDB.Close()
+	assertNotSuperuserBypass(t, appDB)
+
+	t.Cleanup(func() {
+		bg := context.Background()
+		_, _ = adminDB.ExecContext(bg, `DELETE FROM idempotency_keys WHERE tenant_id = $1`, tenant)
+		_, _ = adminDB.ExecContext(bg, `DELETE FROM workflow_instances WHERE tenant_id = $1`, tenant)
+		_, _ = adminDB.ExecContext(bg, `DELETE FROM workflow_defs WHERE tenant_id = $1`, tenant)
+	})
+	if _, err := adminDB.ExecContext(ctx,
+		`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, tenant_id)
+		 VALUES ($1, 1, $2, 1, 0, $3)`,
+		def, []byte{0x00, 0x61, 0x73, 0x6d}, tenant); err != nil {
+		t.Fatalf("seed workflow_defs: %v", err)
+	}
+
+	keyHash := sha256.Sum256([]byte(key))
+
+	// The competitor: holds the key, uncommitted.
+	winner, err := adminDB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin the competing transaction: %v", err)
+	}
+	defer winner.Rollback()
+	if _, err := winner.ExecContext(ctx,
+		`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id, def_name)
+		 VALUES ($1, $2, now() + INTERVAL '1 hour', $3, $4)`,
+		keyHash[:], winnerID, tenant, def); err != nil {
+		t.Fatalf("competitor insert: %v", err)
+	}
+
+	type result struct {
+		id      string
+		existed bool
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		id, existed, err := NewPostgresStore(appDB).WithTenant(tenant).StartNewRunWithOptions(
+			ctx, "", def, 1, json.RawMessage(`{}`), key, tenant, 0, StartOptions{})
+		done <- result{id, existed, err}
+	}()
+
+	// Wait for the store's insert to BLOCK, rather than sleeping and hoping.
+	// An ungranted lock held by some other backend is the observable that says
+	// the lookup has already run and found nothing.
+	blocked := false
+	for i := 0; i < 200; i++ {
+		var n int
+		// Scoped to a backend blocked ON THIS STATEMENT, in this database. A
+		// bare `NOT granted` count is true of any contention anywhere in the
+		// instance, and the engine suite shares a database -- so the loop would
+		// then proceed on somebody else's wait and commit too early, which
+		// reads as a pass through the LOOKUP rather than the re-read.
+		//
+		// A conflicting insert waits on the inserting TRANSACTION, not on the
+		// relation, so pg_locks.relation is null here and joining on it finds
+		// nothing. The waiting backend's own query text is what identifies it.
+		if err := adminDB.QueryRowContext(ctx,
+			`SELECT count(*) FROM pg_locks l
+			   JOIN pg_stat_activity a ON a.pid = l.pid
+			  WHERE NOT l.granted
+			    AND a.datname = current_database()
+			    AND a.query ILIKE '%INSERT INTO idempotency_keys%'`).Scan(&n); err != nil {
+			t.Fatalf("poll pg_locks: %v", err)
+		}
+		if n > 0 {
+			blocked = true
+			break
+		}
+		select {
+		case r := <-done:
+			t.Fatalf("PRECONDITION FAILED: the start finished (%+v) before blocking on the "+
+				"competitor's uncommitted row, so it never reached the concurrent re-read. "+
+				"Nothing below was measured.", r)
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+	if !blocked {
+		t.Fatal("PRECONDITION FAILED: no backend ever blocked, so the start did not reach the " +
+			"conflicting insert. Nothing below was measured.")
+	}
+
+	if _, err := winner.ExecContext(ctx,
+		`INSERT INTO workflow_instances (id, def_name, def_version, status, input, tenant_id)
+		 VALUES ($1, $2, 1, 'ready', '{}', $3)`, winnerID, def, tenant); err != nil {
+		t.Fatalf("competitor workflow row: %v", err)
+	}
+	if err := winner.Commit(); err != nil {
+		t.Fatalf("competitor commit: %v", err)
+	}
+
+	r := <-done
+	if r.err != nil {
+		t.Fatalf("the start failed on the concurrent path: %v\n\n"+
+			"If this is \"cleat.tenant_id is not set\", the re-read ran without the tenant "+
+			"established -- the third of startNewRun's idempotency_keys statements, the one "+
+			"that ran on s.db after tx.Rollback(). cleat#1534 gives it a transaction of its "+
+			"own.", r.err)
+	}
+	if !r.existed || r.id != winnerID {
+		t.Fatalf("the loser was given (id=%q existed=%v), want (%q true). Its own lookup ran "+
+			"before the winner's row was committed, so returning that id is only possible "+
+			"by re-reading it -- which is what this test measures.", r.id, r.existed, winnerID)
+	}
+}

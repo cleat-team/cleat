@@ -4,7 +4,6 @@ package engine
 
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +16,7 @@ import (
 
 	"github.com/cespare/xxhash/v2"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 
 	"github.com/cleat-team/cleat/wasm"
 )
@@ -57,20 +56,37 @@ type wasmtimeBackend struct {
 	engine  *wasmtime.Engine
 	handler HostHandler // current execution session
 
+	// wasiMonotonicNs backs CLOCK_MONOTONIC handed to WASI, and
+	// wasiMonotonicStart is the instant it counts from. Per-execution, same as
+	// handler above, and monotonic by construction.
+	//
+	// It tracks REAL ELAPSED TIME since cleat#1300. It used to advance a fixed
+	// step per read, which multiplied every guest sleep on this backend by
+	// ~125x: see registerWasiDeterminism.
+	wasiMonotonicNs    int64
+	wasiMonotonicStart time.Time
+
+	// budget bounds GUEST EXECUTION rather than wall clock. Per-execution, and
+	// safe here only because Execute runs on a PerExecution() backend.
+	// IMPROVEMENT-PLAN 3.90; see engine/wasmtime_hostbudget.go.
+	budget *hostBudget
+
 	// moduleCache holds compiled wasmtime Modules keyed by xxhash of wasmBytes.
 	// Shared across PerExecution instances to avoid serialized recompilation.
-	moduleCache  *sync.Map
+	//
+	// BOUNDED since cleat#1563. It was a bare sync.Map with no Delete anywhere,
+	// so it held one entry per distinct artifact the process had ever run, for
+	// the life of the process, across every tenant -- and the resident cost is
+	// compiled native code. See moduleLRU for why evicting is safe despite the
+	// "Do NOT close the module" rule below, and why the bound counts entries
+	// rather than bytes.
+	moduleCache  *moduleLRU
 	compileLocks *sync.Map // per-key *sync.Mutex to serialize compilation
 	metaCache    *sync.Map // per-key *wasmMeta (envNeeded, hasWasi, language)
 
 	// envNeeded is the set of "env" module imports the WASM module requests.
 	// nil means "register everything" (conservative fallback on parse error).
 	envNeeded map[string]bool
-
-	// witDylib holds the wit_dylib stack machine state for component
-	// model adapter ABI (push/pop/export_call). Initialized per
-	// ExecuteComponent call.
-	witDylib *witDylibState
 
 	// Work data for the Go dispatcher (cleat_poll_work).
 	workEntryPoint string
@@ -84,6 +100,20 @@ type wasmtimeBackend struct {
 	// store sees a consistent snapshot even if this were ever mutated
 	// concurrently, which it isn't after construction).
 	limits wasmtimeLimits
+
+	// logger receives this backend's own records. nil means slog.Default();
+	// see log() and WithWasmtimeLogger for why that default is a trap.
+	logger *slog.Logger
+
+	// deferPhase marks this execution as a defer segment: the workflow is
+	// being replayed for the sole purpose of running its outstanding defers,
+	// not to make progress. See runGuestDefersAfterSuspend.
+	//
+	// Set per-execution by the engine (executor.go), so it lives on the
+	// PerExecution copy rather than the root, and is deliberately NOT copied
+	// by PerExecution -- a root backend is never in a defer phase, and
+	// inheriting the flag would make every subsequent execution one.
+	deferPhase bool
 
 	// epochStop, when non-nil, stops the background epoch-ticker goroutine
 	// on Close. Only set on the backend returned directly by
@@ -110,10 +140,11 @@ type wasmtimeBackend struct {
 // Config at all. Fuel-based instruction metering is enabled additionally
 // when WithWasmtimeInstructionLimit(n) is passed with n > 0.
 func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeBackend, error) {
-	lim := wasmtimeLimits{}
+	bcfg := wasmtimeConfig{}
 	for _, opt := range opts {
-		opt(&lim)
+		opt(&bcfg)
 	}
+	lim := bcfg.limits
 	if lim.executionTimeout <= 0 {
 		lim.executionTimeout = DefaultWasmtimeExecutionTimeout
 	}
@@ -136,10 +167,11 @@ func NewWasmtimeBackend(ctx context.Context, opts ...WasmtimeOption) (*wasmtimeB
 
 	b := &wasmtimeBackend{
 		engine:       eng,
-		moduleCache:  new(sync.Map),
+		moduleCache:  newModuleLRU(bcfg.moduleCacheMaxEntries, bcfg.moduleCacheMaxBytes),
 		compileLocks: new(sync.Map),
 		metaCache:    new(sync.Map),
 		limits:       lim,
+		logger:       bcfg.logger,
 		epochStop:    make(chan struct{}),
 		epochDone:    make(chan struct{}),
 	}
@@ -174,6 +206,19 @@ func (b *wasmtimeBackend) startEpochTicker() {
 	}()
 }
 
+// log returns the configured logger, or slog.Default() when none was set.
+//
+// Mirrors Engine.log(). The nil case is deliberately still slog.Default()
+// rather than a discard: a backend built without a logger by a caller that
+// never had one -- cmd/cleat-worker's verify_backend.go, and every test --
+// should still say something.
+func (b *wasmtimeBackend) log() *slog.Logger {
+	if b.logger != nil {
+		return b.logger
+	}
+	return slog.Default()
+}
+
 // Name returns "wasmtime" for diagnostics.
 func (b *wasmtimeBackend) Name() string { return "wasmtime" }
 
@@ -199,13 +244,32 @@ func (b *wasmtimeBackend) Close(ctx context.Context) error {
 // the data race when Execute is called concurrently. The resource limits
 // configured on the root backend are copied so every execution enforces
 // the same bounds; epochStop is deliberately left nil (see its doc).
-func (b *wasmtimeBackend) PerExecution() WasmBackend {
+//
+// The one limit that is NOT simply copied is executionTimeout, which is
+// resolved per tenant here -- see the clamp below and IMPROVEMENT-PLAN 3.94
+// step 5b.
+func (b *wasmtimeBackend) PerExecution(tenantInstanceTimeout time.Duration) WasmBackend {
+	// Clamp HERE, not at the caller. This is the only place the tenant's value
+	// and the operator's ceiling (limits.executionTimeout, from
+	// --wasm-instance-timeout) are both in scope, and the direction is the
+	// whole point: a tenant may tighten its own execution bound, never widen
+	// it past what the operator granted. ClampToCeiling treats a non-positive
+	// value on either side as "no limit from that side", so a tenant that set
+	// nothing gets the operator's number unchanged.
+	lim := b.limits
+	lim.executionTimeout = ClampToCeiling(tenantInstanceTimeout, b.limits.executionTimeout)
+
 	return &wasmtimeBackend{
 		engine:       b.engine,
 		moduleCache:  b.moduleCache,
 		compileLocks: b.compileLocks,
 		metaCache:    b.metaCache,
-		limits:       b.limits,
+		limits:       lim,
+		// Copied, like limits. A PerExecution copy that dropped the logger
+		// would send every record from the path that actually executes
+		// workflows to slog.Default(), which is the bug this field exists to
+		// fix -- and it would do so while the root backend looked correct.
+		logger: b.logger,
 	}
 }
 
@@ -274,6 +338,191 @@ func (b *wasmtimeBackend) configureStore(ctx context.Context, store *wasmtime.St
 	}
 	store.Limiter(memLimit, tblLimit, instLimit, -1, -1)
 	return timeout, nil
+}
+
+// runGuestDefersAfterKill runs the defers of a workflow the host just stopped.
+//
+// IMPROVEMENT-PLAN 3.35 phase 4. A guest killed by the fence, the instruction
+// limit, or an unrecoverable runtime failure never reaches the entry point
+// wrapper that normally drains its defer table (3.70), so its cleanup -- the
+// released lock, the refunded charge -- simply did not happen. #544 and #548
+// measured that the instance is nonetheless still usable and its closures
+// intact after all three; this is the call that uses that.
+//
+// Best-effort by construction. It is called immediately before returning the
+// error that says the workflow was killed, and it must not change that error:
+// the workflow failed, and it failed for the reason the caller already has.
+// A cleanup that itself fails is logged and nothing more.
+//
+// The budget refresh is not uniform, and the shape of it was measured rather
+// than assumed (2026-09-02, probes over testdata/fencereentry):
+//
+//   - Wall clock is always refreshed. SetEpochDeadline is relative to the
+//     current epoch, so without it the call is interrupted immediately.
+//   - Fuel is refreshed only when metering is on, and it is REQUIRED there:
+//     without SetFuel the runner traps instantly, ran=0. The wall-clock budget
+//     above stays the binding bound, so this can be generous.
+//   - The memory ceiling is deliberately NOT raised. It does not need to be:
+//     the export takes no arguments, so unlike an entry point it needs no
+//     scratch buffers, and an OOM-killed guest ran its defer with the ceiling
+//     left exactly where it was (ran=1, the defer reached the host). Raising
+//     it would hand more memory to a guest that has just proved it cannot be
+//     trusted with what it had.
+//
+// setDeferPhase marks this per-execution backend as running a defer segment.
+//
+// Unexported and reached through an interface assertion in executor.go rather
+// than added to WasmBackend: a defer segment is a wasmtime-path concept today,
+// and widening the backend interface for it would oblige every implementation
+// to have an opinion about a phase it cannot enter.
+func (b *wasmtimeBackend) setDeferPhase(on bool) { b.deferPhase = on }
+
+// runGuestDefersAfterSuspend drains the defer table of a workflow that
+// suspended during a defer segment.
+//
+// IMPROVEMENT-PLAN 3.35 phase 5 / 3.81. A defer segment replays a workflow
+// whose terminal outcome is already decided, purely to run its outstanding
+// cleanup. The common case -- a workflow worth terminating is usually one that
+// is waiting -- is that replay re-suspends on the recorded sleep or await it
+// was sitting in, and never reaches the end of history at all.
+//
+// That suspension is what makes this work, rather than a problem to route
+// around. The guest's own drain is gated on `if !__susSuspended`
+// (wasm/exports.go, writeRunDeferred), so a suspended guest deliberately does
+// NOT drain: the defer table is still populated and the closures are still in
+// the instance's memory. The host calls the drain export itself, here, with
+// ordinary host-call semantics in force.
+//
+// Contrast with runGuestDefersAfterKill, which this deliberately mirrors but
+// does not share code with. That one runs after a trap and must not disturb
+// the error it is about to return; this one runs after a clean suspension,
+// where the calls the defer bodies make are the segment's real work and their
+// events belong in the history. The budget handling is identical and is
+// explained there.
+//
+// 3.81's measurement is why this is not simply "refuse the fresh call and let
+// the guest drain": _cleatRunDeferred takes the whole defer table before
+// running anything, so a refusal that also refuses the defer bodies' calls
+// consumes the cleanup rather than performing it.
+func (b *wasmtimeBackend) runGuestDefersAfterSuspend(
+	store *wasmtime.Store, instance *wasmtime.Instance, entryPoint string,
+) {
+	fn := instance.GetFunc(store, deferRunnerExport)
+	if fn == nil {
+		return
+	}
+
+	budget := b.limits.deferBudget
+	if budget <= 0 {
+		budget = DefaultWasmtimeDeferBudget
+	}
+	// Guest execution, not wall clock -- the defer budget is the case where
+	// that matters most. A defer body's whole purpose is a cleanup call, so
+	// charging the wait for it against a 1s budget spends the budget on the
+	// very thing it exists to allow. IMPROVEMENT-PLAN 3.90.
+	b.budget = newHostBudget(store, budget)
+	b.budget.arm()
+	if b.limits.instructionLimit > 0 {
+		if err := store.SetFuel(b.limits.instructionLimit); err != nil {
+			b.log().Warn("could not refuel the guest to run its defers on a defer segment",
+				"entry_point", entryPoint, "error", err)
+			return
+		}
+	}
+
+	// Bracket the drain so the defer bodies' own durable calls are permitted
+	// while the workflow body's are stopped. Without this the segment refuses
+	// the cleanup calls too -- and because _cleatRunDeferred takes the whole
+	// defer table before running anything, that CONSUMES the cleanup rather
+	// than skipping it: the lock is not released, the charge is not refunded,
+	// and the registrations are gone. Measured in IMPROVEMENT-PLAN 3.81.
+	//
+	// Asserted rather than required: a handler that does not implement it is a
+	// backend running without an engine session, which has no calls to stop.
+	if d, ok := b.handler.(interface{ setDeferDrain(bool) }); ok {
+		d.setDeferDrain(true)
+		defer d.setDeferDrain(false)
+	}
+
+	var ran int64
+	var callErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				callErr = fmt.Errorf("wasmtime panic: %v", r)
+			}
+		}()
+		res, err := fn.Call(store)
+		if err != nil {
+			callErr = err
+			return
+		}
+		ran, _ = res.(int64)
+	}()
+
+	if callErr != nil {
+		b.log().Warn("a defer segment's defers could not be run",
+			"entry_point", entryPoint, "error", callErr)
+		return
+	}
+	b.log().Info("ran a defer segment's defers",
+		"entry_point", entryPoint, "defers_run", ran)
+}
+
+func (b *wasmtimeBackend) runGuestDefersAfterKill(
+	store *wasmtime.Store, instance *wasmtime.Instance, entryPoint string, cause error,
+) {
+	fn := instance.GetFunc(store, deferRunnerExport)
+	if fn == nil {
+		// Not an error worth logging on its own: a guest built before this
+		// export existed, or one with no entry points, simply has nothing to
+		// drain here.
+		return
+	}
+
+	budget := b.limits.deferBudget
+	if budget <= 0 {
+		budget = DefaultWasmtimeDeferBudget
+	}
+	// Guest execution, not wall clock -- the defer budget is the case where
+	// that matters most. A defer body's whole purpose is a cleanup call, so
+	// charging the wait for it against a 1s budget spends the budget on the
+	// very thing it exists to allow. IMPROVEMENT-PLAN 3.90.
+	b.budget = newHostBudget(store, budget)
+	b.budget.arm()
+	if b.limits.instructionLimit > 0 {
+		if err := store.SetFuel(b.limits.instructionLimit); err != nil {
+			b.log().Warn("could not refuel the guest to run its defers",
+				"entry_point", entryPoint, "error", err)
+			return
+		}
+	}
+
+	var ran int64
+	var callErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				callErr = fmt.Errorf("wasmtime panic: %v", r)
+			}
+		}()
+		res, err := fn.Call(store)
+		if err != nil {
+			callErr = err
+			return
+		}
+		ran, _ = res.(int64)
+	}()
+
+	switch {
+	case callErr != nil:
+		b.log().Warn("a killed workflow's defers could not be run",
+			"entry_point", entryPoint, "defer_budget", budget,
+			"error", callErr, "killed_by", cause)
+	case ran > 0:
+		b.log().Info("ran the defers of a killed workflow",
+			"entry_point", entryPoint, "defers_run", ran, "killed_by", cause)
+	}
 }
 
 // executionLimitError marks an error as "the host stopped this guest", as
@@ -385,6 +634,9 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	if err != nil {
 		return nil, err
 	}
+	// The fence bounds guest execution, not wall clock. IMPROVEMENT-PLAN 3.90,
+	// engine/wasmtime_hostbudget.go.
+	b.budget = newHostBudget(store, execTimeout)
 	t1 := time.Now()
 
 	// Configure WASI for Go wasip1 module support.
@@ -418,58 +670,43 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	ctx = withHandler(ctx, session)
 	b.handler = session
 
+	// Anchor CLOCK_MONOTONIC at the start of THIS execution, so a guest sees a
+	// clock near zero as a freshly started process does, rather than one
+	// carrying the previous execution's elapsed time. Set beside b.handler
+	// because the two have the same lifetime and the same reason: this backend
+	// is PerExecution(). cleat#1300.
+	b.wasiMonotonicNs = 0
+	b.wasiMonotonicStart = time.Now()
+
 	// Detect Component Model binaries and dispatch to the component execution path.
 	if isComponentWasm(wasmBytes) {
-		// Try native component model via CGo first.
-		result, cgoErr := b.ExecuteComponentCGo(ctx, wasmBytes, entryPoint, []byte(input), OutBufSize)
-		if cgoErr == nil {
-			return result, nil
-		}
-		// A guest that exhausted its execution budget must not be handed a
-		// second one. Falling through to decomposition here did exactly that:
-		// a component with a 2s budget was interrupted on the native path and
-		// then started again from scratch on the decomposition path, so the
-		// effective bound was a multiple of the configured one -- and the
-		// error the caller finally saw was decomposition's, which reads as a
-		// guest defect rather than the host stopping a runaway.
+		// The native Component Model path is the only one. There used to be a
+		// hand-rolled decomposition fallback here -- ~620 lines of
+		// shared-everything dynamic linking, GOT.mem/GOT.func routing,
+		// placeholder tables, an "instance with the most exports is the CPython
+		// runtime" heuristic, and a multi-pass instantiation loop with an
+		// `undefined element` retry. It never once executed a workflow.
 		//
-		// Only for limit traps. Every other native-path failure is still a
-		// reason to try decomposition, which is the whole point of having it.
-		if isExecutionLimit(cgoErr) {
-			return nil, cgoErr
-		}
-		// Say why the native path was not taken. This used to be
-		// `if result, err := ...; err == nil`, discarding the error entirely,
-		// so a native-path failure surfaced only as whatever the fallback below
-		// happened to report -- typically an unresolved-import error from
-		// decomposition, which reads like "wasmtime cannot run this component"
-		// when the real cause was something else.
+		// Measured 2026-09-01 against the only Component Model binary in the
+		// repo, a 19.3 MB componentize-py build, with the native path as the
+		// control:
 		//
-		// The example that mattered: until 2026-08-05 the native path was
-		// compiled out entirely unless the wasmtime_component_cgo tag was set,
-		// and no build set it. Every component therefore reached decomposition,
-		// and decomposition's failure was read for months as wasmtime's verdict
-		// on Component Model guests. It was not; the native path runs them.
-		// The remaining known limit is real though: the export lookup resolves
-		// only top-level names (componentGetFunc passes a nil parent export
-		// index), so a component exporting through an interface instance still
-		// reports its export as missing and lands here.
+		//	native (this path)        reached CPython, ran guest code, and
+		//	                          returned the guest's own type error
+		//	wasmtime decomposition    failed at instance 81 of 85:
+		//	                          "incompatible import type for env::cleat_call"
+		//	wazero decomposition      failed at instance 8:
+		//	                          "memory is not exported in module env"
 		//
-		// Logged rather than returned: the fallback may still succeed, and
-		// turning a recoverable miss into a hard failure would change
-		// behaviour. The point is only that the reason stops vanishing.
-		slog.DebugContext(ctx, "wasmtime native component path unavailable, falling back to decomposition",
-			"entry_point", entryPoint, "error", cgoErr)
-		// Fall back to manual decomposition + instantiation.
-		bundle, bundleErr := wasm.ParseComponentBundle(wasmBytes)
-		if bundleErr != nil {
-			return nil, fmt.Errorf("host: parse component bundle (native component path first failed: %v): %w", cgoErr, bundleErr)
-		}
-		res, fallbackErr := b.ExecuteComponent(ctx, wasmBytes, bundle, entryPoint, input, session)
-		if fallbackErr != nil {
-			return nil, fmt.Errorf("%w (native component path first failed: %v)", fallbackErr, cgoErr)
-		}
-		return res, nil
+		// tiers.yaml already parked decomposition at tier 3 -- "not built, not
+		// shipped, not claimed". See IMPROVEMENT-PLAN 3.65.
+		//
+		// The consequence for the caller is that a native-path failure is now
+		// the answer rather than a prelude to a second, worse error. That is
+		// the improvement, not a regression: the fallback's failure was what
+		// callers actually saw, and it described decomposition's problems with
+		// the module rather than the real cause.
+		return b.ExecuteComponentCGo(ctx, wasmBytes, entryPoint, []byte(input), OutBufSize)
 	}
 
 	// Compile the WASM module (cached by xxhash key, computed above).
@@ -478,8 +715,8 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	var module *wasmtime.Module
 
 	// Fast path: module already cached.
-	if cached, ok := b.moduleCache.Load(wKey); ok {
-		module = cached.(*wasmtime.Module)
+	if cached, ok := b.moduleCache.load(wKey); ok {
+		module = cached
 		if DebugTiming {
 			fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile CACHE HIT elapsed=%dms\n", time.Since(compileStart).Milliseconds())
 		}
@@ -489,8 +726,8 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		mu := muI.(*sync.Mutex)
 		mu.Lock()
 		// Double-check: another goroutine may have compiled while we waited.
-		if cached, ok := b.moduleCache.Load(wKey); ok {
-			module = cached.(*wasmtime.Module)
+		if cached, ok := b.moduleCache.load(wKey); ok {
+			module = cached
 			if DebugTiming {
 				fmt.Fprintf(os.Stderr, "TIMING: wasmtime compile WAIT THEN HIT elapsed=%dms\n", time.Since(compileStart).Milliseconds())
 			}
@@ -504,7 +741,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 				mu.Unlock()
 				return nil, fmt.Errorf("host: compile: %w", err)
 			}
-			b.moduleCache.Store(wKey, module)
+			b.moduleCache.store(wKey, module, len(wasmBytes))
 		}
 		mu.Unlock()
 	}
@@ -518,13 +755,18 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// can store the workflow result and the Execute method can retrieve
 	// it even when the module subsequently traps (e.g. via proc_exit).
 	var completeResult, completeErr string
-	if err := b.registerAllImports(linker, &completeResult, &completeErr, needsWasi, abortImportType(module)); err != nil {
+	if err := b.registerAllImports(linker, &completeResult, &completeErr, needsWasi, module); err != nil {
 		return nil, fmt.Errorf("host: register imports: %w", err)
 	}
 
 	t2 := time.Now()
 
 	// Instantiate the module.
+	// Arm here rather than relying on configureStore's deadline: on a cold
+	// module everything above -- compilation included -- happened after that
+	// deadline was set, and came out of the guest's budget.
+	b.budget.arm()
+
 	instance, err := linker.Instantiate(store, module)
 	if err != nil {
 		return nil, fmt.Errorf("host: instantiate: %w", err)
@@ -561,6 +803,53 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 			// with specific import counts.
 			b.writeWorkToFixedMemory(mem, store, entryPoint, []byte(input))
 
+			// REFUSED BEFORE THE GUEST RUNS, not after it fails.
+			//
+			// Both delivery paths truncate: writeWorkToFixedMemory clamps to
+			// fixedWorkMaxInput and cleat_poll_work clamps to the buffer the
+			// guest advertises, and BOTH report the clamped length, so neither
+			// the guest nor a later reader can tell a complete input from a
+			// prefix of a larger one.
+			//
+			// Checking after execution is not good enough, and that is measured
+			// rather than assumed: a guest handed a truncated envelope does not
+			// politely report a JSON error, it dies -- `exit status 2`, a Go
+			// fatal runtime failure, whose message blames out-of-memory or
+			// stack exhaustion. That return path leaves before any host-side
+			// post-mortem, so a check placed after the call never runs on the
+			// case it exists for.
+			//
+			// Refusing up front also means the workflow never observes a
+			// half-delivered input at all, which is the difference between a
+			// failed run and a run on the wrong arguments (cleat#1312).
+			// BOTH lengths are checked, because the two delivery paths carry
+			// DIFFERENT payloads and the larger one is not the obvious one.
+			// writeWorkToFixedMemory copies the raw input; cleat_poll_work
+			// hands over b.workInput, the {"inputJSON":...} envelope, which is
+			// bigger than the input it wraps and grows further with every
+			// character JSON has to escape. So an input comfortably under the
+			// limit can still produce an envelope over it, and checking only
+			// the raw length would let exactly that case through -- silently,
+			// which is the property being fixed.
+			if n := len(input); n > fixedWorkMaxInput {
+				return nil, &GuestReturnedError{
+					Err: fmt.Errorf("host: export %q was started with %d bytes of input "+
+						"but the guest can receive %d, so %d bytes were not delivered. "+
+						"Refused rather than run on a prefix of its own arguments "+
+						"(cleat#1312)",
+						entryPoint, n, fixedWorkMaxInput, n-fixedWorkMaxInput),
+				}
+			}
+			if n := len(b.workInput); n > fixedWorkMaxInput {
+				return nil, &GuestReturnedError{
+					Err: fmt.Errorf("host: export %q was started with %d bytes of input, "+
+						"which the dispatch envelope grows to %d -- more than the %d the "+
+						"guest can receive, so %d bytes were not delivered. Refused rather "+
+						"than run on a prefix of its own arguments (cleat#1312)",
+						entryPoint, len(input), n, fixedWorkMaxInput, n-fixedWorkMaxInput),
+				}
+			}
+
 			var startErr error
 			func() {
 				defer func() {
@@ -574,6 +863,9 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 			}()
 
 			if completeResult == `"__cleat_suspended__"` {
+				if b.deferPhase {
+					b.runGuestDefersAfterSuspend(store, instance, entryPoint)
+				}
 				return &ExecResult{Suspended: true}, nil
 			}
 
@@ -606,7 +898,12 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 			//
 			// See IMPROVEMENT-PLAN.md 3.22.
 			if completeErr != "" {
-				return nil, fmt.Errorf("host: export %q failed: %s", entryPoint, guestErrorText(completeErr))
+				// Marked, not just formatted: the guest stopped cleanly and
+				// said it had failed. Without the marker the executor cannot
+				// tell this from a trap and labels it one (3.23).
+				return nil, &GuestReturnedError{
+					Err: fmt.Errorf("host: export %q failed: %s", entryPoint, guestErrorText(completeErr)),
+				}
 			}
 			if completeResult != "" {
 				return &ExecResult{Result: completeResult, Suspended: false}, nil
@@ -625,7 +922,54 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 			// silent "ok".
 			if startErr != nil {
 				if limitErr := b.resourceLimitError(startErr, execTimeout); limitErr != nil {
+					b.runGuestDefersAfterKill(store, instance, entryPoint, limitErr)
 					return nil, fmt.Errorf("host: export %q: %w", entryPoint, limitErr)
+				}
+				// A NON-ZERO WASI exit is the guest dying, not finishing.
+				//
+				// The check above only recognises the two resource-limit trap
+				// codes. Everything else reaching here used to fall through to
+				// the `"ok"` below, and the case that matters is not
+				// hypothetical: when the Go runtime cannot grow the heap past
+				// the configured memory limit it does not trap at all. It
+				// prints a goroutine dump and calls proc_exit(2) from its fatal
+				// path. That is not a *wasmtime.Trap, so resourceLimitError
+				// returns nil, so an out-of-memory workflow was returned as
+				// Result: `"ok"` with a nil error — and the worker stored
+				// status='done'. Every step after the allocation silently never
+				// happened, with no error text anywhere to find it by.
+				//
+				// Measured 2026-09-02 through Engine.Execute against
+				// testdata/fencereentry's allocate_forever under a 64 MB limit:
+				// result="ok" err=<nil>. See IMPROVEMENT-PLAN §3.71.
+				//
+				// Only non-zero is a failure. proc_exit(0) is how EVERY healthy
+				// Go guest leaves — main() returns and the wasip1 runtime exits
+				// — which is the whole reason startErr was ignored here.
+				//
+				// Non-Go guests never had this hole: the direct-export path
+				// below returns its callErr unconditionally.
+				//
+				// Deliberately NOT widened to "any startErr is a failure". A
+				// non-resource trap that is not a proc_exit still falls through
+				// to `"ok"`, which is the same shape of hole. It is left alone
+				// because nothing has demonstrated a Go guest reaching it: Go
+				// recovers panics into cleat_complete, and its unrecoverable
+				// failures leave through proc_exit, which the check above now
+				// catches. Widening on the strength of an argument rather than
+				// a measurement is how the exit-0 path -- which every healthy
+				// guest depends on -- would get broken.
+				var wasmErr *wasmtime.Error
+				if errors.As(startErr, &wasmErr) {
+					if code, ok := wasmErr.ExitStatus(); ok && code != 0 {
+						b.runGuestDefersAfterKill(store, instance, entryPoint, startErr)
+						return nil, fmt.Errorf(
+							"host: export %q: the guest exited with status %d without "+
+								"reporting a result; it was killed rather than finishing "+
+								"(a Go guest exits this way on an unrecoverable runtime "+
+								"failure such as out-of-memory or stack exhaustion): %w",
+							entryPoint, code, startErr)
+					}
 				}
 			}
 			return &ExecResult{Result: `"ok"`, Suspended: false}, nil
@@ -675,7 +1019,7 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Call the export directly (non-Go modules, or Go modules without _start).
 	fn := instance.GetFunc(store, entryPoint)
 	if fn == nil {
-		return nil, fmt.Errorf("host: export %q not found", entryPoint)
+		return nil, fmt.Errorf("host: export %q not found: %w", entryPoint, ErrExportNotFound)
 	}
 
 	t4 := time.Now()
@@ -710,9 +1054,16 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 	// Check for a result delivered via cleat_complete before treating
 	// a trap/proc_exit as an error.
 	if completeErr != "" {
-		return nil, fmt.Errorf("host: export %q failed: %s", entryPoint, completeErr)
+		// Same marking as the Go-on-wasmtime branch above; this is the
+		// direct-export path taken by every non-Go guest.
+		return nil, &GuestReturnedError{
+			Err: fmt.Errorf("host: export %q failed: %s", entryPoint, completeErr),
+		}
 	}
 	if completeResult == `"__cleat_suspended__"` {
+		if b.deferPhase {
+			b.runGuestDefersAfterSuspend(store, instance, entryPoint)
+		}
 		return &ExecResult{Suspended: true}, nil
 	}
 
@@ -724,6 +1075,30 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 		if limitErr := b.resourceLimitError(callErr, execTimeout); limitErr != nil {
 			callErr = limitErr
 		}
+		// Run the guest's outstanding defers before giving up on it.
+		// IMPROVEMENT-PLAN §3.35 phase 4.
+		//
+		// This is the non-Go path -- Rust, Java, AssemblyScript, and any Go
+		// module without _start -- and until this call it had no defer pass at
+		// all. The Go-on-wasmtime branch above got one in #550; #553, #557 and
+		// #558 then gave Rust, AssemblyScript and Java a __cleat_run_deferred
+		// export for the host to call, and nothing called it. "The guest
+		// exports it" and "the host calls it" are two different facts.
+		//
+		// Measured 2026-09-02 before the fix, AssemblyScript spin_forever under
+		// a 2s fence: the workflow was killed, its defer did not run, and the
+		// engine's fallback pass logged `defer execution failed ...
+		// export=cleat_defer_defer-0 ... not found` -- a message about an
+		// export naming convention no guest in any language has ever had, for
+		// cleanup that simply never happened.
+		//
+		// Only reached when the guest did NOT come out through its own wrapper:
+		// the completeErr and completeResult branches above return first, and
+		// a guest that reached either has already drained its own defer table
+		// (§3.73). This call is idempotent regardless -- every SDK's runner
+		// drains the table before running the first body, so a second call
+		// runs nothing and returns 0.
+		b.runGuestDefersAfterKill(store, instance, entryPoint, callErr)
 		return nil, fmt.Errorf("host: export %q: %w", entryPoint, callErr)
 	}
 
@@ -739,6 +1114,9 @@ func (b *wasmtimeBackend) Execute(ctx context.Context, wasmBytes []byte, entryPo
 
 	// Check for the suspend sentinel: (1 << 62).
 	if raw == (1 << 62) {
+		if b.deferPhase {
+			b.runGuestDefersAfterSuspend(store, instance, entryPoint)
+		}
 		return &ExecResult{Suspended: true}, nil
 	}
 
@@ -788,634 +1166,31 @@ const (
 	_dispatcherTimeout   = 30 * time.Second
 )
 
-func (b *wasmtimeBackend) ExecuteComponent(ctx context.Context, wasmBytes []byte, bundle *wasm.ComponentBundle, entryPoint string, input json.RawMessage, session HostHandler) (*ExecResult, error) {
-	const componentAdapterModule = "__component_adapter__"
-
-	// ---- Step 1: Compile all core modules ----
-	compiled := make([]*wasmtime.Module, len(bundle.Modules))
-	for i, modBytes := range bundle.Modules {
-		patched := wasm.PatchEmptyImportModuleName(modBytes, componentAdapterModule)
-		if rewritten, rwErr := wasm.RewriteWitImports(patched); rwErr == nil && rewritten != nil {
-			patched = rewritten
-		}
-		m, err := wasmtime.NewModule(b.engine, patched)
-		if err != nil {
-			return nil, fmt.Errorf("host: compile core module %d: %w", i, err)
-		}
-		compiled[i] = m
-		defer m.Close()
-	}
-
-	// ---- Step 2: Create store with WASI ----
-	store := wasmtime.NewStore(b.engine)
-	defer store.Close()
-	execTimeout, err := b.configureStore(ctx, store)
-	if err != nil {
-		return nil, err
-	}
-	wasiConfig := wasmtime.NewWasiConfig()
-	wasiConfig.InheritStderr()
-	store.SetWasi(wasiConfig)
-
-	// ---- Step 3: Walk instance DAG ----
-	instances := make([]*wasmtime.Instance, len(bundle.Instances))
-
-	// Resolve FromExports chains: walk transitively to find the actual
-	// instantiated instance that provides exports for each instance index.
-	actualProvider := make([]int, len(bundle.Instances))
-	for i := range actualProvider {
-		actualProvider[i] = i
-	}
-	// Iterate to closure: follow FromExports chains until we reach an
-	// instantiated instance or hit a fixed point.
-	for changed := true; changed; {
-		changed = false
-		for i, inst := range bundle.Instances {
-			if inst.ModuleIndex >= 0 {
-				continue // has its own module, no need to resolve further
-			}
-			// Try to resolve through any FromExports entry.
-			for _, fe := range inst.FromExports {
-				src := fe.SourceInstance
-				if src >= 0 && src < len(actualProvider) && actualProvider[src] != i {
-					next := actualProvider[src]
-					if bundle.Instances[next].ModuleIndex >= 0 && actualProvider[i] != next {
-						actualProvider[i] = next
-						changed = true
-						break
-					}
-				}
-			}
-		}
-	}
-
-	// Initialize the wit_dylib stack machine for component model ABI.
-	b.witDylib = newWitDylibState()
-
-	// Find the CPython runtime instance: the one whose compiled module
-	// has the most exports. The component model DAG's FromExports chains
-	// for GOT.mem / GOT.func may point to adapter instances that lack
-	// the actual CPython symbols; we fall back to this instance for GOT.
-	cpythonRuntimeIdx := -1
-	maxExports := 0
-	for i, inst := range bundle.Instances {
-		if inst.ModuleIndex >= 0 && inst.ModuleIndex < len(compiled) {
-			if n := len(compiled[inst.ModuleIndex].Exports()); n > maxExports {
-				maxExports = n
-				cpythonRuntimeIdx = i
-			}
-		}
-	}
-
-	// Multi-pass instantiation: instances are processed in passes.
-	// Each pass tries to instantiate any still-pending instance that has
-	// a module. If instantiation fails because a dependency isn't ready,
-	// it is retried in a later pass. This handles complex FromExports
-	// chains and avoids the need for an explicit topological sort.
-	pending := make([]bool, len(bundle.Instances))
-	pendingCount := 0
-	for i, inst := range bundle.Instances {
-		if inst.ModuleIndex >= 0 {
-			pending[i] = true
-			pendingCount++
-		}
-	}
-
-	maxPasses := len(bundle.Instances) + 5
-	for pass := 0; pass < maxPasses && pendingCount > 0; pass++ {
-		progress := false
-		for i, inst := range bundle.Instances {
-			if !pending[i] || inst.ModuleIndex < 0 {
-				continue
-			}
-			cm := compiled[inst.ModuleIndex]
-
-			// Build a map from import module name to source instance index,
-			// resolving through FromExports chains to the actual instantiated instance.
-			importNameToInstance := make(map[string]int, len(inst.Args))
-			for _, arg := range inst.Args {
-				resolved := arg.InstanceIndex
-				if resolved >= 0 && resolved < len(actualProvider) {
-					resolved = actualProvider[resolved]
-				}
-				importNameToInstance[arg.Name] = resolved
-				if arg.Name == "" {
-					importNameToInstance[componentAdapterModule] = resolved
-				}
-			}
-			// For GOT.mem / GOT.func imports, override to the CPython
-			// runtime instance when available. The component model DAG
-			// may route through adapter instances that lack CPython symbols.
-			if cpythonRuntimeIdx >= 0 {
-				for _, arg := range inst.Args {
-					if strings.HasPrefix(arg.Name, "GOT.") {
-						importNameToInstance[arg.Name] = cpythonRuntimeIdx
-					}
-				}
-			}
-
-			linker := wasmtime.NewLinker(b.engine)
-			// Register host functions (WASI, env stubs, teavm stubs, all cleat_*).
-			// Use dummy completeResult/completeErr since component modules don't
-			// use the Go dispatcher cleat_complete protocol.
-			var completeResult, completeErr string
-			if err := b.registerAllImports(linker, &completeResult, &completeErr, true, abortImportType(cm)); err != nil {
-				return nil, fmt.Errorf("host: register imports for instance %d: %w", i, err)
-			}
-
-			// Per-export routing: resolve GOT / libpython imports
-			// from already-instantiated instances before DefineInstance.
-			b.perExportRoute(store, cm, linker, instances, bundle, compiled)
-
-			// Wire cross-module imports: for each import the module declares,		}
-
-			// Wire cross-module imports: for each import the module declares,
-			// map it to the already-instantiated source instance.
-			// Skip WASI 0.2.0 interface names — adapter signatures may not
-			// match what the module expects. Traps handle them instead.
-			for importName, srcIdx := range importNameToInstance {
-				if strings.Contains(importName, ":") && !strings.HasPrefix(importName, "GOT.") {
-					continue
-				}
-				if srcIdx < 0 || srcIdx >= len(instances) || instances[srcIdx] == nil {
-					continue
-				}
-				if err := linker.DefineInstance(store, importName, instances[srcIdx]); err != nil {
-					// "defined twice" is OK — some exports (e.g. abort) are
-					// defined by both registerEnvStubs and the source instance.
-					if !strings.Contains(err.Error(), "defined twice") {
-						return nil, fmt.Errorf("host: define instance %d as %q for instance %d: %w", srcIdx, importName, i, err)
-					}
-				}
-			}
-
-			// Some modules import "memory" from "env" (not as a host function).
-			// Route it from any already-instantiated instance that exports memory.
-			for _, prevInst := range instances {
-				if prevInst == nil {
-					continue
-				}
-				if memExp := prevInst.GetExport(store, "memory"); memExp != nil {
-					_ = linker.Define(store, "env", "memory", memExp)
-					break
-				}
-			}
-			// wit_dylib functions for component model adapter canonical ABI.
-			for _, impTy := range cm.Imports() {
-				if impTy.Module() != "env" || impTy.Name() == nil ||
-					!strings.HasPrefix(*impTy.Name(), "wit_dylib_") {
-					continue
-				}
-				if impTy.Type() == nil || impTy.Type().FuncType() == nil {
-					continue
-				}
-				b.defineWitDylib(store, linker, impTy)
-			}
-			// Final GOT routing: for GOT.mem/GOT.func imports, route
-			// from the CPython runtime with proper mutability handling.
-			for _, impTy := range cm.Imports() {
-				modName := impTy.Module()
-				if modName != "GOT.mem" && modName != "GOT.func" {
-					continue
-				}
-				namePtr := impTy.Name()
-				if namePtr == nil {
-					continue
-				}
-				fieldName := *namePtr
-				if fieldName == "__memory_base" || fieldName == "__table_base" {
-					continue
-				}
-				extType := impTy.Type()
-				if extType == nil || extType.GlobalType() == nil {
-					continue
-				}
-				importGlobalType := extType.GlobalType()
-				routed := false
-				if cpythonRuntimeIdx >= 0 && instances[cpythonRuntimeIdx] != nil {
-					cpythonInst := instances[cpythonRuntimeIdx]
-					cpythonModIdx := bundle.Instances[cpythonRuntimeIdx].ModuleIndex
-					for _, expTy := range compiled[cpythonModIdx].Exports() {
-						if !strings.HasSuffix(expTy.Name(), ":"+fieldName) {
-							continue
-						}
-						candidate := cpythonInst.GetExport(store, expTy.Name())
-						if candidate == nil || candidate.Global() == nil {
-							continue
-						}
-						val := candidate.Global().Get(store)
-						newGType := wasmtime.NewGlobalType(
-							importGlobalType.Content(),
-							importGlobalType.Mutable())
-						if newG, newErr := wasmtime.NewGlobal(store, newGType, val); newErr == nil {
-							_ = linker.Define(store, modName, fieldName, newG)
-							routed = true
-						}
-						break
-					}
-				}
-				if !routed {
-					// Create a default mutable global with the import's type.
-					gType := wasmtime.NewGlobalType(
-						importGlobalType.Content(),
-						importGlobalType.Mutable())
-					if g, err := wasmtime.NewGlobal(store, gType, wasmtime.ValI32(0)); err == nil {
-						_ = linker.Define(store, modName, fieldName, g)
-					}
-				}
-			}
-
-			// Fill unresolved WASI 0.2.0 imports with traps.
-			_ = linker.DefineUnknownImportsAsTraps(cm)
-			// Define placeholder imports for modules that need them.
-			// __indirect_function_table: size from the module's table import
-			// (or a generous default if import info is unavailable).
-			tblMinSize := uint32(1048576)
-			tblHasMax := false
-			tblMaxSize := uint32(0)
-			for _, impTy := range cm.Imports() {
-				if impTy.Module() == "env" && impTy.Name() != nil && *impTy.Name() == "__indirect_function_table" {
-					if extType := impTy.Type(); extType != nil {
-						if tt := extType.TableType(); tt != nil {
-							tblMinSize = tt.Minimum()
-							tblHasMax, tblMaxSize = tt.Maximum()
-						}
-					}
-					break
-				}
-			}
-			tblType := wasmtime.NewTableType(wasmtime.NewValType(wasmtime.KindFuncref), tblMinSize, tblHasMax, tblMaxSize)
-			if tbl, err := wasmtime.NewTable(store, tblType, wasmtime.ValFuncref(nil)); err == nil {
-				_ = linker.Define(store, "env", "__indirect_function_table", tbl)
-			}
-			i32Mut := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), true)
-			i32Imm := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), false)
-			if sp, err := wasmtime.NewGlobal(store, i32Mut, wasmtime.ValI32(0)); err == nil {
-				_ = linker.Define(store, "env", "__stack_pointer", sp)
-			}
-			if mb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(1024)); err == nil {
-				_ = linker.Define(store, "env", "__memory_base", mb)
-			}
-			if tb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(1024)); err == nil {
-				_ = linker.Define(store, "env", "__table_base", tb)
-			}
-			if gmb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(0)); err == nil {
-				_ = linker.Define(store, "GOT.mem", "__memory_base", gmb)
-			}
-			if gtb, err := wasmtime.NewGlobal(store, i32Imm, wasmtime.ValI32(1)); err == nil {
-				_ = linker.Define(store, "GOT.func", "__table_base", gtb)
-			}
-
-			modInst, instErr := linker.Instantiate(store, cm)
-			if instErr != nil {
-				// If the error is a missing import, retry in a later pass
-				// (the dependency may not be instantiated yet).
-				if strings.Contains(instErr.Error(), "unknown import") ||
-					strings.Contains(instErr.Error(), "has not been defined") {
-					continue // retry in next pass
-				}
-				// Element segment / table errors can result from
-				// adapter-provided tables conflicting with our
-				// placeholders. Retry without cross-module routing.
-				if strings.Contains(instErr.Error(), "undefined element") ||
-					strings.Contains(instErr.Error(), "out of bounds") {
-					linker2 := wasmtime.NewLinker(b.engine)
-					var cr2, ce2 string
-					b.registerAllImports(linker2, &cr2, &ce2, true, abortImportType(cm))
-					// wit_dylib functions for component model adapter canonical ABI (fallback).
-					for _, impTy := range cm.Imports() {
-						if impTy.Module() != "env" || impTy.Name() == nil ||
-							!strings.HasPrefix(*impTy.Name(), "wit_dylib_") {
-							continue
-						}
-						if impTy.Type() == nil || impTy.Type().FuncType() == nil {
-							continue
-						}
-						b.defineWitDylib(store, linker2, impTy)
-					}
-					_ = linker2.DefineUnknownImportsAsTraps(cm)
-					for _, prevInst := range instances {
-						if prevInst == nil {
-							continue
-						}
-						if memExp := prevInst.GetExport(store, "memory"); memExp != nil {
-							_ = linker2.Define(store, "env", "memory", memExp)
-							break
-						}
-					}
-					tblMin2 := uint32(1048576)
-					tblType2 := wasmtime.NewTableType(wasmtime.NewValType(wasmtime.KindFuncref), tblMin2, false, 0)
-					if tbl2, _ := wasmtime.NewTable(store, tblType2, wasmtime.ValFuncref(nil)); tbl2 != nil {
-						_ = linker2.Define(store, "env", "__indirect_function_table", tbl2)
-					}
-					i32Imm2 := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), false)
-					i32Mut2 := wasmtime.NewGlobalType(wasmtime.NewValType(wasmtime.KindI32), true)
-					if sp2, _ := wasmtime.NewGlobal(store, i32Mut2, wasmtime.ValI32(0)); sp2 != nil {
-						_ = linker2.Define(store, "env", "__stack_pointer", sp2)
-					}
-					if mb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(1024)); mb2 != nil {
-						_ = linker2.Define(store, "env", "__memory_base", mb2)
-					}
-					if tb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(1024)); tb2 != nil {
-						_ = linker2.Define(store, "env", "__table_base", tb2)
-					}
-					if gmb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(0)); gmb2 != nil {
-						_ = linker2.Define(store, "GOT.mem", "__memory_base", gmb2)
-					}
-					if gtb2, _ := wasmtime.NewGlobal(store, i32Imm2, wasmtime.ValI32(1)); gtb2 != nil {
-						_ = linker2.Define(store, "GOT.func", "__table_base", gtb2)
-					}
-					// Also run per-export routing for the fresh linker
-					// to resolve GOT / libpython global imports.
-					b.perExportRoute(store, cm, linker2, instances, bundle, compiled)
-					if modInst2, err2 := linker2.Instantiate(store, cm); err2 == nil {
-						instances[i] = modInst2
-						pending[i] = false
-						pendingCount--
-						progress = true
-						continue
-					}
-				}
-				// Build a list of expected import module names for diagnostics.
-				var importMods []string
-				for importName := range importNameToInstance {
-					importMods = append(importMods, importName)
-				}
-				return nil, fmt.Errorf("host: instantiate instance %d (module %d, %d args, imports: %v): %w", i, inst.ModuleIndex, len(inst.Args), importMods, instErr)
-			}
-			instances[i] = modInst
-			pending[i] = false
-			pendingCount--
-			progress = true
-		}
-		if !progress {
-			// No instances could be instantiated in this pass.
-			// Build a diagnostic list of whats still pending.
-			var pendingList []int
-			for idx, p := range pending {
-				if p {
-					pendingList = append(pendingList, idx)
-				}
-			}
-			return nil, fmt.Errorf("host: could not instantiate %d instances (stuck at pass %d): pending=%v", pendingCount, pass, pendingList)
-		}
-	}
-
-	if pendingCount > 0 {
-		var pendingList []int
-		for idx, p := range pending {
-			if p {
-				pendingList = append(pendingList, idx)
-			}
-		}
-		return nil, fmt.Errorf("host: %d instances still pending after %d passes: %v", pendingCount, maxPasses, pendingList)
-	}
-
-	// ---- Step 3b: Call constructors on all core instances ----
-	// Modules compiled with Emscripten or componentize-py export
-	// __wasm_call_ctors which must be called before the entry point
-	// to set up WIT metadata (wit_dylib_initialize) and dispatch tables.
-	for i, inst := range instances {
-		if inst == nil {
-			continue
-		}
-		if f := inst.GetFunc(store, "__wasm_call_ctors"); f != nil {
-			if _, err := f.Call(store); err != nil {
-				return nil, fmt.Errorf("host: __wasm_call_ctors instance %d: %w", i, err)
-			}
-		}
-		if f := inst.GetFunc(store, "__wasm_apply_data_relocs"); f != nil {
-			if _, err := f.Call(store); err != nil {
-				return nil, fmt.Errorf("host: __wasm_apply_data_relocs instance %d: %w", i, err)
-			}
-		}
-	}
-
-	// ---- Step 3c: Scan for wit_dylib metadata blob ----
-	// Dump the first 256 u32 values from the adapter instance's memory
-	// to find the metadata blob, then call wit_dylib_initialize.
-	if b.witDylib != nil {
-		for _, inst := range instances {
-			if inst == nil {
-				continue
-			}
-			memExp := inst.GetExport(store, "memory")
-			if memExp == nil {
-				continue
-			}
-			m := memExp.Memory()
-			if m == nil {
-				continue
-			}
-			data := m.UnsafeData(store)
-			if len(data) < 256 {
-				continue
-			}
-			// Scan for the metadata signature: 16 small u32 counts
-			// followed by type arrays. The counts[14] is export_funcs.
-			for ptr := 0; ptr < len(data)-64; ptr += 4 {
-				nExportFuncs := binary.LittleEndian.Uint32(data[ptr+56:])
-				// Check that the first 13 counts are all < 1000 (reasonable)
-				allSmall := true
-				for j := 0; j < 13; j++ {
-					v := binary.LittleEndian.Uint32(data[ptr+j*4:])
-					if v > 1000 {
-						allSmall = false
-						break
-					}
-				}
-				if allSmall && nExportFuncs >= 1 && nExportFuncs <= 20 {
-					if err := b.witDylib.initialize(m, store, int32(ptr)); err == nil {
-						break
-					}
-				}
-			}
-			break // only check first instance with memory
-		}
-	}
-
-	// ---- Step 4: Build resolved exports map per instance ----
-	type resolvedExp struct {
-		exportName string
-		inst       *wasmtime.Instance
-	}
-	resolvedExports := make([]map[string]resolvedExp, len(bundle.Instances))
-
-	for i, inst := range bundle.Instances {
-		resolvedExports[i] = make(map[string]resolvedExp)
-		if inst.ModuleIndex >= 0 {
-			modInst := instances[i]
-			if modInst == nil {
-				continue
-			}
-			// Collect function exports by iterating the module's export types.
-			cm := compiled[inst.ModuleIndex]
-			exports := cm.Exports()
-			for _, exp := range exports {
-				if exp.Type().FuncType() != nil {
-					resolvedExports[i][exp.Name()] = resolvedExp{exportName: exp.Name(), inst: modInst}
-				}
-			}
-		}
-		// Apply FromExports aliases.
-		for _, fe := range inst.FromExports {
-			if fe.SourceInstance >= 0 && fe.SourceInstance < len(resolvedExports) {
-				if exp, ok := resolvedExports[fe.SourceInstance][fe.SourceName]; ok {
-					resolvedExports[i][fe.Name] = exp
-				}
-			}
-		}
-	}
-
-	// ---- Step 5: Resolve entry point ----
-	exp, ok := bundle.Exports[entryPoint]
-	if !ok {
-		return nil, fmt.Errorf("host: component export %q not found", entryPoint)
-	}
-
-	var entryInst *wasmtime.Instance
-	var entryExportName string
-
-	if exp.InstanceIndex >= 0 && exp.InstanceIndex < len(instances) {
-		// Direct instance reference.
-		if re, ok2 := resolvedExports[exp.InstanceIndex][exp.Name]; ok2 && re.inst != nil {
-			entryInst = re.inst
-			entryExportName = re.exportName
-		} else if instances[exp.InstanceIndex] != nil {
-			entryInst = instances[exp.InstanceIndex]
-			entryExportName = exp.Name
-		}
-	} else {
-		// No direct instance reference (e.g. func export without
-		// instance sort). Search all instantiated instances.
-		for i, inst := range instances {
-			if inst == nil {
-				continue
-			}
-			if re, ok2 := resolvedExports[i][exp.Name]; ok2 && re.inst != nil {
-				entryInst = re.inst
-				entryExportName = re.exportName
-				break
-			}
-			if f := inst.GetFunc(store, exp.Name); f != nil {
-				entryInst = inst
-				entryExportName = exp.Name
-				break
-			}
-		}
-	}
-
-	if entryInst == nil {
-		return nil, fmt.Errorf("host: cannot resolve component export %q (instance %d)", entryPoint, exp.InstanceIndex)
-	}
-
-	fn := entryInst.GetFunc(store, entryExportName)
-	if fn == nil {
-		return nil, fmt.Errorf("host: component export %q func %q not found", entryPoint, entryExportName)
-	}
-
-	// ---- Step 6: Find memory and set up scratch buffers ----
-	memory := entryInst.GetExport(store, "memory")
-	if memory == nil {
-		// Try other instances for memory.
-		for _, inst := range instances {
-			if inst == nil {
-				continue
-			}
-			if m := inst.GetExport(store, "memory"); m != nil {
-				memory = m
-				break
-			}
-		}
-	}
-	if memory == nil {
-		return nil, fmt.Errorf("host: no exported memory found in component instances")
-	}
-	mem := memory.Memory()
-	if mem == nil {
-		return nil, fmt.Errorf("host: memory export is not a memory")
-	}
-
-	outBufSz := OutBufSize
-	currentSize := uint64(mem.DataSize(store))
-	scratchBase, scratchErr := scratchBaseFor(currentSize, outBufSz)
-	if scratchErr != nil {
-		return nil, scratchErr
-	}
-	inputOffset := scratchBase
-	outputOffset := scratchBase + outBufSz
-	needed := uint64(outputOffset + outBufSz)
-	if currentSize < needed {
-		pagesNeeded := (needed - currentSize + wasmPageSize - 1) / wasmPageSize
-		if _, err := mem.Grow(store, pagesNeeded); err != nil {
-			return nil, fmt.Errorf("host: grow memory: exceeded configured wasm memory limit (%d bytes; configure with --wasm-memory-max-mb): %w", b.limits.memoryLimitBytes, err)
-		}
-	}
-
-	// Write input JSON.
-	inputBytes := []byte(input)
-	if len(inputBytes) > 0 {
-		data := mem.UnsafeData(store)
-		if uint64(inputOffset)+uint64(len(inputBytes)) > uint64(len(data)) {
-			return nil, fmt.Errorf("host: input exceeds memory bounds")
-		}
-		copy(data[inputOffset:], inputBytes)
-	}
-
-	// ---- Step 7: Call the entry point ----
-	var results any
-	var callErr error
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				callErr = fmt.Errorf("host: wasmtime panic in %q: %v", entryPoint, r)
-			}
-		}()
-		results, callErr = fn.Call(store, int32(inputOffset), int32(len(inputBytes)), int32(outputOffset), int32(outBufSz))
-	}()
-
-	if callErr != nil {
-		if limitErr := b.resourceLimitError(callErr, execTimeout); limitErr != nil {
-			callErr = limitErr
-		}
-		return nil, fmt.Errorf("host: component export %q: %w", entryPoint, callErr)
-	}
-	if results == nil {
-		return nil, fmt.Errorf("host: export %q returned no results", entryPoint)
-	}
-
-	raw, ok := results.(int64)
-	if !ok {
-		return nil, fmt.Errorf("host: export %q returned non-int64 result", entryPoint)
-	}
-
-	if raw == (1 << 62) {
-		return &ExecResult{Suspended: true}, nil
-	}
-
-	errCode, actualLen := decodeExportResult(uint64(raw))
-	if actualLen > outBufSz {
-		return nil, fmt.Errorf("host: export %q: output overflow: wrote %d bytes, buffer is %d bytes", entryPoint, actualLen, outBufSz)
-	}
-
-	data := mem.UnsafeData(store)
-	outputStr := string(data[outputOffset : outputOffset+actualLen])
-	if errCode != 0 {
-		return nil, fmt.Errorf("host: export %q: %s", entryPoint, outputStr)
-	}
-
-	return &ExecResult{Result: outputStr, Suspended: false}, nil
-}
-
 // registerAllImports registers all host function imports on the given linker.
-// Extracted so both Execute and ExecuteComponent can share the same setup.
-func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeResult, completeErr *string, needsWasi bool, abortTy *wasmtime.FuncType) error {
+// Extracted so the core-module and native-component paths share the same setup.
+func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeResult, completeErr *string, needsWasi bool, module *wasmtime.Module) error {
 	if needsWasi {
 		if err := b.registerWasiStubs(linker); err != nil {
 			return err
 		}
+		// AFTER the stubs: DefineWasi binds clock_time_get and random_get, and
+		// these two replace them. cleat#1300.
+		// poll_oneoff BEFORE the determinism overrides, matching their own
+		// AllowShadowing discipline: each shadows exactly what it replaces.
+		if err := b.registerPollOneoff(linker); err != nil {
+			return err
+		}
+		if err := b.registerWasiDeterminism(linker); err != nil {
+			return err
+		}
+		// LAST, so it is the final word: DefineWasi binds the stock surface and
+		// the determinism overrides replace two of them; this refuses the rest.
+		// cleat#1381.
+		if err := b.registerWasiPolicy(linker, module); err != nil {
+			return err
+		}
 	}
-	if err := b.registerEnvStubs(linker, abortTy); err != nil {
+	if err := b.registerEnvStubs(linker, abortImportType(module)); err != nil {
 		return err
 	}
 	if err := b.registerTeavmStubs(linker); err != nil {
@@ -1445,6 +1220,9 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 	if err := b.registerCleatDefer(linker); err != nil {
 		return err
 	}
+	if err := b.registerCleatDeferPhase(linker); err != nil {
+		return err
+	}
 	if err := b.registerCleatPollCancellation(linker); err != nil {
 		return err
 	}
@@ -1461,9 +1239,6 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 		return err
 	}
 	if err := b.registerCleatChildWorkflowWithOptions(linker); err != nil {
-		return err
-	}
-	if err := b.registerCleatChildWorkflowInSchema(linker); err != nil {
 		return err
 	}
 	if err := b.registerCleatAwaitChild(linker); err != nil {
@@ -1496,6 +1271,12 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 	if err := b.registerCleatPluginCallStreaming(linker); err != nil {
 		return err
 	}
+	if err := b.registerCleatPollUpdate(linker); err != nil {
+		return err
+	}
+	if err := b.registerCleatCompleteUpdate(linker); err != nil {
+		return err
+	}
 	if err := b.registerCleatRegisterUpdateHandler(linker); err != nil {
 		return err
 	}
@@ -1503,12 +1284,6 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 		return err
 	}
 	if err := b.registerCleatAwaitPromise(linker); err != nil {
-		return err
-	}
-	if err := b.registerCleatSendSignalAndWait(linker); err != nil {
-		return err
-	}
-	if err := b.registerCleatReplyToSignal(linker); err != nil {
 		return err
 	}
 	if err := b.registerCleatSignalWorkflow(linker); err != nil {
@@ -1556,22 +1331,7 @@ func (b *wasmtimeBackend) registerAllImports(linker *wasmtime.Linker, completeRe
 	if err := b.registerCleatRunDetached(linker); err != nil {
 		return err
 	}
-	if err := b.registerCleatSetState(linker); err != nil {
-		return err
-	}
-	if err := b.registerCleatGetState(linker); err != nil {
-		return err
-	}
-	if err := b.registerCleatDeleteState(linker); err != nil {
-		return err
-	}
-	if err := b.registerCleatIncrState(linker); err != nil {
-		return err
-	}
-	if err := b.registerCleatHasState(linker); err != nil {
-		return err
-	}
-	if err := b.registerCleatListState(linker); err != nil {
+	if err := b.registerCleatStartDetached(linker); err != nil {
 		return err
 	}
 	if err := b.registerCleatFetch(linker); err != nil {
@@ -1633,432 +1393,5 @@ func (b *wasmtimeBackend) writeWorkToFixedMemory(mem *wasmtime.Memory, store was
 	}
 	if inputLen > 0 {
 		copy(data[fixedWorkOffset+8+entryLen:fixedWorkOffset+8+entryLen+inputLen], input[:inputLen])
-	}
-}
-
-// perExportRoute resolves non-host imports by searching already-instantiated
-// instances for matching exports. Exact name match first, then suffix match
-// for prefixed exports (e.g. libpython3.14.so:PyExc_AttributeError matches
-// imports of PyExc_AttributeError). Handles global mutability mismatches.
-func (b *wasmtimeBackend) perExportRoute(store wasmtime.Storelike, cm *wasmtime.Module, linker *wasmtime.Linker, instances []*wasmtime.Instance, bundle *wasm.ComponentBundle, compiled []*wasmtime.Module) {
-	for _, impTy := range cm.Imports() {
-		modName := impTy.Module()
-		namePtr := impTy.Name()
-		if namePtr == nil {
-			continue
-		}
-		fieldName := *namePtr
-
-		// Skip WASI and teavm (handled by registerAllImports).
-		// "env" imports are NOT skipped — some have prefixed
-		// names like libpython3.14.so:memory_base that need
-		// suffix matching from other instances.
-		if modName == "wasi_snapshot_preview1" || modName == "teavm" ||
-			strings.Contains(modName, "wasi:") {
-			continue
-		}
-		if modName == "env" && fieldName != "memory" &&
-			fieldName != "__indirect_function_table" &&
-			fieldName != "__stack_pointer" &&
-			!strings.Contains(fieldName, ":") {
-			continue
-		}
-
-		extType := impTy.Type()
-		if extType == nil {
-			continue
-		}
-		// Search already-instantiated instances — exact then suffix.
-		for prevIdx, prevInst := range instances {
-			if prevInst == nil {
-				continue
-			}
-			exp := prevInst.GetExport(store, fieldName)
-			if exp == nil && prevIdx < len(bundle.Instances) {
-				// Suffix match: source module exports ending in
-				// ":" + fieldName.
-				prevModIdx := bundle.Instances[prevIdx].ModuleIndex
-				if prevModIdx >= 0 && prevModIdx < len(compiled) {
-					for _, expTy := range compiled[prevModIdx].Exports() {
-						en := expTy.Name()
-						if !strings.HasSuffix(en, ":"+fieldName) {
-							continue
-						}
-						candidate := prevInst.GetExport(store, en)
-						if candidate == nil {
-							continue
-						}
-						// Type check before accepting.
-						if (extType.FuncType() != nil && candidate.Func() != nil) ||
-							(extType.GlobalType() != nil && candidate.Global() != nil) ||
-							(extType.MemoryType() != nil && candidate.Memory() != nil) ||
-							(extType.TableType() != nil && candidate.Table() != nil) {
-							exp = candidate
-							break
-						}
-					}
-				}
-			}
-			if exp == nil {
-				continue
-			}
-			// Route the export under the import's module name.
-			// For globals, handle mutability mismatches.
-			if extType.FuncType() != nil && exp.Func() != nil {
-				_ = linker.Define(store, modName, fieldName, exp)
-			} else if extType.GlobalType() != nil && exp.Global() != nil {
-				expGlobal := exp.Global()
-				expGlobalType := expGlobal.Type(store)
-				importGlobalType := extType.GlobalType()
-				if importGlobalType.Mutable() != expGlobalType.Mutable() ||
-					importGlobalType.Content().Kind() != expGlobalType.Content().Kind() {
-					val := expGlobal.Get(store)
-					newGlobalType := wasmtime.NewGlobalType(
-						importGlobalType.Content(),
-						importGlobalType.Mutable())
-					if newGlobal, newErr := wasmtime.NewGlobal(
-						store, newGlobalType, val); newErr == nil {
-						_ = linker.Define(store, modName, fieldName, newGlobal)
-					}
-				} else {
-					_ = linker.Define(store, modName, fieldName, exp)
-				}
-			} else if extType.MemoryType() != nil && exp.Memory() != nil {
-				_ = linker.Define(store, modName, fieldName, exp)
-			} else if extType.TableType() != nil && exp.Table() != nil {
-				_ = linker.Define(store, modName, fieldName, exp)
-			}
-			break
-		}
-	}
-}
-
-// defineWitDylib defines a wit_dylib_* host function for the component model
-// adapter (module 10). These functions implement the canonical ABI memory
-// read/write operations needed by componentize-py generated modules.
-func (b *wasmtimeBackend) defineWitDylib(store *wasmtime.Store, linker *wasmtime.Linker, impTy *wasmtime.ImportType) {
-	name := *impTy.Name()
-	functype := impTy.Type().FuncType()
-	makeNoop := func() *wasmtime.Func {
-		return wasmtime.NewFunc(store, functype,
-			func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-				resTypes := functype.Results()
-				results := make([]wasmtime.Val, len(resTypes))
-				for i, rt := range resTypes {
-					switch rt.Kind() {
-					case wasmtime.KindI32:
-						results[i] = wasmtime.ValI32(0)
-					case wasmtime.KindI64:
-						results[i] = wasmtime.ValI64(0)
-					case wasmtime.KindF32:
-						results[i] = wasmtime.ValF32(0)
-					case wasmtime.KindF64:
-						results[i] = wasmtime.ValF64(0)
-					default:
-						results[i] = wasmtime.ValI32(0)
-					}
-				}
-				return results, nil
-			})
-	}
-
-	// Push functions: ctx = args[0].I32()
-	if strings.HasPrefix(name, "wit_dylib_push_") {
-		kind := name[15:]
-		switch {
-		case kind == "u32" || kind == "s32" || kind == "u8" || kind == "s8" ||
-			kind == "u16" || kind == "s16" || kind == "bool" || kind == "char" ||
-			kind == "flags" || kind == "enum":
-			fn := wasmtime.NewFunc(store, functype,
-				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					if b.witDylib != nil {
-						b.witDylib.pushI32(args[0].I32(), args[1].I32())
-					}
-					return nil, nil
-				})
-			_ = linker.Define(store, "env", name, fn)
-		case kind == "u64" || kind == "s64":
-			fn := wasmtime.NewFunc(store, functype,
-				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					if b.witDylib != nil {
-						b.witDylib.pushI64(args[0].I32(), args[1].I64())
-					}
-					return nil, nil
-				})
-			_ = linker.Define(store, "env", name, fn)
-		case kind == "f32":
-			fn := wasmtime.NewFunc(store, functype,
-				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					if b.witDylib != nil {
-						b.witDylib.pushF32(args[0].I32(), args[1].F32())
-					}
-					return nil, nil
-				})
-			_ = linker.Define(store, "env", name, fn)
-		case kind == "f64":
-			fn := wasmtime.NewFunc(store, functype,
-				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					if b.witDylib != nil {
-						b.witDylib.pushF64(args[0].I32(), args[1].F64())
-					}
-					return nil, nil
-				})
-			_ = linker.Define(store, "env", name, fn)
-		case kind == "string":
-			fn := wasmtime.NewFunc(store, functype,
-				func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					if b.witDylib != nil && len(args) >= 3 {
-						exp := caller.GetExport("memory")
-						if exp != nil {
-							mem := exp.Memory()
-							if mem != nil {
-								data := mem.UnsafeData(caller)
-								ptr := args[1].I32()
-								length := args[2].I32()
-								if ptr >= 0 && int(ptr)+int(length) <= len(data) {
-									strData := make([]byte, length)
-									copy(strData, data[ptr:ptr+length])
-									b.witDylib.pushString(args[0].I32(), strData)
-								}
-							}
-						}
-					}
-					return nil, nil
-				})
-			_ = linker.Define(store, "env", name, fn)
-		default:
-			fn := wasmtime.NewFunc(store, functype,
-				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					if b.witDylib != nil && len(args) >= 2 {
-						b.witDylib.pushI32(args[0].I32(), args[1].I32())
-					}
-					return nil, nil
-				})
-			_ = linker.Define(store, "env", name, fn)
-		}
-		return
-	}
-
-	// Pop functions: ctx = args[0].I32()
-	if strings.HasPrefix(name, "wit_dylib_pop_") {
-		kind := name[14:]
-		switch {
-		case kind == "u32" || kind == "s32" || kind == "u8" || kind == "s8" ||
-			kind == "u16" || kind == "s16" || kind == "bool" || kind == "char" ||
-			kind == "flags" || kind == "enum":
-			fn := wasmtime.NewFunc(store, functype,
-				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					var val int32
-					if b.witDylib != nil {
-						val = b.witDylib.popI32(args[0].I32())
-					}
-					return []wasmtime.Val{wasmtime.ValI32(val)}, nil
-				})
-			_ = linker.Define(store, "env", name, fn)
-		case kind == "u64" || kind == "s64":
-			fn := wasmtime.NewFunc(store, functype,
-				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					var val int64
-					if b.witDylib != nil {
-						val = b.witDylib.popI64(args[0].I32())
-					}
-					return []wasmtime.Val{wasmtime.ValI64(val)}, nil
-				})
-			_ = linker.Define(store, "env", name, fn)
-		case kind == "f32":
-			fn := wasmtime.NewFunc(store, functype,
-				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					var val float32
-					if b.witDylib != nil {
-						val = b.witDylib.popF32(args[0].I32())
-					}
-					return []wasmtime.Val{wasmtime.ValF32(val)}, nil
-				})
-			_ = linker.Define(store, "env", name, fn)
-		case kind == "f64":
-			fn := wasmtime.NewFunc(store, functype,
-				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					var val float64
-					if b.witDylib != nil {
-						val = b.witDylib.popF64(args[0].I32())
-					}
-					return []wasmtime.Val{wasmtime.ValF64(val)}, nil
-				})
-			_ = linker.Define(store, "env", name, fn)
-		case kind == "string":
-			fn := wasmtime.NewFunc(store, functype,
-				func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					var length int32
-					if b.witDylib != nil && len(args) >= 2 {
-						exp := caller.GetExport("memory")
-						if exp != nil {
-							mem := exp.Memory()
-							if mem != nil {
-								length = b.witDylib.popString(args[0].I32(), mem, caller, args[1].I32())
-							}
-						}
-					}
-					return []wasmtime.Val{wasmtime.ValI32(length)}, nil
-				})
-			_ = linker.Define(store, "env", name, fn)
-		default:
-			fn := wasmtime.NewFunc(store, functype,
-				func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					if b.witDylib != nil {
-						_ = b.witDylib.popI32(args[0].I32())
-					}
-					return []wasmtime.Val{wasmtime.ValI32(0)}, nil
-				})
-			_ = linker.Define(store, "env", name, fn)
-		}
-		return
-	}
-
-	// Export lifecycle and other special functions
-	switch name {
-	case "wit_dylib_initialize":
-		fn := wasmtime.NewFunc(store, functype,
-			func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-				if b.witDylib != nil && len(args) >= 1 {
-					exp := caller.GetExport("memory")
-					if exp != nil {
-						mem := exp.Memory()
-						if mem != nil {
-							b.witDylib.initialize(mem, caller, args[0].I32())
-						}
-					}
-				}
-				resTypes := functype.Results()
-				results := make([]wasmtime.Val, len(resTypes))
-				return results, nil
-			})
-		_ = linker.Define(store, "env", name, fn)
-
-	case "wit_dylib_export_start":
-		fn := wasmtime.NewFunc(store, functype,
-			func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-				var handle int32
-				if b.witDylib != nil && len(args) >= 1 {
-					handle = b.witDylib.exportStart(args[0].I32())
-				}
-				resTypes := functype.Results()
-				results := make([]wasmtime.Val, len(resTypes))
-				if len(results) > 0 {
-					results[0] = wasmtime.ValI32(handle)
-				}
-				return results, nil
-			})
-		_ = linker.Define(store, "env", name, fn)
-
-	case "wit_dylib_export_call", "wit_dylib_export_async_callback":
-		if name == "wit_dylib_export_call" {
-			fn := wasmtime.NewFunc(store, functype,
-				func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-					if len(args) < 2 || b.witDylib == nil {
-						return nil, nil
-					}
-					elemIdx := b.witDylib.getExportElemIndex(args[1].I32())
-					if elemIdx < 0 {
-						return nil, nil
-					}
-					tableExp := caller.GetExport("__indirect_function_table")
-					if tableExp == nil {
-						return nil, nil
-					}
-					table := tableExp.Table()
-					if table == nil {
-						return nil, nil
-					}
-					elem, err := table.Get(caller, uint64(elemIdx))
-					if err != nil {
-						return nil, nil
-					}
-					callee := elem.Funcref()
-					if callee == nil {
-						return nil, nil
-					}
-					ctx := args[0].I32()
-					arg3 := b.witDylib.popI32(ctx)
-					arg2 := b.witDylib.popI32(ctx)
-					arg1 := b.witDylib.popI32(ctx)
-					arg0 := b.witDylib.popI32(ctx)
-					callResult, callErr := callee.Call(caller, arg0, arg1, arg2, arg3)
-					if callErr != nil {
-						return nil, wasmtime.NewTrap(callErr.Error())
-					}
-					if r, ok := callResult.(int32); ok {
-						b.witDylib.pushI32(ctx, r)
-					} else if r, ok := callResult.(int64); ok {
-						b.witDylib.pushI64(ctx, r)
-					}
-					return nil, nil
-				})
-			_ = linker.Define(store, "env", name, fn)
-		} else {
-			_ = linker.Define(store, "env", name, makeNoop())
-		}
-
-	case "wit_dylib_export_async_call":
-		fn := wasmtime.NewFunc(store, functype,
-			func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-				resTypes := functype.Results()
-				results := make([]wasmtime.Val, len(resTypes))
-				if len(results) > 0 {
-					results[0] = wasmtime.ValI32(0)
-				}
-				return results, nil
-			})
-		_ = linker.Define(store, "env", name, fn)
-
-	case "wit_dylib_export_finish":
-		fn := wasmtime.NewFunc(store, functype,
-			func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-				if b.witDylib != nil && len(args) >= 2 {
-					b.witDylib.exportFinish(args[0].I32())
-				}
-				return nil, nil
-			})
-		_ = linker.Define(store, "env", name, fn)
-
-	case "cabi_realloc":
-		fn := wasmtime.NewFunc(store, functype,
-			func(caller *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-				oldPtr := args[0].I32()
-				oldSize := args[1].I32()
-				_ = oldSize
-				_ = args[2].I32() // align
-				newSize := args[3].I32()
-				exp := caller.GetExport("memory")
-				if exp == nil {
-					return []wasmtime.Val{wasmtime.ValI32(0)}, nil
-				}
-				mem := exp.Memory()
-				if mem == nil {
-					return []wasmtime.Val{wasmtime.ValI32(0)}, nil
-				}
-				if oldPtr == 0 && newSize > 0 {
-					data := mem.UnsafeData(caller)
-					newPtr := int32(len(data) - int(newSize) - 64)
-					if newPtr < 0 {
-						newPtr = 0
-					}
-					return []wasmtime.Val{wasmtime.ValI32(newPtr)}, nil
-				}
-				return []wasmtime.Val{wasmtime.ValI32(oldPtr)}, nil
-			})
-		_ = linker.Define(store, "env", name, fn)
-
-	case "wit_dylib_list_append":
-		fn := wasmtime.NewFunc(store, functype,
-			func(_ *wasmtime.Caller, args []wasmtime.Val) ([]wasmtime.Val, *wasmtime.Trap) {
-				if b.witDylib != nil && len(args) >= 2 {
-					b.witDylib.pushI32(args[0].I32(), args[1].I32())
-				}
-				return nil, nil
-			})
-		_ = linker.Define(store, "env", name, fn)
-
-	default:
-		_ = linker.Define(store, "env", name, makeNoop())
 	}
 }

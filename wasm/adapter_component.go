@@ -63,8 +63,31 @@ func needsJSON(usage *UsageInfo) bool {
 }
 
 // needsUnsafe returns true if any adapter reads from output buffers.
+//
+// Both reasons the generated file can mention unsafe, and they are found
+// differently:
+//
+//   - An output buffer. generateField emits
+//     `unsafe.Pointer(unsafe.SliceData(xBuf))` for every kindOutString
+//     parameter, so the condition is numOutBufs > 0 -- the SAME predicate the
+//     generator uses, deliberately, rather than a second one that has to agree
+//     with it.
+//   - `unsafe.String`, which a def writes into its own ResultStmts to return a
+//     string that borrows the buffer.
+//
+// This used to test only the second, which asks what a def SAYS while the
+// unsafe.Pointer argument is SYNTHESISED by the generator from the import's
+// parameter kinds. PluginCallStreaming is the one adapter that has an output
+// buffer and no unsafe.String, so a workflow whose only host call was
+// PluginCallStreaming generated a file using unsafe without importing it and
+// failed to compile with "undefined: unsafe". Any second host call pulled the
+// import in and hid it, which is why it survived: the defect needed a workflow
+// that used this call and nothing else.
 func needsUnsafe(usage *UsageInfo) bool {
 	for _, hf := range usage.Funcs {
+		if numOutBufs(hf.ImportName) > 0 {
+			return true
+		}
 		adef, ok := adapterDefs[hf.FieldName]
 		if !ok {
 			continue
@@ -79,8 +102,8 @@ func needsUnsafe(usage *UsageInfo) bool {
 }
 
 // needsTime returns true if any of the used adapter defs use time types.
-// Only checks adapterDefs (not hostWrapperDefs) because this determines
-// imports for gen_host_adapter.go which only uses adapterDefs.
+// adapterDefs is the only table there is: it determines the imports for
+// gen_host_adapter.go, which is the only adapter file a build writes.
 func needsTime(usage *UsageInfo) bool {
 	for _, hf := range usage.Funcs {
 		adef, ok := adapterDefs[hf.FieldName]
@@ -156,7 +179,53 @@ func GenerateHostAdapter(pkgName string, usage *UsageInfo, target string) []byte
 	buf.WriteString("\t\"github.com/cleat-team/cleat/cleat\"\n")
 	buf.WriteString(")\n\n")
 
-	buf.WriteString("const _cleatOutBufSize = 65536\n\n")
+	// Output buffers start small and GROW WHEN THE HOST SAYS THEY WERE TOO
+	// SMALL, rather than being sized at the host's ceiling up front.
+	//
+	// The ceiling is engine.DefaultOutBufSize = 1 MiB, and allocating that per
+	// call was measurably wrong: it is a `make` on the guest heap, and the
+	// defer pass of an OOM-killed workflow has no heap left. Isolated by
+	// changing one constant at a time --
+	// TestTheHostRunsDefersOfAnOOMKilledWorkflow fails with the response buffer
+	// at 1 MiB and passes with it at 64 KB, while the input buffer is a
+	// package-level array and costs nothing at call time either way. That test
+	// exists for the property this would have broken: "the export takes no
+	// arguments and so needs no scratch space, which is what makes it safe to
+	// run cleanup for a guest that just exhausted its memory."
+	//
+	// So: 64 KB baseline, doubling to the host's ceiling as truncations are
+	// reported. A workflow whose payloads all fit never allocates more than it
+	// did before; one whose payloads are large pays for the size it actually
+	// needs, once, and keeps it for the rest of the segment.
+	//
+	// WHAT THIS DOES NOT DO: rescue the call that truncated. That call returns
+	// CallErrorOutputTruncated and fails, which is cleat#1312's fix -- before
+	// it, the value was cut and the call reported success. Re-fetching the
+	// recorded value without re-running the call would mean re-serving a
+	// recorded event mid-segment, which is replay machinery and belongs in its
+	// own change.
+	buf.WriteString("// _cleatOutBufCap is the current output-buffer size. It starts at the\n")
+	buf.WriteString("// historical 64 KiB and doubles, up to the host's ceiling, each time the\n")
+	buf.WriteString("// host reports that a value did not fit (ABI.md, \"Output truncation\").\n")
+	buf.WriteString("//\n")
+	buf.WriteString("// Not sized at the ceiling up front: that is a 1 MiB heap allocation per\n")
+	buf.WriteString("// call, and a workflow that has just exhausted its memory still has to\n")
+	buf.WriteString("// run its defers.\n")
+	buf.WriteString("const _cleatOutBufFloor = 65536\n")
+	buf.WriteString("const _cleatOutBufCeiling = 1048576\n\n")
+	buf.WriteString("var _cleatOutBufCap = _cleatOutBufFloor\n\n")
+	buf.WriteString("// _cleatGrowOutBuf is called when the host reports errCode 7. It doubles\n")
+	buf.WriteString("// the buffer for subsequent calls and reports whether it managed to grow.\n")
+	buf.WriteString("func _cleatGrowOutBuf() bool {\n")
+	buf.WriteString("\tif _cleatOutBufCap >= _cleatOutBufCeiling {\n")
+	buf.WriteString("\t\treturn false\n")
+	buf.WriteString("\t}\n")
+	buf.WriteString("\t_cleatOutBufCap *= 2\n")
+	buf.WriteString("\tif _cleatOutBufCap > _cleatOutBufCeiling {\n")
+	buf.WriteString("\t\t_cleatOutBufCap = _cleatOutBufCeiling\n")
+	buf.WriteString("\t}\n")
+	buf.WriteString("\treturn true\n")
+	buf.WriteString("}\n\n")
 
 	buf.WriteString("func makeHostCalls() cleat.HostCalls {\n")
 	buf.WriteString("\treturn cleat.NewHostCalls(cleat.HostCallsOptions{\n")
@@ -233,24 +302,61 @@ func parseSimpleResult(json string, secondKey string) (first, second, errStr str
 // Returns []cleat.ChildResult.
 func parseChildResultArray(json string) []cleat.ChildResult {
 	var results []cleat.ChildResult
-	// Find each object between { and }
-	i := 0
-	for i < len(json) {
-		open := strings.Index(json[i:], "{")
-		if open < 0 {
-			break
+	// Scan for top-level objects, tracking string state and escapes.
+	//
+	// This was strings.Index(json, "{") followed by strings.Index(json, "}"),
+	// which finds the WRONG closing brace as soon as any value contains one.
+	// A child's result is itself a JSON object, so an outcome reads
+	//
+	//	{"run_id":"a","result":"{\"tag\":\"x\"}"}
+	//
+	// and the first } is the escaped one INSIDE the result value. The object
+	// was therefore cut before its own closing quote, extractJSONString read an
+	// unterminated string and returned "", and run_id survived only because it
+	// sits before the cut. Every child of every fan-in came back with an empty
+	// result, no error, and a workflow that reported success.
+	depth := 0
+	start := -1
+	inStr := false
+	esc := false
+	for i := 0; i < len(json); i++ {
+		c := json[i]
+		if esc {
+			esc = false
+			continue
 		}
-		close := strings.Index(json[i+open:], "}")
-		if close < 0 {
-			break
+		if c == '\\' {
+			if inStr {
+				esc = true
+			}
+			continue
 		}
-		obj := json[i+open : i+open+close+1]
-		results = append(results, cleat.ChildResult{
-			RunID:  extractJSONString(obj, "run_id"),
-			Result: extractJSONString(obj, "result"),
-			Error:  extractJSONString(obj, "error"),
-		})
-		i = i + open + close + 1
+		if c == '"' {
+			inStr = !inStr
+			continue
+		}
+		if inStr {
+			continue
+		}
+		if c == '{' {
+			if depth == 0 {
+				start = i
+			}
+			depth++
+			continue
+		}
+		if c == '}' && depth > 0 {
+			depth--
+			if depth == 0 && start >= 0 {
+				obj := json[start : i+1]
+				results = append(results, cleat.ChildResult{
+					RunID:  extractJSONString(obj, "run_id"),
+					Result: extractJSONString(obj, "result"),
+					Error:  extractJSONString(obj, "error"),
+				})
+				start = -1
+			}
+		}
 	}
 	return results
 }
@@ -280,6 +386,8 @@ func generateField(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 			closureParams = append(closureParams, p.Name+" time.Duration")
 		case "func(string)":
 			closureParams = append(closureParams, p.Name+" func(string)")
+		case "func()":
+			closureParams = append(closureParams, p.Name+" func()")
 		case "func() (string, error)":
 			closureParams = append(closureParams, p.Name+" func() (string, error)")
 		}
@@ -297,7 +405,12 @@ func generateField(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 
 	// Allocate output buffers.
 	for _, name := range outBufNames(importName) {
-		fmt.Fprintf(buf, "\t\t\t%s := make([]byte, _cleatOutBufSize)\n", name)
+		fmt.Fprintf(buf, "\t\t\t%s := make([]byte, _cleatOutBufCap)\n", name)
+	}
+
+	// Import arguments the caller does not supply (see adapterDef.PreStmts).
+	for _, stmt := range adef.PreStmts {
+		buf.WriteString("\t\t\t" + stmt + "\n")
 	}
 
 	// Build adapter param type lookup for import arg conversion.
@@ -357,168 +470,29 @@ func generateField(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
 	buf.WriteString(strings.Join(args, ", "))
 	buf.WriteString(")\n")
 
+	// Output-buffer growth, before the def's own decoding.
+	//
+	// Emitted for every adapter that HAS an output buffer, rather than for the
+	// ones that go through withSuspendCheck: that population is "calls the host
+	// can refuse mid-segment", which is a different set from "calls that write a
+	// value into the guest". WorkflowID and RunID are in the second and not the
+	// first, and would silently never grow.
+	//
+	// The errCode byte is read here before any field is decoded. That is safe
+	// for the ordering the stop sentinel requires, because withSuspendCheck --
+	// where present -- has already run and panicked.
+	if len(outBufNames(importName)) > 0 {
+		buf.WriteString("\t\t\tif uint32(result)&0xFF == 7 {\n")
+		buf.WriteString("\t\t\t\t// OutputTruncated (ABI.md). This call still fails; the\n")
+		buf.WriteString("\t\t\t\t// buffer grows so the next attempt at this step has room.\n")
+		buf.WriteString("\t\t\t\t_cleatGrowOutBuf()\n")
+		buf.WriteString("\t\t\t}\n")
+	}
+
 	// Result processing.
 	for _, stmt := range adef.ResultStmts {
 		buf.WriteString("\t\t\t" + stmt + "\n")
 	}
 
 	buf.WriteString("\t\t},\n")
-}
-
-// generateHostFunc writes a standalone package-level function that makes a
-// direct WASM import call. The transformer rewrites h.FieldName(...) calls
-// to host_FieldName(...) calls, avoiding all function pointer indirection.
-func generateHostFunc(buf *bytes.Buffer, hf HostFunction, adef adapterDef) {
-	importName := hf.ImportName
-	funcName := "host_" + adef.FieldName
-
-	fmt.Fprintf(buf, "// %s is the direct-call version of h.%s.\n", funcName, adef.FieldName)
-	fmt.Fprintf(buf, "// Called by workflow code after source transformation.\n")
-	fmt.Fprintf(buf, "func %s(", funcName)
-
-	// Parameter list.
-	var params []string
-	for _, p := range adef.Params {
-		switch p.Type {
-		case "string":
-			params = append(params, p.Name+" string")
-		case "[]string":
-			params = append(params, p.Name+" []string")
-		case "int64":
-			params = append(params, p.Name+" int64")
-		case "int":
-			params = append(params, p.Name+" int")
-		case "time.Duration":
-			params = append(params, p.Name+" time.Duration")
-		case "func(string)":
-			params = append(params, p.Name+" func(string)")
-		case "func() (string, error)":
-			params = append(params, p.Name+" func() (string, error)")
-		}
-	}
-	buf.WriteString(strings.Join(params, ", "))
-	buf.WriteString(")")
-
-	if adef.ReturnType != "" {
-		buf.WriteString(" ")
-		buf.WriteString(adef.ReturnType)
-	}
-
-	buf.WriteString(" {\n")
-
-	// Allocate output buffers.
-	for _, name := range outBufNames(importName) {
-		fmt.Fprintf(buf, "\t%s := make([]byte, _cleatOutBufSize)\n", name)
-	}
-
-	// Build adapter param type lookup for import arg conversion.
-	adapterParamType := make(map[string]string)
-	for _, p := range adef.Params {
-		adapterParamType[p.Name] = p.Type
-	}
-
-	// Argument setup.
-	for _, p := range adef.Params {
-		switch p.Type {
-		case "string":
-			fmt.Fprintf(buf, "\t%sPtr, %sLen := stringPtr(%s)\n", p.Name, p.Name, p.Name)
-		case "[]string":
-			fmt.Fprintf(buf, "\t%sJSON, err := json.Marshal(%s)\n", p.Name, p.Name)
-			fmt.Fprintf(buf, "\tif err != nil { panic(\"json.Marshal for %s: \" + err.Error()) }\n", p.Name)
-			fmt.Fprintf(buf, "\t%sPtr, %sLen := stringPtr(string(%sJSON))\n", p.Name, p.Name, p.Name)
-		case "func() (string, error)":
-			fmt.Fprintf(buf, "\t_computedResult, _sideEffectErr := %s()\n", p.Name)
-			fmt.Fprintf(buf, "\tif _sideEffectErr != nil { return \"\", _sideEffectErr }\n")
-			fmt.Fprintf(buf, "\tresultPtr, resultLen := stringPtr(_computedResult)\n")
-		}
-	}
-
-	// Convert time.Duration params to int64 milliseconds for WASM.
-	for _, p := range adef.Params {
-		if p.Type == "time.Duration" {
-			fmt.Fprintf(buf, "\t%sMs := %s.Milliseconds()\n", p.Name, p.Name)
-		}
-	}
-
-	// Build the import call.
-	hasResultUse := len(adef.ResultStmts) > 0
-	if hasResultUse {
-		buf.WriteString("\tresult := ")
-	} else {
-		buf.WriteString("\t")
-	}
-	buf.WriteString(goName(importName))
-	buf.WriteString("Import(")
-
-	def := importDefs[importName]
-	var args []string
-	for _, dp := range def.Params {
-		switch dp.Kind {
-		case kindInString:
-			args = append(args, fmt.Sprintf("%sPtr, %sLen", dp.Name, dp.Name))
-		case kindOutString:
-			args = append(args, fmt.Sprintf("unsafe.Pointer(unsafe.SliceData(%sBuf)), uint32(len(%sBuf))", dp.Name, dp.Name))
-		case kindInt64:
-			if adapterParamType[dp.Name] == "int" {
-				args = append(args, fmt.Sprintf("int64(%s)", dp.Name))
-			} else {
-				args = append(args, dp.Name)
-			}
-		}
-	}
-	buf.WriteString(strings.Join(args, ", "))
-	buf.WriteString(")\n")
-
-	// Result processing.
-	for _, stmt := range adef.ResultStmts {
-		buf.WriteString("\t" + stmt + "\n")
-	}
-
-	buf.WriteString("}\n\n")
-}
-
-// generateHostWrapperFunc writes a standalone host_ wrapper function for a
-// higher-level HostCalls method that delegates to core host_* functions.
-func generateHostWrapperFunc(buf *bytes.Buffer, fieldName string, wdef hostWrapperDef) {
-	funcName := "host_" + fieldName
-
-	fmt.Fprintf(buf, "// %s is the direct-call version of h.%s (wrapper).\n", funcName, fieldName)
-	fmt.Fprintf(buf, "func %s(", funcName)
-
-	var params []string
-	for _, p := range wdef.Params {
-		switch p.Type {
-		case "string":
-			params = append(params, p.Name+" string")
-		case "[]string":
-			params = append(params, p.Name+" []string")
-		case "int64":
-			params = append(params, p.Name+" int64")
-		case "int":
-			params = append(params, p.Name+" int")
-		case "time.Duration":
-			params = append(params, p.Name+" time.Duration")
-		case "func(string)":
-			params = append(params, p.Name+" func(string)")
-		case "func() (string, error)":
-			params = append(params, p.Name+" func() (string, error)")
-		case "interface{}":
-			params = append(params, p.Name+" interface{}")
-		case "cleat.CallOptions":
-			params = append(params, p.Name+" cleat.CallOptions")
-		}
-	}
-	buf.WriteString(strings.Join(params, ", "))
-	buf.WriteString(")")
-
-	if wdef.ReturnType != "" {
-		buf.WriteString(" ")
-		buf.WriteString(wdef.ReturnType)
-	}
-
-	buf.WriteString(" {\n")
-	for _, stmt := range wdef.Body {
-		buf.WriteString("\t" + stmt + "\n")
-	}
-	buf.WriteString("}\n\n")
 }

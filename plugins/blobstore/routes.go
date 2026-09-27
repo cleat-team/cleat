@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -14,14 +13,21 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
-	"github.com/google/uuid"
 )
 
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("blobstore: nil mux")
 	}
-	mux.HandleFunc("PUT /blobs/{key...}", p.handlePut)
+	// cleat#2232 / cleat#2273: PUT's ceiling is the operator's own
+	// max_blob_size setting (default 10 MiB, Init in plugin.go), not a value
+	// that participates in min() with --plugin-max-body-size -- the host's
+	// default flag (1 MiB) is far too small for a blob upload, and an
+	// operator who explicitly configured a larger max_blob_size did not mean
+	// for an unrelated global flag to silently override it. MaxBodyFromConfig
+	// is the constructor for exactly this: an unconditional ceiling owned by
+	// the plugin's own config, reported under its own name on a 413.
+	mux.Handle("PUT /blobs/{key...}", plugin.MaxBodyFromConfig(p.config.MaxBlobSize, "max_blob_size in --plugin-config", p.handlePut))
 	mux.HandleFunc("GET /blobs/{key...}", p.handleGet)
 	mux.HandleFunc("HEAD /blobs/{key...}", p.handleHead)
 	mux.HandleFunc("DELETE /blobs/{key...}", p.handleDelete)
@@ -41,18 +47,11 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// tenantID extracts the tenant UUID from the request context. Returns the
-// zero UUID if no tenant is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
-}
-
 // ---- PUT /blobs/{key} ----
 
 func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -64,13 +63,10 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Read the entire body.
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("blobstore: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
+	body, ok := plugin.ReadBody(w, r)
+	if !ok {
 		return
 	}
-	defer r.Body.Close()
 
 	if len(body) == 0 {
 		p.writeError(w, 400, "empty body")
@@ -120,7 +116,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 	if storageBackend == "s3" {
 		s3Key = &sha256Hex
 	}
-	_, err = p.db.Exec(r.Context(), plugin.Rebind(upsertBlobContent.For(p.dialect), p.dialect),
+	_, err := p.db.Exec(r.Context(), plugin.Rebind(upsertBlobContent.For(p.dialect), p.dialect),
 		hash[:], len(body), storageBackend, s3Key)
 	if err != nil {
 		p.logger.Error("blobstore: store content", "key", key, "error", err)
@@ -167,8 +163,8 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 // ---- GET /blobs/{key} ----
 
 func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -184,12 +180,17 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 	var size int64
 	var expiresAt sql.NullTime
 
-	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
+	// plugin.QuoteIdent, not a bare "i.key": key is a reserved word in MySQL
+	// and SQL Server both, and an unquoted reference 500ed on both backends
+	// ("Incorrect syntax near the keyword 'key'" on MSSQL) -- the same bug
+	// kvstore and featureflags already carry the fix for. See
+	// plugin.QuoteIdent. cleat#2206.
+	err := p.db.QueryRow(r.Context(), plugin.Rebind(fmt.Sprintf(`
 		SELECT c.sha256, i.content_type, i.size, i.expires_at
 		FROM blob_index i
 		JOIN blob_content c ON i.sha256 = c.sha256
-		WHERE i.key = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
-	`, p.dialect), key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
+		WHERE i.%s = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
+	`, plugin.QuoteIdent("key", p.dialect)), p.dialect), key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "blob not found")
 		return
@@ -225,8 +226,8 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 // ---- HEAD /blobs/{key} ----
 
 func (p *Plugin) handleHead(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -242,12 +243,13 @@ func (p *Plugin) handleHead(w http.ResponseWriter, r *http.Request) {
 	var size int64
 	var expiresAt sql.NullTime
 
-	err := p.db.QueryRow(r.Context(), plugin.Rebind(`
+	// plugin.QuoteIdent: see handleGet's identical comment above. cleat#2206.
+	err := p.db.QueryRow(r.Context(), plugin.Rebind(fmt.Sprintf(`
 		SELECT c.sha256, i.content_type, i.size, i.expires_at
 		FROM blob_index i
 		JOIN blob_content c ON i.sha256 = c.sha256
-		WHERE i.key = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
-	`, p.dialect), key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
+		WHERE i.%s = $1 AND i.tenant_id = $2 AND i.deleted_at IS NULL
+	`, plugin.QuoteIdent("key", p.dialect)), p.dialect), key, tid).Scan(&sha256Bytes, &contentType, &size, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "blob not found")
 		return
@@ -272,8 +274,8 @@ func (p *Plugin) handleHead(w http.ResponseWriter, r *http.Request) {
 // ---- DELETE /blobs/{key} ----
 
 func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -287,10 +289,11 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 	// Soft delete: set deleted_at timestamp. Physical deletion is deferred
 	// to the TTL cleanup loop, which only removes bytes from S3 when no
 	// in-flight workflow references the blob.
-	rows, err := p.db.Exec(r.Context(), plugin.Rebind(`
+	// plugin.QuoteIdent: see handleGet's identical comment above. cleat#2206.
+	rows, err := p.db.Exec(r.Context(), plugin.Rebind(fmt.Sprintf(`
 		UPDATE blob_index SET deleted_at = now()
-		WHERE key = $1 AND tenant_id = $2 AND deleted_at IS NULL
-	`, p.dialect), key, tid)
+		WHERE %s = $1 AND tenant_id = $2 AND deleted_at IS NULL
+	`, plugin.QuoteIdent("key", p.dialect)), p.dialect), key, tid)
 	if err != nil {
 		p.logger.Error("blobstore: soft delete", "key", key, "error", err)
 		p.writeError(w, 500, "failed to delete blob")
@@ -308,8 +311,8 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 // ---- GET /blobs ----
 
 func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -324,16 +327,19 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	query := `
-		SELECT i.key, i.sha256, i.size, i.content_type, i.tags, i.created_at, i.expires_at
+	// plugin.QuoteIdent, not a bare "i.key": see handleGet's identical
+	// comment above. cleat#2206.
+	quotedKey := plugin.QuoteIdent("key", p.dialect)
+	query := fmt.Sprintf(`
+		SELECT i.%s, i.sha256, i.size, i.content_type, i.tags, i.created_at, i.expires_at
 		FROM blob_index i
 		WHERE i.tenant_id = $1 AND i.deleted_at IS NULL
-		`
+		`, quotedKey)
 	args := []any{tid}
 	argIdx := 2
 
 	if prefix != "" {
-		query += fmt.Sprintf(" AND i.key LIKE $%d", argIdx)
+		query += fmt.Sprintf(" AND i.%s LIKE $%d", quotedKey, argIdx)
 		args = append(args, prefix+"%")
 		argIdx++
 	}
@@ -355,7 +361,11 @@ func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	query += " ORDER BY i.created_at DESC"
-	query += " LIMIT " + fmt.Sprintf("$%d", argIdx)
+	// plugin.LimitClause, not a literal "LIMIT $N": SQL Server has no LIMIT,
+	// and this endpoint answered every list request with a 500,
+	// "Incorrect syntax near 'LIMIT'" -- the same bug #2191 and #2198 already
+	// fixed at the other list endpoints, missed here. cleat#2206.
+	query += " " + plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, limit)
 
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)

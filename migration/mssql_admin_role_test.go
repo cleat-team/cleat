@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -109,15 +110,46 @@ func setupAdminRoleDB(t *testing.T) *sql.DB {
 	db := newMSSQLScratchDB(t, adminRoleTestDB)
 	ctx := context.Background()
 
-	if err := migration.NewRunner(db, migration.DialectMSSQL, migrationsRoot(t)).Run(ctx); err != nil {
+	if err := runMigrations(t, ctx,
+		migration.NewRunner(db, migration.DialectMSSQL, migrationsRoot(t)),
+		migration.DialectMSSQL); err != nil {
 		t.Fatalf("apply the shipped SQL Server migrations: %v", err)
 	}
 
-	// Seeded with no session context at all, which works because 001 declares
-	// FILTER predicates and a FILTER predicate constrains reads, not writes.
-	// (A BLOCK predicate would refuse these inserts. There are none.)
+	// The tests in this file are ABOUT the cleat_admin bypass, and since
+	// cleat#1541 the shipped predicate does not grant it: 074 makes the
+	// disjunction opt-in, so a member reads IS_ROLEMEMBER = 1 and still sees
+	// nothing. Without this the cross-tenant assertions below fail for a
+	// correct reason, which is the least useful kind of red.
+	//
+	// Applied on ONE connection: 074 captures the policy set into a #temp table
+	// in one batch and replays it in another, and a #temp table lives for the
+	// session. migration.Runner opens one connection per file for the same
+	// reason.
+	applyMSSQLOptIn(t, db)
+
+	// Used to be seeded with no session context at all, which worked because
+	// 001's FILTER predicates constrain reads, not writes. cleat#2205
+	// (migration 103) added an AFTER INSERT block predicate on the same
+	// dbo.fn_tenant_filter, and a block predicate DOES check SESSION_CONTEXT
+	// regardless of the row's own tenant_id value, so a plain db.ExecContext
+	// insert is refused outright now. One pinned connection, with the target
+	// tenant's id stamped into the session immediately before each insert --
+	// see engine/flush_dialect_test.go's identical fix and its doc comment
+	// for why sp_set_session_context has to run on the SAME *sql.Conn as the
+	// write that follows it (it is connection-scoped, and database/sql may
+	// otherwise hand the write to a different pooled connection).
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin a connection to seed workflow_defs: %v", err)
+	}
+	defer conn.Close()
 	for i, tenant := range []string{tenantA, tenantA, tenantB} {
-		if _, err := db.ExecContext(ctx, `
+		if _, err := conn.ExecContext(ctx,
+			`EXEC sp_set_session_context @key=N'tenant_id', @value=@p1`, tenant); err != nil {
+			t.Fatalf("set the tenant session context to seed workflow_defs: %v", err)
+		}
+		if _, err := conn.ExecContext(ctx, `
 			INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, task_queue, tenant_id)
 			VALUES (@p1, 1, 0x00, '[]', 'default', @p2)`,
 			fmt.Sprintf("admin-role-def-%d", i), tenant); err != nil {
@@ -348,4 +380,30 @@ func mssqlCredentials(t *testing.T) (string, string) {
 	}
 	password, _ := u.User.Password()
 	return u.User.Username(), password
+}
+
+// applyMSSQLOptIn applies migrations/mssql/optional/cross_tenant_claim.sql,
+// which the runner never picks up because it lives in a subdirectory and
+// readMigrations skips directory entries (cleat#1541).
+func applyMSSQLOptIn(t *testing.T, db *sql.DB) {
+	t.Helper()
+	path := filepath.Join(migrationsRoot(t), "mssql", "optional", "cross_tenant_claim.sql")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read the cross-tenant opt-in: %v", err)
+	}
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire one connection: %v", err)
+	}
+	defer conn.Close()
+	for _, batch := range strings.Split(string(raw), "\nGO\n") {
+		if strings.TrimSpace(batch) == "" {
+			continue
+		}
+		if _, err := conn.ExecContext(ctx, batch); err != nil {
+			t.Fatalf("apply the cross-tenant opt-in: %v", err)
+		}
+	}
 }

@@ -77,6 +77,39 @@ git config core.hooksPath .githooks
 composes with `--signoff`, `--amend` and `git rebase --signoff` rather than
 signing anything twice.
 
+### Claude-Stream
+
+The same hook stamps a second trailer naming the workstream that produced the
+commit, which `Stream Trailer Check` enforces the same way `DCO Check`
+enforces the first. It needs one more setting, **per checkout**:
+
+```
+git config --local cleat.stream <stream>
+```
+
+The hook refuses a commit when this is unset, and refuses a value the check
+would reject. Both refusals print the accepted values, which it reads out of
+`.github/workflows/stream-trailer-check.yml` rather than keeping its own copy.
+
+It refuses rather than defaulting because there is no default worth having: a
+wrong stream is not "unattributed", it is attributed to someone else. That is
+the failure the check was written after — two pull requests went out as
+`coordinator`, and the coordinator session found a red pull request carrying
+its own name that it had not opened.
+
+A message that already names a stream is left alone, so `git commit --trailer`
+and a rebase onto a checkout that never set the config both work.
+
+The same setting enables `.githooks/pre-commit`, which refuses a commit that
+adds an `IMPROVEMENT-PLAN.md` section outside your sandbox's allocated block.
+CI cannot check that — it asserts uniqueness and block membership, both of
+which a cross-stream misallocation satisfies — so the commit is the only point
+where the answer is knowable. Ask for your number rather than picking one:
+
+```
+scripts/next-section-number.sh
+```
+
 If a branch is already unsigned:
 
 ```
@@ -91,7 +124,7 @@ To build and test cleat you will need:
 **Minimum (write and run Go workflows):**
 | Tool | Version | Required | Notes |
 |------|---------|----------|-------|
-| Go | 1.25+ | Yes | Standard Go toolchain |
+| Go | 1.27+ | Yes | Standard Go toolchain (go.mod pins `toolchain go1.27.1`; with `GOTOOLCHAIN=auto`, the default, Go downloads it for you) |
 | PostgreSQL | 14+ (16 recommended) | Yes | Or MySQL 8.0+, or SQL Server 2017+ |
 | Docker | Latest | No | Only if using Docker for the database |
 
@@ -241,7 +274,7 @@ go test -short ./...
 # one database; engine/testutil's CleanupPostgresTestData is an unqualified
 # DELETE across eleven tables, so packages run concurrently delete each other's
 # fixtures mid-test. The result looks like a flaky product defect and is not
-# one. See the header of scripts/skip-budget.txt.
+# one. See the header of scripts/skip-ledger.tsv.
 go test -count=1 -p 1 ./...
 
 # Tests for a specific package
@@ -275,6 +308,77 @@ cd packages/cleat-as && npm test
 > MySQL, and SQL Server configurations. The compose file defines all three
 > database services for local multi-backend development.
 
+## Proving a test can fail
+
+A passing test is evidence of nothing until you have seen it fail. Two specific
+habits, both of which came out of real defects in this repo.
+
+### Sabotage the read
+
+**To find out whether a parameter is guarded, break it and run the suite.**
+Replace the place the value is read with a constant, run the package, and see
+whether anything goes red:
+
+```go
+idempotencyKey := "" // was r.Header.Get("Idempotency-Key")
+```
+
+If nothing fails, that parameter is unguarded — regardless of how many tests
+mention it, and regardless of what they are called. This is the only check here
+with no blind spot, because it asks the code rather than the names.
+
+It is not hypothetical. `POST /api/dead-letters/{id}/reprocess` passed the empty
+string where `StartNewRun` takes an idempotency key, so an operator retry after a
+lost response re-drove work that had already failed partway (cleat#1167). Two
+tests asserted idempotency and both passed on the broken code. Sabotaging the
+start path — the one that *worked* — left them green as well, so "the header is
+read at all" was under test nowhere in the package.
+
+Run over every parameter a handler reads, the same method found that four of the
+seven `/api/workflows` list filters were guarded by nothing (cleat#1248), while a
+test named `TestTheTargetedFiltersReachTheStore` covered exactly three of them.
+
+Beware the cheap proxy. "Is this parameter mentioned in a test file?" answered
+**13 of 14 covered** for that same API. Sabotage answered 3 of 7 for the subset
+it was asked about. The metric that is easy to compute reports close to the
+opposite of the truth.
+
+### A double that ignores an argument cannot see it
+
+**Test doubles should record what they were handed**, not return a canned answer
+regardless of it. This is blind:
+
+```go
+ms.startNewRunFn = func(_ context.Context, runID, defName string, defVersion int,
+    input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error) {
+    return "wf-existing", true, nil   // "already started", whatever it is given
+}
+```
+
+A test driving that asserts the handler *renders* the already-started branch,
+never that anything can reach it.
+
+Model the constraint the real thing enforces, and keep what you were passed.
+`keyedRunStarter` in `cmd/cleat-worker/reprocess_idempotency_test.go` is the
+worked example: `idempotency_keys` is `PRIMARY KEY (key_hash, tenant_id)`, so a
+repeated key returns the original run, and every key it receives is appended to a
+slice the test asserts on. Dropping the header then fails an assertion instead of
+sailing past one.
+
+One detail worth copying: treat an empty token as the **absence** of a token,
+never as a token equal to `""`. Otherwise two callers who both send nothing
+collide.
+
+`scripts/check-blind-doubles.sh` ratchets this — it fails on a *new* double that
+never reads a parameter its test is named after. It is a prompt to look, not a
+verdict: some doubles ignore an argument on purpose, and
+`TestGetCompactionCandidates_LimitEnforcement` is one (it returns three
+candidates for a limit of two precisely so the assertion can prove the wrapper
+truncates). Entries in `scripts/blind-doubles-baseline.txt` are not a to-do list.
+Its blind spot is the reason the sabotage habit above is not optional: a double
+whose test is named for the *concept* rather than the parameter is invisible to
+it.
+
 ## Svelte UI dev setup
 
 The web UI is a Svelte 5 application located in the `web/` directory. It
@@ -292,8 +396,11 @@ defaults to connecting to `http://localhost:8080`). Start the worker with the
 
 ```bash
 cleat-worker --db "postgres://user:pass@localhost/cleat?sslmode=disable" \
-    --api-addr :8080
+    --api-addr :8080 --migrate-on-start
 ```
+
+(`--migrate-on-start` creates the schema on a fresh development database; a worker
+otherwise only verifies it.)
 
 To build the UI for production (output goes to `cmd/cleat-worker/web/dist/`):
 
@@ -439,8 +546,19 @@ The reviewer may approve, request changes, or comment with questions.
 ### 5. Merge
 
 Once approved and all checks are green, the PR is **squash-merged** into
-`main`. Squash is the only merge method — no merge commits, no rebase merges.
-This keeps the main branch history linear and each commit atomic.
+`develop` — the branch it was opened against, and the repo default. It does not
+go to `main`; only the `release/` and `hotfix/` flows touch `main`, and they use
+merge commits rather than squash, for the reason given in
+[Where to branch from](#where-to-branch-from-and-how-it-merges).
+
+**`develop` is behind a merge queue, so you do not pick the method.** The queue
+is configured `SQUASH`, and `gh pr merge --squash` reports "The merge strategy
+for develop is set by the merge queue" and enqueues the PR rather than merging
+it. Expect a wait behind other entries; the PR merges when it reaches the front
+and its checks pass there. Re-derive the configuration with:
+
+    gh api graphql -f query='{ repository(owner:"cleat-team",name:"cleat"){
+      mergeQueue(branch:"develop"){ configuration { mergeMethod mergingStrategy } } } }'
 
 The squash commit message must retain the PR title as its subject line and
 include any `Co-authored-by` trailers for contributors who participated.
@@ -448,16 +566,98 @@ include any `Co-authored-by` trailers for contributors who participated.
 ## Release process overview
 
 Releases are automated via GoReleaser. When a maintainer pushes a version tag
-(e.g., `v0.5.0`) to the repository, the release workflow:
+(e.g., `v0.5.0`), `.github/workflows/release.yml` runs GoReleaser, which:
 
-1. Builds release binaries for Linux (amd64, arm64), macOS (amd64, arm64), and
-   Windows (amd64).
-2. Publishes the `cleat`, `cleat-worker`, and `cleat-gen` binaries to the
-   GitHub release page.
-3. Publishes the `cleat-macro` and `cleat-sdk` crates to crates.io.
-4. Builds and publishes the `cleat` Docker image to GitHub Container Registry.
+1. Builds `cleat` and `cleat-gen` for **linux and darwin**, amd64 and arm64,
+   and `cleat-worker` for **linux only** — it links wasmtime through CGO, so
+   each artifact is built on a matching host. **There is no Windows build**
+   (`grep -i windows .goreleaser.yml` returns nothing).
+2. Publishes those binaries to the GitHub release page.
+
+That is the whole of it, and the list above is short on purpose. Three things
+this section previously claimed do **not** happen, and the corrections are
+dated 2026-09-04 with the command that re-derives each:
+
+| previously claimed | actually |
+|---|---|
+| Windows amd64 binaries | no `windows` anywhere in `.goreleaser.yml` |
+| `cleat-macro` and `cleat-sdk` published to crates.io | nothing publishes any crate. `git log -S'cargo publish' -- .goreleaser.yml .github/` is **empty**, so this was never true rather than having rotted |
+| `cleat` Docker image pushed to GHCR | `.goreleaser.yml` has no `dockers:` section and `grep -rl ghcr.io .github/` finds nothing. The root `Dockerfile` is real and builds by hand; no automation pushes it |
 
 Release candidates follow semver pre-release tags (e.g., `v0.5.0-rc.1`).
+
+### SDK versions: which numbers are load-bearing
+
+All five SDKs and the chart carry **one number, `0.3.0`** — the version the repo
+tag releases. That is owner decision 4 in cleat#2058, put on disk by cleat#2452,
+and `.github/workflows/publish-pypi.yml` is built around it: its own header says
+the whole repo is released under one tag, "All manifest versions become 0.3.0",
+not a per-SDK `python-sdk/vX.Y.Z` tag. Only one of the five is versioned by the
+repo tag, and only one more has a publisher at all:
+
+| SDK | version | set by | publisher |
+|---|---|---|---|
+| Go | repo tag | `git tag` (`v0.1.0`, `v0.2.0`) | the module path — Go's proxy serves the tag |
+| Python (`cleat-sdk`) | `0.3.0` | `python-sdk/pyproject.toml` | `.github/workflows/publish-pypi.yml` |
+| Rust (`cleat-sdk`, `cleat-macro`, `cleat-test`) | `0.3.0` | `crates/*/Cargo.toml` | **none** |
+| Java | `0.3.0` | `crates/cleat-java/build.gradle.kts` | **none** |
+| AssemblyScript | `0.3.0` | `packages/cleat-as/package.json` | **none** |
+
+The chart takes the same number (`charts/cleat/Chart.yaml`), and the number lives
+in more places than the manifests. Each SDK stamps its own version into the
+metadata of every workflow it compiles, so a bump that stops at the manifest
+leaves the stamp behind — cleat#2452 moved
+`python-sdk/cleat_sdk/version.py`, `python-sdk/scripts/stamp_metadata.py`,
+`crates/cleat-sdk/src/bin/inject_metadata.rs`,
+`crates/cleat-java/scripts/inject-metadata.sh` and
+`packages/cleat-as/scripts/inject-metadata.js`. The Go module is the same story
+from the other side: five modules in this repo consume it, so each pins the
+version in its own `go.mod` — `cleat/`, `cleat/backendkit/`, `examples/`,
+`tests/cross-language/` and `tests/plugin-harness/` — and those move with the
+tag, in the same change.
+
+**Measured 2026-09-04, overridden 2026-09-23.** This section used to argue the
+opposite, and the argument it made is worth keeping, because it is sound as far as
+it goes: a version in a manifest that no workflow publishes is *inert* — nothing
+reads it, and nothing would break if it changed — so the three `0.1.0`s should be
+left alone, and bumping them to `0.2.0` would be *worse* than leaving them,
+because it would assert a release of a package whose `0.1.0` never shipped either,
+so a first crate or npm release would find its version already claimed. What
+overrides it is the publish path above: that workflow is designed around one
+number for the whole repo, so uniformity is worth more than an unclaimed first
+release. The cost is accepted rather than denied — **if crate or npm publishing is
+wired up later, its first release is numbered above `0.3.0`.**
+
+Until cleat#2452 the values on disk were Python `0.2.0`, and Rust, Java and
+AssemblyScript `0.1.0`.
+
+The Python number is different: it *is* load-bearing, because a publisher reads
+it. Historically it did not track the repo tag — `python-sdk` went `0.1.0` →
+`0.2.0` on **2026-05-07**, six days before the `v0.1.0` tag (2026-05-13) and
+three months before `v0.2.0` (2026-08-10); the agreement between "python-sdk
+0.2.0" and "tag v0.2.0" was a coincidence of numbering, not a policy.
+Re-derive the history with
+`git log --format='%h %cI %s' -S'version = "0.2.0"' -- python-sdk/pyproject.toml`.
+
+**As of cleat#2127 this is enforced, not coincidental.** `publish-pypi.yml`
+fails the run before any upload if the pushed tag's version and
+`python-sdk/pyproject.toml`'s version disagree, so from the 0.3.0 release
+onward the two cannot drift apart silently — bump `pyproject.toml` on the
+release branch before tagging, per #2058.
+
+Which registries the project depends on is decided by tier, and
+`.github/workflows/tier1-gate.yml` already states it: PyPI is accepted because
+python is tier 1; crates.io, npm and Maven Central are not, because their
+languages are tier 2. That is the reason the three inert versions have no
+publisher, and it is a deliberate position rather than an oversight.
+
+**The Python publish path's trigger and version-check were fixed in
+cleat#2127 — see IMPROVEMENT-PLAN 3.304.** `cleat-sdk` is still not on PyPI as
+of this writing (`curl -s -o /dev/null -w '%{http_code}'
+https://pypi.org/pypi/cleat-sdk/json` → `404`, against `200` for a control
+package), and `publish-pypi.yml` still has never run — both expected to stay
+true until the 0.3.0 release tag is actually pushed, which is what would
+exercise it for the first time.
 
 ## Areas that need help
 

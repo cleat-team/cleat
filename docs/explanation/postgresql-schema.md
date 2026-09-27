@@ -12,6 +12,48 @@ lexical order, against a PostgreSQL 16+ database before deploying workflows:
 for f in migrations/postgres/*.sql; do psql -U postgres -d cleat -f "$f"; done
 ```
 
+### PostgreSQL 16 is required, not merely recommended
+
+From migration `077_a_plugin_policy_can_use_its_index.sql` onward the schema uses
+syntax that does not exist before PostgreSQL 16:
+
+```sql
+GRANT cleat_sweep TO <role> WITH INHERIT FALSE
+```
+
+`WITH INHERIT FALSE` is the whole isolation boundary for the cross-tenant sweep,
+not a stylistic choice. A plugin table's tenant policy is indexable because the
+bypass lives in a *separate* policy attached to `cleat_sweep`; membership that
+**inherited** would make every member match that policy's `USING (true)` and see
+every tenant's rows. Membership that is assumable but not inherited is what lets
+a sweep enter the role deliberately while nothing enters it by accident
+(cleat#1490).
+
+Earlier versions of cleat ran on older servers. The claim was `16+` before this
+too, but as a statement about what CI tested rather than a requirement — see
+`tiers.yaml`, `dialect_versions`.
+
+**On a server older than 16 the migration runner refuses before applying
+anything**, naming the version it found and the reason:
+
+> cleat requires PostgreSQL 16 or later and this server is 15.19 (Debian ...).
+>   Migration 077 grants the cross-tenant sweep role WITH INHERIT FALSE, ...
+>   Nothing has been applied. ...
+
+(Quoted rather than fenced deliberately: it is the error a migration run
+returns, not a command to type. A fenced block whose first line begins
+`cleat ` reads as an invocation, and `TestEveryDocumentedSubcommandExists`
+rightly rejects it — a reader following it literally would try to run
+`cleat requires`.)
+
+That last sentence is accurate rather than reassuring: each migration file runs
+inside a transaction, so before the check existed a 15 server failed *inside*
+077 with `syntax error at or near "INHERIT"` and rolled the file back whole. A
+database in that state has the migrations up to 076 and nothing from 077 — no
+partial policies and no `cleat_sweep` role. The check does not prevent a
+corrupted schema; it replaces a Postgres error with a sentence you can act on.
+
+
 All files are idempotent, so re-running them is safe.
 
 Apply **all** of them, not just `001_schema.sql`. `003_procedures.sql`
@@ -40,13 +82,25 @@ CREATE TABLE workflow_defs (
     wasm_bytes BYTEA NOT NULL,
     entry_points TEXT[] NOT NULL DEFAULT '{}',
     min_version INTEGER NOT NULL DEFAULT 0,
-    max_history_length INTEGER NOT NULL DEFAULT 0,
-    namespace TEXT NOT NULL DEFAULT 'default',
-    dag_spec JSONB DEFAULT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (name, version)
+    max_history_length INTEGER NOT NULL DEFAULT 0,
+    dag_spec JSONB,
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    task_queue TEXT NOT NULL DEFAULT 'default',
+    abi_version INTEGER NOT NULL DEFAULT 1,
+    plugin_deps JSONB NOT NULL DEFAULT '{}',
+    gc_eligible BOOLEAN NOT NULL DEFAULT false,
+    disabled_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, name, version)
 );
 ```
+
+**Selected columns.** The `CREATE TABLE` block above is the complete list and is
+checked against a live database by `TestTheSchemaDocDescribesTheDatabaseWeShip`
+(cleat#1093). This table is a curated subset: it exists for the per-column prose,
+which cannot be generated, and a column's absence here means nobody has written
+that prose yet — not that the column does not exist.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -56,7 +110,6 @@ CREATE TABLE workflow_defs (
 | `entry_points` | TEXT[] | Exported entry point names (e.g., `{"place_order","cancel_order"}`) |
 | `min_version` | INTEGER | Minimum compatible version for replay |
 | `max_history_length` | INTEGER | Max events before compaction triggers (0 = default) |
-| `namespace` | TEXT | Namespace for multi-tenant isolation |
 | `dag_spec` | JSONB | DAG structure for visualization (optional) |
 | `created_at` | TIMESTAMPTZ | Deployment timestamp |
 
@@ -72,7 +125,7 @@ work queue.
 
 ```sql
 CREATE TABLE workflow_instances (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL,
     def_name TEXT NOT NULL,
     def_version INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT 'ready',
@@ -82,25 +135,61 @@ CREATE TABLE workflow_instances (
     next_wake_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ,
-    result JSONB,
-    error_msg TEXT,
     cancellation_requested BOOLEAN NOT NULL DEFAULT false,
     cancellation_reason TEXT,
-    namespace TEXT NOT NULL DEFAULT 'default',
+    result JSONB,
+    error_msg TEXT,
+    error_code TEXT,
+    error_op TEXT,
     parent_workflow_id TEXT,
+    parent_close_policy TEXT DEFAULT 'ABANDON',
     query_state JSONB DEFAULT '{}',
-    sticky_worker_id TEXT,
     trace_id TEXT,
-    FOREIGN KEY (def_name, def_version) REFERENCES workflow_defs(name, version)
+    sticky_worker_id TEXT,
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    task_queue TEXT NOT NULL DEFAULT 'default',
+    compaction_state JSONB,
+    compacted_at TIMESTAMPTZ,
+    compaction_step INTEGER,
+    plugin_vers JSONB NOT NULL DEFAULT '{}',
+    event_count BIGINT NOT NULL DEFAULT 0,
+    allowed_signals JSONB,
+    priority INTEGER NOT NULL DEFAULT 0,
+    generation BIGINT NOT NULL DEFAULT 0,
+    pending_terminal_status TEXT,
+    defer_phase_deadline TIMESTAMPTZ,
+    continued_from TEXT,
+    signal_seq BIGINT NOT NULL DEFAULT 0,
+    signal_seq_at_claim BIGINT NOT NULL DEFAULT 0,
+    signal_consumed_seq BIGINT NOT NULL DEFAULT 0,
+    signal_consumed_at_claim BIGINT NOT NULL DEFAULT 0,
+    reclaim_count BIGINT NOT NULL DEFAULT 0,
+    started_at TIMESTAMPTZ,
+    concurrency_key TEXT,
+    concurrency_key_hash BYTEA,
+    run_wasm_instance_timeout_ms BIGINT,
+    run_wasm_wall_clock_ceiling_ms BIGINT,
+    run_host_retry_budget_ms BIGINT,
+    run_max_workflow_duration_ms BIGINT,
+    completed_by TEXT,
+    history_swept_at TIMESTAMPTZ,
+    PRIMARY KEY (id),
+    FOREIGN KEY (tenant_id, def_name, def_version) REFERENCES workflow_defs(tenant_id, name, version)
 );
 ```
+
+**Selected columns.** The `CREATE TABLE` block above is the complete list and is
+checked against a live database by `TestTheSchemaDocDescribesTheDatabaseWeShip`
+(cleat#1093). This table is a curated subset: it exists for the per-column prose,
+which cannot be generated, and a column's absence here means nobody has written
+that prose yet — not that the column does not exist.
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | TEXT | Unique workflow instance ID (UUID) |
 | `def_name` | TEXT | References `workflow_defs.name` |
 | `def_version` | INTEGER | References `workflow_defs.version` |
-| `status` | TEXT | `ready`, `running`, `completed`, `failed`, `suspended` |
+| `status` | TEXT | One of `ready`, `running`, `done`, `failed`, `dead_lettered`, `terminated`, `cancelled`, `terminating`. No `CHECK` constraint; see [Workflow lifecycle](../reference/workflow-lifecycle.md#the-statuses) — note there is no `completed` and no `suspended`. |
 | `input` | JSONB | Workflow input arguments |
 | `assigned_to` | TEXT | Worker ID currently claiming this instance |
 | `heartbeat_at` | TIMESTAMPTZ | Last heartbeat from the claiming worker |
@@ -109,23 +198,29 @@ CREATE TABLE workflow_instances (
 | `error_msg` | TEXT | Error message (if failed) |
 | `cancellation_requested` | BOOLEAN | Whether cancellation has been requested |
 | `cancellation_reason` | TEXT | Reason for cancellation |
-| `namespace` | TEXT | Namespace for multi-tenant routing |
 | `parent_workflow_id` | TEXT | Parent workflow for child workflows |
 | `query_state` | JSONB | Queryable workflow state |
+| `tenant_id` | UUID | The owning tenant. **This is how tenancy is stored** — there is no `namespace` column and never has been; the doc claimed one until cleat#1093. Row-level security policies key off this, and it is part of the foreign key into `workflow_defs`. |
 | `sticky_worker_id` | TEXT | Preferred worker for cache locality |
 | `trace_id` | TEXT | OpenTelemetry trace ID for observability |
+| `parent_workflow_id` | TEXT | Exposed as `parent_workflow_id` on the API's workflow object since cleat#1103. The run that spawned this one; `NULL` for a run nobody spawned, and inherited through `ContinueAsNew` so a continuation of a child is still that parent's child. `GetChildCount` and `enforceParentClosePolicy` key off this column. **Not** `continued_from` below, which names the opposite relation — that row states the distinction from the other side. Written since children existed and readable by no client until #1103: the column was in no `GetWorkflowByID` SELECT on any dialect. |
+| `continued_from` | TEXT | Exposed as `continued_from` on the API's workflow object, and followed by `GET /api/workflows/:id/terminal`. The run that continued into this one. `NULL` unless `ContinueAsNew` created this row, and `NULL` on every row written before migration 045. **Not** `parent_workflow_id`: a continuation is not a child, and `GetChildCount` and `enforceParentClosePolicy` both key off that column — see cleat#826 and the migration header. |
+| `reclaim_count` | BIGINT | Exposed as `reclaim_count` on the API's workflow object. How many times `ReapStaleInstances` has taken this workflow back from a worker that stopped heartbeating. **Not a bound** — nothing compares it to a limit, deliberately: what reaches it is infrastructure (host OOM, node failure, deploy, SIGKILL) rather than workload, since a runaway guest is interrupted by the worker's own limits and fails terminally instead. **Not `generation`**, which counts *claims* — the ordinary suspend/resume path drives that column, and a workflow that completed successfully without ever being reclaimed has been measured at generation 12. `0` on every row written before migration 052; nothing is backfilled. See cleat#1008. |
+| `completed_by` | TEXT | The worker that performed the terminal write, recorded at the moment the lease is surrendered. `assigned_to` is a LEASE and every terminal write clears it while fencing on it, so it is blank on every finished run and cannot answer "which worker ran this" after the fact. NULL for a run that reached a terminal state without ever being claimed, and for every row written before migration 074 — nothing is backfilled. A run terminated through its DEFER PHASE names the worker that ran the defer phase, not the body: that transition clears the lease deliberately, to fence the old owner out. See cleat#1118. |
 
 **Indexes**:
 
-- `idx_instances_ready` on `(status, next_wake_at)` WHERE `status = 'ready'` --
-  accelerates the worker poll loop. This is the most critical index for worker
-  throughput.
+- `idx_instances_claimable` on `(status, next_wake_at)` WHERE
+  `status IN ('ready', 'terminating')` -- accelerates the worker poll loop.
+  This is the most critical index for worker throughput. It was
+  `idx_instances_ready`, filtered on `status = 'ready'` alone, until migration
+  040: the claim now also picks up workflows running their defer phase
+  (`docs/reference/workflow-lifecycle.md`), and a partial index is only usable
+  when the query's predicate implies its filter.
 - `idx_instances_heartbeat` on `(assigned_to, heartbeat_at)` WHERE
   `status = 'running'` -- enables monitoring and stale-assignment detection.
 - `idx_instances_stale` on `(status, heartbeat_at)` WHERE `status = 'running'` --
   used by the reaper to reclaim instances with stale heartbeats.
-- `idx_instances_namespace_ready` on `(namespace, status, next_wake_at)` WHERE
-  `status = 'ready'` -- namespace-filtered claim lookups.
 - `idx_instances_sticky` on `(sticky_worker_id)` WHERE `sticky_worker_id IS NOT
   NULL` -- sticky worker fast path.
 
@@ -136,35 +231,43 @@ event. This is the core of the replay mechanism.
 
 ```sql
 CREATE TABLE event_history (
-    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    workflow_id TEXT NOT NULL,
     step INTEGER NOT NULL,
-    event_type TEXT NOT NULL DEFAULT 'call',
     service TEXT,
     operation TEXT,
-    request JSONB,
-    response JSONB,
+    request TEXT,
+    response TEXT,
     error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    event_type TEXT NOT NULL DEFAULT 'call',
     duration_ms BIGINT,
     signal_names TEXT,
     timeout_ms BIGINT,
     signal_name TEXT,
-    signal_payload JSONB,
+    signal_payload TEXT,
     defer_description TEXT,
     defer_id TEXT,
     child_name TEXT,
-    child_input JSONB,
+    child_input TEXT,
     run_id TEXT,
-    new_input JSONB,
+    new_input TEXT,
     plugin_name TEXT,
     plugin_func TEXT,
-    plugin_input JSONB,
-    plugin_output JSONB,
+    plugin_input TEXT,
+    plugin_output TEXT,
     plugin_error TEXT,
     promise_name TEXT,
     promise_id TEXT,
     promise_result TEXT,
     promise_error TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    payload JSONB,
+    payload_encoding SMALLINT,
+    checksum TEXT,
+    thread_id TEXT NOT NULL DEFAULT 'main',
+    local_step INTEGER NOT NULL DEFAULT 0,
+    global_seq BIGINT NOT NULL DEFAULT 0,
+    intent_at TIMESTAMPTZ,
     PRIMARY KEY (workflow_id, step)
 );
 ```
@@ -185,17 +288,39 @@ External signals delivered to running workflows.
 
 ```sql
 CREATE TABLE workflow_signals (
-    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    workflow_id TEXT NOT NULL,
     signal_name TEXT NOT NULL,
     payload JSONB NOT NULL DEFAULT '{}',
     delivered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (workflow_id, signal_name)
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    id BIGSERIAL,
+    PRIMARY KEY (id),
+    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
 );
+
+CREATE INDEX idx_workflow_signals_queue
+    ON workflow_signals (workflow_id, signal_name);
 ```
 
-The engine checks for signals during `AwaitSignals` and `PollSignal`. Signal
-delivery is recorded in `event_history` as `signal_received` events for
-deterministic replay.
+**The key is a surrogate id, not `(workflow_id, signal_name)`, and that is the
+whole of the table's semantics.** A signal is a *delivery*, and a name is not an
+identity: sending `approve` twice before the workflow consumes it produces two
+rows, and a workflow that accumulates — a counter, one approval per reviewer, a
+batch of items — receives both. The table was keyed on the name until 2026-09-05
+(`migrations/postgres/041_signal_queue.sql`), which made the second delivery
+overwrite the first with no error.
+
+So the table is a FIFO queue per `(workflow_id, signal_name)`, ordered by `id`.
+`delivered_at` cannot serve as the order: two deliveries in the same microsecond
+tie, and the tie has to break identically on every read or a replay can see a
+different signal than the original run did.
+
+The engine checks for signals during `AwaitSignals` and `PollSignal`. Reading is
+non-consuming; the await path removes the delivery in a separate call *after*
+recording the `signal_received` event, so a crash in between re-delivers rather
+than losing the signal. Signal delivery is recorded in `event_history` as
+`signal_received` events for deterministic replay, and it is that record, not
+the row, that makes a consumed signal replayable.
 
 ### Additional Tables
 
@@ -206,17 +331,60 @@ the REST API.
 
 ```sql
 CREATE TABLE workflow_schedules (
-    name TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
     def_name TEXT NOT NULL,
     entry_point TEXT NOT NULL DEFAULT '',
     cron_expression TEXT NOT NULL,
     input JSONB NOT NULL DEFAULT '{}',
-    enabled BOOLEAN NOT NULL DEFAULT true,
     next_run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_run_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    misfire_policy TEXT NOT NULL DEFAULT 'catch_up',
+    catch_up_limit INTEGER NOT NULL DEFAULT 60,
+    overlap_policy TEXT NOT NULL DEFAULT 'allow',
+    last_run_id TEXT,
+    idempotency_key TEXT,
+    request_digest TEXT,
+    disabled_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, name)
 );
+
+CREATE UNIQUE INDEX uq_workflow_schedules_idempotency_key
+    ON workflow_schedules (tenant_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
 ```
+
+**`enabled` is gone, and `disabled_at` is not a rename of it.** Migration 089 replaced the boolean
+with the entity contract's timestamp (cleat#1702), and the polarity inverted on the way:
+`enabled = true` meant live, `disabled_at IS NULL` means live. A read written against the old
+column does not fail to compile against the new one if it goes through a generic "is this live?"
+helper — it silently answers backwards, which is the hazard the contract exists to remove. The
+scheduler's due-schedule scan and `admin.get_due_schedules()` both filter on `disabled_at IS NULL`,
+and `idx_schedules_tenant_due` is partial on the same predicate (three columns on MySQL, which has
+no partial indexes). Values backfilled by the conversion are an **upper bound**: the boolean
+recorded that a schedule was disabled and never when.
+
+**This is also the accepted API break.** `GET /api/schedules` no longer returns `"enabled": bool`;
+it returns `"disabled_at"`, omitted entirely for a live schedule. `POST /api/schedules/{name}/enable`
+and `/disable` are unchanged — they are the uniform surface the contract asks for, and they now
+clear and stamp the timestamp respectively. Re-disabling keeps the original instant rather than
+moving it.
+
+`idempotency_key` and `request_digest` are what let `POST /api/schedules` tell a retry from a
+genuine name collision (cleat#1495). They live on the schedule row rather than in
+`idempotency_keys` because that table's `workflow_id` is `NOT NULL` and a schedule has no workflow
+id — and because retention there is built for a run: cleat#1258 deletes a key with the workflow it
+names and cleat#1264 expires it on `expires_at`, neither of which has an answer for a long-lived
+schedule. On the row, the key lives exactly as long as the thing it created.
+
+**The index is partial, and on SQL Server that is required rather than tidy.** A unique index there
+treats NULLs as equal, so an unfiltered one would permit at most *one* keyless schedule per tenant
+and refuse every create from a caller that never sent a key. PostgreSQL and MySQL do not collide
+NULLs and would be correct either way; the filter is written on all three so the constraint means
+the same thing everywhere. See `migrations/postgres/072`.
 
 #### workflow_promises
 
@@ -224,32 +392,149 @@ Inter-workflow promise coordination (for cross-workflow data passing).
 
 ```sql
 CREATE TABLE workflow_promises (
-    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    workflow_id TEXT NOT NULL,
     promise_id TEXT NOT NULL,
     promise_name TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'pending',
     result JSONB,
     error_msg TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     resolved_at TIMESTAMPTZ,
-    PRIMARY KEY (workflow_id, promise_id)
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    PRIMARY KEY (workflow_id, promise_id),
+    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
 );
 ```
 
 #### concurrency_keys
 
-Per-key concurrency control -- ensures only one workflow holds a given key at
-a time.
+Per-key concurrency control for a key with **no registered queue behind it**: one row per
+key, so exactly one workflow holds it at a time. It is a mutex, and the primary key is what
+makes it one.
+
+A key that names a live row in `queues` takes the semaphore path below instead, and this
+table is not involved.
+
+A row is held for as long as its workflow is non-terminal (cleat#1965), not until `expires_at`
+passes -- a terminal commit deletes it immediately (`ReleaseWorkflowConcurrencyKeys`), and
+`ReapExpiredConcurrencyKeys` sweeps any that survive a run going terminal without it, e.g. a
+failed release. `expires_at` is a long (about a week) safety backstop for whatever that sweep
+misses, not the release path: a parked run (sleeping, or waiting on a signal with no deadline)
+sends no heartbeat and has no wake time to renew a shorter TTL from, so binding validity to
+elapsed time at all made a long-lived run eventually stop counting against its own limit while
+still alive. See `claimedKeyTTL`'s doc comment (`engine/concurrency_key_holder.go`) for the full
+reasoning, including why renewal-on-activity was rejected.
 
 ```sql
 CREATE TABLE concurrency_keys (
-    key_hash BYTEA PRIMARY KEY,
+    key_hash BYTEA NOT NULL,
     key_text TEXT NOT NULL,
-    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    workflow_id TEXT NOT NULL,
     acquired_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at TIMESTAMPTZ NOT NULL
+    expires_at TIMESTAMPTZ NOT NULL,
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    PRIMARY KEY (key_hash),
+    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
 );
 ```
+
+#### queues
+
+A **declared** concurrency limit, registered by an operator with `cleatctl queue create`.
+A workflow joins it by setting its `concurrency_key` to the queue's name; at most
+`concurrency_limit` of them are claimed at once and the rest **wait**, then are claimed as
+slots free. Work past the limit is deferred, never rejected.
+
+Registration is explicit, not implicit-on-first-use: a name exists before anything starts
+against it, so capacity is never conjured by whichever run happened to start first.
+
+```sql
+CREATE TABLE queues (
+    tenant_id            UUID NOT NULL REFERENCES admin.tenants(tenant_id) ON DELETE CASCADE,
+    name                 TEXT NOT NULL,
+    concurrency_limit    INTEGER NOT NULL,
+    rate_limit           INTEGER,
+    rate_period_seconds  INTEGER,
+    worker_concurrency   INTEGER,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    disabled_at          TIMESTAMPTZ,
+    PRIMARY KEY (tenant_id, name)
+);
+```
+
+`disabled_at` follows the [entity contract](../reference/entity-lifecycle.md), and retiring a
+queue **does not stop its work** — every claim joins this table with
+`AND q.disabled_at IS NULL`, so a disabled queue reads as unregistered and its key falls back
+to the `concurrency_keys` mutex, N=1 rather than 0. That page explains why that is the right
+direction.
+
+`rate_limit` / `rate_period_seconds` are an independent admission control, set together or left
+both NULL (unlimited) — a queue can be concurrency-limited, rate-limited, both, or neither. See
+`queue_rate_tokens` below for the counter this pair drives.
+
+`worker_concurrency` is a third, independent control (cleat#1917): a PER-WORKER cap, NULL meaning
+none. Unlike `concurrency_limit`, which bounds the queue's total across every worker,
+`worker_concurrency` bounds how many of the queue's holders ONE worker process may own at once —
+DBOS parity, and a per-tenant cap rather than hardware protection: a worker serving two tenants,
+each capped at 1 on a queue of the same name, may run one of each at the same time. When set, it
+must be between 1 and the queue's own `concurrency_limit` (a cap above the global limit could
+never bind). See `queue_holders.worker_id` below for what it counts.
+
+#### queue_holders
+
+One row per admitted holder — the semaphore `concurrency_keys` cannot be, since its primary
+key admits only one row per key. Transient, and shaped like `concurrency_keys` rather than
+like `queues`: a terminal commit frees the slot, held for as long as the run is non-terminal
+rather than until `expires_at` passes (cleat#1965) -- see `concurrency_keys` above for the full
+reasoning, which applies here identically.
+
+```sql
+CREATE TABLE queue_holders (
+    tenant_id    UUID NOT NULL,
+    queue_name   TEXT NOT NULL,
+    workflow_id  TEXT NOT NULL REFERENCES workflow_instances(id) ON DELETE CASCADE,
+    expires_at   TIMESTAMPTZ NOT NULL,
+    worker_id    TEXT,
+    PRIMARY KEY (tenant_id, queue_name, workflow_id)
+);
+```
+
+Counting holders cannot be decided by one statement's snapshot — two concurrent claims would
+each read one slot free and both insert — so the claim locks the `queues` row for the key
+(in sorted name order, against deadlock across multi-key claims) and counts under that lock.
+
+`worker_id` (cleat#1917) is the claiming worker's id, nullable because a holder written before
+this column existed carries none — such a row counts toward no worker's cap until its run goes
+terminal and it is released. A holder's count is per `worker_id`, and includes a PARKED run
+(`assigned_to = NULL, status = 'ready'`, `ReleaseWorkflow`) — a sleeping workflow still occupies
+its slot, matching DBOS's own parity fixture, for as long as it stays non-terminal (cleat#1965),
+not merely until `expires_at` passes. When a parked run wakes and a different worker claims it,
+this column MOVES to that worker (an `UPDATE`, not a new row) and that worker's cap applies from
+then on.
+
+#### queue_rate_tokens
+
+One row per admission through a rate-limited queue, holding `expires_at` rather than an
+admission timestamp: "how many admissions fall inside the trailing window right now" and
+"which rows have aged out and can be reaped" are the same question asked twice, and
+`expires_at` answers both with one comparison against `now()`.
+
+```sql
+CREATE TABLE queue_rate_tokens (
+    tenant_id    UUID NOT NULL REFERENCES admin.tenants(tenant_id) ON DELETE CASCADE,
+    queue_name   TEXT NOT NULL,
+    workflow_id  TEXT NOT NULL,
+    expires_at   TIMESTAMPTZ NOT NULL
+);
+```
+
+Unlike `queue_holders`, `workflow_id` carries no foreign key here: a rate token's relevance ends
+`rate_period_seconds` after admission, which is unrelated to how long completed workflow rows are
+retained. A foreign key to `workflow_instances` would let a short retention window silently delete
+rate-limiting evidence out from under an in-progress window, undercounting admissions and letting
+a burst through the limiter should have caught. `workflow_id` is carried for diagnostics only.
 
 #### workflow_update_requests
 
@@ -257,8 +542,11 @@ Update handler requests (in-flight workflow mutations).
 
 ```sql
 CREATE TABLE workflow_update_requests (
-    workflow_id TEXT NOT NULL REFERENCES workflow_instances(id),
+    workflow_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,   -- the row's identity; update_name is NOT unique
     update_name TEXT NOT NULL,
+    tenant_id UUID NOT NULL DEFAULT '00000000-0000-0000-0000-000000000000',
+    priority INTEGER NOT NULL DEFAULT 0,
     payload JSONB NOT NULL DEFAULT '{}',
     promise_id TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
@@ -266,19 +554,27 @@ CREATE TABLE workflow_update_requests (
     error_msg TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at TIMESTAMPTZ,
-    PRIMARY KEY (workflow_id, update_name)
+    PRIMARY KEY (workflow_id, request_id),
+    FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE
 );
 ```
+
+The key was `(workflow_id, update_name)` until cleat#1416. Because completion is
+an `UPDATE … SET status = 'completed'` rather than a delete, that key consumed a
+name for the life of the workflow — a workflow could accept each update name
+exactly once. `request_id` is generated by the engine and is what
+`CompleteUpdateRequest` addresses; `update_name` is now a label that several
+rows of one workflow may share.
 
 ## Key Indexes Summary
 
 | Index | Table | Purpose | Uniqueness |
 |-------|-------|---------|------------|
-| `idx_instances_ready` | `workflow_instances` | Worker poll loop: find runnable instances | Non-unique, partial |
-| `idx_instances_namespace_ready` | `workflow_instances` | Namespace-scoped poll loop | Non-unique, partial |
+| `idx_instances_claimable` | `workflow_instances` | Worker poll loop: find runnable instances (`ready` and `terminating`) | Non-unique, partial |
 | `idx_instances_heartbeat` | `workflow_instances` | Heartbeat monitoring | Non-unique, partial |
 | `idx_instances_stale` | `workflow_instances` | Reaper: stale heartbeat detection | Non-unique, partial |
 | `idx_instances_sticky` | `workflow_instances` | Sticky worker fast path | Non-unique, partial |
+| `idx_instances_concurrency_key` | `workflow_instances` | Claim path: skip a run whose concurrency key is held | Non-unique |
 | `idx_defs_active` | `workflow_defs` | Latest-version lookup | Non-unique |
 | `idx_promises_status` | `workflow_promises` | Promise resolution lookup | Non-unique |
 | `idx_concurrency_keys_workflow` | `concurrency_keys` | Key-to-workflow lookup | Non-unique |
@@ -295,8 +591,10 @@ for idempotent application).
 
 ### Future Plans
 
-- **Auto-migration** at worker startup: the worker will check the schema
-  version and apply pending migrations before entering the dispatch loop.
+- **Auto-migration** at worker startup: shipped, and then made a deploy step
+  (cleat#2117). `cleat-worker --migrate-only` applies pending migrations and exits;
+  a normal start verifies the schema and refuses if it is behind; `--migrate-on-start`
+  is the opt-in for a single node. See `docs/operations/upgrading.md`.
 - **Versioned migrations**: each migration will be a numbered SQL file in a
   `migrations/` directory with an up/down pair.
 - **Plugin migrations**: plugins implementing `plugin.HasMigrations` can
@@ -312,6 +610,13 @@ db.SetMaxOpenConns(concurrency + 5)   // Allow headroom for heartbeats, etc.
 db.SetMaxIdleConns(5)
 db.SetConnMaxLifetime(5 * time.Minute)
 ```
+
+This is the **core** pool only. A worker also opens a plugin pool
+(`--max-plugin-connections`, default 10) and an adaptive-flusher pool
+(`--batch-flush-max-connections`, default 50 and **default-on**, PostgreSQL only), plus a
+per-shard pool when sharding is configured and a pool per tenant under
+`--tenant-isolation=role`. A default single-node worker opens 75, not 15 —
+`docs/operations/tuning.md` has the table and the gates. cleat#1470.
 
 ### Sharded Deployments
 
@@ -420,9 +725,33 @@ them.
 | Mechanism | `CREATE POLICY ... FOR ALL USING (tenant_id = current_setting('cleat.tenant_id')::uuid)` | Not available — application-layer `WHERE tenant_id = ?` on every query | `CREATE SECURITY POLICY ... ADD FILTER PREDICATE dbo.fn_tenant_filter() ON dbo.<table>` |
 | Session context | `current_setting('cleat.tenant_id', true)` | N/A | `SESSION_CONTEXT(N'tenant_id')` |
 | Predicate function | Inline policy expression | N/A | Inline TVF returning `1` when `SESSION_CONTEXT` matches |
-| Bypass | Superuser | N/A | `IS_MEMBER('db_owner') = 1` |
-| Fail-closed | Yes (NULL context returns no rows) | Yes (queries without tenant filter return no rows for other tenants) | Yes (unset context returns no rows) |
-| Block predicates | Not implemented (filter only) | N/A | Yes — `ADD BLOCK PRECATE` prevents INSERT/UPDATE of wrong-tenant rows |
+| Bypass | Superuser — unconditionally, and `FORCE ROW LEVEL SECURITY` does not close it (that closes the separate *table owner* exemption; see `migrations/postgres/005_app_role.sql`) | N/A | **None by default.** Since migration 075 the shipped `fn_tenant_filter` is `@tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER)` and names no role at all; sysadmin gets no exemption either. An `IS_ROLEMEMBER(N'cleat_admin')` form exists and must be opted into. |
+| Fail-closed | **On reads.** NULL context returns no rows | Yes (queries without tenant filter return no rows for other tenants) | **On reads.** Unset context returns no rows — and accepts a write, see below |
+| Block predicates | Not implemented (filter only) | N/A | **Not implemented (filter only).** `grep -c 'BLOCK PREDICATE' migrations/mssql/*.sql` → 0, against `ADD FILTER PREDICATE` in 8 files. |
+
+**Both dialects are filter-only, and the consequence is on the WRITE side.** A
+filter predicate makes a row invisible; it does not refuse one. So on SQL Server a
+connection whose `SESSION_CONTEXT` is unset can `INSERT` a row carrying any
+`tenant_id`, the write succeeds, and the row is then invisible to every
+subsequent read — *including the connection that wrote it*, and including the
+blanket `DELETE` that would otherwise remove it. Measured 2026-09-16 on a
+database built from the shipped migrations:
+
+```
+physical=1 visible=0   -- sys.dm_db_partition_stats vs SELECT COUNT(*)
+```
+
+That matters twice over. It is a write-side isolation gap wherever a connection
+reaches the database without tenant context — the engine's own pools re-apply it
+on every recycle (`tenantSessionConn.ResetSession`), and a plain `sql.Open` pool
+does not. And it is a *diagnostic* trap: an invisible row is indistinguishable
+from a deleted one, so "the row was not there" has a second cause with nobody to
+blame for it. See cleat#982.
+
+The row this table used to carry here said SQL Server had block predicates and
+"prevents INSERT/UPDATE of wrong-tenant rows". It never shipped one; the cell
+also misspelled the statement (`ADD BLOCK PRECATE`), which is the tell that the
+line was written rather than run.
 
 ### Checking Type Equivalents in Migrations
 

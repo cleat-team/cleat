@@ -882,44 +882,6 @@ func TestHeartbeat(t *testing.T) {
 	}
 }
 
-func TestBatchHeartbeat(t *testing.T) {
-	for _, backend := range registeredBackends {
-		backend := backend
-		t.Run(backend.Name(), func(t *testing.T) {
-			store, teardown := backend.Setup(t)
-			defer teardown()
-			ctx := context.Background()
-			setupTestData(t, store)
-			truncateAll(t, store)
-
-			// Create 2 workflows and claim them both with the same worker.
-			for i := 0; i < 2; i++ {
-				_, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
-				if err != nil {
-					t.Fatalf("StartNewRun[%d]: %v", i, err)
-				}
-			}
-
-			wfs, err := store.ClaimWorkflows(ctx, "worker-1", 10)
-			if err != nil {
-				t.Fatalf("ClaimWorkflows: %v", err)
-			}
-			if len(wfs) < 2 {
-				t.Fatalf("claimed %d workflows, need at least 2", len(wfs))
-			}
-
-			// BatchHeartbeat should update all running workflows assigned to this worker.
-			count, err := store.BatchHeartbeat(ctx, "worker-1")
-			if err != nil {
-				t.Fatalf("BatchHeartbeat: %v", err)
-			}
-			if count < 2 {
-				t.Errorf("BatchHeartbeat returned %d, want >= 2", count)
-			}
-		})
-	}
-}
-
 func TestMoveToDeadLetterQueue(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend

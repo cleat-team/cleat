@@ -21,6 +21,8 @@ const (
 	mssqlErrUniqueConstraint = 2627 // violation of UNIQUE/PRIMARY KEY constraint
 	mssqlErrSnapshotConflict = 3960 // snapshot isolation update conflict
 	mssqlErrTimeout          = 258  // wait operation timed out
+	mssqlErrLockTimeout      = 1222 // lock request time out period exceeded (SET LOCK_TIMEOUT)
+	mssqlErrForeignKeyRef    = 547  // the INSERT/UPDATE/DELETE statement conflicted with a constraint
 )
 
 // In-memory OLTP (Hekaton) reports its write conflicts with its own numbers
@@ -117,6 +119,38 @@ func isMSSQLDuplicateKey(err error) bool {
 	)
 }
 
+// isMSSQLSignalsWorkflowFKViolation checks for the FK 547 conflict on
+// fk_signals_workflow specifically -- the FK workflow_signals.workflow_id
+// holds on workflow_instances(id) (migrations/mssql/001_schema.sql). 547 is
+// SQL Server's generic "the INSERT/UPDATE/DELETE statement conflicted with a
+// constraint" error, shared by every FOREIGN KEY and CHECK constraint in the
+// database, so a bare error-547 check would also match an unrelated
+// CHECK-constraint failure; the constraint's name is asserted in the
+// message text (SQL Server always includes it) rather than trusted from the
+// error number alone.
+//
+// deliverSignalTx's EXISTS-gated INSERT (mssql_signals_promises.go) reads
+// workflow_instances as a plain, non-locking SELECT: the EXISTS predicate
+// can be true when it is evaluated and false by the time the INSERT's own
+// FK check runs a moment later, if the target is hard-deleted in between --
+// a purge racing a signal, in the caller's own tenant. When that race is
+// lost, the INSERT fails HERE instead of the EXISTS predicate simply being
+// false, and without this check the raw FK error would reach the caller
+// unwrapped, indistinguishable from an unrelated database failure and
+// invisible to a caller checking errors.Is(err, ErrWorkflowNotFound) --
+// including eventtriggers.signalAwaiters, which unregisters on that
+// specifically and would otherwise treat this race as a transient failure
+// and retry it forever against a workflow that is never coming back.
+func isMSSQLSignalsWorkflowFKViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	if !hasNumber(err, mssqlErrForeignKeyRef) {
+		return false
+	}
+	return containsAny(err.Error(), "fk_signals_workflow")
+}
+
 // isMSSQLSnapshotError checks for snapshot isolation write conflicts (error
 // 3960, plus the in-memory OLTP equivalents).
 func isMSSQLSnapshotError(err error) bool {
@@ -152,6 +186,24 @@ func isMSSQLTimeout(err error) bool {
 		return true
 	}
 	return containsAny(err.Error(), "timeout expired", "timed out", "query timeout", "i/o timeout")
+}
+
+// isMSSQLLockTimeout checks for SET LOCK_TIMEOUT's own error (1222), distinct
+// from isMSSQLTimeout's 258: 258 is a client/network wait timing out, 1222 is
+// the server refusing to wait past a session's own configured bound on a lock
+// request. Deliberately NOT included in isMSSQLRetryable -- the caller that
+// sets a lock timeout (claim Step 4, cleat#1963) wants to treat this as "no
+// claim this round" and let its own poll loop retry later, not as a
+// transaction to replay immediately against a lock that is probably still
+// held.
+func isMSSQLLockTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if hasNumber(err, mssqlErrLockTimeout) {
+		return true
+	}
+	return containsAny(err.Error(), "lock request time out period exceeded")
 }
 
 // isMSSQLConnectionError checks for network-level errors that may be transient.

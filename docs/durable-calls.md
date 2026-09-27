@@ -44,46 +44,70 @@ The call is re-executed. The external service sees the same request twice.
 
 ### With write-ahead intent logging
 
-To narrow the window, `flushCallIntent` inserts a pending event **before** dispatching the external call:
+For an operation declared `WriteAheadIntent` (worker flag `--write-ahead-intent-ops
+service.operation,...`), the engine writes a pending row **before** dispatching the external call:
 
 ```
 intent-based flow:
-  step 1:  flushCallIntent(step=1)   ◄── event_history: step 1 = pendingSentinel
-  step 2:  service.Call(request)     ◄── external service processes request
-  step 3:  completeCallEvent(resp)   ◄── event_history: step 1 = response
-                                      ▲
-                                      └── CRASH WINDOW (narrower: only between step 2 and step 3)
+  step 1:  WriteCallIntent(step=1)    ◄── event_history: step 1 pending (intent_at set)
+  step 2:  service.Call(request)      ◄── external service processes request
+  step 3:  CompleteCallIntent(resp)   ◄── event_history: step 1 = response (intent_at cleared)
+                                       ▲
+                                       └── CRASH WINDOW (narrower: only between step 2 and step 3)
 ```
 
-If the worker crashes between step 2 and step 3, the event history contains:
+If the worker crashes between step 2 and step 3, the row is left pending: `intent_at IS NOT NULL
+AND checksum IS NULL` is what "pending" means on disk, set by `WriteCallIntent` and cleared by
+`CompleteCallIntent` in the same statement that writes the outcome, so the two columns cannot
+disagree with it.
 
-| step | service | request | error             |
-|------|---------|---------|-------------------|
-| 1    | my-svc  | {...}   | `__CLEAT_PENDING_INTENT__` |
+On replay, `LoadEventHistory` surfaces that as `EventRecord.Pending`, and `isPendingIntent`
+returns `ErrAmbiguous` instead of silently re-executing. The workflow author is notified that the
+outcome is unknown and must check the external service.
 
-On replay, `replayCall` detects the `pendingSentinel` in the error column and returns `ErrAmbiguous` instead of silently re-executing. The workflow author is notified that the outcome is unknown and must check the external service.
+**Write-ahead intent is implemented and live, but it is opt-in per operation and off by default.**
+`engine/callintent.go` (engine half) and `engine/store_intent.go` (store half — Postgres, MySQL and
+SQL Server all implement `WriteCallIntent`/`CompleteCallIntent`) are the write side;
+`freshCallWithIntent` is where a declared call routes instead of the plain dispatch-then-record
+path above. See [`durable-call-intent-design.md`](durable-call-intent-design.md) for the tiers
+this sits inside and the phasing history — idempotency keys (§5.1 below) remain the only mechanism
+for an operation that is not declared.
 
-**The intent-logging write side is not implemented, and the code sketched for it should not be used.** The replay infrastructure (detection of `pendingSentinel` and return of `ErrAmbiguous`) is in place and correct, but nothing writes a `pendingSentinel`, so in a real crash the detector has nothing to find. `flushCallIntent` / `completeCallEvent` in `engine/flush.go` are not a working write side: wiring them in as they stand would leave every durable call permanently ambiguous. See [`durable-call-intent-design.md`](durable-call-intent-design.md) for why, and for the replacement design.
+**An earlier version of this write side was deleted rather than wired in** (a sentinel string in
+`event_history.error`, written by functions no longer in the tree) because every completion path's
+upsert guarded on `error IS NULL`, so a sentinel row could never be completed and stayed pending
+forever. The current design keeps `error` meaning only "the call failed" and tracks pending state
+in its own columns instead, which is why it is a different shape from what this section described
+before, not just a renamed one.
 
-Until that lands, **the contract is exactly what §1 says: at-least-once, with duplicates on crash that are silent.** Design workflows accordingly — the cheapest mitigation available today is to make external operations idempotent yourself, for example by passing your own idempotency key derived from a workflow-stable value.
+For any operation **not** declared `WriteAheadIntent` — which is every operation, unless an
+operator names it — **the contract is exactly what §1 says: at-least-once, with duplicates on
+crash that are silent.** Design workflows accordingly — the cheapest mitigation that needs no
+worker configuration is to make external operations idempotent yourself, for example by passing
+your own idempotency key derived from a workflow-stable value.
 
 ---
 
 ## 3. Ambiguity Detection
 
-### `pendingSentinel`
+### `EventRecord.Pending`
 
-The constant `pendingSentinel = "__CLEAT_PENDING_INTENT__"` is stored in the `error` column of `event_history` to mark a `DurableCall` whose external call was dispatched but whose outcome was not yet persisted.
-
-Defined in `internal/host/engine.go`:
+A `DurableCall` whose external call was dispatched but whose outcome was not yet persisted is
+marked by `intent_at IS NOT NULL AND checksum IS NULL` on its `event_history` row — not a sentinel
+value in any column. `LoadEventHistory` surfaces this as the `Pending` field on the `EventRecord`
+it returns:
 
 ```go
-const pendingSentinel = "__CLEAT_PENDING_INTENT__"
+// engine/types.go
+Pending bool `json:"-"`
 ```
+
+`json:"-"`: this is server-side replay state, not part of the shape a client reads back through
+`GetWorkflow` (§5.3 below reads `event.Err`, which is what a client actually has).
 
 ### `ErrAmbiguous`
 
-When replay encounters a step with `pendingSentinel`, it constructs an error message and returns it to the WASM module. The error is classified as `ErrAmbiguous` in the host's error taxonomy:
+When replay encounters a step with `Pending` set, it constructs an error message and returns it to the WASM module. The error is classified as `ErrAmbiguous` in the host's error taxonomy:
 
 ```go
 ErrAmbiguous  ErrorCode = 5  // call outcome unknown after crash
@@ -99,18 +123,31 @@ before a crash. Check the external service before retrying.
 
 ### Where ambiguity detection fires
 
-Both `replayCall` (for standard `cleat_call`) and the `cleat_call_retry` / `cleat_call_heartbeat` replay paths check for `pendingSentinel`:
+Both the standard `cleat_call` replay path (`engine/durablecalls.go`) and the `cleat_call_retry` / `cleat_call_heartbeat` replay path (`engine/heartbeats.go`) check `isPendingIntent()`, the method behind the `Pending` field above:
 
 ```go
-// From internal/host/engine.go, replayCall:
-if rec.Err == pendingSentinel {
+// engine/durablecalls.go
+if rec.isPendingIntent() {
+    s.recordAmbiguity(rec) // structured, for an operator query -- not just the message text
     ambiguousErr := fmt.Sprintf(
-        "[AMBIGUOUS] call outcome unknown at step %d: ...",
+        "[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s "+
+            "was dispatched but the response was not recorded before a crash. "+
+            "Check the external service before retrying.",
         rec.Step, rec.Service, rec.Op)
     written, _ := s.writeResult(ctx, m, responsePtr, ambiguousErr, responseMaxLen)
-    return packDurableCallResult(int(written), 1, 1)
+    return packDurableCallResult(int(written), callErrorUnknown, 1)
 }
 ```
+
+**Before that report happens, an optional resolver gets a chance to make it a non-event.**
+`WithAmbiguityResolver` (an `EngineOption`) lets an embedder supply a lookup — keyed on the same
+per-step idempotency key the pattern in §5.1 uses — that checks the external service directly. If
+it answers, the outcome is recorded and replay carries on as though the call had returned
+normally: the crash lost the answer, not the effect, and the workflow never sees `[AMBIGUOUS]` at
+all. **`cleat-worker` does not configure one** — `grep -rn WithAmbiguityResolver
+cmd/cleat-worker/` finds nothing — so on the shipped worker binary every ambiguity reaches the
+report above; this is an extension point for an embedder, and as of this writing nothing in the
+tree, embedded or otherwise, calls it (cleat#1871).
 
 ---
 
@@ -227,7 +264,7 @@ func ProcessPayment(h cleat.HostCalls, paymentID string) error {
 }
 ```
 
-### 5.3 Checking via workflow-level API
+### 5.3 Checking via workflow-level API, and resolving it from outside the workflow
 
 Application code can also use the `backendkit` client to inspect workflow history from outside the workflow, checking whether a specific call event completed:
 
@@ -239,10 +276,25 @@ if err != nil {
 }
 for _, event := range detail.History {
     if event.Step == targetStep && event.Err != "" {
-        // step errored; may need manual resolution
+        // ambiguous -- see below for how an operator settles this from outside the workflow
     }
 }
 ```
+
+Once the external service's true state is known, an operator settles the step directly rather
+than waiting for the workflow itself to retry — `POST
+/api/admin/instances/{id}/steps/{step}/resolve` (`engine.ResolveStep`), with header
+`X-Confirm: resolve-step` and a body naming the outcome to record:
+
+```
+POST /api/admin/instances/wf-123/steps/4/resolve
+X-Confirm: resolve-step
+{"response": "<the outcome confirmed against the external service>"}
+```
+
+This writes the response replay will treat as the call's real result for the rest of the
+workflow's life, so it is a claim that the operator has actually checked — not a guess. See
+`cmd/cleat-worker/api_admin.go`'s handler doc comment for why the header is required.
 
 ### 5.4 No SDK-level `ErrAmbiguous` type yet
 
@@ -264,10 +316,10 @@ Both Cleat and Temporal require external services to be idempotent. The key diff
 
 | Aspect | Temporal | Cleat |
 |--------|----------|-------|
-| Crash window signal | Activity timeout / retry | `ErrAmbiguous` (via `pendingSentinel`) |
+| Crash window signal | Activity timeout / retry | `ErrAmbiguous` (§3) |
 | Workflow knows call may have succeeded? | No (sees timeout) | Yes (receives `[AMBIGUOUS]`) |
 | Idempotency requirement | Yes | Yes |
-| Write-ahead intent log | No | Planned (`flushCallIntent`/`completeCallEvent`) |
+| Write-ahead intent log | No | Yes, opt-in per operation (§2) |
 
 ### DBOS
 
@@ -279,7 +331,7 @@ However, DBOS workflows are at-least-once too. Between `@Step`-annotated methods
 |--------|------|-------|
 | Unit of durability | DB transaction + step boundary | Event history |
 | Between-step crash | Re-runs previous step | Replay from last event |
-| Ambiguity signal | None | `ErrAmbiguous` (via `pendingSentinel`) |
+| Ambiguity signal | None | `ErrAmbiguous` (§3) |
 
 ### AWS Step Functions
 
@@ -301,7 +353,7 @@ Step Functions tasks are at-least-once. The callback/token pattern provides a fo
 | Exactly-once claimed? | No | No | No (marketing claims refer to DB tx state) | No |
 | Ambiguous outcome signal | Yes (`ErrAmbiguous`) | No (timeout/retry) | No | No (timeout) |
 | Idempotency required? | Yes | Yes | Yes | Yes |
-| Write-ahead intent log | Planned | No | Via DB tx | Via callback token |
+| Write-ahead intent log | Yes, opt-in per operation | No | Via DB tx | Via callback token |
 | Replay model | Deterministic | Deterministic | DB replay | State machine |
 
 No framework provides exactly-once execution for external side effects. The best any framework can do is:
@@ -309,4 +361,4 @@ No framework provides exactly-once execution for external side effects. The best
 2. Signal ambiguity when it occurs.
 3. Provide tools (idempotency keys, idempotent service design) to make at-least-once safe.
 
-Cleat addresses #2 with the `ErrAmbiguous` mechanism and `pendingSentinel` intent logging. Frameworks that claim exactly-once are either limiting the scope to database state (which can be transactional) or making assumptions that break in real distributed deployments.
+Cleat addresses #2 with the `ErrAmbiguous` mechanism and write-ahead call intent (§2). Frameworks that claim exactly-once are either limiting the scope to database state (which can be transactional) or making assumptions that break in real distributed deployments.

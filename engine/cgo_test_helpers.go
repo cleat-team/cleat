@@ -24,6 +24,7 @@ package engine
 // #include <wasmtime/component/func.h>
 // #include <wasmtime/component/val.h>
 // #include <stdlib.h>
+// #include <string.h>
 //
 // extern wasmtime_error_t *goComponentCallback(
 //     void *env, wasmtime_context_t *ctx,
@@ -71,6 +72,46 @@ package engine
 //     }
 //     *len = 0;
 //     return NULL;
+// }
+//
+// // Decode a `result<string, call-failure>` the dispatchers write.
+// //
+// // Returns 0 ok / 1 err(suspended) / 2 err(failed) / -1 for anything that is
+// // not one, and fills in whichever payload the case carries. Reading the
+// // shape rather than "is it non-nil" is the point: a dispatcher that wrote a
+// // bare string, or an `ok` where an `err` belongs, both satisfy non-nil.
+// static int cgotest_val_get_call_outcome(const wasmtime_component_val_t *v,
+//                                         const char **msg, size_t *msglen,
+//                                         uint32_t *code) {
+//     *msg = NULL;
+//     *msglen = 0;
+//     *code = 0;
+//     if (v->kind != WASMTIME_COMPONENT_RESULT) { return -1; }
+//     const wasmtime_component_val_t *inner = v->of.result.val;
+//     if (inner == NULL) { return -1; }
+//     if (v->of.result.is_ok) {
+//         if (inner->kind != WASMTIME_COMPONENT_STRING) { return -1; }
+//         *msg = inner->of.string.data;
+//         *msglen = inner->of.string.size;
+//         return 0;
+//     }
+//     if (inner->kind != WASMTIME_COMPONENT_VARIANT) { return -1; }
+//     const char *d = inner->of.variant.discriminant.data;
+//     size_t dlen = inner->of.variant.discriminant.size;
+//     if (dlen == 9 && memcmp(d, "suspended", 9) == 0) { return 1; }
+//     if (dlen != 6 || memcmp(d, "failed", 6) != 0) { return -1; }
+//     const wasmtime_component_val_t *rec = inner->of.variant.val;
+//     if (rec == NULL || rec->kind != WASMTIME_COMPONENT_RECORD) { return -1; }
+//     for (size_t i = 0; i < rec->of.record.size; i++) {
+//         wasmtime_component_valrecord_entry_t *f = &rec->of.record.data[i];
+//         if (f->name.size == 4 && memcmp(f->name.data, "code", 4) == 0) {
+//             *code = f->val.of.u32;
+//         } else if (f->name.size == 7 && memcmp(f->name.data, "message", 7) == 0) {
+//             *msg = f->val.of.string.data;
+//             *msglen = f->val.of.string.size;
+//         }
+//     }
+//     return 2;
 // }
 import "C"
 import (
@@ -151,6 +192,34 @@ func cgotestHasResultString(r unsafe.Pointer) bool {
 	return C.cgotest_val_get_string((*C.wasmtime_component_val_t)(r), &slen) != nil
 }
 
+// cgotestReadCallOutcome decodes a result<string, call-failure> written into a
+// result slot.
+//
+// kind is "ok", "suspended", "failed", or "" for a value that is not a result
+// at all -- which is what a dispatcher still calling setResultString produces,
+// and the reason this returns a kind rather than a bool.
+func cgotestReadCallOutcome(r unsafe.Pointer) (kind, payload string, code uint32) {
+	var msg *C.char
+	var msgLen C.size_t
+	var cCode C.uint32_t
+	switch C.cgotest_val_get_call_outcome((*C.wasmtime_component_val_t)(r), &msg, &msgLen, &cCode) {
+	case 0:
+		return "ok", cgotestGoStr(msg, msgLen), 0
+	case 1:
+		return "suspended", "", 0
+	case 2:
+		return "failed", cgotestGoStr(msg, msgLen), uint32(cCode)
+	}
+	return "", "", 0
+}
+
+func cgotestGoStr(p *C.char, n C.size_t) string {
+	if p == nil {
+		return ""
+	}
+	return C.GoStringN(p, C.int(n))
+}
+
 func (b *wasmtimeBackend) cgotestDispatchStr(method int, argsPtr unsafe.Pointer, nargs int, resultPtr unsafe.Pointer) error {
 	dispatch := map[int]func(*C.wasmtime_component_val_t, C.size_t, *C.wasmtime_component_val_t, C.size_t) *C.wasmtime_error_t{
 		0:  b.dispatchDurableCallString,
@@ -161,23 +230,26 @@ func (b *wasmtimeBackend) cgotestDispatchStr(method int, argsPtr unsafe.Pointer,
 		5:  b.dispatchCreatePromise,
 		6:  b.dispatchPluginCall,
 		7:  b.dispatchSetScope,
-		8:  b.dispatchGetState,
-		9:  b.dispatchListState,
 		10: b.dispatchPollCancellation,
 		11: b.dispatchWorkflowID,
 		12: b.dispatchRunID,
 		13: b.dispatchUUID,
 		14: b.dispatchSideEffect,
 		15: b.dispatchFetch,
-		16: b.dispatchChildWorkflowInSchema,
 		17: b.dispatchAwaitChild,
 		18: b.dispatchAwaitAllChildren,
 		19: b.dispatchPluginCallStreaming,
 		20: b.dispatchChildWorkflowWithOptions,
-		21: b.dispatchSendSignalAndWait,
 		22: b.dispatchAwaitPromise,
 		23: b.dispatchPollSignal,
 	}[method]
+	// A missing key yields a nil func value, and calling it segfaults rather
+	// than failing a test. The map has had gaps since the durable-state family
+	// was removed (IMPROVEMENT-PLAN 3.216) and it will have more whenever a
+	// dispatcher goes; an unknown method must be an error, not a crash.
+	if dispatch == nil {
+		return fmt.Errorf("cgotestDispatchStr: no dispatcher for method %d", method)
+	}
 	err := dispatch((*C.wasmtime_component_val_t)(argsPtr), C.size_t(nargs), (*C.wasmtime_component_val_t)(resultPtr), 1)
 	if err != nil {
 		var msg C.wasm_byte_vec_t
@@ -203,14 +275,9 @@ func (b *wasmtimeBackend) cgotestDispatchU64(method int, argsPtr unsafe.Pointer,
 		8:  b.dispatchRejectPromise,
 		9:  b.dispatchSetQueryState,
 		10: b.dispatchDurableSend,
-		11: b.dispatchSetState,
-		12: b.dispatchIncrState,
-		13: b.dispatchHasState,
-		14: b.dispatchDeleteState,
 		15: b.dispatchAcquireLock,
 		16: b.dispatchReleaseLock,
 		17: b.dispatchSignalWorkflow,
-		18: b.dispatchReplyToSignal,
 		19: b.dispatchScheduleInvoke,
 		20: b.dispatchRegisterUpdateHandler,
 		21: b.dispatchRegisterQueryHandler,
@@ -219,6 +286,16 @@ func (b *wasmtimeBackend) cgotestDispatchU64(method int, argsPtr unsafe.Pointer,
 		24: b.dispatchAwaitSignals,
 		25: b.dispatchComponentDefault,
 	}[method]
+	// The same nil guard as cgotestDispatchStr, which this helper LACKED until
+	// 2026-09-06 while the comment on the other one claimed the rule for both.
+	// A gap in this map segfaulted instead of failing: removing
+	// cleat_reply_to_signal (index 18) for IMPROVEMENT-PLAN 3.220 crashed the
+	// test binary, which silently truncated the engine package to 676 of 2978
+	// tests and read as "4 failures". A crash in a test helper does not fail
+	// one test, it stops measuring.
+	if dispatch == nil {
+		return fmt.Errorf("cgotestDispatchU64: no dispatcher for method %d", method)
+	}
 	err := dispatch((*C.wasmtime_component_val_t)(argsPtr), C.size_t(nargs), (*C.wasmtime_component_val_t)(resultPtr), 1)
 	if err != nil {
 		var msg C.wasm_byte_vec_t

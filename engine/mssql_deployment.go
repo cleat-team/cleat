@@ -17,8 +17,8 @@ import (
 func (s *MSSQLStore) LoadWASM(ctx context.Context, defName string, defVersion int) ([]byte, error) {
 	var wasmBytes []byte
 	err := s.db.QueryRowContext(ctx, `
-		SELECT wasm_bytes FROM workflow_defs WHERE name = @p1 AND version = @p2
-	`, defName, defVersion).Scan(&wasmBytes)
+		SELECT wasm_bytes FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
+	`, defName, defVersion, s.tenantID).Scan(&wasmBytes)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("wasm not found: %s v%d", defName, defVersion)
 	}
@@ -42,9 +42,27 @@ func (s *MSSQLStore) GetWASMLength(ctx context.Context, defName string, defVersi
 
 // ListVersions returns all deployed versions of a workflow.
 func (s *MSSQLStore) ListVersions(ctx context.Context, defName string) ([]int, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT version FROM workflow_defs WHERE name = @p1 ORDER BY version DESC
-	`, defName)
+	// beginTxWithContext, not a plain s.db.QueryContext: this must run under
+	// s.tenantID's own SESSION_CONTEXT, not whatever the connection's pool
+	// happened to bake in at connect time. Those agree for a store obtained
+	// the ordinary way (MSSQLStoreFactory.OpenStore), but not for a store
+	// re-scoped via WithTenant after the fact -- WithTenant only mutates
+	// s.tenantID, a plain query never re-asserts it, so a store built over
+	// one tenant's pool silently kept answering as that tenant even after
+	// being redirected. cleat#2187: startPluginWorkflow re-scopes the
+	// process-wide store to a plugin start's destination tenant before
+	// calling this, and a foreign tenant's own workflow_defs row was
+	// invisible under the wrong ambient context, so "no versions deployed"
+	// masked the correct answer.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list versions: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT version FROM workflow_defs WHERE name = @p1 AND tenant_id = @p2 ORDER BY version DESC
+	`, defName, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("list versions: %w", err)
 	}
@@ -65,8 +83,8 @@ func (s *MSSQLStore) ListVersions(ctx context.Context, defName string) ([]int, e
 func (s *MSSQLStore) LoadWorkflowConfig(ctx context.Context, defName string, defVersion int) (int, error) {
 	var maxHistoryLength int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT max_history_length FROM workflow_defs WHERE name = @p1 AND version = @p2
-	`, defName, defVersion).Scan(&maxHistoryLength)
+		SELECT max_history_length FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
+	`, defName, defVersion, s.tenantID).Scan(&maxHistoryLength)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
@@ -80,8 +98,8 @@ func (s *MSSQLStore) LoadWorkflowConfig(ctx context.Context, defName string, def
 func (s *MSSQLStore) LoadDAGSpec(ctx context.Context, defName string, defVersion int) (json.RawMessage, error) {
 	var raw *[]byte
 	err := s.db.QueryRowContext(ctx, `
-		SELECT dag_spec FROM workflow_defs WHERE name = @p1 AND version = @p2
-	`, defName, defVersion).Scan(&raw)
+		SELECT dag_spec FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
+	`, defName, defVersion, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
@@ -123,7 +141,7 @@ func (s *MSSQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte
 	var tenantIDStr string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT CONVERT(NVARCHAR(36), tenant_id) FROM admin.tenant_api_keys
-		 WHERE key_hash = @p1 AND revoked_at IS NULL`, keyHash).Scan(&tenantIDStr)
+		 WHERE key_hash = @p1 AND disabled_at IS NULL`, keyHash).Scan(&tenantIDStr)
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -144,44 +162,8 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 	)
 	qb.AddArgs(s.tenantID)
 
-	if filter.Status != "" {
-		qb.AddCondition("status = %s", filter.Status)
-	}
-	if filter.InputContains != "" {
-		qb.AddLikeCondition(d.castExpr("input"), "%"+filter.InputContains+"%", true)
-	}
-	if filter.ErrorContains != "" {
-		qb.AddLikeCondition("error_msg", "%"+filter.ErrorContains+"%", true)
-	}
-	if filter.Search != "" {
-		pattern := "%" + filter.Search + "%"
-		icol := d.castExpr("input")
-		rcol := d.castExpr("result")
-		n := qb.NextPos()
-		qb.AddRaw(fmt.Sprintf("AND (%s OR %s OR %s OR %s)",
-			d.likeExpr(icol, n, true),
-			d.likeExpr(rcol, n+1, true),
-			d.likeExpr("error_msg", n+2, true),
-			d.likeExpr("def_name", n+3, true)))
-		qb.AddArgs(pattern, pattern, pattern, pattern)
-	}
-
-	qb.AddRaw("ORDER BY created_at DESC")
-
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = 100
-	} else if limit > 1000 {
-		limit = 1000
-	}
-
-	if filter.Offset > 0 {
-		qb.AddRaw(d.limitOffset(qb.NextPos(), qb.NextPos()+1, true))
-		qb.AddArgs(limit, filter.Offset)
-	} else {
-		qb.AddRaw(d.limitOffset(qb.NextPos(), 0, false))
-		qb.AddArgs(limit)
-	}
+	applyWorkflowFilters(qb, d, filter)
+	applyWorkflowListPaging(qb, d, filter)
 
 	query, args := qb.SQL()
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -198,7 +180,8 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 		var assignedTo, errorCode, errorOp, errorMsg sql.NullString
 		var traceID sql.NullString
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputStr,
-			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.Priority, &traceID); err != nil {
+			&assignedTo, &nextWakeAt, &errorCode, &errorOp, &errorMsg, &createdAt, &wf.Generation, &wf.Priority, &traceID, &wf.ReclaimCount,
+			&wf.CancellationRequested, &wf.CompletedBy); err != nil {
 			return nil, fmt.Errorf("scan workflow: %w", err)
 		}
 		wf.TraceID = traceID.String
@@ -219,24 +202,60 @@ func (s *MSSQLStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) (
 }
 
 // GetWorkflowByID returns a single workflow instance by ID.
+//
+// cleat#2204: this used to read with a plain s.db.QueryRowContext, relying
+// on whatever SESSION_CONTEXT the connection's pool happened to have baked
+// in at connect time rather than asserting s.tenantID itself. That is
+// invisible for a store obtained the normal way (the pool is baked for
+// exactly the tenant the store reports), and silently wrong for one
+// re-scoped via WithTenant after the fact: WithTenant only mutates
+// s.tenantID, so a plain query kept answering as the pool's original
+// tenant. The explicit "AND tenant_id = @p2" below never fired the way it
+// looked like it would either -- the FILTER PREDICATE evaluates against
+// the ambient SESSION_CONTEXT for every row before this query's own WHERE
+// clause is reached, so a mismatched context hid the row regardless of
+// what this statement asked for. beginTxWithContext, matching
+// ClaimWorkflows and (as of cleat#2187) ListVersions.
 func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get workflow: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var wf WorkflowInstance
-	var nextWakeAt, heartbeatAt, completedAt sql.NullTime
+	var nextWakeAt, heartbeatAt, completedAt, startedAt sql.NullTime
 	var assignedTo, errorMsg sql.NullString
 	var result sql.NullString
 	var inputRaw string
 	var errorCode, errorOp sql.NullString
+	var continuedFrom, parentWorkflowID sql.NullString
 
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT id, def_name, def_version, status, input,
-		       assigned_to, heartbeat_at, next_wake_at, completed_at, CAST(result AS NVARCHAR(MAX)), error_msg, error_code, error_op,
+		       assigned_to, heartbeat_at, next_wake_at, completed_at, started_at, CAST(result AS NVARCHAR(MAX)), error_msg, error_code, error_op,
 		       generation, COALESCE(priority, 0) AS priority,
-		       COALESCE(trace_id, '')
+		       COALESCE(trace_id, ''),
+		       -- CONVERT, not the raw column: go-mssqldb scans UNIQUEIDENTIFIER
+		       -- into a Go string as 16 raw storage bytes. Same workaround as
+		       -- the claim queries, and TestMSSQLUUIDColumnsAreConvertedInProjections
+		       -- fails the build without it.
+		       LOWER(CONVERT(NVARCHAR(36), tenant_id)) AS tenant_id,
+		       continued_from, reclaim_count, parent_workflow_id,
+		       created_at, COALESCE(pending_terminal_status, ''),
+		       -- CONVERT to BIT, not the raw column: SQL Server has no boolean,
+		       -- so cancellation_requested is a BIT and go-mssqldb scans it into
+		       -- a Go bool directly. COALESCE keeps a NULL from a pre-migration
+		       -- row reading as cancelled.
+		       COALESCE(cancellation_requested, 0), COALESCE(cancellation_reason, ''),
+		       COALESCE(completed_by, '')
 		FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2
 	`, id, s.tenantID).Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &inputRaw,
-		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &result, &errorMsg, &errorCode, &errorOp,
+		&assignedTo, &heartbeatAt, &nextWakeAt, &completedAt, &startedAt, &result, &errorMsg, &errorCode, &errorOp,
 		&wf.Generation, &wf.Priority,
-		&wf.TraceID)
+		&wf.TraceID, &wf.TenantID, &continuedFrom, &wf.ReclaimCount, &parentWorkflowID,
+		&wf.CreatedAt, &wf.PendingTerminalStatus,
+		&wf.CancellationRequested, &wf.CancellationReason, &wf.CompletedBy)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -249,8 +268,18 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 	wf.Error = errorMsg.String
 	wf.ErrorCode = errorCode.String
 	wf.ErrorOp = errorOp.String
+	wf.ContinuedFrom = continuedFrom.String
 	if nextWakeAt.Valid {
 		wf.NextWakeAt = nextWakeAt.Time
+	}
+	if completedAt.Valid {
+		wf.CompletedAt = &completedAt.Time
+	}
+	if startedAt.Valid {
+		wf.StartedAt = &startedAt.Time
+	}
+	if parentWorkflowID.Valid {
+		wf.ParentWorkflowID = &parentWorkflowID.String
 	}
 	return &wf, nil
 }
@@ -259,8 +288,18 @@ func (s *MSSQLStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowI
 
 // DeployWorkflowDef inserts or updates a workflow definition.
 func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) error {
-	pluginDepsJSON, _ := json.Marshal(def.PluginDeps)
-	if pluginDepsJSON == nil {
+	// json.Marshal of a nil map returns the four bytes "null", not nil, so the
+	// guard this replaced -- `if pluginDepsJSON == nil` -- could never fire and
+	// every workflow that declares no plugin dependencies stored the literal
+	// `null`. PostgreSQL JSONB and MySQL JSON both accept a bare JSON scalar, so
+	// nothing noticed; SQL Server's ISJSON does not (`ISJSON('null')` = 0),
+	// which is how the CHECK constraint in migrations/mssql/036 found it.
+	//
+	// An error is folded in for the same reason the default exists: the column
+	// is NOT NULL DEFAULT '{}' on all three dialects, so "no dependencies" has
+	// one spelling and it is not `null`.
+	pluginDepsJSON, err := json.Marshal(def.PluginDeps)
+	if err != nil || len(pluginDepsJSON) == 0 || string(pluginDepsJSON) == "null" {
 		pluginDepsJSON = []byte("{}")
 	}
 	// Refuse to deploy over a definition owned by another tenant, and record
@@ -283,37 +322,23 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	}
 	defer tx.Rollback()
 
-	var owner sql.NullString
-	err = tx.QueryRowContext(ctx, `
-		SELECT LOWER(CONVERT(NVARCHAR(36), tenant_id))
-		FROM workflow_defs WITH (UPDLOCK, HOLDLOCK)
-		WHERE name = @p1 AND version = @p2
-	`, def.Name, def.Version).Scan(&owner)
-	switch {
-	case err == nil:
-		if !canAdoptDef(owner.String, s.tenantID) {
-			return defOwnershipError(def.Name, def.Version)
-		}
-	case errors.Is(err, sql.ErrNoRows):
-		// Does not exist yet; the MERGE inserts it.
-	default:
-		return fmt.Errorf("deploy workflow def: read owner: %w", err)
-	}
-
+	// No ownership check: under (tenant_id, name, version) another tenant's
+	// definition of the same name is a different row. IMPROVEMENT-PLAN 3.77.
 	_, err = tx.ExecContext(ctx, `
 		MERGE workflow_defs AS target
-		USING (SELECT @p1 AS name, @p2 AS version) AS source
-		ON target.name = source.name AND target.version = source.version
+		USING (VALUES (@p1, @p2)) AS source(name, version)
+		ON target.tenant_id = @p8 AND target.name = source.name AND target.version = source.version
 		WHEN MATCHED THEN UPDATE SET
 			wasm_bytes = @p3,
 			abi_version = @p4,
 			min_version = @p5,
 			plugin_deps = @p6,
-			deprecated = @p7,
-			tenant_id = @p8
-		WHEN NOT MATCHED THEN INSERT (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id)
-		     VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8);
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, s.tenantID)
+			disabled_at = @p7,
+			gc_eligible = @p10,
+			max_history_length = @p9
+		WHEN NOT MATCHED THEN INSERT (name, version, wasm_bytes, abi_version, min_version, plugin_deps, disabled_at, tenant_id, max_history_length, gc_eligible)
+		     VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10);
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, string(pluginDepsJSON), def.DisabledAt, s.tenantID, def.MaxHistoryLength, def.GCEligible)
 	if err != nil {
 		return fmt.Errorf("deploy workflow def: %w", err)
 	}
@@ -329,14 +354,14 @@ func (s *MSSQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 	var err error
 	if name == "" {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, deprecated
-			FROM workflow_defs ORDER BY name, version DESC
-		`)
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
+			FROM workflow_defs WHERE tenant_id = @p1 ORDER BY name, version DESC
+		`, s.tenantID)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, deprecated
-			FROM workflow_defs WHERE name = @p1 ORDER BY version DESC
-		`, name)
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
+			FROM workflow_defs WHERE name = @p1 AND tenant_id = @p2 ORDER BY version DESC
+		`, name, s.tenantID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("list workflow defs: %w", err)
@@ -349,12 +374,12 @@ func (s *MSSQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 		var pluginDepsRaw []byte
 		var createdAt time.Time
 		if err := rows.Scan(&def.Name, &def.Version, &def.ABIVersion, &def.MinVersion,
-			&pluginDepsRaw, &createdAt, &def.Deprecated); err != nil {
+			&pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible); err != nil {
 			return nil, fmt.Errorf("scan workflow def: %w", err)
 		}
 		def.CreatedAt = createdAt
 		if len(pluginDepsRaw) > 0 {
-			json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
+			def.PluginDeps = decodePluginDeps(s.log(), pluginDepsRaw, def.Name, def.Version)
 		}
 		if def.PluginDeps == nil {
 			def.PluginDeps = make(map[string]string)
@@ -371,10 +396,10 @@ func (s *MSSQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 	var wasmBytes []byte
 	var createdAt time.Time
 	err := s.db.QueryRowContext(ctx, `
-		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, deprecated
-		FROM workflow_defs WHERE name = @p1 AND version = @p2
-	`, name, version).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
-		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.Deprecated)
+		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
+		FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
+	`, name, version, s.tenantID).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
+		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -384,7 +409,7 @@ func (s *MSSQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 	def.WASMBytes = wasmBytes
 	def.CreatedAt = createdAt
 	if len(pluginDepsRaw) > 0 {
-		json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
+		def.PluginDeps = decodePluginDeps(s.log(), pluginDepsRaw, name, version)
 	}
 	if def.PluginDeps == nil {
 		def.PluginDeps = make(map[string]string)
@@ -392,11 +417,18 @@ func (s *MSSQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 	return &def, nil
 }
 
-// MarkVersionDeprecated sets the deprecated flag on a workflow version.
+// MarkVersionDeprecated retires a workflow version, or restores it.
+//
+// Writes BOTH columns in one statement -- see the PostgresStore method for why
+// a partial write here would leave a version live and collectable, a state
+// neither column can express alone (cleat#1702).
 func (s *MSSQLStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error {
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE workflow_defs SET deprecated = @p3 WHERE name = @p1 AND version = @p2
-	`, name, version, deprecated)
+		UPDATE workflow_defs
+		   SET disabled_at = CASE WHEN @p3 = 1 THEN COALESCE(disabled_at, SYSUTCDATETIME()) ELSE NULL END,
+		       gc_eligible = @p3
+		 WHERE name = @p1 AND version = @p2 AND tenant_id = @p4
+	`, name, version, deprecated, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("mark version deprecated: %w", err)
 	}
@@ -406,8 +438,8 @@ func (s *MSSQLStore) MarkVersionDeprecated(ctx context.Context, name string, ver
 // PurgeWorkflowDef permanently deletes a workflow definition.
 func (s *MSSQLStore) PurgeWorkflowDef(ctx context.Context, name string, version int) error {
 	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM workflow_defs WHERE name = @p1 AND version = @p2
-	`, name, version)
+		DELETE FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
+	`, name, version, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("purge workflow def: %w", err)
 	}
@@ -419,9 +451,9 @@ func (s *MSSQLStore) CountActiveInstances(ctx context.Context, name string, vers
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM workflow_instances
-		WHERE def_name = @p1 AND def_version = @p2
+		WHERE def_name = @p1 AND def_version = @p2 AND tenant_id = @p3
 		  AND status IN ('ready', 'running')
-	`, name, version).Scan(&count)
+	`, name, version, s.tenantID).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("count active instances: %w", err)
 	}
@@ -433,8 +465,8 @@ func (s *MSSQLStore) ResolveLatestVersion(ctx context.Context, defName string) (
 	var version int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT ISNULL(MAX(version), 0) FROM workflow_defs
-		WHERE name = @p1 AND deprecated = 0
-	`, defName).Scan(&version)
+		WHERE name = @p1 AND disabled_at IS NULL AND tenant_id = @p2
+	`, defName, s.tenantID).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("resolve latest version: %w", err)
 	}
@@ -450,9 +482,9 @@ func (s *MSSQLStore) ValidateVersion(ctx context.Context, defName string, defVer
 	err := s.db.QueryRowContext(ctx, `
 		SELECT CASE WHEN EXISTS (
 			SELECT 1 FROM workflow_defs
-			WHERE name = @p1 AND version = @p2 AND deprecated = 0
+			WHERE name = @p1 AND version = @p2 AND tenant_id = @p3 AND disabled_at IS NULL
 		) THEN 1 ELSE 0 END
-	`, defName, defVersion).Scan(&exists)
+	`, defName, defVersion, s.tenantID).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("validate version: %w", err)
 	}
@@ -514,11 +546,38 @@ func (s *MSSQLStore) getActiveInstanceCountsByVersionOnce(ctx context.Context) (
 
 // SetWorkflowTag assigns a tag to a specific version.
 // Uses MERGE so reassigning a tag updates in place.
+//
+// `AND target.tenant_id` in the ON clause is load-bearing, and this is the
+// quietest of the five statements 3.86 covers on this table. Without it the
+// MERGE MATCHES another tenant's row and updates it: nothing is inserted,
+// nothing errors, and that tenant's "stable" now points at a version they
+// never promoted -- a tag decides which code a run executes, so this changes
+// what somebody else's workflows do.
+//
+// Not visible from a tenant-scoped connection, which is why it survived. There
+// dbo.fn_tenant_filter hides the other tenant's row, the MERGE falls through
+// to WHEN NOT MATCHED, and the INSERT trips the primary key. Loud, and the
+// opposite conclusion. It is only on a dbo.cleat_admin login -- which a
+// multi-tenant deployment must use -- that the filter is off and the match
+// succeeds. See the note above ClaimDueSchedule in mssql_schedules.go.
+//
+// Shaped like DeployWorkflowDef's MERGE on purpose: the tenant is compared to
+// a BOUND PARAMETER (`target.tenant_id = @p4`) rather than to a projected
+// source column. The first version of this wrote
+// `USING (SELECT ... CAST(@p4 AS UNIQUEIDENTIFIER) AS tenant_id) ... ON
+// target.tenant_id = source.tenant_id`, which is equivalent SQL but trips
+// TestMSSQLUUIDColumnsAreConvertedInProjections -- that guard is a textual
+// scan and reads `tenant_id = ... tenant_id` in a join predicate as a
+// projection. It is a false positive (nothing is scanned into Go from an ON
+// clause), and the fix is to match the existing form rather than to weaken a
+// guard that exists because two real bugs got past review.
 func (s *MSSQLStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
 	_, err := s.db.ExecContext(ctx, `
 		MERGE workflow_tags AS target
-		USING (SELECT @p1 AS workflow_name, @p2 AS tag) AS source
-		ON target.workflow_name = source.workflow_name AND target.tag = source.tag
+		USING (VALUES (@p1, @p2)) AS source(workflow_name, tag)
+		ON target.tenant_id = @p4
+		   AND target.workflow_name = source.workflow_name
+		   AND target.tag = source.tag
 		WHEN MATCHED THEN UPDATE SET
 			version = @p3,
 			created_at = SYSUTCDATETIME()
@@ -534,8 +593,8 @@ func (s *MSSQLStore) SetWorkflowTag(ctx context.Context, workflowName string, ve
 // RemoveWorkflowTag deletes a tag assignment.
 func (s *MSSQLStore) RemoveWorkflowTag(ctx context.Context, workflowName string, tag string) error {
 	_, err := s.db.ExecContext(ctx, `
-		DELETE FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2
-	`, workflowName, tag)
+		DELETE FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2 AND tenant_id = @p3
+	`, workflowName, tag, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("remove workflow tag: %w", err)
 	}
@@ -546,8 +605,8 @@ func (s *MSSQLStore) RemoveWorkflowTag(ctx context.Context, workflowName string,
 func (s *MSSQLStore) GetWorkflowTag(ctx context.Context, workflowName string, tag string) (int, error) {
 	var version int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT version FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2
-	`, workflowName, tag).Scan(&version)
+		SELECT version FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2 AND tenant_id = @p3
+	`, workflowName, tag, s.tenantID).Scan(&version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("get workflow tag: tag %q not found for workflow %s", tag, workflowName)
 	}
@@ -560,8 +619,8 @@ func (s *MSSQLStore) GetWorkflowTag(ctx context.Context, workflowName string, ta
 // GetWorkflowTags returns all tag -> version mappings for a workflow.
 func (s *MSSQLStore) GetWorkflowTags(ctx context.Context, workflowName string) (map[string]int, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT tag, version FROM workflow_tags WHERE workflow_name = @p1
-	`, workflowName)
+		SELECT tag, version FROM workflow_tags WHERE workflow_name = @p1 AND tenant_id = @p2
+	`, workflowName, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("get workflow tags: %w", err)
 	}
@@ -602,11 +661,15 @@ func (s *MSSQLStore) RemoveRoutingRule(ctx context.Context, ruleID string) error
 	if err != nil {
 		return fmt.Errorf("remove routing rule: invalid rule id %q: %w", ruleID, err)
 	}
-	_, err = s.db.ExecContext(ctx, `
-		DELETE FROM workflow_routing WHERE id = @p1
-	`, id)
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM workflow_routing WHERE id = @p1 AND tenant_id = @p2
+	`, id, s.tenantID)
 	if err != nil {
 		return fmt.Errorf("remove routing rule: %w", err)
+	}
+	// See the PostgreSQL implementation for why rows-affected is checked.
+	if n, rErr := res.RowsAffected(); rErr == nil && n == 0 {
+		return ErrRoutingRuleNotFound
 	}
 	return nil
 }
@@ -615,8 +678,8 @@ func (s *MSSQLStore) RemoveRoutingRule(ctx context.Context, ruleID string) error
 func (s *MSSQLStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT CONVERT(NVARCHAR(36), id), workflow_name, target_version, weight
-		FROM workflow_routing WHERE workflow_name = @p1
-	`, workflowName)
+		FROM workflow_routing WHERE workflow_name = @p1 AND tenant_id = @p2
+	`, workflowName, s.tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("get routing rules: %w", err)
 	}
@@ -687,8 +750,8 @@ func (s *MSSQLStore) ResolveVersionByTag(ctx context.Context, workflowName strin
 	}
 	var version int
 	err := s.db.QueryRowContext(ctx, `
-		SELECT version FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2
-	`, workflowName, tag).Scan(&version)
+		SELECT version FROM workflow_tags WHERE workflow_name = @p1 AND tag = @p2 AND tenant_id = @p3
+	`, workflowName, tag, s.tenantID).Scan(&version)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("resolve version by tag: tag %q not found for workflow %s", tag, workflowName)
 	}

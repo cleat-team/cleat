@@ -77,16 +77,16 @@ When creating a child workflow:
 
 ```
 # Production: pin to whatever is tagged "stable" right now
-cleat build --channel stable --tenant <tenant-uuid>
+cleat --tenant <tenant-uuid> build --channel stable
 
 # Development: always use latest at runtime
 cleat build --channel latest
 
 # Canary: follow the "canary" tag
-cleat build --channel canary --tenant <tenant-uuid>
+cleat --tenant <tenant-uuid> build --channel canary
 
 # Custom tag
-cleat build --channel experiment-b --tenant <tenant-uuid>
+cleat --tenant <tenant-uuid> build --channel experiment-b
 ```
 
 The `--channel` flag determines both:
@@ -152,10 +152,8 @@ cleat build --channel stable
 # Then edit the cleat.lock and change policy to "frozen" before embedding
 ```
 
-Or set the policy explicitly at build time (future CLI option):
-```
-cleat build --channel stable --binding-policy frozen
-```
+There is no `--binding-policy` flag to set this directly at build time; the
+`cleat.lock` edit above is the only way to select `"frozen"` today.
 
 With `"frozen"`, the parent workflow compiled as version 1 will always spawn
 child `Payment` version 3 (what was pinned at build time), even after
@@ -166,7 +164,7 @@ through using the child versions it was tested with.
 
 ```
 # Deploy new child version
-cleat deploy Payment --wasm payment-v5.wasm
+cleat deploy --name Payment payment-v5.wasm
 
 # Test it as canary first
 cleatctl versions tag Payment 5 canary

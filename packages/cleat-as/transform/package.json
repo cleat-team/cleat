@@ -1,6 +1,6 @@
 {
   "name": "@cleat/transform",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "AssemblyScript transformer for cleat durable workflows. Generates WASM ABI export wrappers for functions decorated with @cleatEntry.",
   "main": "index.js",
   "type": "commonjs",
@@ -21,7 +21,7 @@
     "package.json"
   ],
   "peerDependencies": {
-    "assemblyscript": "^0.27.0"
+    "assemblyscript": "^0.28.19"
   },
   "engines": {
     "node": ">=16.0.0"

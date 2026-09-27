@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"sync"
 	"time"
 )
 
@@ -72,17 +71,23 @@ type Caller interface {
 	// unmarshals the response JSON into result.
 	DurableCallJSONWithOptions(opts CallOptions, service, operation, requestJSON string, result interface{}) error
 
-	// DurableCallWithHeartbeat makes a long-running durable API call and
-	// invokes onProgress periodically with status updates from the engine.
-	// The heartbeatInterval controls how often the host sends progress
-	// events. onProgress receives a JSON string with implementation-specific
-	// progress details. Falls back to a regular DurableCall if the host
-	// does not support heartbeats.
-	DurableCallWithHeartbeat(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(progressJSON string)) (string, error)
+	// DurableCallWithHeartbeat makes a long-running durable API call, telling
+	// the host to heartbeat the claim every heartbeatInterval so a call that
+	// outlives the ordinary lease is not reaped as a stale instance. Falls
+	// back to a regular DurableCall if the host does not support heartbeats.
+	//
+	// It took an onProgress callback until cleat#854. The callback could never
+	// fire: the guest is suspended inside the cleat_call_heartbeat import for
+	// the whole call, so there is no moment at which the host could run guest
+	// code. It was inert in compiled workflows AND under localdev and
+	// cleattest, so no caller has ever received a progress update. Rust's
+	// equivalent never took one. Progress reporting, if it is wanted, needs a
+	// mechanism that does not require calling back into a suspended guest.
+	DurableCallWithHeartbeat(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error)
 
 	// DurableCallTypedWithHeartbeat is like DurableCallWithHeartbeat but marshals
 	// request to JSON and unmarshals the response into result.
-	DurableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(progressJSON string)) error
+	DurableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration) error
 
 	// PluginCall invokes a named function on a registered plugin.
 	PluginCall(pluginName, functionName, inputJSON string) (string, error)
@@ -174,6 +179,19 @@ type Signaler interface {
 
 	// DurableAwaitSignals is the low-level signal wait. Prefer AwaitSignals.
 	DurableAwaitSignals(signalNames []string, timeoutMs int64) (signalName, payload string, timedOut bool, err error)
+
+	// PollUpdate and CompleteUpdate are the low-level update primitives.
+	// Prefer DispatchUpdates, which pairs them with handler lookup, validation
+	// and the guarantee that every delivered update is answered.
+	//
+	// They are on the interface for the same reason DurableAwaitSignals is: a
+	// generated adapter binds each host call to a named method, so a call the
+	// SDK reaches only through a wrapper still needs the wrapper's parts to be
+	// nameable. Calling them directly is legitimate but leaves the answering to
+	// you -- a delivered update that is never completed leaves its caller
+	// holding a promise nothing settles.
+	PollUpdate() (envelopeJSON string, found bool, err error)
+	CompleteUpdate(requestID, resultJSON, errMsg string) error
 
 	// SendSignalAndWait sends a signal to another workflow and waits for a response.
 	// The signal is sent with an embedded correlation ID; the target workflow uses
@@ -271,8 +289,19 @@ type Lifecycle interface {
 	// Returns the runID, result, and any error. This is "wait for any child."
 	AwaitAnyChild(runIDs []string) (completedRunID string, result string, err error)
 
-	// PollChild checks a child's status without blocking.
+	// PollChild checks a run's status without blocking.
 	// Returns status ("running", "completed", "failed"), result, and any error.
+	//
+	// NOT restricted to your children, despite the name. PollChild takes any
+	// run id in the calling workflow's TENANT: nothing filters by parentage --
+	// not this call, not the ABI binding, and not the store query, which is
+	// `WHERE id = ?` on all three dialects. The `child` names the common case,
+	// not a boundary; the boundary is the tenant. This is the call for
+	// observing a run you did not spawn (cleat#1120).
+	//
+	// An unknown run id reports "running", NOT an error: a missing row and an
+	// unfinished one are indistinguishable here. Never read "running" as proof
+	// a run exists.
 	PollChild(runID string) (status string, result string, err error)
 
 	// ChildWorkflowTyped starts a child workflow with typed input.
@@ -283,10 +312,25 @@ type Lifecycle interface {
 	// AwaitChildTyped waits for a child workflow and unmarshals its result.
 	AwaitChildTyped(runID string, result interface{}) error
 
-	// RunDetached runs fn with a fresh HostCalls that ignores cancellation.
-	// fn executes immediately, is recorded in history, and survives crash/replay.
-	// On replay, fn IS re-executed (not replayed from cache).
-	RunDetached(fn func(h HostCalls) error) error
+	// RunDetached starts a named workflow fire-and-forget: it does not become a
+	// child of this one and this workflow does not wait for it.
+	//
+	// The signature is (name, inputJSON) because that is what the host call
+	// cleat_run_detached takes, and what every other SDK exposes. It used to
+	// take a closure, which cannot cross the ABI -- so it worked under localdev
+	// and cleattest, which populate the field directly, and silently did
+	// nothing in every compiled workflow.
+	RunDetached(name, inputJSON string) error
+
+	// StartDetached is RunDetached that returns the run id of the workflow it
+	// started, so a caller has a handle to it -- to poll it, signal it, or
+	// record it somewhere durable. RunDetached computes the same id and
+	// discards it; this hands it back (cleat#1154).
+	//
+	// It is a second host call, not a wider RunDetached: a host call's arity is
+	// part of its import type, and widening one stops every already-deployed
+	// binary instantiating. See ABI.md 2.24a.
+	StartDetached(name, inputJSON string) (runID string, err error)
 
 	// Version returns the current workflow version number for schema evolution.
 	Version() int
@@ -324,12 +368,6 @@ type Promises interface {
 // StateManager provides durable key-value state operations scoped to the workflow.
 type StateManager interface {
 	SetQueryState(key, value string)
-	SetState(key string, value interface{})
-	GetState(key string, result interface{}) error
-	DeleteState(key string)
-	HasState(key string) bool
-	IncrState(key string, delta int64) int64
-	ListState(prefix string) []string
 }
 
 // UpdateHandlers provides workflow update-handler registration.
@@ -471,6 +509,31 @@ const (
 	CallErrorNotFound                       // non-retryable
 	CallErrorInvalidRequest                 // non-retryable
 	CallErrorPermissionDenied               // non-retryable
+	// CallErrorRetryPolicyTooLong means the host declined to run this retry
+	// policy in one segment because its worst-case total backoff exceeds the
+	// tenant's host-retry budget. The call did NOT happen and the host
+	// recorded no event, so no attempt has been consumed; the caller should
+	// run the policy itself, suspending between attempts.
+	//
+	// Non-retryable on purpose, and the default `Retryable()` arm gives that
+	// for free. Re-issuing cleat_call_retry would be refused again on
+	// identical grounds and loop forever -- see ABI.md, "Retry refusal".
+	CallErrorRetryPolicyTooLong // non-retryable
+
+	// CallErrorOutputTruncated means the host had more to write than the
+	// buffer this guest supplied could hold. The response you received is a
+	// prefix of the real one.
+	//
+	// Before cleat#1312 this was not reported at all: the host cut the value to
+	// the buffer's size and returned only how many bytes it had written, so a
+	// truncated response and a genuinely short one were the same thing from
+	// here. The symptom was a JSON unmarshal error pointing at the response
+	// body, which sends you to debug the service you called.
+	//
+	// Non-retryable, like RetryPolicyTooLong: reissuing the identical call with
+	// the identical buffer fails identically. The fix is a bigger buffer or a
+	// smaller payload, and both are the caller's.
+	CallErrorOutputTruncated // non-retryable
 )
 
 // CallError is a structured error returned by DurableCall and its variants.
@@ -493,55 +556,6 @@ func (e *CallError) Retryable() bool {
 	default:
 		return false
 	}
-}
-
-// ---- Virtual Object definitions ----
-
-// VirtualObjectDef describes a virtual object type for key-scoped
-// stateful services.
-type VirtualObjectDef struct {
-	// Name is the unique name for this virtual object type.
-	Name string
-
-	// EntryPoint is the function that handles invocations for this
-	// virtual object type. It receives a HostCalls (with state scoped
-	// to the instance) and the input JSON, and returns the result JSON
-	// or an error.
-	EntryPoint func(h HostCalls, input string) (string, error)
-}
-
-// virtualObjectRegistry is the package-level registry of virtual object
-// definitions.
-var virtualObjectRegistry = struct {
-	mu   sync.RWMutex
-	defs map[string]VirtualObjectDef
-}{
-	defs: make(map[string]VirtualObjectDef),
-}
-
-// RegisterVirtualObject registers a virtual object definition in the
-// global registry. Returns an error if a definition with the same name
-// already exists or if the name is empty.
-func RegisterVirtualObject(def VirtualObjectDef) error {
-	virtualObjectRegistry.mu.Lock()
-	defer virtualObjectRegistry.mu.Unlock()
-	if def.Name == "" {
-		return fmt.Errorf("durable: virtual object name must not be empty")
-	}
-	if _, exists := virtualObjectRegistry.defs[def.Name]; exists {
-		return fmt.Errorf("durable: virtual object %q already registered", def.Name)
-	}
-	virtualObjectRegistry.defs[def.Name] = def
-	return nil
-}
-
-// GetVirtualObject returns a registered virtual object definition by name.
-// The second return value is false if no definition with that name exists.
-func GetVirtualObject(name string) (VirtualObjectDef, bool) {
-	virtualObjectRegistry.mu.RLock()
-	defer virtualObjectRegistry.mu.RUnlock()
-	def, ok := virtualObjectRegistry.defs[name]
-	return def, ok
 }
 
 // TerminalError is a sentinel error that marks a workflow error as
@@ -602,16 +616,11 @@ func (e *ServiceNotFoundError) Unwrap() error {
 	return e.Err
 }
 
-// CallTimeoutError is returned when a call exceeds its timeout.
-type CallTimeoutError struct {
-	Service   string
-	Operation string
-	Timeout   time.Duration
-}
-
-func (e *CallTimeoutError) Error() string {
-	return fmt.Sprintf("call %s.%s timed out after %v", e.Service, e.Operation, e.Timeout)
-}
+// There is no SDK-side CallTimeoutError. It was removed with the CallOptions
+// timeout fields in cleat#1006 -- nothing could produce it, so a workflow
+// matching on it with errors.As would never match. A timeout REPORTED BY THE
+// HOST arrives as a *CallError with Code == CallErrorTimeout, which is a real
+// signal and is retryable.
 
 // ---- Plugin and versioning types ----
 
@@ -646,6 +655,33 @@ const (
 	ParentClosePolicyRequestCancel ParentClosePolicy = "REQUEST_CANCEL" // Cancellation is requested on children
 )
 
+// Valid reports whether p is a policy the engine will accept.
+//
+// The empty value is valid and means "unset" -- ChildWorkflow sends it for
+// every caller that does not choose a policy, and the column defaults to
+// ABANDON.
+//
+// Everything else must match EXACTLY, including case. ParentClosePolicy is a
+// string type, so the constants above are easy to bypass and any literal
+// compiles; before cleat#936 a mis-cased value was written verbatim and then
+// compared against the policy arms by whichever database was underneath:
+//
+//	mysql>      SELECT 'terminate' = 'TERMINATE';   1     (utf8mb4_0900_ai_ci)
+//	postgres=#  SELECT 'terminate' = 'TERMINATE';   f
+//
+// The same workflow therefore terminated its children on one database and
+// abandoned them on the other. The engine refuses an unrecognised policy at
+// the child-start boundary; this check exists so the error arrives at the
+// call site rather than as a host-call failure, and so the mistake is visible
+// to anyone reading the SDK.
+func (p ParentClosePolicy) Valid() bool {
+	switch p {
+	case "", ParentClosePolicyAbandon, ParentClosePolicyTerminate, ParentClosePolicyRequestCancel:
+		return true
+	}
+	return false
+}
+
 // ChildWorkflowOptions carries version resolution, parent close policy, and
 // priority configuration for spawning a child workflow.
 //
@@ -661,18 +697,57 @@ const (
 
 // CallOptions provides per-call configuration.
 //
-// Timeout and StartToCloseTimeout are respected when the host-side
-// durableCallWithOptions import is populated (the normal WASM runtime path).
-// When falling back to the SDK-level retry loop these fields are advisory
-// since the underlying DurableCall import has no timeout parameter.
+// There is deliberately NO per-call timeout here. `Timeout` and
+// `StartToCloseTimeout` were removed in cleat#1006 because they were inert on
+// every path a workflow can actually run on, and the only way to make them work
+// without an ABI change would have introduced a determinism defect.
+//
+// Measured 2026-09-13, one slow call (400ms/2s) and one short timeout, with a
+// control proving the delay was really in the path in each row:
+//
+//	path                                      Timeout   StartToCloseTimeout
+//	compiled WASM (cleat build --target go)   inert     inert
+//	cleat/cleattest (unit-test harness)       inert     inert
+//	cleat/localdev (local dev runner)         inert     inert
+//	hand-built HostCalls, WithOptions nil     works     works
+//
+// The last row is cleat/runtime_test.go and nothing else, which is why the
+// tests were green for as long as the fields existed. adapterDefs has no
+// DurableCallWithOptions entry, so the generated adapter leaves the import nil
+// and the SDK fallback runs -- a goroutine racing time.After, inside a wasip1
+// guest that is blocked in a synchronous //go:wasmimport for the whole call, so
+// the timer cannot be serviced until there is nothing left to interrupt. The
+// two harnesses that DO populate the import discard the field instead.
+//
+// Making the goroutine work was not an option: time.After reads the wall clock,
+// so a timeout that fires on the original execution and not on replay is a
+// determinism failure in an engine whose contract is that replay reproduces the
+// original. A real per-call timeout needs a host-side representation the way
+// retry already has one -- cleat_call_retry carries its policy in four i64s --
+// and that is a feature with an ABI cost, to be argued on its merits.
+//
+// `MaxResponseSize` went the same way in cleat#1424, for the same reason and on
+// the same evidence. It was documented as "0 = use default (64KB), capped at
+// outBufSize" and BOTH halves of that were false: wasm/generator.go documents
+// outBufSize as dead, and since cleat#1384 the guest's output buffer is
+// ADAPTIVE -- _cleatOutBufFloor doubling toward _cleatOutBufCeiling as the host
+// reports truncation -- chosen by generated code that never sees a CallOptions.
+//
+// Measured 2026-09-13 through cleattest, whose DurableCallWithOptions hook IS
+// populated, with a 100,011-byte response and a ONE-BYTE cap:
+//
+//	MaxResponseSize=1      -> response 100011 bytes
+//	MaxResponseSize unset  -> response 100011 bytes
+//
+// The second row is the control; the first alone is equally consistent with a
+// stub returning whatever it likes.
+//
+// A per-call response cap remains a coherent feature. It needs a host-side
+// representation, and the adaptive buffer weakens the case for it -- so it is a
+// design to argue, not a field to leave lying around. Removing the inert one
+// does not foreclose it.
 type CallOptions struct {
-	Retry           *RetryPolicy
-	MaxResponseSize int           // 0 = use default (64KB), capped at outBufSize
-	Timeout         time.Duration // 0 = no timeout, per-call deadline
-	// Overall deadline for the call including all retries.
-	// Unlike Timeout (per-attempt), this caps the total wall-clock time.
-	// Temporal-compatible.
-	StartToCloseTimeout time.Duration
+	Retry *RetryPolicy
 }
 
 // RetryPolicy configures automatic retry behavior for durable calls.
@@ -686,7 +761,7 @@ type RetryPolicy struct {
 	InitialInterval    time.Duration
 	BackoffCoefficient float64
 	MaxInterval        time.Duration
-	NonRetryableErrors []string // error substrings that skip retry
+	NonRetryableErrors []string // service error CODES that skip retry
 }
 
 // DefaultRetryPolicy returns a sensible default retry policy.
@@ -729,7 +804,7 @@ type HostCallsImpl struct {
 	durableCallTypedWithOptions   func(opts CallOptions, service, operation string, request, result interface{}) error
 	durableCallWithOptions        func(opts CallOptions, service, operation, requestJSON string) (string, error)
 	durableCallJSONWithOptions    func(opts CallOptions, service, operation, requestJSON string, result interface{}) error
-	durableCallWithHeartbeat      func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error)
+	durableCallWithHeartbeat      func(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error)
 	durableSleep                  func(ms int64)
 	durableAwaitSignals           func(signalNames []string, timeoutMs int64) (string, string, bool, error)
 	createPromise                 func(name string) (promiseID string, err error)
@@ -751,7 +826,7 @@ type HostCallsImpl struct {
 	awaitAllChildren              func(runIDs []string) ([]ChildResult, error)
 	awaitAnyChild                 func(runIDs []string) (completedRunID string, result string, err error)
 	pollChild                     func(runID string) (status string, result string, err error)
-	durableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error
+	durableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration) error
 	childWorkflowTyped            func(name string, request interface{}) (string, error)
 	awaitChildTyped               func(runID string, result interface{}) error
 	durableCallWithRetry          func(service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string) (string, error)
@@ -760,17 +835,20 @@ type HostCallsImpl struct {
 	setQueryState                 func(key, value string)
 	registerUpdateHandler         func(name string)
 	handleUpdate                  func(name, payload string) (string, error)
-	runDetached                   func(fn func(h HostCalls) error) error
-	now                           func() int64
-	random                        func() int64
-	newUUID                       func() string
+	pollUpdate                    func() (envelopeJSON string, found bool, err error)
+	completeUpdate                func(requestID, resultJSON, errMsg string) error
+	// dispatchingUpdates is the reentrancy guard for DispatchUpdates; see there.
+	dispatchingUpdates bool
+	runDetached        func(name, inputJSON string) error
+	startDetached      func(name, inputJSON string) (string, error)
+	now                func() int64
+	random             func() int64
+	newUUID            func() string
 
 	pluginCall             func(pluginName, functionName, inputJSON string) (string, error)
 	pluginCallStreaming    func(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error)
 	durableSend            func(service, operation, requestJSON string) error
 	scheduleInvoke         func(service, operation, requestJSON string, delayMs int64) error
-	sendSignalAndWait      func(targetRunID, signalName, payload string, timeout time.Duration) (string, error)
-	replyToSignal          func(correlationID, response string) error
 	awaitSignalsWithQuorum func(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error)
 	signalWorkflow         func(targetRunID, signalName, payload string) error
 	scheduleCron           func(workflowName, cronExpr, timezone, inputJSON string) (string, error)
@@ -783,8 +861,6 @@ type HostCallsImpl struct {
 
 	sideEffect func(computedResult string) (string, error)
 
-	// State map for typed K/V operations.
-	stateMap       map[string]interface{}
 	updateHandlers map[string]updateHandlerEntry
 
 	// Scope management for virtual object instances.
@@ -792,6 +868,11 @@ type HostCallsImpl struct {
 	scopeObjType string // current object type in scope
 	scopeInstKey string // current instance key in scope
 	scopeSet     bool   // true when scope is active
+	// The host calls behind the three scope methods. Nil under localdev and
+	// cleattest, which populate the impl directly; non-nil in a compiled
+	// workflow, where the generated adapter supplies them.
+	setScope func(objectType, instanceKey string) (string, error)
+	getScope func() (string, string, error)
 }
 
 // NewHostCalls creates a HostCalls from a set of function implementations.
@@ -815,6 +896,8 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		workflowID:                    opts.WorkflowID,
 		workflowRunID:                 opts.RunID,
 		durableLog:                    opts.DurableLog,
+		setScope:                      opts.SetScope,
+		getScope:                      opts.GetScope,
 		pollCancellation:              opts.PollCancellation,
 		pollSignal:                    opts.PollSignal,
 		continueAsNew:                 opts.ContinueAsNew,
@@ -833,8 +916,11 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		minVersion:                    opts.MinVersion,
 		setQueryState:                 opts.SetQueryState,
 		registerUpdateHandler:         opts.RegisterUpdateHandler,
+		pollUpdate:                    opts.PollUpdate,
+		completeUpdate:                opts.CompleteUpdate,
 		handleUpdate:                  opts.HandleUpdate,
 		runDetached:                   opts.RunDetached,
+		startDetached:                 opts.StartDetached,
 		now:                           opts.Now,
 		random:                        opts.Random,
 		newUUID:                       opts.NewUUID,
@@ -842,8 +928,6 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 		pluginCallStreaming:           opts.PluginCallStreaming,
 		durableSend:                   opts.DurableSend,
 		scheduleInvoke:                opts.ScheduleInvoke,
-		sendSignalAndWait:             opts.SendSignalAndWait,
-		replyToSignal:                 opts.ReplyToSignal,
 		awaitSignalsWithQuorum:        opts.AwaitSignalsWithQuorum,
 		signalWorkflow:                opts.SignalWorkflow,
 		scheduleCron:                  opts.ScheduleCron,
@@ -882,24 +966,32 @@ func NewHostCalls(opts HostCallsOptions) HostCalls {
 //
 // See individual method docs on hostCallsImpl for details.
 type HostCallsOptions struct {
-	DurableCall                   func(service, operation, requestJSON string) (string, error)
-	DurableCallTyped              func(service, operation string, request, result interface{}) error
-	DurableCallTypedWithOptions   func(opts CallOptions, service, operation string, request, result interface{}) error
-	DurableCallWithOptions        func(opts CallOptions, service, operation, requestJSON string) (string, error)
-	DurableCallJSONWithOptions    func(opts CallOptions, service, operation, requestJSON string, result interface{}) error
-	DurableCallWithHeartbeat      func(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error)
-	DurableSleep                  func(ms int64)
-	DurableSleepMs                func(ms int64)
-	DurableAwaitSignals           func(signalNames []string, timeoutMs int64) (string, string, bool, error)
-	CreatePromise                 func(name string) (promiseID string, err error)
-	AwaitPromise                  func(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
-	ResolvePromise                func(id, value string) error
-	RejectPromise                 func(id, errMsg string) error
-	DurableDefer                  func(description string) (string, error)
-	DurableDeferFunc              func(fn func()) (string, error)
-	WorkflowID                    func() string
-	RunID                         func() string
-	DurableLog                    func(message string)
+	DurableCall                 func(service, operation, requestJSON string) (string, error)
+	DurableCallTyped            func(service, operation string, request, result interface{}) error
+	DurableCallTypedWithOptions func(opts CallOptions, service, operation string, request, result interface{}) error
+	DurableCallWithOptions      func(opts CallOptions, service, operation, requestJSON string) (string, error)
+	DurableCallJSONWithOptions  func(opts CallOptions, service, operation, requestJSON string, result interface{}) error
+	DurableCallWithHeartbeat    func(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error)
+	DurableSleep                func(ms int64)
+	DurableSleepMs              func(ms int64)
+	DurableAwaitSignals         func(signalNames []string, timeoutMs int64) (string, string, bool, error)
+	CreatePromise               func(name string) (promiseID string, err error)
+	AwaitPromise                func(promiseID string, timeout time.Duration) (result string, timedOut bool, err error)
+	ResolvePromise              func(id, value string) error
+	RejectPromise               func(id, errMsg string) error
+	DurableDefer                func(description string) (string, error)
+	DurableDeferFunc            func(fn func()) (string, error)
+	WorkflowID                  func() string
+	RunID                       func() string
+	DurableLog                  func(message string)
+	// SetScope/GetScope reach cleat_set_scope / cleat_get_scope. Wired
+	// 2026-09-09 (cleat#984): before that HostCallsImpl.SetScope set three
+	// local fields against a host call that was never generated, so a Go
+	// guest took no lock where every other SDK serialises. ClearScope has no
+	// field here because it is SetScope("", "") -- the empty pair is the
+	// documented clear.
+	SetScope                      func(objectType, instanceKey string) (previousScope string, err error)
+	GetScope                      func() (objectType, instanceKey string, err error)
 	PollCancellation              func() (bool, string)
 	PollSignal                    func(signalName string) (string, bool, error)
 	ContinueAsNew                 func(newInputJSON string) error
@@ -911,15 +1003,18 @@ type HostCallsOptions struct {
 	AwaitAnyChild                 func(runIDs []string) (completedRunID string, result string, err error)
 	PollChild                     func(runID string) (status string, result string, err error)
 	DurableCallWithRetry          func(service, operation, requestJSON string, maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64, nonRetryableErrorsJSON string) (string, error)
-	DurableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error
+	DurableCallTypedWithHeartbeat func(service, operation string, request, result interface{}, heartbeatInterval time.Duration) error
 	ChildWorkflowTyped            func(name string, request interface{}) (string, error)
 	AwaitChildTyped               func(runID string, result interface{}) error
 	Version                       func() int
 	MinVersion                    func() int
 	SetQueryState                 func(key, value string)
 	RegisterUpdateHandler         func(name string)
+	PollUpdate                    func() (envelopeJSON string, found bool, err error)
+	CompleteUpdate                func(requestID, resultJSON, errMsg string) error
 	HandleUpdate                  func(name, payload string) (string, error)
-	RunDetached                   func(fn func(h HostCalls) error) error
+	RunDetached                   func(name, inputJSON string) error
+	StartDetached                 func(name, inputJSON string) (string, error)
 	Now                           func() int64
 	Random                        func() int64
 	NewUUID                       func() string
@@ -927,8 +1022,6 @@ type HostCallsOptions struct {
 	PluginCallStreaming           func(pluginName, functionName, inputJSON string) (<-chan StreamEvent, error)
 	DurableSend                   func(service, operation, requestJSON string) error
 	ScheduleInvoke                func(service, operation, requestJSON string, delayMs int64) error
-	SendSignalAndWait             func(targetRunID, signalName, payload string, timeout time.Duration) (string, error)
-	ReplyToSignal                 func(correlationID, response string) error
 	AwaitSignalsWithQuorum        func(signalNames []string, minCount int, maxRejections int, timeout time.Duration) ([]SignalResult, error)
 	SignalWorkflow                func(targetRunID, signalName, payload string) error
 	ScheduleCron                  func(workflowName, cronExpr, timezone, inputJSON string) (string, error)
@@ -1006,6 +1099,53 @@ func (h *HostCallsImpl) DurableCallTyped(service, operation string, request, res
 	return nil
 }
 
+// DurableCallWithRetry runs a retry policy on the HOST, in one segment.
+//
+// This is the explicit form of what DurableCallWithOptions picks automatically
+// for a short policy. It exists for two reasons: it is the symbol
+// wasm/usage.go keys the cleat_call_retry import on, and it is the form the
+// Rust SDK has always had (HostCalls::cleat_call_with_retry), so the two SDKs
+// now describe the same capability with the same shape.
+//
+// This SDK applies no threshold of its own: a caller naming this function has
+// asked for the host loop specifically. But the HOST still applies the tenant's
+// budget, and it can refuse.
+//
+// That is a deliberate narrowing, and it is what moving the threshold host-side
+// means (§3.94 step 4). This function used to be an escape hatch -- a long
+// policy would hold a worker and could blow through --wasm-wall-clock-ceiling,
+// "which is the caller's choice to make". It is not the caller's choice on a
+// shared deployment: the budget bounds how long one tenant may hold a slot, so
+// a guest that could opt out of it would make the limit advisory.
+//
+// A refused policy comes back as a *CallError with Code
+// CallErrorRetryPolicyTooLong, and unlike DurableCallWithOptions this function
+// does NOT fall back for you -- it has no SDK-level loop to fall back to. The
+// call was not made and no attempt was consumed, so a caller that wants the
+// suspending behaviour should handle that code by calling
+// DurableCallWithOptions, which does it automatically.
+//
+// Returns an error rather than falling back when the import is unavailable,
+// because silently doing something with different durability semantics is how
+// this whole area went wrong -- see IMPROVEMENT-PLAN 3.88.
+func (h *HostCallsImpl) DurableCallWithRetry(service, operation, requestJSON string, policy RetryPolicy) (string, error) {
+	if h.durableCallWithRetry == nil {
+		return "", fmt.Errorf("durable: DurableCallWithRetry: the cleat_call_retry import is not wired into this module")
+	}
+	nonRetryableJSON, _ := json.Marshal(policy.NonRetryableErrors)
+	if nonRetryableJSON == nil {
+		nonRetryableJSON = []byte("[]")
+	}
+	return h.durableCallWithRetry(
+		service, operation, requestJSON,
+		int64(policy.MaxAttempts),
+		policy.InitialInterval.Milliseconds(),
+		int64(policy.BackoffCoefficient*100),
+		policy.MaxInterval.Milliseconds(),
+		string(nonRetryableJSON),
+	)
+}
+
 // DurableCallWithOptions provides retry at either host or SDK level.
 // When the host-side durableCallWithRetry import is available, the retry
 // loop runs on the host and produces ONE history event per logical call.
@@ -1015,74 +1155,45 @@ func (h *HostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 		return h.durableCallWithOptions(opts, service, operation, requestJSON)
 	}
 
-	// Per-call timeout enforcement.
-	// When opts.Timeout > 0, the call is wrapped in a goroutine and must
-	// complete within the deadline or a CallTimeoutError is returned.
-	if opts.Timeout > 0 {
-		type callResult struct {
-			resp string
-			err  error
-		}
-		ch := make(chan callResult, 1)
-		go func() {
-			resp, err := h.DurableCall(service, operation, requestJSON)
-			ch <- callResult{resp, err}
-		}()
-		select {
-		case r := <-ch:
-			return r.resp, r.err
-		case <-time.After(opts.Timeout):
-			return "", &CallTimeoutError{
-				Service:   service,
-				Operation: operation,
-				Timeout:   opts.Timeout,
-			}
-		}
-	}
-
-	// StartToCloseTimeout: overall deadline across all retry attempts.
-	// Unlike Timeout (per-attempt), this caps the total wall-clock time.
-	var overallDeadline time.Time
-	if opts.StartToCloseTimeout > 0 {
-		overallDeadline = time.Now().Add(opts.StartToCloseTimeout)
-
-		if opts.Retry == nil {
-			// No retry: use StartToCloseTimeout as the per-call timeout.
-			type callResult struct {
-				resp string
-				err  error
-			}
-			ch := make(chan callResult, 1)
-			go func() {
-				resp, err := h.DurableCall(service, operation, requestJSON)
-				ch <- callResult{resp, err}
-			}()
-			select {
-			case r := <-ch:
-				return r.resp, r.err
-			case <-time.After(opts.StartToCloseTimeout):
-				return "", &CallTimeoutError{
-					Service:   service,
-					Operation: operation,
-					Timeout:   opts.StartToCloseTimeout,
-				}
-			}
-		}
-	}
-
 	if opts.Retry == nil {
 		return h.DurableCall(service, operation, requestJSON)
 	}
 
-	// When host-side retry is available, delegate to the host import.
-	// This produces ONE history event per logical call instead of one per attempt.
-	if h.durableCallWithRetry != nil {
+	// When host-side retry is available AND the policy is short enough to be
+	// worth holding a worker for, delegate to the host import: ONE history
+	// event for the whole logical call, one segment, no replay per attempt.
+	//
+	// The threshold is the whole point, not a safety valve. IMPROVEMENT-PLAN
+	// 3.88: a retry loop finishing within a few minutes should keep its worker,
+	// the way non-durable code would, because that is frequent and ordinary. A
+	// policy that backs off for an hour should NOT -- it should suspend and let
+	// the worker do something else, which is what the SDK-level loop below does
+	// via DurableSleep.
+	//
+	// Getting this wrong in the generous direction is worse than not wiring the
+	// import at all: the host loop backs off inside a host call, so a policy
+	// exceeding the wall-clock ceiling (--wasm-wall-clock-ceiling, 5m by
+	// default, see 3.90) does not merely waste a worker -- it gets the
+	// invocation killed, where the SDK-level path would have suspended and
+	// completed.
+	// The HOST decides whether this policy fits in one segment. It knows the
+	// tenant's budget; this SDK does not, and a constant compiled in here could
+	// only ever be one operator's answer for every tenant (§3.94 step 4).
+	//
+	// A refusal costs nothing: the host makes no call, records no event, and
+	// consumes no attempt, so falling through to the loop below starts the
+	// policy from attempt 1 with an untouched history.
+	// opts.Retry != nil is load-bearing, not defensive: retryFitsInOneSegment,
+	// which this condition replaces, returned false for a nil policy and so
+	// sent it down the loop below. Dropping the check here would dereference
+	// nil instead.
+	if h.durableCallWithRetry != nil && opts.Retry != nil {
 		rp := opts.Retry
 		nonRetryableJSON, _ := json.Marshal(rp.NonRetryableErrors)
 		if nonRetryableJSON == nil {
 			nonRetryableJSON = []byte("[]")
 		}
-		return h.durableCallWithRetry(
+		resp, err := h.durableCallWithRetry(
 			service, operation, requestJSON,
 			int64(rp.MaxAttempts),
 			rp.InitialInterval.Milliseconds(),
@@ -1090,32 +1201,23 @@ func (h *HostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 			rp.MaxInterval.Milliseconds(),
 			string(nonRetryableJSON),
 		)
+		var ce *CallError
+		if !errors.As(err, &ce) || ce.Code != CallErrorRetryPolicyTooLong {
+			return resp, err
+		}
+		// Refused as too long. Fall through to the SDK-level loop, which
+		// suspends between attempts via DurableSleep.
 	}
 
 	// Fall back to SDK-level retry (one event per attempt).
 	rp := opts.Retry
 	var lastErr error
 	for attempt := 1; attempt <= rp.MaxAttempts; attempt++ {
-		if !overallDeadline.IsZero() && time.Now().After(overallDeadline) {
-			return "", &CallTimeoutError{
-				Service:   service,
-				Operation: operation,
-				Timeout:   opts.StartToCloseTimeout,
-			}
-		}
 		resp, err := h.DurableCall(service, operation, requestJSON)
 		if err == nil {
 			return resp, nil
 		}
 		lastErr = err
-
-		if !overallDeadline.IsZero() && time.Now().After(overallDeadline) {
-			return "", &CallTimeoutError{
-				Service:   service,
-				Operation: operation,
-				Timeout:   opts.StartToCloseTimeout,
-			}
-		}
 
 		if isNonRetryable(err, rp.NonRetryableErrors) {
 			return "", err
@@ -1125,16 +1227,6 @@ func (h *HostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 			backoff := time.Duration(float64(rp.InitialInterval) * math.Pow(rp.BackoffCoefficient, float64(attempt-1)))
 			if backoff > rp.MaxInterval {
 				backoff = rp.MaxInterval
-			}
-			if !overallDeadline.IsZero() {
-				remaining := time.Until(overallDeadline)
-				if backoff > remaining {
-					return "", &CallTimeoutError{
-						Service:   service,
-						Operation: operation,
-						Timeout:   opts.StartToCloseTimeout,
-					}
-				}
 			}
 			h.DurableSleep(backoff)
 		}
@@ -1146,80 +1238,6 @@ func (h *HostCallsImpl) DurableCallWithOptions(opts CallOptions, service, operat
 func (h *HostCallsImpl) DurableCallTypedWithOptions(opts CallOptions, service, operation string, request, result interface{}) error {
 	if h.durableCallTypedWithOptions != nil {
 		return h.durableCallTypedWithOptions(opts, service, operation, request, result)
-	}
-
-	// Per-call timeout enforcement for the typed variant.
-	if opts.Timeout > 0 {
-		type callResult struct {
-			resp string
-			err  error
-		}
-		ch := make(chan callResult, 1)
-		go func() {
-			reqBytes, marshalErr := json.Marshal(request)
-			if marshalErr != nil {
-				ch <- callResult{"", marshalErr}
-				return
-			}
-			resp, callErr := h.DurableCallWithOptions(opts, service, operation, string(reqBytes))
-			ch <- callResult{resp, callErr}
-		}()
-		select {
-		case r := <-ch:
-			if r.err != nil {
-				return r.err
-			}
-			if result != nil {
-				if err := json.Unmarshal([]byte(r.resp), result); err != nil {
-					return fmt.Errorf("durable: unmarshaling response from %s.%s: %w", service, operation, err)
-				}
-			}
-			return nil
-		case <-time.After(opts.Timeout):
-			return &CallTimeoutError{
-				Service:   service,
-				Operation: operation,
-				Timeout:   opts.Timeout,
-			}
-		}
-	}
-
-	// StartToCloseTimeout: overall deadline across all retry attempts.
-	// When there is a retry policy, DurableCallWithOptions handles the deadline.
-	if opts.StartToCloseTimeout > 0 && opts.Retry == nil {
-		// No retry: use StartToCloseTimeout as the per-call timeout.
-		type callResult struct {
-			resp string
-			err  error
-		}
-		ch := make(chan callResult, 1)
-		go func() {
-			reqBytes, marshalErr := json.Marshal(request)
-			if marshalErr != nil {
-				ch <- callResult{"", marshalErr}
-				return
-			}
-			resp, callErr := h.DurableCall(service, operation, string(reqBytes))
-			ch <- callResult{resp, callErr}
-		}()
-		select {
-		case r := <-ch:
-			if r.err != nil {
-				return r.err
-			}
-			if result != nil {
-				if err := json.Unmarshal([]byte(r.resp), result); err != nil {
-					return fmt.Errorf("durable: unmarshaling response from %s.%s: %w", service, operation, err)
-				}
-			}
-			return nil
-		case <-time.After(opts.StartToCloseTimeout):
-			return &CallTimeoutError{
-				Service:   service,
-				Operation: operation,
-				Timeout:   opts.StartToCloseTimeout,
-			}
-		}
 	}
 
 	reqBytes, err := json.Marshal(request)
@@ -1254,20 +1272,20 @@ func (h *HostCallsImpl) DurableCallJSONWithOptions(opts CallOptions, service, op
 	return nil
 }
 
-func (h *HostCallsImpl) DurableCallWithHeartbeat(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error) {
+func (h *HostCallsImpl) DurableCallWithHeartbeat(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error) {
 	if h.durableCallWithHeartbeat != nil {
-		return h.durableCallWithHeartbeat(service, operation, requestJSON, heartbeatInterval, onProgress)
+		return h.durableCallWithHeartbeat(service, operation, requestJSON, heartbeatInterval)
 	}
 	// Fallback: regular durable call without heartbeat support.
 	return h.DurableCall(service, operation, requestJSON)
 }
 
-func (h *HostCallsImpl) DurableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error {
+func (h *HostCallsImpl) DurableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration) error {
 	reqJSON, err := json.Marshal(request)
 	if err != nil {
 		return fmt.Errorf("durable: marshaling request for %s.%s: %w", service, operation, err)
 	}
-	resp, err := h.DurableCallWithHeartbeat(service, operation, string(reqJSON), heartbeatInterval, onProgress)
+	resp, err := h.DurableCallWithHeartbeat(service, operation, string(reqJSON), heartbeatInterval)
 	if err != nil {
 		return err
 	}
@@ -1345,7 +1363,30 @@ func (h *HostCallsImpl) AwaitCondition(predicate func() bool, pollInterval, time
 		if h.Now().After(deadline) {
 			return false
 		}
-		h.AwaitSignals([]string{"__condition_poll"}, pollInterval)
+		// CLAMPED, not passed through. cleat#1331.
+		//
+		// pollInterval is this function's public parameter, and
+		// AwaitCondition(pred, 100*time.Microsecond, time.Minute) is an
+		// entirely reasonable thing to write -- a tight poll on a cheap
+		// predicate. Passed through, it used to livelock the workflow: the
+		// deadline check above never ran again because the body never
+		// returned.
+		//
+		// With AwaitSignals now guarding its converted value, an unclamped
+		// sub-millisecond interval would merely stop suspending -- the loop
+		// would terminate at the deadline, but spin in the guest for the whole
+		// wait instead of yielding the worker. Clamping to the durable wait's
+		// 1ms resolution is what the caller asked for, as closely as the
+		// mechanism can express it.
+		//
+		// No error is returned because this function has no error channel; it
+		// answers bool. Returning false for a predicate that would have become
+		// true is the worse silence of the two.
+		interval := pollInterval
+		if interval.Milliseconds() <= 0 {
+			interval = time.Millisecond
+		}
+		h.AwaitSignals([]string{"__condition_poll"}, interval)
 	}
 }
 

@@ -224,9 +224,21 @@ func TestGenerateExportsPlaceOrderUnmarshalsArgs(t *testing.T) {
 	result, cr := loadBasic(t)
 	_ = cr
 	code := string(GenerateExports("basic", result, "go"))
-	// UserID is a simple string: extracted via extractJSONString.
-	if !strings.Contains(code, `UserID := extractJSONString`) {
-		t.Error("expected UserID extraction in generated code")
+	// UserID is a declared scalar, so it is bound BY NAME and its absence is
+	// an error. cleat#1065 step 4.
+	//
+	// This used to assert `UserID := extractJSONString`, which was the old
+	// zero-binding shape: extractJSONString returns "" for a missing key, so
+	// the generated code could not tell "sent empty" from "sent nothing".
+	// Asserting the call was asserting an implementation detail; asserting the
+	// refusal is asserting the contract, and it is the half that would
+	// silently regress.
+	if !strings.Contains(code, `extractJSONRaw(argsJSON, "userID")`) {
+		t.Error("expected userID to be looked up by name in generated code")
+	}
+	if !strings.Contains(code, "is absent from the start payload") {
+		t.Error("generated code binds userID without refusing an absent key; " +
+			"an absent declared parameter is an error since cleat#1065")
 	}
 	// Cart is []CartItem (complex type): deserialized via json.Unmarshal.
 	if !strings.Contains(code, "json.Unmarshal") {
@@ -871,4 +883,27 @@ func TestCronAdaptersReportTheHostsReason(t *testing.T) {
 	}
 
 	syntaxCheck(t, "GenerateHostAdapter(all)", code)
+}
+
+// TestGenerateExportsEmitsTheDeferRunner pins that codegen emits the export the
+// host needs to drain a dead workflow's defer table (IMPROVEMENT-PLAN §3.35
+// phase 4).
+//
+// The name matters as much as the presence. Entry-point exports are ToSnakeCase
+// of an EXPORTED Go identifier, so they always begin with a lowercase letter --
+// a leading underscore is what makes this one impossible to collide with a
+// workflow's own entry point.
+func TestGenerateExportsEmitsTheDeferRunner(t *testing.T) {
+	result, cr := loadBasic(t)
+	_ = cr
+	code := string(GenerateExports("basic", result, "go"))
+
+	if !strings.Contains(code, "//go:wasmexport __cleat_run_deferred") {
+		t.Error("no __cleat_run_deferred export; the host has no way to run the " +
+			"defers of a workflow that was killed before it could run its own")
+	}
+	if !strings.Contains(code, "_cleatRunDeferred()") {
+		t.Error("the defer runner export does not call _cleatRunDeferred")
+	}
+	syntaxCheck(t, "GenerateExports", code)
 }

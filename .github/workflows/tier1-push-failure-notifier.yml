@@ -1,0 +1,297 @@
+# ---------------------------------------------------------------------------
+# Tier 1 Push Failure Notifier
+#
+# Tier 1 Gate is report-only in the merge queue for tier1-engine and
+# tier1-rest (cleat#2080): a semantic conflict between two independently-
+# green PRs (each fine alone, broken merged together) is no longer caught IN
+# the queue, only by develop's own push run afterward. Nothing watched that
+# run -- cleat#2150. Develop push run 35921827006 (d1306a7e9, #2102) failed at
+# 21:36Z on 2026-09-23 -- TestFinalizeRetriesADeadlockOnEventCount/mysql, a
+# known flake (#2033) -- and nothing on GitHub referenced it; three more
+# merges landed at 21:39, 21:46 and 21:49 before anyone looked.
+#
+# This is the mitigation the owner's 2A decision (cleat#2150, 2026-09-24 --
+# "the notifier, together with 1A [R10's known-flake re-run], is the
+# mitigation. That makes the notifier the part that makes 2A safe") names as
+# what makes the report-only tradeoff above safe. A red develop push run of
+# Tier 1 Gate now opens, or comments on, a tracking issue naming the SHA, the
+# run and the failing tests -- within a minute or two of the run completing.
+#
+# `workflow_run`, not a step inside tier1-gate.yml itself, so this fires
+# regardless of *which* job failed -- including tier1-coverage, which has no
+# DB and no log artifact of its own, and would have no step of its own to add
+# a notifier to. Filtered (in the script, not only in a job `if:` -- see the
+# dry-run note below) to the push run on develop specifically: a PR's own
+# `pull_request` run failing is unremarkable and already visible on the PR,
+# and a `merge_group` run is report-only and rarely fails at all.
+#
+# NOT A REQUIRED CHECK, AND DELIBERATELY NOT NAMED LIKE ONE. Adding a job to
+# a required workflow, or introducing a new job name that must become
+# required, is a live branch-protection change and needs the owner's sign-off
+# (see tiers.yaml's required_contexts block and .github/required-checks.txt).
+# This is a read-only listener with no bearing on whether anything merges --
+# it has nothing in `needs:` from any gate, and nothing gates on it -- so it
+# needs none of that, and can change freely without touching branch
+# protection.
+#
+# DRY RUN, FOR REAL VERIFICATION WITHOUT WAITING FOR THE NEXT RED PUSH. The
+# `workflow_dispatch` trigger below takes a real Tier 1 Gate run id and runs
+# the identical script against it, including the identical filter (event ==
+# push, branch == develop, conclusion == failure) -- it does not bypass that
+# check, it only supplies the run id a real `workflow_run` completion would
+# have supplied. A `dry_run` input additionally suppresses the two write
+# calls (issue create/comment) and prints the computed title and body to the
+# step summary instead, so the extraction logic can be verified against a
+# known-failing run (35921827006, this file's own cleat#2102 example) and a
+# known-green one without creating or polluting a real issue either way.
+# ---------------------------------------------------------------------------
+name: Tier 1 Push Failure Notifier
+
+on:
+  workflow_run:
+    workflows: ["Tier 1 Gate"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Tier 1 Gate run id to evaluate (for testing the notifier itself)"
+        required: true
+      dry_run:
+        description: "If true, compute and print the issue title/body but do not create or comment"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  # workflow_run fires once per completed run, so two live completions of the
+  # same run cannot race -- this only guards a manual dry-run dispatch
+  # against racing a live completion for the same run id.
+  group: ${{ github.workflow }}-${{ github.event.inputs.run_id || github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+permissions:
+  # actions:read to list this run's jobs and download the tier-gate-log
+  # artifacts its jobs uploaded; issues:write to open or comment on the
+  # tracking issue. Nothing else -- no contents, no pull-requests, no
+  # checkout step anywhere in this workflow.
+  actions: read
+  issues: write
+
+jobs:
+  notify:
+    name: Notify on a red develop push
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Resolve the run to evaluate
+        id: resolve
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const isDispatch = context.eventName === 'workflow_dispatch';
+            const runId = isDispatch
+              ? Number(context.payload.inputs.run_id)
+              : context.payload.workflow_run.id;
+
+            const { data: run } = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runId,
+            });
+
+            const dryRun = isDispatch
+              ? String(context.payload.inputs.dry_run) !== 'false'
+              : false;
+
+            core.setOutput('run_id', String(run.id));
+            core.setOutput('head_sha', run.head_sha);
+            core.setOutput('html_url', run.html_url);
+            core.setOutput('event', run.event);
+            core.setOutput('head_branch', run.head_branch);
+            core.setOutput('conclusion', run.conclusion || '');
+            core.setOutput('dry_run', String(dryRun));
+
+            // The actual gate this workflow exists to apply -- evaluated
+            // here, once, rather than duplicated between a job-level `if:`
+            // and the script below. A workflow_dispatch dry run goes through
+            // this exact check, so testing it against a known-green run
+            // proves the filter itself, not just the dry-run flag.
+            const relevant = run.event === 'push' && run.head_branch === 'develop' && run.conclusion === 'failure';
+            core.setOutput('relevant', String(relevant));
+            core.notice(
+              `run=${run.id} event=${run.event} branch=${run.head_branch} ` +
+              `conclusion=${run.conclusion} relevant=${relevant} dry_run=${dryRun}`
+            );
+
+      - name: Download tier-gate log artifacts from the run
+        if: steps.resolve.outputs.relevant == 'true'
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ steps.resolve.outputs.run_id }}
+          pattern: tier-gate-log-*
+          path: tier-gate-logs
+          merge-multiple: true
+
+      - name: Open or update the tracking issue
+        if: steps.resolve.outputs.relevant == 'true'
+        uses: actions/github-script@v9
+        env:
+          RUN_ID: ${{ steps.resolve.outputs.run_id }}
+          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+          RUN_URL: ${{ steps.resolve.outputs.html_url }}
+          DRY_RUN: ${{ steps.resolve.outputs.dry_run }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            const runId = Number(process.env.RUN_ID);
+            const sha = process.env.HEAD_SHA;
+            const runUrl = process.env.RUN_URL;
+            const dryRun = process.env.DRY_RUN === 'true';
+
+            // Which jobs failed, straight from the API. This covers
+            // tier1-coverage too, which has no DB and no log artifact of its
+            // own -- a log-only report would say nothing about it failing.
+            const jobsResp = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runId,
+              per_page: 100,
+            });
+            const failedJobs = jobsResp.data.jobs.filter(j => j.conclusion === 'failure');
+
+            // Failing test names, from any tier-gate.log artifact this run's
+            // jobs uploaded. go test -v's own failure line is `--- FAIL:
+            // <Test>`, indented once per subtest level -- anchoring on `^---`
+            // with no leading-whitespace allowance misses every subtest
+            // failure, which is where this repo's actual failures live (a
+            // dialect subtest, not the parent). Verified against
+            // cleat#2102's real log: the reported failure is the indented
+            // `    --- FAIL: TestFinalizeRetriesADeadlockOnEventCount/mysql`
+            // line, not the unindented parent line above it.
+            let failingTests = [];
+            let logNote = '';
+            const logDir = 'tier-gate-logs';
+            if (fs.existsSync(logDir)) {
+              const files = fs.readdirSync(logDir);
+              if (files.length === 0) {
+                logNote = '(no tier-gate-log-* artifact was attached to this run)';
+              }
+              for (const f of files) {
+                const text = fs.readFileSync(path.join(logDir, f), 'utf8');
+                const matches = [...text.matchAll(/^[ \t]*--- FAIL: (\S+)/gm)];
+                failingTests.push(...matches.map(m => m[1]));
+              }
+            } else {
+              logNote = '(no tier-gate-log-* artifact was attached to this run -- ' +
+                'likely a failure before any shard ran, e.g. tier1-coverage)';
+            }
+            failingTests = [...new Set(failingTests)];
+
+            const title = '[tier1] develop push run is failing';
+            const bodyLines = [
+              `Run: ${runUrl}`,
+              `Commit: ${sha}`,
+              '',
+              `Failed jobs: ${failedJobs.map(j => j.name).join(', ') || '(none reported failure -- check the run directly)'}`,
+              '',
+            ];
+            if (failingTests.length > 0) {
+              bodyLines.push('Failing tests:');
+              bodyLines.push('```');
+              bodyLines.push(...failingTests);
+              bodyLines.push('```');
+            } else {
+              bodyLines.push(`No \`--- FAIL:\` line found in the uploaded log. ${logNote}`);
+            }
+            bodyLines.push('');
+            bodyLines.push('cleat#2150: Tier 1 Gate is report-only in the merge queue; this is the net.');
+            const body = bodyLines.join('\n');
+
+            if (dryRun) {
+              core.notice('DRY RUN -- not creating or commenting on any issue');
+              await core.summary
+                .addHeading('Tier 1 Push Failure Notifier -- dry run')
+                .addRaw(`Title: ${title}\n\n`)
+                .addCodeBlock(body, 'text')
+                .write();
+              return;
+            }
+
+            const openIssues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'area/ci',
+              per_page: 100,
+            });
+            const existing = openIssues.data.find(i => i.title === title);
+
+            if (existing) {
+              // Dedupe per run: a retried `workflow_run` completion for a run
+              // already reported must not double-post. Checked against the
+              // run URL rather than the SHA, because a re-run of the SAME
+              // commit's Tier 1 Gate produces a new run id and a new URL for
+              // what is, from a reader's perspective, the same failure worth
+              // re-flagging -- but the SAME run completing twice (GitHub can
+              // redeliver a webhook) must not.
+              const comments = await github.rest.issues.listComments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                per_page: 100,
+              });
+              const alreadyReported = comments.data.some(c => c.body && c.body.includes(runUrl))
+                || (existing.body && existing.body.includes(runUrl));
+              if (alreadyReported) {
+                core.notice(`Run ${runUrl} already reported on #${existing.number}, skipping`);
+              } else {
+                await github.rest.issues.createComment({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: existing.number,
+                  body: `Failed again.\n\n${body}`,
+                });
+                core.notice(`Commented on existing issue #${existing.number}`);
+              }
+            } else {
+              const created = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['area/ci'],
+              });
+              core.notice(`Opened issue #${created.data.number}`);
+            }
+
+      - name: Quiet on green
+        if: steps.resolve.outputs.relevant == 'false'
+        # Values come through `env:`, never spliced into the script text via
+        # `${{ }}` -- this step runs for every non-matching Tier 1 Gate run,
+        # which includes every `pull_request` run, and cleat-team/cleat is
+        # public: HEAD_BRANCH on such a run is a fork PR's branch name,
+        # attacker-chosen, and `${{ steps.resolve.outputs.head_branch }}`
+        # spliced directly into `run:` would make it part of the shell
+        # script text itself rather than data -- a classic Actions script-
+        # injection hole (`git check-ref-format --branch` accepts branch
+        # names containing `$(...)`). `workflow_run` jobs execute in the
+        # base repo's context regardless of which fork triggered the
+        # upstream run, so this would run attacker-controlled shell on a
+        # trusted runner with this job's `actions:read`/`issues:write`
+        # token. Quoting `"$HEAD_BRANCH"` here is not enough on its own --
+        # the vulnerability is the YAML-level substitution happening BEFORE
+        # the shell ever parses the line, not the shell's own quoting -- so
+        # the value must never appear inside `${{ }}` in a `run:` block at
+        # all. Found in review before this workflow ever ran (cleat#2150).
+        env:
+          RUN_ID: ${{ steps.resolve.outputs.run_id }}
+          EVENT: ${{ steps.resolve.outputs.event }}
+          HEAD_BRANCH: ${{ steps.resolve.outputs.head_branch }}
+          CONCLUSION: ${{ steps.resolve.outputs.conclusion }}
+        run: |
+          echo "run $RUN_ID: event=$EVENT branch=$HEAD_BRANCH conclusion=$CONCLUSION -- not a red develop push run, nothing to report"

@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 	"os"
 	"strings"
 	"time"
@@ -15,10 +17,54 @@ import (
 // check-db command
 // ---------------------------------------------------------------------------
 
+// coreTableExistsSQL asks whether one core table exists, per dialect.
+//
+// THE TWO ARMS TAKE DIFFERENT NUMBERS OF PARAMETERS, which is unusual enough to
+// say out loud. MySQL has no schema inside a database -- the two are one
+// namespace -- so there is no schema to bind, and the right question is "in the
+// database this DSN selected", which DATABASE() answers. Asking across all
+// schemas instead would count a table of the same name in any other database on
+// the server, and report a missing table as present.
+//
+// The caller switches on an empty schema from dialect.qualifiedTable and binds
+// accordingly. Written as a plugin.Query rather than two inline strings so that
+// the MySQL-only form is STRUCTURALLY identifiable as a non-PostgreSQL arm:
+// TestEveryInlineStatementParsesOnPostgres PREPAREs every inline statement
+// against PostgreSQL, where DATABASE() does not exist, and it prunes MySQL and
+// MSSQL arms by key. A bare string literal is not something it can recognise.
+var coreTableExistsSQL = plugin.Query{
+	Default: `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2`,
+	MySQL:   `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = $1`,
+}
+
+// latestMigrationSQL reads the highest applied schema version.
+//
+// `ORDER BY ... LIMIT 1` is not SQL Server syntax; it wants TOP. This is the
+// one statement in check-db where the DIALECTS DIFFER IN SYNTAX rather than in
+// schema, which is why it is a plugin.Query arm and not a rebind --
+// plugin.Rebind rewrites placeholders, now() and boolean literals, and has no
+// business rewriting a row-limiting clause.
+var latestMigrationSQL = plugin.Query{
+	Default: `
+		SELECT version, applied_at
+		FROM schema_migrations
+		ORDER BY version DESC
+		LIMIT 1`,
+	MSSQL: `
+		SELECT TOP 1 version, applied_at
+		FROM schema_migrations
+		ORDER BY version DESC`,
+}
+
+// errSizeEstimateNotPortable marks the event-history size estimate as skipped
+// rather than failed. It never reaches a user: the caller reads it only to take
+// the row-count branch, which prints a row count instead of a size.
+var errSizeEstimateNotPortable = errors.New("event history size estimate is PostgreSQL-only")
+
 // runCheckDB verifies database connectivity and schema health.
 // It connects to the database, pings it, checks the schema migration version,
 // inspects workflow instance counts, and reports overall health status.
-func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
+func runCheckDB(ctx context.Context, db *sql.DB, d dialect, dsn string, args []string) {
 	verbose := false
 	for _, arg := range args {
 		if arg == "--verbose" || arg == "-v" {
@@ -59,12 +105,7 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 	// 2. Schema version.
 	var schemaVersion string
 	var appliedAt *time.Time
-	err := db.QueryRowContext(ctx, `
-		SELECT version, applied_at
-		FROM schema_migrations
-		ORDER BY version DESC
-		LIMIT 1
-	`).Scan(&schemaVersion, &appliedAt)
+	err := db.QueryRowContext(ctx, latestMigrationSQL.For(d.query)).Scan(&schemaVersion, &appliedAt)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		fmt.Fprintf(os.Stderr, "SCHEMA: WARNING: cannot read schema version: %v\n", err)
 		issues = append(issues, fmt.Sprintf("schema version check failed: %v", err))
@@ -81,30 +122,142 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 		fmt.Printf("SCHEMA: version %s (applied: %s)\n", schemaVersion, timeStr)
 	}
 
-	// 3. Table accessibility.
-	tables := []string{
-		"workflow_instances",
-		"event_history",
-		"workflow_defs",
-		"workflow_signals",
-		"workflow_promises",
-		"child_workflows",
-		"workflow_schedules",
-		"workflow_dead_letters",
-		"idempotency_keys",
-		"concurrency_keys",
-		"tenant_api_keys",
-		"plugin_registry",
-		"plugin_audit_log",
+	// 2b. What this connection can see.
+	//
+	// Reported before the table checks because it EXPLAINS them: on a
+	// connection row-level security applies to, the reads below fail or
+	// return one tenant's rows, and without this line the operator is left to
+	// infer a permissions problem from a count. Telling them what their
+	// database looks like is this command's whole job. cleat#1184.
+	switch posture, reasons, rerr := rlsPostureFn(ctx, db, d.name); {
+	case rerr != nil:
+		fmt.Fprintf(os.Stderr, "RLS: WARNING: cannot determine enforcement: %v\n", rerr)
+		issues = append(issues, fmt.Sprintf("row-level security check failed: %v", rerr))
+	case posture == rlsNotApplicable:
+		fmt.Printf("RLS: %s has no row-level security -- reads are cluster-wide\n", d.name)
+	case posture == rlsExempt:
+		// The REASON differs by dialect and naming the wrong one sends an
+		// operator after a privilege that does not exist. cleat#1646.
+		if d.name == "mssql" {
+			fmt.Println("RLS: connection is exempt (member of dbo.cleat_admin) -- reads are cluster-wide")
+		} else {
+			fmt.Println("RLS: connection is exempt (superuser or BYPASSRLS) -- reads are cluster-wide")
+		}
+	case posture == rlsSubject:
+		fmt.Fprintln(os.Stderr, "RLS: connection IS subject to row-level security -- reads below "+
+			"are scoped to one tenant, or fail")
+		issues = append(issues, "--db is subject to row-level security: cleatctl needs a "+
+			"superuser or BYPASSRLS role, not the cleat_app role cleat-worker takes")
+	case posture == rlsUnprotected:
+		// Reads will work, and that is the bad news rather than the good.
+		// Nothing is isolating tenants in this database.
+		fmt.Fprintln(os.Stderr, "RLS: this DATABASE is not enforcing tenant isolation:")
+		for _, r := range reasons {
+			fmt.Fprintf(os.Stderr, "  - %s\n", r.Detail)
+		}
+		issues = append(issues, "row-level security is not enforced by this database")
 	}
+
+	// 2c. Which database the RUNTIME figures below come from.
+	//
+	// On MySQL a tenant's per-tenant tables live in their own database,
+	// cleat_<tenant-id>, because MySQL has neither schemas-inside-a-database
+	// nor row-level security. --db names the BASE database, which holds the
+	// control-plane tables -- and which the migration set is applied to as
+	// well, so every per-tenant table exists there too, empty. A count against
+	// it therefore does not fail. It answers zero, confidently.
+	//
+	// That is what this command did until cleat#1956's audit. Measured against
+	// a deployment holding one workflow instance in the tenant database and
+	// none in the base one:
+	//
+	//	cleatctl check-db  ->  INSTANCES: 0 total ... STATUS: healthy
+	//	same row in the base database (control)  ->  INSTANCES: 1 total
+	//
+	// So the post-incident tool an operator reaches for on a sick MySQL
+	// deployment reported health about a database nothing runs in. The
+	// unqualified name was not wrong SQL; it resolved, to the wrong database.
+	//
+	// PostgreSQL and SQL Server take the empty qualifier and are unchanged:
+	// there the tenant's rows are in the database --db already names.
+	//
+	// ONE TENANT. check-db takes no tenant argument, so this reports the
+	// default tenant's runtime data. That is the whole of it on MySQL, which
+	// tiers.yaml D1 makes single-tenant; on a MySQL deployment that somehow
+	// has several, the figures below are one tenant's and the line printed
+	// says which.
+	runtimeQual, runtimeDBPresent, qualErr := d.tenantRuntimeQualifier(ctx, db, defaultTenantID)
+	switch {
+	case qualErr != nil:
+		fmt.Fprintf(os.Stderr, "RUNTIME DATA: WARNING: cannot locate the tenant database: %v\n", qualErr)
+		issues = append(issues, fmt.Sprintf("tenant database lookup failed: %v", qualErr))
+	case !runtimeDBPresent:
+		// An absence worth failing on, and the message names the benign cause
+		// so the operator is not sent hunting. cleat-worker CREATES this
+		// database on startup, so "not there" means no worker has ever run
+		// against this deployment -- which for a command that answers "can
+		// this database run cleat" is not health.
+		fmt.Fprintf(os.Stderr, "RUNTIME DATA: the per-tenant database %s does not exist\n",
+			engine.MySQLTenantDatabaseName(defaultTenantID))
+		issues = append(issues, fmt.Sprintf(
+			"per-tenant database %s does not exist: on MySQL cleat-worker creates it at "+
+				"startup, so this deployment has never run one (or it was dropped)",
+			engine.MySQLTenantDatabaseName(defaultTenantID)))
+	case runtimeQual != "":
+		fmt.Printf("RUNTIME DATA: %s (tenant %s)\n",
+			engine.MySQLTenantDatabaseName(defaultTenantID), defaultTenantID)
+	}
+
+	// 3. Table accessibility.
+	//
+	// coreTables is every table migrations/postgres/ creates, and it is checked
+	// against those files by TestCoreTablesMatchTheMigrations. Before that test
+	// existed this was a hand-maintained list that had drifted in BOTH
+	// directions, silently, for as long as anyone had run the command:
+	//
+	//   - FOUR names that no migration has ever created --  child_workflows,
+	//     workflow_dead_letters, plugin_registry, plugin_audit_log -- so every
+	//     healthy database was told "TABLES: 9 accessible, 4 missing";
+	//   - and TEN real core tables it never looked at, including
+	//     workflow_routing, workflow_tags and workflow_update_requests.
+	//
+	// The over-reporting is what got noticed, because it prints. The
+	// under-reporting is the worse half: a command whose job is to say whether
+	// the schema is complete was answering about a subset chosen by hand.
+	//
+	// Two of the four phantoms were not renames and are not coming back.
+	// child_workflows: parent/child is workflow_instances.parent_workflow_id, a
+	// column. plugin_audit_log: the only audit-shaped table is audit_events,
+	// created by plugins/auditlog -- a PLUGIN, present only where it is
+	// installed, which a core health check must not require. cleat#1216.
+	tables := coreTables
 	var missingTables []string
 	var accessibleCount int
 	for _, table := range tables {
+		// Schema-qualified names are matched on BOTH parts. Matching on
+		// table_name alone -- which is what this did -- makes `admin.tenants`
+		// and a `tenants` in any other schema indistinguishable, so a table in
+		// the wrong schema reads as present. That mattered the moment the list
+		// stopped being purely public: four of these live in `admin`.
+		// Which schema a core table lives in is dialect-dependent and not
+		// derivable from the PostgreSQL name: MySQL has no `admin` schema at
+		// all, SQL Server keeps `admin` but puts the rest in `dbo`. See
+		// dialect.qualifiedTable, which TestQualifiedTableMatchesEachDialects-
+		// Migrations holds to each dialect's own migration files.
+		schemaName, bareName := d.qualifiedTable(table)
 		var count int
-		err := db.QueryRowContext(ctx,
-			"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = $1 AND table_schema NOT IN ('pg_catalog', 'information_schema')",
-			table,
-		).Scan(&count)
+		var stmt string
+		var stmtArgs []any
+		var err error
+		switch {
+		case schemaName == "":
+			stmt, stmtArgs, err = d.rebindArgs(coreTableExistsSQL.For(d.query), bareName)
+		default:
+			stmt, stmtArgs, err = d.rebindArgs(coreTableExistsSQL.For(d.query), schemaName, bareName)
+		}
+		if err == nil {
+			err = db.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&count)
+		}
 		if err != nil {
 			// information_schema might not exist on all drivers; try a simple count instead.
 			var rowCount int64
@@ -139,12 +292,13 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 		Status string
 		Count  int64
 	}
-	rows, err := db.QueryContext(ctx, `
+	//nolint:gosec // G202: the only interpolated fragment is runtimeQual, which tenantRuntimeQualifier builds by backtick-quoting engine.MySQLTenantDatabaseName of a uuid.Parse'd tenant id, and which is empty on every dialect but MySQL. Nothing caller-controlled reaches this: check-db takes no arguments but --verbose.
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`
 		SELECT status, COUNT(*) AS cnt
-		FROM workflow_instances
+		FROM %sworkflow_instances
 		GROUP BY status
 		ORDER BY status
-	`)
+	`, runtimeQual))
 	if err == nil {
 		defer rows.Close()
 		var totalInstances int64
@@ -165,33 +319,74 @@ func runCheckDB(ctx context.Context, db *sql.DB, args []string) {
 			}
 			fmt.Printf("  by status: %s\n", strings.Join(parts, ", "))
 		}
-	} else if verbose {
-		fmt.Fprintf(os.Stderr, "INSTANCES: WARNING: cannot query workflow_instances: %v\n", err)
+	} else {
+		// Not `else if verbose`, and that is the whole point of cleat#1184.
+		// This branch used to print nothing without --verbose, so the section
+		// simply vanished from the report and STATUS stayed "healthy" -- a
+		// diagnostic command reporting health about a table it could not read.
+		// Measured on a cleat_app connection: exit 0, "STATUS: healthy", and
+		// the INSTANCES and EVENT HISTORY lines absent with no trace.
+		fmt.Fprintf(os.Stderr, "INSTANCES: UNREADABLE: %v\n", err)
+		issues = append(issues, fmt.Sprintf("cannot read workflow_instances: %v", err))
 	}
 
 	// 5. Event history size estimate.
+	//
+	// pg_column_size(row_to_json(...)) has no portable equivalent, and the
+	// nearest ones are not the same measurement -- MySQL's
+	// information_schema.TABLES.DATA_LENGTH and SQL Server's sp_spaceused
+	// report ALLOCATED pages including free space and indexes, not the size of
+	// the rows. Reporting either under the same label would be a different
+	// number wearing this one's name.
+	//
+	// So the query is not issued at all off PostgreSQL, rather than issued and
+	// allowed to fail into the row-count path below. The fallback exists for a
+	// query that FAILED; using it for one that was never applicable makes an
+	// error path carry an expected case, and the stderr line it prints would be
+	// reporting a defect that is not there.
 	var histSize int64
-	err = db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(pg_column_size(row_to_json(event_history.*))), 0)
-		FROM event_history
-	`).Scan(&histSize)
+	err = errSizeEstimateNotPortable
+	if d.name == "postgres" {
+		err = db.QueryRowContext(ctx, `
+			SELECT COALESCE(SUM(pg_column_size(row_to_json(event_history.*))), 0)
+			FROM event_history
+		`).Scan(&histSize)
+	}
 	if err == nil {
 		sizeMB := float64(histSize) / (1024 * 1024)
 		fmt.Printf("EVENT HISTORY: %.1f MB\n", sizeMB)
-	} else if verbose {
-		// Fallback: count rows
+	} else {
+		// The row-count fallback first: pg_column_size over row_to_json is the
+		// expensive form and can fail where a plain COUNT(*) succeeds. Only
+		// when BOTH fail has the table proved unreadable.
 		var rowCount int64
-		if countErr := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM event_history").Scan(&rowCount); countErr == nil {
+		//nolint:gosec // G202: runtimeQual, as the instance count above.
+		if countErr := db.QueryRowContext(ctx,
+			fmt.Sprintf("SELECT COUNT(*) FROM %sevent_history", runtimeQual),
+		).Scan(&rowCount); countErr == nil {
 			fmt.Printf("EVENT HISTORY: %d rows\n", rowCount)
+		} else {
+			fmt.Fprintf(os.Stderr, "EVENT HISTORY: UNREADABLE: %v\n", countErr)
+			issues = append(issues, fmt.Sprintf("cannot read event_history: %v", countErr))
 		}
+		_ = histSize
 	}
 
-	// 6. Dead letter queue count.
-	var deadLetterCount int64
-	err = db.QueryRowContext(ctx, "SELECT COUNT(*) FROM workflow_dead_letters").Scan(&deadLetterCount)
-	if err == nil && deadLetterCount > 0 && verbose {
-		fmt.Printf("DEAD LETTERS: %d workflows\n", deadLetterCount)
-	}
+	// 6. Dead letters are reported by section 4 above, and were never reported
+	// here.
+	//
+	// This section used to run `SELECT COUNT(*) FROM workflow_dead_letters`
+	// behind `if err == nil && deadLetterCount > 0 && verbose`. There is no
+	// such table -- dead_lettered is a STATUS on workflow_instances
+	// (migrations/postgres/033, 052) -- so the query always errored, err was
+	// never nil, and the DEAD LETTERS line has never printed once. Removing it
+	// cannot regress output that was never produced.
+	//
+	// Not repointed at workflow_instances, because section 4's `by status`
+	// line already carries the number under the same --verbose gate: on a
+	// database with five, it prints `dead_lettered: 5`. A second statement for
+	// a figure already on screen is a second thing to drift, which is the
+	// defect this file is being repaired for. cleat#1216.
 
 	// 7. Summary.
 	if len(issues) > 0 {

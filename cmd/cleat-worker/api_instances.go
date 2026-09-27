@@ -42,6 +42,9 @@ func (s *apiServer) handleGetInstanceEvents(w http.ResponseWriter, r *http.Reque
 	if !ok {
 		return
 	}
+	if !s.runExists(w, r, st, id) {
+		return
+	}
 	offset := 0
 	limit := 1000
 	if v, err := strconv.Atoi(r.URL.Query().Get("offset")); err == nil && v >= 0 {

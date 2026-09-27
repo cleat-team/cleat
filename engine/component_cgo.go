@@ -2,7 +2,7 @@
 
 // This file (plus component_callbacks.go and cgo_test_helpers.go) calls the
 // wasmtime Component Model C API directly via cgo, using types like
-// wasmtime_component_val_t that github.com/bytecodealliance/wasmtime-go/v44
+// wasmtime_component_val_t that github.com/bytecodealliance/wasmtime-go/v48
 // does not expose through its Go bindings -- the module ships exactly one
 // component-related Go file, config_feat_component_model.go, and it is a
 // config flag.
@@ -90,6 +90,215 @@ package engine
 //     return val;
 // }
 //
+// // ---- result<string, call-failure> -------------------------------------
+// //
+// // Three constructors for the one WIT type that carries a host call's
+// // outcome (python-sdk/wit/cleat.wit, interface `outcomes`). A stop and a
+// // failure are cases here rather than values of the response string, which
+// // is the whole point: no response a service can return produces one.
+// //
+// // Every name and every payload is heap-allocated with the C allocator, and
+// // it is REQUIRED, not a preference. wasmtime FREES these -- so static
+// // storage would be a free() of a string literal, which is a crash rather
+// // than a saving.
+// //
+// // The header does not say so; wasmtime's source does. In
+// // crates/c-api/src/component/linker.rs (v44.0.0, the version wasmtime-go v44
+// // links) the callback's results are a Vec<wasmtime_component_val_t> that
+// // wasmtime converts BY REFERENCE and then drops at end of scope:
+// //
+// //     for (rust_val, c_val) in std::iter::zip(rets, c_rets) {
+// //         *rust_val = Val::from(&c_val);
+// //     }
+// //
+// // wasmtime_component_val_t is a #[repr(C, u8)] enum whose String arm is a
+// // wasm_name_t and whose Result/Variant arms hold Option<Box<Self>> -- a Rust
+// // Box, not a raw pointer -- so that drop is RECURSIVE through of.result.val,
+// // the discriminant and the record entries. wasmtime_component_val_delete is
+// // literally ManuallyDrop::drop of the same value, which is why nothing in
+// // engine/ needing to call it is not a leak.
+// //
+// // This comment previously said the opposite -- "a deliberate choice of the
+// // leak over the crash" -- and that setResultString had leaked a C.CString
+// // per call since it was written. Both were wrong. Measured from the outside
+// // as well: a 4 MiB response body is not retained across 80 executions
+// // (IMPROVEMENT-PLAN 3.110), and the fixed-size allocations are freed by the
+// // same recursive drop in the same instant.
+// // Aborts rather than returning NULL, and that is the point of it existing.
+// // A NULL return reaches wasmtime as discriminant.data = NULL alongside
+// // discriminant.size = 9, which is a nine-byte read from address zero inside
+// // wasmtime's own lowering rather than a clean stop at the allocation. An
+// // allocation failure here is unrecoverable either way -- the callback has no
+// // way to report one, since its error channel is a wasmtime_error_t it would
+// // also have to allocate -- so the only choice is where it becomes visible.
+// static char *cleat_dup(const char *s, size_t len) {
+//     char *out = (char *)malloc(len + 1);
+//     if (out == NULL) { abort(); }
+//     memcpy(out, s, len);
+//     out[len] = 0;
+//     return out;
+// }
+//
+// // ---- wasi:clocks/wall-clock and wasi:random/random --------------------
+// //
+// // cleat#1410. These two shapes are why that issue was retitled: the seam on
+// // the component linker already existed, and the values could not be built.
+// //
+// // OWNERSHIP, and it is the opposite of what "leak it, wasmtime reads it
+// // later" would suggest -- see the long note below on
+// // component_val_set_call_ok. wasmtime converts a callback's results BY
+// // REFERENCE and then DROPS them, recursively, through the record entries
+// // and the list elements. So every buffer here is C-allocator heap because
+// // wasmtime frees it; static storage would be a free() of a literal.
+//
+// // datetime { seconds: u64, nanoseconds: u32 }
+// //
+// // The same construction as component_val_set_call_failed's {code, message}
+// // record one nesting level down -- no variant and no result around it.
+// static void component_val_set_datetime(wasmtime_component_val_t *v,
+//                                        uint64_t seconds, uint32_t nanos) {
+//     static const char seconds_name[] = "seconds";
+//     static const char nanos_name[] = "nanoseconds";
+//
+//     wasmtime_component_valrecord_entry_t *fields =
+//         (wasmtime_component_valrecord_entry_t *)malloc(2 * sizeof(*fields));
+//     if (fields == NULL) { abort(); }   // dereferenced on the next line
+//     fields[0].name.data = cleat_dup(seconds_name, sizeof(seconds_name) - 1);
+//     fields[0].name.size = sizeof(seconds_name) - 1;
+//     fields[0].val.kind = WASMTIME_COMPONENT_U64;
+//     fields[0].val.of.u64 = seconds;
+//     fields[1].name.data = cleat_dup(nanos_name, sizeof(nanos_name) - 1);
+//     fields[1].name.size = sizeof(nanos_name) - 1;
+//     fields[1].val.kind = WASMTIME_COMPONENT_U32;
+//     fields[1].val.of.u32 = nanos;
+//
+//     v->kind = WASMTIME_COMPONENT_RECORD;
+//     v->of.record.size = 2;
+//     v->of.record.data = fields;
+// }
+//
+// // list<u8>
+// //
+// // A component list is a vec of wasmtime_component_val_t, not a byte buffer:
+// // one full val per byte, each tagged WASMTIME_COMPONENT_U8. That is 16 bytes
+// // of host memory per guest byte, which is why get-random-bytes is bounded by
+// // its caller rather than trusting the guest's length.
+// static void component_val_set_list_u8(wasmtime_component_val_t *v,
+//                                       const uint8_t *bytes, size_t len) {
+//     v->kind = WASMTIME_COMPONENT_LIST;
+//     v->of.list.size = len;
+//     if (len == 0) {
+//         // A zero-length list still needs a non-NULL data pointer only if
+//         // wasmtime dereferences it; it does not, and malloc(0) may return
+//         // NULL legitimately. Set it explicitly rather than leaving whatever
+//         // malloc returned.
+//         v->of.list.data = NULL;
+//         return;
+//     }
+//     wasmtime_component_val_t *elems =
+//         (wasmtime_component_val_t *)malloc(len * sizeof(*elems));
+//     if (elems == NULL) { abort(); }   // dereferenced in the loop
+//     for (size_t i = 0; i < len; i++) {
+//         elems[i].kind = WASMTIME_COMPONENT_U8;
+//         elems[i].of.u8 = bytes[i];
+//     }
+//     v->of.list.data = elems;
+// }
+//
+// // ok(response)
+// //
+// // PRECONDITION: `s` must be C-allocator storage, and ownership passes to
+// // `v` -- this does NOT copy. The comment above says "every name and every
+// // payload is heap-allocated with the C allocator"; the NAMES are, via
+// // cleat_dup, but the payload half of that invariant is enforced by the Go
+// // caller passing C.CString, not by anything here. A later caller handing
+// // this a literal or a Go pointer breaks it with nothing in this file to
+// // catch it.
+// static void component_val_set_call_ok(wasmtime_component_val_t *v,
+//                                       const char *s, size_t len) {
+//     wasmtime_component_val_t inner;
+//     inner.kind = WASMTIME_COMPONENT_STRING;
+//     inner.of.string.data = (char *)s;
+//     inner.of.string.size = len;
+//     v->kind = WASMTIME_COMPONENT_RESULT;
+//     v->of.result.is_ok = true;
+//     v->of.result.val = wasmtime_component_val_new(&inner);
+// }
+//
+// // err(call-failure.suspended) -- the defer-segment stop. No payload: there
+// // is nothing to say beyond "do not do this, unwind".
+// static void component_val_set_call_suspended(wasmtime_component_val_t *v) {
+//     static const char name[] = "suspended";
+//     wasmtime_component_val_t variant;
+//     variant.kind = WASMTIME_COMPONENT_VARIANT;
+//     variant.of.variant.discriminant.data = cleat_dup(name, sizeof(name) - 1);
+//     variant.of.variant.discriminant.size = sizeof(name) - 1;
+//     variant.of.variant.val = NULL;
+//     v->kind = WASMTIME_COMPONENT_RESULT;
+//     v->of.result.is_ok = false;
+//     v->of.result.val = wasmtime_component_val_new(&variant);
+// }
+//
+// // err(call-failure.failed({code, message}))
+// //
+// // PRECONDITION on `msg`: as component_val_set_call_ok's `s` -- C-allocator
+// // storage, ownership passes to `v`, not copied here.
+// static void component_val_set_call_failed(wasmtime_component_val_t *v,
+//                                           uint32_t code,
+//                                           const char *msg, size_t msglen) {
+//     static const char variant_name[] = "failed";
+//     static const char code_name[] = "code";
+//     static const char message_name[] = "message";
+//
+//     wasmtime_component_valrecord_entry_t *fields =
+//         (wasmtime_component_valrecord_entry_t *)malloc(2 * sizeof(*fields));
+//     if (fields == NULL) { abort(); }   // dereferenced on the next line
+//     fields[0].name.data = cleat_dup(code_name, sizeof(code_name) - 1);
+//     fields[0].name.size = sizeof(code_name) - 1;
+//     fields[0].val.kind = WASMTIME_COMPONENT_U32;
+//     fields[0].val.of.u32 = code;
+//     fields[1].name.data = cleat_dup(message_name, sizeof(message_name) - 1);
+//     fields[1].name.size = sizeof(message_name) - 1;
+//     fields[1].val.kind = WASMTIME_COMPONENT_STRING;
+//     fields[1].val.of.string.data = (char *)msg;
+//     fields[1].val.of.string.size = msglen;
+//
+//     wasmtime_component_val_t record;
+//     record.kind = WASMTIME_COMPONENT_RECORD;
+//     record.of.record.size = 2;
+//     record.of.record.data = fields;
+//
+//     wasmtime_component_val_t variant;
+//     variant.kind = WASMTIME_COMPONENT_VARIANT;
+//     variant.of.variant.discriminant.data =
+//         cleat_dup(variant_name, sizeof(variant_name) - 1);
+//     variant.of.variant.discriminant.size = sizeof(variant_name) - 1;
+//     variant.of.variant.val = wasmtime_component_val_new(&record);
+//     v->kind = WASMTIME_COMPONENT_RESULT;
+//     v->of.result.is_ok = false;
+//     v->of.result.val = wasmtime_component_val_new(&variant);
+// }
+//
+// // Read a `run-outcome` the guest returned from its `run` export.
+// // Returns 0 completed / 1 suspended / -1 for anything else, and sets *out to
+// // the payload when the case carries one.
+// static int component_val_get_run_outcome(const wasmtime_component_val_t *v,
+//                                          const char **out, size_t *outlen) {
+//     *out = NULL;
+//     *outlen = 0;
+//     if (v->kind != WASMTIME_COMPONENT_VARIANT) { return -1; }
+//     const char *d = v->of.variant.discriminant.data;
+//     size_t dlen = v->of.variant.discriminant.size;
+//     const wasmtime_component_val_t *payload = v->of.variant.val;
+//     if (payload != NULL && payload->kind == WASMTIME_COMPONENT_STRING) {
+//         *out = payload->of.string.data;
+//         *outlen = payload->of.string.size;
+//     }
+//     if (dlen == 9 && memcmp(d, "completed", 9) == 0) { return 0; }
+//     if (dlen == 9 && memcmp(d, "suspended", 9) == 0) { return 1; }
+//     return -1;
+// }
+//
 // static void get_error_message(wasmtime_error_t *err, wasm_byte_vec_t *msg) {
 //     wasmtime_error_message(err, msg);
 // }
@@ -127,7 +336,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 // -- engine ptr access -------------------------------------------------------
@@ -216,6 +425,16 @@ func componentCall(
 	}
 	var result C.wasmtime_component_val_t
 	result.kind = C.WASMTIME_COMPONENT_STRING
+	// Ours to release. `result` is embedder storage, which is exactly the case
+	// wasmtime_component_val_delete documents itself for -- "should only be
+	// used when the embedder owns the pointer `value` itself" (val.h). Nothing
+	// released it before, so every call through here retained its result
+	// string.
+	//
+	// Safe on the error path, and not by luck: Go zeroes `result` at
+	// declaration, so a call that fails without writing leaves data=NULL and
+	// size=0 and the delete frees nothing.
+	defer C.wasmtime_component_val_delete(&result)
 	err := C.wasmtime_component_func_call(fn, ctx, &args[0], 1, &result, 1)
 	if err != nil {
 		var msg C.wasm_byte_vec_t
@@ -231,6 +450,99 @@ func componentCall(
 		return "", nil
 	}
 	return C.GoStringN(resultData, C.int(resultLen)), nil
+}
+
+// runOutcomeKind is what the guest's `run` export said it did with the segment.
+type runOutcomeKind int
+
+const (
+	runOutcomeCompleted runOutcomeKind = iota
+	runOutcomeSuspended
+	runOutcomeUnrecognised
+)
+
+// componentCallRun calls the world's `run` export and decodes its `run-outcome`.
+//
+// The outcome used to be a string, with a suspension spelled as the literal
+// "__CLEAT_SUSPEND__" and compared verbatim. That comparison is gone: a
+// suspension is a case of the return type now, so no result a workflow can
+// produce is one. See python-sdk/wit/cleat.wit.
+func componentCallRun(
+	fn *C.wasmtime_component_func_t, store wasmtime.Storelike, input string,
+) (runOutcomeKind, string, error) {
+	ctx := C.store_context(unsafe.Pointer(store.Context()))
+	cInput := C.CString(input)
+	defer C.free(unsafe.Pointer(cInput))
+	args := [1]C.wasmtime_component_val_t{
+		C.make_component_val_string(cInput, C.size_t(len(input))),
+	}
+	var result C.wasmtime_component_val_t
+	// Ours to release, same contract as componentCall above, and it matters
+	// more here: a `run-outcome` is a VARIANT, so the value owns its
+	// discriminant buffer, its payload buffer, and the
+	// wasmtime_component_val_new pointer behind of.variant.val -- three
+	// allocations per execution where the bare string this replaced owned one.
+	//
+	// Ordering: every return below copies out with C.GoStringN before the
+	// deferred delete runs, so no returned Go string points into freed memory.
+	// Measured over 300 executions with a stability assertion on the result --
+	// a use-after-free here shows up as a result that changes between
+	// identical runs, not as a crash. See IMPROVEMENT-PLAN 3.110.
+	defer C.wasmtime_component_val_delete(&result)
+	if err := C.wasmtime_component_func_call(fn, ctx, &args[0], 1, &result, 1); err != nil {
+		var msg C.wasm_byte_vec_t
+		C.get_error_message(err, &msg)
+		s := C.GoStringN(msg.data, C.int(msg.size))
+		C.wasm_byte_vec_delete(&msg)
+		C.wasmtime_error_delete(err)
+		return runOutcomeUnrecognised, "", fmt.Errorf("component call: %s", s)
+	}
+
+	// `result` is not deleted, here or in componentRunDeferred, and that is the
+	// same open ownership question the constructors above carry -- in the other
+	// direction. This one is the highest-frequency instance: a completed
+	// workflow's `run-outcome` carries a lifted string, once per execution.
+	// Deliberate rather than overlooked; see IMPROVEMENT-PLAN 3.110.
+	var payload *C.char
+	var payloadLen C.size_t
+	switch C.component_val_get_run_outcome(&result, &payload, &payloadLen) {
+	case 0:
+		if payload == nil {
+			return runOutcomeCompleted, "", nil
+		}
+		return runOutcomeCompleted, C.GoStringN(payload, C.int(payloadLen)), nil
+	case 1:
+		return runOutcomeSuspended, "", nil
+	}
+	return runOutcomeUnrecognised, "", fmt.Errorf(
+		"the guest's run export returned a value that is not a run-outcome variant")
+}
+
+// componentRunDeferred calls the world's `run-deferred` export and returns how
+// many defer bodies ran.
+//
+// The Component Model counterpart of deferRunnerExport. The caller brackets it
+// with setDeferDrain, exactly as runGuestDefersAfterSuspend does for a core
+// module -- see componentRunGuestDefersAfterSuspend.
+func componentRunDeferred(
+	fn *C.wasmtime_component_func_t, store wasmtime.Storelike,
+) (uint32, error) {
+	ctx := C.store_context(unsafe.Pointer(store.Context()))
+	var result C.wasmtime_component_val_t
+	// A no-op today -- run-deferred returns u32 and a scalar owns nothing --
+	// and here anyway so all three call sites carry the same discipline. The
+	// day this export's return type grows a payload, the leak arrives without
+	// anyone editing this function.
+	defer C.wasmtime_component_val_delete(&result)
+	if err := C.wasmtime_component_func_call(fn, ctx, nil, 0, &result, 1); err != nil {
+		var msg C.wasm_byte_vec_t
+		C.get_error_message(err, &msg)
+		s := C.GoStringN(msg.data, C.int(msg.size))
+		C.wasm_byte_vec_delete(&msg)
+		C.wasmtime_error_delete(err)
+		return 0, fmt.Errorf("component run-deferred: %s", s)
+	}
+	return uint32(C.component_val_get_u32(&result)), nil
 }
 
 // -- callback registry -------------------------------------------------------
@@ -250,7 +562,17 @@ const (
 	cbTypeDurableSleep // (u64) -> u64
 	cbTypeNow          // () -> u64
 	cbTypeRandom       // () -> u64
-	cbTypeDurableLog   // (string) -> u64
+
+	// wasi:clocks/wall-clock and wasi:random/random, shadowed so a Python
+	// guest's time.time(), random.random() and os.urandom() come from the
+	// durable clock and the seeded source rather than the host's real ones.
+	// cleat#1410. Registered on the component linker only: a core-module guest
+	// reaches these through preview1, which engine/wasi_policy.go covers.
+	cbTypeWasiWallClockNow        // () -> datetime
+	cbTypeWasiWallClockResolution // () -> datetime
+	cbTypeWasiRandomU64           // () -> u64
+	cbTypeWasiRandomBytes         // (u64) -> list<u8>
+	cbTypeDurableLog              // (string) -> u64
 
 	// durable-version interface
 	cbTypeVersion    // () -> u64
@@ -262,11 +584,14 @@ const (
 	cbTypePollCancellation // () -> string
 
 	// durable-signals interface
-	cbTypeAwaitSignals      // (string,u64,u32,u32,u32,u32) -> u64
-	cbTypePollSignal        // (string) -> string
-	cbTypeSendSignalAndWait // (string,string,string,u64) -> string
-	cbTypeReplyToSignal     // (string,string) -> u64
-	cbTypeSignalWorkflow    // (string,string,string) -> u64
+	cbTypeAwaitSignals // (string,u64,u32,u32,u32,u32) -> u64
+	cbTypePollSignal   // (string) -> string
+	// cbTypeSendSignalAndWait and cbTypeReplyToSignal were here until
+	// 2026-09-06 (IMPROVEMENT-PLAN 3.220). Removing them shifts every later
+	// value in this iota, which is safe because the numbers never leave Go:
+	// the C side receives an opaque env handle and goComponentCallback looks
+	// the entry up with lookupCB. Nothing serialises a cbType.
+	cbTypeSignalWorkflow // (string,string,string) -> u64
 
 	// durable-children interface
 	cbTypeChildWorkflow            // (string,string) -> string
@@ -286,6 +611,8 @@ const (
 	// durable-handlers interface
 	cbTypeRegisterUpdateHandler // (string) -> u64
 	cbTypeRegisterQueryHandler  // (string) -> u64
+	cbTypePollUpdate            // () -> string
+	cbTypeCompleteUpdate        // (string,string,string) -> u64
 
 	// durable-messaging interface
 	cbTypeDurableSend    // (string,string,string) -> u64
@@ -309,19 +636,10 @@ const (
 	cbTypeUUID     // (string) -> string
 
 	// durable-stream-state interface
-	cbTypeSetState    // (string,string) -> u64
-	cbTypeGetState    // (string) -> string
-	cbTypeDeleteState // (string) -> u64
-	cbTypeIncrState   // (string,u64) -> u64
-	cbTypeHasState    // (string) -> u64
-	cbTypeListState   // (string) -> string
 
 	// durable-extended-lifecycle interface
 	cbTypeContinueAsNewVersioned // (string,u32) -> u64
 	cbTypeSideEffect             // (string) -> string
-
-	// durable-extended-children interface
-	cbTypeChildWorkflowInSchema // (string,string,string,u64,u64,string) -> string
 
 	// durable-fetch interface
 	cbTypeFetch // (string,string,string,string) -> string
@@ -420,6 +738,125 @@ func setResultString(results *C.wasmtime_component_val_t, nresults C.size_t, s s
 	*r = C.make_component_val_string(cStr, C.size_t(len(s)))
 }
 
+// setResultDatetime sets the first result to a WIT
+// `datetime { seconds: u64, nanoseconds: u32 }` built from a millisecond
+// epoch.
+//
+// The durable clock has millisecond resolution, so `nanoseconds` is always a
+// whole number of milliseconds. Said here rather than left to be inferred from
+// a run: a guest that measures elapsed time by subtracting two readings sees
+// millisecond granularity, which is what wall-clock.resolution() below
+// reports.
+func setResultDatetime(results *C.wasmtime_component_val_t, nresults C.size_t, ms int64) {
+	if int(nresults) < 1 {
+		return
+	}
+	// Floor division, not truncation toward zero: a pre-epoch millisecond
+	// must not round up into the following second and leave a negative
+	// nanosecond remainder, and `seconds` is unsigned so the error would be
+	// a wrap rather than a small offset.
+	sec := ms / 1000
+	rem := ms % 1000
+	if rem < 0 {
+		sec--
+		rem += 1000
+	}
+	if sec < 0 {
+		sec = 0 // the WIT type is unsigned; a clock before 1970 clamps
+	}
+	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
+	C.component_val_set_datetime(r, C.uint64_t(sec), C.uint32_t(rem*1e6))
+}
+
+// setResultListU8 sets the first result to a WIT `list<u8>`.
+func setResultListU8(results *C.wasmtime_component_val_t, nresults C.size_t, b []byte) {
+	if int(nresults) < 1 {
+		return
+	}
+	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
+	if len(b) == 0 {
+		C.component_val_set_list_u8(r, nil, 0)
+		return
+	}
+	C.component_val_set_list_u8(r, (*C.uint8_t)(unsafe.Pointer(&b[0])), C.size_t(len(b)))
+}
+
+// callOutcome is a host call's packed return value decoded into the three
+// cases the WIT `result<string, call-failure>` distinguishes.
+//
+// The packed word is the core-module ABI's, and a component guest never sees
+// it: this type is where the two representations meet. Everything the packed
+// word can say that a bare `string` could not -- a stop, a failure, the
+// failure's classification -- lives in these fields.
+type callOutcome struct {
+	suspended bool
+	failed    bool
+	code      uint32 // the packed word's callErrorCode; 0 when unclassified
+	payload   string // the response on success, the error message on failure
+}
+
+// decodeCallOutcome turns a packed host-call result into a callOutcome.
+//
+// extractString differs per layout -- packDurableCallResult puts the length at
+// bits 40-63 and packSimpleResult at bits 32-63 -- so the caller passes the
+// extractor that matches the handler it called. Getting that wrong returns ""
+// for any response under 256 bytes rather than failing, which is why the two
+// are not merged.
+//
+// The sentinel is tested FIRST and by mask, both deliberately. callSuspendSentinel
+// is bit 31 (engine/memory.go), and for the two layouts this function decodes it
+// is unreachable STRUCTURALLY rather than by a bound: packDurableCallResult takes
+// `callErrorCode byte`, so that field only ever occupies bits 8-15 and bit 31 is
+// zero for every input; packSimpleResult puts its length at bits 32-63 and an
+// errCode byte at 0-7, leaving 8-31 clear. errBadParam (0xFFFFFFFF00000001) does
+// not alias it either -- its low word is 1 -- which is worth having checked given
+// 2.10, where that constant decoded into all three fields of this layout at once.
+//
+// "Free" means the host cannot produce it, though, not that the ordinary field
+// decode ignores it. In the await-signals layout it lands inside the
+// timed-out field. A decoder that read its fields first would read a stop as an
+// ordinary result and carry on, which is the whole defect deferSegmentLanguages
+// exists to prevent.
+func decodeCallOutcome(packed int64, buf []byte, extractString func(int64, []byte) string) callOutcome {
+	if uint64(packed)&uint64(callSuspendSentinel) != 0 {
+		return callOutcome{suspended: true}
+	}
+	u := uint64(packed)
+	if byte(u&0xFF) != 0 {
+		return callOutcome{
+			failed:  true,
+			code:    uint32((u >> 8) & 0xFFFFFFFF),
+			payload: extractString(packed, buf),
+		}
+	}
+	return callOutcome{payload: extractString(packed, buf)}
+}
+
+// setResultCallOutcome writes a callOutcome into the first result slot as a
+// WIT `result<string, call-failure>`.
+//
+// This replaces a setResultString that threw both error cases away. A failure
+// arrived at the guest as an ordinary successful response carrying the error
+// text; a stop arrived as an EMPTY successful response, because
+// extractStringFromPacked read responseLen=0 out of the sentinel. Neither had
+// any marker in it -- the "__CLEAT_ERROR__:" prefix the WIT documented and the
+// Python SDK checked for has never had a producer anywhere in the host.
+func setResultCallOutcome(results *C.wasmtime_component_val_t, nresults C.size_t, out callOutcome) {
+	if int(nresults) < 1 {
+		return
+	}
+	r := (*C.wasmtime_component_val_t)(unsafe.Pointer(results))
+	switch {
+	case out.suspended:
+		C.component_val_set_call_suspended(r)
+	case out.failed:
+		C.component_val_set_call_failed(r, C.uint32_t(out.code),
+			C.CString(out.payload), C.size_t(len(out.payload)))
+	default:
+		C.component_val_set_call_ok(r, C.CString(out.payload), C.size_t(len(out.payload)))
+	}
+}
+
 // extractStringFromPacked decodes the output string from a handler's packed
 // return value. The packed format is:
 //
@@ -459,6 +896,14 @@ func goComponentCallback(
 		return entry.backend.dispatchNow(args, nargs, results, nresults)
 	case cbTypeRandom:
 		return entry.backend.dispatchRandom(args, nargs, results, nresults)
+	case cbTypeWasiWallClockNow:
+		return entry.backend.dispatchWasiWallClockNow(args, nargs, results, nresults)
+	case cbTypeWasiWallClockResolution:
+		return entry.backend.dispatchWasiWallClockResolution(args, nargs, results, nresults)
+	case cbTypeWasiRandomU64:
+		return entry.backend.dispatchWasiRandomU64(args, nargs, results, nresults)
+	case cbTypeWasiRandomBytes:
+		return entry.backend.dispatchWasiRandomBytes(args, nargs, results, nresults)
 	case cbTypeDurableLog:
 		return entry.backend.dispatchDurableLog(args, nargs, results, nresults)
 	case cbTypeVersion:
@@ -475,10 +920,6 @@ func goComponentCallback(
 		return entry.backend.dispatchAwaitSignals(args, nargs, results, nresults)
 	case cbTypePollSignal:
 		return entry.backend.dispatchPollSignal(args, nargs, results, nresults)
-	case cbTypeSendSignalAndWait:
-		return entry.backend.dispatchSendSignalAndWait(args, nargs, results, nresults)
-	case cbTypeReplyToSignal:
-		return entry.backend.dispatchReplyToSignal(args, nargs, results, nresults)
 	case cbTypeSignalWorkflow:
 		return entry.backend.dispatchSignalWorkflow(args, nargs, results, nresults)
 	case cbTypeChildWorkflow:
@@ -503,6 +944,10 @@ func goComponentCallback(
 		return entry.backend.dispatchRegisterUpdateHandler(args, nargs, results, nresults)
 	case cbTypeRegisterQueryHandler:
 		return entry.backend.dispatchRegisterQueryHandler(args, nargs, results, nresults)
+	case cbTypePollUpdate:
+		return entry.backend.dispatchPollUpdate(args, nargs, results, nresults)
+	case cbTypeCompleteUpdate:
+		return entry.backend.dispatchCompleteUpdate(args, nargs, results, nresults)
 	case cbTypeDurableSend:
 		return entry.backend.dispatchDurableSend(args, nargs, results, nresults)
 	case cbTypeScheduleInvoke:
@@ -525,24 +970,10 @@ func goComponentCallback(
 		return entry.backend.dispatchGetScope(args, nargs, results, nresults)
 	case cbTypeUUID:
 		return entry.backend.dispatchUUID(args, nargs, results, nresults)
-	case cbTypeSetState:
-		return entry.backend.dispatchSetState(args, nargs, results, nresults)
-	case cbTypeGetState:
-		return entry.backend.dispatchGetState(args, nargs, results, nresults)
-	case cbTypeDeleteState:
-		return entry.backend.dispatchDeleteState(args, nargs, results, nresults)
-	case cbTypeIncrState:
-		return entry.backend.dispatchIncrState(args, nargs, results, nresults)
-	case cbTypeHasState:
-		return entry.backend.dispatchHasState(args, nargs, results, nresults)
-	case cbTypeListState:
-		return entry.backend.dispatchListState(args, nargs, results, nresults)
 	case cbTypeContinueAsNewVersioned:
 		return entry.backend.dispatchContinueAsNewVersioned(args, nargs, results, nresults)
 	case cbTypeSideEffect:
 		return entry.backend.dispatchSideEffect(args, nargs, results, nresults)
-	case cbTypeChildWorkflowInSchema:
-		return entry.backend.dispatchChildWorkflowInSchema(args, nargs, results, nresults)
 	case cbTypeFetch:
 		return entry.backend.dispatchFetch(args, nargs, results, nresults)
 	case cbTypeScheduleCron:
@@ -612,12 +1043,38 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 		return nil, fmt.Errorf("wasi add: %s", s)
 	}
 
+	// Shadow the WASI clock and entropy interfaces before cleat's own, inside
+	// the allow_shadowing bracket opened above and after add_wasip2 supplied
+	// the real ones. cleat#1410.
+	if err := b.registerWasiDeterminismImports(linker); err != nil {
+		return nil, fmt.Errorf("register wasi determinism imports: %w", err)
+	}
 	if err := b.registerCleatComponentImports(linker); err != nil {
 		return nil, fmt.Errorf("cleat component imports: %w", err)
 	}
 
 	instance, err := componentInstantiate(linker, store, component)
 	if err != nil {
+		// THE FENCE CAN FIRE HERE, NOT ONLY IN THE CALL BELOW, and until
+		// wasmtime-go v48 it did not in practice -- which is why this path
+		// returned the raw error for as long as it did.
+		//
+		// A componentize-py build is ~19 MB and its instantiation runs real
+		// guest code: CPython's own module initialisation. That work is inside
+		// the epoch budget, correctly, so a budget small enough relative to
+		// that startup cost is exhausted before the export is ever called. The
+		// v44->v48 bump moved it across that line and TestPythonComponentExecutionFence
+		// caught it, reporting `wasm trap: component instantiate: wasm trap:
+		// interrupt` where it wanted the configured limit named.
+		//
+		// Unclassified, that reads as a guest crash during startup rather than
+		// the host enforcing a bound it was given -- the same confusion the
+		// call path's comment twenty lines below describes, arriving through
+		// the other door. Classify it the same way, so an operator sees which
+		// flag to change.
+		if limitErr := b.resourceLimitError(err, execTimeout); limitErr != nil {
+			return nil, limitErr
+		}
 		return nil, err
 	}
 
@@ -633,7 +1090,7 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 		return nil, fmt.Errorf("component get func: %w", err)
 	}
 
-	resultStr, callErr := componentCall(fn, store, string(input))
+	outcome, resultStr, callErr := componentCallRun(fn, store, string(input))
 	if callErr != nil {
 		// Name the limit that stopped it, the same way the core-module and
 		// decomposition paths do. Without this an exhausted budget arrived as
@@ -646,14 +1103,63 @@ func (b *wasmtimeBackend) ExecuteComponentCGo(
 		return nil, fmt.Errorf("host: component export %q: %w", entryPoint, callErr)
 	}
 
-	// Check for suspension sentinel from the Python wrapper.
-	if resultStr == "__CLEAT_SUSPEND__" {
+	if outcome == runOutcomeSuspended {
+		// A suspended guest deliberately does NOT drain its own defer table,
+		// for the reason runGuestDefersAfterSuspend gives at length: the host
+		// has to be the one to call the drain, because only the host can
+		// bracket it so the defer bodies' calls are permitted while the
+		// workflow body's are stopped.
+		b.componentRunGuestDefersAfterSuspend(store, instance, entryPoint)
 		return &ExecResult{Suspended: true}, nil
 	}
-	_ = instance
-	_ = outBufSz
+
 	if resultStr == "" {
 		return &ExecResult{Result: `"ok"`, Suspended: false}, nil
 	}
 	return &ExecResult{Result: resultStr, Suspended: false}, nil
+}
+
+// componentRunGuestDefersAfterSuspend drains a suspended component guest's
+// defer table, on the same instance, through the world's `run-deferred` export.
+//
+// The Component Model counterpart of runGuestDefersAfterSuspend
+// (backend_wasmtime.go), and it exists for exactly the reason that one does:
+// 3.81 measured that refusing the defer bodies' own calls CONSUMES the cleanup
+// rather than skipping it, because the table is taken before the first body
+// runs. The bracket below is what makes the difference.
+//
+// It is deliberately not shared code with the core-module version. That one
+// reaches a wasmtime.Instance through the Go bindings; this one holds a
+// C.wasmtime_component_instance_t, and the two have no common type to write
+// against. What they do share is the bracket, and that is the part with the
+// measurement behind it.
+//
+// Silent when the guest exports no run-deferred: a component built against an
+// older world has no defer table the host can reach, and a workflow with no
+// defers is the overwhelmingly common case. The defer segment's own test is
+// what catches a guest that should have had one.
+func (b *wasmtimeBackend) componentRunGuestDefersAfterSuspend(
+	store wasmtime.Storelike, instance *C.wasmtime_component_instance_t, entryPoint string,
+) {
+	fn, err := componentGetFunc(instance, store, componentDeferRunnerExport)
+	if err != nil {
+		return
+	}
+
+	// Asserted rather than required, exactly as in the core-module path: a
+	// handler that does not implement it is a backend running without an
+	// engine session, which has no calls to stop.
+	if d, ok := b.handler.(interface{ setDeferDrain(bool) }); ok {
+		d.setDeferDrain(true)
+		defer d.setDeferDrain(false)
+	}
+
+	ran, callErr := componentRunDeferred(fn, store)
+	if callErr != nil {
+		b.log().Warn("a component defer segment's defers could not be run",
+			"entry_point", entryPoint, "error", callErr)
+		return
+	}
+	b.log().Info("ran a component defer segment's defers",
+		"entry_point", entryPoint, "defers_run", ran)
 }

@@ -45,7 +45,9 @@ package engine
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"sort"
 )
 
 // callIntentStore is implemented by the three shipped stores. It is unexported
@@ -140,10 +142,52 @@ func intentFenceOrNotPending(ctx context.Context, hb func(ctx context.Context, w
 // target list without explicit casts, checked against a real PostgreSQL
 // instance rather than assumed. An empty $8 is the "fencing not requested"
 // escape hatch; see callIntentStore's doc.
+// THE THREE INTENT INSERTS BELOW DO NOT AGREE ABOUT payload_encoding, AND THAT
+// IS CORRECT RATHER THAN AN OVERSIGHT. #1383 routed WriteCallIntent through
+// encodeEventForStorage on PostgreSQL ONLY, matching #1380's scope, so:
+//
+//	postgres   binds stored.Encoding -- the request is base64 now
+//	mysql      literal 0 -- still nullStr(rec.Request), genuinely plaintext
+//	mssql      literal 0 -- likewise
+//
+// Recording a literal 0 on the postgres arm was correct when written and became
+// WRONG the moment #1383 landed, in a way worse than the NULL it replaced: a
+// NULL sends decodePayload to tryDecodeBase64, which guesses, whereas an explicit
+// 0 over base64 bytes does not guess -- it hands the caller the base64 TEXT,
+// deterministically, on every read. Falsified rather than reasoned about:
+// reverting the postgres arm to the literal round-trips "true" as "dHJ1ZQ==",
+// while mysql and mssql pass, which is the split above stated as a test result.
+//
+// The structural guard cannot see this. It asserts the column is NAMED, and it
+// was. Only the behavioural round trip can tell a truthful encoding from a lie
+// about one, which is why that test writes a request chosen to be valid base64.
+//
+// # WHY THIS COLUMN IS LOAD BEARING HERE AND NOWHERE ELSE
+//
+// An intent row writes no `payload` column. Every other writer populates
+// `payload`, whose JSON carries request_b64/response_b64 and whose
+// populateFromPayload runs AFTER the scanned columns, so those rows are shadowed
+// and the column disagreeing with them is harmless. Intent rows are not
+// shadowed: until CompleteCallIntent fills `payload` in, the request column is
+// the only copy, and before this the reader guessed at its encoding.
+//
+// Measured on all three dialects, writing an intent and loading it back, when
+// the request was stored raw and the reader guessed:
+//
+//	"true"    -> "\xb6\xbb\x9e"   "1234" -> "\xd7m\xf8"
+//	"null"    -> "\x9e\xe9e"       {"a":1} -> intact
+//
+// JSON objects are safe because `{` and `"` are not in the base64 alphabet. A
+// JSON SCALAR request is not: `true` and `null` are four characters drawn
+// entirely from it. And these rows are what the ambiguity resolver reads after a
+// crash, so the corruption surfaced exactly during recovery.
+//
+// CompleteCallIntent leaves its 0 alone on purpose: it writes rec.Response raw
+// on every dialect, so plaintext stays the truthful answer for that row.
 const writeCallIntentSQLPostgres = `
 	INSERT INTO event_history (workflow_id, step, event_type, service, operation, request,
-		created_at, intent_at, tenant_id)
-	SELECT $1, $2, $3, $4, $5, $6, now(), now(), $7
+		created_at, intent_at, tenant_id, payload_encoding)
+	SELECT $1, $2, $3, $4, $5, $6, now(), now(), $7, $10
 	WHERE ($8 = '' OR EXISTS (
 		SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $8 AND generation = $9
 	))`
@@ -155,9 +199,30 @@ func (s *PostgresStore) WriteCallIntent(ctx context.Context, workflowID string, 
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// The same encoding every other writer uses. Until #1379 this path bound
+	// rec.Request RAW, while every INSERT path base64-encodes it and every
+	// read path applies tryDecodeBase64 -- which falls back to the raw string
+	// only when decoding FAILS, so a raw request that happens to be valid
+	// base64 decoded to the wrong bytes (cleat#1319, six of nine ordinary
+	// short values). And it did not encrypt, so --encrypt-sensitive-payloads
+	// left every write-ahead intent's request in the clear.
+	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
+	if err != nil {
+		// cleat#1317: encryption failures were counted nowhere, while their
+		// decryption twin has been counted since db.go:176. The asymmetry was
+		// not a decision -- RecordEncryptionError existed, was registered and
+		// described, and had no caller.
+		//
+		// Recorded HERE rather than inside encodeEventForStorage because that
+		// is a free function with no store receiver and therefore no Metrics.
+		// The error is already propagated with context; this only counts it.
+		s.recordEncryptionFailure(ctx)
+		return fmt.Errorf("write call intent: step %d: %w", rec.Step, err)
+	}
+
 	res, err := tx.ExecContext(ctx, writeCallIntentSQLPostgres,
 		workflowID, rec.Step, rec.EventType, nullStr(rec.Service), nullStr(rec.Op),
-		nullStr(rec.Request), s.tenantID, workerID, generation)
+		nullStr(stored.Request), s.tenantID, workerID, generation, stored.Encoding)
 	if err != nil {
 		return fmt.Errorf("write call intent: step %d: %w", rec.Step, err)
 	}
@@ -173,12 +238,93 @@ func (s *PostgresStore) WriteCallIntent(ctx context.Context, workflowID string, 
 	return nil
 }
 
+// WHY response IS BOUND THROUGH nullStr HERE AND IN ResolveCallIntent, on all
+// three dialects. cleat#1379 part 1.
+//
+// It used to be bound raw, so a call that completed with an EMPTY response
+// stored the empty string where every INSERT path stores NULL. That is not a
+// cosmetic difference: engine/flush.go's insertEventSQL carried (before
+// cleat#2333 fixed the clause itself, see below)
+//
+//	ON CONFLICT (workflow_id, step) DO UPDATE
+//	  SET response = EXCLUDED.response, error = EXCLUDED.error
+//	  WHERE event_history.response = '' AND event_history.error IS NULL
+//
+// whose stated purpose is to COMPLETE a row that was written without a result
+// while leaving finished rows immutable. A row written without a result has
+// response NULL, and `NULL = ”` is not true -- so the clause could never fire
+// for the rows it was written for. The only rows it COULD fire on were
+// finished call-intent rows that completed with an empty response, which are
+// exactly the rows it was meant to leave alone. The behaviour was inverted
+// relative to its own comment.
+//
+// Measured on PostgreSQL 16 before the change, completing an intent with an
+// empty response and no error and then appending the same step again with a
+// different one:
+//
+//	after Complete (empty, no err)  response=""      checksum="chk2"  payload={... no response_b64 ...}
+//	after re-append w/ response     response="eyJs…" checksum="chk2"  payload=UNCHANGED
+//	VerifyWorkflowEvents -> checksum mismatch (expected chk2, got f54d6dfd…)
+//
+// The DO UPDATE fired, overwrote the column, and left the payload and the
+// checksum alone -- so the row's displayed response disagreed with the payload
+// replay reads, and the workflow was permanently unverifiable. `response` is
+// not in shadowFields (it is redacted and encrypted, so it cannot be compared),
+// which is why verifyShadowColumns cannot see that divergence and only the
+// checksum catches it.
+//
+// So the firing this closes was never self-healing; it could only corrupt.
+// With NULL the clause is false for these rows too, which is what
+// engine/flush.go's comment has always claimed it is for every row.
+//
+// cleat#2333: that dead clause was not only harmless here, it was actively
+// broken for the event types that DO rely on the generic ON CONFLICT path to
+// complete a suspended row -- AwaitChild chief among them, which has no
+// CompleteCallIntent-style direct UPDATE of its own. A parent that awaited a
+// child, then recorded one more event, failed every subsequent replay with a
+// checksum mismatch, because the completing overwrite never took effect. The
+// fix widens the WHERE to also match a NULL response and adds checksum,
+// payload and payload_encoding to the SET list, so the clause now does what
+// this file's comment always said it did -- for every row, not none of them.
+//
+// That widening is not enough on its own to leave THIS mechanism's rows
+// immutable, and an earlier draft of this comment claimed it was --
+// "response/error/checksum/payload now move together" is true and beside
+// the point, because the vulnerability this reopens is not columns going
+// stale relative to each other, it is the WHOLE ROW being eligible for
+// overwrite again. A call intent completed here with a genuinely empty
+// response (this function's own WHY comment, two paragraphs up) stores
+// response/error NULL exactly like a row that has never been completed at
+// all, and nothing in response/error/checksum tells the two apart --
+// checksum is set on both, just by different writers. What insertEventSQL's
+// WHERE actually relies on to stay immutable is event_type: only
+// await_child/await_promise/await_all_children are in its pending-test
+// list, and a "call" row's event_type never changes, so a re-append of an
+// already-completed call intent (FinalizeWorkflowSegment's routine
+// re-append of a whole segment, not an exotic path) fails that test and
+// leaves this row alone regardless of how empty its response was. See
+// insertEventSQL's own doc, and TestACompletedIntentIsNotOverwrittenByALaterAppend,
+// which is what caught the draft of this fix that omitted event_type.
 func (s *PostgresStore) CompleteCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, checksum string, workerID string, generation int64) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("complete call intent: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// See WriteCallIntent: one encoding for every writer. The payload and the
+	// checksum are the CALLER's, built from the plaintext record, and stay
+	// that way -- encodePayloadForStorage encrypts what it is given rather
+	// than rebuilding it, so the checksum the caller computed still matches
+	// what VerifyWorkflowEvents recomputes from the decrypted row.
+	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
+	if err != nil {
+		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
+	}
+	storedPayload, err := encodePayloadForStorage(string(payload), s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
+	if err != nil {
+		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
+	}
 
 	res, err := tx.ExecContext(ctx, `
 		UPDATE event_history
@@ -188,7 +334,7 @@ func (s *PostgresStore) CompleteCallIntent(ctx context.Context, workflowID strin
 		  AND ($8 = '' OR EXISTS (
 		      SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $8 AND generation = $9
 		  ))
-	`, workflowID, rec.Step, rec.Response, nullStr(rec.Err), nullStr(string(payload)),
+	`, workflowID, rec.Step, nullStr(stored.Response), nullStr(stored.Err), storedPayload,
 		checksum, s.tenantID, workerID, generation)
 	if err != nil {
 		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
@@ -244,8 +390,8 @@ func (s *MySQLStore) WriteCallIntent(ctx context.Context, workflowID string, rec
 	// for the fence check's own reference to the same value.
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request,
-			created_at, intent_at, tenant_id)
-		SELECT ?, ?, ?, ?, ?, ?, NOW(6), NOW(6), ?
+			created_at, intent_at, tenant_id, payload_encoding)
+		SELECT ?, ?, ?, ?, ?, ?, NOW(6), NOW(6), ?, 0
 		WHERE (? = '' OR EXISTS (
 			SELECT 1 FROM workflow_instances WHERE id = ? AND assigned_to = ? AND generation = ?
 		))
@@ -278,7 +424,7 @@ func (s *MySQLStore) CompleteCallIntent(ctx context.Context, workflowID string, 
 		  AND (? = '' OR EXISTS (
 		      SELECT 1 FROM workflow_instances WHERE id = ? AND assigned_to = ? AND generation = ?
 		  ))
-	`, rec.Response, nullStr(rec.Err), nullStr(string(payload)), checksum,
+	`, nullStr(rec.Response), nullStr(rec.Err), nullStr(string(payload)), checksum,
 		workflowID, rec.Step, s.tenantID, workerID, workflowID, workerID, generation)
 	if err != nil {
 		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
@@ -337,8 +483,8 @@ func (s *MSSQLStore) WriteCallIntent(ctx context.Context, workflowID string, rec
 	// MSSQL query in this file already does.
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO event_history (workflow_id, step, event_type, service, operation, request,
-			created_at, intent_at, tenant_id)
-		SELECT @p1, @p2, @p3, @p4, @p5, @p6, SYSUTCDATETIME(), SYSUTCDATETIME(), @p7
+			created_at, intent_at, tenant_id, payload_encoding)
+		SELECT @p1, @p2, @p3, @p4, @p5, @p6, SYSUTCDATETIME(), SYSUTCDATETIME(), @p7, 0
 		WHERE (@p8 = '' OR EXISTS (
 			SELECT 1 FROM workflow_instances WHERE id = @p9 AND assigned_to = @p10 AND generation = @p11
 		))
@@ -371,7 +517,7 @@ func (s *MSSQLStore) CompleteCallIntent(ctx context.Context, workflowID string, 
 		  AND (@p8 = '' OR EXISTS (
 		      SELECT 1 FROM workflow_instances WHERE id = @p9 AND assigned_to = @p10 AND generation = @p11
 		  ))
-	`, workflowID, rec.Step, rec.Response, nullStr(rec.Err), nullStr(string(payload)),
+	`, workflowID, rec.Step, nullStr(rec.Response), nullStr(rec.Err), nullStr(string(payload)),
 		checksum, s.tenantID, workerID, workflowID, workerID, generation)
 	if err != nil {
 		return fmt.Errorf("complete call intent: step %d: %w", rec.Step, err)
@@ -449,11 +595,56 @@ var (
 // the engine performing this replay is itself just another claimant, and can
 // itself stall and be reaped mid-resolution. workerID == "" skips the check,
 // per callIntentStore's doc.
+//
+// The later parameter is what keeps the chain verifiable, and it is not
+// optional on any path that can have events above the resolved row. See
+// chainRepairsAfter.
 type callIntentResolver interface {
-	ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64) error
+	ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64, later []EventRecord) error
 }
 
-func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64) error {
+// chainRepairsAfter returns the events stored above step, in step order, that
+// have to have their checksums rewritten when step is resolved in place.
+//
+// Resolving gives a pending row a checksum it did not have, and every row
+// already stored above it was chained on its *absence*: previousStoredChecksum
+// reads the immediately preceding row and gets "" for a pending one, which is
+// exactly what VerifyWorkflowEvents does when it walks the history and resets
+// on a missing checksum. Writing the resolved row's checksum without rewriting
+// theirs leaves a history that fails verification at the very next row --
+// reported as tampering, and fatal on a worker, which runs the verifier with
+// failOnChecksumMismatch. IMPROVEMENT-PLAN 3.89.
+//
+// It stops at the first pending row above step, because that row is itself a
+// reset point: everything above it is already chained on "" and stays correct.
+//
+// The common case returns nothing. A pending row is normally the last row --
+// the crash that made it pending stopped the workflow there -- and then this
+// is empty and the resolve is a single UPDATE, as it was before. It is the
+// operator paths that break that assumption: force-fail and force-complete
+// append an audit event above the pending row, and a signal delivered to a
+// stopped workflow lands above it too.
+func chainRepairsAfter(history []EventRecord, step int) []EventRecord {
+	var above []EventRecord
+	for _, rec := range history {
+		if rec.Step > step {
+			above = append(above, rec)
+		}
+	}
+	// Sorted rather than assumed: the break below is only correct in step
+	// order, and every caller happens to pass a LoadEventHistory result that
+	// is already ordered. Depending on that silently is how the next caller
+	// gets it wrong.
+	sort.Slice(above, func(i, j int) bool { return above[i].Step < above[j].Step })
+	for i, rec := range above {
+		if rec.isPendingIntent() {
+			return above[:i]
+		}
+	}
+	return above
+}
+
+func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64, later []EventRecord) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve call intent: begin: %w", err)
@@ -466,6 +657,20 @@ func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string
 	}
 	checksum := computeEventChecksum(rec, prev)
 
+	// See WriteCallIntent: one encoding for every writer. The payload and the
+	// checksum are the CALLER's, built from the plaintext record, and stay
+	// that way -- encodePayloadForStorage encrypts what it is given rather
+	// than rebuilding it, so the checksum the caller computed still matches
+	// what VerifyWorkflowEvents recomputes from the decrypted row.
+	stored, err := encodeEventForStorage(rec, s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
+	if err != nil {
+		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)
+	}
+	storedPayload, err := encodePayloadForStorage(string(payload), s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
+	if err != nil {
+		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)
+	}
+
 	res, err := tx.ExecContext(ctx, `
 		UPDATE event_history
 		SET response = $3, error = $4, payload = $5, checksum = $6, intent_at = NULL
@@ -474,7 +679,7 @@ func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string
 		  AND ($8 = '' OR EXISTS (
 		      SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $8 AND generation = $9
 		  ))
-	`, workflowID, rec.Step, rec.Response, nullStr(rec.Err), nullStr(string(payload)),
+	`, workflowID, rec.Step, nullStr(stored.Response), nullStr(stored.Err), storedPayload,
 		checksum, s.tenantID, workerID, generation)
 	if err != nil {
 		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)
@@ -499,10 +704,15 @@ func (s *PostgresStore) ResolveCallIntent(ctx context.Context, workflowID string
 	if n != 1 {
 		return fmt.Errorf("resolve call intent: step %d: %w (%d rows matched)", rec.Step, errIntentNotPending, n)
 	}
+	// In the same transaction as the resolve, so a crash between them cannot
+	// leave a history that fails verification.
+	if err := s.repairChainAfterResolve(ctx, tx, workflowID, checksum, later); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
-func (s *MySQLStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64) error {
+func (s *MySQLStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64, later []EventRecord) error {
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve call intent: begin: %w", err)
@@ -523,7 +733,7 @@ func (s *MySQLStore) ResolveCallIntent(ctx context.Context, workflowID string, r
 		  AND (? = '' OR EXISTS (
 		      SELECT 1 FROM workflow_instances WHERE id = ? AND assigned_to = ? AND generation = ?
 		  ))
-	`, rec.Response, nullStr(rec.Err), nullStr(string(payload)), checksum,
+	`, nullStr(rec.Response), nullStr(rec.Err), nullStr(string(payload)), checksum,
 		workflowID, rec.Step, s.tenantID, workerID, workflowID, workerID, generation)
 	if err != nil {
 		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)
@@ -548,10 +758,15 @@ func (s *MySQLStore) ResolveCallIntent(ctx context.Context, workflowID string, r
 	if n != 1 {
 		return fmt.Errorf("resolve call intent: step %d: %w (%d rows matched)", rec.Step, errIntentNotPending, n)
 	}
+	// In the same transaction as the resolve, so a crash between them cannot
+	// leave a history that fails verification.
+	if err := s.repairChainAfterResolve(ctx, tx, workflowID, checksum, later); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
-func (s *MSSQLStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64) error {
+func (s *MSSQLStore) ResolveCallIntent(ctx context.Context, workflowID string, rec EventRecord, payload []byte, workerID string, generation int64, later []EventRecord) error {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("resolve call intent: begin: %w", err)
@@ -572,7 +787,7 @@ func (s *MSSQLStore) ResolveCallIntent(ctx context.Context, workflowID string, r
 		  AND (@p8 = '' OR EXISTS (
 		      SELECT 1 FROM workflow_instances WHERE id = @p9 AND assigned_to = @p10 AND generation = @p11
 		  ))
-	`, workflowID, rec.Step, rec.Response, nullStr(rec.Err), nullStr(string(payload)),
+	`, workflowID, rec.Step, nullStr(rec.Response), nullStr(rec.Err), nullStr(string(payload)),
 		checksum, s.tenantID, workerID, workflowID, workerID, generation)
 	if err != nil {
 		return fmt.Errorf("resolve call intent: step %d: %w", rec.Step, err)
@@ -597,7 +812,60 @@ func (s *MSSQLStore) ResolveCallIntent(ctx context.Context, workflowID string, r
 	if n != 1 {
 		return fmt.Errorf("resolve call intent: step %d: %w (%d rows matched)", rec.Step, errIntentNotPending, n)
 	}
+	// In the same transaction as the resolve, so a crash between them cannot
+	// leave a history that fails verification.
+	if err := s.repairChainAfterResolve(ctx, tx, workflowID, checksum, later); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+// repairChainAfterResolve rewrites the stored checksums of the events above a
+// row that was just resolved in place, so the chain the verifier walks matches
+// the chain the writer left behind. chain is the checksum just written to the
+// resolved row; each subsequent event is re-chained onto it in step order.
+//
+// Three near-identical bodies rather than one, because the placeholder syntax
+// is the only thing that differs and the repo keeps its SQL beside the dialect
+// that speaks it. The loop is one UPDATE per row and runs only on the operator
+// paths -- see chainRepairsAfter for why the ordinary case passes nothing.
+func (s *PostgresStore) repairChainAfterResolve(ctx context.Context, tx *sql.Tx, workflowID, chain string, later []EventRecord) error {
+	for _, rec := range later {
+		chain = computeEventChecksum(rec, chain)
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE event_history SET checksum = $1
+			WHERE workflow_id = $2 AND step = $3 AND tenant_id = $4
+		`, chain, workflowID, rec.Step, s.tenantID); err != nil {
+			return fmt.Errorf("resolve call intent: repair chain at step %d: %w", rec.Step, err)
+		}
+	}
+	return nil
+}
+
+func (s *MySQLStore) repairChainAfterResolve(ctx context.Context, tx *sql.Tx, workflowID, chain string, later []EventRecord) error {
+	for _, rec := range later {
+		chain = computeEventChecksum(rec, chain)
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE event_history SET checksum = ?
+			WHERE workflow_id = ? AND step = ? AND tenant_id = ?
+		`, chain, workflowID, rec.Step, s.tenantID); err != nil {
+			return fmt.Errorf("resolve call intent: repair chain at step %d: %w", rec.Step, err)
+		}
+	}
+	return nil
+}
+
+func (s *MSSQLStore) repairChainAfterResolve(ctx context.Context, tx *sql.Tx, workflowID, chain string, later []EventRecord) error {
+	for _, rec := range later {
+		chain = computeEventChecksum(rec, chain)
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE event_history SET checksum = @p1
+			WHERE workflow_id = @p2 AND step = @p3 AND tenant_id = @p4
+		`, chain, workflowID, rec.Step, s.tenantID); err != nil {
+			return fmt.Errorf("resolve call intent: repair chain at step %d: %w", rec.Step, err)
+		}
+	}
+	return nil
 }
 
 var (

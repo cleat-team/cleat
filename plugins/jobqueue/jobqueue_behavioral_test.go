@@ -9,10 +9,12 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -55,13 +57,22 @@ type fakeJobQueueStore struct {
 	failNextQuery bool // if true, next QueryContext returns error (cleared after use)
 	querySkip     int  // number of queries to let succeed before failNextQuery takes effect
 	execSkip      int  // number of execs to let succeed before failNextExec takes effect
+
+	// inFlightRunIDs stands in for workflow_instances' status IN ('ready',
+	// 'running') set, which this fake has no table for. sweepAbandonedJobs'
+	// query asks "is this run_id still in flight" -- a run_id present here
+	// answers yes, absent answers no (gone, whether finished, reaped, or
+	// never existed). A test drives this directly instead of standing up a
+	// second fake table for a single boolean question. cleat#1715.
+	inFlightRunIDs map[string]bool
 }
 
 func newFakeJobQueueStore() *fakeJobQueueStore {
 	return &fakeJobQueueStore{
-		rows:    make(map[string]*jqRow),
-		apiKeys: make(map[string]string),
-		now:     time.Now,
+		rows:           make(map[string]*jqRow),
+		apiKeys:        make(map[string]string),
+		now:            time.Now,
+		inFlightRunIDs: make(map[string]bool),
 	}
 }
 
@@ -133,6 +144,12 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 		return c.execCancel(args)
 	case strings.Contains(query, "SET status = 'failed'"):
 		return c.execMarkFailed(args)
+	case strings.Contains(query, "SET status = 'dispatched'"):
+		return c.execMarkDispatched(args)
+	case strings.Contains(query, "SET status = 'abandoned'"):
+		return c.execSweepAbandoned(query)
+	case strings.Contains(query, "SET status = $1") && strings.Contains(query, "run_id"):
+		return c.execObserveFinalize(query, args)
 	case strings.Contains(query, "SET status = 'completed'") && strings.Contains(query, "run_id"):
 		return c.execMarkCompleted(args, true)
 	case strings.Contains(query, "SET status = 'completed'"):
@@ -178,7 +195,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 	case strings.Contains(query, "AND job_id"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
-		return c.queryJobByID(args)
+		return c.queryJobByID(query, args)
 	case strings.Contains(query, "tenant_id = $1 AND queue_name = $2"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
@@ -248,18 +265,23 @@ func argOptionalString(args []driver.NamedValue, ordinal int) (*string, error) {
 	return nil, fmt.Errorf("arg %d not found", ordinal)
 }
 
-// argOptionalBytes returns nil when the value is nil (SQL NULL).
+// argOptionalBytes returns nil when the value is nil (SQL NULL), and accepts
+// either []byte or string -- plugin.JSONColumn (used for payload/input)
+// deliberately yields a string from Value(). See JSONColumn's doc comment in
+// plugin/query.go.
 func argOptionalBytes(args []driver.NamedValue, ordinal int) ([]byte, error) {
 	for _, a := range args {
 		if a.Ordinal == ordinal {
-			if a.Value == nil {
+			switch v := a.Value.(type) {
+			case nil:
 				return nil, nil
+			case []byte:
+				return v, nil
+			case string:
+				return []byte(v), nil
+			default:
+				return nil, fmt.Errorf("arg %d: want []byte, string or nil, got %T", ordinal, a.Value)
 			}
-			b, ok := a.Value.([]byte)
-			if !ok {
-				return nil, fmt.Errorf("arg %d: want []byte or nil, got %T", ordinal, a.Value)
-			}
-			return b, nil
 		}
 	}
 	return nil, fmt.Errorf("arg %d not found", ordinal)
@@ -451,6 +473,141 @@ func (c *fakeConn) execMarkCompleted(args []driver.NamedValue, hasRunID bool) (d
 	return &fakeResult{rowsAffected: 1}, nil
 }
 
+// execMarkDispatched handles the dispatch-success write:
+//
+//	UPDATE task_queue SET status = 'dispatched', run_id = $1
+//	WHERE job_id = $2 AND tenant_id = $3 AND queue_name = $4
+//
+// cleat#1715: this used to be the "completed" write. It no longer claims an
+// outcome -- only that the workflow was started. ObserveFinalize (below)
+// writes the real outcome back later.
+//
+// run_id is $1 here, ahead of the WHERE clause's $2-$4: cleat#2257 found
+// this statement scrambling every bound argument on MySQL when it was
+// numbered the other way (run_id last, matching the WHERE clause's more
+// natural reading order) -- MySQL's "?" binds by TEXT APPEARANCE, not by
+// number, and Rebind's MySQL arm does not renumber (CLAUDE.md). These
+// ordinals track background.go's actual Go call order, not the WHERE
+// clause's reading order; keep them in sync with it.
+func (c *fakeConn) execMarkDispatched(args []driver.NamedValue) (driver.Result, error) {
+	runID, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	jobID, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	tid, err := argString(args, 3)
+	if err != nil {
+		return nil, err
+	}
+	queueName, err := argString(args, 4)
+	if err != nil {
+		return nil, err
+	}
+
+	key := rowKey(tid, queueName, jobID)
+	row, ok := c.store.rows[key]
+	if !ok {
+		return &fakeResult{rowsAffected: 0}, nil
+	}
+
+	row.status = "dispatched"
+	row.runID = &runID
+	return &fakeResult{rowsAffected: 1}, nil
+}
+
+// execSweepAbandoned handles the abandonment sweep (background.go's
+// abandonedJobsQuery):
+//
+//	UPDATE task_queue SET status = 'abandoned', completed_at = now()
+//	WHERE status = 'dispatched'
+//	  AND run_id NOT IN (SELECT id FROM <in-flight runs>)
+//
+// This fake has no workflow_instances table, so "still in flight" is
+// answered by store.inFlightRunIDs directly rather than by a second fake
+// table -- a test sets that map to say which run_ids are (still) running
+// and which are gone. Unconditional over every row, matching the real
+// query's lack of a tenant/queue scope: the sweep is cross-tenant by design
+// (plugin.AcrossAllTenants in the production caller).
+func (c *fakeConn) execSweepAbandoned(query string) (driver.Result, error) {
+	// GUARD READ FROM THE QUERY TEXT, same reasoning as execObserveFinalize
+	// above: hardcoding the in-flight check in Go regardless of what the
+	// real WHERE clause says would keep this green even if
+	// "AND run_id NOT IN (...)" were deleted from abandonedJobsQuery, which
+	// is the one line separating "abandon what is truly gone" from "abandon
+	// everything dispatched, in-flight or not".
+	guarded := strings.Contains(query, "run_id NOT IN")
+
+	now := c.store.now()
+	var count int64
+	for _, row := range c.store.rows {
+		if row.status != "dispatched" {
+			continue
+		}
+		if guarded && row.runID != nil && c.store.inFlightRunIDs[*row.runID] {
+			continue
+		}
+		row.status = "abandoned"
+		row.completedAt = &now
+		count++
+	}
+	return &fakeResult{rowsAffected: count}, nil
+}
+
+// execObserveFinalize handles plugin.HasFinalizeObserver's write-back
+// (finalize_observer.go):
+//
+//	UPDATE task_queue SET status = $2, completed_at = now()
+//	WHERE run_id = $1 AND status IN ('dispatched', 'abandoned')
+//
+// $2 is bound, not a literal -- "completed" or "failed" is read from the
+// argument rather than matched in the query text, which is why this needs
+// its own handler rather than reusing execMarkCompleted/execMarkFailed.
+// Matches by run_id across every tenant/queue, same as the production
+// query: the run that just finished names its job by run_id alone.
+//
+// THE GUARD IS READ FROM THE QUERY TEXT, not assumed. A fake that always
+// enforced "only overwrite dispatched/abandoned" in Go, independent of
+// whether the real WHERE clause says so, would stay green even if the guard
+// were deleted from finalize_observer.go -- exactly the "condition that
+// never decides anything" trap: falsifying the guard would produce an
+// unrecognized-query error from this fake rather than a wrong answer from
+// the code under test. Keying the match on "SET status = $2" alone (true of
+// both the guarded and unguarded SQL) and branching on the guard clause's
+// own text is what makes that falsification land on the real assertion.
+func (c *fakeConn) execObserveFinalize(query string, args []driver.NamedValue) (driver.Result, error) {
+	// $1 is status, $2 is run_id -- finalize_observer.go's own comment says
+	// why the order is this way round and not the more natural (runID,
+	// status): MySQL binds by text position, not by $N, and this ordering
+	// is what makes the two agree.
+	newStatus, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	runID, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	guarded := strings.Contains(query, "status IN ('dispatched', 'abandoned')")
+
+	now := c.store.now()
+	var count int64
+	for _, row := range c.store.rows {
+		if row.runID == nil || *row.runID != runID {
+			continue
+		}
+		if guarded && row.status != "dispatched" && row.status != "abandoned" {
+			continue
+		}
+		row.status = newStatus
+		row.completedAt = &now
+		count++
+	}
+	return &fakeResult{rowsAffected: count}, nil
+}
+
 // execResetStuckJobs handles the reaper query:
 //
 //	UPDATE task_queue SET status = 'pending', started_at = NULL
@@ -475,7 +632,7 @@ func (c *fakeConn) execResetStuckJobs() (driver.Result, error) {
 
 // queryTenantLookup handles:
 //
-//	SELECT tenant_id FROM tenant_api_keys WHERE key_hash = $1 AND revoked_at IS NULL
+//	SELECT tenant_id FROM tenant_api_keys WHERE key_hash = $1 AND disabled_at IS NULL
 func (c *fakeConn) queryTenantLookup(args []driver.NamedValue) (driver.Rows, error) {
 	keyHash, err := argBytes(args, 1)
 	if err != nil {
@@ -539,12 +696,85 @@ func (c *fakeConn) queryPendingJobs(_ []driver.NamedValue) (driver.Rows, error) 
 	return &fakeRows{columns: columns, data: data}, nil
 }
 
+// selectedColumns returns the column list a SELECT actually asks for.
+//
+// WHY THE FAKE PARSES THE QUERY INSTEAD OF RETURNING A FIXED LIST. It used to
+// return a hardcoded set of columns whatever the statement said, which made
+// every test here blind to the one thing a column change gets wrong: dropping a
+// column from the SELECT while the scan still expects it. Against a real
+// database that is an immediate "expected N destination arguments in Scan";
+// against the old fake it was invisible, and a falsification that removed
+// run_id from either SELECT came back GREEN. cleat#1715.
+//
+// Deliberately crude -- it splits on commas between SELECT and FROM -- because
+// it only has to model the statements in this file, and a real parser here
+// would be a second thing that can be wrong.
+var selectListRe = regexp.MustCompile(`(?is)\bSELECT\s+(.+?)\s+FROM\b`)
+
+func selectedColumns(query string) []string {
+	// A REGEXP RATHER THAN strings.Index(" FROM "), because the statements here
+	// are formatted across lines: FROM is preceded by a newline and tabs, not a
+	// space, so the literal search found nothing and every read returned 500.
+	// That is the "a tool applied to a format it does not model" trap, and it
+	// failed loudly, which is the good direction.
+	m := selectListRe.FindStringSubmatch(query)
+	if m == nil {
+		return nil
+	}
+	var cols []string
+	for _, c := range strings.Split(m[1], ",") {
+		if c = strings.TrimSpace(c); c != "" {
+			cols = append(cols, c)
+		}
+	}
+	return cols
+}
+
+// projectRow renders one stored row as the columns a query asked for, and fails
+// loudly on a column it does not know rather than returning a silent nil.
+func projectRow(row *jqRow, cols []string) ([]driver.Value, error) {
+	out := make([]driver.Value, 0, len(cols))
+	for _, c := range cols {
+		var v driver.Value
+		switch c {
+		case "job_id":
+			v = row.jobID
+		case "queue_name":
+			v = row.queueName
+		case "status":
+			v = row.status
+		case "payload":
+			v = row.payload
+		case "created_at":
+			v = row.createdAt
+		case "started_at":
+			if row.startedAt != nil {
+				v = *row.startedAt
+			}
+		case "completed_at":
+			if row.completedAt != nil {
+				v = *row.completedAt
+			}
+		case "run_id":
+			if row.runID != nil {
+				v = *row.runID
+			}
+		default:
+			return nil, fmt.Errorf("fake jobqueue store: query selects unknown column %q; "+
+				"add it to projectRow or the test is asserting against a column the fake "+
+				"invented", c)
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
 // queryJobByID handles:
 //
 //	SELECT job_id, queue_name, status, payload, created_at, started_at, completed_at
 //	FROM task_queue
 //	WHERE tenant_id = $1 AND queue_name = $2 AND job_id = $3
-func (c *fakeConn) queryJobByID(args []driver.NamedValue) (driver.Rows, error) {
+func (c *fakeConn) queryJobByID(query string, args []driver.NamedValue) (driver.Rows, error) {
 	tid, err := argString(args, 1)
 	if err != nil {
 		return nil, err
@@ -558,34 +788,22 @@ func (c *fakeConn) queryJobByID(args []driver.NamedValue) (driver.Rows, error) {
 		return nil, err
 	}
 
+	cols := selectedColumns(query)
+	if len(cols) == 0 {
+		return nil, fmt.Errorf("fake jobqueue store: could not read a column list from %q", query)
+	}
+
 	key := rowKey(tid, queueName, jobID)
 	row, ok := c.store.rows[key]
 	if !ok {
-		return &fakeRows{
-			columns: []string{"job_id", "queue_name", "status", "payload", "created_at", "started_at", "completed_at"},
-		}, nil
+		return &fakeRows{columns: cols}, nil
 	}
 
-	var startedAtVal, completedAtVal driver.Value
-	if row.startedAt != nil {
-		startedAtVal = *row.startedAt
+	values, err := projectRow(row, cols)
+	if err != nil {
+		return nil, err
 	}
-	if row.completedAt != nil {
-		completedAtVal = *row.completedAt
-	}
-
-	return &fakeRows{
-		columns: []string{"job_id", "queue_name", "status", "payload", "created_at", "started_at", "completed_at"},
-		data: [][]driver.Value{{
-			row.jobID,
-			row.queueName,
-			row.status,
-			row.payload,
-			row.createdAt,
-			startedAtVal,
-			completedAtVal,
-		}},
-	}, nil
+	return &fakeRows{columns: cols, data: [][]driver.Value{values}}, nil
 }
 
 // queryListJobs handles:
@@ -647,25 +865,17 @@ func (c *fakeConn) queryListJobs(query string, args []driver.NamedValue) (driver
 		results = results[:limit]
 	}
 
-	columns := []string{"job_id", "queue_name", "status", "payload", "created_at", "started_at", "completed_at"}
+	columns := selectedColumns(query)
+	if len(columns) == 0 {
+		return nil, fmt.Errorf("fake jobqueue store: could not read a column list from %q", query)
+	}
 	var data [][]driver.Value
 	for _, row := range results {
-		var startedAtVal, completedAtVal driver.Value
-		if row.startedAt != nil {
-			startedAtVal = *row.startedAt
+		values, err := projectRow(row, columns)
+		if err != nil {
+			return nil, err
 		}
-		if row.completedAt != nil {
-			completedAtVal = *row.completedAt
-		}
-		data = append(data, []driver.Value{
-			row.jobID,
-			row.queueName,
-			row.status,
-			row.payload,
-			row.createdAt,
-			startedAtVal,
-			completedAtVal,
-		})
+		data = append(data, values)
 	}
 	return &fakeRows{columns: columns, data: data}, nil
 }
@@ -742,16 +952,16 @@ type fakeEnvironment struct {
 
 func newFakeEnvironment() *fakeEnvironment {
 	fe := &fakeEnvironment{}
-	fe.Environment.StartWorkflow = func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+	fe.Environment.StartWorkflow = func(ctx context.Context, req plugin.StartRequest) (string, error) {
 		fe.mu.Lock()
-		fe.wfCalls = append(fe.wfCalls, startWorkflowCall{ctx: ctx, defName: defName, input: input})
+		fe.wfCalls = append(fe.wfCalls, startWorkflowCall{ctx: ctx, defName: req.DefName, input: req.Input})
 		count := len(fe.wfCalls)
 		fe.mu.Unlock()
 		if fe.wfError != nil {
 			return "", fe.wfError
 		}
 		// Return a deterministic run ID so the test can verify it was stored.
-		return fmt.Sprintf("run-%s-%d", defName, count), nil
+		return fmt.Sprintf("run-%s-%d", req.DefName, count), nil
 	}
 	return fe
 }
@@ -792,7 +1002,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeJobQueueStore, *
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(p.mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, p.mux)(p.mux)
 	return p, handler, store, clock, fakeEnv
 }
 
@@ -1296,7 +1506,10 @@ func TestPollCallsStartWorkflow(t *testing.T) {
 		t.Errorf("expected input %q, got %q", `{"x":1}`, string(calls[0].input))
 	}
 
-	// Verify job is completed with run_id stored.
+	// Verify job is DISPATCHED (not completed) with run_id stored. cleat#1715:
+	// dispatch only starts the workflow, it does not know the outcome, so
+	// status stays 'dispatched' and completed_at stays unset until
+	// ObserveFinalize (or the abandonment sweep) says otherwise.
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	key := rowKey(testTenantID.String(), "wf-queue", jobID)
@@ -1304,14 +1517,14 @@ func TestPollCallsStartWorkflow(t *testing.T) {
 	if !ok {
 		t.Fatal("expected job to exist")
 	}
-	if row.status != "completed" {
-		t.Errorf("expected status 'completed', got %q", row.status)
+	if row.status != "dispatched" {
+		t.Errorf("expected status 'dispatched', got %q", row.status)
 	}
 	if row.startedAt == nil {
 		t.Error("expected started_at to be set")
 	}
-	if row.completedAt == nil {
-		t.Error("expected completed_at to be set")
+	if row.completedAt != nil {
+		t.Error("expected completed_at to be unset -- the workflow's outcome is not yet known")
 	}
 	if row.runID == nil || *row.runID == "" {
 		t.Error("expected run_id to be set")
@@ -1425,13 +1638,28 @@ func TestJQMigrations(t *testing.T) {
 		if m.Version == 0 {
 			t.Errorf("migration %d: version must be non-zero", i)
 		}
-		if m.Up == "" {
-			t.Errorf("migration %d: Up SQL is empty", i)
-		}
-		if m.Down == "" {
-			t.Errorf("migration %d: Down SQL is empty", i)
-		}
+		// A migration must DO something, which is what this guard is for --
+		// but SQL is not the only way to do something. A TenantScoped
+		// migration carries no SQL by design: the runtime emits ENABLE /
+		// FORCE / CREATE POLICY from the declaration (plugin.applyTenantScoping),
+		// and writing that SQL here by hand would put a second, drifting copy
+		// of the policy in the tree.
+		//
+		// The guard as written rejected exactly that shape, and it is not a
+		// jobqueue quirk: thirteen plugins carry this same loop, so every one
+		// of them blocks tenant scoping until it is amended the same way.
+		// kvstore, the only plugin that had adopted TenantScoped before this,
+		// has no such test -- which is why the mechanism shipped without
+		// anyone discovering that its own reference implementation was the
+		// single case that could not have revealed the obstacle. cleat#1278.
+		_ = i
 	}
+	// The thirteenth copy, replaced by the shared helper rather than amended
+	// in place. This one asked `m.Up == ""`, so a MySQL-only migration read as
+	// doing nothing; the same drift the comment above predicts for every copy
+	// of this loop. cleat#1513 extracted the helper, cleat#1622 corrected its
+	// predicate to match the migration runner's.
+	plugintest.AssertMigrationsDoSomething(t, migrations)
 }
 
 // ===========================================================================

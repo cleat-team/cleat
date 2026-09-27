@@ -37,11 +37,17 @@
 //! }
 //! ```
 //!
-//! Mirrors Go `durabletest.TestEnv` at durable/durabletest/durabletest.go.
+//! Mirrors Go `cleattest.TestEnv` at cleat/cleattest/cleattest.go.
+//!
+//! (Was `durable/durabletest/durabletest.go`, a path that has not existed since
+//! the package was renamed. A stale cross-SDK pointer is worse than none: it
+//! sends a porter looking for a file rather than telling them there is nothing
+//! to find.)
 
 use std::collections::HashMap;
 
-use crate::host_calls::{FetchResult, RetryPolicy};
+use crate::signal_envelope::{decode_signal_envelope, encode_signal_envelope};
+use crate::host_calls::{AwaitedSignal, FetchResult, RetryPolicy};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Public types
@@ -163,8 +169,6 @@ pub struct MockHostCalls {
     retry_sim_attempts: HashMap<String, u32>,
 
     // ---- Signal reply ----
-    signal_reply_channels: HashMap<String, String>,
-    signal_reply_corr_id_counter: u64,
 
     // ---- Other ----
     defer_counter: u64,
@@ -203,8 +207,6 @@ impl MockHostCalls {
             cancel_reason: String::new(),
             retry_sim_count: 0,
             retry_sim_attempts: HashMap::new(),
-            signal_reply_channels: HashMap::new(),
-            signal_reply_corr_id_counter: 0,
             defer_counter: 0,
             child_run_id_counter: 0,
             update_handlers: Vec::new(),
@@ -407,7 +409,12 @@ impl MockHostCalls {
     }
 
     /// Wait for one or more external signals with a timeout.
-    pub fn await_signals(&mut self, signal_names: &[&str], timeout_ms: i64) -> (String, String, bool, Option<String>) {
+    /// Returns the same `AwaitedSignal` the real SDK returns, rather than a
+    /// tuple. The two differed only in an error slot this mock never filled --
+    /// both arms returned `None` -- and sharing the type is what lets a
+    /// receiver written against the mock read `reply_to` the same way it will
+    /// in a workflow. IMPROVEMENT-PLAN 3.220.
+    pub fn await_signals(&mut self, signal_names: &[&str], timeout_ms: i64) -> AwaitedSignal {
         let mut found_idx: Option<usize> = None;
 
         for (i, sig) in self.pending_signals.iter().enumerate() {
@@ -419,13 +426,19 @@ impl MockHostCalls {
 
         if let Some(idx) = found_idx {
             let sig = self.pending_signals.remove(idx);
-            (sig.name, sig.payload, false, None)
+            // Strip the reply envelope so the receiver sees the payload as
+            // sent and gets the address separately.
+            let (reply_to, payload) = match decode_signal_envelope(&sig.payload) {
+                Some((addr, inner)) => (addr, inner),
+                None => (String::new(), sig.payload),
+            };
+            AwaitedSignal { name: sig.name, payload, timed_out: false, reply_to }
         } else {
             // No matching signal — return timeout
             if timeout_ms > 0 {
                 self.now_ms += timeout_ms;
             }
-            (String::new(), String::new(), true, None)
+            AwaitedSignal { name: String::new(), payload: String::new(), timed_out: true, reply_to: String::new() }
         }
     }
 
@@ -565,53 +578,11 @@ impl MockHostCalls {
         Ok(())
     }
 
-    /// Set a state value.
-    pub fn set_state(&mut self, key: &str, value: &str) -> Result<(), String> {
-        self.workflow_state.insert(self.scoped_key(key), value.to_string());
-        Ok(())
-    }
 
-    /// Get a state value.
-    pub fn get_state(&self, key: &str) -> Result<String, String> {
-        let scoped = self.scoped_key(key);
-        self.workflow_state
-            .get(&scoped)
-            .cloned()
-            .ok_or_else(|| format!("key not found: {}", key))
-    }
 
-    /// Delete a state key.
-    pub fn delete_state(&mut self, key: &str) -> Result<(), String> {
-        self.workflow_state.remove(&self.scoped_key(key));
-        Ok(())
-    }
 
-    /// Atomically increment a state counter.
-    pub fn incr_state(&mut self, key: &str, delta: i64) -> Result<i64, String> {
-        let scoped = self.scoped_key(key);
-        let current = self.workflow_state
-            .get(&scoped)
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0);
-        let new_val = current + delta;
-        self.workflow_state.insert(scoped, new_val.to_string());
-        Ok(new_val)
-    }
 
-    /// Check if a state key exists.
-    pub fn has_state(&self, key: &str) -> bool {
-        self.workflow_state.contains_key(&self.scoped_key(key))
-    }
 
-    /// List state keys with a given prefix.
-    pub fn list_state(&self, prefix: &str) -> Result<Vec<String>, String> {
-        let scoped = self.scoped_key(prefix);
-        Ok(self.workflow_state
-            .keys()
-            .filter(|k| k.starts_with(&scoped))
-            .cloned()
-            .collect())
-    }
 
     /// Await all children workflows.
     pub fn await_all_children(&self, _run_ids: &[&str]) -> Result<String, String> {
@@ -626,28 +597,32 @@ impl MockHostCalls {
     }
 
     /// Send a signal to a target workflow and wait for a response.
+    ///
+    /// Composed over the mock's own promises, exactly as the real SDK composes
+    /// over the host's (IMPROVEMENT-PLAN 3.220). The version this replaces
+    /// minted a `corr-<target>-<name>-<n>` ID into a private channel map --
+    /// a protocol that existed only in this harness, so a receiver written
+    /// against it could not work in a workflow.
     pub fn send_signal_and_wait(&mut self, target_run_id: &str, signal_name: &str, payload: &str, timeout_ms: i64) -> Result<String, String> {
-        self.signal_reply_corr_id_counter += 1;
-        let correlation_id = format!("corr-{}-{}-{}", target_run_id, signal_name, self.signal_reply_corr_id_counter);
-
-        // Register a reply channel
-        self.signal_reply_channels.insert(correlation_id.clone(), "__pending__".to_string());
-
-        // Send the signal
-        let _ = self.signal_workflow(target_run_id, signal_name, payload);
-
-        // Check if reply was already sent
-        if let Some(reply) = self.signal_reply_channels.get(&correlation_id) {
-            if reply != "__pending__" {
-                let resp = reply.clone();
-                self.signal_reply_channels.remove(&correlation_id);
-                return Ok(resp);
-            }
+        let (reply_to, err) = self.create_promise(&format!("__reply:{}", signal_name));
+        if let Some(e) = err {
+            return Err(format!("send_signal_and_wait: create reply promise: {}", e));
         }
+        let envelope = encode_signal_envelope(&reply_to, payload)
+            .map_err(|e| format!("send_signal_and_wait: {}", e))?;
+        self.signal_workflow(target_run_id, signal_name, &envelope)?;
 
-        // Simulate timeout
-        self.now_ms += timeout_ms;
-        Err(format!("SendSignalAndWait(target={}, signal={}) timed out after {}ms", target_run_id, signal_name, timeout_ms))
+        let (response, timed_out, err) = self.await_promise(&reply_to, timeout_ms);
+        if let Some(e) = err {
+            return Err(format!("send_signal_and_wait: await reply to signal \"{}\": {}", signal_name, e));
+        }
+        if timed_out {
+            return Err(format!(
+                "send_signal_and_wait: no reply to signal \"{}\" from workflow \"{}\" within {}ms",
+                signal_name, target_run_id, timeout_ms
+            ));
+        }
+        Ok(response)
     }
 
     /// Send signal and wait (ms variant, alias for send_signal_and_wait).
@@ -655,14 +630,14 @@ impl MockHostCalls {
         self.send_signal_and_wait(target_run_id, signal_name, payload, timeout_ms)
     }
 
-    /// Reply to a signal from within a handler.
+    /// Reply to a signal from within a handler. `correlation_id` is
+    /// `AwaitedSignal::reply_to`, which is the reply promise's ID.
     pub fn reply_to_signal(&mut self, correlation_id: &str, response: &str) -> Result<(), String> {
-        if let Some(ch) = self.signal_reply_channels.get_mut(correlation_id) {
-            *ch = response.to_string();
-            Ok(())
-        } else {
-            Err(format!("no pending signal for correlation ID: {}", correlation_id))
+        if correlation_id.is_empty() {
+            return Err("reply_to_signal: empty correlation ID. Pass AwaitedSignal::reply_to from the signal being answered; it is empty when the sender used signal_workflow and is not waiting for a reply.".to_string());
         }
+        self.resolve_promise(correlation_id, response)
+            .map_err(|e| format!("reply_to_signal(correlation_id=\"{}\"): {}", correlation_id, e))
     }
 
     /// Send a signal to a target workflow (fire-and-forget).
@@ -870,8 +845,6 @@ impl MockHostCalls {
         self.child_errors.clear();
         self.plugin_call_stubs.clear();
         self.promises.clear();
-        self.signal_reply_channels.clear();
-        self.signal_reply_corr_id_counter = 0;
         self.update_handlers.clear();
         self.sent_signals.clear();
         self.scheduled_invocations.clear();
@@ -1068,11 +1041,6 @@ impl CleatTest {
         self.mock.call_count(service, operation) == expected
     }
 
-    /// Assert that a workflow state key has the given value.
-    pub fn assert_state(&self, key: &str, value: &str) -> bool {
-        self.mock.get_state(key).is_ok_and(|v| v == value)
-    }
-
     /// Assert that a signal with the given name was delivered.
     pub fn assert_signal_delivered(&self, signal_name: &str) -> bool {
         self.mock.sent_signals.iter().any(|s| s.contains(&format!(":{}", signal_name)))
@@ -1171,21 +1139,22 @@ mod tests {
         let mut env = CleatTest::new();
         env.deliver_signal("payment_received", r#"{"amount":5000}"#);
 
-        let (name, payload, timed_out, err) = env.mock.await_signals(&["payment_received"], 1000);
-        assert!(!timed_out);
-        assert!(err.is_none());
-        assert_eq!(name, "payment_received");
-        assert_eq!(payload, r#"{"amount":5000}"#);
+        let sig = env.mock.await_signals(&["payment_received"], 1000);
+        assert!(!sig.timed_out);
+        assert_eq!(sig.name, "payment_received");
+        assert_eq!(sig.payload, r#"{"amount":5000}"#);
+        // A signal delivered directly is one-way: no reply address.
+        assert_eq!(sig.reply_to, "");
     }
 
     #[test]
     fn test_await_signals_timeout() {
         let mut env = CleatTest::new();
-        let (name, payload, timed_out, err) = env.mock.await_signals(&["nonexistent"], 100);
-        assert!(timed_out);
-        assert!(err.is_none());
-        assert!(name.is_empty());
-        assert!(payload.is_empty());
+        let sig = env.mock.await_signals(&["nonexistent"], 100);
+        assert!(sig.timed_out);
+        assert!(sig.name.is_empty());
+        assert!(sig.payload.is_empty());
+        assert!(sig.reply_to.is_empty());
     }
 
     #[test]
@@ -1216,25 +1185,6 @@ mod tests {
         assert_eq!(env.mock.version(), 3);
     }
 
-    #[test]
-    fn test_promise_workflow() {
-        let mut env = CleatTest::new();
-        let (prom_id, err) = env.mock.create_promise("test-promise");
-        assert!(err.is_none());
-        assert!(prom_id.contains("test-promise"));
-
-        // Promise is pending initially
-        let (_val, timed_out, err) = env.mock.await_promise(&prom_id, 100);
-        assert!(timed_out);
-        assert!(err.is_none());
-
-        // Resolve and await
-        env.mock.resolve_promise(&prom_id, r#"{"status":"done"}"#).unwrap();
-        let (val, timed_out, err) = env.mock.await_promise(&prom_id, 100);
-        assert!(!timed_out);
-        assert!(err.is_none());
-        assert_eq!(val, r#"{"status":"done"}"#);
-    }
 
     #[test]
     fn test_child_workflow() {
@@ -1281,19 +1231,6 @@ mod tests {
         assert_eq!(resp, r#"{"data":"hello"}"#);
     }
 
-    #[test]
-    fn test_workflow_state() {
-        let mut env = CleatTest::new();
-        env.mock.set_state("my_key", "my_value").unwrap();
-
-        let val = env.mock.get_state("my_key").unwrap();
-        assert_eq!(val, "my_value");
-        assert!(env.mock.has_state("my_key"));
-        assert!(!env.mock.has_state("nonexistent"));
-
-        env.mock.delete_state("my_key").unwrap();
-        assert!(!env.mock.has_state("my_key"));
-    }
 
     #[test]
     fn test_signal_workflow_and_signal() {
@@ -1312,48 +1249,77 @@ mod tests {
         env.deliver_signal("vote_2", r#"{"approved":true}"#);
 
         let signals = &["vote_1", "vote_2", "vote_3"];
-        let (name, _payload, timed_out, err) = env.mock.await_signals(signals, 5000);
-        assert!(!timed_out);
-        assert!(err.is_none());
-        assert_eq!(name, "vote_1");
+        let sig = env.mock.await_signals(signals, 5000);
+        assert!(!sig.timed_out);
+        assert_eq!(sig.name, "vote_1");
     }
 
+
+    /// Asserts the three things the request/reply envelope must get right: the
+    /// receiver sees the caller's payload exactly as sent, it gets a reply
+    /// address without parsing one out of that payload, and replying to that
+    /// address settles the promise the sender is waiting on.
+    ///
+    /// What it replaces was named `test_send_signal_and_wait` and never called
+    /// `send_signal_and_wait`. It inserted a hand-written correlation ID into
+    /// the harness's private `signal_reply_channels` map, replied into it, and
+    /// asserted the map had changed -- a test that a `HashMap` works, passing
+    /// against a protocol that existed in no other environment
+    /// (IMPROVEMENT-PLAN 3.220).
+    ///
+    /// It cannot assert the SENDER waking, because the mock's `await_promise`
+    /// returns immediately for a pending promise rather than suspending
+    /// (IMPROVEMENT-PLAN 3.235). The Go harnesses had this and no longer do,
+    /// but their fix -- wait on a channel a concurrent resolver closes -- does
+    /// not port here: this mock's state is in a `RefCell` and is not `Sync`,
+    /// so there is no second thread to wait for. The shape for Rust is a
+    /// responder registered before the call, which settles the promise before
+    /// the await ever reads it.
     #[test]
-    fn test_scope_and_state() {
+    fn test_send_signal_and_wait_delivers_a_reply_address_and_the_original_payload() {
         let mut env = CleatTest::new();
-        let prev = env.mock.set_scope("counter", "user_42");
-        assert!(prev.is_empty());
 
-        env.mock.set_state("count", "10").unwrap();
-        let val = env.mock.get_state("count").unwrap();
-        assert_eq!(val, "10");
+        // Nothing replies, so the send times out -- but the envelope is sent.
+        assert!(env
+            .mock
+            .send_signal_and_wait("target", "sig", r#"{"key":"val"}"#, 5000)
+            .is_err());
 
-        // Verify scoped key
-        let (obj_type, inst_key) = env.mock.get_scope();
-        assert_eq!(obj_type, "counter");
-        assert_eq!(inst_key, "user_42");
+        let sig = env.mock.await_signals(&["sig"], 1000);
+        assert!(!sig.timed_out, "the signal was never sent");
+        assert_eq!(sig.payload, r#"{"key":"val"}"#, "receiver must see the payload as sent");
+        assert!(!sig.reply_to.is_empty(), "expected a reply address");
 
-        env.mock.clear_scope();
-        let (obj_type2, _) = env.mock.get_scope();
-        assert!(obj_type2.is_empty());
+        env.mock.reply_to_signal(&sig.reply_to, "reply-response").unwrap();
+
+        let (got, timed_out, err) = env.mock.await_promise(&sig.reply_to, 1000);
+        assert!(err.is_none(), "await_promise after the reply: {:?}", err);
+        assert!(!timed_out, "the reply promise is still pending after reply_to_signal");
+        assert_eq!(got, "reply-response");
     }
 
+    /// Negative control: a one-way signal must carry no reply address, or a
+    /// receiver cannot tell a request that wants an answer from a
+    /// notification, and would reply into a promise nobody is awaiting.
     #[test]
-    fn test_send_signal_and_wait() {
+    fn test_signal_workflow_carries_no_reply_address() {
         let mut env = CleatTest::new();
+        env.mock.signal_workflow("target", "sig", r#"{"key":"val"}"#).unwrap();
 
-        // Send signal and wait — will reply via reply_to_signal
-        let corr_id = "corr-target-test-1";
-        env.mock.signal_reply_channels.insert(corr_id.to_string(), "__pending__".to_string());
+        let sig = env.mock.await_signals(&["sig"], 1000);
+        assert!(!sig.timed_out);
+        assert_eq!(sig.reply_to, "", "a one-way signal must carry no reply address");
+        assert_eq!(sig.payload, r#"{"key":"val"}"#, "payload must pass through unchanged");
+    }
 
-        // Simulate the target replying
-        env.mock.reply_to_signal(corr_id, r#"{"status":"ok"}"#).unwrap();
-
-        // Now check the channel has the reply
-        assert_eq!(
-            env.mock.signal_reply_channels.get(corr_id).unwrap(),
-            r#"{"status":"ok"}"#
-        );
+    /// Replying to an address nobody is waiting on is an error, not a silent
+    /// success -- otherwise a stale address leaves the sender suspended until
+    /// its timeout with the failure visible nowhere.
+    #[test]
+    fn test_reply_to_an_unknown_address_is_an_error() {
+        let mut env = CleatTest::new();
+        assert!(env.mock.reply_to_signal("no-such-promise", "resp").is_err());
+        assert!(env.mock.reply_to_signal("", "resp").is_err());
     }
 
     #[test]
@@ -1372,15 +1338,6 @@ mod tests {
         assert_eq!(result, r#"{"greeting":"Hello, World!"}"#);
     }
 
-    #[test]
-    fn test_assert_state() {
-        let mut env = CleatTest::new();
-        env.mock.set_state("key1", "value1").unwrap();
-
-        assert!(env.assert_state("key1", "value1"));
-        assert!(!env.assert_state("key1", "wrong"));
-        assert!(!env.assert_state("nonexistent", "anything"));
-    }
 
     #[test]
     fn test_reset() {
@@ -1401,27 +1358,7 @@ mod tests {
         assert_eq!(env.call_count("notification", "email"), 1);
     }
 
-    #[test]
-    fn test_incr_state() {
-        let mut env = CleatTest::new();
 
-        let val = env.mock.incr_state("counter", 5).unwrap();
-        assert_eq!(val, 5);
-
-        let val2 = env.mock.incr_state("counter", 3).unwrap();
-        assert_eq!(val2, 8);
-    }
-
-    #[test]
-    fn test_list_state() {
-        let mut env = CleatTest::new();
-        env.mock.set_state("a:1", "v1").unwrap();
-        env.mock.set_state("a:2", "v2").unwrap();
-        env.mock.set_state("b:1", "v3").unwrap();
-
-        let keys = env.mock.list_state("a:").unwrap();
-        assert_eq!(keys.len(), 2);
-    }
 
     #[test]
     fn test_continue_as_new() {

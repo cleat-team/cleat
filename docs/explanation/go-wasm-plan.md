@@ -1,5 +1,14 @@
 # Plan: Replace TinyGo with Standard Go WASM Compilation
 
+> **This is an original design document, not a description of the shipped system.**
+> Read it for intent; check `tiers.yaml` and the source for what is true now.
+> Marked 2026-09-06 while sweeping stale wazero references: every mention of
+> wazero as *the* runtime below dates from before #459 (2026-08-10) deleted the
+> wazero backend. wasmtime is the only WASM backend cleat has; the wazero
+> `engine.Runtime` survives for CLI and test tooling only. The body is left as
+> written, because rewriting a design document to match what was built destroys
+> the only record of what was intended.
+
 ## Problem
 
 TinyGo has too many restrictions and bugs:
@@ -65,7 +74,7 @@ The docs already reference a `--target go` option but it was never implemented.
 
 ### Exp 7: Can we drop the manual JSON helpers?
 - Standard Go `encoding/json` works in wasip1
-- But the vet checker blocks `encoding/json` (W001 warning) and `reflect` (E011 error)
+- But the vet checker blocks `encoding/json` (E021 on map iteration -- an error, not a warning) and `reflect` (E011 error)
 - Decision: keep manual helpers for TinyGo compat, but standard Go can use real JSON
 
 ## Implementation Plan

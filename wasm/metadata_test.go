@@ -1,6 +1,8 @@
 package wasm
 
 import (
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -60,6 +62,85 @@ func TestWriteMetadata_InvalidMeta(t *testing.T) {
 	}
 	if readMeta.WorkflowVersion != 1 {
 		t.Errorf("expected version 1, got %d", readMeta.WorkflowVersion)
+	}
+}
+
+func TestReadEntryPointsSection_MissingSection(t *testing.T) {
+	wasmHeader := []byte{
+		0x00, 0x61, 0x73, 0x6d,
+		0x01, 0x00, 0x00, 0x00,
+	}
+	_, err := ReadEntryPointsSection(wasmHeader)
+	if !errors.Is(err, ErrEntryPointsSectionMissing) {
+		t.Fatalf("expected ErrEntryPointsSectionMissing, got %v", err)
+	}
+}
+
+func TestReadEntryPointsSection_ReadsNames(t *testing.T) {
+	wasmHeader := []byte{
+		0x00, 0x61, 0x73, 0x6d,
+		0x01, 0x00, 0x00, 0x00,
+	}
+	wasmBytes, err := writeCustomSection(wasmHeader, entryPointsSectionName, []byte("place_order\ncancel_order\ndefer_order\n"))
+	if err != nil {
+		t.Fatalf("writeCustomSection: %v", err)
+	}
+	names, err := ReadEntryPointsSection(wasmBytes)
+	if err != nil {
+		t.Fatalf("ReadEntryPointsSection: %v", err)
+	}
+	want := []string{"place_order", "cancel_order", "defer_order"}
+	if len(names) != len(want) {
+		t.Fatalf("got %v, want %v", names, want)
+	}
+	for i, n := range want {
+		if names[i] != n {
+			t.Errorf("index %d: got %q, want %q", i, names[i], n)
+		}
+	}
+}
+
+func TestReadEntryPointsSection_EmptySectionIsEmptyNames(t *testing.T) {
+	wasmHeader := []byte{
+		0x00, 0x61, 0x73, 0x6d,
+		0x01, 0x00, 0x00, 0x00,
+	}
+	wasmBytes, err := writeCustomSection(wasmHeader, entryPointsSectionName, []byte(""))
+	if err != nil {
+		t.Fatalf("writeCustomSection: %v", err)
+	}
+	names, err := ReadEntryPointsSection(wasmBytes)
+	if err != nil {
+		t.Fatalf("ReadEntryPointsSection: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("expected no entry points for an empty section, got %v", names)
+	}
+}
+
+func TestReadEntryPointsSection_DuplicateNamesFail(t *testing.T) {
+	wasmHeader := []byte{
+		0x00, 0x61, 0x73, 0x6d,
+		0x01, 0x00, 0x00, 0x00,
+	}
+	// Two independent #[cleat_entry] statics contributing the same name --
+	// e.g. two functions sharing an identifier across modules, or the same
+	// macro expansion linked in twice.
+	wasmBytes, err := writeCustomSection(wasmHeader, entryPointsSectionName, []byte("place_order\ncancel_order\nplace_order\ndefer_order\ndefer_order\n"))
+	if err != nil {
+		t.Fatalf("writeCustomSection: %v", err)
+	}
+	_, err = ReadEntryPointsSection(wasmBytes)
+	if err == nil {
+		t.Fatal("expected an error for duplicate entry point names")
+	}
+	for _, want := range []string{"place_order", "defer_order"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name duplicate %q", err.Error(), want)
+		}
+	}
+	if strings.Contains(err.Error(), "cancel_order") {
+		t.Errorf("error %q wrongly names the non-duplicate cancel_order", err.Error())
 	}
 }
 

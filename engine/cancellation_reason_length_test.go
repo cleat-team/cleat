@@ -13,9 +13,11 @@ func (c *cancelledSignalStore) DeliverSignal(context.Context, string, string, st
 	return nil
 }
 
-func (c *cancelledSignalStore) PollSignal(context.Context, string, string) (string, bool, error) {
-	return "", false, nil
+func (c *cancelledSignalStore) PollSignal(context.Context, string, string) (SignalDelivery, bool, error) {
+	return SignalDelivery{}, false, nil
 }
+
+func (c *cancelledSignalStore) ConsumeSignal(context.Context, string, int64) error { return nil }
 
 func (c *cancelledSignalStore) PollCancellation(context.Context, string) (bool, string, error) {
 	return true, c.reason, nil

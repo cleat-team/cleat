@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -52,7 +53,9 @@ func StaticVersionStore(store WorkflowStore) VersionStoreResolver {
 //	POST   /api/versions/<name>/<v>/restore       — mark version active
 //	POST   /api/versions/<name>/<v>/purge         — delete version permanently
 //	GET    /api/versions/stale        — list stale version alerts
-//	POST   /api/versions/gc           — run garbage collection
+//	POST   /api/versions/gc           — run garbage collection.
+//	                                    Query: dry_run=true, min_versions=N,
+//	                                    max_age=<Go duration, e.g. 720h>
 func RegisterVersionHandler(mux *http.ServeMux, resolve VersionStoreResolver) {
 	h := &versionHandler{resolve: resolve}
 	mux.HandleFunc("/api/versions", h.handleVersions)
@@ -190,9 +193,45 @@ func (h *versionHandler) runGC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	opts := DefaultGCOptions()
-	// Support dry_run=true query parameter.
-	if r.URL.Query().Get("dry_run") == "true" {
+	q := r.URL.Query()
+	if q.Get("dry_run") == "true" {
 		opts.DryRun = true
+	}
+	// RETENTION IS OVERRIDABLE HERE TOO. Until cleat#1315 this read only
+	// dry_run and took DefaultGCOptions() wholesale, so the policy --
+	// MinVersionsToKeep=3, MaxVersionAge=30d -- was compiled in and unreachable
+	// from any interface.
+	//
+	// A malformed value is REFUSED rather than ignored. Falling back to the
+	// default would run a destructive sweep under a policy the caller did not
+	// ask for and report success, which is the shape this change exists to
+	// remove.
+	if v := q.Get("min_versions"); v != "" {
+		n, err := strconv.Atoi(v)
+		// n >= 1, not n >= 0. GarbageCollectVersions normalises
+		// MinVersionsToKeep <= 0 back to DefaultMinVersionsToKeep, so accepting
+		// 0 here would answer 200 and then sweep under a policy of 3 -- the
+		// silent substitution this change exists to remove, reintroduced at the
+		// boundary meant to prevent it.
+		if err != nil || n < 1 {
+			writeVersionError(w, 400, fmt.Sprintf(
+				"min_versions must be an integer >= 1, got %q (0 is not accepted: the "+
+					"sweep treats it as unset and substitutes %d)", v, DefaultMinVersionsToKeep))
+			return
+		}
+		opts.MinVersionsToKeep = n
+	}
+	if v := q.Get("max_age"); v != "" {
+		d, err := time.ParseDuration(v)
+		// d > 0 for the same reason as min_versions above.
+		if err != nil || d <= 0 {
+			writeVersionError(w, 400, fmt.Sprintf(
+				"max_age must be a positive Go duration such as 720h, got %q (0 is not "+
+					"accepted: the sweep treats it as unset and substitutes %s)",
+				v, DefaultMaxVersionAge))
+			return
+		}
+		opts.MaxVersionAge = d
 	}
 	result, err := GarbageCollectVersions(r.Context(), store, opts)
 	if err != nil {

@@ -52,7 +52,10 @@ The decorator generates a WASM export wrapper conforming to the Cleat ABI (`(arg
 
 ## HostCalls overview
 
-The `HostCalls` class wraps all 36 WASM host function imports grouped by category:
+The `HostCalls` class binds 48 WASM host function imports, grouped by category below.
+The number is derived, not counted by hand -- see "Deriving the surface" at the end
+of this file, because it was 36 here for long enough to be copied into three more
+places.
 
 ### Workflow Identity
 - `current_workflow_id() -> str` -- the current workflow's unique ID
@@ -87,10 +90,6 @@ The `HostCalls` class wraps all 36 WASM host function imports grouped by categor
 
 ### State
 - `set_query_state(key, value) -> None` -- set queryable state key-value pair
-- `set_state(key, value) -> None` -- set typed state (marshals to JSON)
-- `get_state(key, result_type) -> T` -- get typed state (unmarshals from JSON)
-- `delete_state(key) -> None` -- delete a state key
-- `incr_state(key, delta=1) -> int` -- atomically increment a numeric state key
 
 ### Promises
 - `create_promise(name, ttl_ms=None) -> str` -- create a durable promise, returns promise ID
@@ -109,7 +108,7 @@ state that any caller can read via `GET /api/workflows/:id/query?key=X`.
 ### Lifecycle
 - `cleat_defer(description) -> str` -- register cleanup to run on exit, returns defer ID
 - `continue_as_new(input) -> None` -- start a fresh run with new input
-- `run_detached(fn) -> None` -- execute a function detached from cancellation
+- `run_detached(name, input_json) -> None` -- start a workflow that outlives this one
 
 ### Plugin Calls
 - `plugin_call(plugin_name, function_name, input) -> str` -- call a host plugin function
@@ -126,7 +125,9 @@ def my_workflow(h: HostCalls, name: str) -> str:
     # WRONG: stdout output is not deterministic, not visible in replay
     print(f"Processing {name}")
 
-    # CORRECT: recorded in event history, visible in replay
+    # CORRECT: goes to the worker's logger, tagged with the workflow id, and
+    # suppressed on replay so a resumed run does not re-emit it.
+    # NOT recorded in event history -- see cleat#1308.
     h.cleat_log(f"Processing {name}")
 
     result = h.cleat_call("service", "Op", {"name": name})
@@ -395,7 +396,7 @@ def counter_entity(h: HostCalls, instance_key: str) -> str:
     # Initialize or restore state
     count = 0
     if h.has_state("count"):
-        count = int(h.get_state("count", int))
+        count = counter          # an ordinary local: replay makes it durable
 
     h.cleat_log(f"Counter {instance_key} starting at {count}")
 
@@ -415,7 +416,7 @@ def counter_entity(h: HostCalls, instance_key: str) -> str:
             h.cleat_log(f"Counter {instance_key} incremented to {count}")
 
         elif name == "reset":
-            h.set_state("count", 0)
+            counter = 0
             count = 0
             h.cleat_log(f"Counter {instance_key} reset to 0")
 
@@ -547,7 +548,7 @@ Cleat does **not** have an `all_handlers_finished` equivalent (found in Temporal
 ```python
 @cleat_entry
 def tracked_workflow(h: HostCalls, input: str) -> str:
-    h.set_state("pending_handlers", 0)
+    pending_handlers = 0
 
     def handler(payload: str) -> str:
         h.incr_state("pending_handlers", 1)
@@ -794,7 +795,8 @@ Decorator similar to `@cleat_entry` but for entity workflows (virtual objects). 
 
 ### `HostCalls`
 
-Core class wrapping all 36 WASM host function imports. Each method handles the pointer+length string protocol and bit-packed `i64` result decoding per the Cleat ABI. The host runtime guarantees deterministic replay — all side effects are recorded in the event history.
+Core class binding the 48 WASM host function imports (derived -- see "Deriving the
+surface"). Each method handles the pointer+length string protocol and bit-packed `i64` result decoding per the Cleat ABI. The host runtime guarantees deterministic replay — all side effects are recorded in the event history.
 
 ### Result types
 
@@ -804,6 +806,22 @@ Core class wrapping all 36 WASM host function imports. Each method handles the p
 - `RetryPolicy(max_attempts, initial_interval_ms, backoff_coefficient, max_interval_ms, non_retryable_errors)` — for `cleat_call_with_retry`
 - `SuspendSentinel` — exception raised to signal workflow suspension
 - `TerminalError` — exception raised from a saga step to trigger immediate compensation (non-retryable)
+- `CleatCallError` — raised when a durable call fails, with `CleatCallTimeoutError`,
+  `CleatCallTransientError` and `CleatCallPermanentError` selected by the host's error code
+
+#### A failed call raises; it does not come back as a response
+
+`call`, `call_with_retry`, `call_with_heartbeat`, `child_workflow`,
+`child_workflow_with_options`, `plugin_call` and `plugin_call_streaming` return
+`result<string, call-failure>` in `wit/cleat.wit`, which the generated bindings lift into
+"return the response, or raise". So a failure reaches you as a `CleatCallError`, and the
+engine stopping your workflow reaches you as `SuspendSentinel` — neither can arrive as a
+string, whatever the service on the other end returns.
+
+This changed in IMPROVEMENT-PLAN 3.110. Before it, these returned a bare `string`, and both
+cases arrived as ordinary successful responses: a failure as the error text, and a stop as
+`""`. **If your workflow inspected a response for an error marker, delete that check** — the
+`"__CLEAT_ERROR__:"` prefix the SDK looked for had no producer in the host and never appeared.
 
 ### Saga
 
@@ -867,3 +885,33 @@ Typed convenience wrappers for cleat plugin host functions. Provides methods for
 
 - [Cleat project README](../../README.md) -- architecture, worker deployment, CLI reference, database schema
 - [Cleat WASM ABI specification](../../ABI.md) -- full ABI contract, bit-packing layouts, memory layout
+
+## Deriving the surface
+
+The host-call numbers in this file are derived. Do not count by hand, and do not copy
+a number from another document -- on 2026-09-13 four documents agreed at 36 and the
+figure was 48, because it was one number copied rather than four measurements.
+
+```
+python3 - <<'EOF'
+import ast, pathlib
+t = ast.parse(pathlib.Path('python-sdk/cleat_sdk/host_calls.py').read_text())
+print(len({a.asname for n in ast.walk(t) if isinstance(n, ast.ImportFrom)
+           for a in n.names if a.asname and a.asname.startswith('_import_')}))
+EOF
+```
+
+Parse, do not grep. A regex over `_import_*` returns **52**, and three of those are
+names inside comments stating the import does **not** exist:
+
+```
+# There is no _import_cleat_register_query_handler here (removed 2026-08-09).
+# There is no _import_cleat_send_signal_and_wait or
+# _import_cleat_reply_to_signal here (removed 2026-09-06, ...)
+```
+
+A text search cannot tell a binding from a sentence denying one.
+
+The WIT world in `wit/cleat.wit` declares **49** functions across 17 imported
+interfaces. The SDK binds 48 of them; the unbound one is
+`durable-register-query-handler`, matching the removal note above.

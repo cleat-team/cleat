@@ -22,7 +22,7 @@ func TestGetInstanceEvents_Success(t *testing.T) {
 			{Step: 1, EventType: engine.EventTypeCall, Service: "svc", Op: "op2"},
 		}, nil
 	}
-	api := newTestAPIServer(ms)
+	api := newTestAPIServer(existingWorkflow(ms))
 	mux := http.NewServeMux()
 	registerRoutes(mux, api)
 
@@ -55,7 +55,7 @@ func TestGetInstanceEvents_Empty(t *testing.T) {
 	ms.loadEventHistoryPaginatedFn = func(_ context.Context, workflowID string, offset, limit int) ([]engine.EventRecord, error) {
 		return nil, nil
 	}
-	api := newTestAPIServer(ms)
+	api := newTestAPIServer(existingWorkflow(ms))
 	mux := http.NewServeMux()
 	registerRoutes(mux, api)
 

@@ -1,5 +1,7 @@
 package wasm
 
+import "sort"
+
 // adapterDef describes how to generate the closure for a single HostCalls
 // method, bridging the clean Go interface to the //go:wasmimport call.
 type adapterDef struct {
@@ -7,11 +9,44 @@ type adapterDef struct {
 	ReturnType  string         // Go return type for the closure, e.g. "(string, error)"
 	Params      []adapterParam // closure parameter descriptions
 	ResultStmts []string       // lines of Go code for result processing
+
+	// PreStmts are emitted before the import arguments are set up. They exist
+	// for a method whose import takes an argument the caller does not supply:
+	// DurableDeferFunc takes only a closure, but cleat_defer wants a
+	// description, so the description is synthesised here.
+	PreStmts []string
 }
 
 type adapterParam struct {
 	Name string // parameter name
 	Type string // "string", "int64", "[]string"
+}
+
+// suspendSentinelStmts is the guest-side half of callSuspendSentinel
+// (engine/memory.go), and it must run before any field of the result is
+// decoded.
+//
+// The sentinel is bit 31, which is free in all six result layouts a host call
+// that starts fresh work can return. "Free" means the host cannot produce it,
+// not that these decoders would otherwise ignore it: in the await-signals
+// layout bit 31 lands inside the timed-out field, read below as
+// `(r>>16)&0xFFFF != 0`, so checking fields first would turn a stop into an
+// ordinary timeout and the guest would run on. Order is the contract.
+//
+// See IMPROVEMENT-PLAN 3.84 and ABI.md.
+var suspendSentinelStmts = []string{
+	"if uint64(result)&(1<<31) != 0 {",
+	"	panic(cleat.ErrSuspend)",
+	"}",
+}
+
+// withSuspendCheck prefixes the sentinel test onto a decoder's statements. Every
+// host call the host can refuse mid-segment goes through it, so the check
+// cannot be forgotten by a decoder that is added later.
+func withSuspendCheck(stmts ...string) []string {
+	out := make([]string, 0, len(suspendSentinelStmts)+len(stmts))
+	out = append(out, suspendSentinelStmts...)
+	return append(out, stmts...)
 }
 
 var adapterDefs = map[string]adapterDef{
@@ -23,7 +58,7 @@ var adapterDefs = map[string]adapterDef{
 			{"operation", "string"},
 			{"requestJSON", "string"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"responseLen := uint32(uint64(result) >> 40)",
 			"callErrorCode := cleat.CallErrorCode((uint64(result) >> 8) & 0xFFFFFFFF)",
 			"errCode := uint32(result & 0xFF)",
@@ -36,7 +71,7 @@ var adapterDefs = map[string]adapterDef{
 			`	}`,
 			"}",
 			"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
-		},
+		),
 	},
 	"DurableSleep": {
 		FieldName: "DurableSleep",
@@ -69,15 +104,51 @@ var adapterDefs = map[string]adapterDef{
 			{"signalNames", "[]string"},
 			{"timeoutMs", "int64"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"signalNameLen := uint32(uint64(result) >> 48)",
 			"payloadLen := uint32((uint64(result) >> 32) & 0xFFFF)",
 			"timedOut := uint32((uint64(result) >> 16) & 0xFFFF) != 0",
 			"errCode := uint32(result & 0xFFFF)",
 			"if errCode != 0 {",
-			`	return "", "", false, fmt.Errorf("cleat_await_signals: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`	return "", "", false, fmt.Errorf("cleat_await_signals: %s", hostErrMessage(signalNameBuf[:], signalNameLen))`,
 			"}",
 			"return unsafe.String(&signalNameBuf[0], int(signalNameLen)), unsafe.String(&payloadBuf[0], int(payloadLen)), timedOut, nil",
+		),
+	},
+	// The scope pair. ClearScope deliberately has NO entry here: it is
+	// SetScope("", "") -- the documented empty-pair call -- so it is a Go-side
+	// wrapper like DurableFetch over DurableCall, and its hostFunctions row
+	// records which import it ultimately reaches rather than asking for an
+	// adapter of its own.
+	//
+	// cleat_set_scope packs prevLen in the high 32 bits (packSimpleResult) and
+	// errCode in the low bits. That length was returned as a bare 0 on every
+	// success path until #1043, so an adapter written against the old encoding
+	// would have compiled, run, and handed back "" forever.
+	"SetScope": {
+		FieldName:  "SetScope",
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"objectType", "string"},
+			{"instanceKey", "string"},
+		},
+		ResultStmts: []string{
+			"prevLen := uint32(uint64(result) >> 32)",
+			"errCode := uint32(result & 0xFFFF)",
+			"if errCode != 0 {",
+			`	return "", fmt.Errorf("cleat_set_scope: %s", hostErrMessage(prevScopeBuf[:], prevLen))`,
+			"}",
+			"return unsafe.String(&prevScopeBuf[0], int(prevLen)), nil",
+		},
+	},
+	"GetScope": {
+		FieldName:  "GetScope",
+		ReturnType: "(string, string, error)",
+		ResultStmts: []string{
+			"objTypeLen := uint32(uint64(result) >> 32)",
+			"instKeyLen := uint32(result)",
+			"return unsafe.String(&objectTypeBuf[0], int(objTypeLen)), " +
+				"unsafe.String(&instanceKeyBuf[0], int(instKeyLen)), nil",
 		},
 	},
 	"DurableDefer": {
@@ -90,9 +161,47 @@ var adapterDefs = map[string]adapterDef{
 			"deferIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
-			`	return "", fmt.Errorf("cleat_defer: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`	return "", fmt.Errorf("cleat_defer: %s", hostErrMessage(deferIDBuf[:], deferIDLen))`,
 			"}",
 			"return unsafe.String(&deferIDBuf[0], int(deferIDLen)), nil",
+		},
+	},
+	// DurableDeferFunc registers a closure, so unlike DurableDefer it has a
+	// body the guest can actually run. The ID the host mints is the key: it is
+	// what the workflow gets back, and what _cleatRunDeferred looks up.
+	//
+	// The host cannot run this body. It invokes defers by export name from a
+	// fresh instance, and a closure lives in the memory of the instance that
+	// registered it -- so a body registered at runtime is unreachable from
+	// outside. The guest runs its own defers instead, on the path where the
+	// entry point finished. IMPROVEMENT-PLAN 3.35, 3.70.
+	"DurableDeferFunc": {
+		FieldName:  "DurableDeferFunc",
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"fn", "func()"},
+		},
+		PreStmts: []string{
+			// Before the host call, not after: a check that ran after
+			// cleat_defer would leave the durable event behind, which is the
+			// whole defect. IMPROVEMENT-PLAN 3.35 phase 4.
+			"if _cleatInDeferPhase {",
+			`	return "", _cleatErrInDeferPhase("DurableDeferFunc")`,
+			"}",
+			`description := "deferred function"`,
+			"descriptionPtr, descriptionLen := stringPtr(description)",
+		},
+		ResultStmts: []string{
+			"deferIDLen := uint32(uint64(result) >> 32)",
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return "", fmt.Errorf("cleat_defer: %s", hostErrMessage(deferIDBuf[:], deferIDLen))`,
+			"}",
+			// Copy rather than alias: unsafe.String would pin the whole 64 KiB
+			// output buffer for as long as the table holds the key.
+			"deferID := string(unsafe.String(&deferIDBuf[0], int(deferIDLen)))",
+			"_cleatRegisterDefer(deferID, fn)",
+			"return deferID, nil",
 		},
 	},
 	"DurableLog": {
@@ -113,6 +222,50 @@ var adapterDefs = map[string]adapterDef{
 			"return cancelled, unsafe.String(&reasonBuf[0], int(reasonLen))",
 		},
 	},
+	// PollUpdate returns a JSON envelope {"name","payload","request_id"} in one
+	// buffer rather than three out-params: three lengths plus a found flag do
+	// not fit an i64 alongside each other. The SDK decodes it.
+	//
+	// withSuspendCheck because delivering an update runs guest code that can
+	// start new work, so a defer segment must refuse it. See
+	// engine/updater.go and stopSurfaces["DurablePollUpdate"].
+	"PollUpdate": {
+		FieldName:  "PollUpdate",
+		ReturnType: "(string, bool, error)",
+		ResultStmts: withSuspendCheck(
+			"envelopeLen := uint32(uint64(result) >> 32)",
+			"flags := uint32(result)",
+			"errCode := flags & 0xFF",
+			"found := (flags >> 8) != 0",
+			"if errCode != 0 {",
+			`	return "", false, fmt.Errorf("cleat_poll_update: %s", hostErrMessage(envelopeBuf[:], envelopeLen))`,
+			"}",
+			"if !found {",
+			`	return "", false, nil`,
+			"}",
+			"return unsafe.String(&envelopeBuf[0], int(envelopeLen)), true, nil",
+		),
+	},
+	// CompleteUpdate: three strings in, nothing out but an error code.
+	"CompleteUpdate": {
+		FieldName:  "CompleteUpdate",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"requestID", "string"},
+			// Not "result": the generated ResultStmts below refer to a
+			// variable of that name holding the host call's return value, and a
+			// parameter would shadow it.
+			{"resultJSON", "string"},
+			{"errMsg", "string"},
+		},
+		ResultStmts: withSuspendCheck(
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return fmt.Errorf("cleat_complete_update: error %d", errCode)`,
+			"}",
+			"return nil",
+		),
+	},
 	"PollSignal": {
 		FieldName:  "PollSignal",
 		ReturnType: "(string, bool, error)",
@@ -125,9 +278,104 @@ var adapterDefs = map[string]adapterDef{
 			"errCode := flags & 0xFF",
 			"found := (flags >> 8) != 0",
 			"if errCode != 0 {",
-			`	return "", false, fmt.Errorf("cleat_poll_signal: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`	return "", false, fmt.Errorf("cleat_poll_signal: %s", hostErrMessage(payloadBuf[:], payloadLen))`,
 			"}",
 			"return unsafe.String(&payloadBuf[0], int(payloadLen)), found, nil",
+		},
+	},
+	// DurableSend: three strings in, nothing out. IMPROVEMENT-PLAN 3.226.
+	// ScheduleInvoke below is the same call with a delay; both get only an
+	// error code back, since there is no response buffer.
+	"DurableSend": {
+		FieldName:  "DurableSend",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"service", "string"},
+			{"operation", "string"},
+			{"requestJSON", "string"},
+		},
+		ResultStmts: []string{
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return fmt.Errorf("cleat_send: error %d", errCode)`,
+			"}",
+			"return nil",
+		},
+	},
+	// ResolvePromise: two strings in, nothing out. IMPROVEMENT-PLAN 3.226.
+	"ResolvePromise": {
+		FieldName:  "ResolvePromise",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"id", "string"},
+			{"value", "string"},
+		},
+		ResultStmts: []string{
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return fmt.Errorf("cleat_resolve_promise: error %d", errCode)`,
+			"}",
+			"return nil",
+		},
+	},
+	// RejectPromise: two strings in, nothing out. The mirror of ResolvePromise.
+	// IMPROVEMENT-PLAN 3.226.
+	"RejectPromise": {
+		FieldName:  "RejectPromise",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"id", "string"},
+			{"errMsg", "string"},
+		},
+		ResultStmts: []string{
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return fmt.Errorf("cleat_reject_promise: error %d", errCode)`,
+			"}",
+			"return nil",
+		},
+	},
+	// ScheduleInvoke: three strings and a delay in, nothing out.
+	// IMPROVEMENT-PLAN 3.224. Same shape as SignalWorkflow below: no response
+	// buffer, so the error code is all the guest gets.
+	"ScheduleInvoke": {
+		FieldName:  "ScheduleInvoke",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"service", "string"},
+			{"operation", "string"},
+			{"requestJSON", "string"},
+			{"delayMs", "int64"},
+		},
+		ResultStmts: []string{
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return fmt.Errorf("cleat_schedule_invoke: error %d", errCode)`,
+			"}",
+			"return nil",
+		},
+	},
+	// SignalWorkflow: three strings in, nothing out. IMPROVEMENT-PLAN 3.224.
+	//
+	// errCode is the full 64-bit result rather than a packed field: the engine
+	// returns 0 on success and a non-zero sentinel otherwise -- including
+	// errSignalAuthRequiredInt when signal authorization refuses the target --
+	// and there is no response buffer to carry a message, so the code is all
+	// the guest gets.
+	"SignalWorkflow": {
+		FieldName:  "SignalWorkflow",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"targetRunID", "string"},
+			{"signalName", "string"},
+			{"payload", "string"},
+		},
+		ResultStmts: []string{
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return fmt.Errorf("cleat_signal_workflow: error %d", errCode)`,
+			"}",
+			"return nil",
 		},
 	},
 	"ContinueAsNew": {
@@ -136,10 +384,20 @@ var adapterDefs = map[string]adapterDef{
 		Params: []adapterParam{
 			{"newInputJSON", "string"},
 		},
+		PreStmts: []string{
+			// IMPROVEMENT-PLAN 3.35 phase 4. Before the host call: a check
+			// after cleat_continue_as_new would leave the event in the
+			// history, and the worker stores 'done' anyway because the
+			// wrapper reports the already-decided result -- so the
+			// continuation is recorded and silently never taken.
+			"if _cleatInDeferPhase {",
+			`	return _cleatErrInDeferPhase("ContinueAsNew")`,
+			"}",
+		},
 		ResultStmts: []string{
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
-			`	return fmt.Errorf("cleat_continue_as_new: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`	return fmt.Errorf("cleat_continue_as_new: error %d", errCode)`,
 			"}",
 			"return nil",
 		},
@@ -151,10 +409,20 @@ var adapterDefs = map[string]adapterDef{
 			{"newInputJSON", "string"},
 			{"newVersion", "int64"},
 		},
+		PreStmts: []string{
+			// IMPROVEMENT-PLAN 3.35 phase 4. Before the host call: a check
+			// after cleat_continue_as_new would leave the event in the
+			// history, and the worker stores 'done' anyway because the
+			// wrapper reports the already-decided result -- so the
+			// continuation is recorded and silently never taken.
+			"if _cleatInDeferPhase {",
+			`	return _cleatErrInDeferPhase("ContinueAsNewWithVersion")`,
+			"}",
+		},
 		ResultStmts: []string{
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
-			`	return fmt.Errorf("cleat_continue_as_new_versioned: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`	return fmt.Errorf("cleat_continue_as_new_versioned: error %d", errCode)`,
 			"}",
 			"return nil",
 		},
@@ -166,14 +434,14 @@ var adapterDefs = map[string]adapterDef{
 			{"name", "string"},
 			{"inputJSON", "string"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"runIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
-			`	return "", fmt.Errorf("cleat_child_workflow: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`	return "", fmt.Errorf("cleat_child_workflow: %s", hostErrMessage(runIDBuf[:], runIDLen))`,
 			"}",
 			"return unsafe.String(&runIDBuf[0], int(runIDLen)), nil",
-		},
+		),
 	},
 	"ChildWorkflowWithOptions": {
 		FieldName:  "ChildWorkflowWithOptions",
@@ -185,14 +453,14 @@ var adapterDefs = map[string]adapterDef{
 			{"parentClosePolicy", "string"},
 			{"priority", "int"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"runIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
-			`	return "", fmt.Errorf("cleat_child_workflow_with_options: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`	return "", fmt.Errorf("cleat_child_workflow_with_options: %s", hostErrMessage(runIDBuf[:], runIDLen))`,
 			"}",
 			"return unsafe.String(&runIDBuf[0], int(runIDLen)), nil",
-		},
+		),
 	},
 	"AwaitChild": {
 		FieldName:  "AwaitChild",
@@ -208,7 +476,7 @@ var adapterDefs = map[string]adapterDef{
 			"resultLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
-			`	return "", fmt.Errorf("cleat_await_child: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`	return "", fmt.Errorf("cleat_await_child: %s", hostErrMessage(resultBuf[:], resultLen))`,
 			"}",
 			"return unsafe.String(&resultBuf[0], int(resultLen)), nil",
 		},
@@ -223,7 +491,7 @@ var adapterDefs = map[string]adapterDef{
 			"resultLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result & 0xFF)",
 			"if errCode != 0 {",
-			`    return nil, fmt.Errorf("cleat_await_all_children: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`    return nil, fmt.Errorf("cleat_await_all_children: %s", hostErrMessage(resultsBuf[:], resultLen))`,
 			"}",
 			"outcomes := parseChildResultArray(unsafe.String(&resultsBuf[0], int(resultLen)))",
 			"return outcomes, nil",
@@ -239,7 +507,7 @@ var adapterDefs = map[string]adapterDef{
 			"resultLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
-			`	return "", "", fmt.Errorf("cleat_poll_child: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`	return "", "", fmt.Errorf("cleat_poll_child: %s", hostErrMessage(resultBuf[:], resultLen))`,
 			"}",
 			"prStatus, prResult, prErr := parseSimpleResult(unsafe.String(&resultBuf[0], int(resultLen)), \"result\")",
 			"if prErr != \"\" {",
@@ -262,7 +530,7 @@ var adapterDefs = map[string]adapterDef{
 			"resultLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
-			`	return "", "", fmt.Errorf("cleat_await_any_child: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`	return "", "", fmt.Errorf("cleat_await_any_child: %s", hostErrMessage(resultBuf[:], resultLen))`,
 			"}",
 			"outRunID, outResult, outErr := parseSimpleResult(unsafe.String(&resultBuf[0], int(resultLen)), \"result\")",
 			"if outErr != \"\" {",
@@ -284,7 +552,7 @@ var adapterDefs = map[string]adapterDef{
 			{"maxIntervalMs", "int64"},
 			{"nonRetryableErrorsJSON", "string"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"responseLen := uint32(uint64(result) >> 40)",
 			"callErrorCode := cleat.CallErrorCode((uint64(result) >> 8) & 0xFFFFFFFF)",
 			"errCode := uint32(result & 0xFF)",
@@ -297,7 +565,7 @@ var adapterDefs = map[string]adapterDef{
 			`	}`,
 			"}",
 			"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
-		},
+		),
 	},
 	"DurableCallWithHeartbeat": {
 		FieldName:  "DurableCallWithHeartbeat",
@@ -307,9 +575,8 @@ var adapterDefs = map[string]adapterDef{
 			{"operation", "string"},
 			{"requestJSON", "string"},
 			{"heartbeatInterval", "time.Duration"},
-			{"onProgress", "func(string)"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"responseLen := uint32(uint64(result) >> 40)",
 			"callErrorCode := cleat.CallErrorCode((uint64(result) >> 8) & 0xFFFFFFFF)",
 			"errCode := uint32(result & 0xFF)",
@@ -322,7 +589,7 @@ var adapterDefs = map[string]adapterDef{
 			`	}`,
 			"}",
 			"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
-		},
+		),
 	},
 	"Version": {
 		FieldName:  "Version",
@@ -359,6 +626,47 @@ var adapterDefs = map[string]adapterDef{
 			"return int(uint32(result))",
 		},
 	},
+	"RunDetached": {
+		FieldName:  "RunDetached",
+		ReturnType: "error",
+		Params: []adapterParam{
+			{"name", "string"},
+			{"inputJSON", "string"},
+		},
+		// withSuspendCheck since cleat#1154. Without it the sentinel -- bit 31,
+		// which the host sets to refuse new work in a defer segment -- was read
+		// by the line below as errCode = 0x80000000, so a refused Go guest got
+		// "cleat_run_detached: error 2147483648" instead of ErrSuspend and could
+		// carry on. See stopSurfaces["runDetached"] for how the stale exemption
+		// that hid this survived two changes.
+		ResultStmts: withSuspendCheck(
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return fmt.Errorf("cleat_run_detached: error %d", errCode)`,
+			"}",
+			"return nil",
+		),
+	},
+	// StartDetached is RunDetached that hands back the run id (cleat#1154).
+	// Both decoders test the sentinel, because both calls reach the same
+	// stopBeforeNewWork in the shared runDetached body -- the entry above
+	// gained its check in the same change, having gone without one since #806.
+	"StartDetached": {
+		FieldName:  "StartDetached",
+		ReturnType: "(string, error)",
+		Params: []adapterParam{
+			{"name", "string"},
+			{"inputJSON", "string"},
+		},
+		ResultStmts: withSuspendCheck(
+			"runIDLen := uint32(uint64(result) >> 32)",
+			"errCode := uint32(result)",
+			"if errCode != 0 {",
+			`	return "", fmt.Errorf("cleat_start_detached: %s", hostErrMessage(runIDBuf[:], runIDLen))`,
+			"}",
+			"return unsafe.String(&runIDBuf[0], int(runIDLen)), nil",
+		),
+	},
 	"SetQueryState": {
 		FieldName: "SetQueryState",
 		Params: []adapterParam{
@@ -393,7 +701,7 @@ var adapterDefs = map[string]adapterDef{
 			"promiseIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
-			"return \"\", fmt.Errorf(\"cleat_create_promise: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)\", errCode)",
+			"return \"\", fmt.Errorf(\"cleat_create_promise: %s\", hostErrMessage(promiseIDOutBuf[:], promiseIDLen))",
 			"}",
 			"return unsafe.String(&promiseIDOutBuf[0], int(promiseIDLen)), nil",
 		},
@@ -403,14 +711,18 @@ var adapterDefs = map[string]adapterDef{
 		ReturnType: "(string, bool, error)",
 		Params: []adapterParam{
 			{"promiseID", "string"},
-			{"timeoutMs", "int64"},
+			// time.Duration, not int64: cleat.HostCallsOptions.AwaitPromise is
+			// func(promiseID string, timeout time.Duration). The generator
+			// emits `timeoutMs := timeout.Milliseconds()` for a Duration param,
+			// which is also what the import's timeoutMs argument needs.
+			{"timeout", "time.Duration"},
 		},
 		ResultStmts: []string{
 			"resultLen := uint32(uint64(result) >> 32)",
 			"timedOut := uint32((uint64(result) >> 16) & 0xFFFF) != 0",
 			"errCode := uint32(result & 0xFFFF)",
 			"if errCode != 0 {",
-			"return \"\", false, fmt.Errorf(\"cleat_await_promise: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)\", errCode)",
+			"return \"\", false, fmt.Errorf(\"cleat_await_promise: %s\", hostErrMessage(resultOutBuf[:], resultLen))",
 			"}",
 			"return unsafe.String(&resultOutBuf[0], int(resultLen)), timedOut, nil",
 		},
@@ -432,14 +744,15 @@ var adapterDefs = map[string]adapterDef{
 			{"functionName", "string"},
 			{"inputJSON", "string"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"responseLen := uint32(uint64(result) >> 40)",
+			"callErrorCode := uint32((uint64(result) >> 8) & 0xFFFFFFFF)",
 			"errCode := uint32(result & 0xFF)",
 			"if errCode != 0 {",
-			`	return "", fmt.Errorf("plugin_call: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`	return "", fmt.Errorf("%s", callErrorMessage("plugin_call", responseBuf, responseLen, callErrorCode))`,
 			"}",
 			"return unsafe.String(&responseBuf[0], int(responseLen)), nil",
-		},
+		),
 	},
 	"AcquireLock": {
 		FieldName:  "AcquireLock",
@@ -448,30 +761,14 @@ var adapterDefs = map[string]adapterDef{
 			{"key", "string"},
 			{"ttlMs", "int64"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"errCode := uint32(result & 0xFF)",
 			"acquired := uint32((uint64(result) >> 8) & 0x1) != 0",
 			"if errCode != 0 {",
-			`    return false, fmt.Errorf("cleat_acquire_lock: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`    return false, fmt.Errorf("cleat_acquire_lock: error %d", errCode)`,
 			"}",
 			"return acquired, nil",
-		},
-	},
-	"AcquireLockMs": {
-		FieldName:  "AcquireLockMs",
-		ReturnType: "(bool, error)",
-		Params: []adapterParam{
-			{"key", "string"},
-			{"ttlMs", "int64"},
-		},
-		ResultStmts: []string{
-			"errCode := uint32(result & 0xFF)",
-			"acquired := uint32((uint64(result) >> 8) & 0x1) != 0",
-			"if errCode != 0 {",
-			`    return false, fmt.Errorf("cleat_acquire_lock: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
-			"}",
-			"return acquired, nil",
-		},
+		),
 	},
 	"ReleaseLock": {
 		FieldName:  "ReleaseLock",
@@ -482,7 +779,7 @@ var adapterDefs = map[string]adapterDef{
 		ResultStmts: []string{
 			"errCode := uint32(result & 0xFF)",
 			"if errCode != 0 {",
-			`    return fmt.Errorf("cleat_release_lock: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`    return fmt.Errorf("cleat_release_lock: error %d", errCode)`,
 			"}",
 			"return nil",
 		},
@@ -491,16 +788,22 @@ var adapterDefs = map[string]adapterDef{
 		FieldName:  "SideEffect",
 		ReturnType: "(string, error)",
 		Params: []adapterParam{
-			{"fn", "func() (string, error)"},
+			// A string, not the func. cleat.HostCallsImpl.SideEffect takes the
+			// closure, calls it, and passes the computed string to
+			// HostCallsOptions.SideEffect -- which is
+			// func(computedResult string) (string, error). Emitting the func
+			// signature here produced a closure the struct literal would not
+			// accept, so no workflow calling SideEffect could compile.
+			{"computedResult", "string"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"cachedResultLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
-			`    return "", fmt.Errorf("cleat_side_effect: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`    return "", fmt.Errorf("cleat_side_effect: %s", hostErrMessage(cachedResultBuf[:], cachedResultLen))`,
 			"}",
 			"return unsafe.String(&cachedResultBuf[0], int(cachedResultLen)), nil",
-		},
+		),
 	},
 	"ScheduleCron": {
 		FieldName:  "ScheduleCron",
@@ -511,7 +814,7 @@ var adapterDefs = map[string]adapterDef{
 			{"timezone", "string"},
 			{"inputJSON", "string"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"scheduleIDLen := uint32(uint64(result) >> 32)",
 			"errCode := uint32(result)",
 			"if errCode != 0 {",
@@ -522,7 +825,7 @@ var adapterDefs = map[string]adapterDef{
 			`	return "", fmt.Errorf("cleat_schedule_cron: %s", hostErrMessage(scheduleIDBuf[:], scheduleIDLen))`,
 			"}",
 			"return unsafe.String(&scheduleIDBuf[0], int(scheduleIDLen)), nil",
-		},
+		),
 	},
 	"DeleteCron": {
 		FieldName:  "DeleteCron",
@@ -561,11 +864,12 @@ var adapterDefs = map[string]adapterDef{
 			{"functionName", "string"},
 			{"inputJSON", "string"},
 		},
-		ResultStmts: []string{
+		ResultStmts: withSuspendCheck(
 			"responseLen := uint32(uint64(result) >> 40)",
+			"callErrorCode := uint32((uint64(result) >> 8) & 0xFFFFFFFF)",
 			"errCode := uint32(result & 0xFF)",
 			"if errCode != 0 {",
-			`		return nil, fmt.Errorf("plugin_call_streaming: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", errCode)`,
+			`		return nil, fmt.Errorf("%s", callErrorMessage("plugin_call_streaming", responseBuf, responseLen, callErrorCode))`,
 			"}",
 			"var events []cleat.StreamEvent",
 			`if err := json.Unmarshal(responseBuf[:responseLen], &events); err != nil {`,
@@ -577,173 +881,21 @@ var adapterDefs = map[string]adapterDef{
 			"}",
 			"close(ch)",
 			"return ch, nil",
-		},
+		),
 	},
 }
 
-// hostWrapperDef describes how to generate a host_ wrapper function for a
-// higher-level HostCalls method that isn't a direct WASM import wrapper.
-// The body should call core host_* functions rather than going through h.
-type hostWrapperDef struct {
-	ReturnType string
-	Params     []adapterParam
-	Body       []string // Go statements implementing the wrapper
-}
-
-// hostWrapperDefs contains definitions for wrapper methods that call
-// core host_* functions. These are methods on HostCalls that eventually
-// delegate to a direct WASM import (e.g., DurableCallJSON → DurableCall).
-var hostWrapperDefs = map[string]hostWrapperDef{
-	"DurableCallJSON": {
-		ReturnType: "error",
-		Params: []adapterParam{
-			{"service", "string"},
-			{"operation", "string"},
-			{"requestJSON", "string"},
-			{"result", "interface{}"},
-		},
-		Body: []string{
-			"resp, err := host_DurableCall(service, operation, requestJSON)",
-			"if err != nil { return err }",
-			"if result == nil { return nil }",
-			`return json.Unmarshal([]byte(resp), result)`,
-		},
-	},
-	"DurableCallTyped": {
-		ReturnType: "error",
-		Params: []adapterParam{
-			{"service", "string"},
-			{"operation", "string"},
-			{"request", "interface{}"},
-			{"result", "interface{}"},
-		},
-		Body: []string{
-			"reqBytes, err := json.Marshal(request)",
-			`if err != nil { return fmt.Errorf("durable: marshaling request for %s.%s: %%w", service, operation, err) }`,
-			"return host_DurableCallJSON(service, operation, string(reqBytes), result)",
-		},
-	},
-	"DurableCallTypedWithOptions": {
-		ReturnType: "error",
-		Params: []adapterParam{
-			{"opts", "cleat.CallOptions"},
-			{"service", "string"},
-			{"operation", "string"},
-			{"request", "interface{}"},
-			{"result", "interface{}"},
-		},
-		Body: []string{
-			"reqBytes, err := json.Marshal(request)",
-			`if err != nil { return fmt.Errorf("durable: marshaling request for %s.%s: %%w", service, operation, err) }`,
-			"return host_DurableCallJSONWithOptions(opts, service, operation, string(reqBytes), result)",
-		},
-	},
-	"DurableCallWithOptions": {
-		ReturnType: "(string, error)",
-		Params: []adapterParam{
-			{"opts", "cleat.CallOptions"},
-			{"service", "string"},
-			{"operation", "string"},
-			{"requestJSON", "string"},
-		},
-		Body: []string{
-			"_ = opts",
-			"return host_DurableCall(service, operation, requestJSON)",
-		},
-	},
-	"DurableCallJSONWithOptions": {
-		ReturnType: "error",
-		Params: []adapterParam{
-			{"opts", "cleat.CallOptions"},
-			{"service", "string"},
-			{"operation", "string"},
-			{"requestJSON", "string"},
-			{"result", "interface{}"},
-		},
-		Body: []string{
-			"resp, err := host_DurableCallWithOptions(opts, service, operation, requestJSON)",
-			"if err != nil { return err }",
-			"if result == nil { return nil }",
-			`return json.Unmarshal([]byte(resp), result)`,
-		},
-	},
-	"AwaitSignals": {
-		ReturnType: "cleat.SignalResult",
-		Params: []adapterParam{
-			{"signalNames", "[]string"},
-			{"timeout", "time.Duration"},
-		},
-		Body: []string{
-			"name, payload, timedOut, err := host_DurableAwaitSignals(signalNames, timeout.Milliseconds())",
-			"return cleat.SignalResult{Name: name, Payload: payload, TimedOut: timedOut, Err: err}",
-		},
-	},
-	"Now": {
-		ReturnType: "time.Time",
-		Body: []string{
-			"ms := host_NowMs()",
-			"return time.Unix(ms/1000, (ms%1000)*1_000_000)",
-		},
-	},
-	"DurableSleep": {
-		Params: []adapterParam{
-			{"d", "time.Duration"},
-		},
-		Body: []string{
-			"host_DurableSleepMs(d.Milliseconds())",
-		},
-	},
-	"AcquireLock": {
-		ReturnType: "(bool, error)",
-		Params: []adapterParam{
-			{"key", "string"},
-			{"ttl", "time.Duration"},
-		},
-		Body: []string{
-			"return host_AcquireLockMs(key, ttl.Milliseconds())",
-		},
-	},
-	"ChildWorkflowTyped": {
-		ReturnType: "(string, error)",
-		Params: []adapterParam{
-			{"name", "string"},
-			{"request", "interface{}"},
-		},
-		Body: []string{
-			"reqJSON, err := json.Marshal(request)",
-			`if err != nil { return "", fmt.Errorf("durable: marshaling child workflow input for %%s: %%w", name, err) }`,
-			"return host_ChildWorkflow(name, string(reqJSON))",
-		},
-	},
-	"AwaitChildTyped": {
-		ReturnType: "error",
-		Params: []adapterParam{
-			{"runID", "string"},
-			{"result", "interface{}"},
-		},
-		Body: []string{
-			"resp, err := host_AwaitChild(runID)",
-			"if err != nil { return err }",
-			`return json.Unmarshal([]byte(resp), result)`,
-		},
-	},
-	"DurableCallTypedWithHeartbeat": {
-		ReturnType: "error",
-		Params: []adapterParam{
-			{"service", "string"},
-			{"operation", "string"},
-			{"request", "interface{}"},
-			{"result", "interface{}"},
-			{"heartbeatInterval", "time.Duration"},
-			{"onProgress", "func(string)"},
-		},
-		Body: []string{
-			"reqJSON, err := json.Marshal(request)",
-			`if err != nil { return fmt.Errorf("durable: marshaling request for %s.%s: %%w", service, operation, err) }`,
-			"resp, err := host_DurableCallWithHeartbeat(service, operation, string(reqJSON), heartbeatInterval, onProgress)",
-			"if err != nil { return err }",
-			"if result == nil { return nil }",
-			`return json.Unmarshal([]byte(resp), result)`,
-		},
-	},
+// AdapterFieldNames returns every cleat.HostCallsOptions field the host-adapter
+// generator can emit, sorted.
+//
+// Exported for cmd/cleat's compile test, which needs to assert that its fixture
+// exercises the whole table -- a host call the fixture never calls is a host
+// call nobody compiles. See IMPROVEMENT-PLAN.md 3.204.
+func AdapterFieldNames() []string {
+	names := make([]string, 0, len(adapterDefs))
+	for _, def := range adapterDefs {
+		names = append(names, def.FieldName)
+	}
+	sort.Strings(names)
+	return names
 }

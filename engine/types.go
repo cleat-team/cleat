@@ -19,21 +19,40 @@ const maxPayloadLen = 4096
 type EventType string
 
 const (
-	EventTypeCall                  EventType = "call"
-	EventTypeAwaitSignals          EventType = "await_signals"
-	EventTypeSignalReceived        EventType = "signal_received"
-	EventTypeDefer                 EventType = "defer"
-	EventTypeChildWorkflow         EventType = "child_workflow"
-	EventTypeAwaitChild            EventType = "await_child"
-	EventTypeContinueAsNew         EventType = "continue_as_new"
-	EventTypeHeartbeat             EventType = "heartbeat"
-	EventTypeAwaitAllChildren      EventType = "await_all_children"
-	EventTypePluginCall            EventType = "plugin_call"
-	EventTypeCreatePromise         EventType = "create_promise"
-	EventTypeAwaitPromise          EventType = "await_promise"
-	EventTypePromiseResolved       EventType = "promise_resolved"
-	EventTypePromiseRejected       EventType = "promise_rejected"
-	EventTypeUpdateHandler         EventType = "update_handler"
+	EventTypeCall EventType = "call"
+	// EventTypeCallAttemptFailed is one failed attempt of a host-path retry
+	// policy that is about to make another. It exists so MaxAttempts bounds
+	// attempts per WORKFLOW rather than per incarnation: nothing was recorded
+	// until the call finished, so a worker lost mid-backoff restarted the
+	// policy at attempt 1 and re-spent the whole budget (cleat#1145).
+	//
+	// Always followed by a terminal EventTypeCall for the same step unless the
+	// run was interrupted -- which is exactly the case replay has to read.
+	EventTypeCallAttemptFailed EventType = "call_attempt_failed"
+	EventTypeAwaitSignals      EventType = "await_signals"
+	EventTypeSignalReceived    EventType = "signal_received"
+	EventTypeDefer             EventType = "defer"
+	EventTypeChildWorkflow     EventType = "child_workflow"
+	EventTypeAwaitChild        EventType = "await_child"
+	EventTypeContinueAsNew     EventType = "continue_as_new"
+	EventTypeHeartbeat         EventType = "heartbeat"
+	EventTypeAwaitAllChildren  EventType = "await_all_children"
+	EventTypePluginCall        EventType = "plugin_call"
+	EventTypeCreatePromise     EventType = "create_promise"
+	EventTypeAwaitPromise      EventType = "await_promise"
+	EventTypePromiseResolved   EventType = "promise_resolved"
+	EventTypePromiseRejected   EventType = "promise_rejected"
+	EventTypeUpdateHandler     EventType = "update_handler"
+	// EventTypeUpdateReceived records that a pending update request was
+	// delivered to the guest at this step. It is what makes an update
+	// replayable: on replay the poll reads this event rather than the
+	// workflow_update_requests table, so the handler sees the same payload at
+	// the same point in the program. See execSession.DurablePollUpdate.
+	EventTypeUpdateReceived EventType = "update_received"
+	// EventTypeUpdateCompleted records the handler's outcome. Without it every
+	// replay would settle the caller's promise again, and a settle matching
+	// nothing reports not-found (#818), so replay would start erroring.
+	EventTypeUpdateCompleted       EventType = "update_completed"
 	EventTypeStateMutation         EventType = "state_mutation"
 	EventTypeRunDetached           EventType = "run_detached"
 	EventTypePluginCallStreamChunk EventType = "plugin_call_stream_chunk"
@@ -60,10 +79,13 @@ type EventRecord struct {
 	EventType EventType `json:"type"`
 
 	// TimestampMs is the virtual time (ms since Unix epoch) that Now()
-	// should return after this event completes. For non-sleep events it
-	// is the wall-clock time when the event was recorded. For sleep
-	// events it is the pre-sleep time plus the sleep duration, encoding
-	// the post-sleep virtual time for deterministic replay.
+	// should return after this event completes: the wall-clock time when the
+	// event was recorded.
+	//
+	// This used to add "for sleep events it is the pre-sleep time plus the
+	// sleep duration" -- there are no sleep events. Sleep has recorded nothing
+	// since 0a02a84 (2026-05-08), and it is this field on the *last recorded*
+	// event that a sleep now anchors its deadline to. See DurableSleep.
 	TimestampMs int64 `json:"timestamp_ms"`
 
 	// CreatedAt is the wall-clock time when the event was recorded in the
@@ -84,12 +106,15 @@ type EventRecord struct {
 	// instead of guessing at it from the message string.
 	//
 	// This is one bit rather than the full error class IMPROVEMENT-PLAN 2.35
-	// describes, and deliberately so: it is the only part of a classification
-	// the engine can actually populate today. ServiceCaller returns a bare
-	// `error`, and the sole machine-readable signal any implementation can
-	// send is the optional RetryableError interface, which
-	// isDefinitelyNonRetryable already honours. Recording a richer taxonomy
-	// would mean inventing values no caller supplies.
+	// describes. It used to be the only part of a classification the engine
+	// could populate, on the grounds that ServiceCaller returns a bare `error`
+	// whose sole machine-readable signal is the optional RetryableError
+	// interface; that stopped being the whole story when dbServiceCaller began
+	// returning CleatError, and the class is now recorded beside this in
+	// ErrCode below.
+	//
+	// This field remains the authoritative one for retryability, and the two
+	// are not redundant -- see ErrCode for why they can disagree.
 	//
 	// The zero value is the pre-2.35 behaviour: an event recorded before this
 	// field existed carries no such key, reads back as false, and replays as
@@ -97,6 +122,72 @@ type EventRecord struct {
 	// not a code -- a code field's zero value would collide with
 	// callErrorUnknown, which is a real classification.
 	ErrNonRetryable bool `json:"err_non_retryable,omitempty"`
+
+	// ErrCode records the engine's error classification for Err -- the
+	// ErrorCode a ServiceCaller supplied through CleatError -- so the class the
+	// fresh run derived survives into history instead of being collapsed to the
+	// single bit above at write time. IMPROVEMENT-PLAN 2.35.
+	//
+	// It does NOT feed the code the guest sees. ErrNonRetryable remains
+	// authoritative for that, because the two can legitimately disagree:
+	// DurableCallWithRetry's nonRetryableErrors list comes from the *guest's*
+	// retry policy across the ABI, so a workflow author can declare a substring
+	// non-retryable for an error whose CleatError says ErrTransient. The bool
+	// records what the engine actually did; this field records how the caller
+	// classified it. Deriving retryability from this one would let an upgrade
+	// change the retry behaviour of workflows already in flight -- which is the
+	// determinism bug 2.35 exists to prevent, reintroduced from the other side.
+	//
+	// It stores ErrorCode.String() rather than the int, for three reasons.
+	// The int's zero value is ErrUnknown, a real classification, so an absent
+	// field and a genuinely unknown one would be indistinguishable -- the same
+	// collision that made ErrNonRetryable a bool (see above); the empty string
+	// has no such clash. workflow_instances.error_code already stores exactly
+	// these strings, and ErrorCode.String()'s own doc says it is "suitable for
+	// storage in the error_code column", so one vocabulary spans both tables
+	// and an operator's query matches in both. And a string survives a value
+	// being inserted into the ErrorCode iota block, which an int would not.
+	//
+	// Empty means the event predates this field or the failure carried no
+	// CleatError. Nothing downstream requires it to be set.
+	ErrCode string `json:"err_code,omitempty"`
+
+	// RetriesExhausted records that this call failed because its retry budget
+	// ran out, as opposed to failing once.
+	//
+	// It exists because that fact had NO durable channel, and the two fields
+	// above are not it. ErrCode holds the class the *caller* supplied, and
+	// exhaustion is the engine's own conclusion, not the caller's. And
+	// ErrNonRetryable is the near-miss worth naming: durablecalls.go sets it
+	// as `!exhausted`, so on that one path `!ErrNonRetryable` does mean
+	// "exhausted" -- but the field means "retryable OR unclassified" across
+	// the codebase as a whole, and callintent.go leaves it unset on a plain
+	// failed call ON PURPOSE, so reading exhaustion out of it would classify
+	// an ordinary write-ahead-intent failure as one. See cleat#902.
+	//
+	// Zero value is the pre-existing behaviour: an event written before this
+	// field existed carries no such key and reads back false, which is what
+	// every such event was -- unclassified, and therefore not dead-lettered.
+	// Written only when true, so an ordinary failure's payload stays
+	// byte-identical and its checksum does not move.
+	RetriesExhausted bool `json:"retries_exhausted,omitempty"`
+
+	// ResolvedBy names the operator who supplied this event's outcome, when it
+	// did not come from the service. It is set only by admin step-resolution
+	// (IMPROVEMENT-PLAN 1.4 phase F): a call left pending by a crash, whose real
+	// outcome a human went and checked.
+	//
+	// It lives on the event rather than only in the separate audit record
+	// because the two are written by different statements and cannot be made
+	// atomic without per-dialect SQL. If the audit append fails, this still
+	// says the response was asserted rather than observed -- and that
+	// distinction is permanent, because replay reads this row as the call's
+	// outcome forever. An audit row that can go missing is a worse place for
+	// the one fact a reader must not lose.
+	//
+	// Empty is the normal case: the service answered, and nobody asserted
+	// anything.
+	ResolvedBy string `json:"resolved_by,omitempty"`
 
 	// Pending records that this event is a write-ahead call intent whose
 	// outcome was never written: the external call was dispatched and the
@@ -123,6 +214,36 @@ type EventRecord struct {
 	DeferDescription string `json:"defer_description,omitempty"`
 	DeferID          string `json:"defer_id,omitempty"`
 
+	// InDeferPhase records that this event was produced while the guest was
+	// DRAINING its defer table, rather than by the workflow body.
+	//
+	// It exists because the two were indistinguishable, and one consumer of
+	// the history cannot do its job without telling them apart: dead-lettering
+	// asks what the workflow's last durable act was, and a defer's own host
+	// calls are durable calls appended after it. So a workflow that exhausted
+	// its retries and then cleaned up looked, to that question, exactly like a
+	// workflow that exhausted its retries and carried on working -- and was
+	// classified `failed` rather than `dead_lettered`, which is the difference
+	// between being retained for an operator and being deleted by retention.
+	// cleat#1155.
+	//
+	// GUEST-ASSERTED, not host-observed, and that is a real limitation rather
+	// than an oversight. On the ordinary failure path the guest's own wrapper
+	// drains the table (wasm/exports.go), so the host is not in the loop and
+	// cannot infer the boundary; the guest already tracks it internally and
+	// now reports it. A guest that never reports gets the old behaviour, which
+	// fails toward the existing defect rather than a new one.
+	//
+	// A FLAG RATHER THAN A MARKER EVENT, deliberately. Replay is positional --
+	// s.history[s.stepCount] -- so an event marking the transition would
+	// consume a step, and a workflow already in flight when this shipped would
+	// replay an old history whose step N is not the marker the new guest
+	// emits. A field on events that are recorded anyway shifts nothing.
+	//
+	// Emitted into the checksum payload only when true (see
+	// eventRecordToPayload), so every event ever written keeps its checksum.
+	InDeferPhase bool `json:"in_defer_phase,omitempty"`
+
 	// Promise fields.
 	PromiseName   string `json:"promise_name,omitempty"`
 	PromiseID     string `json:"promise_id,omitempty"`
@@ -146,17 +267,49 @@ type EventRecord struct {
 	PluginInput  string `json:"plugin_input,omitempty"`
 	PluginOutput string `json:"plugin_output,omitempty"`
 	PluginError  string `json:"plugin_error,omitempty"`
-	Idempotent   bool   `json:"idempotent,omitempty"`
+	// Idempotent and SameValueOnReplay are the two halves cleat#1318 split
+	// apart. Neither is persisted: event_history has dedicated plugin_*
+	// columns and none for these, so both read false on any record loaded
+	// from the database and the registry decides instead. They carry the
+	// policy only for an in-process replay.
+	Idempotent        bool `json:"idempotent,omitempty"`
+	SameValueOnReplay bool `json:"same_value_on_replay,omitempty"`
 
 	// Stream chunk fields.
 	StreamChunkIndex int  `json:"stream_chunk_index,omitempty"`
 	StreamFinish     bool `json:"stream_finish,omitempty"`
+	// StreamErrCode is the call error code the guest was told when this chunk
+	// records a stream-level failure -- what recordStreamError packed into the
+	// durable-call result, not a classification derived again later.
+	//
+	// The code rather than the cause, deliberately. replayPluginCallStreaming
+	// has to hand the guest the same code the fresh run did, and reading back
+	// what was reported is the only version of that which cannot drift: a
+	// stored cause would still need a cause-to-code mapping on the replay
+	// side, and changing that mapping would silently change the retryability
+	// of steps already recorded.
+	//
+	// Zero means "not recorded", which is also callErrorUnknown -- and that is
+	// the right reading for every stream chunk written before IMPROVEMENT-PLAN
+	// 2.35's plugin half, because callErrorUnknown is exactly what those
+	// failures reported when they were fresh.
+	StreamErrCode int `json:"stream_err_code,omitempty"`
 
 	// Update handler fields.
+	//
+	// UpdateHandlerName carries the handler name on all three update events.
+	// UpdatePayload/UpdateResponse/UpdateError were declared here long before
+	// anything assigned them -- compaction_fuzz_test.go exempted all three as
+	// dead fields on 2026-08-09. They are live as of the end-to-end update
+	// implementation and those exemptions are gone.
 	UpdateHandlerName string `json:"update_handler_name,omitempty"`
 	UpdatePayload     string `json:"update_payload,omitempty"`
 	UpdateResponse    string `json:"update_response,omitempty"`
 	UpdateError       string `json:"update_error,omitempty"`
+
+	// UpdateRequestID identifies the workflow_update_requests row a delivery
+	// came from, so the completion can settle the right caller's promise.
+	UpdateRequestID string `json:"update_request_id,omitempty"`
 
 	// State mutation fields.
 	StateKey   string `json:"state_key,omitempty"`
@@ -191,6 +344,25 @@ type EventRecord struct {
 	LockKey      string `json:"lock_key,omitempty"`
 	LockTTLMs    int64  `json:"lock_ttl_ms,omitempty"`
 	LockAcquired int    `json:"lock_acquired,omitempty"`
+	// Attempt is the 1-based attempt number of an EventTypeCallAttemptFailed.
+	// Replay could count the events instead; recording it makes a history
+	// self-describing for `cleatctl replay` and lets replay notice a gap.
+	Attempt int `json:"attempt,omitempty"`
+	// LockNotHeld marks a release that matched no row the caller held -- an
+	// expired key, or a key belonging to someone else. Not an error; recorded
+	// so the no-op leaves a trace (cleat#1188).
+	LockNotHeld bool `json:"lock_not_held,omitempty"`
+
+	// ReplacedOutcome is the terminal outcome an admin action erased, carried
+	// on the audit event that records the action. Set only by AdminReReplay,
+	// and only when the row had an outcome to lose -- see
+	// eventRecordToPayload's admin_action arm, where an unconditional key
+	// would rewrite the checksum of every admin event already written.
+	ReplacedStatus      string `json:"replaced_status,omitempty"`
+	ReplacedErrorMsg    string `json:"replaced_error_msg,omitempty"`
+	ReplacedErrorCode   string `json:"replaced_error_code,omitempty"`
+	ReplacedErrorOp     string `json:"replaced_error_op,omitempty"`
+	ReplacedCompletedAt string `json:"replaced_completed_at,omitempty"`
 
 	// SideEffect fields.
 	SideEffectResult string `json:"side_effect_result,omitempty"`
@@ -221,17 +393,54 @@ type Fetcher interface {
 type SignalStore interface {
 	// DeliverSignal stores a signal for a workflow.
 	DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error
-	// PollSignal checks for a delivered signal.
-	PollSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error)
+	// PollSignal returns the oldest unconsumed delivery with this name,
+	// without consuming it. See WorkflowStore.PollSignal for why it does not
+	// consume and ConsumeSignal is separate.
+	PollSignal(ctx context.Context, workflowID, signalName string) (delivery SignalDelivery, found bool, err error)
+	// ConsumeSignal removes one delivery by id. Removing an id that is
+	// already gone is not an error.
+	ConsumeSignal(ctx context.Context, workflowID string, id int64) error
 	// PollCancellation checks whether the workflow has been cancelled.
 	PollCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error)
+}
+
+// UpdateStore provides update-request delivery for running workflows.
+//
+// Every method is already on WorkflowStore, so a store satisfies this by
+// assertion and no dialect had to change to support updates -- the same
+// composition move IMPROVEMENT-PLAN 3.220 used for request/reply signals.
+type UpdateStore interface {
+	// GetPendingUpdateRequests returns the requests still awaiting delivery,
+	// oldest first. Delivery does not consume the row: the guest's completion
+	// call is what moves it out of 'pending', so a handler that traps leaves
+	// the request to be redelivered on the next segment.
+	GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error)
+	// CompleteUpdateRequest records the handler's outcome on the request row.
+	CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error
+	// ResolvePromise and RejectPromise settle the promise the caller is
+	// holding. Both are keyed by promise ID alone; see PromiseStore.
+	ResolvePromise(ctx context.Context, promiseID, value string) error
+	RejectPromise(ctx context.Context, promiseID, errMsg string) error
 }
 
 // PromiseStore provides promise resolution capabilities for running workflows.
 type PromiseStore interface {
 	CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error
-	ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error
-	RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error
+	// Settled by promise ID alone, with no workflow ID.
+	//
+	// A promise exists so that something OTHER than the waiter can complete
+	// it, and the settler holds only the ID -- it has no way to know which
+	// workflow created the promise. Requiring a workflow ID could therefore
+	// only ever be satisfied with the wrong one, the caller's own, which is
+	// what these used to do: a child settling its parent's promise updated a
+	// row that did not exist and then woke ITSELF. The parent waited forever.
+	//
+	// #818 made that failure loud (ErrPromiseNotFound instead of nil); this is
+	// what makes it reachable. Knowing the ID is the authority to settle it,
+	// bounded by tenant -- by RLS on PostgreSQL and by an explicit tenant
+	// predicate elsewhere. See #813.
+	ResolvePromise(ctx context.Context, promiseID, result string) error
+	RejectPromise(ctx context.Context, promiseID, errMsg string) error
 	GetPromise(ctx context.Context, workflowID, promiseID string) (status string, result string, errMsg string, err error)
 }
 
@@ -298,8 +507,48 @@ type ConcurrencyKeyStore interface {
 	// Automatically releases expired keys during acquisition.
 	AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error)
 
-	// ReleaseConcurrencyKey releases a specific concurrency key.
-	ReleaseConcurrencyKey(ctx context.Context, key string) error
+	// ReleaseConcurrencyKey releases a concurrency key HELD BY workflowID.
+	//
+	// The holder is a parameter because it is part of the identity of the thing
+	// being released. Without it the statement deleted any row with a matching
+	// key in the tenant, so one workflow could release a lock another held and
+	// both would then be inside the critical section, with no error on any side
+	// (cleat#1188).
+	//
+	// released reports whether a row was actually removed. False is an ordinary
+	// outcome, not an error: a key whose TTL has passed is already gone, and a
+	// workflow releasing it has done nothing wrong.
+	ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (released bool, err error)
+}
+
+// ChildOutcome is what a child run left behind, as its parent sees it.
+//
+// The parent asks one question -- "is my child finished, and how did it go" --
+// and it has three answers, not two. Before cleat#1115 the store returned
+// (resultJSON, completed, err) where err meant a STORE failure, so "the child
+// failed" had no representation at all and arrived as (empty result, completed,
+// nil): indistinguishable from a child that succeeded and returned nothing.
+type ChildOutcome struct {
+	// Completed is true once the child has reached a terminal status.
+	Completed bool
+
+	// Failed is true when the child reached a terminal status by failing.
+	//
+	// Cancellation is an ERROR CODE rather than a status here (see
+	// WorkflowFilter.ErrorCode), so a cancelled child is a failed one and
+	// needs no third case.
+	Failed bool
+
+	// Result is the child's result, and is empty when it failed -- a failed
+	// run's `result` column is never written (migration 053 routes the
+	// finalize parameter to `error_msg` on the 'failed' branch).
+	Result string
+
+	// Error is the child's own error message, read from `error_msg`. It is
+	// what the parent can act on, and what replay returns on the next
+	// execution; a failure flag with no message moves the defect rather than
+	// fixing it.
+	Error string
 }
 
 type ChildWorkflowStore interface {
@@ -314,30 +563,36 @@ type ChildWorkflowStore interface {
 	// The event is written to event_history atomically with the child row.
 	// The caller should still append the event to the in-memory history for
 	// same-execution replay. The later event flush will skip it via
-	// ON CONFLICT (workflow_id, step) DO NOTHING.
+	// ON CONFLICT (tenant_id, workflow_id, step) DO NOTHING.
 	StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (runID string, err error)
 
-	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
+	// GetChildResult reports what a child run left behind. The returned error
+	// is a STORE error; a child that ran and FAILED is a successful call with
+	// Outcome.Failed set, and conflating the two is cleat#1115 -- the triple
+	// this used to return had nowhere to say "completed, and failed", so every
+	// caller reported a failed child to its parent as a success with an empty
+	// result.
+	GetChildResult(ctx context.Context, runID string) (outcome ChildOutcome, err error)
+
+	// GetChildCompletedAtMs returns the child's completion time in Unix
+	// milliseconds, and whether it has one. A child that is still running
+	// returns ok=false.
+	//
+	// PollChild needs this and GetChildResult's `completed` is not enough,
+	// because "is it complete NOW" is not a replayable question -- see
+	// IMPROVEMENT-PLAN.md and issue #847. The replayable question is "was it
+	// complete as of the parent's durable time", which needs the instant.
+	//
+	// CLOCK DOMAIN: this is the DATABASE clock (`completed_at` is written by
+	// `now()` inside finalize_workflow_status), while the parent's durable
+	// clock is the WORKER clock. Callers comparing the two must read the note
+	// on PollChild before assuming the comparison is exact.
+	GetChildCompletedAtMs(ctx context.Context, runID string) (completedAtMs int64, ok bool, err error)
 
 	// ResolveVersionByTag resolves a workflow version by tag name (e.g. "stable", "canary").
 	// Returns the version number and nil error on success, or 0 and an error if the tag
 	// is not found.
 	ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error)
-}
-
-// CrossSchemaChildStore is an optional extension to ChildWorkflowStore for
-// starting child workflows in a different PostgreSQL schema.  This enables
-// cross-instance workflow cooperation: an instance in schema A can start a
-// child workflow in schema B, and the B worker pool picks it up.
-type CrossSchemaChildStore interface {
-	ChildWorkflowStore
-
-	// StartChildWorkflowInSchema creates a child workflow in the given target schema.
-	// The schema must be part of the engine's configured peerSchemas.
-	StartChildWorkflowInSchema(ctx context.Context, targetSchema, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
-
-	// GetChildResultInSchema polls a child workflow in the given target schema.
-	GetChildResultInSchema(ctx context.Context, targetSchema, runID string) (resultJSON string, completed bool, err error)
 }
 
 // RetryableError is optionally implemented by errors to indicate retryability.
@@ -375,50 +630,34 @@ const (
 	sleepStatusSuspend   = 1
 )
 
-// pendingSentinel marks a DurableCall whose external call has been dispatched
-// but whose outcome is not yet persisted. On replay, a pending event means the
-// call outcome is ambiguous — the external service may have processed it.
-//
-// NOTHING WRITES THIS. The detectors below are live and correct, but no
-// production path ever stores a pendingSentinel, so in a real crash there is
-// nothing for them to find. The contract today is exactly what
-// docs/durable-calls.md states: at-least-once, with silent duplicates on crash.
-//
-// The write side that used to sit in flush.go (flushCallIntent /
-// completeCallEvent) was deleted rather than wired in: every completion path
-// guards its upsert on `error IS NULL`, so an intent row could never be
-// completed, and the sentinel would have stuck forever. See
-// docs/durable-call-intent-design.md for that analysis and for the replacement
-// design, which drops this sentinel in favour of a dedicated intent_at column.
-//
-// Keep the constant and the detectors: they cost nothing, they are the read
-// half of that design, and deleting them would lose the one part that works.
-const pendingSentinel = "__CLEAT_PENDING_INTENT__"
-
-// PendingSentinel is the exported form of pendingSentinel, provided so that
-// external packages (notably the integrity test suite) can reference it
-// without duplicating the sentinel value.
-const PendingSentinel = pendingSentinel
-
 // execSession implements HostHandler for a single execution or replay.
 type execSession struct {
-	engine           *Engine
-	history          []EventRecord
-	stepCount        int
-	isReplay         bool
-	replayJustEnded  bool // true when replay just ended (first sleep after replay completes)
-	nowMs            int64
-	randomSeq        int64 // monotonic counter for deterministic Random()
-	suspendErr       *SuspendError
-	deferrals        map[string]string // registered defer callbacks (deferID -> description)
-	workflowID       string            // parent workflow instance ID (for child workflows)
-	defName          string            // workflow definition name (for metrics labels)
-	execRunID        string            // current execution run ID
-	queryState       map[string]string // key-value state set via SetQueryState
-	stateStore       map[string]string // workflow state for Stream R state operations
-	tenantID         string            // tenant ID injected into plugin function context
-	callerPluginName string            // for WASM plugins, the calling plugin's name (for call_plugin enforcement)
-	queryHandlers    []string          // registered query handler names
+	engine       *Engine
+	history      []EventRecord
+	stepCount    int
+	isReplay     bool
+	nowMs        int64
+	randomSeq    int64 // monotonic counter for deterministic Random()
+	suspendErr   *SuspendError
+	deferrals    map[string]string // registered defer callbacks (deferID -> description)
+	inDeferPhase bool              // true while the guest is draining its defer table (cleat#1155)
+	workflowID   string            // parent workflow instance ID (for child workflows)
+	defName      string            // workflow definition name (for metrics labels)
+	execRunID    string            // current execution run ID
+	queryState   map[string]string // key-value state set via SetQueryState
+	tenantID     string            // tenant ID injected into plugin function context
+
+	// callerPluginName is read by pluginCallGuard.Check at both call_plugin
+	// sites in plugins.go, but nothing outside a _test.go file assigns it.
+	// Grepping the bare name also matches this explanation, so exclude
+	// comment lines rather than just _test.go ones: `grep -n callerPluginName
+	// engine/*.go | grep -v _test.go | grep -vE '^\S+:[0-9]+:\s*//'` returns
+	// the two read sites and the field declaration and nothing else. So the
+	// guard's trigger condition, `callerPluginName != ""`, is false on every
+	// real invocation, and Check is never actually consulted outside a test
+	// that sets this field by hand. See WithPluginCallGuard for why.
+	callerPluginName string   // for WASM plugins, the calling plugin's name (for call_plugin enforcement)
+	queryHandlers    []string // registered query handler names
 
 	// Scope management for virtual object instances.
 	scopePrefix  string   // "vo:<type>:<key>:" prefix, empty if no scope
@@ -429,6 +668,12 @@ type execSession struct {
 
 	// originalInput stores the initial workflow input for auto-ContinueAsNew.
 	originalInput string
+
+	// inDeferDrain is true only while the host is running the guest's defer
+	// table itself, inside a defer segment. It is what lets a defer body make
+	// the durable calls its cleanup needs while the workflow body's own calls
+	// are stopped -- see stopBeforeNewWork.
+	inDeferDrain bool
 
 	// autoContinueAsNewTriggered is set to true after the event cap is hit
 	// to prevent repeated triggers during the same execution segment.
@@ -443,11 +688,20 @@ type execSession struct {
 	// auto-ContinueAsNew without querying the database.
 	eventCount int
 
+	// ambiguity records the first replayed call whose outcome could not be
+	// determined -- dispatched before a crash, no response recorded, and no
+	// resolver able to answer. It is set at the moment the "[AMBIGUOUS]"
+	// result is handed to the guest, so that if the workflow goes on to fail,
+	// the executor can classify the failure as ErrAmbiguous rather than
+	// leaving it indistinguishable from every other error. See
+	// execSession.classifyFailure and IMPROVEMENT-PLAN 3.24.
+	ambiguity *ambiguousCall
+
 	// lastChecksum tracks the checksum of the most recently flushed event,
 	// avoiding a DB round-trip to re-fetch it for the next step's chain.
 	lastChecksum string
 
-	// mu protects maps (queryState, stateStore, deferrals) from
+	// mu protects maps (queryState, deferrals) from
 	// concurrent access when wasmtime host functions race with Go dispatch.
 	mu sync.Mutex
 

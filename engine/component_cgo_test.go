@@ -96,17 +96,14 @@ func TestCbTypeConstants(t *testing.T) {
 		cbTypeDurableCallString, cbTypeDurableCallRetry, cbTypeDurableCallHeartbeat,
 		cbTypeDurableSleep, cbTypeNow, cbTypeRandom, cbTypeDurableLog,
 		cbTypeVersion, cbTypeMinVersion, cbTypeDurableDefer, cbTypeContinueAsNew, cbTypePollCancellation,
-		cbTypeAwaitSignals, cbTypePollSignal, cbTypeSendSignalAndWait,
-		cbTypeReplyToSignal, cbTypeSignalWorkflow,
+		cbTypeAwaitSignals, cbTypePollSignal, cbTypeSignalWorkflow,
 		cbTypeChildWorkflow, cbTypeAwaitChild, cbTypeAwaitAllChildren,
-		cbTypeChildWorkflowWithOptions, cbTypeChildWorkflowInSchema,
+		cbTypeChildWorkflowWithOptions,
 		cbTypeCreatePromise, cbTypeAwaitPromise, cbTypeResolvePromise, cbTypeRejectPromise,
 		cbTypeSetQueryState, cbTypeRegisterUpdateHandler, cbTypeRegisterQueryHandler,
 		cbTypeDurableSend, cbTypeScheduleInvoke, cbTypeWorkflowID, cbTypeRunID,
 		cbTypePluginCall, cbTypePluginCallStreaming, cbTypeAcquireLock, cbTypeReleaseLock,
 		cbTypeSetScope, cbTypeGetScope, cbTypeUUID,
-		cbTypeSetState, cbTypeGetState, cbTypeDeleteState,
-		cbTypeIncrState, cbTypeHasState, cbTypeListState,
 		cbTypeContinueAsNewVersioned, cbTypeSideEffect, cbTypeFetch,
 	}
 	for _, typ := range allTypes {
@@ -128,6 +125,47 @@ func TestWitTypeMapNoDefaults(t *testing.T) {
 }
 
 func packStrLen(n int64) int64 { return n << 40 }
+
+// packSimpleStrLen is packStrLen for the OTHER layout. packSimpleResult puts
+// the written length at bits 32-63, packDurableCallResult at bits 40-63, and
+// the dispatchers are split between them -- child-workflow and fetch decode
+// the simple one. The tests below used to assert only "the result is non-nil",
+// which both layouts satisfy from either packer, so the mismatch was invisible.
+func packSimpleStrLen(n int64) int64 { return n << 32 }
+
+// wantCallOutcome asserts the shape of a result<string, call-failure>.
+//
+// The old assertion was `cgotestHasResultString(resultPtr)`. It could not fail
+// for any reason worth catching: a dispatcher that dropped an error and
+// returned it as a success passes it, a dispatcher that returned the wrong
+// length passes it, and after IMPROVEMENT-PLAN 3.110 a dispatcher that had not
+// been converted at all would pass it too -- a bare string IS a non-nil
+// string. It is the assertion this whole item is about, in miniature.
+func wantCallOutcome(t *testing.T, resultPtr unsafe.Pointer, wantKind string, wantLen int, wantCode uint32) {
+	t.Helper()
+	kind, payload, code := cgotestReadCallOutcome(resultPtr)
+	if kind != wantKind {
+		t.Fatalf("result is %q, want %q.\n\n"+
+			"An empty kind means the dispatcher wrote something that is not a "+
+			"result<string, call-failure> at all -- most likely still "+
+			"setResultString. The guest lifts by the WIT type, so that is a "+
+			"value of the wrong shape at the ABI boundary.", kindOrNotAResult(kind), wantKind)
+	}
+	if len(payload) != wantLen {
+		t.Errorf("payload is %d bytes, want %d -- the wrong length decoder for this layout?",
+			len(payload), wantLen)
+	}
+	if code != wantCode {
+		t.Errorf("call-error code = %d, want %d", code, wantCode)
+	}
+}
+
+func kindOrNotAResult(kind string) string {
+	if kind == "" {
+		return "not a result"
+	}
+	return kind
+}
 
 // =============================================================================
 // Comprehensive dispatch guard tests — nil handler
@@ -156,20 +194,16 @@ func TestDispatchGuardsNilHandler(t *testing.T) {
 		{"CreatePromise", true, 5, strPtr, 1},
 		{"PluginCall", true, 6, strPtr, 3},
 		{"SetScope", true, 7, strPtr, 2},
-		{"GetState", true, 8, strPtr, 1},
-		{"ListState", true, 9, strPtr, 1},
 		{"PollCancellation", true, 10, nil, 0},
 		{"WorkflowID", true, 11, nil, 0},
 		{"RunID", true, 12, nil, 0},
 		{"UUID", true, 13, strPtr, 1},
 		{"SideEffect", true, 14, strPtr, 1},
 		{"Fetch", true, 15, strPtr, 4},
-		{"ChildWorkflowInSchema", true, 16, strPtr, 6},
 		{"AwaitChild", true, 17, strPtr, 1},
 		{"AwaitAllChildren", true, 18, strPtr, 1},
 		{"PluginCallStreaming", true, 19, strPtr, 3},
 		{"ChildWorkflowWithOptions", true, 20, strPtr, 5},
-		{"SendSignalAndWait", true, 21, strPtr, 4},
 		{"AwaitPromise", true, 22, strPtr, 2},
 		{"PollSignal", true, 23, strPtr, 1},
 		{"DurableSleep", false, 0, u64Ptr, 1},
@@ -183,14 +217,9 @@ func TestDispatchGuardsNilHandler(t *testing.T) {
 		{"RejectPromise", false, 8, strPtr, 2},
 		{"SetQueryState", false, 9, strPtr, 2},
 		{"DurableSend", false, 10, strPtr, 3},
-		{"SetState", false, 11, strPtr, 2},
-		{"IncrState", false, 12, strPtr, 2},
-		{"HasState", false, 13, strPtr, 1},
-		{"DeleteState", false, 14, strPtr, 1},
 		{"AcquireLock", false, 15, strPtr, 2},
 		{"ReleaseLock", false, 16, strPtr, 1},
 		{"SignalWorkflow", false, 17, strPtr, 3},
-		{"ReplyToSignal", false, 18, strPtr, 2},
 		{"ScheduleInvoke", false, 19, strPtr, 4},
 		{"RegisterUpdateHandler", false, 20, strPtr, 1},
 		{"RegisterQueryHandler", false, 21, strPtr, 1},
@@ -236,16 +265,12 @@ func TestDispatchGuardsInsufficientArgs(t *testing.T) {
 		{"CreatePromise(0<1)", true, 5},
 		{"PluginCall(0<3)", true, 6},
 		{"SetScope(0<2)", true, 7},
-		{"GetState(0<1)", true, 8},
-		{"ListState(0<1)", true, 9},
 		{"AwaitChild(0<1)", true, 17},
 		{"AwaitAllChildren(0<1)", true, 18},
 		{"PluginCallStreaming(0<3)", true, 19},
 		{"ChildWorkflowWithOptions(0<5)", true, 20},
-		{"SendSignalAndWait(0<4)", true, 21},
 		{"AwaitPromise(0<2)", true, 22},
 		{"PollSignal(0<1)", true, 23},
-		{"ChildWorkflowInSchema(0<6)", true, 16},
 		{"UUID(0<1)", true, 13},
 		{"SideEffect(0<1)", true, 14},
 		{"Fetch(0<4)", true, 15},
@@ -256,14 +281,9 @@ func TestDispatchGuardsInsufficientArgs(t *testing.T) {
 		{"RejectPromise(0<2)", false, 8},
 		{"SetQueryState(0<2)", false, 9},
 		{"DurableSend(0<3)", false, 10},
-		{"SetState(0<2)", false, 11},
-		{"IncrState(0<2)", false, 12},
-		{"HasState(0<1)", false, 13},
-		{"DeleteState(0<1)", false, 14},
 		{"AcquireLock(0<2)", false, 15},
 		{"ReleaseLock(0<1)", false, 16},
 		{"SignalWorkflow(0<3)", false, 17},
-		{"ReplyToSignal(0<2)", false, 18},
 		{"ScheduleInvoke(0<4)", false, 19},
 		{"RegisterUpdateHandler(0<1)", false, 20},
 		{"RegisterQueryHandler(0<1)", false, 21},
@@ -425,58 +445,6 @@ func TestDispatchDurableSend(t *testing.T) {
 	}
 }
 
-func TestDispatchSetState(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 1}}
-	strPtr, _, freeArgs := cgotestMakeStrArgs("key", "value")
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(11, strPtr, 2, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := cgotestReadResultU64(resultPtr); got != 1 {
-		t.Errorf("result = %d, want 1", got)
-	}
-}
-
-func TestDispatchIncrState(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 5}}
-	argsPtr, _, freeArgs := cgotestMakeMixedArgs("counter-key", uint64(10))
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(12, argsPtr, 2, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := cgotestReadResultU64(resultPtr); got != 5 {
-		t.Errorf("result = %d, want 5", got)
-	}
-}
-
-func TestDispatchHasState(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 1}}
-	strPtr, _, freeArgs := cgotestMakeStrArgs("key")
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(13, strPtr, 1, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := cgotestReadResultU64(resultPtr); got != 1 {
-		t.Errorf("result = %d, want 1", got)
-	}
-}
-
-func TestDispatchDeleteState(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 1}}
-	strPtr, _, freeArgs := cgotestMakeStrArgs("key")
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(14, strPtr, 1, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := cgotestReadResultU64(resultPtr); got != 1 {
-		t.Errorf("result = %d, want 1", got)
-	}
-}
-
 func TestDispatchAcquireLock(t *testing.T) {
 	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 1}}
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("lock-key", uint64(5000))
@@ -509,19 +477,6 @@ func TestDispatchSignalWorkflow(t *testing.T) {
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchU64(17, strPtr, 3, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := cgotestReadResultU64(resultPtr); got != 1 {
-		t.Errorf("result = %d, want 1", got)
-	}
-}
-
-func TestDispatchReplyToSignal(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: 1}}
-	strPtr, _, freeArgs := cgotestMakeStrArgs("corr-id", "response")
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchU64(18, strPtr, 2, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got := cgotestReadResultU64(resultPtr); got != 1 {
@@ -619,9 +574,7 @@ func TestDispatchDurableCallString(t *testing.T) {
 	if err := b.cgotestDispatchStr(0, strPtr, 3, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
+	wantCallOutcome(t, resultPtr, "ok", 5, 0)
 }
 
 func TestDispatchDurableCallRetry(t *testing.T) {
@@ -632,9 +585,7 @@ func TestDispatchDurableCallRetry(t *testing.T) {
 	if err := b.cgotestDispatchStr(1, argsPtr, 8, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
+	wantCallOutcome(t, resultPtr, "ok", 5, 0)
 }
 
 func TestDispatchDurableCallHeartbeat(t *testing.T) {
@@ -645,9 +596,59 @@ func TestDispatchDurableCallHeartbeat(t *testing.T) {
 	if err := b.cgotestDispatchStr(2, argsPtr, 4, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
+	wantCallOutcome(t, resultPtr, "ok", 5, 0)
+}
+
+// TestDispatchDurableCallStopIsNotAResponse is the case the eight tests above
+// could not express before IMPROVEMENT-PLAN 3.110, because there was nothing to
+// express it with.
+//
+// The host refuses a body call past the frontier of a defer segment by
+// returning callSuspendSentinel (engine/durablecalls.go). The old dispatcher
+// ran that word through extractStringFromPacked, which read responseLen=0 out
+// of it and handed the guest "" -- an ordinary EMPTY SUCCESSFUL RESPONSE. The
+// Python SDK had no way to tell that from a service that returned nothing, so
+// a stopped workflow carried on and reported itself complete (3.83's defect,
+// measured on a real component in 3.110).
+//
+// Asserting "suspended" rather than "not ok" is deliberate: `err(failed{...})`
+// would also be not-ok, and it is the wrong answer -- a stop is not a failure,
+// and an SDK that raised its error class for one would report a terminated
+// workflow as FAILED and never drain its defer table.
+func TestDispatchDurableCallStopIsNotAResponse(t *testing.T) {
+	b := &wasmtimeBackend{handler: &mockHostHandler{ret: callSuspendSentinel}}
+	strPtr, _, freeArgs := cgotestMakeStrArgs("svc", "op", "req")
+	defer freeArgs()
+	resultPtr := cgotestAllocResult()
+	if err := b.cgotestDispatchStr(0, strPtr, 3, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
+	wantCallOutcome(t, resultPtr, "suspended", 0, 0)
+}
+
+// TestDispatchDurableCallFailureIsNotAResponse is the other half, and the one
+// that had been broken for longer.
+//
+// cleat.wit documented a failure as a response string prefixed with
+// "__CLEAT_ERROR__:" and the Python SDK checked for that prefix in six places.
+// Nothing in the host has ever written it -- so a failed call arrived as an
+// ordinary successful response holding the error text, and its callErrorCode,
+// which decides retryable from permanent, was discarded on the way.
+//
+// The code is asserted, not just the kind. Dropping it is exactly what the old
+// dispatcher did, and a test that only checked "this is an err" would pass a
+// dispatcher that reported every failure as unclassified.
+func TestDispatchDurableCallFailureIsNotAResponse(t *testing.T) {
+	// responseLen=7 ("timeout" would be in the buffer), callErrorCode=1
+	// (CallErrorTimeout), errCode=1.
+	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packDurableCallResult(7, 1, 1)}}
+	strPtr, _, freeArgs := cgotestMakeStrArgs("svc", "op", "req")
+	defer freeArgs()
+	resultPtr := cgotestAllocResult()
+	if err := b.cgotestDispatchStr(0, strPtr, 3, resultPtr); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	wantCallOutcome(t, resultPtr, "failed", 7, 1)
 }
 
 func TestDispatchDurableDefer(t *testing.T) {
@@ -664,16 +665,14 @@ func TestDispatchDurableDefer(t *testing.T) {
 }
 
 func TestDispatchChildWorkflow(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(20)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(20)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("wf-name", "input")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(4, strPtr, 2, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
+	wantCallOutcome(t, resultPtr, "ok", 20, 0)
 }
 
 func TestDispatchCreatePromise(t *testing.T) {
@@ -697,9 +696,7 @@ func TestDispatchPluginCall(t *testing.T) {
 	if err := b.cgotestDispatchStr(6, strPtr, 3, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
+	wantCallOutcome(t, resultPtr, "ok", 15, 0)
 }
 
 func TestDispatchSetScope(t *testing.T) {
@@ -708,32 +705,6 @@ func TestDispatchSetScope(t *testing.T) {
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(7, strPtr, 2, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
-}
-
-func TestDispatchGetState(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(10)}}
-	strPtr, _, freeArgs := cgotestMakeStrArgs("key")
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(8, strPtr, 1, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
-}
-
-func TestDispatchListState(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(10)}}
-	strPtr, _, freeArgs := cgotestMakeStrArgs("prefix")
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(9, strPtr, 1, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !cgotestHasResultString(resultPtr) {
@@ -788,42 +759,28 @@ func TestDispatchUUID(t *testing.T) {
 }
 
 func TestDispatchSideEffect(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(8)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(8)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("result")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(14, strPtr, 1, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
+	// result<string, call-failure> since IMPROVEMENT-PLAN 3.300, not a bare
+	// string: side-effect is a stop site, and setResultString had nowhere to put
+	// the refusal.
+	wantCallOutcome(t, resultPtr, "ok", 8, 0)
 }
 
 func TestDispatchFetch(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(10)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(10)}}
 	strPtr, _, freeArgs := cgotestMakeStrArgs("GET", "http://x", "{}", "")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(15, strPtr, 4, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
-}
-
-func TestDispatchChildWorkflowInSchema(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(20)}}
-	argsPtr, _, freeArgs := cgotestMakeMixedArgs("schema", "name", "input", uint64(0), uint64(0), "policy")
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(16, argsPtr, 6, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
+	wantCallOutcome(t, resultPtr, "ok", 10, 0)
 }
 
 func TestDispatchAwaitChild(t *testing.T) {
@@ -860,35 +817,18 @@ func TestDispatchPluginCallStreaming(t *testing.T) {
 	if err := b.cgotestDispatchStr(19, strPtr, 3, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
+	wantCallOutcome(t, resultPtr, "ok", 15, 0)
 }
 
 func TestDispatchChildWorkflowWithOptions(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(20)}}
+	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packSimpleStrLen(20)}}
 	argsPtr, _, freeArgs := cgotestMakeMixedArgs("wf-name", "input", uint64(0), uint64(0), "policy")
 	defer freeArgs()
 	resultPtr := cgotestAllocResult()
 	if err := b.cgotestDispatchStr(20, argsPtr, 5, resultPtr); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
-}
-
-func TestDispatchSendSignalAndWait(t *testing.T) {
-	b := &wasmtimeBackend{handler: &mockHostHandler{ret: packStrLen(10)}}
-	argsPtr, _, freeArgs := cgotestMakeMixedArgs("target", "signal", "payload", uint64(5000))
-	defer freeArgs()
-	resultPtr := cgotestAllocResult()
-	if err := b.cgotestDispatchStr(21, argsPtr, 4, resultPtr); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !cgotestHasResultString(resultPtr) {
-		t.Error("expected non-nil string result")
-	}
+	wantCallOutcome(t, resultPtr, "ok", 20, 0)
 }
 
 func TestDispatchAwaitPromise(t *testing.T) {

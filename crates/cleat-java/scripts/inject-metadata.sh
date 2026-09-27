@@ -168,16 +168,22 @@ elif [ -x "$CLEAT_CLI" ]; then
   "child_binding_policy": "$CHILD_BINDING_POLICY",
   "sdk_language": "java",
   "language": "java",
-  "sdk_version": "0.1.0",
+  "sdk_version": "0.3.0",
   "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 ENDJSON
 )
-        OUTPUT_FLAG=""
+        # An ARRAY, not a string. OUTPUT_FLAG was "" or "-o $OUTPUT" and was
+        # deliberately left unquoted so it word-split into two arguments or
+        # vanished. ShellCheck's SC2086 suggestion -- quote it -- silently
+        # breaks that: "-o file" becomes a single argv entry and wasm-tools
+        # sees one unknown flag. The array expresses the intent directly and
+        # survives a filename with a space, which the original did not.
+        OUTPUT_FLAG=()
         if [ -n "$OUTPUT" ]; then
-            OUTPUT_FLAG="-o $OUTPUT"
+            OUTPUT_FLAG=(-o "$OUTPUT")
         fi
-        echo "$META_JSON" | wasm-tools metadata add "$WASM_FILE" cleat.metadata --payload - $OUTPUT_FLAG
+        echo "$META_JSON" | wasm-tools metadata add "$WASM_FILE" cleat.metadata --payload - "${OUTPUT_FLAG[@]}"
         echo "Stamped cleat metadata (via wasm-tools) into ${OUTPUT:-$WASM_FILE}"
     else
         echo "Error: No stamping tool available."
@@ -200,16 +206,22 @@ else
   "child_binding_policy": "$CHILD_BINDING_POLICY",
   "sdk_language": "java",
   "language": "java",
-  "sdk_version": "0.1.0",
+  "sdk_version": "0.3.0",
   "created_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 }
 ENDJSON
 )
-        OUTPUT_FLAG=""
+        # An ARRAY, not a string. OUTPUT_FLAG was "" or "-o $OUTPUT" and was
+        # deliberately left unquoted so it word-split into two arguments or
+        # vanished. ShellCheck's SC2086 suggestion -- quote it -- silently
+        # breaks that: "-o file" becomes a single argv entry and wasm-tools
+        # sees one unknown flag. The array expresses the intent directly and
+        # survives a filename with a space, which the original did not.
+        OUTPUT_FLAG=()
         if [ -n "$OUTPUT" ]; then
-            OUTPUT_FLAG="-o $OUTPUT"
+            OUTPUT_FLAG=(-o "$OUTPUT")
         fi
-        echo "$META_JSON" | wasm-tools metadata add "$WASM_FILE" cleat.metadata --payload - $OUTPUT_FLAG
+        echo "$META_JSON" | wasm-tools metadata add "$WASM_FILE" cleat.metadata --payload - "${OUTPUT_FLAG[@]}"
         echo "Stamped cleat metadata (via wasm-tools) into ${OUTPUT:-$WASM_FILE}"
     else
         echo "Error: No stamping tool available."

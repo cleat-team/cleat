@@ -1,6 +1,7 @@
 package fooddash
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -49,7 +50,7 @@ func TestPlaceOrder_Success(t *testing.T) {
 	// Signal pickup confirmation immediately.
 	env.Signal("pickup_confirmed", `{"status":"picked_up"}`)
 
-	result, err := PlaceOrder(env.H(), "user_1", "rest_1",
+	resultJSON, err := PlaceOrder(env.H(), "user_1", "rest_1",
 		[]OrderItem{
 			{SKU: "pizza", Quantity: 1},
 			{SKU: "soda", Quantity: 2},
@@ -59,6 +60,14 @@ func TestPlaceOrder_Success(t *testing.T) {
 
 	if err != nil {
 		t.Fatalf("PlaceOrder failed: %v", err)
+	}
+	// PlaceOrder returns JSON, not a struct: an entry point's result must be a
+	// string (IMPROVEMENT-PLAN 3.228). Unmarshal it back before asserting, so
+	// the test checks the bytes the host would actually receive rather than an
+	// in-process value that never crosses the boundary.
+	var result OrderResult
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatalf("PlaceOrder returned unparseable JSON %q: %v", resultJSON, err)
 	}
 	if result.Status != "confirmed" {
 		t.Errorf("expected status 'confirmed', got %q", result.Status)
@@ -186,7 +195,7 @@ func TestPlaceOrder_PickupTimeoutCompensates(t *testing.T) {
 	// Run the workflow in a goroutine and advance time past the
 	// 30-minute AwaitSignals timeout to trigger the timeout path.
 	type outcome struct {
-		result OrderResult
+		result string
 		err    error
 	}
 	ch := make(chan outcome, 1)

@@ -5,15 +5,17 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/migration"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/pagerdutyalert"
+	"github.com/google/uuid"
 )
 
 // OpenTestDB opens a database connection and creates an isolated schema
@@ -38,6 +40,27 @@ func OpenTestDB(t *testing.T, dialect plugin.Dialect, connStr string) (*sql.DB, 
 	switch dialect {
 	case plugin.DialectPostgres:
 		driverName = "postgres"
+		// TAGGED HERE, IN THE HELPER, NOT AT THE CALL SITES. cleat#1501.
+		//
+		// The cleat#982 gate identifies our own PostgreSQL sessions by
+		// application_name and nothing else, because PostgreSQL does not hand
+		// the client's pid to the server. A connection opened from an untagged
+		// DSN is reported as a stranger and refuses somebody else's run.
+		//
+		// Both callers in this module pass a DSN they read from the
+		// environment themselves, and a third would have to remember. Putting
+		// it here is the same move as PostgresTestDSN tagging in the
+		// constructor rather than at its thirteen callers.
+		//
+		// TagPostgresDSN, not PostgresTestDSN: callers here do their own
+		// empty-check and skip, and PostgresTestDSN's localhost fallback would
+		// turn that skip into a connection attempt. Idempotent, so a caller
+		// that already tagged loses nothing.
+		//
+		// Postgres only. MySQL and SQL Server report the client process id to
+		// the server without being asked, so the gate identifies those without
+		// a tag and there is nothing to add.
+		connStr = testutil.TagPostgresDSN(connStr)
 	case plugin.DialectMySQL:
 		driverName = "mysql"
 	case plugin.DialectMSSQL:
@@ -84,90 +107,119 @@ func OpenTestDB(t *testing.T, dialect plugin.Dialect, connStr string) (*sql.DB, 
 // Migration files are expected at ../../migrations/{postgres,mysql,mssql}/.
 // This function is a no-op if the migration directory cannot be found (the
 // caller is expected to have created the schemas another way).
+//
+// # One transaction per FILE, which is not a refinement
+//
+// migrations/mssql/001_schema.sql drops the seven tenant SECURITY POLICYs at
+// the top, before the CREATE OR ALTER of the function they are schemabound to,
+// and recreates them at the bottom. Its header explains why that is safe and
+// names the single condition it rests on:
+//
+//	"that atomicity is the runner's, not this file's. Applying this file by
+//	hand -- sqlcmd, a GUI, ANY TOOL THAT TREATS GO AS A REAL BATCH SEPARATOR
+//	AND AUTOCOMMITS EACH BATCH -- does leave tenant-scoped tables unfiltered"
+//
+// This function was that tool. It split on GO and executed each batch on a
+// bare connection, so a file that failed part-way left everything before the
+// failure committed.
+//
+// On SQL Server that was not a window, it was permanent. 001 cannot re-run
+// against a database that already carries migration 031: 031 adds
+// TenantFilter_Promises, which 001 predates and so does not drop, and which
+// holds a hard dependency on dbo.fn_tenant_filter -- so the CREATE OR ALTER
+// FUNCTION fails with "Cannot ALTER 'dbo.fn_tenant_filter' because it is being
+// referenced by object 'TenantFilter_Promises'". The seven drops had already
+// committed. Measured 2026-09-06 against a freshly migrated database:
+//
+//	before this test: 9 security policies
+//	after  this test: 2 -- TenantFilter_Promises and TenantFilter_Settings,
+//	                       the two that 001 does not know to drop
+//
+// The MSSQL arm of OpenTestDB creates a SCHEMA, not a database, so this ran
+// against the shared cleat database in dbo -- and every tenant-scoped MSSQL
+// test in the repo afterwards ran with no RLS backstop. CI never saw it
+// because CI does not set CLEAT_TEST_MSSQL for this suite; a developer
+// following CLAUDE.md and setting all three DSNs does.
+//
+// A transaction restores the atomicity 001's header depends on. The re-run
+// still fails -- that is a separate defect, and this file's own failure is now
+// the loud, safe one 001's header calls "the OLD ordering failed safely" --
+// but the database it fails against is left as it was found.
 func RunCoreMigrations(t *testing.T, db *sql.DB, dialect plugin.Dialect, schemaName string) {
 	t.Helper()
+	if err := runCoreMigrations(context.Background(), db, dialect, schemaName, coreMigrationDir(t, dialect)); err != nil {
+		t.Fatalf("RunCoreMigrations: %v", err)
+	}
+}
 
-	dir := coreMigrationDir(t, dialect)
+// runCoreMigrations is RunCoreMigrations without the *testing.T, so that a
+// test can apply the migrations, observe the error, and go on to assert what
+// the database looks like afterwards. RunCoreMigrations cannot be used for
+// that: it calls t.Fatalf, which ends the test at the point the interesting
+// question starts.
+func runCoreMigrations(ctx context.Context, db *sql.DB, dialect plugin.Dialect, schemaName, dir string) error {
 	if dir == "" {
-		t.Log("RunCoreMigrations: no migration directory found, skipping")
-		return
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("RunCoreMigrations: read dir %s: %v", dir, err)
-	}
-
-	var files []fs.DirEntry
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".sql") {
-			files = append(files, e)
-		}
-	}
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Name() < files[j].Name()
-	})
-
-	ctx := context.Background()
-
-	// Use a single dedicated connection so that SET search_path / USE
-	// database persists across all migration statements. Connection
-	// pooling would otherwise distribute statement execution across
-	// different connections, losing the schema/database context.
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatalf("RunCoreMigrations: get conn: %v", err)
-	}
-	defer conn.Close()
-
-	if err := setSearchPath(ctx, conn, dialect, schemaName); err != nil {
-		t.Fatalf("RunCoreMigrations: set context %s: %v", schemaName, err)
-	}
-
-	for _, f := range files {
-		path := filepath.Join(dir, f.Name())
-		sqlBytes, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatalf("RunCoreMigrations: read %s: %v", path, err)
-		}
-		sqlStr := string(sqlBytes)
-		if prefix := schemaPrefix(dialect, schemaName); prefix != "" {
-			sqlStr = prefix + ";" + "\n" + sqlStr
-		}
-		statements := splitStatements(dialect, sqlStr)
-		for _, stmt := range statements {
-			if _, err := conn.ExecContext(ctx, stmt); err != nil {
-				t.Fatalf("RunCoreMigrations: execute %s: %v", f.Name(), err)
-			}
-		}
-	}
-}
-
-// schemaPrefix returns a dialect-appropriate SET/USE statement to prepend
-// before migration SQL so the correct schema/database is targeted.
-func schemaPrefix(dialect plugin.Dialect, schemaName string) string {
-	switch dialect {
-	case plugin.DialectPostgres:
-		return fmt.Sprintf(`SET search_path TO %s`, quoteIdent(dialect, schemaName))
-	case plugin.DialectMySQL:
-		return fmt.Sprintf(`USE %s`, quoteIdent(dialect, schemaName))
-	default:
-		return ""
-	}
-}
-
-// setSearchPath ensures the connection targets the correct schema/database.
-func setSearchPath(ctx context.Context, conn *sql.Conn, dialect plugin.Dialect, schemaName string) error {
-	switch dialect {
-	case plugin.DialectPostgres:
-		_, err := conn.ExecContext(ctx, fmt.Sprintf(`SET search_path TO %s`, quoteIdent(dialect, schemaName)))
-		return err
-	case plugin.DialectMySQL:
-		_, err := conn.ExecContext(ctx, fmt.Sprintf(`USE %s`, quoteIdent(dialect, schemaName)))
-		return err
-	default:
 		return nil
 	}
+
+	// migration.Runner, not a loop of our own.
+	//
+	// The hand-rolled loop re-applied EVERY migration file on every call, which
+	// is what IMPROVEMENT-PLAN 3.237 is about: migrations/mssql/001_schema.sql
+	// cannot be applied twice once migration 031 exists, because 031 adds
+	// TenantFilter_Promises -- schemabound to dbo.fn_tenant_filter, and not in
+	// 001's drop list, since 001 predates it. So the CREATE OR ALTER FUNCTION
+	// fails and TestPluginCalls_MultiDB/mssql fails for anyone whose database
+	// already carries the schema.
+	//
+	// The Runner records what it has applied in schema_migrations and skips it,
+	// so a second call is a no-op rather than a second application. It also
+	// wraps each file in one transaction, which is the property #853 added to
+	// the old loop by hand -- and which migrations/mssql/001_schema.sql's header
+	// names as the condition its drop-then-recreate ordering depends on.
+	//
+	// This is the same call engine/testutil makes. Two implementations of
+	// "apply the shipped migrations" was the defect, not a detail of one of
+	// them.
+	target := db
+	if dialect == plugin.DialectMySQL {
+		// The Runner uses the pool, and MySQL's current database is a
+		// per-connection property: OpenTestDB's `USE` reached one connection,
+		// and the old loop worked only because it pinned one for the whole run.
+		// Clamping the pool to a single connection restores that guarantee for
+		// the Runner's transactions, which is the smallest change that keeps
+		// the migrations inside the per-test database.
+		db.SetMaxOpenConns(1)
+		defer db.SetMaxOpenConns(0)
+		if _, err := db.ExecContext(ctx, `USE `+quoteIdent(dialect, schemaName)); err != nil {
+			return fmt.Errorf("use database %s: %w", schemaName, err)
+		}
+	}
+
+	md, err := toMigrationDialect(dialect)
+	if err != nil {
+		return err
+	}
+	root := filepath.Dir(dir) // coreMigrationDir returns migrations/<dialect>
+	if err := migration.NewRunner(target, md, root).Run(ctx); err != nil {
+		return fmt.Errorf("apply %s migrations from %s: %w", dialect, root, err)
+	}
+	return nil
+}
+
+// toMigrationDialect converts the harness's plugin.Dialect to the migration
+// package's own. The two carry identical strings and are declared separately;
+// see engine/testutil's function of the same name for why.
+func toMigrationDialect(d plugin.Dialect) (migration.Dialect, error) {
+	switch d {
+	case plugin.DialectPostgres:
+		return migration.DialectPostgres, nil
+	case plugin.DialectMySQL:
+		return migration.DialectMySQL, nil
+	case plugin.DialectMSSQL:
+		return migration.DialectMSSQL, nil
+	}
+	return "", fmt.Errorf("unknown dialect %q", d)
 }
 
 // RunPluginMigrations runs each loaded plugin's database migrations for the
@@ -256,9 +308,12 @@ func SeedPluginConfig(t *testing.T, db *sql.DB, dialect plugin.Dialect) {
 			args:  []interface{}{defaultTenant, "00000000-0000-0000-0000-000000000004", "test-slack", "https://hooks.slack.com/test", true},
 		},
 		{
+			// No routing_key column any more (cleat#1992, migration v3) -- the
+			// value SeedPluginSecrets writes below, under the same name
+			// triggerIncident reads, is what makes this config usable.
 			table: "pd_config",
-			sql:   placeholderSQL(dialect, "INSERT INTO pd_config (tenant_id, id, name, routing_key, enabled) VALUES (%s, %s, %s, %s, %s)"),
-			args:  []interface{}{defaultTenant, "00000000-0000-0000-0000-000000000003", "test-pd", "test-routing-key", true},
+			sql:   placeholderSQL(dialect, "INSERT INTO pd_config (tenant_id, id, name, enabled) VALUES (%s, %s, %s, %s)"),
+			args:  []interface{}{defaultTenant, "00000000-0000-0000-0000-000000000003", "test-pd", true},
 		},
 	}
 
@@ -268,6 +323,37 @@ func SeedPluginConfig(t *testing.T, db *sql.DB, dialect plugin.Dialect) {
 		if _, err := db.ExecContext(ctx, row.sql, row.args...); err != nil {
 			t.Logf("SeedPluginConfig: %s: %v (plugin migrations may not have run yet)", row.table, err)
 		}
+	}
+}
+
+// SeedPluginSecrets writes the tenant secrets SeedPluginConfig's rows now
+// depend on, since cleat#1992 moved their credentials out of the plugin's own
+// table and into tenant_secrets.
+//
+// A SEPARATE FUNCTION FROM SeedPluginConfig, not folded into it: that one
+// takes a *sql.DB, and Secrets is a distinct plugin.Environment field wired
+// from a distinct store (NewTestPluginEnv builds both against the same
+// database, but a caller of SeedPluginConfig alone -- there may be one, this
+// package's own SQL-only tests -- should not have to construct a
+// plugin.Secrets it does not need).
+func SeedPluginSecrets(t *testing.T, ctx context.Context, secrets plugin.Secrets) {
+	t.Helper()
+	if secrets == nil {
+		return
+	}
+
+	const defaultTenant = "00000000-0000-0000-0000-000000000000"
+	pdConfigID := uuid.MustParse("00000000-0000-0000-0000-000000000003")
+
+	name := pagerdutyalert.PagerdutyRoutingKeySecretName(pdConfigID)
+	if err := secrets.ForTenant(defaultTenant).Put(ctx, name, "test-routing-key"); err != nil {
+		// Fatalf, not Logf: unlike SeedPluginConfig's "the plugin migration
+		// hasn't run yet" case, there is no legitimate reason for this write to
+		// fail against a freshly migrated test database. Logging it here would
+		// surface as a confusing "routing key not found" failure in whichever
+		// pagerduty-alert test happens to run next, pointing at the wrong
+		// place -- this IS the place. cleat-review, reviewing this PR.
+		t.Fatalf("SeedPluginSecrets: %s: %v", name, err)
 	}
 }
 

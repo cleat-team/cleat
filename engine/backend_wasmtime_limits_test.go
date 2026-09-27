@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 // infiniteLoopGoStartWat is a hand-written WASM module (no wasi imports, no

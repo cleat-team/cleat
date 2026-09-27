@@ -8,6 +8,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,7 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // ---------------------------------------------------------------------------
@@ -414,25 +416,17 @@ func TestMigrationValid(t *testing.T) {
 	p := &Plugin{}
 	migrations := p.Migrations()
 
-	if len(migrations) == 0 {
-		t.Fatal("expected at least one migration")
-	}
+	// One shared predicate for what a migration must do, rather than a copy per
+	// plugin -- thirteen plugins carried their own and they had already drifted
+	// (cleat#1513). The copy that stood here rejected a TenantScoped migration
+	// in both halves: v4 declares a table for the runtime to put a policy on
+	// and carries no SQL in either direction, because there is none to write
+	// and no policy an author could drop. cleat#1512.
+	plugintest.AssertMigrationsDoSomething(t, migrations)
 
-	for i, m := range migrations {
-		t.Run(fmt.Sprintf("migration-%d", m.Version), func(t *testing.T) {
-			if m.Version <= 0 {
-				t.Errorf("migration[%d] has non-positive version %d", i, m.Version)
-			}
-			if strings.TrimSpace(m.Up) == "" {
-				t.Errorf("migration[%d] (v%d) has empty Up SQL", i, m.Version)
-			}
-			if strings.TrimSpace(m.Down) == "" {
-				t.Errorf("migration[%d] (v%d) has empty Down SQL", i, m.Version)
-			}
-		})
-	}
-
-	// Verify versions are sequential and strictly increasing.
+	// Kept local: strictly increasing versions is blobstore's own rule, and
+	// cleat#1513's doc comment asks for exactly this split rather than folding
+	// one plugin's rule onto twelve others.
 	for i := 1; i < len(migrations); i++ {
 		if migrations[i].Version <= migrations[i-1].Version {
 			t.Errorf("migrations not sequential: v%d follows v%d",
@@ -444,6 +438,18 @@ func TestMigrationValid(t *testing.T) {
 func TestMigrationUpContainsSQL(t *testing.T) {
 	p := &Plugin{}
 	for _, m := range p.Migrations() {
+		// A TenantScoped migration has no SQL and that is the point: the
+		// runtime emits the policy from the field. This assertion is about a
+		// migration that WRITES SQL saying nothing, so it does not apply --
+		// and it is the one cleat#1512's table records blobstore as not
+		// having, which is how it was nearly shipped red. cleat#1513's shared
+		// helper covers "the migration does something"; these two cover "the
+		// SQL it wrote is SQL".
+		// A SweepTables-only migration has no SQL either: the runtime emits
+		// the GRANT, same as it emits the policy for TenantScoped. cleat#1490.
+		if len(m.TenantScoped) > 0 || len(m.SweepTables) > 0 {
+			continue
+		}
 		up := m.Up
 		if !strings.Contains(up, "CREATE") && !strings.Contains(up, "ALTER") && !strings.Contains(up, "INSERT") {
 			t.Errorf("migration v%d Up SQL does not contain CREATE, ALTER, or INSERT: %s", m.Version, up[:min(len(up), 80)])
@@ -454,6 +460,11 @@ func TestMigrationUpContainsSQL(t *testing.T) {
 func TestMigrationDownContainsSQL(t *testing.T) {
 	p := &Plugin{}
 	for _, m := range p.Migrations() {
+		// See TestMigrationUpContainsSQL. A TenantScoped migration has no Down
+		// either -- the policy is the runtime's to drop, not an author's.
+		if len(m.TenantScoped) > 0 || len(m.SweepTables) > 0 {
+			continue
+		}
 		down := m.Down
 		if !strings.Contains(down, "DROP") && !strings.Contains(down, "ALTER") {
 			t.Errorf("migration v%d Down SQL does not contain DROP or ALTER: %s", m.Version, down[:min(len(down), 80)])
@@ -614,6 +625,23 @@ func (b *failBackend) Get(_ context.Context, _ string) ([]byte, error) {
 
 func (b *failBackend) Delete(_ context.Context, _ string) error {
 	return fmt.Errorf("backend error")
+}
+
+// deploymentSecretsUnavailableBackend is a Backend that always fails with
+// errDeploymentSecretsUnavailable in its chain -- the shape a real s3Backend
+// produces when the deployment secrets it needs cannot be resolved (backend.go).
+type deploymentSecretsUnavailableBackend struct{}
+
+func (b *deploymentSecretsUnavailableBackend) Put(_ context.Context, _ string, _ []byte, _ string) error {
+	return fmt.Errorf("blobstore: s3 put: %w", errDeploymentSecretsUnavailable)
+}
+
+func (b *deploymentSecretsUnavailableBackend) Get(_ context.Context, _ string) ([]byte, error) {
+	return nil, fmt.Errorf("blobstore: s3 get: %w", errDeploymentSecretsUnavailable)
+}
+
+func (b *deploymentSecretsUnavailableBackend) Delete(_ context.Context, _ string) error {
+	return fmt.Errorf("blobstore: s3 delete: %w", errDeploymentSecretsUnavailable)
 }
 
 // selectiveErrorConn wraps a fakeConn and injects errors for SQL statements
@@ -793,6 +821,204 @@ func TestPluginInitS3Backend(t *testing.T) {
 	}
 }
 
+// TestPluginInitS3BackendUseIAMCredentials is the opt-out path's own
+// construction test: with use_iam_credentials true, newS3Backend must build
+// a client from the EnvAWS/IAM chain rather than reaching for
+// p.deploymentSecrets -- env.DeploymentSecrets is left nil here, so a client
+// that mistakenly went through the deployment-secrets path would still
+// construct without error (neither path makes an HTTP call at construction
+// time -- see the comment above), but this pins the wiring textually rather
+// than relying on that absence of a crash to mean anything.
+func TestPluginInitS3BackendUseIAMCredentials(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{}
+	ctx := context.Background()
+
+	env := &plugin.Environment{
+		DB:     &engine.SQLDBAdapter{DB: db},
+		Mux:    http.NewServeMux(),
+		Logger: slog.Default(),
+		Config: []byte(`{"backend":"s3","bucket":"test-bucket","region":"us-east-1","endpoint":"localhost:9000","use_iam_credentials":true}`),
+	}
+
+	if err := p.Init(ctx, env); err != nil {
+		t.Fatalf("Init with use_iam_credentials: %v", err)
+	}
+	if !p.config.UseIAMCredentials {
+		t.Error("expected UseIAMCredentials to be true")
+	}
+	if p.backend == nil {
+		t.Error("expected backend to be set")
+	}
+}
+
+// TestBlobstoreInitWarnsOnLeftoverKeys is the mirror of scheduledbackup's
+// TestSB_InitWarnsOnLeftoverDSN: access_key_id/secret_access_key left over
+// in --plugin-config from before cleat#1992 part 1b no longer do anything --
+// Config has no field for either -- so Init must WARN naming the dead
+// fields and the replacement commands, rather than silently ignoring them.
+func TestBlobstoreInitWarnsOnLeftoverKeys(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+		Config: []byte(`{"access_key_id":"AKIAOLD","secret_access_key":"old-secret"}`),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "access_key_id") || !strings.Contains(got, "secret_access_key") {
+		t.Errorf("expected a WARN naming both dead fields, got log output: %q", got)
+	}
+	if !strings.Contains(got, "no longer read") {
+		t.Errorf("expected the WARN to say the fields are no longer read, got: %q", got)
+	}
+	if !strings.Contains(got, "set-deployment-secret") {
+		t.Errorf("expected the WARN to name the replacement command, got: %q", got)
+	}
+}
+
+// TestBlobstoreInitWarnsOnOneLeftoverKey proves the WARN fires on EITHER
+// field alone, not only when both are present -- an operator could have
+// migrated one and not the other.
+func TestBlobstoreInitWarnsOnOneLeftoverKey(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+		Config: []byte(`{"secret_access_key":"old-secret"}`),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if got := buf.String(); !strings.Contains(got, "no longer read") {
+		t.Errorf("expected a WARN with only secret_access_key set, got: %q", got)
+	}
+}
+
+// TestBlobstoreInitNoWarnWithoutLeftoverKeys is the negative control: a
+// config with neither field at all must not log the leftover-key WARN.
+func TestBlobstoreInitNoWarnWithoutLeftoverKeys(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+		Config: []byte(`{"backend":"memory"}`),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	if got := buf.String(); strings.Contains(got, "no longer read") {
+		t.Errorf("did not expect a leftover-key WARN with neither field in config, got: %q", got)
+	}
+}
+
+// TestBlobstoreRequiredDeploymentSecrets_S3RequiresBothUnconditionally is
+// the case that used to read the opposite way and was wrong: an s3 backend
+// not using use_iam_credentials must require BOTH
+// blobstore.access_key_id/blobstore.secret_access_key even with no legacy
+// access_key_id/secret_access_key anywhere in --plugin-config. On develop
+// this exact config -- {"backend":"s3"}, no static keys -- fell back
+// silently to the AWS env/instance-profile credential chain, so it is the
+// COMMON case, not an edge case: every IAM-role s3 deployment looks like
+// this. Requiring the secrets regardless of legacy-key presence is what
+// stops such a deployment from booting green and then failing every S3
+// call at request time (deploymentSecretsCredentialsProvider has no
+// fallback to that chain).
+func TestBlobstoreRequiredDeploymentSecrets_S3RequiresBothUnconditionally(t *testing.T) {
+	p := &Plugin{}
+	cfg := []byte(`{"backend":"s3","bucket":"b","region":"us-east-1"}`)
+	if err := p.Init(context.Background(), &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config: cfg,
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	names, err := p.RequiredDeploymentSecrets(cfg)
+	if err != nil {
+		t.Fatalf("RequiredDeploymentSecrets: %v", err)
+	}
+	want := []string{"blobstore.access_key_id", "blobstore.secret_access_key"}
+	if len(names) != len(want) || names[0] != want[0] || names[1] != want[1] {
+		t.Errorf("RequiredDeploymentSecrets(s3, no legacy key) = %v, want %v", names, want)
+	}
+}
+
+// TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresenceDoesNotChangeOutcome
+// proves legacy-key presence is no longer the deciding factor: the SAME s3
+// config plus a leftover access_key_id/secret_access_key pair gets the SAME
+// answer as TestBlobstoreRequiredDeploymentSecrets_S3RequiresBothUnconditionally.
+// This is what remains of the old _LegacyKeyPresent_S3 test, which used to be
+// the ONLY case that required the two names -- that made it look like the
+// interesting case, when the interesting case was the one above it did not
+// cover.
+func TestBlobstoreRequiredDeploymentSecrets_LegacyKeyPresenceDoesNotChangeOutcome(t *testing.T) {
+	p := &Plugin{}
+	cfg := []byte(`{"backend":"s3","bucket":"b","region":"us-east-1","access_key_id":"AKIAOLD","secret_access_key":"old-secret"}`)
+	if err := p.Init(context.Background(), &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config: cfg,
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	names, err := p.RequiredDeploymentSecrets(cfg)
+	if err != nil {
+		t.Fatalf("RequiredDeploymentSecrets: %v", err)
+	}
+	want := []string{"blobstore.access_key_id", "blobstore.secret_access_key"}
+	if len(names) != len(want) || names[0] != want[0] || names[1] != want[1] {
+		t.Errorf("RequiredDeploymentSecrets(s3, legacy key present) = %v, want %v", names, want)
+	}
+}
+
+// TestBlobstoreRequiredDeploymentSecrets_MemoryBackend is the exclusion
+// guard for the DEFAULT (memory) backend: it must not require anything,
+// legacy key or not, because the memory backend never reads either secret.
+func TestBlobstoreRequiredDeploymentSecrets_MemoryBackend(t *testing.T) {
+	p := &Plugin{}
+	cfg := []byte(`{"access_key_id":"AKIAOLD","secret_access_key":"old-secret"}`)
+	if err := p.Init(context.Background(), &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config: cfg,
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	names, err := p.RequiredDeploymentSecrets(cfg)
+	if err != nil {
+		t.Fatalf("RequiredDeploymentSecrets: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("RequiredDeploymentSecrets(memory backend) = %v, want none", names)
+	}
+}
+
+// TestBlobstoreRequiredDeploymentSecrets_UseIAMCredentials is the exclusion
+// guard for use_iam_credentials: that flag opts the deployment out of the
+// deployment-secrets table entirely, in favor of the EnvAWS/IAM chain, so
+// blobstore.access_key_id/blobstore.secret_access_key are never read
+// regardless of what --plugin-config carries.
+func TestBlobstoreRequiredDeploymentSecrets_UseIAMCredentials(t *testing.T) {
+	p := &Plugin{}
+	cfg := []byte(`{"backend":"s3","bucket":"b","region":"us-east-1","use_iam_credentials":true,"access_key_id":"AKIAOLD","secret_access_key":"old-secret"}`)
+	if err := p.Init(context.Background(), &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config: cfg,
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	names, err := p.RequiredDeploymentSecrets(cfg)
+	if err != nil {
+		t.Fatalf("RequiredDeploymentSecrets: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("RequiredDeploymentSecrets(use_iam_credentials) = %v, want none", names)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Route handler backend error paths
 // ---------------------------------------------------------------------------
@@ -941,7 +1167,7 @@ func TestHandleListDBQueryError(t *testing.T) {
 	// Fail on list SELECT.
 	_, handler, _, _ := setupSelectiveErrorDB(t,
 		nil,
-		[]string{"SELECT i.key, i.sha256, i.size"},
+		[]string{`SELECT i."key", i.sha256, i.size`},
 	)
 
 	req := authedRequest("GET", "/blobs", nil)
@@ -1008,6 +1234,173 @@ func TestBlobGetBackendError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "get data") {
 		t.Errorf("expected 'get data' error, got: %v", err)
+	}
+
+	_ = store
+}
+
+// TestBlobPutDeploymentSecretsUnavailableIsGeneric is the coordinator/
+// cleat-review tenant-error-leak fix: a backend error carrying
+// errDeploymentSecretsUnavailable must reach the tenant's workflow as the
+// GENERIC blobstoreDeploymentSecretsUnavailableMessage, not the underlying
+// "deployment secrets unavailable: ..." text -- which names
+// deployment-secret plumbing that is none of the tenant's business and
+// nothing they can act on.
+func TestBlobPutDeploymentSecretsUnavailableIsGeneric(t *testing.T) {
+	p := &Plugin{
+		backend: &deploymentSecretsUnavailableBackend{},
+		logger:  slog.Default(),
+		config:  Config{Backend: "s3"},
+	}
+	ctx := hostFuncContext(context.Background(), testTenantID, "")
+
+	input := blobPutInput{Key: "leak-key", Data: []byte("data")}
+	inputJSON, _ := json.Marshal(input)
+
+	_, err := p.blobPut(ctx, string(inputJSON))
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if err.Error() != blobstoreDeploymentSecretsUnavailableMessage {
+		t.Errorf("got %q, want the generic message %q -- the tenant-facing error leaked deployment-secret plumbing",
+			err.Error(), blobstoreDeploymentSecretsUnavailableMessage)
+	}
+}
+
+// TestBlobGetDeploymentSecretsUnavailableIsGeneric is
+// TestBlobPutDeploymentSecretsUnavailableIsGeneric's Get counterpart.
+func TestBlobGetDeploymentSecretsUnavailableIsGeneric(t *testing.T) {
+	p, store, _ := setupHostFuncTest(t)
+	ctx := hostFuncContext(context.Background(), testTenantID, "")
+
+	input := blobPutInput{Key: "leak-get-key", Data: []byte("data")}
+	inputJSON, _ := json.Marshal(input)
+	if _, err := p.blobPut(ctx, string(inputJSON)); err != nil {
+		t.Fatalf("blobPut: %v", err)
+	}
+
+	p.backend = &deploymentSecretsUnavailableBackend{}
+
+	getInput := blobGetInput{Key: "leak-get-key"}
+	getInputJSON, _ := json.Marshal(getInput)
+	_, err := p.blobGet(ctx, string(getInputJSON))
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if err.Error() != blobstoreDeploymentSecretsUnavailableMessage {
+		t.Errorf("got %q, want the generic message %q -- the tenant-facing error leaked deployment-secret plumbing",
+			err.Error(), blobstoreDeploymentSecretsUnavailableMessage)
+	}
+
+	_ = store
+}
+
+// TestBlobPutBackendErrorMessageIsNotGeneric is the negative control for
+// TestBlobPutDeploymentSecretsUnavailableIsGeneric: an ORDINARY backend
+// error -- no errDeploymentSecretsUnavailable in its chain -- must NOT be
+// replaced by the generic message, or every backend failure would read the
+// same and an operator debugging a real S3 outage would lose the detail
+// TestHandlePutBackendError already asserts on ("failed to store content").
+func TestBlobPutBackendErrorMessageIsNotGeneric(t *testing.T) {
+	p := &Plugin{
+		backend: &failBackend{},
+		logger:  slog.Default(),
+		config:  Config{Backend: "memory"},
+	}
+	ctx := hostFuncContext(context.Background(), testTenantID, "")
+
+	input := blobPutInput{Key: "ordinary-fail-key", Data: []byte("data")}
+	inputJSON, _ := json.Marshal(input)
+
+	_, err := p.blobPut(ctx, string(inputJSON))
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if err.Error() == blobstoreDeploymentSecretsUnavailableMessage {
+		t.Error("an ordinary backend error must not be replaced by the deployment-secrets generic message")
+	}
+	if !strings.Contains(err.Error(), "store content") {
+		t.Errorf("expected 'store content' error, got: %v", err)
+	}
+}
+
+// TestBlobPutSentinelWrapReachesGenericMessageThroughRealProvider is
+// TestBlobPutDeploymentSecretsUnavailableIsGeneric's real-path counterpart --
+// cleat-review's finding was that the fake-backend tests above leave the
+// %w errDeploymentSecretsUnavailable wrap in RetrieveWithCredContext
+// (backend.go) unpinned: removing it would leave every test in this file
+// green, because none of them go through the real provider.
+//
+// This one does: newS3Backend builds a REAL s3Backend around a REAL
+// deploymentSecretsCredentialsProvider wired to a fakeBlobstoreSecrets that
+// fails every Get, so p.blobPut here drives minio-go's PutObject ->
+// RetrieveWithCredContext's actual %w wrap -> blobPut's errors.Is check,
+// with no fake standing in for any of those three. No mock HTTP transport
+// is needed: credential retrieval fails before minio-go signs or sends
+// anything, so this never reaches the network.
+func TestBlobPutSentinelWrapReachesGenericMessageThroughRealProvider(t *testing.T) {
+	backend, err := newS3Backend(context.Background(),
+		Config{Backend: "s3", Bucket: "test-bucket", Region: "us-east-1"},
+		&fakeBlobstoreSecrets{fail: true})
+	if err != nil {
+		t.Fatalf("newS3Backend: %v", err)
+	}
+
+	p := &Plugin{
+		backend: backend,
+		logger:  slog.Default(),
+		config:  Config{Backend: "s3"},
+	}
+	ctx := hostFuncContext(context.Background(), testTenantID, "")
+
+	input := blobPutInput{Key: "real-provider-put-key", Data: []byte("data")}
+	inputJSON, _ := json.Marshal(input)
+
+	_, err = p.blobPut(ctx, string(inputJSON))
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if err.Error() != blobstoreDeploymentSecretsUnavailableMessage {
+		t.Errorf("got %q, want the generic message %q -- either RetrieveWithCredContext's sentinel wrap or blobPut's errors.Is check is broken",
+			err.Error(), blobstoreDeploymentSecretsUnavailableMessage)
+	}
+}
+
+// TestBlobGetSentinelWrapReachesGenericMessageThroughRealProvider is
+// TestBlobPutSentinelWrapReachesGenericMessageThroughRealProvider's Get
+// counterpart, and blobGet's real-path analogue of
+// TestBlobGetDeploymentSecretsUnavailableIsGeneric.
+func TestBlobGetSentinelWrapReachesGenericMessageThroughRealProvider(t *testing.T) {
+	p, store, _ := setupHostFuncTest(t)
+	ctx := hostFuncContext(context.Background(), testTenantID, "")
+
+	// Seed a real blob_index/blob_content row via the memory backend --
+	// blobGet looks the key up in the database before ever calling
+	// p.backend.Get, so the S3 credential failure below is the only thing
+	// under test.
+	input := blobPutInput{Key: "real-provider-get-key", Data: []byte("data")}
+	inputJSON, _ := json.Marshal(input)
+	if _, err := p.blobPut(ctx, string(inputJSON)); err != nil {
+		t.Fatalf("blobPut: %v", err)
+	}
+
+	backend, err := newS3Backend(context.Background(),
+		Config{Backend: "s3", Bucket: "test-bucket", Region: "us-east-1"},
+		&fakeBlobstoreSecrets{fail: true})
+	if err != nil {
+		t.Fatalf("newS3Backend: %v", err)
+	}
+	p.backend = backend
+
+	getInput := blobGetInput{Key: "real-provider-get-key"}
+	getInputJSON, _ := json.Marshal(getInput)
+	_, err = p.blobGet(ctx, string(getInputJSON))
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if err.Error() != blobstoreDeploymentSecretsUnavailableMessage {
+		t.Errorf("got %q, want the generic message %q -- either RetrieveWithCredContext's sentinel wrap or blobGet's errors.Is check is broken",
+			err.Error(), blobstoreDeploymentSecretsUnavailableMessage)
 	}
 
 	_ = store
@@ -1150,6 +1543,6 @@ func setupSelectiveErrorDB(t *testing.T, failExecPatterns, failQueryPatterns []s
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(errDB), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(errDB), false, mux)(mux)
 	return p, handler, store, clock
 }

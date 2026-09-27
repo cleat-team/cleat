@@ -85,6 +85,28 @@ func requireMSSQLPoliciesIntact(t *testing.T, db *sql.DB) {
 		"    DROP DATABASE %s; CREATE DATABASE %s;\n", dbName, dbName, dbName)
 }
 
+// mssqlCleanupTables is the set of tables CleanupMSSQLTestData clears.
+// Kept in the same order as postgresCleanupTables; TestCleanupTableListsAgree
+// fails if the three drift apart again.
+var mssqlCleanupTables = []string{
+	"admin.tenant_api_keys",
+	"workflow_tags",
+	"workflow_routing",
+	"workflow_update_requests",
+	"workflow_promises",
+	"workflow_signals",
+	"concurrency_keys",
+	"queue_holders",
+	"idempotency_keys",
+	"event_history",
+	"workflow_memory_samples",
+	"workflow_memory_stats",
+	"workflow_schedules",
+	"workflow_instances",
+	"workflow_defs",
+	"plugin_defs",
+}
+
 // CleanupMSSQLTestData removes all test data from the MSSQL tables.
 // Uses DELETE with table existence checks. Order respects FK constraints.
 //
@@ -106,25 +128,12 @@ func CleanupMSSQLTestData(t *testing.T, db *sql.DB) {
 	// connecting principal's default schema and failed with "Invalid object
 	// name" -- while the existence check above it passed, because sys.tables is
 	// keyed on name alone and happily found the admin one.
-	tables := []string{
-		"admin.tenant_api_keys",
-		"workflow_tags",
-		"workflow_routing",
-		"workflow_update_requests",
-		"workflow_promises",
-		"workflow_signals",
-		"concurrency_keys",
-		"idempotency_keys",
-		"event_history",
-		"workflow_memory_samples",
-		"workflow_memory_stats",
-		"workflow_schedules",
-		"workflow_instances",
-		"workflow_defs",
-		"plugin_defs",
-	}
 
-	for _, table := range tables {
+	// present collects the tables that actually exist, so the emptiness check
+	// below asks only about those. A table absent from this branch is the one
+	// legitimate reason a delete here does nothing.
+	var present []string
+	for _, table := range mssqlCleanupTables {
 		// Split "admin.tenant_api_keys" so the existence check can match on
 		// schema as well as name. Checking on name alone is what let the
 		// unqualified entry look present and then fail to delete.
@@ -137,15 +146,28 @@ func CleanupMSSQLTestData(t *testing.T, db *sql.DB) {
 			JOIN sys.schemas s ON t.schema_id = s.schema_id
 			WHERE s.name = @p1 AND t.name = @p2`, schema, name).Scan(&exists)
 		if err != nil {
-			t.Logf("cleanup: check table %s: %v", table, err)
-			continue
+			t.Fatalf("cleanup: check table %s: %v", table, err)
 		}
 		if exists > 0 {
 			if _, err := db.Exec(fmt.Sprintf("DELETE FROM [%s].[%s]", schema, name)); err != nil {
-				t.Logf("cleanup: delete from %s: %v", table, err)
+				t.Fatalf("cleanup: delete from %s: %v\n\n"+
+					"This used to be a t.Logf. See IMPROVEMENT-PLAN 2.60d.", table, err)
 			}
+			present = append(present, table)
 		}
 	}
+
+	// SQL Server is the dialect this check exists for. Its security policy
+	// applies to every principal including sysadmin, so a filtered DELETE
+	// removes nothing and reports success -- §3.37, and the 141-failure
+	// signature in §2.71's residual.
+	assertTablesEmpty(t, db, present, func(s string) string {
+		schema, name := "dbo", s
+		if i := strings.IndexByte(s, '.'); i >= 0 {
+			schema, name = s[:i], s[i+1:]
+		}
+		return fmt.Sprintf("[%s].[%s]", schema, name)
+	})
 }
 
 // MSSQLTestDB opens a connection to the MSSQL test database.

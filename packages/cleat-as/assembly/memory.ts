@@ -30,6 +30,23 @@ export const OUTPUT_OFFSET: usize = 10551296;
  */
 export const SUSPEND_SENTINEL: i64 = 0x4000000000000000;
 
+/**
+ * Bit 31 of a host-call result: the host is refusing this call because the
+ * workflow is in a defer segment and the call would start new work.
+ *
+ * Distinct from `SUSPEND_SENTINEL`, which is bit 62 and is what the guest
+ * returns to the host from an export. This one travels the other way — host to
+ * guest, inside an ordinary result word — and bit 31 was chosen because it is
+ * the one bit free in all six result layouts a call that can start fresh work
+ * returns. See IMPROVEMENT-PLAN 3.84 and ABI.md.
+ *
+ * The engine's copy is `callSuspendSentinel` in `engine/memory.go`. The two
+ * must agree, and nothing in either language can see the other, so
+ * `TestTheAssemblyScriptSDKAgreesOnTheStopBit` in `engine/` reads this file and
+ * pins the value.
+ */
+export const SUSPEND_STOP_BIT: i64 = 0x80000000;
+
 // ──────────────────────────────────────────────
 // Internal status constants
 // ──────────────────────────────────────────────
@@ -418,6 +435,108 @@ export function resetWorkflowSuspended(): void {
 /** Set the suspension flag — called by HostCalls methods. */
 export function setWorkflowSuspended(): void {
   _workflowSuspended = true;
+}
+
+/**
+ * Report whether the host refused this call because the workflow is running as
+ * a defer segment, setting the suspension flag if so.
+ *
+ * **Call this before decoding any field of the result.** Order is the contract,
+ * not a style preference: in the await-signals layout bit 31 lands inside the
+ * timed-out field, which `decodeAwaitSignalsResult` reads as
+ * `(r >> 16) & 0xFFFF`, so a caller that decoded first would turn a stop into
+ * an ordinary timeout and the workflow would carry on — doing the new work the
+ * defer segment exists to prevent, with nothing to see.
+ *
+ * **This SDK cannot unwind, and that makes the guarantee weaker here than in
+ * the others.** Go panics, Java throws, Rust returns `Err(CallError::Suspended)`
+ * — each of those takes the workflow body out of its own control flow. This
+ * runtime has no exceptions (`--runtime stub`), so all a stop can do is set the
+ * flag and hand the caller an error result. A workflow body that ignores both
+ * keeps running.
+ *
+ * What makes that acceptable rather than a hole is where the enforcement lives:
+ * the host refuses *every* call for the rest of the segment, not just the first
+ * one, so a guest that runs on cannot reach anything durable. It can burn
+ * instructions and return a value the host discards, because the segment's
+ * terminal outcome was decided before it started. The flag is how the guest
+ * finds out; the host is what makes it true.
+ *
+ * @param result the raw result word from a host call
+ * @returns `true` if the host refused the call
+ */
+export function stopRequested(result: i64): bool {
+  if ((result & SUSPEND_STOP_BIT) !== 0) {
+    setWorkflowSuspended();
+    return true;
+  }
+  return false;
+}
+
+// ──────────────────────────────────────────────
+// Defer phase
+// ──────────────────────────────────────────────
+
+/**
+ * True while the guest is draining its defer table.
+ *
+ * IMPROVEMENT-PLAN §3.35 phase 4. Two things a defer body must not do, both
+ * measured on this SDK 2026-09-02 before they were blocked:
+ *
+ *   * **Register another defer.** The table is drained BEFORE the first body
+ *     runs -- it has to be, or a body that registers would extend the slice
+ *     being walked -- so the new registration lands in a table nobody walks
+ *     again. The host had already minted an ID and written a durable `defer`
+ *     event for it, so a *completed* workflow's history carried a pending
+ *     defer that nothing anywhere could ever run. That is §3.70's defect
+ *     exactly, arrived at by a different road.
+ *   * **Call continueAsNew.** Worse: the host recorded a `continue_as_new`
+ *     event at step 3 AND the wrapper went on to report the workflow's
+ *     already-decided result. One history with two contradictory terminal
+ *     facts; the worker stores `done`, and the continuation silently never
+ *     happens.
+ *
+ * The flag lives here, not in defer.ts, so that `host-calls.ts` can read it
+ * without importing `defer.ts` -- which imports `host-calls.ts`, and a cycle
+ * between two modules with top-level initialisers is a start-function ordering
+ * hazard under `--runtime stub`. `memory.ts` has no imports at all.
+ */
+let _inDeferPhase: bool = false;
+
+/** Returns `true` while defer bodies are running. */
+export function isInDeferPhase(): bool {
+  return _inDeferPhase;
+}
+
+/**
+ * `cleat_defer_phase` reports the start and end of the defer drain to the HOST.
+ *
+ * Declared here rather than in `host-calls.ts` to keep the property the comment
+ * above depends on: `memory.ts` imports no module, so it cannot take part in a
+ * cycle. An `@external` declaration is a WASM import, not a module import, so
+ * it costs that property nothing.
+ */
+@external("env", "cleat_defer_phase")
+declare function import_cleat_defer_phase(on: i32): i64;
+
+/**
+ * Marks the start and end of the defer drain. Called by `runDeferred`.
+ *
+ * Tells the host as well as setting the local flag, and that is why the host
+ * call lives HERE rather than at the call sites: `runDeferred` has three exits
+ * -- normal, suspended, and the loop's end -- and three copies of a paired
+ * update is three chances for one of them to be missed. One assignment, one
+ * notification, no way for them to disagree.
+ *
+ * Without it a defer body's durable calls are indistinguishable from the
+ * workflow body's in the recorded history, which is what made a workflow that
+ * exhausted its retries and then cleaned up come out `failed` rather than
+ * `dead_lettered` -- deleted by retention instead of kept for an operator.
+ * cleat#1155.
+ */
+export function setInDeferPhase(v: bool): void {
+  _inDeferPhase = v;
+  import_cleat_defer_phase(v ? 1 : 0);
 }
 
 // ──────────────────────────────────────────────

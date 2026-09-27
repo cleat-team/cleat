@@ -21,7 +21,23 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
+
+// fakeFinalizeObserver records every ObserveFinalize call it receives, so a
+// test can assert not just that notifyTerminal fired but what status it
+// actually passed. cleat#1976.
+type fakeFinalizeObserver struct {
+	name  string
+	calls []struct{ runID, status string }
+}
+
+func (f *fakeFinalizeObserver) Info() plugin.PluginInfo                         { return plugin.PluginInfo{Name: f.name} }
+func (f *fakeFinalizeObserver) Init(context.Context, *plugin.Environment) error { return nil }
+func (f *fakeFinalizeObserver) ObserveFinalize(_ context.Context, runID, finalStatus string) error {
+	f.calls = append(f.calls, struct{ runID, status string }{runID, finalStatus})
+	return nil
+}
 
 // failedTotalFor scrapes the worker's own /metrics endpoint and returns the
 // cleat_workflows_failed_total sample lines mentioning defName. Reading the
@@ -119,18 +135,84 @@ func TestRecordTerminalFailure_UsesTheWorkflowsFence(t *testing.T) {
 	}
 }
 
-// TestRecordTerminalFailure_RetriesExhaustedDeadLetters pins the routing that
-// used to live inline at each call site, so folding it into the helper did not
-// quietly change which workflows are dead-lettered.
-func TestRecordTerminalFailure_RetriesExhaustedDeadLetters(t *testing.T) {
+// TestDeadLetteringDoesNotDependOnTheGuestsWording is cleat#902 as amended by
+// cleat#979.
+//
+// #902 replaced a substring match on the terminal error with
+// EventRecord.RetriesExhausted -- a fact the engine records -- plus a text
+// comparison tying that event to the terminal error. #979 found the residue:
+// the comparison required the GUEST to relay the engine's text, so
+//
+//	fmt.Errorf("the call never succeeded: %w", err)   -> dead_lettered
+//	fmt.Errorf("could not reach the billing provider") -> failed
+//
+// for two workflows differing by one line. The tie is now POSITION -- was the
+// exhausted call the last durable thing that happened -- which no wording can
+// change. Cases 2 and 3 are the pair from #979 and must now agree.
+func TestDeadLetteringDoesNotDependOnTheGuestsWording(t *testing.T) {
+	const engineText = "retries exhausted: connection refused"
+
+	exhausted := engine.EventRecord{
+		EventType: engine.EventTypeCall, Service: "svc", Op: "op",
+		Err: engineText, RetriesExhausted: true,
+	}
+	ordinaryCall := engine.EventRecord{
+		EventType: engine.EventTypeCall, Service: "svc", Op: "op2",
+		Response: `{"ok":true}`,
+	}
+
 	for _, tc := range []struct {
-		name       string
-		errMsg     string
-		wantDLQ    bool
-		wantFailed bool
+		name    string
+		history []engine.EventRecord
+		errMsg  string
+		wantDLQ bool
+		why     string
 	}{
-		{"retries exhausted", "step failed: retries exhausted after 5 attempts", true, false},
-		{"ordinary failure", "step failed: connection refused", false, true},
+		{
+			name: "the exhaustion ended the run", history: []engine.EventRecord{exhausted},
+			errMsg: engineText, wantDLQ: true,
+			why: "a real exhaustion still reaches the DLQ",
+		},
+		{
+			name: "the guest relayed the engine's text", history: []engine.EventRecord{exhausted},
+			errMsg: "the call never succeeded: " + engineText, wantDLQ: true,
+			why: "cleat#979 fixture A -- wrapped with %w",
+		},
+		{
+			name: "the guest reported in its own terms", history: []engine.EventRecord{exhausted},
+			errMsg: "could not reach the billing provider", wantDLQ: true,
+			why: "cleat#979 fixture B -- THE DEFECT: differs from A by one line and must not differ here",
+		},
+		{
+			name:    "recovered, then did more work, then failed",
+			history: []engine.EventRecord{exhausted, ordinaryCall},
+			errMsg:  "invalid customer id", wantDLQ: false,
+			why: "REGRESSION GUARD: a later event means the exhaustion is not what ended the run",
+		},
+		{
+			name:    "recovered, did more work, and the text still mentions the old error",
+			history: []engine.EventRecord{exhausted, ordinaryCall},
+			errMsg:  "later step failed after " + engineText, wantDLQ: false,
+			why: "position decides, so relayed text cannot drag a recovered run into the DLQ either",
+		},
+		{
+			name: "no exhaustion, but the phrase is in the message", history: nil,
+			errMsg: "step failed: retries exhausted after 5 attempts", wantDLQ: false,
+			why: "the pre-#902 false positive stays fixed",
+		},
+		{
+			name: "a failed call that was NOT an exhaustion",
+			history: []engine.EventRecord{{
+				EventType: engine.EventTypeCall, Service: "svc", Op: "op",
+				Err: engineText, RetriesExhausted: false,
+			}},
+			errMsg: engineText, wantDLQ: false,
+			why: "the typed bit decides; engine/callintent.go records exactly this shape",
+		},
+		{
+			name: "no history at all", history: nil, errMsg: engineText, wantDLQ: false,
+			why: "pre-execution paths (WASM load, version check) cannot be exhaustions",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var sawDLQ, sawFail bool
@@ -145,11 +227,156 @@ func TestRecordTerminalFailure_RetriesExhaustedDeadLetters(t *testing.T) {
 			}
 			w := newTestWorker(ms)
 
-			w.recordTerminalFailure(testInstance("dlq-routing-wf"), time.Now(), tc.errMsg, "", "")
+			w.recordTerminalFailureWithHistory(testInstance("dlq-routing-wf"), time.Now(), tc.errMsg, "", "", tc.history)
 
-			if sawDLQ != tc.wantDLQ || sawFail != tc.wantFailed {
-				t.Errorf("routing for %q: dead-letter=%v fail=%v, want dead-letter=%v fail=%v",
-					tc.errMsg, sawDLQ, sawFail, tc.wantDLQ, tc.wantFailed)
+			if sawDLQ != tc.wantDLQ || sawFail == tc.wantDLQ {
+				t.Errorf("routing for %q: dead-letter=%v fail=%v, want dead-letter=%v fail=%v\n  %s",
+					tc.errMsg, sawDLQ, sawFail, tc.wantDLQ, !tc.wantDLQ, tc.why)
+			}
+		})
+	}
+}
+
+// TestTheSameHistoryRoutesTheSameWayWhateverTheGuestSaid is cleat#979 stated as
+// the property rather than as two cases: for ONE history, no terminal message
+// changes the outcome. A table can be satisfied by luck in the cases it lists;
+// this fails for any wording that moves the decision.
+func TestTheSameHistoryRoutesTheSameWayWhateverTheGuestSaid(t *testing.T) {
+	history := []engine.EventRecord{{
+		EventType: engine.EventTypeCall, Service: "svc", Op: "op",
+		Err: "retries exhausted: connection refused", RetriesExhausted: true,
+	}}
+
+	messages := []string{
+		"retries exhausted: connection refused",
+		"the call never succeeded: retries exhausted: connection refused",
+		"could not reach the billing provider",
+		"",
+		"unrelated words entirely",
+	}
+
+	var first bool
+	for i, msg := range messages {
+		var sawDLQ bool
+		ms := &mockStore{}
+		ms.moveToDeadLetterQueueFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string) error {
+			sawDLQ = true
+			return nil
+		}
+		ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
+			return nil
+		}
+		w := newTestWorker(ms)
+		w.recordTerminalFailureWithHistory(testInstance("wording-wf"), time.Now(), msg, "", "", history)
+
+		if i == 0 {
+			first = sawDLQ
+			continue
+		}
+		if sawDLQ != first {
+			t.Errorf("wording changed the routing: %q gave dead-letter=%v, but %q gave %v.\n"+
+				"Whether work is retained must not depend on how the author phrased the error.",
+				messages[0], first, msg, sawDLQ)
+		}
+	}
+	if !first {
+		t.Error("the exhaustion history did not dead-letter at all, so this test compares two nothings")
+	}
+}
+
+// TestTheLimitOfWhatPositionCanTell asserts the case position CANNOT decide, so
+// the choice is recorded rather than rediscovered.
+//
+// A workflow that catches an exhaustion, does no further durable work, and then
+// fails on pure computation for an unrelated reason leaves exactly the history
+// of one that died of the exhaustion. There is no third signal -- the only
+// thing that ever separated them was the guest's wording, which is what #979
+// established cannot be trusted.
+//
+// So it is decided, toward RETENTION: a workflow wrongly held for redrive costs
+// an operator one dismissal, one wrongly dropped costs the work. If a signal
+// for guest-side recovery ever exists, this is the test to change, and it says
+// why it read this way.
+func TestTheLimitOfWhatPositionCanTell(t *testing.T) {
+	history := []engine.EventRecord{{
+		EventType: engine.EventTypeCall, Service: "svc", Op: "op",
+		Err: "retries exhausted: connection refused", RetriesExhausted: true,
+	}}
+
+	var sawDLQ bool
+	ms := &mockStore{}
+	ms.moveToDeadLetterQueueFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string) error {
+		sawDLQ = true
+		return nil
+	}
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
+		return nil
+	}
+	w := newTestWorker(ms)
+
+	// The guest caught the exhaustion and failed on its own logic instead.
+	w.recordTerminalFailureWithHistory(testInstance("caught-then-failed"), time.Now(),
+		"validation failed: customer id must be numeric", "", "", history)
+
+	if !sawDLQ {
+		t.Error("this case is dead-lettered ON PURPOSE. It is indistinguishable from a run " +
+			"that died of the exhaustion, and the tie is broken toward retention. If that " +
+			"is being changed deliberately, change this test and say what new signal exists.")
+	}
+}
+
+// TestAPanicIsNeverDeadLettered is cleat#902's unambiguous half.
+//
+// releaseOrFail has exactly one caller -- executeWorkflow's panic recovery,
+// `w.releaseOrFail(wf, fmt.Sprintf("panic: %v", r))` -- so every message that
+// reaches it is a recovered panic value. Until eligibleForDLQ existed, whether
+// one was dead-lettered was decided by whether that VALUE happened to contain
+// the words "retries exhausted".
+//
+// Both cases here are the same panic as far as the system is concerned. The
+// first is the one that used to be routed to the dead-letter queue, and the
+// only thing that put it there was a substring in text the guest chose.
+func TestAPanicIsNeverDeadLettered(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		panicV string
+	}{
+		{"panic whose text happens to say retries exhausted",
+			"panic: sending on closed channel: retries exhausted after 5 attempts"},
+		{"ordinary panic", "panic: runtime error: index out of range [3] with length 2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var sawDLQ, sawFail bool
+			var gotCode, gotOp string
+			ms := &mockStore{}
+			ms.moveToDeadLetterQueueFn = func(_ context.Context, _, _ string, _ int64, _, _, _ string) error {
+				sawDLQ = true
+				return nil
+			}
+			ms.failWorkflowFn = func(_ context.Context, _, _ string, _ int64, _, errorCode, errorOp string, _ map[string]string) error {
+				sawFail, gotCode, gotOp = true, errorCode, errorOp
+				return nil
+			}
+			w := newTestWorker(ms)
+
+			w.releaseOrFail(testInstance("panic-routing-wf"), tc.panicV)
+
+			if sawDLQ {
+				t.Errorf("a recovered panic was dead-lettered. The dead-letter queue is for "+
+					"work that exhausted its retries and can be reprocessed; a panic is a "+
+					"crash, and it landed there only because its text contained a phrase: %q",
+					tc.panicV)
+			}
+			if !sawFail {
+				t.Fatal("the panic was neither dead-lettered nor failed, so nothing recorded it")
+			}
+			// The old call passed "", "" -- so every panicked workflow was
+			// stored with a blank classification, indistinguishable in the
+			// error_code column from a failure nobody had classified.
+			if gotCode != engine.ErrUnknown.String() || gotOp != "panic" {
+				t.Errorf("a panicked workflow was recorded with error_code=%q error_op=%q, "+
+					"want %q/%q -- a blank code cannot be told from an unclassified failure",
+					gotCode, gotOp, engine.ErrUnknown.String(), "panic")
 			}
 		})
 	}
@@ -170,5 +397,131 @@ func TestReleaseWorkflow_FenceLostIsNotAnError(t *testing.T) {
 
 	if samples := failedTotalFor(t, w, defName); len(samples) > 0 {
 		t.Errorf("a lost fence on release was counted as a workflow failure:\n  %s", strings.Join(samples, "\n  "))
+	}
+}
+
+// TestRecordTerminalFailureWithHistory_NotifiesTerminal is cleat#1976's own
+// named regression: before it, this path failed stranded updates but never
+// woke the parent and never called a finalize observer, which is why a
+// jobqueue-dispatched job whose workflow failed was only ever recovered by
+// the abandonment sweep -- and marked 'abandoned', not 'failed'. See
+// plugins/jobqueue's TestAJobWhoseWorkflowFailed for the same acceptance
+// criterion from jobqueue's own side.
+func TestRecordTerminalFailureWithHistory_NotifiesTerminal(t *testing.T) {
+	ms := &mockStore{}
+	ms.failWorkflowFn = func(context.Context, string, string, int64, string, string, string, map[string]string) error {
+		return nil
+	}
+	w := newTestWorker(ms)
+	w.parentWakeCh = make(chan struct{}, 1)
+	obs := &fakeFinalizeObserver{name: "fake"}
+	w.finalizeObservers = []plugin.HasFinalizeObserver{obs}
+
+	wf := testInstance("notify-on-fail-wf")
+	w.recordTerminalFailureWithHistory(wf, time.Now(), "boom", engine.ErrUnknown.String(), "", nil)
+
+	select {
+	case <-w.parentWakeCh:
+	default:
+		t.Error("an ordinary terminal failure did not wake the parent-wake loop")
+	}
+	if len(obs.calls) != 1 {
+		t.Fatalf("finalize observer called %d times, want 1", len(obs.calls))
+	}
+	if got := obs.calls[0]; got.runID != wf.ID || got.status != "failed" {
+		t.Errorf("finalize observer got (runID=%q, status=%q), want (%q, %q)",
+			got.runID, got.status, wf.ID, "failed")
+	}
+}
+
+// TestRecordTerminalFailureWithHistory_DeadLetteredNotifiesDistinctly checks
+// that a dead-lettered run is not reported to observers as an ordinary
+// "failed" -- an operator (or jobqueue's task_queue row) asking "did this
+// fail or is it sitting in the dead-letter queue for redrive?" needs the
+// distinction, and folding both into "failed" is exactly the ambiguity
+// task_queue's own third status exists to remove. cleat#1976.
+func TestRecordTerminalFailureWithHistory_DeadLetteredNotifiesDistinctly(t *testing.T) {
+	ms := &mockStore{}
+	ms.moveToDeadLetterQueueFn = func(context.Context, string, string, int64, string, string, string) error {
+		return nil
+	}
+	w := newTestWorker(ms)
+	w.parentWakeCh = make(chan struct{}, 1)
+	obs := &fakeFinalizeObserver{name: "fake"}
+	w.finalizeObservers = []plugin.HasFinalizeObserver{obs}
+
+	history := []engine.EventRecord{{
+		EventType: engine.EventTypeCall, Service: "svc", Op: "op",
+		Err: "retries exhausted", RetriesExhausted: true,
+	}}
+	wf := testInstance("notify-dlq-wf")
+	w.recordTerminalFailureWithHistory(wf, time.Now(), "retries exhausted", "", "", history)
+
+	if len(obs.calls) != 1 {
+		t.Fatalf("finalize observer called %d times, want 1", len(obs.calls))
+	}
+	if got := obs.calls[0].status; got != "dead_lettered" {
+		t.Errorf("finalize observer got status=%q for a dead-lettered run, want %q -- "+
+			"folding it into a plain \"failed\" loses the distinction task_queue's own "+
+			"third status exists to carry", got, "dead_lettered")
+	}
+}
+
+// TestReleaseOrFail_NotifiesTerminal is cleat#1976's regression for the panic
+// path, which before this fix was the only one of the four terminal paths
+// that woke no parent, notified no finalize observer, and recorded no
+// workflows_failed_total at all -- see TestAPanicIsNeverDeadLettered above
+// for the routing half; this is the notification half.
+func TestReleaseOrFail_NotifiesTerminal(t *testing.T) {
+	ms := &mockStore{}
+	ms.failWorkflowFn = func(context.Context, string, string, int64, string, string, string, map[string]string) error {
+		return nil
+	}
+	w := newTestWorker(ms)
+	w.parentWakeCh = make(chan struct{}, 1)
+	obs := &fakeFinalizeObserver{name: "fake"}
+	w.finalizeObservers = []plugin.HasFinalizeObserver{obs}
+
+	const defName = "panic-notify-wf"
+	wf := testInstance(defName)
+	w.releaseOrFail(wf, "panic: index out of range")
+
+	select {
+	case <-w.parentWakeCh:
+	default:
+		t.Error("a panic-terminated workflow did not wake the parent-wake loop")
+	}
+	if len(obs.calls) != 1 {
+		t.Fatalf("finalize observer called %d times, want 1", len(obs.calls))
+	}
+	if got := obs.calls[0]; got.runID != wf.ID || got.status != "failed" {
+		t.Errorf("finalize observer got (runID=%q, status=%q), want (%q, %q)",
+			got.runID, got.status, wf.ID, "failed")
+	}
+	if samples := failedTotalFor(t, w, defName); len(samples) == 0 {
+		t.Error("a panic-terminated workflow was not counted in cleat_workflows_failed_total")
+	}
+}
+
+// TestReleaseOrFail_ReleaseDoesNotNotify is the positive control for the
+// tests above: releaseOrFail's early-return branch (errMsg == "") is a
+// re-queue, not a terminal outcome, and must not fire any of the three
+// post-settle side effects.
+func TestReleaseOrFail_ReleaseDoesNotNotify(t *testing.T) {
+	ms := &mockStore{}
+	w := newTestWorker(ms)
+	w.parentWakeCh = make(chan struct{}, 1)
+	obs := &fakeFinalizeObserver{name: "fake"}
+	w.finalizeObservers = []plugin.HasFinalizeObserver{obs}
+
+	w.releaseOrFail(testInstance("released-not-failed-wf"), "")
+
+	select {
+	case <-w.parentWakeCh:
+		t.Error("a released (non-terminal) workflow woke the parent-wake loop")
+	default:
+	}
+	if len(obs.calls) != 0 {
+		t.Errorf("a released (non-terminal) workflow notified %d finalize observer(s), want 0", len(obs.calls))
 	}
 }

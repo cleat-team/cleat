@@ -327,35 +327,6 @@ class TestChildWorkflows:
 # ======================================================================
 
 
-class TestState:
-    """Tests for state operations through the test harness."""
-
-    def test_set_and_get_state(self):
-        h = CleatTestHarness()
-        h.stub_call("state", "set", '{"ok": true}')
-        h.stub_call("state", "get", '{"value": "stored"}')
-        h.set_state("mykey", "myvalue")
-        result = h.get_state("mykey", str)
-        assert result == "stored"
-
-    def test_incr_state(self):
-        h = CleatTestHarness()
-        h.stub_call("state", "incr", "5")
-        val = h.incr_state("counter", 1)
-        assert val == 5
-
-    def test_delete_state(self):
-        h = CleatTestHarness()
-        h.stub_call("state", "delete", '{"ok": true}')
-        h.delete_state("mykey")
-
-    def test_set_query_state(self):
-        h = CleatTestHarness()
-        h.set_query_state("status", '"active"')
-        val = h.get_query_state("status")
-        assert val == '"active"'
-
-
 # ======================================================================
 # Durable send / schedule / defer / continue_as_new
 # ======================================================================

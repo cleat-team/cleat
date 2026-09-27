@@ -134,7 +134,7 @@ func TestMySQLStore_ResolvePromise(t *testing.T) {
 		{match: "UPDATE workflow_promises SET status = ?, result = ?", affected: 1},
 		{match: "UPDATE workflow_instances SET next_wake_at", affected: 1},
 	})
-	err := store.ResolvePromise(testCtx, "wf-1", "promise-uuid", `{"ok":true}`)
+	err := store.ResolvePromise(testCtx, "promise-uuid", `{"ok":true}`)
 	if err != nil {
 		t.Fatalf("ResolvePromise: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestMySQLStore_RejectPromise(t *testing.T) {
 		{match: "UPDATE workflow_promises SET status = ?, error_msg = ?", affected: 1},
 		{match: "UPDATE workflow_instances SET next_wake_at", affected: 1},
 	})
-	err := store.RejectPromise(testCtx, "wf-1", "promise-uuid", "something went wrong")
+	err := store.RejectPromise(testCtx, "promise-uuid", "something went wrong")
 	if err != nil {
 		t.Fatalf("RejectPromise: %v", err)
 	}
@@ -272,9 +272,13 @@ func TestMySQLStore_GetPendingUpdateRequests_WithRows(t *testing.T) {
 	createdAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	store := newMySQLStoreForTest(t, []mockRowsResult{
 		{
-			match: "SELECT workflow_id, update_name",
+			// The match is a PREFIX of the real query and the column list
+			// changed under it (cleat#1416 inserted request_id), so this
+			// stopped matching and the mock returned nothing -- surfacing as
+			// "unexpected: []" rather than as a stale fixture.
+			match: "SELECT workflow_id, COALESCE(request_id",
 			data: [][]driver.Value{
-				{"wf-1", "update-a", `{}`, "prom-1", "pending", "", "", createdAt},
+				{"wf-1", "ureq-1", "update-a", `{}`, "prom-1", "pending", "", "", createdAt},
 			},
 		},
 	}, nil)
@@ -282,7 +286,7 @@ func TestMySQLStore_GetPendingUpdateRequests_WithRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetPendingUpdateRequests: %v", err)
 	}
-	if len(reqs) != 1 || reqs[0].UpdateName != "update-a" {
+	if len(reqs) != 1 || reqs[0].UpdateName != "update-a" || reqs[0].RequestID != "ureq-1" {
 		t.Errorf("unexpected: %+v", reqs)
 	}
 }
@@ -301,10 +305,12 @@ func TestMySQLStore_CompleteUpdateRequest(t *testing.T) {
 // Concurrency Keys
 // ---------------------------------------------------------------------------
 
+// The acquire mocks below no longer configure a `SELECT workflow_id` result.
+// AcquireConcurrencyKey used to insert, then read back the owner and compare it
+// to workflowID; it now reports whether *this call* inserted the row, which is
+// what INSERT IGNORE's rows-affected already says. See IMPROVEMENT-PLAN 3.39.
 func TestMySQLStore_AcquireConcurrencyKey_Success(t *testing.T) {
-	store := newMySQLStoreForTest(t, []mockRowsResult{
-		queryRowOk("SELECT workflow_id FROM concurrency_keys WHERE key_hash", "wf-1"),
-	}, []mockExecResult{
+	store := newMySQLStoreForTest(t, nil, []mockExecResult{
 		{match: "DELETE FROM concurrency_keys WHERE key_hash", affected: 0},
 		{match: "INSERT IGNORE INTO concurrency_keys", affected: 1},
 	})
@@ -317,12 +323,18 @@ func TestMySQLStore_AcquireConcurrencyKey_Success(t *testing.T) {
 	}
 }
 
+// TestMySQLStore_AcquireConcurrencyKey_AlreadyHeld covers a key held by anyone,
+// including this same workflow -- the two are the same case now.
+//
+// The mock previously said the INSERT affected 1 row and relied on the
+// follow-up SELECT finding nothing, which is a database state that cannot
+// occur: a row was inserted and is then absent. It passed for a reason that
+// did not correspond to anything real. A held key means INSERT IGNORE is a
+// no-op, so rows-affected is 0.
 func TestMySQLStore_AcquireConcurrencyKey_AlreadyHeld(t *testing.T) {
-	// Default mock behavior returns empty rows, which means insert succeeded
-	// but verify returns ErrNoRows -> not acquired.
 	store := newMySQLStoreForTest(t, nil, []mockExecResult{
 		{match: "DELETE FROM concurrency_keys WHERE key_hash", affected: 0},
-		{match: "INSERT IGNORE INTO concurrency_keys", affected: 1},
+		{match: "INSERT IGNORE INTO concurrency_keys", affected: 0},
 	})
 	acquired, err := store.AcquireConcurrencyKey(testCtx, "my-key", "wf-2", 30*time.Second)
 	if err != nil {
@@ -354,16 +366,24 @@ func TestMySQLStore_AcquireConcurrencyKey_InsertError(t *testing.T) {
 	}
 }
 
-func TestMySQLStore_AcquireConcurrencyKey_VerifyError(t *testing.T) {
-	store := newMySQLStoreForTest(t, []mockRowsResult{
-		{match: "SELECT workflow_id FROM concurrency_keys WHERE key_hash", err: sql.ErrConnDone},
-	}, []mockExecResult{
+// TestMySQLStore_AcquireConcurrencyKey_RowsAffectedError replaces the former
+// _VerifyError test. The read-back SELECT it covered no longer exists, but the
+// error path did not disappear with it -- it moved. RowsAffected can fail
+// independently of Exec, and a caller that decides "did I take the lock" from
+// its value must not silently report false when it could not find out.
+func TestMySQLStore_AcquireConcurrencyKey_RowsAffectedError(t *testing.T) {
+	store := newMySQLStoreForTest(t, nil, []mockExecResult{
 		{match: "DELETE FROM concurrency_keys WHERE key_hash", affected: 0},
-		{match: "INSERT IGNORE INTO concurrency_keys", affected: 1},
+		{match: "INSERT IGNORE INTO concurrency_keys", affectedErr: sql.ErrConnDone},
 	})
-	_, err := store.AcquireConcurrencyKey(testCtx, "my-key", "wf-1", 30*time.Second)
+	acquired, err := store.AcquireConcurrencyKey(testCtx, "my-key", "wf-1", 30*time.Second)
 	if err == nil {
-		t.Fatal("expected error from verify failure")
+		t.Fatal("expected error when rows-affected is unreadable; reporting " +
+			"acquired=false for an unknown outcome would let a second workflow " +
+			"take a key this one may already hold")
+	}
+	if acquired {
+		t.Error("acquired=true alongside an error")
 	}
 }
 
@@ -371,7 +391,7 @@ func TestMySQLStore_ReleaseConcurrencyKey(t *testing.T) {
 	store := newMySQLStoreForTest(t, nil, []mockExecResult{
 		{match: "DELETE FROM concurrency_keys WHERE key_hash", affected: 1},
 	})
-	err := store.ReleaseConcurrencyKey(testCtx, "my-key")
+	_, err := store.ReleaseConcurrencyKey(testCtx, "my-key", "wf-1")
 	if err != nil {
 		t.Fatalf("ReleaseConcurrencyKey: %v", err)
 	}
@@ -379,7 +399,7 @@ func TestMySQLStore_ReleaseConcurrencyKey(t *testing.T) {
 
 func TestMySQLStore_ReapExpiredConcurrencyKeys(t *testing.T) {
 	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "DELETE FROM concurrency_keys WHERE expires_at", affected: 5},
+		{match: "DELETE FROM concurrency_keys ck", affected: 5},
 	})
 	n, err := store.ReapExpiredConcurrencyKeys(testCtx)
 	if err != nil {
@@ -404,7 +424,6 @@ func TestMySQLStore_CreateSchedule(t *testing.T) {
 		EntryPoint:     "main",
 		CronExpression: "0 2 * * *",
 		Input:          json.RawMessage(`{}`),
-		Enabled:        true,
 		NextRunAt:      time.Date(2025, 1, 1, 2, 0, 0, 0, time.UTC),
 	}
 	err := store.CreateSchedule(testCtx, sch)
@@ -427,12 +446,14 @@ func TestMySQLStore_ListSchedules_Empty(t *testing.T) {
 func TestMySQLStore_ListSchedules_WithRows(t *testing.T) {
 	nextRunAt := time.Date(2025, 1, 1, 2, 0, 0, 0, time.UTC)
 	lastRunAt := time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC)
+	// nil is LIVE; see db_methods_test.go's note on the polarity inversion.
+	disabledAt := time.Date(2024, 12, 25, 0, 0, 0, 0, time.UTC)
 	store := newMySQLStoreForTest(t, []mockRowsResult{
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, lastRunAt, "UTC", "00000000-0000-0000-0000-000000000000", "catch_up", 60, "allow", "run-1"},
-				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), false, nextRunAt, nil, "America/New_York", "33333333-3333-3333-3333-333333333333", "skip", 7, "skip", ""},
+				{"sched-1", "wf-a", "main", "0 2 * * *", []byte(`{}`), nil, nextRunAt, lastRunAt, "UTC", "00000000-0000-0000-0000-000000000000", "catch_up", 60, "allow", "run-1"},
+				{"sched-2", "wf-b", "handler", "*/5 * * * *", []byte(`{"x":1}`), disabledAt, nextRunAt, nil, "America/New_York", "33333333-3333-3333-3333-333333333333", "skip", 7, "skip", ""},
 			},
 		},
 	}, nil)
@@ -443,7 +464,7 @@ func TestMySQLStore_ListSchedules_WithRows(t *testing.T) {
 	if len(scheds) != 2 {
 		t.Fatalf("expected 2, got %d", len(scheds))
 	}
-	if scheds[0].Name != "sched-1" || !scheds[0].Enabled {
+	if scheds[0].Name != "sched-1" || scheds[0].Disabled() {
 		t.Errorf("unexpected first: %+v", scheds[0])
 	}
 	if scheds[1].LastRunAt != nil {
@@ -460,9 +481,15 @@ func TestMySQLStore_ListSchedules_WithRows(t *testing.T) {
 }
 
 func TestMySQLStore_DeleteSchedule(t *testing.T) {
-	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "DELETE FROM workflow_schedules", affected: 1},
-	})
+	// The count row is required since cleat#1297: the method checks the
+	// schedule exists before deleting, because RowsAffected cannot answer
+	// "was it there" on MySQL. Absent-schedule behaviour is covered in
+	// schedule_mutations_report_not_found_test.go.
+	store := newMySQLStoreForTest(t,
+		[]mockRowsResult{queryRowOk("SELECT count(*) FROM workflow_schedules", int64(1))},
+		[]mockExecResult{
+			{match: "DELETE FROM workflow_schedules", affected: 1},
+		})
 	err := store.DeleteSchedule(testCtx, "daily")
 	if err != nil {
 		t.Fatalf("DeleteSchedule: %v", err)
@@ -470,9 +497,13 @@ func TestMySQLStore_DeleteSchedule(t *testing.T) {
 }
 
 func TestMySQLStore_SetScheduleEnabled(t *testing.T) {
-	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_schedules SET enabled", affected: 1},
-	})
+	// See TestMySQLStore_DeleteSchedule: the existence check is new in
+	// cleat#1297 and needs a count row.
+	store := newMySQLStoreForTest(t,
+		[]mockRowsResult{queryRowOk("SELECT count(*) FROM workflow_schedules", int64(1))},
+		[]mockExecResult{
+			{match: "UPDATE workflow_schedules SET enabled", affected: 1},
+		})
 	err := store.SetScheduleEnabled(testCtx, "daily", false)
 	if err != nil {
 		t.Fatalf("SetScheduleEnabled: %v", err)
@@ -496,7 +527,7 @@ func TestMySQLStore_GetDueSchedules_WithRows(t *testing.T) {
 		{
 			match: "SELECT name, def_name, entry_point",
 			data: [][]driver.Value{
-				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), true, nextRunAt, nil, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333", "skip", 11, "skip", "run-due"},
+				{"due-sched", "wf-a", "main", "0 2 * * *", []byte(`{}`), nil, nextRunAt, nil, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333", "skip", 11, "skip", "run-due"},
 			},
 		},
 	}, nil)
@@ -535,16 +566,6 @@ func TestMySQLStore_GetDueSchedules_Error(t *testing.T) {
 	_, err := store.GetDueSchedules(testCtx)
 	if err == nil {
 		t.Fatal("expected error")
-	}
-}
-
-func TestMySQLStore_UpdateScheduleNextRun(t *testing.T) {
-	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_schedules SET next_run_at", affected: 1},
-	})
-	err := store.UpdateScheduleNextRun(testCtx, "daily", time.Date(2025, 1, 2, 2, 0, 0, 0, time.UTC))
-	if err != nil {
-		t.Fatalf("UpdateScheduleNextRun: %v", err)
 	}
 }
 
@@ -724,12 +745,29 @@ func TestMySQLStore_CompactHistory_BeginError(t *testing.T) {
 // ListWorkflows
 // ---------------------------------------------------------------------------
 
-// testWorkflowRow returns a mock row for ListWorkflows/GetWorkflowByID.
+// testWorkflowRow returns a mock row shaped like DialectMySQL.workflowInstanceColumns(),
+// which is the SELECT list of ListWorkflows. GetWorkflowByID reads a much longer
+// list and does not use this helper.
+//
+// reclaim_count is deliberately non-zero: it was added to the list by cleat#1123,
+// and a 0 here would be indistinguishable from the scanner dropping the column,
+// which is the whole defect #1123 reports.
 func testWorkflowRow(id, name string, version int64, status string, assignedTo string) [][]driver.Value {
 	nextWakeAt := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	return [][]driver.Value{{
 		id, name, version, status, []byte(`{"in":1}`), assignedTo,
-		nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "",
+		nextWakeAt, nil, nil, nil, nil, int64(0), int64(0), "", int64(4),
+		// cancellation_requested, added by cleat#1351. The column list and the
+		// Scan are two separately-written lists that must agree in length, and
+		// a mock row is a third -- a mismatch here is a RUNTIME error
+		// ("expected 15 destination arguments in Scan, not 16"), not a compile
+		// one, so these rows are the part a widened SELECT breaks.
+		false,
+		// completed_by, added by cleat#1118 -- the next column to prove the
+		// paragraph above. Blank because this row is a RUNNING workflow: the
+		// column is written at the moment the lease is surrendered, so a run
+		// that has not finished has nothing to record.
+		"",
 	}}
 }
 
@@ -743,6 +781,14 @@ func TestMySQLStore_ListWorkflows_All(t *testing.T) {
 	}
 	if len(wfs) != 1 || wfs[0].ID != "wf-1" {
 		t.Errorf("unexpected: %+v", wfs)
+	}
+	// reclaim_count is the field cleat#1123 was about: it is a plain int64 with
+	// no omitempty, so before the fix the list serialised a confident 0 for every
+	// run -- "never reclaimed" and "this path does not read the column" looked the
+	// same to a caller. This is the only place the MySQL list scan is exercised
+	// without a live server.
+	if wfs[0].ReclaimCount != 4 {
+		t.Errorf("ReclaimCount = %d, want 4 (cleat#1123)", wfs[0].ReclaimCount)
 	}
 }
 
@@ -819,7 +865,19 @@ func TestMySQLStore_GetWorkflowByID_Found(t *testing.T) {
 			"worker-1", time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC),
 			time.Date(2025, 1, 1, 1, 0, 0, 0, time.UTC),
+			time.Date(2025, 1, 1, 0, 30, 0, 0, time.UTC), // started_at (cleat#1090)
 			`{"result":"ok"}`, "", nil, nil, int64(0), int64(0), "", "tenant-1",
+			"wf-0",      // continued_from (cleat#887)
+			int64(5),    // reclaim_count (cleat#1008)
+			"wf-parent", // parent_workflow_id (cleat#1103)
+			time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), // created_at (cleat#1105)
+			"failed",                           // pending_terminal_status (cleat#1105)
+			true,                               // cancellation_requested (cleat#1351)
+			"INCIDENT-4242 operator cancelled", // cancellation_reason (cleat#1351)
+			// completed_by (cleat#1118). Deliberately NOT "worker-1", which
+			// this row already supplies for assigned_to: a scan that read the
+			// lease column twice would pass against a matching value.
+			"worker-7",
 		),
 	}, nil)
 	wf, err := store.GetWorkflowByID(testCtx, "wf-1")
@@ -828,6 +886,31 @@ func TestMySQLStore_GetWorkflowByID_Found(t *testing.T) {
 	}
 	if wf == nil || wf.ID != "wf-1" || wf.TraceID != "" {
 		t.Errorf("unexpected: %+v", wf)
+	}
+	// cleat#887, as in the PostgreSQL test: supplied by the fake row, so it
+	// must reach the struct rather than being scanned and dropped.
+	if wf != nil && wf.ContinuedFrom != "wf-0" {
+		t.Errorf("ContinuedFrom = %q, want %q", wf.ContinuedFrom, "wf-0")
+	}
+	// cleat#1090, same idiom as the line above: supplied by the fake row, so
+	// it must reach the struct. A nil here is the scan dropping it, which is
+	// exactly how completed_at went unnoticed (cleat#1091).
+	if wf != nil && wf.StartedAt == nil {
+		t.Errorf("StartedAt is nil, want %v -- the fake row supplies it", time.Date(2025, 1, 1, 0, 30, 0, 0, time.UTC))
+	} else if !wf.StartedAt.Equal(time.Date(2025, 1, 1, 0, 30, 0, 0, time.UTC)) {
+		t.Errorf("StartedAt = %v, want %v", *wf.StartedAt, time.Date(2025, 1, 1, 0, 30, 0, 0, time.UTC))
+	}
+	// cleat#1103, same idiom as the two lines above: supplied by the fake row,
+	// so it must reach the struct. A nil here is the scan dropping it.
+	if wf != nil && wf.ParentWorkflowID == nil {
+		t.Errorf("ParentWorkflowID is nil, want %q -- the fake row supplies it", "wf-parent")
+	} else if *wf.ParentWorkflowID != "wf-parent" {
+		t.Errorf("ParentWorkflowID = %q, want %q", *wf.ParentWorkflowID, "wf-parent")
+	}
+	// cleat#1118, same idiom as the three lines above. The want differs from
+	// AssignedTo on purpose -- see the row comment.
+	if wf != nil && wf.CompletedBy != "worker-7" {
+		t.Errorf("CompletedBy = %q, want %q", wf.CompletedBy, "worker-7")
 	}
 }
 
@@ -1020,7 +1103,7 @@ func TestMySQLStore_ListWorkflowDefs_All(t *testing.T) {
 		{
 			match: "SELECT name, version, abi_version",
 			data: [][]driver.Value{
-				{"wf-a", int64(2), int64(1), int64(0), []byte(`{}`), createdAt, false},
+				{"wf-a", int64(2), int64(1), int64(0), []byte(`{}`), createdAt, nil, false},
 			},
 		},
 	}, nil)
@@ -1039,7 +1122,7 @@ func TestMySQLStore_ListWorkflowDefs_ByName(t *testing.T) {
 		{
 			match: "SELECT name, version, abi_version",
 			data: [][]driver.Value{
-				{"wf-a", int64(1), int64(1), int64(0), []byte(`{}`), createdAt, false},
+				{"wf-a", int64(1), int64(1), int64(0), []byte(`{}`), createdAt, nil, false},
 			},
 		},
 	}, nil)
@@ -1057,7 +1140,7 @@ func TestMySQLStore_GetWorkflowDef_Found(t *testing.T) {
 	store := newMySQLStoreForTest(t, []mockRowsResult{
 		queryRowOk("SELECT name, version, wasm_bytes",
 			"test-wf", int64(2), []byte("wasm-data"), int64(1), int64(0),
-			[]byte(`{"p":"1.0"}`), createdAt, false,
+			[]byte(`{"p":"1.0"}`), createdAt, nil, false,
 		),
 	}, nil)
 	def, err := store.GetWorkflowDef(testCtx, "test-wf", 2)
@@ -1082,7 +1165,7 @@ func TestMySQLStore_GetWorkflowDef_NotFound(t *testing.T) {
 
 func TestMySQLStore_MarkVersionDeprecated(t *testing.T) {
 	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_defs SET deprecated", affected: 1},
+		{match: "UPDATE workflow_defs", affected: 1},
 	})
 	err := store.MarkVersionDeprecated(testCtx, "wf", 1, true)
 	if err != nil {
@@ -1299,13 +1382,51 @@ func TestMySQLStore_QueueDepth(t *testing.T) {
 	}
 }
 
+// TerminateWorkflow reads the row before it writes, because which UPDATE it
+// runs depends on whether the workflow owes a defer phase (IMPROVEMENT-PLAN
+// 3.112). Both arms are exercised: the mock cannot tell them apart -- they are
+// both "UPDATE workflow_instances" -- so what this covers is the read and the
+// branch reaching a write at all, not which write.
 func TestMySQLStore_TerminateWorkflow(t *testing.T) {
-	store := newMySQLStoreForTest(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_instances", affected: 1},
-	})
+	for _, tc := range []struct {
+		name       string
+		status     string
+		hasDefers  bool
+		compaction bool
+	}{
+		{"no defers terminates in one step", "running", false, false},
+		{"registered defers enter the defer phase", "running", true, false},
+		{"compacted history is treated as owing defers", "running", false, true},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			store := newMySQLStoreForTest(t, []mockRowsResult{
+				queryRowOk("SELECT w.status", tc.status, tc.hasDefers, tc.compaction),
+			}, []mockExecResult{
+				{match: "UPDATE workflow_instances", affected: 1},
+			})
+			if err := store.TerminateWorkflow(testCtx, "wf-1", "manual termination"); err != nil {
+				t.Fatalf("TerminateWorkflow: %v", err)
+			}
+		})
+	}
+}
+
+// TestMySQLStore_TerminateWorkflow_RefusesASettledWorkflow used to be the
+// "already terminal stays one-step" case in the table above -- cleat#1975
+// (D3) retires that: 'done' is a settled status, and a terminate on it now
+// refuses before reaching any UPDATE. No exec result is configured, so if the
+// settled check is ever removed, mockStmt.Exec's unmatched-query fallback (a
+// silent zero-rows result) would route this through the RowsAffected==0 arm
+// instead and return ErrWorkflowNotFound, not ErrAdminStateConflict -- the
+// assertion below is falsifiable against exactly that regression.
+func TestMySQLStore_TerminateWorkflow_RefusesASettledWorkflow(t *testing.T) {
+	store := newMySQLStoreForTest(t, []mockRowsResult{
+		queryRowOk("SELECT w.status", "done", true, false),
+	}, nil)
 	err := store.TerminateWorkflow(testCtx, "wf-1", "manual termination")
-	if err != nil {
-		t.Fatalf("TerminateWorkflow: %v", err)
+	if !errors.Is(err, ErrAdminStateConflict) {
+		t.Fatalf("TerminateWorkflow on a done workflow: err = %v, want ErrAdminStateConflict", err)
 	}
 }
 
@@ -1457,8 +1578,17 @@ func TestMySQLStore_GetWorkflowByID_NullOptionals(t *testing.T) {
 		queryRowOk("SELECT id, def_name, def_version, status, input",
 			"wf-1", "test-wf", int64(1), "running", []byte(`{}`),
 			nil, nil, nil, nil,
+			nil, // started_at (NULL: never claimed)
 			nil, nil, nil, nil,
 			int64(0), int64(0), "", "tenant-1",
+			nil,      // continued_from (NULL: not a continuation)
+			int64(0), // reclaim_count (never reclaimed)
+			nil,      // parent_workflow_id (NULL: top-level run)
+			time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), // created_at (NOT NULL in the schema)
+			"",    // pending_terminal_status (none pending)
+			false, // cancellation_requested (NOT NULL, default false)
+			"",    // cancellation_reason (COALESCE of NULL: never cancelled)
+			"",    // completed_by (COALESCE of NULL: still running, no worker recorded)
 		),
 	}, nil)
 	wf, err := store.GetWorkflowByID(testCtx, "wf-1")

@@ -63,7 +63,7 @@ func TestMSSQLSessionContext_SurvivesConnectionReuse(t *testing.T) {
 	factory := NewMSSQLStoreFactory(dsn)
 	defer factory.Close()
 
-	pool, err := factory.getOrCreateTenantPool(ctx, tenant)
+	pool, err := tenantPoolDB(ctx, factory, tenant)
 	if err != nil {
 		t.Fatalf("getOrCreateTenantPool: %v", err)
 	}
@@ -126,11 +126,11 @@ func TestMSSQLSessionContext_TenantPoolsStaySeparate(t *testing.T) {
 	factory := NewMSSQLStoreFactory(dsn)
 	defer factory.Close()
 
-	poolA, err := factory.getOrCreateTenantPool(ctx, tenantA)
+	poolA, err := tenantPoolDB(ctx, factory, tenantA)
 	if err != nil {
 		t.Fatalf("getOrCreateTenantPool(A): %v", err)
 	}
-	poolB, err := factory.getOrCreateTenantPool(ctx, tenantB)
+	poolB, err := tenantPoolDB(ctx, factory, tenantB)
 	if err != nil {
 		t.Fatalf("getOrCreateTenantPool(B): %v", err)
 	}

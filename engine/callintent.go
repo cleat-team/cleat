@@ -92,14 +92,60 @@ func (e *Engine) intentStore() (callIntentStore, error) {
 // isPendingIntent reports whether a replayed event was left mid-flight by a
 // crash: the call was dispatched and the outcome never recorded.
 //
-// Two sources, deliberately. Pending is the live one, read from intent_at and
-// checksum by LoadEventHistory. pendingSentinel is the representation the
-// deleted flushCallIntent would have written; nothing in any deployment ever
-// wrote it, but the detector for it predates this work, tests/integrity
-// exercises it directly, and keeping it costs one comparison. It should go when
-// phase E retires the constant.
+// One source. Pending is read from intent_at and checksum by LoadEventHistory,
+// which is what IMPROVEMENT-PLAN 1.4 phase D made the live representation.
+//
+// This used to also match a "__CLEAT_PENDING_INTENT__" sentinel in Err, the
+// representation the deleted flushCallIntent would have written. Nothing in any
+// deployment ever wrote it -- the write side was deleted rather than wired in,
+// because every completion path guarded its upsert on `error IS NULL`, so a
+// sentinel row could never be completed and would have stuck forever. The
+// comment here said it should go when phase E retired the constant; E and F are
+// both done, so it has (1.4 phase F tail).
 func (r EventRecord) isPendingIntent() bool {
-	return r.Pending || r.Err == pendingSentinel
+	return r.Pending
+}
+
+// ambiguousCall identifies the replayed call that was left mid-flight. It is
+// the call an operator has to go and reconcile against the external service,
+// so the fields here are the ones that name it in a support conversation.
+type ambiguousCall struct {
+	Step    int
+	Service string
+	Op      string
+}
+
+// recordAmbiguity notes that replay handed the guest an unresolved pending
+// intent. First one wins: if a workflow hits several, the earliest is the one
+// whose side effect is in doubt for the longest, and reporting a later call
+// would point reconciliation at the wrong operation.
+//
+// This is deliberately separate from the "[AMBIGUOUS]" text written into the
+// guest-visible result. That text is an English sentence, and until this
+// existed it was the *only* record of the condition -- callers detected it by
+// substring, so rewording the message silently disabled the detection.
+func (s *execSession) recordAmbiguity(rec EventRecord) {
+	if s.ambiguity == nil {
+		s.ambiguity = &ambiguousCall{Step: rec.Step, Service: rec.Service, Op: rec.Op}
+	}
+}
+
+// classifyFailure tags a failed execution with the reason only the host
+// session saw. Today that is exactly one case: replay hit a pending intent
+// that no resolver could settle, the guest turned it into a failure, and the
+// resulting error would otherwise be stored as error_code='unknown' -- the
+// same value as every ordinary bug, so the one class of failure that needs a
+// human to check an external service could not be queried for.
+//
+// A workflow that catches the ambiguous call and completes anyway is not a
+// failure and is not classified; err == nil passes straight through.
+func (s *execSession) classifyFailure(err error) error {
+	if err == nil || s.ambiguity == nil {
+		return err
+	}
+	// Empty op and workflowID: this wrap carries the code and leaves the
+	// message exactly as it was built. See CleatError.Error.
+	return NewAmbiguousError("", "", err)
 }
 
 // freshCallWithIntent is freshCall for an operation declared WriteAheadIntent.
@@ -132,6 +178,14 @@ func (s *execSession) freshCallWithIntent(ctx context.Context, service, operatio
 		Service:   service,
 		Op:        operation,
 		Request:   requestJSON,
+		// Stamped at CONSTRUCTION, not in recordEventPersisted like the
+		// non-intent path, because this path computes the payload and the
+		// checksum from `rec` before persisting it. Setting the flag after
+		// that would leave the stored row and the in-memory event disagreeing
+		// about a field the checksum covers -- and the intent written ahead of
+		// the call has to carry it too, or a crash between the intent and its
+		// completion would resume with the flag lost. cleat#1155.
+		InDeferPhase: s.inDeferPhase,
 	}
 	if err := st.WriteCallIntent(ctx, s.workflowID, intent, s.engine.workerID, s.engine.generation); err != nil {
 		// The call has NOT been dispatched. That is the correct outcome of a
@@ -215,6 +269,30 @@ type AmbiguityResolver interface {
 
 // WithAmbiguityResolver sets the resolver consulted when replay finds a call
 // that was dispatched but whose outcome was never recorded.
+//
+// EMBEDDER API. `cleat-worker` never calls this -- confirmed by
+// `grep -rln WithAmbiguityResolver --include='*.go' . | grep -v _test`, which
+// returns only this file -- and that is the designed default, not a gap: a
+// nil resolver makes resolveAmbiguity return ("", false) without calling
+// anything, leaving the ambiguity exactly as it was and reported as such,
+// "not a worse one" than the state it started in (see resolveAmbiguity's own
+// comment on the same phrase, in the resolver-error branch). A worker
+// deployment relies on the always-available manual path instead --
+// `POST /api/admin/instances/{id}/steps/{step}/resolve` (`engine.ResolveStep`)
+// followed by `engine.ReReplay` -- which needs no resolver configured.
+//
+// Automatic resolution is an extension point for an embedder that links the
+// engine directly and can supply one: most services that accept an
+// idempotency key can also answer "what happened to this one", turning most
+// ambiguities into non-events instead of an operator's manual check. See
+// `AmbiguityResolver`'s doc comment for the guarantee it must uphold.
+//
+// Recorded because it was found stale twice: two independent sessions read
+// the same zero-non-test-callers grep and concluded, wrongly, that automatic
+// resolution was simply unbuilt (cleat#1778). The decision already existed --
+// `engine_option_reachability_test.go`'s exemption table, "EMBEDDER API: nil
+// is the designed default; degrades to no-op" -- but a reachability guard's
+// exemption list is not somewhere an API's own reader consults. cleat#1871.
 func WithAmbiguityResolver(r AmbiguityResolver) EngineOption {
 	return func(e *Engine) { e.ambiguityResolver = r }
 }
@@ -264,7 +342,12 @@ func (s *execSession) resolveAmbiguity(ctx context.Context, rec EventRecord) (st
 	}
 	payload, _ := eventRecordToPayload(completed)
 
-	if err := store.ResolveCallIntent(ctx, s.workflowID, completed, payload, s.engine.workerID, s.engine.generation); err != nil {
+	// The replay path usually resolves the last row, where chainRepairsAfter
+	// returns nothing -- but not always: a signal delivered while the workflow
+	// was down lands above the pending call, and then the chain needs the same
+	// repair the operator path needs. IMPROVEMENT-PLAN 3.89.
+	if err := store.ResolveCallIntent(ctx, s.workflowID, completed, payload,
+		s.engine.workerID, s.engine.generation, chainRepairsAfter(s.history, rec.Step)); err != nil {
 		s.engine.log().ErrorContext(ctx, "ambiguity was resolved but could not be recorded; reporting ambiguity instead",
 			"workflow_id", s.workflowID, "step", rec.Step, "error", err)
 		return "", false

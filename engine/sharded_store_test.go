@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +19,10 @@ import (
 // ---------------------------------------------------------------------------
 
 type mockShardStore struct {
-	name string
+	// heldRoutingRules, when non-nil, is the set of routing-rule IDs this
+	// shard actually holds. See RemoveRoutingRule below.
+	heldRoutingRules map[string]bool
+	name             string
 
 	// Default error for all methods (if fn override is nil)
 	err error
@@ -38,7 +43,9 @@ type mockShardStore struct {
 	listSchedulesFn              func(ctx context.Context) ([]Schedule, error)
 	listWorkflowsFn              func(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error)
 	getWorkflowByIDFn            func(ctx context.Context, id string) (*WorkflowInstance, error)
-	batchHeartbeatFn             func(ctx context.Context, workerID string) (int64, error)
+	getTerminalRunFn             func(ctx context.Context, id string) (*WorkflowInstance, error)
+	successorOfRunFn             func(ctx context.Context, id string) (string, error)
+	heartbeatBatchFencedFn       func(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error)
 	reapStaleInstancesFn         func(ctx context.Context, timeout time.Duration) (int, error)
 	reapExpiredConcurrencyKeysFn func(ctx context.Context) (int64, error)
 	queueDepthFn                 func(ctx context.Context) (int64, error)
@@ -52,7 +59,7 @@ type mockShardStore struct {
 	startNewRunFn                func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error)
 	startChildWorkflowFn         func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
 	startChildWorkflowAtomicFn   func(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error)
-	getChildResultFn             func(ctx context.Context, runID string) (string, bool, error)
+	getChildResultFn             func(ctx context.Context, runID string) (ChildOutcome, error)
 	streamEventHistoryFn         func(ctx context.Context, workflowID string, pageSize int) (<-chan EventRecord, <-chan error)
 	resolveTenantFn              func(ctx context.Context, keyHash []byte) (uuid.UUID, error)
 	loadWorkflowConfigFn         func(ctx context.Context, defName string, defVersion int) (int, error)
@@ -72,6 +79,7 @@ type mockShardStore struct {
 	eventTotal          int
 	eventSize           int64
 	concurrencyKeyCount int
+	keysExpiringSoon    int
 }
 
 func (m *mockShardStore) recordCall(method string) {
@@ -113,6 +121,12 @@ func (m *mockShardStore) ClaimWorkflows(ctx context.Context, workerID string, li
 	return m.wfs, nil
 }
 
+// CountRunnableWorkflows: a double, so the honest answer is "I do not know".
+// Zero is what a store with nothing runnable returns, and the caller treats the
+// number as a floor, so a double reporting 0 never claims work exists that does
+// not. See IMPROVEMENT-PLAN 3.250.
+func (m *mockShardStore) CountRunnableWorkflows(_ context.Context) (int, error) { return 0, nil }
+
 func (m *mockShardStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	m.recordCall("ClaimStickyWorkflows")
 	if m.claimStickyWorkflowsFn != nil {
@@ -133,6 +147,14 @@ func (m *mockShardStore) LoadEventHistory(ctx context.Context, workflowID string
 		return nil, m.err
 	}
 	return nil, nil
+}
+
+func (m *mockShardStore) IsHistorySwept(ctx context.Context, workflowID string) (bool, error) {
+	m.recordCall("IsHistorySwept")
+	if m.err != nil {
+		return false, m.err
+	}
+	return false, nil
 }
 
 func (m *mockShardStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) {
@@ -213,15 +235,15 @@ func (m *mockShardStore) Heartbeat(ctx context.Context, workflowID, workerID str
 	return true, nil
 }
 
-func (m *mockShardStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	m.recordCall("BatchHeartbeat")
-	if m.batchHeartbeatFn != nil {
-		return m.batchHeartbeatFn(ctx, workerID)
+func (m *mockShardStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	m.recordCall("HeartbeatBatchFenced")
+	if m.heartbeatBatchFencedFn != nil {
+		return m.heartbeatBatchFencedFn(ctx, workerID, runs)
 	}
 	if m.err != nil {
-		return 0, m.err
+		return nil, m.err
 	}
-	return 0, nil
+	return nil, nil
 }
 
 func (m *mockShardStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error {
@@ -280,12 +302,12 @@ func (m *mockShardStore) DeliverSignal(ctx context.Context, workflowID, signalNa
 	return m.err
 }
 
-func (m *mockShardStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+func (m *mockShardStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
 	m.recordCall("PollSignal")
 	if m.err != nil {
-		return "", false, m.err
+		return SignalDelivery{}, false, m.err
 	}
-	return "", false, nil
+	return SignalDelivery{}, false, nil
 }
 
 func (m *mockShardStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
@@ -296,12 +318,9 @@ func (m *mockShardStore) PollCancellation(ctx context.Context, workflowID string
 	return false, "", nil
 }
 
-func (m *mockShardStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	m.recordCall("PollAndClaimSignal")
-	if m.err != nil {
-		return "", false, m.err
-	}
-	return "", false, nil
+func (m *mockShardStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
+	m.recordCall("ConsumeSignal")
+	return m.err
 }
 
 func (m *mockShardStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error) {
@@ -340,18 +359,18 @@ func (m *mockShardStore) StartChildWorkflowAtomic(ctx context.Context, childID, 
 	return childID, nil
 }
 
-func (m *mockShardStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+func (m *mockShardStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	m.recordCall("GetChildResult")
 	if m.getChildResultFn != nil {
 		return m.getChildResultFn(ctx, runID)
 	}
 	if m.err != nil {
-		return "", false, m.err
+		return ChildOutcome{}, m.err
 	}
-	return "", false, nil
+	return ChildOutcome{}, nil
 }
 
-func (m *mockShardStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (m *mockShardStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	m.recordCall("ReapStaleInstances")
 	if m.reapStaleInstancesFn != nil {
 		return m.reapStaleInstancesFn(ctx, timeout)
@@ -370,6 +389,10 @@ func (m *mockShardStore) GetQueryState(ctx context.Context, workflowID, key stri
 	return "", nil
 }
 
+func (m *mockShardStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	return map[string]string{}, nil
+}
+
 func (m *mockShardStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
 	m.recordCall("ListWorkflows")
 	if m.listWorkflowsFn != nil {
@@ -383,6 +406,38 @@ func (m *mockShardStore) ListWorkflows(ctx context.Context, filter WorkflowFilte
 
 func (m *mockShardStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) {
 	m.recordCall("GetWorkflowByID")
+	if m.getWorkflowByIDFn != nil {
+		return m.getWorkflowByIDFn(ctx, id)
+	}
+	if m.err != nil {
+		return nil, m.err
+	}
+	return nil, nil
+}
+
+// GetTerminalRun mirrors GetWorkflowByID rather than returning nil
+// unconditionally: ShardedStore.GetTerminalRun walks by asking each shard, so a
+// mock that always answers nil would make that fan-out untestable here.
+// successorOfRun makes mockShardStore satisfy runSuccessorFinder, which
+// ShardedStore.GetTerminalRun requires of every shard. Modelled on the real
+// contract: it answers about continued_from WITHOUT needing to hold id, which
+// is the whole distinction the interface exists to draw.
+func (m *mockShardStore) successorOfRun(ctx context.Context, id string) (string, error) {
+	m.recordCall("successorOfRun")
+	if m.successorOfRunFn != nil {
+		return m.successorOfRunFn(ctx, id)
+	}
+	if m.err != nil {
+		return "", m.err
+	}
+	return "", nil
+}
+
+func (m *mockShardStore) GetTerminalRun(ctx context.Context, id string) (*WorkflowInstance, error) {
+	m.recordCall("GetTerminalRun")
+	if m.getTerminalRunFn != nil {
+		return m.getTerminalRunFn(ctx, id)
+	}
 	if m.getWorkflowByIDFn != nil {
 		return m.getWorkflowByIDFn(ctx, id)
 	}
@@ -424,11 +479,6 @@ func (m *mockShardStore) GetDueSchedules(ctx context.Context) ([]Schedule, error
 		return nil, m.err
 	}
 	return nil, nil
-}
-
-func (m *mockShardStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	m.recordCall("UpdateScheduleNextRun")
-	return m.err
 }
 
 func (m *mockShardStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
@@ -491,12 +541,12 @@ func (m *mockShardStore) CreatePromise(ctx context.Context, workflowID, promiseN
 	return m.err
 }
 
-func (m *mockShardStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockShardStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	m.recordCall("ResolvePromise")
 	return m.err
 }
 
-func (m *mockShardStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockShardStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	m.recordCall("RejectPromise")
 	return m.err
 }
@@ -530,7 +580,7 @@ func (m *mockShardStore) GetPendingUpdateRequests(ctx context.Context, workflowI
 	return nil, nil
 }
 
-func (m *mockShardStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (m *mockShardStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	m.recordCall("CompleteUpdateRequest")
 	return m.err
 }
@@ -543,9 +593,9 @@ func (m *mockShardStore) AcquireConcurrencyKey(ctx context.Context, key, workflo
 	return false, nil
 }
 
-func (m *mockShardStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (m *mockShardStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
 	m.recordCall("ReleaseConcurrencyKey")
-	return m.err
+	return false, m.err
 }
 
 func (m *mockShardStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
@@ -706,6 +756,10 @@ func (m *mockShardStore) DeleteExpiredEvents(ctx context.Context, olderThan time
 	return 0, nil
 }
 
+func (m *mockShardStore) ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
 func (m *mockShardStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	m.recordCall("DeleteDeadLetteredWorkflows")
 	if m.deleteDeadLetteredFn != nil {
@@ -714,6 +768,22 @@ func (m *mockShardStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderT
 	if m.err != nil {
 		return 0, m.err
 	}
+	return 0, nil
+}
+
+func (m *mockShardStore) CountExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockShardStore) CountExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockShardStore) CountDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockShardStore) CountCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
 
@@ -730,6 +800,11 @@ func (m *mockShardStore) DeleteCompletedWorkflows(ctx context.Context, olderThan
 
 func (m *mockShardStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	m.recordCall("TerminateWorkflow")
+	return m.err
+}
+
+func (m *mockShardStore) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
+	m.recordCall("CancelWorkflow")
 	return m.err
 }
 
@@ -777,6 +852,14 @@ func (m *mockShardStore) GetChildCount(ctx context.Context, parentWorkflowID str
 		return 0, m.err
 	}
 	return 0, nil
+}
+
+// OriginalChildRunIDs returns nothing: no test using this double is about
+// cleat#1661's orphan check, and a double that invented children would make
+// the check fire on unrelated tests. Recorded as a choice rather than left as
+// another empty return.
+func (m *mockShardStore) OriginalChildRunIDs(context.Context, string) ([]string, error) {
+	return nil, nil
 }
 
 func (m *mockShardStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
@@ -848,7 +931,19 @@ func (m *mockShardStore) RemoveRoutingRule(ctx context.Context, ruleID string) e
 	if m.err != nil {
 		return m.err
 	}
-	return nil
+	// A shard with no rule set claims everything, which is what every test
+	// written before cleat#946's second half assumed. Once heldRoutingRules is
+	// set the mock answers honestly -- claiming what it holds and reporting the
+	// rest as not found, which is what a real store does now that all three
+	// check rows-affected.
+	if m.heldRoutingRules == nil {
+		return nil
+	}
+	if m.heldRoutingRules[ruleID] {
+		delete(m.heldRoutingRules, ruleID)
+		return nil
+	}
+	return ErrRoutingRuleNotFound
 }
 
 func (m *mockShardStore) GetRoutingRules(ctx context.Context, workflowName string) ([]RoutingRule, error) {
@@ -908,7 +1003,27 @@ func (m *mockShardStore) CountActiveConcurrencyKeys(ctx context.Context) (int, e
 	return m.concurrencyKeyCount, nil
 }
 
+func (m *mockShardStore) CountConcurrencyKeysExpiringSoon(ctx context.Context, within time.Duration) (int, error) {
+	m.recordCall("CountConcurrencyKeysExpiringSoon")
+	if m.err != nil {
+		return 0, m.err
+	}
+	return m.keysExpiringSoon, nil
+}
+
 var _ WorkflowStore = (*mockShardStore)(nil)
+
+// AND metricsStore, which this mock must satisfy in FULL or it satisfies none
+// of it. ShardedStore reaches each shard through one assertion to the whole
+// interface, so a mock missing a single method sends every shard down the
+// `continue` and makes all five metrics return (0, nil) -- the tests then fail
+// with "want 7, got 0" and point at the aggregation rather than at the mock.
+//
+// That is not hypothetical: adding CountConcurrencyKeysExpiringSoon did exactly
+// this to nine tests here before the method was added above, and it is the same
+// shape as the production defect cleat#1317 found in PostgresStore. A
+// compile-time assertion turns it into a build failure naming the method.
+var _ metricsStore = (*mockShardStore)(nil)
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1675,20 +1790,16 @@ func TestDeliverSignal_Success(t *testing.T) {
 	}
 }
 
-func TestPollAndClaimSignal_Success(t *testing.T) {
+func TestConsumeSignal_Success(t *testing.T) {
 	ss, _ := makeShardedStore(t, 2)
-	_, found, err := ss.PollAndClaimSignal(context.Background(), "wf-1", "sig")
-	if err != nil {
+	if err := ss.ConsumeSignal(context.Background(), "wf-1", 1); err != nil {
 		t.Errorf("unexpected error: %v", err)
-	}
-	if found {
-		t.Error("expected not found")
 	}
 }
 
-func TestPollAndClaimSignal_NilShard(t *testing.T) {
+func TestConsumeSignal_NilShard(t *testing.T) {
 	ss := makeShardedStoreManual(nil)
-	_, _, err := ss.PollAndClaimSignal(context.Background(), "wf-1", "sig")
+	err := ss.ConsumeSignal(context.Background(), "wf-1", 1)
 	if err == nil {
 		t.Fatal("expected error for nil shard")
 	}
@@ -1717,7 +1828,7 @@ func TestStartNewRun_GeneratesUUID(t *testing.T) {
 	var capturedID string
 	mocks[0].startNewRunFn = func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error) {
 		capturedID = runID
-		return runID, true, nil
+		return runID, false, nil
 	}
 
 	id, _, err := ss.StartNewRun(context.Background(), "", "my-def", 1, nil, "", "", 0)
@@ -1815,11 +1926,12 @@ func TestStartChildWorkflowAtomic_GeneratesChildID(t *testing.T) {
 
 func TestGetChildResult_Success(t *testing.T) {
 	ss, mocks := makeShardedStore(t, 2)
-	mocks[0].getChildResultFn = func(ctx context.Context, runID string) (string, bool, error) {
-		return "result-json", true, nil
+	mocks[0].getChildResultFn = func(ctx context.Context, runID string) (ChildOutcome, error) {
+		return ChildOutcome{Completed: true, Result: "result-json"}, nil
 	}
 
-	result, completed, err := ss.GetChildResult(context.Background(), "child-1")
+	out, err := ss.GetChildResult(context.Background(), "child-1")
+	result, completed := out.Result, out.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult failed: %v", err)
 	}
@@ -1833,7 +1945,7 @@ func TestGetChildResult_Success(t *testing.T) {
 
 func TestGetChildResult_NilShard(t *testing.T) {
 	ss := makeShardedStoreManual(nil)
-	_, _, err := ss.GetChildResult(context.Background(), "child-1")
+	_, err := ss.GetChildResult(context.Background(), "child-1")
 	if err == nil {
 		t.Fatal("expected error for nil shard")
 	}
@@ -1909,7 +2021,7 @@ func TestAcquireConcurrencyKey_NilShard(t *testing.T) {
 
 func TestReleaseConcurrencyKey_Success(t *testing.T) {
 	ss, _ := makeShardedStore(t, 2)
-	err := ss.ReleaseConcurrencyKey(context.Background(), "key-1")
+	_, err := ss.ReleaseConcurrencyKey(context.Background(), "key-1", "wf-1")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -2122,7 +2234,7 @@ func TestCreatePromise_Success(t *testing.T) {
 
 func TestResolvePromise_Success(t *testing.T) {
 	ss, _ := makeShardedStore(t, 2)
-	err := ss.ResolvePromise(context.Background(), "wf-1", "id-1", "result")
+	err := ss.ResolvePromise(context.Background(), "id-1", "result")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -2130,7 +2242,7 @@ func TestResolvePromise_Success(t *testing.T) {
 
 func TestRejectPromise_Success(t *testing.T) {
 	ss, _ := makeShardedStore(t, 2)
-	err := ss.RejectPromise(context.Background(), "wf-1", "id-1", "error msg")
+	err := ss.RejectPromise(context.Background(), "id-1", "error msg")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -2170,27 +2282,56 @@ func TestTerminateWorkflow_Success(t *testing.T) {
 // Fan-out method tests
 // ---------------------------------------------------------------------------
 
-func TestBatchHeartbeat_Success(t *testing.T) {
+// cleat#2008: ShardedStore.HeartbeatBatchFenced replaced BatchHeartbeat's
+// fan-out (deleted with it) as the shard-routing layer over the new fenced
+// mechanism. Every mock shard echoes back whatever runs it received as
+// "lost" -- which shard each id actually routes to is an implementation
+// detail (getShard hashes the id), so the assertion is on the aggregated
+// SET across all shards, not on a specific shard's call.
+func TestHeartbeatBatchFenced_FansOutAndAggregatesLost(t *testing.T) {
 	ss, mocks := makeShardedStore(t, 3)
-	mocks[0].batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) { return 5, nil }
-	mocks[1].batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) { return 3, nil }
-	mocks[2].batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) { return 2, nil }
-
-	total, err := ss.BatchHeartbeat(context.Background(), "worker-1")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat failed: %v", err)
+	for _, m := range mocks {
+		m.heartbeatBatchFencedFn = func(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+			lost := make([]string, len(runs))
+			for i, r := range runs {
+				lost[i] = r.WorkflowID
+			}
+			return lost, nil
+		}
 	}
-	if total != 10 {
-		t.Errorf("total = %d, want 10", total)
+	runs := []GenerationKey{
+		{WorkflowID: "wf-a", Generation: 1},
+		{WorkflowID: "wf-b", Generation: 2},
+		{WorkflowID: "wf-c", Generation: 3},
+		{WorkflowID: "wf-d", Generation: 4},
+	}
+
+	lost, err := ss.HeartbeatBatchFenced(context.Background(), "worker-1", runs)
+	if err != nil {
+		t.Fatalf("HeartbeatBatchFenced failed: %v", err)
+	}
+	if len(lost) != len(runs) {
+		t.Fatalf("lost = %v (%d ids), want %d", lost, len(lost), len(runs))
+	}
+	gotSet := map[string]bool{}
+	for _, id := range lost {
+		gotSet[id] = true
+	}
+	for _, r := range runs {
+		if !gotSet[r.WorkflowID] {
+			t.Errorf("expected %s in lost (every mock shard echoes every run it receives), got lost=%v", r.WorkflowID, lost)
+		}
 	}
 }
 
-func TestBatchHeartbeat_ShardError(t *testing.T) {
+func TestHeartbeatBatchFenced_ShardError(t *testing.T) {
 	ss, mocks := makeShardedStore(t, 2)
-	mocks[0].batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) { return 1, nil }
-	mocks[1].err = errors.New("shard down")
+	for _, m := range mocks {
+		m.err = errors.New("shard down")
+	}
+	runs := []GenerationKey{{WorkflowID: "wf-a", Generation: 1}, {WorkflowID: "wf-b", Generation: 1}}
 
-	_, err := ss.BatchHeartbeat(context.Background(), "worker-1")
+	_, err := ss.HeartbeatBatchFenced(context.Background(), "worker-1", runs)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -2202,7 +2343,7 @@ func TestReapStaleInstances_Success(t *testing.T) {
 	mocks[1].reapStaleInstancesFn = func(ctx context.Context, timeout time.Duration) (int, error) { return 2, nil }
 	mocks[2].reapStaleInstancesFn = func(ctx context.Context, timeout time.Duration) (int, error) { return 1, nil }
 
-	total, err := ss.ReapStaleInstances(context.Background(), time.Minute)
+	total, err := ss.ReapStaleInstances(context.Background(), time.Minute, 0)
 	if err != nil {
 		t.Fatalf("ReapStaleInstances failed: %v", err)
 	}
@@ -2215,7 +2356,7 @@ func TestReapStaleInstances_ShardError(t *testing.T) {
 	ss, mocks := makeShardedStore(t, 2)
 	mocks[1].err = errors.New("shard down")
 
-	_, err := ss.ReapStaleInstances(context.Background(), time.Minute)
+	_, err := ss.ReapStaleInstances(context.Background(), time.Minute, 0)
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -2748,19 +2889,6 @@ func TestSetScheduleEnabled_ForEachShard(t *testing.T) {
 	}
 }
 
-func TestUpdateScheduleNextRun_ForEachShard(t *testing.T) {
-	ss, mocks := makeShardedStore(t, 3)
-	err := ss.UpdateScheduleNextRun(context.Background(), "my-schedule", time.Now())
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-	for i, m := range mocks {
-		if n := m.CallCount("UpdateScheduleNextRun"); n != 1 {
-			t.Errorf("shard-%d: expected 1 UpdateScheduleNextRun call, got %d", i, n)
-		}
-	}
-}
-
 func TestListSchedules_Merges(t *testing.T) {
 	ss, mocks := makeShardedStore(t, 2)
 	mocks[0].listSchedulesFn = func(ctx context.Context) ([]Schedule, error) {
@@ -3130,7 +3258,7 @@ func TestCreatePromise_NilShard(t *testing.T) {
 
 func TestResolvePromise_NilShard(t *testing.T) {
 	ss := makeShardedStoreManual(nil)
-	err := ss.ResolvePromise(context.Background(), "wf-1", "id-1", "result")
+	err := ss.ResolvePromise(context.Background(), "id-1", "result")
 	if err == nil {
 		t.Fatal("expected error for nil shard")
 	}
@@ -3138,7 +3266,7 @@ func TestResolvePromise_NilShard(t *testing.T) {
 
 func TestRejectPromise_NilShard(t *testing.T) {
 	ss := makeShardedStoreManual(nil)
-	err := ss.RejectPromise(context.Background(), "wf-1", "id-1", "err")
+	err := ss.RejectPromise(context.Background(), "id-1", "err")
 	if err == nil {
 		t.Fatal("expected error for nil shard")
 	}
@@ -3186,7 +3314,7 @@ func TestGetEventCount_NilShard(t *testing.T) {
 
 func TestReleaseConcurrencyKey_NilShard(t *testing.T) {
 	ss := makeShardedStoreManual(nil)
-	err := ss.ReleaseConcurrencyKey(context.Background(), "key-1")
+	_, err := ss.ReleaseConcurrencyKey(context.Background(), "key-1", "wf-1")
 	if err == nil {
 		t.Fatal("expected error for nil shard")
 	}
@@ -3912,4 +4040,118 @@ func TestShardedClaimWorkflows_RotatesStartingShard(t *testing.T) {
 		t.Errorf("three claims of one workflow each touched %v -- the starting shard "+
 			"is not rotating, so the last shards starve under sustained load", order)
 	}
+}
+
+func (_ *mockShardStore) SetAllowedSignalCallers(_ context.Context, _ string, _ []string) error {
+	return nil
+}
+
+// GetChildCompletedAtMs satisfies the store interface. Added with #847, which
+// made PollChild derive its answer from the child's completion instant rather
+// than querying live. Returning ok=false means "never completed", which keeps
+// every existing test's PollChild answer at "running".
+func (m *mockShardStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	return 0, false, nil
+}
+
+// ---- cleat#946: routing rules were written by name and deleted by rule id ----
+
+// shardIndexFor mirrors getShard's arithmetic so a test can state which shard a
+// key belongs to instead of assuming. It is deliberately a second, independent
+// expression of that rule: if getShard's hashing ever changes, these tests
+// should fail rather than quietly agree with whatever it does now.
+func shardIndexFor(key string, n int) int {
+	h := sha256.Sum256([]byte(key))
+	return int(binary.BigEndian.Uint64(h[:8]) % uint64(n))
+}
+
+// TestRemovingARoutingRuleReachesTheShardThatHoldsIt is the regression test for
+// cleat#946, and it is written around the premise rather than the symptom.
+//
+// The premise is that the write key and the delete key disagree. The test
+// asserts that first -- if they ever landed on the same shard for these inputs
+// the rest would prove nothing, and the old code would pass.
+func TestRemovingARoutingRuleReachesTheShardThatHoldsIt(t *testing.T) {
+	const (
+		workflowName = "checkout"
+		ruleID       = "6b0d549b-6f03-475a-9600-a35a099950d8"
+		shards       = 4
+	)
+
+	nameShard := shardIndexFor(workflowName, shards)
+	idShard := shardIndexFor(ruleID, shards)
+	if nameShard == idShard {
+		t.Fatalf("premise broken: %q and rule id both hash to shard %d, so this "+
+			"test cannot distinguish the two keys -- pick a different rule id",
+			workflowName, nameShard)
+	}
+
+	ss, mocks := makeShardedStore(t, shards)
+
+	// The rule is created the way production creates it: keyed by name.
+	if err := ss.SetRoutingRule(context.Background(), workflowName, 2, 0.25); err != nil {
+		t.Fatalf("SetRoutingRule: %v", err)
+	}
+	if got := mocks[nameShard].CallCount("SetRoutingRule"); got != 1 {
+		t.Fatalf("the rule was not created on shard %d (the name's shard): count %d",
+			nameShard, got)
+	}
+
+	if err := ss.RemoveRoutingRule(context.Background(), ruleID); err != nil {
+		t.Fatalf("RemoveRoutingRule: %v", err)
+	}
+
+	// The one that matters: the shard actually holding the row was asked.
+	if got := mocks[nameShard].CallCount("RemoveRoutingRule"); got != 1 {
+		t.Errorf("removal never reached shard %d, which holds the rule (count %d). "+
+			"The rule is still live and still routing traffic, and the API "+
+			"reported success.", nameShard, got)
+	}
+}
+
+// TestRemovingARoutingRuleAsksEveryShard pins the mechanism the fix uses, which
+// the test above deliberately does not: that one would also pass if removal
+// were routed by name, and routing by name is not available here because
+// RemoveRoutingRule is given only an id.
+func TestRemovingARoutingRuleAsksEveryShard(t *testing.T) {
+	const shards = 4
+	ss, mocks := makeShardedStore(t, shards)
+
+	if err := ss.RemoveRoutingRule(context.Background(), "rule-1"); err != nil {
+		t.Fatalf("RemoveRoutingRule: %v", err)
+	}
+	for i, m := range mocks {
+		if got := m.CallCount("RemoveRoutingRule"); got != 1 {
+			t.Errorf("shard %d was asked %d times, want 1", i, got)
+		}
+	}
+}
+
+// TestRemovingARoutingRuleOnOneShardStillWorks is the control.
+//
+// TestRemoveRoutingRule_Delegation, which existed before this fix, builds the
+// store with makeShardedStore(t, 1). At one shard every key maps to shard 0, so
+// the wrong-key defect was invisible to it by construction and it passed
+// throughout. Keeping the single-shard case asserted means the fan-out cannot
+// regress the common deployment, but it is NOT evidence about sharding -- that
+// is what the two tests above are for.
+func TestRemovingARoutingRuleOnOneShardStillWorks(t *testing.T) {
+	ss, mocks := makeShardedStore(t, 1)
+	if err := ss.RemoveRoutingRule(context.Background(), "rule-1"); err != nil {
+		t.Fatalf("RemoveRoutingRule: %v", err)
+	}
+	if got := mocks[0].CallCount("RemoveRoutingRule"); got != 1 {
+		t.Errorf("the only shard was asked %d times, want 1", got)
+	}
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (m *mockShardStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	wfs, err := m.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
 }

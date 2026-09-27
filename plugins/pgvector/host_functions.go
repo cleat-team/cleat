@@ -18,13 +18,31 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	if scope == nil {
 		return fmt.Errorf("pgvector: nil function registry")
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "search", Idempotent: true}, p.search); err != nil {
+	if err := scope.Register(plugin.FuncOptions{
+		Name: "search",
+		// Idempotent -- a search writes nothing. NOT stable: it reads a mutable
+		// index, and any insert between the original call and the replay
+		// changes the result set. cleat#1318.
+		Idempotent:        true,
+		SameValueOnReplay: false,
+	}, p.search); err != nil {
 		return err
 	}
 	if err := scope.Register(plugin.FuncOptions{Name: "upsert"}, p.upsert); err != nil {
 		return err
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "delete", Idempotent: true}, p.delete); err != nil {
+	// NOT Idempotent, and the flag's name is why it once was. Idempotent is
+	// read by the engine's REPLAY path: a function marked so has its recorded
+	// output DISCARDED and is called live again on every replay
+	// (engine/plugins.go). That needs "returns the same value on replay", and
+	// the flag says "safe to re-invoke" -- two different properties, and this
+	// function has neither.
+	//
+	// It runs `DELETE FROM pgvector_embeddings`. Idempotent in the HTTP sense
+	// (deleting twice leaves the same end state) and re-executed on every
+	// replay, so a replay re-deletes rows the workflow may legitimately have
+	// re-created since. cleat#1318.
+	if err := scope.Register(plugin.FuncOptions{Name: "delete"}, p.delete); err != nil {
 		return err
 	}
 	return nil
@@ -99,11 +117,11 @@ func (p *Plugin) search(ctx context.Context, inputJSON string) (string, error) {
 	// Look up collection.
 	var collectionID uuid.UUID
 	var dimensions int
-	err := p.db.QueryRow(ctx, `
+	err := plugin.ScanRow(p.db.QueryRow(ctx, `
 		SELECT id, dimensions
 		FROM pgvector_collections
 		WHERE name = $1
-	`, input.Collection).Scan(&collectionID, &dimensions)
+	`, input.Collection), &collectionID, &dimensions)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("pgvector: collection not found: %s", input.Collection)
 	}
@@ -148,7 +166,7 @@ func (p *Plugin) search(ctx context.Context, inputJSON string) (string, error) {
 			metaJSON   []byte
 			score      float64
 		)
-		if err := rows.Scan(&id, &externalID, &content, &metaJSON, &score); err != nil {
+		if err := plugin.ScanRow(rows, &id, &externalID, &content, &metaJSON, &score); err != nil {
 			return "", fmt.Errorf("pgvector: scan: %w", err)
 		}
 		r := searchResult{
@@ -204,9 +222,9 @@ func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 
 	// Look up collection.
 	var collectionID uuid.UUID
-	err := p.db.QueryRow(ctx, `
+	err := plugin.ScanRow(p.db.QueryRow(ctx, `
 		SELECT id FROM pgvector_collections WHERE name = $1
-	`, input.Collection).Scan(&collectionID)
+	`, input.Collection), &collectionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("pgvector: collection not found: %s", input.Collection)
 	}
@@ -235,7 +253,7 @@ func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 
 	if input.ExternalID != "" && vectorStr != "" {
 		// Upsert by external_id.
-		err = p.db.QueryRow(ctx, `
+		err = plugin.ScanRow(p.db.QueryRow(ctx, `
 			INSERT INTO pgvector_embeddings (tenant_id, collection_id, external_id, content, metadata, embedding)
 			VALUES ($1, $2, $3, $4, $5, $6::vector)
 			ON CONFLICT (tenant_id, collection_id, external_id) DO UPDATE
@@ -244,10 +262,10 @@ func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 			    embedding = EXCLUDED.embedding,
 			    updated_at = now()
 			RETURNING id
-		`, cc.TenantID, collectionID, input.ExternalID, input.Content, metaJSON, vectorStr).Scan(&id)
+		`, cc.TenantID, collectionID, input.ExternalID, input.Content, metaJSON, vectorStr), &id)
 	} else if input.ExternalID != "" {
 		// Upsert without embedding.
-		err = p.db.QueryRow(ctx, `
+		err = plugin.ScanRow(p.db.QueryRow(ctx, `
 			INSERT INTO pgvector_embeddings (tenant_id, collection_id, external_id, content, metadata)
 			VALUES ($1, $2, $3, $4, $5)
 			ON CONFLICT (tenant_id, collection_id, external_id) DO UPDATE
@@ -255,21 +273,21 @@ func (p *Plugin) upsert(ctx context.Context, inputJSON string) (string, error) {
 			    metadata = EXCLUDED.metadata,
 			    updated_at = now()
 			RETURNING id
-		`, cc.TenantID, collectionID, input.ExternalID, input.Content, metaJSON).Scan(&id)
+		`, cc.TenantID, collectionID, input.ExternalID, input.Content, metaJSON), &id)
 	} else if vectorStr != "" {
 		// Insert new row with embedding.
-		err = p.db.QueryRow(ctx, `
+		err = plugin.ScanRow(p.db.QueryRow(ctx, `
 			INSERT INTO pgvector_embeddings (tenant_id, collection_id, content, metadata, embedding)
 			VALUES ($1, $2, $3, $4, $5::vector)
 			RETURNING id
-		`, cc.TenantID, collectionID, input.Content, metaJSON, vectorStr).Scan(&id)
+		`, cc.TenantID, collectionID, input.Content, metaJSON, vectorStr), &id)
 	} else {
 		// Insert new row without embedding.
-		err = p.db.QueryRow(ctx, `
+		err = plugin.ScanRow(p.db.QueryRow(ctx, `
 			INSERT INTO pgvector_embeddings (tenant_id, collection_id, content, metadata)
 			VALUES ($1, $2, $3, $4)
 			RETURNING id
-		`, cc.TenantID, collectionID, input.Content, metaJSON).Scan(&id)
+		`, cc.TenantID, collectionID, input.Content, metaJSON), &id)
 	}
 	if err != nil {
 		return "", fmt.Errorf("pgvector: upsert: %w", err)
@@ -304,9 +322,9 @@ func (p *Plugin) delete(ctx context.Context, inputJSON string) (string, error) {
 
 	// Look up collection.
 	var collectionID uuid.UUID
-	err := p.db.QueryRow(ctx, `
+	err := plugin.ScanRow(p.db.QueryRow(ctx, `
 		SELECT id FROM pgvector_collections WHERE name = $1
-	`, input.Collection).Scan(&collectionID)
+	`, input.Collection), &collectionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("pgvector: collection not found: %s", input.Collection)
 	}

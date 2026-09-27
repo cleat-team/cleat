@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,7 +14,7 @@ import (
 // runBuildRust compiles a Rust workflow crate to WASM using cargo.
 // Uses wasm32-unknown-unknown (no WASI) to avoid non-deterministic
 // WASI imports (environ_get etc.) that break replay determinism.
-func runBuildRust(pattern, outDir, channel string) {
+func runBuildRust(pattern, outDir, channel string, workflowVersion int) {
 	cargoDir := pattern
 
 	// Validate Cargo.toml exists.
@@ -21,6 +22,33 @@ func runBuildRust(pattern, outDir, channel string) {
 	if _, err := os.Stat(cargoToml); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "Error: no Cargo.toml found in %s\n", cargoDir)
 		fmt.Fprintf(os.Stderr, "Rust workflows require a Cargo.toml with cleat-sdk and cleat-macro dependencies.\n")
+		os.Exit(1)
+	}
+
+	// Determinism gate. The Go target runs the whole-program analysis in
+	// runBuild before emitting anything; every other target reached its
+	// builder through an early return and emitted an artifact with no
+	// determinism checking at all (cleat#1770).
+	//
+	// It runs BEFORE the cargo lookup deliberately. runVetRust is pure Go and
+	// needs no toolchain, so a crate with determinism errors is refused on a
+	// machine that could not have compiled it either way. Refusing for the
+	// real reason beats refusing for an incidental one -- see the comment on
+	// the known-limit fixture in rust_build_refuses_nondeterminism_test.go for
+	// what that distinction costs when it is missing.
+	//
+	// Note what this check is and is not. Since cleat#1811 it resolves `use`
+	// declarations and matches the RESOLVED path, so grouped imports, nested
+	// groups and `as` aliases are all seen -- but there is no type resolution,
+	// so a METHOD call names no module and escapes. Passing it is therefore not
+	// evidence of determinism; it is evidence that no path resolving to a
+	// listed module is named in code. The fixture pair in that test states the
+	// limit rather than leaving it implied, and
+	// docs/contributor/design/rust-determinism-checker.md says why the limit is
+	// where it is.
+	if code := runVetRust(cargoDir); code != 0 {
+		fmt.Fprintf(os.Stderr, "\nError: determinism check failed for %s -- no artifact was emitted.\n", cargoDir)
+		fmt.Fprintf(os.Stderr, "Fix the errors above, or run 'cleat vet --lang rust %s' to see them again.\n", cargoDir)
 		os.Exit(1)
 	}
 
@@ -70,8 +98,42 @@ func runBuildRust(pattern, outDir, channel string) {
 		os.Exit(1)
 	}
 
-	// Inject cleat.metadata so the engine can detect the source language.
-	if enriched, metaErr := wasm.WriteMetadata(input, &wasm.Metadata{Language: "rust"}); metaErr == nil {
+	// entryPoints is read from the "cleat_entry_points" custom section the
+	// #[cleat_entry] proc macro itself emits at expansion (cleat#2113) --
+	// authoritative, not a source-level guess: its presence is proof the
+	// compiler saw every declared entry, so there is nothing left for a
+	// regex to get wrong. See wasm.ReadEntryPointsSection and
+	// crates/cleat-macro/src/entry.rs for how the section is assembled by
+	// the linker from one static per #[cleat_entry] expansion.
+	//
+	// A missing section means a crate built against a cleat-sdk/cleat-macro
+	// old enough to predate this mechanism -- refused rather than silently
+	// falling back to source-level prediction, which would reopen exactly
+	// the silent-miss risk this section exists to close.
+	entryPoints, epErr := wasm.ReadEntryPointsSection(input)
+	if epErr != nil {
+		if errors.Is(epErr, wasm.ErrEntryPointsSectionMissing) {
+			fmt.Fprintf(os.Stderr, "Error: rust build: the compiled .wasm carries no \"cleat_entry_points\" "+
+				"section. This crate's cleat-macro dependency predates cleat#2113 and does not emit it. "+
+				"Upgrade cleat-macro (and cleat-sdk) to a version that emits cleat_entry_points, then rebuild.\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "Error: rust build: %v\n", epErr)
+		}
+		os.Exit(1)
+	}
+	// The other direction still matters: the section can only name what the
+	// macro expanded over, and says nothing about whether the linker
+	// actually kept the export alive under this crate's own LTO/strip
+	// settings. See verifyEntryPointsAreExports's own doc comment.
+	if verifyErr := verifyEntryPointsAreExports("rust", input, entryPoints); verifyErr != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", verifyErr)
+		os.Exit(1)
+	}
+
+	// Inject cleat.metadata. Must pass wasm.Metadata.Validate(), which
+	// `cleat deploy` runs and exits 1 on; see cleat#1077.
+	if enriched, metaErr := wasm.WriteMetadata(input,
+		nonGoMetadata("rust", crateName, workflowVersion, entryPoints)); metaErr == nil {
 		input = enriched
 	}
 

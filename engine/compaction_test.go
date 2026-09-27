@@ -25,7 +25,10 @@ func TestCompactionPreservesErrNonRetryable(t *testing.T) {
 			Request: `{}`, Err: "connection reset", ErrNonRetryable: false},
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	reconstructed := buildFullHistoryFromCompaction(nil, cs)
 	if len(reconstructed) != len(events) {
 		t.Fatalf("expected %d reconstructed events, got %d", len(events), len(reconstructed))
@@ -87,7 +90,10 @@ func TestPluginCallCompactionRoundTrip(t *testing.T) {
 		compacted := events[:split]
 		tail := events[split:]
 
-		cs := extractCompactionState(compacted)
+		cs, extractErr := extractCompactionState(compacted)
+		if extractErr != nil {
+			t.Fatalf("extractCompactionState: %v", extractErr)
+		}
 		reconstructed := buildFullHistoryFromCompaction(tail, cs)
 
 		if len(reconstructed) != len(events) {
@@ -120,7 +126,10 @@ func TestCompactionBelowThreshold(t *testing.T) {
 		{Step: 2, EventType: EventTypeCall, Service: "svc", Op: "op3", Request: `{}`, Response: `{"ok":true}`},
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if cs == nil {
 		t.Fatal("expected non-nil CompactionState")
 	}
@@ -170,7 +179,10 @@ func TestCompactionAboveThreshold(t *testing.T) {
 	compacted := events[:keepStep]
 	tail := events[keepStep:]
 
-	cs := extractCompactionState(compacted)
+	cs, extractErr := extractCompactionState(compacted)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if len(cs.Events) != keepStep {
 		t.Fatalf("expected %d compacted events, got %d", keepStep, len(cs.Events))
 	}
@@ -209,7 +221,10 @@ func TestCompactionPreservesRecentEvents(t *testing.T) {
 	compacted := events[:nEvents-tailSize]
 	tail := events[nEvents-tailSize:]
 
-	cs := extractCompactionState(compacted)
+	cs, extractErr := extractCompactionState(compacted)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	reconstructed := buildFullHistoryFromCompaction(tail, cs)
 
 	// The tail events should be identical objects (not reconstructed from JSON).
@@ -235,7 +250,10 @@ func TestCompactionOfCompletedWorkflow(t *testing.T) {
 	}
 
 	// Full compaction: all events are compacted, tail is nil.
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if cs.CompactedStep != len(events) {
 		t.Errorf("expected CompactedStep=%d, got %d", len(events), cs.CompactedStep)
 	}
@@ -269,7 +287,10 @@ func TestCompactionOfRunningWorkflow(t *testing.T) {
 		{Step: 5, EventType: EventTypeSignalReceived, SignalName: "payment", SignalPayload: `{"paid":true}`},
 	}
 
-	cs := extractCompactionState(oldEvents)
+	cs, extractErr := extractCompactionState(oldEvents)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	reconstructed := buildFullHistoryFromCompaction(recentEvents, cs)
 
 	expectedLen := len(oldEvents) + len(recentEvents)
@@ -356,7 +377,10 @@ func TestCompactionRoundTripThenReplay(t *testing.T) {
 	}
 
 	// Compact all events (simulating a fully compacted workflow) and reconstruct.
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if len(cs.Events) != len(events) {
 		t.Fatalf("expected %d compacted events, got %d", len(events), len(cs.Events))
 	}
@@ -402,6 +426,10 @@ func (m *mockCompactStore) LoadEventHistory(ctx context.Context, workflowID stri
 	return m.events, nil
 }
 
+func (m *mockCompactStore) IsHistorySwept(ctx context.Context, workflowID string) (bool, error) {
+	return false, nil
+}
+
 func (m *mockCompactStore) CompactHistory(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error {
 	m.compactCount++
 	m.compactWorkflowID = workflowID
@@ -418,6 +446,12 @@ func (m *mockCompactStore) ClaimWorkflow(ctx context.Context, workerID string) (
 func (m *mockCompactStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
+
+// CountRunnableWorkflows: a double, so the honest answer is "I do not know".
+// Zero is what a store with nothing runnable returns, and the caller treats the
+// number as a floor, so a double reporting 0 never claims work exists that does
+// not. See IMPROVEMENT-PLAN 3.250.
+func (m *mockCompactStore) CountRunnableWorkflows(_ context.Context) (int, error) { return 0, nil }
 func (m *mockCompactStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
@@ -457,8 +491,8 @@ func (m *mockCompactStore) CheckCancellation(ctx context.Context, workflowID str
 func (m *mockCompactStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
 	return nil
 }
-func (m *mockCompactStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	return "", false, nil
+func (m *mockCompactStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
+	return nil
 }
 func (m *mockCompactStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error) {
 	return "", false, nil
@@ -469,19 +503,34 @@ func (m *mockCompactStore) StartChildWorkflow(ctx context.Context, parentID, def
 func (m *mockCompactStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error) {
 	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
-func (m *mockCompactStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
-	return "", false, nil
+func (m *mockCompactStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
+	return ChildOutcome{}, nil
 }
-func (m *mockCompactStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (m *mockCompactStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	return 0, nil
 }
 func (m *mockCompactStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
 	return "", nil
 }
+
+func (m *mockCompactStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	return map[string]string{}, nil
+}
 func (m *mockCompactStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
 	return nil, nil
 }
+
+// GetWorkflowByID returns a row rather than nil, because CompactWorkflowHistory
+// reads it to resolve the definition's max_history_length (cleat#889) and
+// treats nil as "deleted between candidate selection and now" -- a legitimate
+// production race, and a wrong answer for a mock whose whole premise is that
+// the workflow is there. LoadWorkflowConfig below returns 0, so every existing
+// test in this file keeps comparing against the global threshold exactly as
+// before.
 func (m *mockCompactStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) {
+	return &WorkflowInstance{ID: id, DefName: "mock-wf", DefVersion: 1, Status: "running"}, nil
+}
+func (m *mockCompactStore) GetTerminalRun(ctx context.Context, id string) (*WorkflowInstance, error) {
 	return nil, nil
 }
 func (m *mockCompactStore) CreateSchedule(ctx context.Context, s Schedule) error  { return nil }
@@ -491,10 +540,6 @@ func (m *mockCompactStore) SetScheduleEnabled(ctx context.Context, name string, 
 	return nil
 }
 func (m *mockCompactStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) { return nil, nil }
-func (m *mockCompactStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	return nil
-}
-
 func (m *mockCompactStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }
@@ -522,10 +567,10 @@ func (m *mockCompactStore) LoadCompactionState(ctx context.Context, workflowID s
 func (m *mockCompactStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	return nil
 }
-func (m *mockCompactStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockCompactStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	return nil
 }
-func (m *mockCompactStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockCompactStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	return nil
 }
 func (m *mockCompactStore) GetPromise(ctx context.Context, workflowID, promiseID string) (string, string, string, error) {
@@ -540,13 +585,15 @@ func (m *mockCompactStore) CreateUpdateRequest(ctx context.Context, workflowID, 
 func (m *mockCompactStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
 	return nil, nil
 }
-func (m *mockCompactStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (m *mockCompactStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	return nil
 }
 func (m *mockCompactStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
 	return false, nil
 }
-func (m *mockCompactStore) ReleaseConcurrencyKey(ctx context.Context, key string) error { return nil }
+func (m *mockCompactStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return true, nil
+}
 func (m *mockCompactStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
 	return nil
 }
@@ -597,6 +644,10 @@ func (m *mockCompactStore) CleanupMemorySamples(ctx context.Context, maxSamplesP
 func (m *mockCompactStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
+
+func (m *mockCompactStore) ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
 func (m *mockCompactStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string, priority int) (string, error) {
 	return "", nil
 }
@@ -606,9 +657,29 @@ func (m *mockCompactStore) FinalizeWorkflowSegment(ctx context.Context, runID, w
 func (m *mockCompactStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	return nil
 }
+
+func (m *mockCompactStore) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
+	return nil
+}
 func (m *mockCompactStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
+func (m *mockCompactStore) CountExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockCompactStore) CountExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockCompactStore) CountDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockCompactStore) CountCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
 func (m *mockCompactStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
@@ -1035,7 +1106,10 @@ func TestExtractCompactionState_WithOpenChildren(t *testing.T) {
 		{Step: 1, EventType: EventTypeChildWorkflow, ChildName: "child-b", ChildInput: `{"y":2}`, RunID: "run-b"},
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if len(cs.OpenChildren) != 2 {
 		t.Fatalf("expected 2 open children, got %d", len(cs.OpenChildren))
 	}
@@ -1067,7 +1141,10 @@ func TestExtractCompactionState_OpenChildrenClosed(t *testing.T) {
 		{Step: 2, EventType: EventTypeAwaitChild, RunID: "run-a", Response: `{"ok":true}`},
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if len(cs.OpenChildren) != 1 {
 		t.Fatalf("expected 1 open child (child-b), got %d", len(cs.OpenChildren))
 	}
@@ -1085,7 +1162,10 @@ func TestExtractCompactionState_AwaitAllChildrenResets(t *testing.T) {
 		{Step: 2, EventType: EventTypeAwaitAllChildren, Response: `[{"ok":true}]`},
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if len(cs.OpenChildren) != 0 {
 		t.Errorf("expected 0 open children after await_all, got %d", len(cs.OpenChildren))
 	}
@@ -1099,7 +1179,10 @@ func TestExtractCompactionState_WithPendingDefers(t *testing.T) {
 		{Step: 1, EventType: EventTypeDefer, DeferID: "d2", DeferDescription: "close connection"},
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if len(cs.PendingDefers) != 2 {
 		t.Fatalf("expected 2 pending defers, got %d", len(cs.PendingDefers))
 	}
@@ -1130,7 +1213,10 @@ func TestExtractCompactionState_SideEffectRoundTrip(t *testing.T) {
 		{Step: 1, EventType: EventTypeScopeAcquired, ScopeKey: "vo:order:123"},
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	reconstructed := buildFullHistoryFromCompaction(nil, cs)
 
 	if len(reconstructed) != len(events) {
@@ -1356,7 +1442,10 @@ func TestCompactionWithOpenChildrenRoundTrip(t *testing.T) {
 		// child-b is still open (no await or await_all for run-b)
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	if len(cs.OpenChildren) != 1 {
 		t.Fatalf("expected 1 open child (child-b), got %d", len(cs.OpenChildren))
 	}
@@ -1395,7 +1484,10 @@ func TestCompactionWithPendingSignals(t *testing.T) {
 		{Step: 2, EventType: EventTypeAwaitSignals, SignalNames: "approval", TimeoutMs: 60000},
 	}
 
-	cs := extractCompactionState(events)
+	cs, extractErr := extractCompactionState(events)
+	if extractErr != nil {
+		t.Fatalf("extractCompactionState: %v", extractErr)
+	}
 	reconstructed := buildFullHistoryFromCompaction(nil, cs)
 
 	if len(reconstructed) != len(events) {
@@ -1665,8 +1757,8 @@ func TestLoadCompactionStateWithOpenChildren(t *testing.T) {
 		t.Errorf("expected 3 compacted events, got %d", len(cs.Events))
 	}
 }
-func (m *mockCompactStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	return 0, nil
+func (m *mockCompactStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	return nil, nil
 }
 
 func (m *mockCompactStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) {
@@ -1679,8 +1771,8 @@ func (m *mockCompactStore) MoveToDeadLetterQueue(ctx context.Context, workflowID
 	return nil
 }
 func (m *mockCompactStore) RetryWorkflow(ctx context.Context, workflowID string) error { return nil }
-func (m *mockCompactStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	return "", false, nil
+func (m *mockCompactStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
+	return SignalDelivery{}, false, nil
 }
 func (m *mockCompactStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
 	return false, "", nil
@@ -1699,6 +1791,14 @@ func (m *mockCompactStore) IncrementEventCount(ctx context.Context, tx *sql.Tx, 
 }
 func (m *mockCompactStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
 	return 0, nil
+}
+
+// OriginalChildRunIDs returns nothing: no test using this double is about
+// cleat#1661's orphan check, and a double that invented children would make
+// the check fire on unrelated tests. Recorded as a choice rather than left as
+// another empty return.
+func (m *mockCompactStore) OriginalChildRunIDs(context.Context, string) ([]string, error) {
+	return nil, nil
 }
 func (m *mockCompactStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
 	return 0, nil
@@ -1817,4 +1917,27 @@ func TestCompactWorkflowHistory_NoRetryOnNonDeadlock(t *testing.T) {
 	if store.callCount != 1 {
 		t.Errorf("expected 1 compact call (no retries for non-deadlock), got %d", store.callCount)
 	}
+}
+
+func (_ *mockCompactStore) SetAllowedSignalCallers(_ context.Context, _ string, _ []string) error {
+	return nil
+}
+
+// GetChildCompletedAtMs satisfies the store interface. Added with #847, which
+// made PollChild derive its answer from the child's completion instant rather
+// than querying live. Returning ok=false means "never completed", which keeps
+// every existing test's PollChild answer at "running".
+func (m *mockCompactStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	return 0, false, nil
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (m *mockCompactStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	wfs, err := m.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
 }

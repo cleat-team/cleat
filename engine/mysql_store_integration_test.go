@@ -14,7 +14,6 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -437,210 +436,6 @@ func TestMySQLIntegration_DeadLetterAndRetry(t *testing.T) {
 	}
 }
 
-// 8.
-func TestMySQLIntegration_ClaimAndRelease(t *testing.T) {
-	s, teardown := mysqlIntegrationStore(t)
-	defer teardown()
-	ctx := context.Background()
-
-	_ = createReadyWorkflow(t, s, "integ-release-1")
-	wf := claimOne(t, s, "worker-1")
-
-	// Release with a future wake time (suspend).
-	nextWakeAt := time.Now().Add(30 * time.Minute)
-	if err := s.ReleaseWorkflow(ctx, wf.ID, "worker-1", wf.Generation, nextWakeAt); err != nil {
-		t.Fatalf("ReleaseWorkflow: %v", err)
-	}
-
-	stored, err := s.GetWorkflowByID(ctx, wf.ID)
-	if err != nil {
-		t.Fatalf("GetWorkflowByID: %v", err)
-	}
-	if stored == nil {
-		t.Fatal("workflow not found after ReleaseWorkflow")
-	}
-	if stored.Status != "ready" {
-		t.Errorf("status = %q, want %q", stored.Status, "ready")
-	}
-	if stored.AssignedTo != "" {
-		t.Errorf("AssignedTo after release = %q, want empty", stored.AssignedTo)
-	}
-	if stored.NextWakeAt.Before(time.Now().Add(20 * time.Minute)) {
-		t.Errorf("NextWakeAt too early: %v (expected ~30m from now)", stored.NextWakeAt)
-	}
-	if stored.NextWakeAt.After(time.Now().Add(40 * time.Minute)) {
-		t.Errorf("NextWakeAt too late: %v (expected ~30m from now)", stored.NextWakeAt)
-	}
-}
-
-// TestMySQLIntegration_ClaimWorkflowsAcrossTenants proves the two halves of
-// ClaimWorkflowsAcrossTenants's contract on the shared-database shape it
-// actually widens (see its doc comment in mysql_lifecycle.go): the ordinary
-// claim stays scoped to one tenant, and the cross-tenant claim is not.
-func TestMySQLIntegration_ClaimWorkflowsAcrossTenants(t *testing.T) {
-	s, teardown := mysqlIntegrationStore(t)
-	defer teardown()
-	ctx := context.Background()
-
-	const otherTenant = "11111111-1111-1111-1111-111111111111"
-
-	deployTestDef(t, s, "test-workflow", 1)
-
-	// Both rows land in the one database mysqlIntegrationStore opens -- there
-	// is no MySQLStoreFactory here, so "tenant" is only ever the tenant_id
-	// column, which is exactly the shape this method's doc comment says it
-	// widens.
-	ownID, _, err := s.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", DefaultTenantUUID, 0)
-	if err != nil {
-		t.Fatalf("StartNewRun (own tenant): %v", err)
-	}
-	otherID, _, err := s.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "", otherTenant, 0)
-	if err != nil {
-		t.Fatalf("StartNewRun (other tenant): %v", err)
-	}
-
-	// s defaults to DefaultTenantUUID (NewMySQLStore's default), so the
-	// ordinary claim must see its own workflow and not the other tenant's,
-	// exactly like every other MySQLStore method's "AND tenant_id = ?".
-	scoped, err := s.ClaimWorkflows(ctx, "worker-scoped", 10)
-	if err != nil {
-		t.Fatalf("ClaimWorkflows: %v", err)
-	}
-	if len(scoped) != 1 || scoped[0].ID != ownID {
-		t.Fatalf("ClaimWorkflows claimed %d workflow(s) (%v), want exactly [%s]", len(scoped), claimedIDs(scoped), ownID)
-	}
-
-	// The cross-tenant claim has to reach the row ClaimWorkflows above could
-	// not: the other tenant's, still 'ready'.
-	across, err := s.ClaimWorkflowsAcrossTenants(ctx, "worker-cross", 10)
-	if err != nil {
-		t.Fatalf("ClaimWorkflowsAcrossTenants: %v", err)
-	}
-	if len(across) != 1 || across[0].ID != otherID {
-		t.Fatalf("ClaimWorkflowsAcrossTenants claimed %d workflow(s) (%v), want exactly [%s]", len(across), claimedIDs(across), otherID)
-	}
-	claimed := across[0]
-	if claimed.TenantID != otherTenant {
-		t.Errorf("claimed workflow TenantID = %q, want %q -- callers re-scope on this field, "+
-			"see CrossTenantClaimer's doc comment", claimed.TenantID, otherTenant)
-	}
-	if claimed.Status != "running" {
-		t.Errorf("claimed workflow status = %q, want %q", claimed.Status, "running")
-	}
-	if claimed.AssignedTo != "worker-cross" {
-		t.Errorf("claimed workflow AssignedTo = %q, want %q", claimed.AssignedTo, "worker-cross")
-	}
-
-	// Nothing left for either claim to find.
-	if more, err := s.ClaimWorkflowsAcrossTenants(ctx, "worker-cross-2", 10); err != nil {
-		t.Fatalf("ClaimWorkflowsAcrossTenants (drained): %v", err)
-	} else if len(more) != 0 {
-		t.Errorf("ClaimWorkflowsAcrossTenants on a drained queue returned %v, want none", claimedIDs(more))
-	}
-}
-
-// TestMySQLIntegration_CrossTenantClaimRefusedOnFactoryStore covers the other
-// topology: a store MySQLStoreFactory opened, whose connection points at one
-// tenant's own physical database.
-//
-// There, dropping the tenant_id predicate widens nothing -- the other tenants'
-// rows are in other databases, not filtered out of this one -- so the claim
-// would return one tenant's work and report that it had swept them all. That
-// is the failure ErrCrossTenantClaimUnsupported exists to make audible: the
-// worker does the same work either way, but it says which claim it ran.
-//
-// The two halves have to be tested together. A ClaimWorkflowsAcrossTenants
-// that refused unconditionally would satisfy the first half alone, and it
-// would also be wrong -- the shared-database deployment above is real, and
-// this method is the only thing that serves it.
-func TestMySQLIntegration_CrossTenantClaimRefusedOnFactoryStore(t *testing.T) {
-	s, teardown := mysqlIntegrationStore(t)
-	defer teardown()
-	ctx := context.Background()
-
-	factory := NewMySQLStoreFactory(s.db, mysqlTestBaseDSN(t))
-	defer factory.Close()
-
-	const tenant = "22222222-2222-2222-2222-222222222222"
-	opened, closer, err := factory.OpenStore(ctx, tenant)
-	if err != nil {
-		t.Fatalf("OpenStore: %v", err)
-	}
-	defer closer.Close()
-
-	xt, ok := opened.(CrossTenantClaimer)
-	if !ok {
-		t.Fatal("a factory-opened MySQL store does not implement CrossTenantClaimer, so the " +
-			"worker would never ask it and never learn the claim is unsupported here")
-	}
-	_, err = xt.ClaimWorkflowsAcrossTenants(ctx, "worker-factory", 10)
-	if !errors.Is(err, ErrCrossTenantClaimUnsupported) {
-		t.Fatalf("ClaimWorkflowsAcrossTenants on a per-tenant-database store returned %v, want "+
-			"ErrCrossTenantClaimUnsupported -- without it the worker believes it swept every "+
-			"tenant while it swept one, and nothing says otherwise", err)
-	}
-	// The message has to name the tenant, or an operator reading one line in a
-	// multi-tenant deployment cannot tell which store refused.
-	if !strings.Contains(err.Error(), tenant) {
-		t.Errorf("refusal does not name the tenant it is scoped to: %v", err)
-	}
-
-	// The other half: the same method on a store built directly, against one
-	// shared database, must NOT refuse -- it is the deployment shape the method
-	// exists for. TestMySQLIntegration_ClaimWorkflowsAcrossTenants asserts what
-	// it returns; this asserts only that the refusal is conditional.
-	if _, err := s.ClaimWorkflowsAcrossTenants(ctx, "worker-shared", 10); errors.Is(err, ErrCrossTenantClaimUnsupported) {
-		t.Error("a directly-built MySQL store refused the cross-tenant claim; the refusal is " +
-			"unconditional, which breaks the shared-database deployment it is meant to serve")
-	}
-}
-
-// TestMySQLIntegration_CrossTenantSchedulesRefusedOnFactoryStore is the
-// schedule half of the topology refusal, and it needs its own test rather than
-// riding on the claim's: the two are separate methods, and a store that
-// refuses the claim but silently answers the schedule read would report that
-// it had swept every tenant's schedules while sweeping one.
-//
-// Both halves together, for the same reason as the claim's: a method that
-// refused unconditionally would satisfy the first assertion and break the
-// shared-database deployment this exists to serve.
-func TestMySQLIntegration_CrossTenantSchedulesRefusedOnFactoryStore(t *testing.T) {
-	s, teardown := mysqlIntegrationStore(t)
-	defer teardown()
-	ctx := context.Background()
-
-	factory := NewMySQLStoreFactory(s.db, mysqlTestBaseDSN(t))
-	defer factory.Close()
-
-	const tenant = "33333333-3333-3333-3333-333333333333"
-	opened, closer, err := factory.OpenStore(ctx, tenant)
-	if err != nil {
-		t.Fatalf("OpenStore: %v", err)
-	}
-	defer closer.Close()
-
-	xt, ok := opened.(CrossTenantScheduleReader)
-	if !ok {
-		t.Fatal("a factory-opened MySQL store does not implement CrossTenantScheduleReader, so " +
-			"the worker would never ask it and never learn the read is unsupported here")
-	}
-	_, err = xt.GetDueSchedulesAcrossTenants(ctx)
-	if !errors.Is(err, ErrCrossTenantClaimUnsupported) {
-		t.Fatalf("GetDueSchedulesAcrossTenants on a per-tenant-database store returned %v, want "+
-			"ErrCrossTenantClaimUnsupported -- without it the worker believes every tenant's "+
-			"schedules will fire while only one tenant's can", err)
-	}
-	if !strings.Contains(err.Error(), tenant) {
-		t.Errorf("refusal does not name the tenant it is scoped to: %v", err)
-	}
-
-	// A store built directly, against one shared database, must NOT refuse.
-	if _, err := s.GetDueSchedulesAcrossTenants(ctx); errors.Is(err, ErrCrossTenantClaimUnsupported) {
-		t.Error("a directly-built MySQL store refused the cross-tenant schedule read; the refusal " +
-			"is unconditional, which breaks the shared-database deployment it is meant to serve")
-	}
-}
-
 // 9.
 func TestMySQLIntegration_ContinueAsNew(t *testing.T) {
 	s, teardown := mysqlIntegrationStore(t)
@@ -970,36 +765,6 @@ func TestMySQLIntegration_Heartbeat(t *testing.T) {
 	}
 }
 
-// 16.
-func TestMySQLIntegration_BatchHeartbeat(t *testing.T) {
-	s, teardown := mysqlIntegrationStore(t)
-	defer teardown()
-	ctx := context.Background()
-
-	// Create 3 workflows and claim them all with the same worker.
-	for i := 0; i < 3; i++ {
-		key := fmt.Sprintf("integ-batch-hb-%d", i)
-		createReadyWorkflow(t, s, key)
-	}
-
-	wfs, err := s.ClaimWorkflows(ctx, "batch-worker", 10)
-	if err != nil {
-		t.Fatalf("ClaimWorkflows: %v", err)
-	}
-	if len(wfs) < 3 {
-		t.Fatalf("ClaimWorkflows returned %d, want at least 3", len(wfs))
-	}
-
-	// BatchHeartbeat should update all running workflows assigned to this worker.
-	count, err := s.BatchHeartbeat(ctx, "batch-worker")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat: %v", err)
-	}
-	if count < 3 {
-		t.Errorf("BatchHeartbeat returned %d, want >= 3", count)
-	}
-}
-
 // 17.
 func TestMySQLIntegration_ReapStaleInstances(t *testing.T) {
 	s, teardown := mysqlIntegrationStore(t)
@@ -1011,7 +776,7 @@ func TestMySQLIntegration_ReapStaleInstances(t *testing.T) {
 
 	// Reap with a very short timeout -- should reclaim our workflow since no
 	// heartbeat was sent after claim.
-	reaped, err := s.ReapStaleInstances(ctx, 1*time.Nanosecond)
+	reaped, err := s.ReapStaleInstances(ctx, 1*time.Nanosecond, 0)
 	if err != nil {
 		t.Fatalf("ReapStaleInstances: %v", err)
 	}
@@ -1052,33 +817,33 @@ func TestMySQLIntegration_DeliverAndPollSignal(t *testing.T) {
 		t.Fatalf("DeliverSignal: %v", err)
 	}
 
-	gotPayload, found, err := s.PollSignal(ctx, runID, "my-signal")
+	got, found, err := s.PollSignal(ctx, runID, "my-signal")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
 	if !found {
 		t.Fatal("PollSignal: expected found=true")
 	}
-	if gotPayload != payload {
-		t.Errorf("PollSignal payload = %q, want %q", gotPayload, payload)
+	if got.Payload != payload {
+		t.Errorf("PollSignal payload = %q, want %q", got.Payload, payload)
 	}
 
 	// Polling again should return the payload as well (signals are not
 	// consumed on read for MySQL).
-	gotPayload2, found2, err := s.PollSignal(ctx, runID, "my-signal")
+	got2, found2, err := s.PollSignal(ctx, runID, "my-signal")
 	if err != nil {
 		t.Fatalf("PollSignal (second): %v", err)
 	}
 	if !found2 {
 		t.Fatal("PollSignal (second): expected found=true")
 	}
-	if gotPayload2 != payload {
-		t.Errorf("PollSignal (second) payload = %q, want %q", gotPayload2, payload)
+	if got2.Payload != payload {
+		t.Errorf("PollSignal (second) payload = %q, want %q", got2.Payload, payload)
 	}
 }
 
 // 19.
-func TestMySQLIntegration_PollAndClaimSignal(t *testing.T) {
+func TestMySQLIntegration_ConsumeSignal(t *testing.T) {
 	s, teardown := mysqlIntegrationStore(t)
 	defer teardown()
 	ctx := context.Background()
@@ -1090,25 +855,33 @@ func TestMySQLIntegration_PollAndClaimSignal(t *testing.T) {
 		t.Fatalf("DeliverSignal: %v", err)
 	}
 
-	// PollAndClaimSignal should find and atomically claim the signal.
-	gotPayload, found, err := s.PollAndClaimSignal(ctx, runID, "claim-signal")
+	got, found, err := s.PollSignal(ctx, runID, "claim-signal")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal: %v", err)
+		t.Fatalf("PollSignal: %v", err)
 	}
 	if !found {
-		t.Fatal("PollAndClaimSignal: expected found=true")
+		t.Fatal("PollSignal: expected found=true")
 	}
-	if gotPayload != payload {
-		t.Errorf("PollAndClaimSignal payload = %q, want %q", gotPayload, payload)
+	if got.Payload != payload {
+		t.Errorf("PollSignal payload = %q, want %q", got.Payload, payload)
 	}
 
-	// Second call should NOT find it — PollAndClaimSignal deletes the row.
-	_, found2, err := s.PollAndClaimSignal(ctx, runID, "claim-signal")
+	if err := s.ConsumeSignal(ctx, runID, got.ID); err != nil {
+		t.Fatalf("ConsumeSignal: %v", err)
+	}
+
+	// Second poll should NOT find it — ConsumeSignal deleted the row.
+	_, found2, err := s.PollSignal(ctx, runID, "claim-signal")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal (second): %v", err)
+		t.Fatalf("PollSignal (second): %v", err)
 	}
 	if found2 {
-		t.Fatal("PollAndClaimSignal (second): expected found=false (signal was consumed)")
+		t.Fatal("PollSignal (second): expected found=false (the delivery was consumed)")
+	}
+
+	// Consuming it again is the documented no-op, not an error.
+	if err := s.ConsumeSignal(ctx, runID, got.ID); err != nil {
+		t.Fatalf("ConsumeSignal on an id already gone must not error: %v", err)
 	}
 }
 
@@ -1196,7 +969,7 @@ func TestMySQLIntegration_CreateAndResolvePromise(t *testing.T) {
 	}
 
 	// Resolve the promise.
-	if err := s.ResolvePromise(ctx, runID, "promise-abc", `{"resolved":true}`); err != nil {
+	if err := s.ResolvePromise(ctx, "promise-abc", `{"resolved":true}`); err != nil {
 		t.Fatalf("ResolvePromise: %v", err)
 	}
 
@@ -1232,7 +1005,7 @@ func TestMySQLIntegration_CreateAndRejectPromise(t *testing.T) {
 	}
 
 	// Reject the promise.
-	if err := s.RejectPromise(ctx, runID, "promise-def", "something went wrong"); err != nil {
+	if err := s.RejectPromise(ctx, "promise-def", "something went wrong"); err != nil {
 		t.Fatalf("RejectPromise: %v", err)
 	}
 
@@ -1270,7 +1043,7 @@ func TestMySQLIntegration_ListPromises(t *testing.T) {
 	}
 
 	// Resolve the middle one.
-	if err := s.ResolvePromise(ctx, runID, "promise-1", `{"ok":true}`); err != nil {
+	if err := s.ResolvePromise(ctx, "promise-1", `{"ok":true}`); err != nil {
 		t.Fatalf("ResolvePromise: %v", err)
 	}
 
@@ -1451,7 +1224,7 @@ func TestMySQLIntegration_MarkVersionDeprecated(t *testing.T) {
 	if def == nil {
 		t.Fatal("GetWorkflowDef returned nil")
 	}
-	if !def.Deprecated {
+	if !def.Disabled() {
 		t.Error("expected Deprecated=true after MarkVersionDeprecated")
 	}
 
@@ -1467,7 +1240,7 @@ func TestMySQLIntegration_MarkVersionDeprecated(t *testing.T) {
 	if def == nil {
 		t.Fatal("GetWorkflowDef returned nil")
 	}
-	if def.Deprecated {
+	if def.Disabled() {
 		t.Error("expected Deprecated=false after MarkVersionDeprecated(false)")
 	}
 }
@@ -1656,7 +1429,7 @@ func TestMySQLIntegration_ConcurrencyKeys(t *testing.T) {
 	}
 
 	// Release the key.
-	if err := s.ReleaseConcurrencyKey(ctx, "my-key"); err != nil {
+	if _, err := s.ReleaseConcurrencyKey(ctx, "my-key", runID); err != nil {
 		t.Fatalf("ReleaseConcurrencyKey: %v", err)
 	}
 
@@ -1716,7 +1489,7 @@ func TestMySQLIntegration_UpdateRequests(t *testing.T) {
 	}
 
 	// Complete the update request.
-	if err := s.CompleteUpdateRequest(ctx, runID, "my-update", `{"result":"ok"}`, ""); err != nil {
+	if err := s.CompleteUpdateRequest(ctx, runID, pending[0].RequestID, `{"result":"ok"}`, ""); err != nil {
 		t.Fatalf("CompleteUpdateRequest: %v", err)
 	}
 
@@ -1746,7 +1519,6 @@ func TestMySQLIntegration_ScheduleLifecycle(t *testing.T) {
 		EntryPoint:     "main",
 		CronExpression: "*/5 * * * *",
 		Input:          json.RawMessage(`{"scheduled":true}`),
-		Enabled:        true,
 		NextRunAt:      time.Now().Add(-1 * time.Hour), // due now
 	}
 	if err := s.CreateSchedule(ctx, sched); err != nil {
@@ -1769,8 +1541,8 @@ func TestMySQLIntegration_ScheduleLifecycle(t *testing.T) {
 			if sc.DefName != "test-workflow" {
 				t.Errorf("DefName = %q, want %q", sc.DefName, "test-workflow")
 			}
-			if !sc.Enabled {
-				t.Error("Enabled should be true")
+			if sc.Disabled() {
+				t.Error("schedule should be live, but disabled_at is set")
 			}
 			break
 		}
@@ -1795,10 +1567,27 @@ func TestMySQLIntegration_ScheduleLifecycle(t *testing.T) {
 		t.Error("integ-test-schedule not included in GetDueSchedules")
 	}
 
-	// Update the next run time.
+	// Advance the next run time.
+	//
+	// ClaimDueSchedule, not UpdateScheduleNextRun: the latter is gone. It was
+	// the unfenced sibling of this compare-and-swap, superseded and never
+	// called by anything that ships.
+	var current time.Time
+	for _, sch := range due {
+		if sch.Name == "integ-test-schedule" {
+			current = sch.NextRunAt
+		}
+	}
+	if current.IsZero() {
+		t.Fatal("integ-test-schedule was not in the due list, so there is nothing to claim")
+	}
 	newNextRun := time.Now().Add(1 * time.Hour)
-	if err := s.UpdateScheduleNextRun(ctx, "integ-test-schedule", newNextRun); err != nil {
-		t.Fatalf("UpdateScheduleNextRun: %v", err)
+	claimed, err := s.ClaimDueSchedule(ctx, "integ-test-schedule", current, newNextRun, "")
+	if err != nil {
+		t.Fatalf("ClaimDueSchedule: %v", err)
+	}
+	if !claimed {
+		t.Fatal("ClaimDueSchedule did not claim a schedule it had just read as due")
 	}
 
 	// Disable the schedule.
@@ -1924,7 +1713,9 @@ func TestMySQLIntegration_ChildWorkflow(t *testing.T) {
 	}
 
 	// GetChildResult should return not completed.
-	result, completed, err := s.GetChildResult(ctx, childID)
+	_outcome, err := s.GetChildResult(ctx, childID)
+	result := _outcome.Result
+	completed := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -1958,7 +1749,9 @@ func TestMySQLIntegration_ChildWorkflow(t *testing.T) {
 	}
 
 	// Now GetChildResult should return completed.
-	result, completed, err = s.GetChildResult(ctx, childID)
+	_outcome, err = s.GetChildResult(ctx, childID)
+	result = _outcome.Result
+	completed = _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult (after completion): %v", err)
 	}

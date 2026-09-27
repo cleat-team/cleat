@@ -17,18 +17,32 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 	"golang.org/x/time/rate"
 )
 
 //go:embed web/dist
 var webDist embed.FS
 
-// signalMaxBodySize is the maximum request body size for signal and update
-// endpoints (64 KB). General endpoints use the configurable --max-body-size.
+// signalMaxBodySize is the maximum request body size for the signal, cancel
+// and update endpoints (64 KB). General endpoints use the configurable
+// --max-body-size.
+//
+// CANCEL was missing from this list until cleat#1332, and from the operator
+// documentation too, while being the site most likely to be hit in practice:
+// its field is a free-text `reason`. Three call sites, all in this file --
+// handleSignal, handleCancel, handleWorkflowUpdate.
+//
+// This is a compile-time const and --max-body-size is a flag, so raising the
+// flag does NOT move this. That is a real asymmetry rather than an oversight
+// to paper over, which is why bodyTooLargeFixed below says so in the response:
+// an operator who raised the flag and still gets a 413 here can otherwise only
+// discover it by reading this line.
 const signalMaxBodySize = 65536
 
 // globalWorker is set during worker startup for access from HTTP handlers
@@ -64,6 +78,12 @@ type apiServer struct {
 	maxBodySize int64
 	db          *sql.DB
 
+	// maxPriorityMagnitude mirrors --max-priority-magnitude and bounds the
+	// `priority` field of a start request in either direction. 0 means the
+	// operator set no bound. See engine.ValidatePriority for why the bound is
+	// symmetric about the default rather than a floor of zero.
+	maxPriorityMagnitude int
+
 	// factory opens per-tenant stores. Every backend already implements the
 	// tenant scoping this needs -- PostgreSQL sets cleat.tenant_id via
 	// set_config so its RLS policies apply, SQL Server hands out a per-tenant
@@ -81,6 +101,58 @@ type apiServer struct {
 	// attempt and is refused; with auth off, there is only ever one tenant and
 	// the default-tenant store is correct. See storeFor.
 	requireAuth bool
+
+	// plugins and spa are the two handlers only the shipped binary has: the
+	// plugin discovery endpoint closes over the loaded plugin list, and the
+	// SPA serves the embedded web/dist. Both are nil in tests, and
+	// registerRoutes skips a nil one.
+	//
+	// They are fields rather than registerRoutes parameters so that there is
+	// one route table with one signature. The reason that matters is what this
+	// pair of fields replaced: main() used to build its own mux inline and
+	// registerRoutes was reached only from StartAPIServer, which nothing but
+	// tests called. Two tables, one shipped and one tested, and the tested one
+	// was the one with the instance and admin routes on it.
+	plugins http.Handler
+	spa     http.Handler
+
+	// streamHub is the worker-local live tail for plugin stream chunks, shared
+	// with the engines this worker builds. Nil when no worker is attached, in
+	// which case /stream still serves event_history and says the tail is
+	// absent rather than failing. cleat#1572.
+	streamHub *engine.StreamHub
+
+	// streamPollReaders counts readers currently following a run from
+	// event_history rather than from the hub, and maxStreamPollReaders is what
+	// they are counted against. cleat#1639.
+	//
+	// A SEPARATE BUDGET FROM --max-stream-readers, because the two bound
+	// different resources and one number does not fit both. A hub subscriber
+	// costs a buffer and a goroutine on this worker and no database work at
+	// all; a poll reader costs no buffer and a steady query rate -- four round
+	// trips per tick on PostgreSQL, of which one carries data. Sizing the
+	// second against the first would either starve readers this worker could
+	// serve for free or admit a query rate its database cannot take.
+	//
+	// Non-positive means unlimited, which is for tests rather than for a
+	// worker -- the same convention, and the same reason, as NewStreamHub's.
+	streamPollReaders    atomic.Int64
+	maxStreamPollReaders int
+
+	// streamPollInterval is the base gap between two reads of a followed run's
+	// chunks. Zero means defaultStreamPollInterval.
+	streamPollInterval time.Duration
+
+	// streamStatusInterval is how often a followed run's STATUS is read, as
+	// opposed to its chunks. Zero means streamHeartbeat, which is what the live
+	// path's ticker already pays and is the reason there is no flag for it.
+	//
+	// It is a field rather than a constant because it bounds a real latency --
+	// how long after a run ends WITHOUT a final chunk its readers are released
+	// -- and a test that asserts that behaviour against a 15s constant takes
+	// 15s to do it. A deployment that wants to differ can, but nothing here
+	// argues it should.
+	streamStatusInterval time.Duration
 }
 
 // errNoTenant is returned by storeFor when a request carries no authenticated
@@ -122,10 +194,23 @@ func (s *apiServer) storeFor(r *http.Request) (engine.WorkflowStore, error) {
 		return nil, fmt.Errorf("no store factory configured, cannot scope request to tenant %s", tid)
 	}
 
-	st, _, err := s.factory.OpenStore(r.Context(), tid.String(), s.taskQueues...)
+	st, lease, err := s.factory.OpenStore(r.Context(), tid.String(), s.taskQueues...)
 	if err != nil {
 		return nil, fmt.Errorf("open store for tenant %s: %w", tid, err)
 	}
+	// THE LEASE IS RELEASED WHEN THE REQUEST ENDS, not when this returns.
+	//
+	// On MySQL and SQL Server that closer holds the tenant's connection pool
+	// open against the reaper (engine.TenantPoolReaper), and the handler is
+	// about to use the store. Releasing here would leave it unleased for the
+	// whole request; releasing in the caller would mean a release at each of
+	// the thirty-odd scopedStore call sites, which is exactly the kind of
+	// bookkeeping scopedStore exists so that nobody has to remember.
+	//
+	// net/http cancels the request context when ServeHTTP returns (or when the
+	// client disconnects first), so AfterFunc gives request scope exactly, in
+	// one place, and cannot be forgotten at a call site.
+	context.AfterFunc(r.Context(), func() { _ = lease.Close() })
 	return st, nil
 }
 
@@ -174,26 +259,236 @@ func (s *apiServer) writeError(w http.ResponseWriter, status int, msg string) {
 	s.writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func (s *apiServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
-	stale := s.worker.healthTracker.staleLoops()
-	if len(stale) > 0 {
-		s.writeJSON(w, 503, map[string]any{
-			"ok":          false,
-			"stale_loops": stale,
-			"reason":      "background_loop_stuck",
-		})
-		return
+// bodyTooLargeConfigured and bodyTooLargeFixed write the 413 for an oversized
+// request body, naming the limit that was exceeded and which knob moves it.
+//
+// Both said only "request body too large" until cleat#1332. TWO different
+// ceilings are in play on this server -- the configurable --max-body-size and
+// the fixed signalMaxBodySize -- and a caller could not tell from the response
+// which one it had hit, what its value was, or whether anything they control
+// would change it. The worst case is not the missing number: it is an operator
+// who raises --max-body-size, still gets 413 from /signal, and has no reason
+// to suspect that endpoint does not use the flag.
+//
+// Two functions rather than one taking a description, so the choice of limit
+// and the sentence describing it cannot drift apart at a call site. Getting
+// that pairing wrong would be worse than saying nothing, because a caller who
+// learns the body names the knob will believe it.
+// bodyLimit is a request-body ceiling together with the sentence that tells a
+// client how to change it.
+//
+// A type rather than an int64 because the second half is the part that makes a
+// 413 actionable -- cleat#1332 -- and there are three different answers: a
+// flag, a constant that the flag deliberately does not move, and the
+// definition upload's own ceiling. A bare number in the message leaves the
+// caller to guess which knob applies.
+type bodyLimit struct {
+	max int64
+	// help completes "request body too large: the limit is N bytes, <help>".
+	help string
+}
+
+// definitionMaxBodySize is the ceiling on a workflow definition upload.
+//
+// Named because cleat#1332's message has to name the thing that sets the
+// limit, and this was an inline 10*1024*1024 with no name anywhere -- not in
+// the flags, not in the docs, and not in the 400 it used to produce.
+const definitionMaxBodySize int64 = 10 * 1024 * 1024
+
+// terminateMaxBodySize is the ceiling on a dead-letter terminate's reason.
+// Also previously an unnamed inline literal (int64(1<<10)).
+const terminateMaxBodySize int64 = 1 << 10
+
+func (s *apiServer) configuredBodyLimit() bodyLimit {
+	return bodyLimit{s.maxBodySize, "set by --max-body-size"}
+}
+
+func signalBodyLimit() bodyLimit {
+	return bodyLimit{int64(signalMaxBodySize), "fixed for the signal, cancel and " +
+		"update endpoints and not changed by --max-body-size"}
+}
+
+func definitionBodyLimit() bodyLimit {
+	return bodyLimit{definitionMaxBodySize, "fixed for the definition upload endpoint and " +
+		"not changed by --max-body-size"}
+}
+
+func terminateBodyLimit() bodyLimit {
+	return bodyLimit{terminateMaxBodySize, "fixed for the dead-letter terminate endpoint and " +
+		"not changed by --max-body-size"}
+}
+
+// decodeJSONBody bounds the request body, decodes it into dst, and writes the
+// response itself when either fails. It reports whether the caller should
+// carry on.
+//
+// ONE FUNCTION BECAUSE SIXTEEN COPIES DRIFTED. Every handler bounded its body
+// and then hand-wrote the translation from *http.MaxBytesError to a status.
+// Seven of the sixteen never wrote the *http.MaxBytesError arm at all, so an
+// oversized body came back as
+//
+//	400 {"error":"invalid JSON: http: request body too large"}
+//
+// -- a status saying the body was malformed, on a body that was never read,
+// with the real reason buried in a string asserting the opposite. Among the
+// seven was the WASM upload, which is the most legitimate 413 in the API and
+// which additionally said "body too large" under a 400, contradicting itself
+// in one response. cleat#1338.
+//
+// Seven more copies of the arm would have left the eighth handler free to make
+// the same omission. TestEveryBoundedBodyGoesThroughTheHelper fails if a
+// MaxBytesReader call appears outside this function.
+func (s *apiServer) decodeJSONBody(w http.ResponseWriter, r *http.Request, lim bodyLimit, dst any) bool {
+	return s.decodeBody(w, r, lim, dst, false)
+}
+
+// decodeOptionalJSONBody is decodeJSONBody where an EMPTY body is a supported
+// call rather than a malformed one.
+//
+// Only the dead-letter terminate needs it: a terminate with no reason is
+// legitimate and TestHandleDeadLetterTerminate_NoBody has asserted 200 for a
+// nil body since before that handler had any error handling at all. http.NoBody
+// decodes to exactly io.EOF; a TRUNCATED body is io.ErrUnexpectedEOF, which
+// errors.Is(err, io.EOF) does not match -- cleat#1337 turns on those two being
+// distinguishable, so the carve-out is for io.EOF only and stays that way.
+func (s *apiServer) decodeOptionalJSONBody(w http.ResponseWriter, r *http.Request, lim bodyLimit, dst any) bool {
+	return s.decodeBody(w, r, lim, dst, true)
+}
+
+// readBody bounds the request body and returns it unparsed, writing the
+// response itself when the bound is exceeded.
+//
+// For the one endpoint that takes an opaque payload rather than JSON. It
+// shares the bound and the 413 translation with decodeJSONBody and nothing
+// else -- parsing that body would change what the signal carries.
+func (s *apiServer) readBody(w http.ResponseWriter, r *http.Request, lim bodyLimit) ([]byte, bool) {
+	if r.Body == nil {
+		return nil, true
 	}
-	if s.worker.memoryController != nil && s.worker.memoryController.Pressure() > 0 {
-		s.writeJSON(w, 200, map[string]any{
-			"ok":       true,
-			"degraded": true,
-			"reason":   "memory_pressure",
-			"pressure": s.worker.memoryController.Pressure(),
-		})
-		return
+	r.Body = http.MaxBytesReader(w, r.Body, lim.max)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			s.writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf(
+				"request body too large: the limit is %d bytes, %s", lim.max, lim.help))
+			return nil, false
+		}
+		s.writeError(w, 400, "failed to read request body")
+		return nil, false
 	}
-	s.writeJSON(w, 200, map[string]bool{"ok": true})
+	return body, true
+}
+
+func (s *apiServer) decodeBody(w http.ResponseWriter, r *http.Request, lim bodyLimit, dst any, allowEmpty bool) bool {
+	if r.Body == nil {
+		return true
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, lim.max)
+	err := json.NewDecoder(r.Body).Decode(dst)
+	switch {
+	case err == nil:
+		return true
+	case allowEmpty && errors.Is(err, io.EOF):
+		return true
+	}
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		s.writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf(
+			"request body too large: the limit is %d bytes, %s", lim.max, lim.help))
+		return false
+	}
+	s.writeError(w, 400, "invalid JSON: "+err.Error())
+	return false
+}
+
+// unhealthyPlugins returns, by plugin name, the message of every plugin whose Health() last reported
+// a problem. It reads a cache: /healthz is unauthenticated and polled by every kubelet and load
+// balancer, and Health() is the plugin's own code (pagerdutyalert's runs a cross-tenant SELECT), so
+// running it per request would let an anonymous caller drive database load and tie /healthz latency to
+// the plugin pool. pluginHealthLoop fills the cache off the request path. cleat#2168.
+func (w *Worker) unhealthyPlugins() map[string]string {
+	p := w.pluginHealth.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+const pluginHealthInterval = 10 * time.Second
+
+// pluginHealthCallTimeout is a variable so a test can shorten it.
+var pluginHealthCallTimeout = 5 * time.Second
+
+// refreshPluginHealth asks every plugin that implements plugin.HasHealth, and stores the answer.
+// A plugin whose Init failed (!Healthy) is not asked: its state is not one Health() can describe,
+// and it is already reported through Error. A call that does not answer within
+// pluginHealthCallTimeout, or whose previous call is still running, is UNKNOWN: it keeps the last
+// answer rather than degrading the worker on a slow answer or leaking a goroutine per tick.
+func (w *Worker) refreshPluginHealth() {
+	out := map[string]string{}
+	prev := w.pluginHealth.Load()
+	for _, lp := range w.plugList {
+		if lp == nil || lp.Plugin == nil || !lp.Healthy {
+			continue
+		}
+		h, ok := lp.Plugin.(plugin.HasHealth)
+		if !ok {
+			continue
+		}
+		name := lp.Plugin.Info().Name
+		answered, err := w.callPluginHealth(name, h)
+		switch {
+		case !answered:
+			if prev != nil {
+				if msg, had := (*prev)[name]; had {
+					out[name] = msg
+				}
+			}
+		case err != nil:
+			out[name] = err.Error()
+		}
+	}
+	w.pluginHealth.Store(&out)
+}
+
+// callPluginHealth runs h.Health() on its own goroutine so a hung one cannot stall the refresh.
+func (w *Worker) callPluginHealth(name string, h plugin.HasHealth) (answered bool, err error) {
+	if _, running := w.pluginHealthRunning.LoadOrStore(name, struct{}{}); running {
+		return false, nil
+	}
+	res := make(chan error, 1)
+	go func() {
+		defer w.pluginHealthRunning.Delete(name)
+		plugin.RecoverGoroutine(name, nil, func() { res <- h.Health() })
+	}()
+	select {
+	case err := <-res:
+		return true, err
+	case <-time.After(pluginHealthCallTimeout):
+		w.logger.WarnContext(w.ctx, "plugin Health() did not answer in time; keeping its last reported state",
+			"worker_id", w.id, "plugin", name, "timeout", pluginHealthCallTimeout)
+		return false, nil
+	}
+}
+
+// pluginHealthLoop refreshes the cache every pluginHealthInterval, starting immediately.
+func (w *Worker) pluginHealthLoop() {
+	defer w.wg.Done()
+	w.healthTracker.setInterval("plugin_health", pluginHealthInterval)
+	w.refreshPluginHealth()
+	w.healthTracker.recordRun("plugin_health")
+	ticker := time.NewTicker(pluginHealthInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-w.getLoopCtx("plugin_health").Done():
+			return
+		case <-ticker.C:
+			w.healthTracker.recordRun("plugin_health")
+			w.refreshPluginHealth()
+		}
+	}
 }
 
 // handleDrain handles POST and GET /api/admin/drain for graceful worker drain.
@@ -239,11 +534,10 @@ func (s *apiServer) handleDrainStatus(w http.ResponseWriter, r *http.Request) {
 		"in_flight": count,
 	}
 
+	// READ-ONLY. This used to close the drain channel and cancel the worker when the drain was done, so a
+	// drain only completed if something polled it, and a monitor polling the status stopped a worker that
+	// had been asked to drain (cleat#2285). The dispatch loop and gracefulShutdown complete the drain now.
 	if draining && count == 0 {
-		s.worker.drainOnce.Do(func() {
-			close(s.worker.drainCh)
-			s.worker.cancel()
-		})
 		resp["complete"] = true
 	}
 
@@ -264,15 +558,78 @@ func (s *apiServer) handleWorkflowsList(w http.ResponseWriter, r *http.Request) 
 	filter := engine.WorkflowFilter{
 		Status:        q.Get("status"),
 		InputContains: q.Get("input_contains"),
-		ErrorContains: q.Get("error_contains"),
-		Search:        q.Get("search"),
-		Limit:         100,
+		// result_contains is the counterpart to input_contains. Both are
+		// unindexed payload scans; `search` no longer covers them, so the
+		// expensive question is now asked explicitly instead of being hidden
+		// inside the cheap one.
+		ResultContains: q.Get("result_contains"),
+		ErrorContains:  q.Get("error_contains"),
+		Search:         q.Get("search"),
+		DefName:        q.Get("def_name"),
+		ErrorCode:      q.Get("error_code"),
+		IDPrefix:       q.Get("id_prefix"),
+		// cleat#1172 measured this parameter being ACCEPTED and IGNORED:
+		// `?concurrency_key=NONSENSE-XYZ` returned the same rows as the real
+		// key and as no filter at all. A parameter that is read and discarded
+		// is worse than one that 400s, because the caller reads the result as
+		// an answer.
+		ConcurrencyKey: q.Get("concurrency_key"),
+	}
+
+	// Paging, mirroring handleGetInstanceEvents: both parameters read from the
+	// query, a server ceiling applied rather than assumed, and the total sent
+	// as a header.
+	//
+	// Before this, Limit was hard-coded to 100 and Offset was never read, so a
+	// tenant with more than 100 workflows saw 100 of them and nothing in the
+	// response distinguished that from having exactly 100 (cleat#1182). A cap
+	// pretending to be a default is worse than a small cap.
+	filter.Limit = 100
+	if v, err := strconv.Atoi(q.Get("limit")); err == nil && v > 0 {
+		filter.Limit = v
+	}
+	if filter.Limit > 1000 {
+		filter.Limit = 1000
+	}
+	if v, err := strconv.Atoi(q.Get("offset")); err == nil && v >= 0 {
+		filter.Offset = v
+	}
+
+	// A malformed time is refused rather than ignored. Dropping it would widen
+	// the window silently, which for a time-bounded query means returning rows
+	// the caller asked not to see.
+	for _, tf := range []struct {
+		param string
+		dst   *time.Time
+	}{
+		{"started_after", &filter.StartedAfter},
+		{"started_before", &filter.StartedBefore},
+	} {
+		raw := q.Get(tf.param)
+		if raw == "" {
+			continue
+		}
+		t, tErr := time.Parse(time.RFC3339, raw)
+		if tErr != nil {
+			s.writeError(w, 400, fmt.Sprintf("%s must be RFC3339, e.g. 2026-09-10T14:00:00Z: %v", tf.param, tErr))
+			return
+		}
+		*tf.dst = t
+	}
+
+	total, err := st.CountWorkflows(r.Context(), filter)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
 	}
 	workflows, err := st.ListWorkflows(r.Context(), filter)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
+	// Header rather than an envelope: the body stays a bare array, so no
+	// existing caller breaks. handleGetInstanceEvents established this shape.
+	w.Header().Set("X-Total-Count", strconv.Itoa(total))
 	if workflows == nil {
 		workflows = []engine.WorkflowInstance{}
 	}
@@ -313,9 +670,15 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 2 && parts[1] == "retry" && r.Method == http.MethodPost:
 		// POST /api/workflows/:id/retry
 		s.handleWorkflowRetry(w, r, id)
+	case len(parts) == 2 && parts[1] == "terminal" && r.Method == http.MethodGet:
+		// GET /api/workflows/:id/terminal
+		s.handleGetTerminalRun(w, r, id)
 	case len(parts) == 2 && parts[1] == "history" && r.Method == http.MethodGet:
 		// GET /api/workflows/:id/history
 		s.handleGetHistory(w, r, id)
+	case len(parts) == 2 && parts[1] == "stream" && r.Method == http.MethodGet:
+		// GET /api/workflows/:id/stream  -- SSE of plugin stream chunks
+		s.handleStreamWorkflow(w, r, id)
 	case len(parts) == 2 && parts[1] == "query" && r.Method == http.MethodGet:
 		// GET /api/workflows/:id/query?key=X
 		s.handleGetQueryState(w, r, id)
@@ -340,6 +703,30 @@ func (s *apiServer) handleWorkflows(w http.ResponseWriter, r *http.Request) {
 		} else {
 			s.writeError(w, 404, "not found")
 		}
+	case len(parts) == 2 && parts[1] == "routing" && r.Method == http.MethodGet:
+		// GET /api/workflows/:name/routing
+		s.handleListRoutingRules(w, r, id)
+	case len(parts) == 2 && parts[1] == "routing" && r.Method == http.MethodPost:
+		// POST /api/workflows/:name/routing
+		s.handleSetRoutingRule(w, r, id)
+	case len(parts) == 3 && parts[1] == "routing" && r.Method == http.MethodDelete:
+		// DELETE /api/workflows/:name/routing/:ruleID
+		s.handleRemoveRoutingRule(w, r, parts[2])
+	case len(parts) == 2 && parts[1] == "tags" && r.Method == http.MethodGet:
+		// GET /api/workflows/:name/tags
+		s.handleListWorkflowTags(w, r, id)
+	case len(parts) == 2 && parts[1] == "tags" && r.Method == http.MethodPut:
+		// PUT /api/workflows/:name/tags
+		s.handleSetWorkflowTag(w, r, id)
+	case len(parts) == 3 && parts[1] == "tags" && r.Method == http.MethodDelete:
+		// DELETE /api/workflows/:name/tags/:tag
+		s.handleRemoveWorkflowTag(w, r, id, parts[2])
+	case len(parts) == 2 && parts[1] == "allowed-signals" && r.Method == http.MethodGet:
+		// GET /api/workflows/:id/allowed-signals
+		s.handleGetAllowedSignals(w, r, id)
+	case len(parts) == 2 && parts[1] == "allowed-signals" && r.Method == http.MethodPut:
+		// PUT /api/workflows/:id/allowed-signals
+		s.handleSetAllowedSignals(w, r, id)
 	case len(parts) == 3 && parts[1] == "update" && r.Method == http.MethodPost:
 		// POST /api/workflows/:id/update/:name
 		s.handleWorkflowUpdate(w, r, id, parts[2])
@@ -366,6 +753,42 @@ func (s *apiServer) handleGetWorkflow(w http.ResponseWriter, r *http.Request, id
 
 	// Return full workflow info.
 	wf, err := st.GetWorkflowByID(r.Context(), id)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	if wf == nil {
+		s.writeError(w, 404, "workflow not found")
+		return
+	}
+	s.writeJSON(w, 200, wf)
+}
+
+// handleGetTerminalRun serves GET /api/workflows/:id/terminal -- the last run
+// in this id's ContinueAsNew chain AS OF NOW. cleat#887.
+//
+// The run it returns may still be 'running' with an empty result: "terminal"
+// names the end of the chain, not a terminal status, and while the workflow is
+// working the last recorded link is the one executing. A client must poll on
+// `status` rather than assume a 200 carries an outcome. This comment said
+// otherwise until #904, and a test believed it.
+//
+// A SEPARATE route rather than a `?follow=1` on the handler above. Both were on
+// the table; the sub-resource wins because the existing URL keeps returning
+// exactly the row it names. Four call sites and the admin dashboard read
+// through GetWorkflowByID, and a query parameter that changes which row comes
+// back is the same hazard as making the follow implicit -- it just moves the
+// surprise from "always" to "whenever someone sets the flag".
+//
+// A workflow that never continued is its own terminal run, so this is not an
+// error case for the overwhelming majority of ids -- it returns the same row
+// the plain GET does.
+func (s *apiServer) handleGetTerminalRun(w http.ResponseWriter, r *http.Request, id string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	wf, err := st.GetTerminalRun(r.Context(), id)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -406,21 +829,38 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		TenantID       string          `json:"tenant_id"`
 		Namespace      string          `json:"namespace"` // deprecated; use tenant_id
 		Priority       int             `json:"priority"`
+
+		// Per-run limit overrides (cleat#1187). Each is clamped to this
+		// tenant's setting and then to the operator's flag, so a value larger
+		// than either is honoured only up to the smaller -- a run may tighten
+		// its own bounds and never widen them.
+		//
+		// Milliseconds, matching tenant_settings' columns and the units the
+		// guest APIs already speak. Zero or absent means no override.
+		WasmInstanceTimeoutMs  int64 `json:"wasm_instance_timeout_ms"`
+		WasmWallClockCeilingMs int64 `json:"wasm_wall_clock_ceiling_ms"`
+		HostRetryBudgetMs      int64 `json:"host_retry_budget_ms"`
+
+		// MaxWorkflowDurationMs bounds the WHOLE execution rather than one
+		// invocation, which is what separates it from the three above
+		// (cleat#1117). Same clamping rule, same units.
+		MaxWorkflowDurationMs int64 `json:"max_workflow_duration_ms"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-			var maxErr *http.MaxBytesError
-			if errors.As(err, &maxErr) {
-				s.writeError(w, 413, "request body too large")
-				return
-			}
-			s.writeError(w, 400, "invalid JSON: "+err.Error())
-			return
-		}
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &input) {
+		return
 	}
 	if input.Input == nil {
 		input.Input = json.RawMessage("{}")
+	}
+
+	// Before the tenant is resolved and before any database work, because this
+	// is a pure check on the body: an out-of-range priority is wrong whether or
+	// not the workflow exists, and validating it after ListVersions would
+	// answer such a request with 404 for a name that is also unknown. Refused
+	// rather than clamped -- see engine.ValidatePriority.
+	if err := engine.ValidatePriority(input.Priority, s.maxPriorityMagnitude); err != nil {
+		s.writeError(w, 400, err.Error())
+		return
 	}
 
 	// Resolve tenant_id: prefer tenant_id, fall back to deprecated namespace.
@@ -451,6 +891,34 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		tenantID = engine.DefaultTenantUUID
 	}
 
+	// A suspended tenant may not start new work.
+	//
+	// 403, not 503: this is a decision about the caller rather than a
+	// condition of the server, and a retry will not help until an operator
+	// resumes the tenant. The draining and memory-pressure branches above are
+	// 503 for exactly the opposite reason.
+	//
+	// READS ARE NOT AFFECTED, deliberately. A tenant suspended for
+	// non-payment should still be able to see its own runs and history --
+	// blocking that punishes the wrong thing and makes the state harder to
+	// reason about, not easier.
+	//
+	// Costs one primary-key lookup on a small table per start, next to the
+	// ListVersions call below that every start already makes.
+	if susp, ok := st.(engine.TenantSuspensionReader); ok {
+		suspended, serr := susp.IsTenantSuspended(r.Context(), tenantID)
+		if serr != nil {
+			s.writeError(w, 500, serr.Error())
+			return
+		}
+		if suspended {
+			s.writeError(w, http.StatusForbidden,
+				"tenant is suspended; no new workflows may be started. "+
+					"Runs already executing finish normally, and reads are unaffected.")
+			return
+		}
+	}
+
 	// Find the latest version of this workflow.
 	versions, err := st.ListVersions(r.Context(), name)
 	if err != nil {
@@ -474,15 +942,43 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		)
 	}
 
-	// Inject entry point into input if provided.
-	in := input.Input
-	if input.EntryPoint != "" {
-		var originalInput map[string]any
-		json.Unmarshal(input.Input, &originalInput)
-		in, _ = json.Marshal(map[string]any{
-			"input":         originalInput,
-			"__entry_point": input.EntryPoint,
-		})
+	// Refuse a deprecated version, cleat#889.
+	//
+	// Deprecation was already enforced for CHILD workflows (cmd/cleat/main.go:
+	// "child workflow %q has no non-deprecated versions deployed") and for
+	// plugins, but not here -- so a version could be marked deprecated and
+	// still started by any API caller, which is the one path an operator
+	// deprecating a version is actually trying to close.
+	//
+	// AFTER the routing block on purpose. A routing rule names a version
+	// explicitly, so it can select a deprecated one; checking before would let
+	// exactly the case an operator most wants refused through. The check is on
+	// targetVersion, whatever chose it.
+	//
+	// 409, not 404: the definition exists and the caller is not wrong about
+	// its name. This matches how a stale generation is refused on the admin
+	// API -- the request is well-formed and the state says no.
+	ok, vErr := st.ValidateVersion(r.Context(), name, targetVersion)
+	if vErr != nil {
+		s.writeError(w, 500, vErr.Error())
+		return
+	}
+	if !ok {
+		s.writeError(w, 409, fmt.Sprintf(
+			"version %d of %q is deprecated and cannot be started", targetVersion, name))
+		return
+	}
+
+	// Inject entry point into input if provided. plugin.MergeEntryPoint is the
+	// one place this flat-merge shape is implemented -- cleat#2108 found this
+	// handler WRAPPING instead of merging, and cleat#2114 gave the
+	// event-triggers plugin's start path the same job, so it is a shared
+	// helper rather than a second copy free to drift the way #2108's did.
+	// See its doc comment for why the shape matters.
+	in, err := plugin.MergeEntryPoint(input.Input, input.EntryPoint)
+	if err != nil {
+		s.writeError(w, 400, err.Error())
+		return
 	}
 
 	// Support Concurrency-Key header or JSON body field (Feature 5).
@@ -495,13 +991,156 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 	idempotencyKey := r.Header.Get("Idempotency-Key")
 	// Redact sensitive fields in the input before storing.
 	in = json.RawMessage(engine.Redact(string(in)))
-	runID, alreadyExisted, err := st.StartNewRun(r.Context(), "", name, targetVersion, in, idempotencyKey, tenantID, input.Priority)
+	// The key is recorded BY THE INSERT when the store can do it, so the run is
+	// never claimable-without-its-key even for an instant (cleat#1186). Stores
+	// that cannot fall through to the plain StartNewRun and keep the old
+	// acquire-or-refuse behaviour below.
+	var runID string
+	var alreadyExisted bool
+	keyRecorded := false
+	//
+	// A NEGATIVE value is refused rather than clamped. Zero already means "no
+	// override", so a negative cannot be expressed as a tightening at all --
+	// and silently treating it as "unset" would answer a caller who asked for
+	// something impossible with a run bounded by someone else's limits.
+	if input.WasmInstanceTimeoutMs < 0 || input.WasmWallClockCeilingMs < 0 || input.HostRetryBudgetMs < 0 ||
+		input.MaxWorkflowDurationMs < 0 {
+		s.writeError(w, 400, "per-run limit overrides must be positive milliseconds; 0 or absent means no override")
+		return
+	}
+	startOpts := engine.StartOptions{
+		ConcurrencyKey: concurrencyKey,
+		RunLimits: engine.TenantSettings{
+			WasmInstanceTimeout:  time.Duration(input.WasmInstanceTimeoutMs) * time.Millisecond,
+			WasmWallClockCeiling: time.Duration(input.WasmWallClockCeilingMs) * time.Millisecond,
+			HostRetryBudget:      time.Duration(input.HostRetryBudgetMs) * time.Millisecond,
+			MaxWorkflowDuration:  time.Duration(input.MaxWorkflowDurationMs) * time.Millisecond,
+		},
+	}
+	if starter, ok := st.(interface {
+		StartNewRunWithOptions(context.Context, string, string, int, json.RawMessage, string, string, int, engine.StartOptions) (string, bool, error)
+	}); ok && startOpts != (engine.StartOptions{}) {
+		runID, alreadyExisted, err = starter.StartNewRunWithOptions(r.Context(), "", name, targetVersion, in, idempotencyKey, tenantID, input.Priority, startOpts)
+		keyRecorded = err == nil && concurrencyKey != ""
+	} else {
+		runID, alreadyExisted, err = st.StartNewRun(r.Context(), "", name, targetVersion, in, idempotencyKey, tenantID, input.Priority)
+	}
 	if err != nil {
-		s.writeError(w, 500, err.Error())
+		// A rejected idempotency key is a CLIENT error and was reported as a
+		// server fault (cleat#1170, and cleat#832's shape). 409: the request
+		// conflicts with state that already exists -- the same status
+		// writeScheduleError gives ErrScheduleExists, which is the same
+		// situation. The `detail` field names the case so a client can branch
+		// without parsing prose.
+		switch {
+		case errors.Is(err, engine.ErrIdempotencyKeyDefMismatch):
+			s.writeJSON(w, 409, map[string]string{
+				"error":  err.Error(),
+				"detail": "idempotency_key_definition_mismatch",
+			})
+		case errors.Is(err, engine.ErrIdempotencyKeyInputMismatch):
+			s.writeJSON(w, 409, map[string]string{
+				"error":  err.Error(),
+				"detail": "idempotency_key_input_mismatch",
+			})
+		default:
+			s.writeError(w, 500, err.Error())
+		}
 		return
 	}
 	if alreadyExisted {
-		s.writeJSON(w, 200, map[string]string{"workflow_id": runID, "already_started": "true"})
+		// Say what became of the winner. cleat#1151.
+		//
+		// The point of an idempotency key is to make a retry safe when the
+		// caller does not know whether the first attempt landed -- and on
+		// being told `already_started` the right next action differs: wait
+		// for a winner that has not finished, fetch a finished one's result,
+		// surface a failed one rather than wait for a result that will never
+		// improve. These answers were byte-identical, so every caller needed
+		// a second request to tell them apart and one that skipped it was
+		// wrong.
+		//
+		// BRANCH ON TERMINAL vs NON-TERMINAL, NOT ON `running` (cleat#1325).
+		// `status` is workflow_instances.status copied verbatim -- see
+		// docs/reference/workflow-lifecycle.md for the full table -- and this
+		// comment used to state the contract as a three-way `running` / `done`
+		// / `failed` decision. That named the WRONG non-terminal value. A
+		// workflow parked in a durable sleep is `ready`, not `running`: the
+		// worker finalizes a suspending segment with finalStatus "ready" and a
+		// next_wake_at, which is the documented model and was measured at
+		// twenty consecutive `ready` samples across an 8s DurableSleepMs,
+		// none of them `running`.
+		//
+		// So `ready` is the value a retrying caller MOST OFTEN sees -- any
+		// workflow that sleeps, awaits a child, waits on a signal or backs off
+		// a retry is `ready` for nearly all of its life, and `running` covers
+		// only the slices when a worker holds it. The three-way table had no
+		// branch for the common case.
+		//
+		//	terminal (done, failed, terminated, dead_lettered)
+		//	    -> the outcome is final; fetch it or surface it
+		//	non-terminal (ready, running, terminating)
+		//	    -> still outstanding; poll or wait. `ready` here means either
+		//	       "not yet claimed" or "sleeping until next_wake_at", and
+		//	       next_wake_at is what distinguishes them.
+		//	unknown
+		//	    -> the winner could not be read; see below
+		//
+		// READ FROM THE RUN, not from idempotency_keys.error_msg. That column
+		// is written at start time and has no production reader; the run row
+		// is written at failure time and is the live truth. Two sources for
+		// one fact is the shape cleat#1213 was -- GetChildResult and
+		// GetChildCount holding two definitions of "terminal" forty lines
+		// apart, only one of them deciding anything.
+		//
+		// THE ORIGINAL RESPONSE PLUS A FLAG, which is cleat#1169's policy
+		// folding the shape this comment used to say it would fold later.
+		//
+		// `id`, not `workflow_id`: the original answered `{"id":X}` and the
+		// duplicate answered `{"workflow_id":X}`, so a caller reading only
+		// `id` got nothing from a deduplicated response and concluded its
+		// retry had started a SECOND workflow. `already_started` is gone; the
+		// standard flag says the same thing in the same place on every
+		// work-creating endpoint.
+		//
+		// The outcome fields below are a SUPERSET of the original response,
+		// not a byte-for-byte replay, and that is deliberate: the original
+		// `{"id":X}` was written before the workflow had done anything, so
+		// replaying it exactly would discard what cleat#1151 and cleat#1325
+		// added. "Return the original result" is about the shape a caller has
+		// to parse, not about withholding what is now known.
+		resp := withReplayFlag(map[string]any{
+			"id": runID,
+			// Stated, not implied by an absent field: a caller branching on
+			// status must be able to tell "I cannot tell you" from "I forgot
+			// to tell you", and an omitted key reads as the second.
+			"status": "unknown",
+		}, true)
+		// A failed lookup leaves status "unknown" rather than failing the
+		// request. The duplicate WAS correctly recognised and workflow_id is
+		// valid; turning that into a 500 because a secondary read failed
+		// would lose the answer the caller actually asked for.
+		//
+		// The winner being GONE is not an error and is newly reachable:
+		// cleat#1264 moved key cleanup onto expires_at on all three dialects
+		// and cleat#1258 made retention delete the key with the workflow, so
+		// a key can now outlive the run it names.
+		if wf, lookupErr := st.GetWorkflowByID(r.Context(), runID); lookupErr == nil && wf != nil {
+			resp["status"] = wf.Status
+			// Only when non-empty. An empty `error` on a success is the
+			// ambiguity cleat#1115 was: a failure indistinguishable from a
+			// result nobody wrote.
+			if wf.Error != "" {
+				resp["error"] = wf.Error
+			}
+			if wf.ErrorCode != "" {
+				resp["error_code"] = wf.ErrorCode
+			}
+		}
+		// 201, the status the ORIGINAL call returned. The 200/201 split used
+		// to be the duplicate signal; the flag carries it now, so the status
+		// can go back to describing the resource rather than the retry.
+		s.writeJSON(w, 201, resp)
 		return
 	}
 
@@ -512,8 +1151,19 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	// If concurrency key is specified, try to acquire it for the new run.
-	if concurrencyKey != "" {
+	// A BLOCKED START NOW WAITS INSTEAD OF BEING REFUSED (cleat#1186).
+	//
+	// When the key is on the row, the claim path does the enforcing: it defers
+	// a run whose key someone else holds, and ACQUIRES the key as part of
+	// claiming. So the run is simply left 'ready' and the caller gets its id --
+	// a limit on how many run at once, which is what a concurrency key is for,
+	// rather than a limit on how many may be accepted.
+	//
+	// The old path below is kept for stores that cannot record the key. There
+	// it still acquires here and terminates the loser with 409, because the
+	// alternative for such a store is a run that starts and is never deferred
+	// -- strictly worse than a refusal.
+	if concurrencyKey != "" && !keyRecorded {
 		ttl := 30 * time.Minute
 		acquired, err := st.AcquireConcurrencyKey(r.Context(), concurrencyKey, runID, ttl)
 		if err != nil {
@@ -531,16 +1181,48 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 			// arguments this caller could pass, returned ErrFenceLost, and
 			// the error was discarded. The client got a 409 saying the run
 			// was rejected while the run stayed claimable, and the next
-			// worker to poll executed it. The HTTP layer is the only
-			// enforcement point for Cleat-Concurrency-Key; ClaimWorkflows
-			// does not consult concurrency_keys. See
+			// worker to poll executed it. See
 			// engine/fence_lost_callers_test.go.
 			//
-			// TerminateWorkflow is the unowned-writer primitive: it matches
-			// on id alone and bumps generation, so it also wins the race
-			// against a worker that claimed the run in the window since
-			// StartNewRun — that worker's own fenced write then returns
-			// ErrFenceLost and it stops.
+			// This used to add "the HTTP layer is the only enforcement point
+			// for Cleat-Concurrency-Key; ClaimWorkflows does not consult
+			// concurrency_keys". The second clause stopped being true in
+			// cleat#1186: the claim and sticky-claim statements on all three
+			// dialects now skip a run whose concurrency key is held by
+			// another run, so a held key defers a claim as well as failing an
+			// acquire here.
+			//
+			// The first clause has now gone too, and this block is the
+			// FALLBACK rather than the enforcement. The conditions it was
+			// waiting on are both met: StartNewRunWithConcurrencyKey records
+			// the key in the INSERT that creates the run, and the claim
+			// ACQUIRES that key as part of claiming, on all three dialects.
+			// So a store that can do both defers instead of refusing, and
+			// never reaches here.
+			//
+			// This runs only for a store that cannot record the key. There the
+			// old behaviour is still the right one: without a recorded key
+			// nothing would defer the run and nothing would acquire on its
+			// behalf, two waiting runs would both become claimable the moment
+			// the holder released, and "deferral" would remove the exclusion
+			// rather than relax it -- strictly worse than this 409.
+			//
+			// TerminateWorkflow is the unowned-writer primitive: it does not
+			// fence on assigned_to or generation, and it bumps generation, so
+			// it wins the race against a worker that claimed the run in the
+			// window since StartNewRun — that worker's own fenced write then
+			// returns ErrFenceLost and it stops.
+			//
+			// This used to say "it matches on id alone", and that stopped
+			// being true in 3.86: MySQL and SQL Server now carry an explicit
+			// `AND tenant_id`, and PostgreSQL's runs inside beginTxWithRLS
+			// where the policy narrows it to one tenant. Nothing here breaks
+			// -- runID was created by the StartNewRun above on this same
+			// request-scoped store, so the tenant matches by construction --
+			// but the property the sentence named is gone, and it is the
+			// property a reader would rely on when moving this call. What is
+			// still true is the fencing half, which is what makes it work
+			// here.
 			if err := st.TerminateWorkflow(context.Background(), runID, "concurrency key conflict: "+concurrencyKey); err != nil {
 				// The run is live and will execute despite the 409 below.
 				// Report it rather than letting the client believe the key
@@ -550,16 +1232,60 @@ func (s *apiServer) handleStartWorkflow(w http.ResponseWriter, r *http.Request, 
 				s.writeError(w, 500, "workflow already running with key "+concurrencyKey+", and the losing run could not be rejected: "+err.Error())
 				return
 			}
-			s.writeError(w, 409, "workflow already running with key "+concurrencyKey)
+			// cleat#1172: the refusal used to say only "workflow already
+			// running with key K" -- and K is the value the CALLER supplied, so
+			// the response restated the request. The two questions at that
+			// moment are WHAT holds the key and FOR HOW LONG, and neither was
+			// answerable: not from the refusal, not by filtering the listing,
+			// not by paging. It is worst exactly where the feature earns its
+			// keep -- a holder that has hung blocks every later start under that
+			// key, and the only signal is a 409 naming the key back at you.
+			//
+			// The holder is LOOKED UP rather than already known. The issue reads
+			// as though it were in hand; it is not. AcquireConcurrencyKey
+			// returns a bool, and on PostgreSQL its INSERT is ON CONFLICT DO
+			// NOTHING RETURNING workflow_id -- a conflict returns no rows. The
+			// runID above is the LOSER's, created by StartNewRun a few lines
+			// earlier.
+			//
+			// Best-effort, and the 409 is unconditional. A diagnostic that can
+			// fail must not be able to turn a refusal into a 500: the caller
+			// still needs to be told it was refused, and the holder is the part
+			// that may be missing. A key released between the failed acquire and
+			// this read is a legitimate miss, not an error.
+			body := map[string]string{"error": "workflow already running with key " + concurrencyKey}
+			if lookup, ok := st.(interface {
+				GetConcurrencyKeyHolder(context.Context, string) (engine.ConcurrencyKeyHolder, error)
+			}); ok {
+				if holder, herr := lookup.GetConcurrencyKeyHolder(r.Context(), concurrencyKey); herr != nil {
+					slog.WarnContext(r.Context(), "concurrency key conflict: could not look up the holder",
+						"concurrency_key", concurrencyKey, "error", herr)
+				} else if holder.Held {
+					body["error"] = "workflow " + holder.WorkflowID + " already running with key " + concurrencyKey
+					body["held_by"] = holder.WorkflowID
+					body["held_until"] = holder.ExpiresAt.UTC().Format(time.RFC3339)
+				}
+			}
+			s.writeJSON(w, 409, body)
 			return
 		}
 	}
 
-	s.writeJSON(w, 201, map[string]string{"id": runID})
+	// The flag is on the ORIGINAL too, so a caller can read it unconditionally
+	// rather than inferring "original" from its absence. cleat#1169.
+	s.writeJSON(w, 201, withReplayFlag(map[string]any{"id": runID}, false))
 }
 
 func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id string) {
-	st, ok := s.scopedStore(w, r)
+	// callerOwnsTarget, and it must run BEFORE the allowed-signals check below.
+	// That check answers 403, which confirms the workflow exists -- fine for a
+	// caller who owns it, an existence oracle for one who does not.
+	//
+	// Delivering to another tenant's id used to reach the store and fail with a
+	// primary-key violation surfaced as a 500 (3.86): safe, because the MERGE's
+	// ON clause is tenant-scoped, but a 500 distinguishable from the 201 an
+	// unknown id produced. Same 404 for both now.
+	st, ok := s.callerOwnsTarget(w, r, id)
 	if !ok {
 		return
 	}
@@ -567,17 +1293,8 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 		SignalName string `json:"signal_name"`
 		Payload    string `json:"payload"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, signalMaxBodySize)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			var maxErr *http.MaxBytesError
-			if errors.As(err, &maxErr) {
-				s.writeError(w, 413, "request body too large")
-				return
-			}
-			s.writeError(w, 400, "invalid JSON: "+err.Error())
-			return
-		}
+	if !s.decodeJSONBody(w, r, signalBodyLimit(), &req) {
+		return
 	}
 	if req.SignalName == "" {
 		s.writeError(w, 400, "signal_name is required")
@@ -590,6 +1307,15 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 	if s.worker.requireSignalAuth != nil && *s.worker.requireSignalAuth {
 		callers, err := st.GetAllowedSignalCallers(r.Context(), id)
 		if err != nil {
+			// 404, not 500: callerOwnsTarget above already confirmed this id
+			// exists under the caller's own tenant, so the only way
+			// GetAllowedSignalCallers reaches ErrWorkflowNotFound here is the
+			// workflow having been purged in the window between that check
+			// and this one -- a genuine not-found, not a server error.
+			if errors.Is(err, engine.ErrWorkflowNotFound) {
+				s.writeError(w, 404, "not found")
+				return
+			}
 			s.writeError(w, 500, err.Error())
 			return
 		}
@@ -598,33 +1324,126 @@ func (s *apiServer) handleSignal(w http.ResponseWriter, r *http.Request, id stri
 			return
 		}
 	}
+	// Idempotency-Key, mirroring the start path's header (cleat#1121).
+	//
+	// A sender retrying after a timeout cannot tell a lost signal from a slow
+	// one. Without a token it must choose between possibly losing the signal
+	// and possibly delivering it twice; with one, a retry is absorbed and said
+	// to have been.
+	//
+	// No header means NO TOKEN, not a token equal to "" -- otherwise two
+	// callers who both send nothing would collide with each other. A keyless
+	// caller keeps today's behaviour exactly, including the right to send the
+	// same signal deliberately twice, which is why no key is derived for them.
+	// Same decision as cleat#1167 took for reprocess.
+	key := r.Header.Get("Idempotency-Key")
+	si, canAbsorb := st.(engine.SignalIdempotencyStore)
+	if key != "" && canAbsorb {
+		already, err := si.DeliverSignalIdempotent(r.Context(), id, req.SignalName, payload, key)
+		if err != nil {
+			// Same TOCTOU window as the auth check above: callerOwnsTarget
+			// already confirmed this id exists, so ErrWorkflowNotFound here
+			// means it was purged in between -- a genuine not-found, not a
+			// server error.
+			if errors.Is(err, engine.ErrWorkflowNotFound) {
+				s.writeError(w, 404, "not found")
+				return
+			}
+			s.writeError(w, 500, err.Error())
+			return
+		}
+		// 200 either way, and `status` says only WHAT HAPPENED. It used to
+		// also carry whether this was a retry -- "already_delivered" -- which
+		// welded two questions into one field: a caller wanting the outcome had
+		// to parse the replay marker out of it, and one wanting the marker had
+		// to know that this endpoint spelled it differently from every other.
+		// cleat#1169 moved that to the standard flag.
+		//
+		// This path was the CLOSEST to the policy already: right status, right
+		// shape, wrong place for the marker. start and reprocess had to change
+		// their status and their field names as well.
+		s.writeJSON(w, 200, withReplayFlag(map[string]any{"status": "delivered"}, already))
+		return
+	}
+
 	if err := st.DeliverSignal(r.Context(), id, req.SignalName, payload); err != nil {
+		// Same TOCTOU window as above.
+		if errors.Is(err, engine.ErrWorkflowNotFound) {
+			s.writeError(w, 404, "not found")
+			return
+		}
 		s.writeError(w, 500, err.Error())
 		return
 	}
-	s.writeJSON(w, 200, map[string]string{"status": "delivered"})
+	// Keyless: no token, so nothing to replay -- the caller keeps the right to
+	// send the same signal deliberately twice. The flag is still present and
+	// false, because "this is not a replay" is an answer and an absent field is
+	// not.
+	s.writeJSON(w, 200, withReplayFlag(map[string]any{"status": "delivered"}, false))
 }
 
 func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id string) {
-	st, ok := s.scopedStore(w, r)
+	// callerOwnsTarget, matching terminate and signal (3.101). Cancel was the
+	// third route taking an id from the URL path and not checking it: 3.86
+	// scoped RequestCancellation's UPDATE so nothing crossed, but the handler
+	// reported 200 "cancellation_requested" for a workflow it had not
+	// cancelled -- and for one that does not exist at all.
+	//
+	// Its two siblings turned out NOT to need this, which is why only one
+	// route changes here. handleWorkflowRetry already reads the workflow back
+	// through a tenant-scoped GetWorkflowByID and 404s when it is nil.
+	// handleGetQueryState needs nothing: GetQueryState returns ("", nil) for no
+	// rows on all three dialects, so a foreign id, an unknown id and a real
+	// workflow with that key unset are already the same 200 with an empty
+	// value -- indistinguishable, which is the property that matters.
+	st, ok := s.callerOwnsTarget(w, r, id)
 	if !ok {
 		return
 	}
 	var req struct {
 		Reason string `json:"reason"`
+		// Preemptive selects the cleat#1153 behaviour: stop the workflow and
+		// record 'cancelled' as its terminal status, rather than setting a flag
+		// and hoping it looks.
+		//
+		// DEFAULTS TO FALSE, AND THAT IS THE WHOLE COMPATIBILITY STORY. An
+		// existing client sends {"reason": "..."} and gets exactly what it got
+		// before, including the "cancellation_requested" response. Making
+		// pre-emption the default would silently convert every cooperative
+		// caller into a forceful one, which is a behaviour change nobody asked
+		// for on a request body that did not change.
+		Preemptive bool `json:"preemptive"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, signalMaxBodySize)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			var maxErr *http.MaxBytesError
-			if errors.As(err, &maxErr) {
-				s.writeError(w, 413, "request body too large")
+	if !s.decodeJSONBody(w, r, signalBodyLimit(), &req) {
+		return
+	}
+
+	if req.Preemptive {
+		if err := st.CancelWorkflow(r.Context(), id, req.Reason); err != nil {
+			// Same shape as terminate: callerOwnsTarget has already answered
+			// 404 for an id this tenant does not own, so reaching here means
+			// the row went away in between.
+			if errors.Is(err, engine.ErrWorkflowNotFound) {
+				s.writeError(w, 404, "not found")
 				return
 			}
-			s.writeError(w, 400, "invalid JSON: "+err.Error())
+			// cleat#1975 (D3): a pre-emptive cancel on a settled row now comes
+			// back as engine.ErrAdminStateConflict -> 409, via the same
+			// mapping re-replay and force-fail/force-complete use.
+			s.handleAdminOpError(w, err)
 			return
 		}
+		// Names the OUTCOME, not the current state, which is what terminate
+		// does -- it answers "terminated" for a workflow that is at that moment
+		// 'terminating' and running its defers. A cancelled workflow owing
+		// defers is in exactly that position, so answering "cancelled" here is
+		// the same promise: this is what the run will end as. A caller that
+		// needs to know it has finished polls the status, as tiers.yaml's
+		// decision D6 already requires for terminate.
+		s.writeJSON(w, 200, map[string]string{"status": "cancelled"})
+		return
 	}
+
 	if err := st.RequestCancellation(r.Context(), id, req.Reason); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -632,9 +1451,372 @@ func (s *apiServer) handleCancel(w http.ResponseWriter, r *http.Request, id stri
 	s.writeJSON(w, 200, map[string]string{"status": "cancellation_requested"})
 }
 
+// runExists reports whether id names a workflow the caller can see, writing the
+// 404 itself when it does not.
+//
+// It exists so that a collection under a run answers the same way the run
+// itself does. Before cleat#900, GET /api/workflows/{id} and
+// /api/instances/{id}/state answered 404 for an unknown id while
+// /events, /history and /promises answered 200 with an empty array -- so a
+// caller could not tell "this run has no events" from "this run does not
+// exist", and a typo in an id looked like a healthy empty result.
+//
+// That mattered more here than in a typical REST API, because an empty
+// collection is a NORMAL state in cleat: event history is buffered within a
+// segment and purged at completion, so a legitimately finished run also
+// reports []. The empty response therefore already meant three things, with
+// nothing to separate them.
+//
+// One shared helper rather than a check in each handler: a fourth collection
+// endpoint added later inherits the behaviour instead of having to remember
+// it, which is the failure mode that produced the inconsistency.
+//
+// The cost is one indexed lookup per request on endpoints that previously did
+// none, and it is smaller than it looks. Measured against web/src, ignoring
+// tests:
+//
+//	setInterval / refreshInterval / refetchInterval / useSWR   0 occurrences
+//	/api/instances/{id}/events                                 0 references
+//	/api/instances/{id}/state                                  0 references
+//	/api/workflows/{id}/promises                               0 references
+//	/api/workflows/{id}/history                                1 (lib/api.ts:72)
+//
+// So the dashboard does not poll -- there is no polling construct anywhere in
+// it -- and three of the four endpoints this helper guards are never called
+// by it at all. The fourth is fetched once, on demand, when a run's detail
+// view is opened.
+//
+// Recorded rather than removed because the sentence it replaces asserted the
+// opposite ("the dashboard polls these, so it is not free") and was the stated
+// justification for a cost nothing was incurring. A wrong reason for a right
+// decision is still load-bearing: the next person weighing this lookup would
+// have weighed it against traffic that does not exist.
+func (s *apiServer) runExists(w http.ResponseWriter, r *http.Request, st engine.WorkflowStore, id string) bool {
+	wf, err := st.GetWorkflowByID(r.Context(), id)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return false
+	}
+	if wf == nil {
+		s.writeError(w, 404, "workflow not found")
+		return false
+	}
+	return true
+}
+
+// defExists is runExists for the name-scoped paths: it answers whether any
+// version of a definition by this name has ever been deployed to this tenant.
+//
+// It exists because the reader and the writer on the SAME path disagreed about
+// an unknown name (cleat#942). Both writers call ValidateVersion and answer
+// 409 -- "version N of X does not exist or is deprecated" -- while both readers
+// had no 404 branch at all and answered 200 with an empty collection. The
+// server already knew the name was not a definition; it just did not consult
+// that on the way out.
+//
+// This reverses the decision recorded below at handleGetQueryState, which read
+// "an empty result for an unknown name is the normal state". Two facts that
+// were not in front of that decision:
+//
+//   - The write half of the same path already refuses exactly this input, so
+//     "unknown name is normal" and "unknown name is a 409" were both in force
+//     on the same two paths, in opposite directions.
+//   - :id and :name share a path segment and are disambiguated only by the
+//     suffix, and the namespaces never overlap. So GET /{run-id}/routing --
+//     a caller building the URL from the wrong variable -- answered 200 [],
+//     byte-identical to a deployed definition with no rules. Observed in the
+//     samples-go port before it was checked here.
+//
+// EMPTY IS STILL 200 FOR A DEPLOYED NAME, and that is the control, not a
+// footnote: a definition that exists and has no routing rules or no tags must
+// keep answering 200 [] / 200 {}. TestAnEmptyRoutingTableIsAnArrayNotNull and
+// TestNoTagsIsAnObjectNotNull assert exactly that and now deploy a definition
+// first. An over-broad fix -- 404 whenever the collection is empty -- passes
+// the unknown-name test and breaks every caller polling a definition that
+// simply has no routing yet.
+//
+// ListWorkflowDefs is already on engine.WorkflowStore, so this costs no new
+// method across the 16 implementers.
+func (s *apiServer) defExists(w http.ResponseWriter, r *http.Request, st engine.WorkflowStore, name string) bool {
+	defs, err := st.ListWorkflowDefs(r.Context(), name)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return false
+	}
+	if len(defs) == 0 {
+		s.writeError(w, 404, "workflow definition not found")
+		return false
+	}
+	return true
+}
+
+// ---- A/B version routing, cleat#889 ----
+//
+// PickVersionByRouting has run on every workflow start since routing was
+// added, and logs "A/B routing applied" when a rule fires. There was no way to
+// create a rule, so it always returned 0, the branch was dead and that log
+// line was unreachable. The store had the whole surface -- SetRoutingRule,
+// GetRoutingRules, RemoveRoutingRule -- and nothing reached any of it.
+//
+// The read path is unchanged by these handlers. That is the point: the feature
+// was complete except for the way in.
+//
+// Keyed by workflow NAME, not by run id, because a routing rule is a property
+// of the definition. The path is under /api/workflows/{name}/routing for that
+// reason, and it is why these live beside the definition endpoints rather than
+// under /api/admin/instances/.
+
+func (s *apiServer) handleListRoutingRules(w http.ResponseWriter, r *http.Request, name string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	if !s.defExists(w, r, st, name) {
+		return
+	}
+	rules, err := st.GetRoutingRules(r.Context(), name)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	// A list, never null: an empty routing table is the normal state, and a
+	// caller iterating the response should not have to special-case it.
+	out := make([]map[string]any, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, map[string]any{
+			"id":             rule.ID,
+			"workflow_name":  rule.WorkflowName,
+			"target_version": rule.TargetVersion,
+			"weight":         rule.Weight,
+		})
+	}
+	s.writeJSON(w, 200, out)
+}
+
+func (s *apiServer) handleSetRoutingRule(w http.ResponseWriter, r *http.Request, name string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		TargetVersion int      `json:"target_version"`
+		Weight        *float64 `json:"weight"`
+	}
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
+		return
+	}
+	if req.TargetVersion <= 0 {
+		s.writeError(w, 400, "target_version is required and must be positive")
+		return
+	}
+	// Weight is a pointer so that an omitted weight is distinguishable from an
+	// explicit 0. Omitted means 1.0 -- send all matching traffic to this
+	// version -- while an explicit 0 means "never pick this", which is a
+	// legitimate way to park a rule without deleting it.
+	weight := 1.0
+	if req.Weight != nil {
+		weight = *req.Weight
+	}
+	if weight < 0 || weight > 1 {
+		s.writeError(w, 400, "weight must be between 0 and 1")
+		return
+	}
+
+	// Refuse a rule pointing at a version that does not exist or is
+	// deprecated. The table has a foreign key on (name, version) so a missing
+	// version would fail anyway, but as a 500 from a constraint violation
+	// rather than as an answer. Deprecation the FK cannot see at all -- and
+	// routing a share of live traffic to a version an operator has just
+	// deprecated is precisely the mistake worth refusing.
+	valid, vErr := st.ValidateVersion(r.Context(), name, req.TargetVersion)
+	if vErr != nil {
+		s.writeError(w, 500, vErr.Error())
+		return
+	}
+	if !valid {
+		s.writeError(w, 409, fmt.Sprintf(
+			"version %d of %q does not exist or is deprecated, so traffic cannot be routed to it",
+			req.TargetVersion, name))
+		return
+	}
+
+	if err := st.SetRoutingRule(r.Context(), name, req.TargetVersion, weight); err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 201, map[string]any{
+		"workflow_name":  name,
+		"target_version": req.TargetVersion,
+		"weight":         weight,
+	})
+}
+
+func (s *apiServer) handleRemoveRoutingRule(w http.ResponseWriter, r *http.Request, ruleID string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	if err := st.RemoveRoutingRule(r.Context(), ruleID); err != nil {
+		// 404, not the 200 this answered for every miss before cleat#946's
+		// second half. No store checked rows-affected, so a DELETE matching
+		// nothing returned nil and an operator tearing down a canary was told it
+		// was gone while it went on shifting live traffic. A rule ID that names
+		// nothing is a bad request path, not a server fault, so it is not a 500
+		// either.
+		if errors.Is(err, engine.ErrRoutingRuleNotFound) {
+			s.writeError(w, 404, "routing rule not found: "+ruleID)
+			return
+		}
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 200, map[string]string{"status": "removed"})
+}
+
+// ---- Deployment channel tags, cleat#889 ----
+//
+// A tag maps (workflow_name, tag) -> version: "stable" or "canary" pointing at
+// a deployed version. They are NOT labels on runs -- workflow_tags is keyed by
+// definition, and /api/workflows lists instances.
+//
+// THE READER IS ALREADY LIVE, which is what makes this a writer and not a
+// feature. engine/children.go resolves a tag to a version inside
+// resolveChildVersion -- a runtime "tag:" override, the "stable" policy branch,
+// and an explicit "tag:" policy from metadata. So a child asking for a tag
+// resolves it today, and always missed, because SetWorkflowTag had no
+// production caller and no tag could ever be created.
+//
+// How live is the "stable" branch? Not unconditional: it fires only when
+// child_binding_policy is explicitly "stable", and an empty policy falls back
+// to frozen or latest. But the policy is chosen for the author one level up --
+// cmd/cleat/main.go:134 stamps "stable" whenever --db or CLEAT_DATABASE_URL is
+// set. So the reader is live for every workflow built with a database, and
+// inert for one built without. Anyone debugging an unhonoured tag needs to
+// know which of the two they have.
+//
+// That is #889's A/B routing shape exactly: a live read path with no way in.
+// The issue described tags as "inert in both directions ... no live reader
+// implying a live writer", which is wrong on the reader, and this comment
+// exists so the next person does not inherit that description.
+//
+// Deliberately NOT wired into the HTTP start path. Three things would then be
+// choosing a version there -- A/B routing, the deprecation check, and a tag --
+// and their precedence is its own decision rather than a side effect of adding
+// a setter.
+
+func (s *apiServer) handleListWorkflowTags(w http.ResponseWriter, r *http.Request, name string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	if !s.defExists(w, r, st, name) {
+		return
+	}
+	tags, err := st.GetWorkflowTags(r.Context(), name)
+	if err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	// An object, never null: no tags is the normal state for most definitions.
+	if tags == nil {
+		tags = map[string]int{}
+	}
+	s.writeJSON(w, 200, tags)
+}
+
+func (s *apiServer) handleSetWorkflowTag(w http.ResponseWriter, r *http.Request, name string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Tag     string `json:"tag"`
+		Version int    `json:"version"`
+	}
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
+		return
+	}
+	if req.Tag == "" {
+		s.writeError(w, 400, "tag is required")
+		return
+	}
+	if req.Version <= 0 {
+		s.writeError(w, 400, "version is required and must be positive")
+		return
+	}
+
+	// Refuse a tag pointing at a version that does not exist or is deprecated.
+	//
+	// The table's foreign key on (workflow_name, version) catches a missing
+	// version, but as a 500 from a constraint violation rather than an answer,
+	// and it cannot see deprecation at all. Pointing "stable" at a version an
+	// operator has just deprecated is the mistake this refusal exists for --
+	// and it matters more here than it does for a routing rule.
+	//
+	// The reason is which runs get redirected. A routing rule only affects
+	// starts that match it. A tag affects children of any workflow whose
+	// binding policy is "stable" -- and nobody has to have asked for that
+	// policy, because `cleat build` selects it on their behalf:
+	//
+	//	cmd/cleat/main.go:134
+	//	if buildChannel == "" {
+	//	    if dbConnStr != "" || os.Getenv("CLEAT_DATABASE_URL") != "" {
+	//	        buildChannel = "stable"
+	//	    } else {
+	//	        buildChannel = "latest"
+	//	    }
+	//	}
+	//
+	// So every workflow built with --db or CLEAT_DATABASE_URL set carries
+	// child_binding_policy: "stable" in its metadata, and children.go:73
+	// resolves the tag for it. Not "every child start" -- a workflow built
+	// without a database gets "latest" and never reaches the tag branch --
+	// but the operator who picks the wrong version here did not choose the
+	// policy that spreads it.
+	valid, vErr := st.ValidateVersion(r.Context(), name, req.Version)
+	if vErr != nil {
+		s.writeError(w, 500, vErr.Error())
+		return
+	}
+	if !valid {
+		s.writeError(w, 409, fmt.Sprintf(
+			"version %d of %q does not exist or is deprecated, so %q cannot point at it",
+			req.Version, name, req.Tag))
+		return
+	}
+
+	// PUT, not POST: (workflow_name, tag) is the primary key, so setting a tag
+	// that already exists MOVES it rather than creating a second one. The store
+	// upserts; the verb should say so.
+	if err := st.SetWorkflowTag(r.Context(), name, req.Version, req.Tag); err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 200, map[string]any{
+		"workflow_name": name,
+		"tag":           req.Tag,
+		"version":       req.Version,
+	})
+}
+
+func (s *apiServer) handleRemoveWorkflowTag(w http.ResponseWriter, r *http.Request, name, tag string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	if err := st.RemoveWorkflowTag(r.Context(), name, tag); err != nil {
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 200, map[string]string{"status": "removed"})
+}
+
 func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if !s.runExists(w, r, st, id) {
 		return
 	}
 	offset := 0
@@ -668,9 +1850,124 @@ func (s *apiServer) handleGetHistory(w http.ResponseWriter, r *http.Request, id 
 	s.writeJSON(w, 200, history)
 }
 
+// handleGetQueryState answers a published query key for one run.
+//
+// The runExists check is cleat#900's, applied to the last endpoint that fix did
+// not reach. /events, /history and /promises answered 200 with an empty
+// collection for an id that did not exist; /query answered 200 with an empty
+// VALUE, which is the same defect in a different container:
+//
+//	GET /api/workflows/00000000-0000-0000-0000-000000000000/query?key=counter
+//	200 {"key":"counter","value":""}
+//
+// Found by the samples-go port, which asserted 404 here on the grounds that
+// #900 had settled the question for the other per-run reads. It had not been
+// asked of this one.
+//
+// The run-scoped reads span TWO prefixes, which is why an enumeration from one
+// route switch misses some of them:
+//
+//	/api/instances/{id}/events      #917
+//	/api/instances/{id}/state       already 404'd
+//	/api/workflows/{id}             already 404'd
+//	/api/workflows/{id}/terminal    #896
+//	/api/workflows/{id}/history     #917
+//	/api/workflows/{id}/promises    #917
+//	/api/workflows/{id}/dag         already 404'd
+//	/api/workflows/{id}/query       this change
+//
+// /api/workflows/{name}/routing and /tags take a definition NAME, so runExists
+// does not apply to them. This comment used to end there -- "an empty result
+// for an unknown name is the normal state" -- and that was reversed by
+// cleat#942. They are name-scoped, not exempt: defExists is their runExists,
+// and the reasoning is on it. What survives from the original is only the
+// narrow claim that runExists cannot serve them, which is still true.
+//
+// The full name-scoped enumeration, since an enumeration from one route switch
+// is what let /query survive #900:
+//
+//	GET    /api/workflows/{name}/routing            404 via defExists
+//	POST   /api/workflows/{name}/routing            409 via ValidateVersion
+//	GET    /api/workflows/{name}/tags               404 via defExists
+//	PUT    /api/workflows/{name}/tags               409 via ValidateVersion
+//	DELETE /api/workflows/{name}/tags/{tag}         unchecked -- see below
+//	DELETE /api/workflows/{name}/routing/{ruleID}   name UNUSED -- see below
+//
+// The two DELETEs are deliberately left alone here, for different reasons.
+// The tag delete is a no-op on the store for an unknown name, and adding a 404
+// changes DELETE idempotency semantics, which is a separate argument from the
+// reader/writer disagreement this change is about. The routing delete is a
+// different defect rather than the same one: it never reads the name at all
+// (handleRemoveRoutingRule takes parts[2], the rule id), so any name in the
+// path deletes any rule id within the tenant. Filed separately; fixing it here
+// would bundle a second concern.
+//
+// The empty value is worse here than an empty list was there, because it is
+// ALSO a legitimate answer: a key that has not been published yet reads
+// exactly the same as a run that does not exist and a key that was published
+// as "". Three meanings, one response. The 404 separates the first two.
 func (s *apiServer) handleGetQueryState(w http.ResponseWriter, r *http.Request, id string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if !s.runExists(w, r, st, id) {
+		return
+	}
+	// An ABSENT key is a malformed request, not a lookup of "".
+	//
+	// The comment above already notes that an empty value carries three
+	// meanings in one response. Omitting ?key= folded in a fourth, and it is
+	// the one the documented design forbids: docs/how-to/common-patterns.md,
+	// "Reading a key you do not know", says every reader takes the key as a
+	// REQUIRED argument, decided in cleat#1119 at the owner's direction. A
+	// required argument that is silently accepted as empty is not required.
+	//
+	// Has, not Get: they are different questions and Get cannot tell them
+	// apart.
+	//
+	//	?key=counter   lookup of "counter"
+	//	?key=          lookup of ""        <- legitimate, see below
+	//	(absent)       400                 <- this change
+	//
+	// ?key= stays a lookup because "" is a storable key. Nothing validates the
+	// key on the write path -- HostCallsImpl.SetQueryState passes it straight
+	// to the import (cleat/runtime_workflow.go:110), and set_query_state
+	// forwards it unchecked (engine/imports.go:372) -- and the column can hold
+	// it: measured 2026-09-13 on PostgreSQL 16,
+	//
+	//	'{"":"v","a":"b"}'::jsonb ->> ''   -> 'v'
+	//
+	// so a workflow that published under "" is readable only by asking for it.
+	// Rejecting ?key= would make that key unreachable, which is a different
+	// and larger change than making a required argument required.
+	// NO ?key AT ALL LISTS EVERYTHING THE RUN PUBLISHED. cleat#1571.
+	//
+	// This used to 400 with "this endpoint reads one published key and cannot
+	// list them (cleat#1119)". That refusal was the RESOLUTION of cleat#1119,
+	// which asked whether published state should be enumerable and answered
+	// no: a keyed-only reader means the caller must know what it is asking
+	// for, which keeps published state a contract rather than a bag.
+	//
+	// Reversed on the operational case cleat#1119 itself named -- "a run
+	// misbehaved and you do not know what it published" -- and on the owner's
+	// framing that query state is a semantically limited standard interface,
+	// so viewing it is part of that interface. Anything elaborate is
+	// app-specific and is not shoehorned in here: this lists, and stops.
+	//
+	// THE DISTINCTION THE OLD CODE DREW IS PRESERVED EXACTLY, and it is the
+	// subtle part. `Has("key")` is true for `?key=` with an empty value, and a
+	// workflow CAN publish under "" -- measured on PostgreSQL 16,
+	// '{"":"v"}'::jsonb ->> '' -> 'v'. So `?key=` still reads that key, and
+	// only the complete ABSENCE of the parameter lists. Switching this to a
+	// Get("key") == "" check would make the empty key unreachable.
+	if !r.URL.Query().Has("key") {
+		all, err := st.ListQueryState(r.Context(), id)
+		if err != nil {
+			s.writeError(w, 500, err.Error())
+			return
+		}
+		s.writeJSON(w, 200, map[string]any{"state": all})
 		return
 	}
 	key := r.URL.Query().Get("key")
@@ -699,9 +1996,29 @@ func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id stri
 	}
 
 	// Load the dag_spec from workflow_defs.
+	//
+	// A load FAILURE is a 500; only a missing spec is a 404. They were the same
+	// answer until cleat#900's follow-up, and collapsing them erased the
+	// distinction one level above where #899 fixed it.
+	//
+	// It mattered because of who calls this. web/src/pages/WorkflowDetail.svelte
+	// fetches the DAG on every workflow detail view inside a try whose comment
+	// reads "silently ignore if not available" -- so a 404 is displayed as
+	// nothing at all. While a store error also answered 404, a connection loss
+	// or a permission failure reached a user as an empty panel.
+	//
+	// That is exactly the shape #899 was: a broken answer and an absent one
+	// arriving identically. #899 fixed the cause -- LoadDAGSpec no longer errors
+	// on the NULL dag_spec that every non-DAG workflow has -- and this fixes the
+	// erasure, so the dashboard's swallow is now CORRECT rather than currently
+	// harmless. Once 404 means only "no DAG spec", "silently ignore if not
+	// available" is an accurate comment.
+	//
+	// This was the only error path in this file answering anything but 500;
+	// the other twelve handlers already did. Found by WS-3 sweeping the shape.
 	spec, err := st.LoadDAGSpec(r.Context(), wf.DefName, wf.DefVersion)
 	if err != nil {
-		s.writeError(w, 404, err.Error())
+		s.writeError(w, 500, err.Error())
 		return
 	}
 	if spec == nil {
@@ -725,10 +2042,82 @@ func (s *apiServer) handleGetDAG(w http.ResponseWriter, r *http.Request, id stri
 
 // ---- Promise API handlers ----
 
+// handleGetAllowedSignals handles GET /api/workflows/:id/allowed-signals
+//
+// Returns the list --require-signal-auth checks a caller against. Always a JSON
+// array: an unset column reads back as [], not null, so a client can tell
+// "denies everyone" from "the field is missing" without special-casing.
+func (s *apiServer) handleGetAllowedSignals(w http.ResponseWriter, r *http.Request, id string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	callers, err := st.GetAllowedSignalCallers(r.Context(), id)
+	if err != nil {
+		// 404 for a workflow this tenant cannot see, same as
+		// handleSetAllowedSignals below -- this endpoint has no
+		// callerOwnsTarget pre-check of its own, so this is the first and
+		// only place a missing id is discovered here, not a narrow race.
+		if errors.Is(err, engine.ErrWorkflowNotFound) {
+			s.writeError(w, 404, "workflow not found")
+			return
+		}
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	if callers == nil {
+		callers = []string{}
+	}
+	s.writeJSON(w, 200, map[string]any{"allowed_signals": callers})
+}
+
+// handleSetAllowedSignals handles PUT /api/workflows/:id/allowed-signals
+//
+// The writer IMPROVEMENT-PLAN 3.15 is about. Until this existed, nothing in the
+// product could populate workflow_instances.allowed_signals, so enabling
+// --require-signal-auth denied every signal and the documented remedy -- "add
+// \"*\" to allowed_signals" -- named something no interface could do.
+//
+// PUT rather than POST because it replaces the whole list, which is what the
+// store method does and what makes the result of two concurrent grants
+// predictable rather than order-dependent.
+func (s *apiServer) handleSetAllowedSignals(w http.ResponseWriter, r *http.Request, id string) {
+	st, ok := s.scopedStore(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		AllowedSignals []string `json:"allowed_signals"`
+	}
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
+		return
+	}
+	for _, c := range req.AllowedSignals {
+		if c == "" {
+			s.writeError(w, 400, "allowed_signals entries must be non-empty (use \"*\" to allow any caller)")
+			return
+		}
+	}
+	if err := st.SetAllowedSignalCallers(r.Context(), id, req.AllowedSignals); err != nil {
+		// 404 for a workflow this tenant cannot see, which is the same answer
+		// as for one that does not exist -- see engine.ErrWorkflowNotFound.
+		if errors.Is(err, engine.ErrWorkflowNotFound) {
+			s.writeError(w, 404, "workflow not found")
+			return
+		}
+		s.writeError(w, 500, err.Error())
+		return
+	}
+	s.writeJSON(w, 200, map[string]any{"allowed_signals": req.AllowedSignals})
+}
+
 // handleListPromises handles GET /api/workflows/:id/promises
 func (s *apiServer) handleListPromises(w http.ResponseWriter, r *http.Request, id string) {
 	st, ok := s.scopedStore(w, r)
 	if !ok {
+		return
+	}
+	if !s.runExists(w, r, st, id) {
 		return
 	}
 	promises, err := st.ListPromises(r.Context(), id)
@@ -751,17 +2140,21 @@ func (s *apiServer) handleResolvePromise(w http.ResponseWriter, r *http.Request,
 	var req struct {
 		Result string `json:"result"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			s.writeError(w, 413, "request body too large")
-			return
-		}
-		s.writeError(w, 400, "invalid JSON: "+err.Error())
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
 		return
 	}
-	if err := st.ResolvePromise(r.Context(), id, promiseID, req.Result); err != nil {
+	// The route names a workflow AND a promise, so the pairing is a claim this
+	// endpoint has to verify. Settling is now keyed by promise ID alone (#813),
+	// which is right for a workflow holding an opaque handle and wrong here:
+	// without this check an operator could resolve any promise by pairing it
+	// with any workflow ID in the path, and the mismatch would be accepted.
+	// The store used to enforce it incidentally, through a WHERE clause that
+	// carried both.
+	if _, _, _, err := st.GetPromise(r.Context(), id, promiseID); err != nil {
+		s.writeError(w, 404, "no such promise for this workflow")
+		return
+	}
+	if err := st.ResolvePromise(r.Context(), promiseID, req.Result); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
@@ -777,21 +2170,48 @@ func (s *apiServer) handleRejectPromise(w http.ResponseWriter, r *http.Request, 
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			s.writeError(w, 413, "request body too large")
-			return
-		}
-		s.writeError(w, 400, "invalid JSON: "+err.Error())
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
 		return
 	}
-	if err := st.RejectPromise(r.Context(), id, promiseID, req.Reason); err != nil {
+	// Verified against the workflow named in the route, as in
+	// handleResolvePromise above and for the same reason.
+	if _, _, _, err := st.GetPromise(r.Context(), id, promiseID); err != nil {
+		s.writeError(w, 404, "no such promise for this workflow")
+		return
+	}
+	if err := st.RejectPromise(r.Context(), promiseID, req.Reason); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
 	}
 	s.writeJSON(w, 200, map[string]string{"status": "rejected"})
+}
+
+// isTerminalStatus reports whether a workflow can no longer run guest code, and
+// therefore can never service an update.
+//
+// The five settled statuses are obvious -- 'cancelled' joined them in
+// cleat#1153. 'terminating' is included and is worth
+// explaining: a terminating workflow is running its DEFER phase, and the engine
+// refuses new work there on purpose -- engine/updater.go's poll says so, "a
+// defer segment exists to run a terminated workflow's cleanup, not to service
+// new requests". So an update accepted then could not be delivered either.
+//
+// The two cases differ in what happens to a request that slips through, and the
+// difference is why this is not just a tidy list:
+//
+//   - accepted while 'terminating': failStrandedUpdates runs on the transition
+//     to the final status and rejects it, so the caller learns.
+//   - accepted while ALREADY final: nothing collects it. The sweep runs AS a
+//     workflow goes terminal, and that has happened. The promise never settles.
+//
+// The second is cleat#910 and is the reason this check exists. The first is
+// refused for consistency and because a 409 now beats a rejection later.
+func isTerminalStatus(status string) bool {
+	switch status {
+	case "done", "failed", "terminated", "dead_lettered", "cancelled", "terminating":
+		return true
+	}
+	return false
 }
 
 // handleWorkflowUpdate handles POST /api/workflows/:id/update/:name
@@ -811,22 +2231,49 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Parse the request body as the update payload.
-	var payload string
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, signalMaxBodySize)
-		body, rErr := io.ReadAll(r.Body)
-		if rErr != nil {
-			var maxErr *http.MaxBytesError
-			if errors.As(rErr, &maxErr) {
-				s.writeError(w, 413, "request body too large")
-				return
-			}
-			s.writeError(w, 400, "failed to read request body")
-			return
-		}
-		payload = string(body)
+	// Refuse an update against a workflow that has already finished, cleat#910.
+	//
+	// An update is delivered at a dispatch point inside a segment. A terminal
+	// workflow has no future segment, so a request created after it finished can
+	// never be delivered -- and nothing sweeps it up either: failStrandedUpdates
+	// runs AS a workflow goes terminal, so a request created afterwards is
+	// collected by nothing. The caller gets a 202 and a promise id for a promise
+	// that provably cannot settle.
+	//
+	// That is cleat#849's original complaint in its residual form. The
+	// scheduling half was fixed; accepting a request that cannot be delivered
+	// was not.
+	//
+	// Refused at ADMISSION rather than by adding a sweep. The workflow is
+	// already in hand here for the existence check above, so this costs nothing,
+	// and it never creates the unsettleable promise in the first place. A sweep
+	// would still leave a window in which a caller holds a 202 that is already
+	// meaningless.
+	//
+	// 409, matching how a stale generation and a deprecated version are refused:
+	// the request is well-formed and the state says no.
+	//
+	// A note on the race this does NOT close: a workflow can finish between this
+	// check and the insert. That window is small and self-correcting --
+	// failStrandedUpdates runs on the transition and collects anything pending
+	// at that moment. What is being closed is the case where the workflow was
+	// ALREADY terminal, which no sweep covers because the sweep has run.
+	if isTerminalStatus(wf.Status) {
+		s.writeError(w, 409, fmt.Sprintf(
+			"workflow is %s and cannot accept updates; it has no future segment to deliver one in",
+			wf.Status))
+		return
 	}
+
+	// Parse the request body as the update payload.
+	// Not decodeJSONBody: this endpoint takes the body as an opaque signal
+	// payload rather than as JSON, so it must not be parsed. readBody shares
+	// the bound and the 413 translation and stops there.
+	body, ok := s.readBody(w, r, signalBodyLimit())
+	if !ok {
+		return
+	}
+	payload := string(body)
 	if payload == "" {
 		payload = "{}"
 	}
@@ -841,7 +2288,39 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	}
 	for _, p := range pending {
 		if p.UpdateName == updateName {
-			s.writeError(w, 409, "update already pending with name: "+updateName)
+			// The `detail` stays even though it no longer distinguishes this
+			// from update_name_used, which cleat#1416 removed. A caller that
+			// learned to branch on it under cleat#1330 keeps working, and the
+			// field still says which of the API's 409s this is -- the message
+			// text is not a contract.
+			//
+			// This is the ONLY reason a repeat is refused now: one request per
+			// name in flight at a time. It clears when the in-flight update is
+			// answered, and the next request with the same name is accepted.
+			//
+			// AND IT IS A CHECK, NOT A CONSTRAINT, which is a real change and
+			// is stated rather than glossed. This read and the INSERT below are
+			// not atomic; before cleat#1416 the primary key on
+			// (workflow_id, update_name) was the backstop, so two racing
+			// requests produced one 409 and one row. Now they produce two rows,
+			// two promises and two dispatches.
+			//
+			// Left that way deliberately. Under "an update is a request" two
+			// concurrent requests ARE two requests, and each caller gets its
+			// own answer -- which is the outcome this whole change is for. No
+			// caller is stranded either way, because each row carries its own
+			// request_id and its own promise. What is lost is only the
+			// guarantee that the 409 fires; nothing depends on it firing.
+			//
+			// Closing the race properly would need a partial unique index on
+			// (workflow_id, update_name) WHERE status = 'pending'. PostgreSQL
+			// and SQL Server have those; MySQL has no filtered index, so it
+			// would be a two-dialect guarantee documented as three. See
+			// docs/reference/sdk-api.md, which says the same thing to callers.
+			s.writeJSON(w, 409, map[string]string{
+				"error":  "update already pending with name: " + updateName,
+				"detail": "update_already_pending",
+			})
 			return
 		}
 	}
@@ -854,6 +2333,19 @@ func (s *apiServer) handleWorkflowUpdate(w http.ResponseWriter, r *http.Request,
 	}
 
 	// Create the update request in the database.
+	// No update_name_used branch, and its absence is the point of cleat#1416.
+	//
+	// A name used to be consumed for the life of the workflow, because
+	// (workflow_id, update_name) was the primary key and completion is an
+	// UPDATE rather than a delete. cleat#1392 made all three dialects refuse
+	// the second request identically, with a 409 carrying
+	// detail=update_name_used, and said in its own commit that the refusal
+	// would become UNREACHABLE rather than wrong if the name were later made
+	// reusable. It is now reusable, so the branch is gone rather than dead.
+	//
+	// The pending guard above is what remains, and it is now the whole of the
+	// concurrency control: one request per name may be in flight, and the next
+	// one is accepted the moment that one is answered.
 	if err := st.CreateUpdateRequest(r.Context(), id, updateName, payload, promiseID); err != nil {
 		s.writeError(w, 500, err.Error())
 		return
@@ -917,19 +2409,19 @@ func (s *apiServer) handleSchedules(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case len(parts) == 2 && parts[1] == "enable" && r.Method == http.MethodPost:
 		if err := st.SetScheduleEnabled(r.Context(), name, true); err != nil {
-			s.writeError(w, 500, err.Error())
+			s.writeScheduleError(w, r, "enable", name, err)
 			return
 		}
 		s.writeJSON(w, 200, map[string]string{"status": "enabled"})
 	case len(parts) == 2 && parts[1] == "disable" && r.Method == http.MethodPost:
 		if err := st.SetScheduleEnabled(r.Context(), name, false); err != nil {
-			s.writeError(w, 500, err.Error())
+			s.writeScheduleError(w, r, "disable", name, err)
 			return
 		}
 		s.writeJSON(w, 200, map[string]string{"status": "disabled"})
 	case len(parts) == 1 && r.Method == http.MethodDelete:
 		if err := st.DeleteSchedule(r.Context(), name); err != nil {
-			s.writeError(w, 500, err.Error())
+			s.writeScheduleError(w, r, "delete", name, err)
 			return
 		}
 		s.writeJSON(w, 200, map[string]string{"status": "deleted"})
@@ -959,14 +2451,7 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		CatchUp    int             `json:"catch_up_limit"`
 		Overlap    string          `json:"overlap_policy"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			s.writeError(w, 413, "request body too large")
-			return
-		}
-		s.writeError(w, 400, "invalid JSON: "+err.Error())
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
 		return
 	}
 	if req.Name == "" || req.Cron == "" || req.DefName == "" {
@@ -999,23 +2484,115 @@ func (s *apiServer) handleCreateSchedule(w http.ResponseWriter, r *http.Request)
 		s.writeError(w, 400, "catch_up_limit must not be negative")
 		return
 	}
+	// NextRunAt has to be computed here, the way `cleat schedule create`
+	// computes it. The column is `NOT NULL DEFAULT now()`, but CreateSchedule
+	// names it in the INSERT, so a zero time.Time is bound as year 1 rather
+	// than falling back to the default -- and the scheduler selects on
+	// `next_run_at <= now()`, which year 1 satisfies forever. A schedule
+	// created through this handler therefore fired on the next scheduler tick
+	// no matter what its cron expression said, and logged "schedule was too
+	// far behind to catch up" with a backlog measured in centuries.
+	//
+	// The timezone is already validated above, so the ok result is not
+	// actionable: LoadScheduleLocation falls back to UTC, which is what
+	// scheduleTimezoneOrDefault would have stored anyway.
+	loc, _ := engine.LoadScheduleLocation(req.Timezone)
 	sch := engine.Schedule{
 		Name:           req.Name,
 		DefName:        req.DefName,
 		EntryPoint:     req.EntryPoint,
 		CronExpression: req.Cron,
 		Input:          req.Input,
-		Enabled:        true,
-		Timezone:       req.Timezone,
-		MisfirePolicy:  req.Misfire,
-		CatchUpLimit:   req.CatchUp,
-		OverlapPolicy:  req.Overlap,
+		// A new schedule is live, which after cleat#1702 is the zero value.
+		NextRunAt:     engine.NextCronTimeIn(req.Cron, time.Now(), loc),
+		Timezone:      req.Timezone,
+		MisfirePolicy: req.Misfire,
+		CatchUpLimit:  req.CatchUp,
+		OverlapPolicy: req.Overlap,
 	}
-	if err := st.CreateSchedule(r.Context(), sch); err != nil {
-		s.writeError(w, 500, err.Error())
-		return
+	// The key is what lets this endpoint tell a retry from a name collision.
+	// Without one it cannot be asked the question: both arrive as a second
+	// create under a taken name, and both were answered `409 schedule_exists`
+	// -- correct for the collision and wrong for the retry. cleat#1495.
+	sch.IdempotencyKey = r.Header.Get("Idempotency-Key")
+
+	err := st.CreateSchedule(r.Context(), sch)
+	switch {
+	case err == nil:
+		s.writeJSON(w, 201, withReplayFlag(map[string]any{"status": "created"}, false))
+	case errors.Is(err, engine.ErrScheduleIdempotentReplay):
+		// THE ORIGINAL RESPONSE, not a different one. cleat#1169's policy is
+		// that a duplicate returns what the first call returned plus the flag,
+		// so a caller that never thinks about retries stays correct and one
+		// that cares opts in to noticing.
+		s.writeJSON(w, 201, withReplayFlag(map[string]any{"status": "created"}, true))
+	case errors.Is(err, engine.ErrIdempotencyKeyInputMismatch):
+		// Same `detail` string as the start handler's branch, deliberately: a
+		// client branching on it should not need to know which endpoint it
+		// called to recognise the case. cleat#1170.
+		s.writeJSON(w, 409, map[string]string{
+			"error":  err.Error(),
+			"detail": "idempotency_key_input_mismatch",
+		})
+	default:
+		// ErrScheduleExists still lands here and still means what it always
+		// meant -- somebody else's name is in the way. It is no longer
+		// conscripted to answer "I am retrying my own request".
+		s.writeScheduleError(w, r, "create", req.Name, err)
 	}
-	s.writeJSON(w, 201, map[string]string{"status": "created"})
+}
+
+// writeScheduleError classifies a schedule store failure instead of reporting
+// every one as a server fault carrying whatever the driver said.
+//
+// It was `writeError(w, 500, err.Error())`, which had three problems at once
+// (cleat#996). A caller reusing a schedule name got a 500, so a client could
+// not tell its own mistake from cleat being broken and an operator's dashboard
+// counted it as an outage. The response body carried the raw driver text --
+// `pq: duplicate key value violates unique constraint "workflow_schedules_pkey"
+// (23505)` -- leaking the schema. And that text is dialect-specific, so it was
+// not parseable either: the same condition reads differently on MySQL and SQL
+// Server, which is the one job a machine-readable error has.
+//
+// The shape is handleAdminOpError's, deliberately: typed sentinels through
+// errors.Is, a stable `detail` discriminator so a client can tell two 409s
+// apart without reading prose, and 500 reserved for the genuinely
+// unclassified. As that function's own comment puts it, an unclassified error
+// is a real server fault rather than a refusal nobody got round to labelling.
+//
+// The unclassified branch no longer echoes err.Error(). It logs the detail
+// server-side, where an operator can read it, and answers a fixed message --
+// so a driver string cannot reach a client through the default path either,
+// which is where it reached one before.
+func (s *apiServer) writeScheduleError(w http.ResponseWriter, r *http.Request, op, name string, err error) {
+	switch {
+	case errors.Is(err, engine.ErrScheduleNotFound):
+		// 404 rather than 500, and rather than the 200 this was until
+		// cleat#1297: a name that does not exist is the caller's mistake, and
+		// answering success to it tells an operator mid-incident that a
+		// schedule is disabled while it keeps firing.
+		//
+		// A cross-tenant attempt arrives here and is answered the same way.
+		// Every store statement is scoped by tenant_id, so tenant B asking
+		// about tenant A's schedule finds no row -- and "not found" is also
+		// the response that leaks least, being indistinguishable from a name
+		// nobody has ever used.
+		s.writeJSON(w, 404, map[string]string{
+			"error":  fmt.Sprintf("no schedule named %q", name),
+			"detail": "schedule_not_found",
+		})
+	case errors.Is(err, engine.ErrScheduleExists):
+		s.writeJSON(w, 409, map[string]string{
+			"error":  fmt.Sprintf("a schedule named %q already exists", name),
+			"detail": "schedule_exists",
+		})
+	default:
+		// slog directly, as the concurrency-key handler above does -- apiServer
+		// carries no logger of its own.
+		slog.ErrorContext(r.Context(), "schedule operation failed",
+			"op", op, "schedule", name, "error", err)
+		s.writeError(w, 500, "schedule "+op+" failed")
+	}
 }
 
 // handleDefinitions handles GET /api/definitions
@@ -1058,12 +2635,18 @@ func (s *apiServer) handleDefinitions(w http.ResponseWriter, r *http.Request) {
 	for _, def := range defs {
 		count, _ := st.CountActiveInstances(r.Context(), def.Name, def.Version)
 		dr := defResponse{
-			Name:            def.Name,
-			Version:         def.Version,
-			ABIVersion:      def.ABIVersion,
-			MinVersion:      def.MinVersion,
-			CreatedAt:       def.CreatedAt,
-			Deprecated:      def.Deprecated,
+			Name:       def.Name,
+			Version:    def.Version,
+			ABIVersion: def.ABIVersion,
+			MinVersion: def.MinVersion,
+			CreatedAt:  def.CreatedAt,
+			// json:"deprecated" is kept and DERIVED from disabled_at, so
+			// cleat#1702's column split carries no HTTP break -- the API
+			// break in that issue is reserved for workflow_schedules.
+			// "deprecated" here has always meant admission control, which is
+			// what disabled_at now carries; gc_eligible is deliberately not
+			// exposed, because nothing outside the worker decides collection.
+			Deprecated:      def.Disabled(),
 			ActiveInstances: count,
 		}
 		if ms, ok := memoryStats[def.Name]; ok {
@@ -1087,16 +2670,11 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 10*1024*1024)
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "body too large"})
-		return
-	}
-
+	// This one said "body too large" under a 400 -- the message and the status
+	// contradicting each other in a single response, on the WASM upload, which
+	// is the most legitimate 413 in the API. cleat#1338.
 	var req createDefRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		s.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+	if !s.decodeJSONBody(w, r, definitionBodyLimit(), &req) {
 		return
 	}
 
@@ -1142,18 +2720,11 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	}
 
 	if err := st.DeployWorkflowDef(ctx, def); err != nil {
-		// A name another tenant already holds is the caller's situation, not a
-		// server fault: 409, and no mention of who holds it. Everything else
-		// stays a 500. IMPROVEMENT-PLAN 3.12.
-		if errors.Is(err, engine.ErrWorkflowDefOwnedByAnotherTenant) {
-			slog.Warn("deploy refused: workflow definition belongs to another tenant",
-				"name", def.Name, "version", def.Version)
-			s.writeJSON(w, http.StatusConflict, map[string]string{
-				"error": fmt.Sprintf("a workflow definition named %q version %d already exists and is not yours",
-					def.Name, def.Version),
-			})
-			return
-		}
+		// The 409 arm that used to be here is gone with the shared namespace it
+		// existed for: a name another tenant holds is no longer a conflict,
+		// because each tenant has its own (tenant_id, name, version) row and a
+		// deploy simply creates or updates the caller's own. IMPROVEMENT-PLAN
+		// 3.77 / D7.
 		slog.Error("deploy workflow def failed", "error", err)
 		s.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to deploy: " + err.Error()})
 		return
@@ -1170,12 +2741,6 @@ func (s *apiServer) handleCreateDefinition(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-func (s *apiServer) inflightCount() int {
-	count := 0
-	s.worker.inflight.Range(func(_, _ any) bool { count++; return true })
-	return count
-}
-
 // generateUpdatePromiseID creates a unique ID for tracking an update's outcome.
 func generateUpdatePromiseID() (string, error) {
 	b := make([]byte, 16)
@@ -1188,20 +2753,27 @@ func generateUpdatePromiseID() (string, error) {
 
 // getPluginDB returns the plugin DB adapter, using pluginDB if available
 // (separate pool), falling back to the main db otherwise.
-func getPluginDB(db, pluginDB *sql.DB) *engine.SQLDBAdapter {
+//
+// The dialect is a REQUIRED PARAMETER rather than a field the caller may set,
+// because Rebind on the zero Dialect is a no-op that looks exactly like a
+// working rewrite -- statements pass through untouched and every test that
+// runs on PostgreSQL still passes. A constructor that can be called correctly
+// by accident and incorrectly by omission is the shape this repository keeps
+// paying for, so omission is made impossible at compile time instead.
+func getPluginDB(db, pluginDB *sql.DB, dialect plugin.Dialect) *engine.SQLDBAdapter {
 	if pluginDB != nil {
-		return &engine.SQLDBAdapter{DB: pluginDB}
+		return &engine.SQLDBAdapter{DB: pluginDB, Dialect: dialect}
 	}
-	return &engine.SQLDBAdapter{DB: db}
+	return &engine.SQLDBAdapter{DB: db, Dialect: dialect}
 }
 
 // getPluginReadOnlyDB returns the read-only plugin DB adapter, using pluginDB
 // if available (separate pool), falling back to the main db otherwise.
-func getPluginReadOnlyDB(db, pluginDB *sql.DB) *engine.ReadOnlyDB {
+func getPluginReadOnlyDB(db, pluginDB *sql.DB, dialect plugin.Dialect) *engine.ReadOnlyDB {
 	if pluginDB != nil {
-		return &engine.ReadOnlyDB{Inner: pluginDB}
+		return &engine.ReadOnlyDB{Inner: pluginDB, Dialect: dialect}
 	}
-	return &engine.ReadOnlyDB{Inner: db}
+	return &engine.ReadOnlyDB{Inner: db, Dialect: dialect}
 }
 
 // ---- Rate limiter ----
@@ -1231,6 +2803,11 @@ func newIPRateLimiter(r rate.Limit, burst int) *ipRateLimiter {
 	// Background cleanup: every 10 minutes remove limiter entries that
 	// have not been used in the last hour.
 	go func() {
+		// cleat#1769. Map iteration and time arithmetic under a mutex, in a
+		// loop that runs for the worker's whole life: a panic here took the
+		// process down. slog.Default() because neither this constructor nor
+		// ipRateLimiter carries a logger, matching idempotencyCleanupLoop.
+		defer recoverBackgroundGoroutine(slog.Default(), "", "ip-rate-limiter-cleanup")
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -1300,6 +2877,8 @@ func newKeyedRateLimiter() *keyedRateLimiter {
 		stopCh: make(chan struct{}),
 	}
 	go func() {
+		// cleat#1769, same shape as newIPRateLimiter's cleanup above.
+		defer recoverBackgroundGoroutine(slog.Default(), "", "keyed-rate-limiter-cleanup")
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
 		for {

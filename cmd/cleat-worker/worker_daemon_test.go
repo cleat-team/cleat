@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -33,10 +34,12 @@ import (
 // to that function. Otherwise it returns a safe zero-valued result.
 type mockStore struct {
 	claimWorkflowFn                    func(ctx context.Context, workerID string) (*engine.WorkflowInstance, error)
+	countRunnableWorkflowsFn           func(context.Context) (int, error)
 	claimWorkflowsFn                   func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error)
 	claimStickyWorkflowsFn             func(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error)
 	loadEventHistoryFn                 func(ctx context.Context, workflowID string) ([]engine.EventRecord, error)
 	loadEventHistoryPaginatedFn        func(ctx context.Context, workflowID string, offset, limit int) ([]engine.EventRecord, error)
+	loadStreamChunksAfterFn            func(ctx context.Context, workflowID string, afterStep, limit int) ([]engine.EventRecord, error)
 	countEventHistoryFn                func(ctx context.Context, workflowID string) (int, error)
 	appendEventHistoryFn               func(ctx context.Context, workflowID string, rec engine.EventRecord) error
 	appendEventHistoryBatchFn          func(ctx context.Context, workflowID string, recs []engine.EventRecord) error
@@ -44,7 +47,7 @@ type mockStore struct {
 	getWASMLengthFn                    func(ctx context.Context, defName string, defVersion int) (int64, error)
 	listVersionsFn                     func(ctx context.Context, defName string) ([]int, error)
 	heartbeatFn                        func(ctx context.Context, workflowID, workerID string, generation int64) (bool, error)
-	batchHeartbeatFn                   func(ctx context.Context, workerID string) (int64, error)
+	heartbeatBatchFencedFn             func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error)
 	completeWorkflowFn                 func(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error
 	failWorkflowFn                     func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error
 	releaseWorkflowFn                  func(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error
@@ -55,11 +58,22 @@ type mockStore struct {
 	pollAndClaimSignalFn               func(ctx context.Context, workflowID, signalName string) (string, bool, error)
 	startNewRunFn                      func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error)
 	startChildWorkflowFn               func(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error)
-	getChildResultFn                   func(ctx context.Context, runID string) (string, bool, error)
+	getChildResultFn                   func(ctx context.Context, runID string) (engine.ChildOutcome, error)
 	reapStaleInstancesFn               func(ctx context.Context, timeout time.Duration) (int, error)
 	getQueryStateFn                    func(ctx context.Context, workflowID, key string) (string, error)
+	listQueryStateFn                   func(ctx context.Context, workflowID string) (map[string]string, error)
 	listWorkflowsFn                    func(ctx context.Context, filter engine.WorkflowFilter) ([]engine.WorkflowInstance, error)
+	countWorkflowsFn                   func(ctx context.Context, filter engine.WorkflowFilter) (int, error)
 	getWorkflowByIDFn                  func(ctx context.Context, id string) (*engine.WorkflowInstance, error)
+	deliverSignalIdempotentFn          func(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (bool, error)
+	validateVersionFn                  func(ctx context.Context, defName string, defVersion int) (bool, error)
+	setRoutingRuleFn                   func(ctx context.Context, workflowName string, targetVersion int, weight float64) error
+	removeRoutingRuleFn                func(ctx context.Context, ruleID string) error
+	getRoutingRulesFn                  func(ctx context.Context, workflowName string) ([]engine.RoutingRule, error)
+	setWorkflowTagFn                   func(ctx context.Context, workflowName string, version int, tag string) error
+	removeWorkflowTagFn                func(ctx context.Context, workflowName string, tag string) error
+	getWorkflowTagsFn                  func(ctx context.Context, workflowName string) (map[string]int, error)
+	getTerminalRunFn                   func(ctx context.Context, id string) (*engine.WorkflowInstance, error)
 	createScheduleFn                   func(ctx context.Context, s engine.Schedule) error
 	listSchedulesFn                    func(ctx context.Context) ([]engine.Schedule, error)
 	deleteScheduleFn                   func(ctx context.Context, name string) error
@@ -73,13 +87,13 @@ type mockStore struct {
 	loadCompactionStateFn              func(ctx context.Context, workflowID string) (*engine.CompactionState, error)
 	compactHistoryFn                   func(ctx context.Context, workflowID string, compactionState []byte, compactionStep int, keepStep int) error
 	createPromiseFn                    func(ctx context.Context, workflowID, promiseName, promiseID string) error
-	resolvePromiseFn                   func(ctx context.Context, workflowID, promiseID, result string) error
-	rejectPromiseFn                    func(ctx context.Context, workflowID, promiseID, errMsg string) error
+	resolvePromiseFn                   func(ctx context.Context, promiseID, result string) error
+	rejectPromiseFn                    func(ctx context.Context, promiseID, errMsg string) error
 	getPromiseFn                       func(ctx context.Context, workflowID, promiseID string) (string, string, string, error)
 	listPromisesFn                     func(ctx context.Context, workflowID string) ([]engine.PromiseInfo, error)
 	createUpdateRequestFn              func(ctx context.Context, workflowID, updateName, payload, promiseID string) error
 	getPendingUpdateRequestsFn         func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error)
-	completeUpdateRequestFn            func(ctx context.Context, workflowID, updateName, result, errMsg string) error
+	completeUpdateRequestFn            func(ctx context.Context, workflowID, requestID, result, errMsg string) error
 	acquireConcurrencyKeyFn            func(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error)
 	releaseConcurrencyKeyFn            func(ctx context.Context, key string) error
 	releaseWorkflowConcurrencyKeysFn   func(ctx context.Context, workflowID string) error
@@ -100,10 +114,16 @@ type mockStore struct {
 	queueDepthFn                       func(ctx context.Context) (int64, error)
 	deleteExpiredEventsFn              func(ctx context.Context, olderThan time.Time) (int64, error)
 	deleteCompletedWorkflowsFn         func(ctx context.Context, olderThan time.Time) (int64, error)
+	deleteDeadLetteredWorkflowsFn      func(ctx context.Context, olderThan time.Time) (int64, error)
+	clearExpiredCompactionStateFn      func(ctx context.Context, olderThan time.Time) (int64, error)
 	continueAsNewFn                    func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, result string, queryState map[string]string, priority int) (string, error)
 	finalizeWorkflowSegmentFn          func(ctx context.Context, runID, workerID string, generation int64, newEvents []engine.EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
 	getAllowedSignalCallersFn          func(ctx context.Context, workflowID string) ([]string, error)
+	setAllowedSignalCallersFn          func(ctx context.Context, workflowID string, callers []string) error
+	setAllowedSignalCallersID          string
+	setAllowedSignalCallers            []string
 	terminateWorkflowFn                func(ctx context.Context, workflowID, reason string) error
+	cancelWorkflowFn                   func(ctx context.Context, workflowID, reason string) error
 	adminForceCompleteFn               func(ctx context.Context, workflowID string, generation int64, result string, operator string) error
 	adminForceFailFn                   func(ctx context.Context, workflowID string, generation int64, errorMsg, errorCode string, operator string) error
 	adminReReplayFn                    func(ctx context.Context, workflowID string, generation int64, operator string) error
@@ -123,6 +143,17 @@ func (m *mockStore) ClaimWorkflows(ctx context.Context, workerID string, limit i
 	return nil, nil
 }
 
+// CountRunnableWorkflows: a double, so the honest answer is "I do not know".
+// Zero is what a store with nothing runnable returns, and the caller treats the
+// number as a floor, so a double reporting 0 never claims work exists that does
+// not. See IMPROVEMENT-PLAN 3.250.
+func (m *mockStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
+	if m.countRunnableWorkflowsFn != nil {
+		return m.countRunnableWorkflowsFn(ctx)
+	}
+	return 0, nil
+}
+
 func (m *mockStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*engine.WorkflowInstance, error) {
 	if m.claimStickyWorkflowsFn != nil {
 		return m.claimStickyWorkflowsFn(ctx, workerID, limit)
@@ -135,6 +166,10 @@ func (m *mockStore) LoadEventHistory(ctx context.Context, workflowID string) ([]
 		return m.loadEventHistoryFn(ctx, workflowID)
 	}
 	return nil, nil
+}
+
+func (m *mockStore) IsHistorySwept(ctx context.Context, workflowID string) (bool, error) {
+	return false, nil
 }
 
 func (m *mockStore) AppendEventHistory(ctx context.Context, workflowID string, rec engine.EventRecord) error {
@@ -214,6 +249,18 @@ func (m *mockStore) CheckCancellation(ctx context.Context, workflowID string) (b
 	return false, "", nil
 }
 
+// deliverSignalIdempotentFn makes mockStore satisfy engine.SignalIdempotencyStore.
+//
+// Its presence matters: the interface is asserted at run time, so a mockStore
+// without it would send every handler test down the plain-delivery path and the
+// idempotent branch would be covered by nothing (cleat#1121).
+func (m *mockStore) DeliverSignalIdempotent(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (bool, error) {
+	if m.deliverSignalIdempotentFn != nil {
+		return m.deliverSignalIdempotentFn(ctx, workflowID, signalName, payload, idempotencyKey)
+	}
+	return false, m.DeliverSignal(ctx, workflowID, signalName, payload)
+}
+
 func (m *mockStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
 	if m.deliverSignalFn != nil {
 		return m.deliverSignalFn(ctx, workflowID, signalName, payload)
@@ -221,16 +268,15 @@ func (m *mockStore) DeliverSignal(ctx context.Context, workflowID, signalName, p
 	return nil
 }
 
-func (m *mockStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	if m.pollAndClaimSignalFn != nil {
-		return m.pollAndClaimSignalFn(ctx, workflowID, signalName)
-	}
-	return "", false, nil
-}
+func (m *mockStore) ConsumeSignal(context.Context, string, int64) error { return nil }
 
 // PollSignal satisfies engine.SignalStore. Delegates to PollAndClaimSignal.
-func (m *mockStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	return m.PollAndClaimSignal(ctx, workflowID, signalName)
+func (m *mockStore) PollSignal(ctx context.Context, workflowID, signalName string) (engine.SignalDelivery, bool, error) {
+	if m.pollAndClaimSignalFn != nil {
+		payload, found, err := m.pollAndClaimSignalFn(ctx, workflowID, signalName)
+		return engine.SignalDelivery{ID: 1, Payload: payload}, found, err
+	}
+	return engine.SignalDelivery{}, false, nil
 }
 
 // PollCancellation satisfies engine.SignalStore. Delegates to CheckCancellation.
@@ -256,14 +302,14 @@ func (m *mockStore) StartChildWorkflowAtomic(ctx context.Context, childID, paren
 	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
 
-func (m *mockStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+func (m *mockStore) GetChildResult(ctx context.Context, runID string) (engine.ChildOutcome, error) {
 	if m.getChildResultFn != nil {
 		return m.getChildResultFn(ctx, runID)
 	}
-	return "", false, nil
+	return engine.ChildOutcome{}, nil
 }
 
-func (m *mockStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (m *mockStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	if m.reapStaleInstancesFn != nil {
 		return m.reapStaleInstancesFn(ctx, timeout)
 	}
@@ -277,6 +323,13 @@ func (m *mockStore) GetQueryState(ctx context.Context, workflowID, key string) (
 	return "", nil
 }
 
+func (m *mockStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	if m.listQueryStateFn != nil {
+		return m.listQueryStateFn(ctx, workflowID)
+	}
+	return map[string]string{}, nil
+}
+
 func (m *mockStore) ListWorkflows(ctx context.Context, filter engine.WorkflowFilter) ([]engine.WorkflowInstance, error) {
 	if m.listWorkflowsFn != nil {
 		return m.listWorkflowsFn(ctx, filter)
@@ -287,6 +340,17 @@ func (m *mockStore) ListWorkflows(ctx context.Context, filter engine.WorkflowFil
 func (m *mockStore) GetWorkflowByID(ctx context.Context, id string) (*engine.WorkflowInstance, error) {
 	if m.getWorkflowByIDFn != nil {
 		return m.getWorkflowByIDFn(ctx, id)
+	}
+	return nil, nil
+}
+
+// GetTerminalRun has its OWN hook rather than falling back to
+// getWorkflowByIDFn. The whole guarantee in cleat#887 is that these two calls
+// answer differently for a continued workflow, so a mock that made them answer
+// identically could not express the case the handler exists for.
+func (m *mockStore) GetTerminalRun(ctx context.Context, id string) (*engine.WorkflowInstance, error) {
+	if m.getTerminalRunFn != nil {
+		return m.getTerminalRunFn(ctx, id)
 	}
 	return nil, nil
 }
@@ -324,13 +388,6 @@ func (m *mockStore) GetDueSchedules(ctx context.Context) ([]engine.Schedule, err
 		return m.getDueSchedulesFn(ctx)
 	}
 	return nil, nil
-}
-
-func (m *mockStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	if m.updateScheduleNextRunFn != nil {
-		return m.updateScheduleNextRunFn(ctx, name, nextRun)
-	}
-	return nil
 }
 
 func (m *mockStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
@@ -386,16 +443,16 @@ func (m *mockStore) CreatePromise(ctx context.Context, workflowID, promiseName, 
 	return nil
 }
 
-func (m *mockStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	if m.resolvePromiseFn != nil {
-		return m.resolvePromiseFn(ctx, workflowID, promiseID, result)
+		return m.resolvePromiseFn(ctx, promiseID, result)
 	}
 	return nil
 }
 
-func (m *mockStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	if m.rejectPromiseFn != nil {
-		return m.rejectPromiseFn(ctx, workflowID, promiseID, errMsg)
+		return m.rejectPromiseFn(ctx, promiseID, errMsg)
 	}
 	return nil
 }
@@ -428,9 +485,9 @@ func (m *mockStore) GetPendingUpdateRequests(ctx context.Context, workflowID str
 	return nil, nil
 }
 
-func (m *mockStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (m *mockStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	if m.completeUpdateRequestFn != nil {
-		return m.completeUpdateRequestFn(ctx, workflowID, updateName, result, errMsg)
+		return m.completeUpdateRequestFn(ctx, workflowID, requestID, result, errMsg)
 	}
 	return nil
 }
@@ -442,11 +499,11 @@ func (m *mockStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID s
 	return true, nil
 }
 
-func (m *mockStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (m *mockStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
 	if m.releaseConcurrencyKeyFn != nil {
-		return m.releaseConcurrencyKeyFn(ctx, key)
+		return false, m.releaseConcurrencyKeyFn(ctx, key)
 	}
-	return nil
+	return true, nil
 }
 
 func (m *mockStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
@@ -568,6 +625,13 @@ func (m *mockStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time
 	return 0, nil
 }
 
+func (m *mockStore) ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	if m.clearExpiredCompactionStateFn != nil {
+		return m.clearExpiredCompactionStateFn(ctx, olderThan)
+	}
+	return 0, nil
+}
+
 func (m *mockStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []engine.EventRecord, result string, queryState map[string]string, priority int) (string, error) {
 	if m.continueAsNewFn != nil {
 		return m.continueAsNewFn(ctx, currentRunID, workerID, generation, defName, defVersion, newInput, result, queryState, priority)
@@ -591,7 +655,7 @@ func newTestWorker(ms *mockStore) *Worker {
 	monitor := NewMemoryMonitor(5 * time.Second)
 	mc := NewMemoryController(monitor, ms, "test-worker", 5, 1<<40, 1<<40)
 	testMetrics := newTestPrometheus()
-	return &Worker{
+	w := &Worker{
 		Metrics:             testMetrics,
 		id:                  "test-worker",
 		store:               ms,
@@ -608,6 +672,12 @@ func newTestWorker(ms *mockStore) *Worker {
 		healthTracker:       newHealthTracker(),
 		loopCtxMap:          make(map[string]*loopContext),
 	}
+	// cleat#2008: seed to now, not the atomic.Int64 zero value -- see the
+	// identical comment at the real construction site in main.go.
+	w.lastHeartbeatOK.Store(time.Now().UnixNano())
+	// cleat#2005: same seeding, opposite reason -- see lastDBTrouble's doc.
+	w.lastDBTrouble.Store(time.Now().UnixNano())
+	return w
 }
 
 // newTestWorkerWithConcurrency creates a Worker with the given concurrency,
@@ -618,7 +688,7 @@ func newTestWorkerWithConcurrency(ms *mockStore, concurrency int) *Worker {
 	monitor := NewMemoryMonitor(5 * time.Second)
 	mc := NewMemoryController(monitor, ms, "test-worker", concurrency, 1<<40, 1<<40)
 	testMetrics := newTestPrometheus()
-	return &Worker{
+	w := &Worker{
 		Metrics:             testMetrics,
 		id:                  "test-worker",
 		store:               ms,
@@ -635,6 +705,10 @@ func newTestWorkerWithConcurrency(ms *mockStore, concurrency int) *Worker {
 		healthTracker:       newHealthTracker(),
 		loopCtxMap:          make(map[string]*loopContext),
 	}
+	w.lastHeartbeatOK.Store(time.Now().UnixNano())
+	// cleat#2005: same seeding, opposite reason -- see lastDBTrouble's doc.
+	w.lastDBTrouble.Store(time.Now().UnixNano())
+	return w
 }
 
 // newTestPrometheus creates a Metrics instance for test use. Errors are
@@ -1015,16 +1089,18 @@ func TestDispatchLoop_ConnectionError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHeartbeatLoop_UpdatesHeartbeats(t *testing.T) {
+	// cleat#2008: the loop's store call is now HeartbeatBatchFenced, not
+	// BatchHeartbeat -- see heartbeatAndFenceInFlight.
 	ms := &mockStore{}
 	var (
 		mu        sync.Mutex
 		callCount int64
 	)
-	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
+	ms.heartbeatBatchFencedFn = func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
 		mu.Lock()
 		callCount++
 		mu.Unlock()
-		return 2, nil
+		return nil, nil
 	}
 
 	w := newTestWorker(ms)
@@ -1080,13 +1156,17 @@ func TestHeartbeatLoop_StopsOnCancel(t *testing.T) {
 }
 
 func TestHeartbeatLoop_DoesNotRemoveFromInflight(t *testing.T) {
-	// With BatchHeartbeat, the heartbeat loop does not remove workflows from
-	// inflight — ownership recovery is handled by the reaper loop.
+	// The heartbeat loop itself never removes workflows from inflight --
+	// only executeWorkflow's own deferred Delete does that, on completion.
+	// cleat#2008: HeartbeatBatchFenced reporting a run lost cancels its
+	// execCancel, which is a DIFFERENT map; neither "wf-alive" nor
+	// "wf-lost" is reported lost here (nil return), so this exercises the
+	// ordinary case rather than that path.
 	ms := &mockStore{}
 	callCount := 0
-	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
+	ms.heartbeatBatchFencedFn = func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
 		callCount++
-		return 0, nil
+		return nil, nil
 	}
 
 	w := newTestWorker(ms)
@@ -1124,8 +1204,8 @@ func TestHeartbeatLoop_DoesNotRemoveFromInflight(t *testing.T) {
 
 func TestHeartbeatLoop_DBErrorNoCrash(t *testing.T) {
 	ms := &mockStore{}
-	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
-		return 0, errors.New("connection refused")
+	ms.heartbeatBatchFencedFn = func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
+		return nil, errors.New("connection refused")
 	}
 
 	w := newTestWorker(ms)
@@ -1167,7 +1247,7 @@ func TestReaperLoop_CallsReap(t *testing.T) {
 	//
 	// Instead we test the behaviour by directly calling the _inner_ portion:
 	// we verify the store method signature and default timeout.
-	_, _ = w.store.ReapStaleInstances(context.Background(), 30*time.Second)
+	_, _ = w.store.ReapStaleInstances(context.Background(), 30*time.Second, 0)
 	if !reapCalled {
 		t.Fatal("store.ReapStaleInstances did not reach the mock")
 	}
@@ -1202,7 +1282,7 @@ func TestReaperLoop_HandlesResults(t *testing.T) {
 
 	// Since we can't easily wait for the 30s ticker, we verify the
 	// store.ReapStaleInstances contract directly.
-	reapedCount, err := ms.ReapStaleInstances(context.Background(), 30*time.Second)
+	reapedCount, err := ms.ReapStaleInstances(context.Background(), 30*time.Second, 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1218,7 +1298,7 @@ func TestReaperLoop_DBErrorNoCrash(t *testing.T) {
 	}
 
 	// Verify the store method handles errors gracefully (no panic).
-	n, err := ms.ReapStaleInstances(context.Background(), 30*time.Second)
+	n, err := ms.ReapStaleInstances(context.Background(), 30*time.Second, 0)
 	if err == nil {
 		t.Error("expected error from mock, got nil")
 	}
@@ -1241,7 +1321,7 @@ func TestReaperLoop_DefaultInterval(t *testing.T) {
 	}
 
 	// Call the method directly to verify the signature.
-	_, _ = ms.ReapStaleInstances(context.Background(), 30*time.Second)
+	_, _ = ms.ReapStaleInstances(context.Background(), 30*time.Second, 0)
 	if capturedTimeout != 30*time.Second {
 		t.Errorf("expected timeout 30s, got %v", capturedTimeout)
 	}
@@ -1271,7 +1351,7 @@ func TestRetentionLoop_ReturnsImmediatelyWhenBothDisabled(t *testing.T) {
 	done := make(chan struct{})
 	w.wg.Add(1)
 	go func() {
-		w.retentionLoop(0, 0)
+		w.retentionLoop(0, 0, 0)
 		close(done)
 	}()
 
@@ -1304,7 +1384,7 @@ func TestRunRetentionSweep_CallsBothWithIndependentCutoffs(t *testing.T) {
 	// rows far longer than event_history, e.g. --retention-days=7
 	// --completed-workflow-retention-days=90. The two cutoffs must not be
 	// the same computation reused for both.
-	w.runRetentionSweep(7, 90)
+	w.runRetentionSweep(7, 90, 0)
 
 	if !eventsCalled {
 		t.Fatal("DeleteExpiredEvents was not called")
@@ -1340,7 +1420,7 @@ func TestRunRetentionSweep_SkipsCompletedWorkflowsWhenDisabled(t *testing.T) {
 	// completedWorkflowRetentionDays=0: this is the shipped default. Proves
 	// the off-by-default argument in docs/operations/workflow-retention.md
 	// is actually true of the code, not just the prose.
-	w.runRetentionSweep(30, 0)
+	w.runRetentionSweep(30, 0, 0)
 }
 
 func TestRunRetentionSweep_SkipsEventsWhenDisabled(t *testing.T) {
@@ -1354,7 +1434,7 @@ func TestRunRetentionSweep_SkipsEventsWhenDisabled(t *testing.T) {
 	}
 	w := newTestWorker(ms)
 
-	w.runRetentionSweep(0, 90)
+	w.runRetentionSweep(0, 90, 0)
 }
 
 // TestCompletedWorkflowRetentionDaysDefaultsOff is the argument in
@@ -1393,8 +1473,18 @@ func TestCompactionLoop_CompactsCandidates(t *testing.T) {
 		return []string{"wf-compact-1"}, nil
 	}
 
-	// CompactWorkflowHistory calls LoadEventHistory first. For the mock,
-	// return enough events to exceed the default threshold.
+	// CompactWorkflowHistory resolves the workflow's definition FIRST, to read
+	// its max_history_length override (cleat#889), and treats a nil workflow as
+	// "deleted between candidate selection and now" -- so the mock has to say
+	// the workflow exists or nothing compacts. loadWorkflowConfigFn is left
+	// unset and returns 0, meaning "no override", so this test still measures
+	// the global threshold exactly as it did.
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "mock-wf", DefVersion: 1}, nil
+	}
+
+	// Then it calls LoadEventHistory. For the mock, return enough events to
+	// exceed the default threshold.
 	ms.loadEventHistoryFn = func(ctx context.Context, workflowID string) ([]engine.EventRecord, error) {
 		events := make([]engine.EventRecord, engine.DefaultCompactionThreshold+100)
 		for i := range events {
@@ -1628,7 +1718,7 @@ func TestAPISchedulesList(t *testing.T) {
 	ms := &mockStore{}
 	ms.listSchedulesFn = func(ctx context.Context) ([]engine.Schedule, error) {
 		return []engine.Schedule{
-			{Name: "hourly-job", DefName: "test", CronExpression: "0 * * * *", Enabled: true},
+			{Name: "hourly-job", DefName: "test", CronExpression: "0 * * * *"},
 		}, nil
 	}
 
@@ -1922,7 +2012,7 @@ func TestDetermineEntryPoint_EdgeCases(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := determineEntryPoint(tt.input, nil)
+			got, _ := determineEntryPoint(tt.input, nil)
 			if got != tt.want {
 				t.Errorf("determineEntryPoint(%s) = %q, want %q", string(tt.input), got, tt.want)
 			}
@@ -2082,14 +2172,14 @@ func TestScheduleLoop_StopsOnCancel(t *testing.T) {
 }
 
 func TestIdempotencyCleanupLoop_StopsOnCancel(t *testing.T) {
-	// idempotencyCleanupLoop takes a raw context + *sql.DB.
+	// idempotencyCleanupLoop takes a raw context + *sql.DB + driver name.
 	// We can't easily mock *sql.DB, but we can verify the loop exits on cancel.
 	ctx, cancel := context.WithCancel(context.Background())
 
 	done := make(chan struct{})
 	go func() {
 		// Pass nil db — the loop will exit on ctx.Done() before trying to use it.
-		idempotencyCleanupLoop(ctx, nil, 10*time.Millisecond)
+		idempotencyCleanupLoop(ctx, nil, "postgres", 10*time.Millisecond)
 		close(done)
 	}()
 
@@ -2141,13 +2231,19 @@ func TestDispatchLoop_BatchSizeCap(t *testing.T) {
 }
 
 func TestHeartbeatLoop_EmptyInflight(t *testing.T) {
-	// With BatchHeartbeat, the heartbeat loop always calls the store
-	// regardless of inflight state — the DB tracks ownership.
+	// cleat#2008: unlike BatchHeartbeat (which had no per-run predicate to
+	// fence and so always ran), HeartbeatBatchFenced takes a batch of
+	// (workflowID, generation) pairs -- with none in flight there is
+	// nothing to ask about, so heartbeatAndFenceInFlight short-circuits
+	// before ever calling the store. The loop must still tick without
+	// error, and lastHeartbeatOK must still advance (see
+	// heartbeat_fenced_execution_test.go for that half, at the
+	// heartbeatAndFenceInFlight level rather than through the ticker).
 	ms := &mockStore{}
 	heartbeatCalled := false
-	ms.batchHeartbeatFn = func(ctx context.Context, workerID string) (int64, error) {
+	ms.heartbeatBatchFencedFn = func(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
 		heartbeatCalled = true
-		return 0, nil
+		return nil, nil
 	}
 
 	w := newTestWorker(ms)
@@ -2167,8 +2263,8 @@ func TestHeartbeatLoop_EmptyInflight(t *testing.T) {
 
 	<-done
 
-	if !heartbeatCalled {
-		t.Error("expected batch heartbeat to be called even when inflight is empty")
+	if heartbeatCalled {
+		t.Error("HeartbeatBatchFenced was called with zero in-flight runs -- heartbeatAndFenceInFlight should short-circuit before calling the store")
 	}
 }
 
@@ -2218,26 +2314,6 @@ func TestDispatchLoop_ClaimWorkflowsFallback(t *testing.T) {
 	// After one sticky result, remaining = 5 - 1 = 4
 	if generalLimit != 4 {
 		t.Errorf("expected general claim limit 4, got %d", generalLimit)
-	}
-}
-
-func TestBaseDSNFromURL_EdgeCases(t *testing.T) {
-	tests := []struct {
-		url  string
-		want string
-	}{
-		{"", "host= port=5432 dbname= sslmode=disable"},
-		{"not-a-url", "host= port=5432 dbname=not-a-url sslmode=disable"},
-		{"postgres://", "host= port=5432 dbname= sslmode=disable"},
-		{"postgres://user:pass@host:5432/db?sslmode=require", "host=host port=5432 dbname=db sslmode=require"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.url, func(t *testing.T) {
-			got := baseDSNFromURL(tt.url)
-			if got != tt.want {
-				t.Errorf("baseDSNFromURL(%q) = %q, want %q", tt.url, got, tt.want)
-			}
-		})
 	}
 }
 
@@ -2293,35 +2369,20 @@ func TestLoadShardConfigsErrors(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// dispatchPendingUpdates tests
-// ---------------------------------------------------------------------------
-
-func TestDispatchPendingUpdates_EmptyInflight(t *testing.T) {
-	ms := &mockStore{}
-	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error) {
-		t.Error("should not be called when inflight is empty")
-		return nil, nil
-	}
-
-	w := newTestWorker(ms)
-	// Should not panic or call store.
-	w.dispatchPendingUpdates()
-}
-
-func TestDispatchPendingUpdates_NoEngine(t *testing.T) {
-	ms := &mockStore{}
-	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error) {
-		return []engine.UpdateRequestInfo{
-			{UpdateName: "update-1", Payload: "{}"},
-		}, nil
-	}
-
-	w := newTestWorker(ms)
-	w.inflight.Store("wf-1", &engine.WorkflowInstance{ID: "wf-1"})
-	// No engine in execEngines for wf-1 — should skip without error.
-	w.dispatchPendingUpdates()
-}
+// The three TestDispatchPendingUpdates_* tests were removed when updates were
+// implemented end to end, along with the function they exercised.
+//
+// They are worth a note rather than a silent deletion, because cleat#849 named
+// them as the reason the defect went unnoticed: each constructed the
+// precondition by hand -- storing an entry in w.inflight, and in one case
+// configuring an engine update handler with engine.WithUpdateHandler -- and so
+// asserted that dispatchPendingUpdates worked GIVEN a state that never
+// occurred when the ticker actually fired. w.inflight is populated only for the
+// lifetime of one segment; the ticker ran every five seconds.
+//
+// Updates are now delivered by the guest at dispatch points, and the tests that
+// replace these are in cleat/cleattest (update_dispatch_test.go) and
+// engine/update_replay_test.go, both of which drive the real path.
 
 // mockServiceCaller implements engine.ServiceCaller for tests.
 type mockServiceCaller struct{}
@@ -2337,11 +2398,13 @@ func TestExecEngines_MapLifecycle(t *testing.T) {
 	wfID := "wf-store-delete-test"
 	w.inflight.Store(wfID, &engine.WorkflowInstance{ID: wfID})
 
-	// Create a minimal engine with an update handler.
+	// A minimal engine. It used to be constructed with an update handler and
+	// the test then called DispatchUpdate through the loaded value -- both of
+	// which are gone with that hook. Nothing is lost: this test is about the
+	// execEngines map, and `loaded != eng` is the identity check that says the
+	// same thing without needing the engine to do anything.
 	caller := &mockServiceCaller{}
-	eng := engine.NewEngine(nil, caller, engine.WithUpdateHandler(func(name, payload string) (string, error) {
-		return "ok", nil
-	}))
+	eng := engine.NewEngine(nil, caller)
 
 	// Store the engine.
 	w.execEngines.Store(wfID, eng)
@@ -2355,15 +2418,6 @@ func TestExecEngines_MapLifecycle(t *testing.T) {
 		t.Errorf("loaded engine = %v, want %v", loaded, eng)
 	}
 
-	// Verify DispatchUpdate works through the loaded engine.
-	result, err := loaded.(*engine.Engine).DispatchUpdate(context.Background(), "test-update", "{}")
-	if err != nil {
-		t.Fatalf("DispatchUpdate failed: %v", err)
-	}
-	if result != "ok" {
-		t.Errorf("DispatchUpdate = %q, want %q", result, "ok")
-	}
-
 	// Delete the engine.
 	w.execEngines.Delete(wfID)
 
@@ -2371,62 +2425,6 @@ func TestExecEngines_MapLifecycle(t *testing.T) {
 	_, ok = w.execEngines.Load(wfID)
 	if ok {
 		t.Fatal("expected engine to be gone after Delete")
-	}
-}
-
-func TestDispatchPendingUpdates_WithEngine(t *testing.T) {
-	ms := &mockStore{}
-
-	var dispatchedName, dispatchedPayload string
-	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error) {
-		return []engine.UpdateRequestInfo{
-			{UpdateName: "status-update", Payload: `{"status":"running"}`},
-		}, nil
-	}
-	completed := false
-	ms.completeUpdateRequestFn = func(ctx context.Context, workflowID, updateName, result, errMsg string) error {
-		completed = true
-		if updateName != "status-update" {
-			t.Errorf("updateName = %q, want %q", updateName, "status-update")
-		}
-		if result != `{"status":"ok"}` {
-			t.Errorf("result = %q, want %q", result, `{"status":"ok"}`)
-		}
-		if errMsg != "" {
-			t.Errorf("errMsg = %q, want empty", errMsg)
-		}
-		return nil
-	}
-
-	w := newTestWorker(ms)
-	wfID := "wf-dispatch-test"
-	w.inflight.Store(wfID, &engine.WorkflowInstance{ID: wfID})
-
-	// Create an engine that captures the dispatched update.
-	caller := &mockServiceCaller{}
-	eng := engine.NewEngine(nil, caller, engine.WithUpdateHandler(func(name, payload string) (string, error) {
-		dispatchedName = name
-		dispatchedPayload = payload
-		return `{"status":"ok"}`, nil
-	}))
-	w.execEngines.Store(wfID, eng)
-
-	w.dispatchPendingUpdates()
-
-	if dispatchedName != "status-update" {
-		t.Errorf("dispatched name = %q, want %q", dispatchedName, "status-update")
-	}
-	if dispatchedPayload != `{"status":"running"}` {
-		t.Errorf("dispatched payload = %q, want %q", dispatchedPayload, `{"status":"running"}`)
-	}
-	if !completed {
-		t.Error("expected CompleteUpdateRequest to be called")
-	}
-
-	// Verify cleanup: Delete removes engine, Load returns !ok.
-	w.execEngines.Delete(wfID)
-	if _, ok := w.execEngines.Load(wfID); ok {
-		t.Error("expected engine to be gone after Delete")
 	}
 }
 
@@ -2587,14 +2585,88 @@ func TestAPIStartWorkflow_WithIdempotencyKey(t *testing.T) {
 	w := httptest.NewRecorder()
 	api.handleStartWorkflow(w, req, "my-wf")
 
-	if w.Code != 200 {
-		t.Errorf("expected 200 (already started), got %d", w.Code)
+	if w.Code != 201 {
+		t.Errorf("expected 201 (cleat#1169: the replay returns the original status), got %d", w.Code)
 	}
-	var resp map[string]string
+	var resp map[string]any
 	json.NewDecoder(w.Body).Decode(&resp)
 	// Body is bytes.Buffer; no Close needed.
-	if resp["already_started"] != "true" {
-		t.Error("expected already_started=true in response")
+	if resp[idempotentReplayField] != true {
+		t.Errorf("expected %s=true in response, got %v", idempotentReplayField, resp)
+	}
+}
+
+// TestAPIStartWorkflow_RejectedIdempotencyKeyIs409 is cleat#1170's second half
+// and cleat#832's shape: a caller that reused a key badly has made a CLIENT
+// error, and it was reported as a server fault. 500 sends an operator to look
+// at cleat for a request cleat handled exactly right.
+//
+// Both refusals are covered, not just the new one. Fixing only the input case
+// would leave the definition case on 500 by omission -- standardising the wrong
+// answer at the moment the code path gained a second caller.
+func TestAPIStartWorkflow_RejectedIdempotencyKeyIs409(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantDetail string
+	}{
+		{"definition mismatch", engine.ErrIdempotencyKeyDefMismatch, "idempotency_key_definition_mismatch"},
+		{"input mismatch", engine.ErrIdempotencyKeyInputMismatch, "idempotency_key_input_mismatch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ms := &mockStore{}
+			ms.listVersionsFn = func(ctx context.Context, defName string) ([]int, error) {
+				return []int{1}, nil
+			}
+			ms.startNewRunFn = func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error) {
+				return "", false, fmt.Errorf("%w: detail", tc.err)
+			}
+
+			api := newTestAPIServer(ms)
+			req := httptest.NewRequest(http.MethodPost, "/api/workflows/my-wf/start", strings.NewReader(`{"input":{}}`))
+			req.Header.Set("Idempotency-Key", "idem-123")
+			w := httptest.NewRecorder()
+			api.handleStartWorkflow(w, req, "my-wf")
+
+			if w.Code != 409 {
+				t.Errorf("a refused idempotency key returned %d, want 409. A client error "+
+					"reported as a server fault sends an operator looking at cleat for a "+
+					"request cleat handled correctly (cleat#832).", w.Code)
+			}
+			var resp map[string]string
+			json.NewDecoder(w.Body).Decode(&resp)
+			if resp["detail"] != tc.wantDetail {
+				t.Errorf("detail = %q, want %q -- a client should be able to branch without "+
+					"parsing prose", resp["detail"], tc.wantDetail)
+			}
+			if resp["error"] == "" {
+				t.Error("the response carries no error message")
+			}
+		})
+	}
+}
+
+// TestAPIStartWorkflow_AnOrdinaryStoreErrorIsStill500 is the control for the
+// test above. Without it, "a refusal returns 409" is equally satisfied by
+// returning 409 for everything, which would report a genuine server fault as
+// the caller's fault -- the same defect pointing the other way.
+func TestAPIStartWorkflow_AnOrdinaryStoreErrorIsStill500(t *testing.T) {
+	ms := &mockStore{}
+	ms.listVersionsFn = func(ctx context.Context, defName string) ([]int, error) {
+		return []int{1}, nil
+	}
+	ms.startNewRunFn = func(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error) {
+		return "", false, errors.New("connection refused")
+	}
+
+	api := newTestAPIServer(ms)
+	req := httptest.NewRequest(http.MethodPost, "/api/workflows/my-wf/start", strings.NewReader(`{"input":{}}`))
+	req.Header.Set("Idempotency-Key", "idem-123")
+	w := httptest.NewRecorder()
+	api.handleStartWorkflow(w, req, "my-wf")
+
+	if w.Code != 500 {
+		t.Errorf("an ordinary store error returned %d, want 500", w.Code)
 	}
 }
 
@@ -2690,6 +2762,21 @@ func TestAPICancel(t *testing.T) {
 	}
 }
 
+// existingWorkflow makes a mockStore answer "this run exists" for any id.
+//
+// Needed since cleat#900: the collection endpoints under a run -- /events,
+// /history, /promises -- now check the run exists before serving, so they
+// answer 404 for the zero-value mock whose GetWorkflowByID returns (nil, nil).
+//
+// A helper rather than six copies, because the next collection endpoint's test
+// will need the same thing and should not have to rediscover why.
+func existingWorkflow(ms *mockStore) *mockStore {
+	ms.getWorkflowByIDFn = func(_ context.Context, id string) (*engine.WorkflowInstance, error) {
+		return &engine.WorkflowInstance{ID: id, DefName: "wf", DefVersion: 1, Status: "running"}, nil
+	}
+	return ms
+}
+
 func TestAPIGetHistory(t *testing.T) {
 	ms := &mockStore{}
 	ms.loadEventHistoryPaginatedFn = func(ctx context.Context, workflowID string, offset, limit int) ([]engine.EventRecord, error) {
@@ -2701,7 +2788,7 @@ func TestAPIGetHistory(t *testing.T) {
 		return 1, nil
 	}
 
-	api := newTestAPIServer(ms)
+	api := newTestAPIServer(existingWorkflow(ms))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/history", nil)
 	w := httptest.NewRecorder()
@@ -2731,7 +2818,7 @@ func TestAPIGetHistory_Nil(t *testing.T) {
 		return 0, nil
 	}
 
-	api := newTestAPIServer(ms)
+	api := newTestAPIServer(existingWorkflow(ms))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/history", nil)
 	w := httptest.NewRecorder()
@@ -2752,7 +2839,11 @@ func TestAPIGetHistory_Nil(t *testing.T) {
 }
 
 func TestAPIGetQueryState(t *testing.T) {
-	ms := &mockStore{}
+	// existingWorkflow because the handler now checks the run exists before
+	// reading a key from it (cleat#900's helper, applied to /query). The bare
+	// mock returns nil for GetWorkflowByID, which is indistinguishable from
+	// "no such run" and is exactly the 404 this test would then be reporting.
+	ms := existingWorkflow(&mockStore{})
 	ms.getQueryStateFn = func(ctx context.Context, workflowID, key string) (string, error) {
 		return "state-value-42", nil
 	}
@@ -2850,7 +2941,7 @@ func TestAPIListPromises(t *testing.T) {
 		}, nil
 	}
 
-	api := newTestAPIServer(ms)
+	api := newTestAPIServer(existingWorkflow(ms))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/promises", nil)
 	w := httptest.NewRecorder()
@@ -2876,7 +2967,7 @@ func TestAPIListPromises_Nil(t *testing.T) {
 		return nil, nil
 	}
 
-	api := newTestAPIServer(ms)
+	api := newTestAPIServer(existingWorkflow(ms))
 
 	req := httptest.NewRequest(http.MethodGet, "/api/workflows/wf-1/promises", nil)
 	w := httptest.NewRecorder()
@@ -2895,7 +2986,7 @@ func TestAPIListPromises_Nil(t *testing.T) {
 
 func TestAPIResolvePromise(t *testing.T) {
 	ms := &mockStore{}
-	ms.resolvePromiseFn = func(ctx context.Context, workflowID, promiseID, result string) error {
+	ms.resolvePromiseFn = func(ctx context.Context, promiseID, result string) error {
 		return nil
 	}
 
@@ -2936,7 +3027,7 @@ func TestAPIResolvePromise_InvalidJSON(t *testing.T) {
 
 func TestAPIRejectPromise(t *testing.T) {
 	ms := &mockStore{}
-	ms.rejectPromiseFn = func(ctx context.Context, workflowID, promiseID, errMsg string) error {
+	ms.rejectPromiseFn = func(ctx context.Context, promiseID, errMsg string) error {
 		return nil
 	}
 
@@ -3223,11 +3314,11 @@ func TestReadMemTotal(t *testing.T) {
 		t.Errorf("readMemTotal() = %d bytes, seems unreasonably large", total)
 	}
 }
-func (m *mockStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	if m.batchHeartbeatFn != nil {
-		return m.batchHeartbeatFn(ctx, workerID)
+func (m *mockStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []engine.GenerationKey) ([]string, error) {
+	if m.heartbeatBatchFencedFn != nil {
+		return m.heartbeatBatchFencedFn(ctx, workerID, runs)
 	}
-	return 0, nil
+	return nil, nil
 }
 
 func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]engine.EventRecord, error) {
@@ -3248,6 +3339,9 @@ func (m *mockStore) ResolveLatestVersion(ctx context.Context, defName string) (i
 	return 0, nil
 }
 func (m *mockStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) {
+	if m.validateVersionFn != nil {
+		return m.validateVersionFn(ctx, defName, defVersion)
+	}
 	return true, nil
 }
 func (m *mockStore) CountEventHistory(ctx context.Context, workflowID string) (int, error) {
@@ -3261,8 +3355,27 @@ func (m *mockStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte)
 }
 func (m *mockStore) CountActiveConcurrencyKeys(ctx context.Context) (int, error) { return 0, nil }
 func (m *mockStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	if m.deleteDeadLetteredWorkflowsFn != nil {
+		return m.deleteDeadLetteredWorkflowsFn(ctx, olderThan)
+	}
 	return 0, nil
 }
+func (m *mockStore) CountExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockStore) CountExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockStore) CountDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockStore) CountCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
 func (m *mockStore) DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	if m.deleteCompletedWorkflowsFn != nil {
 		return m.deleteCompletedWorkflowsFn(ctx, olderThan)
@@ -3275,6 +3388,13 @@ func (m *mockStore) LoadEventHistoryBatch(ctx context.Context, workflowIDs []str
 func (m *mockStore) StreamEventHistory(ctx context.Context, workflowID string, pageSize int) (<-chan engine.EventRecord, <-chan error) {
 	return nil, nil
 }
+func (m *mockStore) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
+	if m.cancelWorkflowFn != nil {
+		return m.cancelWorkflowFn(ctx, workflowID, reason)
+	}
+	return nil
+}
+
 func (m *mockStore) TerminateWorkflow(ctx context.Context, workflowID, reason string) error {
 	if m.terminateWorkflowFn != nil {
 		return m.terminateWorkflowFn(ctx, workflowID, reason)
@@ -3302,6 +3422,18 @@ func (m *mockStore) AdminReReplay(ctx context.Context, workflowID string, genera
 func (m *mockStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
 	return 0, nil
 }
+
+// OriginalChildRunIDs returns nothing: no test in this package is about
+// cleat#1661's orphan check, and a double that invented children would make the
+// check fire on unrelated tests. Recorded as a choice rather than left as
+// another empty return.
+//
+// Four other doubles in this package embed *mockStore -- crossTenantMockStore,
+// unsupportedCrossTenantStore, holderAwareStore, deferPhaseStore -- so this one
+// method satisfies all five.
+func (m *mockStore) OriginalChildRunIDs(context.Context, string) ([]string, error) {
+	return nil, nil
+}
 func (m *mockStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
 	return 0, nil
 }
@@ -3316,22 +3448,42 @@ func (m *mockStore) GetAllowedSignalCallers(ctx context.Context, workflowID stri
 }
 
 func (m *mockStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
+	if m.setWorkflowTagFn != nil {
+		return m.setWorkflowTagFn(ctx, workflowName, version, tag)
+	}
 	return nil
 }
 func (m *mockStore) RemoveWorkflowTag(ctx context.Context, workflowName string, tag string) error {
+	if m.removeWorkflowTagFn != nil {
+		return m.removeWorkflowTagFn(ctx, workflowName, tag)
+	}
 	return nil
 }
 func (m *mockStore) GetWorkflowTag(ctx context.Context, workflowName string, tag string) (int, error) {
 	return 0, nil
 }
 func (m *mockStore) GetWorkflowTags(ctx context.Context, workflowName string) (map[string]int, error) {
+	if m.getWorkflowTagsFn != nil {
+		return m.getWorkflowTagsFn(ctx, workflowName)
+	}
 	return nil, nil
 }
 func (m *mockStore) SetRoutingRule(ctx context.Context, workflowName string, targetVersion int, weight float64) error {
+	if m.setRoutingRuleFn != nil {
+		return m.setRoutingRuleFn(ctx, workflowName, targetVersion, weight)
+	}
 	return nil
 }
-func (m *mockStore) RemoveRoutingRule(ctx context.Context, ruleID string) error { return nil }
+func (m *mockStore) RemoveRoutingRule(ctx context.Context, ruleID string) error {
+	if m.removeRoutingRuleFn != nil {
+		return m.removeRoutingRuleFn(ctx, ruleID)
+	}
+	return nil
+}
 func (m *mockStore) GetRoutingRules(ctx context.Context, workflowName string) ([]engine.RoutingRule, error) {
+	if m.getRoutingRulesFn != nil {
+		return m.getRoutingRulesFn(ctx, workflowName)
+	}
 	return nil, nil
 }
 func (m *mockStore) PickVersionByRouting(ctx context.Context, workflowName string) (int, error) {
@@ -3697,11 +3849,11 @@ func TestDispatchLoop_DrainAfterClaim(t *testing.T) {
 	w.wg.Wait()
 }
 
-// TestDrainStatus_ClosesChannelBeforeCancel verifies that handleDrainStatus
-// closes the drainCh and cancels the root context in the correct order
-// (Fix 3). The drainCh is closed first, then cancel is called, ensuring
-// that external callers waiting on DrainComplete() always unblock.
-func TestDrainStatus_ClosesChannelBeforeCancel(t *testing.T) {
+// TestDrainStatus_ReportsCompleteWithoutSideEffects: GET /api/admin/drain reports a finished drain and does
+// NOTHING else. It used to close drainCh and cancel the worker, so a monitor polling the status stopped a worker
+// that had been asked to drain, and a drain nobody polled never finished (cleat#2285). The dispatch loop
+// completes the drain now: see TestDispatchLoop_CompletesADrainByItself.
+func TestDrainStatus_ReportsCompleteWithoutSideEffects(t *testing.T) {
 	ms := &mockStore{}
 	w := newTestWorker(ms)
 	w.drainCh = make(chan struct{})
@@ -3710,8 +3862,6 @@ func TestDrainStatus_ClosesChannelBeforeCancel(t *testing.T) {
 
 	api := &apiServer{store: ms, worker: w, maxBodySize: 1 << 20}
 
-	// Call handleDrainStatus. With draining=true and inflight=0, it should
-	// close drainCh and cancel the context.
 	req := httptest.NewRequest(http.MethodGet, "/api/drain", nil)
 	resp := httptest.NewRecorder()
 	api.handleDrainStatus(resp, req)
@@ -3719,26 +3869,16 @@ func TestDrainStatus_ClosesChannelBeforeCancel(t *testing.T) {
 	if resp.Code != 200 {
 		t.Fatalf("expected 200, got %d", resp.Code)
 	}
-
-	// drainCh must be closed.
+	if !strings.Contains(resp.Body.String(), `"complete":true`) {
+		t.Errorf("a drained worker must report complete=true, got %s", resp.Body.String())
+	}
 	select {
 	case <-w.drainCh:
-		// drainCh closed — correct.
+		t.Error("GET drain status closed drainCh: a status request must not complete the drain")
 	default:
-		t.Error("drainCh should be closed by handleDrainStatus when inflight is empty")
 	}
-
-	// Context must be cancelled AFTER drainCh is closed.
-	if w.ctx.Err() == nil {
-		t.Error("context should be cancelled by handleDrainStatus")
-	}
-
-	// Calling DrainComplete() must not block — it returns the already-closed channel.
-	select {
-	case <-w.DrainComplete():
-		// Not blocking — correct.
-	default:
-		t.Error("DrainComplete() should not block after handleDrainStatus completes")
+	if w.ctx.Err() != nil {
+		t.Error("GET drain status cancelled the worker: a status request must not stop it")
 	}
 }
 
@@ -3806,4 +3946,181 @@ func TestDrainComplete_DoesNotBlock(t *testing.T) {
 	default:
 		t.Error("DrainComplete() should not block after drain completes")
 	}
+}
+
+// SetAllowedSignalCallers records what the handler passed down, so a test can
+// assert on the call rather than only on the status code. An overridable func
+// for the error cases, matching getAllowedSignalCallersFn above.
+func (m *mockStore) SetAllowedSignalCallers(ctx context.Context, workflowID string, callers []string) error {
+	m.setAllowedSignalCallersID = workflowID
+	m.setAllowedSignalCallers = callers
+	if m.setAllowedSignalCallersFn != nil {
+		return m.setAllowedSignalCallersFn(ctx, workflowID, callers)
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// Stranded update requests — IMPROVEMENT-PLAN 3.238
+// ---------------------------------------------------------------------------
+
+// TestAStrandedUpdateIsRejectedWhenItsWorkflowFails drives the real terminal
+// path rather than failStrandedUpdates directly, because the defect it guards
+// is a MISSING CALL: the helper on its own could be perfect and every caller
+// still hang.
+//
+// An update request is dispatched only while its workflow is mid-segment. Once
+// the workflow is terminal there is no future segment, so a request still
+// pending at that moment can never be handled -- and the caller is holding the
+// promise_id the API returned with its 202, waiting on a promise nothing will
+// ever settle. Before this, that wait was permanent and silent.
+func TestAStrandedUpdateIsRejectedWhenItsWorkflowFails(t *testing.T) {
+	ms := &mockStore{}
+	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error) {
+		return []engine.UpdateRequestInfo{
+			{WorkflowID: workflowID, RequestID: "ureq-1", UpdateName: "set-address",
+				Payload: `{"a":1}`, PromiseID: "prom-1"},
+		}, nil
+	}
+	// completedID, not completedName: cleat#1416 made the name reusable, so
+	// CompleteUpdateRequest is keyed on the request's own identity. A sweep
+	// still passing the name would close every request sharing it -- see
+	// TestAStrandSweepAddressesEachRequestSeparately, which covers that
+	// directly.
+	var completedID, completedErr string
+	var completeCalls int
+	ms.completeUpdateRequestFn = func(ctx context.Context, workflowID, requestID, result, errMsg string) error {
+		completeCalls++
+		completedID, completedErr = requestID, errMsg
+		return nil
+	}
+	var rejectedID, rejectedErr string
+	var rejectCalls int
+	ms.rejectPromiseFn = func(ctx context.Context, promiseID, errMsg string) error {
+		rejectCalls++
+		rejectedID, rejectedErr = promiseID, errMsg
+		return nil
+	}
+
+	w := newTestWorker(ms)
+	w.recordTerminalFailure(&engine.WorkflowInstance{ID: "wf-1"}, time.Now(), "boom", "ERR_UNKNOWN", "")
+
+	if completeCalls != 1 {
+		t.Fatalf("the stranded update was completed %d times, want 1", completeCalls)
+	}
+	if completedID != "ureq-1" {
+		t.Fatalf("completed update request = %q, want %q", completedID, "ureq-1")
+	}
+	if completedErr == "" {
+		t.Fatal("the stranded update was completed with an empty error, so the caller is told it " +
+			"finished rather than that it can never be handled")
+	}
+	if rejectCalls != 1 {
+		t.Fatalf("the update's promise was rejected %d times, want 1 -- the caller holds this "+
+			"promise_id and waits on it", rejectCalls)
+	}
+	if rejectedID != "prom-1" {
+		t.Fatalf("rejected promise = %q, want %q", rejectedID, "prom-1")
+	}
+	if rejectedErr != completedErr {
+		t.Fatalf("the request and its promise carry different reasons:\n  request: %q\n  promise: %q\n\n"+
+			"A caller reading the promise and a caller reading the request must not be told "+
+			"different things about the same event.", completedErr, rejectedErr)
+	}
+}
+
+// TestAStrandedUpdateWithNoPromiseIsStillCompleted: the promise_id is optional
+// -- CreateUpdateRequest takes it as a plain string and the HTTP API is not the
+// only way a request can be made. A request with no promise has no caller
+// blocked on it, but leaving it 'pending' forever still misreports what
+// happened to it.
+func TestAStrandedUpdateWithNoPromiseIsStillCompleted(t *testing.T) {
+	ms := &mockStore{}
+	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error) {
+		return []engine.UpdateRequestInfo{{WorkflowID: workflowID, UpdateName: "no-promise"}}, nil
+	}
+	completeCalls := 0
+	ms.completeUpdateRequestFn = func(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+		completeCalls++
+		return nil
+	}
+	rejectCalls := 0
+	ms.rejectPromiseFn = func(ctx context.Context, promiseID, errMsg string) error {
+		rejectCalls++
+		return nil
+	}
+
+	w := newTestWorker(ms)
+	w.failStrandedUpdates(&engine.WorkflowInstance{ID: "wf-1"}, "done")
+
+	if completeCalls != 1 {
+		t.Fatalf("completed %d times, want 1", completeCalls)
+	}
+	if rejectCalls != 0 {
+		t.Fatalf("rejected a promise %d times for a request that carries none; RejectPromise is "+
+			"keyed by promise ID alone, so an empty one would address whatever a blank ID matches",
+			rejectCalls)
+	}
+}
+
+// TestNoPendingUpdatesMeansNoWrites is the negative control. Every workflow in
+// the system reaches a terminal status, and almost none of them has an update
+// outstanding, so this path must be silent by default -- a version that
+// completed or rejected something unconditionally would pass the two tests
+// above.
+func TestNoPendingUpdatesMeansNoWrites(t *testing.T) {
+	ms := &mockStore{}
+	ms.getPendingUpdateRequestsFn = func(ctx context.Context, workflowID string) ([]engine.UpdateRequestInfo, error) {
+		return nil, nil
+	}
+	ms.completeUpdateRequestFn = func(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+		t.Fatal("completed an update request when none was pending")
+		return nil
+	}
+	ms.rejectPromiseFn = func(ctx context.Context, promiseID, errMsg string) error {
+		t.Fatal("rejected a promise when no update request was pending")
+		return nil
+	}
+
+	w := newTestWorker(ms)
+	w.failStrandedUpdates(&engine.WorkflowInstance{ID: "wf-1"}, "done")
+}
+
+// GetChildCompletedAtMs satisfies the store interface. Added with #847, which
+// made PollChild derive its answer from the child's completion instant rather
+// than querying live. Returning ok=false means "never completed", which keeps
+// every existing test's PollChild answer at "running".
+func (m *mockStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	return 0, false, nil
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (m *mockStore) CountWorkflows(ctx context.Context, filter engine.WorkflowFilter) (int, error) {
+	if m.countWorkflowsFn != nil {
+		return m.countWorkflowsFn(ctx, filter)
+	}
+	// Delegating to this mock's own ListWorkflows keeps the count and the page
+	// from disagreeing. A mock whose total its list cannot support is a trap:
+	// it makes a paging bug look like a data bug.
+	wfs, err := m.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
+}
+
+// LoadStreamChunksAfter makes mockStore an engine.StreamChunkTailReader, so a
+// handler test can exercise the durable tail cleat#1639 added.
+//
+// A nil loadStreamChunksAfterFn returns nothing rather than panicking: most
+// tests in this package do not stream, and a double that refuses every call it
+// was not explicitly given makes unrelated tests fail for reasons about this
+// one.
+func (m *mockStore) LoadStreamChunksAfter(ctx context.Context, workflowID string, afterStep, limit int) ([]engine.EventRecord, error) {
+	if m.loadStreamChunksAfterFn != nil {
+		return m.loadStreamChunksAfterFn(ctx, workflowID, afterStep, limit)
+	}
+	return nil, nil
 }

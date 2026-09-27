@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -490,4 +491,52 @@ func CatchUpLimitOrDefault(n int) int {
 		return DefaultCatchUpLimit
 	}
 	return n
+}
+
+// scheduleInputOrDefault is the same normalisation for a schedule's input.
+//
+// workflow_schedules.input is `NOT NULL DEFAULT '{}'` in all three shipped
+// schemas, and a column default applies only when the INSERT omits the column.
+// CreateSchedule names every column explicitly, so an absent input is bound as
+// SQL NULL and the constraint rejects the row -- the default is never reached.
+// An empty json.RawMessage is worse than NULL rather than better: it is a
+// non-NULL value that is not valid JSON, which a JSON column rejects on its own
+// terms (Postgres: `invalid input syntax for type json`).
+//
+// Both are reachable from POST /api/schedules, which requires name, cron and
+// def_name and treats input as optional.
+// ValidateForCreate reports whether this Schedule may be created.
+//
+// NAMED FOR THE OPERATION, not just the type. A method called Validate that
+// means "valid to create" is the one an update path reaches for without
+// reading it, and that failure is silent: the update passes a check that was
+// never about updates. An update path will want different rules -- a name may
+// not change, next_run_at may legitimately move -- so the create-time contract
+// says so in its name.
+//
+// A METHOD ON THE TYPE, and called at the top of all three CreateSchedule
+// implementations rather than copied into them: three copies of a rule are
+// three chances to diverge, which is the exact shape of the defect it closes.
+//
+// One implementation is still not enough on its own -- a fourth store, or a
+// caller who forgets the call, diverges again -- so the guarantee lives in
+// TestEveryDialectRejectsAScheduleWithNoNextRunAt, which drives every
+// registered backend. That is the half that fails when someone forgets, and it
+// is there because a nearly identical fix elsewhere in this repo shipped with
+// a regression test hardcoded to one dialect: the fix was applied per dialect,
+// the test guarded one of them, and the other two stayed broken while the
+// suite stayed green. A test covering a third of the surface reads exactly
+// like full coverage in a summary.
+func (s Schedule) ValidateForCreate() error {
+	if s.NextRunAt.IsZero() {
+		return fmt.Errorf("%w: %s", ErrScheduleNextRunUnset, s.Name)
+	}
+	return nil
+}
+
+func scheduleInputOrDefault(input json.RawMessage) json.RawMessage {
+	if len(input) == 0 {
+		return json.RawMessage(`{}`)
+	}
+	return input
 }

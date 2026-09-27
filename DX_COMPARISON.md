@@ -39,8 +39,11 @@ validating cleat's architecture against real-world code.
    It measures in-process function-call cost and says nothing about the sandbox.
    For a durable figure, `docs/contributor/design/cleat-execution-design.md`
    estimates roughly 500 steps/sec on a single PostgreSQL instance.
-   `benchmarks/comparative/` has Temporal and DBOS harnesses written but
-   `results/` contains only a template — no head-to-head numbers exist yet.
+   Head-to-head numbers still do not exist. `benchmarks/comparative/` — harnesses
+   written, results never produced — was removed in favour of
+   [cleat-bench](https://github.com/cleat-team/cleat-bench), whose committed
+   results cover cleat and DBOS at different rounds with no Temporal run at
+   either, so they are not a three-way comparison.
 
 ---
 
@@ -102,7 +105,7 @@ out of date). The port produced a 141 KB WASM binary (release, stripped).
 - `#[cleat_entry]` proc-macro — compile-time code generation, praised as best DX
 - Clean ABI boundary, no unnecessary abstractions
 - Smallest WASM binaries
-- All K/V state operations present (`set_state`/`get_state`/`delete_state`/`incr_state`/`has_state`/`list_state`)
+- K/V state operations were removed 2026-09-05 (IMPROVEMENT-PLAN §3.216): neither Temporal nor DBOS scopes state beyond one workflow, and cleat's was run-scoped and so equivalent to a local variable
 - Full promise support (`create_promise`/`await_promise`/`resolve_promise`/`reject_promise`)
 - Test harness exists (`test.rs` — WASM-free mock HostCalls with call assertions)
 
@@ -182,7 +185,7 @@ run, not just on disk.
 - `TerminalError` added to core SDK
 - Virtual Object support via `virtual_object` decorator and `set_scope`/`get_scope`
 - External signal API (`signal_workflow`, `send_signal_and_wait`, `reply_to_signal`)
-- K/V state operations via `cleat_call("state", ...)` — `set_state`/`get_state`/`delete_state`/`incr_state`/`has_state`/`list_state`
+- K/V state operations via `cleat_call("state", ...)` — removed 2026-09-05, see IMPROVEMENT-PLAN §3.216
 - `CleatTestHarness` with call recording and state persistence
 - REST client (`CleatClient`) with `send_update`, `resolve_promise`, `send_signal`
 - Update handler support (`register_update_handler` with WIT import)

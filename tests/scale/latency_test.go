@@ -62,10 +62,15 @@ func TestLatencyP50(t *testing.T) {
 	t.Logf("  Min: %v", latencies[0])
 	t.Logf("  Max: %v", latencies[numSamples-1])
 
-	var threshold = 100 * time.Millisecond
-	if p50 > threshold {
-		t.Errorf("P50 latency %.0fms exceeds threshold %v", p50.Seconds()*1000, threshold)
-	}
+	// No wall-clock assertion here. See the comment on TestLatencyP99 for the
+	// measurement that removed it from both tests; this one carried a 100ms
+	// P50 threshold, and its own Max ran to 219ms on the run that failed.
+	//
+	// What is asserted instead is that every sample was actually measured. A
+	// t.Fatalf above stops the test on an append error, so a zero here would
+	// mean a sample that never ran, and zeros sort to the front and pull the
+	// median DOWN -- a measurement hole that reads as "fast".
+	assertAllSampled(t, latencies)
 }
 
 // TestLatencyP99 measures the 99th percentile latency for event appends under
@@ -139,10 +144,43 @@ func TestLatencyP99(t *testing.T) {
 	t.Logf("  Min: %v", latencies[0])
 	t.Logf("  Max: %v", latencies[numSamples-1])
 
-	var threshold = 500 * time.Millisecond
-	if p99 > threshold {
-		t.Errorf("P99 latency %v exceeds threshold %v", p99, threshold)
-	}
+	// This test carried `if p99 > 500ms { t.Errorf(...) }` until 2026-09-04,
+	// when it failed on develop at 491a0f7 (#720) with a P99 of 623.876463ms
+	// over a P50 of 2.676839ms. The threshold is removed rather than widened,
+	// per CLAUDE.md: "If an assertion depends on wall-clock time, remove the
+	// timing rather than widening it."
+	//
+	// It was removed rather than repaired because the stall is not ours. The
+	// first reading of that failure was that a pair of near-identical outliers
+	// (623.876ms and 625.203ms) over a 2.7ms median looked like a fixed stall
+	// -- a lock wait, a retry backoff, a pool timeout -- rather than runner
+	// noise. Three measurements over the scale job's last 20 develop runs say
+	// otherwise:
+	//
+	//   1. The magnitude is not fixed. P99 across those runs is a continuum
+	//      spanning three orders of magnitude, with no cluster at 624ms:
+	//      4.4, 4.8, 5.2, 5.2, 5.9, 6.0, 6.4, 6.5, 7.3, 13.7, 14.5, 15.1,
+	//      15.2, 16.2, 18.4, 27.1, 33.0, 92.1, 377.4, 623.9 (ms).
+	//      Median 14.1ms, max 44x that.
+	//   2. The "near-identical pair" recurs at other magnitudes -- b35c52f's
+	//      top two were 377.4ms and 387.9ms. Four goroutines are in flight at
+	//      once here, so whatever is in flight during one host stall window
+	//      records that window's length. The pair is a signature of the
+	//      concurrency, not of a constant in the code.
+	//   3. TestLatencyP50 above is SEQUENTIAL -- one goroutine, no lock
+	//      contention, no pool competition, no retry path on this code path at
+	//      all -- and shows the same tail (219.3ms max on the failing run,
+	//      126.9ms on b35c52f). Across the 20 runs its Max correlates with
+	//      this test's Max at Pearson r = 0.937. No lock or backoff inside
+	//      AppendEventHistory can make a single-goroutine test slow.
+	//
+	// So the tail is a per-run property of the CI host, and any fixed
+	// threshold under ~700ms is below its noise floor. Re-derive with
+	// scripts/scale-latency-history.py, which reproduces all three.
+	//
+	// TestLatencyUnderConcurrency below already worked this way: it measures,
+	// logs, and asserts nothing about the clock. These two now match it.
+	assertAllSampled(t, latencies)
 }
 
 // TestLatencyUnderConcurrency measures latency as the number of concurrent
@@ -216,6 +254,33 @@ func TestLatencyUnderConcurrency(t *testing.T) {
 			t.Logf("  Concurrency=%d: P50=%v P99=%v mean=%v samples=%d",
 				conc, p50, p99, mean, len(latencies))
 		})
+	}
+}
+
+// assertAllSampled fails if any slot in a fixed-size latency slice was never
+// written, which is what a zero duration means here: no append completes in
+// 0ns, and the slices are allocated at full length before the samples are
+// taken.
+//
+// This replaces the wall-clock thresholds these two tests used to carry, and
+// unlike them it does not depend on how fast the host is. It closes a real
+// hole rather than restating one the appends already check: in
+// TestLatencyP99 a goroutine that fails its INSERT calls t.Errorf and returns
+// without ever writing latencies[idx], and a zero left behind sorts to the
+// FRONT, pulling both the median and the P99 down. A run that measured fewer
+// samples than it claimed would report itself as faster, not as broken.
+func assertAllSampled(t *testing.T, latencies []time.Duration) {
+	t.Helper()
+	var unsampled int
+	for _, d := range latencies {
+		if d == 0 {
+			unsampled++
+		}
+	}
+	if unsampled > 0 {
+		t.Errorf("%d of %d samples were never recorded; the percentiles above "+
+			"are computed over zeros and are lower than the truth",
+			unsampled, len(latencies))
 	}
 }
 

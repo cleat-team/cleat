@@ -761,3 +761,99 @@ func TestPrepareBuildDirGoTargetWithCleattest(t *testing.T) {
 		}
 	}
 }
+
+// TestProjectSDKReplaceSurvivesWhenNoCheckoutIsFound is the guard for #771.
+//
+// propagateReplaces skips carrying the project's SDK and root replaces forward
+// because "the SDK's replace was already written above". That holds only when
+// sdkReplaceDir found a checkout. When it did not, nothing was written above,
+// and the skip dropped the only replaces that could resolve the SDK locally --
+// so a project that deliberately pins the SDK to its own checkout silently got
+// a workflow compiled against whatever the module proxy served.
+//
+// Silently is the whole problem. The build succeeds; the workflow is simply
+// built against different code than the project asked for.
+//
+// Both directions are checked. Restoring the replaces is only half the fix:
+// emitting them when they WERE written above is not a tolerated duplicate but
+// "go.mod: repeated replacement", a hard build failure, which is the hazard the
+// skip existed for in the first place.
+func TestProjectSDKReplaceSurvivesWhenNoCheckoutIsFound(t *testing.T) {
+	// The layout that cannot be found: the SDK lives under .cleat-src/, so
+	// walking up from the project root never passes a directory whose cleat/
+	// subdirectory is the SDK. This is cleat-ports' layout.
+	newProject := func(t *testing.T, withSiblingSDK bool) (projectRoot, outDir, sdkPath string) {
+		t.Helper()
+		tmp := t.TempDir()
+		projectRoot = filepath.Join(tmp, "proj")
+		sdkPath = filepath.Join(projectRoot, ".cleat-src", "cleat")
+		if err := os.MkdirAll(sdkPath, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(sdkPath, "go.mod"),
+			[]byte("module "+SDKModulePath+"\n\ngo 1.25\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if withSiblingSDK {
+			// The findable layout, in ADDITION to the project's own replace:
+			// both are present, and exactly one replace must be emitted.
+			sibling := filepath.Join(projectRoot, "cleat")
+			if err := os.MkdirAll(sibling, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(sibling, "go.mod"),
+				[]byte("module "+SDKModulePath+"\n\ngo 1.25\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(projectRoot, "go.mod"), []byte(
+			"module example.com/ports\n\ngo 1.25\n\n"+
+				"replace "+SDKModulePath+" => ./.cleat-src/cleat\n\n"+
+				"replace "+RootModulePath+" => ./.cleat-src\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		srcDir := filepath.Join(projectRoot, "wf")
+		if err := os.MkdirAll(srcDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		outDir = filepath.Join(tmp, "out")
+		cfg := &BuildConfig{
+			SrcDir: srcDir, OutDir: outDir, PkgName: "main",
+			ModulePath: "example.com/ports", ProjectRoot: projectRoot,
+			GoVersion: "1.26", Target: "go",
+			Outputs: &OutputFiles{Imports: "// i\n", Memory: "// m\n", Adapter: "// a\n", Exports: "// e\n"},
+		}
+		if err := PrepareBuildDir(cfg); err != nil {
+			t.Fatalf("PrepareBuildDir: %v", err)
+		}
+		return projectRoot, outDir, sdkPath
+	}
+
+	t.Run("no checkout found, the project's own replace must survive", func(t *testing.T) {
+		_, outDir, sdkPath := newProject(t, false)
+		mod, err := os.ReadFile(filepath.Join(outDir, "go.mod"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "replace " + SDKModulePath + " => " + sdkPath
+		if !strings.Contains(string(mod), want) {
+			t.Errorf("the project pins the SDK to its own checkout and the generated go.mod "+
+				"does not carry that pin forward, so `go mod tidy` resolves the SDK from the "+
+				"module proxy -- a successful build of different code than the project asked "+
+				"for.\nwant: %s\ngot:\n%s", want, string(mod))
+		}
+	})
+
+	t.Run("checkout found, the replace must not be emitted twice", func(t *testing.T) {
+		_, outDir, _ := newProject(t, true)
+		mod, err := os.ReadFile(filepath.Join(outDir, "go.mod"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := strings.Count(string(mod), "replace "+SDKModulePath+" =>"); n != 1 {
+			t.Errorf("the SDK is replaced %d times; go rejects a repeated replacement "+
+				"outright (\"go.mod: repeated replacement of %s\") and the build fails. "+
+				"Got:\n%s", n, SDKModulePath, string(mod))
+		}
+	})
+}

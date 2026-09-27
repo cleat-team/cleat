@@ -1,0 +1,2 @@
+test-go/engine	4	^Test(ARegisteredQueueAdmitsAtMostItsLimit|ARegisteredQueueLimitHoldsUnderConcurrentClaims)/(mysql|mssql)$	dialect-gated: cleat#1116's two claim-path semaphore tests each run all three dialects; the mysql and mssql subtests (2 tests x 2 dialects = 4) skip in this PostgreSQL-only job and RUN in test-mysql and test-mssql.
+cluster	4	^Test(ARegisteredQueueAdmitsAtMostItsLimit|ARegisteredQueueLimitHoldsUnderConcurrentClaims)/(mysql|mssql)$	dialect-gated: the same four subtests, and the cluster job sweeps ./engine/... too. See the test-go/engine line above.

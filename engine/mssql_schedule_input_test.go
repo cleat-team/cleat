@@ -104,7 +104,6 @@ func TestMSSQLCreateSchedule_SurvivesTheShippedInputConstraint(t *testing.T) {
 				EntryPoint:     "main",
 				CronExpression: "* * * * *",
 				Input:          tc.input,
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(time.Hour),
 			}); err != nil {
 				t.Fatalf("CreateSchedule: %v\n\nThis is what a SQL Server built from "+

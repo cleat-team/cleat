@@ -274,8 +274,9 @@ Result: the workflow hangs until the signal timeout, then fails.
 **Mitigation for Scenario C:**
 
 - Configure alerting on workflows that exceed expected execution duration
-- After recovery, check for workflows in `suspended` or `running` state that
-  are waiting on external signals and verify the external system state matches
+- After recovery, check for workflows waiting on external signals and verify
+  the external system state matches. **Query on `status = 'ready'`, not `suspended`** -- there is no
+  `suspended` status; a run sleeping until a signal arrives is `ready` with `next_wake_at` set
 - If needed, resend signals via the REST API:
 
 ```bash
@@ -488,10 +489,26 @@ SELECT pg_is_in_recovery(), pg_last_wal_receive_lsn(), pg_last_wal_replay_lsn();
 In normal operation, the standby region runs workers in a **read-only** mode.
 They connect to the standby database but do not claim or execute workflows:
 
+**There is no `--read-only` flag.** This block used to show
+`cleat-worker --db "$STANDBY_DATABASE_URL" --read-only`; the worker defines no
+such flag and rejects unknown flags at startup, so the command exits (cleat#1311).
+Nor is there any other switch that makes a worker connect without claiming —
+`cleat-worker --help | grep read` finds nothing.
+
+A worker that reaches the standby database *will* claim and execute whatever it
+finds there. The two ways to have a standby that does not execute:
+
 ```bash
-# Standby region workers (read-only monitoring)
-cleat-worker --db "$STANDBY_DATABASE_URL" --read-only
+# Run no workers against the standby at all -- the simplest, and the default
+# if you simply do not start them.
+
+# Or point them at a task queue nothing is enqueued to, so there is
+# nothing for them to claim:
+cleat-worker --db "$STANDBY_DATABASE_URL" --task-queue standby-idle
 ```
+
+The second keeps a process alive for health checks and metrics. It is not a
+safety mechanism: anything enqueued to that queue will run.
 
 In read-only mode, workers:
 
@@ -649,7 +666,7 @@ Additional verification queries:
 
 ```bash
 # Verify all expected tables exist
-cleatctl check-db --db "$DATABASE_URL" --verbose
+cleatctl check-db --db "$CLEAT_DATABASE_URL" --verbose
 
 # Check that the schema version is current
 cleatctl versions list | head -20
@@ -712,14 +729,14 @@ psql "$STANDBY_URL" -c "SELECT pg_is_in_recovery();"
 # Should return: f (false = not in recovery = writable)
 
 # Step 4: Update worker connection strings (DNS-based or config-based)
-export DATABASE_URL="postgres://user:pass@promoted-standby:5432/cleat?sslmode=require"
+export CLEAT_DATABASE_URL="postgres://user:pass@promoted-standby:5432/cleat?sslmode=require"
 
 # Step 5: Restart workers pointing at the new primary
 pkill -TERM cleat-worker
-cleat-worker --db "$DATABASE_URL" --concurrency 20
+cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 20
 
 # Step 6: Verify failover
-cleatctl check-db --db "$DATABASE_URL"
+cleatctl check-db --db "$CLEAT_DATABASE_URL"
 ```
 
 ### Validate
@@ -728,10 +745,10 @@ After failover, validate the system:
 
 ```bash
 # 1. Database connectivity
-cleatctl check-db --db "$DATABASE_URL"
+cleatctl check-db --db "$CLEAT_DATABASE_URL"
 
 # 2. Schema health
-psql "$DATABASE_URL" -c "SELECT version, applied_at FROM schema_migrations ORDER BY version;"
+psql "$CLEAT_DATABASE_URL" -c "SELECT version, applied_at FROM schema_migrations ORDER BY version;"
 
 # 3. Workflow distribution
 curl -s http://worker:8080/api/admin/stats
@@ -740,7 +757,7 @@ curl -s http://worker:8080/api/admin/stats
 curl -s http://worker:8080/api/workflows?status=running | jq '. | length'
 
 # 5. Verify the reaper has cycled (~10 seconds after worker start, at default settings)
-psql "$DATABASE_URL" -c "
+psql "$CLEAT_DATABASE_URL" -c "
     SELECT status, COUNT(*) FROM workflow_instances GROUP BY status;
 "
 ```
@@ -769,12 +786,12 @@ psql "$STANDBY_URL" -c "
 pg_ctlcluster 16 main promote
 
 # Step 4: Redirect workers back to the original primary
-export DATABASE_URL="postgres://user:pass@original-primary:5432/cleat?sslmode=require"
+export CLEAT_DATABASE_URL="postgres://user:pass@original-primary:5432/cleat?sslmode=require"
 pkill -TERM cleat-worker
-cleat-worker --db "$DATABASE_URL" --concurrency 20
+cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 20
 
 # Step 5: Verify
-cleatctl check-db --db "$DATABASE_URL"
+cleatctl check-db --db "$CLEAT_DATABASE_URL"
 ```
 
 ## Backup validation procedure
@@ -814,10 +831,11 @@ echo "Smoke queries: OK"
 
 # Simulate workflow replay: start a worker in dry-run mode against the test DB
 # and verify the reaper reclaims stale instances
+# NOTE: neither --dry-run nor --timeout exists on cleat-worker (cleat#1311).
+# A worker started against the restored copy executes for real -- which is the
+# point of the drill, since the copy is disposable and is dropped below.
 cleat-worker --db "postgres://localhost/${TEST_DB}?sslmode=disable" \
-    --concurrency=2 \
-    --dry-run \
-    --timeout=30s 2>&1 | head -20
+    --concurrency=2 2>&1 | head -20
 echo "Replay simulation: OK"
 
 # Clean up
@@ -868,9 +886,10 @@ For CI/CD integration, validate backups automatically:
 createdb cleat_drill_$(date +%Y%m%d)
 pg_restore -d cleat_drill_$(date +%Y%m%d) latest-backup.dump
 
-# Start a worker in dry-run mode to verify replay
+# Start a worker to verify replay. There is no dry-run mode (cleat#1311); this
+# executes against the restored copy, which is why the copy is dropped below.
 cleat-worker --db "postgres://user:pass@localhost/cleat_drill_$(date +%Y%m%d)" \
-    --concurrency 1 --dry-run
+    --concurrency 1
 
 # Clean up
 dropdb cleat_drill_$(date +%Y%m%d)

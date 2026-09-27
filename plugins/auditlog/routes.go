@@ -29,8 +29,8 @@ type auditEvent struct {
 
 // handleQueryEvents handles GET /audit/events.
 func (p *Plugin) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, http.StatusUnauthorized, "tenant required")
 		return
 	}
@@ -88,8 +88,11 @@ func (p *Plugin) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	query += " ORDER BY timestamp DESC"
-	query += fmt.Sprintf(" LIMIT $%d", argIdx)
+	query += " ORDER BY timestamp DESC "
+	// LimitClause, not a literal LIMIT: SQL Server has no LIMIT, so this endpoint answered
+	// every request there with a 500 (found while proving the export returns the same rows
+	// on all three dialects, cleat#2047).
+	query += plugin.LimitClause(fmt.Sprintf("$%d", argIdx), p.dialect)
 	args = append(args, limit)
 
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(query, p.dialect), args...)
@@ -104,7 +107,7 @@ func (p *Plugin) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var e auditEvent
 		var metadataJSON []byte
-		if err := rows.Scan(
+		if err := plugin.ScanRow(rows,
 			&e.ID, &e.TenantID, &e.Timestamp, &e.Method, &e.Path,
 			&e.StatusCode, &e.UserID, &e.IPAddress, &e.UserAgent,
 			&e.DurationMs, &metadataJSON,
@@ -129,10 +132,4 @@ func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 
 func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
-}
-
-// tenantID extracts the tenant UUID from the request context.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
 }

@@ -137,6 +137,7 @@ func (p *Plugin) produceViaRestProxy(ctx context.Context, topic string, input pr
 	if err != nil {
 		return produceOutput{}, fmt.Errorf("kafka-connect: create request: %w", err)
 	}
+	plugin.SetTraceparentFromContext(ctx, req)
 	req.Header.Set("Content-Type", "application/vnd.kafka.json.v2+json")
 	req.Header.Set("Accept", "application/vnd.kafka.v2+json")
 

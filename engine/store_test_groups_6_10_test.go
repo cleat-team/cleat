@@ -33,15 +33,15 @@ func TestDeliverSignal(t *testing.T) {
 				t.Fatalf("DeliverSignal: %v", err)
 			}
 
-			payload, found, err := store.PollSignal(ctx, runID, "my-signal")
+			d, found, err := store.PollSignal(ctx, runID, "my-signal")
 			if err != nil {
 				t.Fatalf("PollSignal: %v", err)
 			}
 			if !found {
 				t.Fatal("PollSignal: expected found=true")
 			}
-			if payload != `{"data":"hello"}` {
-				t.Fatalf("PollSignal: expected payload %q, got %q", `{"data":"hello"}`, payload)
+			if d.Payload != `{"data":"hello"}` {
+				t.Fatalf("PollSignal: expected payload %q, got %q", `{"data":"hello"}`, d.Payload)
 			}
 		})
 	}
@@ -69,16 +69,49 @@ func TestDeliverSignalWakesWorkflow(t *testing.T) {
 			updateWorkflowNextWakeAt(t, store, runID, futureTime)
 
 			// Deliver a signal — expect next_wake_at to be updated to now().
-			beforeDeliver := time.Now()
+			//
+			// Bracketed against the DATABASE's clock, not the Go process's.
+			// DeliverSignal sets next_wake_at from the server's own now(), so the
+			// stored value must lie between two readings of that same clock taken
+			// either side of the call. That is an exact statement of the
+			// behaviour and needs no tolerance for skew.
+			//
+			// This used to read `beforeDeliver := time.Now()` and allow ±1s. It
+			// failed once on a loaded run (2026-09-01, engine suite at 93% CPU
+			// and 1:46 wall against a usual 1:12).
+			//
+			// Two things were wrong with it, and measuring separated them.
+			// Go-to-database clock skew on this machine is only 42ms
+			// (postgres, mysql) to 74ms (mssql), so skew alone does not reach
+			// the 1s window -- the first explanation was wrong. The dominant
+			// term is CALL LATENCY: next_wake_at is written at the end of
+			// DeliverSignal, so the gap from beforeDeliver to the stored value
+			// is the whole round trip. Under load that exceeds a second and the
+			// `diff > time.Second` arm fires.
+			//
+			// Bracketing fixes both at once: dbAfter is sampled after the call
+			// returns, so however long the call takes, nw <= dbAfter. Widening
+			// the window would only have moved the threshold.
+			dbBefore := queryDatabaseNow(t, store)
 			if err := store.DeliverSignal(ctx, runID, "wake-signal", "{}"); err != nil {
 				t.Fatalf("DeliverSignal (ready): %v", err)
 			}
+			dbAfter := queryDatabaseNow(t, store)
 
 			nw := queryWorkflowNextWakeAt(t, store, runID)
-			diff := nw.Sub(beforeDeliver)
-			if diff < -time.Second || diff > time.Second {
-				t.Errorf("ready case: next_wake_at %v not within 1s of %v (diff=%v)",
-					nw, beforeDeliver, diff)
+			// The slack absorbs stored-column precision only (MySQL truncates
+			// DATETIME to the column's fractional seconds), never clock skew:
+			// every value here comes from the same server.
+			const precisionSlack = time.Second
+			if nw.Before(dbBefore.Add(-precisionSlack)) || nw.After(dbAfter.Add(precisionSlack)) {
+				t.Errorf("ready case: next_wake_at %v is outside [%v, %v], the database's "+
+					"own clock either side of DeliverSignal — so it was not reset to now()",
+					nw, dbBefore, dbAfter)
+			}
+			// And the point of the case: it moved off the far-future value.
+			if !nw.Before(futureTime.Add(-time.Minute)) {
+				t.Errorf("ready case: next_wake_at %v is still at or near the future value %v; "+
+					"the signal did not wake the workflow", nw, futureTime)
 			}
 
 			// --- Case 2: status='running' (guard) ---
@@ -97,6 +130,11 @@ func TestDeliverSignalWakesWorkflow(t *testing.T) {
 				t.Fatalf("DeliverSignal (running): %v", err)
 			}
 
+			// No database-clock bracket here, and it is not an oversight: this
+			// case asserts next_wake_at did NOT change, comparing the value read
+			// back against the one this test wrote. Both sides are the same Go
+			// value round-tripped through the column, so only storage precision
+			// is in play -- there is no second clock to disagree with.
 			nw2 := queryWorkflowNextWakeAt(t, store, runID2)
 			diff2 := nw2.Sub(futureTime2)
 			if diff2 < -time.Second || diff2 > time.Second {
@@ -129,25 +167,28 @@ func TestPollAndClaimSignal(t *testing.T) {
 				t.Fatalf("DeliverSignal: %v", err)
 			}
 
-			// First call should find and claim the signal.
-			payload, found, err := store.PollAndClaimSignal(ctx, runID, "sig-1")
+			// Poll, then consume by id -- what the await path does.
+			d, found, err := store.PollSignal(ctx, runID, "sig-1")
 			if err != nil {
-				t.Fatalf("PollAndClaimSignal (first): %v", err)
+				t.Fatalf("PollSignal (first): %v", err)
 			}
 			if !found {
-				t.Fatal("PollAndClaimSignal (first): expected found=true")
+				t.Fatal("PollSignal (first): expected found=true")
 			}
-			if payload != "payload-1" {
-				t.Fatalf("PollAndClaimSignal (first): expected payload %q, got %q", "payload-1", payload)
+			if d.Payload != "payload-1" {
+				t.Fatalf("PollSignal (first): expected payload %q, got %q", "payload-1", d.Payload)
+			}
+			if err := store.ConsumeSignal(ctx, runID, d.ID); err != nil {
+				t.Fatalf("ConsumeSignal: %v", err)
 			}
 
-			// Second call should return found=false — signal already consumed.
-			_, found, err = store.PollAndClaimSignal(ctx, runID, "sig-1")
+			// Second call should return found=false — the delivery is gone.
+			_, found, err = store.PollSignal(ctx, runID, "sig-1")
 			if err != nil {
-				t.Fatalf("PollAndClaimSignal (second): %v", err)
+				t.Fatalf("PollSignal (second): %v", err)
 			}
 			if found {
-				t.Fatal("PollAndClaimSignal (second): expected found=false (signal already consumed)")
+				t.Fatal("PollSignal (second): expected found=false (the delivery was consumed)")
 			}
 		})
 	}
@@ -177,6 +218,169 @@ func TestPollSignal_NotDelivered(t *testing.T) {
 			}
 			if found {
 				t.Fatal("PollSignal for undelivered signal: expected found=false")
+			}
+		})
+	}
+}
+
+// TestSignalsOfTheSameNameQueueOldestFirst is the regression test for
+// IMPROVEMENT-PLAN 3.215(b): two signals of the same name, delivered before
+// either is consumed, must both arrive, oldest first.
+//
+// It ran red on all three dialects before the fix and for three different
+// reasons, which is the point of putting it here rather than in a
+// dialect-specific file -- the overwrite was not one bug reachable from three
+// places, it was one SCHEMA decision (PRIMARY KEY (workflow_id, signal_name))
+// that each dialect then honoured in its own syntax:
+//
+//	postgres  ON CONFLICT (workflow_id, signal_name) DO UPDATE SET payload = $3
+//	mysql     ON DUPLICATE KEY UPDATE payload = VALUES(payload)
+//	mssql     MERGE ... WHEN MATCHED THEN UPDATE SET payload = source.payload
+//
+// A fix that changed the Go and not the key would go green on none of them,
+// and a fix that changed one dialect's clause would go green on one.
+//
+// The third delivery is not padding. With two, a store that returns the LAST
+// delivery rather than the FIRST still fails the payload assertion, but a
+// store that returns them in arbitrary order can pass by luck half the time.
+// Three makes an ordering claim that a coin flip does not satisfy.
+func TestSignalsOfTheSameNameQueueOldestFirst(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			setupTestData(t, store)
+
+			ctx := context.Background()
+
+			runID, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "signal-queue-test", DefaultTenantUUID, 0)
+			if err != nil {
+				t.Fatalf("StartNewRun: %v", err)
+			}
+
+			want := []string{"first", "second", "third"}
+			for _, p := range want {
+				if err := store.DeliverSignal(ctx, runID, "approve", p); err != nil {
+					t.Fatalf("DeliverSignal(%q): %v", p, err)
+				}
+			}
+
+			var lastID int64
+			for i, expected := range want {
+				d, found, err := store.PollSignal(ctx, runID, "approve")
+				if err != nil {
+					t.Fatalf("PollSignal %d: %v", i, err)
+				}
+				if !found {
+					t.Fatalf("delivery %d of %d is missing: a second signal of the same "+
+						"name overwrote an earlier one", i+1, len(want))
+				}
+				if d.Payload != expected {
+					t.Fatalf("delivery %d: got payload %q, want %q -- deliveries are "+
+						"not being returned oldest-first", i+1, d.Payload, expected)
+				}
+				if d.ID <= lastID {
+					t.Fatalf("delivery %d: id %d does not advance past %d, so ORDER BY id "+
+						"cannot express FIFO", i+1, d.ID, lastID)
+				}
+				lastID = d.ID
+
+				if err := store.ConsumeSignal(ctx, runID, d.ID); err != nil {
+					t.Fatalf("ConsumeSignal %d: %v", i, err)
+				}
+			}
+
+			if _, found, err := store.PollSignal(ctx, runID, "approve"); err != nil {
+				t.Fatalf("final PollSignal: %v", err)
+			} else if found {
+				t.Fatal("expected the queue to be empty after all three were consumed")
+			}
+		})
+	}
+}
+
+// TestAPromiseIsSettledByAnyHolderOfItsID covers both halves of how settling
+// ended up: #818 made a settle that matched nothing report it, and #813 made a
+// settle by a workflow other than the creator match in the first place.
+//
+// This replaces TestSettlingAPromiseThatIsNotYoursIsAnError, which asserted
+// that a different workflow settling a promise is an error. That was a correct
+// reading of the code at the time and the wrong requirement: a promise exists
+// SO THAT something other than the waiter can complete it, and the settler is
+// handed an opaque ID and nothing else. Under the old rule the only caller who
+// could settle a promise was the one workflow with no reason to -- a workflow
+// awaiting its own promise deadlocks.
+//
+// What survives from #818 is the half that was always right and is the harder
+// one to keep: a settle that matches no row must say so. Now that any holder of
+// the ID may settle, ErrPromiseNotFound means the promise genuinely does not
+// exist, which is a more useful thing for it to mean than "exists, but not
+// yours".
+//
+// Cross-backend because the behaviour lives in three separate UPDATE
+// statements, not one shared helper: postgres, mysql and mssql each write their
+// own.
+func TestAPromiseIsSettledByAnyHolderOfItsID(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			setupTestData(t, store)
+
+			ctx := context.Background()
+
+			owner, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "promise-owner", DefaultTenantUUID, 0)
+			if err != nil {
+				t.Fatalf("StartNewRun(owner): %v", err)
+			}
+
+			if err := store.CreatePromise(ctx, owner, "approval", "prom-1"); err != nil {
+				t.Fatalf("CreatePromise: %v", err)
+			}
+			if err := store.CreatePromise(ctx, owner, "approval-2", "prom-2"); err != nil {
+				t.Fatalf("CreatePromise: %v", err)
+			}
+
+			// Settling reaches the row without being told who owns it. This is
+			// the case a settler is actually in: it has the ID and nothing
+			// else. It used to update zero rows.
+			if err := store.ResolvePromise(ctx, "prom-1", `{"ok":true}`); err != nil {
+				t.Fatalf("resolving a promise by ID alone: %v", err)
+			}
+			status, result, _, err := store.GetPromise(ctx, owner, "prom-1")
+			if err != nil {
+				t.Fatalf("GetPromise: %v", err)
+			}
+			if status != "resolved" {
+				t.Errorf("status is %q, want resolved -- the settle reported success without "+
+					"changing the row, which is the shape of the defect it replaced", status)
+			}
+			if result == "" {
+				t.Error("the resolved promise carries no result; a settle that reaches the row " +
+					"but drops the value is only half the mechanism")
+			}
+
+			if err := store.RejectPromise(ctx, "prom-2", "nope"); err != nil {
+				t.Fatalf("rejecting a promise by ID alone: %v", err)
+			}
+			if status, _, _, err := store.GetPromise(ctx, owner, "prom-2"); err != nil {
+				t.Fatalf("GetPromise: %v", err)
+			} else if status != "rejected" {
+				t.Errorf("status is %q, want rejected", status)
+			}
+
+			// The half kept from #818: a settle that matches nothing is
+			// reported. Without it the call above cannot be trusted either --
+			// a store that returns nil unconditionally passes every assertion
+			// up to here.
+			if err := store.ResolvePromise(ctx, "no-such-promise", `{}`); err == nil {
+				t.Error("resolving a promise that does not exist returned nil; the caller " +
+					"believes it succeeded")
+			}
+			if err := store.RejectPromise(ctx, "no-such-promise", "nope"); err == nil {
+				t.Error("rejecting a promise that does not exist returned nil")
 			}
 		})
 	}
@@ -212,8 +416,8 @@ func TestPollSignal_NonDestructive(t *testing.T) {
 			if !found1 {
 				t.Fatal("PollSignal (first): expected found=true")
 			}
-			if p1 != "nd-payload" {
-				t.Fatalf("PollSignal (first): expected payload %q, got %q", "nd-payload", p1)
+			if p1.Payload != "nd-payload" {
+				t.Fatalf("PollSignal (first): expected payload %q, got %q", "nd-payload", p1.Payload)
 			}
 
 			// Second PollSignal must also find the signal — PollSignal is non-destructive.
@@ -224,8 +428,11 @@ func TestPollSignal_NonDestructive(t *testing.T) {
 			if !found2 {
 				t.Fatal("PollSignal (second): expected found=true (non-destructive)")
 			}
-			if p2 != "nd-payload" {
-				t.Fatalf("PollSignal (second): expected payload %q, got %q", "nd-payload", p2)
+			if p2.Payload != "nd-payload" {
+				t.Fatalf("PollSignal (second): expected payload %q, got %q", "nd-payload", p2.Payload)
+			}
+			if p2.ID != p1.ID {
+				t.Fatalf("PollSignal returned a different delivery on the second read: %d then %d", p1.ID, p2.ID)
 			}
 		})
 	}
@@ -319,7 +526,9 @@ func TestGetChildResult_Completed(t *testing.T) {
 			}
 
 			// GetChildResult on the completed workflow ID.
-			resultJSON, completed, err := store.GetChildResult(ctx, claimed.ID)
+			_outcome, err := store.GetChildResult(ctx, claimed.ID)
+			resultJSON := _outcome.Result
+			completed := _outcome.Completed
 			if err != nil {
 				t.Fatalf("GetChildResult: %v", err)
 			}
@@ -360,7 +569,8 @@ func TestGetChildResult_NotCompleted(t *testing.T) {
 			}
 
 			// Do NOT claim or complete the child — it should still be pending.
-			_, completed, err := store.GetChildResult(ctx, childID)
+			_outcome, err := store.GetChildResult(ctx, childID)
+			completed := _outcome.Completed
 			if err != nil {
 				t.Fatalf("GetChildResult: %v", err)
 			}
@@ -404,7 +614,7 @@ func TestReapStaleInstances(t *testing.T) {
 
 			// Reap with a 1-nanosecond timeout. The just-claimed workflow's
 			// heartbeat_at should already be stale at this granularity.
-			count, err := store.ReapStaleInstances(ctx, time.Nanosecond)
+			count, err := store.ReapStaleInstances(ctx, time.Nanosecond, 0)
 			if err != nil {
 				t.Fatalf("ReapStaleInstances(1ns): %v", err)
 			}
@@ -413,7 +623,7 @@ func TestReapStaleInstances(t *testing.T) {
 			}
 
 			// Reap with a zero timeout (reclaim any running workflow).
-			count, err = store.ReapStaleInstances(ctx, 0)
+			count, err = store.ReapStaleInstances(ctx, 0, 0)
 			if err != nil {
 				t.Fatalf("ReapStaleInstances(0): %v", err)
 			}
@@ -701,7 +911,6 @@ func TestCreateSchedule(t *testing.T) {
 				EntryPoint:     "main",
 				CronExpression: "* * * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(time.Hour),
 			}
 
@@ -750,53 +959,6 @@ func TestGetDueSchedules(t *testing.T) {
 	}
 }
 
-func TestUpdateScheduleNextRun(t *testing.T) {
-	for _, backend := range registeredBackends {
-		backend := backend
-		t.Run(backend.Name(), func(t *testing.T) {
-			store, teardown := backend.Setup(t)
-			defer teardown()
-			setupTestData(t, store)
-
-			ctx := context.Background()
-
-			sch := Schedule{
-				Name:           "test-update-schedule",
-				DefName:        "test-workflow",
-				EntryPoint:     "main",
-				CronExpression: "0 * * * *",
-				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
-				NextRunAt:      time.Now().Add(time.Hour),
-			}
-			if err := store.CreateSchedule(ctx, sch); err != nil {
-				t.Fatalf("CreateSchedule: %v", err)
-			}
-
-			futureTime := time.Now().Add(24 * time.Hour)
-			if err := store.UpdateScheduleNextRun(ctx, "test-update-schedule", futureTime); err != nil {
-				t.Fatalf("UpdateScheduleNextRun: %v", err)
-			}
-
-			// Verify the schedule still exists via ListSchedules.
-			schedules, err := store.ListSchedules(ctx)
-			if err != nil {
-				t.Fatalf("ListSchedules: %v", err)
-			}
-			found := false
-			for _, s := range schedules {
-				if s.Name == "test-update-schedule" {
-					found = true
-					break
-				}
-			}
-			if !found {
-				t.Fatal("ListSchedules: expected 'test-update-schedule' to exist after UpdateScheduleNextRun")
-			}
-		})
-	}
-}
-
 func TestSetScheduleEnabled(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
@@ -815,7 +977,6 @@ func TestSetScheduleEnabled(t *testing.T) {
 				EntryPoint:     "main",
 				CronExpression: "0 * * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(-time.Hour),
 			}
 			if err := store.CreateSchedule(ctx, sch); err != nil {
@@ -857,7 +1018,6 @@ func TestDeleteSchedule(t *testing.T) {
 				EntryPoint:     "main",
 				CronExpression: "0 * * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      time.Now().Add(time.Hour),
 			}
 			if err := store.CreateSchedule(ctx, sch); err != nil {
@@ -919,6 +1079,37 @@ func updateWorkflowNextWakeAt(t *testing.T, store WorkflowStore, workflowID stri
 	default:
 		t.Fatalf("updateWorkflowNextWakeAt: unknown store type %T", store)
 	}
+}
+
+// queryDatabaseNow returns the database server's own clock, using the same
+// expression the corresponding DeliverSignal uses to set next_wake_at:
+// now() on PostgreSQL, NOW(6) on MySQL, SYSUTCDATETIME() on SQL Server.
+//
+// It exists so that a test comparing against next_wake_at compares two readings
+// of ONE clock. The Go process and the database server do not share a clock --
+// under colima the database runs in a VM with its own time -- so any assertion
+// that puts time.Now() on one side and a database-generated timestamp on the
+// other is measuring clock skew as much as behaviour.
+func queryDatabaseNow(t *testing.T, store WorkflowStore) time.Time {
+	t.Helper()
+	var now time.Time
+	switch s := store.(type) {
+	case *PostgresStore:
+		if err := s.db.QueryRow(`SELECT now()`).Scan(&now); err != nil {
+			t.Fatalf("queryDatabaseNow (postgres): %v", err)
+		}
+	case *MySQLStore:
+		if err := s.db.QueryRow(`SELECT NOW(6)`).Scan(&now); err != nil {
+			t.Fatalf("queryDatabaseNow (mysql): %v", err)
+		}
+	case *MSSQLStore:
+		if err := s.db.QueryRow(`SELECT SYSUTCDATETIME()`).Scan(&now); err != nil {
+			t.Fatalf("queryDatabaseNow (mssql): %v", err)
+		}
+	default:
+		t.Fatalf("queryDatabaseNow: unknown store type %T", store)
+	}
+	return now
 }
 
 // queryWorkflowNextWakeAt returns next_wake_at from the database.

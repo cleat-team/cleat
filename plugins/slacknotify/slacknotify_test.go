@@ -1,6 +1,7 @@
 package slacknotify
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -40,6 +41,27 @@ func TestInit(t *testing.T) {
 	}
 	if p.logger == nil {
 		t.Error("expected logger to be set")
+	}
+}
+
+// TestInitNoWarnWithNoConfig is the mirror of
+// TestSN_InitWarnsOnLeftoverSigningSecret (slacknotify_new_test.go): with no
+// --plugin-config at all, Init must log no leftover-key WARN. Before
+// cleat#2172, Init logged a WARN here about unsigned requests being
+// accepted -- that premise is gone now that handleInteractiveCallback
+// refuses unconditionally when no secret is available (interactive.go), so
+// nothing about signing belongs in Init's own log output any more.
+func TestInitNoWarnWithNoConfig(t *testing.T) {
+	var buf bytes.Buffer
+	p := &Plugin{}
+	env := &plugin.Environment{
+		Logger: slog.New(slog.NewTextHandler(&buf, nil)),
+	}
+	if err := p.Init(context.Background(), env); err != nil {
+		t.Fatalf("Init() returned error: %v", err)
+	}
+	if got := buf.String(); strings.Contains(got, "signing") || strings.Contains(got, "signature") {
+		t.Errorf("did not expect Init to log anything about signing with no config at all, got log output: %q", got)
 	}
 }
 

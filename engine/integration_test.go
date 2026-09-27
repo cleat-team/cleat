@@ -343,36 +343,41 @@ func TestIntegrationSignalAndResume(t *testing.T) {
 
 	// ---- Step 3: Poll the signal back (atomic claim + delete) ----
 	//
-	// This step exercises "atomic claim + delete", so it must call
-	// PollAndClaimSignal, not PollSignal. Those are two distinct
-	// SignalStore methods with two distinct, documented contracts:
-	// PollSignal "checks for a delivered signal" (a plain, repeatable read
-	// -- see TestPollSignal_NonDestructive in
-	// store_test_groups_6_10_test.go and PostgresStore.PollSignal's doc
-	// comment in store_signals.go) while PollAndClaimSignal "atomically
-	// checks for AND CLAIMS" it (consumes it). This test used to call
-	// PollSignal for both steps 3 and 4 and assert the consuming behavior
-	// on it, which happened to pass only because PostgresStore.PollSignal
-	// used to be implemented as a bug-for-bug copy of PollAndClaimSignal.
-	payload, found, err := store.PollAndClaimSignal(ctx, runID, "payment_confirmed")
+	// This step exercises what the await path does -- poll the head, then
+	// consume it by id -- which is two calls with two distinct, documented
+	// contracts. PollSignal "returns the oldest unconsumed delivery ...
+	// without consuming it" (a plain, repeatable read -- see
+	// TestPollSignal_NonDestructive in store_test_groups_6_10_test.go),
+	// and ConsumeSignal removes it.
+	//
+	// It used to call PollAndClaimSignal, which did both in one step and had
+	// no caller in the engine, so this was integration coverage of a method
+	// production never ran (IMPROVEMENT-PLAN 3.215(d)). Before that it called
+	// PollSignal for both steps 3 and 4 and asserted the consuming behaviour
+	// on it, which passed only because PollSignal was then a bug-for-bug copy
+	// of PollAndClaimSignal.
+	d, found, err := store.PollSignal(ctx, runID, "payment_confirmed")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal: %v", err)
+		t.Fatalf("PollSignal: %v", err)
 	}
 	if !found {
-		t.Error("expected PollAndClaimSignal to find the delivered signal")
+		t.Error("expected PollSignal to find the delivered signal")
 	}
-	if normalizeJSON(payload) != normalizeJSON(signalPayload) {
-		t.Errorf("signal payload mismatch: expected=%q, got=%q", signalPayload, payload)
+	if normalizeJSON(d.Payload) != normalizeJSON(signalPayload) {
+		t.Errorf("signal payload mismatch: expected=%q, got=%q", signalPayload, d.Payload)
 	}
-	t.Logf("Signal delivered and polled successfully: %s", payload)
+	if err := store.ConsumeSignal(ctx, runID, d.ID); err != nil {
+		t.Fatalf("ConsumeSignal: %v", err)
+	}
+	t.Logf("Signal delivered, polled and consumed successfully: %s", d.Payload)
 
-	// ---- Step 4: Claiming the same signal again returns not-found (consumed) ----
-	_, found, err = store.PollAndClaimSignal(ctx, runID, "payment_confirmed")
+	// ---- Step 4: Polling the same signal again returns not-found (consumed) ----
+	_, found, err = store.PollSignal(ctx, runID, "payment_confirmed")
 	if err != nil {
-		t.Fatalf("second PollAndClaimSignal: %v", err)
+		t.Fatalf("second PollSignal: %v", err)
 	}
 	if found {
-		t.Error("expected second PollAndClaimSignal to return not-found (signal was consumed)")
+		t.Error("expected second PollSignal to return not-found (the delivery was consumed)")
 	}
 
 	// ---- Step 5: Persist the execution history ----
@@ -734,6 +739,13 @@ func TestRLSTenantIsolation(t *testing.T) {
 	if err := storeA.DeployWorkflowDef(ctx, def); err != nil {
 		t.Fatalf("DeployWorkflowDef: %v", err)
 	}
+	// B needs its own definition of the same name: since D7 the FK on
+	// workflow_instances carries tenant_id (IMPROVEMENT-PLAN 3.77). That two
+	// tenants can hold one name at all is the change; before it, this second
+	// deploy would have been refused.
+	if err := storeB.DeployWorkflowDef(ctx, def); err != nil {
+		t.Fatalf("DeployWorkflowDef(B): %v", err)
+	}
 
 	runIDA := fmt.Sprintf("rls-test-a-%d", time.Now().UnixNano())
 	runIDB := fmt.Sprintf("rls-test-b-%d", time.Now().UnixNano())
@@ -768,7 +780,16 @@ func TestRLSTenantIsolation(t *testing.T) {
 		}
 
 		// Release tenant A's workflow so it doesn't affect the tenant B test.
-		if err := storeA.ReleaseWorkflow(ctx, wfsA[0].ID, "worker-a", 0, time.Now()); err != nil {
+		//
+		// wfsA[0].Generation, not a literal 0. The generation is part of the
+		// fence, and a claimed run's is not zero -- so this passed credentials
+		// it did not hold and the UPDATE matched no rows. Until cleat#1223 a
+		// zero-row release returned nil on PostgreSQL, so the release this
+		// comment describes has never happened: the test went on to pass
+		// because tenant scoping, not the release, is what keeps tenant B's
+		// claim clean. The fix that made a lost fence reportable is what
+		// surfaced it.
+		if err := storeA.ReleaseWorkflow(ctx, wfsA[0].ID, "worker-a", wfsA[0].Generation, time.Now()); err != nil {
 			t.Fatalf("ReleaseWorkflow tenant A: %v", err)
 		}
 	}

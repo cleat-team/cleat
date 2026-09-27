@@ -77,6 +77,20 @@ func TestPluginCredentialFieldsUseTheSecretType(t *testing.T) {
 		// anything.
 		"blobstore.Config.AccessKeyID": {reason: "public half of an AWS key pair, not a secret"},
 
+		// NOT A CREDENTIAL. token_endpoint is a URL out of an issuer's OIDC
+		// discovery document -- where cleat should POST to exchange a code --
+		// and it is published at a well-known path for anyone to read. It
+		// matches here on the word "token" alone.
+		//
+		// The name is not ours to change: "token_endpoint" is the field name
+		// in OpenID Connect Discovery, so renaming it out of this guard's way
+		// would mean the JSON no longer decodes. Narrowed to this one field
+		// rather than the type, so the ClientSecret-shaped things this guard
+		// exists for stay in scope if discoveryDoc ever grows one. cleat#1582.
+		"oauthprovider.discoveryDoc.TokenEndpoint": {
+			reason: "a public URL from OIDC discovery, not a credential; the field name is fixed by the OIDC spec",
+		},
+
 		// This is the OUTBOUND request body to PagerDuty's Events API, not a
 		// response to one of our callers. plugin.Secret would be exactly wrong
 		// here: MarshalJSON would put "[redacted]" in the routing_key field and
@@ -91,25 +105,77 @@ func TestPluginCredentialFieldsUseTheSecretType(t *testing.T) {
 			reason: "outbound body to PagerDuty; redacting it would break authentication",
 		},
 
-		// CANNOT REACH A CALLER. These five are process configuration,
-		// unmarshaled from a deployment file into a Config struct and never
-		// returned by any endpoint -- which is why they are not part of the
-		// leak this change fixes.
+		// CANNOT REACH A CALLER. Process configuration, unmarshaled from a
+		// deployment file into a Config struct and never returned by any
+		// endpoint -- which is why they are not part of the leak this change
+		// fixes.
 		//
-		// They are still credentials and still worth converting, for the
+		// email.Config.SendGridAPIKey, llm.ProviderConfig.APIKey and
+		// slacknotify.Config.SlackSigningSecret are GONE from this list,
+		// not converted: cleat#1992 part 1 removed the first two fields from
+		// Config/ProviderConfig, and cleat#2172 (part 1b) removed the third
+		// from slacknotify's Config the same way -- each moving its
+		// credential to a deployment secret. What remains in --plugin-config
+		// is legacyEmailConfig.SendGridAPIKey, legacyProviderConfig.APIKey
+		// and legacySlackConfig.SlackSigningSecret, read once at Init purely
+		// to WARN or refuse to boot on a leftover value -- and those ARE
+		// plugin.Secret (cleat-review's #2202 re-check for the first two,
+		// the same convention followed for the third), not allowlisted,
+		// since converting them cost nothing (none is built from a
+		// marshaled Config struct in any test helper the way the three
+		// removed entries were).
+		//
+		// blobstore.Config.SecretAccessKey is still worth converting, for the
 		// logging path rather than the response path. That was attempted here
 		// and backed out: plugin.Secret does not round-trip through
-		// json.Marshal by design, and six llm test helpers build their
+		// json.Marshal by design, and test helpers build their
 		// Environment.Config by marshaling a Config struct. Production never
 		// does that -- PluginLoader.DeployPlugin marshals a map[string]any
 		// parsed from deployment JSON -- so the conversion is safe, but the
 		// test churn belongs to its own change rather than riding along with a
 		// security fix. Tracked in tiers.yaml under the plugins entry.
 		"blobstore.Config.SecretAccessKey":          {reason: "process config; never returned by an endpoint (tracked)"},
-		"email.Config.SendGridAPIKey":               {reason: "process config; never returned by an endpoint (tracked)"},
-		"llm.ProviderConfig.APIKey":                 {reason: "process config; never returned by an endpoint (tracked)"},
-		"slacknotify.Config.SlackSigningSecret":     {reason: "process config; never returned by an endpoint (tracked)"},
 		"oauthprovider.oauthConfigRow.ClientSecret": {reason: "internal row struct; handleListSessions never selects it (tracked)"},
+
+		// CANNOT REACH A CALLER, the same shape as llm.ProviderConfig.APIKey
+		// two lines up. chatRequest is decode-only in production -- it is
+		// unmarshaled FROM a workflow's inputJSON in p.chat/p.chatStream and
+		// never marshaled back out by any of this plugin's own code; the only
+		// call sites that marshal it are test helpers building synthetic
+		// input (per_tenant_api_key_test.go, host_functions_test.go,
+		// llm_behavioral_test.go). plugin.Secret would break every one of
+		// them the same way it was found to break llm.ProviderConfig.APIKey's
+		// own test helpers: it does not round-trip through json.Marshal by
+		// design, so `json.Marshal(chatRequest{APIKey: "k"})` would produce
+		// `"api_key":"[redacted]"`, which UnmarshalJSON then refuses to
+		// accept back.
+		//
+		// A literal key typed directly into workflow input (as opposed to a
+		// resolved ${secret:...} reference) USED TO BE recorded in the clear
+		// in event history -- cleat#1988's own PR (#2023) accepted this
+		// rather than guess at a field's secrecy from its JSON shape, because
+		// this plugin sees only the POST-RESOLUTION string and cannot tell a
+		// resolved secret from a literal.
+		//
+		// cleat#2043 closed that gap, but NOT by converting this field's Go
+		// type -- event history records the RAW inputJSON the workflow sent,
+		// not a re-marshal of this struct, so that type has no bearing on
+		// what gets stored, same as before. The fix is
+		// plugin.FuncOptions.SecretOnlyFields: "chat" and "chat_stream" now
+		// declare "api_key" secret-only, and the engine refuses a call whose
+		// raw api_key isn't exactly a ${secret:NAME} reference before the
+		// call is dispatched or recorded (engine/plugins.go,
+		// checkSecretOnlyFields). This allowlist entry stays: that guard
+		// checks something unrelated to #2043's fix (a credential-shaped
+		// field marshaled back OUT toward a caller, and chatRequest still
+		// never is), and this field still can't round-trip through
+		// json.Marshal as plugin.Secret, for the same test-helper reason as
+		// before.
+		"llm.chatRequest.APIKey": {
+			reason: "decode-only in production, never marshaled towards a caller; the literal-" +
+				"secret gap this note used to describe was closed by cleat#2043's " +
+				"SecretOnlyFields, which is enforced on the raw JSON, not on this Go type",
+		},
 	}
 
 	root := filepath.Join("..", "plugins")

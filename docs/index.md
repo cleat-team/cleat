@@ -3,13 +3,18 @@
 ## I want to...
 
 - **Get started in 5 minutes** -- [Quick Start Tutorial](tutorials/quick-start.md)
+- **Install an SDK (Go, Python, Rust, Java, AssemblyScript)** -- [Installing an SDK](reference/sdk-api.md#installing-an-sdk)
 - **Build my first workflow** -- [Your First Workflow](tutorials/your-first-workflow.md)
 - **Learn about signals and human-in-the-loop** -- [Signals Tutorial](tutorials/signals-and-human-loop.md)
 - **Use plugins (LLM, Slack, webhooks)** -- [Using Plugins](how-to/use-plugins.md)
 - **Test my workflows** -- [Testing Workflows](how-to/test-workflows.md)
+- **Stream a model's tokens to a browser** -- [Streaming Tokens to a Client](how-to/stream-tokens-to-a-client.md)
+- **Connect my company's identity provider (incl. SAML)** -- [Connect Any Identity Provider](how-to/connect-any-identity-provider.md)
 - **Deploy to production** -- [Deploying to Production](operations/deploying-to-production.md)
 - **Understand the architecture** -- [Architecture Overview](explanation/architecture.md)
 - **Monitor workflows visually** -- [Web UI / Admin Dashboard](../web/README.md)
+- **Understand what state a workflow is in** -- [Workflow Lifecycle](reference/workflow-lifecycle.md)
+- **Retire an API key, schedule or secret without deleting it** -- [Entity Lifecycle](reference/entity-lifecycle.md)
 - **See the full CLI reference** -- [CLI Reference](reference/cli.md)
 - **Migrate from Temporal/DBOS/Restate** -- [Migration Guides](migration/)
 - **Troubleshoot common issues** -- [Troubleshooting Guide](troubleshooting.md)

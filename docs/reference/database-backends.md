@@ -557,7 +557,10 @@ the target dialect's syntax.
 3. **No partial (filtered) indexes**: Indexes in migration 002 are full
    indexes instead of filtered indexes. The `idx_instances_tenant_ready` index
    covers all statuses, not just `ready`, making it larger than the equivalent
-   PostgreSQL or SQL Server index. Query plans still use it effectively.
+   PostgreSQL or SQL Server index (`idx_instances_tenant_claimable`, filtered
+   on `status IN ('ready', 'terminating')`). Query plans still use it
+   effectively — and MySQL needed no change when the claim widened, for exactly
+   this reason.
 
 4. **No native SHA-256**: Idempotency key hashing and event checksums are
    computed in Go using `crypto/sha256`. No measurable performance impact.
@@ -622,6 +625,158 @@ the target dialect's syntax.
    estimates (all backends) are approximate. PostgreSQL and SQL Server have
    native window functions that are exact; MySQL computes from all samples in
    Go.
+
+
+### 7.4 What a workflow result may contain
+
+**The contract for a workflow result is the INTERSECTION of what all three
+backends accept. cleat does not normalise them to agree** (cleat#1025).
+
+A result is stored in `workflow_instances.result`, which is a different type on
+each backend, and the type is the constraint:
+
+| backend | column | behaviour |
+|---|---|---|
+| PostgreSQL | `JSONB` | validates **and normalises** |
+| MySQL | `LONGTEXT` + `CHECK (JSON_VALID(result))` | validates, depth-limited, stores bytes as given |
+| SQL Server | `NVARCHAR(MAX)` + `CHECK (ISJSON(result) = 1)` | validates, stores bytes as given |
+
+**MySQL's row changed in cleat#1022** (`migrations/mysql/070`). It was `JSON`,
+which silently rewrote any integer outside `[-2^63, 2^64-1]` and any decimal
+needing more precision than a `float64` holds. It now matches SQL Server, which
+never had the defect for exactly this reason: a text column stores the text.
+
+Two consequences worth knowing. **The depth limit survives** — `JSON_VALID`
+parses, so it still refuses depth 101 — but the rejection now comes from the
+CHECK constraint rather than the column type, so the error is `3819` rather
+than `3157`. And **CHECK constraints are parsed and ignored before MySQL
+8.0.16**, so on such a server these columns get neither validation nor the
+depth limit. cleat already depends on that for `tenant_settings`
+(`migrations/mysql/036`, tested at runtime by
+`engine/mysql_tenant_settings_test.go`); CI pins 8.4.11.
+
+Nothing upstream catches a violation. `coerceResultJSON`
+(`engine/store_lifecycle.go`) checks `json.Valid` and object shape and *reports*
+rather than rejects — every case below is valid JSON and an object, so it passes
+all of them. The rejection happens in the database, at
+`FinalizeWorkflowSegment`, **after the workflow body and its side effects have
+already run**: the work is done and the record says `failed`.
+
+#### The limits
+
+Measured 2026-09-13 against the schema the migrations build, on PostgreSQL
+16.15, MySQL 8.4.11 and SQL Server 2022 (16.0.4275.2):
+
+| what you write | PostgreSQL | MySQL | SQL Server |
+|---|---|---|---|
+| a `\u0000` escape in a string | **rejected** `22P05` | accepted | accepted |
+| a lone surrogate (`\ud800`) | **rejected** `22P02` | **rejected** `3140` | accepted |
+| nesting depth 100 | accepted | accepted | accepted |
+| nesting depth 101 | accepted | **rejected** `3157` | accepted |
+| nesting depth 129 | accepted | **rejected** `3157` | **rejected** |
+| integer up to 2^64−1 | exact | exact | exact |
+| integer 2^64 | exact | exact *(degraded before cleat#1022)* | exact |
+
+So the contract is:
+
+- **No `\u0000` escape.** PostgreSQL cannot store a NUL in text.
+- **No unpaired surrogate.** Two of three reject it.
+- **Nesting depth at most 100** — MySQL's limit, and the tightest of the three.
+  SQL Server's is 128; PostgreSQL accepted 10 000.
+- **Integers are exact on every backend.** MySQL used to degrade beyond
+  `2^64−1` to a `DOUBLE`; `migrations/mysql/070` and `071` removed that
+  (cleat#1022). The old bound is recorded here because it is still the shape of
+  the failure if it returns, and because it was **not** "must fit `BIGINT`":
+  `9223372036854775808` is past signed `BIGINT` and was always kept exactly, so
+  a limit written to the signed bound was wrong by a factor of two on the
+  positive side.
+
+  Two migrations were needed, not one. The column type fixes the plain `UPDATE`
+  that `CompleteWorkflow` issues. It does **not** fix the FINALIZE half of the
+  two-phase terminal transition, which goes through the
+  `finalize_workflow_status` procedure — that wrote
+  `result = CAST(p_result AS JSON)`, and a cast re-degrades the value *before*
+  it reaches the column, LONGTEXT or not.
+
+  **Plugin tables have the same fix, and three columns deliberately do not.**
+  Plugin schemas are a separate migration system and were out of scope above;
+  cleat#1622 converted nine of their JSON columns the same way. What stayed
+  `JSON` on MySQL, and why:
+
+  | column | why it was left |
+  |---|---|
+  | `blob_index.tags` | queried with `JSON_CONTAINS`, so it cannot be text without rewriting the read — degraded, like `workflow_instances.query_state` |
+  | `webhook_config.events`, `webhook_events.headers` | `[]string` and `map[string]string`; they cannot carry a number |
+  | `audit_events.metadata` | only ever `{}`: the chained insert writes it explicitly so the hash covers the stored value |
+
+  One column is beyond a migration's reach: `ingested_events.event_data`
+  arrives through `map[string]any`, and Go's decoder turns a JSON number into a
+  `float64` before any column type has a say. Converting it would measure clean
+  and change nothing. That is cleat#1641.
+
+**No backend is "the strict one", which is the whole reason this is written
+down.** A NUL escape passes on MySQL and SQL Server and fails on PostgreSQL;
+depth 120 passes on PostgreSQL and SQL Server and fails on MySQL. A workflow
+validated against one backend can fail on another.
+
+#### And acceptance is not the whole contract
+
+A result accepted by all three can still **read back differently**, because two
+of the three normalise:
+
+| | key order preserved | duplicate keys preserved |
+|---|---|---|
+| PostgreSQL `JSONB` | no — reordered | no — last wins |
+| MySQL `LONGTEXT` | yes | yes |
+| SQL Server `NVARCHAR` | yes | yes |
+
+Measured: `{"b":1,"a":2}` reads back as `{"a": 2, "b": 1}` on PostgreSQL and
+byte-identical on MySQL and SQL Server; `{"a":1,"a":2}` becomes `{"a": 2}` on
+PostgreSQL only.
+
+**MySQL's two rows moved with its column type** (cleat#1022). They were both
+`no`, and that is why the sentence below used to read "two of three reorder".
+
+So, independently of what is accepted: **never depend on key order, and never
+send duplicate keys.** PostgreSQL still does both, so the advice is unchanged —
+what changed is that fewer backends enforce it for you by accident, which makes
+it easier to write a workflow that passes on two backends and surprises you on
+the third. Every consumer in cleat reads these through `json.Unmarshal`, which
+takes the last of a duplicate pair on all three regardless.
+
+#### Re-deriving this
+
+Every figure above comes from writing the payload into
+`workflow_instances.result` on a schema built from `migrations/<dialect>/` and
+reading it back. Two things make the measurement easy to get wrong, both met
+while taking it:
+
+- **SQL Server needs session context set on the connection you measure with.**
+  `dbo.TenantFilter_Instances` is a FILTER PREDICATE, so without it the row is
+  invisible: the `UPDATE` matches zero rows and *reports success*, and the
+  read-back returns nothing. Nothing errors. Set
+  `sp_set_session_context @key=N'tenant_id'` and hold the connection —
+  `database/sql` calls `ResetSession` when a connection returns to the pool and
+  go-mssqldb implements that as `sp_reset_connection`, which clears it.
+- **Do not type a NUL escape into a shell.** The payload is the four characters
+  `\u0000`, not a NUL byte; build it in the program.
+- **Measure against `workflow_instances` itself, never a probe table built to
+  mirror the column.** The constraint is not in the column type. In
+  `migrations/mssql/001_schema.sql` the type is at line 190 and the validation
+  is 23 lines below it, inside the same `CREATE TABLE`:
+
+      CONSTRAINT ck_workflow_instances_result CHECK (result IS NULL OR ISJSON(result) = 1)
+
+  A probe table built as bare `NVARCHAR(MAX)` — which is what line 190 says on
+  its own — accepts every payload on this list, and reports a clean, complete,
+  entirely wrong table. That is how the first attempt at this section concluded
+  SQL Server validates nothing: **the instrument was constructed from the
+  hypothesis it existed to test, so it could not disagree.** Found by a second
+  session measuring the real column and getting a different answer.
+
+`TestAWorkflowResultContractIsTheIntersection` (`engine/`) asserts every row of
+both tables above on all three dialects, so a backend changing its limits turns
+this section red rather than stale.
 
 ---
 
@@ -709,8 +864,10 @@ innodb_buffer_pool_instances = 4  # 1 instance per ~2 GB of pool
 **Skip locked contention:**
 
 Ensure `idx_instances_tenant_ready` exists on `workflow_instances(tenant_id,
-status, next_wake_at)`. Without this index, `SELECT ... FOR UPDATE SKIP LOCKED`
-performs a full table scan under lock, serializing all claim attempts.
+status, next_wake_at)` — named `idx_instances_tenant_claimable` on PostgreSQL
+and SQL Server, where it is filtered on `status IN ('ready', 'terminating')`.
+Without this index, `SELECT ... FOR UPDATE SKIP LOCKED` performs a full table
+scan under lock, serializing all claim attempts.
 
 **Connection timeouts:**
 

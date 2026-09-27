@@ -7,9 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
-	"strconv"
-	"strings"
 	"sync/atomic"
 	"time"
 
@@ -135,21 +132,100 @@ func (s *execSession) RegisterUpdateHandler(ctx context.Context, m api.Module, n
 }
 
 // exitReplay transitions from replay to forward execution.
-// It sets replayJustEnded so that the first DurableSleep after replay
-// can detect the resume-from-sleep case and complete without suspending.
-
+//
+// It used to also arm a replayJustEnded flag that DurableSleep consumed to
+// detect resume-from-sleep. That flag is gone: sleep now decides from elapsed
+// time, which does not require another call to have crossed the frontier
+// first. See DurableSleep and IMPROVEMENT-PLAN 3.67.
 func (s *execSession) exitReplay() {
 	s.isReplay = false
-	s.replayJustEnded = true
 }
 
 // recordEvent timestamps a fresh event, advances the session clock,
 // and appends it to the history. It must only be called during fresh
 // execution (not replay).
 
-func (s *execSession) recordEvent(rec EventRecord) {
+// eventPersistence says what happened to an event's durable write, which is
+// three outcomes and not two. cleat#1572.
+//
+// The distinction that matters is NOT ATTEMPTED versus ATTEMPTED AND FAILED.
+// Both leave the row absent, and they mean opposite things:
+//
+//   - Not attempted is a configuration. This engine has no database, or the
+//     operator set --no-per-step-flush and the events land at segment end.
+//     Nothing is wrong and nothing is lost.
+//   - Failed is a refusal. The commonest cause is ErrFenceLost: another worker
+//     has taken this run, so THIS worker's events are not going to be in its
+//     history at all. Anything shown to a user off the back of one is output
+//     the system does not believe happened.
+type eventPersistence int
+
+const (
+	// eventNotAttempted: no database, or per-step flush is off.
+	eventNotAttempted eventPersistence = iota
+	// eventPersisted: the row is in the database now.
+	eventPersisted
+	// eventFlushFailed: the write was attempted and refused or errored.
+	eventFlushFailed
+)
+
+// recordEvent appends an event to the session history and persists it.
+//
+// It returns what became of the durable write. EXISTING CALLERS IGNORE IT and
+// still compile, which is deliberate: the return exists for the one caller
+// that must not show a user a token the database refused, and adding it should
+// not touch the several dozen sites that have no such question.
+func (s *execSession) recordEvent(rec EventRecord) eventPersistence {
 	if rec.TimestampMs == 0 {
 		rec.TimestampMs = time.Now().UnixMilli()
+	}
+	// Stamped here rather than at each call site, because "was the guest
+	// draining its defer table when this happened" is a property of the
+	// session at the moment of recording, and there are too many call sites
+	// for any of them to be the place that remembers. cleat#1155.
+	if s.inDeferPhase {
+		rec.InDeferPhase = true
+	}
+	// The durable clock must not go backwards (cleat#944).
+	//
+	// Two clock domains feed Now(). Before any event is recorded it is the
+	// seed -- the workflow row's created_at, which is the DATABASE's clock
+	// (see Engine.seedNowMs, and note why created_at has to stay the seed: it
+	// is the only value identical on the original run and the replay). The
+	// first recorded event's timestamp is the WORKER's time.Now(). Nothing
+	// reconciled them, so the step between them was the offset between two
+	// machines' clocks, in whichever direction they happened to differ.
+	//
+	// Measured on the samples-go port: PostgreSQL 6 of 8 runs backwards, worst
+	// -26ms; MySQL 4 of 5, worst -118ms. Both databases were containers against
+	// a host worker. The magnitude tracks the DEPLOYMENT, not the dialect --
+	// two clocks on one laptop are close, a worker and a database in different
+	// availability zones have no such bound.
+	//
+	// A workflow computing Now().Sub(start) across its first durable call got a
+	// negative duration.
+	//
+	// CLAMPING HERE RATHER THAN AT THE READ IS WHAT KEEPS REPLAY EXACT, and the
+	// reason is sharper than "history would hold a different number".
+	//
+	// A read-side clamp would make the guest see a value that was never
+	// recorded. The original run and the replay would then agree only by both
+	// applying the same clamp to the same stale input -- which holds until
+	// someone changes the clamp, and nothing would fail at the moment they did.
+	// Writing the adjusted value means the recorded number IS the number: it is
+	// what the checksum covers, replay sets s.nowMs straight from it
+	// (engine/replayer.go), and there is nothing left to recompute or to keep
+	// in agreement.
+	//
+	// (That framing is rcownie-ef's, from the review of this change.)
+	//
+	// This is a floor, not a rewrite: once the worker clock passes the seed --
+	// which it does within the offset, tens of milliseconds -- the branch stops
+	// firing and every later timestamp is the worker's own. DurableSleep is
+	// unaffected either way, because it sets TimestampMs to anchor+duration,
+	// which is already >= s.nowMs.
+	if rec.TimestampMs < s.nowMs {
+		rec.TimestampMs = s.nowMs
 	}
 	s.nowMs = rec.TimestampMs
 	s.history = append(s.history, rec)
@@ -157,6 +233,7 @@ func (s *execSession) recordEvent(rec EventRecord) {
 	atomic.AddInt64(&freshStepCount, 1)
 
 	// Persist immediately so events survive worker crashes.
+	outcome := eventNotAttempted
 	if s.engine.db != nil && !s.isReplay {
 		checksum := computeEventChecksum(rec, s.lastChecksum)
 		flushed := false
@@ -178,38 +255,85 @@ func (s *execSession) recordEvent(rec EventRecord) {
 					} else {
 						s.engine.log().ErrorContext(context.Background(), "adaptive flush failed", "workflow_id", s.workflowID, "step", rec.Step, "error", err)
 					}
+					outcome = eventFlushFailed
 				} else {
 					s.lastChecksum = checksum
+					outcome = eventPersisted
 				}
 				flushed = true
 			}
 		}
 		if !flushed {
 			// Direct flush (low-rate mode or batch/adaptive flushers disabled)
-			if flushErr := s.engine.flushEvent(context.Background(), s.workflowID, rec, s.lastChecksum); flushErr != nil {
+			//
+			// RETRIED, which it was not. Of the six routes to
+			// eventFlushFailed this is the one a low-rate workflow takes on
+			// every step, and it made exactly one attempt: a database that
+			// dropped a connection lost the event outright, while the same
+			// event at a higher step rate would have been retried by the batch
+			// path. The asymmetry was not a decision, it was where the retry
+			// happened to be written. cleat#1717.
+			//
+			// RETRYING IS SAFE HERE BECAUSE A RE-INSERT IS NOT A DOUBLE WRITE.
+			// insertEventSQL is ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE
+			// with a WHERE that cannot fire (see its doc), so an attempt that
+			// committed and lost its acknowledgement replays as zero rows
+			// affected -- and afterFencedInsert answers zero rows by asking
+			// Heartbeat whether the fence still holds, which it does, so the
+			// retry returns nil rather than mistaking its own earlier success
+			// for a lost fence. TestARetryOfAnAlreadyCommittedFlushIsNotAFenceLoss
+			// measures that rather than trusting this paragraph.
+			flushErr := retryFlushUntilDeadline(context.Background(), s.engine.flushRetryWindow, "direct flush", func() error {
+				return s.engine.flushEvent(context.Background(), s.workflowID, rec, s.lastChecksum)
+			})
+			if flushErr != nil {
 				if errors.Is(flushErr, ErrFenceLost) {
 					s.engine.log().DebugContext(context.Background(), "flushEvent: fence lost, workflow reassigned to another worker", "workflow_id", s.workflowID, "step", rec.Step)
 				} else {
 					s.engine.log().ErrorContext(context.Background(), "recordEvent flushEvent failed", "workflow_id", s.workflowID, "step", rec.Step, "event_type", rec.EventType, "error", flushErr)
 				}
+				outcome = eventFlushFailed
 			} else {
 				s.lastChecksum = checksum
+				// flushEvent returns nil WITHOUT WRITING when per-step flush
+				// is disabled, so a nil error is not on its own evidence that
+				// the row exists.
+				if !s.engine.noPerStepFlush {
+					outcome = eventPersisted
+				}
 			}
 		}
 	}
+	return outcome
 }
 
 func (s *execSession) Now(ctx context.Context) int64 {
-	// During replay, read the timestamp from the last consumed event
-	// to produce deterministic Now() values matching the original
-	// execution. Before any event is consumed (stepCount==0), s.nowMs
-	// is seeded from the first history event or wall clock.
+	// The virtual clock is the LATER of two deterministic anchors, never just
+	// the recorded one.
+	//
+	// During replay, the last consumed event's timestamp reproduces what the
+	// original execution saw. But a sleep records no event and advances s.nowMs
+	// to anchor+duration (see DurableSleep), and stepCount does not move -- so
+	// reading only the history timestamp handed the guest a PRE-sleep instant
+	// after a sleep had completed. Measured: 163ms of apparent elapsed time
+	// across a 3000ms sleep, until the next event happened to be recorded and
+	// re-anchored the clock.
+	//
+	// Both values are deterministic, so taking the later of them is too:
+	// history timestamps are recorded, and s.nowMs is anchor+duration where the
+	// anchor is itself one of these. Replay recomputes the same sleeps from the
+	// same anchors and arrives at the same number.
+	//
+	// max, not assignment, for the reason DurableSleep gives for its own max:
+	// the clock must never run backwards, and either source can be the larger
+	// one depending on where the workflow is.
+	now := s.nowMs
 	if s.stepCount > 0 && s.stepCount <= len(s.history) {
-		if ts := s.history[s.stepCount-1].TimestampMs; ts > 0 {
-			return ts
+		if ts := s.history[s.stepCount-1].TimestampMs; ts > now {
+			now = ts
 		}
 	}
-	return s.nowMs
+	return now
 }
 
 func (s *execSession) Random(ctx context.Context) int64 {
@@ -236,13 +360,19 @@ func (s *execSession) UUID(ctx context.Context, m api.Module, seed string, uuidP
 	uuidStr := fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		hash[0:4], hash[4:6], hash[6:8], hash[8:10], hash[10:16])
 
-	written, _ := s.writeResult(ctx, m, uuidPtr, uuidStr, uuidMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, uuidPtr, uuidStr, uuidMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 func (s *execSession) SideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64 {
 	if s.isReplay {
 		return s.replaySideEffect(ctx, m, computedResult, respPtr, respMaxLen)
+	}
+	// A fresh side_effect is new work: it records a non-deterministic value into
+	// the history of a workflow that has already terminated, and any later
+	// replay would take that value as authoritative.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
 	}
 	return s.freshSideEffect(ctx, m, computedResult, respPtr, respMaxLen)
 }
@@ -256,8 +386,8 @@ func (s *execSession) freshSideEffect(ctx context.Context, m api.Module, compute
 	}
 	s.recordEvent(rec)
 
-	written, _ := s.writeResult(ctx, m, respPtr, computedResult, respMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, respPtr, computedResult, respMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, computedResult string, respPtr, respMaxLen uint32) int64 {
@@ -293,8 +423,8 @@ func (s *execSession) replaySideEffect(ctx context.Context, m api.Module, comput
 			return packSimpleResult(1, written)
 		}
 
-		written, _ := s.writeResult(ctx, m, respPtr, rec.SideEffectResult, respMaxLen)
-		return packSimpleResult(0, written)
+		written, writtenEC := s.writeOut(ctx, m, respPtr, rec.SideEffectResult, respMaxLen)
+		return packSimpleResult(writtenEC, written)
 	}
 
 	s.exitReplay()
@@ -307,8 +437,8 @@ func (s *execSession) WorkflowID(ctx context.Context, m api.Module, idPtr, idMax
 	if id == "" {
 		id = "unknown"
 	}
-	written, _ := s.writeResult(ctx, m, idPtr, id, idMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, idPtr, id, idMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 func (s *execSession) RunID(ctx context.Context, m api.Module, idPtr, idMaxLen uint32) int64 {
@@ -317,8 +447,8 @@ func (s *execSession) RunID(ctx context.Context, m api.Module, idPtr, idMaxLen u
 	if runID == "" {
 		runID = "unknown"
 	}
-	written, _ := s.writeResult(ctx, m, idPtr, runID, idMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, idPtr, runID, idMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 func (s *execSession) RegisterQueryHandler(ctx context.Context, m api.Module, name string) int64 {
@@ -332,251 +462,11 @@ func (s *execSession) RegisterQueryHandler(ctx context.Context, m api.Module, na
 
 // ---- Stream R host functions ----
 
-func (s *execSession) SetState(ctx context.Context, m api.Module, key, value string) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
-			}
-			if rec.EventType != EventTypeStateMutation || rec.StateOp != "set" || rec.StateKey != key {
-				return 1
-			}
-			s.mu.Lock()
-			if s.stateStore == nil {
-				s.stateStore = make(map[string]string)
-			}
-			s.stateStore[key] = rec.StateValue
-			s.mu.Unlock()
-			return 0
-		}
-		s.exitReplay()
-	}
-
-	s.mu.Lock()
-	if s.stateStore == nil {
-		s.stateStore = make(map[string]string)
-	}
-	s.stateStore[key] = value
-	s.mu.Unlock()
-
-	rec := EventRecord{
-		Step:       s.stepCount,
-		EventType:  EventTypeStateMutation,
-		StateKey:   key,
-		StateValue: value,
-		StateOp:    "set",
-	}
-	s.recordEvent(rec)
-	return 0
-}
-
-func (s *execSession) GetState(ctx context.Context, m api.Module, key string, valuePtr, valueMaxLen uint32) int64 {
-
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
-			}
-			if rec.EventType != EventTypeStateMutation || rec.StateOp != "get" || rec.StateKey != key {
-				return packSimpleResult(1, 0)
-			}
-			written, _ := s.writeResult(ctx, m, valuePtr, rec.StateValue, valueMaxLen)
-			return packSimpleResult(0, written)
-		}
-		s.exitReplay()
-	}
-
-	s.mu.Lock()
-	value := ""
-	if s.stateStore != nil {
-		value = s.stateStore[key]
-	}
-	s.mu.Unlock()
-
-	rec := EventRecord{
-		Step:       s.stepCount,
-		EventType:  EventTypeStateMutation,
-		StateKey:   key,
-		StateValue: value,
-		StateOp:    "get",
-	}
-	s.recordEvent(rec)
-
-	written, _ := s.writeResult(ctx, m, valuePtr, value, valueMaxLen)
-	return packSimpleResult(0, written)
-}
-
-func (s *execSession) DeleteState(ctx context.Context, m api.Module, key string) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
-			}
-			if rec.EventType != EventTypeStateMutation || rec.StateOp != "del" || rec.StateKey != key {
-				return 1
-			}
-			s.mu.Lock()
-			if s.stateStore != nil {
-				delete(s.stateStore, key)
-			}
-			s.mu.Unlock()
-			return 0
-		}
-		s.exitReplay()
-	}
-
-	s.mu.Lock()
-	if s.stateStore != nil {
-		delete(s.stateStore, key)
-	}
-	s.mu.Unlock()
-
-	rec := EventRecord{
-		Step:      s.stepCount,
-		EventType: EventTypeStateMutation,
-		StateKey:  key,
-		StateOp:   "del",
-	}
-	s.recordEvent(rec)
-	return 0
-}
-
 // IncrState atomically increments a numeric state value.  It is NOT safe for
 // concurrent access from multiple WASM modules.  The engine serialises all
 // host calls within a single workflow execution, so this is never called
 // concurrently in practice — speculative parallelism MUST NOT be introduced
 // without adding synchronisation to IncrState.
-
-func (s *execSession) IncrState(ctx context.Context, m api.Module, key string, delta int64) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
-			}
-			if rec.EventType != EventTypeStateMutation || rec.StateOp != "incr" || rec.StateKey != key {
-				return 0
-			}
-			s.mu.Lock()
-			if s.stateStore == nil {
-				s.stateStore = make(map[string]string)
-			}
-			s.stateStore[key] = rec.StateValue
-			s.mu.Unlock()
-			newVal, _ := strconv.ParseInt(rec.StateValue, 10, 64)
-			return newVal
-		}
-		s.exitReplay()
-	}
-
-	s.mu.Lock()
-	if s.stateStore == nil {
-		s.stateStore = make(map[string]string)
-	}
-
-	current := int64(0)
-	if v, ok := s.stateStore[key]; ok {
-		current, _ = strconv.ParseInt(v, 10, 64)
-	}
-	newVal := current + delta
-	s.stateStore[key] = fmt.Sprintf("%d", newVal)
-	s.mu.Unlock()
-
-	rec := EventRecord{
-		Step:       s.stepCount,
-		EventType:  EventTypeStateMutation,
-		StateKey:   key,
-		StateValue: fmt.Sprintf("%d", newVal),
-		StateDelta: delta,
-		StateOp:    "incr",
-	}
-	s.recordEvent(rec)
-	return newVal
-}
-
-func (s *execSession) HasState(ctx context.Context, m api.Module, key string) int64 {
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
-			}
-			if rec.EventType != EventTypeStateMutation || rec.StateOp != "has" || rec.StateKey != key {
-				return 0
-			}
-			if rec.StateValue == "1" {
-				return 1
-			}
-			return 0
-		}
-		s.exitReplay()
-	}
-
-	s.mu.Lock()
-	exists := int64(0)
-	if s.stateStore != nil {
-		if _, ok := s.stateStore[key]; ok {
-			exists = 1
-		}
-	}
-	s.mu.Unlock()
-
-	rec := EventRecord{
-		Step:       s.stepCount,
-		EventType:  EventTypeStateMutation,
-		StateKey:   key,
-		StateValue: fmt.Sprintf("%d", exists),
-		StateOp:    "has",
-	}
-	s.recordEvent(rec)
-	return exists
-}
-
-func (s *execSession) ListState(ctx context.Context, m api.Module, prefix string, keysPtr, keysMaxLen uint32) int64 {
-
-	if s.isReplay {
-		if s.stepCount < len(s.history) {
-			rec := s.history[s.stepCount]
-			if !s.advanceReplayStep(ctx, &rec) {
-				return 0
-			}
-			if rec.EventType != EventTypeStateMutation || rec.StateOp != "list" || rec.StateKey != prefix {
-				return packSimpleResult(1, 0)
-			}
-			written, _ := s.writeResult(ctx, m, keysPtr, rec.StateKeys, keysMaxLen)
-			return packSimpleResult(0, written)
-		}
-		s.exitReplay()
-	}
-
-	s.mu.Lock()
-	var keys []string
-	if s.stateStore != nil {
-		for k := range s.stateStore {
-			if strings.HasPrefix(k, prefix) {
-				keys = append(keys, k)
-			}
-		}
-	}
-	s.mu.Unlock()
-	sort.Strings(keys)
-	keysJSON, _ := json.Marshal(keys)
-
-	rec := EventRecord{
-		Step:      s.stepCount,
-		EventType: EventTypeStateMutation,
-		StateKey:  prefix,
-		StateKeys: string(keysJSON),
-		StateOp:   "list",
-	}
-	s.recordEvent(rec)
-
-	written, _ := s.writeResult(ctx, m, keysPtr, string(keysJSON), keysMaxLen)
-	return packSimpleResult(0, written)
-}
 
 func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, headersJSON, body string, responsePtr, responseMaxLen uint32) int64 {
 
@@ -604,10 +494,26 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 				written, _ := s.writeResult(ctx, m, responsePtr, rec.Err, responseMaxLen)
 				return packSimpleResult(1, written)
 			}
-			written, _ := s.writeResult(ctx, m, responsePtr, rec.FetchResponse, responseMaxLen)
-			return packSimpleResult(0, written)
+			written, writtenEC := s.writeOut(ctx, m, responsePtr, rec.FetchResponse, responseMaxLen)
+			return packSimpleResult(writtenEC, written)
 		}
 		s.exitReplay()
+	}
+
+	// Past the frontier in a defer segment: an outbound HTTP request is new
+	// work, and the most externally visible kind there is -- it leaves a side
+	// effect on someone else's server that no amount of unwinding takes back.
+	//
+	// IMPROVEMENT-PLAN 3.84 guarded six fresh paths and this is the seventh it
+	// did not list. Its table was built by reading the entry points a guest
+	// uses to reach a *service*, and Fetch reaches one without going through
+	// the durable-call family, so it was not in the inventory to begin with.
+	//
+	// packSimpleResult, which is what every return below uses, has bit 31 free
+	// -- TestStopSentinelBitsAcrossEveryLayout measures it as free=ff000000ffffff00
+	// -- so the same universal sentinel works here with no new layout question.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
 	}
 
 	var response string
@@ -615,7 +521,17 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 	if s.engine.fetcher != nil {
 		response, fetchErr = s.engine.fetcher.Fetch(ctx, method, url, headersJSON, body)
 	} else {
-		fetchErr = fmt.Errorf("no fetcher configured: workflow %s attempted %s %s", s.engine.workflowID, method, url)
+		// NOT a misconfiguration an operator can fix, and the old text --
+		// "no fetcher configured" -- read like one. cleat ships no default
+		// Fetcher and cleat-worker sets none, so this branch is taken on
+		// EVERY cleat_fetch from a stock worker (IMPROVEMENT-PLAN 3.317).
+		// Say who can supply one, so the reader stops looking for a flag.
+		fetchErr = fmt.Errorf(
+			"cleat_fetch is unavailable: this engine has no Fetcher, and cleat "+
+				"ships no default one. cleat_fetch works only when the engine is "+
+				"embedded and the host supplies engine.WithFetcher(...); a stock "+
+				"cleat-worker cannot serve it. Workflow %s attempted %s %s",
+			s.engine.workflowID, method, url)
 	}
 
 	rec := EventRecord{
@@ -637,8 +553,8 @@ func (s *execSession) Fetch(ctx context.Context, m api.Module, method, url, head
 		return packSimpleResult(1, written)
 	}
 
-	written, _ := s.writeResult(ctx, m, responsePtr, response, responseMaxLen)
-	return packSimpleResult(0, written)
+	written, writtenEC := s.writeOut(ctx, m, responsePtr, response, responseMaxLen)
+	return packSimpleResult(writtenEC, written)
 }
 
 // JsonParse validates and canonicalises input using the host's encoding/json.

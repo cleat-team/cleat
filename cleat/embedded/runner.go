@@ -96,6 +96,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/cleat"
+	"github.com/cleat-team/cleat/engine"
 	"github.com/google/uuid"
 )
 
@@ -125,6 +126,32 @@ type Runner struct {
 	mu        sync.RWMutex
 	workflows map[string]WorkflowFunc
 	now       time.Time
+
+	// egressAllowlist is the set of hosts http.fetch may reach. Nil denies
+	// everything, which is the same rule the worker enforces per tenant --
+	// cleat#1565, owner decision 2026-09-14.
+	//
+	// EXPLICIT rather than inherited or defaulted-open, and that was the
+	// decision rather than an accident of implementation. The embedded runner
+	// executes guest code exactly as the worker does, so defaulting it open
+	// would make the development path quietly weaker than production and
+	// would make "it worked in embedded" stop predicting anything.
+	egressAllowlist *engine.HostAllowlist
+}
+
+// WithEgressAllowlist permits http.fetch to reach these hosts, and only these.
+//
+//	embedded.New(embedded.WithEgressAllowlist("api.stripe.com", ".internal.example"))
+//
+// Entry forms are the worker's: an exact host, or a leading dot for "any host
+// ending in this", which excludes the apex. Without this option a workflow's
+// http.fetch is refused, naming the missing allowlist.
+//
+// It narrows and cannot widen: the link-local, loopback and RFC1918 floor is
+// refused whatever is listed here, so allowlisting 169.254.169.254 does not
+// reach cloud instance metadata.
+func WithEgressAllowlist(hosts ...string) Option {
+	return func(r *Runner) { r.egressAllowlist = engine.NewHostAllowlist(hosts...) }
 }
 
 // New creates a new embedded Runner. The simulated clock starts at
@@ -250,6 +277,12 @@ type promiseState struct {
 	status string // "pending", "resolved", "rejected"
 	result string
 	errMsg string
+
+	// settled is closed by settlePromise the first time this promise leaves
+	// "pending". awaitPromise blocks on it; see its doc comment and
+	// IMPROVEMENT-PLAN 3.235. Nil is tolerated: a promiseState built by any
+	// route other than createPromise simply never wakes an awaiter.
+	settled chan struct{}
 }
 
 type childResult struct {
@@ -283,12 +316,12 @@ func (e *execution) hostCalls() cleat.HostCalls {
 		Random:              e.random,
 		CreatePromise:       e.createPromise,
 		AwaitPromise:        e.awaitPromise,
+		ResolvePromise:      e.resolvePromise,
+		RejectPromise:       e.rejectPromise,
 		ChildWorkflow:       e.childWorkflow,
 		AwaitChild:          e.awaitChild,
 		WorkflowID:          e.workflowID,
 		RunID:               e.runID,
-		SendSignalAndWait:   e.sendSignalAndWait,
-		ReplyToSignal:       e.replyToSignal,
 		SignalWorkflow:      e.signalWorkflow,
 		AcquireLock:         e.acquireLock,
 		ReleaseLock:         e.releaseLock,
@@ -424,10 +457,26 @@ func (e *execution) handleHTTPFetch(requestJSON string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("http.fetch: %w", err)
 	}
+	// cleat#1565, the SECOND implementation of this. The worker's copy is
+	// guarded the same way, and guarding only one would make this the
+	// documented route around whatever egress policy the other enforces --
+	// which is why the issue names both.
+	if err := engine.CheckScheme(httpReq.URL.Scheme); err != nil {
+		return "", fmt.Errorf("http.fetch: %w", err)
+	}
 	for k, v := range req.Headers {
 		httpReq.Header.Set(k, v)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+	// The allowlist lives on the Runner, which is what the caller configured;
+	// an execution borrows it. Nil stays nil, and nil denies.
+	guard := &engine.EgressGuard{}
+	if e.runner != nil && e.runner.egressAllowlist != nil {
+		guard.AllowHost = e.runner.egressAllowlist.AllowHostFunc()
+	}
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{DialContext: guard.DialContext},
+	}
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		rec := cleat.CallResult{
@@ -607,26 +656,115 @@ func (e *execution) createPromise(name string) (string, error) {
 	defer e.mu.Unlock()
 	id := uuid.New().String()
 	e.promises[id] = &promiseState{
-		name:   name,
-		status: "pending",
+		name:    name,
+		status:  "pending",
+		settled: make(chan struct{}),
 	}
 	return id, nil
 }
 
+// resolvePromise and rejectPromise settle a promise created by this
+// execution. They were missing until SendSignalAndWait became a composite
+// over promises (IMPROVEMENT-PLAN 3.220): the embedded runner offered
+// CreatePromise and AwaitPromise but no way to settle one, so a promise
+// created here could only ever time out.
+func (e *execution) resolvePromise(promiseID, value string) error {
+	return e.settlePromise(promiseID, "resolved", value, "")
+}
+
+func (e *execution) rejectPromise(promiseID, errMsg string) error {
+	return e.settlePromise(promiseID, "rejected", "", errMsg)
+}
+
+// settlePromise reports not-found rather than silently doing nothing, which
+// is what the engine does after #818 -- a settle matching no row returns
+// ErrPromiseNotFound, and engine/promises.go turns that into a non-zero
+// result code.
+func (e *execution) settlePromise(promiseID, status, result, errMsg string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	ps, ok := e.promises[promiseID]
+	if !ok {
+		return fmt.Errorf("embedded: settle promise %s: promise not found", promiseID)
+	}
+	wasPending := ps.status == "pending"
+	ps.status = status
+	ps.result = result
+	ps.errMsg = errMsg
+	// Only the first settlement closes the channel; closing a closed channel
+	// panics.
+	if wasPending && ps.settled != nil {
+		close(ps.settled)
+	}
+	return nil
+}
+
+// pendingAwaitCeiling bounds how long awaitPromise will really wait for a
+// pending promise, whatever timeout the workflow asked for. Same value and
+// same reasoning as cleattest's constant of the same name: workflows pass
+// production durations, and a test awaiting with 7*24*time.Hour must not hang
+// the suite for a week.
+const pendingAwaitCeiling = 2 * time.Second
+
 func (e *execution) awaitPromise(promiseID string, timeout time.Duration) (string, bool, error) {
+	// The map holds *promiseState, so its fields must be copied under the lock
+	// rather than read through the pointer afterwards. Reading them outside it
+	// was a data race with settlePromise -- pre-existing, and unobservable
+	// until this function could be waiting while another goroutine settled:
+	// `go test -race` reports it on the very first test that does
+	// (runner.go's read of ps.status against settlePromise's write).
 	e.mu.Lock()
 	ps, ok := e.promises[promiseID]
+	var status, result, errMsg string
+	var settled chan struct{}
+	if ok {
+		status, result, errMsg, settled = ps.status, ps.result, ps.errMsg, ps.settled
+	}
 	e.mu.Unlock()
 
 	if !ok {
 		return "", false, fmt.Errorf("embedded: promise %s not found", promiseID)
 	}
 
-	if ps.status == "resolved" {
-		return ps.result, false, nil
+	if status == "resolved" {
+		return result, false, nil
 	}
-	if ps.status == "rejected" {
-		return "", false, fmt.Errorf("promise rejected: %s", ps.errMsg)
+	if status == "rejected" {
+		return "", false, fmt.Errorf("promise rejected: %s", errMsg)
+	}
+
+	// Pending. Wait for a settlement rather than reporting a timeout without
+	// waiting at all, which is what this did until IMPROVEMENT-PLAN 3.235:
+	// a promise pending at the instant of the call could never be observed
+	// settling, so SendSignalAndWait -- a composite over CreatePromise +
+	// SignalWorkflow + AwaitPromise since §3.220 -- always timed out here.
+	//
+	// The runner drives one workflow at a time, so nothing in a plain
+	// embedded run settles a promise concurrently and this select falls
+	// through to the timeout as before. It is here because "single-threaded
+	// today" is a property of the runner, not of the API: a caller holding a
+	// promise ID may settle it from its own goroutine, and the old code could
+	// not see that no matter when it happened.
+	if settled != nil {
+		wait := timeout
+		if wait > pendingAwaitCeiling {
+			wait = pendingAwaitCeiling
+		}
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-settled:
+			e.mu.Lock()
+			status, result, errMsg = ps.status, ps.result, ps.errMsg
+			e.mu.Unlock()
+			if status == "resolved" {
+				return result, false, nil
+			}
+			if status == "rejected" {
+				return "", false, fmt.Errorf("promise rejected: %s", errMsg)
+			}
+		case <-timer.C:
+		}
 	}
 
 	// Simulate timeout by advancing clock.
@@ -679,26 +817,6 @@ func (e *execution) awaitChild(runID string) (string, error) {
 		return result.result, nil
 	}
 	return `{"status":"completed"}`, nil
-}
-
-func (e *execution) sendSignalAndWait(targetRunID, signalName, payload string, timeout time.Duration) (string, error) {
-	// Store the outgoing signal for test inspection.
-	e.mu.Lock()
-	e.signals = append(e.signals, signalEvent{name: signalName, payload: payload})
-	e.mu.Unlock()
-
-	// In the embedded runner, simulate an immediate response.
-	// A full implementation would route the signal to the target execution
-	// and wait for a reply.
-	return `{"status":"delivered"}`, nil
-}
-
-func (e *execution) replyToSignal(correlationID, response string) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	// Store the reply as a signal for the caller to poll.
-	e.signals = append(e.signals, signalEvent{name: correlationID, payload: response})
-	return nil
 }
 
 func (e *execution) signalWorkflow(targetRunID, signalName, payload string) error {

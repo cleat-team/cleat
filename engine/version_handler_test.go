@@ -207,7 +207,7 @@ func TestRegisterVersionHandler_ListAllEmpty(t *testing.T) {
 func TestRegisterVersionHandler_ListAllWithData(t *testing.T) {
 	store := &versionHandlerMockStore{
 		defs: []WorkflowDef{
-			{Name: "wf-test", Version: 1, Deprecated: false, CreatedAt: time.Now(), ABIVersion: 1, MinVersion: 1},
+			{Name: "wf-test", Version: 1, GCEligible: false, CreatedAt: time.Now(), ABIVersion: 1, MinVersion: 1},
 		},
 		counts: map[string]int{"wf-test:1": 3},
 	}
@@ -238,8 +238,8 @@ func TestRegisterVersionHandler_ListAllWithData(t *testing.T) {
 func TestRegisterVersionHandler_ListByName(t *testing.T) {
 	store := &versionHandlerMockStore{
 		defs: []WorkflowDef{
-			{Name: "wf-alpha", Version: 1, Deprecated: false, CreatedAt: time.Now(), ABIVersion: 1, MinVersion: 1},
-			{Name: "wf-beta", Version: 1, Deprecated: true, CreatedAt: time.Now(), ABIVersion: 1, MinVersion: 1},
+			{Name: "wf-alpha", Version: 1, GCEligible: false, CreatedAt: time.Now(), ABIVersion: 1, MinVersion: 1},
+			{Name: "wf-beta", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now(), ABIVersion: 1, MinVersion: 1},
 		},
 		counts: map[string]int{},
 	}
@@ -790,7 +790,15 @@ func (m *recordingVersionStore) MarkVersionDeprecated(_ context.Context, name st
 	m.deprecateCalls = append(m.deprecateCalls, fmt.Sprintf("%s/%d/%v", name, version, deprecated))
 	for i := range m.defs {
 		if m.defs[i].Name == name && m.defs[i].Version == version {
-			m.defs[i].Deprecated = deprecated
+			// Both roles, as the real stores do: a fake that moved only
+			// one would let a partial-write regression pass (cleat#1702).
+			if deprecated {
+				m.defs[i].DisabledAt = RetiredAt(time.Now())
+				m.defs[i].GCEligible = true
+			} else {
+				m.defs[i].DisabledAt = nil
+				m.defs[i].GCEligible = false
+			}
 		}
 	}
 	return nil
@@ -847,7 +855,7 @@ func TestRegisterVersionHandler_TenantIsolation(t *testing.T) {
 		stubWorkflowStore: &stubWorkflowStore{},
 		label:             "A",
 		defs: []WorkflowDef{
-			{Name: "wf-shared-name", Version: 1, Deprecated: false, CreatedAt: time.Now(), ABIVersion: 1, MinVersion: 1},
+			{Name: "wf-shared-name", Version: 1, GCEligible: false, CreatedAt: time.Now(), ABIVersion: 1, MinVersion: 1},
 		},
 		counts: map[string]int{},
 	}
@@ -855,7 +863,7 @@ func TestRegisterVersionHandler_TenantIsolation(t *testing.T) {
 		stubWorkflowStore: &stubWorkflowStore{},
 		label:             "B",
 		defs: []WorkflowDef{
-			{Name: "wf-shared-name", Version: 1, Deprecated: false, CreatedAt: time.Now(), ABIVersion: 1, MinVersion: 1},
+			{Name: "wf-shared-name", Version: 1, GCEligible: false, CreatedAt: time.Now(), ABIVersion: 1, MinVersion: 1},
 		},
 		counts: map[string]int{},
 	}

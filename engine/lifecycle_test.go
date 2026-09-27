@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"strings"
@@ -102,8 +101,8 @@ func TestDurableCall_ReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if len(caller.calls) != 1 {
 		t.Errorf("expected 1 real call, got %d", len(caller.calls))
@@ -142,6 +141,13 @@ func TestDurableCall_Fresh(t *testing.T) {
 
 func TestDurableSleep_FreshSuspends(t *testing.T) {
 	s := newTestExecSession()
+	// newTestExecSession dates the session clock to t=1000000ms -- 1970. Sleep
+	// now decides by comparing its deadline against real time, so without a
+	// matching wall clock every sleep in this fixture would complete: half a
+	// century really has passed since the anchor. Pin the wall clock to the
+	// session's own epoch so "a fresh sleep suspends" is the question asked.
+	sessionEpoch := s.nowMs // captured: DurableSleep advances s.nowMs before comparing
+	s.engine.nowFn = func() int64 { return sessionEpoch }
 
 	result := s.DurableSleep(context.Background(), nil, 5000)
 
@@ -157,33 +163,89 @@ func TestDurableSleep_FreshSuspends(t *testing.T) {
 	}
 }
 
-func TestDurableSleep_ReplayJustEnded(t *testing.T) {
+// TestDurableSleep_DeadlineAlreadyPassed replaces
+// TestDurableSleep_ReplayJustEnded, which set the flag this no longer has.
+//
+// The flag asked whether some *other* durable call had just crossed the replay
+// frontier, which is not a question sleep can answer for itself. The rule is
+// now local to sleep: the anchor is the last recorded event, and if the
+// deadline that anchor plus this duration implies is already behind real time,
+// the wait has happened.
+func TestDurableSleep_DeadlineAlreadyPassed(t *testing.T) {
 	s := newTestExecSession()
-	s.replayJustEnded = true
-	s.history = []EventRecord{{Step: 0, EventType: EventTypeCall}}
+	anchor := int64(1_000_000)
+	s.history = []EventRecord{{Step: 0, EventType: EventTypeCall, TimestampMs: anchor}}
+	s.stepCount = 1
+	// Real time is well past anchor+5000, so the sleep has already been served.
+	s.engine.nowFn = func() int64 { return anchor + 60_000 }
 
 	result := s.DurableSleep(context.Background(), nil, 5000)
 
-	status := byte(result >> 56)
-	if status != sleepStatusCompleted {
+	if status := byte(result >> 56); status != sleepStatusCompleted {
 		t.Errorf("expected sleepStatusCompleted (%d), got %d", sleepStatusCompleted, status)
 	}
-	if s.replayJustEnded {
-		t.Error("expected replayJustEnded=false after consuming it")
+	if s.suspendErr != nil {
+		t.Errorf("a sleep whose deadline has passed must not suspend: %v", s.suspendErr)
+	}
+	if s.nowMs != anchor+5000 {
+		t.Errorf("virtual clock = %d, want %d: Now() must advance by the duration "+
+			"the workflow asked for, not by real elapsed time", s.nowMs, anchor+5000)
 	}
 }
 
+// TestDurableSleep_ResumedEarlyWaitsOutTheRemainder is the case the old flag
+// got wrong and could not have got right.
+//
+// A reaper, a manual retry, or a NOTIFY can hand the workflow back before its
+// deadline. replayJustEnded would have completed the sleep regardless, cutting
+// the wait short. Elapsed-time accounting suspends for what is left.
+func TestDurableSleep_ResumedEarlyWaitsOutTheRemainder(t *testing.T) {
+	s := newTestExecSession()
+	anchor := int64(1_000_000)
+	s.history = []EventRecord{{Step: 0, EventType: EventTypeCall, TimestampMs: anchor}}
+	s.stepCount = 1
+	s.isReplay = false // replay is over; this is forward execution
+	// Only 2s of the requested 5s have actually elapsed.
+	s.engine.nowFn = func() int64 { return anchor + 2_000 }
+
+	result := s.DurableSleep(context.Background(), nil, 5000)
+
+	if status := byte(result >> 56); status != sleepStatusSuspend {
+		t.Errorf("expected sleepStatusSuspend (%d), got %d -- the workflow asked to "+
+			"wait 5s and only 2s have passed", sleepStatusSuspend, status)
+	}
+	if s.suspendErr == nil {
+		t.Fatal("expected suspendErr")
+	}
+	if got := s.suspendErr.Until.UnixMilli(); got != anchor+5000 {
+		t.Errorf("suspend until %d, want %d (the original deadline, not a fresh "+
+			"5s from now -- that would extend the wait on every early wake)",
+			got, anchor+5000)
+	}
+}
+
+// TestDurableSleep_ZeroDuration records a deliberate behaviour change.
+//
+// A zero-duration sleep used to suspend, because the old rule suspended
+// unconditionally unless a flag said otherwise. Under elapsed-time accounting
+// it completes: the question is "has the requested delay passed", and for zero
+// it has, trivially.
+//
+// Suspending for 0ms meant persisting a suspension and immediately re-claiming
+// the workflow -- a full round trip through the store to wait no time at all.
+// Nothing could have depended on it as a checkpoint either, because sleep
+// records no event.
 func TestDurableSleep_ZeroDuration(t *testing.T) {
 	s := newTestExecSession()
 
 	result := s.DurableSleep(context.Background(), nil, 0)
 
 	status := byte(result >> 56)
-	if status != sleepStatusSuspend {
-		t.Errorf("expected sleepStatusSuspend for zero duration, got %d", status)
+	if status != sleepStatusCompleted {
+		t.Errorf("expected sleepStatusCompleted for zero duration, got %d", status)
 	}
-	if s.suspendErr == nil {
-		t.Error("expected suspendErr for zero duration sleep")
+	if s.suspendErr != nil {
+		t.Errorf("a zero-duration sleep must not suspend: %v", s.suspendErr)
 	}
 }
 
@@ -304,7 +366,12 @@ func findMetricLine(t *testing.T, exposition, metricName string) string {
 }
 
 func TestDurableCallWithRetry_FreshNonRetryable(t *testing.T) {
-	errCaller := &errorCaller{calls: 0, errMsg: "NON_RETRYABLE: invalid input"}
+	// errSvc, not errMsg: a declaration matches the code a service gave, not
+	// its message. This fixture relied on substring matching before that
+	// channel was replaced.
+	errCaller := &errorCaller{calls: 0, errSvc: &ServiceError{
+		Code: "NON_RETRYABLE", Message: "invalid input",
+	}}
 	s := newTestExecSession()
 	s.engine.caller = errCaller
 
@@ -545,394 +612,25 @@ func TestSideEffect_Fresh(t *testing.T) {
 // SetState tests.
 // ---------------------------------------------------------------------------
 
-func TestSetState_ReplayMatch(t *testing.T) {
-	s := newTestExecSession()
-	s.isReplay = true
-	s.history = []EventRecord{{
-		Step: 0, EventType: EventTypeStateMutation,
-		StateKey: "my-key", StateValue: "my-val", StateOp: "set",
-	}}
-
-	result := s.SetState(context.Background(), nil, "my-key", "my-val")
-
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
-	if s.stepCount != 1 {
-		t.Errorf("expected stepCount=1, got %d", s.stepCount)
-	}
-	if s.stateStore["my-key"] != "my-val" {
-		t.Errorf("expected stateStore['my-key']='my-val', got %q", s.stateStore["my-key"])
-	}
-}
-
-func TestSetState_ReplayPastEnd(t *testing.T) {
-	s := newTestExecSession()
-	s.isReplay = true
-	s.history = nil
-
-	result := s.SetState(context.Background(), nil, "my-key", "my-val")
-
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
-	if s.stateStore["my-key"] != "my-val" {
-		t.Errorf("expected stateStore set")
-	}
-	if len(s.history) != 1 {
-		t.Errorf("expected 1 history entry, got %d", len(s.history))
-	}
-}
-
-func TestSetState_Fresh(t *testing.T) {
-	s := newTestExecSession()
-
-	result := s.SetState(context.Background(), nil, "my-key", "my-val")
-
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
-	if s.stateStore["my-key"] != "my-val" {
-		t.Errorf("expected stateStore['my-key']='my-val', got %q", s.stateStore["my-key"])
-	}
-	if len(s.history) != 1 {
-		t.Errorf("expected 1 history entry, got %d", len(s.history))
-	}
-	if s.history[0].StateOp != "set" {
-		t.Errorf("expected StateOp 'set', got %q", s.history[0].StateOp)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // GetState tests.
 // ---------------------------------------------------------------------------
-
-func TestGetState_ReplayMatch(t *testing.T) {
-	s := newTestExecSession()
-	s.isReplay = true
-	s.history = []EventRecord{{
-		Step: 0, EventType: EventTypeStateMutation,
-		StateKey: "my-key", StateValue: "my-val", StateOp: "get",
-	}}
-
-	buf := make([]byte, 64)
-	ctx := contextWithRawMemBuf(context.Background(), buf)
-	result := s.GetState(ctx, nil, "my-key", 0, uint32(len(buf)))
-
-	// Replay path writes StateValue from history.
-	errCode := byte(result)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
-	}
-	if s.stepCount != 1 {
-		t.Errorf("expected stepCount=1, got %d", s.stepCount)
-	}
-}
-
-func TestGetState_ReplayPastEnd(t *testing.T) {
-	s := newTestExecSession()
-	s.stateStore["my-key"] = "replay-val"
-	s.isReplay = true
-	s.history = nil
-
-	buf := make([]byte, 64)
-	ctx := contextWithRawMemBuf(context.Background(), buf)
-	result := s.GetState(ctx, nil, "my-key", 0, uint32(len(buf)))
-
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	errCode := byte(result)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
-	}
-}
-
-func TestGetState_Fresh(t *testing.T) {
-	s := newTestExecSession()
-	s.stateStore["my-key"] = "my-val"
-
-	buf := make([]byte, 64)
-	ctx := contextWithRawMemBuf(context.Background(), buf)
-	result := s.GetState(ctx, nil, "my-key", 0, uint32(len(buf)))
-
-	errCode := byte(result)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
-	}
-	if len(s.history) != 1 {
-		t.Errorf("expected 1 history entry, got %d", len(s.history))
-	}
-	if s.history[0].StateOp != "get" {
-		t.Errorf("expected StateOp 'get', got %q", s.history[0].StateOp)
-	}
-}
-
-func TestGetState_FreshMissingKey(t *testing.T) {
-	s := newTestExecSession()
-	// stateStore is empty.
-
-	buf := make([]byte, 64)
-	ctx := contextWithRawMemBuf(context.Background(), buf)
-	result := s.GetState(ctx, nil, "nonexistent", 0, uint32(len(buf)))
-
-	errCode := byte(result)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
-	}
-	// Empty string written for missing key.
-	written := uint32(result >> 32)
-	if written != 0 {
-		t.Errorf("expected written=0 for missing key, got %d", written)
-	}
-}
 
 // ---------------------------------------------------------------------------
 // DeleteState tests.
 // ---------------------------------------------------------------------------
 
-func TestDeleteState_ReplayMatch(t *testing.T) {
-	s := newTestExecSession()
-	s.stateStore["my-key"] = "my-val"
-	s.isReplay = true
-	s.history = []EventRecord{{
-		Step: 0, EventType: EventTypeStateMutation,
-		StateKey: "my-key", StateOp: "del",
-	}}
-
-	result := s.DeleteState(context.Background(), nil, "my-key")
-
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
-	if _, ok := s.stateStore["my-key"]; ok {
-		t.Error("expected my-key to be deleted")
-	}
-}
-
-func TestDeleteState_Fresh(t *testing.T) {
-	s := newTestExecSession()
-	s.stateStore["my-key"] = "my-val"
-
-	result := s.DeleteState(context.Background(), nil, "my-key")
-
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
-	if _, ok := s.stateStore["my-key"]; ok {
-		t.Error("expected my-key to be deleted")
-	}
-	if len(s.history) != 1 {
-		t.Errorf("expected 1 history entry, got %d", len(s.history))
-	}
-	if s.history[0].StateOp != "del" {
-		t.Errorf("expected StateOp 'del', got %q", s.history[0].StateOp)
-	}
-}
-
-func TestDeleteState_FreshMissingKey(t *testing.T) {
-	s := newTestExecSession()
-	// Key doesn't exist — should not panic.
-
-	result := s.DeleteState(context.Background(), nil, "nonexistent")
-
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // IncrState tests.
 // ---------------------------------------------------------------------------
-
-func TestIncrState_ReplayMatch(t *testing.T) {
-	s := newTestExecSession()
-	s.isReplay = true
-	s.history = []EventRecord{{
-		Step: 0, EventType: EventTypeStateMutation,
-		StateKey: "counter", StateValue: "5", StateDelta: 1, StateOp: "incr",
-	}}
-
-	result := s.IncrState(context.Background(), nil, "counter", 1)
-
-	if result != 5 {
-		t.Errorf("expected 5 (replayed value), got %d", result)
-	}
-	if s.stateStore["counter"] != "5" {
-		t.Errorf("expected stateStore['counter']='5', got %q", s.stateStore["counter"])
-	}
-}
-
-func TestIncrState_Fresh(t *testing.T) {
-	s := newTestExecSession()
-
-	result := s.IncrState(context.Background(), nil, "counter", 3)
-
-	if result != 3 {
-		t.Errorf("expected 3, got %d", result)
-	}
-	if s.stateStore["counter"] != "3" {
-		t.Errorf("expected stateStore['counter']='3', got %q", s.stateStore["counter"])
-	}
-	if len(s.history) != 1 {
-		t.Errorf("expected 1 history entry, got %d", len(s.history))
-	}
-	if s.history[0].StateOp != "incr" {
-		t.Errorf("expected StateOp 'incr', got %q", s.history[0].StateOp)
-	}
-}
-
-func TestIncrState_FreshExisting(t *testing.T) {
-	s := newTestExecSession()
-	s.stateStore["counter"] = "10"
-
-	result := s.IncrState(context.Background(), nil, "counter", 5)
-
-	if result != 15 {
-		t.Errorf("expected 15, got %d", result)
-	}
-	if s.stateStore["counter"] != "15" {
-		t.Errorf("expected stateStore['counter']='15', got %q", s.stateStore["counter"])
-	}
-}
-
-func TestIncrState_ReplayPastEnd(t *testing.T) {
-	s := newTestExecSession()
-	s.isReplay = true
-	s.history = nil
-
-	result := s.IncrState(context.Background(), nil, "counter", 7)
-
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	if result != 7 {
-		t.Errorf("expected 7, got %d", result)
-	}
-}
 
 // ---------------------------------------------------------------------------
 // HasState tests.
 // ---------------------------------------------------------------------------
 
-func TestHasState_ReplayMatchExists(t *testing.T) {
-	s := newTestExecSession()
-	s.isReplay = true
-	s.history = []EventRecord{{
-		Step: 0, EventType: EventTypeStateMutation,
-		StateKey: "my-key", StateValue: "1", StateOp: "has",
-	}}
-
-	result := s.HasState(context.Background(), nil, "my-key")
-
-	if result != 1 {
-		t.Errorf("expected 1 (exists), got %d", result)
-	}
-}
-
-func TestHasState_ReplayMatchNotExists(t *testing.T) {
-	s := newTestExecSession()
-	s.isReplay = true
-	s.history = []EventRecord{{
-		Step: 0, EventType: EventTypeStateMutation,
-		StateKey: "my-key", StateValue: "0", StateOp: "has",
-	}}
-
-	result := s.HasState(context.Background(), nil, "my-key")
-
-	if result != 0 {
-		t.Errorf("expected 0 (not exists), got %d", result)
-	}
-}
-
-func TestHasState_FreshExists(t *testing.T) {
-	s := newTestExecSession()
-	s.stateStore["my-key"] = "my-val"
-
-	result := s.HasState(context.Background(), nil, "my-key")
-
-	if result != 1 {
-		t.Errorf("expected 1 (exists), got %d", result)
-	}
-}
-
-func TestHasState_FreshNotExists(t *testing.T) {
-	s := newTestExecSession()
-
-	result := s.HasState(context.Background(), nil, "nonexistent")
-
-	if result != 0 {
-		t.Errorf("expected 0 (not exists), got %d", result)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // ListState tests.
 // ---------------------------------------------------------------------------
-
-func TestListState_ReplayMatch(t *testing.T) {
-	s := newTestExecSession()
-	s.isReplay = true
-	s.history = []EventRecord{{
-		Step: 0, EventType: EventTypeStateMutation,
-		StateKey: "prefix-", StateKeys: `["prefix-a","prefix-b"]`, StateOp: "list",
-	}}
-
-	buf := make([]byte, 128)
-	ctx := contextWithRawMemBuf(context.Background(), buf)
-	result := s.ListState(ctx, nil, "prefix-", 0, uint32(len(buf)))
-
-	errCode := byte(result)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
-	}
-}
-
-func TestListState_Fresh(t *testing.T) {
-	s := newTestExecSession()
-	s.stateStore["prefix-a"] = "1"
-	s.stateStore["prefix-b"] = "2"
-	s.stateStore["other"] = "3"
-
-	buf := make([]byte, 128)
-	ctx := contextWithRawMemBuf(context.Background(), buf)
-	result := s.ListState(ctx, nil, "prefix-", 0, uint32(len(buf)))
-
-	errCode := byte(result)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
-	}
-
-	written := uint32(result >> 32)
-	var keys []string
-	if err := json.Unmarshal(buf[:written], &keys); err != nil {
-		t.Fatalf("unmarshal keys: %v", err)
-	}
-	if len(keys) != 2 {
-		t.Errorf("expected 2 keys, got %d: %v", len(keys), keys)
-	}
-}
-
-func TestListState_FreshEmpty(t *testing.T) {
-	s := newTestExecSession()
-	// Empty stateStore.
-
-	buf := make([]byte, 128)
-	ctx := contextWithRawMemBuf(context.Background(), buf)
-	result := s.ListState(ctx, nil, "prefix-", 0, uint32(len(buf)))
-
-	errCode := byte(result)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
-	}
-	written := uint32(result >> 32)
-	if written <= 2 {
-		t.Errorf("expected at least '[]', got %d bytes", written)
-	}
-}
 
 // ---------------------------------------------------------------------------
 // AwaitPromise tests.
@@ -975,6 +673,11 @@ func TestAwaitPromise_ReplayRejected(t *testing.T) {
 
 func TestAwaitPromise_ReplayPendingThenExit(t *testing.T) {
 	s := newTestExecSession()
+	// A PENDING store, not a missing one. This reached the suspend path by
+	// having no store at all, which is a different thing that now reports an
+	// error (IMPROVEMENT-PLAN 3.231). The test is about a pending promise, so
+	// it should have one.
+	s.engine.promiseStore = &mockPromiseStore{}
 	s.isReplay = true
 	// EventTypeAwaitPromise means promise was pending in original execution.
 	s.history = []EventRecord{{
@@ -984,11 +687,11 @@ func TestAwaitPromise_ReplayPendingThenExit(t *testing.T) {
 
 	result := s.AwaitPromise(context.Background(), nil, "prom-1", 5000, 0, 0)
 
-	// Should exitReplay and check store. With no store, should suspend.
+	// Should exitReplay and check store. Pending -> suspend.
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	// With no promiseStore, falls through to suspend.
+	// A pending promise suspends.
 	if s.suspendErr == nil {
 		t.Error("expected suspendErr from pending await")
 	}
@@ -1038,7 +741,10 @@ func TestAwaitPromise_FreshRejected(t *testing.T) {
 
 func TestAwaitPromise_FreshPending(t *testing.T) {
 	s := newTestExecSession()
-	// No promiseStore → falls through to suspend.
+	// A pending promise, which is what this test is named for. It used to reach
+	// the suspend path by having no store at all -- a different condition, and
+	// one that now reports an error (IMPROVEMENT-PLAN 3.231).
+	s.engine.promiseStore = &mockPromiseStore{}
 
 	result := s.AwaitPromise(context.Background(), nil, "prom-1", 5000, 0, 0)
 
@@ -1069,6 +775,8 @@ func TestResolvePromise_ReplayMatch(t *testing.T) {
 
 	result := s.ResolvePromise(context.Background(), nil, "prom-1", `{"status":"done"}`)
 
+	// Replay returns the recorded outcome without touching the store, so this
+	// stays 0 even with no store configured.
 	if result != 0 {
 		t.Errorf("expected 0, got %d", result)
 	}
@@ -1087,8 +795,13 @@ func TestResolvePromise_ReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
+	// newTestExecSession has NO promise store, and this asserted success --
+	// codifying the defect. A resolve that reaches no store settles nothing, so
+	// every awaiter stays suspended; reporting 0 is how that stayed invisible.
+	// IMPROVEMENT-PLAN 3.231. The event is still recorded, which the assertions
+	// below continue to pin.
+	if errCode := uint32(result) & 0xFF; errCode != 1 {
+		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
 	}
 }
 
@@ -1097,8 +810,13 @@ func TestResolvePromise_Fresh(t *testing.T) {
 
 	result := s.ResolvePromise(context.Background(), nil, "prom-1", `{"status":"done"}`)
 
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
+	// newTestExecSession has NO promise store, and this asserted success --
+	// codifying the defect. A resolve that reaches no store settles nothing, so
+	// every awaiter stays suspended; reporting 0 is how that stayed invisible.
+	// IMPROVEMENT-PLAN 3.231. The event is still recorded, which the assertions
+	// below continue to pin.
+	if errCode := uint32(result) & 0xFF; errCode != 1 {
+		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
 	}
 	if len(s.history) != 1 {
 		t.Errorf("expected 1 history entry, got %d", len(s.history))
@@ -1138,8 +856,9 @@ func TestRejectPromise_Fresh(t *testing.T) {
 
 	result := s.RejectPromise(context.Background(), nil, "prom-1", "error msg")
 
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
+	// Same inversion as TestResolvePromise_Fresh, same reason.
+	if errCode := uint32(result) & 0xFF; errCode != 1 {
+		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
 	}
 	if len(s.history) != 1 {
 		t.Errorf("expected 1 history entry, got %d", len(s.history))
@@ -1241,15 +960,15 @@ func TestSignalWorkflow_Fresh(t *testing.T) {
 		t.Errorf("expected SignalName 'my-signal', got %q", s.history[0].SignalName)
 	}
 	// Verify signal was delivered to store.
-	payload, found, err := store.PollSignal(context.Background(), "target-wf", "my-signal")
+	d, found, err := store.PollSignal(context.Background(), "target-wf", "my-signal")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
 	if !found {
 		t.Error("expected signal to be found in store")
 	}
-	if payload != `{"msg":"hello"}` {
-		t.Errorf("expected payload %q, got %q", `{"msg":"hello"}`, payload)
+	if d.Payload != `{"msg":"hello"}` {
+		t.Errorf("expected payload %q, got %q", `{"msg":"hello"}`, d.Payload)
 	}
 }
 
@@ -1434,78 +1153,6 @@ func TestUUID_Format(t *testing.T) {
 // ---------------------------------------------------------------------------
 // SendSignalAndWait tests (fresh path).
 // ---------------------------------------------------------------------------
-
-func TestSendSignalAndWait_FreshSignalFound(t *testing.T) {
-	store := newMockSignalWorkflowStore()
-	ctx := context.Background()
-	err := store.DeliverSignal(ctx, "target-wf", "my-signal", `{"response":"ok"}`)
-	if err != nil {
-		t.Fatalf("DeliverSignal: %v", err)
-	}
-
-	s := newTestExecSession()
-	s.engine.signalStore = store
-
-	result := s.SendSignalAndWait(ctx, nil, "target-wf", "my-signal", `{"req":"hello"}`, 5000, 0, 0)
-
-	errCode := byte(result)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
-	}
-	if len(s.history) != 1 {
-		t.Errorf("expected 1 history entry, got %d", len(s.history))
-	}
-	if s.history[0].EventType != EventTypeSignalReceived {
-		t.Errorf("expected EventTypeSignalReceived, got %q", s.history[0].EventType)
-	}
-}
-
-func TestSendSignalAndWait_FreshNoSignalSuspend(t *testing.T) {
-	s := newTestExecSession()
-	// No signal store → should suspend.
-
-	result := s.SendSignalAndWait(context.Background(), nil, "target-wf", "my-signal", `{}`, 5000, 0, 0)
-
-	errCode := byte(result)
-	if errCode != 1 {
-		t.Errorf("expected errCode 1 (suspend), got %d", errCode)
-	}
-	if s.suspendErr == nil {
-		t.Fatal("expected suspendErr")
-	}
-}
-
-func TestSendSignalAndWait_ReplayMatch(t *testing.T) {
-	s := newTestExecSession()
-	s.isReplay = true
-	s.history = []EventRecord{{
-		Step: 0, EventType: EventTypeSignalReceived,
-		SignalName: "my-signal", SignalPayload: `{"response":"ok"}`,
-	}}
-
-	result := s.SendSignalAndWait(context.Background(), nil, "target-wf", "my-signal", `{}`, 5000, 0, 0)
-
-	errCode := byte(result)
-	if errCode != 0 {
-		t.Errorf("expected errCode 0, got %d", errCode)
-	}
-	if s.stepCount != 1 {
-		t.Errorf("expected stepCount=1, got %d", s.stepCount)
-	}
-}
-
-func TestSendSignalAndWait_ReplayPastEnd(t *testing.T) {
-	s := newTestExecSession()
-	s.isReplay = true
-	s.history = nil
-
-	result := s.SendSignalAndWait(context.Background(), nil, "target-wf", "my-signal", `{}`, 5000, 0, 0)
-
-	if s.isReplay {
-		t.Error("expected isReplay=false after exitReplay")
-	}
-	_ = result
-}
 
 func TestJsonParse(t *testing.T) {
 	ctx := context.Background()

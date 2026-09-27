@@ -402,10 +402,12 @@ func TestParseConstraint(t *testing.T) {
 		// ^ (minor-locked)
 		{"^1.2.3", "v1.2.3", "v2.0.0", false},
 		{"^0.0.1", "v0.0.1", "v1.0.0", false},
-		// = exact
-		{"=1.2.3", "v1.2.3", "v1.2.3", false},
-		// bare version
-		{"1.2.3", "v1.2.3", "v1.2.3", false},
+		// = exact and bare version now carry Exact rather than Min == Max, so
+		// both bounds are empty here. What they resolve to is asserted in
+		// plugin_constraint_exact_test.go, which checks the behaviour rather
+		// than the representation. cleat#1243.
+		{"=1.2.3", "", "", false},
+		{"1.2.3", "", "", false},
 		// invalid
 		{">=notasemver", "", "", true},
 		{"invalid", "", "", true},
@@ -1387,11 +1389,20 @@ func (s *stubWorkflowStore) ClaimWorkflow(ctx context.Context, workerID string) 
 func (s *stubWorkflowStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
+
+// CountRunnableWorkflows: a double, so the honest answer is "I do not know".
+// Zero is what a store with nothing runnable returns, and the caller treats the
+// number as a floor, so a double reporting 0 never claims work exists that does
+// not. See IMPROVEMENT-PLAN 3.250.
+func (s *stubWorkflowStore) CountRunnableWorkflows(_ context.Context) (int, error) { return 0, nil }
 func (s *stubWorkflowStore) ClaimStickyWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	return nil, nil
 }
 func (s *stubWorkflowStore) LoadEventHistory(ctx context.Context, workflowID string) ([]EventRecord, error) {
 	return nil, nil
+}
+func (s *stubWorkflowStore) IsHistorySwept(ctx context.Context, workflowID string) (bool, error) {
+	return false, nil
 }
 func (s *stubWorkflowStore) AppendEventHistory(ctx context.Context, workflowID string, rec EventRecord) error {
 	return nil
@@ -1429,8 +1440,8 @@ func (s *stubWorkflowStore) CheckCancellation(ctx context.Context, workflowID st
 func (s *stubWorkflowStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
 	return nil
 }
-func (s *stubWorkflowStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	return "", false, nil
+func (s *stubWorkflowStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
+	return nil
 }
 func (s *stubWorkflowStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey, tenantID string, priority int) (string, bool, error) {
 	return "", false, nil
@@ -1441,14 +1452,14 @@ func (s *stubWorkflowStore) StartChildWorkflow(ctx context.Context, parentID, de
 func (s *stubWorkflowStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error) {
 	return s.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
-func (s *stubWorkflowStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
-	return "", false, nil
+func (s *stubWorkflowStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
+	return ChildOutcome{}, nil
 }
-func (s *stubWorkflowStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (s *stubWorkflowStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	return 0, nil
 }
-func (s *stubWorkflowStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	return "", false, nil
+func (s *stubWorkflowStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
+	return SignalDelivery{}, false, nil
 }
 func (s *stubWorkflowStore) PollCancellation(ctx context.Context, workflowID string) (bool, string, error) {
 	return false, "", nil
@@ -1456,10 +1467,17 @@ func (s *stubWorkflowStore) PollCancellation(ctx context.Context, workflowID str
 func (s *stubWorkflowStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
 	return "", nil
 }
+
+func (s *stubWorkflowStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	return map[string]string{}, nil
+}
 func (s *stubWorkflowStore) ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error) {
 	return nil, nil
 }
 func (s *stubWorkflowStore) GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error) {
+	return nil, nil
+}
+func (s *stubWorkflowStore) GetTerminalRun(ctx context.Context, id string) (*WorkflowInstance, error) {
 	return nil, nil
 }
 func (s *stubWorkflowStore) CreateSchedule(ctx context.Context, sch Schedule) error {
@@ -1477,10 +1495,6 @@ func (s *stubWorkflowStore) SetScheduleEnabled(ctx context.Context, name string,
 func (s *stubWorkflowStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 	return nil, nil
 }
-func (s *stubWorkflowStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	return nil
-}
-
 func (s *stubWorkflowStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }
@@ -1505,10 +1519,10 @@ func (s *stubWorkflowStore) CompactHistory(ctx context.Context, workflowID strin
 func (s *stubWorkflowStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	return nil
 }
-func (s *stubWorkflowStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (s *stubWorkflowStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	return nil
 }
-func (s *stubWorkflowStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (s *stubWorkflowStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	return nil
 }
 func (s *stubWorkflowStore) GetPromise(ctx context.Context, workflowID, promiseID string) (string, string, string, error) {
@@ -1523,14 +1537,14 @@ func (s *stubWorkflowStore) CreateUpdateRequest(ctx context.Context, workflowID,
 func (s *stubWorkflowStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
 	return nil, nil
 }
-func (s *stubWorkflowStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (s *stubWorkflowStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	return nil
 }
 func (s *stubWorkflowStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
 	return false, nil
 }
-func (s *stubWorkflowStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
-	return nil
+func (s *stubWorkflowStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return true, nil
 }
 func (s *stubWorkflowStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
 	return nil
@@ -1583,6 +1597,10 @@ func (s *stubWorkflowStore) CleanupMemorySamples(ctx context.Context, maxSamples
 func (s *stubWorkflowStore) DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
+
+func (s *stubWorkflowStore) ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
 func (s *stubWorkflowStore) ListWorkflowDefs(ctx context.Context, name string) ([]WorkflowDef, error) {
 	return nil, nil
 }
@@ -1594,7 +1612,27 @@ func (s *stubWorkflowStore) TerminateWorkflow(ctx context.Context, workflowID, r
 	return nil
 }
 
+func (s *stubWorkflowStore) CancelWorkflow(ctx context.Context, workflowID, reason string) error {
+	return nil
+}
+
 func (s *stubWorkflowStore) DeleteDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (s *stubWorkflowStore) CountExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (s *stubWorkflowStore) CountExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (s *stubWorkflowStore) CountDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
+	return 0, nil
+}
+
+func (s *stubWorkflowStore) CountCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error) {
 	return 0, nil
 }
 
@@ -1674,9 +1712,9 @@ func TestCollectVersionMetrics_WithData(t *testing.T) {
 	store := &mockCollectMetricsStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf-alpha", Version: 2, Deprecated: false, CreatedAt: now.Add(-24 * time.Hour), ABIVersion: 1, MinVersion: 1},
-			{Name: "wf-alpha", Version: 1, Deprecated: true, CreatedAt: now.Add(-72 * time.Hour), ABIVersion: 1, MinVersion: 1},
-			{Name: "wf-beta", Version: 1, Deprecated: false, CreatedAt: now.Add(-48 * time.Hour), ABIVersion: 2, MinVersion: 2},
+			{Name: "wf-alpha", Version: 2, GCEligible: false, CreatedAt: now.Add(-24 * time.Hour), ABIVersion: 1, MinVersion: 1},
+			{Name: "wf-alpha", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-72 * time.Hour), ABIVersion: 1, MinVersion: 1},
+			{Name: "wf-beta", Version: 1, GCEligible: false, CreatedAt: now.Add(-48 * time.Hour), ABIVersion: 2, MinVersion: 2},
 		},
 		counts: map[string]int{
 			"wf-alpha:2": 5,
@@ -1727,7 +1765,7 @@ func TestCheckStaleVersions_NoAlerts(t *testing.T) {
 	store := &mockCheckStaleStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf-fresh", Version: 1, Deprecated: false, CreatedAt: time.Now()},
+			{Name: "wf-fresh", Version: 1, GCEligible: false, CreatedAt: time.Now()},
 		},
 		counts: map[string]int{"wf-fresh:1": 0},
 	}
@@ -1744,7 +1782,7 @@ func TestCheckStaleVersions_StaleNonDeprecated(t *testing.T) {
 	store := &mockCheckStaleStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf-old", Version: 1, Deprecated: false, CreatedAt: time.Now().Add(-14 * 24 * time.Hour)},
+			{Name: "wf-old", Version: 1, GCEligible: false, CreatedAt: time.Now().Add(-14 * 24 * time.Hour)},
 		},
 		counts: map[string]int{"wf-old:1": 3},
 	}
@@ -1767,7 +1805,7 @@ func TestCheckStaleVersions_DeprecatedWithInstances(t *testing.T) {
 	store := &mockCheckStaleStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf-dep", Version: 1, Deprecated: true, CreatedAt: time.Now().Add(-14 * 24 * time.Hour)},
+			{Name: "wf-dep", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now().Add(-14 * 24 * time.Hour)},
 		},
 		counts: map[string]int{"wf-dep:1": 2},
 	}
@@ -1790,7 +1828,7 @@ func TestCheckStaleVersions_DeprecatedNoInstancesGC(t *testing.T) {
 	store := &mockCheckStaleStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf-gc", Version: 1, Deprecated: true, CreatedAt: time.Now().Add(-60 * 24 * time.Hour)},
+			{Name: "wf-gc", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now().Add(-60 * 24 * time.Hour)},
 		},
 		counts: map[string]int{"wf-gc:1": 0},
 	}
@@ -1837,7 +1875,7 @@ func TestGarbageCollectVersions_NothingToGC(t *testing.T) {
 	store := &mockGCStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 1, Deprecated: false, CreatedAt: time.Now().Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, GCEligible: false, CreatedAt: time.Now().Add(-60 * 24 * time.Hour)},
 		},
 		counts: map[string]int{},
 	}
@@ -1854,9 +1892,9 @@ func TestGarbageCollectVersions_RemovesDeprecatedOld(t *testing.T) {
 	store := &mockGCStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 3, Deprecated: false, CreatedAt: time.Now().Add(-24 * time.Hour)},
-			{Name: "wf", Version: 2, Deprecated: true, CreatedAt: time.Now().Add(-60 * 24 * time.Hour)},
-			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: time.Now().Add(-90 * 24 * time.Hour)},
+			{Name: "wf", Version: 3, GCEligible: false, CreatedAt: time.Now().Add(-24 * time.Hour)},
+			{Name: "wf", Version: 2, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now().Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: time.Now().Add(-90 * 24 * time.Hour)},
 		},
 		counts: map[string]int{},
 	}
@@ -1879,9 +1917,9 @@ func TestGarbageCollectVersions_ProtectedByMinKeep(t *testing.T) {
 	store := &mockGCStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 3, Deprecated: false, CreatedAt: now.Add(-24 * time.Hour)},
-			{Name: "wf", Version: 2, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
-			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-90 * 24 * time.Hour)},
+			{Name: "wf", Version: 3, GCEligible: false, CreatedAt: now.Add(-24 * time.Hour)},
+			{Name: "wf", Version: 2, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-90 * 24 * time.Hour)},
 		},
 		counts: map[string]int{},
 	}
@@ -1904,8 +1942,8 @@ func TestGarbageCollectVersions_SkippedActiveInstances(t *testing.T) {
 	store := &mockGCStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 2, Deprecated: false, CreatedAt: now.Add(-24 * time.Hour)},
-			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 2, GCEligible: false, CreatedAt: now.Add(-24 * time.Hour)},
+			{Name: "wf", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
 		},
 		counts: map[string]int{"wf:1": 3},
 	}
@@ -1931,8 +1969,8 @@ func TestGarbageCollectVersions_DryRun(t *testing.T) {
 	store := &mockGCStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 2, Deprecated: false, CreatedAt: now.Add(-24 * time.Hour)},
-			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 2, GCEligible: false, CreatedAt: now.Add(-24 * time.Hour)},
+			{Name: "wf", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
 		},
 		counts: map[string]int{},
 	}
@@ -1998,8 +2036,8 @@ func TestPurgeVersions_RemovesOldDeprecated(t *testing.T) {
 	store := &mockPurgeStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 2, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
-			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-90 * 24 * time.Hour)},
+			{Name: "wf", Version: 2, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-90 * 24 * time.Hour)},
 		},
 		counts: map[string]int{"wf:1": 0, "wf:2": 0},
 	}
@@ -2017,7 +2055,7 @@ func TestPurgeVersions_NotOldEnough(t *testing.T) {
 	store := &mockPurgeStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-10 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-10 * 24 * time.Hour)},
 		},
 		counts: map[string]int{"wf:1": 0},
 	}
@@ -2035,7 +2073,7 @@ func TestPurgeVersions_NotDeprecated(t *testing.T) {
 	store := &mockPurgeStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 1, Deprecated: false, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, GCEligible: false, CreatedAt: now.Add(-60 * 24 * time.Hour)},
 		},
 		counts: map[string]int{"wf:1": 0},
 	}
@@ -2053,7 +2091,7 @@ func TestPurgeVersions_SkippedActiveInstances(t *testing.T) {
 	store := &mockPurgeStore{
 		stubWorkflowStore: &stubWorkflowStore{},
 		defs: []WorkflowDef{
-			{Name: "wf", Version: 1, Deprecated: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
+			{Name: "wf", Version: 1, DisabledAt: RetiredAt(time.Now()), GCEligible: true, CreatedAt: now.Add(-60 * 24 * time.Hour)},
 		},
 		counts: map[string]int{"wf:1": 5},
 	}
@@ -2116,8 +2154,8 @@ type mockConcurrencyKeyStore struct{}
 func (m *mockConcurrencyKeyStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
 	return true, nil
 }
-func (m *mockConcurrencyKeyStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
-	return nil
+func (m *mockConcurrencyKeyStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return true, nil
 }
 
 func newMockConcurrencyKeyStore() *mockConcurrencyKeyStore {
@@ -2130,8 +2168,8 @@ type releaseErrorStore struct {
 	mockConcurrencyKeyStore
 }
 
-func (r *releaseErrorStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
-	return fmt.Errorf("simulated release failure")
+func (r *releaseErrorStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return false, fmt.Errorf("simulated release failure")
 }
 
 func TestReleaseHeldScopes_NilStore(t *testing.T) {
@@ -2251,7 +2289,7 @@ func TestPluginStreamRegistry_Lookup(t *testing.T) {
 	}
 
 	psr.Register("plugin", "func", fn)
-	got, ok := psr.Lookup("plugin", "func")
+	got, _, ok := psr.Lookup("plugin", "func")
 	if !ok {
 		t.Fatal("Lookup should return true for registered function")
 	}
@@ -2260,7 +2298,7 @@ func TestPluginStreamRegistry_Lookup(t *testing.T) {
 	}
 
 	// Lookup nonexistent.
-	_, ok = psr.Lookup("plugin", "missing")
+	_, _, ok = psr.Lookup("plugin", "missing")
 	if ok {
 		t.Error("Lookup should return false for missing function")
 	}
@@ -2293,19 +2331,19 @@ func TestPluginRegistry_Lookup(t *testing.T) {
 
 	pr.Register("plugin", "func", fn)
 
-	f, idempotent, ok := pr.Lookup("plugin", "func")
+	f, policy, _, ok := pr.Lookup("plugin", "func")
 	if !ok {
 		t.Fatal("Lookup should return ok=true for registered func")
 	}
 	if f == nil {
 		t.Error("Lookup should return non-nil function")
 	}
-	if idempotent {
-		t.Error("Lookup should return idempotent=false for non-idempotent func")
+	if policy.Idempotent || policy.SameValueOnReplay {
+		t.Errorf("Lookup should return a zero replay policy for a plain registration, got %+v", policy)
 	}
 
 	// Lookup missing.
-	_, _, ok = pr.Lookup("plugin", "missing")
+	_, _, _, ok = pr.Lookup("plugin", "missing")
 	if ok {
 		t.Error("Lookup should return ok=false for missing func")
 	}
@@ -2465,20 +2503,20 @@ func TestWithOptionsViaNewEngine(t *testing.T) {
 		t.Error("WithPluginStreamRegistry not applied via NewEngine")
 	}
 }
-func (s *stubWorkflowStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	return 0, nil
+func (s *stubWorkflowStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	return nil, nil
 }
-func (m *mockCollectMetricsStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	return 0, nil
+func (m *mockCollectMetricsStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	return nil, nil
 }
-func (m *mockCheckStaleStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	return 0, nil
+func (m *mockCheckStaleStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	return nil, nil
 }
-func (m *mockGCStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	return 0, nil
+func (m *mockGCStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	return nil, nil
 }
-func (m *mockPurgeStore) BatchHeartbeat(ctx context.Context, workerID string) (int64, error) {
-	return 0, nil
+func (m *mockPurgeStore) HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) ([]string, error) {
+	return nil, nil
 }
 
 func (s *stubWorkflowStore) LoadEventHistoryPaginated(ctx context.Context, workflowID string, offset, limit int) ([]EventRecord, error) {
@@ -2500,6 +2538,14 @@ func (s *stubWorkflowStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash
 
 func (s *stubWorkflowStore) GetChildCount(ctx context.Context, parentWorkflowID string) (int, error) {
 	return 0, nil
+}
+
+// OriginalChildRunIDs returns nothing: no test using this double is about
+// cleat#1661's orphan check, and a double that invented children would make
+// the check fire on unrelated tests. Recorded as a choice rather than left as
+// another empty return.
+func (s *stubWorkflowStore) OriginalChildRunIDs(context.Context, string) ([]string, error) {
+	return nil, nil
 }
 
 func (s *stubWorkflowStore) GetConcurrencyKeyCount(ctx context.Context, workflowID string) (int, error) {
@@ -2607,10 +2653,10 @@ func (m *mockCollectMetricsStore) StartChildWorkflow(ctx context.Context, parent
 func (m *mockCollectMetricsStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (runID string, err error) {
 	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
-func (m *mockCollectMetricsStore) GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error) {
-	return "", false, nil
+func (m *mockCollectMetricsStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
+	return ChildOutcome{}, nil
 }
-func (m *mockCollectMetricsStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (m *mockCollectMetricsStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	return 0, nil
 }
 func (m *mockCollectMetricsStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
@@ -2633,10 +2679,6 @@ func (m *mockCollectMetricsStore) SetScheduleEnabled(ctx context.Context, name s
 func (m *mockCollectMetricsStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 	return nil, nil
 }
-func (m *mockCollectMetricsStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	return nil
-}
-
 func (m *mockCollectMetricsStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }
@@ -2661,10 +2703,10 @@ func (m *mockCollectMetricsStore) CompactHistory(ctx context.Context, workflowID
 func (m *mockCollectMetricsStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	return nil
 }
-func (m *mockCollectMetricsStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockCollectMetricsStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	return nil
 }
-func (m *mockCollectMetricsStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockCollectMetricsStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	return nil
 }
 func (m *mockCollectMetricsStore) GetPromise(ctx context.Context, workflowID, promiseID string) (status string, result string, errMsg string, err error) {
@@ -2679,14 +2721,14 @@ func (m *mockCollectMetricsStore) CreateUpdateRequest(ctx context.Context, workf
 func (m *mockCollectMetricsStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
 	return nil, nil
 }
-func (m *mockCollectMetricsStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (m *mockCollectMetricsStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	return nil
 }
 func (m *mockCollectMetricsStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error) {
 	return false, nil
 }
-func (m *mockCollectMetricsStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
-	return nil
+func (m *mockCollectMetricsStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return true, nil
 }
 func (m *mockCollectMetricsStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
 	return nil
@@ -2803,10 +2845,10 @@ func (m *mockCheckStaleStore) StartChildWorkflow(ctx context.Context, parentID, 
 func (m *mockCheckStaleStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (runID string, err error) {
 	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
-func (m *mockCheckStaleStore) GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error) {
-	return "", false, nil
+func (m *mockCheckStaleStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
+	return ChildOutcome{}, nil
 }
-func (m *mockCheckStaleStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (m *mockCheckStaleStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	return 0, nil
 }
 func (m *mockCheckStaleStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
@@ -2827,10 +2869,6 @@ func (m *mockCheckStaleStore) SetScheduleEnabled(ctx context.Context, name strin
 func (m *mockCheckStaleStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) {
 	return nil, nil
 }
-func (m *mockCheckStaleStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	return nil
-}
-
 func (m *mockCheckStaleStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }
@@ -2855,10 +2893,10 @@ func (m *mockCheckStaleStore) CompactHistory(ctx context.Context, workflowID str
 func (m *mockCheckStaleStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	return nil
 }
-func (m *mockCheckStaleStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockCheckStaleStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	return nil
 }
-func (m *mockCheckStaleStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockCheckStaleStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	return nil
 }
 func (m *mockCheckStaleStore) GetPromise(ctx context.Context, workflowID, promiseID string) (status string, result string, errMsg string, err error) {
@@ -2873,14 +2911,14 @@ func (m *mockCheckStaleStore) CreateUpdateRequest(ctx context.Context, workflowI
 func (m *mockCheckStaleStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
 	return nil, nil
 }
-func (m *mockCheckStaleStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (m *mockCheckStaleStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	return nil
 }
 func (m *mockCheckStaleStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error) {
 	return false, nil
 }
-func (m *mockCheckStaleStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
-	return nil
+func (m *mockCheckStaleStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return true, nil
 }
 func (m *mockCheckStaleStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
 	return nil
@@ -2996,10 +3034,10 @@ func (m *mockGCStore) StartChildWorkflow(ctx context.Context, parentID, defName,
 func (m *mockGCStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (runID string, err error) {
 	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
-func (m *mockGCStore) GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error) {
-	return "", false, nil
+func (m *mockGCStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
+	return ChildOutcome{}, nil
 }
-func (m *mockGCStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (m *mockGCStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	return 0, nil
 }
 func (m *mockGCStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
@@ -3018,10 +3056,6 @@ func (m *mockGCStore) SetScheduleEnabled(ctx context.Context, name string, enabl
 	return nil
 }
 func (m *mockGCStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) { return nil, nil }
-func (m *mockGCStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	return nil
-}
-
 func (m *mockGCStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }
@@ -3046,10 +3080,10 @@ func (m *mockGCStore) CompactHistory(ctx context.Context, workflowID string, com
 func (m *mockGCStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	return nil
 }
-func (m *mockGCStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockGCStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	return nil
 }
-func (m *mockGCStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockGCStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	return nil
 }
 func (m *mockGCStore) GetPromise(ctx context.Context, workflowID, promiseID string) (status string, result string, errMsg string, err error) {
@@ -3064,13 +3098,15 @@ func (m *mockGCStore) CreateUpdateRequest(ctx context.Context, workflowID, updat
 func (m *mockGCStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
 	return nil, nil
 }
-func (m *mockGCStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (m *mockGCStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	return nil
 }
 func (m *mockGCStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error) {
 	return false, nil
 }
-func (m *mockGCStore) ReleaseConcurrencyKey(ctx context.Context, key string) error { return nil }
+func (m *mockGCStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return true, nil
+}
 func (m *mockGCStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
 	return nil
 }
@@ -3177,10 +3213,10 @@ func (m *mockPurgeStore) StartChildWorkflow(ctx context.Context, parentID, defNa
 func (m *mockPurgeStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (runID string, err error) {
 	return m.StartChildWorkflow(ctx, parentID, defName, inputJSON, defVersion, parentClosePolicy, priority)
 }
-func (m *mockPurgeStore) GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error) {
-	return "", false, nil
+func (m *mockPurgeStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
+	return ChildOutcome{}, nil
 }
-func (m *mockPurgeStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+func (m *mockPurgeStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	return 0, nil
 }
 func (m *mockPurgeStore) GetQueryState(ctx context.Context, workflowID, key string) (string, error) {
@@ -3199,10 +3235,6 @@ func (m *mockPurgeStore) SetScheduleEnabled(ctx context.Context, name string, en
 	return nil
 }
 func (m *mockPurgeStore) GetDueSchedules(ctx context.Context) ([]Schedule, error) { return nil, nil }
-func (m *mockPurgeStore) UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error {
-	return nil
-}
-
 func (m *mockPurgeStore) ClaimDueSchedule(ctx context.Context, name string, expectedNextRun, newNextRun time.Time, runID string) (bool, error) {
 	return true, nil
 }
@@ -3227,10 +3259,10 @@ func (m *mockPurgeStore) CompactHistory(ctx context.Context, workflowID string, 
 func (m *mockPurgeStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
 	return nil
 }
-func (m *mockPurgeStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockPurgeStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	return nil
 }
-func (m *mockPurgeStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockPurgeStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	return nil
 }
 func (m *mockPurgeStore) GetPromise(ctx context.Context, workflowID, promiseID string) (status string, result string, errMsg string, err error) {
@@ -3245,13 +3277,15 @@ func (m *mockPurgeStore) CreateUpdateRequest(ctx context.Context, workflowID, up
 func (m *mockPurgeStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
 	return nil, nil
 }
-func (m *mockPurgeStore) CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error {
+func (m *mockPurgeStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
 	return nil
 }
 func (m *mockPurgeStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error) {
 	return false, nil
 }
-func (m *mockPurgeStore) ReleaseConcurrencyKey(ctx context.Context, key string) error { return nil }
+func (m *mockPurgeStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
+	return true, nil
+}
 func (m *mockPurgeStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error {
 	return nil
 }
@@ -3290,4 +3324,103 @@ func (m *mockPurgeStore) DeleteExpiredEvents(ctx context.Context, olderThan time
 }
 func (m *mockPurgeStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
 	return uuid.Nil, nil
+}
+
+func (_ *stubWorkflowStore) SetAllowedSignalCallers(_ context.Context, _ string, _ []string) error {
+	return nil
+}
+
+// GetChildCompletedAtMs satisfies the store interface. Added with #847, which
+// made PollChild derive its answer from the child's completion instant rather
+// than querying live. Returning ok=false means "never completed", which keeps
+// every existing test's PollChild answer at "running".
+func (s *stubWorkflowStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	return 0, false, nil
+}
+
+// GetChildCompletedAtMs satisfies the store interface. Added with #847, which
+// made PollChild derive its answer from the child's completion instant rather
+// than querying live. Returning ok=false means "never completed", which keeps
+// every existing test's PollChild answer at "running".
+func (m *mockCollectMetricsStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	return 0, false, nil
+}
+
+// GetChildCompletedAtMs satisfies the store interface. Added with #847, which
+// made PollChild derive its answer from the child's completion instant rather
+// than querying live. Returning ok=false means "never completed", which keeps
+// every existing test's PollChild answer at "running".
+func (m *mockCheckStaleStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	return 0, false, nil
+}
+
+// GetChildCompletedAtMs satisfies the store interface. Added with #847, which
+// made PollChild derive its answer from the child's completion instant rather
+// than querying live. Returning ok=false means "never completed", which keeps
+// every existing test's PollChild answer at "running".
+func (m *mockGCStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	return 0, false, nil
+}
+
+// GetChildCompletedAtMs satisfies the store interface. Added with #847, which
+// made PollChild derive its answer from the child's completion instant rather
+// than querying live. Returning ok=false means "never completed", which keeps
+// every existing test's PollChild answer at "running".
+func (m *mockPurgeStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	return 0, false, nil
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (s *stubWorkflowStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	wfs, err := s.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (m *mockCollectMetricsStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	wfs, err := m.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (m *mockCheckStaleStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	wfs, err := m.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (m *mockGCStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	wfs, err := m.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
+}
+
+// CountWorkflows delegates to this mock's own ListWorkflows so the count and
+// the page cannot disagree. A mock that reports a total its list does not
+// support is a trap: it makes a paging bug look like a data bug.
+func (m *mockPurgeStore) CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error) {
+	wfs, err := m.ListWorkflows(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return len(wfs), nil
 }

@@ -54,8 +54,8 @@ It verifies the agent logic end-to-end and prints the recorded call history.
 cleat build --target python --entry research_agent.py:langchain_research_agent
 
 # Run it
-cleat run langchain_research_agent \
-    '{"topic": "Compare Temporal, DBOS, and Cleat"}'
+cleat run --wasm langchain_research_agent.wasm --entry-point LangChainResearchAgent \
+    --input '{"topic": "Compare Temporal, DBOS, and Cleat"}'
 ```
 
 To see costs only (no execution):
@@ -66,10 +66,22 @@ python research_agent.py --costs
 
 ## Demo: Crash Recovery
 
+`cleat run` (above) is a standalone, in-process execution -- no database, no
+persistence, nothing to resume from if it is killed. Crash recovery is a
+property of a *deployed* workflow, started through a worker:
+
 ```bash
-# Terminal 1: Start the agent
-cleat run langchain_research_agent \
-    '{"topic": "Latest developments in fusion energy"}'
+# Terminal 1: Start Postgres and the worker (prints an API key on first
+# start -- export it as CLEAT_API_KEY below)
+cleat-worker --db "$CLEAT_DATABASE_URL" --api-addr :8080 --migrate-on-start
+
+# Deploy the built WASM, then start a run
+cleat deploy --db "$CLEAT_DATABASE_URL" --name research-agent langchain_research_agent.wasm
+curl -fsS -X POST http://localhost:8080/api/workflows/research-agent/start \
+  -H "Authorization: Bearer $CLEAT_API_KEY" \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -H "Content-Type: application/json" \
+  -d '{"input":{"topic":"Latest developments in fusion energy"}}'
 
 # During execution — after a few steps — kill the worker
 kill -9 $(pgrep cleat-worker)
@@ -78,7 +90,7 @@ kill -9 $(pgrep cleat-worker)
 # Dashboard will show recorded events from completed steps
 
 # Restart the worker — the agent resumes from the last checkpoint
-durable worker start
+cleat-worker --db "$CLEAT_DATABASE_URL" --api-addr :8080 --migrate-on-start
 ```
 
 ## Architecture
@@ -89,14 +101,14 @@ research_agent.py
 ├── _research_agent_impl()     ← Core workflow logic (undecorated, testable)
 │   ├── CleatCallbackHandler   ← Records LangChain agent steps (demonstrated)
 │   ├── Plugins.llm_chat()     ← Deterministic LLM call (cleat-durable)
-│   ├── set_state()            ← Progress persisted in durable state
+│   ├── set_query_state()      ← Progress published as queryable state
 │   ├── poll_cancellation()    ← Graceful cancellation support
 │   └── _execute_tool()        ← Tool dispatch (also durable)
 │
-└── langchain_research_agent() ← @durable_entry wrapper (WASM export)
+└── langchain_research_agent() ← @cleat_entry wrapper (WASM export)
 
 SDK modules used:
-  cleat_sdk.host_calls         ← HostCalls (durable_log, set_state, now, ...)
+  cleat_sdk.host_calls         ← HostCalls (durable_log, set_query_state, now, ...)
   cleat_sdk.plugins            ← Plugins.llm_chat, Plugins.llm_embed, ...
   cleat_sdk.langchain          ← CleatCallbackHandler
   cleat_sdk.langgraph          ← CleatCheckpointer (for LangGraph state)
@@ -107,7 +119,7 @@ SDK modules used:
 
 ### Deterministic Replay
 
-When a Cleat workflow executes, every `plugin_call`, `durable_call`, `set_state`,
+When a Cleat workflow executes, every `plugin_call`, `durable_call`, `set_query_state`,
 and `durable_sleep` appends an event to the workflow history. If the worker
 crashes and restarts, the runtime replays the history from the beginning.
 Instead of making real API calls, every replayed event returns the result that

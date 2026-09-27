@@ -29,7 +29,6 @@ Port of the Go pattern from ``durable/durabletest/durabletest.go``.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -487,7 +486,6 @@ class CleatTestHarness(HostCalls):
         operation: str,
         request: Any,
         heartbeat_interval_ms: int,
-        progress: Callable[[str], None],
     ) -> str:
         # Delegate to call (no heartbeat simulation)
         return self.call(service, operation, request)
@@ -596,26 +594,6 @@ class CleatTestHarness(HostCalls):
     # ------------------------------------------------------------------
     # State
     # ------------------------------------------------------------------
-
-    def set_state(self, key: str, value: Any) -> None:
-        self.call("state", "set", {"key": key, "value": value})
-
-    def get_state(self, key: str, result_type: type = str) -> Any:
-        result = self.call("state", "get", {"key": key})
-        data = json.loads(result)
-        value = data.get("value", data) if isinstance(data, dict) else data
-        if result_type is str:
-            return str(value)
-        if isinstance(value, dict):
-            return result_type(**value)
-        return result_type(value)
-
-    def delete_state(self, key: str) -> None:
-        self.call("state", "delete", {"key": key})
-
-    def incr_state(self, key: str, delta: int = 1) -> int:
-        result = self.call("state", "incr", {"key": key, "delta": delta})
-        return int(json.loads(result))
 
     # ------------------------------------------------------------------
     # Promises

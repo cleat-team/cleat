@@ -17,12 +17,35 @@ func TestErrorCode_String(t *testing.T) {
 		{ErrTimeout, "timeout"},
 		{ErrAmbiguous, "ambiguous"},
 		{ErrRetriesExhausted, "retries_exhausted"},
+		{ErrResultRejected, "result_rejected_by_store"},
+		{ErrOperator, "operator"},
 		{ErrorCode(99), "unknown"}, // unknown code falls through to default
 	}
 	for _, tt := range tests {
 		got := tt.code.String()
 		if got != tt.want {
 			t.Errorf("ErrorCode(%d).String() = %q, want %q", tt.code, got, tt.want)
+		}
+	}
+}
+
+// TestIsRecognizedErrorCodeString pins the set an operator-supplied
+// force-fail error_code must belong to (cleat#1977, D5): every documented
+// code plus "operator", nothing else, and emphatically not the empty string
+// -- ForceFail is the one that substitutes ErrOperator.String() for empty,
+// this function does not.
+func TestIsRecognizedErrorCodeString(t *testing.T) {
+	for _, s := range []string{
+		"unknown", "transient", "permanent", "cancelled", "timeout",
+		"ambiguous", "retries_exhausted", "result_rejected_by_store", "operator",
+	} {
+		if !IsRecognizedErrorCodeString(s) {
+			t.Errorf("IsRecognizedErrorCodeString(%q) = false, want true", s)
+		}
+	}
+	for _, s := range []string{"", "banana", "Timeout", "TIMEOUT", " timeout"} {
+		if IsRecognizedErrorCodeString(s) {
+			t.Errorf("IsRecognizedErrorCodeString(%q) = true, want false", s)
 		}
 	}
 }

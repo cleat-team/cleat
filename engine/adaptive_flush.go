@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,7 +18,19 @@ type batchEntry struct {
 	workflowID string
 	step       int
 	done       chan error
-	params     []interface{} // 31 values matching insertEventSQL parameter order
+	params     []interface{} // matches insertEventSQL parameter order
+
+	// payloadEncoding is what request/response were encoded as, recorded at
+	// write time rather than inferred when they are read back (cleat#1319).
+	// nil for an event carrying neither payload, so the column never makes a
+	// claim about bytes that do not exist.
+	payloadEncoding any
+
+	// createdAt is the EVENT's timestamp, not the moment of the write. The
+	// column is what LoadEventHistory reconstructs TimestampMs from, and
+	// execSession.Now() reads that back, so storing the flush time here made
+	// h.Now() non-deterministic across replay. See insertEventSQL's doc.
+	createdAt time.Time
 
 	// workerID and generation are the claiming worker's identity, for
 	// fencing (B4). workerID == "" means the caller did not ask for fencing
@@ -57,6 +68,11 @@ type AdaptiveFlusher struct {
 
 	encryptSensitivePayloads bool
 	encryption               *PayloadEncryption
+
+	// retryWindow bounds how long a failed batch INSERT is retried. Zero means
+	// DefaultFlushRetryWindow. Set through setRetryWindow rather than the
+	// constructor, which already carries seven parameters and has callers.
+	retryWindow time.Duration
 
 	// Stats
 	directFlushes  atomic.Int64
@@ -104,6 +120,36 @@ func (af *AdaptiveFlusher) SetEncryption(encrypt bool, enc *PayloadEncryption) {
 	defer af.mu.Unlock()
 	af.encryptSensitivePayloads = encrypt
 	af.encryption = enc
+}
+
+// setRetryWindow bounds how long a failed batch INSERT is retried. Zero
+// restores DefaultFlushRetryWindow.
+func (af *AdaptiveFlusher) setRetryWindow(d time.Duration) {
+	af.mu.Lock()
+	defer af.mu.Unlock()
+	af.retryWindow = d
+}
+
+// retryWindowOf is how long a failed batch INSERT is retried. Zero means
+// DefaultFlushRetryWindow.
+//
+// Read under the lock rather than touching the field directly, because
+// setRetryWindow writes it under the lock and retryBatchFlush runs on the
+// flushing goroutine. In practice it is set once at construction, which is
+// exactly the argument that would leave a race here until somebody made it a
+// per-tenant setting. flushAndNotify never calls this while holding af.mu, so
+// it cannot deadlock -- see its body, which reads af.db and af.tenantID the
+// same way, and takes the lock only for the scalar capture in its closing
+// stats block, after every call to this.
+//
+// (That was written as "flushAndNotify does not hold af.mu" until cleat#2382,
+// which is the same claim about the callers but no longer describes the
+// callee: the stats report now takes the lock. The deadlock argument depends
+// on where the call is made, not on whether the function locks at all.)
+func (af *AdaptiveFlusher) retryWindowOf() time.Duration {
+	af.mu.Lock()
+	defer af.mu.Unlock()
+	return af.retryWindow
 }
 
 // Flush is called from recordEvent. In direct mode it returns (nil, false)
@@ -188,12 +234,18 @@ func (af *AdaptiveFlusher) onTimer() {
 // partitionFencedBatch splits batch into entries whose claim still holds
 // (held) and entries whose claim was lost (lost), renewing the lease for
 // every distinct (workflow_id, worker_id, generation) triple in the batch in
-// one round trip -- the batch-mode counterpart to Engine.flushEvent's single
+// one STATEMENT -- the batch-mode counterpart to Engine.flushEvent's single
 // Heartbeat call (B4). A single Heartbeat call cannot fence a whole batch
 // because one AdaptiveFlusher accumulates events from every workflow this
 // worker process is running, each claimed under its own generation, so this
 // does the same (assigned_to, generation) check for all of them at once
 // instead of one at a time.
+//
+// One statement, not one round trip: since cleat#1677 the statement runs
+// inside a transaction that sets the tenant first, because the RLS policy on
+// workflow_instances raises rather than filters when it is unset. The point
+// the sentence above is making survives that -- it is one query for every
+// claim in the batch, not one Heartbeat per workflow.
 //
 // Entries with workerID == "" (fencing not requested for that entry) always
 // come back in held, regardless of generation.
@@ -230,6 +282,27 @@ func (af *AdaptiveFlusher) partitionFencedBatch(ctx context.Context, batch []bat
 		return batch, nil, nil
 	}
 
+	// THE FENCE CHECK RUNS IN A TENANT-SCOPED TRANSACTION. cleat#1677.
+	//
+	// workflow_instances is ENABLE + FORCE ROW LEVEL SECURITY, and the policy
+	// is USING (tenant_id = cleat.assert_tenant_set()) -- a function that
+	// RAISES when the tenant is unset rather than filtering to nothing. On the
+	// pool this statement did not return the wrong rows; it could not run at
+	// all, failing with "cleat.tenant_id is not set (P0001)".
+	//
+	// A `WITH cfg AS (SELECT set_config(...))` CTE WAS TRIED FIRST AND DOES NOT
+	// WORK HERE, which is worth recording because the two other writes in this
+	// file use exactly that and do work (:382 and :596). Measured against the
+	// NOSUPERUSER app role, both ways:
+	//
+	//	cfg declared, never referenced   -> P0001, the CTE is not evaluated
+	//	cfg referenced via FROM ..., cfg -> P0001 ANYWAY
+	//
+	// The policy on the UPDATE's target is evaluated before the CTE's
+	// set_config has taken effect, so the idiom that carries an INSERT does not
+	// carry this. Preferring consistency with the neighbours over the mechanism
+	// the guard actually recommends was the wrong call and the test is what
+	// said so.
 	valuesSQL := make([]string, len(claims))
 	args := make([]interface{}, 0, len(claims)*3)
 	for i, c := range claims {
@@ -238,7 +311,24 @@ func (af *AdaptiveFlusher) partitionFencedBatch(ctx context.Context, batch []bat
 		args = append(args, c.workflowID, c.workerID, c.generation)
 	}
 
-	rows, qerr := af.db.QueryContext(ctx, fmt.Sprintf(`
+	tx, terr := af.db.BeginTx(ctx, nil)
+	if terr != nil {
+		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check: begin: %w", terr)
+	}
+	defer tx.Rollback()
+	// setRLSOnFlushTx rather than an inline set_config, and the difference is
+	// not style. The two are the same statement, but
+	// postgres_rls_reachability_test.go recognises tenant establishment by
+	// CALL -- beginTxWithRLS, setRLSOnTx, setRLSOnFlushTx -- so a hand-written
+	// equivalent leaves the guard reporting this statement as unscoped. It
+	// did, on the first version of this fix: a correct statement that the
+	// guard could not see was correct is the same cost to the next reader as
+	// an incorrect one.
+	if serr := setRLSOnFlushTx(ctx, tx, af.tenantID); serr != nil {
+		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check: set tenant: %w", serr)
+	}
+
+	rows, qerr := tx.QueryContext(ctx, fmt.Sprintf(`
 		WITH claims(workflow_id, worker_id, generation) AS (VALUES %s)
 		UPDATE workflow_instances wi
 		SET heartbeat_at = now()
@@ -261,6 +351,15 @@ func (af *AdaptiveFlusher) partitionFencedBatch(ctx context.Context, batch []bat
 	}
 	if rerr := rows.Err(); rerr != nil {
 		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check rows: %w", rerr)
+	}
+	// Commit, or the heartbeat_at renewal this statement performs rolls back
+	// with the transaction and the lease is not actually refreshed. rows must
+	// be drained first, which the loop above has done.
+	if cerr := rows.Close(); cerr != nil {
+		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check close: %w", cerr)
+	}
+	if cerr := tx.Commit(); cerr != nil {
+		return nil, nil, fmt.Errorf("adaptive flusher: batch fence check commit: %w", cerr)
 	}
 
 	for _, e := range batch {
@@ -310,41 +409,7 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 
 	events := make([]map[string]interface{}, len(batch))
 	for i, entry := range batch {
-		p := entry.params
-		events[i] = map[string]interface{}{
-			"workflow_id":       p[0],
-			"step":              p[1],
-			"event_type":        p[2],
-			"service":           jsonNull(p[3]),
-			"operation":         jsonNull(p[4]),
-			"request":           jsonNull(p[5]),
-			"response":          jsonNull(p[6]),
-			"error":             jsonNull(p[7]),
-			"duration_ms":       jsonNull(p[8]),
-			"signal_names":      jsonNull(p[9]),
-			"timeout_ms":        jsonNull(p[10]),
-			"signal_name":       jsonNull(p[11]),
-			"signal_payload":    jsonNull(p[12]),
-			"defer_description": jsonNull(p[13]),
-			"defer_id":          jsonNull(p[14]),
-			"child_name":        jsonNull(p[15]),
-			"child_input":       jsonNull(p[16]),
-			"run_id":            jsonNull(p[17]),
-			"new_input":         jsonNull(p[18]),
-			"plugin_name":       jsonNull(p[19]),
-			"plugin_func":       jsonNull(p[20]),
-			"plugin_input":      jsonNull(p[21]),
-			"plugin_output":     jsonNull(p[22]),
-			"plugin_error":      jsonNull(p[23]),
-			"promise_name":      jsonNull(p[24]),
-			"promise_id":        jsonNull(p[25]),
-			"promise_result":    jsonNull(p[26]),
-			"promise_error":     jsonNull(p[27]),
-			"payload":           payloadJSONRaw(p[28]),
-			"checksum":          p[29],
-			"tenant_id":         p[30],
-			"created_at":        time.Now(),
-		}
+		events[i] = batchEntryJSONRow(entry)
 	}
 
 	t0 := time.Now()
@@ -370,7 +435,7 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 			defer_id, child_name, child_input, run_id, new_input,
 			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 			promise_name, promise_id, promise_result, promise_error,
-			payload, created_at, checksum, tenant_id
+			payload, created_at, checksum, tenant_id, payload_encoding
 		)
 		SELECT
 			workflow_id, step, event_type, service, operation,
@@ -379,11 +444,16 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 			defer_id, child_name, child_input, run_id, new_input,
 			plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 			promise_name, promise_id, promise_result, promise_error,
-			payload, created_at, checksum, tenant_id
+			payload, created_at, checksum, tenant_id, payload_encoding
 		FROM jsonb_populate_recordset(NULL::event_history, $1::jsonb), cfg
-		ON CONFLICT (workflow_id, step) DO UPDATE
-			SET response = EXCLUDED.response, error = EXCLUDED.error
-			WHERE event_history.response = '' AND event_history.error IS NULL
+		ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE
+			SET response = EXCLUDED.response, error = EXCLUDED.error,
+				promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,
+				checksum = EXCLUDED.checksum, payload = EXCLUDED.payload, payload_encoding = EXCLUDED.payload_encoding,
+				event_type = EXCLUDED.event_type
+			WHERE event_history.event_type IN ('await_child', 'await_promise', 'await_all_children')
+			  AND event_history.response IS NULL AND event_history.error IS NULL
+			  AND event_history.promise_result IS NULL AND event_history.promise_error IS NULL
 	`, string(eventsJSON))
 	dbUs := time.Since(t1).Microseconds()
 	af.totalDBUs.Add(dbUs)
@@ -414,9 +484,41 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 	}
 
 	// Periodic report every ~5 seconds.
+	//
+	// lastReportTime, batchMode and rateEWMA live under af.mu: updateRate and
+	// Flush take it to read or write them. flushAndNotify runs on its own
+	// goroutine with the lock RELEASED -- every dispatch of it (onTimer at
+	// af.onTimer, Flush's full-batch branch, Run and Shutdown) unlocks first --
+	// so this report has to take it, or it reads state a concurrent updateRate
+	// is rewriting.
+	//
+	// That read was the one the detector reported, not the write beside it: an
+	// unlocked read here against updateRate's locked write of batchMode is a
+	// race in production, and it only looked like a test-harness problem
+	// because the counterpart that tripped the detector was the test's own
+	// write of batchMode under the lock (cleat#2382). Capture the two guarded
+	// scalars under the lock and log after dropping it -- every counter below
+	// is an atomic and needs no lock.
+	//
+	// The lock also makes the due test a real check-and-set, and that is a
+	// behaviour change worth naming rather than a tidy-up: `if due { ... }` used
+	// to be an unlocked read-then-write, so two flushers that arrived inside the
+	// same 5s window could both see it expire and both emit ADAPTIVE-STATS. Now
+	// exactly one wins per window and the other skips the whole block. Found in
+	// review, not by the detector -- it is a second production pair (two
+	// flushAndNotify goroutines against each other) that the reported race
+	// happened to hide behind.
 	now := time.Now()
-	if now.Sub(af.lastReportTime) >= 5*time.Second {
+	af.mu.Lock()
+	due := now.Sub(af.lastReportTime) >= 5*time.Second
+	if due {
 		af.lastReportTime = now
+	}
+	reportBatchMode := af.batchMode
+	reportRate := af.rateEWMA
+	af.mu.Unlock()
+
+	if due {
 		bc := af.batchCount.Load()
 		bs := af.batchSizeTotal.Load()
 		bf := af.batchFlushes.Load()
@@ -443,8 +545,8 @@ func (af *AdaptiveFlusher) flushAndNotify(ctx context.Context, batch []batchEntr
 			avgPrepare = float64(af.totalPrepareUs.Load()) / float64(be)
 		}
 		slog.Debug("ADAPTIVE-STATS",
-			"batchMode", af.batchMode,
-			"rate", af.rateEWMA,
+			"batchMode", reportBatchMode,
+			"rate", reportRate,
 			"directFlushes", df,
 			"batchFlushes", bf,
 			"batchedEvents", be,
@@ -532,6 +634,13 @@ func errIsRetryable(err error) bool {
 	if errPoolClosed(err) {
 		return false
 	}
+	// A refusal a later attempt would receive identically -- most often
+	// ErrFenceLost, which is not a database failure at all. See
+	// errFlushRetryPointless for why the closing "retry unknown errors" clause
+	// below makes this check load-bearing rather than tidy.
+	if errFlushRetryPointless(err) {
+		return false
+	}
 	// driver.ErrBadConn — the pool dropped a bad connection; retry gets a fresh one.
 	if errors.Is(err, sql.ErrConnDone) {
 		return true
@@ -550,31 +659,22 @@ func errIsRetryable(err error) bool {
 	return true
 }
 
-// retryBatchFlush executes the batch INSERT with exponential backoff on
-// transient errors. It returns nil on success or the last error after
-// exhausting retries.
+// retryBatchFlush executes the batch INSERT, retrying transient errors until
+// af.retryWindow has elapsed. It returns nil on success or the last error.
+//
+// The window replaces a fixed `maxRetries = 5`. The count was not wrong so much
+// as unstatable: what an operator needs to size is how long a flush keeps
+// trying, and five attempts at 50ms doubling is 750ms only until someone edits
+// the base. At the default window this performs the same five attempts it
+// always did -- see DefaultFlushRetryWindow.
+//
+// THE BATCH IS RETRIED WHOLE, which is correct here and is not a general
+// property of retry. One AdaptiveFlusher batches events from every workflow of
+// a tenant on this worker, so a failure is shared-fate by construction: the
+// INSERT is one statement, and there is no partial success to isolate. Per-entry
+// fate is decided before this, in partitionFencedBatch. cleat#1717.
 func retryBatchFlush(ctx context.Context, af *AdaptiveFlusher, eventsJSON []byte, batchSize int) error {
-	const (
-		maxRetries  = 5
-		baseBackoff = 50 * time.Millisecond
-		maxBackoff  = 2 * time.Second
-	)
-	var lastErr error
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		if attempt > 0 {
-			backoff := time.Duration(math.Min(float64(baseBackoff)*math.Pow(2, float64(attempt-1)), float64(maxBackoff)))
-			slog.Warn("adaptive flusher retrying batch flush",
-				"attempt", attempt,
-				"batchSize", batchSize,
-				"backoff", backoff,
-				"prevErr", lastErr,
-			)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(backoff):
-			}
-		}
+	return retryFlushUntilDeadline(ctx, af.retryWindowOf(), fmt.Sprintf("batch flush (%d events)", batchSize), func() error {
 		_, err := af.db.ExecContext(ctx, `
 			WITH cfg AS (SELECT set_config('cleat.tenant_id', ($1::jsonb->0->>'tenant_id'), true))
 			INSERT INTO event_history (
@@ -584,7 +684,7 @@ func retryBatchFlush(ctx context.Context, af *AdaptiveFlusher, eventsJSON []byte
 				defer_id, child_name, child_input, run_id, new_input,
 				plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 				promise_name, promise_id, promise_result, promise_error,
-				payload, created_at, checksum, tenant_id
+				payload, created_at, checksum, tenant_id, payload_encoding
 			)
 			SELECT
 				workflow_id, step, event_type, service, operation,
@@ -593,21 +693,19 @@ func retryBatchFlush(ctx context.Context, af *AdaptiveFlusher, eventsJSON []byte
 				defer_id, child_name, child_input, run_id, new_input,
 				plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 				promise_name, promise_id, promise_result, promise_error,
-				payload, created_at, checksum, tenant_id
+				payload, created_at, checksum, tenant_id, payload_encoding
 			FROM jsonb_populate_recordset(NULL::event_history, $1::jsonb), cfg
-			ON CONFLICT (workflow_id, step) DO UPDATE
-				SET response = EXCLUDED.response, error = EXCLUDED.error
-				WHERE event_history.response = '' AND event_history.error IS NULL
+			ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE
+				SET response = EXCLUDED.response, error = EXCLUDED.error,
+					promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,
+					checksum = EXCLUDED.checksum, payload = EXCLUDED.payload, payload_encoding = EXCLUDED.payload_encoding,
+					event_type = EXCLUDED.event_type
+				WHERE event_history.event_type IN ('await_child', 'await_promise', 'await_all_children')
+				  AND event_history.response IS NULL AND event_history.error IS NULL
+				  AND event_history.promise_result IS NULL AND event_history.promise_error IS NULL
 		`, string(eventsJSON))
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if !errIsRetryable(err) {
-			return err
-		}
-	}
-	return fmt.Errorf("batch flush failed after %d attempts: %w", maxRetries, lastErr)
+		return err
+	})
 }
 
 // jsonNull converts sql.Null* types to JSON-safe values (string, int64, or nil)
@@ -644,95 +742,88 @@ func payloadJSONRaw(v interface{}) interface{} {
 }
 
 func (af *AdaptiveFlusher) prepareEntry(workflowID string, rec EventRecord, checksum string) (batchEntry, error) {
-	payloadJSON, _ := eventRecordToPayload(rec)
-	payloadArg := nullStr("")
-	if len(payloadJSON) > 0 {
-		payloadArg = sql.NullString{String: string(payloadJSON), Valid: true}
-	}
-
-	requestStr := tryEncodeBase64(rec.Request)
-	responseStr := tryEncodeBase64(rec.Response)
-	errStr := rec.Err
-	sigPayload := rec.SignalPayload
-	childInput := rec.ChildInput
-	newInput := rec.NewInput
-	pluginInput := rec.PluginInput
-	pluginOutput := rec.PluginOutput
-	promiseResult := rec.PromiseResult
-	promiseError := rec.PromiseError
-
 	af.mu.Lock()
 	encrypt := af.encryptSensitivePayloads
 	enc := af.encryption
 	af.mu.Unlock()
 
-	if encrypt && enc != nil {
-		var encErr error
-		if requestStr, encErr = enc.EncryptString(rec.Request); encErr != nil {
-			return batchEntry{}, fmt.Errorf("prepare entry: encrypt request: %w", encErr)
-		}
-		if responseStr, encErr = enc.EncryptString(rec.Response); encErr != nil {
-			return batchEntry{}, fmt.Errorf("prepare entry: encrypt response: %w", encErr)
-		}
-		if errStr, encErr = enc.EncryptString(rec.Err); encErr != nil {
-			return batchEntry{}, fmt.Errorf("prepare entry: encrypt err: %w", encErr)
-		}
-		if rec.SignalPayload != "" {
-			if sigPayload, encErr = enc.EncryptString(rec.SignalPayload); encErr != nil {
-				return batchEntry{}, fmt.Errorf("prepare entry: encrypt signal_payload: %w", encErr)
-			}
-		}
-		if rec.ChildInput != "" {
-			if childInput, encErr = enc.EncryptString(rec.ChildInput); encErr != nil {
-				return batchEntry{}, fmt.Errorf("prepare entry: encrypt child_input: %w", encErr)
-			}
-		}
-		if rec.NewInput != "" {
-			if newInput, encErr = enc.EncryptString(rec.NewInput); encErr != nil {
-				return batchEntry{}, fmt.Errorf("prepare entry: encrypt new_input: %w", encErr)
-			}
-		}
-		if rec.PluginInput != "" {
-			if pluginInput, encErr = enc.EncryptString(rec.PluginInput); encErr != nil {
-				return batchEntry{}, fmt.Errorf("prepare entry: encrypt plugin_input: %w", encErr)
-			}
-		}
-		if rec.PluginOutput != "" {
-			if pluginOutput, encErr = enc.EncryptString(rec.PluginOutput); encErr != nil {
-				return batchEntry{}, fmt.Errorf("prepare entry: encrypt plugin_output: %w", encErr)
-			}
-		}
-		if rec.PromiseResult != "" {
-			if promiseResult, encErr = enc.EncryptString(rec.PromiseResult); encErr != nil {
-				return batchEntry{}, fmt.Errorf("prepare entry: encrypt promise_result: %w", encErr)
-			}
-		}
-		if rec.PromiseError != "" {
-			if promiseError, encErr = enc.EncryptString(rec.PromiseError); encErr != nil {
-				return batchEntry{}, fmt.Errorf("prepare entry: encrypt promise_error: %w", encErr)
-			}
-		}
-		if len(payloadJSON) > 0 && enc != nil {
-			encrypted, encErr := enc.EncryptJSON(payloadJSON)
-			if encErr != nil {
-				return batchEntry{}, fmt.Errorf("prepare entry: encrypt payload: %w", encErr)
-			}
-			payloadArg = sql.NullString{String: string(encrypted), Valid: true}
-		}
+	// The checksum is computed by the caller over the plaintext record, and the
+	// payload is built from it here for the same reason -- see
+	// encodeEventForStorage, which is the single encoding all five writers use.
+	stored, err := encodeEventForStorage(rec, enc, encrypt, tenantForAAD(af.tenantID))
+	if err != nil {
+		return batchEntry{}, fmt.Errorf("prepare entry: %w", err)
 	}
+	payloadArg := stored.Payload
 
 	params := []interface{}{
 		workflowID, rec.Step, rec.EventType,
-		nullStr(rec.Service), nullStr(rec.Op), nullStr(requestStr), nullStr(responseStr), nullStr(errStr),
+		nullStr(rec.Service), nullStr(rec.Op), nullStr(stored.Request), nullStr(stored.Response), nullStr(stored.Err),
 		nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
-		nullStr(rec.SignalName), nullStr(sigPayload),
+		nullStr(rec.SignalName), nullStr(stored.SignalPayload),
 		nullStr(rec.DeferDescription), nullStr(rec.DeferID),
-		nullStr(rec.ChildName), nullStr(childInput), nullStr(rec.RunID), nullStr(newInput),
-		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(pluginInput), nullStr(pluginOutput), nullStr(rec.PluginError),
-		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(promiseResult), nullStr(promiseError),
+		nullStr(rec.ChildName), nullStr(stored.ChildInput), nullStr(rec.RunID), nullStr(stored.NewInput),
+		nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(stored.PluginInput), nullStr(stored.PluginOutput), nullStr(rec.PluginError),
+		nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(stored.PromiseResult), nullStr(stored.PromiseError),
 		payloadArg, checksum, af.tenantID,
 	}
-	return batchEntry{workflowID: workflowID, step: rec.Step, params: params}, nil
+	return batchEntry{
+		workflowID:      workflowID,
+		step:            rec.Step,
+		params:          params,
+		createdAt:       eventCreatedAt(rec),
+		payloadEncoding: stored.Encoding,
+	}, nil
+}
+
+// batchEntryJSONRow turns one prepared batch entry into the map shape the
+// batch INSERT's jsonb_populate_recordset expects for a single row -- one
+// true construction shared by flushAndNotify's primary attempt and a direct
+// call to retryBatchFlush (cleat#2364's engine-level test calls the latter
+// to exercise retryBatchFlush's own guard clause without needing to force a
+// transient DB error), rather than a second hand-written copy of this
+// column list that could silently diverge the next time one is added.
+func batchEntryJSONRow(entry batchEntry) map[string]interface{} {
+	p := entry.params
+	return map[string]interface{}{
+		"workflow_id":       p[0],
+		"step":              p[1],
+		"event_type":        p[2],
+		"service":           jsonNull(p[3]),
+		"operation":         jsonNull(p[4]),
+		"request":           jsonNull(p[5]),
+		"response":          jsonNull(p[6]),
+		"error":             jsonNull(p[7]),
+		"duration_ms":       jsonNull(p[8]),
+		"signal_names":      jsonNull(p[9]),
+		"timeout_ms":        jsonNull(p[10]),
+		"signal_name":       jsonNull(p[11]),
+		"signal_payload":    jsonNull(p[12]),
+		"defer_description": jsonNull(p[13]),
+		"defer_id":          jsonNull(p[14]),
+		"child_name":        jsonNull(p[15]),
+		"child_input":       jsonNull(p[16]),
+		"run_id":            jsonNull(p[17]),
+		"new_input":         jsonNull(p[18]),
+		"plugin_name":       jsonNull(p[19]),
+		"plugin_func":       jsonNull(p[20]),
+		"plugin_input":      jsonNull(p[21]),
+		"plugin_output":     jsonNull(p[22]),
+		"plugin_error":      jsonNull(p[23]),
+		"promise_name":      jsonNull(p[24]),
+		"promise_id":        jsonNull(p[25]),
+		"promise_result":    jsonNull(p[26]),
+		"promise_error":     jsonNull(p[27]),
+		"payload":           payloadJSONRaw(p[28]),
+		"checksum":          p[29],
+		"tenant_id":         p[30],
+		"created_at":        entry.createdAt,
+		// cleat#1319: what the request/response bytes ARE, rather than a
+		// guess made when they are read back. NULL for an event that
+		// carries neither, so the column never claims something about
+		// bytes that do not exist.
+		"payload_encoding": entry.payloadEncoding,
+	}
 }
 
 func (af *AdaptiveFlusher) InBatchMode() bool {
@@ -757,6 +848,10 @@ type FlusherConfig struct {
 	MaxBatch       int
 	EnterThreshold float64
 	ExitThreshold  float64
+
+	// RetryWindow bounds how long a failed batch INSERT is retried. Zero means
+	// DefaultFlushRetryWindow.
+	RetryWindow time.Duration
 }
 
 // TenantFlusherRegistry creates and caches per-tenant AdaptiveFlusher instances.
@@ -818,6 +913,7 @@ func (r *TenantFlusherRegistry) For(tenantID string) *AdaptiveFlusher {
 	af := NewAdaptiveFlusher(r.db, tenantID, r.config.MaxWait, r.config.MaxBatch,
 		r.config.EnterThreshold, r.config.ExitThreshold, 0)
 	af.SetEncryption(r.encrypt, r.enc)
+	af.setRetryWindow(r.config.RetryWindow)
 	r.flushers[tenantID] = af
 	return af
 }

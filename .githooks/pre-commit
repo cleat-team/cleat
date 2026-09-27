@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+#
+# Refuse a commit that adds an IMPROVEMENT-PLAN section outside this sandbox's
+# block.
+#
+# WHY THIS IS A HOOK AND NOT A CI CHECK. The CI gate
+# (scripts/check-section-numbers.sh) asserts two things: section numbers are
+# unique, and every 3.x number sits inside SOME declared block. A cross-stream
+# misallocation satisfies both, so the gate is structurally blind to it -- it
+# runs on a shallow checkout, cannot diff against develop to see which numbers a
+# PR added, and could not attribute them anyway, because all three streams
+# commit under one git identity.
+#
+# The sandbox is the only place the stream is known. That is here.
+#
+# The gate's header said this was its limitation on the day it landed. It was
+# realised twice within hours, reported by WS-2 and confirmed on develop:
+#
+#   3.201, 3.202  WS-2's Python SDK work, inside WS-1's block   (e4de0a4, 9353527)
+#   3.300         WS-3's boundary inventory, inside WS-2's      (#697)
+#
+# In both cases the author had started the work before the block rule landed and
+# never re-ran scripts/next-section-number.sh, which answers correctly. Nobody
+# ignored the rule; the rule arrived after the number was already chosen. A
+# check that fires at `git commit` catches exactly that, because it fires when
+# the number reaches the file rather than when the work began.
+#
+# Those three sections were NOT renumbered. Blocks exist to prevent collisions,
+# and no collision is made more likely by a misallocation:
+# next-section-number.sh reads every used number regardless of block, so it
+# never hands out one that is taken. Renumbering would have meant editing two
+# other streams' sections plus 18 references, across streams, while one of them
+# had an open PR citing them. The cost of absorbing is cosmetic; the cost of
+# renumbering is a cross-stream edit. They are recorded as exceptions in
+# scripts/section-blocks.sh.
+#
+# ENABLING. This runs only if hooks are enabled for the clone:
+#
+#   git config core.hooksPath .githooks     # once, per clone
+#
+# which CONTRIBUTING.md already tells contributors to do for the DCO trailer
+# hook alongside this one. If it is unset, nothing here runs and nothing warns
+# -- a real weakness, and the reason this hook is a second line of defence
+# rather than the rule itself. `git commit --no-verify` bypasses it deliberately.
+
+set -uo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+BLOCKS="$REPO_ROOT/scripts/section-blocks.sh"
+PLAN="IMPROVEMENT-PLAN.md"
+
+# THE PLAN IS TWO PATHS SINCE cleat#1727: IMPROVEMENT-PLAN.md holds the closed
+# sections, IMPROVEMENT-PLAN.d/ holds one file per OPEN section. A NEW section is
+# now almost always a new file in the directory -- which is the whole point of
+# the split -- so a hook watching only IMPROVEMENT-PLAN.md would exit 0 on
+# exactly the commits it exists to check, and go on passing forever.
+PLAN_D="IMPROVEMENT-PLAN.d"
+
+# Nothing to say unless one of them is being changed.
+git diff --cached --name-only --diff-filter=ACM -- "$PLAN" "$PLAN_D" | grep -q . || exit 0
+[ -f "$BLOCKS" ] || exit 0
+
+# shellcheck source=scripts/section-blocks.sh
+. "$BLOCKS"
+
+# Genuinely new section numbers, computed as a SET DIFFERENCE between the staged
+# file and HEAD's -- not from the diff's `+` lines.
+#
+# Reading `+` lines was the first implementation and it was wrong. `git diff`
+# pairs lines by similarity, so a commit that removes a lot of surrounding text
+# re-emits unchanged headings as additions even at -U0. The archive migration
+# (A3) moved 13,000 lines out of this file without adding a single section, and
+# the hook refused it while listing 98 grandfathered numbers as newly added.
+# A set difference cannot make that mistake: a number already in HEAD is not new,
+# however the diff chose to render it.
+heads_of() { grep -oE '^### [0-9]+\.[0-9]+ ' | sed 's/^### //; s/ $//' | sort -u; }
+
+# Headings from BOTH namespaces, on both sides of the comparison. The set
+# difference is still what decides; it just now covers the directory too.
+heads_at() {
+  # $1: "" for the index (":<path>"), or a rev ("HEAD").
+  local rev="$1" f
+  if [ -z "$rev" ]; then
+    git show ":$PLAN" 2>/dev/null
+    git diff --cached --name-only --diff-filter=ACMR -- "$PLAN_D" | while read -r f; do
+      [ -n "$f" ] && git show ":$f" 2>/dev/null
+    done
+  else
+    git show "$rev:$PLAN" 2>/dev/null
+    git ls-tree --name-only "$rev:$PLAN_D" 2>/dev/null | while read -r f; do
+      [ -n "$f" ] && git show "$rev:$PLAN_D/$f" 2>/dev/null
+    done
+  fi
+}
+
+staged="$(heads_at "" | heads_of)"
+current="$(heads_at HEAD | heads_of)"
+
+# DURING A MERGE, HEAD IS ONLY THE FIRST PARENT, so every section the second
+# parent brings looks new and the hook refuses a merge that authored nothing.
+# Observed on a conflicted merge of develop into a feature branch: refused for
+# a section belonging to another stream, which arrived through the merge and
+# which no commit on the branch wrote.
+#
+# It only bites on a CONFLICTED merge, which is why it is easy to miss: git
+# runs no pre-commit hook for a merge that resolves automatically, so the same
+# merge is silently fine until the day it conflicts.
+#
+# The fix widens `current` rather than skipping the check. Skipping during a
+# merge would also stop looking at sections in NEITHER parent -- genuinely new
+# ones introduced by the merge commit itself, which is exactly where a stray
+# section is easiest to add by accident. A section present in any parent is not
+# new; one present in none still is.
+#
+# `git rev-parse --git-path` rather than a literal ".git/MERGE_HEAD": in a
+# WORKTREE `.git` is a file and the real path is
+# .git/worktrees/<name>/MERGE_HEAD, so the literal test reports "no merge in
+# progress" during a merge -- passing in a normal clone and doing nothing in a
+# worktree, silently, which is the worse of the two failures.
+#
+# Reading the FILE rather than `git rev-parse -q --verify MERGE_HEAD` because
+# --verify demands exactly one object and fails on an octopus merge, leaving
+# those refused for the original reason. The file carries one line per parent.
+merge_heads="$(git rev-parse --git-path MERGE_HEAD)"
+if [ -f "$merge_heads" ]; then
+    while IFS= read -r parent; do
+        [ -n "$parent" ] || continue
+        current="$(printf '%s\n%s\n' "$current" \
+            "$(git show "$parent:$PLAN" 2>/dev/null | heads_of)" | sort -u)"
+    done < "$merge_heads"
+fi
+
+# A first commit of the file has no HEAD side; everything in it is new, which is
+# the correct reading.
+added="$(comm -23 <(printf '%s\n' "$staged") <(printf '%s\n' "$current"))"
+[ -n "$added" ] || exit 0
+
+stream="$(section_stream_for_checkout)"
+if [ -z "$stream" ]; then
+  echo "note: pre-commit cannot tell which stream this checkout is, so the" >&2
+  echo "      section-block check is skipped. Add this sandbox to" >&2
+  echo "      SECTION_SANDBOXES in scripts/section-blocks.sh if it is a new one." >&2
+  exit 0
+fi
+
+bad=""
+while IFS= read -r num; do
+  [ -n "$num" ] || continue
+  case "$num" in
+    3.*) ;;
+    *) continue ;;   # 1.x and 2.x are closed series; the CI gate owns them
+  esac
+  owner="$(section_block_for "${num#3.}")"
+  [ "$owner" = "$stream" ] || bad="$bad  $num  (block belongs to: $owner)"$'\n'
+done <<<"$added"
+
+[ -n "$bad" ] || exit 0
+
+echo "REFUSED: this commit adds $PLAN section(s) outside $stream's block:" >&2
+echo >&2
+printf '%s' "$bad" >&2
+echo >&2
+echo "Blocks are per-stream so that two streams appending at once cannot pick" >&2
+echo "the same number:" >&2
+echo >&2
+section_blocks_summary >&2
+echo >&2
+echo "Your next free number is:" >&2
+echo "    $("$REPO_ROOT/scripts/next-section-number.sh" 2>/dev/null || echo '(run scripts/next-section-number.sh)')" >&2
+echo >&2
+echo "Renumber the heading and every reference to it -- they are load-bearing:" >&2
+echo "    grep -rn '<old number>' --include='*.go' --include='*.md' ." >&2
+echo >&2
+echo "If the misallocation is deliberate and agreed with the other stream," >&2
+echo "record it in scripts/section-blocks.sh and commit with --no-verify." >&2
+exit 1

@@ -51,13 +51,10 @@ func TestDeleteCompletedWorkflows_RLSEnforcedAndEventHistoryNotOrphaned(t *testi
 	const tenantA = "d2000000-0000-4000-8000-00000000000a"
 	const tenantB = "d2000000-0000-4000-8000-00000000000b"
 
-	adminStore := NewPostgresStore(adminDB)
 	const defName = "completed-rls-def"
-	if err := adminStore.DeployWorkflowDef(ctx, &WorkflowDef{
-		Name: defName, Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d}, ABIVersion: 1, MinVersion: 1,
-	}); err != nil {
-		t.Fatalf("DeployWorkflowDef: %v", err)
-	}
+	// Once per tenant: the FK on workflow_instances carries tenant_id since D7
+	// (IMPROVEMENT-PLAN 3.77).
+	deployDefForTenants(t, adminDB, defName, 1, tenantA, tenantB)
 
 	// seedTerminated creates one workflow for the given tenant (via the
 	// superuser adminDB connection -- fixture setup, not the thing under

@@ -42,7 +42,7 @@ func TestDashboardMetricsExist(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() && strings.HasSuffix(path, ".json") {
+		if !d.IsDir() && (strings.HasSuffix(path, ".json") || strings.HasSuffix(path, "alerts.yml")) {
 			jsonFiles = append(jsonFiles, path)
 		}
 		return nil

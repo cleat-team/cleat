@@ -38,6 +38,22 @@ func TestDurableSendReplayMatch(t *testing.T) {
 }
 
 func TestDurableSendReplayPastEnd(t *testing.T) {
+	// A send past the end of history is NEW WORK: nothing recorded it, so
+	// nothing executed it, and the session must leave replay and dispatch it.
+	//
+	// This test used to assert the opposite, in the implementation's own words:
+	//
+	//	// On past-end, DurableSend returns 0 without calling exitReplay.
+	//	if !s.isReplay {
+	//	    t.Error("expected isReplay to remain true (DurableSend does not exitReplay on past-end)")
+	//	}
+	//
+	// It gave no reason why that would be right, because there is none -- it
+	// restated the code. What the code did was return success having recorded
+	// no event and dispatched nothing, so every send after a workflow's first
+	// suspension was silently dropped, and every defer's send with it. The test
+	// is why the defect survived: changing the behaviour failed three tests,
+	// which reads as "this was intended". cleat#835.
 	s := newTestExecSession()
 	s.isReplay = true
 	s.history = nil // past end
@@ -47,9 +63,14 @@ func TestDurableSendReplayPastEnd(t *testing.T) {
 	if result != 0 {
 		t.Errorf("expected 0, got %d", result)
 	}
-	// On past-end, DurableSend returns 0 without calling exitReplay.
-	if !s.isReplay {
-		t.Error("expected isReplay to remain true (DurableSend does not exitReplay on past-end)")
+	if s.isReplay {
+		t.Error("the session stayed in replay, so the send was neither replayed nor performed")
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected the send to be recorded as a fresh event, got %d events", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeDurableSend {
+		t.Errorf("recorded %q, want %q", s.history[0].EventType, EventTypeDurableSend)
 	}
 }
 
@@ -326,8 +347,8 @@ func TestSetScopeReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if result != 0 {
 		t.Errorf("expected 0, got %d", result)
@@ -515,8 +536,8 @@ func TestReleaseLockReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if result != 0 {
 		t.Errorf("expected 0, got %d", result)
@@ -575,9 +596,11 @@ func (k *keyedCancellationStore) DeliverSignal(_ context.Context, _, _, _ string
 	return nil
 }
 
-func (k *keyedCancellationStore) PollSignal(_ context.Context, _, _ string) (string, bool, error) {
-	return "", false, nil
+func (k *keyedCancellationStore) PollSignal(_ context.Context, _, _ string) (SignalDelivery, bool, error) {
+	return SignalDelivery{}, false, nil
 }
+
+func (k *keyedCancellationStore) ConsumeSignal(context.Context, string, int64) error { return nil }
 
 // TestPollCancellationCancelled proves that a workflow actually observes a
 // cancellation request made against its own workflow ID. It uses a store
@@ -773,8 +796,8 @@ func TestDurableDeferReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if result != 0 {
 		t.Errorf("expected 0, got %d", result)
@@ -794,21 +817,36 @@ func TestDurableDeferReplayPastEnd(t *testing.T) {
 // DurableScheduleInvoke edge case: replay divergence.
 // ---------------------------------------------------------------------------
 
-func TestScheduleInvokeReplayAdvancesAnyEvent(t *testing.T) {
+// TestScheduleInvokeReplayRefusesAForeignEvent was
+// TestScheduleInvokeReplayAdvancesAnyEvent, and it asserted the defect.
+//
+// Its body carried the behaviour as a statement of fact -- `EventType: "call",
+// // DurableScheduleInvoke does not check event type` and `// Advances past the
+// event without checking type` -- under a heading reading "replay divergence".
+// So the divergence case was noticed and what was written down was what the
+// code DID, not what it should do. Renamed as well as inverted, because the old
+// name asserted the bug too.
+//
+// Consuming a foreign record is the damaging half: every subsequent step then
+// reads the wrong history entry, and the run reports success throughout. See
+// TestAFireAndForgetReplayChecksWhatItConsumes, which covers both primitives
+// and both directions. cleat#1507.
+func TestScheduleInvokeReplayRefusesAForeignEvent(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
 	s.history = []EventRecord{{
 		Step:      0,
-		EventType: "call", // DurableScheduleInvoke does not check event type
+		EventType: "call", // belongs to a durable call, not to this
 	}}
 	result := s.DurableScheduleInvoke(context.Background(), nil, "my-svc", "my-op", `{}`, 5000)
 
-	// Advances past the event without checking type, never calls exitReplay.
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
+	if result == 0 {
+		t.Error("reported success on a foreign record: wasm/adapter_metadata.go raises an " +
+			"error only for a non-zero code, so the guest would be told the invoke was scheduled")
 	}
-	if s.stepCount != 1 {
-		t.Errorf("expected stepCount=1 (advanced past event), got %d", s.stepCount)
+	if s.stepCount != 0 {
+		t.Errorf("expected stepCount=0 (the foreign record must NOT be consumed), got %d -- "+
+			"consuming it misaligns every later step", s.stepCount)
 	}
 	if !s.isReplay {
 		t.Error("expected isReplay to remain true")
@@ -826,11 +864,11 @@ type trackingConcurrencyStore struct {
 	releases []string
 }
 
-func (t *trackingConcurrencyStore) ReleaseConcurrencyKey(ctx context.Context, key string) error {
+func (t *trackingConcurrencyStore) ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (bool, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.releases = append(t.releases, key)
-	return nil
+	return true, nil
 }
 
 func TestSetScopeSwitchingReleasesOldKey(t *testing.T) {
@@ -884,17 +922,27 @@ func TestClearScopeReleasesHeldScope(t *testing.T) {
 	}
 }
 
-func TestSetScopeAcquisitionFailure(t *testing.T) {
-	// Create a store that returns not-acquired.
+// TestSetScopeAcquisitionSucceeds is the happy-path control for
+// TestSetScopeStoreFailureSuspends (engine/scope_acquire_failure_test.go).
+//
+// It was called TestSetScopeAcquisitionFailure until cleat#1062 and tested no
+// failure of any kind: its own comment read "The mock always returns
+// acquired=true, so this tests the happy path. For the failure path we'd need
+// a different mock." So the one test named for the store-failure branch never
+// entered it, and the defect that branch carried -- a failed acquisition
+// reported to the guest as success -- survived under a green test bearing its
+// name. Renamed rather than deleted, because a success control is worth having
+// next to the failure tests; the name now says which one it is.
+func TestSetScopeAcquisitionSucceeds(t *testing.T) {
 	store := &mockConcurrencyKeyStore{}
 	s := newTestExecSession()
 	s.engine.concurrencyKeyStore = store
 
-	// The mock always returns acquired=true, so this tests the happy path.
-	// For the failure path we'd need a different mock.
-	// Test that scope is set correctly.
 	s.SetScope(context.Background(), nil, "account", "acct-123", 0, 0)
 	if !s.scopeSet {
 		t.Error("expected scopeSet=true after acquisition")
+	}
+	if s.suspendErr != nil {
+		t.Errorf("a successful acquisition must not suspend, got %v", s.suspendErr)
 	}
 }

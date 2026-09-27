@@ -644,12 +644,6 @@ public class CleatTestEnv {
             return delegate.childWorkflow(name, inputJSON);
         }
 
-        @Override
-        public CleatResult<String> childWorkflowInSchema(
-                String targetSchema, String name, String inputJSON,
-                long version, String parentClosePolicy) {
-            return delegate.childWorkflow(name, inputJSON);
-        }
 
         @Override
         public CleatResult<String> awaitChild(String runID) {
@@ -785,36 +779,11 @@ public class CleatTestEnv {
 
         // ---- Durable state ----
 
-        @Override
-        public CleatResult<Void> setState(String key, String value) {
-            return delegate.setState(key, value);
-        }
 
-        @Override
-        public CleatResult<String> getState(String key) {
-            return delegate.getState(key);
-        }
 
-        @Override
-        public CleatResult<Void> deleteState(String key) {
-            return delegate.deleteState(key);
-        }
 
-        @Override
-        public CleatResult<Long> incrState(String key, long delta) {
-            long newValue = delegate.incrState(key, delta);
-            return CleatResult.ok(newValue);
-        }
 
-        @Override
-        public boolean hasState(String key) {
-            return delegate.hasState(key);
-        }
 
-        @Override
-        public CleatResult<String> listState(String prefix) {
-            return delegate.listState(prefix);
-        }
 
         // ---- Heartbeat call ----
 

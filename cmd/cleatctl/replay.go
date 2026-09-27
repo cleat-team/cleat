@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/plugin"
 )
 
 // runReplay replays a workflow's event history to diagnose issues.
@@ -16,7 +17,7 @@ import (
 // Reads the workflow instance, its WASM binary, and its event history, then
 // replays through the engine and reports results. This is a diagnostic tool
 // for debugging stuck or unexpectedly-failed workflows.
-func runReplay(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args []string) {
+func runReplay(ctx context.Context, store engine.WorkflowStore, db *sql.DB, d dialect, args []string) {
 	flags := parseReplayFlags(args)
 	if flags == nil {
 		return // usage already printed
@@ -27,7 +28,7 @@ func runReplay(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args
 	verbose := flags.verbose
 
 	// Load the workflow instance from the database.
-	inst, err := loadWorkflowInstance(ctx, db, workflowID)
+	inst, err := loadWorkflowInstance(ctx, db, d, workflowID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading workflow instance %q: %v\n", workflowID, err)
 		osExit(1)
@@ -198,20 +199,97 @@ Examples:
 `)
 }
 
-// loadWorkflowInstance loads a single workflow instance by ID from the database.
-func loadWorkflowInstance(ctx context.Context, db *sql.DB, id string) (*engine.WorkflowInstance, error) {
-	row := db.QueryRowContext(ctx, `
-		SELECT id, def_name, def_version, min_version, status, input,
-		       COALESCE(result, ''), COALESCE(error, ''), COALESCE(error_code, ''),
-		       COALESCE(error_op, ''), assigned_to, next_wake_at,
-		       COALESCE(tenant_id, ''), created_at, generation
+// loadWorkflowInstanceSQL reads one instance, per dialect.
+//
+// A FUNCTION RATHER THAN A PACKAGE-LEVEL VAR, and not for style.
+// TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate keys its allowlist
+// on "<file>:<enclosing Go function>#<digest of the SQL>", so a statement at
+// package level has no function to attach a reason to and the guard says so
+// outright. Wrapping it gives the exemption somewhere to live -- and the digest
+// half means it stops covering this statement the moment the statement changes.
+//
+// Only two columns need an arm, and both are a TYPE difference rather than a
+// syntax one -- which is why this is a plugin.Query with explicit arms and not
+// a rebind. plugin.Rebind rewrites placeholders and now(); it cannot know that
+// `result` is JSONB here, JSON there and NVARCHAR(MAX) on the third, and a
+// rewrite that silently did nothing would hand Scan a []byte it cannot put in
+// a string field.
+//
+//	          result             tenant_id
+//	postgres  JSONB   ::text     UUID              ::text
+//	mysql     JSON    (as-is)    CHAR(36)          (as-is)
+//	mssql     NVARCHAR(MAX)      UNIQUEIDENTIFIER  CONVERT(NVARCHAR(36), ...)
+//
+// The CONVERT form is the one auth/tenant_store.go already uses for the same
+// column on the same dialect, rather than a second spelling of one idea.
+func loadWorkflowInstanceSQL() plugin.Query {
+	return plugin.Query{
+		Default: `
+		SELECT id, def_name, def_version, status, input,
+		       COALESCE(result::text, ''), COALESCE(error_msg, ''),
+		       COALESCE(error_code, ''), COALESCE(error_op, ''),
+		       COALESCE(assigned_to, ''), next_wake_at, tenant_id::text,
+		       created_at, generation
 		FROM workflow_instances
-		WHERE id = $1
-	`, id)
+		WHERE id = $1`,
+		MySQL: `
+		SELECT id, def_name, def_version, status, input,
+		       COALESCE(result, ''), COALESCE(error_msg, ''),
+		       COALESCE(error_code, ''), COALESCE(error_op, ''),
+		       COALESCE(assigned_to, ''), next_wake_at, tenant_id,
+		       created_at, generation
+		FROM workflow_instances
+		WHERE id = $1`,
+		MSSQL: `
+		SELECT id, def_name, def_version, status, input,
+		       COALESCE(result, ''), COALESCE(error_msg, ''),
+		       COALESCE(error_code, ''), COALESCE(error_op, ''),
+		       COALESCE(assigned_to, ''), next_wake_at,
+		       CONVERT(NVARCHAR(36), tenant_id),
+		       created_at, generation
+		FROM workflow_instances
+		WHERE id = $1`,
+	}
+}
+
+// loadWorkflowInstance loads a single workflow instance by ID from the database.
+func loadWorkflowInstance(ctx context.Context, db *sql.DB, d dialect, id string) (*engine.WorkflowInstance, error) {
+
+	// FOUR things were wrong with this statement, and it had never run.
+	// cleat#1208.
+	//
+	//   min_version              belongs to workflow_defs, not here
+	//   error                    the column is error_msg
+	//   COALESCE(result, '')     result is jsonb; '' is not valid json
+	//   COALESCE(tenant_id, '')  tenant_id is uuid NOT NULL
+	//   assigned_to              nullable, scanned into a plain string
+	//
+	// Only the first two were in the bug report. The next two are downstream of
+	// them -- PostgreSQL stops at the first unresolved name, so nobody could see
+	// them until it was fixed, and TestEveryInlineStatementParsesOnPostgres
+	// reported both on its first run against the half-fixed statement.
+	//
+	// THE FIFTH IS THE INTERESTING ONE, because that test cannot find it and
+	// never will. PREPARE parses and plans; it says nothing about the Go value
+	// a column is scanned into, so a nullable column read into a non-pointer
+	// string parses perfectly and fails at run time with "converting NULL to
+	// string is unsupported". It took actually running the command against a
+	// row. A guard that checks the SQL is not a guard that checks the read, and
+	// it is worth knowing which one you have.
+	//
+	// MinVersion is dropped rather than sourced from somewhere else: it is a
+	// property of a workflow DEFINITION, nothing downstream of this function
+	// reads it, and joining workflow_defs to populate a field neither command
+	// prints would be inventing a requirement to justify a column name.
+	stmt, stmtArgs, err := d.rebindArgs(loadWorkflowInstanceSQL().For(d.query), id)
+	if err != nil {
+		return nil, err
+	}
+	row := db.QueryRowContext(ctx, stmt, stmtArgs...)
 
 	var inst engine.WorkflowInstance
-	err := row.Scan(
-		&inst.ID, &inst.DefName, &inst.DefVersion, &inst.MinVersion,
+	err = row.Scan(
+		&inst.ID, &inst.DefName, &inst.DefVersion,
 		&inst.Status, &inst.Input, &inst.Result, &inst.Error,
 		&inst.ErrorCode, &inst.ErrorOp, &inst.AssignedTo,
 		&inst.NextWakeAt, &inst.TenantID, &inst.CreatedAt, &inst.Generation,

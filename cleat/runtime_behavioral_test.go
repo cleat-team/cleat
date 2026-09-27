@@ -163,25 +163,6 @@ func TestCallErrorRetryable(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// CallTimeoutError
-// ---------------------------------------------------------------------------
-
-func TestCallTimeoutErrorError(t *testing.T) {
-	err := &CallTimeoutError{
-		Service:   "svc",
-		Operation: "op",
-		Timeout:   5 * time.Second,
-	}
-	msg := err.Error()
-	if !strings.Contains(msg, "svc") || !strings.Contains(msg, "op") {
-		t.Errorf("expected error to contain service and operation, got %q", msg)
-	}
-	if !strings.Contains(msg, "timed out") {
-		t.Errorf("expected 'timed out' in error, got %q", msg)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // ServiceNotFoundError
 // ---------------------------------------------------------------------------
 
@@ -412,197 +393,6 @@ func TestPromiseAwaitUnmarshalError(t *testing.T) {
 // VirtualObject
 // ---------------------------------------------------------------------------
 
-func TestNewVirtualObject(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{})
-	vo := NewVirtualObject(h, "counter", "room-123")
-	if vo.ObjectType != "counter" {
-		t.Errorf("expected ObjectType 'counter', got %q", vo.ObjectType)
-	}
-	if vo.InstanceKey != "room-123" {
-		t.Errorf("expected InstanceKey 'room-123', got %q", vo.InstanceKey)
-	}
-}
-
-func TestVirtualObjectSetAndGet(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{})
-	vo := NewVirtualObject(h, "counter", "room-123")
-
-	vo.Set("visits", 42)
-
-	var val int
-	if err := vo.Get("visits", &val); err != nil {
-		t.Fatalf("Get failed: %v", err)
-	}
-	if val != 42 {
-		t.Errorf("expected 42, got %d", val)
-	}
-}
-
-func TestVirtualObjectSetAndGetString(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{})
-	vo := NewVirtualObject(h, "app", "inst-1")
-
-	vo.Set("name", "test-entity")
-
-	var val string
-	if err := vo.Get("name", &val); err != nil {
-		t.Fatalf("Get failed: %v", err)
-	}
-	if val != "test-entity" {
-		t.Errorf("expected 'test-entity', got %q", val)
-	}
-}
-
-func TestVirtualObjectGetInt(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{})
-	vo := NewVirtualObject(h, "counter", "room-123")
-
-	vo.Set("count", 99)
-
-	val := vo.GetInt("count")
-	if val != 99 {
-		t.Errorf("expected 99, got %d", val)
-	}
-}
-
-func TestVirtualObjectGetIntMissing(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{})
-	vo := NewVirtualObject(h, "counter", "room-123")
-
-	val := vo.GetInt("nonexistent")
-	if val != 0 {
-		t.Errorf("expected 0 for missing key, got %d", val)
-	}
-}
-
-func TestVirtualObjectDelete(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{})
-	vo := NewVirtualObject(h, "counter", "room-123")
-
-	vo.Set("temp", "value")
-	if !vo.Has("temp") {
-		t.Fatal("expected key to exist before delete")
-	}
-
-	vo.Delete("temp")
-	if vo.Has("temp") {
-		t.Error("expected key to be gone after delete")
-	}
-}
-
-func TestVirtualObjectHasExisting(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{})
-	vo := NewVirtualObject(h, "counter", "room-123")
-
-	if vo.Has("present") {
-		t.Log("Has returns false before Set")
-	}
-
-	vo.Set("present", true)
-	if !vo.Has("present") {
-		t.Error("expected Has to return true after Set")
-	}
-}
-
-func TestVirtualObjectList(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{})
-	vo := NewVirtualObject(h, "counter", "room-123")
-
-	vo.Set("a", 1)
-	vo.Set("b", 2)
-	vo.Set("c", 3)
-
-	keys := vo.List("")
-	if len(keys) != 3 {
-		t.Fatalf("expected 3 keys, got %d: %v", len(keys), keys)
-	}
-}
-
-func TestVirtualObjectListPrefix(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{})
-	vo := NewVirtualObject(h, "app", "inst")
-
-	vo.Set("item_x", "x")
-	vo.Set("item_y", "y")
-	vo.Set("other", "z")
-
-	keys := vo.List("item_")
-	if len(keys) != 2 {
-		t.Fatalf("expected 2 keys with prefix 'item_', got %d: %v", len(keys), keys)
-	}
-}
-
-func TestVirtualObjectListEmpty(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{})
-	vo := NewVirtualObject(h, "counter", "room-123")
-
-	keys := vo.List("")
-	if len(keys) != 0 {
-		t.Errorf("expected empty list, got %v", keys)
-	}
-}
-
-func TestVirtualObjectContinueAsNew(t *testing.T) {
-	var capturedInput string
-	h := NewHostCalls(HostCallsOptions{
-		ContinueAsNew: func(inputJSON string) error {
-			capturedInput = inputJSON
-			return nil
-		},
-	})
-	vo := NewVirtualObject(h, "counter", "room-123")
-
-	err := vo.ContinueAsNew(`{"state":"fresh"}`)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if capturedInput != `{"state":"fresh"}` {
-		t.Errorf("expected input %q, got %q", `{"state":"fresh"}`, capturedInput)
-	}
-}
-
-func TestVirtualObjectContinueAsNewError(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{
-		ContinueAsNew: func(inputJSON string) error {
-			return errors.New("continue failed")
-		},
-	})
-	vo := NewVirtualObject(h, "counter", "room-123")
-
-	err := vo.ContinueAsNew(`{}`)
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "continue failed") {
-		t.Errorf("expected 'continue failed' in error, got %v", err)
-	}
-}
-
-func TestVirtualObjectScopeIsolation(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{})
-	vo1 := NewVirtualObject(h, "counter", "room-a")
-	vo2 := NewVirtualObject(h, "counter", "room-b")
-
-	// Set values in different scopes using the same HostCalls instance.
-	vo1.Set("visits", 10)
-	vo2.Set("visits", 20)
-
-	var val int
-	if err := vo1.Get("visits", &val); err != nil {
-		t.Fatalf("vo1 Get failed: %v", err)
-	}
-	if val != 10 {
-		t.Errorf("vo1 expected 10, got %d", val)
-	}
-
-	if err := vo2.Get("visits", &val); err != nil {
-		t.Fatalf("vo2 Get failed: %v", err)
-	}
-	if val != 20 {
-		t.Errorf("vo2 expected 20, got %d", val)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // isNonRetryable — positive match
 // ---------------------------------------------------------------------------
@@ -622,10 +412,18 @@ func TestIsNonRetryableMultiplePatterns(t *testing.T) {
 	}
 }
 
-func TestIsNonRetryableSubstring(t *testing.T) {
+// INVERTED DELIBERATELY. This asserted that a declared name matched anywhere in
+// the message, which is the coupling that made a callee's PROSE decide a
+// caller's retry behaviour: rewording an error flipped a non-idempotent call
+// between fail-fast and retried, across a team boundary, with nothing
+// declaring the dependency. A declaration now names a CODE, and a code is what
+// the error leads with.
+func TestIsNonRetryableDoesNotMatchACodeMentionedMidMessage(t *testing.T) {
 	err := errors.New("something with Timeout in the middle")
-	if !isNonRetryable(err, []string{"Timeout"}) {
-		t.Error("expected isNonRetryable to match substring 'Timeout'")
+	if isNonRetryable(err, []string{"Timeout"}) {
+		t.Error("a declared code matched because it appeared inside the message. " +
+			"A service must not be able to change a caller's control flow by what " +
+			"it writes in a sentence.")
 	}
 }
 
@@ -1106,7 +904,7 @@ func TestHostCallsImpl_Fallback_DurableCallWithHeartbeat(t *testing.T) {
 			return "result", nil
 		},
 	})
-	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", time.Second, func(s string) {})
+	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1121,12 +919,12 @@ func TestHostCallsImpl_Fallback_DurableCallWithHeartbeat(t *testing.T) {
 func TestHostCallsImpl_Fallback_DurableCallWithHeartbeatDirect(t *testing.T) {
 	var captured bool
 	h := NewHostCalls(HostCallsOptions{
-		DurableCallWithHeartbeat: func(svc, op, req string, interval time.Duration, onProgress func(string)) (string, error) {
+		DurableCallWithHeartbeat: func(svc, op, req string, interval time.Duration) (string, error) {
 			captured = true
 			return "hb-result", nil
 		},
 	})
-	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", time.Second, func(s string) {})
+	resp, err := h.DurableCallWithHeartbeat("svc", "op", "{}", time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1482,20 +1280,54 @@ func TestHostCallsImpl_NilGuard_ReplyToSignal(t *testing.T) {
 	}
 }
 
-func TestHostCallsImpl_ReplyToSignalSuccess(t *testing.T) {
-	var captured bool
+// TestHostCallsImpl_ReplyToSignalResolvesTheReplyPromise pins the composition
+// itself: replying to a signal IS resolving the promise whose ID is the
+// correlation ID (IMPROVEMENT-PLAN 3.220). It replaces a test that supplied a
+// HostCallsOptions.ReplyToSignal hook and asserted only that the hook ran --
+// which pinned the indirection rather than the behaviour, and kept passing
+// while the host call behind it did nothing at all.
+func TestHostCallsImpl_ReplyToSignalResolvesTheReplyPromise(t *testing.T) {
+	var gotID, gotValue string
 	h := NewHostCalls(HostCallsOptions{
-		ReplyToSignal: func(corrID, resp string) error {
-			captured = true
+		ResolvePromise: func(id, value string) error {
+			gotID, gotValue = id, value
 			return nil
 		},
 	})
-	err := h.ReplyToSignal("corr-id", "ok")
-	if err != nil {
+	if err := h.ReplyToSignal("corr-id", "ok"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !captured {
-		t.Error("expected ReplyToSignal to be called")
+	if gotID != "corr-id" || gotValue != "ok" {
+		t.Errorf("expected ResolvePromise(%q, %q), got (%q, %q)", "corr-id", "ok", gotID, gotValue)
+	}
+}
+
+// A settle failure must reach the caller. If it did not, a reply to a stale
+// address would report success and leave the sender suspended until its
+// timeout, with the error visible nowhere.
+func TestHostCallsImpl_ReplyToSignalSurfacesASettleFailure(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		ResolvePromise: func(id, value string) error {
+			return errors.New("promise not found")
+		},
+	})
+	if err := h.ReplyToSignal("stale-id", "ok"); err == nil {
+		t.Fatal("expected the ResolvePromise failure to surface")
+	}
+}
+
+// An empty address must be refused before it reaches the store, because
+// SignalResult.ReplyTo is empty for every one-way signal -- so the mistake
+// this catches is replying to a notification nobody is waiting on.
+func TestHostCallsImpl_ReplyToSignalRejectsAnEmptyAddress(t *testing.T) {
+	h := NewHostCalls(HostCallsOptions{
+		ResolvePromise: func(id, value string) error {
+			t.Error("ResolvePromise must not be reached for an empty correlation ID")
+			return nil
+		},
+	})
+	if err := h.ReplyToSignal("", "ok"); err == nil {
+		t.Fatal("expected an error for an empty correlation ID")
 	}
 }
 
@@ -1761,56 +1593,6 @@ func TestHostCallsImpl_NewUUIDv7Format(t *testing.T) {
 // ---------------------------------------------------------------------------
 // HostCalls: State operations (SetState, GetState, etc.)
 // ---------------------------------------------------------------------------
-
-func TestHostCallsImpl_StateOperations(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{})
-	h.SetState("key1", "value1")
-	h.SetState("key2", 42)
-
-	var result string
-	err := h.GetState("key1", &result)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result != "value1" {
-		t.Errorf("expected 'value1', got %q", result)
-	}
-
-	if !h.HasState("key1") {
-		t.Error("expected HasState(key1)=true")
-	}
-	if h.HasState("nonexistent") {
-		t.Error("expected HasState(nonexistent)=false")
-	}
-
-	h.DeleteState("key1")
-	if h.HasState("key1") {
-		t.Error("expected HasState(key1)=false after delete")
-	}
-
-	newVal := h.IncrState("counter", 5)
-	if newVal != 5 {
-		t.Errorf("expected IncrState=5, got %d", newVal)
-	}
-	newVal = h.IncrState("counter", 3)
-	if newVal != 8 {
-		t.Errorf("expected IncrState=8, got %d", newVal)
-	}
-
-	keys := h.ListState("key")
-	if len(keys) < 1 {
-		t.Errorf("expected at least 1 key matching 'key', got %d: %v", len(keys), keys)
-	}
-}
-
-func TestHostCallsImpl_GetStateNotFound(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{})
-	var result string
-	err := h.GetState("missing", &result)
-	if err == nil {
-		t.Error("expected error for missing key")
-	}
-}
 
 // ---------------------------------------------------------------------------
 // HostCalls: DeleteCron / ListCrons success paths
@@ -2145,43 +1927,9 @@ func TestHostCallsImpl_AwaitAllChildrenSuccess(t *testing.T) {
 // VirtualObject: NewVirtualObject sets scope
 // ---------------------------------------------------------------------------
 
-func TestNewVirtualObjectBasic(t *testing.T) {
-	h := NewHostCalls(HostCallsOptions{})
-	vo := NewVirtualObject(h, "MyType", "instance-1")
-	if vo == nil {
-		t.Fatal("expected non-nil VirtualObject")
-	}
-	vo.Set("key1", "value1")
-	var result string
-	err := vo.Get("key1", &result)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result != "value1" {
-		t.Errorf("expected 'value1', got %q", result)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Error types: additional coverage
 // ---------------------------------------------------------------------------
-
-func TestCallTimeoutErrorFields(t *testing.T) {
-	err := &CallTimeoutError{
-		Service:   "svc",
-		Operation: "op",
-		Timeout:   time.Minute,
-	}
-	if err.Service != "svc" {
-		t.Errorf("expected 'svc', got %q", err.Service)
-	}
-	if err.Operation != "op" {
-		t.Errorf("expected 'op', got %q", err.Operation)
-	}
-	if err.Timeout != time.Minute {
-		t.Errorf("expected 1m, got %v", err.Timeout)
-	}
-}
 
 func TestCallErrorFields(t *testing.T) {
 	err := &CallError{

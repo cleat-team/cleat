@@ -2,12 +2,12 @@
 
 This is the simplest possible Cleat workflow demonstrating:
 1. @cleat_entry decorator
-2. HostCalls.cleat_call()
+2. HostCalls.call()
 3. WASM compilation and execution
 
 Usage:
-    durable build --target python --entry hello_workflow.py:hello
-    durable run hello '{"name": "World"}'
+    cleat build --target python --entry hello_workflow.py:hello
+    cleat run --wasm hello.wasm --entry-point Hello --input '{"name": "World"}'
 """
 
 from cleat_sdk import HostCalls, cleat_entry
@@ -29,5 +29,5 @@ def hello(h: HostCalls, name: str = "World") -> str:
     str
         A greeting message from the greeter service.
     """
-    greeting = h.cleat_call("greeter", "greet", {"name": name})
+    greeting = h.call("greeter", "greet", {"name": name})
     return greeting

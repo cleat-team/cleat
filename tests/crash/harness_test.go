@@ -26,6 +26,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -33,6 +34,8 @@ import (
 	"time"
 
 	_ "github.com/lib/pq"
+
+	"github.com/cleat-team/cleat/migration"
 )
 
 const (
@@ -65,7 +68,7 @@ const (
 
 // ownerDSN is the migration/owner connection. Deliberately not defaulted to
 // port 5432: that instance belongs to another workstream's checkout, and
-// PARALLEL-WORKSTREAMS.md assigns this one 5433.
+// WORKSTREAM.md's DSN table assigns this one 5433.
 func ownerDSN() string {
 	if dsn := os.Getenv("CLEAT_CRASH_DB"); dsn != "" {
 		return dsn
@@ -80,13 +83,22 @@ func ownerDSN() string {
 // is the §1.10 defect. Not worth reintroducing to save a role.
 func appDSN(t *testing.T) string {
 	t.Helper()
+	return appDSNFor(t, crashDatabase)
+}
+
+// appDSNFor is appDSN against a named database. Only
+// TestWorkerMigratesTheDatabaseItServes passes anything but crashDatabase; it
+// needs a database no other test has started a worker against, because the
+// evidence it looks for is created once and then stays created.
+func appDSNFor(t *testing.T, dbName string) string {
+	t.Helper()
 	owner := ownerDSN()
 	at := strings.Index(owner, "@")
 	scheme := strings.Index(owner, "://")
 	if at < 0 || scheme < 0 {
 		t.Fatalf("cannot derive the cleat_app DSN from %s: expected scheme://user:pass@host/db", redact(owner))
 	}
-	return swapDatabase(owner[:scheme+3]+"cleat_app:"+appPassword+owner[at:], crashDatabase)
+	return swapDatabase(owner[:scheme+3]+"cleat_app:"+appPassword+owner[at:], dbName)
 }
 
 func redact(dsn string) string {
@@ -115,7 +127,13 @@ func repoRoot(t *testing.T) string {
 // pass.
 func ownerDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dsn := ensureCrashDatabase(t)
+	return ownerDBFor(t, crashDatabase)
+}
+
+// ownerDBFor is ownerDB against a named database. See appDSNFor.
+func ownerDBFor(t *testing.T, dbName string) *sql.DB {
+	t.Helper()
+	dsn := ensureDatabaseNamed(t, dbName)
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("opening %s: %v", redact(dsn), err)
@@ -125,27 +143,26 @@ func ownerDB(t *testing.T) *sql.DB {
 			"instance (WS-2's is port 5433; override with CLEAT_CRASH_DB)", redact(dsn), err)
 	}
 
-	root := repoRoot(t)
-	dir := filepath.Join(root, "migrations", "postgres")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		t.Fatalf("reading %s: %v", dir, err)
-	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".sql") {
-			names = append(names, e.Name())
-		}
-	}
-	// ReadDir is already lexical, which is the migration order.
-	for _, name := range names {
-		body, err := os.ReadFile(filepath.Join(dir, name))
-		if err != nil {
-			t.Fatalf("reading migration %s: %v", name, err)
-		}
-		if _, err := db.Exec(string(body)); err != nil {
-			t.Fatalf("applying migration %s: %v", name, err)
-		}
+	// Applied through migration.Runner -- the same call cmd/cleat-worker makes
+	// at boot -- rather than this suite's own ReadDir-and-Exec loop over
+	// migrations/postgres/*.sql.
+	//
+	// That loop was a second implementation of "apply the shipped migrations",
+	// which is the mechanism §1.9 and §2.60b are about: engine/testutil used to
+	// carry its own copy of the schema, the copy drifted, and every test in the
+	// repo ran against a schema production never uses. A loop that reads the
+	// right files is a smaller version of the same thing, not a different
+	// thing -- it has no schema_migrations bookkeeping, so it re-executes every
+	// file on every run and can only ever work for statements that are
+	// re-appliable, and it splits statements differently from the Runner.
+	// engine/testutil has a guard test against reintroducing a hand-written
+	// schema; this suite had no such guard and had quietly kept one.
+	if err := migration.NewRunner(db, migration.DialectPostgres,
+		filepath.Join(repoRoot(t), "migrations")).Run(context.Background()); err != nil {
+		t.Fatalf("applying the shipped PostgreSQL migrations to %s: %v\n\n"+
+			"This is the code path cmd/cleat-worker takes at boot, so a failure "+
+			"here is a worker that cannot start, not a harness problem.",
+			dbName, err)
 	}
 
 	// Give cleat_app a login. 005 creates it NOLOGIN and says the deployment
@@ -178,6 +195,21 @@ const crashDatabase = "cleat_crash"
 // smallest fix that does not change a helper every other suite depends on.
 func ensureCrashDatabase(t *testing.T) string {
 	t.Helper()
+	return ensureDatabaseNamed(t, crashDatabase)
+}
+
+// ensureDatabaseNamed is ensureCrashDatabase against a named database. See
+// appDSNFor for the one caller that passes anything else.
+//
+// dbName is interpolated into CREATE DATABASE, which cannot be parameterised,
+// so it is restricted to characters that need no quoting. Both call sites pass
+// a compile-time constant; the check is here so that stops being load-bearing.
+func ensureDatabaseNamed(t *testing.T, dbName string) string {
+	t.Helper()
+	if !validDatabaseName.MatchString(dbName) {
+		t.Fatalf("database name %q must match %s -- it is interpolated into "+
+			"CREATE DATABASE, which cannot be parameterised", dbName, validDatabaseName)
+	}
 	base := ownerDSN()
 
 	admin, err := sql.Open("postgres", base)
@@ -192,24 +224,25 @@ func ensureCrashDatabase(t *testing.T) string {
 
 	var exists bool
 	if err := admin.QueryRow(
-		`SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, crashDatabase).Scan(&exists); err != nil {
-		t.Fatalf("checking for the %s database: %v", crashDatabase, err)
+		`SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, dbName).Scan(&exists); err != nil {
+		t.Fatalf("checking for the %s database: %v", dbName, err)
 	}
 	if !exists {
-		// CREATE DATABASE cannot be parameterised. crashDatabase is a compile-time
-		// constant, so there is nothing here to inject.
-		if _, err := admin.Exec(`CREATE DATABASE ` + crashDatabase); err != nil {
+		// CREATE DATABASE cannot be parameterised; dbName is checked above.
+		if _, err := admin.Exec(`CREATE DATABASE ` + dbName); err != nil {
 			// A concurrent run may have won the race; re-check rather than fail.
 			if err2 := admin.QueryRow(
 				`SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`,
-				crashDatabase).Scan(&exists); err2 != nil || !exists {
-				t.Fatalf("creating the %s database: %v", crashDatabase, err)
+				dbName).Scan(&exists); err2 != nil || !exists {
+				t.Fatalf("creating the %s database: %v", dbName, err)
 			}
 		}
 	}
 
-	return swapDatabase(base, crashDatabase)
+	return swapDatabase(base, dbName)
 }
+
+var validDatabaseName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,50}$`)
 
 // swapDatabase replaces the database component of a postgres URL.
 func swapDatabase(dsn, name string) string {
@@ -252,6 +285,29 @@ type chargeService struct {
 	gate     chan struct{}
 
 	hold chan struct{}
+
+	// holdStatus, when non-zero, is the HTTP status the held invocation answers with once released, instead of 200.
+	holdStatus int
+	// failFirst maps an operation to how many of its first invocations answer 503 (retryable), then succeed.
+	failFirst map[string]int
+}
+
+// failFirstN makes the first n invocations of op answer 503, a retryable failure, so a call under a retry
+// policy is left in its backoff wait.
+func (c *chargeService) failFirstN(op string, n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.failFirst == nil {
+		c.failFirst = map[string]int{}
+	}
+	c.failFirst[op] = n
+}
+
+// answerHeldWith makes the held invocation answer with status once released. 400 is not retryable.
+func (c *chargeService) answerHeldWith(status int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.holdStatus = status
 }
 
 func newChargeService(t *testing.T) *chargeService {
@@ -303,11 +359,22 @@ func (c *chargeService) handle(w http.ResponseWriter, r *http.Request) {
 	n := c.counts[op]
 	shouldHold := c.holdOp != "" && op == c.holdOp && n == 1
 	hold := c.hold
+	failing := n <= c.failFirst[op]
+	holdStatus := c.holdStatus
 	c.mu.Unlock()
+
+	if failing {
+		http.Error(w, `{"error":"unavailable"}`, http.StatusServiceUnavailable)
+		return
+	}
 
 	if shouldHold && hold != nil {
 		c.gateOnce.Do(func() { close(c.gate) })
 		<-hold
+		if holdStatus != 0 {
+			http.Error(w, `{"error":"rejected"}`, holdStatus)
+			return
+		}
 	}
 
 	body := fmt.Sprintf(`{"charge_id":"chg-%s-%d","status":"ok"}`, op, n)
@@ -352,6 +419,18 @@ func (c *chargeService) awaitHeldCall(t *testing.T, w *worker, budget time.Durat
 		t.Fatalf("the external service was never called within %v; the worker "+
 			"never reached the durable call, so there is no crash window to test"+
 			"\n--- worker log ---\n%s", budget, w.output())
+	}
+}
+
+// awaitCount blocks until op has been invoked at least n times.
+func (c *chargeService) awaitCount(t *testing.T, w *worker, op string, n int, budget time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(budget)
+	for c.count(op) < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("%s was invoked %d times within %v, want %d\n--- worker log ---\n%s", op, c.count(op), budget, n, w.output())
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
@@ -402,8 +481,10 @@ func buildWorker(t *testing.T) string {
 	return bin
 }
 
-// deployFixture compiles testdata/crashcall and registers it as a definition.
-func deployFixture(t *testing.T, db *sql.DB, taskQueue string) {
+// buildFixtureWASM compiles testdata/crashcall and returns the module. Split
+// out of deployFixture so the dialect targets can register the same module
+// without a second copy of the build.
+func buildFixtureWASM(t *testing.T) []byte {
 	t.Helper()
 	root := repoRoot(t)
 	outDir := t.TempDir()
@@ -432,19 +513,61 @@ func deployFixture(t *testing.T, db *sql.DB, taskQueue string) {
 	if err != nil {
 		t.Fatalf("reading %s: %v", wasmPath, err)
 	}
+	return wasm
+}
+
+// deployFixture compiles testdata/crashcall and registers it as a definition.
+func deployFixture(t *testing.T, db *sql.DB, taskQueue string) {
+	t.Helper()
+	wasm := buildFixtureWASM(t)
 
 	// tenant_id must be set explicitly. workflow_defs' RLS policy is
-	// `tenant_id = assert_tenant_set() OR tenant_id = <default>`, and NULL
-	// satisfies neither, so a definition inserted without one is invisible to
-	// the worker's cleat_app connection. The symptom is not a permission error
-	// -- it is "wasm not found: crashcall v1", which reads like a build problem.
+	// `tenant_id = assert_tenant_set()`, and NULL does not satisfy it, so a
+	// definition inserted without one is invisible to the worker's cleat_app
+	// connection. The symptom is not a permission error -- it is "wasm not
+	// found: crashcall v1", which reads like a build problem.
+	//
+	// The policy used to carry `OR tenant_id = <default>` as well; D7 removed
+	// that clause along with the adoption window it served (IMPROVEMENT-PLAN
+	// 3.77), so the tenant here matters more than it did, not less.
+	//
+	// ON CONFLICT names the full primary key, which is (tenant_id, name,
+	// version) since D7. This fixture writes the INSERT by hand rather than
+	// calling DeployWorkflowDef, so it does not get the store's version of
+	// this statement for free -- and a hand-written copy of a production
+	// statement is the same shape as the ReadDir-and-Exec migration loop this
+	// file's header describes replacing. It is left hand-written because the
+	// fixture deliberately sets columns DeployWorkflowDef does not expose
+	// (entry_points, task_queue, dag_spec), but it is worth knowing that this
+	// is the second copy and it broke when the first one changed.
+	//
+	// The DO UPDATE lists EVERY column the INSERT sets, and that is not
+	// thoroughness -- it is a repair. This clause used to refresh wasm_bytes
+	// and task_queue only, so an entry point ADDED to the fixture never reached
+	// a database that already had the definition: cleat#2287 added
+	// `catches_abort` here, and because cleat_crash outlives the checkout, its
+	// workflow_defs row kept `{three_charges}` and TestSIGTERM_b2 failed with
+	// "unknown entry point: catches_abort" on a tree where nothing was wrong.
+	// CI never saw it -- the service container is fresh every run -- which is
+	// exactly what makes it worth writing down: a long-lived local database is
+	// the only place it appears, and the failure names neither the fixture nor
+	// the column. Same family as "when a schema migration lands, recreate your
+	// test databases": CREATE TABLE IF NOT EXISTS never adds a column, and an
+	// upsert that omits one never updates it.
 	if _, err := db.Exec(`
 		INSERT INTO workflow_defs
 			(name, version, wasm_bytes, entry_points, min_version,
 			 max_history_length, dag_spec, task_queue, abi_version, plugin_deps, tenant_id)
-		VALUES ('crashcall', 1, $1, ARRAY['three_charges'], 1, 10000, '{}'::jsonb, $2, 1, '{}'::jsonb, $3)
-		ON CONFLICT (name, version) DO UPDATE SET wasm_bytes = EXCLUDED.wasm_bytes,
-			task_queue = EXCLUDED.task_queue, tenant_id = EXCLUDED.tenant_id`,
+		VALUES ('crashcall', 1, $1, ARRAY['three_charges','compensating','with_cleanup','continues_as_new','cleanup_with_backoff','parent_with_child','child_echo','catches_abort'], 1, 10000, '{}'::jsonb, $2, 1, '{}'::jsonb, $3)
+		ON CONFLICT (tenant_id, name, version) DO UPDATE SET
+			wasm_bytes = EXCLUDED.wasm_bytes,
+			entry_points = EXCLUDED.entry_points,
+			min_version = EXCLUDED.min_version,
+			max_history_length = EXCLUDED.max_history_length,
+			dag_spec = EXCLUDED.dag_spec,
+			task_queue = EXCLUDED.task_queue,
+			abi_version = EXCLUDED.abi_version,
+			plugin_deps = EXCLUDED.plugin_deps`,
 		wasm, taskQueue, defaultTenant); err != nil {
 		t.Fatalf("deploying the crashcall definition: %v", err)
 	}
@@ -465,15 +588,53 @@ type worker struct {
 // not honour cannot pass here.
 func startWorker(t *testing.T, bin, taskQueue, svcURL string, extraFlags ...string) *worker {
 	t.Helper()
+	return startWorkerOn(t, crashDatabase, bin, taskQueue, svcURL, extraFlags...)
+}
+
+// startWorkerOn is startWorker against a named database. See appDSNFor.
+func startWorkerOn(t *testing.T, dbName, bin, taskQueue, svcURL string, extraFlags ...string) *worker {
+	t.Helper()
+	return startWorkerProcess(t, bin, taskQueue, svcURL,
+		appDSNFor(t, dbName), ensureDatabaseNamed(t, dbName), extraFlags...)
+}
+
+// startWorkerWith starts a worker against a dialect target's connections. See
+// startWorkerProcess for the flag set.
+func startWorkerWith(t *testing.T, tg *crashTarget, bin, taskQueue, svcURL string, extraFlags ...string) *worker {
+	t.Helper()
+	return startWorkerProcess(t, bin, taskQueue, svcURL, tg.workerDB, tg.migrateDB, extraFlags...)
+}
+
+func startWorkerProcess(t *testing.T, bin, taskQueue, svcURL, workerDB, migrateDB string, extraFlags ...string) *worker {
+	t.Helper()
 
 	w := &worker{log: &strings.Builder{}}
+	// --migrate-db is the owner connection to the database this worker serves
+	// from, NOT ownerDSN(). ownerDSN() names the *base* database -- `cleat` --
+	// which this suite deliberately does not use: it took cleat_crash of its own
+	// precisely so engine/testutil's unqualified DELETEs could not reach it (see
+	// ensureCrashDatabase). Passing it here meant every worker start ran
+	// migration.Runner and plugin.RunMigrations against the shared database and
+	// migrated nothing in the one it actually reads and writes.
+	//
+	// Measured 2026-08-31 before the fix, after one worker start: `cleat` had
+	// schema_migrations (14 rows) and plugin_migrations; cleat_crash had
+	// neither, and its 14 tables came from ownerDB's loop instead. The tables
+	// happened to agree, so nothing failed -- but the worker's own migration
+	// step, the one cmd/cleat-worker runs at boot, was being exercised against
+	// a database no assertion in this suite ever looks at.
 	args := []string{
-		"--db", appDSN(t),
-		"--migrate-db", ownerDSN(),
+		"--db", workerDB,
+		"--migrate-db", migrateDB,
 		"--task-queue", taskQueue,
 		"--bench-svc-url", svcURL,
 		"--poll", "200ms",
 		"--concurrency", "1",
+		// This suite exercises the worker's OWN migration step (see above), and a
+		// worker no longer migrates unless asked (cleat#2117). It also applies only
+		// the CORE migrations itself, so without this every worker would be refused
+		// for the plugin migrations it has not applied.
+		"--migrate-on-start",
 	}
 	args = append(args, extraFlags...)
 	//nolint:gosec // bin is built by this test from this repo.
@@ -505,6 +666,28 @@ func (w *worker) kill() {
 	_, _ = w.cmd.Process.Wait()
 }
 
+// hup sends SIGHUP to the worker. Unlike term(), it returns nothing to wait on: SIGHUP is not
+// supposed to end the process (cleat#1992), so there is no exit to await.
+func (w *worker) hup() {
+	if w.cmd == nil || w.cmd.Process == nil {
+		return
+	}
+	_ = syscall.Kill(-w.cmd.Process.Pid, syscall.SIGHUP)
+}
+
+// term sends SIGTERM to the worker, the signal an orchestrator sends first, and returns a channel that
+// receives the process's exit error (nil for exit status 0) once it has gone. kill() afterwards is harmless.
+func (w *worker) term() <-chan error {
+	done := make(chan error, 1)
+	if w.cmd == nil || w.cmd.Process == nil {
+		done <- fmt.Errorf("worker was never started")
+		return done
+	}
+	_ = syscall.Kill(-w.cmd.Process.Pid, syscall.SIGTERM)
+	go func() { done <- w.cmd.Wait() }()
+	return done
+}
+
 func (w *worker) output() string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -525,7 +708,13 @@ func (s *syncWriter) Write(p []byte) (int, error) {
 // startWorkflow queues one crashcall instance.
 func startWorkflow(t *testing.T, db *sql.DB, id, orderID, taskQueue string) {
 	t.Helper()
-	input := fmt.Sprintf(`{"__entry_point":"three_charges","orderID":%q}`, orderID)
+	startWorkflowEntry(t, db, id, orderID, taskQueue, "three_charges")
+}
+
+// startWorkflowEntry queues one crashcall instance running the named entry point.
+func startWorkflowEntry(t *testing.T, db *sql.DB, id, orderID, taskQueue, entry string) {
+	t.Helper()
+	input := fmt.Sprintf(`{"__entry_point":%q,"orderID":%q}`, entry, orderID)
 	if _, err := db.Exec(`
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id)
 		VALUES ($1, 'crashcall', 1, 'ready', $2::jsonb, $3, $4)`,

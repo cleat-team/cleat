@@ -19,6 +19,7 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"github.com/google/uuid"
 )
 
@@ -474,11 +475,26 @@ func TestFF_WriteError(t *testing.T) {
 // ===========================================================================
 
 func TestFF_TenantID_NotPresent(t *testing.T) {
-	p, _, _ := newFFPlugin(t)
 	req := httptest.NewRequest("GET", "/", nil)
-	tid := p.tenantID(req)
+	tid, ok := auth.TenantIDFromRequest(req)
+	if ok {
+		t.Errorf("expected ok=false with no tenant in context, got ok=true tid=%s", tid)
+	}
+}
+
+// TestFF_TenantID_DefaultTenant is the cleat#2183 regression case:
+// authenticated as the seeded default tenant, whose ID IS uuid.Nil, must
+// read as ok=true -- not be conflated with "no tenant in context" the way
+// comparing the UUID to uuid.Nil does.
+func TestFF_TenantID_DefaultTenant(t *testing.T) {
+	ctx := auth.WithTenantID(context.Background(), uuid.Nil)
+	req := httptest.NewRequest("GET", "/", nil).WithContext(ctx)
+	tid, ok := auth.TenantIDFromRequest(req)
+	if !ok {
+		t.Errorf("expected ok=true for the default tenant (uuid.Nil), got ok=false")
+	}
 	if tid != uuid.Nil {
-		t.Errorf("expected nil UUID when no tenant in context, got %s", tid)
+		t.Errorf("expected tid=uuid.Nil, got %s", tid)
 	}
 }
 
@@ -787,18 +803,13 @@ func TestFF_ListFlags_Empty(t *testing.T) {
 
 func TestFF_Migrations(t *testing.T) {
 	p, _, _ := newFFPlugin(t)
-	migrations := p.Migrations()
-	if len(migrations) == 0 {
-		t.Error("expected at least one migration")
-	}
-	for i, m := range migrations {
-		if m.Version == 0 {
-			t.Errorf("migration %d: version must be non-zero", i)
-		}
-		if m.Up == "" {
-			t.Errorf("migration %d: Up SQL is empty", i)
-		}
-	}
+	// One shared predicate for what a migration must do, rather than a copy per
+	// plugin. This one had drifted already -- it checked Up and never Down --
+	// and its "Up is non-empty" rule rejects a TenantScoped migration by
+	// construction: v2 declares a table for the runtime to put a policy on and
+	// deliberately carries no SQL in either direction, because there is none to
+	// write and no policy an author could drop. cleat#1512.
+	plugintest.AssertMigrationsDoSomething(t, p.Migrations())
 }
 
 // ===========================================================================

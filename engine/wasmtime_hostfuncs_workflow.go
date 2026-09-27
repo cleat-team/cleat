@@ -5,7 +5,7 @@ package engine
 import (
 	"context"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 func (b *wasmtimeBackend) registerCleatDefer(linker *wasmtime.Linker) error {
@@ -13,7 +13,7 @@ func (b *wasmtimeBackend) registerCleatDefer(linker *wasmtime.Linker) error {
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_defer", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_defer", func(caller *wasmtime.Caller,
 		descPtr, descLen, deferIDPtr, deferIDMaxLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -28,12 +28,29 @@ func (b *wasmtimeBackend) registerCleatDefer(linker *wasmtime.Linker) error {
 	})
 }
 
+// registerCleatDeferPhase registers cleat_defer_phase, which reports that the
+// guest has started or finished draining its defer table.
+//
+// It takes no memory and returns no value the guest uses -- there is nothing to
+// read and nothing to write -- so unlike its neighbours it needs no buffer.
+// cleat#1155.
+func (b *wasmtimeBackend) registerCleatDeferPhase(linker *wasmtime.Linker) error {
+	if b.skipIfNotNeeded("cleat_defer_phase") {
+		return nil
+	}
+
+	return b.hostFunc(linker, "env", "cleat_defer_phase", func(caller *wasmtime.Caller,
+		on int32) int64 {
+		return b.handler.SetDeferPhase(context.Background(), on != 0)
+	})
+}
+
 func (b *wasmtimeBackend) registerCleatPollCancellation(linker *wasmtime.Linker) error {
 	if b.skipIfNotNeeded("cleat_poll_cancellation") {
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_poll_cancellation", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_poll_cancellation", func(caller *wasmtime.Caller,
 		reasonPtr, reasonMaxLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -49,7 +66,7 @@ func (b *wasmtimeBackend) registerCleatPollSignal(linker *wasmtime.Linker) error
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_poll_signal", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_poll_signal", func(caller *wasmtime.Caller,
 		namePtr, nameLen, payloadPtr, payloadMaxLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -69,7 +86,7 @@ func (b *wasmtimeBackend) registerCleatContinueAsNew(linker *wasmtime.Linker) er
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_continue_as_new", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_continue_as_new", func(caller *wasmtime.Caller,
 		inputPtr, inputLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -89,7 +106,7 @@ func (b *wasmtimeBackend) registerCleatContinueAsNewVersioned(linker *wasmtime.L
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_continue_as_new_versioned", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_continue_as_new_versioned", func(caller *wasmtime.Caller,
 		inputPtr, inputLen int32, newVersion int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -109,7 +126,7 @@ func (b *wasmtimeBackend) registerCleatChildWorkflow(linker *wasmtime.Linker) er
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_child_workflow", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_child_workflow", func(caller *wasmtime.Caller,
 		namePtr, nameLen, inputPtr, inputLen, runIDPtr, runIDMaxLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -133,7 +150,7 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowWithOptions(linker *wasmtime
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_child_workflow_with_options", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_child_workflow_with_options", func(caller *wasmtime.Caller,
 		namePtr, nameLen, inputPtr, inputLen int32, version int64, priority int64,
 		policyPtr, policyLen, runIDPtr, runIDMaxLen int32) int64 {
 		h := b.handler
@@ -162,49 +179,12 @@ func (b *wasmtimeBackend) registerCleatChildWorkflowWithOptions(linker *wasmtime
 	})
 }
 
-func (b *wasmtimeBackend) registerCleatChildWorkflowInSchema(linker *wasmtime.Linker) error {
-	if b.skipIfNotNeeded("cleat_child_workflow_in_schema") {
-		return nil
-	}
-
-	return linker.FuncWrap("env", "cleat_child_workflow_in_schema", func(caller *wasmtime.Caller,
-		schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen int32, version int64, priority int64,
-		policyPtr, policyLen, runIDPtr, runIDMaxLen int32) int64 {
-		h := b.handler
-		buf, _, err := callerMemBuf(caller)
-		if err != nil {
-			return errBadParamInt64
-		}
-		// Empty means the local schema; see children.go.
-		targetSchema, ok := wasmtimeReadOptionalServiceName(buf, schemaPtr, schemaLen)
-		if !ok {
-			return errBadParamInt64
-		}
-		wfName, ok := wasmtimeReadServiceName(buf, namePtr, nameLen)
-		if !ok {
-			return errBadParamInt64
-		}
-		wfInput, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
-		if !ok {
-			return errBadParamInt64
-		}
-		// Empty means the default policy. wazero guarded this with an inline
-		// policyLen > 0 check and wasmtime did not, so the same guest call
-		// worked on one backend and was refused on the other.
-		parentClosePolicy, ok := wasmtimeReadOptionalServiceName(buf, policyPtr, policyLen)
-		if !ok {
-			return errBadParamInt64
-		}
-		return h.ChildWorkflowInSchema(ctxWithMem(context.Background(), buf), nil, targetSchema, wfName, wfInput, version, priority, parentClosePolicy, uint32(runIDPtr), uint32(runIDMaxLen))
-	})
-}
-
 func (b *wasmtimeBackend) registerCleatAwaitChild(linker *wasmtime.Linker) error {
 	if b.skipIfNotNeeded("cleat_await_child") {
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_await_child", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_await_child", func(caller *wasmtime.Caller,
 		runIDPtr, runIDLen, resultPtr, resultMaxLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -224,7 +204,7 @@ func (b *wasmtimeBackend) registerCleatAwaitAllChildren(linker *wasmtime.Linker)
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_await_all_children", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_await_all_children", func(caller *wasmtime.Caller,
 		idsPtr, idsLen, resultsPtr, resultsMaxLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -244,7 +224,7 @@ func (b *wasmtimeBackend) registerCleatCallRetry(linker *wasmtime.Linker) error 
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_call_retry", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_call_retry", func(caller *wasmtime.Caller,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen int32,
 		maxAttempts, initialIntervalMs, backoffCoefficient100x, maxIntervalMs int64,
 		nonRetryPtr, nonRetryLen int32,
@@ -281,7 +261,7 @@ func (b *wasmtimeBackend) registerCleatAwaitSignals(linker *wasmtime.Linker) err
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_await_signals", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_await_signals", func(caller *wasmtime.Caller,
 		namesPtr, namesLen int32, timeoutMs int64,
 		sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen int32) int64 {
 		h := b.handler
@@ -303,7 +283,7 @@ func (b *wasmtimeBackend) registerCleatSetQueryState(linker *wasmtime.Linker) er
 		return nil
 	}
 
-	return linker.FuncWrap("env", "set_query_state", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "set_query_state", func(caller *wasmtime.Caller,
 		keyPtr, keyLen, valPtr, valLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -327,7 +307,7 @@ func (b *wasmtimeBackend) registerCleatCallHeartbeat(linker *wasmtime.Linker) er
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_call_heartbeat", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_call_heartbeat", func(caller *wasmtime.Caller,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen int32,
 		heartbeatIntervalMs int64,
 		respPtr, respMaxLen int32) int64 {
@@ -357,7 +337,7 @@ func (b *wasmtimeBackend) registerCleatRegisterUpdateHandler(linker *wasmtime.Li
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_register_update_handler", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_register_update_handler", func(caller *wasmtime.Caller,
 		namePtr, nameLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -372,57 +352,47 @@ func (b *wasmtimeBackend) registerCleatRegisterUpdateHandler(linker *wasmtime.Li
 	})
 }
 
-func (b *wasmtimeBackend) registerCleatSendSignalAndWait(linker *wasmtime.Linker) error {
-	if b.skipIfNotNeeded("cleat_send_signal_and_wait") {
+func (b *wasmtimeBackend) registerCleatPollUpdate(linker *wasmtime.Linker) error {
+	if b.skipIfNotNeeded("cleat_poll_update") {
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_send_signal_and_wait", func(caller *wasmtime.Caller,
-		targetPtr, targetLen, sigPtr, sigLen, payloadPtr, payloadLen int32,
-		timeoutMs int64,
-		respPtr, respMaxLen int32) int64 {
+	return b.hostFunc(linker, "env", "cleat_poll_update", func(caller *wasmtime.Caller,
+		outPtr, outMaxLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
 			return errBadParamInt64
 		}
-		targetRunID, ok := wasmtimeReadServiceName(buf, targetPtr, targetLen)
-		if !ok {
-			return errBadParamInt64
-		}
-		signalName, ok := wasmtimeReadServiceName(buf, sigPtr, sigLen)
-		if !ok {
-			return errBadParamInt64
-		}
-		payload, ok := wasmtimeReadPayload(buf, payloadPtr, payloadLen, int32(MaxWasmStringLen))
-		if !ok {
-			return errBadParamInt64
-		}
-		return h.SendSignalAndWait(ctxWithMem(context.Background(), buf), nil, targetRunID, signalName, payload, timeoutMs, uint32(respPtr), uint32(respMaxLen))
+		return h.DurablePollUpdate(ctxWithMem(context.Background(), buf), nil, uint32(outPtr), uint32(outMaxLen))
 	})
 }
 
-func (b *wasmtimeBackend) registerCleatReplyToSignal(linker *wasmtime.Linker) error {
-	if b.skipIfNotNeeded("cleat_reply_to_signal") {
+func (b *wasmtimeBackend) registerCleatCompleteUpdate(linker *wasmtime.Linker) error {
+	if b.skipIfNotNeeded("cleat_complete_update") {
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_reply_to_signal", func(caller *wasmtime.Caller,
-		correlationPtr, correlationLen, respPtr, respLen int32) int64 {
+	return b.hostFunc(linker, "env", "cleat_complete_update", func(caller *wasmtime.Caller,
+		reqIDPtr, reqIDLen, resultPtr, resultLen, errPtr, errLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
 			return errBadParamInt64
 		}
-		correlationID, ok := wasmtimeReadServiceName(buf, correlationPtr, correlationLen)
+		requestID, ok := wasmtimeReadPayload(buf, reqIDPtr, reqIDLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}
-		response, ok := wasmtimeReadPayload(buf, respPtr, respLen, int32(MaxWasmStringLen))
+		result, ok := wasmtimeReadPayload(buf, resultPtr, resultLen, int32(MaxWasmStringLen))
 		if !ok {
 			return errBadParamInt64
 		}
-		return h.ReplyToSignal(context.Background(), nil, correlationID, response)
+		errMsg, ok := wasmtimeReadPayload(buf, errPtr, errLen, int32(MaxWasmStringLen))
+		if !ok {
+			return errBadParamInt64
+		}
+		return h.DurableCompleteUpdate(context.Background(), nil, requestID, result, errMsg)
 	})
 }
 
@@ -431,7 +401,7 @@ func (b *wasmtimeBackend) registerCleatSignalWorkflow(linker *wasmtime.Linker) e
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_signal_workflow", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_signal_workflow", func(caller *wasmtime.Caller,
 		targetPtr, targetLen, sigPtr, sigLen, payloadPtr, payloadLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -459,7 +429,7 @@ func (b *wasmtimeBackend) registerCleatSetScope(linker *wasmtime.Linker) error {
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_set_scope", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_set_scope", func(caller *wasmtime.Caller,
 		objTypePtr, objTypeLen, instKeyPtr, instKeyLen int32,
 		prevScopePtr, prevScopeMaxLen int32) int64 {
 		h := b.handler
@@ -485,7 +455,7 @@ func (b *wasmtimeBackend) registerCleatGetScope(linker *wasmtime.Linker) error {
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_get_scope", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_get_scope", func(caller *wasmtime.Caller,
 		objTypePtr, objTypeMaxLen, instKeyPtr, instKeyMaxLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -501,7 +471,7 @@ func (b *wasmtimeBackend) registerCleatSideEffect(linker *wasmtime.Linker) error
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_side_effect", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_side_effect", func(caller *wasmtime.Caller,
 		resultPtr, resultLen, outPtr, outMaxLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -521,7 +491,7 @@ func (b *wasmtimeBackend) registerCleatRegisterQueryHandler(linker *wasmtime.Lin
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_register_query_handler", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_register_query_handler", func(caller *wasmtime.Caller,
 		namePtr, nameLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -541,7 +511,7 @@ func (b *wasmtimeBackend) registerCleatRunDetached(linker *wasmtime.Linker) erro
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_run_detached", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_run_detached", func(caller *wasmtime.Caller,
 		namePtr, nameLen, inputPtr, inputLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -560,12 +530,46 @@ func (b *wasmtimeBackend) registerCleatRunDetached(linker *wasmtime.Linker) erro
 	})
 }
 
+// registerCleatStartDetached is cleat_run_detached with the run id written back
+// (cleat#1154).
+//
+// BOTH ARE REGISTERED. The old name cannot simply grow two parameters: an
+// arity mismatch is a hard link error on this backend, measured in
+// IMPROVEMENT-PLAN 3.55 as `incompatible import type for
+// env::cleat_create_promise`, and every deployed workflow binary imports
+// cleat_run_detached with four. hostabi_runtime_parity_test.go requires this
+// registration to match engine/imports.go's.
+func (b *wasmtimeBackend) registerCleatStartDetached(linker *wasmtime.Linker) error {
+	if b.skipIfNotNeeded("cleat_start_detached") {
+		return nil
+	}
+
+	return b.hostFunc(linker, "env", "cleat_start_detached", func(caller *wasmtime.Caller,
+		namePtr, nameLen, inputPtr, inputLen, runIDPtr, runIDMaxLen int32) int64 {
+		h := b.handler
+		buf, _, err := callerMemBuf(caller)
+		if err != nil {
+			return errBadParamInt64
+		}
+		name, ok := wasmtimeReadServiceName(buf, namePtr, nameLen)
+		if !ok {
+			return errBadParamInt64
+		}
+		inputJSON, ok := wasmtimeReadStringValidated(buf, inputPtr, inputLen, int32(MaxWasmStringLen))
+		if !ok {
+			return errBadParamInt64
+		}
+		return h.StartDetached(ctxWithMem(context.Background(), buf), nil, name, inputJSON,
+			uint32(runIDPtr), uint32(runIDMaxLen))
+	})
+}
+
 func (b *wasmtimeBackend) registerCleatPollChild(linker *wasmtime.Linker) error {
 	if b.skipIfNotNeeded("cleat_poll_child") {
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_poll_child", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_poll_child", func(caller *wasmtime.Caller,
 		runIDPtr, runIDLen, resultPtr, resultMaxLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)
@@ -585,7 +589,7 @@ func (b *wasmtimeBackend) registerCleatAwaitAnyChild(linker *wasmtime.Linker) er
 		return nil
 	}
 
-	return linker.FuncWrap("env", "cleat_await_any_child", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_await_any_child", func(caller *wasmtime.Caller,
 		idsPtr, idsLen, resultPtr, resultMaxLen int32) int64 {
 		h := b.handler
 		buf, _, err := callerMemBuf(caller)

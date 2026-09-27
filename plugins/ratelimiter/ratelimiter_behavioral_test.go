@@ -8,6 +8,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -328,7 +329,7 @@ func behRouteHandler(t *testing.T) (*Plugin, http.Handler) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes(): %v", err)
 	}
-	return p, auth.Middleware(engine.NewPostgresStore(p.db.(*engine.SQLDBAdapter).DB), false)(mux)
+	return p, auth.MiddlewareWithMux(engine.NewPostgresStore(p.db.(*engine.SQLDBAdapter).DB), false, mux)(mux)
 }
 
 // ---------------------------------------------------------------------------
@@ -485,7 +486,7 @@ func TestHandlePut_EmptyKey(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.handlePut(w, r)
 	})
-	authHandler := auth.Middleware(engine.NewPostgresStore(p.db.(*engine.SQLDBAdapter).DB), false)(handler)
+	authHandler := auth.MiddlewareWithMux(engine.NewPostgresStore(p.db.(*engine.SQLDBAdapter).DB), false, nil)(handler)
 
 	body := `{"max_requests":10,"window_seconds":60}`
 	req := behAuthedReq("PUT", "/rate-limits/", bytes.NewReader([]byte(body)))
@@ -503,7 +504,7 @@ func TestHandleDelete_EmptyKey(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p.handleDelete(w, r)
 	})
-	authHandler := auth.Middleware(engine.NewPostgresStore(p.db.(*engine.SQLDBAdapter).DB), false)(handler)
+	authHandler := auth.MiddlewareWithMux(engine.NewPostgresStore(p.db.(*engine.SQLDBAdapter).DB), false, nil)(handler)
 
 	req := behAuthedReq("DELETE", "/rate-limits/", nil)
 	rec := httptest.NewRecorder()
@@ -589,17 +590,12 @@ func TestBehavioralMigrations(t *testing.T) {
 	if len(migs) == 0 {
 		t.Fatal("expected at least one migration")
 	}
-	for i, m := range migs {
-		if m.Version == 0 {
-			t.Errorf("migration[%d]: Version must be > 0", i)
-		}
-		if m.Up == "" {
-			t.Errorf("migration[%d]: Up must not be empty", i)
-		}
-		if m.Down == "" {
-			t.Errorf("migration[%d]: Down must not be empty", i)
-		}
-	}
+	// One shared predicate for what a migration must do, rather than a copy
+	// per plugin. Thirteen plugins carried their own and they had already
+	// drifted -- three checked Up and not Down. A TenantScoped migration has
+	// no SQL in either direction by design, so the old wording rejected it by
+	// construction. cleat#1278.
+	plugintest.AssertMigrationsDoSomething(t, migs)
 	if !strings.Contains(migs[0].Up, "rate_limits") {
 		t.Error("migration Up should create rate_limits table")
 	}

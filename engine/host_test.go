@@ -1317,9 +1317,9 @@ func (m *mockChildWorkflowStore) StartChildWorkflowAtomic(ctx context.Context, c
 	return "child-run-001", nil
 }
 
-func (m *mockChildWorkflowStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+func (m *mockChildWorkflowStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
 	m.gotRunID = runID
-	return m.result, m.completed, m.err
+	return ChildOutcome{Completed: m.completed, Result: m.result}, m.err
 }
 
 func (m *mockChildWorkflowStore) ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error) {
@@ -1351,11 +1351,11 @@ func (m *mockPromiseStore) CreatePromise(ctx context.Context, workflowID, promis
 	return m.createErr
 }
 
-func (m *mockPromiseStore) ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error {
+func (m *mockPromiseStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
 	return nil
 }
 
-func (m *mockPromiseStore) RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error {
+func (m *mockPromiseStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
 	return nil
 }
 
@@ -1373,7 +1373,6 @@ func newTestExecSession() *execSession {
 		engine:     NewEngine(nil, nil),
 		nowMs:      1000000,
 		deferrals:  make(map[string]string),
-		stateStore: make(map[string]string),
 		queryState: make(map[string]string),
 	}
 }
@@ -1422,8 +1421,8 @@ func TestAwaitChildReplayEmptyEvent(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true after exitReplay")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if result != packAwaitChildResultSuspend() {
 		t.Errorf("expected suspend sentinel (1<<62), got %d", result)
@@ -1665,8 +1664,8 @@ func TestCreatePromiseReplayDivergence(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true after exitReplay")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	// Fresh path runs after exitReplay, recording a create_promise event.
 	if len(s.history) < 2 {
@@ -1678,8 +1677,11 @@ func TestCreatePromiseReplayDivergence(t *testing.T) {
 	if s.history[1].PromiseID == "" {
 		t.Error("expected non-empty PromiseID in fresh event")
 	}
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
+	// newTestExecSession has NO promise store. This asserted success, which is
+	// what let 3.231 survive: a create that reaches no store produces an ID the
+	// guest proceeds with and a promise nobody can ever settle.
+	if errCode := uint32(result) & 0xFF; errCode != 1 {
+		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
 	}
 }
 
@@ -1693,8 +1695,8 @@ func TestCreatePromiseReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay (past end of history)")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true after exitReplay")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	// Fresh path runs, recording a create_promise event.
 	if len(s.history) != 1 {
@@ -1703,8 +1705,11 @@ func TestCreatePromiseReplayPastEnd(t *testing.T) {
 	if s.history[0].EventType != EventTypeCreatePromise {
 		t.Errorf("expected EventTypeCreatePromise, got %q", s.history[0].EventType)
 	}
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
+	// newTestExecSession has NO promise store. This asserted success, which is
+	// what let 3.231 survive: a create that reaches no store produces an ID the
+	// guest proceeds with and a promise nobody can ever settle.
+	if errCode := uint32(result) & 0xFF; errCode != 1 {
+		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
 	}
 }
 
@@ -1713,8 +1718,11 @@ func TestCreatePromiseFresh(t *testing.T) {
 
 	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
 
-	if result != 0 {
-		t.Errorf("expected 0, got %d", result)
+	// newTestExecSession has NO promise store. This asserted success, which is
+	// what let 3.231 survive: a create that reaches no store produces an ID the
+	// guest proceeds with and a promise nobody can ever settle.
+	if errCode := uint32(result) & 0xFF; errCode != 1 {
+		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
 	}
 	if len(s.history) != 1 {
 		t.Fatalf("expected 1 history entry, got %d", len(s.history))
@@ -1752,9 +1760,19 @@ func TestCreatePromiseFreshStoreError(t *testing.T) {
 
 	result := s.CreatePromise(context.Background(), nil, "my-promise", 0, 0)
 
-	// Store error is logged, not surfaced. Function should still succeed.
-	if result != 0 {
-		t.Errorf("expected 0 (error is logged, not surfaced), got %d", result)
+	// The store error IS surfaced, and this assertion used to be its opposite:
+	// "Store error is logged, not surfaced. Function should still succeed."
+	//
+	// That test asserted the code as written and justified neither half, which
+	// is how it held the defect in place. Swallowing the error does not produce
+	// a disagreement between history and the store -- it produces a HANG. The
+	// event record above the store call already asserts the promise exists, the
+	// guest gets an ID and errCode 0, and the AwaitPromise that follows finds
+	// nothing in the store, falls past both the resolved and rejected branches,
+	// and suspends waiting for a promise no external caller can resolve.
+	// IMPROVEMENT-PLAN 3.218.
+	if errCode := uint32(result); errCode == 0 {
+		t.Errorf("expected a non-zero errCode after the store refused the write, got %d", result)
 	}
 	if mock.lastCreatedPromiseName != "my-promise" {
 		t.Error("expected CreatePromise called despite previous errors")
@@ -1824,19 +1842,19 @@ func TestAwaitPromiseReplayAwaitThenFreshNoStore(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay from await_promise event")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true after exitReplay")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
-	// Fresh path with no promiseStore -> suspend.
-	expected := packAwaitPromiseResult(0, true, 0)
-	if result != expected {
-		t.Errorf("expected %d (suspend), got %d", expected, result)
+	// Fresh path with no promiseStore reports an error. This asserted SUSPEND,
+	// and the assertion was the defect stated as a contract: with no store,
+	// nothing can ever resolve the promise, so suspending waits forever. The
+	// test even set promiseStore = nil deliberately and called the outcome
+	// correct. IMPROVEMENT-PLAN 3.231.
+	if errCode := uint32(result) & 0xFF; errCode != 1 {
+		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
 	}
-	if s.suspendErr == nil {
-		t.Fatal("expected suspendErr non-nil")
-	}
-	if !strings.Contains(s.suspendErr.Reason, "await_promise(abc-123)") {
-		t.Errorf("expected suspendErr reason containing 'await_promise(abc-123)', got %q", s.suspendErr.Reason)
+	if s.suspendErr != nil {
+		t.Errorf("expected no suspend with no promise store, got %q", s.suspendErr.Reason)
 	}
 }
 
@@ -1870,6 +1888,12 @@ func TestAwaitPromiseReplayAwaitThenFreshResolved(t *testing.T) {
 
 func TestAwaitPromiseReplayDivergence(t *testing.T) {
 	s := newTestExecSession()
+	// A PENDING store, not a nil one. This test is about replay divergence, and
+	// it used to reach the fresh path with no store at all -- so it asserted
+	// suspend for a reason that has nothing to do with divergence, and broke
+	// when a missing store started reporting an error (IMPROVEMENT-PLAN 3.231).
+	// A pending promise suspends legitimately, which is what this wants.
+	s.engine.promiseStore = &mockPromiseStore{}
 	s.isReplay = true
 	s.history = []EventRecord{{
 		Step:      0,
@@ -1883,7 +1907,7 @@ func TestAwaitPromiseReplayDivergence(t *testing.T) {
 	if !s.isReplay {
 		t.Error("expected isReplay to remain true (exitReplay not called on mismatch)")
 	}
-	// Fresh path suspends since promiseStore is nil.
+	// Fresh path suspends because the promise is pending.
 	expected := packAwaitPromiseResult(0, true, 0)
 	if result != expected {
 		t.Errorf("expected %d (suspend), got %d", expected, result)
@@ -1898,6 +1922,8 @@ func TestAwaitPromiseReplayDivergence(t *testing.T) {
 
 func TestAwaitPromiseReplayPastEnd(t *testing.T) {
 	s := newTestExecSession()
+	// Pending, not nil, for the same reason as TestAwaitPromiseReplayDivergence.
+	s.engine.promiseStore = &mockPromiseStore{}
 	s.isReplay = true
 	s.history = nil // stepCount(0) >= len(history)(0)
 
@@ -1906,10 +1932,10 @@ func TestAwaitPromiseReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay (past end of history)")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true after exitReplay")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
-	// Fresh path suspends (no store).
+	// Fresh path suspends because the promise is pending.
 	expected := packAwaitPromiseResult(0, true, 0)
 	if result != expected {
 		t.Errorf("expected %d (suspend), got %d", expected, result)
@@ -2018,18 +2044,15 @@ func TestAwaitPromiseFreshNilStore(t *testing.T) {
 
 	result := s.AwaitPromise(context.Background(), nil, "abc-123", 5000, 0, 0)
 
-	// Nil store -> suspends immediately.
-	expected := packAwaitPromiseResult(0, true, 0)
-	if result != expected {
-		t.Errorf("expected %d (suspend), got %d", expected, result)
+	// Nil store -> reports an error. This asserted "suspends immediately",
+	// which is the hang: nothing can resolve a promise that was never stored,
+	// so the suspend never ends. The test then checked the deadline encoding on
+	// a suspend that should not happen. IMPROVEMENT-PLAN 3.231.
+	if errCode := uint32(result) & 0xFF; errCode != 1 {
+		t.Errorf("expected errCode 1 with no promise store, got %d (raw %d)", errCode, result)
 	}
-	if s.suspendErr == nil {
-		t.Fatal("expected suspendErr non-nil")
-	}
-	// Verify timeout encoding: nowMs + timeoutMs
-	expectedUntil := time.UnixMilli(s.nowMs).Add(time.Duration(5000) * time.Millisecond)
-	if !s.suspendErr.Until.Equal(expectedUntil) {
-		t.Errorf("expected Until=%v, got %v", expectedUntil, s.suspendErr.Until)
+	if s.suspendErr != nil {
+		t.Errorf("expected no suspend with no promise store, got %q", s.suspendErr.Reason)
 	}
 }
 
@@ -2070,9 +2093,11 @@ func (m *mockCancellationStore) DeliverSignal(_ context.Context, _, _, _ string)
 	return nil
 }
 
-func (m *mockCancellationStore) PollSignal(_ context.Context, _, _ string) (string, bool, error) {
-	return "", false, nil
+func (m *mockCancellationStore) PollSignal(_ context.Context, _, _ string) (SignalDelivery, bool, error) {
+	return SignalDelivery{}, false, nil
 }
+
+func (m *mockCancellationStore) ConsumeSignal(_ context.Context, _ string, _ int64) error { return nil }
 
 func TestPollCancellationReplay(t *testing.T) {
 	s := newTestExecSession()
@@ -2224,8 +2249,8 @@ func TestContinueAsNewReplayDivergence(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if s.stepCount != 1 {
 		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
@@ -2255,8 +2280,8 @@ func TestContinueAsNewReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if s.stepCount != 1 {
 		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
@@ -2386,8 +2411,8 @@ func TestContinueAsNewWithVersionReplayDivergence(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if s.stepCount != 1 {
 		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
@@ -2417,8 +2442,8 @@ func TestContinueAsNewWithVersionReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if s.stepCount != 1 {
 		t.Errorf("expected stepCount=1 after recordEvent, got %d", s.stepCount)
@@ -2518,9 +2543,11 @@ func (m *mockSignalStore) DeliverSignal(_ context.Context, workflowID, signalNam
 	return m.deliverErr
 }
 
-func (m *mockSignalStore) PollSignal(_ context.Context, _, _ string) (string, bool, error) {
-	return "", false, nil
+func (m *mockSignalStore) PollSignal(_ context.Context, _, _ string) (SignalDelivery, bool, error) {
+	return SignalDelivery{}, false, nil
 }
+
+func (m *mockSignalStore) ConsumeSignal(_ context.Context, _ string, _ int64) error { return nil }
 
 func (m *mockSignalStore) PollCancellation(_ context.Context, _ string) (bool, string, error) {
 	return false, "", nil
@@ -2561,8 +2588,8 @@ func TestSignalWorkflowReplayDivergence(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	// Fresh path records EventTypeSignalReceived.
 	if len(s.history) < 2 {
@@ -2586,8 +2613,8 @@ func TestSignalWorkflowReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if len(s.history) != 1 {
 		t.Fatalf("expected 1 history entry, got %d", len(s.history))
@@ -2725,6 +2752,11 @@ func TestScheduleInvokeReplayMatch(t *testing.T) {
 }
 
 func TestScheduleInvokeReplayPastEnd(t *testing.T) {
+	// Past the end of history the schedule is new work and must be recorded.
+	// This test used to assert "isReplay to remain true (ScheduleInvoke does
+	// not exitReplay on past-end)" -- a restatement of the code, with the
+	// consequence that a delayed invocation scheduled after a suspension was
+	// dropped in silence. cleat#835; the same shape as DurableSend beside it.
 	s := newTestExecSession()
 	s.isReplay = true
 	s.history = nil // stepCount >= len → past end
@@ -2734,8 +2766,14 @@ func TestScheduleInvokeReplayPastEnd(t *testing.T) {
 	if result != 0 {
 		t.Errorf("expected 0, got %d", result)
 	}
-	if !s.isReplay {
-		t.Error("expected isReplay to remain true (ScheduleInvoke does not exitReplay on past-end)")
+	if s.isReplay {
+		t.Error("the session stayed in replay, so the schedule was neither replayed nor recorded")
+	}
+	if len(s.history) != 1 {
+		t.Fatalf("expected the schedule to be recorded as a fresh event, got %d events", len(s.history))
+	}
+	if s.history[0].EventType != EventTypeDurableScheduleInvoke {
+		t.Errorf("recorded %q, want %q", s.history[0].EventType, EventTypeDurableScheduleInvoke)
 	}
 }
 
@@ -2820,8 +2858,8 @@ func TestRegisterUpdateHandlerReplayDivergence(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if len(s.history) < 2 {
 		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
@@ -2844,8 +2882,8 @@ func TestRegisterUpdateHandlerReplayPastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if len(s.history) != 1 {
 		t.Fatalf("expected 1 history entry, got %d", len(s.history))
@@ -2943,8 +2981,8 @@ func TestAwaitAnyChildReplaySuspendNoReexec(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if result != packAwaitChildResultSuspend() {
 		t.Errorf("expected suspend sentinel, got %d", result)
@@ -3150,8 +3188,8 @@ func TestRegisterUpdateHandlerReplay_Mismatch(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true after exitReplay")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if len(s.history) < 2 {
 		t.Fatalf("expected at least 2 history entries, got %d", len(s.history))
@@ -3177,8 +3215,8 @@ func TestRegisterUpdateHandlerReplay_PastEnd(t *testing.T) {
 	if s.isReplay {
 		t.Error("expected isReplay=false after exitReplay")
 	}
-	if !s.replayJustEnded {
-		t.Error("expected replayJustEnded=true after exitReplay")
+	if s.isReplay {
+		t.Error("expected replay to have ended")
 	}
 	if len(s.history) != 1 {
 		t.Fatalf("expected 1 history entry, got %d", len(s.history))
@@ -3244,6 +3282,12 @@ func TestPluginCallStreamingReplay_MultipleChunks(t *testing.T) {
 	}
 }
 
+// Covers the in-memory branch only. This assigns s.history directly, so its
+// StreamFinish is a field the store could not produce until IMPROVEMENT-PLAN
+// 3.96 -- the flag was written by neither eventRecordToPayload nor a column,
+// and this test passed throughout. engine/stream_finish_persistence_test.go
+// is the version that puts the same record through the real encoder and
+// decoder first, and it is the one that fails when the flag is not persisted.
 func TestPluginCallStreamingReplay_StreamError(t *testing.T) {
 	s := newTestExecSession()
 	s.isReplay = true
@@ -3269,21 +3313,43 @@ func TestPluginCallStreamingReplay_StreamError(t *testing.T) {
 }
 
 func TestPluginCallStreamingReplay_EmptyHistory(t *testing.T) {
+	// An empty history means there is nothing recorded at this step, so the
+	// call is new work: leave replay and take the fresh path.
+	//
+	// This test used to assert "errCode=0 (empty result)" and "isReplay=true",
+	// which is what the code did: it returned SUCCESS with a marshalled `null`
+	// for a stream the plugin was never asked to produce. A workflow that
+	// suspended and then streamed got an empty stream and no error. cleat#835.
+	//
+	// The non-streaming twin, replayPluginCall, has always ended with
+	// exitReplay + freshPluginCall under the comment "Past recorded history --
+	// switch to fresh execution". Only the streaming one was written without it.
 	s := newTestExecSession()
 	s.isReplay = true
 	// empty history — no chunks to replay
 
 	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
 
-	errCode := uint32(result & 0xFFFFFFFF)
-	if errCode != 0 {
-		t.Errorf("expected errCode=0 (empty result), got %d", errCode)
+	// stepCount is no longer asserted to be 0. It used to be, under the label
+	// "no events consumed" -- but with the history empty there was nothing to
+	// consume either way, so the assertion held for the wrong reason and
+	// conflated "consumed nothing from history" with "did nothing". The fresh
+	// path records a stream-level error event, so stepCount advancing is the
+	// call having happened.
+	if s.isReplay {
+		t.Error("the session stayed in replay, so the stream was neither replayed nor requested")
 	}
-	if s.stepCount != 0 {
-		t.Errorf("expected stepCount=0 (no events consumed), got %d", s.stepCount)
+	if len(s.history) == 0 {
+		t.Error("the fresh path recorded nothing, so the call did not happen")
 	}
-	if !s.isReplay {
-		t.Error("expected isReplay=true")
+	// No stream registry is configured on this session, so the fresh path
+	// fails -- and that failure is the assertion. It reports that the call
+	// REACHED the fresh path. The old behaviour returned errCode 0 for a
+	// plugin call that never happened, which is the one answer a caller
+	// cannot act on.
+	if errCode := uint32(result & 0xFFFFFFFF); errCode == 0 {
+		t.Error("errCode=0 for a streaming call with no registry: the call did not reach " +
+			"the fresh path, so success is being reported for a stream nobody produced")
 	}
 }
 
@@ -3353,9 +3419,19 @@ func TestPluginCallStreamingFresh_FuncNotFound(t *testing.T) {
 
 	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
 
-	errCode := uint32(result & 0xFFFFFFFF)
+	// decodeCallResultGuest, not a 32-bit mask. The mask that used to be here
+	// spanned bits 0-31, which is the 8-bit errCode AND the low 24 bits of the
+	// 32-bit call error code -- so it read 1 only while the classification
+	// happened to be 0. IMPROVEMENT-PLAN 2.35's plugin half made this site
+	// report callFailureCode and the mask started returning 513, which looks
+	// like a broken result rather than a test reading the wrong field.
+	_, callErr, errCode := decodeCallResultGuest(result)
 	if errCode != 1 {
 		t.Errorf("expected errCode=1 (not found), got %d", errCode)
+	}
+	if callErr != uint32(callFailureCode) {
+		t.Errorf("expected call error %d (callFailureCode, matching PluginCall for the "+
+			"same condition), got %d", callFailureCode, callErr)
 	}
 	if len(s.history) != 1 {
 		t.Fatalf("expected 1 history entry, got %d", len(s.history))
@@ -3376,9 +3452,19 @@ func TestPluginCallStreamingFresh_FuncError(t *testing.T) {
 
 	result := s.PluginCallStreaming(context.Background(), nil, "test-plugin", "Echo", `{}`, 0, 0)
 
-	errCode := uint32(result & 0xFFFFFFFF)
+	// decodeCallResultGuest, not a 32-bit mask. The mask that used to be here
+	// spanned bits 0-31, which is the 8-bit errCode AND the low 24 bits of the
+	// 32-bit call error code -- so it read 1 only while the classification
+	// happened to be 0. IMPROVEMENT-PLAN 2.35's plugin half made this site
+	// report callFailureCode and the mask started returning 513, which looks
+	// like a broken result rather than a test reading the wrong field.
+	_, callErr, errCode := decodeCallResultGuest(result)
 	if errCode != 1 {
 		t.Errorf("expected errCode=1 (func error), got %d", errCode)
+	}
+	if callErr != uint32(callFailureCode) {
+		t.Errorf("expected call error %d (callFailureCode, matching PluginCall for the "+
+			"same condition), got %d", callFailureCode, callErr)
 	}
 	if len(s.history) != 1 {
 		t.Fatalf("expected 1 history entry, got %d", len(s.history))
@@ -3453,33 +3539,6 @@ func TestDeferralsFromHistory_MixedEvents(t *testing.T) {
 	}
 	if defs["d2"] != "notify" {
 		t.Errorf("d2: got %q, want 'notify'", defs["d2"])
-	}
-}
-
-// ---- DispatchUpdate ----
-
-func TestDispatchUpdate_NilHandler(t *testing.T) {
-	engine := NewEngine(nil, nil)
-	_, err := engine.DispatchUpdate(context.Background(), "update1", `{"key":"val"}`)
-	if err == nil {
-		t.Fatal("expected error for nil handler")
-	}
-	if !strings.Contains(err.Error(), "no update handler configured") {
-		t.Errorf("error should mention missing handler: %v", err)
-	}
-}
-
-func TestDispatchUpdate_ValidHandler(t *testing.T) {
-	handler := func(name, payload string) (string, error) {
-		return `{"result":"` + name + `"}`, nil
-	}
-	engine := NewEngine(nil, nil, WithUpdateHandler(handler))
-	result, err := engine.DispatchUpdate(context.Background(), "myUpdate", `{"x":1}`)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if want := `{"result":"myUpdate"}`; result != want {
-		t.Errorf("got %q, want %q", result, want)
 	}
 }
 
@@ -3623,9 +3682,19 @@ func TestPluginCallStreamingFresh_CallGuardRejection(t *testing.T) {
 
 	result := s.PluginCallStreaming(context.Background(), nil, "secure-plugin", "GetSecrets", `{}`, 0, 0)
 
-	errCode := uint32(result & 0xFFFFFFFF)
+	// decodeCallResultGuest, not a 32-bit mask. The mask that used to be here
+	// spanned bits 0-31, which is the 8-bit errCode AND the low 24 bits of the
+	// 32-bit call error code -- so it read 1 only while the classification
+	// happened to be 0. IMPROVEMENT-PLAN 2.35's plugin half made this site
+	// report callFailureCode and the mask started returning 513, which looks
+	// like a broken result rather than a test reading the wrong field.
+	_, callErr, errCode := decodeCallResultGuest(result)
 	if errCode != 1 {
 		t.Errorf("expected errCode=1 (call guard rejection), got %d", errCode)
+	}
+	if callErr != uint32(callFailureCode) {
+		t.Errorf("expected call error %d (callFailureCode, matching PluginCall for the "+
+			"same condition), got %d", callFailureCode, callErr)
 	}
 	if len(s.history) != 1 {
 		t.Fatalf("expected 1 history entry (error event), got %d", len(s.history))
@@ -3636,4 +3705,12 @@ func TestPluginCallStreamingFresh_CallGuardRejection(t *testing.T) {
 	if s.history[0].EventType != EventTypePluginCallStreamChunk {
 		t.Errorf("expected EventTypePluginCallStreamChunk, got %s", s.history[0].EventType)
 	}
+}
+
+// GetChildCompletedAtMs satisfies the store interface. Added with #847, which
+// made PollChild derive its answer from the child's completion instant rather
+// than querying live. Returning ok=false means "never completed", which keeps
+// every existing test's PollChild answer at "running".
+func (m *mockChildWorkflowStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	return 0, false, nil
 }

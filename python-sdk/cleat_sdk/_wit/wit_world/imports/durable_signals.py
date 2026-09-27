@@ -3,31 +3,37 @@
 """
 Signal send, receive, and correlation operations.
 """
+from typing import TypeVar, Generic, Union, Optional, Protocol, Tuple, List, Any, Self, Callable
+from types import TracebackType
+from enum import Flag, Enum, auto
+from dataclasses import dataclass
+from abc import abstractmethod
+import weakref
+
+from componentize_py_types import Result, Ok, Err, Some
 
 
 
 def durable_await_signals(names: str, timeout_ms: int, sig_name_ptr: int, sig_name_max_len: int, payload_ptr: int, payload_max_len: int) -> int:
     """
     Wait for one or more external signals, with a timeout.
+    Output buffers kept for multi-return (name + payload).
     """
     raise NotImplementedError
 def durable_poll_signal(name: str) -> str:
     """
     Poll for a specific pending signal (non-blocking).
-    """
-    raise NotImplementedError
-def durable_send_signal_and_wait(target_run_id: str, signal_name: str, payload: str, timeout_ms: int) -> str:
-    """
-    Send a signal with correlation and wait for a reply.
-    """
-    raise NotImplementedError
-def durable_reply_to_signal(correlation_id: str, response: str) -> int:
-    """
-    Reply to a correlated signal from within a handler.
+    Returns the signal payload, or empty string if none.
     """
     raise NotImplementedError
 def durable_signal_workflow(target_run_id: str, signal_name: str, payload: str) -> int:
     """
+    durable-send-signal-and-wait and durable-reply-to-signal were removed
+    on 2026-09-06. Both mapped to host calls that were inert engine-side,
+    and request/reply is now composed from create-promise + signal-workflow
+    + await-promise + resolve-promise (IMPROVEMENT-PLAN 3.220). Declaring
+    them here made every Python component import two host functions it
+    never called.
     Send a signal to a target workflow (fire-and-forget, recorded).
     """
     raise NotImplementedError

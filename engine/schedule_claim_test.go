@@ -19,7 +19,6 @@ func createDueSchedule(t *testing.T, store WorkflowStore, ctx context.Context, n
 		DefName:        "test-workflow",
 		CronExpression: "* * * * *",
 		Input:          json.RawMessage(`{}`),
-		Enabled:        true,
 		NextRunAt:      dueAt,
 	}); err != nil {
 		t.Fatalf("CreateSchedule: %v", err)

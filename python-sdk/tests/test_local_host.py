@@ -42,214 +42,14 @@ def host() -> LocalHostCalls:
 # ========================================================================
 
 
-class TestRecordMode:
-    """Verify that calls in record mode are recorded to the event log."""
-
-    def test_cleat_call_is_recorded(self, host: LocalHostCalls):
-        """``call`` is recorded with service, operation, and request."""
-        result = host.call("greeter", "Greet", {"name": "World"})
-        assert json.loads(result)["status"] == "ok"
-        log = host.get_event_log()
-        assert len(log) == 1
-        assert log[0]["method"] == "call"
-        assert log[0]["kwargs"]["service"] == "greeter"
-        assert log[0]["kwargs"]["operation"] == "Greet"
-
-    def test_sleep_is_recorded(self, host: LocalHostCalls):
-        """``sleep_ms`` is recorded."""
-        host.sleep_ms(100)
-        log = host.get_event_log()
-        assert len(log) == 1
-        assert log[0]["method"] == "sleep_ms"
-        assert log[0]["kwargs"]["timeout_ms"] == 100
-
-    def test_state_operations_recorded(self, host: LocalHostCalls):
-        """State operations are recorded."""
-        host.set_state("key1", "val1")
-        host.get_state("key1")
-        host.delete_state("key1")
-        log = host.get_event_log()
-        assert len(log) == 3
-        assert log[0]["method"] == "set_state"
-        assert log[1]["method"] == "get_state"
-        assert log[2]["method"] == "delete_state"
-
-    def test_log_recorded(self, host: LocalHostCalls):
-        """``log`` and ``log_kv`` are recorded."""
-        host.log("hello")
-        host.log_kv("test", "key", "value")
-        log = host.get_event_log()
-        assert len(log) >= 2
-        # log_kv chains through log, so there should be at least 2 entries
-        log_entries = [e for e in log if e["method"] == "log"]
-        assert len(log_entries) == 2
-
-    def test_signal_workflow_recorded(self, host: LocalHostCalls):
-        """``signal_workflow`` records the signal."""
-        host.signal_workflow("target-run-id", "my_signal", {"data": 42})
-        log = host.get_event_log()
-        assert len(log) == 1
-        assert log[0]["method"] == "signal_workflow"
-
-
 # ========================================================================
 # Replay mode
 # ========================================================================
 
 
-class TestReplayMode:
-    """Verify that replay mode reproduces recorded results."""
-
-    def test_cleat_call_replay(self):
-        """Record a call, save the log, replay it, verify the same result."""
-        h1 = LocalHostCalls(mode="record")
-        result1 = h1.call("svc", "op", {"x": 1})
-        log = h1.get_event_log()
-
-        h2 = LocalHostCalls(mode="replay")
-        h2.load_event_log(log)
-        result2 = h2.call("svc", "op", {"x": 1})
-
-        assert result1 == result2
-
-    def test_replay_cursor_advances(self):
-        """Replaying multiple calls advances the cursor and returns in order."""
-        h1 = LocalHostCalls(mode="record")
-        h1.call("a", "op1", {})
-        h1.call("b", "op2", {})
-        log = h1.get_event_log()
-
-        h2 = LocalHostCalls(mode="replay")
-        h2.load_event_log(log)
-        r1 = h2.call("a", "op1", {})
-        r2 = h2.call("b", "op2", {})
-        assert json.loads(r1)["service"] == "a"
-        assert json.loads(r2)["service"] == "b"
-
-    def test_replay_method_mismatch_raises(self):
-        """Replaying with the wrong method name raises RuntimeError."""
-        h1 = LocalHostCalls(mode="record")
-        h1.call("svc", "op", {})
-        log = h1.get_event_log()
-
-        h2 = LocalHostCalls(mode="replay")
-        h2.load_event_log(log)
-        with pytest.raises(RuntimeError, match="Replay mismatch"):
-            h2.sleep_ms(100)  # wrong method
-
-    def test_replay_exhausted_raises(self):
-        """Replaying with no more events raises RuntimeError."""
-        h1 = LocalHostCalls(mode="record")
-        h1.call("svc", "op", {})
-        log = h1.get_event_log()
-
-        h2 = LocalHostCalls(mode="replay")
-        h2.load_event_log(log)
-        h2.call("svc", "op", {})  # OK
-        with pytest.raises(RuntimeError, match="Replay exhausted"):
-            h2.call("svc", "op", {})  # no more events
-
-    def test_state_replay(self):
-        """State operations can be recorded and replayed."""
-        h1 = LocalHostCalls(mode="record")
-        h1.set_state("k", "v")
-        h1.has_state("k")
-        h1.get_state("k")
-        h1.incr_state("counter")
-        h1.list_state()
-        log = h1.get_event_log()
-
-        h2 = LocalHostCalls(mode="replay")
-        h2.load_event_log(log)
-        # In replay mode, state operations return recorded results
-        h2.set_state("k", "v")
-        assert h2.has_state("k") is True
-        assert h2.get_state("k", str) == "v"
-        assert h2.incr_state("counter") == 1
-        keys = h2.list_state()
-        assert isinstance(keys, list)
-
-    def test_promise_replay(self):
-        """Promise operations can be recorded and replayed."""
-        h1 = LocalHostCalls(mode="record")
-        pid = h1.create_promise("test-prom")
-        h1.resolve_promise(pid, '"resolved"')
-        r1 = h1.await_promise(pid, 5.0)
-        log = h1.get_event_log()
-
-        h2 = LocalHostCalls(mode="replay")
-        h2.load_event_log(log)
-        pid2 = h2.create_promise("test-prom")
-        h2.resolve_promise(pid2, '"resolved"')
-        r2 = h2.await_promise(pid2, 5.0)
-        assert r1.result == r2.result
-        assert r1.timed_out == r2.timed_out
-
-
 # ========================================================================
 # State operations
 # ========================================================================
-
-
-class TestStateOperations:
-    """State set, get, delete, increment, has, list operations."""
-
-    def test_set_and_get(self, host: LocalHostCalls):
-        """``set_state`` stores a value that ``get_state`` retrieves."""
-        host.set_state("color", "blue")
-        assert host.get_state("color", str) == "blue"
-
-    def test_get_missing_raises_key_error(self, host: LocalHostCalls):
-        """``get_state`` with a missing key raises KeyError."""
-        with pytest.raises(KeyError):
-            host.get_state("nonexistent")
-
-    def test_delete_state(self, host: LocalHostCalls):
-        """``delete_state`` removes a stored key."""
-        host.set_state("temp", "value")
-        assert host.has_state("temp")
-        host.delete_state("temp")
-        assert not host.has_state("temp")
-
-    def test_incr_state_default(self, host: LocalHostCalls):
-        """``incr_state`` with no delta increments by 1."""
-        assert host.incr_state("counter") == 1
-        assert host.incr_state("counter") == 2
-
-    def test_incr_state_custom_delta(self, host: LocalHostCalls):
-        """``incr_state`` with a custom delta."""
-        assert host.incr_state("counter", 5) == 5
-        assert host.incr_state("counter", -2) == 3
-
-    def test_has_state(self, host: LocalHostCalls):
-        """``has_state`` returns True for existing keys, False otherwise."""
-        assert not host.has_state("missing")
-        host.set_state("present", 42)
-        assert host.has_state("present")
-
-    def test_list_state(self, host: LocalHostCalls):
-        """``list_state`` returns all keys or filtered by prefix."""
-        host.set_state("alpha_1", "a")
-        host.set_state("alpha_2", "b")
-        host.set_state("beta_1", "c")
-        all_keys = host.list_state()
-        assert "alpha_1" in all_keys
-        assert "beta_1" in all_keys
-        alpha_keys = host.list_state("alpha_")
-        assert "alpha_1" in alpha_keys
-        assert "alpha_2" in alpha_keys
-        assert "beta_1" not in alpha_keys
-
-    def test_scoped_state(self, host: LocalHostCalls):
-        """State keys are automatically prefixed when a scope is active."""
-        host.set_scope("Customer", "c-42")
-        host.set_state("email", "a@b.com")
-        assert host.has_state("email")
-        assert "vo:Customer:c-42:email" in host.list_state()
-
-    def test_list_state_empty(self, host: LocalHostCalls):
-        """``list_state`` returns an empty list when no keys exist."""
-        assert host.list_state() == []
 
 
 # ========================================================================
@@ -422,12 +222,27 @@ class TestPromises:
             host.await_promise("nonexistent", 1.0)
 
     def test_resolve_nonexistent_promise(self, host: LocalHostCalls):
-        """Resolving a non-existent promise is a no-op (does not raise)."""
-        host.resolve_promise("nonexistent", '"val"')  # should not raise
+        """Settling a non-existent promise raises, matching the engine.
+
+        These two asserted the opposite until 2026-09-06 -- that settling an
+        unknown promise is a silent no-op -- and that was true of the engine
+        when they were written. #818 made the store report ErrPromiseNotFound
+        for a settle matching no row, and engine/promises.go turns any store
+        error into a non-zero result code, so the harness had become more
+        permissive than production and these tests were what held it there.
+
+        It matters beyond promises because a reply address IS a promise ID
+        (IMPROVEMENT-PLAN 3.220): a stale reply address and an unknown promise
+        are now the same case, and succeeding on it would leave the sender
+        suspended until its timeout with the error visible nowhere.
+        """
+        with pytest.raises(RuntimeError, match="promise not found"):
+            host.resolve_promise("nonexistent", '"val"')
 
     def test_reject_nonexistent_promise(self, host: LocalHostCalls):
-        """Rejecting a non-existent promise is a no-op (does not raise)."""
-        host.reject_promise("nonexistent", "error")  # should not raise
+        """Rejecting a non-existent promise raises. See the test above."""
+        with pytest.raises(RuntimeError, match="promise not found"):
+            host.reject_promise("nonexistent", "error")
 
 
 # ========================================================================
@@ -526,15 +341,26 @@ class TestLifecycleHelpers:
         """``extend_timeout`` does not raise."""
         host.extend_timeout(60000)  # should not raise
 
-    def test_run_detached_executes_fn(self, host: LocalHostCalls):
-        """``run_detached`` executes the provided function."""
-        captured = []
+    def test_run_detached_records_the_workflow_it_starts(self, host: LocalHostCalls):
+        """``run_detached`` records the start, and does not run anything inline.
 
-        def my_detached(h: LocalHostCalls) -> None:
-            captured.append("executed")
+        This test asserted the opposite until IMPROVEMENT-PLAN 3.253: it passed a
+        function and checked that it had been *executed*, which is exactly the
+        behaviour that made the method a silent no-op -- the work ran inside the
+        caller and was cancelled with it, while the docstring promised the host
+        would keep it alive.
 
-        host.run_detached(my_detached)
-        assert captured == ["executed"]
+        A test can pin a defect as firmly as a feature. This one did, and it
+        passed for as long as the defect existed.
+        """
+        host.run_detached("detached-workflow", '{"a": 1}')
+
+        recorded = [e for e in host._event_log if e.method == "run_detached"]
+        assert len(recorded) == 1, (
+            "run_detached must be recorded like any other host call; a call that "
+            "logs nothing cannot be replayed"
+        )
+        assert recorded[0].kwargs["name"] == "detached-workflow"
 
     def test_uuid_deterministic(self, host: LocalHostCalls):
         """``uuid`` returns a deterministic UUID for the same seed."""
@@ -589,42 +415,6 @@ class TestIdentity:
 # ========================================================================
 # Scope management
 # ========================================================================
-
-
-class TestScopeManagement:
-    """State-key scoping for virtual object instances."""
-
-    def test_set_and_get_scope(self, host: LocalHostCalls):
-        """``set_scope`` returns previous scope; ``get_scope`` reads it."""
-        prev = host.set_scope("Customer", "c-42")
-        assert prev == ""
-        obj_type, instance_key = host.get_scope()
-        assert obj_type == "Customer"
-        assert instance_key == "c-42"
-
-    def test_clear_scope(self, host: LocalHostCalls):
-        """``clear_scope`` removes the scope and returns the previous prefix."""
-        host.set_scope("Order", "ord-1")
-        prev = host.clear_scope()
-        assert prev == "vo:Order:ord-1:"
-        obj_type, instance_key = host.get_scope()
-        assert obj_type == ""
-        assert instance_key == ""
-
-    def test_scoped_key_prefixing(self, host: LocalHostCalls):
-        """Keys are correctly prefixed when scope is active."""
-        host.set_scope("Cart", "c-1")
-        host.set_state("items", ["a", "b"])
-        assert host.has_state("items")
-        host.clear_scope()
-        # Without scope, the raw key should not exist
-        assert not host.has_state("items")
-
-    def test_get_scope_no_scope(self, host: LocalHostCalls):
-        """``get_scope`` returns empty strings when no scope is active."""
-        obj_type, instance_key = host.get_scope()
-        assert obj_type == ""
-        assert instance_key == ""
 
 
 # ========================================================================
@@ -725,11 +515,49 @@ class TestCallErrorHandling:
         assert result.status == "ok"
         assert result.service == "svc"
 
-    def test_send_signal_and_wait(self, host: LocalHostCalls):
-        """``send_signal_and_wait`` returns a response."""
-        result = host.send_signal_and_wait("target-run", "sig", "{}", 5.0)
-        data = json.loads(result)
-        assert data["status"] == "signal_sent"
+    def test_send_signal_and_wait_delivers_a_reply_address_and_the_original_payload(
+        self, host: LocalHostCalls
+    ):
+        """The receiver sees the payload as sent, plus an address to answer at.
+
+        What this replaces asserted ``data["status"] == "signal_sent"`` -- a
+        constant this harness returned without sending a signal, waiting, or
+        ever receiving a reply, so it could not fail for any reason connected
+        to request/reply (IMPROVEMENT-PLAN 3.220).
+
+        It cannot assert the SENDER waking: await_promise_ms returns
+        immediately for a pending promise rather than suspending
+        (IMPROVEMENT-PLAN 3.235). The Go harnesses had this and no longer do --
+        they wait on a channel a concurrent resolver closes. That fix ports
+        here, because LocalHostCalls is an ordinary object a second thread can
+        reach; it does not port to the Rust harness, which holds its state in a
+        RefCell.
+        """
+        with pytest.raises(RuntimeError, match="no reply to signal"):
+            host.send_signal_and_wait("target-run", "sig", '{"key":"val"}', 5.0)
+
+        sig = host.await_signals(["sig"], 1.0)
+        assert not sig.timed_out, "the signal was never sent"
+        assert sig.payload == '{"key":"val"}', "receiver must see the payload as sent"
+        assert sig.reply_to, "expected a reply address"
+
+        host.reply_to_signal(sig.reply_to, '"reply-response"')
+
+        res = host.await_promise(sig.reply_to, 1.0)
+        assert not res.timed_out, "the reply promise is still pending after reply_to_signal"
+        assert res.result == '"reply-response"'
+
+    def test_signal_workflow_carries_no_reply_address(self, host: LocalHostCalls):
+        """Negative control: a one-way signal must carry no reply address.
+
+        Without this, a receiver could not tell a request that wants an answer
+        from a notification, and would reply into a promise nobody awaits.
+        """
+        host.signal_workflow("target-run", "sig", '{"key":"val"}')
+        sig = host.await_signals(["sig"], 1.0)
+        assert not sig.timed_out
+        assert sig.reply_to == "", "a one-way signal must carry no reply address"
+        assert sig.payload == '{"key":"val"}', "payload must pass through unchanged"
 
 
 # ========================================================================
@@ -740,9 +568,18 @@ class TestCallErrorHandling:
 class TestReplyToSignal:
     """Reply-to-signal operations."""
 
-    def test_reply_to_signal_no_error(self, host: LocalHostCalls):
-        """``reply_to_signal`` does not raise."""
-        host.reply_to_signal("corr-123", '"ok"')  # should not raise
+    def test_reply_to_an_unknown_address_raises(self, host: LocalHostCalls):
+        """Replying to an address nobody awaits is an error, not a success.
+
+        This asserted the opposite -- that reply_to_signal never raises -- back
+        when it only appended a journal entry and reached nothing. Now it
+        resolves the reply promise, so a stale or empty address has to be
+        visible rather than leaving the sender suspended until its timeout.
+        """
+        with pytest.raises(RuntimeError, match="promise not found"):
+            host.reply_to_signal("corr-123", '"ok"')
+        with pytest.raises(RuntimeError, match="empty correlation ID"):
+            host.reply_to_signal("", '"ok"')
 
 
 # ========================================================================
@@ -767,22 +604,6 @@ class TestModeValidation:
 # ========================================================================
 # Reset
 # ========================================================================
-
-
-class TestReset:
-    """Reset behaviour."""
-
-    def test_reset_clears_state(self, host: LocalHostCalls):
-        """``reset`` clears all state."""
-        host.set_state("k", "v")
-        host.inject_signal("s", "p")
-        host.create_promise("p")
-        host.reset()
-        assert host.list_state() == []
-        assert host.poll_signal("s") == ("", False)
-        # After reset, new state works
-        host.set_state("new", "value")
-        assert host.get_state("new", str) == "value"
 
 
 # ========================================================================

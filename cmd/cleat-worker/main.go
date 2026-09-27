@@ -17,15 +17,18 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"log/slog"
 	"net/http"
-	_ "net/http/pprof"
+	_ "net/http/pprof" //nolint:gosec // G108: registers /debug/pprof on DefaultServeMux, which this worker never serves. The API listener builds its own http.NewServeMux; pprof gets a separate opt-in listener behind --pprof-addr, empty by default. See the comment at the pprof server below.
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -47,7 +50,9 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/internal/tenantctx"
 	"github.com/cleat-team/cleat/migration"
+	"github.com/cleat-team/cleat/migrations"
 	"github.com/cleat-team/cleat/monitoring/prometheus"
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/google/uuid"
@@ -58,12 +63,348 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 
 	// Plugins
+	// Every bundled plugin, blank-imported so its init() registers it.
+	//
+	// A plugin registers via an init() in its own package, which runs only if
+	// the package is LINKED. --plugin-config supplies configuration and cannot
+	// change that, so this block is the plugin feature set of the binary --
+	// see IMPROVEMENT-PLAN.md 3.315, which found that only llm was here while
+	// event-triggers, event-store, webhook-ingest and kafka-connect were built,
+	// documented as features, and reachable from nothing. `cleat-worker
+	// --list-plugins` prints what this block yields.
+	//
+	// Adding one here is not free: plugin.RunMigrations is FATAL at boot
+	// (cmd/cleat-worker/main.go, os.Exit(1)), so a plugin whose migration
+	// cannot run stops the worker starting.
+	_ "github.com/cleat-team/cleat/plugins/auditlog"
+	_ "github.com/cleat-team/cleat/plugins/blobstore"
+	_ "github.com/cleat-team/cleat/plugins/dag"
+	_ "github.com/cleat-team/cleat/plugins/datadogexport"
+	_ "github.com/cleat-team/cleat/plugins/email"
+	_ "github.com/cleat-team/cleat/plugins/eventstore"
+	_ "github.com/cleat-team/cleat/plugins/eventtriggers"
+	_ "github.com/cleat-team/cleat/plugins/featureflags"
+	_ "github.com/cleat-team/cleat/plugins/jobqueue"
+	_ "github.com/cleat-team/cleat/plugins/kafkaconnect"
+	_ "github.com/cleat-team/cleat/plugins/kvstore"
 	_ "github.com/cleat-team/cleat/plugins/llm"
-	// _ "github.com/cleat-team/cleat/plugins/pgvector"  // requires pgvector extension
+	_ "github.com/cleat-team/cleat/plugins/notifications"
+	_ "github.com/cleat-team/cleat/plugins/oauthprovider"
+	_ "github.com/cleat-team/cleat/plugins/pagerdutyalert"
+	_ "github.com/cleat-team/cleat/plugins/ratelimiter"
+	_ "github.com/cleat-team/cleat/plugins/scheduledbackup"
+	_ "github.com/cleat-team/cleat/plugins/scheduler"
+	_ "github.com/cleat-team/cleat/plugins/slacknotify"
+	_ "github.com/cleat-team/cleat/plugins/tenantquota"
+	_ "github.com/cleat-team/cleat/plugins/webhookingest"
+	//
+	// pgvector is deliberately NOT here, and the reason is stronger than the
+	// "requires pgvector extension" note it replaces. Its Migrations() creates
+	// an `embedding vector(1536)` column, which is the FATAL path -- so on any
+	// PostgreSQL without the vector extension available, linking it would stop
+	// cleat-worker booting. Its Init() does run `CREATE EXTENSION IF NOT
+	// EXISTS vector`, and an Init failure is non-fatal (InitAll marks the
+	// plugin unhealthy and continues), but that only helps on a server where
+	// the extension is installable. Linking pgvector needs its migration to
+	// degrade instead, which is a change to the plugin, not to this list.
+	// _ "github.com/cleat-team/cleat/plugins/pgvector"
 )
+
+// migrationsOverrideFS returns the embedded migration tree, unless
+// --migrations-dir names a disk directory to read from instead -- in which
+// case it returns nil, and Runner.WithFS(nil) is a no-op, leaving the
+// NewRunner-supplied disk directory in effect.
+//
+// A PLAIN VALUE, NOT A RUNNER-BUILDING HELPER: an earlier version of this
+// returned a *migration.Runner directly, which moved the .WithSchema(...)
+// call at each call site below into a separate function -- and
+// TestEveryMigrationRunnerGetsTheConfiguredSchema (cleat#1287) requires
+// .WithSchema to be chained onto the SAME migration.NewRunner(...)
+// expression, not merely reachable from it. Keeping NewRunner...WithSchema
+// as one unbroken chain at each site, with only the FS choice factored out,
+// keeps that guard meaningful instead of poking a hole in it.
+func migrationsOverrideFS() fs.FS {
+	if *migrationsDir != "" {
+		return nil
+	}
+	return migrations.FS
+}
+
+// startPluginWorkflow implements plugin.Environment.StartWorkflow for the
+// worker's own store. Extracted out of the pluginEnv literal in main() so it
+// is unit-testable against a mock engine.WorkflowStore without a live
+// server -- the closure it replaced had no test coverage at all.
+//
+// REJECTED, NOT DEFAULTED. Both req.IdempotencyKey and req.TenantID used to
+// be hardcoded at this seam -- the key as `""` and the tenant as
+// engine.DefaultTenantUUID -- which is why no plugin start was retry-safe
+// (cleat#1555) or correctly attributed (cleat#1580). Substituting a default
+// for a missing value would put both failures back, silently, which is the
+// whole reason the fields are required.
+//
+// req.EntryPoint is flat-merged into req.Input via plugin.MergeEntryPoint --
+// the same helper handleStartWorkflow (server.go) uses for the public start
+// API's entry_point field (cleat#2108) -- so this is the one place that
+// shape is implemented, not a second copy. cleat#2114: before this, the
+// event-triggers plugin read a subscription's entry_point back out of
+// event_subscriptions and never used it, so every event-triggered start
+// resolved its entry point implicitly no matter what the subscription
+// named. req.EntryPoint == "" is a no-op, so a caller that never sets it
+// keeps today's implicit resolution.
+func startPluginWorkflow(ctx context.Context, store engine.WorkflowStore, req plugin.StartRequest) (string, error) {
+	if req.IdempotencyKey == "" {
+		return "", fmt.Errorf("start workflow %s: idempotency key is required; "+
+			"derive one from the durable row being acted on", req.DefName)
+	}
+	if req.TenantID == "" {
+		return "", fmt.Errorf("start workflow %s: tenant id is required", req.DefName)
+	}
+
+	// store IS THE PROCESS-WIDE STORE -- opened once, for the default
+	// tenant, for the worker's whole lifetime (see main()). req.TenantID can
+	// legitimately name any tenant: every non-test caller derives it from a
+	// durable row it already owns (a schedule, an event subscription, a job
+	// queue entry), each stamped with its owning tenant under correctly
+	// scoped RLS when that row was created, so req.TenantID itself is
+	// trustworthy. The store is not scoped to it, though, and on Postgres
+	// and SQL Server tenant scoping is a property of the SESSION, not a
+	// query parameter: ListVersions and StartNewRun both decide what they
+	// can see and write from the store's own configured tenant. Without
+	// re-scoping, ListVersions silently answers about the DEFAULT tenant's
+	// deployed versions rather than req.TenantID's, and StartNewRun either
+	// gets rejected outright (Postgres: cleat#2187) or succeeds scoped to
+	// the wrong session (SQL Server: cleat#2204, cleat#2205 will make that a
+	// rejection too, so this must not rely on it staying permissive).
+	scoped := scopeToTenant(store, req.TenantID)
+
+	versions, err := scoped.ListVersions(ctx, req.DefName)
+	if err != nil {
+		return "", fmt.Errorf("start workflow %s: %w", req.DefName, err)
+	}
+	if len(versions) == 0 {
+		return "", fmt.Errorf("start workflow %s: no versions deployed", req.DefName)
+	}
+	in, err := plugin.MergeEntryPoint(req.Input, req.EntryPoint)
+	if err != nil {
+		return "", fmt.Errorf("start workflow %s: %w", req.DefName, err)
+	}
+	runID, _, err := scoped.StartNewRun(ctx, "", req.DefName, versions[0], in,
+		req.IdempotencyKey, req.TenantID, 0)
+	return runID, err
+}
+
+// pluginInitSeverity is how main()'s per-plugin Init loop should react to an
+// error Init returned.
+type pluginInitSeverity int
+
+const (
+	// pluginInitDisabledQuiet is plugin.ErrNotConfigured: the plugin is
+	// disabled, and it is unremarkable enough to log at INFO.
+	pluginInitDisabledQuiet pluginInitSeverity = iota
+	// pluginInitFatal is plugin.ErrFatalMisconfiguration: the whole worker
+	// refuses to start, not just this one plugin.
+	pluginInitFatal
+	// pluginInitDisabledLoud is anything else: the plugin is disabled, and
+	// it is unexpected enough to log at ERROR.
+	pluginInitDisabledLoud
+)
+
+// classifyPluginInitError decides pluginInitSeverity for an error a plugin's
+// Init returned. Extracted out of the switch in main()'s Init loop -- rather
+// than left inline -- so the FATAL case has a call site a test can exercise
+// directly, without going through Init and without actually calling os.Exit.
+//
+// Untested until cleat-review's #2202 re-check: mutating the inline switch's
+// `case errors.Is(err, plugin.ErrFatalMisconfiguration):` to `case false:`
+// left every test green, because nothing called the switch with a fatal
+// error and asserted on the OUTCOME -- the mutated build still ran, and the
+// email test at the time only asserted `errors.Is(err,
+// plugin.ErrFatalMisconfiguration)` on Init's return value, never on what
+// main() does with it. Under that mutation the fatal case falls to the
+// default arm: the plugin merely disables (ERROR log, no os.Exit), so a
+// worker with a leftover sendgrid_api_key and no email_enabled BOOTS with
+// email off -- exactly the silent regression this whole GAP2 mechanism
+// exists to prevent, and exactly what the CHANGELOG's upgrade note says
+// cannot happen. TestClassifyPluginInitError's fatal case is what catches
+// it: it calls this function directly with an error wrapping
+// plugin.ErrFatalMisconfiguration and asserts pluginInitFatal, which the
+// mutation turns into pluginInitDisabledLoud.
+func classifyPluginInitError(err error) pluginInitSeverity {
+	switch {
+	case errors.Is(err, plugin.ErrNotConfigured):
+		return pluginInitDisabledQuiet
+	case errors.Is(err, plugin.ErrFatalMisconfiguration):
+		return pluginInitFatal
+	default:
+		return pluginInitDisabledLoud
+	}
+}
+
+// deploymentSecretsForPlugin returns the plugin.DeploymentSecrets value a
+// plugin's Environment should carry: a scoped adapter refusing any name
+// outside its own declared prefix if it implements
+// plugin.HasDeploymentSecretPrefix, else nil.
+//
+// Default-deny, not the unscoped adapter every plugin used to share
+// regardless of whether it read deployment secrets at all -- cleat-review's
+// #2202 re-check GAP 2, found after the first version of
+// plugin.HasDeploymentSecretPrefix left every non-declaring plugin (all but
+// email and llm) able to read email's and llm's secrets through the one
+// adapter they all still received.
+//
+// Extracted to its own function -- rather than left inline in main()'s
+// per-plugin Init loop -- so it has a call site a test can exercise directly
+// against the REAL registered plugins (plugin.Discover()), per GAP 3: the
+// wiring itself was untested, and deleting this decision (or either
+// email's/llm's DeploymentSecretPrefix method) left every test green.
+// TestDeploymentSecretsForPluginIsScopedByDeclaredPrefix and
+// TestDeploymentSecretsForPluginDefaultsToNilForAPluginThatDeclaresNoPrefix
+// (a_deployment_secrets_wiring_test.go) exercise this function; a third test
+// there, TestMainWiresDeploymentSecretsForPlugin, asserts main() still calls
+// it -- extracting the DECISION into a function a test can call does not by
+// itself prove anything calls that function.
+func deploymentSecretsForPlugin(p plugin.Plugin, unscoped plugin.DeploymentSecrets) plugin.DeploymentSecrets {
+	if dsp, ok := p.(plugin.HasDeploymentSecretPrefix); ok {
+		return engine.NewScopedPluginDeploymentSecrets(unscoped, dsp.DeploymentSecretPrefix())
+	}
+	return nil
+}
+
+// scopeToTenant returns a copy of store re-scoped to tenantID, for the
+// dialects that support cheap, no-I/O per-call re-scoping (Postgres, SQL
+// Server, and a sharded Postgres store, via each store's own WithTenant).
+// WithTenant is deliberately not part of the engine.WorkflowStore interface
+// -- see PostgresStore.StartNewRunWithConcurrencyKey's doc comment for why:
+// it would touch every implementation and every test double for a
+// capability not all of them have.
+//
+// MySQL has no equivalent, and this is not an oversight: tenant isolation
+// there is which PHYSICAL DATABASE a connection targets, fixed when that
+// pool was opened, not a session-level value a later call can change --
+// and per tiers.yaml's D1 decision, MySQL is single-tenant only. A store's
+// own tenant is returned unchanged, and startPluginWorkflow above is
+// expected to fail for any req.TenantID other than the store's own on this
+// dialect; that is what TestStartPluginWorkflow_MySQLIsSingleTenantOnly
+// pins, not a gap this function is supposed to close.
+func scopeToTenant(store engine.WorkflowStore, tenantID string) engine.WorkflowStore {
+	switch s := store.(type) {
+	case *engine.PostgresStore:
+		return s.WithTenant(tenantID)
+	case *engine.MSSQLStore:
+		return s.WithTenant(tenantID)
+	case *engine.ShardedStore:
+		return s.WithTenant(tenantID)
+	case *engine.MySQLStore:
+		// No per-call scoping exists or is needed -- see the doc comment above.
+		return s
+	default:
+		// A store type this function does not recognize. Returning it
+		// unscoped without saying so would repeat cleat#2187/#2204 for
+		// whatever dialect or wrapper this is the first time anyone adds
+		// one -- log it so the gap is visible before an incident finds it.
+		slog.Default().Warn("scopeToTenant: unrecognized store type, returning it unscoped",
+			"type", fmt.Sprintf("%T", store), "tenant_id", tenantID)
+		return store
+	}
+}
+
+// signalPluginWorkflow delivers a signal from a plugin to a specific
+// workflow run, scoped to the tenant workflowID's own run belongs to.
+//
+// store is the same process-wide, default-tenant store startPluginWorkflow
+// above re-scopes per call -- see its doc comment for why that matters on
+// Postgres and SQL Server. The tenant comes from ctx rather than a request
+// field: every real caller already carries one there. webhookingest's HTTP
+// handler and retry loop, and eventtriggers' publish path, each wrap ctx
+// with plugin.ForTenant before calling env.SignalWorkflow. Without this,
+// DeliverSignal ran on the default tenant's session regardless of which
+// tenant's workflow was named -- on Postgres and SQL Server that wrote the
+// signal row under the default tenant and updated zero rows of the actual
+// target, silently, so webhookingest and eventtriggers both marked the
+// triggering event completed with the signal never delivered (cleat#2209).
+//
+// No tenant in ctx is left unscoped rather than treated as an error -- the
+// same pass-through convention tenantctx.From's other callers in this
+// package use (see dbServiceCaller.resolveSecrets,
+// hostPluginRegistryAdapter.withSecrets): a caller with no tenant to give
+// has no wrong tenant to guard against either, and DeliverSignal now fails
+// loudly on its own if the workflow it names cannot be found under
+// whatever session it ran under.
+func signalPluginWorkflow(ctx context.Context, store engine.WorkflowStore, workflowID, signalName, payload string) error {
+	scoped := store
+	if tid, ok := tenantctx.From(ctx); ok {
+		scoped = scopeToTenant(store, tid.String())
+	}
+	if err := scoped.DeliverSignal(ctx, workflowID, signalName, payload); err != nil {
+		if errors.Is(err, engine.ErrWorkflowNotFound) {
+			return plugin.ErrWorkflowNotFound
+		}
+		return err
+	}
+	return nil
+}
+
+// signalPluginWorkflowWithAuth is signalPluginWorkflow plus the
+// --require-signal-auth check: pluginName must appear (or "*" must appear)
+// in the target workflow's own allowed_signals. Scoped once, so the
+// authorization check and the delivery it gates read the SAME tenant's row
+// -- checking one tenant's allowed_signals and then delivering under
+// another's would make the check meaningless, not merely wrong (cleat#2209:
+// GetAllowedSignalCallers ran unscoped here exactly like DeliverSignal did).
+//
+// GetAllowedSignalCallers's own ErrWorkflowNotFound is translated the same
+// way DeliverSignal's is, below. Before this fix, a missing workflow read
+// back as an empty caller list -- GetAllowedSignalCallers returned (nil,
+// nil) for it -- so this function reported the ordinary "signal auth
+// denied" for a target that did not exist, while signalPluginWorkflow (auth
+// off) reported not-found for the identical id. The two functions
+// disagreeing was itself a leak: the shape of the error told a caller
+// whether --require-signal-auth was on. And unlike DeliverSignal's own
+// not-found case, cleat#2218 never touched this one -- it only reached
+// deliverSignalTx, not GetAllowedSignalCallers -- so cleat#2213's awaiter
+// leak was live here, continuously, the whole time: signalAwaiters
+// unregisters on ErrWorkflowNotFound but not on an ordinary error, and this
+// path returned an ordinary "signal auth denied" for a target that was
+// never there to be denied.
+func signalPluginWorkflowWithAuth(ctx context.Context, store engine.WorkflowStore, workflowID, signalName, payload, pluginName string) error {
+	scoped := store
+	if tid, ok := tenantctx.From(ctx); ok {
+		scoped = scopeToTenant(store, tid.String())
+	}
+	callers, err := scoped.GetAllowedSignalCallers(ctx, workflowID)
+	if err != nil {
+		if errors.Is(err, engine.ErrWorkflowNotFound) {
+			return plugin.ErrWorkflowNotFound
+		}
+		return err
+	}
+	if !signalCallerAllowed(callers, pluginName) {
+		return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", pluginName, workflowID)
+	}
+	if err := scoped.DeliverSignal(ctx, workflowID, signalName, payload); err != nil {
+		if errors.Is(err, engine.ErrWorkflowNotFound) {
+			return plugin.ErrWorkflowNotFound
+		}
+		return err
+	}
+	return nil
+}
 
 func main() {
 	flag.Parse()
+
+	if err := validateReclaimTimeout(*reclaimTimeout, *heartbeatInterval); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := validateHeartbeat(*heartbeatInterval); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	if err := validateHeartbeatMaxConnections(*heartbeatMaxConnections); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 
 	// Before anything else, and before any database is needed: --verify-backend
 	// answers "does this binary have the wasmtime backend?" and exits.
@@ -71,10 +412,17 @@ func main() {
 		os.Exit(runVerifyBackend(os.Stdout))
 	}
 
+	// Likewise --list-plugins: a plugin is registered by an init() in a linked
+	// package, so this answers "what does this binary actually have" without a
+	// database, a config file, or reading the source. See IMPROVEMENT-PLAN 3.315.
+	if *listPlugins {
+		os.Exit(runListPlugins(os.Stdout))
+	}
+
 	// Apply CLEAT_CHILD_BINDING_OVERRIDE env var as fallback when the flag is not set.
 	applyChildBindingOverrideEnv()
 
-	// Fall back to DATABASE_URL env var if --db is empty.
+	// Fall back to CLEAT_DATABASE_URL env var if --db is empty.
 	resolveDBURL()
 
 	// Set WASM output buffer size before any Runtime is created.
@@ -103,6 +451,293 @@ func main() {
 		logger.InfoContext(context.Background(), "checksum verification enabled", "worker_id", workerID)
 	}
 
+	// TENANT ISOLATION IS RESOLVED FIRST, BEFORE ANY ONE-SHOT MODE. cleat#1307.
+	//
+	// The repo owner's decision was refuse-to-boot, and "boot" includes the
+	// administrative modes below. --create-tenant PROVISIONS the tenant's login
+	// role when role isolation is configured, so it needs the derivation key --
+	// and a --create-tenant that silently created a tenant with no role, under
+	// a configuration asking for per-tenant credentials, would leave a tenant
+	// that no worker in that deployment can serve: TenantPools.For refuses
+	// rather than falling back to the owner pool.
+	//
+	// Before any connection is opened, so a bad configuration costs nothing.
+	tenantMode, tenantSecret, tiErr := resolveTenantIsolation(
+		*tenantIsolation, *tenantRoleSecretFile, *driver)
+	if tiErr != nil {
+		// Surfaced as-is: resolveTenantIsolation's errors name the flag, the
+		// value and what to do, and this layer cannot improve on that.
+		logger.ErrorContext(context.Background(), "tenant isolation configuration refused",
+			"worker_id", workerID, "error", tiErr)
+		os.Exit(1)
+	}
+
+	// Handle --uninstall-plugin (standalone mode: reverse migrations and exit).
+	//
+	// cleat#1290. Migration.Down is populated by 18 plugins across 29 sites and
+	// was read by nothing; this is its caller. Placed before --create-tenant
+	// only because both are one-shot modes and this one is the most
+	// destructive, so a reader scanning for "what can this binary do besides
+	// run" meets it first.
+	//
+	// cleat-worker rather than `cleat plugin uninstall` because this is the
+	// only binary that links the plugin registry -- plugin.Discover() returns
+	// nothing in the others -- and a plugin's Down SQL lives in its compiled
+	// Go, not in the database.
+	if *uninstallPlugin != "" {
+		dbURL := *dbURL
+		if dbURL == "" {
+			dbURL = os.Getenv("CLEAT_DATABASE_URL")
+		}
+		if dbURL == "" {
+			logger.ErrorContext(context.Background(), "--db or CLEAT_DATABASE_URL required for --uninstall-plugin", "worker_id", workerID)
+			os.Exit(1)
+		}
+		udb, err := sql.Open(sqlDriverName(*driver), dsnWithSchema(dbURL, *schemaName, *driver))
+		if err != nil {
+			logger.ErrorContext(context.Background(), "failed to connect to database", "worker_id", workerID, "error", err)
+			os.Exit(1)
+		}
+		defer udb.Close()
+
+		all, dErr := plugin.Discover()
+		if dErr != nil {
+			logger.ErrorContext(context.Background(), "failed to discover plugins", "worker_id", workerID, "error", dErr)
+			os.Exit(1)
+		}
+		var target *plugin.LoadedPlugin
+		names := make([]string, 0, len(all))
+		for _, lp := range all {
+			names = append(names, lp.Plugin.Info().Name)
+			if lp.Plugin.Info().Name == *uninstallPlugin {
+				target = lp
+			}
+		}
+		if target == nil {
+			// The available set is printed because a typo is the likeliest
+			// reason to land here, and "not found" alone does not help.
+			logger.ErrorContext(context.Background(), "no such plugin", "worker_id", workerID,
+				"requested", *uninstallPlugin, "available", strings.Join(names, ", "))
+			os.Exit(1)
+		}
+
+		// cleat#2306. Measured 2026-09-25: 7 of 18 plugins' uninstall broken on
+		// MySQL, 17 of 18 on SQL Server, and a failed reversal is not a no-op --
+		// it can leave the schema in neither shape, and on SQL Server that has
+		// already left a database PERMANENTLY unmigratable (notifications:
+		// "Cannot find the object webhook_delivery (4902)"). Refuse before the
+		// dry-run report too: a dry run that reads clean says nothing about
+		// whether the real Down SQL does, and printing it first would read as
+		// reassurance this plugin has not earned on this dialect.
+		if proven := plugin.UninstallProvenOnDialect(*uninstallPlugin, plugin.Dialect(*driver)); !proven {
+			verified := plugin.ProvenPluginNamesForDialect(plugin.Dialect(*driver))
+			verifiedDesc := "none yet"
+			if len(verified) > 0 {
+				verifiedDesc = strings.Join(verified, ", ")
+			}
+			logger.ErrorContext(context.Background(), "uninstall not verified on this dialect", "worker_id", workerID,
+				"plugin", *uninstallPlugin, "dialect", *driver, "verified_on_this_dialect", verified)
+			fmt.Fprintf(os.Stderr, "\nuninstall is supported on PostgreSQL; on %s it's verified only for: %s\n\n"+
+				"%q has no end-to-end test proving its Down chain reverses cleanly on %s (cleat#2306), "+
+				"and a broken reversal here is not a no-op -- it can leave the schema in neither shape, "+
+				"and on SQL Server that has already left a database permanently unmigratable. Nothing "+
+				"has been changed. Add a test in the shape of "+
+				"plugins/scheduledbackup/a_v4_down_keeps_uninstall_working_test.go "+
+				"(TestUninstallSchedulerBackupOnEveryDialect) and list the plugin in "+
+				"plugin.provenPluginDialects to lift this refusal.\n\n",
+				*driver, verifiedDesc, *uninstallPlugin, *driver)
+			os.Exit(1)
+		}
+
+		if *uninstallDryRun {
+			// Reports the DECISION without executing, which is the whole point:
+			// RunDownMigrations refuses before touching anything, so a dry run
+			// that reaches the same refusal tells an operator the real answer.
+			fmt.Printf("\n=== DRY RUN: %s ===\n", *uninstallPlugin)
+			for _, m := range target.Plugin.(plugin.HasMigrations).Migrations() {
+				state := "no Down declared"
+				if strings.TrimSpace(m.Down) != "" {
+					state = "reversible"
+				}
+				fmt.Printf("  v%-4d %s\n", m.Version, state)
+			}
+			fmt.Printf("\nNothing was changed. Re-run without --uninstall-dry-run to reverse.\n\n")
+			os.Exit(0)
+		}
+
+		res, uErr := plugin.RunDownMigrations(context.Background(), udb,
+			plugin.Dialect(*driver), target, all)
+		if uErr != nil {
+			// Surfaced as-is. RunDownMigrations' errors name which version or
+			// which colliding plugin stopped it, and say that nothing changed;
+			// this layer cannot improve on that.
+			logger.ErrorContext(context.Background(), "uninstall refused", "worker_id", workerID,
+				"plugin", *uninstallPlugin, "error", uErr)
+			os.Exit(1)
+		}
+		fmt.Printf("\n=== UNINSTALLED %s ===\n", *uninstallPlugin)
+		fmt.Printf("Versions reversed (newest first): %v\n", res.Reversed)
+		if len(res.TenantScopedTables) > 0 {
+			fmt.Printf("Tables those migrations declared: %s\n", strings.Join(res.TenantScopedTables, ", "))
+		}
+		fmt.Printf("\n")
+		os.Exit(0)
+	}
+
+	// Handle --create-org (standalone mode: create an org and exit).
+	//
+	// Placed before --create-tenant for the same reason that flag is placed
+	// before --generate-api-key: admin.tenants.org_id REFERENCES
+	// admin.orgs(org_id) and is NOT NULL, so a tenant cannot be created before
+	// its org exists. cleat#1898.
+	if *createOrgNamed != "" {
+		dbURL := *dbURL
+		if dbURL == "" {
+			dbURL = os.Getenv("CLEAT_DATABASE_URL")
+		}
+		if dbURL == "" {
+			logger.ErrorContext(context.Background(), "--db or CLEAT_DATABASE_URL required for --create-org", "worker_id", workerID)
+			os.Exit(1)
+		}
+		gdb, err := sql.Open(sqlDriverName(*driver), dbURL)
+		if err != nil {
+			logger.ErrorContext(context.Background(), "failed to connect to database — check the --db flag or CLEAT_DATABASE_URL environment variable", "worker_id", workerID, "error", err)
+			os.Exit(1)
+		}
+		defer gdb.Close()
+		store, tsErr := auth.NewTenantStoreForDialect(gdb, *driver)
+		if tsErr != nil {
+			logger.ErrorContext(context.Background(), "cannot create an org", "worker_id", workerID, "error", tsErr)
+			os.Exit(1)
+		}
+		// auth.CreateOrg refuses on MySQL and SQL Server for the same reason
+		// CreateTenant does -- surfaced as-is, naming the dialect.
+		oid, cErr := store.CreateOrg(context.Background(), *createOrgNamed)
+		if cErr != nil {
+			logger.ErrorContext(context.Background(), "failed to create org", "worker_id", workerID, "name", *createOrgNamed, "error", cErr)
+			os.Exit(1)
+		}
+		fmt.Printf("\n")
+		fmt.Printf("=== CLEAT ORG ===\n")
+		fmt.Printf("Org ID: %s\n", oid)
+		fmt.Printf("Name:   %s\n", *createOrgNamed)
+		fmt.Printf("\n")
+		fmt.Printf("Create a tenant under it with:\n")
+		fmt.Printf("  cleat-worker --create-tenant <name> --org %s --db \"$DSN\"\n", oid)
+		fmt.Printf("\n")
+		os.Exit(0)
+	}
+
+	// Handle --create-tenant (standalone mode: create a tenant and exit).
+	//
+	// Placed before --generate-api-key because that is the order they are used
+	// in: a key cannot be minted for a tenant that does not exist --
+	// admin.tenant_api_keys.tenant_id REFERENCES admin.tenants(tenant_id) -- and
+	// before this flag there was no command that created one. See cleat#1114.
+	if *createTenantNamed != "" {
+		// cleat#1898: admin.tenants.org_id is NOT NULL and immutable once set.
+		// No implicit default -- the operator names the org, the same way
+		// they already name the tenant. A missing --org is refused here,
+		// before any connection is opened, rather than left to surface as a
+		// database NOT NULL violation that names a column instead of a flag.
+		if *tenantOrgID == "" {
+			logger.ErrorContext(context.Background(), "--org is required with --create-tenant", "worker_id", workerID,
+				"hint", "create one first with --create-org <name>")
+			os.Exit(1)
+		}
+		orgUUID, uErr := uuid.Parse(*tenantOrgID)
+		if uErr != nil {
+			logger.ErrorContext(context.Background(), "--org is not a valid UUID", "worker_id", workerID, "org", *tenantOrgID, "error", uErr)
+			os.Exit(1)
+		}
+		dbURL := *dbURL
+		if dbURL == "" {
+			dbURL = os.Getenv("CLEAT_DATABASE_URL")
+		}
+		if dbURL == "" {
+			logger.ErrorContext(context.Background(), "--db or CLEAT_DATABASE_URL required for --create-tenant", "worker_id", workerID)
+			os.Exit(1)
+		}
+		gdb, err := sql.Open(sqlDriverName(*driver), dbURL)
+		if err != nil {
+			logger.ErrorContext(context.Background(), "failed to connect to database — check the --db flag or CLEAT_DATABASE_URL environment variable", "worker_id", workerID, "error", err)
+			os.Exit(1)
+		}
+		defer gdb.Close()
+		store, tsErr := auth.NewTenantStoreForDialect(gdb, *driver)
+		if tsErr != nil {
+			logger.ErrorContext(context.Background(), "cannot create a tenant", "worker_id", workerID, "error", tsErr)
+			os.Exit(1)
+		}
+		display := *createTenantDisplayName
+		if display == "" {
+			display = *createTenantNamed
+		}
+		// auth.CreateTenant refuses on MySQL and SQL Server rather than emitting
+		// PostgreSQL SQL at them. Surfaced as-is: the message names the dialect,
+		// which is more useful than anything this layer could add.
+		tid, cErr := store.CreateTenant(context.Background(), *createTenantNamed, display, orgUUID)
+		if cErr != nil {
+			logger.ErrorContext(context.Background(), "failed to create tenant", "worker_id", workerID, "name", *createTenantNamed, "error", cErr)
+			os.Exit(1)
+		}
+		// PROVISION THE ROLE, when role isolation is configured. cleat#1307.
+		//
+		// admin.create_tenant_role creates the tenant's PostgreSQL login role,
+		// its tenant_<uuid> schema, and the cleat.tenant_id role default that
+		// makes the connection self-identifying. Nothing called it: it was
+		// reachable only from 002_defaults.sql's backfill, which runs at
+		// migration time and cannot know a tenant created afterwards.
+		//
+		// HERE rather than inside auth.CreateTenant, because the password is
+		// DERIVED from the worker's key and auth/ has no access to it -- and
+		// because admin.tenant_roles.tenant_id REFERENCES admin.tenants, so the
+		// role can only be provisioned once the tenant row exists.
+		//
+		// Only under --tenant-isolation=role. Creating login roles on a
+		// deployment that does not use them would leave credentials nobody
+		// asked for.
+		if tenantMode == isolationRole {
+			password, pErr := plugin.TenantRolePassword(tenantSecret, tid.String())
+			if pErr != nil {
+				logger.ErrorContext(context.Background(), "failed to derive the tenant role password",
+					"worker_id", workerID, "tenant_id", tid, "error", pErr)
+				os.Exit(1)
+			}
+			var roleName sql.NullString
+			if rErr := gdb.QueryRowContext(context.Background(),
+				`SELECT admin.create_tenant_role($1::uuid, $2)`, tid, password).Scan(&roleName); rErr != nil {
+				logger.ErrorContext(context.Background(), "failed to provision the tenant role",
+					"worker_id", workerID, "tenant_id", tid, "error", rErr)
+				os.Exit(1)
+			}
+			if !roleName.Valid {
+				// create_tenant_role RAISEs a warning and returns NULL when the
+				// connection cannot CREATE ROLE. Fatal here rather than a
+				// warning: the operator asked for role isolation, and a tenant
+				// without a role cannot be served under it -- TenantPools.For
+				// refuses rather than falling back to the owner pool.
+				logger.ErrorContext(context.Background(),
+					"tenant role was not created: this connection cannot CREATE ROLE",
+					"worker_id", workerID, "tenant_id", tid,
+					"hint", "--tenant-isolation=role needs a superuser or CREATEROLE connection")
+				os.Exit(1)
+			}
+			logger.InfoContext(context.Background(), "provisioned tenant role",
+				"worker_id", workerID, "tenant_id", tid, "role", roleName.String)
+		}
+
+		fmt.Printf("\n")
+		fmt.Printf("=== CLEAT TENANT ===\n")
+		fmt.Printf("Tenant ID: %s\n", tid)
+		fmt.Printf("Name:      %s\n", *createTenantNamed)
+		fmt.Printf("\n")
+		fmt.Printf("Mint a key for it with:\n")
+		fmt.Printf("  cleat-worker --generate-api-key %s --db \"$DSN\"\n", tid)
+		fmt.Printf("\n")
+		os.Exit(0)
+	}
+
 	// Handle --generate-api-key (standalone mode: generate key and exit).
 	if *generateAPIKeyFor != "" {
 		tenantID, err := uuid.Parse(*generateAPIKeyFor)
@@ -112,22 +747,26 @@ func main() {
 		}
 		dbURL := *dbURL
 		if dbURL == "" {
-			dbURL = os.Getenv("DATABASE_URL")
+			dbURL = os.Getenv("CLEAT_DATABASE_URL")
 		}
 		if dbURL == "" {
-			logger.ErrorContext(context.Background(), "--db or DATABASE_URL required for --generate-api-key", "worker_id", workerID)
+			logger.ErrorContext(context.Background(), "--db or CLEAT_DATABASE_URL required for --generate-api-key", "worker_id", workerID)
 			os.Exit(1)
 		}
 		gdb, err := sql.Open(sqlDriverName(*driver), dbURL)
 		if err != nil {
-			logger.ErrorContext(context.Background(), "failed to connect to database — check the --db flag or DATABASE_URL environment variable", "worker_id", workerID, "error", err)
+			logger.ErrorContext(context.Background(), "failed to connect to database — check the --db flag or CLEAT_DATABASE_URL environment variable", "worker_id", workerID, "error", err)
 			os.Exit(1)
 		}
 		defer gdb.Close()
-		store := auth.NewTenantStore(gdb)
+		store, tsErr := auth.NewTenantStoreForDialect(gdb, *driver)
+		if tsErr != nil {
+			logger.ErrorContext(context.Background(), "cannot create an API key", "worker_id", workerID, "error", tsErr)
+			os.Exit(1)
+		}
 		key := auth.GenerateAPIKey()
 		if err := store.CreateAPIKey(context.Background(), tenantID, "generated by --generate-api-key", key); err != nil {
-			logger.ErrorContext(context.Background(), "failed to create API key — check that the tenant UUID exists", "worker_id", workerID, "error", err)
+			logger.ErrorContext(context.Background(), "failed to create API key", "worker_id", workerID, "driver", *driver, "tenant_id", tenantID, "error", err)
 			os.Exit(1)
 		}
 		fmt.Printf("\n")
@@ -143,6 +782,14 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// hardStopCtx is cancelled at grace expiry (cleat#2287), before cancel(),
+	// to abort in-flight durable calls and suspend their runs so another worker
+	// reclaims them without overlap. It outlives the call-abort long enough for
+	// the suspend to be written back, but fires before ctx so the heartbeat and
+	// flusher are still alive while that write happens.
+	hardStopCtx, hardStopCancel := context.WithCancel(context.Background())
+	defer hardStopCancel()
 
 	shutdownTelemetry := setupTelemetry(ctx, *otelEndpoint, *otelDisabled, workerID)
 	defer shutdownTelemetry()
@@ -167,12 +814,18 @@ func main() {
 	var (
 		pluginRegistry       = engine.NewPluginRegistry()
 		pluginStreamRegistry = engine.NewPluginStreamRegistry()
-		plugList             []*plugin.LoadedPlugin
-		plugHandler          http.Handler
-		plugMux              *http.ServeMux
-		bgWg                 sync.WaitGroup
-		ratelim              *ipRateLimiter
-		tenantLim            *keyedRateLimiter
+		// The live tail for GET /api/workflows/{id}/stream. Built here rather
+		// than inside the API server because the engines this worker executes
+		// runs on are what publish to it. cleat#1572.
+		streamHub         = engine.NewStreamHub(*maxStreamReadersFlag)
+		plugList          []*plugin.LoadedPlugin
+		plugHandler       http.Handler
+		plugMux           *http.ServeMux
+		bgWg              sync.WaitGroup
+		bgPlugins         []plugin.HasBackground
+		finalizeObservers []plugin.HasFinalizeObserver
+		ratelim           *ipRateLimiter
+		tenantLim         *keyedRateLimiter
 	)
 
 	defaultTenantID := "00000000-0000-0000-0000-000000000000"
@@ -180,7 +833,15 @@ func main() {
 	var store engine.WorkflowStore
 	var db *sql.DB
 	var pluginDB *sql.DB
+	var heartbeatCloser io.Closer
+	var heartbeatStore engine.WorkflowStore
 	var tenantPools *plugin.TenantPools
+	// shardPoolCount is captured here rather than read from shardDBs, which is
+	// scoped to the sharded branch below. The connection census (cleat#1486)
+	// needs it after that scope has closed, and a census that silently omits
+	// the shard pools would understate a sharded worker by 15 per shard.
+	shardPoolCount := 0
+
 	var factory engine.StoreFactory
 	var payloadEncryption *engine.PayloadEncryption
 	if *shardsFile != "" {
@@ -196,33 +857,43 @@ func main() {
 			}
 		}
 
-		// Load encryption key if configured (sharded path).
-		var payloadEncryption *engine.PayloadEncryption
+		// Load encryption key if configured (sharded path). payloadEncryption
+		// here is the OUTER variable declared above -- cleat#2305 found that
+		// this block used to shadow it with its own `var payloadEncryption
+		// *engine.PayloadEncryption`, so the sharded path's assignment below
+		// never reached the shared registry/flusher/plugin.Payloads wiring
+		// further down, which all read the outer one. Fixed by removing the
+		// shadow, not by adding a second variable to thread through.
 		if *encryptSensitivePayloads {
 			if *encryptionKeyFile == "" {
 				logger.ErrorContext(context.Background(), "--encrypt-sensitive-payloads requires --encryption-key-file", "worker_id", workerID)
 				os.Exit(1)
 			}
 		}
-		if *encryptionKeyFile != "" {
-			keyData, kerr := os.ReadFile(*encryptionKeyFile)
-			if kerr != nil {
-				logger.ErrorContext(context.Background(), "failed to read encryption key file — check that the file exists and is readable", "worker_id", workerID, "file", *encryptionKeyFile, "error", kerr)
-				os.Exit(1)
+		// loadPayloadEncryption is called unconditionally rather than only
+		// when --encryption-key-file is set: it already refuses
+		// --encryption-key-file-previous with no --encryption-key-file, and
+		// gating the call on *encryptionKeyFile != "" meant that refusal
+		// never fired -- the previous-only flag was silently ignored
+		// (cleat-review, #2308).
+		pe, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
+		if perr != nil {
+			logger.ErrorContext(context.Background(), "failed to load encryption key", "worker_id", workerID, "error", perr)
+			os.Exit(1)
+		}
+		payloadEncryption = pe
+		if payloadEncryption != nil {
+			if *encryptionKeyFilePrevious != "" {
+				logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
+			} else {
+				logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
 			}
-			keyStr := strings.TrimSpace(string(keyData))
-			pe, perr := engine.NewPayloadEncryption(keyStr)
-			if perr != nil {
-				logger.ErrorContext(context.Background(), "invalid encryption key — expected a base64-encoded 256-bit AES key", "worker_id", workerID, "error", perr)
-				os.Exit(1)
-			}
-			payloadEncryption = pe
-			logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
 		}
 		// Build stores, DB connections, and closers for each shard.
 		stores := make([]engine.WorkflowStore, len(configs))
 		closers := make([]func() error, len(configs))
 		shardDBs := make([]*sql.DB, len(configs))
+		shardPoolCount = len(configs)
 		shardFactories := make([]engine.StoreFactory, 0, len(configs))
 		for i, cfg := range configs {
 			dsn := cfg.ConnStr
@@ -299,9 +970,18 @@ func main() {
 				logger.InfoContext(context.Background(), "plugin DB pool created", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
 		}
-		// Start idempotency key cleanup on each shard.
+		// heartbeatStore is intentionally left nil here. cleat#2009's reserved
+		// heartbeat pool is not wired for the sharded path: HeartbeatBatchFenced
+		// would need to run per-shard, against each shard's own connection
+		// pool, and no shard-aware heartbeat routing exists yet. Every shard
+		// falls back to heartbeating through its own store, same as before
+		// this change -- a known scope limit, not a silent gap.
+		// Start idempotency key cleanup on each shard. Sharding is a
+		// PostgreSQL configuration -- shardDBs come from the postgres
+		// connection strings above -- so the driver is named explicitly rather
+		// than inherited from *driver, which this branch does not consult.
 		for _, sdb := range shardDBs {
-			go idempotencyCleanupLoop(ctx, sdb, 1*time.Hour)
+			go idempotencyCleanupLoop(ctx, sdb, "postgres", 1*time.Hour)
 		}
 	} else {
 		// Resolve DB connection string via the configured credential provider.
@@ -317,15 +997,15 @@ func main() {
 		}
 		*dbURL = resolvedURL
 		if *dbURL == "" {
-			*dbURL = os.Getenv("DATABASE_URL")
+			*dbURL = os.Getenv("CLEAT_DATABASE_URL")
 		}
 		if *dbURL == "" {
-			fmt.Fprintln(os.Stderr, "error: the --db flag or DATABASE_URL environment variable must be set to a database connection string")
+			fmt.Fprintln(os.Stderr, "error: the --db flag or CLEAT_DATABASE_URL environment variable must be set to a database connection string")
 			os.Exit(1)
 		}
 
 		sqlDriver := sqlDriverName(*driver)
-		dbDSN := dsnWithSchema(*dbURL, *schemaName)
+		dbDSN := dsnWithSchema(*dbURL, *schemaName, *driver)
 
 		var err error
 		switch *driver {
@@ -339,18 +1019,57 @@ func main() {
 			db.SetMaxOpenConns(*concurrency + 5)
 			db.SetMaxIdleConns(max(10, *concurrency/2))
 			db.SetConnMaxLifetime(5 * time.Minute)
-			factory = engine.NewPostgresStoreFactory(db, *schemaName).WithNotifyChannel(*notifyChannel).WithLogger(logger)
+			pgFactory := engine.NewPostgresStoreFactory(db, *schemaName).WithNotifyChannel(*notifyChannel).WithLogger(logger).WithDSN(dbDSN)
+			factory = pgFactory
 
-			// Create per-tenant database connection pools for tenant-scoped operations.
-			// PostgreSQL uses set_config('cleat.tenant_id', ...) per transaction for RLS,
-			// which works on the owner pool — separate tenant pools are unnecessary.
-			// MySQL and MSSQL use per-tenant databases or session context, so pools
-			// are only created for those drivers.
-			if *driver != "postgres" && *requireAuth {
+			// PER-TENANT POOLS, WHEN --tenant-isolation=role. cleat#1307.
+			//
+			// This is the decided answer to the question the previous version of
+			// this comment left open. What plugin.TenantPools provides is
+			// defence in depth: a pool per tenant authenticating AS that
+			// tenant's PostgreSQL login role, with cleat.tenant_id set as a
+			// ROLE DEFAULT, so the RLS variable arrives with the credential and
+			// isolation does not depend on the application remembering to
+			// assert who it is. Its own comment: "the connection IS the tenant".
+			//
+			// POSTGRES ONLY, AND ONLY IN THIS ARM. TenantPools is
+			// PostgreSQL-only in its implementation -- plugin/tenant_db.go
+			// opens sql.Open("postgres", ...) against a libpq keyword DSN --
+			// and resolveTenantIsolation refuses --tenant-isolation=role on any
+			// other driver before we get here. Building it inside this arm
+			// rather than after the switch is what makes that structural rather
+			// than a matter of remembering.
+			//
+			// WHAT USED TO BE HERE, because the obvious repair was the
+			// dangerous one and the next reader will think of it. The block read
+			//
+			//	if *driver != "postgres" && *requireAuth { tenantPools = ... }
+			//
+			// inside this `case "postgres":` arm -- so reaching it required
+			// *driver == "postgres" while it tested the opposite. Unreachable,
+			// and tenantPools was nil on every dialect. Moving it out of the
+			// switch, which is what the old comment invited, would have handed a
+			// MySQL worker a postgres connection builder.
+			//
+			// Gated on its own flag rather than on *requireAuth, which is what
+			// the dead branch used: --require-auth defaults TRUE, so reusing it
+			// would switch a new isolation mechanism on for every existing
+			// deployment at upgrade.
+			if tenantMode == isolationRole {
 				baseDSN := baseDSNFromURL(*dbURL)
-				if baseDSN != "" {
-					tenantPools = plugin.NewTenantPools(db, baseDSN, *tenantPoolMaxConns)
+				if baseDSN == "" {
+					// Refused, not skipped. A nil tenantPools here would fall
+					// back to the owner pool for every tenant -- the silent
+					// downgrade TenantPools.For was changed to refuse.
+					logger.ErrorContext(context.Background(),
+						"--tenant-isolation=role could not derive a base DSN from --db",
+						"worker_id", workerID)
+					os.Exit(1)
 				}
+				tenantPools = plugin.NewTenantPools(db, baseDSN, *tenantPoolMaxConns, tenantSecret)
+				logger.InfoContext(context.Background(),
+					"role-per-tenant isolation enabled for plugin host functions",
+					"worker_id", workerID, "max_conns_per_tenant", *tenantPoolMaxConns)
 			}
 
 			// Create plugin-dedicated connection pool.
@@ -367,6 +1086,30 @@ func main() {
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
+
+			// Create a reserved connection pool for heartbeat writes, isolated
+			// from the execution pool. cleat#2009: a saturated execution pool
+			// (long-held connections claiming/deferring workflows) starves
+			// heartbeats on the shared pool, and a missed heartbeat is what
+			// triggers reclaim -- so pool exhaustion looks like a dead worker.
+			//
+			// Built through the factory, not a bare sql.Open: Postgres isolates
+			// tenants with RLS set per-transaction rather than baked into the
+			// pool, so this arm was already safe with a bare pool -- but MySQL
+			// is not (see the mysql arm below), and going through
+			// OpenIsolatedStore keeps all three dialects on one reviewed path
+			// instead of three hand-rolled ones that can silently diverge.
+			if *heartbeatMaxConnections > 0 {
+				hs, closer, err := pgFactory.OpenIsolatedStore(context.Background(), defaultTenantID, *heartbeatMaxConnections, taskQueues...)
+				if err != nil {
+					logger.ErrorContext(context.Background(), "failed to open heartbeat connection pool", "worker_id", workerID, "error", err)
+					os.Exit(1)
+				}
+				heartbeatCloser = closer
+				defer heartbeatCloser.Close()
+				heartbeatStore = hs
+				logger.InfoContext(context.Background(), "heartbeat DB pool configured", "worker_id", workerID, "max_connections", *heartbeatMaxConnections)
+			}
 		case "mysql":
 			db, err = sql.Open(sqlDriver, *dbURL)
 			if err != nil {
@@ -377,7 +1120,8 @@ func main() {
 			db.SetMaxOpenConns(*concurrency + 5)
 			db.SetMaxIdleConns(5)
 			db.SetConnMaxLifetime(5 * time.Minute)
-			factory = engine.NewMySQLStoreFactory(db, mysqlBaseDSN(*dbURL)).WithTenantPoolMaxConns(*tenantPoolMaxConns).WithLogger(logger)
+			myFactory := engine.NewMySQLStoreFactory(db, mysqlBaseDSN(*dbURL)).WithTenantPoolMaxConns(*tenantPoolMaxConns).WithLogger(logger)
+			factory = myFactory
 
 			// Create plugin-dedicated connection pool.
 			if *maxPluginConnections > 0 {
@@ -393,8 +1137,32 @@ func main() {
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
+
+			// Reserved heartbeat connection pool. cleat#2009.
+			//
+			// MUST go through the factory, unlike a bare sql.Open: MySQL has no
+			// RLS and isolates tenants by PHYSICAL DATABASE
+			// (MySQLTenantDatabaseName), selected by the DATABASE NAME COMPONENT
+			// OF THE DSN. A bare sql.Open(sqlDriver, *dbURL) connects to the base
+			// database -- same schema, zero rows for any tenant -- so every
+			// heartbeat this pool wrote landed somewhere the reaper could never
+			// see, and every run got fenced out and cancelled at its first
+			// heartbeat. OpenIsolatedStore opens its own pool on the tenant DSN,
+			// the same path OpenStore uses.
+			if *heartbeatMaxConnections > 0 {
+				hs, closer, err := myFactory.OpenIsolatedStore(context.Background(), defaultTenantID, *heartbeatMaxConnections, taskQueues...)
+				if err != nil {
+					logger.ErrorContext(context.Background(), "failed to open heartbeat connection pool", "worker_id", workerID, "error", err)
+					os.Exit(1)
+				}
+				heartbeatCloser = closer
+				defer heartbeatCloser.Close()
+				heartbeatStore = hs
+				logger.InfoContext(context.Background(), "heartbeat DB pool configured", "worker_id", workerID, "max_connections", *heartbeatMaxConnections)
+			}
 		case "mssql":
-			factory = engine.NewMSSQLStoreFactory(*dbURL).WithTenantPoolMaxConns(*tenantPoolMaxConns).WithLogger(logger)
+			mssqlFactory := engine.NewMSSQLStoreFactory(*dbURL).WithTenantPoolMaxConns(*tenantPoolMaxConns).WithLogger(logger)
+			factory = mssqlFactory
 			// Open a connection to verify and for plugin/migration use.
 			db, err = sql.Open(sqlDriver, *dbURL)
 			if err != nil {
@@ -420,6 +1188,28 @@ func main() {
 				defer pluginDB.Close()
 				logger.InfoContext(context.Background(), "plugin DB pool configured", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
+
+			// Reserved heartbeat connection pool. cleat#2009.
+			//
+			// Built through the factory rather than a bare sql.Open, for the
+			// same reason as the postgres and mysql arms above: one reviewed
+			// path for all three dialects rather than three that can silently
+			// diverge. MSSQL sets its RLS session context per-transaction
+			// (beginTxWithContext), independent of the pool's own connector, so
+			// this arm was not exposed to the mysql arm's bug -- but it shares
+			// the fix regardless, and gets the tenantID/logger wiring OpenStore
+			// already gives every other store.
+			if *heartbeatMaxConnections > 0 {
+				hs, closer, err := mssqlFactory.OpenIsolatedStore(context.Background(), defaultTenantID, *heartbeatMaxConnections, taskQueues...)
+				if err != nil {
+					logger.ErrorContext(context.Background(), "failed to open heartbeat connection pool", "worker_id", workerID, "error", err)
+					os.Exit(1)
+				}
+				heartbeatCloser = closer
+				defer heartbeatCloser.Close()
+				heartbeatStore = hs
+				logger.InfoContext(context.Background(), "heartbeat DB pool configured", "worker_id", workerID, "max_connections", *heartbeatMaxConnections)
+			}
 		default:
 			logger.ErrorContext(context.Background(), "invalid driver", "worker_id", workerID, "driver", *driver)
 			os.Exit(1)
@@ -436,20 +1226,25 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		if *encryptionKeyFile != "" {
-			keyData, kerr := os.ReadFile(*encryptionKeyFile)
-			if kerr != nil {
-				logger.ErrorContext(context.Background(), "failed to read encryption key file", "worker_id", workerID, "error", kerr)
-				os.Exit(1)
-			}
-			keyStr := strings.TrimSpace(string(keyData))
-			pe, perr := engine.NewPayloadEncryption(keyStr)
+		// loadPayloadEncryption is called unconditionally: it already refuses
+		// --encryption-key-file-previous with no --encryption-key-file, and
+		// gating the call on *encryptionKeyFile != "" meant that refusal
+		// never fired -- the previous-only flag was silently ignored
+		// (cleat-review, #2308).
+		{
+			pe, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
 			if perr != nil {
-				logger.ErrorContext(context.Background(), "invalid encryption key", "worker_id", workerID, "error", perr)
+				logger.ErrorContext(context.Background(), "failed to load encryption key", "worker_id", workerID, "error", perr)
 				os.Exit(1)
 			}
 			payloadEncryption = pe
-			logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
+			if payloadEncryption != nil {
+				if *encryptionKeyFilePrevious != "" {
+					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
+				} else {
+					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
+				}
+			}
 		}
 
 		// Propagate encryption to the store factory.
@@ -457,7 +1252,11 @@ func main() {
 			pgFactory.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
 		}
 
-		// Load encryption key if configured.
+		// This second load-and-propagate is a pre-existing duplicate of the
+		// block just above (same flags, same result, run unconditionally
+		// right after it) -- not introduced or removed here to keep this
+		// change to the rotation flag. Cheap and idempotent: loadPayloadEncryption
+		// re-reads the same files and builds an equivalent ring.
 		if *encryptSensitivePayloads {
 			if *driver != "postgres" {
 				log.Fatalf("[worker %s] --encrypt-sensitive-payloads requires --driver=postgres (MySQL and MSSQL are not yet supported for encryption at rest)", workerID)
@@ -466,18 +1265,22 @@ func main() {
 				log.Fatalf("[worker %s] --encrypt-sensitive-payloads requires --encryption-key-file", workerID)
 			}
 		}
-		if *encryptionKeyFile != "" {
-			keyData, kerr := os.ReadFile(*encryptionKeyFile)
-			if kerr != nil {
-				log.Fatalf("[worker %s] Failed to read encryption key file %s: %v", workerID, *encryptionKeyFile, kerr)
-			}
-			keyStr := strings.TrimSpace(string(keyData))
-			pe, perr := engine.NewPayloadEncryption(keyStr)
+		// loadPayloadEncryption is called unconditionally, for the same
+		// reason as the block above: gating on *encryptionKeyFile != ""
+		// silently ignored a previous-only flag (cleat-review, #2308).
+		{
+			pe, perr := loadPayloadEncryption(*encryptionKeyFile, *encryptionKeyFilePrevious)
 			if perr != nil {
-				log.Fatalf("[worker %s] Invalid encryption key — expected a base64-encoded 256-bit AES key: %v", workerID, perr)
+				log.Fatalf("[worker %s] failed to load encryption key: %v", workerID, perr)
 			}
 			payloadEncryption = pe
-			logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
+			if payloadEncryption != nil {
+				if *encryptionKeyFilePrevious != "" {
+					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields, with a previous key for rotation", "worker_id", workerID)
+				} else {
+					logger.InfoContext(context.Background(), "encryption at rest enabled for sensitive payload fields", "worker_id", workerID)
+				}
+			}
 		}
 
 		// Propagate encryption to the store factory.
@@ -485,17 +1288,30 @@ func main() {
 			pgFactory.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
 		}
 
-		s, _, err := factory.OpenStore(ctx, defaultTenantID, taskQueues...)
+		// THE LEASE IS DELIBERATELY NEVER RELEASED. On MySQL and SQL Server
+		// this closer is a lease on the default tenant's connection pool (see
+		// engine.TenantPoolReaper), and the store it guards is the worker's
+		// own: the dispatch, heartbeat, reaper and scheduler loops all write
+		// through it for the life of the process, and none of them calls
+		// OpenStore, so nothing would ever stamp the pool as used. Releasing
+		// here would leave the one pool the worker always needs looking idle,
+		// and the reaper would close it out from under every loop at the first
+		// quiet quarter of an hour.
+		//
+		// Held for the process, released when the process ends. Named rather
+		// than assigned to _ so that reads as the decision it is.
+		s, processStoreLease, err := factory.OpenStore(ctx, defaultTenantID, taskQueues...)
 		if err != nil {
 			logger.ErrorContext(context.Background(), "failed to open database store — check that the database is accessible and the schema exists", "worker_id", workerID, "error", err)
 			os.Exit(1)
 		}
+		_ = processStoreLease
 		store = s
 
-		// Start periodic cleanup of expired idempotency keys (Postgres only).
-		if *driver == "postgres" {
-			go idempotencyCleanupLoop(ctx, db, 1*time.Hour)
-		}
+		// Start periodic cleanup of expired idempotency keys. Every dialect:
+		// the postgres-only guard that used to stand here left MySQL and SQL
+		// Server with nothing that ever removed a key (cleat#1256).
+		go idempotencyCleanupLoop(ctx, db, *driver, 1*time.Hour)
 
 	}
 
@@ -503,6 +1319,43 @@ func main() {
 	if *apiAddr != "" {
 		plugMux = http.NewServeMux()
 	}
+
+	// SECRETS. Built before plugin host functions are registered, because the
+	// adapter captures it -- a store created later would be nil in every
+	// wrapper and every ${secret:...} reference would silently reach the plugin
+	// as literal text.
+	//
+	// The master key comes from the ENVIRONMENT and not a flag: a flag value is
+	// visible in `ps`, in /proc/<pid>/cmdline to any local user, and in
+	// whatever records the command line. See engine.MasterKeyFromEnv.
+	//
+	// A KEY RING, not a single key (cleat#1991): the current key seals every write
+	// and an optional previous key only reads, so a rotation can be rolled out
+	// without a moment at which existing secrets stop resolving. Versions are
+	// integers the operator declares; the current key defaults to 1, which is what
+	// every existing row carries, so a deployment that has never rotated changes
+	// nothing. See engine.SecretKeyRingFromEnv for the four variables.
+	secretRing, mkErr := engine.SecretKeyRingFromEnv(os.Getenv)
+	if mkErr != nil {
+		logger.ErrorContext(context.Background(), "the secret master key configuration is unusable",
+			"worker_id", workerID, "error", mkErr)
+		os.Exit(1)
+	}
+	if secretRing != nil {
+		// Versions only; never key material.
+		logger.InfoContext(context.Background(), "secret key ring configured",
+			"worker_id", workerID, "current_key_version", secretRing.Current().Version,
+			"key_versions", secretRing.Versions())
+	}
+	secretStore := engine.NewSecretStoreWithRing(db, string(factory.Dialect()), secretRing)
+	// deployment_secrets shares tenant secrets' ring (cleat#1992 part 1) --
+	// domain separation is carried by engine.DeploymentSecretStore's own HKDF
+	// info string and AAD, not a second master key.
+	deploymentSecretStore := engine.NewDeploymentSecretStore(db, string(factory.Dialect()), secretRing)
+	// checkSecretsUsable runs AFTER the migrations below, not here: it reads
+	// tenant_secrets, which does not exist until migration 080 has applied, and a
+	// check that has to tolerate a missing table is a check that tolerates every
+	// other read failure too (cleat#2123).
 
 	var rawPluginConfig []byte
 	if *pluginConfigFile != "" {
@@ -520,28 +1373,123 @@ func main() {
 		}
 	}
 
+	// cleat#1565: the per-tenant egress allowlist. Built from the worker's own
+	// pool, which carries no tenant -- the reads are scoped by an explicit
+	// tenant_id predicate, and admin.tenant_egress_allow deliberately has no
+	// row-level policy for that reason (see migration 079).
+	//
+	// Constructed HERE, above the plugin environment, because the plugin
+	// transport needs it too (open question 4) and Go wants it declared before
+	// use. It was below, next to the Worker literal, when only the service
+	// caller consumed it.
+	// PARSED AND VALIDATED AT BOOT, not at the call site. A malformed endpoint is
+	// a configuration mistake, and the moment to report one is startup -- not
+	// the first time a workflow reaches that service, where it arrives as a
+	// failed DurableCall inside a retry rather than as a bad flag.
+	serviceEndpoints, seErr := parseServiceEndpoints(*serviceEndpointsFlag)
+	if seErr != nil {
+		logger.Error("--service-endpoints is not usable", "error", seErr)
+		os.Exit(1)
+	}
+	if len(serviceEndpoints) > 0 {
+		names := make([]string, 0, len(serviceEndpoints))
+		for n := range serviceEndpoints {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		logger.Info("service endpoints registered", "services", strings.Join(names, ","))
+	}
+
+	egressAllow := &engine.TenantEgressStore{DB: db, Dialect: engine.Dialect(*driver)}
+
+	// cleat#1565: egress needs BOTH the operator's permission and the
+	// requesting tenant's. This is the operator half, and it is one policy for
+	// the whole deployment rather than a per-surface flag -- guest fetches,
+	// plugin host-function calls and plugin sweeps all answer to it.
+	operatorEgress := engine.NewHostAllowlist(splitCommaList(*egressAllowlistFlag)...)
+
+	// cleat#1627: the operator's private-address exceptions for PLUGIN
+	// endpoints. Passed only here. The guest fetch path below builds its own
+	// guard and does not receive this, which is asserted by
+	// TestOnlyThePluginTransportCarriesThePrivateHostExemption.
+	pluginPrivateHosts := newPluginPrivateHosts(splitCommaList(*pluginEgressAllowPrivate))
+	pluginPrivateHosts.logStartup(slog.Default())
+
+	// Built here, not down at the auth.HostBindingMiddlewareWithMux call site
+	// where the only prior consumer lived, because pluginEnv (below) needs it
+	// too, and plugin Init -- which reads pluginEnv -- runs long before that
+	// call site does. auth.NewTenantStoreForDialect has no failure mode tied
+	// to --require-host-match, so building it unconditionally changes which
+	// requests are served by nothing. The one difference is timing: a
+	// resolver that cannot be built now fails before any plugin initializes,
+	// where it used to fail after they all had. Strictly earlier, and the
+	// worker exits either way. cleat#2340.
+	authResolver, arErr := auth.NewTenantStoreForDialect(db, *driver)
+	if arErr != nil {
+		logger.ErrorContext(context.Background(), "cannot build the API key resolver, so no request could be authenticated", "worker_id", workerID, "error", arErr)
+		os.Exit(1)
+	}
+
 	pluginEnv := &plugin.Environment{
-		DB:      getPluginDB(db, pluginDB),
-		Mux:     plugMux,
-		Config:  rawPluginConfig,
-		Logger:  slog.Default(),
-		Done:    ctx.Done(),
-		Dialect: plugin.Dialect(factory.Dialect()),
-		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
-			versions, err := store.ListVersions(ctx, defName)
-			if err != nil {
-				return "", fmt.Errorf("start workflow %s: %w", defName, err)
+		HTTPTransport:    pluginEgressTransport(egressAllow, operatorEgress, pluginPrivateHosts),
+		DB:               getPluginDB(db, pluginDB, plugin.Dialect(factory.Dialect())),
+		Mux:              plugMux,
+		Config:           rawPluginConfig,
+		Logger:           slog.Default(),
+		HostResolver:     authResolver,
+		RequireHostMatch: *requireHostMatch,
+		// WS-2's addition to WS-3's file, declared as WORKSTREAM.md asks:
+		// leaving this unwired is worse than the cross-stream edit, because a
+		// nil here is an OAuth login that cannot mint a credential, and the
+		// plugin has no other way to reach a key store at all.
+		//
+		// THE SAME authResolver as HostResolver above, for the reason that
+		// comment gives -- it is built early precisely so pluginEnv can carry
+		// it. The HOST owns the key format, the hash and the INSERT; the plugin
+		// only asks for a key and gets the plaintext back. cleat#2340.
+		MintOAuthAPIKey: func(ctx context.Context, req plugin.MintOAuthAPIKeyRequest) (string, error) {
+			rawKey := auth.GenerateAPIKey()
+			if err := authResolver.CreateOAuthAPIKey(ctx, req.TenantID, req.Description, rawKey, req.ExpiresAt, req.OAuthIdentity); err != nil {
+				return "", err
 			}
-			if len(versions) == 0 {
-				return "", fmt.Errorf("start workflow %s: no versions deployed", defName)
-			}
-			runID, _, err := store.StartNewRun(ctx, "", defName, versions[0], input, "", engine.DefaultTenantUUID, 0)
-			return runID, err
+			return rawKey, nil
+		},
+		// WS-2's second addition to WS-3's file, same declaration and the same
+		// reason as the mint above: oauthprovider's background loop cannot
+		// reach admin.tenant_api_keys itself, because a plugin's cross-tenant
+		// statement runs as cleat_sweep and that role holds no privilege on the
+		// table -- measured, see auth.TenantStore.RevokeExpiredOAuthAPIKeys.
+		// The host's own connection is where the grant is, so the write goes
+		// here.
+		//
+		// It disables nothing but expired OAuth-minted keys, so the grant it
+		// needs is exactly the one the mint above already needs; a deployment
+		// where this fails is a deployment where the mint failed first, and
+		// loudly.
+		RevokeExpiredOAuthAPIKeys: func(ctx context.Context) (int64, error) {
+			return authResolver.RevokeExpiredOAuthAPIKeys(ctx)
+		},
+		Done:       ctx.Done(),
+		Dialect:    plugin.Dialect(factory.Dialect()),
+		EventsLost: pluginEventsLostHook(metricsInstance),
+		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
+			return startPluginWorkflow(ctx, store, req)
 		},
 
 		SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
-			return store.DeliverSignal(ctx, workflowID, signalName, payload)
+			return signalPluginWorkflow(ctx, store, workflowID, signalName, payload)
 		},
+
+		// cleat#1992. Both adapters are safe on a nil target -- secretStore is
+		// never nil (see where it is built, above) but has no usable master key
+		// when secretRing is nil, and payloadEncryption is a plain nil
+		// *engine.PayloadEncryption when --encrypt-sensitive-payloads is off.
+		// Every method on both then returns a clear "not configured" error
+		// rather than panicking, which is what lets these be assigned
+		// unconditionally instead of behind an if.
+		Secrets:           engine.NewPluginSecrets(secretStore),
+		Payloads:          engine.NewPluginPayloads(payloadEncryption),
+		DeploymentSecrets: engine.NewPluginDeploymentSecrets(deploymentSecretStore),
 	}
 
 	var err error
@@ -559,7 +1507,7 @@ func main() {
 	// run DDL. Falls back to db so an unsplit deployment behaves as before.
 	migrateDB := db
 	if *migrateDBURL != "" {
-		mdb, mErr := sql.Open(sqlDriverName(*driver), dsnWithSchema(*migrateDBURL, *schemaName))
+		mdb, mErr := sql.Open(sqlDriverName(*driver), dsnWithSchema(*migrateDBURL, *schemaName, *driver))
 		if mErr != nil {
 			logger.ErrorContext(context.Background(), "failed to connect to the migration database (--migrate-db)", "worker_id", workerID, "error", mErr)
 			os.Exit(1)
@@ -572,15 +1520,143 @@ func main() {
 		migrateDB = mdb
 	}
 
-	migrator := migration.NewRunner(migrateDB, migration.Dialect(factory.Dialect()), "migrations")
-	if err := migrator.Run(ctx); err != nil {
-		logger.ErrorContext(context.Background(), "core database migrations failed — check that the database user has CREATE/ALTER privileges (see --migrate-db)", "worker_id", workerID, "error", err)
+	// WithSchema, or every unqualified CREATE in migrations/postgres/ lands in
+	// public while the runtime pool -- opened through dsnWithSchema above --
+	// looks in --schema. That was cleat#1287: the migration run did not even
+	// finish, because nineteen files pinned public and twenty-five did not.
+	migrator := migration.NewRunner(migrateDB, migration.Dialect(factory.Dialect()), *migrationsDir).
+		WithFS(migrationsOverrideFS()).
+		WithLockTimeout(*migrationLockTimeout).
+		WithSchema(*schemaName)
+
+	// MIGRATE OR VERIFY (cleat#2117). Migration is a deploy step: `--migrate-only`
+	// applies it and exits; a normal start only VERIFIES that the schema is not
+	// behind this binary and refuses, with the remediation, if it is. The old
+	// migrate-at-every-start is the explicit opt-in `--migrate-on-start`, for a
+	// single node with no deploy step.
+	migrating := *migrateOnly || *migrateOnStart
+	if migrating {
+		if err := migrator.Run(ctx); err != nil {
+			logger.ErrorContext(context.Background(), "core database migrations failed — check that the database user has CREATE/ALTER privileges (see --migrate-db)", "worker_id", workerID, "error", err)
+			os.Exit(1)
+		}
+		// WithSchema, or plugin tables land in public while the runtime pool --
+		// opened through dsnWithSchema -- looks in --schema, and every plugin's
+		// first query fails with "relation ... does not exist". cleat#1287.
+		if err := plugin.RunMigrations(ctx, migrateDB, plugin.Dialect(factory.Dialect()), nil, plugList,
+			plugin.WithSchema(*schemaName)); err != nil {
+			logger.ErrorContext(context.Background(), "plugin database migrations failed — check plugin logs for details", "worker_id", workerID, "error", err)
+			os.Exit(1)
+		}
+	} else if err := verifySchema(ctx, migrator, migrateDB, plugin.Dialect(factory.Dialect()), plugList,
+		*schemaName, func(msg string, args ...any) {
+			logger.WarnContext(context.Background(), msg, append([]any{"worker_id", workerID}, args...)...)
+		}); err != nil {
+		logger.ErrorContext(context.Background(), "refusing to start: "+err.Error(), "worker_id", workerID)
 		os.Exit(1)
 	}
 
-	if err := plugin.RunMigrations(ctx, migrateDB, plugin.Dialect(factory.Dialect()), nil, plugList); err != nil {
-		logger.ErrorContext(context.Background(), "plugin database migrations failed — check plugin logs for details", "worker_id", workerID, "error", err)
+	// For MySQL, the factory creates a per-tenant database that needs its own
+	// copy of the schema: migrated or verified exactly as the shared one is.
+	// (This block used to sit further down, after the row-level-security check;
+	// nothing there depends on it, and --migrate-only has to finish it before it
+	// exits.)
+	if *driver == "mysql" {
+		if mf, ok := factory.(*engine.MySQLStoreFactory); ok {
+			tenantDB, terr := mf.TenantDB(ctx, defaultTenantID)
+			if terr != nil {
+				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr)
+				os.Exit(1)
+			}
+			tm := migration.NewRunner(tenantDB, migration.Dialect(factory.Dialect()), *migrationsDir).
+				WithFS(migrationsOverrideFS()).
+				WithLockTimeout(*migrationLockTimeout).
+				WithSchema(*schemaName)
+			if migrating {
+				if terr = tm.Run(ctx); terr != nil {
+					logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
+					os.Exit(1)
+				}
+				if terr = plugin.RunMigrations(ctx, tenantDB, plugin.Dialect(factory.Dialect()), nil, plugList,
+					plugin.WithSchema(*schemaName)); terr != nil {
+					logger.ErrorContext(context.Background(), "tenant plugin migrations failed", "worker_id", workerID, "error", terr)
+					os.Exit(1)
+				}
+			} else if terr = verifySchema(ctx, tm, tenantDB, plugin.Dialect(factory.Dialect()), plugList,
+				*schemaName, func(msg string, args ...any) {
+					logger.WarnContext(context.Background(), msg, append([]any{"worker_id", workerID}, args...)...)
+				}); terr != nil {
+				logger.ErrorContext(context.Background(), "refusing to start (tenant database): "+terr.Error(), "worker_id", workerID)
+				os.Exit(1)
+			}
+		}
+	}
+
+	// --migrate-only ends HERE: the schema is current, and nothing below -- the
+	// worker registering, the secrets check, serving -- is part of a deploy step.
+	// In particular a migrate job has no reason to hold the master key, so it must
+	// not reach checkSecretsUsable.
+	if *migrateOnly {
+		logger.InfoContext(context.Background(), "migrations complete", "worker_id", workerID)
+		os.Exit(0)
+	}
+
+	// Publish this worker's secret keys and run the secrets startup check, as
+	// ONE span under the shared secret-key gate, now that the schema is current.
+	//
+	// UNCONDITIONAL. Registration used to be opt-in with
+	// --cluster-connection-budget; it is not any more, because the registry is
+	// how a writer (cleatctl set-secret, reseal-secrets) learns which keys the
+	// live workers can open. The connection share stays opt-in.
+	//
+	// The order is the model's and it is load-bearing: publish, then read every
+	// stored secret, with no writer able to interleave (engine/secret_key_gate.go,
+	// specs/CleatKeyRotation.tla). See checkSecretsUsable for why an unreadable
+	// table refuses to start rather than passing.
+	workerRegistry := &engine.WorkerRegistry{DB: db, Dialect: engine.Dialect(*driver)}
+	// Before the call, not after it: the registry stamps last_heartbeat_at when the
+	// INSERT runs inside RegisterUnderKeyGate, which can first wait for the gate lock
+	// (up to 45s), and a clock started when the call returns would be short by all of
+	// that. See the note on membershipTick's beat. cleat#2167.
+	registeredAt := time.Now()
+	if err := registerWithKeyCheck(ctx, workerRegistry, secretStore, engine.WorkerRegistration{
+		WorkerID:         workerID,
+		Hostname:         hostnameOrEmpty(),
+		PID:              os.Getpid(),
+		Concurrency:      *concurrency,
+		ConnectionBudget: *clusterConnectionBudgetFlag,
+	}, func(msg string) {
+		logger.WarnContext(context.Background(), msg, "worker_id", workerID)
+	}); err != nil {
+		logger.ErrorContext(context.Background(),
+			"refusing to start: could not register in the worker registry and pass the secrets startup check",
+			"worker_id", workerID, "error", err)
 		os.Exit(1)
+	}
+	// From here a writer is entitled to count this worker as live for SecretKeyLiveWindow
+	// after its last heartbeat, and the first heartbeat is a membership interval away.
+	// The rest of boot counts against that, so the clock the membership loop measures a
+	// lapse from is registeredAt, taken before the registration -- not the first tick.
+	logger.InfoContext(context.Background(), "registered in the worker registry",
+		"worker_id", workerID, "secret_key_versions", secretStore.KeyVersions())
+
+	// Reconcile every already-provisioned tenant's role password to the
+	// current key, unconditionally, on every boot. cleat#1990: without this, a
+	// --tenant-role-secret-file rotation broke every existing tenant's pool
+	// until an operator manually re-derived and re-ALTERed each one --
+	// --create-tenant only provisions a NEW tenant under whichever key that
+	// run has, and nothing revisited a tenant --create-tenant had already
+	// provisioned under a prior key. See plugin.ReconcileTenantRolePasswords's
+	// doc comment for why this runs every boot rather than only after a
+	// detected change, and why a failure here is fatal rather than logged and
+	// skipped.
+	if tenantMode == isolationRole {
+		n, rErr := plugin.ReconcileTenantRolePasswords(ctx, migrateDB, tenantSecret)
+		if rErr != nil {
+			logger.ErrorContext(context.Background(), "failed to reconcile tenant role passwords — an existing tenant's pool may be unable to authenticate", "worker_id", workerID, "error", rErr)
+			os.Exit(1)
+		}
+		logger.InfoContext(context.Background(), "reconciled tenant role passwords", "worker_id", workerID, "count", n)
 	}
 
 	// Now that the schema (and its policies) exist, check that the *runtime*
@@ -606,27 +1682,6 @@ func main() {
 		}
 	}
 
-	// For MySQL, the factory creates a per-tenant database that needs its
-	// own copy of the schema. Run core and plugin migrations on it.
-	if *driver == "mysql" {
-		if mf, ok := factory.(*engine.MySQLStoreFactory); ok {
-			tenantDB, terr := mf.TenantDB(ctx, defaultTenantID)
-			if terr != nil {
-				logger.ErrorContext(context.Background(), "failed to get tenant database", "worker_id", workerID, "error", terr)
-				os.Exit(1)
-			}
-			tm := migration.NewRunner(tenantDB, migration.Dialect(factory.Dialect()), "migrations")
-			if terr = tm.Run(ctx); terr != nil {
-				logger.ErrorContext(context.Background(), "tenant core migrations failed", "worker_id", workerID, "error", terr)
-				os.Exit(1)
-			}
-			if terr = plugin.RunMigrations(ctx, tenantDB, plugin.Dialect(factory.Dialect()), nil, plugList); terr != nil {
-				logger.ErrorContext(context.Background(), "tenant plugin migrations failed", "worker_id", workerID, "error", terr)
-				os.Exit(1)
-			}
-		}
-	}
-
 	// Initialize plugins with per-plugin DB access control.
 	// Each plugin receives a copy of the environment with its DB handle
 	// wrapped (or nil) according to its declared DatabaseAccess level.
@@ -635,27 +1690,21 @@ func main() {
 			continue
 		}
 		envCopy := *pluginEnv
+		envCopy.DeploymentSecrets = deploymentSecretsForPlugin(lp.Plugin, pluginEnv.DeploymentSecrets)
 		switch lp.Plugin.Info().DatabaseAccess {
 		case plugin.DatabaseAccessNone:
 			envCopy.DB = nil
 		case plugin.DatabaseAccessReadOnly:
-			envCopy.DB = getPluginReadOnlyDB(db, pluginDB)
+			envCopy.DB = getPluginReadOnlyDB(db, pluginDB, plugin.Dialect(factory.Dialect()))
 		default: // DatabaseAccessReadWrite or empty (backward compat)
-			envCopy.DB = getPluginDB(db, pluginDB)
+			envCopy.DB = getPluginDB(db, pluginDB, plugin.Dialect(factory.Dialect()))
 		}
 		// Wrap SignalWorkflow with signal authorization.
 		// The plugin name is the caller identity checked against allowed_signals.
 		if *requireSignalAuth {
 			pluginName := lp.Plugin.Info().Name
 			envCopy.SignalWorkflow = func(ctx context.Context, workflowID, signalName, payload string) error {
-				callers, err := store.GetAllowedSignalCallers(ctx, workflowID)
-				if err != nil {
-					return err
-				}
-				if !signalCallerAllowed(callers, pluginName) {
-					return fmt.Errorf("signal auth denied: %s not in allowed_signals of %s", pluginName, workflowID)
-				}
-				return store.DeliverSignal(ctx, workflowID, signalName, payload)
+				return signalPluginWorkflowWithAuth(ctx, store, workflowID, signalName, payload, pluginName)
 			}
 		}
 		func() {
@@ -669,32 +1718,85 @@ func main() {
 			if err := lp.Plugin.Init(ctx, &envCopy); err != nil {
 				lp.Healthy = false
 				lp.Error = err
-				logger.ErrorContext(context.Background(), "plugin init failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", err)
+				switch classifyPluginInitError(err) {
+				case pluginInitDisabledQuiet:
+					logger.InfoContext(context.Background(), "plugin not configured, disabled", "worker_id", workerID, "plugin", lp.Plugin.Info().Name)
+				case pluginInitFatal:
+					// Same severity as checkRequiredDeploymentSecrets below:
+					// this is not "disable and continue", it is "the
+					// deployment is broken in a way nobody should be allowed
+					// to not notice". See ErrFatalMisconfiguration's doc
+					// comment (plugin/plugin.go).
+					logger.ErrorContext(context.Background(), "refusing to start: "+err.Error(), "worker_id", workerID, "plugin", lp.Plugin.Info().Name)
+					os.Exit(1)
+				default: // pluginInitDisabledLoud
+					logger.ErrorContext(context.Background(), "plugin init failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", err)
+				}
 			}
 		}()
 	}
 
+	// cleat#1992 part 1: fail closed if an ENABLED plugin's required
+	// deployment secret is missing or unopenable, rather than starting and
+	// having every call that plugin serves fail individually. See
+	// checkRequiredDeploymentSecrets (setup.go) for why this runs after Init
+	// rather than folded into it.
+	if rErr := checkRequiredDeploymentSecrets(ctx, plugList, pluginEnv.Config, deploymentSecretStore); rErr != nil {
+		logger.ErrorContext(context.Background(), "refusing to start: "+rErr.Error(), "worker_id", workerID)
+		os.Exit(1)
+	}
+
+	// cleat#2232, design A: every plugin route is registered through this
+	// adapter rather than directly on plugMux, so a request body is bounded
+	// (--plugin-max-body-size, or a route's own larger plugin.MaxBody
+	// declaration) before any plugin's own code runs. Core routes, registered
+	// separately below via registerRoutes(mux, api), are untouched by this --
+	// see the block comment a few lines down for why plugMux is not a
+	// plugin-only mux and why that reuse means this wrap must not reach them.
+	// cleat#2277: a plugin whose RegisterRoutes has drifted to the
+	// pre-#2232 signature, or whose RegisterRoutes call itself errors, used
+	// to only log and continue -- silently serving none, or part, of that
+	// plugin's routes while /readyz kept answering 200. Both now refuse to
+	// start, naming the plugin, the same shape checkRequiredDeploymentSecrets
+	// already uses a few lines up.
+	if err := checkPluginRouteSignatures(plugList); err != nil {
+		logger.ErrorContext(context.Background(), "refusing to start: "+err.Error(), "worker_id", workerID)
+		os.Exit(1)
+	}
+	pluginRouter := &pluginBodyLimitRouter{mux: plugMux, defaultLimit: *pluginMaxBodySize}
 	for _, lp := range plugList {
 		if !lp.Healthy {
 			continue
 		}
 		if p, ok := lp.Plugin.(plugin.HasRoutes); ok && plugMux != nil {
-			if rerr := p.RegisterRoutes(plugMux); rerr != nil {
-				logger.ErrorContext(context.Background(), "plugin route registration failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", rerr)
+			if rerr := p.RegisterRoutes(pluginRouter); rerr != nil {
+				logger.ErrorContext(context.Background(), "refusing to start: plugin route registration failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", rerr)
+				os.Exit(1)
 			}
 		}
 	}
 
+	// PLUGIN MIDDLEWARE WRAPS THE CORE API, NOT ONLY PLUGIN ROUTES, and the
+	// three lines below read like the opposite.
+	//
+	// plugMux is not a separate mux for plugin routes. It becomes `mux` further
+	// down (`mux := plugMux`), registerRoutes(mux, api) puts the CORE route
+	// table on it, and `handler := plugHandler` serves the result. So a plugin
+	// implementing HasMiddleware sees POST /api/workflows/:name/start exactly as
+	// it sees its own routes.
+	//
+	// Written here because the misreading is expensive in one direction: it
+	// makes anything that needs to intercept a core request look like it needs
+	// core changes. cleat#1569 (per-tenant consumption quotas) was scoped as
+	// three dialect migrations plus per-dialect store methods before this was
+	// checked; it is a plugin, modelled on plugins/ratelimiter, which enforces
+	// per-tenant rate limits through this same seam.
+	//
+	// Verified rather than assumed, and it took two passes -- the first
+	// concluded plugin middleware did NOT reach core routes, which the
+	// `mux := plugMux` line contradicts.
 	if plugMux != nil {
-		plugHandler = plugMux
-		for _, lp := range plugList {
-			if !lp.Healthy {
-				continue
-			}
-			if p, ok := lp.Plugin.(plugin.HasMiddleware); ok {
-				plugHandler = p.Middleware(plugHandler)
-			}
-		}
+		plugHandler = wrapPluginMiddleware(plugMux, plugList)
 	}
 
 	for _, lp := range plugList {
@@ -706,6 +1808,7 @@ func main() {
 				registry:       pluginRegistry,
 				streamRegistry: pluginStreamRegistry,
 				pluginName:     lp.Plugin.Info().Name,
+				secrets:        secretStore,
 			}
 			if rerr := p.RegisterHostFunctions(adapter); rerr != nil {
 				logger.ErrorContext(context.Background(), "plugin host functions failed", "worker_id", workerID, "plugin", lp.Plugin.Info().Name, "error", rerr)
@@ -718,13 +1821,28 @@ func main() {
 			continue
 		}
 		if p, ok := lp.Plugin.(plugin.HasBackground); ok {
-			bgWg.Add(1)
-			go func(bg plugin.HasBackground) {
-				defer bgWg.Done()
-				if berr := bg.Run(ctx); berr != nil {
-					logger.ErrorContext(context.Background(), "plugin background worker exited", "worker_id", workerID, "plugin", bg.Info().Name, "error", berr)
-				}
-			}(p)
+			// COLLECTED HERE, STARTED BY THE WORKER. They used to be spawned
+			// on this line -- 124 lines before the *Worker that owns the
+			// health tracker, the background-loop metric and
+			// withPanicRecovery exists -- so a panicking plugin loop was
+			// invisible to /healthz and to monitoring, and an operator
+			// learned about it by reading logs. cleat#1347.
+			//
+			// Nothing between here and the Worker depends on a plugin loop
+			// running: the window loads redaction patterns, starts the plugin
+			// pool monitor, builds the WASM disk cache, the wasmtime backend,
+			// the NOTIFY listener and the flusher registry. The dependency
+			// runs the other way and is satisfied either way -- a plugin's
+			// Run(ctx) uses the Environment it was handed at Init, which is
+			// complete before this point.
+			bgPlugins = append(bgPlugins, p)
+		}
+		// SAME DISCOVERY SHAPE AS HasBackground, ABOVE. cleat#1715: a plugin
+		// that starts workflows (jobqueue) wants to know their terminal
+		// status; see plugin.HasFinalizeObserver's own doc comment for what
+		// this hook is and is not.
+		if p, ok := lp.Plugin.(plugin.HasFinalizeObserver); ok {
+			finalizeObservers = append(finalizeObservers, p)
 		}
 	}
 
@@ -741,6 +1859,9 @@ func main() {
 		bgWg.Add(1)
 		go func() {
 			defer bgWg.Done()
+			// cleat#1769. This is newer than the panic-recovery fix it was
+			// missing, and sits a few hundred lines from it.
+			defer recoverBackgroundGoroutine(logger, workerID, "plugin-pool-monitor")
 			ticker := time.NewTicker(30 * time.Second)
 			defer ticker.Stop()
 			for {
@@ -785,13 +1906,32 @@ func main() {
 		engine.WithWasmtimeExecutionTimeout(*wasmInstanceTimeout),
 		engine.WithWasmtimeInstructionLimit(uint64(*wasmInstructionLimit)),
 		engine.WithWasmtimeMemoryLimits(wasmtimeMemoryLimitBytes, 0, 0),
+		engine.WithWasmtimeDeferBudget(*wasmDeferBudget),
+		engine.WithWasmtimeModuleCacheMaxEntries(*wasmModuleCacheMaxEntries),
+		engine.WithWasmtimeModuleCacheMaxBytes(int64(*wasmModuleCacheMaxMB)<<20),
+		// Without this the backend writes to slog.Default(), and this worker's
+		// configured handler never sees the one record that says whether a
+		// KILLED workflow's defers ran. See WithWasmtimeLogger.
+		engine.WithWasmtimeLogger(logger),
 	)
 	if wasmtimeErr != nil {
 		logger.ErrorContext(context.Background(), "wasmtime backend failed to initialize; wasmtime is the only WASM backend cleat has, there is no fallback", "worker_id", workerID, "error", wasmtimeErr)
 		os.Exit(1)
 	}
+	// A ceiling below the instance timeout is a configuration that cannot mean
+	// what it says: configureStore clamps the epoch deadline to whatever the
+	// context has left, so the guest's execution bound silently becomes the
+	// ceiling and --wasm-instance-timeout stops being the number that decides.
+	if *wasmWallClockCeiling > 0 && *wasmWallClockCeiling < *wasmInstanceTimeout {
+		logger.WarnContext(context.Background(),
+			"--wasm-wall-clock-ceiling is below --wasm-instance-timeout, so the guest's execution bound is effectively the ceiling",
+			"worker_id", workerID,
+			"wall_clock_ceiling", *wasmWallClockCeiling,
+			"instance_timeout", *wasmInstanceTimeout)
+	}
+
 	var wasmtimeBackend engine.WasmBackend = wt
-	logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes)
+	logger.InfoContext(context.Background(), "wasmtime backend registered for Go WASM", "worker_id", workerID, "instance_timeout", *wasmInstanceTimeout, "wall_clock_ceiling", *wasmWallClockCeiling, "instruction_limit", *wasmInstructionLimit, "memory_limit_bytes", wasmtimeMemoryLimitBytes, "defer_budget", *wasmDeferBudget)
 
 	// Start PostgreSQL NOTIFY listener for low-latency dispatch wake-up.
 	var notifyCh chan struct{}
@@ -803,12 +1943,16 @@ func main() {
 	}
 
 	// Set up per-tenant adaptive flusher registry if batch flushing is not disabled.
+	// PostgreSQL only: see batchFlushEnabled.
 	var flusherRegistry *engine.TenantFlusherRegistry
 	var flusherDB *sql.DB
-	if !*batchFlushDisabled && !*noPerStepFlush {
+	if notice := batchFlushIgnoredNotice(*driver, *batchFlushDisabled, *noPerStepFlush); notice != "" {
+		logger.InfoContext(ctx, notice, "worker_id", workerID, "driver", *driver)
+	}
+	if batchFlushEnabled(*driver, *batchFlushDisabled, *noPerStepFlush) {
 		// Open a dedicated DB pool for the adaptive flusher so batch flushes
 		// never queue behind workflow claims, history loads, or finalizations.
-		flusherDB, err = sql.Open(sqlDriverName(*driver), dsnWithSchema(*dbURL, *schemaName))
+		flusherDB, err = sql.Open(sqlDriverName(*driver), dsnWithSchema(*dbURL, *schemaName, *driver))
 		if err != nil {
 			logger.ErrorContext(ctx, "failed to open flusher DB pool", "worker_id", workerID, "error", err)
 			os.Exit(1)
@@ -821,38 +1965,210 @@ func main() {
 			MaxBatch:       *batchFlushMaxSize,
 			EnterThreshold: float64(*batchFlushEnterRate),
 			ExitThreshold:  float64(*batchFlushExitRate),
+			RetryWindow:    *flushRetryWindow,
 		})
 		registry.SetEncryption(*encryptSensitivePayloads, payloadEncryption)
 		flusherRegistry = registry
 		logger.InfoContext(ctx, "adaptive flusher registry enabled", "worker_id", workerID, "max_wait_ms", *batchFlushMaxWaitMs, "max_batch", *batchFlushMaxSize, "enter_rate", *batchFlushEnterRate, "exit_rate", *batchFlushExitRate)
 	}
+	// Emitted OUTSIDE the registry branch above, because the advice is about
+	// the retry window and both flush paths have one -- a deployment running
+	// with --batch-flush-disabled is exactly the one whose every step takes the
+	// direct path, and it would be the wrong deployment to stay quiet for.
+	if advice := flushRetryWindowAdvice(*flushRetryWindow, *reclaimTimeout, *heartbeatInterval); advice != "" {
+		logger.WarnContext(ctx, advice, "worker_id", workerID,
+			"flush_retry_window", (*flushRetryWindow).String(),
+			"reclaim_window", reclaimWindow(*reclaimTimeout, *heartbeatInterval).String())
+	}
+
+	// The connection census. cleat#1486.
+	//
+	// Computed HERE because this is the first point at which every term is
+	// known: the shard pools are built from a config file, the flusher pool
+	// exists only if both its gates are false, and the plugin pool only if
+	// --max-plugin-connections > 0. Any earlier and the numbers would be flag
+	// defaults rather than this worker's.
+	//
+	// Logged unconditionally, checked only when a budget was configured. The
+	// log line is most of the value on its own: the documented figure was
+	// `concurrency + 5` -- the core pool alone -- for as long as nobody saw the
+	// other terms printed beside it.
+	budget := connectionBudget{
+		Core:          *concurrency + 5,
+		TenantPerPool: *tenantPoolMaxConns,
+	}
+	if *maxPluginConnections > 0 {
+		budget.Plugin = *maxPluginConnections
+	}
+	if batchFlushEnabled(*driver, *batchFlushDisabled, *noPerStepFlush) {
+		budget.Flusher = *batchFlushMaxConns
+	}
+	budget.Shards = shardPoolCount * shardPoolMaxConns
+	if *migrateDBURL != "" {
+		budget.Migrate = migratePoolMaxConns
+	}
+	// --heartbeat-max-connections has no effect on a sharded deployment yet
+	// (see its flag doc), so counting it there would charge the budget for a
+	// pool that was never opened.
+	if *heartbeatMaxConnections > 0 && *shardsFile == "" {
+		budget.Heartbeat = *heartbeatMaxConnections
+	}
+	// WHO ACTUALLY HAS A POOL PER TENANT, asked rather than assumed.
+	//
+	// This used to read `if tenantPools == nil { budget.TenantPerPool = 0 }`,
+	// and plugin.TenantPools is built only under --tenant-isolation=role,
+	// which is PostgreSQL-only. So the census reported the per-tenant term as
+	// ZERO on MySQL and SQL Server -- the two dialects that ALWAYS have it,
+	// because their factories are constructed with .WithTenantPoolMaxConns()
+	// and size a pool per tenant from the same flag.
+	//
+	// The term was suppressed precisely where it is largest, which is the
+	// defect cleat#1486 exists for, recurring in the one term a worker serving
+	// many tenants notices first.
+	//
+	// Two independent sources, and either is enough: the role-isolation pools,
+	// and a factory that pools per tenant by construction. On PostgreSQL with
+	// --tenant-isolation=role only the first applies; on SQL Server and MySQL
+	// only the second; and both read the same flag, so there is nothing to
+	// reconcile.
+	budget.TenantPerPool = perTenantPoolCeiling(tenantPools, factory, *tenantPoolMaxConns)
+	logger.InfoContext(ctx, "database connection budget",
+		"worker_id", workerID, "pools", budget.Describe(),
+		"configured_budget", *connectionBudgetFlag,
+		"tenant_pools_that_fit", budget.TenantHeadroom(*connectionBudgetFlag))
+	// Does this worker fit on this server? cleat#1487.
+	//
+	// The issue opens with "two default workers want 150 and PostgreSQL's
+	// default is 100", and nothing detected it -- the only matches for
+	// `max_connections` in the tree were log labels for the plugin pool's own
+	// flag. This asks the server rather than assuming a default, because the
+	// answer is a property of the deployment and the usable figure is not the
+	// advertised one: superuser_reserved_connections and (on 16+)
+	// reserved_connections come off the top before an ordinary role is
+	// admitted.
+	//
+	// WARNS, never refuses. checkConnectionBudget below refuses because that
+	// budget is a number the operator stated, so a contradiction is
+	// unambiguously their error. This is the server's ceiling, and a worker
+	// that excludes a second may be the only worker there is; refusing to start
+	// it would be worse than the problem.
+	if limit, ok, reason := queryServerConnectionLimit(ctx, db, *driver); ok {
+		logger.InfoContext(ctx, "server connection limit",
+			"worker_id", workerID, "usable", limit.Usable(), "detail", limit.Detail,
+			"this_worker_needs", budget.Fixed())
+		if sev, msg := assessConnectionFit(budget.Fixed(), limit); sev == "error" {
+			logger.ErrorContext(ctx, msg, "worker_id", workerID)
+		} else if sev == "warn" {
+			logger.WarnContext(ctx, msg, "worker_id", workerID)
+		}
+	} else if reason != "" {
+		// Said out loud rather than skipped silently: a silent skip is
+		// indistinguishable from a check that passed, which is the failure this
+		// whole check exists to end.
+		logger.InfoContext(ctx, "server connection limit not checked",
+			"worker_id", workerID, "reason", reason)
+	}
+
+	if err := checkConnectionBudget(*connectionBudgetFlag, budget); err != nil {
+		logger.ErrorContext(ctx, "refusing to start", "worker_id", workerID, "error", err)
+		os.Exit(1)
+	}
+
+	// Hand the tenant pools whatever the fixed pools leave. cleat#1470.
+	//
+	// THE FIXED POOLS COME OFF THE TOP, and that is the only defensible split:
+	// they are opened at startup and never evicted, so a budget shared with
+	// them would be a budget the tenant pools can never actually reach. What is
+	// left is genuinely theirs.
+	//
+	// Zero, or an unset budget, leaves them unbounded -- which is what every
+	// deployment had before this and stays the default. The admission control
+	// this enables is opt-in for the same reason the check above is: a worker
+	// must not start evicting tenant pools because it was upgraded.
+	if tenantPools != nil && *connectionBudgetFlag > 0 {
+		tenantShare := *connectionBudgetFlag - budget.Fixed()
+		tenantPools.SetConnectionBudget(tenantShare)
+		logger.InfoContext(ctx, "tenant pools are bounded",
+			"worker_id", workerID, "tenant_connection_budget", tenantShare,
+			"tenant_pools_that_fit", budget.TenantHeadroom(*connectionBudgetFlag))
+	}
+
+	// Cluster-wide budget: this worker is already registered (right after the
+	// migrations), so a count taken now includes it, and it takes an equal share
+	// of what every budgeted worker divides. cleat#1487.
+	//
+	// REGISTER BEFORE COUNTING, and the order is load-bearing rather than
+	// tidy. A worker that counts first sizes itself to a cluster it is not yet
+	// part of, so every joining worker would briefly claim one worker's worth
+	// too much -- exactly when the cluster is growing and least able to
+	// absorb it.
+	var share *connectionShare
+	if *clusterConnectionBudgetFlag > 0 {
+		share = newConnectionShare(*clusterConnectionBudgetFlag, connectionShareGrowHoldDown, nil)
+		logger.InfoContext(ctx, "taking part in the cluster connection budget",
+			"worker_id", workerID, "cluster_connection_budget", *clusterConnectionBudgetFlag,
+			"grow_hold_down", connectionShareGrowHoldDown)
+	}
+
 	w := &Worker{
 		Metrics:                          metricsInstance,
 		id:                               workerID,
 		logger:                           logger,
 		store:                            store,
+		heartbeatStore:                   heartbeatStore,
 		storeTenantID:                    defaultTenantID,
 		storeFactory:                     factory,
 		taskQueues:                       taskQueues,
 		claimAcrossTenants:               *claimAcrossTenants,
+		claimTenantsPerTick:              *claimTenantsPerTick,
 		concurrency:                      *concurrency,
+		maxReclaimPerTick:                *maxReclaimPerTick,
+		unservableBackoff:                *unservableBackoffFlag,
+		bgPlugins:                        bgPlugins,
+		finalizeObservers:                finalizeObservers,
+		bgWg:                             &bgWg,
 		maxQueued:                        *maxQueued,
 		heartbeatInterval:                *heartbeatInterval,
+		membershipLastBeat:               registeredAt,
+		reclaimTimeout:                   *reclaimTimeout,
+		flushRetryWindow:                 *flushRetryWindow,
+		privateHosts:                     pluginPrivateHosts,
+		serviceEndpoints:                 serviceEndpoints,
+		egressAllow:                      egressAllow,
+		secrets:                          secretStore,
+		operatorEgress:                   operatorEgress,
+		workerRegistry:                   workerRegistry,
+		connectionShare:                  share,
+		connectionBudgetParts:            budget,
+		clusterConnectionBudget:          *clusterConnectionBudgetFlag,
+		perWorkerConnectionBudget:        *connectionBudgetFlag,
 		pollInterval:                     *pollInterval,
 		ctx:                              ctx,
 		cancel:                           cancel,
+		hardStopCtx:                      hardStopCtx,
+		hardStopCancel:                   hardStopCancel,
 		wasmCache:                        newWasmLRUCache(*wasmCacheMaxEntries, *wasmCacheMaxMB),
 		scheduleInterval:                 15 * time.Second,
 		compactionThreshold:              *compactionThreshold,
 		compactionInterval:               *compactionInterval,
+		stallThreshold:                   *stallThreshold,
+		metricsSweepInterval:             *metricsSweepInterval,
+		keyExpiryWindow:                  *keyExpiryWindow,
+		retentionInterval:                *retentionInterval,
+		versionGCInterval:                *versionGCInterval,
+		versionGCMinVersions:             *versionGCMinVersions,
+		versionGCMaxAge:                  *versionGCMaxAge,
 		pluginRegistry:                   pluginRegistry,
+		pluginStreamRegistry:             pluginStreamRegistry,
+		streamHub:                        streamHub,
 		plugList:                         plugList,
+		dbDialect:                        string(factory.Dialect()),
 		tenantPools:                      tenantPools,
 		memorySampleRetention:            *memorySampleRetention,
 		retentionDays:                    *retentionDays,
+		deadLetterRetentionDays:          *deadLetterRetentionDays,
 		completedWorkflowRetentionDays:   *completedWorkflowRetentionDays,
 		schemaName:                       *schemaName,
-		peerSchemas:                      parsePeerSchemas(*peerSchemas),
 		disableChecksumVerification:      disableChecksumVerification,
 		requireSignalAuth:                requireSignalAuth,
 		maxRetries:                       *maxRetries,
@@ -867,6 +2183,8 @@ func main() {
 		maxQuotaConcurrencyKeys:          *maxQuotaConcurrencyKeys,
 		maxQuotaSchedules:                *maxQuotaSchedules,
 		maxWorkflowDuration:              *maxWorkflowDuration,
+		wasmWallClockCeiling:             *wasmWallClockCeiling,
+		hostRetryBudget:                  *hostRetryBudget,
 		childBindingOverride:             *childBindingOverride,
 		healthCheckInterval:              *healthCheckInterval,
 		encryption:                       payloadEncryption,
@@ -877,13 +2195,24 @@ func main() {
 		flusherRegistry:                  flusherRegistry,
 		db:                               db,
 	}
+	// cleat#2008 decision 2: seed to now, not the atomic.Int64 zero value --
+	// a fresh worker has not yet proven its heartbeat is failing, and
+	// leaving this at the Unix epoch would presume every worker's heartbeat
+	// lost from the instant it starts, before heartbeatLoop has ticked even
+	// once.
+	w.lastHeartbeatOK.Store(time.Now().UnixNano())
+	// cleat#2005: also seed to now, but for the OPPOSITE reason -- see
+	// lastDBTrouble's doc. A fresh worker has not yet PROVEN a clean window
+	// of database contact either, and its reaper must not act on anyone
+	// else's staleness until it has.
+	w.lastDBTrouble.Store(time.Now().UnixNano())
 
 	// Initialize memory-aware concurrency controller.
 	monitor := NewMemoryMonitor(*memoryCheckInterval)
 	monitor.logger = logger
 	mc := NewMemoryController(monitor, store, workerID, *concurrency, *memorySoftLimit, *memoryHardLimit)
 	mc.logger = logger
-	if err := mc.LoadEstimates(ctx); err != nil {
+	if err := mc.LoadEstimates(ctx, defaultTenantID); err != nil {
 		logger.WarnContext(context.Background(), "failed to load memory estimates", "worker_id", workerID, "error", err)
 	}
 	w.memoryController = mc
@@ -892,8 +2221,14 @@ func main() {
 
 	// Set metrics on the store factory so stores created during workflow
 	// execution inherit the OTel metrics instance.
+	//
+	// The worker's OWN store is not made by the factory, and neither are the
+	// shard stores, so they need the same wiring: without it every store-level
+	// counter is silently a no-op -- cleat_decryption_errors_total never moved
+	// while a run was being released for a history this worker could not
+	// decrypt (cleat#2311).
+	wireStoreMetrics(store, factory, metricsInstance)
 	if pf, ok := factory.(*engine.PostgresStoreFactory); ok {
-		pf.WithMetrics(metricsInstance)
 		if syncCommitOff != nil && *syncCommitOff {
 			pf.WithSyncCommitOff(true)
 		}
@@ -902,13 +2237,18 @@ func main() {
 
 	if *apiAddr != "" {
 		api := &apiServer{
-			store:       store,
-			worker:      w,
-			maxBodySize: *maxBodySize,
-			db:          db,
-			factory:     factory,
-			taskQueues:  taskQueues,
-			requireAuth: *requireAuth,
+			store:                store,
+			worker:               w,
+			maxBodySize:          *maxBodySize,
+			maxPriorityMagnitude: *maxPriorityMagnitude,
+			db:                   db,
+			factory:              factory,
+			taskQueues:           taskQueues,
+			requireAuth:          *requireAuth,
+			streamHub:            streamHub,
+
+			maxStreamPollReaders: *maxStreamPollReadersFlag,
+			streamPollInterval:   *streamPollIntervalFlag,
 		}
 
 		// Use plugin mux if available, otherwise create a fresh one.
@@ -917,38 +2257,10 @@ func main() {
 			mux = http.NewServeMux()
 		}
 
-		mux.HandleFunc("/healthz", api.handleHealthz)
-		mux.Handle("/metrics", metricsInstance.ServeHTTP())
-		mux.HandleFunc("/api/admin/drain", api.handleDrain)
-		// Schedule API routes (registered before workflows so /api/schedules is not caught by /api/workflows/).
-		mux.HandleFunc("/api/schedules/", api.handleSchedules)
-		mux.HandleFunc("/api/schedules", api.handleSchedulesList)
-		mux.HandleFunc("/api/workflows/", api.handleWorkflows)
-		mux.HandleFunc("/api/workflows", api.handleWorkflowsList)
-		mux.HandleFunc("/api/dead-letters/", api.handleDeadLetters)
-		mux.HandleFunc("/api/dead-letters", api.handleDeadLettersList)
-
-		// Workflow definitions endpoint.
-		mux.HandleFunc("GET /api/definitions", api.handleDefinitions)
-		mux.HandleFunc("POST /api/definitions", api.handleCreateDefinition)
-
-		// Version management endpoints.
-		//
-		// api.scopedStore, not store: store is the process-wide connection
-		// opened at boot against the default tenant. Passing it here served
-		// every caller's GET /api/versions, listStaleAlerts, runGC,
-		// markDeprecated, and -- worst -- POST
-		// /api/versions/<name>/<v>/purge (which permanently deletes a
-		// workflow definition) from the default tenant's data regardless of
-		// who authenticated. api.scopedStore is the same per-request
-		// tenant resolution every other handler in this file uses (see
-		// server.go's storeFor/scopedStore doc comments); it refuses rather
-		// than falling back to the default tenant when a request has no
-		// authenticated tenant and --require-auth is on.
-		engine.RegisterVersionHandler(mux, api.scopedStore)
-
-		// Plugin discovery endpoint.
-		mux.HandleFunc("/api/plugins", func(w http.ResponseWriter, r *http.Request) {
+		// Plugin discovery endpoint. Closes over the loaded plugin list, so it
+		// is built here and handed to the route table rather than declared in
+		// it.
+		api.plugins = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			type pluginStatus struct {
 				plugin.PluginInfo
@@ -969,13 +2281,14 @@ func main() {
 			json.NewEncoder(w).Encode(statuses)
 		})
 
-		// Serve embedded SPA for non-API paths.
+		// Embedded SPA for non-API paths. registerRoutes wraps it so that an
+		// unmatched /api/ path is a JSON 404 instead of index.html.
 		webFS, fsErr := fs.Sub(webDist, "web/dist")
 		if fsErr != nil {
 			logger.WarnContext(context.Background(), "web/dist not found in embedded FS", "worker_id", workerID, "error", fsErr)
 		} else {
 			fileServer := http.FileServer(http.FS(webFS))
-			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			api.spa = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				path := strings.TrimPrefix(r.URL.Path, "/")
 				f, ferr := webFS.Open(path)
 				if ferr != nil {
@@ -986,28 +2299,84 @@ func main() {
 				fileServer.ServeHTTP(w, r)
 			})
 		}
+
+		// One route table, shared with the tests. See registerRoutes.
+		registerRoutes(mux, api)
+
 		// Use plugin middleware chain if available.
 		handler := plugHandler
 		if handler == nil {
 			handler = mux
 		}
 
+		if msg := adminAPIExposure(*enableAdminAPI, *requireAuth); msg != "" {
+			logger.WarnContext(context.Background(), msg, "worker_id", workerID)
+		}
+
 		// Wrap with auth middleware if --require-auth is true.
 		if *requireAuth {
-			// S6: these two plugin endpoints are meant to be called by
+			// S6: these plugin endpoints are meant to be called by
 			// parties who cannot present a cleat API key -- an external
 			// webhook sender (plugins/webhookingest, verifies its own
-			// HMAC signature) and a third-party IdP's OAuth redirect
-			// (plugins/oauthprovider) -- so they must stay reachable
-			// without one even though --require-auth wraps the same
-			// mux/plugHandler every other plugin route goes through. See
-			// auth.Middleware's doc comment for why this is a
+			// HMAC signature), a third-party IdP's OAuth redirect
+			// (plugins/oauthprovider), and Slack's own interactive-callback
+			// POST (plugins/slacknotify, cleat#2172) -- so they must stay
+			// reachable without one even though --require-auth wraps the
+			// same mux/plugHandler every other plugin route goes through.
+			// See auth.MiddlewareWithMux's doc comment for why this is a
 			// hand-maintained list rather than something plugins declare
 			// themselves.
-			handler = auth.Middleware(store, true,
-				"POST /ingest/{source_id}",
-				"GET /oauth/{provider}/callback",
-			)(handler)
+			//
+			// Slack carries no cleat API key and no Host binding either, so
+			// /slack/interactive needs both exemptions below, the same
+			// shape as ingest and the OAuth callback -- and with this
+			// route now reachable, its own HMAC verification against
+			// "slacknotify.signing_secret" (interactive.go) becomes the
+			// ONLY gate. That check refuses unconditionally (missing,
+			// unreadable, or retired secret; missing or bad signature) --
+			// there is no path here that accepts an unsigned request, which
+			// is what makes exempting it from cleat's own auth safe.
+			// authResolver is built once, above, on `db` -- the connection
+			// the DSN names -- and NOT on `store`, which is
+			// factory.OpenStore(ctx, defaultTenantID, ...) and therefore
+			// tenant-scoped.
+			//
+			// Resolving an API key is what tells you which tenant's store
+			// to open, so it cannot run through a store that already
+			// knows the tenant. On PostgreSQL and SQL Server that
+			// distinction costs nothing -- one database, isolation by RLS
+			// or session context, so either connection reaches the table.
+			// On MySQL tenant isolation IS a database boundary, so the
+			// tenant-scoped store looked in cleat_<tenant> while every
+			// writer put the key in the base database, and the API
+			// answered 401 to every request with no key that could work.
+			// cleat#866.
+			authResolver, arErr := auth.NewTenantStoreForDialect(db, *driver)
+			if arErr != nil {
+				logger.ErrorContext(context.Background(), "cannot build the API key resolver, so no request could be authenticated", "worker_id", workerID, "error", arErr)
+				os.Exit(1)
+			}
+			//
+			// HOST BINDING GOES ON FIRST, so that after auth.MiddlewareWithMux wraps
+			// it below the order is auth OUTSIDE, host binding INSIDE.
+			//
+			// That order is the whole correctness argument. Installed the other
+			// way round, the check would run before any credential had been
+			// resolved and would read whatever the tenant-resolver middleware
+			// had put in the context -- which on some paths is a value the
+			// CLIENT supplied. It would then be comparing a header against a
+			// header. cleat#1568.
+			if *requireHostMatch {
+				if err := checkHostBindingConfigured(ctx, authResolver); err != nil {
+					logger.ErrorContext(context.Background(),
+						"--require-host-match is set but no tenant domains are configured",
+						"worker_id", workerID, "error", err)
+					os.Exit(1)
+				}
+				handler = auth.HostBindingMiddlewareWithMux(authResolver, mux, pluginAuthExemptPatterns...)(handler)
+			}
+
+			handler = auth.MiddlewareWithMux(authResolver, true, mux, pluginAuthExemptPatterns...)(handler)
 
 			// If no API keys exist, auto-generate one for the default tenant.
 			//
@@ -1028,10 +2397,7 @@ func main() {
 			// unqualified name resolves to dbo, and dbo is the one nothing
 			// writes. So this counted rows in an always-empty table and
 			// concluded a key needed generating on every start.
-			keyCountQuery := `SELECT COUNT(*) FROM tenant_api_keys`
-			if *driver == "postgres" || *driver == "mssql" {
-				keyCountQuery = `SELECT COUNT(*) FROM admin.tenant_api_keys`
-			}
+			keyCountQuery := liveAPIKeyCountQuery(*driver)
 			var keyCount int
 			if err := db.QueryRowContext(ctx, keyCountQuery).Scan(&keyCount); err != nil {
 				// ERROR, not WARN: if this query fails the auth middleware
@@ -1043,10 +2409,15 @@ func main() {
 			} else if keyCount == 0 {
 				key := auth.GenerateAPIKey()
 				defaultTenantID := uuid.MustParse("00000000-0000-0000-0000-000000000000")
-				ts := auth.NewTenantStore(db)
-				if err := ts.CreateAPIKey(ctx, defaultTenantID, "auto-generated startup key", key); err != nil {
-					logger.WarnContext(context.Background(), "failed to auto-generate API key", "worker_id", workerID, "error", err)
-				} else {
+				ts, tsErr := auth.NewTenantStoreForDialect(db, *driver)
+				switch {
+				case tsErr != nil:
+					logger.WarnContext(context.Background(), "cannot auto-generate an API key", "worker_id", workerID, "error", tsErr)
+				default:
+					if err := ts.CreateAPIKey(ctx, defaultTenantID, "auto-generated startup key", key); err != nil {
+						logger.WarnContext(context.Background(), "failed to auto-generate API key", "worker_id", workerID, "error", err)
+						break
+					}
 					fmt.Println()
 					fmt.Println("=== CLEAT API KEY (auto-generated — no keys were configured) ===")
 					fmt.Printf("Key:       %s\n", key)
@@ -1094,12 +2465,14 @@ func main() {
 			IdleTimeout:  *httpIdleTimeout,
 		}
 		go func() {
+			defer recoverBackgroundGoroutine(logger, workerID, "http-api-listener")
 			logger.InfoContext(context.Background(), "HTTP API listening", "worker_id", workerID, "addr", *apiAddr)
 			if err := srv.ListenAndServe(); err != http.ErrServerClosed {
 				logger.ErrorContext(context.Background(), "HTTP server error", "worker_id", workerID, "error", err)
 			}
 		}()
 		go func() {
+			defer recoverBackgroundGoroutine(logger, workerID, "http-api-shutdown")
 			<-ctx.Done()
 			srv.Shutdown(context.Background())
 		}()
@@ -1108,6 +2481,7 @@ func main() {
 	// Start pprof server on a separate port for CPU profiling.
 	if *pprofAddr != "" {
 		go func() {
+			defer recoverBackgroundGoroutine(logger, workerID, "pprof-listener")
 			logger.InfoContext(context.Background(), "pprof listening", "worker_id", workerID, "addr", *pprofAddr)
 			// An explicit Server rather than http.ListenAndServe, for the
 			// ReadHeaderTimeout (gosec G114/G112): the convenience function
@@ -1135,14 +2509,52 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
+		// A panic here would leave the worker running with no path to a clean
+		// shutdown: cancel() never fires, so nothing drains. cleat#1769.
+		defer recoverBackgroundGoroutine(logger, workerID, "signal-handler")
 		<-sigCh
-		logger.InfoContext(context.Background(), "shutting down", "worker_id", workerID)
-		cancel()
+		// Drain, then cancel (cleat#2285). Cancelling here, on the signal, aborted every in-flight durable
+		// call and wrote the run FAILED; a rolling deploy lost the runs it interrupted.
+		logger.InfoContext(context.Background(), "shutting down: draining in-flight runs", "worker_id", workerID, "grace", shutdownGrace.String())
+		force := make(chan struct{})
+		go func() {
+			defer recoverBackgroundGoroutine(logger, workerID, "signal-handler-force")
+			<-sigCh
+			close(force)
+		}()
+		why := w.gracefulShutdown(*shutdownGrace, force)
+		logger.InfoContext(context.Background(), "shutdown: cancelling the worker", "worker_id", workerID, "because", why)
 		if ratelim != nil {
 			ratelim.stop()
 		}
 		if tenantLim != nil {
 			tenantLim.stop()
+		}
+		// cleat#2147: after the drain, beside the worker's own components
+		// stopping. Stop() was documented as running here for four docs' worth
+		// of releases and nothing called it. See plugin_stop.go for why the
+		// deadline is shared, why this is after the drain, why a plugin whose
+		// Init FAILED is not stopped, and what the budget does not bound.
+		if stopped, failed := stopStoppablePlugins(context.Background(), plugList, pluginStopDeadline, logger); stopped > 0 || failed > 0 {
+			logger.InfoContext(context.Background(), "shutdown: plugin Stop() complete",
+				"worker_id", workerID, "stopped", stopped, "failed", failed)
+		}
+	}()
+
+	// SIGHUP is reserved for a future config/key reload (cleat#1992 part 2,
+	// the ReloadableKeyRing work, tracked separately as cleat#2298) -- not
+	// implemented yet. Log and ignore rather than leaving Go's default
+	// action in place, which for SIGHUP is TERMINATE: an operator sending
+	// `kill -HUP` to roll a worker onto a new key, before that reload
+	// exists, would kill the worker instead of doing nothing. A SEPARATE
+	// channel from sigCh above: SIGHUP must never enter the drain-then-
+	// cancel shutdown path SIGINT/SIGTERM do.
+	sighupCh := make(chan os.Signal, 1)
+	signal.Notify(sighupCh, syscall.SIGHUP)
+	go func() {
+		defer recoverBackgroundGoroutine(logger, workerID, "sighup-handler")
+		for range sighupCh {
+			logger.InfoContext(context.Background(), "received SIGHUP: config/key hot-reload is not implemented yet (cleat#1992), ignoring", "worker_id", workerID)
 		}
 	}()
 
@@ -1164,6 +2576,7 @@ func main() {
 	// Wait for background workers to finish.
 	bgDone := make(chan struct{})
 	go func() {
+		defer recoverBackgroundGoroutine(logger, workerID, "background-waiter")
 		bgWg.Wait()
 		close(bgDone)
 	}()
@@ -1174,4 +2587,70 @@ func main() {
 		logger.WarnContext(context.Background(), "timed out waiting for background workers after 30s", "worker_id", workerID)
 	}
 	logger.InfoContext(context.Background(), "shutdown complete", "worker_id", workerID)
+}
+
+// validateReclaimTimeout refuses a --reclaim-timeout that would reap runs from
+// workers that are alive and heartbeating normally.
+//
+// REFUSED, NOT CLAMPED. Clamping would mean the operator asked for one recovery
+// window and silently got another, and this flag exists precisely to stop the
+// window being derived behind their back -- the same argument the rate limiter
+// makes for refusing a cluster-wide limit it cannot honour (cleat#1581) rather
+// than quietly serving a per-process one.
+//
+// A SEPARATE FUNCTION so it can be tested. Inline in main() the only way to
+// exercise it is to run the binary, which is why the condition it replaced had
+// no test. cleat#1717.
+func validateReclaimTimeout(reclaim, heartbeat time.Duration) error {
+	if reclaim <= 0 {
+		return nil // derive from the heartbeat, as before
+	}
+	// This floor is minimumReclaimAfter(heartbeat) -- ONE function, shared
+	// with reclaimWindow's default derivation and the regression tests that
+	// pin the arithmetic, per cleat-review's third-round ask on cleat#2005:
+	// state the invariant once and have startup and the tests both use it,
+	// rather than restating the formula here and letting it drift the way
+	// the previous `heartbeat + 2*dbCallDeadlineFor(heartbeat)` did. See
+	// minimumReclaimAfter's doc for the derivation and the measured case
+	// that raised it from 2*deadline to 3*deadline.
+	if floor := minimumReclaimAfter(heartbeat); reclaim < floor {
+		return fmt.Errorf(
+			"--reclaim-timeout %v is below the minimum safe window for --heartbeat %v (%v).\n"+
+				"A run is considered stale when it misses that window, so this would reclaim "+
+				"runs from workers that are alive and checking in normally.\n"+
+				"Raise --reclaim-timeout to at least %v, or lower --heartbeat.",
+			reclaim, heartbeat, floor, floor)
+	}
+	return nil
+}
+
+// flushRetryWindowAdvice returns what an operator should be told about a
+// --flush-retry-window that outlasts the window in which this worker's runs stay
+// its own, or "" when there is nothing to say.
+//
+// ADVICE RATHER THAN A REFUSAL, unlike validateReclaimTimeout, and the
+// difference is that this configuration is merely usually pointless rather than
+// always wrong. The reasoning: an outage long enough to need a long retry also
+// stops the heartbeat loop's HeartbeatBatchFenced call, which writes to the
+// same database, so every run in the fleet is past its stale window the
+// moment the database returns. The reaper
+// then reclaims them and the retry that finally succeeds loses its fence. A
+// deployment running one worker has no other reaper and can legitimately want
+// this, so it is not refused -- but nothing in the flag's own units says so, and
+// an operator who sets 5m against a 10s reclaim window has almost certainly not
+// realised the two are related.
+func flushRetryWindowAdvice(flushWindow, reclaim, heartbeat time.Duration) string {
+	if flushWindow <= 0 {
+		return ""
+	}
+	window := reclaimWindow(reclaim, heartbeat)
+	if flushWindow <= window {
+		return ""
+	}
+	return fmt.Sprintf(
+		"--flush-retry-window %v outlasts the reclaim window (%v): an outage that long also stops "+
+			"this worker's heartbeat, so its runs become reclaimable as soon as the database returns "+
+			"and a retry that succeeds after that loses its fence. Raise --reclaim-timeout to at least "+
+			"%v to make the extra retrying reachable, or ignore this if nothing else reaps for this deployment.",
+		flushWindow, window, flushWindow)
 }

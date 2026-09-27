@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -42,6 +43,15 @@ func TestMain(m *testing.M) {
 	exitCode := m.Run()
 	if tmpDir != "" {
 		os.RemoveAll(tmpDir)
+	}
+	// workerBinaryDir (fullstack_template_run_starts_a_workflow_test.go) is
+	// only ever set if some test actually called buildWorkerBinaryOnce --
+	// cleaned up HERE, at the true end of the process, rather than by
+	// whichever test happened to build it first. See that var's doc comment
+	// for why: t.TempDir() there deleted the binary out from under every
+	// later caller (cleat#2109).
+	if workerBinaryDir != "" {
+		os.RemoveAll(workerBinaryDir)
 	}
 	os.Exit(exitCode)
 }
@@ -148,6 +158,138 @@ func TestVetGo_E005_NetHttp(t *testing.T) {
 // TestVetGo_E021_MapIteration verifies that map iteration triggers E021.
 func TestVetGo_E021_MapIteration(t *testing.T) {
 	vetFixture(t, "e021_map_iter", "E021")
+}
+
+// TestVetGo_EntryPointMustReturnString pins the rule that an entry point's
+// result must be a string.
+//
+// The string is deliberate: a WASM entry point hands back bytes, and string is
+// the one shape every language SDK expresses identically, which is why the
+// interfaces use it. GenerateExports declares `var __r string` and emits
+// `return []byte(__r)`, so a non-string result produced
+//
+//	./gen_wasm_exports.go:340:28: cannot convert __r (variable of type
+//	    *BookingResult) to type []byte
+//
+// -- a Go type error in GENERATED code, naming a variable the author never
+// wrote. `cleat vet` said OK on the same package, so the rule existed only as
+// a compile failure in a file nobody wrote. Three shipped examples were in that
+// state; nothing in CI runs `cleat build` on a Go example
+// (IMPROVEMENT-PLAN 3.228).
+//
+// Asserted on the message rather than a code because threading errors carry no
+// Code in VetOutput -- see vetJSONOutput -- and this is one.
+func TestVetGo_EntryPointMustReturnString(t *testing.T) {
+	fixture := filepath.Join("..", "..", "testdata", "vet-checks", "go", "entrypoint_struct_result")
+	out, _ := runVetCmd(t, "vet", "--lang", "go", "--json", fixture)
+
+	var result VetOutput
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("failed to parse JSON output: %v\nstdout: %s", err, out)
+	}
+	if len(result.Errors) == 0 {
+		t.Fatalf("vet accepted an entry point returning *Result; it cannot be built.\nstdout: %s", out)
+	}
+
+	found := false
+	for _, e := range result.Errors {
+		if strings.Contains(e.Message, "an entry point's result must be a string") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected an error naming the string-result rule, got: %+v", result.Errors)
+	}
+}
+
+// TestVetGo_SingleStringEntryPointWarns covers W003.
+//
+// An entry point whose only parameter (after HostCalls) is a string receives
+// the WHOLE input JSON rather than the field of that name. That is deliberate
+// -- something has to carry an opaque payload -- so it is a warning, not an
+// error, and the binding rule is unchanged.
+//
+// What it costs when unwanted is why the warning exists. The rule is invisible
+// at the call site, at build time and at deploy; it surfaces as a semantic
+// failure in whatever the parameter was eventually used for. A lock test in
+// cleat-team/cleat-ports took the lock `lock-{"key":"lock-abc"}` and failed
+// every acquire with `cleat_acquire_lock: error 1` -- a message that points at
+// locks, not at argument binding -- while a two-parameter workflow acquired
+// the same key correctly in the same run. cleat#824.
+//
+// The fixture carries four entry points and only ONE must warn. A check that
+// fired on all four would say nothing about the difference between them, which
+// is the whole content of the warning.
+func TestVetGo_SingleStringEntryPointWarns(t *testing.T) {
+	fixture := filepath.Join("..", "..", "testdata", "vet-checks", "go", "entrypoint_single_string_param")
+	out, err := runVetCmd(t, "vet", "--lang", "go", "--json", fixture)
+	if err != nil {
+		t.Fatalf("cleat vet failed on the fixture: %v\n%s", err, out)
+	}
+
+	var result VetOutput
+	if jsonErr := json.Unmarshal([]byte(out), &result); jsonErr != nil {
+		t.Fatalf("failed to parse JSON output: %v\nstdout: %s", jsonErr, out)
+	}
+
+	// A warning, not an error: the shape is legal and sometimes wanted.
+	if len(result.Errors) != 0 {
+		t.Errorf("W003 must not be an error -- the single-string shape is legal and "+
+			"some workflows want it. Got errors: %+v", result.Errors)
+	}
+
+	var w003 []VetResult
+	for _, w := range result.Warnings {
+		if w.Code == "W003" {
+			w003 = append(w003, w)
+		}
+	}
+	if len(w003) != 1 {
+		t.Fatalf("expected exactly 1 W003 warning, got %d: %+v\n"+
+			"The fixture has four entry points: one single string (must warn), one with "+
+			"two strings, one taking a struct, and one taking a single int -- the last "+
+			"three bind by name and must not.", len(w003), w003)
+	}
+	if !strings.Contains(w003[0].Message, "HandleOneString") {
+		t.Errorf("W003 fired on the wrong function: %q", w003[0].Message)
+	}
+	if !strings.Contains(w003[0].Message, "ENTIRE input JSON") {
+		t.Errorf("W003 does not say what actually happens to the parameter: %q", w003[0].Message)
+	}
+	if !strings.Contains(w003[0].Suggestion, "add a second parameter or take a struct") {
+		t.Errorf("W003 does not name the remedy: %q", w003[0].Suggestion)
+	}
+}
+
+// TestVetGo_HostCallsInAParameterStruct pins that a function reaching HostCalls
+// through a field of a struct it is PASSED counts as threaded.
+//
+// The threading check credited a HostCalls field on a RECEIVER (phase 3) but
+// not on a parameter, so `cleat vet` rejected cleat/dagrun's designed shape --
+// TaskContext.H is handed to every user-written task body, and the package doc
+// names examples/dag as a caller that does exactly this. examples/dag failed
+// with four errors telling its author to add a parameter it already
+// effectively had. IMPROVEMENT-PLAN 3.229.
+//
+// Both spellings are in the fixture, by pointer and by value, because
+// structHasHostCallsField unwraps one level of pointer and a regression could
+// plausibly break either.
+func TestVetGo_HostCallsInAParameterStruct(t *testing.T) {
+	fixture := filepath.Join("..", "..", "testdata", "vet-checks", "go", "hostcalls_in_param_struct")
+	out, err := runVetCmd(t, "vet", "--lang", "go", "--json", fixture)
+	if err != nil {
+		t.Fatalf("cleat vet failed on a package that reaches HostCalls through a "+
+			"parameter struct: %v\n%s", err, out)
+	}
+
+	var result VetOutput
+	if jsonErr := json.Unmarshal([]byte(out), &result); jsonErr != nil {
+		t.Fatalf("failed to parse JSON output: %v\nstdout: %s", jsonErr, out)
+	}
+	if len(result.Errors) != 0 {
+		t.Errorf("expected no errors, got %d: %+v", len(result.Errors), result.Errors)
+	}
 }
 
 // TestVetGo_NoErrors verifies that a clean package produces no errors.
@@ -418,8 +560,8 @@ func TestVetSummaryFields(t *testing.T) {
 	}
 }
 
-// TestVetPython verifies that `cleat vet --lang python` actually detects
-// py002_open's violation, rather than merely not erroring.
+// TestVetPython verifies that `cleat vet --lang python` detects py002_open's
+// violation AND reports it in its exit status.
 //
 // This used to be: run vet, and if it returned a non-nil error, call that
 // "Python vet not available" and skip; the non-skip branch asserted nothing
@@ -427,13 +569,20 @@ func TestVetSummaryFields(t *testing.T) {
 // is a fixture built specifically to contain a violation (file I/O in
 // workflow code, PY002), so the *correct* outcome -- vet finding it -- and
 // "the tooling is missing" need different, disjoint signals, and this test
-// had only one (err). Reproduced live: runVetPython (main.go) treats a
-// python3 exit status of 1 as "vet ran, found violations" and returns exit 0
-// -- finding PY002 does not make `cleat vet` exit non-zero -- but treats
-// anything that writes to stderr, e.g. `ModuleNotFoundError: No module named
-// 'cleat_sdk'`, as a real failure and returns 1. So a non-nil err here has
-// always meant "cleat_sdk was not importable," never "vet found the
-// violation and that's fine."
+// had only one (err).
+//
+// The description that used to sit here -- that runVetPython "returns exit 0"
+// on violations, so a non-nil err here means the SDK was not importable -- was
+// accurate, and is what this test was built around. It stopped being true with
+// cleat#1801, which made a violating file exit 1 and a vet that could not run
+// exit 2. This test now asserts the exit status rather than routing around it.
+//
+// That is the point worth keeping: the defect was written down HERE, in the
+// comment of the test that worked around it, and nowhere else. A test that
+// documents a bug and then parses JSON to avoid it cannot fail on the bug, so
+// nothing was ever going to report it. Prefer asserting the broken behaviour
+// and letting it be red, or file it, over describing it in the test that
+// tiptoes past it.
 //
 // It has also, in this harness, always been non-nil for a second, unrelated
 // reason: findPythonSDKDir (build_python.go) locates <repoRoot>/python-sdk
@@ -450,6 +599,23 @@ func TestVetPython(t *testing.T) {
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not installed")
 	}
+	// An interpreter that is present but too old is the same KIND of condition
+	// as one that is absent, and the distinction that matters is whether the
+	// test can remedy it.
+	//
+	// The comment above records removing a false skip for an unset PYTHONPATH.
+	// That was right: the test can set PYTHONPATH, and does, so skipping for it
+	// was skipping for a condition of its own making. It cannot install a
+	// Python interpreter.
+	//
+	// Without this, every contributor on a machine where python3 is the system
+	// 3.9 sees a red test for a reason that is not about the code -- and a red
+	// that is routinely wrong is a red people learn to scroll past. CI pins
+	// 3.12, so nothing is lost there.
+	if v, ok := pythonAtLeast(pythonSDKMinVersion); !ok {
+		t.Skipf("python3 is %s; the Python SDK requires >= %s (PEP 604 unions are a "+
+			"TypeError at import time on older interpreters)", v, pythonSDKMinVersion)
+	}
 	if testing.Short() {
 		t.Skip("Skipping vet test in short mode")
 	}
@@ -458,10 +624,28 @@ func TestVetPython(t *testing.T) {
 	cmd := exec.Command(cleatBinary, "vet", "--lang", "python", "--json", fixture)
 	cmd.Env = append(os.Environ(), "PYTHONPATH="+filepath.Join(repoRoot(t), "python-sdk"))
 	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("cleat vet --lang python failed (cleat_sdk not importable, or another real "+
-			"tooling failure -- not the fixture's violation, which does not set a non-zero exit): "+
-			"%v\n%s", err, out)
+
+	code := 0
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		code = exitErr.ExitCode()
+	} else if err != nil {
+		t.Fatalf("running cleat vet: %v\n%s", err, out)
+	}
+
+	switch code {
+	case vetExitUnmeasured:
+		// The vet could not run at all. Distinguished from a violation so this
+		// does not read as "the fixture is clean now" -- see cleat#1801.
+		t.Fatalf("the python vet could not run (exit %d): cleat_sdk not importable, "+
+			"no interpreter, or one older than %s. This says nothing about the "+
+			"fixture.\n%s", code, pythonSDKMinVersion, out)
+	case vetExitOK:
+		t.Fatalf("cleat vet --lang python exited 0 for %s, a fixture built specifically "+
+			"to contain a violation.\n\nThis is the cleat#1801 defect: the report and "+
+			"the exit status disagreed, so `cleat vet --lang python && deploy` was a "+
+			"false green, and wiring this as a build gate would have gated nothing.\n%s",
+			fixture, out)
 	}
 
 	var result VetOutput

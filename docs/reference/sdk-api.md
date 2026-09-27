@@ -1,5 +1,25 @@
 # cleat SDK API Reference
 
+## Installing an SDK
+
+Five language SDKs exist; **only Python is published to a package registry**
+for 0.3.0 (PyPI, `cleat-sdk`). Go is fetched with `go get`. The other three --
+Rust, Java, AssemblyScript -- are not published anywhere and are installed
+from git at the release tag. Full instructions, with commands verified
+outside a cleat checkout, live in each SDK's own README:
+
+| Language | Install | Details |
+|---|---|---|
+| Go | `go install github.com/cleat-team/cleat/cmd/cleat@latest` | this page, below |
+| Python | `pip install cleat-sdk` | [`python-sdk/README.md`](../../python-sdk/README.md#installation) |
+| Rust | `git`+`tag` in `Cargo.toml` | [`crates/cleat-sdk/README.md`](../../crates/cleat-sdk/README.md#installation) |
+| Java | git-cloned Gradle subproject (source-only) | [`crates/cleat-java/README.md`](../../crates/cleat-java/README.md#installation) |
+| AssemblyScript | pnpm git+subdirectory, or npm clone+`file:` | [`packages/cleat-as/README.md`](../../packages/cleat-as/README.md#installation) |
+
+The rest of this page documents the Go SDK's `HostCalls` interface.
+
+---
+
 Package `cleat` defines the durable SDK -- the only import a workflow author
 needs. All external interactions go through the `HostCalls` interface, which
 enables deterministic replay.
@@ -28,7 +48,7 @@ func PlaceOrder(h cleat.HostCalls, userID string, cart []CartItem) (string, erro
 - `Signaler` -- signal communication between workflows
 - `Lifecycle` -- versioning, child workflows, cancellation, logging, defer
 - `Promises` -- durable promise operations
-- `StateManager` -- durable key-value state
+- `StateManager` -- `SetQueryState`, for state a caller can read via the REST API
 - `UpdateHandlers` -- workflow update-handler registration
 - `CronScheduler` -- durable cron schedule operations
 - `Scoper` -- virtual object instance scoping
@@ -83,11 +103,18 @@ result, err := h.DurableCallWithOptions(opts, "payments", "Charge", body)
 
 ```go
 DurableCallWithHeartbeat(service, operation, requestJSON string,
-    heartbeatInterval time.Duration,
-    onProgress func(progressJSON string)) (string, error)
+    heartbeatInterval time.Duration) (string, error)
 ```
 
-Long-running durable call with periodic progress updates from the host.
+Long-running durable call. The host heartbeats the claim every
+`heartbeatInterval` so a call that outlives the ordinary lease is not reaped as
+a stale instance.
+
+Took an `onProgress func(progressJSON string)` until cleat#854. It was removed
+rather than fixed: the guest is suspended inside the `cleat_call_heartbeat`
+import for the whole call, so there is no moment at which the host could run
+guest code. The ABI has never carried a progress channel — see `cleat.wit`,
+where `durable-call-heartbeat` takes only the four values above.
 
 ---
 
@@ -96,7 +123,7 @@ DurableCallJSON(service, operation, requestJSON string, result interface{}) erro
 DurableCallJSONWithOptions(opts CallOptions, service, operation, requestJSON string, result interface{}) error
 DurableCallTypedWithOptions(opts CallOptions, service, operation string, request, result interface{}) error
 DurableCallTypedWithHeartbeat(service, operation string, request, result interface{},
-    heartbeatInterval time.Duration, onProgress func(progressJSON string)) error
+    heartbeatInterval time.Duration) error
 ```
 
 Variants combining typed, JSON, options, and heartbeat features.
@@ -248,8 +275,22 @@ Low-level signal wait. Prefer `AwaitSignals`.
 SendSignalAndWait(targetRunID, signalName, payload string, timeout time.Duration) (response string, err error)
 ```
 
-Sends a signal to another workflow with an embedded correlation ID and waits
-for a reply.
+Sends a signal to another workflow and suspends until that workflow replies or
+the timeout elapses.
+
+The reply channel is a durable promise: `SendSignalAndWait` creates one, sends
+its ID to the target under the reserved envelope key `cleat_reply_to`, and
+awaits it. The receiver does not parse that envelope — `AwaitSignals` and
+`PollSignals` strip it, so `SignalResult.Payload` is the payload exactly as
+sent and `SignalResult.ReplyTo` carries the address to answer at.
+
+Because the address is a promise ID, replying is resolving that promise, and a
+reply to an address that matches nothing is an error rather than a silent
+no-op. There is no host call behind this: it composes `CreatePromise`,
+`SignalWorkflow` and `AwaitPromise`, each separately durable, so a crash
+between the steps replays correctly.
+
+Returns an error if nobody replies within `timeout`.
 
 ---
 
@@ -257,8 +298,21 @@ for a reply.
 ReplyToSignal(correlationID, response string) error
 ```
 
-Sends a response back to the sender of a signal identified by a correlation
-ID. Used inside a signal handler.
+Answers a signal sent with `SendSignalAndWait`, waking the sender with
+`response`. Pass `SignalResult.ReplyTo` as `correlationID` — it is the reply
+promise's ID, so this resolves that promise.
+
+`ReplyTo` is empty for a signal sent with `SignalWorkflow`, which is how a
+receiver distinguishes a request that wants an answer from a one-way
+notification; replying to an empty or unknown address returns an error rather
+than reporting success.
+
+```go
+sig := h.AwaitSignals([]string{"approve"}, time.Hour)
+if sig.ReplyTo != "" {
+    h.ReplyToSignal(sig.ReplyTo, `{"approved":true}`)
+}
+```
 
 ---
 
@@ -348,6 +402,61 @@ Waits for all child workflows concurrently. Results match the input order.
 ---
 
 ```go
+PollChild(runID string) (status string, result string, err error)
+```
+
+Checks a run's status without blocking. `status` is `running`, `completed` or
+`failed`; `result` carries the run's result on `completed`.
+
+**This is a separate, smaller vocabulary than `workflow_instances.status`**, not a partial
+spelling of it — it is the polling contract, and the two do not map one-to-one. Everything settled
+that is not a success reports `failed` here, with the *kind* of stop carried in the error text:
+
+| the run's outcome | `PollChild` reports | note |
+|---|---|---|
+| still going | `running` | covers `ready` and `terminating` too |
+| `done` | `completed` | `result` is set |
+| `failed` | `failed` | `error` is the run's `error_msg` |
+| `dead_lettered` | `failed` | same, plus dead-letter membership |
+| `terminated` | `failed` | `error` is prefixed `[TERMINATED] ` |
+| `cancelled` | `failed` | `error` is prefixed `[CANCELLED] ` |
+
+The prefixes are how a polling parent distinguishes a stop a person imposed from a real failure
+(`childOutcomeForSettledStatus`, `engine/status_vocabulary.go`). The call is replay-safe by
+construction: it answers from the child's `completed_at` against the parent's durable clock, so it
+returns the same value on every execution — see the note on `PollChild` in `engine/children.go`,
+including the residual clock-skew window it documents rather than hides.
+
+```go
+status, result, _ := h.PollChild(runID)
+```
+
+**It is not restricted to your children, despite the name.** `PollChild` takes
+**any run id in the calling workflow's tenant** and answers for it. Nothing
+filters by parentage — not the guest call, not the ABI binding, and not the
+store query, which is `WHERE id = ?` on all three dialects. A probe on
+postgres, MySQL and SQL Server returned an unrelated workflow's full result
+body (cleat#1120).
+
+So the `child` in the name describes the common case, not a boundary. **The
+boundary is the tenant**, which is where cleat draws every other isolation line;
+run ids are UUIDs, so this is not an enumeration surface. If you want to observe
+a run you did not spawn — the thing `retrieve_workflow(id)` does in DBOS — this
+is the call, and you do not need to be its parent.
+
+`AwaitChild` reads through the same store path and is unrestricted in the same
+way, but it *blocks* until the run is terminal, so awaiting an unrelated
+long-running workflow parks the caller.
+
+**An unknown run id reports `running`, not an error.** A row that does not exist
+and a row that has not finished are indistinguishable here: the lookup returns
+an empty outcome with no error, and anything not complete is reported `running`.
+Do not treat `running` as proof a run exists, and do not poll a mistyped id
+expecting a failure -- it will report `running` forever.
+
+---
+
+```go
 ChildWorkflowTyped(name string, request interface{}) (runID string, err error)
 AwaitChildTyped(runID string, result interface{}) error
 ```
@@ -357,11 +466,38 @@ Typed variants that marshal/unmarshal request and result automatically.
 ---
 
 ```go
-RunDetached(fn func(h HostCalls) error) error
+RunDetached(name, inputJSON string) error
 ```
 
-Runs `fn` with a fresh `HostCalls` that ignores cancellation. `fn` is
-executed on every replay (not replayed from cache).
+Starts `name` fire-and-forget: it does not become a child of this workflow and
+this workflow does not wait for it. Matches `cleat_run_detached` and the same
+call in the Rust, Java, AssemblyScript and Python SDKs.
+
+Took a closure until it was changed: `RunDetached(fn func(h HostCalls) error)`.
+A closure cannot cross the WASM ABI, so that form worked only under `localdev`
+and `cleattest`, which populate the field in-process, and silently did nothing
+in every compiled workflow.
+
+---
+
+```go
+StartDetached(name, inputJSON string) (runID string, err error)
+```
+
+The same work as `RunDetached`, returning the run id of the workflow it started
+so the caller has a handle to it — to poll it, signal it, or record it
+somewhere durable. `RunDetached` computes the same id and discards it.
+
+Bound in Go, Rust (`start_detached`), Java (`startDetached`) and
+AssemblyScript (`startDetached`). **Not in Python**: the component path needs a
+WIT function returning `result<string, call-failure>` and a dispatcher to match,
+because an out-pointer addresses the guest's linear memory and component
+dispatch writes into a host buffer. Tracked in
+`sdkUnreachedBaseline` in `tests/plugin-harness/sdk_import_names_test.go`.
+
+`cleat_run_detached` is unchanged and both calls stay registered. A host call's
+arity is part of its import type, so widening the existing one would stop every
+already-deployed binary instantiating — see ABI.md §2.24a.
 
 ---
 
@@ -433,7 +569,81 @@ RegisterUpdateHandler(name string,
 ```
 
 Registers a handler for the named workflow update. Called during workflow
-init, before durable operations. The validator runs first (read-only).
+init, before durable operations. The validator runs first (read-only), so a
+request it refuses changes nothing and does no durable work.
+
+An update is a request/reply call into a *running* workflow. It is the only one
+of the three external interactions that both changes workflow state and returns
+a value to the caller:
+
+| | direction | changes state | returns a value |
+|---|---|---|---|
+| signal | in | yes | no |
+| `SetQueryState` | out | no | yes |
+| **update** | both | yes | yes |
+
+A caller posts `POST /api/workflows/:id/update/:name`, gets `202` with a
+`promise_id`, and waits on that promise for the handler's return value.
+
+> **What a workflow result may contain** is a cross-backend contract, not a
+> cleat rule: the intersection of what PostgreSQL, MySQL and SQL Server accept.
+> No `\u0000` escape, no unpaired surrogate, nesting at most 100 deep, integers
+> exact only within ±(2^64−1) — and never depend on key order or duplicate keys,
+> because two of the three backends normalise them away. The measurements and
+> the reasons are in
+> [database-backends.md §7.4](./database-backends.md#74-what-a-workflow-result-may-contain).
+
+**An update name is reusable.** The same name can be requested as many times as
+the caller likes over the life of a run — an update is a request, and a request
+can be made twice. Each request is a row of its own, carries its own
+`promise_id`, and is answered independently.
+
+One rule remains, and it is concurrency rather than identity: a second request
+under a name whose first is **still in flight** is normally refused with `409`:
+
+| `detail` | means | clears |
+|---|---|---|
+| `update_already_pending` | a request under this name has not been handled yet | when it is |
+
+That refusal is a **check, not a constraint** — the server reads the pending set
+and then inserts, and the two are not atomic. Two requests racing under one name
+may therefore both be accepted, and each gets its own `promise_id` and its own
+answer. Do not build on the 409 firing; build on each request being answered,
+which is guaranteed.
+
+`update_name_used` is gone. It was the other half of this table until
+[cleat#1416](https://github.com/cleat-team/cleat/issues/1416), when the primary
+key stopped being `(workflow_id, update_name)`; there is no longer a state a
+name can be in that permanently refuses the next request. A client that branches
+on `detail` keeps working — the value simply never occurs.
+
+Note what that means for retries: a caller that retries after its first request
+was answered gets a **new** update, not a replay of the old one. Updates are not
+idempotent, and the `promise_id` from the first request stays valid and settled
+with the first result. If you need at-most-once semantics, carry your own key in
+the payload.
+
+```go
+DispatchUpdates()
+```
+
+Delivers and runs every update currently pending for this workflow.
+
+**The SDK already calls this before each suspension** -- `DurableSleep`,
+`AwaitSignals`, `AwaitPromise`, `AwaitChild`, `AwaitAllChildren`,
+`AwaitAnyChild` -- so an ordinary workflow needs no update-specific code. It is
+exported for workflows that want to service updates at additional points.
+
+Those call sites are *dispatch points*, and the position matters more than the
+timing. An update handler is a closure in guest memory, so only guest code can
+invoke it -- an arriving update cannot interrupt the workflow. Replay
+re-executes the workflow and matches host calls against the recorded history in
+order, so delivery has to happen at the same **program position** every run.
+That is what makes the handler's effect on workflow state reproducible.
+
+The consequence to know: **an update is handled at the next dispatch point, not
+the instant it arrives.** A workflow in a tight loop of durable calls with no
+suspension will not service updates until it suspends.
 
 There is no `RegisterQueryHandler` -- it was removed 2026-08-09 (see
 `docs/determinism.md`, "Why there is no RegisterQueryHandler"). It recorded a
@@ -448,7 +658,16 @@ DurableLog(message string)
 LogKV(message string, kvs ...interface{})
 ```
 
-Emits structured log messages recorded in the event history.
+Emits structured log messages to the worker's logger, tagged with the workflow
+id and step, and **suppressed on replay** so a resumed run does not re-emit
+lines the original execution already wrote.
+
+**Not recorded in event history**, despite the `Durable` in the name. This
+paragraph claimed it was until cleat#1308, when the host call was in fact
+discarding the message. Everything the event needs exists -- the event type,
+its compaction code, both codec directions and the payload carrier -- and the
+recording path does not, because introducing one changes replay matching for
+runs already in flight. That is open on cleat#1308.
 
 ```go
 h.LogKV("payment processed", "amount", 5000, "currency", "USD")
@@ -456,7 +675,7 @@ h.LogKV("payment processed", "amount", 5000, "currency", "USD")
 
 ---
 
-## StateManager -- Key-Value State
+## StateManager -- Queryable State
 
 ```go
 SetQueryState(key, value string)
@@ -467,19 +686,6 @@ Sets workflow state that is visible via the REST API (`GET /api/workflows/:id?ke
 ```go
 h.SetQueryState("order_status", "shipped")
 ```
-
----
-
-```go
-SetState(key string, value interface{})
-GetState(key string, result interface{}) error
-DeleteState(key string)
-HasState(key string) bool
-IncrState(key string, delta int64) int64
-ListState(prefix string) []string
-```
-
-Full key-value state management scoped to the current workflow.
 
 ---
 
@@ -568,7 +774,25 @@ GetScope() (objectType, instanceKey string)
 ClearScope() (previousScope string)
 ```
 
-Manages virtual object instance scoping for concurrency control.
+Manages virtual object instance scoping. In the **engine**, entering a scope
+takes a concurrency key named `vo:<objectType>:<instanceKey>` and holds it until
+the scope is cleared or replaced, so two workflows cannot be inside the same
+instance at once.
+
+> **Gap — the Go SDK does not reach that.** `SetScope`, `GetScope` and
+> `ClearScope` set local fields and never call `cleat_set_scope`: there is no
+> `HostCallsOptions` field, no row in `wasm/usage.go`, and no adapter
+> definition, so nothing generates the host call. **A Go workflow calling
+> `SetScope` takes no lock.** Rust, Java and AssemblyScript all bind and call
+> the import. See IMPROVEMENT-PLAN §3.223.
+>
+> `cleat/embedded` is inert for a separate reason: its scope does not touch the
+> in-memory lock map that its own `AcquireLock` uses.
+
+The returned string is an **opaque token** for stack-style save/restore — pass
+it back, do not parse it. It has the shape `vo:<objectType>:<instanceKey>:`
+because it once prefixed `SetState`/`GetState` keys; those calls were removed on
+2026-09-05 and the shape is vestigial.
 
 ---
 

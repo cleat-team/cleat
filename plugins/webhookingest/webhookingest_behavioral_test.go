@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"io"
 	"log/slog"
 	"net/http"
@@ -35,12 +36,13 @@ type webhookSourceRow struct {
 	tenantID         string
 	name             string
 	sourceType       string
-	secret           string
+	secretConfigured bool
 	enabled          bool
 	signalWorkflowID string
 	signalName       string
 	createdAt        time.Time
 	updatedAt        time.Time
+	deleted          bool
 }
 
 type webhookEventRow struct {
@@ -138,9 +140,25 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 		return c.execUpdateEventRetry(query, args)
 	case strings.Contains(query, "SET processed"):
 		return c.execUpdateEventProcessed(args)
+	// cleat-review on #2221: handleDeleteSource cancels a deleted source's
+	// own pending events in the same transaction as the soft-delete. Matched
+	// on "SET status = 'cancelled'", a literal specific to this one
+	// statement -- it is the only webhook_events UPDATE keyed by source_id
+	// rather than by event id, so routing it into execUpdateEvent (which
+	// reads args[0] as an event id) would silently no-op: no error, no
+	// stored event ever marked cancelled, and every assertion the caller
+	// makes about the DELETE response itself would still pass.
+	case strings.Contains(query, "UPDATE webhook_events") && strings.Contains(query, "SET status = 'cancelled'"):
+		return c.execCancelPendingEventsForSource(args)
 	case strings.Contains(query, "UPDATE webhook_events"):
 		return c.execUpdateEvent(args)
-	case strings.Contains(query, "DELETE FROM webhook_sources"):
+	// cleat#2199: soft delete (UPDATE ... SET enabled = false, deleted_at =
+	// ...), not a real DELETE -- the production query's literal SET clause
+	// distinguishes it from every other webhook_sources UPDATE this fake
+	// could see (there are none today, but matching a literal substring
+	// specific to this statement rather than the bare table name is the same
+	// discipline the SELECT routing below already needs).
+	case strings.Contains(query, "UPDATE webhook_sources") && strings.Contains(query, "deleted_at"):
 		return c.execDeleteSource(args)
 	default:
 		return nil, fmt.Errorf("fakeConn: unexpected Exec query: %s", query)
@@ -187,8 +205,14 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryTenantLookup(args)
-	case strings.Contains(query, "SELECT id, tenant_id, name, source_type, secret, enabled, signal_workflow_id, signal_name, created_at, updated_at"):
-		if strings.Contains(query, "WHERE id = $1 AND") {
+	case strings.Contains(query, "SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, created_at, updated_at"):
+		// "WHERE id = $1 AND" used to be specific to handleGetSource's
+		// two-argument query (id, tenant_id). cleat#2199 added
+		// "AND deleted_at IS NULL" to handleIngestWebhook's one-argument
+		// (id only) query too, so both now contain that substring --
+		// matched on "tenant_id = $2" instead, which only handleGetSource's
+		// query has.
+		if strings.Contains(query, "WHERE id = $1 AND tenant_id = $2") {
 			c.store.mu.RLock()
 			defer c.store.mu.RUnlock()
 			return c.queryGetSource(args)
@@ -205,11 +229,22 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryListEvents(query, args, corrupt)
-	case strings.Contains(query, "SELECT id, event_type, payload, received_at"):
+	// cleat-review on #2221 joined webhook_sources into this query (for the
+	// deleted_at guard, see host_functions.go), so it now shares the same
+	// "FROM webhook_events e ... LEFT JOIN webhook_sources s" shape as
+	// queryProcessBatch below -- matched, and ordered ahead of that case,
+	// on the select list instead, which the two queries do not share.
+	case strings.Contains(query, "SELECT e.id, e.event_type, e.payload, e.received_at"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryAwaitEvents(query, args)
-	case strings.Contains(query, "SELECT e.id, e.source_id, e.event_type, e.payload, e.received_at"):
+	// Matched on the FROM/JOIN rather than the select list. This case
+	// previously named every column, so adding one to the real query stopped
+	// it matching and the fake answered "unexpected Query" -- which surfaced
+	// as "timed out waiting for signal delivery" two tests away, not as a
+	// routing failure. cleat#1512.
+	case strings.Contains(query, "FROM webhook_events e") &&
+		strings.Contains(query, "LEFT JOIN webhook_sources s"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryProcessBatch(args, corrupt)
@@ -239,25 +274,28 @@ func (c *fakeConn) execInsertSource(args []driver.NamedValue) (driver.Result, er
 	if err != nil {
 		return nil, err
 	}
-	secret, err := argString(args, 5)
+	secretConfigured, err := argBool(args, 5)
 	if err != nil {
 		return nil, err
 	}
+	// created_at (6) and updated_at (7) are two DISTINCT arguments, both
+	// carrying `now` -- see the production INSERT's own comment on why a
+	// placeholder is never reused across two argument positions.
 	nowVal, err := argTime(args, 6)
 	if err != nil {
 		return nil, err
 	}
 
 	var signalWorkflowID string
-	if len(args) >= 7 {
-		if v, err := argAny(args, 7); err == nil && v != nil {
+	if len(args) >= 8 {
+		if v, err := argAny(args, 8); err == nil && v != nil {
 			signalWorkflowID, _ = v.(string)
 		}
 	}
 
 	signalName := "webhook_received"
-	if len(args) >= 8 {
-		if v, err := argString(args, 8); err == nil {
+	if len(args) >= 9 {
+		if v, err := argString(args, 9); err == nil {
 			signalName = v
 		}
 	}
@@ -267,7 +305,7 @@ func (c *fakeConn) execInsertSource(args []driver.NamedValue) (driver.Result, er
 		tenantID:         tenantID,
 		name:             name,
 		sourceType:       sourceType,
-		secret:           secret,
+		secretConfigured: secretConfigured,
 		enabled:          true,
 		signalWorkflowID: signalWorkflowID,
 		signalName:       signalName,
@@ -380,19 +418,60 @@ func (c *fakeConn) execUpdateEvent(args []driver.NamedValue) (driver.Result, err
 	return c.execUpdateEventProcessed(args)
 }
 
-func (c *fakeConn) execDeleteSource(args []driver.NamedValue) (driver.Result, error) {
-	id, err := argString(args, 1)
+// execCancelPendingEventsForSource is cleat-review on #2221's delete-time
+// cancellation: production's `UPDATE webhook_events SET status =
+// 'cancelled', processed = true, error_msg = 'source deleted' WHERE
+// source_id = $1 AND tenant_id = $2 AND processed = false AND (status =
+// 'pending' OR status IS NULL)`. processed = true, same as this table's
+// other terminal statuses ('completed', 'dead_letter') -- owner decision on
+// cleat#2199: a delete stops both the background retry AND a future
+// await_webhook call from ever reaching this event.
+func (c *fakeConn) execCancelPendingEventsForSource(args []driver.NamedValue) (driver.Result, error) {
+	sourceID, err := argString(args, 1)
 	if err != nil {
 		return nil, err
 	}
-	tid, err := argString(args, 2)
+	tenantID, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+
+	var affected int64
+	for i, evt := range c.store.events {
+		if evt.sourceID != sourceID || evt.tenantID != tenantID || evt.processed {
+			continue
+		}
+		if evt.status != "pending" && evt.status != "" {
+			continue
+		}
+		reason := "source deleted"
+		c.store.events[i].status = "cancelled"
+		c.store.events[i].processed = true
+		c.store.events[i].errorMsg = &reason
+		affected++
+	}
+	return &fakeResult{rowsAffected: affected}, nil
+}
+
+// execDeleteSource is cleat#2199's soft delete: production's
+// `UPDATE webhook_sources SET enabled = false, deleted_at = $1 WHERE id = $2
+// AND tenant_id = $3 AND deleted_at IS NULL` -- $1 is the deletion
+// timestamp, not an id, matching the argument order a hand-typed
+// falsification of this file would get wrong first.
+func (c *fakeConn) execDeleteSource(args []driver.NamedValue) (driver.Result, error) {
+	id, err := argString(args, 2)
+	if err != nil {
+		return nil, err
+	}
+	tid, err := argString(args, 3)
 	if err != nil {
 		return nil, err
 	}
 
 	for i, src := range c.store.sources {
-		if src.id == id && src.tenantID == tid {
-			c.store.sources = append(c.store.sources[:i], c.store.sources[i+1:]...)
+		if src.id == id && src.tenantID == tid && !src.deleted {
+			c.store.sources[i].deleted = true
+			c.store.sources[i].enabled = false
 			return &fakeResult{rowsAffected: 1}, nil
 		}
 	}
@@ -427,12 +506,12 @@ func (c *fakeConn) queryListSources(args []driver.NamedValue, corrupt bool) (dri
 
 	var results []webhookSourceRow
 	for _, s := range c.store.sources {
-		if s.tenantID == tid {
+		if s.tenantID == tid && !s.deleted {
 			results = append(results, s)
 		}
 	}
 
-	columns := []string{"id", "tenant_id", "name", "source_type", "secret", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"}
+	columns := []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"}
 	var data [][]driver.Value
 	for i, s := range results {
 		enabled := driver.Value(s.enabled)
@@ -440,7 +519,7 @@ func (c *fakeConn) queryListSources(args []driver.NamedValue, corrupt bool) (dri
 			enabled = "not-a-bool"
 		}
 		data = append(data, []driver.Value{
-			s.id, s.tenantID, s.name, s.sourceType, s.secret,
+			s.id, s.tenantID, s.name, s.sourceType, s.secretConfigured,
 			enabled, s.signalWorkflowID, s.signalName,
 			s.createdAt, s.updatedAt,
 		})
@@ -455,18 +534,18 @@ func (c *fakeConn) querySourceByID(args []driver.NamedValue) (driver.Rows, error
 	}
 
 	for _, s := range c.store.sources {
-		if s.id == id {
+		if s.id == id && !s.deleted {
 			return &fakeRows{
-				columns: []string{"id", "tenant_id", "name", "source_type", "secret", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"},
+				columns: []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"},
 				data: [][]driver.Value{{
-					s.id, s.tenantID, s.name, s.sourceType, s.secret,
+					s.id, s.tenantID, s.name, s.sourceType, s.secretConfigured,
 					s.enabled, s.signalWorkflowID, s.signalName,
 					s.createdAt, s.updatedAt,
 				}},
 			}, nil
 		}
 	}
-	return &fakeRows{columns: []string{"id", "tenant_id", "name", "source_type", "secret", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"}}, nil
+	return &fakeRows{columns: []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"}}, nil
 }
 
 func (c *fakeConn) queryGetSource(args []driver.NamedValue) (driver.Rows, error) {
@@ -480,18 +559,18 @@ func (c *fakeConn) queryGetSource(args []driver.NamedValue) (driver.Rows, error)
 	}
 
 	for _, s := range c.store.sources {
-		if s.id == id && s.tenantID == tid {
+		if s.id == id && s.tenantID == tid && !s.deleted {
 			return &fakeRows{
-				columns: []string{"id", "tenant_id", "name", "source_type", "secret", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"},
+				columns: []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"},
 				data: [][]driver.Value{{
-					s.id, s.tenantID, s.name, s.sourceType, s.secret,
+					s.id, s.tenantID, s.name, s.sourceType, s.secretConfigured,
 					s.enabled, s.signalWorkflowID, s.signalName,
 					s.createdAt, s.updatedAt,
 				}},
 			}, nil
 		}
 	}
-	return &fakeRows{columns: []string{"id", "tenant_id", "name", "source_type", "secret", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"}}, nil
+	return &fakeRows{columns: []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"}}, nil
 }
 
 func (c *fakeConn) queryListEvents(query string, args []driver.NamedValue, corrupt bool) (driver.Rows, error) {
@@ -595,9 +674,18 @@ func (c *fakeConn) queryAwaitEvents(query string, args []driver.NamedValue) (dri
 
 	var results []webhookEventRow
 	for _, e := range c.store.events {
-		if e.tenantID == tid && !e.processed {
-			results = append(results, e)
+		if e.tenantID != tid || e.processed {
+			continue
 		}
+		// Mirrors production's `AND (e.status IS NULL OR e.status !=
+		// 'cancelled') AND s.deleted_at IS NULL` (cleat-review on #2221,
+		// owner decision on cleat#2199): a second, independent guard on top
+		// of execCancelPendingEventsForSource setting processed=true above,
+		// the same belt-and-suspenders shape queryProcessBatch already has.
+		if e.status == "cancelled" || c.sourceDeleted(e.sourceID) {
+			continue
+		}
+		results = append(results, e)
 	}
 
 	nextArg := 2
@@ -635,7 +723,7 @@ func (c *fakeConn) queryAwaitEvents(query string, args []driver.NamedValue) (dri
 		// makes the next filter added below read the right $N instead of
 		// silently reusing this one's. Same reasoning as the //nolint'd
 		// increments in this plugin's own host_functions.go.
-		nextArg++ //nolint:ineffassign // trailing counter; see above
+		nextArg++ //nolint:ineffassign,staticcheck // trailing counter; see above
 	}
 
 	// Sort by received_at DESC, take first
@@ -659,15 +747,37 @@ func (c *fakeConn) queryAwaitEvents(query string, args []driver.NamedValue) (dri
 	return &fakeRows{columns: columns, data: data}, nil
 }
 
+// sourceDeleted reports whether id names a source this store has soft-
+// deleted, or no source at all -- a LEFT JOIN with no matching row also
+// reads s.deleted_at as NULL, so this returns false in that case too,
+// matching the real query's (deliberately) permissive behaviour for an
+// orphaned event.
+func (c *fakeConn) sourceDeleted(id string) bool {
+	for _, s := range c.store.sources {
+		if s.id == id {
+			return s.deleted
+		}
+	}
+	return false
+}
+
 func (c *fakeConn) queryProcessBatch(_ []driver.NamedValue, corrupt bool) (driver.Rows, error) {
 	// Find unprocessed events older than ~10 seconds.
 	var results []webhookEventRow
 	cutoff := time.Now().Add(-10 * time.Second)
 
 	for _, e := range c.store.events {
-		if !e.processed && (e.status == "pending" || e.status == "") && e.receivedAt.Before(cutoff) {
-			results = append(results, e)
+		if e.processed || (e.status != "pending" && e.status != "") || !e.receivedAt.Before(cutoff) {
+			continue
 		}
+		// Mirrors the production query's new `AND s.deleted_at IS NULL`
+		// (cleat-review on #2221): a second, independent guard against
+		// delivering to a deleted source, on top of the delete-time
+		// cancellation execCancelPendingEventsForSource applies above.
+		if c.sourceDeleted(e.sourceID) {
+			continue
+		}
+		results = append(results, e)
 	}
 
 	// Sort by received_at ASC
@@ -683,7 +793,11 @@ func (c *fakeConn) queryProcessBatch(_ []driver.NamedValue, corrupt bool) (drive
 		results = results[:100]
 	}
 
-	columns := []string{"id", "source_id", "event_type", "payload", "received_at", "signal_workflow_id", "signal_name", "retry_count"}
+	// tenant_id is second, matching the column order the real query selects.
+	// processBatch scopes each event's processing to its own tenant with
+	// plugin.ForTenant rather than running the whole sweep under the bypass,
+	// and this fake has to hand it the value to do that with. cleat#1512.
+	columns := []string{"id", "tenant_id", "source_id", "event_type", "payload", "received_at", "signal_workflow_id", "signal_name", "retry_count"}
 	var data [][]driver.Value
 	for i, e := range results {
 		// Find the source for this event.
@@ -705,7 +819,7 @@ func (c *fakeConn) queryProcessBatch(_ []driver.NamedValue, corrupt bool) (drive
 			retryCountVal = "not-an-int"
 		}
 		data = append(data, []driver.Value{
-			e.id, e.sourceID, e.eventType, []byte(e.payload), e.receivedAt,
+			e.id, e.tenantID, e.sourceID, e.eventType, []byte(e.payload), e.receivedAt,
 			signalWorkflowID, signalName, retryCountVal,
 		})
 	}
@@ -777,6 +891,19 @@ func argInt64(args []driver.NamedValue, ordinal int) (int64, error) {
 	return 0, fmt.Errorf("arg %d not found", ordinal)
 }
 
+func argBool(args []driver.NamedValue, ordinal int) (bool, error) {
+	for _, a := range args {
+		if a.Ordinal == ordinal {
+			b, ok := a.Value.(bool)
+			if !ok {
+				return false, fmt.Errorf("arg %d: want bool, got %T", ordinal, a.Value)
+			}
+			return b, nil
+		}
+	}
+	return false, fmt.Errorf("arg %d not found", ordinal)
+}
+
 func argTime(args []driver.NamedValue, ordinal int) (time.Time, error) {
 	for _, a := range args {
 		if a.Ordinal == ordinal {
@@ -846,8 +973,9 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 	t.Cleanup(func() { db.Close() })
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	mux := http.NewServeMux()
@@ -856,7 +984,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 	}
 
 	// Auth middleware for management routes; ingest route works without auth.
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 	return p, handler, store
 }
 
@@ -928,7 +1056,7 @@ func (*rowsErrConn) Close() error              { return nil }
 func (*rowsErrConn) Begin() (driver.Tx, error) { return nil, fmt.Errorf("rowsErrConn: no tx") }
 func (c *rowsErrConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
 	// For processBatch query, return rows that fail with rows.Err().
-	if strings.Contains(query, "SELECT e.id, e.source_id, e.event_type") {
+	if strings.Contains(query, "FROM webhook_events e") && strings.Contains(query, "LEFT JOIN webhook_sources s") {
 		return &rowsErrFakeRows{}, nil
 	}
 	return nil, fmt.Errorf("rowsErrConn: unexpected query: %s", query)
@@ -975,10 +1103,13 @@ func TestMigrations(t *testing.T) {
 		if m.Version == 0 {
 			t.Errorf("migration %d: version must be non-zero", i)
 		}
-		if m.Up == "" {
-			t.Errorf("migration %d: Up SQL is empty", i)
-		}
 	}
+
+	// cleat#1513 has landed; this is the helper rather than a variant of it.
+	// The predicate here was `m.Up == ""`, which reads a MySQL-only migration
+	// as doing nothing -- the drift the comment it replaces predicted.
+	// cleat#1622.
+	plugintest.AssertMigrationsDoSomething(t, migrations)
 }
 
 // ===========================================================================
@@ -1090,8 +1221,11 @@ func TestListAndGetSourcesDoNotLeakSecret(t *testing.T) {
 	}
 	var created map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &created)
-	if created["secret"] != plugin.RedactedPlaceholder {
-		t.Errorf("create: expected secret %q, got %v", plugin.RedactedPlaceholder, created["secret"])
+	if _, present := created["secret"]; present {
+		t.Errorf("create: response carries a \"secret\" key at all: %v", created["secret"])
+	}
+	if created["secret_configured"] != true {
+		t.Errorf("create: expected secret_configured=true, got %v", created["secret_configured"])
 	}
 	id := created["id"].(string)
 
@@ -1107,8 +1241,11 @@ func TestListAndGetSourcesDoNotLeakSecret(t *testing.T) {
 	}
 	var fetched map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &fetched)
-	if fetched["secret"] != plugin.RedactedPlaceholder {
-		t.Errorf("GET: expected secret %q, got %v", plugin.RedactedPlaceholder, fetched["secret"])
+	if _, present := fetched["secret"]; present {
+		t.Errorf("GET: response carries a \"secret\" key at all: %v", fetched["secret"])
+	}
+	if fetched["secret_configured"] != true {
+		t.Errorf("GET: expected secret_configured=true, got %v", fetched["secret_configured"])
 	}
 
 	// LIST.
@@ -1129,8 +1266,11 @@ func TestListAndGetSourcesDoNotLeakSecret(t *testing.T) {
 	for _, s := range list {
 		if s["id"] == id {
 			found = true
-			if s["secret"] != plugin.RedactedPlaceholder {
-				t.Errorf("LIST: expected secret %q, got %v", plugin.RedactedPlaceholder, s["secret"])
+			if _, present := s["secret"]; present {
+				t.Errorf("LIST: response carries a \"secret\" key at all: %v", s["secret"])
+			}
+			if s["secret_configured"] != true {
+				t.Errorf("LIST: expected secret_configured=true, got %v", s["secret_configured"])
 			}
 		}
 	}
@@ -1144,7 +1284,7 @@ func TestListAndGetSourcesDoNotLeakSecret(t *testing.T) {
 func TestCreateSourceDefaults(t *testing.T) {
 	_, handler, _ := setupTestPlugin(t)
 
-	body := `{"name":"generic-source"}`
+	body := `{"name":"generic-source","secret":"test-secret"}`
 	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(body)))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -1165,7 +1305,7 @@ func TestIngestWebhookPayload(t *testing.T) {
 	_, handler, store := setupTestPlugin(t)
 
 	// Create a source.
-	createBody := `{"name":"test-source","source_type":"generic"}`
+	createBody := `{"name":"test-source","source_type":"generic","secret":"test-secret"}`
 	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody)))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -1177,10 +1317,15 @@ func TestIngestWebhookPayload(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	sourceID := created["id"].(string)
 
-	// Ingest a webhook payload (no auth required on ingest endpoint).
+	// Ingest a webhook payload (no auth required on ingest endpoint, but a
+	// valid signature is -- every source has a secret now, cleat#1992/#2172).
 	payload := `{"action":"opened","issue":{"number":1}}`
+	mac := hmac.New(sha256.New, []byte("test-secret"))
+	mac.Write([]byte(payload))
+	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 	req = httptest.NewRequest("POST", "/ingest/"+sourceID, bytes.NewReader([]byte(payload)))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hub-Signature-256", sig)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -1339,8 +1484,9 @@ func TestIngestDisabledSource(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	mux := http.NewServeMux()
@@ -1348,7 +1494,7 @@ func TestIngestDisabledSource(t *testing.T) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	req := httptest.NewRequest("POST", "/ingest/"+sourceID.String(), bytes.NewReader([]byte(`{"test":true}`)))
 	rec := httptest.NewRecorder()
@@ -1426,6 +1572,104 @@ func TestBackgroundRetryWorker(t *testing.T) {
 	}
 }
 
+// TestDeletingASourceCancelsItsPendingEventsForBothDeliveryPaths pins
+// cleat-review's finding on #2221: an event ingested before a source is
+// deleted, still pending because its inline signal delivery
+// (handleIngestWebhook's SignalWorkflow call) failed, must never reach a
+// workflow afterward -- neither through the background retry sweep
+// (processBatch, the PUSH path) nor through a later await_webhook call (the
+// PULL path, host_functions.go; owner decision on cleat#2199). Falsified by
+// reverting handleDeleteSource's second UPDATE (the one that cancels the
+// source's own pending events) back to a no-op: both assertions below then
+// fail -- the signal fires, and await_webhook hands the event out.
+func TestDeletingASourceCancelsItsPendingEventsForBothDeliveryPaths(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
+
+	sourceID := uuid.New()
+	store.sources = append(store.sources, webhookSourceRow{
+		id:               sourceID.String(),
+		tenantID:         testTenantStr,
+		name:             "to-delete-with-pending-event",
+		sourceType:       "generic",
+		enabled:          true,
+		signalWorkflowID: "wf-123",
+	})
+
+	eventID := uuid.New()
+	store.events = append(store.events, webhookEventRow{
+		id:         eventID.String(),
+		sourceID:   sourceID.String(),
+		tenantID:   testTenantStr,
+		eventType:  "push",
+		payload:    `{"hello":"world"}`,
+		receivedAt: time.Now().Add(-30 * time.Second), // past processBatch's 10s cutoff
+		processed:  false,
+		status:     "pending",
+	})
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
+	}
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
+
+	req := authedRequest("DELETE", "/ingest/sources/"+sourceID.String(), nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("DELETE: expected 204, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	store.mu.RLock()
+	evt := store.events[0]
+	store.mu.RUnlock()
+	if evt.status != "cancelled" {
+		t.Fatalf("event status after delete: got %q, want %q", evt.status, "cancelled")
+	}
+	if !evt.processed {
+		t.Fatalf("event processed after delete: got false, want true")
+	}
+
+	// PUSH path.
+	var signalled int
+	p.env = &plugin.Environment{
+		SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
+			signalled++
+			return nil
+		},
+	}
+	p.processBatch(context.Background())
+	if signalled != 0 {
+		t.Errorf("processBatch signalled a deleted source's cancelled event %d time(s), want 0", signalled)
+	}
+
+	// PULL path.
+	callCtx := &plugin.CallContext{TenantID: testTenantStr, WorkflowID: "test-wf"}
+	ctx := plugin.WithCallContext(context.Background(), callCtx)
+	input, _ := json.Marshal(map[string]any{"source_id": sourceID.String()})
+	outJSON, err := p.awaitWebhook(ctx, string(input))
+	if err != nil {
+		t.Fatalf("awaitWebhook: %v", err)
+	}
+	var out awaitWebhookOutput
+	if err := json.Unmarshal([]byte(outJSON), &out); err != nil {
+		t.Fatalf("unmarshal awaitWebhook output: %v", err)
+	}
+	if out.Found {
+		t.Errorf("awaitWebhook returned a deleted source's cancelled event (id=%s), want found=false", out.ID)
+	}
+}
+
 // TestAwaitWebhookHostFunction verifies the await_webhook host function
 // finds and claims unprocessed events.
 func TestAwaitWebhookHostFunction(t *testing.T) {
@@ -1457,8 +1701,9 @@ func TestAwaitWebhookHostFunction(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	// Call awaitWebhook with context containing tenant info.
@@ -1506,8 +1751,9 @@ func TestAwaitWebhookNoEvents(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
@@ -1529,10 +1775,16 @@ func TestAwaitWebhookNoEvents(t *testing.T) {
 }
 
 // TestSourceDelete verifies deleting a webhook source.
+//
+// cleat#2199: this is a SOFT delete -- the row stays in the store (marked
+// deleted, disabled), it does not vanish from it. See
+// a_deleted_source_stays_gone_but_keeps_its_events_multidb_test.go for the
+// end-to-end pin, against real databases, of what soft-delete is for: an
+// event ingested before the delete has to survive it.
 func TestSourceDelete(t *testing.T) {
 	_, handler, store := setupTestPlugin(t)
 
-	createBody := `{"name":"to-delete","source_type":"generic"}`
+	createBody := `{"name":"to-delete","source_type":"generic","secret":"test-secret"}`
 	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody)))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -1553,9 +1805,29 @@ func TestSourceDelete(t *testing.T) {
 
 	store.mu.RLock()
 	count := len(store.sources)
+	var deleted, enabled bool
+	if count == 1 {
+		deleted = store.sources[0].deleted
+		enabled = store.sources[0].enabled
+	}
 	store.mu.RUnlock()
-	if count != 0 {
-		t.Errorf("expected 0 sources after delete, got %d", count)
+	if count != 1 {
+		t.Fatalf("expected 1 source after a soft delete (the row is marked, not removed), got %d", count)
+	}
+	if !deleted {
+		t.Errorf("source row after delete: deleted=false, want true")
+	}
+	if enabled {
+		t.Errorf("source row after delete: enabled=true, want false")
+	}
+
+	// And it is unreachable through the API, which is the half of
+	// soft-delete that has to look like a real delete to a caller.
+	getReq := authedRequest("GET", "/ingest/sources/"+id, nil)
+	getRec := httptest.NewRecorder()
+	handler.ServeHTTP(getRec, getReq)
+	if getRec.Code != http.StatusNotFound {
+		t.Errorf("GET after delete: expected 404, got %d", getRec.Code)
 	}
 }
 
@@ -1596,6 +1868,42 @@ func TestCreateSourceMissingName(t *testing.T) {
 	}
 }
 
+// TestCreateSourceMissingSecret is cleat#1992/#2172's pin for owner decision
+// (b): a signing secret is now REQUIRED, not optional -- a POST with no
+// secret at all is rejected outright, the same shape as a missing name.
+func TestCreateSourceMissingSecret(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	body := `{"name":"unsigned-source","source_type":"github"}`
+	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing secret, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp["error"] == nil {
+		t.Error("expected error message in response")
+	}
+}
+
+// TestCreateSourceEmptySecret is TestCreateSourceMissingSecret's sibling: an
+// explicit empty string is not a secret either. Without this, `"secret":""`
+// could slip through a check that only tests for the field's absence.
+func TestCreateSourceEmptySecret(t *testing.T) {
+	_, handler, _ := setupTestPlugin(t)
+
+	body := `{"name":"unsigned-source","source_type":"github","secret":""}`
+	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(body)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty secret, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestCreateSourceInvalidBody(t *testing.T) {
 	_, handler, _ := setupTestPlugin(t)
 
@@ -1615,7 +1923,7 @@ func TestCreateSourceInvalidBody(t *testing.T) {
 func TestCreateSourceWithSignalBinding(t *testing.T) {
 	_, handler, _ := setupTestPlugin(t)
 
-	body := `{"name":"signal-source","source_type":"generic","signal_workflow_id":"wf-001","signal_name":"custom_signal"}`
+	body := `{"name":"signal-source","source_type":"generic","signal_workflow_id":"wf-001","signal_name":"custom_signal","secret":"test-secret"}`
 	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(body)))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -1641,7 +1949,7 @@ func TestListEventsWithFilters(t *testing.T) {
 	_, handler, store := setupTestPlugin(t)
 
 	// Create two sources.
-	createBody1 := `{"name":"source-1","source_type":"github"}`
+	createBody1 := `{"name":"source-1","source_type":"github","secret":"test-secret"}`
 	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody1)))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -1652,7 +1960,7 @@ func TestListEventsWithFilters(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &src1)
 	sourceID1 := src1["id"].(string)
 
-	createBody2 := `{"name":"source-2","source_type":"stripe"}`
+	createBody2 := `{"name":"source-2","source_type":"stripe","secret":"test-secret"}`
 	req = authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody2)))
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -1663,10 +1971,17 @@ func TestListEventsWithFilters(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &src2)
 	sourceID2 := src2["id"].(string)
 
-	// Ingest an event for source 1.
+	// Ingest an event for source 1. Both sources were created with the same
+	// secret ("test-secret"), so one signing helper covers both.
+	sign := func(payload string) string {
+		mac := hmac.New(sha256.New, []byte("test-secret"))
+		mac.Write([]byte(payload))
+		return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	}
 	payload1 := `{"event":"push"}`
 	req = httptest.NewRequest("POST", "/ingest/"+sourceID1, bytes.NewReader([]byte(payload1)))
 	req.Header.Set("X-Github-Event", "push")
+	req.Header.Set("X-Hub-Signature-256", sign(payload1))
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -1677,6 +1992,7 @@ func TestListEventsWithFilters(t *testing.T) {
 	payload2 := `{"event":"charge"}`
 	req = httptest.NewRequest("POST", "/ingest/"+sourceID2, bytes.NewReader([]byte(payload2)))
 	req.Header.Set("X-Event-Type", "payment")
+	req.Header.Set("X-Hub-Signature-256", sign(payload2))
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -1743,7 +2059,7 @@ func TestIngestNonJSONBody(t *testing.T) {
 	_, handler, store := setupTestPlugin(t)
 
 	// Create source.
-	createBody := `{"name":"nonjson-test","source_type":"generic"}`
+	createBody := `{"name":"nonjson-test","source_type":"generic","secret":"test-secret"}`
 	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody)))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -1757,8 +2073,12 @@ func TestIngestNonJSONBody(t *testing.T) {
 
 	// Ingest a non-JSON plain text payload.
 	rawText := "plain text webhook body"
+	mac := hmac.New(sha256.New, []byte("test-secret"))
+	mac.Write([]byte(rawText))
+	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 	req = httptest.NewRequest("POST", "/ingest/"+sourceID, bytes.NewReader([]byte(rawText)))
 	req.Header.Set("Content-Type", "text/plain")
+	req.Header.Set("X-Hub-Signature-256", sig)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -1798,7 +2118,7 @@ func TestIngestWithSignalDelivery(t *testing.T) {
 		tenantID:         testTenantStr,
 		name:             "signal-source",
 		sourceType:       "generic",
-		secret:           "",
+		secretConfigured: true,
 		enabled:          true,
 		signalWorkflowID: "wf-signal-test",
 		signalName:       "my_signal",
@@ -1807,10 +2127,15 @@ func TestIngestWithSignalDelivery(t *testing.T) {
 	db := sql.OpenDB(&fakeConnector{store: store})
 	defer db.Close()
 
+	const sourceSecret = "signal-source-secret"
+	secrets := plugintest.NewFakeSecrets()
+	secrets.Seed(testTenantStr, WebhookIngestSecretName(sourceID), sourceSecret)
+
 	signalChan := make(chan string, 1)
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: secrets,
 		env: &plugin.Environment{
 			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
 				signalChan <- signalName
@@ -1823,11 +2148,16 @@ func TestIngestWithSignalDelivery(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
-	// Ingest a payload.
+	// Ingest a payload, signed with the source's secret -- every source
+	// requires one now (cleat#1992/#2172).
 	payload := `{"action":"triggered"}`
+	mac := hmac.New(sha256.New, []byte(sourceSecret))
+	mac.Write([]byte(payload))
+	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 	req := httptest.NewRequest("POST", "/ingest/"+sourceID.String(), bytes.NewReader([]byte(payload)))
+	req.Header.Set("X-Hub-Signature-256", sig)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -1900,12 +2230,9 @@ func TestListSourcesHandler(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 for list sources, got %d: %s", rec.Code, rec.Body.String())
 	}
-	// Unmarshal into map[string]any rather than webhookSourceJSON: the
-	// response's "secret" field is always the literal RedactedPlaceholder,
-	// and Secret.UnmarshalJSON deliberately rejects that literal, so decoding
-	// a redacted response back into webhookSourceJSON is not possible (nor
-	// should it be -- that type is for producing responses, not consuming
-	// them).
+	// Unmarshal into map[string]any: cleat#1992 removed the response's
+	// "secret" field entirely -- a source's response now carries
+	// secret_configured (bool), not a redacted placeholder to compare.
 	var sources []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &sources); err != nil {
 		t.Fatalf("unmarshal sources: %v", err)
@@ -1917,7 +2244,7 @@ func TestListSourcesHandler(t *testing.T) {
 	// Create two sources.
 	for i := 0; i < 2; i++ {
 		name := fmt.Sprintf("source-%d", i)
-		body := fmt.Sprintf(`{"name":"%s"}`, name)
+		body := fmt.Sprintf(`{"name":"%s","secret":"test-secret"}`, name)
 		req := authedRequest("POST", "/ingest/sources", strings.NewReader(body))
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)
@@ -1981,8 +2308,9 @@ func TestMarkRetryFailed(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	// First failure: should stay pending (retry 0 -> 1, below max of 3).
@@ -2042,8 +2370,9 @@ func TestRetryEventNoSignalWorkflow(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	// Event with no signal_workflow_id: should complete.
@@ -2187,7 +2516,7 @@ func TestWH_CreateSource_ExecError(t *testing.T) {
 	store.failNextExec = true
 	store.mu.Unlock()
 
-	body := `{"name":"test-source","source_type":"github"}`
+	body := `{"name":"test-source","source_type":"github","secret":"test-secret"}`
 	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(body)))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -2219,7 +2548,7 @@ func TestWH_GetSource_QueryError(t *testing.T) {
 	_, handler, store := setupTestPlugin(t)
 
 	// Create a source first so we have a valid ID.
-	createBody := `{"name":"test-source","source_type":"github"}`
+	createBody := `{"name":"test-source","source_type":"github","secret":"test-secret"}`
 	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody)))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -2298,7 +2627,7 @@ func TestWH_DeleteSource_ExecError(t *testing.T) {
 	_, handler, store := setupTestPlugin(t)
 
 	// Create a source first.
-	createBody := `{"name":"test-source"}`
+	createBody := `{"name":"test-source","secret":"test-secret"}`
 	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody)))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -2371,15 +2700,16 @@ func TestWH_ListSources_TenantIsolation(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	mux := http.NewServeMux()
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	// Tenant 1 lists sources.
 	req := httptest.NewRequest("GET", "/ingest/sources", nil)
@@ -2389,9 +2719,9 @@ func TestWH_ListSources_TenantIsolation(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("tenant 1 list: expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
-	// Unmarshal into map[string]any: the response's "secret" field is always
-	// the literal RedactedPlaceholder, which Secret.UnmarshalJSON refuses to
-	// parse back into a webhookSourceJSON.
+	// Unmarshal into map[string]any: cleat#1992 removed the response's
+	// "secret" field entirely -- a source's response now carries
+	// secret_configured (bool), not a redacted placeholder to compare.
 	var sources []map[string]any
 	if err := json.Unmarshal(rec.Body.Bytes(), &sources); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -2465,7 +2795,7 @@ func TestWH_Ingest_SourceLookupError(t *testing.T) {
 	_, handler, store := setupTestPlugin(t)
 
 	// Create a source so we have a valid source ID to use.
-	createBody := `{"name":"test-source"}`
+	createBody := `{"name":"test-source","secret":"test-secret"}`
 	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody)))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -2499,7 +2829,7 @@ func TestWH_Ingest_EventInsertError(t *testing.T) {
 	_, handler, store := setupTestPlugin(t)
 
 	// Create a source so we have a valid source ID to use.
-	createBody := `{"name":"test-source"}`
+	createBody := `{"name":"test-source","secret":"test-secret"}`
 	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody)))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -2515,9 +2845,14 @@ func TestWH_Ingest_EventInsertError(t *testing.T) {
 	store.failNextExec = true
 	store.mu.Unlock()
 
-	// Ingest request should fail during event insert.
+	// Ingest request should fail during event insert -- signed, so the
+	// failure under test is the insert, not the signature check.
 	payload := `{"action":"opened"}`
+	mac := hmac.New(sha256.New, []byte("test-secret"))
+	mac.Write([]byte(payload))
+	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 	req = httptest.NewRequest("POST", "/ingest/"+sourceID, bytes.NewReader([]byte(payload)))
+	req.Header.Set("X-Hub-Signature-256", sig)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusInternalServerError {
@@ -2535,8 +2870,9 @@ func TestWH_Run_WithDB(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -2558,8 +2894,9 @@ func TestWH_ProcessBatch_QueryError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	// Set fail flag so the query in processBatch fails.
@@ -2606,8 +2943,9 @@ func TestWH_ProcessBatch_ScanError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	// Should not panic, should process the event via processBatch.
@@ -2635,8 +2973,9 @@ func TestWH_AwaitWebhook_NoTenant(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	// Call awaitWebhook with a context that has no CallContext.
@@ -2662,8 +3001,9 @@ func TestWH_AwaitWebhook_InvalidSourceID(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
@@ -2692,8 +3032,9 @@ func TestWH_AwaitWebhook_InvalidJSON(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
@@ -2752,22 +3093,29 @@ func TestWH_Ingest_BodyReadError(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	mux := http.NewServeMux()
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	// Send request with a body that fails on Read.
 	req := httptest.NewRequest("POST", "/ingest/"+sourceID.String(), &errReadCloser{})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 for body read error, got %d: %s", rec.Code, rec.Body.String())
+	// cleat#2232: plugin.ReadBody, not a hand-rolled ReadAll, now serves this
+	// route -- a generic read failure (as opposed to an oversized body) is a
+	// 400, matching cmd/cleat-worker's own decodeBody/readBody precedent.
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for body read error, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "failed to read request body") {
+		t.Errorf("expected a 'failed to read request body' error, got: %s", rec.Body.String())
 	}
 }
 
@@ -2782,8 +3130,14 @@ func TestWH_CreateSource_BodyReadError(t *testing.T) {
 	req := authedRequest("POST", "/ingest/sources", &errReadCloser{})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected 500 for body read error, got %d: %s", rec.Code, rec.Body.String())
+	// cleat#2232: plugin.ReadJSONBody, not a hand-rolled ReadAll, now serves
+	// this route -- a generic read failure is a 400, matching
+	// cmd/cleat-worker's own decodeBody/readBody precedent.
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for body read error, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "failed to read request body") {
+		t.Errorf("expected a 'failed to read request body' error, got: %s", rec.Body.String())
 	}
 }
 
@@ -2802,6 +3156,7 @@ func TestWH_Ingest_SignalWorkflowError(t *testing.T) {
 		tenantID:         testTenantStr,
 		name:             "signal-source",
 		sourceType:       "generic",
+		secretConfigured: true,
 		enabled:          true,
 		signalWorkflowID: "wf-signal-error",
 		signalName:       "my_signal",
@@ -2810,9 +3165,14 @@ func TestWH_Ingest_SignalWorkflowError(t *testing.T) {
 	db := sql.OpenDB(&fakeConnector{store: store})
 	defer db.Close()
 
+	const sourceSecret = "signal-error-secret"
+	secrets := plugintest.NewFakeSecrets()
+	secrets.Seed(testTenantStr, WebhookIngestSecretName(sourceID), sourceSecret)
+
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: secrets,
 		env: &plugin.Environment{
 			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
 				return fmt.Errorf("simulated signal failure")
@@ -2824,11 +3184,15 @@ func TestWH_Ingest_SignalWorkflowError(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
-	// Ingest a payload.
+	// Ingest a payload, signed with the source's secret.
 	payload := `{"action":"test"}`
+	mac := hmac.New(sha256.New, []byte(sourceSecret))
+	mac.Write([]byte(payload))
+	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 	req := httptest.NewRequest("POST", "/ingest/"+sourceID.String(), bytes.NewReader([]byte(payload)))
+	req.Header.Set("X-Hub-Signature-256", sig)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	// Should still return 201 even though signal delivery fails.
@@ -2852,6 +3216,7 @@ func TestWH_Ingest_EmptySignalName(t *testing.T) {
 		tenantID:         testTenantStr,
 		name:             "empty-signal-source",
 		sourceType:       "generic",
+		secretConfigured: true,
 		enabled:          true,
 		signalWorkflowID: "wf-empty-signal",
 		signalName:       "",
@@ -2860,10 +3225,15 @@ func TestWH_Ingest_EmptySignalName(t *testing.T) {
 	db := sql.OpenDB(&fakeConnector{store: store})
 	defer db.Close()
 
+	const sourceSecret = "empty-signal-secret"
+	secrets := plugintest.NewFakeSecrets()
+	secrets.Seed(testTenantStr, WebhookIngestSecretName(sourceID), sourceSecret)
+
 	signalNameCh := make(chan string, 1)
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: secrets,
 		env: &plugin.Environment{
 			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
 				signalNameCh <- signalName
@@ -2876,11 +3246,15 @@ func TestWH_Ingest_EmptySignalName(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
-	// Ingest a payload.
+	// Ingest a payload, signed with the source's secret.
 	payload := `{"action":"test"}`
+	mac := hmac.New(sha256.New, []byte(sourceSecret))
+	mac.Write([]byte(payload))
+	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 	req := httptest.NewRequest("POST", "/ingest/"+sourceID.String(), bytes.NewReader([]byte(payload)))
+	req.Header.Set("X-Hub-Signature-256", sig)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -2913,6 +3287,7 @@ func TestWH_Ingest_NonJSONBodyWithSignal(t *testing.T) {
 		tenantID:         testTenantStr,
 		name:             "nonjson-signal-source",
 		sourceType:       "generic",
+		secretConfigured: true,
 		enabled:          true,
 		signalWorkflowID: "wf-nonjson",
 		signalName:       "my_signal",
@@ -2921,10 +3296,15 @@ func TestWH_Ingest_NonJSONBodyWithSignal(t *testing.T) {
 	db := sql.OpenDB(&fakeConnector{store: store})
 	defer db.Close()
 
+	const sourceSecret = "nonjson-signal-secret"
+	secrets := plugintest.NewFakeSecrets()
+	secrets.Seed(testTenantStr, WebhookIngestSecretName(sourceID), sourceSecret)
+
 	signalPayloadCh := make(chan string, 1)
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: secrets,
 		env: &plugin.Environment{
 			SignalWorkflow: func(ctx context.Context, workflowID, signalName, payload string) error {
 				signalPayloadCh <- signalName + "|" + payload
@@ -2937,11 +3317,15 @@ func TestWH_Ingest_NonJSONBodyWithSignal(t *testing.T) {
 	if err := p.RegisterRoutes(mux); err != nil {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
-	// Ingest a non-JSON plain text body.
+	// Ingest a non-JSON plain text body, signed with the source's secret.
 	rawText := "plain text body"
+	mac := hmac.New(sha256.New, []byte(sourceSecret))
+	mac.Write([]byte(rawText))
+	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 	req := httptest.NewRequest("POST", "/ingest/"+sourceID.String(), bytes.NewReader([]byte(rawText)))
+	req.Header.Set("X-Hub-Signature-256", sig)
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -2991,8 +3375,9 @@ func TestWH_AwaitWebhook_QueryError(t *testing.T) {
 	store.mu.Unlock()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
@@ -3038,8 +3423,9 @@ func TestWH_AwaitWebhook_ExecError(t *testing.T) {
 	store.mu.Unlock()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
@@ -3093,7 +3479,7 @@ func TestWH_ListSources_ScanError(t *testing.T) {
 	_, handler, store := setupTestPlugin(t)
 
 	// Create a source so there's data to scan.
-	createBody := `{"name":"test-source"}`
+	createBody := `{"name":"test-source","secret":"test-secret"}`
 	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody)))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -3124,7 +3510,7 @@ func TestWH_ListEvents_ScanError(t *testing.T) {
 	_, handler, store := setupTestPlugin(t)
 
 	// Create a source to accept webhook events.
-	createBody := `{"name":"test-source","source_type":"github"}`
+	createBody := `{"name":"test-source","source_type":"github","secret":"test-secret"}`
 	req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(createBody)))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
@@ -3135,9 +3521,13 @@ func TestWH_ListEvents_ScanError(t *testing.T) {
 	json.Unmarshal(rec.Body.Bytes(), &created)
 	sourceID := created["id"].(string)
 
-	// Ingest a webhook payload to create an event.
+	// Ingest a webhook payload to create an event, signed with the source's secret.
 	payload := `{"event":"test"}`
+	mac := hmac.New(sha256.New, []byte("test-secret"))
+	mac.Write([]byte(payload))
+	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 	req = httptest.NewRequest("POST", "/ingest/"+sourceID, bytes.NewReader([]byte(payload)))
+	req.Header.Set("X-Hub-Signature-256", sig)
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -3170,8 +3560,9 @@ func TestWH_ProcessBatch_RowsErr(t *testing.T) {
 	defer db.Close()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	// Should not panic — rows.Err() is logged but not returned.
@@ -3216,8 +3607,9 @@ func TestWH_ProcessBatch_CorruptScan(t *testing.T) {
 	store.mu.Unlock()
 
 	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	// Should not panic — corrupt row is skipped and logged.

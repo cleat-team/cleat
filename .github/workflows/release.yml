@@ -13,24 +13,28 @@ on:
 
 permissions:
   contents: write
-  packages: read
+  packages: write
 
 jobs:
   goreleaser:
-    runs-on: ubuntu-latest
+    # Pinned to ubuntu-26.04, NOT ubuntu-latest (cleat#2069). -latest's
+    # mapping moves on its own schedule and would silently change the glibc
+    # baseline every cleat-worker binary is linked against; a fixed label
+    # means that only moves when this line does.
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
       - name: Setup Go
         uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
 
@@ -74,6 +78,37 @@ jobs:
             exit 1
           fi
 
+      # cleat-worker is built with CGO_ENABLED=1 -- wasmtime is the only WASM
+      # backend, and a CGO-less worker exits 1 at startup. amd64 links with the
+      # runner's own gcc; arm64 needs the cross compiler named by the CC
+      # template in .goreleaser.yml.
+      - name: Install the arm64 cross compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-arm64-cross
+          aarch64-linux-gnu-gcc --version
+          # libc6-arm64-cross supplies /usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1.
+          # gcc-aarch64-linux-gnu alone links the binary but does not install the
+          # loader it needs, so qemu-aarch64 fails with
+          #   Could not open '/lib/ld-linux-aarch64.so.1': No such file or directory
+          # which reads as a backend failure but is a missing sysroot. QEMU_LD_PREFIX
+          # below is what points qemu at it.
+          test -e /usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1
+
+      # Registers binfmt_misc handlers so the linux/arm64 worker can be executed
+      # on this amd64 runner. scripts/verify-release-worker.sh runs every
+      # cleat-worker artifact with --verify-backend as a goreleaser post hook,
+      # and has no skip branch: without this step the arm64 hook fails with
+      # "Exec format error" and the release stops.
+      #
+      # That is deliberate. The bug this guards against -- CGO_ENABLED=0 in
+      # .goreleaser.yml, shipping workers that exited 1 before reading a flag --
+      # survived precisely because nothing ever executed the artifact.
+      - name: Set up QEMU for cross-architecture verification
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
@@ -82,3 +117,232 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Where qemu-aarch64 looks for the guest's dynamic loader and libc.
+          # Without it the arm64 post hook dies with "Could not open
+          # '/lib/ld-linux-aarch64.so.1'" before cleat-worker's main runs, and
+          # the release aborts. Found by the Release Dry Run job on its first run.
+          QEMU_LD_PREFIX: /usr/aarch64-linux-gnu
+
+      # .goreleaser.yml has no dockers:/docker_manifests: section -- GoReleaser
+      # above publishes binaries only. This publishes the cleat-worker image
+      # cleat#2058 needs charts/cleat to be able to pull.
+      #
+      # No Dockerfile changes were needed for arm64: the build stage has no
+      # GOARCH/CC override, so buildx's per-platform build (under the QEMU
+      # registered above) produces a correctly-arched binary for each target,
+      # the same way `go build` does natively when buildx runs it under
+      # emulation. And Dockerfile's own `RUN /cleat-worker --verify-backend`
+      # (the fix for cleat's own "a green build proves nothing about whether
+      # the binary runs" lesson -- see scripts/verify-release-worker.sh) runs
+      # as part of the build for EACH platform, so this step verifies both
+      # architectures by construction, with no separate verify step.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Only reachable on a v* tag push (this whole workflow's trigger), so
+      # the actual push cannot fire from a PR. Kept as its own explicit
+      # condition anyway: a future trigger change should not silently start
+      # pushing from somewhere else.
+      - name: Log in to ghcr.io
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute cleat-worker image tags
+        id: worker_image
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$VERSION' is not vX.Y.Z -- refusing to guess a major.minor tag from it"
+            exit 1
+          fi
+          MAJOR_MINOR="$(echo "$VERSION" | sed -E 's/^v([0-9]+\.[0-9]+)\.[0-9]+$/\1/')"
+          IMAGE="ghcr.io/cleat-team/cleat-worker"
+          {
+            echo "full=$IMAGE:$VERSION"
+            echo "minor=$IMAGE:$MAJOR_MINOR"
+            echo "latest=$IMAGE:latest"
+          } >> "$GITHUB_OUTPUT"
+
+      # push: true here is safe only because the whole workflow triggers
+      # solely on a v* tag push -- see the trigger at the top of this file.
+      # ghcr.io's package visibility (public/private) and this token's
+      # packages: write permission are repository settings; until an owner
+      # sets them, this step 401s/403s rather than publishing, and everything
+      # else in this workflow (binaries, GitHub release) still completes.
+      - name: Build and push cleat-worker image (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ steps.worker_image.outputs.full }}
+            ${{ steps.worker_image.outputs.minor }}
+            ${{ steps.worker_image.outputs.latest }}
+
+  # cleat#2068: publish a Homebrew tap so `brew install cleat-team/tap/cleat`
+  # works, kept in sync automatically instead of the hand-maintained bump
+  # docs/project/release-process.md described until this job existed.
+  #
+  # needs: goreleaser -- the GitHub Release this job's tarball URL depends on
+  # is created by GoReleaser (release: github: in .goreleaser.yml), so this
+  # must run after it. It does NOT depend on goreleaser succeeding at
+  # anything past that: the url below is GitHub's own auto-generated source
+  # archive for the tag, not one of goreleaser's build artifacts, so this job
+  # only needs the tag (and the Release it implies) to exist.
+  homebrew-bump:
+    name: Bump the Homebrew tap
+    needs: goreleaser
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Compute the tag tarball's sha256
+        id: tarball
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$VERSION' is not vX.Y.Z -- refusing to bump the tap from it"
+            exit 1
+          fi
+          URL="https://github.com/cleat-team/cleat/archive/refs/tags/${VERSION}.tar.gz"
+          curl -sSL --fail -o tarball.tar.gz "$URL"
+          SHA="$(sha256sum tarball.tar.gz | awk '{print $1}')"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Render the bumped formula
+        env:
+          VERSION: ${{ steps.tarball.outputs.version }}
+          SHA256: ${{ steps.tarball.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          scripts/render-homebrew-formula.sh \
+            "$VERSION" "$SHA256" \
+            packaging/homebrew/Formula/cleat.rb.tmpl \
+            rendered-cleat.rb
+
+      # HOMEBREW_TAP_TOKEN is a fine-grained PAT scoped to Contents:
+      # read-and-write on cleat-team/homebrew-tap ONLY (owner-provisioned,
+      # cleat#2068). It expires; see docs/project/release-process.md for
+      # rotation. Deploy keys are disabled by org policy, so this pushes over
+      # HTTPS with the token rather than SSH.
+      - name: Push the bump to cleat-team/homebrew-tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.tarball.outputs.version }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 \
+            "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/cleat-team/homebrew-tap.git" \
+            tap
+          mkdir -p tap/Formula
+          cp rendered-cleat.rb tap/Formula/cleat.rb
+          cd tap
+          if git diff --quiet -- Formula/cleat.rb; then
+            echo "Formula/cleat.rb is already at $VERSION -- nothing to push."
+            exit 0
+          fi
+          git config user.name "cleat-release-bot"
+          git config user.email "noreply@cleat.dev"
+          git add Formula/cleat.rb
+          git commit -m "cleat $VERSION"
+          git push origin main
+
+  # cleat#2099: publish charts/cleat as an OCI artifact to ghcr.io, next to
+  # the cleat-worker image the goreleaser job above pushes, versioned with
+  # the release -- so a real tag always has a matching
+  # `helm install cleat oci://ghcr.io/cleat-team/charts/cleat --version X.Y.Z`.
+  #
+  # needs: goreleaser for the same reason as homebrew-bump: this job wants
+  # the release tag's other artifacts (here, specifically the cleat-worker
+  # image the chart's default image.tag will point at) to already exist.
+  helm-chart-publish:
+    name: Publish the Helm chart
+    needs: goreleaser
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: latest
+
+      - name: Compute the chart version and image tag
+        id: chart
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME}"
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '$VERSION' is not vX.Y.Z -- refusing to publish a chart version from it"
+            exit 1
+          fi
+          # Helm's chart `version` (and, by this chart's convention,
+          # `appVersion`) is strict SemVer -- no leading "v" -- while the
+          # cleat-worker image tag the goreleaser job above pushed keeps the
+          # "v". helm package's --version/--app-version override Chart.yaml
+          # at package time, so the tracked file is never edited for this.
+          echo "chart_version=${VERSION#v}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # A bare `helm install` with no --set should deploy the cleat-worker
+      # this chart was versioned and tested against, not whatever "latest"
+      # happens to mean when the cluster next reconciles the image. Edited
+      # only in this ephemeral checkout, the same way goreleaser bakes a
+      # version into a binary without touching tracked source -- nothing
+      # here commits back to the repo.
+      - name: Pin the chart's default image tag to this release
+        env:
+          IMAGE_TAG: ${{ steps.chart.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          before="$(grep -c '^  tag: latest$' charts/cleat/values.yaml || true)"
+          if [ "$before" -ne 1 ]; then
+            echo "::error::expected exactly one '  tag: latest' line in charts/cleat/values.yaml, found $before -- values.yaml's shape changed, update this step"
+            exit 1
+          fi
+          sed -i "s/^  tag: latest\$/  tag: ${IMAGE_TAG}/" charts/cleat/values.yaml
+          grep -n '^  tag:' charts/cleat/values.yaml
+
+      - name: helm lint
+        run: helm lint charts/cleat
+
+      - name: Package the chart
+        env:
+          CHART_VERSION: ${{ steps.chart.outputs.chart_version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist-chart
+          helm package charts/cleat \
+            --version "$CHART_VERSION" \
+            --app-version "$CHART_VERSION" \
+            -d dist-chart
+          ls -la dist-chart
+
+      # Only reachable on a v* tag push (this whole workflow's trigger), same
+      # guard as goreleaser's own "Log in to ghcr.io" step.
+      - name: helm registry login ghcr.io
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$GITHUB_TOKEN" | helm registry login ghcr.io --username "$ACTOR" --password-stdin
+
+      # ghcr.io's package visibility (public/private) is a repository/org
+      # setting, same caveat as the cleat-worker image push above: until an
+      # owner makes ghcr.io/cleat-team/charts/cleat public, this push itself
+      # still succeeds with packages: write, but `helm install ... oci://...`
+      # 403s for anyone not authenticated to this org.
+      - name: Push the chart to ghcr.io
+        env:
+          CHART_VERSION: ${{ steps.chart.outputs.chart_version }}
+        run: helm push "dist-chart/cleat-${CHART_VERSION}.tgz" oci://ghcr.io/cleat-team/charts

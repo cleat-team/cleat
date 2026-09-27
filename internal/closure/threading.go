@@ -47,9 +47,30 @@ func VerifyThreading(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *R
 		// like it had a meaning in the nil case, which it does not.
 		usesGlobalH := findGlobalHUsers(result, globalHObj)
 		for name := range durableSet {
-			if usesGlobalH[name] {
-				threaded[name] = true
+			if !usesGlobalH[name] {
+				continue
 			}
+			// A METHOD is not threaded by referencing the global, because
+			// nothing ever assigns the global. Auto-threading works by adding
+			// h as a first parameter and rewriting call sites, and
+			// transform.go skips anything with a receiver -- you cannot
+			// prepend a parameter to a method without changing its signature.
+			// So the declaration survives (canRemoveGlobalH keeps it, seeing a
+			// user it could not convert) holding the zero value, and
+			// cleat.HostCalls is struct{ *HostCallsImpl }: every promoted call
+			// dereferences a nil pointer.
+			//
+			// Crediting the method here made the verifier vouch for exactly
+			// the case the transform refuses to handle, and the build shipped
+			// a module that panicked on first use (cleat#1614).
+			//
+			// Methods that genuinely reach the host are admitted below and are
+			// unaffected: phase 1b (PluginCaller), phase 3 (the receiver
+			// carries a HostCalls field), phase 3b (a parameter does).
+			if fd := result.Funcs[name]; fd != nil && fd.RecvType != nil {
+				continue
+			}
+			threaded[name] = true
 		}
 	}
 
@@ -117,6 +138,45 @@ func VerifyThreading(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *R
 		}
 	}
 
+	// Phase 3b: Functions with a PARAMETER whose type carries a HostCalls
+	// field.
+	//
+	// The same rule as phase 3, applied to parameters instead of receivers, and
+	// symmetric with it rather than a widening: a function that is handed a
+	// *TaskContext holding a cleat.HostCalls can reach the host exactly as a
+	// method on that struct can.
+	//
+	// This is cleat/dagrun's designed shape, and its package doc says so:
+	//
+	//	// TaskContext.H is passed through to every user-written task body ...
+	//	// That means TaskContext cannot be narrowed to a small interface
+	//	// without breaking real callers (see examples/dag, which calls
+	//	// ctx.H.DurableCall).
+	//
+	// Without this phase, `cleat vet` rejected the pattern a first-party cleat
+	// SDK package documents itself as requiring, and examples/dag failed with
+	// four errors telling its author to add a parameter it already effectively
+	// has. IMPROVEMENT-PLAN 3.229.
+	for name := range durableSet {
+		if threaded[name] {
+			continue
+		}
+		fd := result.Funcs[name]
+		if fd == nil || fd.Type == nil {
+			continue
+		}
+		params := fd.Type.Params()
+		if params == nil {
+			continue
+		}
+		for i := 0; i < params.Len(); i++ {
+			if structHasHostCallsField(params.At(i).Type(), fd.Pkg) {
+				threaded[name] = true
+				break
+			}
+		}
+	}
+
 	// Collect errors for unthreaded functions.
 	var errors []ThreadingError
 	for name := range durableSet {
@@ -132,18 +192,185 @@ func VerifyThreading(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *R
 		if fd.Pkg.Fset != nil {
 			line = fd.Pkg.Fset.Position(fd.Ast.Pos()).Line
 		}
+		msg := fmt.Sprintf(
+			"%s is reachable from a workflow entry point (it calls durable SDK methods) but does not have a HostCalls parameter. "+
+				"Add 'h cleat.HostCalls' as the first parameter, or declare a package-level 'var h cleat.HostCalls' that this function can reference.",
+			analyzer.ShortName(name))
+		// A method gets different advice, because half of the advice above is
+		// actively harmful to it: referencing a package-level h compiles,
+		// passes every check, and nil-panics at run time, since nothing
+		// assigns that global and the transform cannot thread a receiver
+		// (cleat#1614). Name the two routes that do work instead.
+		if fd.RecvType != nil {
+			msg = fmt.Sprintf(
+				"%s is a method reachable from a workflow entry point (it calls durable SDK methods), and a method cannot reach the host through a package-level 'var h cleat.HostCalls' -- that global is never assigned, so the call would panic at run time. "+
+					"Give the receiver type a 'cleat.HostCalls' field and call through it, or make this a function taking 'h cleat.HostCalls' as its first parameter.",
+				analyzer.ShortName(name))
+		}
 		errors = append(errors, ThreadingError{
 			FuncName: name,
 			Chain:    chain,
 			Line:     line,
-			Message: fmt.Sprintf(
-				"%s is reachable from a workflow entry point (it calls durable SDK methods) but does not have a HostCalls parameter. "+
-					"Add 'h cleat.HostCalls' as the first parameter, or declare a package-level 'var h cleat.HostCalls' that this function can reference.",
-				analyzer.ShortName(name)),
+			Message:  msg,
 		})
 	}
 
+	errors = append(errors, verifyEntryPointResults(result)...)
+	warnEntryPointTakesRawInput(result, cr)
+
 	return errors
+}
+
+// warnEntryPointTakesRawInput warns about an entry point whose only
+// parameter, after the HostCalls one, is a single string.
+//
+// Such a parameter receives the WHOLE input JSON, not the field matching its
+// name. Every other shape binds by exact Go parameter name. That is deliberate
+// -- something has to be able to carry an opaque payload -- so this is a
+// warning and not an error, and the rule itself is unchanged.
+//
+// What it costs when unwanted is the reason for the warning. The rule is
+// invisible at the call site, at build time and at deploy; it surfaces as a
+// semantic failure in whatever the parameter was eventually used for, which is
+// by construction somewhere else. Measured in cleat-team/cleat-ports:
+//
+//	func HandleLockTry(h cleat.HostCalls, key string) (string, error) {
+//		acquired, err := h.AcquireLockMs("lock"+key, 120000)
+//
+// started with {"key": "lock-abc"} took the lock
+// `lock-{"key":"lock-abc"}`, and every acquire failed with
+// `cleat_acquire_lock: error 1`. Nothing in that message points at argument
+// binding, and the natural reading is that locks are broken -- while a
+// near-identical two-parameter workflow acquired the same key correctly in the
+// same run. It has cost time three times: a detached-execution test, that lock
+// test, and a cron target whose scheduled runs completed successfully having
+// called the wrong service key. cleat#824.
+func warnEntryPointTakesRawInput(result *analyzer.AnalysisResult, cr *Result) {
+	if cr == nil || cr.Warnings == nil {
+		return
+	}
+	for _, name := range result.EntryPoints {
+		fd := result.Funcs[name]
+		if fd == nil || fd.Type == nil {
+			continue
+		}
+		params := fd.Type.Params()
+		if params == nil {
+			continue
+		}
+		// Skip a leading HostCalls parameter, which is not bound from the
+		// input at all.
+		start := 0
+		if params.Len() > 0 && analyzer.IsHostCallsType(params.At(0).Type()) {
+			start = 1
+		}
+		if params.Len()-start != 1 {
+			continue
+		}
+		p := params.At(start)
+		basic, ok := p.Type().Underlying().(*types.Basic)
+		if !ok || basic.Kind() != types.String {
+			continue
+		}
+		line := 0
+		if fd.Pkg != nil && fd.Pkg.Fset != nil && fd.Ast != nil {
+			line = fd.Pkg.Fset.Position(fd.Ast.Pos()).Line
+		}
+		cr.Warnings[name] = append(cr.Warnings[name], ValidationWarning{
+			Code:     "W003",
+			FuncName: name,
+			Message: fmt.Sprintf(
+				"%s is a workflow entry point whose only parameter is a single string, "+
+					"so %q receives the ENTIRE input JSON rather than the field of that name. "+
+					"Starting it with {%q: \"value\"} binds %s to the literal text {%q:\"value\"}.",
+				analyzer.ShortName(name), p.Name(), p.Name(), p.Name(), p.Name()),
+			Suggestion: "If that is what you want -- an opaque payload the workflow parses " +
+				"itself -- nothing needs to change. If you meant to bind one field by name, " +
+				fmt.Sprintf("add a second parameter or take a struct: func(h cleat.HostCalls, %s string, tag string). ", p.Name()) +
+				"Struct parameters are unmarshalled from the input JSON and bind by field.",
+			Line: line,
+		})
+	}
+}
+
+// verifyEntryPointResults rejects an entry point whose result value is not a
+// string.
+//
+// THE STRING IS DELIBERATE, not a codegen limitation. A WASM entry point hands
+// back bytes, and `string` is the one shape every language SDK expresses
+// identically -- which is why the interfaces use it. GenerateExports therefore
+// declares `var __r string` (wasm/exports.go) and emits `return []byte(__r)`,
+// and supports exactly four signatures:
+//
+//	func(h cleat.HostCalls, ...) (string, error)
+//	func(h cleat.HostCalls, ...) error
+//	func(h cleat.HostCalls, ...) string
+//	func(h cleat.HostCalls, ...)
+//
+// Anything else compiled until now, and then failed like this:
+//
+//	./gen_wasm_exports.go:340:28: cannot convert __r (variable of type
+//	    *BookingResult) to type []byte
+//
+// -- a Go type error in GENERATED code, naming a variable the author never
+// wrote and a file they did not create. `cleat vet` said OK on the same
+// package. Three of the shipped examples are in that state
+// (IMPROVEMENT-PLAN 3.228), which is how it went unnoticed: nothing in CI runs
+// cleat build on a Go example.
+//
+// This rejects nothing that previously built. A non-string result already
+// failed, later and less legibly.
+//
+// Note it is only the RESULT. Struct PARAMETERS are fine and common --
+// examples/subscription takes a SubscriptionInput and builds -- because the
+// generator unmarshals those from the args JSON.
+func verifyEntryPointResults(result *analyzer.AnalysisResult) []ThreadingError {
+	var errs []ThreadingError
+	for _, name := range result.EntryPoints {
+		fd := result.Funcs[name]
+		if fd == nil || fd.Type == nil {
+			continue
+		}
+		res := fd.Type.Results()
+		if res == nil {
+			continue
+		}
+		for i := 0; i < res.Len(); i++ {
+			t := res.At(i).Type()
+			if isErrorType(t) {
+				continue
+			}
+			if basic, ok := t.Underlying().(*types.Basic); ok && basic.Kind() == types.String {
+				continue
+			}
+			line := 0
+			if fd.Pkg != nil && fd.Pkg.Fset != nil && fd.Ast != nil {
+				line = fd.Pkg.Fset.Position(fd.Ast.Pos()).Line
+			}
+			errs = append(errs, ThreadingError{
+				FuncName: name,
+				Line:     line,
+				Message: fmt.Sprintf(
+					"%s is a workflow entry point returning %s, but an entry point's result must be a string. "+
+						"A WASM entry point hands back bytes, and string is the shape every language SDK expresses "+
+						"identically. Return (string, error) -- marshal the value yourself -- or error alone. "+
+						"Struct parameters are fine; it is only the result.",
+					analyzer.ShortName(name), t.String()),
+			})
+			break
+		}
+	}
+	return errs
+}
+
+// isErrorType reports whether t is the builtin error interface.
+func isErrorType(t types.Type) bool {
+	named, ok := t.(*types.Named)
+	if !ok {
+		return false
+	}
+	obj := named.Obj()
+	return obj != nil && obj.Pkg() == nil && obj.Name() == "error"
 }
 
 // hasHostCallsParam checks if the function's first parameter is HostCalls.

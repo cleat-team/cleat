@@ -1,0 +1,14 @@
+{
+  "name": "hostcallsas",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "npx asc assembly/index.ts --target release --transform ./node_modules/@cleat/transform/index.js && node ../../../../packages/cleat-as/scripts/inject-metadata.js dist/workflow.wasm --name HostCalls --version 1 --output dist/workflow.stamped.wasm",
+    "clean": "rm -rf dist/"
+  },
+  "devDependencies": {
+    "assemblyscript": "^0.28.19",
+    "@cleat/sdk": "file:../../../../packages/cleat-as",
+    "@cleat/transform": "file:../../../../packages/cleat-as/transform"
+  }
+}

@@ -1,13 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,120 +16,25 @@ import (
 // Which read the loop uses
 // ---------------------------------------------------------------------------
 
-type crossTenantScheduleStore struct {
-	*mockStore
-	mu     sync.Mutex
-	cross  int
-	scoped int
-	// crossErr, when set, is what the cross-tenant read returns.
-	crossErr error
-}
-
-func (m *crossTenantScheduleStore) GetDueSchedules(ctx context.Context) ([]engine.Schedule, error) {
-	m.mu.Lock()
-	m.scoped++
-	m.mu.Unlock()
-	return nil, nil
-}
-
-func (m *crossTenantScheduleStore) GetDueSchedulesAcrossTenants(ctx context.Context) ([]engine.Schedule, error) {
-	m.mu.Lock()
-	m.cross++
-	m.mu.Unlock()
-	return nil, m.crossErr
-}
-
-func (m *crossTenantScheduleStore) counts() (cross, scoped int) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.cross, m.scoped
-}
-
-// TestDueSchedules_UsesTheCrossTenantReadOnlyWhenAsked.
+// A real read failure is propagated, not swallowed.
 //
-// The flag is the whole safety story for this feature: a deployment that has
-// not granted the exemption must keep the pre-existing behaviour exactly.
-func TestDueSchedules_UsesTheCrossTenantReadOnlyWhenAsked(t *testing.T) {
-	for _, tc := range []struct {
-		name             string
-		flag             bool
-		wantCross        int
-		wantScopedAtMost int
-	}{
-		{"flag off: the scoped read, as before", false, 0, 1},
-		{"flag on: the cross-tenant read", true, 1, 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			st := &crossTenantScheduleStore{mockStore: &mockStore{}}
-			w := newTestWorker(st.mockStore)
-			defer w.cancel()
-			w.store = st
-			w.claimAcrossTenants = tc.flag
-
-			if _, err := w.dueSchedules(); err != nil {
-				t.Fatalf("dueSchedules: %v", err)
-			}
-			cross, scoped := st.counts()
-			if cross != tc.wantCross {
-				t.Errorf("cross-tenant reads = %d, want %d", cross, tc.wantCross)
-			}
-			if scoped > tc.wantScopedAtMost {
-				t.Errorf("scoped reads = %d, want at most %d", scoped, tc.wantScopedAtMost)
-			}
-		})
-	}
-}
-
-// TestDueSchedules_FallsBackWhenTheStoreCannotReadAcrossTenants.
+// SUPERSEDED IN PART. Its sibling asserted that the flag chose between a
+// cross-tenant read and a scoped one; that choice is gone with the widened
+// query, and what replaced it -- does the flag decide whether other tenants
+// are served at all -- is TestBothLoopsUseTheRotationOnlyWhenAsked.
 //
-// A missing GRANT must narrow the worker, not stop it firing anything at all.
-// The assertion that matters is the scoped read happening AFTER the refusal:
-// without it the loop returns an error every tick and no schedule fires,
-// including the worker's own tenant's, which is strictly worse than the
-// behaviour before this feature existed.
-func TestDueSchedules_FallsBackWhenTheStoreCannotReadAcrossTenants(t *testing.T) {
-	st := &crossTenantScheduleStore{
-		mockStore: &mockStore{},
-		crossErr: fmt.Errorf("admin.get_due_schedules does not exist: %w",
-			engine.ErrCrossTenantClaimUnsupported),
-	}
-	w := newTestWorker(st.mockStore)
-	defer w.cancel()
-	w.store = st
-	w.claimAcrossTenants = true
-
-	if _, err := w.dueSchedules(); err != nil {
-		t.Fatalf("a refusal must be answered by falling back, not propagated: %v", err)
-	}
-	cross, scoped := st.counts()
-	if cross != 1 {
-		t.Errorf("cross-tenant reads = %d, want 1", cross)
-	}
-	if scoped != 1 {
-		t.Errorf("scoped reads = %d, want 1 -- the fallback did not happen, so no schedule "+
-			"fires at all on a deployment that merely has not applied migration 024", scoped)
-	}
-}
-
-// TestDueSchedules_PropagatesARealFailure is the false-positive half. A
-// fallback that swallowed every error would satisfy the test above and would
-// hide a database outage as "no schedules are due".
+// This half survives unchanged in meaning: a read that fails must reach the
+// schedule loop as an error. Returning (nil, nil) would read as "nothing is
+// due", which is indistinguishable from a quiet period, so a database outage
+// would look like a deployment with no cron.
 func TestDueSchedules_PropagatesARealFailure(t *testing.T) {
-	st := &crossTenantScheduleStore{
-		mockStore: &mockStore{},
-		crossErr:  fmt.Errorf("connection refused"),
-	}
-	w := newTestWorker(st.mockStore)
-	defer w.cancel()
-	w.store = st
-	w.claimAcrossTenants = true
+	w, factory, _ := newRotatingWorker(t, map[string]int{"a": 0, "b": 0})
+	factory.openErr["a"] = fmt.Errorf("connection refused")
+	factory.openErr["b"] = fmt.Errorf("connection refused")
 
 	if _, err := w.dueSchedules(); err == nil {
 		t.Fatal("a real read failure was swallowed; the loop would report an idle scheduler " +
 			"while the database was unreachable")
-	}
-	if _, scoped := st.counts(); scoped != 0 {
-		t.Errorf("scoped reads = %d, want 0 -- a real failure must not be retried as a fallback", scoped)
 	}
 }
 
@@ -177,11 +79,15 @@ func fireProbeStore(label string, probe *scheduleFireProbe, onStart func(string)
 // TestScheduleLoop_FiresThroughTheSchedulesOwnTenantStore is the assertion the
 // whole cross-tenant schedule read depends on.
 //
-// The read is deliberately unscoped -- it returns every tenant's due schedules
-// through one connection. Everything after it must be scoped again immediately,
-// or the loop starts one tenant's run through another tenant's store, with that
-// store's isolation applied and the wrong tenant's quota consumed. Nothing else
-// in the tree checks that.
+// The read spans tenants -- one pass, every tenant's due schedules. Everything
+// after it must be scoped again immediately, or the loop starts one tenant's
+// run through another tenant's store, with that store's isolation applied and
+// the wrong tenant's quota consumed. Nothing else in the tree checks that.
+//
+// It read through admin.get_due_schedules when this was written, and now reads
+// per tenant through the rotation. The property is unchanged by that, which is
+// the point: what must hold is where the FIRING goes, not where the reading
+// came from.
 func TestScheduleLoop_FiresThroughTheSchedulesOwnTenantStore(t *testing.T) {
 	const otherTenant = "22222222-2222-2222-2222-222222222222"
 	const ownTenant = "00000000-0000-0000-0000-000000000000"
@@ -214,23 +120,26 @@ func TestScheduleLoop_FiresThroughTheSchedulesOwnTenantStore(t *testing.T) {
 	})
 	w.storeFactory = &fixedTenantFactory{tenantID: otherTenant, store: tenantStore}
 
-	// The cross-tenant read returns a schedule belonging to the OTHER tenant.
-	xt := &scheduleReadStore{
-		mockStore: own,
-		due: []engine.Schedule{{
+	// The other tenant's store is where its due schedule comes from now: the
+	// rotation enumerates tenants and reads each one's schedules through its
+	// own store. Attaching the due set HERE rather than to the worker's own
+	// store is what makes this test exercise the path that ships.
+	tenantStore.getDueSchedulesFn = func(context.Context) ([]engine.Schedule, error) {
+		return []engine.Schedule{{
 			Name:           "xts-loop",
 			DefName:        "sched-wf",
 			CronExpression: "* * * * *",
 			Input:          json.RawMessage(`{}`),
-			Enabled:        true,
 			NextRunAt:      time.Now().Add(-time.Minute),
 			Timezone:       "UTC",
 			TenantID:       otherTenant,
 			MisfirePolicy:  "catch_up",
 			OverlapPolicy:  "allow",
-		}},
+		}}, nil
 	}
-	w.store = xt
+	w.store = &listingStore{mockStore: own, tenants: []string{otherTenant}}
+	w.claimAcrossTenants = true
+	w.storeTenantID = ""
 
 	// No registerLoopFunc: newTestWorker leaves loopFuncs nil, and scheduleLoop
 	// does not need it. Matches TestScheduleLoop_StopsOnCancel.
@@ -266,24 +175,7 @@ func TestScheduleLoop_FiresThroughTheSchedulesOwnTenantStore(t *testing.T) {
 	}
 }
 
-// scheduleReadStore returns a fixed due set from the cross-tenant read.
-type scheduleReadStore struct {
-	*mockStore
-	due  []engine.Schedule
-	once sync.Once
-}
-
-func (m *scheduleReadStore) GetDueSchedulesAcrossTenants(ctx context.Context) ([]engine.Schedule, error) {
-	// Once: the loop would otherwise re-fire the same schedule every tick,
-	// since nothing here advances next_run_at.
-	var out []engine.Schedule
-	m.once.Do(func() { out = m.due })
-	return out, nil
-}
-
-// fixedTenantFactory hands out one store for one tenant and fails for any
-// other, so a lookup for the wrong tenant is a visible error rather than a
-// silent fallback to the worker's own store.
+// fixedTenantFactory hands out one store, for one tenant.
 type fixedTenantFactory struct {
 	tenantID string
 	store    engine.WorkflowStore
@@ -303,141 +195,3 @@ func (f *fixedTenantFactory) Dialect() engine.Dialect { return engine.DialectPos
 type nopCloserT struct{}
 
 func (nopCloserT) Close() error { return nil }
-
-// ---------------------------------------------------------------------------
-// The startup report
-// ---------------------------------------------------------------------------
-
-type capabilityStore struct {
-	*mockStore
-	capability engine.CrossTenantCapability
-	mu         sync.Mutex
-	checks     int
-}
-
-func (m *capabilityStore) CheckCrossTenantCapability(context.Context) engine.CrossTenantCapability {
-	m.mu.Lock()
-	m.checks++
-	m.mu.Unlock()
-	return m.capability
-}
-
-// TestReportCrossTenantCapability_SaysWhichModeTheWorkerIsIn.
-//
-// Both cross-tenant paths degrade rather than fail, which is the right default
-// and is what makes this report necessary: an operator who set the flag and saw
-// nothing cannot tell "working" from "the warning already scrolled past". So the
-// outcome is stated in both directions, at startup, before either loop ticks.
-//
-// The unavailable case must name the reason, because the runtime error for the
-// worst version of it -- a lost BYPASSRLS -- is "cleat.tenant_id is not set",
-// which names neither the function nor the attribute.
-func TestReportCrossTenantCapability_SaysWhichModeTheWorkerIsIn(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		flag       bool
-		capability engine.CrossTenantCapability
-		wantChecks int
-		wantLevel  string
-		wantIn     []string
-	}{
-		{
-			name:       "flag off: nothing is probed and nothing is said",
-			flag:       false,
-			wantChecks: 0,
-		},
-		{
-			name:       "granted: reported available, so silence is not the only evidence",
-			flag:       true,
-			capability: engine.CrossTenantCapability{Claim: true, Schedules: true},
-			wantChecks: 1,
-			wantLevel:  "INFO",
-			wantIn:     []string{"cross-tenant workflow claim is available", "cross-tenant due-schedule read is available"},
-		},
-		{
-			name: "ungranted: reported unavailable, with the reason and the consequence",
-			flag: true,
-			capability: engine.CrossTenantCapability{
-				ClaimReason:     "admin.claim_workflows does not exist; apply 023",
-				SchedulesReason: "owner does not have BYPASSRLS",
-			},
-			wantChecks: 1,
-			wantLevel:  "WARN",
-			wantIn: []string{
-				"only this worker's own tenant's workflows will execute",
-				"only this worker's own tenant's cron will fire",
-				"BYPASSRLS",
-			},
-		},
-		{
-			name: "partially granted: the claim works and cron does not, said separately",
-			flag: true,
-			capability: engine.CrossTenantCapability{
-				Claim:           true,
-				SchedulesReason: "admin.get_due_schedules does not exist; apply 024",
-			},
-			wantChecks: 1,
-			wantIn: []string{
-				"cross-tenant workflow claim is available",
-				"cross-tenant due-schedule read is NOT available",
-				"024",
-			},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var buf bytes.Buffer
-			st := &capabilityStore{mockStore: &mockStore{}, capability: tc.capability}
-			w := newTestWorker(st.mockStore)
-			defer w.cancel()
-			w.store = st
-			w.claimAcrossTenants = tc.flag
-			w.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-			w.reportCrossTenantCapability()
-
-			st.mu.Lock()
-			checks := st.checks
-			st.mu.Unlock()
-			if checks != tc.wantChecks {
-				t.Errorf("capability checked %d time(s), want %d", checks, tc.wantChecks)
-			}
-			out := buf.String()
-			if tc.wantChecks == 0 && out != "" {
-				t.Errorf("flag off but the worker logged: %s", out)
-			}
-			for _, want := range tc.wantIn {
-				if !strings.Contains(out, want) {
-					t.Errorf("startup report does not mention %q\n%s", want, out)
-				}
-			}
-			if tc.wantLevel != "" && !strings.Contains(out, "level="+tc.wantLevel) {
-				t.Errorf("expected a %s line, got:\n%s", tc.wantLevel, out)
-			}
-		})
-	}
-}
-
-// TestReportCrossTenantCapability_SaysSoWhenItCannotTell is the inconclusive
-// case. A store that cannot answer must not be reported as either working or
-// broken -- asserting a capability nobody established is the failure this whole
-// report exists to prevent, arriving through the report itself.
-func TestReportCrossTenantCapability_SaysSoWhenItCannotTell(t *testing.T) {
-	var buf bytes.Buffer
-	// A plain mockStore implements neither CrossTenantCapabilityChecker nor the
-	// cross-tenant paths.
-	ms := &mockStore{}
-	w := newTestWorker(ms)
-	defer w.cancel()
-	w.claimAcrossTenants = true
-	w.logger = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	w.reportCrossTenantCapability()
-
-	out := buf.String()
-	if !strings.Contains(out, "cannot report whether it supports it") {
-		t.Errorf("a store that cannot answer was not reported as such:\n%s", out)
-	}
-	if strings.Contains(out, "is available") {
-		t.Errorf("an unanswerable check was reported as available:\n%s", out)
-	}
-}

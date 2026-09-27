@@ -88,7 +88,17 @@ func TestTenantSelfAccess(t *testing.T) {
 	forEachBackend(t, func(t *testing.T, store WorkflowStore) {
 		ctx := context.Background()
 
-		// Deploy a workflow definition (visible to all tenants).
+		// Deploy a workflow definition. This one is visible to all tenants,
+		// because forEachBackend hands out a default-tenant store and
+		// workflow_defs' RLS policy admits default-tenant rows -- not because
+		// definitions are global. Since IMPROVEMENT-PLAN 3.12,
+		// DeployWorkflowDef writes the deploying store's tenant, so a
+		// definition deployed by any other tenant is not visible to all.
+		//
+		// Spelled out because migrations/postgres/001_schema.sql used to cite
+		// this line as evidence that definitions were "a shared/global
+		// registry, not tenant-partitioned data", and justified a security
+		// policy with it.
 		def := &WorkflowDef{
 			Name:       "test-isolation",
 			Version:    1,
@@ -334,7 +344,7 @@ func TestTenantIsolation_Signals(t *testing.T) {
 				t.Fatalf("PollSignal on store B: %v", err)
 			}
 			if found {
-				t.Errorf("ISOLATION BREACH: store B can poll signal from tenant A's workflow (payload: %s)", payload)
+				t.Errorf("ISOLATION BREACH: store B can poll signal from tenant A's workflow (payload: %s)", payload.Payload)
 			}
 
 			// Store A should see its own signal.
@@ -409,7 +419,6 @@ func TestTenantIsolation_Schedules(t *testing.T) {
 				EntryPoint:     "main",
 				CronExpression: "* * * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      now.Add(time.Hour),
 			}); err != nil {
 				t.Fatalf("CreateSchedule on store A: %v", err)
@@ -422,7 +431,6 @@ func TestTenantIsolation_Schedules(t *testing.T) {
 				EntryPoint:     "main",
 				CronExpression: "* * * * *",
 				Input:          json.RawMessage(`{}`),
-				Enabled:        true,
 				NextRunAt:      now.Add(time.Hour),
 			}); err != nil {
 				t.Fatalf("CreateSchedule on store B: %v", err)
@@ -732,7 +740,7 @@ func TestTenantIsolation_Reaper(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 
 			// Reap stale instances from store A.
-			reaped, err := storeA.ReapStaleInstances(ctx, 1*time.Nanosecond)
+			reaped, err := storeA.ReapStaleInstances(ctx, 1*time.Nanosecond, 0)
 			if err != nil {
 				t.Fatalf("ReapStaleInstances on store A: %v", err)
 			}
@@ -766,7 +774,7 @@ func TestTenantIsolation_Reaper(t *testing.T) {
 			}
 
 			// Verify storeB's own reaper also works (own-tenant reaping).
-			reapedB, err := storeB.ReapStaleInstances(ctx, 1*time.Nanosecond)
+			reapedB, err := storeB.ReapStaleInstances(ctx, 1*time.Nanosecond, 0)
 			if err != nil {
 				t.Fatalf("ReapStaleInstances on store B: %v", err)
 			}
@@ -853,10 +861,25 @@ func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
 			}
 
 			// --- Part 1: Acquire/release cross-tenant isolation ---
-			// concurrency_keys has PRIMARY KEY (key_hash) alone, so two tenants
-			// cannot simultaneously hold the same key name. The test works within
-			// this constraint, verifying tenant-scoped release isolation and
-			// sequential reuse across tenants.
+			//
+			// This block used to open by documenting the defect as a premise:
+			//
+			//	concurrency_keys has PRIMARY KEY (key_hash) alone, so two tenants
+			//	cannot simultaneously hold the same key name. The test works within
+			//	this constraint, verifying tenant-scoped release isolation and
+			//	sequential reuse across tenants.
+			//
+			// That is an accurate description of the schema and it is not a
+			// constraint -- it is cleat#1189, in the one test named for the
+			// property it violates. A key namespace global across tenants meant
+			// tenant B was blocked by a row it could not see and could not
+			// release, until the TTL expired. "The test works within this
+			// constraint" is how a defect becomes a specification.
+			//
+			// Migration 057 makes the key (key_hash, tenant_id). The assertions
+			// below are otherwise unchanged and were all correct: a tenant must
+			// still exclude ITSELF, and one tenant's release must not reach
+			// another's row.
 
 			acquired, err := storeA.AcquireConcurrencyKey(ctx, "iso-key", "wf-a", 60*time.Second)
 			if err != nil {
@@ -886,7 +909,7 @@ func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
 
 			// storeB tries to release "iso-key" — tenant-scoped, should be a no-op
 			// because the row has tenant_id = tenant A.
-			if err := storeB.ReleaseConcurrencyKey(ctx, "iso-key"); err != nil {
+			if _, err := storeB.ReleaseConcurrencyKey(ctx, "iso-key", "wf-b"); err != nil {
 				t.Fatalf("ReleaseConcurrencyKey on store B: %v", err)
 			}
 
@@ -900,7 +923,7 @@ func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
 			}
 
 			// storeA releases its own key.
-			if err := storeA.ReleaseConcurrencyKey(ctx, "iso-key"); err != nil {
+			if _, err := storeA.ReleaseConcurrencyKey(ctx, "iso-key", "wf-a"); err != nil {
 				t.Fatalf("ReleaseConcurrencyKey on store A (own key): %v", err)
 			}
 
@@ -922,17 +945,27 @@ func TestTenantIsolation_ConcurrencyKeys(t *testing.T) {
 				t.Error("storeB should acquire iso-key after storeA released it")
 			}
 
-			// Now storeA cannot acquire — key is held by storeB (PK conflict).
+			// storeA acquires the same key name while storeB holds it. Two
+			// tenants, two rows, no interaction -- which is what the name of
+			// this test claims to check. The old assertion here was the exact
+			// negation of this one (cleat#1189).
 			acquired, err = storeA.AcquireConcurrencyKey(ctx, "iso-key", "wf-a-3", 60*time.Second)
 			if err != nil {
-				t.Fatalf("AcquireConcurrencyKey on storeA after storeB holds: %v", err)
+				t.Fatalf("AcquireConcurrencyKey on storeA while storeB holds: %v", err)
 			}
-			if acquired {
-				t.Error("storeA should not acquire iso-key while storeB holds it")
+			if !acquired {
+				t.Error("storeA was refused iso-key because storeB holds it: the key " +
+					"namespace is global across tenants, so B blocks A with a row A " +
+					"cannot see and cannot release (cleat#1189)")
+			}
+
+			// Cleanup part 1 for A as well, now that it holds a row too.
+			if _, err := storeA.ReleaseConcurrencyKey(ctx, "iso-key", "wf-a"); err != nil {
+				t.Fatalf("ReleaseConcurrencyKey on store A cleanup: %v", err)
 			}
 
 			// Cleanup part 1.
-			if err := storeB.ReleaseConcurrencyKey(ctx, "iso-key"); err != nil {
+			if _, err := storeB.ReleaseConcurrencyKey(ctx, "iso-key", "wf-b"); err != nil {
 				t.Fatalf("ReleaseConcurrencyKey on store B cleanup: %v", err)
 			}
 

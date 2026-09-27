@@ -5,19 +5,77 @@
 /// that the WASM runtime provides to guest modules.
 package cleat:host-calls;
 
+/// Why a durable host call produced no response.
+///
+/// A stop and a failure are CASES OF A TYPE here, not values of the response
+/// string. That is the whole point of this interface. The host calls below
+/// used to return a bare ``string`` and encode both in it:
+///
+///   * a failure was documented as an error message prefixed with
+///     ``__CLEAT_ERROR__:`` -- which nothing in the host has ever written.
+///     Measured 2026-09-03, ``grep -rn CLEAT_ERROR`` over the whole tree
+///     matches this file, the Python SDK's six checks for the prefix, and
+///     IMPROVEMENT-PLAN. No producer. A failed call arrived at a Python
+///     workflow as an ordinary successful response carrying the error text.
+///   * a stop had no encoding at all. The core-module ABI signals one with
+///     ``callSuspendSentinel`` (bit 31 of the packed result word, engine/memory.go),
+///     and a lifted ``string`` has no bits to carry it. The component dispatch
+///     took ``responseLen=0`` out of the sentinel and handed the guest ``""`` --
+///     an empty SUCCESSFUL response.
+///
+/// Both are the class CLAUDE.md names at the ABI boundary: not an overflow, a
+/// value that means something different on each side. Neither is expressible
+/// now: ``result<string, call-failure>`` lifts into ``Err`` in the guest, and
+/// no response a service can return produces one.
+interface outcomes {
+    variant call-failure {
+        /// The engine stopped this workflow before the call was started.
+        ///
+        /// Returned only inside a defer segment, for a call the workflow BODY
+        /// is making past the end of its recorded history -- the host-side
+        /// refusal in ``stopBeforeNewWork`` (engine/durablecalls.go). The
+        /// guest must unwind: the segment exists to run a terminated
+        /// workflow's cleanup, and carrying on performs the side effect the
+        /// termination was meant to stop. See IMPROVEMENT-PLAN 3.83.
+        suspended,
+
+        /// The call was attempted and failed.
+        failed(call-error),
+    }
+
+    /// A failed call's message and the host's classification of it.
+    ///
+    /// ``code`` is the packed ABI's ``callErrorCode``
+    /// (``packDurableCallResult``, engine/memory.go), which decides whether an
+    /// SDK raises its retryable or its permanent error class. The component
+    /// dispatch used to drop it along with the error itself, so a Python
+    /// workflow could not have told the two apart even if it had seen the
+    /// failure. Zero means the host offered no classification.
+    record call-error {
+        code: u32,
+        message: string,
+    }
+}
+
 /// Service call operations: recorded, retried, or heartbeated.
 interface durable-call {
+    use outcomes.{call-failure};
+
     /// Make a durable (deterministically replayed) call to an external service.
-    /// Returns the response JSON string on success, or an error string prefixed
-    /// with "__CLEAT_ERROR__:" on failure.
+    ///
+    /// ``ok`` carries the response JSON. ``err`` is a stop or a failure -- see
+    /// ``outcomes``; neither is a string a service could have returned.
     durable-call: func(
         service: string,
         operation: string,
         request: string,
-    ) -> string;
+    ) -> result<string, call-failure>;
 
     /// Make a durable call with server-side retry policy.
-    /// Returns the response JSON string on success, or an error on failure.
+    ///
+    /// The retries happen inside the host and one event is recorded whatever
+    /// the attempt count, so ``err`` here means the policy was exhausted --
+    /// or, for ``suspended``, that the call was never started at all.
     durable-call-retry: func(
         service: string,
         operation: string,
@@ -27,16 +85,22 @@ interface durable-call {
         backoff-coefficient-100x: u64,
         max-interval-ms: u64,
         non-retryable-errors: string,
-    ) -> string;
+    ) -> result<string, call-failure>;
 
     /// Make a durable call with periodic heartbeat/progress updates.
-    /// Returns the response JSON string on success, or an error on failure.
+    ///
+    /// The type is the same shape as its two siblings because the failure half
+    /// applies to it identically, and because a third convention for one
+    /// function would be worse. The host half arrived in IMPROVEMENT-PLAN 3.111
+    /// (#672): DurableCallWithHeartbeat consults stopBeforeNewWork, so a defer
+    /// segment stops it, and the component dispatch masks the sentinel ahead of
+    /// any field decode -- both ends of `suspended` are real on this call.
     durable-call-heartbeat: func(
         service: string,
         operation: string,
         request: string,
         heartbeat-interval-ms: u64,
-    ) -> string;
+    ) -> result<string, call-failure>;
 }
 
 /// Timer, clock, random, and log operations.
@@ -69,6 +133,19 @@ interface durable-lifecycle {
     /// Returns the generated defer ID.
     durable-defer: func(desc: string) -> string;
 
+    /// Report that the guest has started (true) or finished (false) draining
+    /// its defer table.
+    ///
+    /// Records no event. It marks the events the drain produces so the engine
+    /// can tell a defer body's durable calls from the workflow body's --
+    /// without which a workflow that exhausted its retries and then cleaned up
+    /// is classified failed rather than dead_lettered, and deleted by
+    /// retention instead of retained for an operator. cleat#1155.
+    ///
+    /// The host cannot observe this boundary itself: on the ordinary failure
+    /// path the guest drains its own table, so the host is not in the loop.
+    durable-defer-phase: func(on: bool);
+
     /// Replace workflow input and restart execution (history compaction).
     durable-continue-as-new: func(input: string) -> u64;
 
@@ -79,6 +156,8 @@ interface durable-lifecycle {
 
 /// Signal send, receive, and correlation operations.
 interface durable-signals {
+    use outcomes.{call-failure};
+
     /// Wait for one or more external signals, with a timeout.
     /// Output buffers kept for multi-return (name + payload).
     durable-await-signals: func(
@@ -94,20 +173,12 @@ interface durable-signals {
     /// Returns the signal payload, or empty string if none.
     durable-poll-signal: func(name: string) -> string;
 
-    /// Send a signal with correlation and wait for a reply.
-    /// Returns the response payload string.
-    durable-send-signal-and-wait: func(
-        target-run-id: string,
-        signal-name: string,
-        payload: string,
-        timeout-ms: u64,
-    ) -> string;
-
-    /// Reply to a correlated signal from within a handler.
-    durable-reply-to-signal: func(
-        correlation-id: string,
-        response: string,
-    ) -> u64;
+    // durable-send-signal-and-wait and durable-reply-to-signal were removed
+    // on 2026-09-06. Both mapped to host calls that were inert engine-side,
+    // and request/reply is now composed from create-promise + signal-workflow
+    // + await-promise + resolve-promise (IMPROVEMENT-PLAN 3.220). Declaring
+    // them here made every Python component import two host functions it
+    // never called.
 
     /// Send a signal to a target workflow (fire-and-forget, recorded).
     durable-signal-workflow: func(
@@ -119,12 +190,14 @@ interface durable-signals {
 
 /// Child workflow spawn and await operations.
 interface durable-children {
+    use outcomes.{call-failure};
+
     /// Start a child workflow instance (async).
     /// Returns the child run ID string.
     durable-child-workflow: func(
         name: string,
         input: string,
-    ) -> string;
+    ) -> result<string, call-failure>;
 
     /// Wait for a single child workflow to complete.
     /// Returns the child result JSON string.
@@ -134,6 +207,18 @@ interface durable-children {
     /// Returns the combined results JSON string.
     durable-await-all-children: func(run-ids-json: string) -> string;
 
+    /// Wait for the FIRST of several child workflows to complete.
+    /// Returns that child's result JSON string.
+    ///
+    /// Distinct from durable-await-all-children, which waits for every one:
+    /// this returns as soon as any single child finishes, which is the
+    /// primitive a race or a first-wins fan-out needs.
+    durable-await-any-child: func(run-ids-json: string) -> string;
+
+    /// Check a child workflow without waiting.
+    /// Returns the child's status JSON; does not suspend.
+    durable-poll-child: func(run-id: string) -> string;
+
     /// Start a child workflow with version, priority, and parent-close-policy options.
     /// Returns the child run ID string.
     durable-child-workflow-with-options: func(
@@ -142,7 +227,7 @@ interface durable-children {
         version: u64,
         priority: u64,
         parent-close-policy: string,
-    ) -> string;
+    ) -> result<string, call-failure>;
 }
 
 /// Durable promise create, await, resolve, and reject operations.
@@ -196,6 +281,21 @@ interface durable-handlers {
 
     /// Register a read-only query handler for external queries.
     durable-register-query-handler: func(name: string) -> u64;
+
+    /// Deliver the next pending update request.
+    ///
+    /// Returns a JSON envelope {"name","payload","request_id"}, or an empty
+    /// string when nothing is pending. Delivery is recorded in the event
+    /// history, which is what makes an update replayable: the handler sees the
+    /// same input at the same point in the program on every run.
+    durable-poll-update: func() -> string;
+
+    /// Record an update handler's outcome and settle the caller's promise.
+    ///
+    /// A non-empty err rejects; an empty one resolves. outcome carries the
+    /// handler result. request-id is the value
+    /// durable-poll-update returned, unchanged.
+    durable-complete-update: func(request-id: string, outcome: string, err: string) -> u64;
 }
 
 /// Fire-and-forget and scheduled messaging.
@@ -227,13 +327,15 @@ interface durable-identity {
 
 /// Plugin host function extension interface.
 interface plugin {
+    use outcomes.{call-failure};
+
     /// Call a plugin host function.
     /// Returns the plugin response JSON string.
     plugin-call: func(
         plugin-name: string,
         function-name: string,
         input: string,
-    ) -> string;
+    ) -> result<string, call-failure>;
 
     /// Call a streaming plugin host function (for workstream D2b).
     /// Returns the streaming event JSON string.
@@ -241,7 +343,7 @@ interface plugin {
         plugin-name: string,
         function-name: string,
         input: string,
-    ) -> string;
+    ) -> result<string, call-failure>;
 }
 
 /// Scoped state / virtual object operations (ABI 2.26-2.28)
@@ -267,20 +369,11 @@ interface durable-scope {
     uuid: func(seed: string) -> string;
 }
 
-/// State operations (Stream R) (ABI 2.37-2.44)
-interface durable-stream-state {
-    set-state: func(key: string, val: string) -> u64;
-    /// Returns the state value string.
-    get-state: func(key: string) -> string;
-    delete-state: func(key: string) -> u64;
-    incr-state: func(key: string, delta: u64) -> u64;
-    has-state: func(key: string) -> u64;
-    /// Returns the list of keys as a JSON array string.
-    list-state: func(prefix: string) -> string;
-}
 
 /// Extended lifecycle (ABI 2.15)
 interface durable-extended-lifecycle {
+    use outcomes.{call-failure};
+
     /// Continue as new with an explicit version.
     continue-as-new-versioned: func(
         input: string,
@@ -289,25 +382,27 @@ interface durable-extended-lifecycle {
 
     /// Record non-deterministic computation result in event history.
     /// Returns the previously recorded result on replay.
-    side-effect: func(value: string) -> string;
-}
+    side-effect: func(value: string) -> result<string, call-failure>;
 
-/// Extended child workflow operations (ABI 2.10)
-interface durable-extended-children {
-    /// Start a child workflow in a different schema (cross-instance cooperation).
-    /// Returns the child run ID string.
-    child-workflow-in-schema: func(
-        schema: string,
+    /// Start a workflow that outlives this one (fire-and-forget).
+    ///
+    /// Takes a workflow NAME and input, not a closure: a closure cannot cross
+    /// the ABI, which is why the SDK method that took one was never wired to
+    /// this call and ran inline instead (IMPROVEMENT-PLAN 3.253).
+    ///
+    /// Returns the host's packed result rather than a string: cleat_run_detached
+    /// has no output buffer, so there is only an error code to report. Declared
+    /// u64 for the same reason durable-signal-workflow is.
+    durable-run-detached: func(
         name: string,
         input: string,
-        version: u64,
-        priority: u64,
-        policy: string,
-    ) -> string;
+    ) -> u64;
 }
 
 /// HTTP fetch (ABI 2.45)
 interface durable-fetch {
+    use outcomes.{call-failure};
+
     /// Perform a durable HTTP fetch.
     /// Returns the response JSON string (status, headers, body).
     fetch: func(
@@ -315,7 +410,7 @@ interface durable-fetch {
         url: string,
         headers: string,
         body: string,
-    ) -> string;
+    ) -> result<string, call-failure>;
 }
 
 /// Recurring workflow triggers.
@@ -328,6 +423,8 @@ interface durable-fetch {
 /// Delivery is at-least-once: a firing may be delivered more than once and
 /// will not be silently skipped. See tiers.yaml, workflow-callable-cron.
 interface durable-cron {
+    use outcomes.{call-failure};
+
     /// Register a recurring trigger for another workflow.
     ///
     /// ``timezone`` is an IANA name ("Europe/Berlin"); empty means UTC. The
@@ -338,7 +435,7 @@ interface durable-cron {
         cron-expr: string,
         timezone: string,
         input: string,
-    ) -> string;
+    ) -> result<string, call-failure>;
 
     /// Remove a recurring trigger by schedule ID.
     durable-delete-cron: func(schedule-id: string);
@@ -366,16 +463,56 @@ world cleat-workflow {
     import plugin;
     import durable-lock;
     import durable-scope;
-    import durable-stream-state;
     import durable-extended-lifecycle;
-    import durable-extended-children;
     import durable-fetch;
     import durable-cron;
+
+    /// What the guest did with the segment.
+    ///
+    /// A suspension used to be the literal string ``__CLEAT_SUSPEND__``
+    /// returned from ``run``, compared verbatim in engine/component_cgo.go.
+    /// The core-module SDKs signal one out of band -- Go panics, Java throws,
+    /// Rust returns an ``Err``, AssemblyScript sets a flag -- and none of them
+    /// can be confused with a result. This makes the component path say it in
+    /// the type too.
+    /// Two cases, not three: there is no ``failed``, and that is deliberate.
+    ///
+    /// A workflow body that raises is caught by the SDK's entry wrapper and
+    /// turned into a completed step carrying an ``{"error": ...}`` payload.
+    /// That boundary is load-bearing -- an exception that escaped it would
+    /// cross the ABI as a trap and the engine would see a dead guest instead
+    /// of a failed step -- so a ``failed`` case here would either duplicate it
+    /// or invite someone to change what it means. A variant case with no
+    /// producer is worse than no case.
+    variant run-outcome {
+        /// The workflow finished. Carries the serialised result JSON.
+        completed(string),
+
+        /// The workflow did not finish: it is waiting, or the host stopped it
+        /// (``outcomes.call-failure.suspended``). Its defer table is still
+        /// populated -- see ``run-deferred``.
+        suspended,
+    }
 
     /// Main workflow entry point.
     ///
     /// ``args`` is the serialised workflow input JSON. The canonical ABI
     /// handles lifting/lowering the string through linear memory.
-    /// Returns the serialised workflow result JSON.
-    export run: func(args: string) -> string;
+    export run: func(args: string) -> run-outcome;
+
+    /// Drain the guest's defer table and report how many bodies ran.
+    ///
+    /// The host calls this itself, on the SAME instance, after ``run``
+    /// returns ``suspended`` during a defer segment. That is not a detail: the
+    /// host brackets this call so the defer bodies' own durable calls are
+    /// permitted while the workflow body's are stopped
+    /// (``setDeferDrain``, engine/backend_wasmtime.go). A guest that drained
+    /// its own table on the way out would have every cleanup call refused --
+    /// and because the table is taken before the first body runs, that
+    /// CONSUMES the cleanup rather than skipping it: the lock stays held and
+    /// the registration is gone. Measured in IMPROVEMENT-PLAN 3.81.
+    ///
+    /// This is the Component Model counterpart of the core-module
+    /// ``__cleat_run_deferred`` export (``deferRunnerExport``).
+    export run-deferred: func() -> u32;
 }

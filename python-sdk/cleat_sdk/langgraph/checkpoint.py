@@ -48,8 +48,22 @@ class CleatCheckpointer:
     """
 
     def __init__(self, h: Any) -> None:
-        # Duck-typed: accept any object with set_state / get_state / list_state.
         self._h = h
+        # Checkpoints live in this dict, not in host state.
+        #
+        # They used the durable-state family until it was removed
+        # (IMPROVEMENT-PLAN 3.216). THE SEMANTICS ARE UNCHANGED BY THAT: cleat
+        # state was rebuilt from the run's own event history and never seeded
+        # from persistence, so it was already scoped to one run and already
+        # equivalent to a dict in the guest. A LangGraph thread does not
+        # outlive the workflow run that drives it, so this store has exactly
+        # the lifetime the checkpoints need.
+        #
+        # What is genuinely lost is that checkpoints were previously visible to
+        # an external reader. If that matters, publish a summary through
+        # h.set_query_state -- but that is a one-way channel and this class
+        # reads its own writes back, so it cannot be the store itself.
+        self._store: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Checkpoint retrieval
@@ -75,7 +89,7 @@ class CleatCheckpointer:
 
         key = f"langgraph_ckpt_{thread_id}"
         try:
-            data = self._h.get_state(key, dict)
+            data = self._store.get(key)
         # Deliberate: a checkpoint that cannot be read is reported as absent, so
         # langgraph starts a fresh thread rather than propagating a host error
         # into a caller that has no way to act on it.
@@ -130,7 +144,7 @@ class CleatCheckpointer:
             "metadata": metadata_data,
             "new_versions": new_versions,
         }
-        self._h.set_state(key, json.dumps(stored))
+        self._store[key] = json.loads(json.dumps(stored))
 
         # Extract checkpoint_id from metadata or checkpoint object.
         checkpoint_id = metadata.get("checkpoint_id") or metadata.get("id") or ""
@@ -172,7 +186,7 @@ class CleatCheckpointer:
 
         key = f"langgraph_write_{thread_id}_{task_id}"
         writes_data = _make_json_safe(self._serialize_writes(writes))
-        self._h.set_state(key, json.dumps(writes_data))
+        self._store[key] = json.loads(json.dumps(writes_data))
 
     def get_writes(self, config: dict[str, Any]) -> list[Any]:
         """Get all pending writes for a thread.
@@ -193,7 +207,7 @@ class CleatCheckpointer:
 
         prefix = f"langgraph_write_{thread_id}_"
         try:
-            keys = self._h.list_state(prefix)
+            keys = [k for k in self._store if k.startswith(prefix)]
         # Deliberate: same reasoning as get_tuple above -- unreadable state
         # reads as empty state.
         except Exception:  # noqa: BLE001
@@ -202,7 +216,7 @@ class CleatCheckpointer:
         writes: list[Any] = []
         for k in keys:
             try:
-                raw = self._h.get_state(k, dict)
+                raw = self._store.get(k)
                 if raw:
                     writes.append(raw)
             # Deliberate: skip the one key that will not decode rather than
@@ -250,7 +264,7 @@ class CleatCheckpointer:
 
         prefix = f"langgraph_ckpt_{thread_id}"
         try:
-            keys = self._h.list_state(prefix)
+            keys = [k for k in self._store if k.startswith(prefix)]
         # Deliberate: an unlistable prefix reads as no checkpoints.
         except Exception:  # noqa: BLE001
             return []
@@ -258,7 +272,7 @@ class CleatCheckpointer:
         results: list[Any] = []
         for k in keys:
             try:
-                raw = self._h.get_state(k, dict)
+                raw = self._store.get(k)
                 if raw:
                     ckpt_tuple = self._deserialize_checkpoint_tuple(raw)
                     if ckpt_tuple is not None:

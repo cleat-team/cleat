@@ -29,9 +29,9 @@ func runVerifyBackend(out io.Writer) int {
 	backend, err := engine.NewWasmtimeBackend(context.Background())
 	if err != nil {
 		fmt.Fprintf(out, "verify-backend: FAIL: wasmtime backend unavailable: %v\n", err)
-		fmt.Fprintf(out, "\nThis binary would fall back to wazero, where --wasm-instance-timeout\n"+
-			"cannot interrupt a WASM guest that does not call into the host: a runaway\n"+
-			"workflow holds its concurrency slot until the process dies.\n\n"+
+		fmt.Fprintf(out, "\nThis binary cannot run a workflow at all. wasmtime is the only WASM\n"+
+			"backend cleat has; cleat-worker logs \"there is no fallback\" and exits 1\n"+
+			"during startup, before it reads a flag or opens a database.\n\n"+
 			"Most likely cause: built with CGO_ENABLED=0, or on a musl base image --\n"+
 			"wasmtime-go ships a glibc libwasmtime.a and does not link against musl.\n")
 		return 1

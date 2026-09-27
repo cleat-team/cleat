@@ -59,8 +59,66 @@ on:
   pull_request_target:
     types: [opened, closed, synchronize]
 
+  # The merge queue tests the required checks against the PROJECTED tip on a
+  # temporary `gh-readonly-queue/...` ref, which fires `merge_group` and not
+  # `pull_request`. Without this trigger the check never starts in queue
+  # context, the queue waits for a status that cannot arrive, and NOTHING
+  # MERGES -- with no check going red. EVERY required context on develop has to
+  # report here. The list is tiers.yaml's `required_contexts` block; the count
+  # is deliberately not repeated here, because it was -- in nine workflow files
+  # at once -- and all nine said 32 while develop required 33 (cleat#1937).
+  merge_group:
+# cleat#1426. `github.ref` is the fallback, and it is what makes this correct
+# under `merge_group`. The two operands before it are BOTH null on that event --
+# the note at the top of the job below already says so about the job body, and
+# it is just as true here, where nothing was guarding against it. The group
+# therefore collapsed to the constant "CLA Assistant-" for every queue entry at
+# once; with cancel-in-progress false a run arriving at a busy group waits, and
+# GitHub keeps only one waiting run per group, so each new entry evicted an
+# earlier one's CLA run. The queue HEAD loses that race, having waited longest,
+# and `Contributor License Agreement` is a required context -- so the head sat
+# at AWAITING_CHECKS with its other nine queue checks green while every entry
+# behind it read UNMERGEABLE. Ten PRs, ~40 minutes, on 2026-09-13.
+#
+# The tell was `gh run view <id> --json jobs --jq '.jobs | length'` returning 0:
+# evicted from a concurrency queue before a runner ever picked it up, which is a
+# different thing from a run killed mid-flight and is not a failing check.
+#
+# branch-naming.yml is the control -- same `merge_group` trigger, keyed on
+# `github.ref`, and it succeeded on every queue branch the same day.
+# KEY ON WHAT THE RUN REPORTS A STATUS FOR. That is the rule this expression
+# encodes, and each operand is the answer for one of the three triggers.
+#
+#   pull_request_target  reports on the PR HEAD SHA   -> head.sha
+#   issue_comment        reports on develop           -> issue.number
+#   merge_group          reports on the queue ref     -> github.ref
+#
+# Two distinct evictions came from getting this wrong, both measured 2026-09-13,
+# both with jobs=0 on the victim -- evicted from the concurrency queue before a
+# runner picked it up, which is not a run that failed and not one killed
+# mid-flight.
+#
+#   merge_group: pull_request.number and issue.number are BOTH null there, so
+#   every queue entry shared the constant group "CLA Assistant-". Each arriving
+#   entry evicted an earlier one's pending run; the queue HEAD loses, having
+#   waited longest. Ten PRs stalled ~40 minutes behind a head sitting at
+#   AWAITING_CHECKS with its other nine checks green.
+#
+#   pull_request_target vs issue_comment: keyed on the PR NUMBER, a comment on a
+#   PR lands in the same group as that PR's push. Commenting 17 seconds after
+#   pushing evicted the push's run -- and the comment's run reports against
+#   develop, not the PR head, so the required context never attached to the
+#   commit. The PR reads BLOCKED with 0 failing and 0 pending checks, one short
+#   of the total, which looks like nothing at all is wrong.
+#
+# head.sha rather than the PR number for pushes because each push needs its own
+# status: keyed on the number, three pushes in quick succession evict the
+# middle one and the newest commit is the one left without a check.
+#
+# github.event_name is first so the three triggers can never share a group even
+# if two operands ever coincide. cleat#1426.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.sha || github.event.issue.number || github.ref }}
   cancel-in-progress: false
 
 permissions:
@@ -74,14 +132,36 @@ jobs:
     name: Contributor License Agreement
     runs-on: ubuntu-latest
     steps:
+      # In the merge queue this check is both impossible and pointless.
+      #
+      # Impossible - a merge_group event carries no pull_request payload, so
+      # every `github.event.pull_request.*` reference below is null.
+      #
+      # Pointless - whatever it would examine was examined on the pull request
+      # and cannot change between there and here.
+      #
+      # It REPORTS rather than being skipped. A skipped job satisfies a
+      # required check, but a job that fails to start does not, and the queue
+      # cannot tell that from a check which has not finished yet - so it waits
+      # forever and nothing merges. That is one chance to deadlock the repository
+      # silently per required context on develop, and tiers.yaml's
+      # `required_contexts` block is the list of them.
+      - name: Already checked on the pull request
+        if: github.event_name == 'merge_group'
+        run: echo "validated when the pull request was opened"
       - name: CLA Assistant
         # Only two things should wake this job: a pull_request_target event, or
         # a comment that is one of the two magic strings. Without this guard it
         # would re-run on every comment on every issue in the repository.
+        # The merge_group clause is first and is the reason this job has a
+        # short-circuit step above: a queued batch carries no pull_request and
+        # no comment, so without excluding it this condition is false and the
+        # job would contribute nothing while still being required.
         if: >-
+          github.event_name != 'merge_group' && (
           github.event_name == 'pull_request_target' ||
           github.event.comment.body == 'recheck' ||
-          github.event.comment.body == 'I have read the cleat Contributor License Agreement and I hereby sign the CLA'
+          github.event.comment.body == 'I have read the cleat Contributor License Agreement and I hereby sign the CLA')
         uses: contributor-assistant/github-action@v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -9,8 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 )
 
@@ -32,10 +30,29 @@ type WasmDiskCache struct {
 }
 
 // indexEntry maps a workflow definition to a content hash.
+//
+// Tenant is what makes the index safe to share between tenants. The blob
+// files are content-addressed, so they were never the hazard; the index was,
+// because a lookup of ("orders", 1) answered with whichever tenant's bytes
+// were stored under that key first. Definition names are caller-chosen, so
+// two tenants both deploying "orders" v1 is an ordinary thing to have, not a
+// contrived collision. cleat#1931.
 type indexEntry struct {
+	Tenant  string `json:"tenant"`
 	Name    string `json:"name"`
 	Version int    `json:"version"`
 	Hash    string `json:"hash"` // sha256 hex of WASM bytes
+}
+
+// defIndexKey identifies one tenant's definition in the in-memory index.
+//
+// A struct rather than a delimited string: definition names may contain the
+// delimiter, so a string key has to be parsed back apart on save, and that
+// parse is a second place for the format to be got wrong.
+type defIndexKey struct {
+	Tenant  string
+	Name    string
+	Version int
 }
 
 // NewWasmDiskCache creates a WasmDiskCache rooted at cacheDir. Returns nil
@@ -68,48 +85,44 @@ func (c *WasmDiskCache) cachePath(hash string) string {
 	return filepath.Join(c.dir, hash+".wasm")
 }
 
-// indexPath returns the path to the name-version index file.
+// indexPath returns the path to the tenant-name-version index file.
+//
+// THE FILENAME CARRIES THE FORMAT VERSION, and that is the whole migration.
+// Entries written before cleat#1931 have no tenant recorded, and "" is a
+// legitimate tenant here (a workflow row written before tenant_id existed
+// runs on the worker's own store), so an absent tenant cannot be told apart
+// from an unset one by reading the entry. A new filename sidesteps the
+// question: the old index is simply not consulted, every definition is
+// re-read from its own tenant's store once, and the blobs it pointed at are
+// content-addressed and age out through the normal LRU pass.
 func (c *WasmDiskCache) indexFilePath() string {
-	return filepath.Join(c.dir, "index.json")
+	return filepath.Join(c.dir, "index.v2.json")
 }
 
-// defIndexKey returns the index lookup key for a workflow definition.
-// Uses a colon delimiter with the version at the end so names containing
-// colons are still parsed correctly (LastIndex split).
-func defIndexKey(name string, version int) string {
-	return name + ":" + strconv.Itoa(version)
-}
-
-// loadIndex reads the name-version-to-hash index from disk.
-func (c *WasmDiskCache) loadIndex() map[string]string {
+// loadIndex reads the tenant-name-version-to-hash index from disk.
+func (c *WasmDiskCache) loadIndex() map[defIndexKey]string {
 	data, err := os.ReadFile(c.indexFilePath())
 	if err != nil {
-		return make(map[string]string)
+		return make(map[defIndexKey]string)
 	}
 	var entries []indexEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
-		return make(map[string]string)
+		return make(map[defIndexKey]string)
 	}
-	idx := make(map[string]string, len(entries))
+	idx := make(map[defIndexKey]string, len(entries))
 	for _, e := range entries {
-		idx[defIndexKey(e.Name, e.Version)] = e.Hash
+		idx[defIndexKey{Tenant: e.Tenant, Name: e.Name, Version: e.Version}] = e.Hash
 	}
 	return idx
 }
 
-// saveIndex writes the name-version-to-hash index to disk.
-func (c *WasmDiskCache) saveIndex(idx map[string]string) {
+// saveIndex writes the tenant-name-version-to-hash index to disk.
+func (c *WasmDiskCache) saveIndex(idx map[defIndexKey]string) {
 	entries := make([]indexEntry, 0, len(idx))
 	for key, hash := range idx {
-		name := key
-		version := 0
-		if colon := strings.LastIndex(key, ":"); colon >= 0 {
-			name = key[:colon]
-			if v, err := strconv.Atoi(key[colon+1:]); err == nil {
-				version = v
-			}
-		}
-		entries = append(entries, indexEntry{Name: name, Version: version, Hash: hash})
+		entries = append(entries, indexEntry{
+			Tenant: key.Tenant, Name: key.Name, Version: key.Version, Hash: hash,
+		})
 	}
 	data, err := json.Marshal(entries)
 	if err != nil {
@@ -128,15 +141,19 @@ func (c *WasmDiskCache) saveIndex(idx map[string]string) {
 	}
 }
 
-// LookupDef retrieves raw WASM bytes for a workflow definition by name and
-// version. Returns nil on cache miss.
-func (c *WasmDiskCache) LookupDef(name string, version int) []byte {
+// LookupDef retrieves raw WASM bytes for one tenant's workflow definition by
+// name and version. Returns nil on cache miss.
+//
+// tenantID scopes the lookup. It is the tenant of the STORE the bytes would
+// otherwise be read from, which for a workflow whose own tenant_id is unset
+// is the worker's tenant rather than "" -- see Worker.loadWASM.
+func (c *WasmDiskCache) LookupDef(tenantID, name string, version int) []byte {
 	if c == nil {
 		return nil
 	}
 	c.mu.Lock()
 	idx := c.loadIndex()
-	hash, ok := idx[defIndexKey(name, version)]
+	hash, ok := idx[defIndexKey{Tenant: tenantID, Name: name, Version: version}]
 	c.mu.Unlock()
 	if !ok {
 		return nil
@@ -144,9 +161,10 @@ func (c *WasmDiskCache) LookupDef(name string, version int) []byte {
 	return c.LookupByKey(hash)
 }
 
-// StoreDef writes raw WASM bytes to the disk cache indexed by (name, version)
-// and content-addressed by sha256. This is a no-op if the entry already exists.
-func (c *WasmDiskCache) StoreDef(name string, version int, wasmBytes []byte) {
+// StoreDef writes raw WASM bytes to the disk cache indexed by
+// (tenant, name, version) and content-addressed by sha256. This is a no-op if
+// the entry already exists.
+func (c *WasmDiskCache) StoreDef(tenantID, name string, version int, wasmBytes []byte) {
 	if c == nil || len(wasmBytes) == 0 {
 		return
 	}
@@ -168,7 +186,7 @@ func (c *WasmDiskCache) StoreDef(name string, version int, wasmBytes []byte) {
 
 	// Update the index.
 	idx := c.loadIndex()
-	key := defIndexKey(name, version)
+	key := defIndexKey{Tenant: tenantID, Name: name, Version: version}
 	if existingHash, exists := idx[key]; exists && existingHash == hash {
 		c.mu.Unlock()
 		return // already indexed

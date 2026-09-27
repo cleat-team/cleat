@@ -12,6 +12,107 @@ turning one on says nothing about the other.
 
 See `docs/reference/worker-config.md` for the flag reference entries.
 
+## `--retention-days` -- what it finds depends on how the workflow stopped
+
+**This section used to say the flag finds nothing to delete, because
+`finalize_workflow_status` already purges a workflow's events the moment it
+reaches `done` or `failed`. That is true for `done` and WRONG for `failed`,
+and the error was about which code path a real failure takes, not about what
+the stored procedure does.** `finalize_workflow_status` -- the stored
+procedure `FinalizeWorkflowSegment` calls -- ends its `done` branch with
+
+```sql
+-- Delete this workflow's events -- they are no longer needed
+-- for replay once the workflow has reached a terminal state.
+-- This keeps event_history bounded to active workflows only,
+-- preventing unbounded table growth that slows per-step INSERTs.
+DELETE FROM event_history WHERE workflow_id = p_workflow_id;
+```
+
+**A production failure never calls it that way.** `cmd/cleat-worker/setup.go`'s
+own comment on `FinalizeWorkflowSegment`'s one production call site says
+`finalStatus` there is "only ever 'done' or 'ready' ... never 'failed'" --
+the real failure path is `store.FailWorkflow`
+(`engine/store_lifecycle.go`), which never calls
+`finalize_workflow_status` and purges no event_history at all. Found via
+cleat#2038, while grounding cleat#1999's TLA+ model in source; confirmed
+empirically by `engine/store_admin_rereplay_test.go`'s
+`TestAdminReReplay_ResetsAStoppedWorkflowAndKeepsItsHistory`, which fails a
+claimed workflow through `store.FailWorkflow` and asserts a preserved call
+event survives.
+
+**cleat#1973: the procedure no longer has a `finalStatus = 'failed'` branch
+at all, as of `migrations/postgres/101_the_finalize_procedure_stops_deleting_failed_history.sql`
+and its MySQL/SQL Server equivalents.** It was dead code -- the paragraph
+above already establishes nothing ever called it that way -- and was removed
+rather than left as a landmine one call-site change could silently
+reactivate. Calling `FinalizeWorkflowSegment` with `finalStatus = "failed"`
+now returns an error ("unknown final status") instead of purging anything;
+`validFinalStatus` (`engine/store_lifecycle.go`) refuses it in Go before a
+transaction ever opens. The old "measured: `1 -> 0` both times" claim, which
+this section used to cite, came from calling the procedure directly that
+way -- a call production never makes and the procedure itself now refuses.
+
+So: a `done` workflow's replay log is purged at finalize, and
+`--retention-days` never sees it. A **`failed` workflow's replay log is not**
+-- it survives until this sweep removes it, `--retention-days` days later
+(default 30, on by default). The same distinction holds in the MySQL and SQL
+Server finalize procedures and `FailWorkflow` implementations.
+
+**What this means in practice:**
+
+* Setting `--retention-days` changes how long a **failed** workflow's replay
+  detail is kept. For a **done** workflow it changes nothing -- that detail
+  is already gone, at finalize, regardless of the flag.
+* `cleat_events_deleted_total` is fed by this sweep's event-deletion count.
+  On a deployment where workflows only ever succeed, it stays at zero
+  permanently, which is expected. On a deployment where workflows fail, it
+  moves, and a flat zero there is worth investigating rather than dismissing.
+* `cleat_compaction_events_deleted_total` is a **different** counter, fed by
+  compaction (`engine/compaction.go`), not by this sweep. Zero there means
+  compaction is not running, which is a real signal and should not be
+  dismissed. An earlier version of this page named that counter here, which
+  told an operator to ignore the one metric of the two that still carries
+  information.
+* The sweep is **not** inert, on any deployment. It also clears
+  `compaction_state`, `compaction_step` and `compacted_at` on the same
+  workflows, and that half does real work regardless of status mix. It is
+  not currently reflected in any metric.
+* `dead_lettered` is the exception: finalize does not purge it and neither does
+  this sweep, so those events survive. **`--completed-workflow-retention-days`
+  does not collect them either** -- its predicate covers `done`, `failed` and
+  `terminated` and excludes `dead_lettered` deliberately, which
+  `engine/store_interface.go` and `engine/db.go` both state at the predicate.
+  Until cleat#1023 nothing collected them at all.
+* `--dead-letter-retention-days` (cleat#1023) is the knob for them, and it is
+  **off by default**. That is deliberate rather than an oversight: a
+  dead-lettered run is the one an operator most wants to inspect, so deleting
+  it destroys exactly the record it was kept for. Set it only when you have
+  decided how long you need those runs.
+
+If you need a **done** workflow's replay detail to survive completion, this
+is the thing to change, and it is a change to the procedure -- not to the
+flag. A **failed** workflow's replay detail already survives until
+`--retention-days` removes it; lower the flag if you need it gone sooner, or
+disable the flag (`0`) if you need it kept.
+
+**cleat#2038: a swept `failed` workflow can no longer be re-replayed.** If a
+`failed` workflow had a call left pending when it stopped (a crash between
+dispatch and recording the response -- `[AMBIGUOUS]` on replay), and this
+sweep removes its history before an operator resolves that ambiguity, the
+workflow's `history_swept_at` column is set at the same time. `ReReplay`
+refuses a re-replay of any workflow whose history is empty **and**
+`history_swept_at` is set, because it can no longer tell "never made a call"
+from "made a call whose outcome was swept" -- silently redispatching in the
+second case is the exact defect cleat#1999's TLA+ model
+(`specs/CleatDurableCallIntent.tla`) found and traced. There is no recovery
+for a workflow already in this state; the only path forward is reprocessing
+it as a new run. A `done` workflow can never reach this state: a workflow
+only completes to `done` once its function returns, which requires every
+call it made to have already resolved.
+
+See cleat#1016, cleat#2038.
+
 ## Why the defaults differ
 
 `--retention-days` deletes a workflow's *step-by-step replay log* once the
@@ -44,16 +145,102 @@ did." There is no undo.
 ## What gets deleted, and in what order
 
 For `--completed-workflow-retention-days`, a workflow is eligible once its
-status is `done`, `failed`, or `terminated` **and** `completed_at` is older
-than the cutoff.
+status is `done`, `failed`, `terminated` **or `cancelled`** -- all three dialects spell the same
+predicate, `engine/retention_predicates.go` -- **and** `completed_at` is older than the cutoff.
+`cancelled` is included deliberately, and it is the member that goes missing when this list is
+written by hand: an operator who opted into collecting terminated runs expects to collect cancelled
+ones too, because both are imposed by a person on a run that did not finish on its own. This
+paragraph and the flag's own `--help` text both omitted `cancelled` until 2026-09-25.
 
 `dead_lettered` is deliberately excluded. It has its own lifecycle (workflows
 land there after exhausting retries, generally because something needs human
-attention) and its own deletion path,
-`DeleteDeadLetteredWorkflows` -- as of this writing that path exists and is
-tested but is not wired into any background loop, so dead-lettered workflows
-are retained indefinitely regardless of either retention flag. That is a
-separate, pre-existing gap outside the scope of this change.
+attention) and its own deletion path, `DeleteDeadLetteredWorkflows`, reached by
+`--dead-letter-retention-days` -- also off by default, on the same reasoning as
+`--completed-workflow-retention-days`: it deletes the record itself, not just the history.
+
+**Until 2026-09-25 this paragraph said `DeleteDeadLetteredWorkflows` "is not wired into any
+background loop, so dead-lettered workflows are retained indefinitely regardless of either
+retention flag", and that had been false since cleat#1023.** The retention loop is registered and
+launched with the flag (`cmd/cleat-worker/setup.go`, `retentionLoop`) and the sweep calls the
+method. The claim was worse than stale: this page contradicted *itself*, because the
+`--dead-letter-retention-days` section further down describes the flag as working. A reader who
+believed the paragraph above would conclude the flag does nothing and stop looking.
+
+**A Go workflow reaches `dead_lettered` only through a SHORT retry policy**, which is worth
+knowing before planning around it. The worker's dead-letter branch reads the run's HISTORY
+(`endedOnAnExhaustedCall`, `cmd/cleat-worker/setup.go`) -- it tests whether the last durable act
+was a call that exhausted its retry policy, and never looks at the error text. It *was* a substring
+test for `retries exhausted` until cleat#902, which is why prose describing dead-lettering as "a
+non-retryable error" is wrong in the other direction: a plain failure is not dead-lettered at all.
+The engine mints that phrase only in its *host-side* retry loop behind the `cleat_call_retry`
+import. Which retry policies reach that loop
+is a threshold, not a given:
+
+| policy's worst-case total backoff | path | dead-letterable | backoff survives a worker loss |
+|---|---|---|---|
+| within `cleat.hostRetryBudget` (60s) | host loop, one segment, worker held | **yes** | **no** |
+| beyond it | SDK loop, one segment per backoff, suspends between | no | yes |
+
+**That last column is a decision, taken 2026-09-10 (cleat#1111), and not a consequence anyone
+should plan around changing.** A retry backoff on the host path is **worker-local state**: it is a
+`time.After` in the worker's memory, so a worker lost mid-backoff discards the remaining wait and
+the reclaimed run retries as soon as the reaper releases it. Measured on the port harness with a
+20s policy: an uninterrupted gap between attempts is 19.6s, and the same gap across a worker kill
+is 11.4s — which is the reaper's latency, not the policy's interval.
+
+The alternative was to make the wait durable on both paths, and it was declined. Re-waiting the
+full interval would make a crash cost the run more than the outage that caused it: the reclaim
+delay is already unplanned latency the policy never asked for, and adding the untaken remainder on
+top compounds it. A backoff spaces attempts against a dependency; it is not a guarantee about
+elapsed time, and the host path does not offer one.
+
+**What this means for `--host-retry-budget`, and it is the part worth carrying:** that flag is
+documented as a worker-slot economics control — how much backoff may be spent holding a slot — and
+it is *also* the boundary at which this property changes. An operator lowering it to free slots
+sooner moves policies onto the SDK path, where the wait becomes durable; raising it moves them onto
+the host path, where a crash discards it. Neither direction is wrong, and neither is announced.
+
+Two tests pin which path a policy takes — `TestAShortRetryPolicyRunsOnTheHostInOneSegment` and
+`TestALongRetryPolicySuspendsInsteadOfHoldingTheWorker` in `engine/retry_backoff_test.go`. Neither
+asserts the crash behaviour, which needs a killed worker; that is covered on the port side.
+
+**A separate defect lives on this same path and is NOT covered by the decision above:** the host
+loop records no event for a failed attempt, so a reclaimed run restarts the policy from attempt one
+and re-spends `MaxAttempts`. Measured: a 3-attempt policy made **4** calls across a crash, against
+3 for the same policy uninterrupted. Losing the *wait* was chosen; exceeding the caller's attempt
+bound was not. See cleat#1145.
+
+So a workflow retrying three times a few seconds apart can be dead-lettered; the same workflow
+retrying three times an hour apart cannot, because its terminal error carries the SDK loop's own
+message (`retry exhausted after N attempts`) rather than the host's. That is a real gap and it is
+recorded as one — see IMPROVEMENT-PLAN.md §3.88 — but it is no longer "nothing on this SDK gets
+here", which is what this paragraph said before the host loop was wired.
+
+**Both SDKs behave this way as of 2026-09-03.** Rust used to take the host path for *any* policy
+— `HostCalls::cleat_call_with_retry` called the import directly with no threshold — so a
+long-backoff Rust policy was dead-letterable where the Go equivalent was not, and held a worker
+for the length of its backoff. It now applies the same threshold, so the table above is the whole
+story rather than the Go half of it.
+
+Since §3.94 step 4 neither SDK carries the threshold at all: the **host** applies the tenant's
+budget (`--host-retry-budget` as the operator's ceiling, `tenant_settings.host_retry_budget_ms`
+to lower it) and refuses a policy that exceeds it with `callErrorCode` 6, `RetryPolicyTooLong`.
+The refusal makes no call and records no event, so the guest falls back to its suspending loop
+from attempt 1. Two SDK constants that had to be held equal by a test scraping one language's
+source from the other are now one value, resolved per tenant.
+
+`HostCalls::cleat_call_with_host_retry` (Rust) and `HostCallsImpl.DurableCallWithRetry` (Go) are
+the explicit forms: they demand the host loop whatever the policy's length, and a workflow using
+either is dead-letterable regardless.
+
+Measured by `engine.TestAShortRetryPolicyRunsOnTheHostInOneSegment` and
+`engine.TestALongRetryPolicySuspendsInsteadOfHoldingTheWorker`, which assert the two sides of the
+threshold. Re-derive the wiring with
+
+    grep -c '"cleat_call_retry", "DurableCallWithOptions"' wasm/usage.go   # 1
+
+which is the entry that makes the host branch reachable at all; without it every Go retry policy
+takes the SDK path regardless of length.
 
 Within one batch (bounded to 10,000 workflow IDs, to avoid a single
 long-running transaction against a table that can be millions of rows deep):
@@ -68,9 +255,13 @@ Step 2 is not optional and not everywhere a genuine no-op:
 - **PostgreSQL**: `event_history` has no foreign key back to
   `workflow_instances` at all. `migrations/postgres/003_procedures.sql` drops
   it deliberately, because `finalize_workflow_status()` already deletes a
-  `done`/`failed` workflow's events itself when it reaches that status. But
-  `TerminateWorkflow` (the path to `terminated`) does **not** call
-  `finalize_workflow_status`, so a force-terminated workflow's events are not
+  `done` workflow's events itself when it reaches that status. (Not
+  `failed` too, despite this section's own history -- see cleat#2038 above.
+  A `failed` workflow's events are gone by the time
+  `--completed-workflow-retention-days` looks only if `--retention-days`
+  already swept them.) But `TerminateWorkflow` (the path to `terminated`)
+  does **not** call `finalize_workflow_status`, so a force-terminated
+  workflow's events are not
   guaranteed to be gone by the time this runs, and would be orphaned forever
   the moment its `workflow_instances` row disappeared. PostgresStore deletes
   `event_history` explicitly, in the same transaction, for exactly this

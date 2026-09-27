@@ -2,8 +2,10 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -197,15 +199,18 @@ func TestPluginLoader_ResolveConstraintTypes(t *testing.T) {
 		{"gte", ">=1.5.0", "2.1.0", false},
 		{"tilde", "~1.2.0", "1.2.0", false},
 		{"caret", "^1.2.0", "1.3.0", false},
-		{
-			// KNOWN BUG: exact constraint fails because versionInRange treats
-			// Max as exclusive and Min==Max means no version can match.
-			// See lessons_learned/ for details.
-			name: "exact_bug", constraint: "=1.3.0", want: "", wantErr: true,
-		},
-		{
-			name: "bare_bug", constraint: "2.0.0", want: "", wantErr: true,
-		},
+		// These two were "exact_bug" and "bare_bug" until cleat#1243, asserting
+		// wantErr: true with a comment calling it a KNOWN BUG. The defect was
+		// pinned rather than fixed, so the suite went green on a resolver that
+		// could not return the one version an exact constraint names -- and a
+		// reader checking whether the forms were covered would have found that
+		// they were.
+		//
+		// A pin is the right tool for a defect someone is tracking; it is the
+		// wrong one when the fix is four lines, and it is actively harmful
+		// without an issue number, because nothing ever brings it back up.
+		{"exact", "=1.3.0", "1.3.0", false},
+		{"bare", "2.0.0", "2.0.0", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -344,6 +349,78 @@ func TestPluginLoader_DeployExecError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "disk full") {
 		t.Errorf("error should wrap exec error, got: %v", err)
+	}
+}
+
+// cleat#2135: plugin versions are immutable. INSERT ... ON CONFLICT DO
+// NOTHING reports 0 rows affected when (name, version) already exists, which
+// is what execRowsAffected: 0 models here -- the mock's Exec always returns
+// this one configured value regardless of statement text, the same
+// simplification every other test in this file already relies on. The
+// subsequent SELECT (a Query call) then returns the stored bytes to compare.
+//
+// Known-positive for the pair below: on develop before this change,
+// DeployPlugin issued an unconditional upsert and neither of these two
+// bodies of code -- the no-op path and the refusal -- existed at all, so
+// BOTH would have overwritten silently. Only the SECOND test (different
+// bytes) is the known-positive proper: it is the case the issue is about,
+// and it is refused ONLY because of this change.
+func TestPluginLoader_DeployIdenticalBytesIsANoOp(t *testing.T) {
+	wasmBytes := []byte{0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00}
+	db := newPluginLoaderMockDB(plMockConfig{
+		execRowsAffected: 0, // (name, version) already exists
+		queryRows:        [][]driver.Value{{append([]byte(nil), wasmBytes...)}},
+	})
+	l := NewPluginLoader(db, nil)
+
+	err := l.DeployPlugin(context.Background(), "p", "1.0.0", wasmBytes, nil)
+	if err != nil {
+		t.Fatalf("identical-bytes redeploy should be a no-op, got error: %v", err)
+	}
+}
+
+// TestPluginLoader_DeployDifferentBytesIsRefused is the known-positive: the
+// exact scenario cleat#2135 exists to fix. Before this change, this call
+// would have overwritten the stored bytes and returned nil.
+func TestPluginLoader_DeployDifferentBytesIsRefused(t *testing.T) {
+	db := newPluginLoaderMockDB(plMockConfig{
+		execRowsAffected: 0, // (name, version) already exists
+		queryRows:        [][]driver.Value{{[]byte("old-bytes-on-record")}},
+	})
+	l := NewPluginLoader(db, nil)
+
+	err := l.DeployPlugin(context.Background(), "p", "1.0.0", []byte("new-different-bytes"), nil)
+	if err == nil {
+		t.Fatal("expected a refusal for different bytes at an existing version")
+	}
+	if !strings.Contains(err.Error(), "refused") || !strings.Contains(err.Error(), "immutable") {
+		t.Errorf("error should say the deploy was refused because versions are immutable, got: %v", err)
+	}
+	oldSum := sha256.Sum256([]byte("old-bytes-on-record"))
+	newSum := sha256.Sum256([]byte("new-different-bytes"))
+	oldHex, newHex := hex.EncodeToString(oldSum[:]), hex.EncodeToString(newSum[:])
+	if !strings.Contains(err.Error(), oldHex) {
+		t.Errorf("error should name the installed checksum %s, got: %v", oldHex, err)
+	}
+	if !strings.Contains(err.Error(), newHex) {
+		t.Errorf("error should name the offered checksum %s, got: %v", newHex, err)
+	}
+}
+
+func TestPluginLoader_DeployReadExistingQueryError(t *testing.T) {
+	queryErr := errors.New("connection reset")
+	db := newPluginLoaderMockDB(plMockConfig{
+		execRowsAffected: 0,
+		queryErr:         queryErr,
+	})
+	l := NewPluginLoader(db, nil)
+
+	err := l.DeployPlugin(context.Background(), "p", "1.0.0", []byte("bytes"), nil)
+	if err == nil {
+		t.Fatal("expected an error reading the existing row")
+	}
+	if !strings.Contains(err.Error(), "connection reset") {
+		t.Errorf("error should wrap the query error, got: %v", err)
 	}
 }
 

@@ -39,6 +39,15 @@ type HostHandler interface {
 	DurableSleep(ctx context.Context, m api.Module, durationMs int64) int64
 	DurableAwaitSignals(ctx context.Context, m api.Module, signalNames string, timeoutMs int64, sigNamePtr, sigNameMaxLen, payloadPtr, payloadMaxLen uint32) int64
 	DurableDefer(ctx context.Context, m api.Module, description string, deferIDPtr, deferIDMaxLen uint32) int64
+
+	// SetDeferPhase reports that the guest has started (1) or finished (0)
+	// draining its defer table. It records NO event: it sets a session flag
+	// that recordEvent stamps onto events recorded while it is on.
+	//
+	// Recording nothing is what makes this safe to add to a running system.
+	// Replay is positional, so a call that consumed a step would desynchronise
+	// every workflow already in flight when it shipped. cleat#1155.
+	SetDeferPhase(ctx context.Context, on bool) int64
 	DurableLog(ctx context.Context, m api.Module, message string) int64
 	PollCancellation(ctx context.Context, m api.Module, reasonPtr, reasonMaxLen uint32) int64
 	PollSignal(ctx context.Context, m api.Module, signalName string, payloadPtr, payloadMaxLen uint32) int64
@@ -46,7 +55,6 @@ type HostHandler interface {
 	ContinueAsNewWithVersion(ctx context.Context, m api.Module, newInputJSON string, newVersion int) int64
 	ChildWorkflow(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64
 	ChildWorkflowWithOptions(ctx context.Context, m api.Module, name, inputJSON string, version int64, priority int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64
-	ChildWorkflowInSchema(ctx context.Context, m api.Module, targetSchema, name, inputJSON string, version int64, priority int64, parentClosePolicy string, runIDPtr, runIDMaxLen uint32) int64
 	AwaitChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64
 	AwaitAllChildren(ctx context.Context, m api.Module, runIDsJSON string, resultsPtr, resultsMaxLen uint32) int64
 	PollChild(ctx context.Context, m api.Module, runID string, resultPtr, resultMaxLen uint32) int64
@@ -58,15 +66,39 @@ type HostHandler interface {
 	SetQueryState(ctx context.Context, m api.Module, key, value string) int64
 	Now(ctx context.Context) int64
 	Random(ctx context.Context) int64
+
+	// ServeWasiSleep serves a sleep the guest reached through WASI rather than
+	// through cleat_sleep -- Go's time.Sleep, or anything else landing in
+	// poll_oneoff -- and reports how long the caller must really block. Zero
+	// means the wait has already happened.
+	//
+	// IT IS NOT DurableSleep AND MUST NOT BECOME IT. DurableSleep suspends the
+	// workflow: it returns a SuspendError, the segment ends, and the run is
+	// rescheduled for the deadline. That is right for a durable timer and
+	// impossible here -- a WASI sleep happens inside a guest instruction, with
+	// no way to unwind to a checkpoint. So this one blocks instead.
+	//
+	// THE REPLAY/LIVE DECISION IS DurableSleep'S, deliberately, so that a
+	// guest's time.Sleep and h.DurableSleep agree about what "already waited"
+	// means rather than being two clocks with two answers: compare the virtual
+	// deadline against real time, instead of asking "am I replaying", which a
+	// sleep cannot answer for itself because it records no event
+	// (IMPROVEMENT-PLAN 3.67).
+	//
+	// It advances the durable clock by durationMs in both cases. That is what
+	// makes h.Now() reflect time passing across a guest sleep, and it is
+	// deterministic: a replay performs the same sleeps from the same anchors
+	// and arrives at the same number.
+	ServeWasiSleep(ctx context.Context, durationMs int64) time.Duration
 	CreatePromise(ctx context.Context, m api.Module, name string, promiseIDPtr, promiseIDMaxLen uint32) int64
 	AwaitPromise(ctx context.Context, m api.Module, promiseID string, timeoutMs int64, resultPtr, resultMaxLen uint32) int64
 	PluginCall(ctx context.Context, m api.Module, pluginName, functionName, inputJSON string, responsePtr, responseMaxLen uint32) int64
 	PluginCallStreaming(ctx context.Context, m api.Module, pluginName, functionName, inputJSON string, responsePtr, responseMaxLen uint32) int64
 	RegisterUpdateHandler(ctx context.Context, m api.Module, name string) int64
+	DurablePollUpdate(ctx context.Context, m api.Module, outPtr, outMaxLen uint32) int64
+	DurableCompleteUpdate(ctx context.Context, m api.Module, requestID, result, errMsg string) int64
 
 	// Signal correlation (ABI 2.23-2.25)
-	SendSignalAndWait(ctx context.Context, m api.Module, targetRunID, signalName, payload string, timeoutMs int64, responsePtr, responseMaxLen uint32) int64
-	ReplyToSignal(ctx context.Context, m api.Module, correlationID, response string) int64
 	SignalWorkflow(ctx context.Context, m api.Module, targetRunID, signalName, payload string) int64
 
 	// Scoped state / virtual objects (ABI 2.26-2.28)
@@ -115,15 +147,16 @@ type HostHandler interface {
 	RegisterQueryHandler(ctx context.Context, m api.Module, name string) int64
 
 	// State operations (Stream R)
-	SetState(ctx context.Context, m api.Module, key, value string) int64
-	GetState(ctx context.Context, m api.Module, key string, valuePtr, valueMaxLen uint32) int64
-	DeleteState(ctx context.Context, m api.Module, key string) int64
-	IncrState(ctx context.Context, m api.Module, key string, delta int64) int64
-	HasState(ctx context.Context, m api.Module, key string) int64
-	ListState(ctx context.Context, m api.Module, prefix string, keysPtr, keysMaxLen uint32) int64
 
 	// Detached execution (Stream R)
 	RunDetached(ctx context.Context, m api.Module, name, inputJSON string) int64
+
+	// StartDetached is RunDetached that hands back the run id (cleat#1154).
+	// A separate name rather than a wider RunDetached: an arity mismatch is a
+	// hard link error, so widening the existing import would stop every
+	// already-deployed workflow binary instantiating. See the doc comment on
+	// execSession.RunDetached.
+	StartDetached(ctx context.Context, m api.Module, name, inputJSON string, runIDPtr, runIDMaxLen uint32) int64
 
 	// HTTP fetch (Stream R)
 	Fetch(ctx context.Context, m api.Module, method, url, headersJSON, body string, responsePtr, responseMaxLen uint32) int64
@@ -210,6 +243,11 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		return uint64(handlerFromContext(ctx).DurableDefer(ctx, m, desc, deferIDPtr, deferIDMaxLen))
 	}).Export("cleat_defer")
 
+	// cleat_defer_phase: (on) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, on uint32) uint64 {
+		return uint64(handlerFromContext(ctx).SetDeferPhase(ctx, on != 0))
+	}).Export("cleat_defer_phase")
+
 	// cleat_poll_cancellation: (ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		reasonPtr, reasonMaxLen uint32) uint64 {
@@ -287,37 +325,6 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		}
 		return uint64(handlerFromContext(ctx).ChildWorkflowWithOptions(ctx, m, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen))
 	}).Export("cleat_child_workflow_with_options")
-
-	// cleat_child_workflow_in_schema: (ptr,len x4, i64, i64, ptr,len, ptr,maxLen) -> i64
-	// Creates a child workflow in a different PostgreSQL schema for cross-instance cooperation.
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		schemaPtr, schemaLen, namePtr, nameLen, inputPtr, inputLen uint32, version int64, priority int64,
-		policyPtr, policyLen, runIDPtr, runIDMaxLen uint32) uint64 {
-		mem := m.Memory()
-		// An empty targetSchema means "the local schema" -- see
-		// ChildWorkflowInSchema in children.go.
-		targetSchema, ok := readOptionalServiceName(mem, schemaPtr, schemaLen)
-		if !ok {
-			return errBadParam
-		}
-		wfName, ok := readServiceName(mem, namePtr, nameLen)
-		if !ok {
-			return errBadParam
-		}
-		wfInput, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
-		if !ok {
-			return errBadParam
-		}
-		// An empty policy means the default. This was already handled here
-		// with an inline policyLen > 0 guard; the helper says the same thing
-		// and is what the wasmtime side now uses too, where the guard was
-		// missing entirely.
-		parentClosePolicy, ok := readOptionalServiceName(mem, policyPtr, policyLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(handlerFromContext(ctx).ChildWorkflowInSchema(ctx, m, targetSchema, wfName, wfInput, version, priority, parentClosePolicy, runIDPtr, runIDMaxLen))
-	}).Export("cleat_child_workflow_in_schema")
 
 	// cleat_await_child: (ptr,len x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
@@ -505,6 +512,35 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		}
 		return uint64(handlerFromContext(ctx).RegisterUpdateHandler(ctx, m, name))
 	}).Export("cleat_register_update_handler")
+
+	// cleat_poll_update: (ptr,maxLen) -> i64
+	//
+	// Writes a JSON envelope {"name","payload","request_id"} and returns
+	// written<<32 | flags, with 0x0100 meaning an update was delivered. See
+	// engine/updater.go for why delivery is an event rather than a table read.
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		outPtr, outMaxLen uint32) uint64 {
+		return uint64(handlerFromContext(ctx).DurablePollUpdate(ctx, m, outPtr, outMaxLen))
+	}).Export("cleat_poll_update")
+
+	// cleat_complete_update: (ptr,len x3) -> i64
+	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
+		reqIDPtr, reqIDLen, resultPtr, resultLen, errPtr, errLen uint32) uint64 {
+		mem := m.Memory()
+		requestID, ok := readWasmPayload(mem, reqIDPtr, reqIDLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		result, ok := readWasmPayload(mem, resultPtr, resultLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		errMsg, ok := readWasmPayload(mem, errPtr, errLen, MaxWasmStringLen)
+		if !ok {
+			return errBadParam
+		}
+		return uint64(handlerFromContext(ctx).DurableCompleteUpdate(ctx, m, requestID, result, errMsg))
+	}).Export("cleat_complete_update")
 	// cleat_create_promise: (ptr,len x2) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
 		namePtr, nameLen, promiseIDPtr, promiseIDMaxLen uint32) uint64 {
@@ -528,43 +564,16 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		return uint64(handlerFromContext(ctx).AwaitPromise(ctx, m, promiseID, timeoutMs, resultPtr, resultMaxLen))
 	}).Export("cleat_await_promise")
 
-	// cleat_send_signal_and_wait: (ptr,len x3, i64, ptr,maxLen) -> i64
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		targetPtr, targetLen, sigPtr, sigLen, payloadPtr, payloadLen uint32,
-		timeoutMs int64,
-		respPtr, respMaxLen uint32) uint64 {
-		h := handlerFromContext(ctx)
-		mem := m.Memory()
-		targetRunID, ok := readServiceName(mem, targetPtr, targetLen)
-		if !ok {
-			return errBadParam
-		}
-		signalName, ok := readServiceName(mem, sigPtr, sigLen)
-		if !ok {
-			return errBadParam
-		}
-		payload, ok := readWasmPayload(mem, payloadPtr, payloadLen, MaxWasmStringLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(h.SendSignalAndWait(ctx, m, targetRunID, signalName, payload, timeoutMs, respPtr, respMaxLen))
-	}).Export("cleat_send_signal_and_wait")
-
-	// cleat_reply_to_signal: (ptr,len x2) -> i64
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		correlationPtr, correlationLen, respPtr, respLen uint32) uint64 {
-		h := handlerFromContext(ctx)
-		mem := m.Memory()
-		correlationID, ok := readServiceName(mem, correlationPtr, correlationLen)
-		if !ok {
-			return errBadParam
-		}
-		response, ok := readWasmPayload(mem, respPtr, respLen, MaxWasmStringLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(h.ReplyToSignal(ctx, m, correlationID, response))
-	}).Export("cleat_reply_to_signal")
+	// cleat_send_signal_and_wait and cleat_reply_to_signal were exported here
+	// until 2026-09-06. Both were INERT: SendSignalAndWait never delivered the
+	// signal it then waited for, and ReplyToSignal recorded a local event and
+	// wrote nothing anywhere. Request/reply is now composed in every SDK from
+	// create_promise + signal_workflow + await_promise + resolve_promise, so
+	// the reply address is a promise ID (IMPROVEMENT-PLAN 3.220).
+	//
+	// The exports could only go after every SDK stopped IMPORTING them, which
+	// completed with the Python WIT removal: a module importing a name the
+	// engine does not export fails at instantiation, not at the call.
 
 	// cleat_signal_workflow: (ptr,len x3) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
@@ -772,83 +781,25 @@ func registerHostFunctions(builder wazero.HostModuleBuilder, rt *Runtime) {
 		return uint64(h.RunDetached(ctx, m, name, inputJSON))
 	}).Export("cleat_run_detached")
 
-	// cleat_set_state: (ptr,len x2) -> i64
+	// cleat_start_detached: (ptr,len x2, ptr,maxLen) -> i64
+	//
+	// cleat_run_detached with the run id written back. Both stay registered:
+	// the old name is what every deployed binary imports, and its arity is part
+	// of that import's type.
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		keyPtr, keyLen, valPtr, valLen uint32) uint64 {
+		namePtr, nameLen, inputPtr, inputLen, runIDPtr, runIDMaxLen uint32) uint64 {
 		h := handlerFromContext(ctx)
 		mem := m.Memory()
-		key, ok := readServiceName(mem, keyPtr, keyLen)
+		name, ok := readServiceName(mem, namePtr, nameLen)
 		if !ok {
 			return errBadParam
 		}
-		value, ok := readWasmPayload(mem, valPtr, valLen, MaxWasmStringLen)
+		inputJSON, ok := readWasmStringValidated(mem, inputPtr, inputLen, MaxWasmStringLen)
 		if !ok {
 			return errBadParam
 		}
-		return uint64(h.SetState(ctx, m, key, value))
-	}).Export("cleat_set_state")
-
-	// cleat_get_state: (ptr,len, ptr,maxLen) -> i64
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		keyPtr, keyLen, valuePtr, valueMaxLen uint32) uint64 {
-		h := handlerFromContext(ctx)
-		mem := m.Memory()
-		key, ok := readServiceName(mem, keyPtr, keyLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(h.GetState(ctx, m, key, valuePtr, valueMaxLen))
-	}).Export("cleat_get_state")
-
-	// cleat_delete_state: (ptr,len) -> i64
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		keyPtr, keyLen uint32) uint64 {
-		h := handlerFromContext(ctx)
-		mem := m.Memory()
-		key, ok := readServiceName(mem, keyPtr, keyLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(h.DeleteState(ctx, m, key))
-	}).Export("cleat_delete_state")
-
-	// cleat_incr_state: (ptr,len, i64) -> i64
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		keyPtr, keyLen uint32, delta int64) uint64 {
-		h := handlerFromContext(ctx)
-		mem := m.Memory()
-		key, ok := readServiceName(mem, keyPtr, keyLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(h.IncrState(ctx, m, key, delta))
-	}).Export("cleat_incr_state")
-
-	// cleat_has_state: (ptr,len) -> i64
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		keyPtr, keyLen uint32) uint64 {
-		h := handlerFromContext(ctx)
-		mem := m.Memory()
-		key, ok := readServiceName(mem, keyPtr, keyLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(h.HasState(ctx, m, key))
-	}).Export("cleat_has_state")
-
-	// cleat_list_state: (ptr,len, ptr,maxLen) -> i64
-	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,
-		prefixPtr, prefixLen, keysPtr, keysMaxLen uint32) uint64 {
-		h := handlerFromContext(ctx)
-		mem := m.Memory()
-		// An empty prefix lists every key: ListState filters with
-		// strings.HasPrefix, and HasPrefix(k, "") is true for all k.
-		prefix, ok := readWasmPayload(mem, prefixPtr, prefixLen, MaxWasmStringLen)
-		if !ok {
-			return errBadParam
-		}
-		return uint64(h.ListState(ctx, m, prefix, keysPtr, keysMaxLen))
-	}).Export("cleat_list_state")
+		return uint64(h.StartDetached(ctx, m, name, inputJSON, runIDPtr, runIDMaxLen))
+	}).Export("cleat_start_detached")
 
 	// cleat_fetch: (ptr,len x4, ptr,maxLen) -> i64
 	builder.NewFunctionBuilder().WithFunc(func(ctx context.Context, m api.Module,

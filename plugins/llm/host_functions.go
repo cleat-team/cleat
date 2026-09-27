@@ -16,18 +16,47 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	if scope == nil {
 		return fmt.Errorf("llm: nil function registry")
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "chat"}, p.chat); err != nil {
+	if err := scope.Register(plugin.FuncOptions{
+		Name: "chat",
+		// cleat#2043: api_key's raw value must be exactly a ${secret:NAME}
+		// reference when present, never a literal -- a literal reaches
+		// event_history otherwise (cleat#1988/#2023). Neither Idempotent nor
+		// SameValueOnReplay is set, so this is not combined with a
+		// re-invoke-on-replay policy; see FuncOptions.SecretOnlyFields.
+		SecretOnlyFields: []string{"api_key"},
+	}, p.chat); err != nil {
 		return err
 	}
 	if streamScope, ok := scope.(plugin.StreamFuncRegistry); ok {
-		if err := streamScope.RegisterStream(plugin.FuncOptions{Name: "chat_stream"}, p.chatStream); err != nil {
+		if err := streamScope.RegisterStream(plugin.FuncOptions{
+			Name:             "chat_stream",
+			SecretOnlyFields: []string{"api_key"},
+		}, p.chatStream); err != nil {
 			return err
 		}
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "embed", Idempotent: true}, p.embed); err != nil {
+	if err := scope.Register(plugin.FuncOptions{
+		Name: "embed",
+		// Near-deterministic for a fixed model and input, which is the property
+		// replay needs rather than mere absence of side effects.
+		//
+		// CAVEAT: "near". A hosted model can change behind a stable name, and
+		// re-invoking costs money -- a real cost, though not a workflow side
+		// effect. Both halves are asserted here rather than derived from the
+		// code, which is what makes this the second entry to re-examine.
+		Idempotent:        true,
+		SameValueOnReplay: true,
+	}, p.embed); err != nil {
 		return err
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "list_models", Idempotent: true}, p.listModels); err != nil {
+	if err := scope.Register(plugin.FuncOptions{
+		Name: "list_models",
+		// Idempotent -- listing has no effect. NOT stable: a provider's model
+		// list is not constant over a workflow's lifetime, so a replay can
+		// return a set the workflow never branched on. cleat#1318.
+		Idempotent:        true,
+		SameValueOnReplay: false,
+	}, p.listModels); err != nil {
 		return err
 	}
 	return nil
@@ -42,6 +71,9 @@ type chatRequest struct {
 	Tools       []providers.Tool    `json:"tools,omitempty"`
 	ToolChoice  string              `json:"tool_choice,omitempty"`
 	System      string              `json:"system,omitempty"`
+	// APIKey overrides the configured provider key for this call (cleat#1988).
+	// See effectiveAPIKey for what this field does and does not guarantee.
+	APIKey string `json:"api_key,omitempty"`
 }
 
 type embedRequest struct {
@@ -74,6 +106,68 @@ func normalizeOutput(out *providers.ChatOutput) {
 	}
 }
 
+// effectiveAPIKey returns the key to use for one call: the request's own
+// (cleat#1988) when the workflow supplied one, falling back to the operator's
+// configured key otherwise.
+//
+// The only case refused is a value that still contains the literal
+// "${secret:" text. withSecrets and withSecretsStream
+// (cmd/cleat-worker/setup.go) pass a call through UNCHANGED when there is no
+// tenant in context or no master key configured -- the one case that boundary
+// lets escape as a string rather than an error -- so that text reaching here
+// means resolution was never attempted. Sending it to a provider as a
+// credential is never correct; a rejected reference is at least legible,
+// where the alternative is an opaque 401 from whichever provider was asked to
+// authenticate with the literal string "${secret:openai}".
+//
+// WHAT THIS DOES NOT DO, AND CANNOT: tell a genuinely resolved secret apart
+// from a key a workflow author typed directly into the call argument. Both
+// arrive here as the same plain string. engine.ResolveSecretRefs
+// (engine/tenant_secrets.go) is a whole-document text substitution with no
+// per-field record of what it touched -- grep the tree for callers of it and
+// there are exactly three, none of which keep one -- so there is no
+// information available at this boundary to distinguish the two. The
+// property this system actually has is the one engine/tenant_secrets.go's
+// SecretStore doc comment already states: a workflow author writing
+// ${secret:NAME} keeps the reference in event history rather than the value,
+// which is a fact about what THEY write, not something enforced against a
+// workflow that chooses not to.
+func (p *Plugin) effectiveAPIKey(ctx context.Context, requestKey, provider string) (string, error) {
+	if requestKey == "" {
+		return p.providerAPIKey(ctx, provider)
+	}
+	if strings.Contains(requestKey, "${secret:") {
+		return "", fmt.Errorf("llm: api_key contains an unresolved secret reference " +
+			"(no tenant context, or no master key configured on the worker)")
+	}
+	return requestKey, nil
+}
+
+// providerAPIKey fetches the current API key for one provider from
+// deployment secrets, at the moment of use rather than cached at Init
+// (cleat#1992 part 1), so a key rotated with `cleatctl set-deployment-secret`
+// takes effect on the next call without a worker restart. ollama needs no
+// key at all -- OllamaChat/OllamaChatStream take none -- so it is excluded
+// here rather than made to look up a secret that will never be set. A
+// provider explicitly marked "requires_deployment_key": false is treated the
+// same way: a keyless self-hosted base_url has nothing to look up, and a
+// BYOK-only provider is reached through effectiveAPIKey's req.APIKey branch
+// before providerAPIKey is ever called for it in the first place -- this
+// only matters for the caller that supplies no request-level key at all.
+func (p *Plugin) providerAPIKey(ctx context.Context, provider string) (string, error) {
+	if provider == "ollama" || !p.config.Providers[provider].requiresDeploymentKey() {
+		return "", nil
+	}
+	if p.deploymentSecrets == nil {
+		return "", fmt.Errorf("llm: no deployment secret store configured")
+	}
+	key, err := p.deploymentSecrets.Get(ctx, "llm.providers."+provider+".api_key")
+	if err != nil {
+		return "", fmt.Errorf("llm: providers.%s.api_key: %w", provider, err)
+	}
+	return key, nil
+}
+
 func (p *Plugin) chat(ctx context.Context, inputJSON string) (string, error) {
 	cc := plugin.CallContextFromContext(ctx)
 	if cc == nil || cc.TenantID == "" {
@@ -93,6 +187,11 @@ func (p *Plugin) chat(ctx context.Context, inputJSON string) (string, error) {
 		return "", fmt.Errorf("llm: provider %q not configured or disabled", req.Provider)
 	}
 
+	apiKey, err := p.effectiveAPIKey(ctx, req.APIKey, req.Provider)
+	if err != nil {
+		return "", err
+	}
+
 	if req.Model == "" {
 		req.Model = cfg.DefaultModel
 	}
@@ -108,21 +207,20 @@ func (p *Plugin) chat(ctx context.Context, inputJSON string) (string, error) {
 	}
 
 	var output providers.ChatOutput
-	var err error
 
 	switch req.Provider {
 	case "openai":
-		output, err = providers.OpenAIChat(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		output, err = providers.OpenAIChat(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	case "anthropic":
-		output, err = providers.AnthropicChat(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		output, err = providers.AnthropicChat(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	case "groq":
-		output, err = providers.GroqChat(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		output, err = providers.GroqChat(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	case "ollama":
 		output, err = providers.OllamaChat(ctx, p.httpClient, cfg.BaseURL, input)
 	case "gemini":
-		output, err = providers.GeminiChat(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		output, err = providers.GeminiChat(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	case "mistral":
-		output, err = providers.MistralChat(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		output, err = providers.MistralChat(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	default:
 		return "", fmt.Errorf("llm: unknown provider: %s", req.Provider)
 	}
@@ -162,17 +260,21 @@ func (p *Plugin) embed(ctx context.Context, inputJSON string) (string, error) {
 		req.Model = cfg.DefaultModel
 	}
 
+	apiKey, err := p.providerAPIKey(ctx, req.Provider)
+	if err != nil {
+		return "", err
+	}
+
 	input := providers.EmbedInput{Model: req.Model, Input: req.Input}
 
 	var output providers.EmbedOutput
-	var err error
 
 	switch req.Provider {
 	case "openai":
-		output, err = providers.OpenAIEmbed(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		output, err = providers.OpenAIEmbed(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	default:
 		// Try OpenAI-compatible path for other providers
-		output, err = providers.OpenAIEmbed(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		output, err = providers.OpenAIEmbed(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	}
 	if err != nil {
 		output.Error = err.Error()
@@ -271,6 +373,11 @@ func (p *Plugin) chatStream(ctx context.Context, inputJSON string) (<-chan plugi
 		return nil, fmt.Errorf("llm: provider %q not configured or disabled", req.Provider)
 	}
 
+	apiKey, err := p.effectiveAPIKey(ctx, req.APIKey, req.Provider)
+	if err != nil {
+		return nil, err
+	}
+
 	if req.Model == "" {
 		req.Model = cfg.DefaultModel
 	}
@@ -286,15 +393,14 @@ func (p *Plugin) chatStream(ctx context.Context, inputJSON string) (<-chan plugi
 	}
 
 	var chunkCh <-chan providers.StreamChunk
-	var err error
 
 	switch req.Provider {
 	case "openai":
-		chunkCh, err = providers.OpenAIChatStream(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		chunkCh, err = providers.OpenAIChatStream(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	case "anthropic":
-		chunkCh, err = providers.AnthropicChatStream(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		chunkCh, err = providers.AnthropicChatStream(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	case "groq":
-		chunkCh, err = providers.GroqChatStream(ctx, p.httpClient, cfg.APIKey, cfg.BaseURL, input)
+		chunkCh, err = providers.GroqChatStream(ctx, p.httpClient, apiKey, cfg.BaseURL, input)
 	case "ollama":
 		chunkCh, err = providers.OllamaChatStream(ctx, p.httpClient, cfg.BaseURL, input)
 	default:
@@ -307,13 +413,15 @@ func (p *Plugin) chatStream(ctx context.Context, inputJSON string) (<-chan plugi
 	out := make(chan plugin.StreamEvent)
 	go func() {
 		defer close(out)
-		for chunk := range chunkCh {
-			out <- plugin.StreamEvent{
-				Index:   chunk.Index,
-				Content: chunk.Content,
-				Finish:  chunk.Done,
+		plugin.RecoverGoroutine("llm", nil, func() {
+			for chunk := range chunkCh {
+				out <- plugin.StreamEvent{
+					Index:   chunk.Index,
+					Content: chunk.Content,
+					Finish:  chunk.Done,
+				}
 			}
-		}
+		})
 	}()
 
 	return out, nil

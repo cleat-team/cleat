@@ -32,17 +32,33 @@ var WitToEnvImport = map[string]map[string]string{
 	},
 	"cleat:host-calls/durable-lifecycle": {
 		"durable-defer":             "cleat_defer",
+		"durable-defer-phase":       "cleat_defer_phase",
 		"durable-continue-as-new":   "cleat_continue_as_new",
 		"durable-poll-cancellation": "cleat_poll_cancellation",
 	},
 	"cleat:host-calls/durable-signals": {
-		"durable-await-signals":        "cleat_await_signals",
-		"durable-poll-signal":          "cleat_poll_signal",
-		"durable-send-signal-and-wait": "cleat_send_signal_and_wait",
-		"durable-reply-to-signal":      "cleat_reply_to_signal",
-		"durable-signal-workflow":      "cleat_signal_workflow",
+		"durable-await-signals": "cleat_await_signals",
+		"durable-poll-signal":   "cleat_poll_signal",
+		// durable-send-signal-and-wait and durable-reply-to-signal were
+		// removed on 2026-09-06 along with their WIT declarations: both host
+		// calls were inert, and request/reply is composed from promises now
+		// (IMPROVEMENT-PLAN 3.220). A mapping for a name the world no longer
+		// declares would be dead, and this table is what the Python half of
+		// TestEverySDKImportIsAHostExport reads.
+		"durable-signal-workflow": "cleat_signal_workflow",
 	},
 	"cleat:host-calls/durable-children": {
+		// IMPROVEMENT-PLAN 3.252: two host calls the Python SDK could not reach.
+		// Without a row here the WIT import resolves to no env name and the
+		// component fails to link -- the table, not the WIT, is what decides a
+		// Python guest's import names.
+		//
+		// In THIS interface, not durable-handlers: the map is keyed by the WIT
+		// interface the function is declared in, and putting them under handlers
+		// left TestEveryImportedWitFunctionHasAnEnvMapping reporting both as
+		// unmapped while the names were visibly present in the file.
+		"durable-await-any-child":             "cleat_await_any_child",
+		"durable-poll-child":                  "cleat_poll_child",
 		"durable-child-workflow":              "cleat_child_workflow",
 		"durable-await-child":                 "cleat_await_child",
 		"durable-await-all-children":          "cleat_await_all_children",
@@ -59,6 +75,8 @@ var WitToEnvImport = map[string]map[string]string{
 	},
 	"cleat:host-calls/durable-handlers": {
 		"durable-register-update-handler": "cleat_register_update_handler",
+		"durable-poll-update":             "cleat_poll_update",
+		"durable-complete-update":         "cleat_complete_update",
 		"durable-register-query-handler":  "cleat_register_query_handler",
 	},
 	"cleat:host-calls/durable-messaging": {
@@ -82,20 +100,13 @@ var WitToEnvImport = map[string]map[string]string{
 		"get-scope": "cleat_get_scope",
 		"uuid":      "cleat_uuid",
 	},
-	"cleat:host-calls/durable-stream-state": {
-		"set-state":    "cleat_set_state",
-		"get-state":    "cleat_get_state",
-		"delete-state": "cleat_delete_state",
-		"incr-state":   "cleat_incr_state",
-		"has-state":    "cleat_has_state",
-		"list-state":   "cleat_list_state",
-	},
 	"cleat:host-calls/durable-extended-lifecycle": {
 		"continue-as-new-versioned": "cleat_continue_as_new_versioned",
 		"side-effect":               "cleat_side_effect",
-	},
-	"cleat:host-calls/durable-extended-children": {
-		"child-workflow-in-schema": "cleat_child_workflow_in_schema",
+		// IMPROVEMENT-PLAN 3.253. In durable-extended-lifecycle, where the WIT
+		// declares it -- this map is keyed by declaring interface, and getting
+		// that wrong reports the name as unmapped while it is visibly present.
+		"durable-run-detached": "cleat_run_detached",
 	},
 	"cleat:host-calls/durable-fetch": {
 		"fetch": "cleat_fetch",
@@ -363,6 +374,7 @@ func RewriteWitImports(wasmBytes []byte) ([]byte, error) {
 	}
 
 	newRaw := make([]byte, 0, totalSize)
+	//nolint:gosec // G602: wasmBytes[0:8] is guarded by a `len(wasmBytes) < 8` early return at the top of this function.
 	newRaw = append(newRaw, wasmBytes[0:8]...) // magic + version
 	for _, s := range sections {
 		newRaw = append(newRaw, s.id)

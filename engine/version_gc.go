@@ -108,7 +108,14 @@ func GarbageCollectVersions(ctx context.Context, store WorkflowStore, opts GCOpt
 				// Protected by the minimum count.
 				continue
 			}
-			if !def.Deprecated {
+			// GCEligible, NOT DisabledAt, and this line is the whole of
+			// cleat#1702's split. Collection is permanent -- PurgeWorkflowDef
+			// below deletes a definition an in-flight instance may still need
+			// to replay -- so it must be armed only by something that names
+			// collection. Keying it on the retirement column instead would
+			// mean any generic "disable this entity" write arms a deletion,
+			// which is the hazard the split removes.
+			if !def.GCEligible {
 				continue
 			}
 			if now.Sub(def.CreatedAt) < opts.MaxVersionAge {
@@ -155,7 +162,8 @@ func PurgeVersions(ctx context.Context, store WorkflowStore, workflowName string
 	cutoff := time.Now().Add(-olderThan)
 
 	for _, def := range defs {
-		if !def.Deprecated {
+		// GCEligible, not DisabledAt -- see GarbageCollectVersions above.
+		if !def.GCEligible {
 			continue
 		}
 		if def.CreatedAt.After(cutoff) {

@@ -3,16 +3,30 @@
 """
 Plugin host function extension interface.
 """
+from typing import TypeVar, Generic, Union, Optional, Protocol, Tuple, List, Any, Self, Callable
+from types import TracebackType
+from enum import Flag, Enum, auto
+from dataclasses import dataclass
+from abc import abstractmethod
+import weakref
+
+from componentize_py_types import Result, Ok, Err, Some
 
 
 
 def plugin_call(plugin_name: str, function_name: str, input: str) -> str:
     """
     Call a plugin host function.
+    Returns the plugin response JSON string.
+    
+    Raises: `componentize_py_types.Err(wit_world.imports.outcomes.CallFailure)`
     """
     raise NotImplementedError
 def plugin_call_streaming(plugin_name: str, function_name: str, input: str) -> str:
     """
     Call a streaming plugin host function (for workstream D2b).
+    Returns the streaming event JSON string.
+    
+    Raises: `componentize_py_types.Err(wit_world.imports.outcomes.CallFailure)`
     """
     raise NotImplementedError

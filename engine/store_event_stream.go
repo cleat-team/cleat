@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 )
 
@@ -26,6 +27,7 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
+		       payload_encoding,
 		       promise_name, promise_id, promise_result, promise_error,
 		       created_at
 		FROM event_history
@@ -50,6 +52,7 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 		var payload sql.NullString
 		var promiseName, promiseID, promiseResult, promiseError sql.NullString
 		var createdAt sql.NullTime
+		var payloadEnc sql.NullInt16
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
@@ -57,6 +60,7 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
+			&payloadEnc,
 			&promiseName, &promiseID, &promiseResult, &promiseError,
 			&createdAt); err != nil {
 			return nil, fmt.Errorf("scan history paginated: %w", err)
@@ -64,8 +68,8 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 
 		rec.Service = service.String
 		rec.Op = op.String
-		rec.Request = tryDecodeBase64(request.String)
-		rec.Response = tryDecodeBase64(response.String)
+		rec.Request = decodePayload(request.String, payloadEnc)
+		rec.Response = decodePayload(response.String, payloadEnc)
 		rec.Err = errMsg.String
 		rec.DurationMs = durationMs.Int64
 		rec.SignalNames = signalNames.String
@@ -88,11 +92,11 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 		rec.PromiseResult = promiseResult.String
 		rec.PromiseError = promiseError.String
 		if createdAt.Valid {
-			rec.CreatedAt = createdAt.Time
+			applyCreatedAt(&rec, createdAt.Time)
 		}
 
 		// Decrypt and redact event record.
-		s.decryptAndRedactEventRecord(&rec, workflowID)
+		s.decryptEventRecordForDisplay(&rec, workflowID)
 
 		// Retroactive redaction on read path.
 		// Redaction runs AFTER decryption (see block above) since redacting
@@ -110,7 +114,7 @@ func (s *PostgresStore) LoadEventHistoryPaginated(ctx context.Context, workflowI
 			rec.PromiseError = RedactOnRead(rec.PromiseError)
 		}
 		if payload.Valid {
-			payloadStr := s.decryptPayloadJSON(payload.String)
+			payloadStr := s.decryptPayloadForDisplay(payload.String)
 			populateFromPayload(&rec, []byte(payloadStr))
 		}
 
@@ -141,21 +145,48 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 				return
 			}
 
-			rows, err := s.db.QueryContext(ctx, `
+			// One RLS-armed transaction per page, not s.db directly.
+			//
+			// cleat#1178: event_history has ENABLE + FORCE ROW LEVEL SECURITY
+			// and its policy is `tenant_id = cleat.assert_tenant_set()`, which
+			// RAISES the moment a candidate row is examined. A statement issued
+			// on s.db runs outside any transaction, so nothing has set
+			// cleat.tenant_id and this failed for ANY workflow that has events
+			// -- a wider blast radius than cleat#1177, which needed a chain with
+			// a successor.
+			//
+			// It was latent rather than live only because this method has no
+			// production caller; store_reachability_test.go lists it in
+			// storeUnreachedBaseline. Fixed rather than commented, so that
+			// wiring it up is not also a bug report.
+			//
+			// Per PAGE rather than one transaction around the whole stream: the
+			// consumer decides how fast it reads, and holding a transaction open
+			// across an unbounded channel send would pin a connection for as
+			// long as the reader takes. Paging already accepts that rows may
+			// change between pages -- LIMIT/OFFSET over ORDER BY step says so.
+			tx, err := s.beginTxWithRLS(ctx)
+			if err != nil {
+				errCh <- err
+				return
+			}
+
+			rows, err := tx.QueryContext(ctx, `
 				SELECT step, event_type, service, operation, request, response, error,
 				       duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 				       defer_description, defer_id, child_name, child_input, run_id, new_input,
 				       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 				       payload,
+				       payload_encoding,
 				       promise_name, promise_id, promise_result, promise_error,
-				       created_at,
-				       EXTRACT(EPOCH FROM created_at)::BIGINT * 1000 AS timestamp_ms
+				       created_at
 				FROM event_history
 				WHERE workflow_id = $1
 				ORDER BY step
 				LIMIT $2 OFFSET $3
 			`, workflowID, pageSize, offset)
 			if err != nil {
+				_ = tx.Rollback()
 				errCh <- err
 				return
 			}
@@ -173,6 +204,7 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 				var payload sql.NullString
 				var promiseName, promiseID, promiseResult, promiseError sql.NullString
 				var createdAt sql.NullTime
+				var payloadEnc sql.NullInt16
 
 				if err := rows.Scan(&rec.Step, &rec.EventType,
 					&service, &op, &request, &response, &errMsg,
@@ -180,20 +212,22 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 					&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 					&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 					&payload,
+					&payloadEnc,
 					&promiseName, &promiseID, &promiseResult, &promiseError,
-					&createdAt, &rec.TimestampMs); err != nil {
+					&createdAt); err != nil {
 					rows.Close()
+					_ = tx.Rollback()
 					errCh <- err
 					return
 				}
 				if createdAt.Valid {
-					rec.CreatedAt = createdAt.Time
+					applyCreatedAt(&rec, createdAt.Time)
 				}
 
 				rec.Service = service.String
 				rec.Op = op.String
-				rec.Request = tryDecodeBase64(request.String)
-				rec.Response = tryDecodeBase64(response.String)
+				rec.Request = decodePayload(request.String, payloadEnc)
+				rec.Response = decodePayload(response.String, payloadEnc)
 				rec.Err = errMsg.String
 				rec.DurationMs = durationMs.Int64
 				rec.SignalNames = signalNames.String
@@ -217,10 +251,10 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 				rec.PromiseError = promiseError.String
 
 				// Decrypt and redact event record.
-				s.decryptAndRedactEventRecord(&rec, workflowID)
+				s.decryptEventRecordForDisplay(&rec, workflowID)
 
 				if payload.Valid {
-					payloadStr := s.decryptPayloadJSON(payload.String)
+					payloadStr := s.decryptPayloadForDisplay(payload.String)
 					populateFromPayload(&rec, []byte(payloadStr))
 				}
 
@@ -228,6 +262,7 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 				case eventCh <- rec:
 				case <-ctx.Done():
 					rows.Close()
+					_ = tx.Rollback()
 					errCh <- ctx.Err()
 					return
 				}
@@ -235,6 +270,11 @@ func (s *PostgresStore) StreamEventHistory(ctx context.Context, workflowID strin
 			rows.Close()
 
 			if err := rows.Err(); err != nil {
+				_ = tx.Rollback()
+				errCh <- err
+				return
+			}
+			if err := tx.Commit(); err != nil {
 				errCh <- err
 				return
 			}
@@ -263,4 +303,26 @@ func (s *PostgresStore) CountEventHistory(ctx context.Context, workflowID string
 		return 0, err
 	}
 	return count, tx.Commit()
+}
+
+// IsHistorySwept reports whether DeleteExpiredEvents has ever swept this
+// workflow's event_history. cleat#2038.
+func (s *PostgresStore) IsHistorySwept(ctx context.Context, workflowID string) (bool, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return false, fmt.Errorf("is history swept: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var sweptAt sql.NullTime
+	err = tx.QueryRowContext(ctx,
+		`SELECT history_swept_at FROM workflow_instances WHERE id = $1 AND tenant_id = $2`,
+		workflowID, s.tenantID).Scan(&sweptAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return sweptAt.Valid, tx.Commit()
 }

@@ -2,8 +2,13 @@ name: Plugin Harness Tests
 
 # CGO on, everywhere in this file. It was "0" in all four jobs, which does not
 # skip a check -- NewWasmtimeBackend is behind //go:build cgo, so disabling CGO
-# removes the primary backend and runs everything on wazero. The same defect
-# 2.70 fixed in multi-db-ci.yml, in a second workflow.
+# removed the primary backend. The same defect 2.70 fixed in multi-db-ci.yml, in
+# a second workflow.
+#
+# When this was written the fallback was wazero. Since #459 (2026-08-10) there is
+# no fallback: a CGO-less build has no WASM backend at all. The history below is
+# left as written because it records a real measurement; only the consequence has
+# changed, and it changed in the direction of failing louder.
 #
 # Here it had a visible cost: TestPluginCalls_Wasm_Go skipped unconditionally on
 # a "wazero v1.11.1 nil Sys context panic", and that panic only happens because
@@ -18,10 +23,73 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+    # `edited` is required, not decorative: it is the activity type a BASE
+    # CHANGE fires. Without it a PR opened against a feature branch and later
+    # retargeted here never triggers this workflow at all -- not at open (the
+    # branches filter excluded it) and not at retarget (not a default type).
+    # Such a PR reports CLEAN with only the unfiltered workflows' checks.
+    # scripts/check-workflow-pr-triggers.sh guards this.
+    types: [opened, synchronize, reopened, edited]
 
+  # The merge queue tests the required checks against the PROJECTED tip on a
+  # temporary `gh-readonly-queue/...` ref, which fires `merge_group` and not
+  # `pull_request`. Without this trigger the check never starts in queue
+  # context, the queue waits for a status that cannot arrive, and NOTHING
+  # MERGES -- with no check going red. EVERY required context on develop has to
+  # report here. The list is tiers.yaml's `required_contexts` block; the count
+  # is deliberately not repeated here, because it was -- in nine workflow files
+  # at once -- and all nine said 32 while develop required 33 (cleat#1937).
+  merge_group:
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Every push gets its own group; PR runs share one per ref and supersede.
+  #
+  # `github.ref` is refs/heads/develop for EVERY merge, so keying the group on
+  # it puts consecutive merges in one group. That discards a merge's own
+  # verification, and `cancelled` is not `success` -- nothing downstream reads
+  # it as a failure, so it disappears silently.
+  #
+  # `cancel-in-progress: false` is NOT enough to prevent that, which is the
+  # part the first fix (#634) got wrong. It stops a *running* run being killed,
+  # but GitHub still allows only one pending run per group: when a third push
+  # enters an occupied group, the one waiting is cancelled before it ever
+  # starts. Measured on develop after #634 merged (18:20:48Z on 2026-09-03),
+  # 5 of 24 `Tier 1 Gate` push runs were cancelled -- every one with **zero
+  # jobs**, killed within seconds of the next merge landing.
+  #
+  # The job count separates the two mechanisms, and does it cleanly. Of the 22
+  # cancelled gate runs that day, the 17 before #634 have jobs=1 (killed
+  # mid-run) with a single jobs=0 exception, and all 5 after it have jobs=0:
+  #
+  #   gh run view <cancelled-id> --json jobs --jq '.jobs | length'   # 0
+  #   gh run view <success-id>   --json jobs --jq '.jobs | length'   # 1
+  #
+  # So #634 did exactly what it claimed and no more. The gate takes 20-40
+  # minutes and merges land minutes apart, so the queue is almost always
+  # occupied. Keying push runs on `github.sha` gives each merge a group of its
+  # own: never queued, so never superseded.
+  #
+  # On a pull_request the group stays per-ref and cancellation is the setting's
+  # real purpose: pushing twice to a branch should not run the suite twice.
+  #
+  # `scripts/check-workflow-concurrency.sh` guards both halves.
+  # A BODY EDIT MUST NOT SUPERSEDE THE RUN IT RACES (cleat#1688).
+  #
+  # `edited` is subscribed above because a BASE CHANGE fires it and nothing
+  # else does -- but it also fires for a title or body edit, and `github.ref`
+  # is identical for every pull_request activity type. The edited run therefore
+  # landed in this group and cancelled the synchronize run it followed, and a
+  # superseded run renders as a failure rather than as "replaced".
+  #
+  # `github.run_id` is unique per run, so a no-op edited run shares a group
+  # with nothing and cancels nothing. An `edited` that DID change the base
+  # keeps the per-ref group: that is a real re-evaluation against a different
+  # target and should supersede, which is why the activity type exists here.
+  #
+  # ONE LINE ON PURPOSE: check-workflow-concurrency.sh reads the single line
+  # matching `^\s*group:` and looks for github.sha/run_id/ref in it. A folded
+  # `>-` scalar hides the expression and the guard reports a false alarm.
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action == 'edited' && !github.event.changes.base && github.run_id || github.ref) || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Least-privilege token, added 2026-08-07. Without a `permissions:` key a
 # workflow inherits the repository default, which can be read/write for every
@@ -45,10 +113,10 @@ jobs:
     name: Layer 1 — SDK (cleattest)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
       - name: Check tools
         run: make tools-go
       # tests/plugin-harness is its own Go module since the
@@ -58,7 +126,33 @@ jobs:
       # fails with "directory prefix tests/plugin-harness does not contain main
       # module or its selected dependencies" -- so the pattern is ./... from
       # inside the module instead. See tests/plugin-harness/go.mod.
-      - run: go test -count=1 -timeout=120s ./... -run 'TestPluginCalls_Cleattest|TestNewTestPluginEnvInMemory|TestMockServers'
+      # TestPluginCallStreaming_Cleattest is in this alternation because it was
+      # in NO job's -run pattern -- it existed, passed in 0.00s, and ran nowhere.
+      # It covers the streaming plugin path, which #730 and #732 both changed
+      # while nothing here executed it. See IMPROVEMENT-PLAN 3.310.
+      #
+      # Note it is not covered by the "TestPluginCalls_Cleattest" term: -run is
+      # an unanchored regex, and TestPluginCallStreaming_Cleattest does not
+      # contain that substring (PluginCalls_ vs PluginCallStreaming_). A name
+      # that looks like it is already matched is exactly how this stayed
+      # invisible.
+      # Every job targeting this module selects with -run, so a test no
+      # pattern matches does not run and NOTHING SAYS SO: the job is green and
+      # scripts/check-ci-package-coverage.sh reports the package as covered,
+      # because it guards matrix drift and exempts `tests` as "driven by their
+      # own dedicated CI jobs". The selection is where the coverage lives.
+      #
+      # Three instances before this guard existed, all found by hand:
+      # TestHostCallTableCoversEveryWave1Call, TestEverySDKImportIsAHostExport,
+      # and five at once in #1066 -- two of which were a PR's own
+      # compiled-binary evidence, passing locally and never run here.
+      #
+      # Runs here rather than in Lint because it needs `go test -list`, and
+      # this is the cheapest job that already has Go and this module.
+      - name: CI test-selection guard
+        run: python3 scripts/check_ci_test_selection.py
+
+      - run: go test -count=1 -timeout=120s ./... -run 'TestPluginCalls_Cleattest|TestPluginCallStreaming_Cleattest|TestNewTestPluginEnvInMemory|TestMockServers'
         working-directory: tests/plugin-harness
         env:
           CGO_ENABLED: "1"
@@ -70,10 +164,10 @@ jobs:
     name: Layer 2 — WASM Integration
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
       # wasm32-unknown-unknown, not wasm32-wasip1: `cleat build --target rust`
       # compiles for the former (cmd/cleat/build_rust.go). Without it
       # TestPluginCalls_Wasm_Rust skips, and it is the only test anywhere that
@@ -135,12 +229,23 @@ jobs:
       # Java 17 to match the other four jobs that build this SDK, rather than
       # inheriting the runner image's default, which can change without us.
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
+        uses: gradle/actions/setup-gradle@v6
+      # Explicit, for the same reason Java 17 is pinned two steps up: the
+      # AssemblyScript host-call fixture needs npx, ubuntu-latest happens to
+      # ship Node, and "happens to" is what changes without us. buildASHostCallWasm
+      # SKIPS on a missing npx rather than failing, so an image that dropped Node
+      # would retire the whole AssemblyScript half of the harness quietly -- the
+      # skip budget below is what would catch it, and only because this step
+      # makes the toolchain this job's own promise rather than the runner's.
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "20"
       # -json into a report, and a skip budget over it. Without that, this step
       # ran `go test` with no -v, so a skipped language and a passing one looked
       # identical in the log -- which is how TestPluginCalls_Wasm_Go sat
@@ -166,15 +271,87 @@ jobs:
           # ../../: the report has to land at the repo root, because the
           # Skip budget step below runs scripts/check-skip-budget.sh from
           # there. Written from inside the module (see working-directory).
+          # This file is WS-3's; WS-1 is adding here under the protocol in
+          # WORKSTREAM.md -- another stream may, when leaving the mechanism
+          # unwired would be worse, and it would be: the harness was in the
+          # tree and selected by NO CI pattern, which is the "coverage nobody
+          # has" case the harness itself exists to find.
+          #
+          # TestHostCalls is the host-call execution harness (IMPROVEMENT-PLAN
+          # §3.210, plan item A1). It is named here explicitly because this
+          # step selects by -run: a test that matches no pattern is not run,
+          # and an unwired guard reads as coverage nobody has. Confirm it is
+          # selected rather than assuming:
+          # HostCallTableCovers is a SEPARATE alternative on purpose, and its
+          # absence is how the first version of this line was wrong:
+          # 'TestHostCalls' selects TestHostCallsGo and does NOT select
+          # TestHostCallTableCoversEveryWave1Call -- the names diverge at
+          # "TestHostCall|s" vs "TestHostCall|Table". So the drift guard added
+          # to catch unselected tests was itself unselected. Found by WS-3.
+          # Confirm with -list, which answers the question -run silently does
+          # not:
+          #   go test ./... -list 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers'
+          #     -> the harness, its table guard, and the five plugin tests
+          #
+          # The count is now SIX, not two: C2 added Rust and AssemblyScript
+          # fixtures, so the pattern selects TestHostCalls{Go,Rust,AS} and
+          # TestHostCallTableCovers.../TestRust.../TestAS... -- three harnesses
+          # and the three drift guards that keep their tables honest.
+          #   cd tests/plugin-harness && go test -list 'TestHostCalls|HostCallTableCovers' ./...
+          # must list 6. If it lists 3, the guards have come unselected again.
+          #
+          # EverySDK is named separately because it matches none of the other
+          # terms -- these are not TestHostCalls* and not TableCovers*. Added
+          # as its own term rather than by renaming the tests to fit an
+          # existing one: the name should say what the test does, and the
+          # pattern should say what CI runs. Confirm with
+          #   go test -list 'EverySDK' ./...    -> 2
+          #
+          # The term is 'EverySDK', not 'EverySDKImportIsAHostExport' as it
+          # read until 2026-09-07. The reverse-direction guard is
+          # TestEverySDKReachesEveryHostExport, and the old term stops matching
+          # one character into it -- 'I' against 'R' -- so it was selected by
+          # no CI job on the commit that introduced it. That is CLAUDE.md's
+          # "a widened pattern that fixes one name can leave the next one out",
+          # and -list is what shows it; -run answers only by implication and is
+          # silent when the answer is "less than you think".
           go test -count=1 -timeout=600s -json \
-            ./... -run 'TestPluginCalls_Wasm' \
+            ./... -run 'TestPluginCalls_Wasm|TestHostCalls|HostCallTableCovers|EverySDK|TestACompiledGoWorkflow|TestAnIntParameterIsDecoded|TestCallOptionsTimeoutAtTheWasmBoundary|TestDurableCallWithOptionsAloneIsBound|TestASBindingContract' \
             2>&1 | tee ../../wasm-integration-report.json
         env:
           # Explicit, not left to the default: Go defaults CGO_ENABLED to 1 only
           # when a C compiler is present and 0 otherwise, so relying on the
-          # default silently reinstates the wazero-only run on a runner without
-          # gcc. Pinned, that case fails loudly.
+          # default leaves a runner without gcc with no WASM backend at all
+          # (the wazero one was deleted in #459). Pinned, that case fails loudly.
+          # This said "silently reinstates the wazero-only run" until 2026-09-06.
           CGO_ENABLED: "1"
+
+      # The tests must not rewrite their own tracked fixtures. This is the
+      # regression guard for IMPROVEMENT-PLAN 3.308: `cleat build --target
+      # python` resolved a relative --output against the *entry file's*
+      # directory, so TestPluginCalls_Wasm_Python overwrote the two committed
+      # call_all_plugins artifacts on every run -- including every run of this
+      # job, invisibly, because a runner's checkout is thrown away.
+      #
+      # git diff rather than git status --porcelain: the invariant is about
+      # *tracked* fixtures. Untracked build leftovers (__pycache__ and the
+      # like) are a tidiness matter and would only make this flap.
+      #
+      # Scoped to testdata rather than to pythonworkflow alone, deliberately.
+      # The same defect in another language is the thing most worth catching,
+      # and #726 already found and fixed one in the AssemblyScript fixture.
+      - name: Tests did not rewrite their own fixtures
+        if: always()
+        run: |
+          if ! git diff --exit-code --stat -- tests/plugin-harness/testdata; then
+            echo
+            echo "The files above are tracked fixtures that a test rewrote as it ran."
+            echo "A build wrote into the source tree instead of its output directory."
+            echo "See IMPROVEMENT-PLAN 3.308 -- do not fix this by committing the"
+            echo "new bytes: componentize-py's output is not reproducible, so they"
+            echo "will differ again on the next run."
+            exit 1
+          fi
 
       - name: Skip budget
         if: always()
@@ -221,6 +398,11 @@ jobs:
         env:
           ACCEPT_EULA: Y
           MSSQL_SA_PASSWORD: CleatTest123!
+          # SQL Server on Linux sizes its buffer pool to 80% of VISIBLE host
+          # memory by default, with no awareness it shares a runner with
+          # other services in this job (cleat#2101). Bump all six sites
+          # together, per the note above.
+          MSSQL_MEMORY_LIMIT_MB: "2048"
         ports:
           - 1433:1433
         options: >-
@@ -234,18 +416,24 @@ jobs:
       CLEAT_TEST_MSSQL: sqlserver://sa:CleatTest123!@localhost:1433?database=master
       CLEAT_TEST_SKIP_REAL_SERVICES: '1'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
-      # This job is currently vacuous, and the budget below is what says so.
+          go-version-file: go.mod
+      # This job WAS vacuous, and the budget below is what said so.
       #
-      # It provisions PostgreSQL, MySQL and SQL Server, sets all three DSNs,
-      # and then runs exactly one test -- TestPluginCalls_MultiDB -- whose
-      # first statement is an unconditional t.Skip for a wazero v1.11.1 nil Sys
-      # context panic. So three database containers start, nothing is tested,
-      # and the job reports success. Every dialect claim this job is supposed
-      # to back is currently unverified by it.
+      # It provisions PostgreSQL, MySQL and SQL Server, sets all three DSNs, and
+      # runs exactly one test -- TestPluginCalls_MultiDB -- whose first statement
+      # used to be an unconditional t.Skip for a wazero v1.11.1 nil Sys context
+      # panic. Three database containers started, nothing was tested, and the job
+      # reported success.
+      #
+      # Re-checked 2026-09-06: the skip is gone. `grep -rn 'nil Sys'
+      # --include='*.go' .` finds only the comment recording it, in
+      # tests/plugin-harness/wasm_plugin_test.go. The panic only happened because
+      # the job forced a CGO-less run onto wazero, and CGO is pinned on above.
+      # The budget below stays -- it is what would catch this becoming vacuous
+      # again.
       #
       # The budget is 1 rather than 0 so the state is recorded rather than
       # breaking the build on a known upstream bug -- the same treatment as the
@@ -263,7 +451,17 @@ jobs:
       # inside the module instead. See tests/plugin-harness/go.mod.
       # ../../test-report.json: the Skip budget step below runs from the repo
       # root, so the report must land there rather than inside the module.
-      - run: go test -count=1 -timeout=600s -json ./... -run 'TestPluginCalls_MultiDB' > ../../test-report.json 2>&1
+      # TestReapplyingTheCoreMigrations… is named separately because it matches
+      # no part of TestPluginCalls_MultiDB, and a -run pattern that does not
+      # name a test does not run it -- it was selected by no CI job at all when
+      # it was written. Confirm with, from tests/plugin-harness:
+      #   go test . -list 'TestPluginCalls_MultiDB|TestReapplyingTheCoreMigrations'
+      # which must list BOTH names. It creates and drops a database of its own
+      # (cleat_migration_rerun_test) rather than using the one this job's DSN
+      # names, because it applies the core migrations twice on purpose and Go
+      # would run it before TestPluginCalls_MultiDB -- see IMPROVEMENT-PLAN
+      # 3.236.
+      - run: go test -count=1 -timeout=600s -json ./... -run 'TestPluginCalls_MultiDB|TestReapplyingTheCoreMigrations' > ../../test-report.json 2>&1
         working-directory: tests/plugin-harness
         env:
           CGO_ENABLED: "1"
@@ -295,51 +493,52 @@ jobs:
       minio:
         # Pinned by digest, not by tag, and not to `latest`.
         #
-        # `Blobstore S3 Round-Trip` is a required status check. `:latest` on a
-        # required check means a third party can turn every PR in this repo red
-        # by publishing a release, at a moment unrelated to anything we did --
-        # and the failure would land on whichever PR happened to be open, whose
-        # author would have no reason to suspect the image. That is the shape of
-        # the actions/setup-go v7 cache-key change that made #325 permanently
-        # unmergeable (tiers.yaml records it), arriving through a different door.
+        # `Blobstore S3 Round-Trip` is a required status check (classic branch
+        # protection on develop). `:latest` on a required check means a third
+        # party can turn every PR in this repo red by publishing a release, at a
+        # moment unrelated to anything we did. That is the shape of the
+        # actions/setup-go v7 cache-key change that made #325 permanently
+        # unmergeable (tiers.yaml records it).
         #
-        # The digest below is what `:latest` resolved to when this was pinned on
-        # 2026-08-07, so this is the image the job had already been green on --
-        # RELEASE.2025-09-07T16-13-09Z, which quay has carried as `latest` since
-        # 2025-09-07. Pinning it is a no-op today and a guarantee tomorrow.
+        # Chainguard's MinIO build, not quay.io/minio/minio. On 2026-09-24
+        # (cleat#2211) quay.io/minio/minio stopped serving anonymous pulls:
+        # `unauthorized` from the Docker daemon, and 401 for the pinned digest
+        # even with an anonymous pull token. docker.io/minio/minio answers 401
+        # too. Every PR's copy of this required check went red at "Initialize
+        # containers", and every merge was blocked. A digest pin does not
+        # protect against a registry withdrawing anonymous access. Nothing
+        # does, except a registry that still serves one.
         #
-        # By digest rather than by the RELEASE tag because MinIO republishes
-        # hotfix tags against old releases (RELEASE.2024-08-03...hotfix.ca75c7346
-        # was pushed in March 2026), so a release tag is not by itself a promise
-        # that the bytes are fixed. Re-derive both:
+        # cgr.dev/chainguard/minio is served anonymously. Its free tier
+        # publishes only `latest`, so this digest is what `latest` resolved to
+        # on 2026-09-24. Re-derive it, and check that it is still pullable
+        # without credentials, with:
         #
-        #   curl -s 'https://quay.io/api/v1/repository/minio/minio/tag/?onlyActiveTags=true' \
-        #     | python3 -c "import json,sys; [print(t['name'], t['manifest_digest']) \
-        #       for t in json.load(sys.stdin)['tags'] if t['name']=='latest']"
+        #   T=$(curl -s 'https://cgr.dev/token?scope=repository:chainguard/minio:pull&service=cgr.dev' \
+        #     | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("token") or d["access_token"])')
+        #   curl -sI -H "Authorization: Bearer $T" \
+        #     -H 'Accept: application/vnd.oci.image.index.v1+json' \
+        #     https://cgr.dev/v2/chainguard/minio/manifests/latest | grep -i docker-content-digest
         #
-        # This is a pin to be bumped deliberately, not a fossil: renovate.json
-        # extends config:recommended, whose github-actions manager reads service
-        # image fields, so a newer digest arrives as a reviewable PR that must go
-        # green before it lands -- which is the whole difference from `:latest`.
+        # Measured against this digest before pinning: TestBlobstore_S3 passes
+        # with the endpoint pointed at it, and fails with the endpoint pointed
+        # at a closed port.
         #
-        # The larger version of the same problem was mcr.microsoft.com/mssql/
-        # server:2022-latest, which this comment used to record as not done.
-        # Done on 2026-08-07: it is pinned by digest at six sites, and the
-        # rationale is in tier1-gate.yml's mssql service. That one had a wrinkle
-        # this one did not -- four `docker ps --filter ancestor=` lookups name
-        # the image too, and they match on the pull reference, so pinning only
-        # `image:` would have left them matching nothing.
-        image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+        # This is a pin to be bumped DELIBERATELY AND BY HAND. Nothing automates
+        # it: Renovate has never run here (renovate.json was deleted in
+        # cleat#1321), and no Dependabot PR has ever touched .github/workflows/.
+        #
+        # The image has no curl or shell, and runs as a non-root user (uid
+        # 65532), so the container health check the quay image used
+        # (`curl -f .../minio/health/live`) cannot run inside it. The step
+        # "Wait for MinIO" below polls the same endpoint from the runner
+        # instead.
+        image: cgr.dev/chainguard/minio@sha256:bd014394a80898e68c149f2311fdf8d5a2c2f3bb2c33b9327ae6d02b4b065ae1
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
         ports:
           - 9000:9000
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
         command: server /data
     env:
       CLEAT_TEST_POSTGRES: postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable
@@ -349,10 +548,10 @@ jobs:
       CLEAT_TEST_S3_BUCKET: cleat-test-harness
       CLEAT_TEST_S3_USE_SSL: 'false'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
       # tests/plugin-harness is its own Go module since the
       # root<->cleat/ module cycle was broken (it imports cleat/cleattest and
       # cleat/wasmtest; the root module must not). `go test
@@ -360,6 +559,17 @@ jobs:
       # fails with "directory prefix tests/plugin-harness does not contain main
       # module or its selected dependencies" -- so the pattern is ./... from
       # inside the module instead. See tests/plugin-harness/go.mod.
+      - name: Wait for MinIO
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:9000/minio/health/live >/dev/null; then
+              echo "MinIO is live after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::error title=minio::MinIO did not answer /minio/health/live within 60s" >&2
+          docker ps -a
+          exit 1
       - run: go test -count=1 -timeout=120s -v ./... -run 'TestBlobstore_S3'
         working-directory: tests/plugin-harness
         env:

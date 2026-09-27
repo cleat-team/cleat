@@ -8,6 +8,39 @@ import (
 	"github.com/google/uuid"
 )
 
+// SignalDelivery is one delivered, not-yet-consumed signal.
+//
+// The ID exists because a signal is a delivery and a delivery needs an
+// identity that a name cannot supply. Before IMPROVEMENT-PLAN 3.215 the table
+// was keyed (workflow_id, signal_name) and a second signal of the same name
+// overwrote the first, so "the approve signal" and "the approve delivery" were
+// the same row by construction.
+type SignalDelivery struct {
+	// ID orders the queue and identifies the row to ConsumeSignal. It is the
+	// table's surrogate key, monotonic per database.
+	ID int64
+	// Payload is the delivered body, already decoded out of the JSON wrapper
+	// the payload column requires (see decodeJSONPayload).
+	Payload string
+	// DeliveredAtMs is when the signal was stored, in Unix milliseconds, from
+	// the workflow_signals.delivered_at column.
+	//
+	// It exists so a non-blocking poll can be answered as a function of
+	// recorded state rather than of when the poll happens to run. PollSignal
+	// used to re-query live on every execution, so a poll that answered "no
+	// signal" before a suspension answered "yes, and here is the payload" after
+	// it -- carrying a payload that did not exist when that line first ran
+	// (#882). The fix compares this against the session's durable clock, which
+	// is the same derivation #847 settled on for PollChild.
+	//
+	// Zero means the store did not populate it. Every real store does; the
+	// value is NOT NULL DEFAULT now() in all three schemas. A zero therefore
+	// means a test double, and is treated as visible so that doubles keep
+	// their previous behaviour. TestEveryPollSignalSelectsDeliveredAt is what
+	// stops a real implementation joining that population silently.
+	DeliveredAtMs int64
+}
+
 type WorkflowStore interface {
 	// ClaimWorkflow atomically dequeues a runnable workflow instance.
 	// Uses SELECT ... FOR UPDATE SKIP LOCKED.
@@ -16,6 +49,30 @@ type WorkflowStore interface {
 	// ClaimWorkflows atomically claims up to limit runnable workflow instances.
 	// Like ClaimWorkflow but batches multiple claims into one query.
 	ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error)
+
+	// CountRunnableWorkflows counts rows a claim would be entitled to take, and
+	// exists so a worker can tell "nothing to run" from "everything was locked".
+	//
+	// ClaimWorkflows selects candidates with FOR UPDATE SKIP LOCKED (READPAST on
+	// SQL Server), so a locked row is REMOVED from the result set rather than
+	// blocking. A zero claim therefore has two meanings and the caller cannot
+	// distinguish them -- and cmd/cleat-worker backs off progressively on the
+	// zero, to 6x pollInterval. See IMPROVEMENT-PLAN 3.249 for the measurement.
+	//
+	// It MUST use the same predicate as this store's ClaimWorkflows, including
+	// task_queue and the tenant scoping, which differs per dialect: PostgreSQL
+	// relies on RLS inside beginTxWithRLS, MySQL and SQL Server carry an
+	// explicit tenant_id. Counting without task_queue over-reports -- rows a
+	// worker is correctly declining to claim would read as work it is missing --
+	// which was the one flaw in cleat#923 as originally filed.
+	//
+	// This is a deliberate interface addition with four implementers, made
+	// because the alternative does not achieve the goal: logging the backoff
+	// state alone cannot distinguish a stalled worker from a genuinely idle one,
+	// since both emit the same line. It has a production caller from the first
+	// commit (cmd/cleat-worker/setup.go), unlike the unwired options 3.889 is
+	// about.
+	CountRunnableWorkflows(ctx context.Context) (int, error)
 
 	// ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
 	// that are sticky to this worker. Uses idx_instances_sticky for low-contention
@@ -34,8 +91,18 @@ type WorkflowStore interface {
 	// CountEventHistory returns the total number of events for a workflow.
 	CountEventHistory(ctx context.Context, workflowID string) (int, error)
 
+	// IsHistorySwept reports whether the retention sweep (DeleteExpiredEvents)
+	// has ever removed this workflow's event_history. cleat#2038: an empty
+	// history is ambiguous between "no call was ever made" and "a call's
+	// outcome was swept before it could be recorded", and ReReplay's
+	// pending-intent guard needs to tell them apart. Returns false, nil for a
+	// workflow that does not exist -- the caller (ReReplay) already treats a
+	// failed lookup as non-fatal for the same reason a failed
+	// LoadEventHistory is.
+	IsHistorySwept(ctx context.Context, workflowID string) (bool, error)
+
 	// AppendEventHistory appends a single event to the history.
-	// Uses ON CONFLICT (workflow_id, step) DO NOTHING for idempotency.
+	// Idempotent: PostgreSQL upserts on ON CONFLICT (tenant_id, workflow_id, step).
 	AppendEventHistory(ctx context.Context, workflowID string, rec EventRecord) error
 
 	// AppendEventHistoryBatch appends multiple events atomically.
@@ -62,14 +129,28 @@ type WorkflowStore interface {
 	// or if the generation does not match (workflow was reaped).
 	Heartbeat(ctx context.Context, workflowID, workerID string, generation int64) (bool, error)
 
-	// BatchHeartbeat updates heartbeat_at for all workflows assigned to this
-	// worker with status 'running'. Uses a single UPDATE instead of N calls.
-	// NOTE: This intentionally does NOT check per-workflow generation because
-	// it operates on ALL workflows for a worker, and generations differ per
-	// workflow. Individual generation-guarded operations (Heartbeat,
-	// CompleteWorkflow, FailWorkflow, etc.) prevent double-execution even if
-	// the batch heartbeat refreshes a stale workflow's heartbeat_at.
-	BatchHeartbeat(ctx context.Context, workerID string) (int64, error)
+	// HeartbeatBatchFenced heartbeats every given (workflowID, generation)
+	// pair in ONE round trip, fenced individually per pair. Returns the
+	// WorkflowIDs from runs whose pair was NOT stamped: the row's generation
+	// has moved on, it is no longer assigned to this worker, or it is no
+	// longer 'running'. Every one of those has lost its fence and must not
+	// be allowed to start another durable call. cleat#2008.
+	//
+	// Replaced BatchHeartbeat at the worker's one heartbeat-loop call site
+	// (cleat#2008; see cmd/cleat-worker/setup.go's heartbeatAndFenceInFlight)
+	// rather than running alongside it: unlike BatchHeartbeat, which took no
+	// generation and so could not tell a superseded execution from a live
+	// one, this takes the (workflowID, generation) pairs w.inflight already
+	// carries and reports exactly which are stale, at the same one-round-trip
+	// cost. The individual generation-guarded operations (Heartbeat,
+	// CompleteWorkflow, FailWorkflow, etc.) still prevent double-execution
+	// independent of this.
+	//
+	// Row-locks the candidates for the duration of the call (FOR UPDATE /
+	// UPDLOCK) so the eligibility check and the stamp happen against the same
+	// snapshot -- a two-step check-then-update across separate statements
+	// would leave a window for a reclaim to land in between and be missed.
+	HeartbeatBatchFenced(ctx context.Context, workerID string, runs []GenerationKey) (lost []string, err error)
 
 	// CompleteWorkflow marks a workflow as completed with a result.
 	CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error
@@ -89,6 +170,21 @@ type WorkflowStore interface {
 
 	// ReleaseWorkflow returns a workflow to the ready queue.
 	// Used when a workflow suspends (sleep/await signals).
+	//
+	// Returns ErrFenceLost when the caller no longer holds the claim -- the
+	// same report CompleteWorkflow, FailWorkflow and FinalizeWorkflowSegment
+	// make for the same condition. It means nothing was written and nothing
+	// needed to be: another worker owns the run, so the release the caller
+	// asked for is already true. Callers should treat it as the no-op it is
+	// rather than as a failure; cmd/cleat-worker's releaseWorkflow is the
+	// reference handling.
+	//
+	// Until cleat#1223 this returned nil on PostgreSQL and MySQL and a raw
+	// "no rows affected" error on SQL Server, so the condition was
+	// undetectable on two dialects and not errors.Is-able on the third.
+	//
+	// nextWakeAt must be a real time. MySQL rejects the zero value for this
+	// column where the other two accept it.
 	ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error
 
 	// ContinueAsNew atomically creates a new workflow run AND completes the
@@ -98,7 +194,8 @@ type WorkflowStore interface {
 
 	// FinalizeWorkflowSegment atomically appends new events and updates the
 	// workflow status in a single database transaction.  finalStatus is one of
-	// "done", "failed" or "ready" (suspend).  Fields not relevant to the chosen
+	// "done" or "ready" (suspend) -- not "failed": a real failure goes through
+	// FailWorkflow instead (cleat#1973).  Fields not relevant to the chosen
 	// status are ignored.  If the transaction fails neither events nor status
 	// are written.
 	FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error
@@ -112,14 +209,26 @@ type WorkflowStore interface {
 	// DeliverSignal stores a signal for a workflow.
 	DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error
 
-	// PollSignal checks for a delivered signal.
-	PollSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error)
+	// PollSignal returns the OLDEST unconsumed delivery with this name,
+	// without consuming it. Ordering is by SignalDelivery.ID, which is the
+	// table's surrogate key -- see migrations/postgres/041_signal_queue.sql
+	// for why delivered_at cannot serve.
+	//
+	// It does not consume, and that is deliberate rather than an oversight:
+	// consuming here would make delivery at-most-once, because the caller
+	// still has to get the signal_received event durable and a crash in
+	// between would lose the signal outright. The await path records the
+	// event first and calls ConsumeSignal after. See IMPROVEMENT-PLAN 3.215.
+	PollSignal(ctx context.Context, workflowID, signalName string) (delivery SignalDelivery, found bool, err error)
+
+	// ConsumeSignal removes one delivery by id, so a later PollSignal for the
+	// same name returns the next one. Removing an id that is already gone is
+	// not an error: the await path may be replaying a segment whose consume
+	// succeeded and whose crash came after.
+	ConsumeSignal(ctx context.Context, workflowID string, id int64) error
 
 	// PollCancellation checks whether the workflow has been cancelled.
 	PollCancellation(ctx context.Context, workflowID string) (cancelled bool, reason string, err error)
-
-	// PollAndClaimSignal atomically checks for and claims a pending signal.
-	PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (payload string, found bool, err error)
 
 	// StartNewRun creates a new workflow instance.
 	// If idempotencyKey is non-empty, provides exactly-once semantics: a
@@ -138,24 +247,162 @@ type WorkflowStore interface {
 	// child_workflow event in a single transaction, guaranteeing exactly-once creation.
 	StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (runID string, err error)
 
-	// GetChildResult checks whether a child workflow has completed and returns its result.
-	GetChildResult(ctx context.Context, runID string) (resultJSON string, completed bool, err error)
+	// GetChildResult reports what a child workflow left behind: whether it has
+	// completed, whether it failed, and its result or its error message. The
+	// returned error is a STORE error -- a child that ran and failed is a
+	// successful call with ChildOutcome.Failed set (cleat#1115).
+	GetChildResult(ctx context.Context, runID string) (outcome ChildOutcome, err error)
+
+	// GetChildCompletedAtMs returns when a child completed, in Unix
+	// milliseconds, and whether it has completed at all. PollChild needs the
+	// instant rather than GetChildResult's boolean, because "is it complete
+	// now" is not a replayable question -- see engine/children.go's
+	// pollChildIsDeterministic and issue #847. DATABASE clock.
+	GetChildCompletedAtMs(ctx context.Context, runID string) (completedAtMs int64, ok bool, err error)
 
 	// ReapStaleInstances reclaims workflow instances that have been running
-	// but whose heartbeat has not been updated within the given timeout.
-	// Returns the number of instances reclaimed.
-	ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error)
+	// but whose heartbeat has not been updated within the given timeout,
+	// oldest heartbeat first, at most limit of them. A limit <= 0 is
+	// unbounded. Returns the number of instances reclaimed.
+	//
+	// THE LIMIT IS A PARAMETER RATHER THAN A STORE FIELD, deliberately: a
+	// field defaults to zero on a dialect that forgets to set it, and zero
+	// here means unbounded -- the exact behaviour the bound exists to prevent,
+	// arrived at silently. As a parameter the compiler makes every
+	// implementation answer for it.
+	//
+	// WHY BOUND IT AT ALL. The reaper reclaims anything whose heartbeat
+	// predates max(2*heartbeat, 10s). Any stall that outlasts that window --
+	// a migration holding ACCESS EXCLUSIVE at boot, a failover, a paused
+	// volume -- ages EVERY running instance past it at once, because they all
+	// heartbeat through the same table. On release the sweep reclaims the
+	// whole running set in one statement and every in-flight workflow replays
+	// simultaneously, against a database that has just finished whatever
+	// stalled it. No data is lost -- fencing sees to that -- and the cost is a
+	// self-inflicted thundering herd at the moment the database can least
+	// absorb one. cleat#1320.
+	//
+	// Ordering by heartbeat_at is what makes the bound safe in the other
+	// direction: if workers really have died, the longest-stale are reclaimed
+	// first and the rest follow on later ticks. The bound changes the RATE of
+	// recovery, never whether it happens.
+	//
+	// `status = 'running'` IS THE WHOLE POPULATION, AND THAT IS DELIBERATE.
+	// The most common not-running state is not an anomaly, it is a parked row:
+	// ReleaseWorkflow writes status='ready' (or 'terminating'), assigned_to =
+	// NULL, next_wake_at = <when>, and every DurableSleep goes through it. Such
+	// a row is not owned by anyone, so there is no claim to reclaim and nothing
+	// stale about it; it is picked up by the ordinary claim predicate,
+	// `status IN ('ready','terminating') AND next_wake_at <= now()`, when its
+	// time comes. Losing the worker that parked it changes nothing.
+	//
+	// So DO NOT widen this to include 'ready' in the name of more aggressive
+	// crash recovery. It would reclaim every sleeping workflow in the system,
+	// bumping generation and reclaim_count on rows that are behaving exactly as
+	// designed. Measured on all three dialects (cleat#1429), one row in both
+	// states: claimed and swept -> reclaim_count 1; then parked with a 45s wake
+	// and swept again -> reclaim_count still 1. Timeout 0 both times, so
+	// nothing is excluded by age and the status arm is the only thing deciding.
+	//
+	// THERE IS NO TEST HOLDING THIS RIGHT NOW, and that is the honest state.
+	// #1436 landed one and it was reverted the same day: it passed alone on all
+	// three dialects and failed inside the full engine suite on SQL Server,
+	// turning develop red. cleat#1447 has what is established and what is ruled
+	// out. Treat this comment as a description, not a guarantee, until a test
+	// is back.
+	//
+	// reclaim_count rather than status is the discriminator, and status cannot
+	// serve: reclaiming sets status back to 'ready', which is exactly where
+	// parking already put the row, so it reads 'ready' either way. Under a
+	// deliberate widening to status IN ('running','ready') the row IS reclaimed
+	// a second time and still logs status="ready" -- so a status-based
+	// assertion passes on the precise inversion of the property.
+	ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error)
 
 	// GetQueryState returns the query state for a workflow instance key.
 	GetQueryState(ctx context.Context, workflowID, key string) (string, error)
+
+	// ListQueryState returns everything a run published, as key -> value.
+	//
+	// WHY THIS EXISTS, given cleat#1119 deliberately decided the opposite.
+	// That issue asked whether published state should be enumerable at all and
+	// answered no: a keyed-only reader means the caller must know what it is
+	// asking for, which keeps published state a contract rather than a bag.
+	// The HTTP route still carries the refusal that decision produced.
+	//
+	// Reversed on the operational case cleat#1119 itself names -- "a run
+	// misbehaved and you do not know what it published". Owner decision
+	// (cleat#1571): query state is a semantically limited standard interface,
+	// and being able to VIEW it is part of that. Anything elaborate belongs in
+	// app-specific code, which is why this returns the map and stops there: no
+	// projection, no join, no aggregation.
+	//
+	// An unknown workflow yields an empty map and no error, matching
+	// GetQueryState's existing answer for a key that is not there. A caller
+	// asking what a run published, when there is no such run, has an answer.
+	ListQueryState(ctx context.Context, workflowID string) (map[string]string, error)
 
 	// ListWorkflows returns workflow instances filtered by the given filter parameters.
 	// Supported filters: Status, InputContains, ErrorContains, Search.
 	// Supports pagination via Offset and Limit (default 100, max 1000).
 	ListWorkflows(ctx context.Context, filter WorkflowFilter) ([]WorkflowInstance, error)
 
+	// CountWorkflows returns how many rows ListWorkflows would return for the
+	// same filter with no limit, so a caller can tell a full page from the end
+	// of the data. On the interface rather than behind a type assertion: a
+	// store that cannot answer this should fail to compile, not silently omit
+	// a total and leave the caller unable to tell which happened.
+	CountWorkflows(ctx context.Context, filter WorkflowFilter) (int, error)
+
 	// GetWorkflowByID returns a single workflow instance by ID.
+	//
+	// It returns THE ROW WITH THAT ID and does not follow a ContinueAsNew
+	// chain. That is deliberate (cleat#887): four call sites and the admin
+	// dashboard read through this method and want the row they named, so
+	// following the chain here would silently change what an existing read
+	// returns. Callers who want the chain's outcome call GetTerminalRun.
 	GetWorkflowByID(ctx context.Context, id string) (*WorkflowInstance, error)
+
+	// GetTerminalRun follows a ContinueAsNew chain forward from id and returns
+	// the last run in it AS OF NOW. cleat#826, cleat#887.
+	//
+	// "Terminal" names the END OF THE CHAIN, not a terminal STATUS, and the
+	// two come apart for exactly as long as the workflow is still working:
+	//
+	//	the run this returns may be 'running', with an empty result
+	//
+	// because the last link recorded so far is the one currently executing.
+	// The caller must poll on the returned run's STATUS; it must not assume
+	// that a non-nil answer carries a result. This doc comment claimed the
+	// opposite until #904 -- it said this returned "the one carrying the
+	// result the caller is waiting for", which is true only once the chain has
+	// finished, and a port-suite test believed it and dereferenced a nil
+	// result. The failure read as a shape problem and was a timing one.
+	//
+	// The trap underneath is worth stating, because it is not obvious: the
+	// FIRST run of a chain reaches a terminal status the instant it continues.
+	// So "the run I started is done" is true almost immediately and means
+	// nothing about the chain. Waiting on the id you started is not waiting
+	// for the work.
+	//
+	// A workflow that never continued is its own terminal run, so this is
+	// equivalent to GetWorkflowByID for the overwhelming majority of ids. A
+	// workflow that continued N times is reached in N hops. Returns nil, nil
+	// when id names no workflow, matching GetWorkflowByID.
+	//
+	// The name is kept rather than corrected to something like GetLatestRun:
+	// it is the end of the chain that callers ask for, and renaming an already
+	// released method to fix a doc comment trades a wrong sentence for a
+	// breaking change.
+	//
+	// COST: one indexed seek per hop, plus one full read at the end, rather
+	// than a single query. A recursive CTE would collapse that to one round
+	// trip and every dialect the project targets supports one -- but the repo
+	// uses no recursive CTE today, and adding three dialect-specific ones with
+	// three different recursion caps is a larger and less falsifiable change
+	// than this method is worth. It is an optimisation, not a correctness fix:
+	// the walk is bounded and cycle-safe either way.
+	GetTerminalRun(ctx context.Context, id string) (*WorkflowInstance, error)
 
 	// CreateSchedule inserts a new cron schedule.
 	CreateSchedule(ctx context.Context, s Schedule) error
@@ -171,9 +418,6 @@ type WorkflowStore interface {
 
 	// GetDueSchedules returns enabled schedules whose next_run_at <= now().
 	GetDueSchedules(ctx context.Context) ([]Schedule, error)
-
-	// UpdateScheduleNextRun updates a schedule's next_run_at after firing.
-	UpdateScheduleNextRun(ctx context.Context, name string, nextRun time.Time) error
 
 	// ClaimDueSchedule advances a schedule from one firing instant to the next,
 	// but only if it is still sitting on the instant the caller saw. It reports
@@ -221,10 +465,13 @@ type WorkflowStore interface {
 	CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error
 
 	// ResolvePromise marks a promise as resolved with the given result.
-	ResolvePromise(ctx context.Context, workflowID, promiseID, result string) error
+	// Keyed by promise ID alone -- see PromiseStore for why a settler cannot
+	// supply a workflow ID.
+	ResolvePromise(ctx context.Context, promiseID, result string) error
 
 	// RejectPromise marks a promise as rejected with the given error message.
-	RejectPromise(ctx context.Context, workflowID, promiseID, errMsg string) error
+	// Keyed by promise ID alone, as ResolvePromise above.
+	RejectPromise(ctx context.Context, promiseID, errMsg string) error
 
 	// GetPromise returns the current status and result of a promise.
 	GetPromise(ctx context.Context, workflowID, promiseID string) (status string, result string, errMsg string, err error)
@@ -243,7 +490,7 @@ type WorkflowStore interface {
 	GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error)
 
 	// CompleteUpdateRequest marks an update request as completed with a result or error.
-	CompleteUpdateRequest(ctx context.Context, workflowID, updateName, result, errMsg string) error
+	CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error
 
 	// ---- Concurrency Key methods (Feature 5) ----
 
@@ -253,7 +500,7 @@ type WorkflowStore interface {
 	AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (acquired bool, err error)
 
 	// ReleaseConcurrencyKey releases a specific concurrency key.
-	ReleaseConcurrencyKey(ctx context.Context, key string) error
+	ReleaseConcurrencyKey(ctx context.Context, key, workflowID string) (released bool, err error)
 
 	// ReleaseWorkflowConcurrencyKeys releases all concurrency keys held by a workflow.
 	ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflowID string) error
@@ -318,9 +565,29 @@ type WorkflowStore interface {
 
 	// DeleteExpiredEvents deletes event history rows for workflows that are in a
 	// terminal state (completed/failed) and whose last update is older than the
-	// cutoff time.  It also deletes associated compaction states.
+	// cutoff time. It also marks history_swept_at on every workflow it actually
+	// swept (cleat#2038) so ReReplay's pending-intent guard can tell "never
+	// attempted" from "swept, outcome unknown". See
+	// PostgresStore.DeleteExpiredEvents in engine/db.go for the full reasoning.
 	// Returns the number of event rows deleted.
 	DeleteExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error)
+
+	// ClearExpiredCompactionState clears compaction bookkeeping --
+	// compaction_state, compaction_step, compacted_at -- on terminal workflows
+	// older than the cutoff, and returns how many rows it cleared.
+	//
+	// Separate from DeleteExpiredEvents on purpose, though the two run
+	// together. THIS COMMENT USED TO SAY THAT FUNCTION "CAN NEVER MATCH"
+	// because finalize_workflow_status purges those events first, citing
+	// cleat#1016 -- wrong about which code path a 'failed' workflow takes; see
+	// PostgresStore.DeleteExpiredEvents's doc comment in engine/db.go for the
+	// correction (cleat#2038). What is still true: this updates
+	// workflow_instances rather than event_history, a different table.
+	// Returning both through one int64 would put deleted rows and updated
+	// rows, on different tables, under a single counter documented as
+	// "expired event history rows deleted" -- so each half reports its own
+	// number under its own metric. cleat#1024.
+	ClearExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error)
 
 	// ResolveTenantFromAPIKey looks up a tenant UUID by API key hash.
 	// Returns uuid.Nil if the key is not found or revoked.
@@ -331,6 +598,26 @@ type WorkflowStore interface {
 	// to own the workflow. Use sparingly — it leaves the workflow in an
 	// indeterminate state and should only be used when a workflow is truly stuck.
 	TerminateWorkflow(ctx context.Context, workflowID, reason string) error
+
+	// CancelWorkflow stops a workflow pre-emptively and records 'cancelled' as
+	// its terminal status. cleat#1153.
+	//
+	// THE DIFFERENCE FROM RequestCancellation IS OBSERVABILITY, not force.
+	// RequestCancellation sets a flag and leaves stopping AND reporting to the
+	// workflow, so a run that honoured a cancellation and one that simply
+	// finished both ended 'done' -- an operator could not answer "did this stop
+	// because I asked it to?". This records the answer.
+	//
+	// IT RUNS THE DEFERS IT OWES. A workflow with registered defer bodies goes
+	// to 'terminating' with 'cancelled' recorded in pending_terminal_status,
+	// is re-claimed, replays its history as a defer segment, and only then
+	// becomes 'cancelled'. That is TerminateWorkflow's two-phase transition,
+	// shared rather than rebuilt.
+	//
+	// IT TAKES EFFECT AT THE NEXT CLAIM, not by interrupting a durable call in
+	// flight. Same as TerminateWorkflow, and the two-phase shape depends on it:
+	// the workflow has to be re-claimed to run its defer segment.
+	CancelWorkflow(ctx context.Context, workflowID, reason string) error
 
 	// DeleteDeadLetteredWorkflows permanently deletes workflow instances that are
 	// in the dead_lettered state and whose completed_at is older than the cutoff.
@@ -379,6 +666,29 @@ type WorkflowStore interface {
 	// workflow_instances rows deleted.
 	DeleteCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error)
 
+	// Count* report what the corresponding Delete/Clear above WOULD remove,
+	// without removing it. cleat#1457.
+	//
+	// Each is built from the same predicate constant as its delete -- see
+	// engine/retention_predicates.go -- so the two cannot drift into disagreeing.
+	// A preview computed by a separately-written query is a MODEL of the sweep
+	// rather than the sweep, and diverges silently and in the reassuring
+	// direction.
+	//
+	// BEST EFFORT. The count is taken at one instant against a database other
+	// workers are writing to; between the preview and the sweep that follows it,
+	// workflows complete and rows age past the cutoff. It is the right number
+	// for catching a mistyped retention window, which is what it is for, and not
+	// a promise about which rows will be deleted.
+	//
+	// On the interface rather than behind a type assertion, deliberately: an
+	// optional interface lets a store silently lack a preview and report nothing
+	// where it should report a refusal.
+	CountExpiredEvents(ctx context.Context, olderThan time.Time) (int64, error)
+	CountExpiredCompactionState(ctx context.Context, olderThan time.Time) (int64, error)
+	CountDeadLetteredWorkflows(ctx context.Context, olderThan time.Time) (int64, error)
+	CountCompletedWorkflows(ctx context.Context, olderThan time.Time) (int64, error)
+
 	// StreamEventHistory loads event history for a workflow in pages, returning
 	// events through a channel. Events are fetched in pages of pageSize as the
 	// caller reads from the channel. The channel is closed when all events have
@@ -391,6 +701,31 @@ type WorkflowStore interface {
 	// are excluded from the count.
 	GetChildCount(ctx context.Context, parentWorkflowID string) (int, error)
 
+	// OriginalChildRunIDs returns the run IDs of children this parent STARTED,
+	// excluding runs that exist only because a child continued as new.
+	//
+	// It exists for one check: every child a parent started has a
+	// child_workflow event in that parent's history, written ATOMICALLY with
+	// the child row (StartChildWorkflowAtomic -- one transaction, both
+	// INSERTs, on all three dialects). A child with no such event is therefore
+	// not a race; it means the event was removed after the fact, and the parent
+	// is about to start a duplicate because replay could not see it. That is
+	// cleat#1661.
+	//
+	// EXCLUDING CONTINUED RUNS IS NOT AN OPTIMISATION. Continue-as-new INHERITS
+	// parent_workflow_id (engine/store_lifecycle.go:307, deliberately -- a
+	// child that continues is still its parent's child, cleat#955) and records
+	// NO new event in the parent. So a parent whose single child continued
+	// three times has four rows pointing at it and one child_workflow event,
+	// and a check that did not exclude them would report three orphans on a
+	// perfectly healthy workflow.
+	//
+	// Compaction needs no such exclusion, and that was checked rather than
+	// assumed: CompactionState preserves child_workflow events WITH their RunID
+	// (engine/compaction.go:713), and buildFullHistoryFromCompaction puts them
+	// back, so a compacted parent's history still names every child it started.
+	OriginalChildRunIDs(ctx context.Context, parentWorkflowID string) ([]string, error)
+
 	// GetConcurrencyKeyCount returns the number of non-expired concurrency keys
 	// held by the given workflow. This is used for per-workflow concurrency key
 	// quota enforcement. Keys whose expires_at is in the past are excluded.
@@ -401,8 +736,22 @@ type WorkflowStore interface {
 	GetEventCount(ctx context.Context, workflowID string) (int, error)
 
 	// GetAllowedSignalCallers returns the allowed_signals list for a workflow.
-	// Returns nil when allowed_signals is NULL or empty (deny-all semantics).
+	// Returns nil, with no error, when allowed_signals is NULL or empty
+	// (deny-all semantics). Returns ErrWorkflowNotFound when no workflow
+	// with this id is visible to the calling store's tenant.
 	GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error)
+
+	// SetAllowedSignalCallers replaces the allowed_signals list for a workflow.
+	//
+	// Replaces rather than merges, so the list a caller writes is the list
+	// GetAllowedSignalCallers reads back. An empty or nil slice writes SQL NULL,
+	// which is the same deny-all the getter reports as nil -- "clear the list"
+	// therefore has one spelling and it round-trips.
+	//
+	// Returns ErrWorkflowNotFound when no workflow with that id is visible to
+	// the caller's tenant. Reporting success for a write that matched no row
+	// would tell an operator they had granted access when they had not.
+	SetAllowedSignalCallers(ctx context.Context, workflowID string, callers []string) error
 
 	// ---- Tag methods (deployment channels) ----
 
@@ -436,7 +785,7 @@ type WorkflowStore interface {
 	// ---- Version Resolution ----
 
 	// ResolveVersionByTag resolves a version tag to a version number.
-	// Special case: tag "latest" returns MAX(version) WHERE NOT deprecated.
+	// Special case: tag "latest" returns MAX(version) WHERE disabled_at IS NULL.
 	ResolveVersionByTag(ctx context.Context, workflowName string, tag string) (int, error)
 
 	// ---- Admin operations ----
@@ -449,6 +798,109 @@ type WorkflowStore interface {
 
 	// AdminReReplay replays a workflow's event history for debugging.
 	AdminReReplay(ctx context.Context, workflowID string, generation int64, operator string) error
+}
+
+// DBPinger is implemented by a store that can report whether it can reach
+// its underlying database right now, independent of any workflow it holds.
+//
+// It is deliberately its own interface rather than a WorkflowStore method:
+// adding it there would force every test stub and mock in engine/ and
+// cmd/cleat-worker to grow a new method before it could compile, for a
+// capability most of them have no database to back. A caller checks for it
+// with a type assertion; a store that doesn't implement it is simply never
+// probed while idle, which is every test double today.
+//
+// cleat#2005's follow-up review: a worker with no in-flight runs made no
+// heartbeat round trip at all, so "no trouble recorded" meant "never
+// checked," not "checked and fine." PingDB is what an idle worker's
+// heartbeat tick calls instead, so the two read the same.
+type DBPinger interface {
+	PingDB(ctx context.Context) error
+}
+
+// StaleSetShape is the raw shape of a store's currently-stale running set,
+// against two thresholds: a short one (missedBeatTimeout, "has this row
+// missed at least one expected heartbeat") used to DETECT a suspected
+// database stall quickly, and the reclaim threshold itself (timeout) used
+// only to know when the set has fully recovered. See DBStallDetector.
+type StaleSetShape struct {
+	// Running is every status='running' row in the store's scope -- the
+	// same population ReapStaleInstances sweeps.
+	Running int
+
+	// MissedBeat, MissedBeatDistinctAssignedTo, MissedBeatOldest and
+	// MissedBeatNewest describe the rows with heartbeat_at older than
+	// missedBeatTimeout -- NOT the reclaim threshold. This is the
+	// DETECTION population: cleat#2006 found that gating detection on the
+	// full reclaim threshold misses a whole-fleet stall shorter than that
+	// threshold, because individual rows cross it staggered rather than at
+	// once.
+	MissedBeat                   int
+	MissedBeatDistinctAssignedTo int
+	MissedBeatOldest             time.Time
+	MissedBeatNewest             time.Time
+
+	// Stale is the count with heartbeat_at older than the reclaim
+	// threshold (timeout) itself -- the population ReapStaleInstances will
+	// actually act on. Used only to know when the set has fully recovered
+	// (Stale == 0), not for detection.
+	Stale int
+
+	// NoRecentHeartbeat is true when NOT EVEN ONE running row in scope has
+	// a heartbeat newer than missedBeatTimeout -- i.e. the single freshest
+	// row in the WHOLE population is itself stale. Computed server-side,
+	// against the database's own clock, over every running row -- unlike
+	// MissedBeatNewest, which is MAX() taken only across the already-stale
+	// subset and so cannot answer "has anything recent happened at all":
+	// if every row happens to be stale, MissedBeatNewest reports the
+	// freshest of THOSE, which looks identical whether or not a live
+	// survivor exists outside the CASE WHEN filter that produced it.
+	//
+	// cleat-review on cleat#2006 (2026-09-24): the original fraction+spread
+	// criterion (suspectedStallStaleFraction) had a residual false-negative
+	// at the boundary -- 5 workers, the 4 oldest rows past missedBeat and
+	// the 5th (freshest) not yet, is 4/5 = 80%, and 80% is not > 80%. This
+	// field is what replaced it: cheaper to reason about, and it doesn't
+	// depend on staleness arriving within any particular spread window.
+	NoRecentHeartbeat bool
+
+	// DistinctAssignedTo is COUNT(DISTINCT assigned_to) over EVERY running
+	// row in scope, not just the missed-beat subset (contrast
+	// MissedBeatDistinctAssignedTo). See suspectedDBStall's doc for why a
+	// single-worker fleet must never trip suspicion regardless of
+	// NoRecentHeartbeat.
+	DistinctAssignedTo int
+}
+
+// DBStallDetector is implemented by a store that can report StaleSetShape,
+// for the suspected-database-stall-vs-dead-workers decision (cleat#2006).
+//
+// Deliberately its own interface, same reasoning as DBPinger: most test
+// doubles have no database behind them to answer this, and a caller checks
+// for it with a type assertion rather than every mock growing a new method.
+type DBStallDetector interface {
+	// StaleSetShape reports the shape of the running set. timeout is the
+	// reclaim threshold (what ReapStaleInstances would use); missedBeatTimeout
+	// is the shorter detection threshold. See StaleSetShape's doc for why
+	// both are needed.
+	StaleSetShape(ctx context.Context, timeout, missedBeatTimeout time.Duration) (StaleSetShape, error)
+}
+
+// MultiShard is implemented by a store that fans a single logical operation
+// out across independently-failing shards (ShardedStore). A caller that
+// wants a per-shard decision -- cleat#2006's stall detection, where one
+// shard's stall must not pause reclaiming on a healthy sibling -- type-
+// asserts for this instead of treating the store as one unit.
+//
+// A non-sharded store does not implement this; callers that get ok=false
+// treat the whole store as a single shard.
+type MultiShard interface {
+	// ShardNames returns the shard names, stable across calls for the
+	// life of the store.
+	ShardNames() []string
+
+	// ShardStore returns the WorkflowStore for one shard by name.
+	ShardStore(name string) (WorkflowStore, bool)
 }
 
 // DefaultTenantUUID is the all-zeros UUID used when no tenant is specified.

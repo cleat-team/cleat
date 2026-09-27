@@ -257,6 +257,14 @@ func (s *MSSQLStore) log() *slog.Logger {
 // This is used in the dispatch loop to set the correct tenant context
 // before executing a workflow. The returned store's methods will set
 // the RLS session variable via sp_set_session_context.
+//
+// Only re-asserted for a method that opens its own transaction via
+// beginTxWithContext (ClaimWorkflows, StartNewRun, DeliverSignal, and as of
+// cleat#2187 ListVersions and GetWorkflowByID). A method that runs a plain
+// query against s.db instead answers under whatever SESSION_CONTEXT that
+// connection's pool happened to have baked in at connect time, ignoring
+// this copy's tenantID entirely -- roughly 45 other methods still have this
+// shape and it is tracked as latent in cleat#2210, not fixed here.
 func (s *MSSQLStore) WithTenant(tenantID string) *MSSQLStore {
 	cp := *s
 	cp.tenantID = tenantID
@@ -304,20 +312,23 @@ func (s *MSSQLStore) buildTaskQueueParam() string {
 // Factory (C.2)
 // ---------------------------------------------------------------------------
 
-// nopCloser is a no-op io.Closer used by OpenStore.
-type mssqlNopCloser struct{}
-
-func (mssqlNopCloser) Close() error { return nil }
-
 // MSSQLStoreFactory implements StoreFactory for Microsoft SQL Server.
 // It manages per-tenant connection pools with sp_set_session_context
 // baked into the connector, enforcing RLS at the connection level.
 type MSSQLStoreFactory struct {
-	mu                 sync.RWMutex
-	connStr            string             // connection string for SQL Server
-	tenantDBs          map[string]*sql.DB // per-tenant connection pools with RLS context
+	mu      sync.RWMutex
+	connStr string // connection string for SQL Server
+
+	// tenantDBs holds one pool per tenant, each with the tenant's RLS context
+	// baked into its connector. Leased rather than bare, so EvictIdle can
+	// reclaim a pool no store is holding -- see leasedPool.
+	tenantDBs          map[string]*leasedPool
 	idempotencyKeyTTL  time.Duration
 	tenantPoolMaxConns int
+
+	// clock is time.Now unless a test replaces it. See
+	// MySQLStoreFactory.clock.
+	clock func() time.Time
 
 	logger *slog.Logger
 }
@@ -331,10 +342,18 @@ func NewMSSQLStoreFactory(connStr string, idempotencyKeyTTL ...time.Duration) *M
 	}
 	return &MSSQLStoreFactory{
 		connStr:            connStr,
-		tenantDBs:          make(map[string]*sql.DB),
+		tenantDBs:          make(map[string]*leasedPool),
 		idempotencyKeyTTL:  ttl,
 		tenantPoolMaxConns: 25,
 	}
+}
+
+// now reports the current time through the injectable clock.
+func (f *MSSQLStoreFactory) now() time.Time {
+	if f.clock == nil {
+		return time.Now()
+	}
+	return f.clock()
 }
 
 // WithLogger sets the structured logger on the factory. Stores created by
@@ -359,21 +378,77 @@ func (f *MSSQLStoreFactory) WithTenantPoolMaxConns(n int) *MSSQLStoreFactory {
 // NOTE: Encryption at rest (--encrypt-sensitive-payloads) is not yet supported
 // on MSSQL backends. See PostgresStore.WithEncryption for the reference implementation.
 func (f *MSSQLStoreFactory) OpenStore(ctx context.Context, tenantID string, taskQueues ...string) (WorkflowStore, io.Closer, error) {
-	tenantDB, err := f.getOrCreateTenantPool(ctx, tenantID)
+	p, err := f.getOrCreateTenantPool(ctx, tenantID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open store for tenant %s: %w", tenantID, err)
 	}
-	store := NewMSSQLStore(tenantDB, taskQueues...)
+	// THE RETURNED CLOSER IS A LEASE, not a pool shutdown. See
+	// MySQLStoreFactory.OpenStore.
+	lease := p.acquire(f.now)
+	store := NewMSSQLStore(p.db, taskQueues...)
 	store.tenantID = tenantID
 	store = store.WithIdempotencyKeyTTL(f.idempotencyKeyTTL)
 	store = store.WithLogger(f.logger)
-	return store, mssqlNopCloser{}, nil
+	return store, lease, nil
+}
+
+// OpenIsolatedStore is OpenStore's shape, on a connector-wrapped pool of its
+// own rather than the tenant's shared leased pool -- for a caller
+// (cleat#2009's heartbeat pool) that wants a pool EvictIdle cannot reclaim
+// out from under it and that does not compete with execution traffic for
+// f.tenantDBs' connections.
+//
+// MSSQLStore itself sets SESSION_CONTEXT per transaction (see
+// beginTxWithContext), not through the connector, so unlike MySQL a bare
+// pool on this DSN is not silently wrong here -- but going through
+// tenantSessionConnector anyway keeps this store's connections consistent
+// with every other MSSQL pool in the process, rather than relying on every
+// call site remembering to use the context-setting transaction helper.
+//
+// The returned closer owns this pool outright and closes it -- unlike
+// OpenStore's lease, there is nothing shared here for EvictIdle to reclaim.
+func (f *MSSQLStoreFactory) OpenIsolatedStore(ctx context.Context, tenantID string, maxConns int, taskQueues ...string) (WorkflowStore, io.Closer, error) {
+	if _, err := uuid.Parse(tenantID); err != nil {
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: invalid tenant ID: %w", tenantID, err)
+	}
+
+	baseDB, err := sql.Open("sqlserver", f.connStr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: open base mssql connection: %w", tenantID, err)
+	}
+	d := baseDB.Driver()
+	baseDB.Close()
+
+	dc, ok := d.(driver.DriverContext)
+	if !ok {
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: mssql driver does not implement DriverContext", tenantID)
+	}
+	connector, err := dc.OpenConnector(f.connStr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: open mssql connector: %w", tenantID, err)
+	}
+	wrapped := &tenantSessionConnector{Connector: connector, tenantID: tenantID}
+
+	isolatedDB := sql.OpenDB(wrapped)
+	isolatedDB.SetMaxOpenConns(maxConns)
+	isolatedDB.SetMaxIdleConns(maxConns)
+	isolatedDB.SetConnMaxLifetime(5 * time.Minute)
+	if err := isolatedDB.PingContext(ctx); err != nil {
+		isolatedDB.Close()
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: ping: %w", tenantID, err)
+	}
+
+	store := NewMSSQLStore(isolatedDB, taskQueues...)
+	store.tenantID = tenantID
+	store = store.WithIdempotencyKeyTTL(f.idempotencyKeyTTL)
+	store = store.WithLogger(f.logger)
+	return store, isolatedDB, nil
 }
 
 // getOrCreateTenantPool returns a *sql.DB pool for the given tenant.
 // The pool uses a wrapped connector that sets sp_set_session_context
 // on every new connection, so RLS is enforced automatically.
-func (f *MSSQLStoreFactory) getOrCreateTenantPool(ctx context.Context, tenantID string) (*sql.DB, error) {
+func (f *MSSQLStoreFactory) getOrCreateTenantPool(ctx context.Context, tenantID string) (*leasedPool, error) {
 	// Validate early to fail fast with a clear error, rather than failing
 	// during the first connection attempt inside the connector.
 	if _, err := uuid.Parse(tenantID); err != nil {
@@ -381,17 +456,17 @@ func (f *MSSQLStoreFactory) getOrCreateTenantPool(ctx context.Context, tenantID 
 	}
 
 	f.mu.RLock()
-	db, ok := f.tenantDBs[tenantID]
+	p, ok := f.tenantDBs[tenantID]
 	f.mu.RUnlock()
 	if ok {
-		return db, nil
+		return p, nil
 	}
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if db, ok := f.tenantDBs[tenantID]; ok {
-		return db, nil
+	if p, ok := f.tenantDBs[tenantID]; ok {
+		return p, nil
 	}
 
 	// Get the mssql driver as a Connector through the registered driver.
@@ -427,19 +502,34 @@ func (f *MSSQLStoreFactory) getOrCreateTenantPool(ctx context.Context, tenantID 
 		return nil, fmt.Errorf("ping tenant pool for %s: %w", tenantID, err)
 	}
 
-	f.tenantDBs[tenantID] = tenantDB
-	return tenantDB, nil
+	p = newLeasedPool(tenantDB, f.now())
+	f.tenantDBs[tenantID] = p
+	return p, nil
 }
 
 // Close closes all tenant connection pools.
 func (f *MSSQLStoreFactory) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	for id, db := range f.tenantDBs {
-		db.Close()
+	for id, p := range f.tenantDBs {
+		p.db.Close()
 		delete(f.tenantDBs, id)
 	}
 	return nil
+}
+
+// EvictIdle closes every tenant pool that no store holds and that nothing has
+// opened or released within maxIdle, and reports how many were closed.
+// See engine.TenantPoolReaper.
+func (f *MSSQLStoreFactory) EvictIdle(maxIdle time.Duration) int {
+	return evictIdleLeasedPools(&f.mu, f.tenantDBs, maxIdle, f.now)
+}
+
+// TenantPoolCount reports how many tenant pools are open right now.
+func (f *MSSQLStoreFactory) TenantPoolCount() int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return len(f.tenantDBs)
 }
 
 // DriverName returns "mssql".
@@ -447,3 +537,8 @@ func (f *MSSQLStoreFactory) DriverName() string { return "mssql" }
 
 // Dialect returns DialectMSSQL.
 func (f *MSSQLStoreFactory) Dialect() Dialect { return DialectMSSQL }
+
+// TenantPoolMaxConns reports this factory's per-tenant pool ceiling. See
+// engine.PerTenantPooler: SQL Server's RLS reads SESSION_CONTEXT, set per
+// connection, so a shared pool cannot scope a tenant here.
+func (f *MSSQLStoreFactory) TenantPoolMaxConns() int { return f.tenantPoolMaxConns }

@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"go/types"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/cleat-team/cleat/internal/analyzer"
@@ -85,25 +86,114 @@ func Compute(result *analyzer.AnalysisResult, cg *callgraph.Graph) *Result {
 	result.NumDurableClosure = len(cr.DurableClosure)
 	result.NumPure = len(cr.Pure)
 
-	// Validate supported constructs in all cleat functions.
+	wasmCache := make(map[string]bool)
+
+	// Validate supported constructs in every function the workflow executes.
 	// Functions defined in files that would be excluded for the WASM target
 	// (GOOS=wasip1 GOARCH=wasm) are skipped — they won't appear in the
 	// compiled WASM module and may legitimately use non-deterministic
 	// platform APIs.
-	wasmCache := make(map[string]bool)
-	for _, fd := range result.Funcs {
-		if fd.DurabilityTag == "DurableLeaf" || fd.DurabilityTag == "DurableClosure" {
-			if !isWASEligible(fd, wasmCache) {
-				continue
-			}
-			validateConstructs(fd, cr)
+	//
+	// The set validated here is NOT the durable closure, and conflating the two
+	// is cleat#949. Closure analysis asks "which functions reach a host call",
+	// because that decides which host functions to import. Determinism asks
+	// "what does this workflow EXECUTE", and replay re-runs the whole workflow
+	// body -- it constrains the results of host calls, not local computation.
+	// A helper that makes no host call is Pure by the first question and fully
+	// in scope for the second.
+	//
+	// The two traversals run in opposite directions. DurableClosure is upward:
+	// callers of anything durable. What determinism needs is downward: callees
+	// of anything durable. nonDeterministicHelper in
+	// testdata/vet-checks/go/helper_escape is Pure, is called by a durable
+	// entry point, carries six violations across E001/E002/E013, and was
+	// counted by the analyzer without being checked by it.
+	//
+	// Tagging is deliberately left alone. Pure still means "reaches no host
+	// call", which is the right answer to the import question and what codegen
+	// consumes; only the validation set is widened.
+	for name := range durableReachable(result, cg, cr) {
+		fd, ok := result.Funcs[name]
+		if !ok {
+			// Not a function this analysis loaded -- stdlib or a dependency.
+			// Nothing to inspect, and its determinism is not ours to police
+			// here; the forbidden-call checks above cover the ones that matter.
+			continue
 		}
+		// Files excluded for the WASM target (GOOS=wasip1 GOARCH=wasm) do not
+		// appear in the compiled module and may legitimately use
+		// non-deterministic platform APIs.
+		if !isWASEligible(fd, wasmCache) {
+			continue
+		}
+		validateConstructs(fd, cr)
 	}
 
 	// Validate that init() functions do not call durable functions.
 	validateInitFunctions(result, cr)
 
 	return cr
+}
+
+// durableReachable returns every function the workflow can execute: the
+// durable ones, plus everything reachable downward from them through the call
+// graph.
+//
+// This is the determinism scope, and it is strictly larger than the durable
+// closure. See the comment at its call site in Compute for why the two differ
+// (cleat#949).
+//
+// Cycles are ordinary in workflow code -- mutual recursion between helpers --
+// so this is a worklist with a visited set rather than recursion. A function
+// name that is not in result.Funcs is still traversed FROM, because the call
+// graph may know edges for a name whose declaration this analysis did not
+// load; the caller decides what to do about a name it cannot inspect.
+func durableReachable(result *analyzer.AnalysisResult, cg *callgraph.Graph, cr *Result) map[string]bool {
+	seen := make(map[string]bool, len(result.Funcs))
+	var queue []string
+
+	push := func(name string) {
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+		queue = append(queue, name)
+	}
+
+	for name := range cr.DurableLeaves {
+		push(name)
+	}
+	for name := range cr.DurableClosure {
+		push(name)
+	}
+	// Entry points too, and this is the half cleat#949 kept after #964.
+	//
+	// Seeding from the durable sets alone misses a workflow that makes NO host
+	// call: it is not durable, and it is not the callee of anything durable, so
+	// the walk never reaches it. That is the FIRST example in the issue --
+	//
+	//	Found 1 functions, 1 entry point(s), 0 in cleat closure.
+	//	Wrote handle_sync_mutex.wasm            <- no E013, builds, deploys
+	//
+	// -- while the same function with one h.SetQueryState added was refused
+	// with two E013s. A mutex is exactly as non-deterministic either way, and
+	// here the unchecked body is not a helper somewhere below the workflow: it
+	// IS the workflow.
+	//
+	// An entry point is by definition executed, so it belongs in the seed on
+	// the same reasoning that put callees there.
+	for _, name := range result.EntryPoints {
+		push(name)
+	}
+
+	for len(queue) > 0 {
+		cur := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		for callee := range cg.Calls[cur] {
+			push(callee)
+		}
+	}
+	return seen
 }
 
 // Result holds the results of closure computation and validation.
@@ -818,4 +908,90 @@ func isWASEligible(fd *analyzer.FuncDecl, cache map[string]bool) bool {
 
 	cache[filename] = ok
 	return ok
+}
+
+// ---------------------------------------------------------------------------
+// Ordered access to diagnostics (cleat#965)
+// ---------------------------------------------------------------------------
+
+// Diagnostic is one finding paired with the function it was reported in.
+//
+// Errors and Warnings are keyed by function name, and Go randomises map
+// iteration, so every consumer that ranged over them directly produced a
+// different ordering on every run. Four output modes did: the human report, the
+// GitHub Actions annotations, the JSON output, and the summary. `cleat vet` on
+// an unchanged package could not be diffed against itself, which is the
+// property a linter is most often asked for -- no golden file, no baseline, no
+// before/after review of what an edit did to the diagnostics.
+//
+// It is also the tool whose job is rejecting non-determinism, and map iteration
+// order is one of its own error codes (E021).
+type Diagnostic struct {
+	FuncName   string
+	Code       string
+	Message    string
+	Suggestion string
+	Line       int
+}
+
+// SortedErrors returns every validation error in a stable, total order.
+//
+// Use this rather than ranging over Errors. The maps stay exported because the
+// analysis consumes them; ordering belongs to presentation.
+func (cr *Result) SortedErrors() []Diagnostic {
+	out := make([]Diagnostic, 0, len(cr.Errors))
+	for funcName, errs := range cr.Errors {
+		for _, e := range errs {
+			out = append(out, Diagnostic{
+				FuncName:   funcName,
+				Code:       e.Code,
+				Message:    e.Message,
+				Suggestion: e.Suggestion,
+				Line:       e.Line,
+			})
+		}
+	}
+	sortDiagnostics(out)
+	return out
+}
+
+// SortedWarnings returns every validation warning in a stable, total order.
+func (cr *Result) SortedWarnings() []Diagnostic {
+	out := make([]Diagnostic, 0, len(cr.Warnings))
+	for funcName, warns := range cr.Warnings {
+		for _, w := range warns {
+			out = append(out, Diagnostic{
+				FuncName:   funcName,
+				Code:       w.Code,
+				Message:    w.Message,
+				Suggestion: w.Suggestion,
+				Line:       w.Line,
+			})
+		}
+	}
+	sortDiagnostics(out)
+	return out
+}
+
+// sortDiagnostics orders by function, then line, then code, then message.
+//
+// All four keys are needed for a TOTAL order, which is the point: two findings
+// that compare equal on every key would be free to swap between runs, and the
+// ordering would be stable only by luck. One function can report the same code
+// on the same line twice -- e013_sync_mutex does, for Lock and Unlock on one
+// line -- so func+line+code alone is not enough.
+func sortDiagnostics(d []Diagnostic) {
+	sort.Slice(d, func(i, j int) bool {
+		a, b := d[i], d[j]
+		switch {
+		case a.FuncName != b.FuncName:
+			return a.FuncName < b.FuncName
+		case a.Line != b.Line:
+			return a.Line < b.Line
+		case a.Code != b.Code:
+			return a.Code < b.Code
+		default:
+			return a.Message < b.Message
+		}
+	})
 }

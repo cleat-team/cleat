@@ -9,12 +9,12 @@ import (
 	"os"
 	"time"
 
+	"sync"
 	"sync/atomic"
 
 	"github.com/tetratelabs/wazero"
 
 	"github.com/cleat-team/cleat/monitoring/prometheus"
-	"github.com/cleat-team/cleat/wasm"
 )
 
 // DebugTiming enables verbose per-step/per-execution timing output to stderr
@@ -30,6 +30,7 @@ type Engine struct {
 	fetcher              Fetcher
 	signalStore          SignalStore
 	promiseStore         PromiseStore
+	updateStore          UpdateStore
 	state                WorkflowState
 	workflowID           string
 	childWfStore         ChildWorkflowStore
@@ -37,14 +38,13 @@ type Engine struct {
 	compactionState      *CompactionState
 	pluginRegistry       *PluginRegistry
 	pluginStreamRegistry *PluginStreamRegistry
-	updateHandler        func(name, payload string) (string, error)
+	streamHub            *StreamHub
 	pluginCallGuard      *PluginCallGuard
 	pluginCallObserver   PluginCallObserver
 	tenantID             string
-	db                   *sql.DB  // tenant-scoped DB for plugin host functions
-	maxRetries           int      // retry ceiling; 0 = MaxRetryAttempts
-	schema               string   // PostgreSQL schema name
-	peerSchemas          []string // peer schemas for cross-instance operations
+	db                   *sql.DB // tenant-scoped DB for plugin host functions
+	maxRetries           int     // retry ceiling; 0 = MaxRetryAttempts
+	schema               string  // PostgreSQL schema name
 
 	defName                string
 	defVersion             int
@@ -53,10 +53,73 @@ type Engine struct {
 	workflowEventVerifier  func(ctx context.Context, workflowID string) error
 	failOnChecksumMismatch bool
 
-	workerID               string
-	generation             int64 // generation this workerID claimed the workflow under; see WithGeneration
+	workerID   string
+	generation int64 // generation this workerID claimed the workflow under; see WithGeneration
+
+	// canStartNewWork gates every fresh durable call, in addition to (not
+	// instead of) the cancellation poll in freshCall. cleat#2008 decision 2:
+	// unlike HeartbeatBatchFenced (decision 1), which tells a SPECIFIC
+	// execution its fence is gone, this answers a question no per-run query
+	// can: "has MY OWN heartbeat been failing for so long that I can no
+	// longer vouch for ANY run I hold?" A worker cut off from the database
+	// cannot tell fenced-out from merely-unconfirmed, so it must refuse new
+	// work across the board rather than assume it is still fine.
+	//
+	// nil means "always allowed" -- the same fail-open default the
+	// cancellation poll uses, and for the same reason: most callers of
+	// NewEngine (cleatctl replay, cleat run_embedded, wasmtest) have no
+	// worker and no heartbeat to be presumed lost.
+	canStartNewWork func() bool
+
+	// shutdownRequested signals a worker-level shutdown (SIGINT/SIGTERM, or the
+	// watchdog's poison-pill exit) to code that is WAITING inside a durable call
+	// rather than starting one. cleat#2020: every wasmtime host function's ctx is
+	// built from context.Background() (engine/wasmtime_hostfuncs.go), never
+	// derived from the caller's context, so the three ctx.Done()/ctx.Err() checks
+	// in durablecalls.go (the backoff wait and the two fire-and-forget sites)
+	// could never fire -- not a CGO limitation like cleat#2008's execCtx finding,
+	// just the wrong context source. canStartNewWork above only gates the START
+	// of a fresh call; this is checked from inside an in-progress wait.
+	//
+	// nil means "never signalled" -- the same fail-open default as
+	// canStartNewWork, for the same reason: most callers of NewEngine
+	// (cleatctl replay, cleat run_embedded, wasmtest) have no worker shutdown to
+	// observe. A nil channel blocks forever in a select, which is exactly that
+	// behaviour.
+	shutdownRequested <-chan struct{}
+
+	// hardStopCtx, when non-nil, is cancelled at grace expiry (cleat#2287): a
+	// request that an in-flight durable call abort and its run suspend, so
+	// another worker reclaims the run without overlapping the aborted call.
+	// Distinct from shutdownRequested above, which fires at the FINAL cancel --
+	// the hard-stop must precede the release of the run's fence, so the call's
+	// outcome is written back before w.cancel() (see gracefulShutdown).
+	//
+	// nil means "never hard-stopped", the same fail-open default as
+	// shutdownRequested: callers of NewEngine with no worker have no hard-stop
+	// to observe.
+	hardStopCtx context.Context
+
 	wasmInstanceTimeout    time.Duration
+	wasmWallClockCeiling   time.Duration
+	hostRetryBudgetCeiling time.Duration
 	defaultWorkflowTimeout time.Duration
+
+	// This tenant's overrides for the two fields above, read from the store
+	// once per execution and clamped to them. See engine/tenant_settings.go.
+	// The Once is not for cross-workflow sharing -- an Engine carries one
+	// workflowID and one tenantID, so it cannot be shared -- but so that the
+	// two wallClockCeiling call sites in executor.go cost one query between
+	// them rather than one each.
+	tenantSettingsOnce  sync.Once
+	tenantSettingsValue TenantSettings
+	runLimitsOnce       sync.Once
+	runLimitsValue      TenantSettings
+
+	deferPassBudget time.Duration // total for one runDefers pass; see WithDeferPassBudget
+	deferPhase      bool          // this execution is a defer segment; see WithDeferPhase
+	nowFn           func() int64  // wall clock for sleep-deadline decisions; see WithClock
+	workflowStartMs int64         // workflow row's created_at; anchors an empty history, see WithWorkflowStartTime
 
 	continueAsNewHandler func(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput string, newEvents []EventRecord, result string, queryState map[string]string, priority int) (newRunID string, err error)
 
@@ -94,7 +157,8 @@ type Engine struct {
 	// is AtLeastOnce, which is what shipped before and costs nothing.
 	intentOps map[string]bool
 
-	flusherRegistry *TenantFlusherRegistry // per-tenant adaptive batch flushers based on step rate
+	flusherRegistry  *TenantFlusherRegistry // per-tenant adaptive batch flushers based on step rate
+	flushRetryWindow time.Duration          // how long a failed event flush is retried; 0 = DefaultFlushRetryWindow
 
 	cancellationCheckInterval time.Duration // throttle PollCancellation; 0 = every step
 
@@ -110,6 +174,14 @@ func WithSignalStore(ss SignalStore) EngineOption { return func(e *Engine) { e.s
 // WithPromiseStore sets the promise store.
 func WithPromiseStore(ps PromiseStore) EngineOption { return func(e *Engine) { e.promiseStore = ps } }
 
+// WithUpdateStore supplies the store the engine delivers update requests from.
+//
+// Without it DurablePollUpdate finds nothing and a workflow simply never sees
+// an update -- which is what every environment did before updates were
+// implemented end to end. It is not silently optional in the worker: see
+// cmd/cleat-worker/setup.go, which asserts the exec store satisfies it.
+func WithUpdateStore(us UpdateStore) EngineOption { return func(e *Engine) { e.updateStore = us } }
+
 // WithWorkflowState sets the workflow state for version info.
 func WithWorkflowState(ws WorkflowState) EngineOption { return func(e *Engine) { e.state = ws } }
 
@@ -124,7 +196,22 @@ func WithChildWorkflowStore(cws ChildWorkflowStore) EngineOption {
 	return func(e *Engine) { e.childWfStore = cws }
 }
 
-// WithFetcher sets the HTTP fetcher.
+// WithFetcher sets the HTTP fetcher, and nothing in a shipped binary calls it.
+//
+// cleat ships no default Fetcher and cmd/cleat-worker sets none, so every
+// cleat_fetch from a stock worker takes the failure branch at
+// engine/lifecycle.go:529 -- not a misconfiguration an operator can fix, but
+// the designed state (IMPROVEMENT-PLAN 3.317). cleat_fetch works only when the
+// engine is embedded and the host supplies one.
+//
+// This is a REAL GAP rather than a deliberate extension point, which is why it
+// is worth saying here: the error text tells whoever HITS it, and the exemption
+// table in engine_option_reachability_test.go tells whoever audits reachability,
+// but neither reaches someone deciding from this declaration whether cleat_fetch
+// is available to them. cleat#1878.
+//
+// If you wire a fetcher, the caveat in ABI.md 2.48 and the explanation above
+// that error both stop being true and should go with it.
 func WithFetcher(f Fetcher) EngineOption { return func(e *Engine) { e.fetcher = f } }
 
 func WithConcurrencyKeyStore(cks ConcurrencyKeyStore) EngineOption {
@@ -152,31 +239,61 @@ func WithPluginStreamRegistry(psr *PluginStreamRegistry) EngineOption {
 	return func(e *Engine) { e.pluginStreamRegistry = psr }
 }
 
-// WithUpdateHandler sets the update handler function.
-func WithUpdateHandler(fn func(name, payload string) (string, error)) EngineOption {
-	return func(e *Engine) { e.updateHandler = fn }
+// WithStreamHub sets the worker-local live tail for plugin stream chunks.
+//
+// Optional, and absent by default: an engine with no hub records and persists
+// chunks exactly as before and publishes nowhere, which is what an embedded
+// engine or a test wants. Only the worker, which serves the SSE route, sets it.
+func WithStreamHub(h *StreamHub) EngineOption {
+	return func(e *Engine) { e.streamHub = h }
 }
 
 // WithTenantID sets the tenant ID.
 func WithTenantID(id string) EngineOption { return func(e *Engine) { e.tenantID = id } }
 
-// WithPluginCallGuard sets the plugin call guard.
+// WithPluginCallGuard sets the plugin call guard, which authorizes one WASM
+// plugin's call_plugin call into another.
+//
+// NEVER CALLED IN PRODUCTION, and if it were, still NEVER CONSULTED -- two
+// separate absences, and that is a decision rather than a gap. This option
+// itself has no non-test caller: grepping the bare name would also match this
+// comment and the declaration below, so ask for the CALL SHAPE instead --
+// `grep -rn 'WithPluginCallGuard(' --include='*.go' . | grep -v _test.go |
+// grep -v '^engine/engine.go:.*func '` -- which returns nothing.
+// pluginCallGuard.Check is reached at both call_plugin sites in plugins.go,
+// each gated on `s.callerPluginName != ""` -- and nothing outside a _test.go
+// file ever assigns callerPluginName (see its own comment in types.go), so
+// even a worker that DID configure a guard here would find that condition
+// false on every real invocation.
+//
+// This is not WithAmbiguityResolver's shape (nil is a designed no-op default
+// for an optional embedder feature) -- it is a guard for a call path,
+// call_plugin between WASM plugins, that PluginLoader.LoadPlugin cannot
+// currently reach either: LoadPlugin has no non-test callers
+// (IMPROVEMENT-PLAN 3.315). Wiring this guard's trigger ahead of the thing it
+// guards would be backwards, so `engine_option_reachability_test.go`'s
+// exemption table excuses this option with exactly that reasoning. cleat#1873
+// puts the same reasoning here, where a reader of this function -- rather
+// than of a reachability guard's exemption list -- will find it.
 func WithPluginCallGuard(g *PluginCallGuard) EngineOption {
 	return func(e *Engine) { e.pluginCallGuard = g }
 }
 
-// WithPluginCallObserver sets a post-invocation observer.
+// WithPluginCallObserver sets a post-invocation observer, and no shipped binary
+// sets one.
+//
+// An embedder API: cmd/cleat-worker instruments plugin calls with metrics and
+// tracing instead, so an unset observer is the designed default rather than a
+// gap, and leaving it nil costs nothing. Recorded here rather than only in
+// engine_option_reachability_test.go's exemption table, which is where this
+// decision lived until cleat#1878 -- a reachability guard's exemption list is
+// not where anyone reads an API's intent.
 func WithPluginCallObserver(o PluginCallObserver) EngineOption {
 	return func(e *Engine) { e.pluginCallObserver = o }
 }
 
 // WithSchema sets the PostgreSQL schema name.
 func WithSchema(schema string) EngineOption { return func(e *Engine) { e.schema = schema } }
-
-// WithPeerSchemas sets peer schemas for cross-instance operations.
-func WithPeerSchemas(schemas []string) EngineOption {
-	return func(e *Engine) { e.peerSchemas = schemas }
-}
 
 // WithDB sets a tenant-scoped DB connection.
 func WithDB(db *sql.DB) EngineOption { return func(e *Engine) { e.db = db } }
@@ -247,6 +364,13 @@ func WithVersionValidation(fn func() error) EngineOption {
 }
 
 // WithAllowVersionMismatch allows replay despite version compatibility failures.
+//
+// EMBEDDER API, deliberately not a worker flag -- `engine_option_reachability_test.go`'s
+// exemption table: "escape hatch, deliberately not a worker flag." `cleat-worker`
+// never calls this; an embedder that links the engine directly can, when it has
+// its own reason to trust a mismatched version. cleat#1871 moved this and
+// WithAmbiguityResolver's reachability decisions from the guard's exemption
+// list, where an API's own reader would not find them, onto the option itself.
 func WithAllowVersionMismatch(allow bool) EngineOption {
 	return func(e *Engine) { e.allowVersionMismatch = allow }
 }
@@ -258,6 +382,71 @@ func WithWorkflowEventVerifier(fn func(ctx context.Context, workflowID string) e
 
 // WithWorkerID sets the worker instance identifier.
 func WithWorkerID(id string) EngineOption { return func(e *Engine) { e.workerID = id } }
+
+// WithCanStartNewWork gates every fresh durable call on fn, in addition to
+// the existing cancellation poll. cleat#2008 decision 2: the worker passes a
+// closure over its own heartbeat health, so an execution stops starting new
+// durable calls once its worker's heartbeats have been failing longer than
+// the reclaim window -- not because THIS run's fence is known lost (that is
+// decision 1, HeartbeatBatchFenced), but because the worker can no longer
+// tell.
+func WithCanStartNewWork(fn func() bool) EngineOption {
+	return func(e *Engine) { e.canStartNewWork = fn }
+}
+
+// WithShutdownSignal wires a worker's own shutdown channel (closed on
+// SIGINT/SIGTERM, or the watchdog's poison-pill exit) into the engine so a
+// durable call WAITING in progress -- a backoff sleep, a fire-and-forget
+// send's delay -- can abort promptly instead of running out its own timeout.
+// cleat#2020: the per-host-call ctx durablecalls.go receives is always
+// context.Background()-derived, so ctx.Done() there can never fire; this is
+// the channel that replaces it at the three sites that need to observe
+// shutdown while waiting, not starting.
+//
+// ch is typically w.ctx.Done() from the worker's own context.Context. nil (or
+// never calling this option) means shutdown is never observed here, which is
+// correct for callers with no worker to shut down.
+func WithShutdownSignal(ch <-chan struct{}) EngineOption {
+	return func(e *Engine) { e.shutdownRequested = ch }
+}
+
+// WithHardStopSignal wires a worker's hard-stop context into the engine so an
+// in-flight durable call aborts and its run suspends rather than riding out its
+// own timeout (cleat#2287). Fired at grace expiry, before the final w.cancel();
+// see hardStopCtx. ctx is typically the worker's own hard-stop context, which
+// the worker cancels at grace expiry.
+func WithHardStopSignal(ctx context.Context) EngineOption {
+	return func(e *Engine) { e.hardStopCtx = ctx }
+}
+
+// shutdownObserved reports whether the worker's shutdown signal has fired. It is what makes every host call
+// that would start fresh work refuse (stopBeforeNewWork): a run being cut off by shutdown must not go on to
+// do new work, above all not the compensation a guest runs when it is told a call failed (cleat#2285).
+func (e *Engine) shutdownObserved() bool {
+	select {
+	case <-e.shutdownRequested:
+		return true
+	default:
+		return false
+	}
+}
+
+// hardStopObserved reports whether the worker's hard-stop has fired. It is what
+// turns an aborted call into a suspend rather than a FAIL or a COMPLETE
+// (cleat#2287): after the call is aborted, the run must suspend and requeue, not
+// finalize, or the aborted call's outcome (unknown, mid-flight) becomes a
+// workflow result.
+func (e *Engine) hardStopObserved() bool {
+	if e.hardStopCtx == nil {
+		return false
+	}
+	select {
+	case <-e.hardStopCtx.Done():
+		return true
+	default:
+		return false
+	}
+}
 
 // WithGeneration sets the generation this workerID claimed the workflow
 // instance under (workflow_instances.generation at claim time).
@@ -289,14 +478,265 @@ func (e *Engine) fencingEnabled() bool {
 	return e.workerID != "" && e.generation != 0 && e.workflowStore != nil
 }
 
-// WithWASMInstanceTimeout sets the per-execution WAT timeout.
+// WithWASMInstanceTimeout bounds GUEST EXECUTION for one invocation.
+//
+// It is the epoch fence, and since IMPROVEMENT-PLAN 3.90 it measures only time
+// the guest is actually running: a host call made on the guest's behalf -- a
+// service call, a plugin call, a DB write, a retry loop's backoff -- costs it
+// nothing. See engine/wasmtime_hostbudget.go.
+//
+// It is NOT a bound on how long an invocation may take in wall-clock terms.
+// That is WithWasmWallClockCeiling, and the two are deliberately separate
+// because they answer different questions: "is this guest runaway?" and "has
+// this been going too long?".
 func WithWASMInstanceTimeout(d time.Duration) EngineOption {
 	return func(e *Engine) { e.wasmInstanceTimeout = d }
+}
+
+// WithWasmWallClockCeiling bounds the WALL CLOCK of one invocation, including
+// time spent inside host calls, as a context deadline.
+//
+// This exists because until IMPROVEMENT-PLAN 3.90 there was no such thing:
+// wasmInstanceTimeout was applied BOTH as the epoch fence and as a context
+// deadline, so the two questions above had one answer and a workflow waiting on
+// slow services died as though it were a runaway guest. Separating them is what
+// lets an in-host retry loop keep its worker for the duration of a short policy
+// (3.88) without the guest being killed for waiting.
+//
+// d <= 0 keeps the pre-3.90 behaviour -- the ceiling falls back to
+// wasmInstanceTimeout -- so an embedder that sets only the instance timeout
+// keeps the wall-clock bound it already had rather than silently losing it.
+// Pass a large value to raise the ceiling; there is deliberately no way to
+// remove it entirely, because an un-timed host call would otherwise hold a
+// worker slot forever.
+func WithWasmWallClockCeiling(d time.Duration) EngineOption {
+	return func(e *Engine) { e.wasmWallClockCeiling = d }
+}
+
+// wallClockCeiling is the deadline the executor applies, with the fallback
+// described on WithWasmWallClockCeiling resolved and this tenant's override
+// clamped to it (3.94 step 3).
+//
+// The clamp direction is the point: the flag is a CEILING, so a tenant can
+// lower its own wall-clock bound but never raise it past what the operator
+// granted. See ClampToCeiling for why that has to hold and what would break it.
+func (e *Engine) wallClockCeiling(ctx context.Context) time.Duration {
+	operator := e.wasmWallClockCeiling
+	if operator <= 0 {
+		operator = e.wasmInstanceTimeout
+	}
+	return e.resolveLimit(ctx, operator,
+		func(t TenantSettings) time.Duration { return t.WasmWallClockCeiling })
+}
+
+// perExecutionInstanceTimeout is the bound on guest EXECUTION that the CALLER
+// tiers ask for -- this run's, tightened against its tenant's -- or 0 when
+// neither set one.
+//
+// cleat#1187 added the run tier here rather than in resolveLimit because this
+// value's operator ceiling is not an Engine field (see below), so the clamp
+// against it happens in the backend. Composing run-against-tenant first and
+// letting the backend clamp the result to the operator preserves the same
+// chain the other two get from resolveLimit:
+//
+//	min(run, tenant, operator)
+//
+// The name changed from tenantInstanceTimeout when the run tier arrived: it is
+// no longer only the tenant's number, and a resolver named for one tier that
+// silently returns two is how the next reader gets it wrong.
+//
+// Deliberately UNCLAMPED, which is the one asymmetry in this file. The other
+// two resolvers (wallClockCeiling, hostRetryBudget) clamp here because the
+// operator's value is an Engine field. The instance timeout's operator value is
+// not: it lives on the backend, set from --wasm-instance-timeout when the
+// worker constructs it, and the Engine never sees it. So the raw value is
+// handed to PerExecution and clamped inside the backend, where both numbers are
+// in scope. See WasmBackend.PerExecution and IMPROVEMENT-PLAN 3.94 step 5b.
+//
+// e.wasmInstanceTimeout is NOT the ceiling to clamp against. It is a separate,
+// engine-level option that 3.90 deliberately stopped applying as an epoch fence
+// -- it survives only as wallClockCeiling's fallback -- so clamping to it here
+// would reintroduce the conflation 3.90 removed, and would bound a tenant by a
+// number the operator's flag never set.
+func (e *Engine) perExecutionInstanceTimeout(ctx context.Context) time.Duration {
+	return ClampToCeiling(
+		e.runLimits(ctx).WasmInstanceTimeout,
+		e.tenantSettings(ctx).WasmInstanceTimeout,
+	)
+}
+
+// DefaultHostRetryBudget is the ceiling applied when an operator sets none.
+//
+// It is 60s because that is the value the Go and Rust SDKs each compiled in
+// before §3.94 step 4 moved the decision here, and every engine constructed
+// without WithHostRetryBudget -- which is every test, and every embedded use --
+// must keep behaving the way it did. The four §3.88 threshold tests are the
+// check on that: they are not modified by this change and must stay green.
+//
+// Deliberately well below --wasm-wall-clock-ceiling's 5m default rather than
+// close to it, for the reason the SDK constant gave: the ceiling covers the
+// WHOLE invocation, so a threshold near it would let one retry policy consume
+// the entire budget and leave nothing for the rest of the workflow.
+const DefaultHostRetryBudget = 60 * time.Second
+
+// WithHostRetryBudget sets the operator's CEILING on how much worst-case
+// backoff a retry policy may carry and still be run on the host, inside one
+// segment, holding the worker slot.
+func WithHostRetryBudget(d time.Duration) EngineOption {
+	return func(e *Engine) { e.hostRetryBudgetCeiling = d }
+}
+
+// hostRetryBudget resolves the host-retry budget for the tenant on this
+// execution, clamped to the operator's ceiling.
+//
+// Same clamp direction as wallClockCeiling, and for the same reason: a tenant
+// may lower its own budget -- pushing more policies onto the suspending path,
+// which costs the tenant latency and costs the operator nothing -- but may
+// never raise it and hold a shared worker slot for longer than the operator
+// allowed.
+func (e *Engine) hostRetryBudget(ctx context.Context) time.Duration {
+	operator := e.hostRetryBudgetCeiling
+	if operator <= 0 {
+		operator = DefaultHostRetryBudget
+	}
+	return e.resolveLimit(ctx, operator,
+		func(t TenantSettings) time.Duration { return t.HostRetryBudget })
+}
+
+// maxWorkflowDuration resolves --max-workflow-duration through this tenant's
+// and this run's overrides.
+//
+// SCOPE: one execution segment, not a workflow's whole lifetime -- see
+// TenantSettings.MaxWorkflowDuration. cleat#1117 changed who may set the bound,
+// not what it spans.
+//
+// cleat#1117. This was the last execution limit left as a bare worker flag,
+// and the reason it could not stay one is that a worker process is not a
+// tenancy boundary: one worker serves many tenants, so a process-wide deadline
+// applies one tenant's operational policy to another's workflows. 3.94 fixed
+// that for the other three limits and this one was not carried across.
+//
+// NO OPERATOR FALLBACK, and the asymmetry with its two siblings is deliberate.
+// wallClockCeiling falls back to the instance timeout and hostRetryBudget to
+// DefaultHostRetryBudget, because each has a meaningful default. This flag
+// defaults to 0 meaning "no limit", and ClampToCeiling already reads a
+// non-positive ceiling as "operator unbounded -- take the tenant's value". So
+// passing the flag through unchanged is what lets a tenant set a deadline on a
+// deployment where the operator set none, which is the common case and the
+// point of the feature. Substituting a fallback here would silently impose a
+// bound no operator asked for.
+func (e *Engine) maxWorkflowDuration(ctx context.Context) time.Duration {
+	return e.resolveLimit(ctx, e.defaultWorkflowTimeout,
+		func(t TenantSettings) time.Duration { return t.MaxWorkflowDuration })
+}
+
+// resolveLimit is THE precedence rule, written once.
+//
+// cleat#1187 asked for exactly that -- "one precedence rule, stated once and
+// tested once, rather than three implementations":
+//
+//	operator flag  >=  tenant setting  >=  per-run override
+//
+// Each tier may LOWER and never raise, which falls straight out of applying
+// ClampToCeiling twice: the tenant's value is clamped to the operator's, and
+// the run's is clamped to that result. A tier that set nothing contributes
+// nothing, because ClampToCeiling treats a non-positive value as "no override"
+// and returns the ceiling unchanged.
+//
+// The direction is the whole point and is not symmetric. Read ClampToCeiling's
+// own comment before adding a fourth tier or a fourth field: "smaller is safer"
+// holds for every setting here because each one bounds a resource the caller
+// consumes, and a future floor-shaped setting would need the opposite
+// comparison. Using this for one would grant precisely the escalation the
+// clamp exists to refuse.
+func (e *Engine) resolveLimit(ctx context.Context, operator time.Duration, field func(TenantSettings) time.Duration) time.Duration {
+	tenant := ClampToCeiling(field(e.tenantSettings(ctx)), operator)
+	return ClampToCeiling(field(e.runLimits(ctx)), tenant)
+}
+
+// runLimits reads this run's own overrides once and memoises them, mirroring
+// tenantSettings -- including its failure posture.
+//
+// A read failure resolves to the tier above rather than failing the workflow.
+// The fallback direction is the safe one: a run that cannot read its override
+// gets its tenant's limits, which are already clamped to the operator's, so an
+// unreadable row can only ever produce a WIDER-than-intended bound up to the
+// operator's ceiling and never past it.
+//
+// Read rather than carried on the claim, deliberately. The claim projects
+// through fifteen sites and is the hottest statement in the system; this is one
+// query per execution, memoised, on the same shape the tenant tier already
+// uses. If per-execution reads ever become the bottleneck, both tiers should
+// move together.
+func (e *Engine) runLimits(ctx context.Context) TenantSettings {
+	e.runLimitsOnce.Do(func() {
+		if e.workflowID == "" {
+			return
+		}
+		reader, ok := e.workflowStore.(RunLimitsReader)
+		if !ok {
+			return
+		}
+		s, err := reader.GetRunLimits(ctx, e.workflowID)
+		if err != nil {
+			e.log().WarnContext(ctx,
+				"reading per-run limits failed, falling back to the tenant's",
+				"tenant_id", e.tenantID, "workflow_id", e.workflowID, "error", err)
+			return
+		}
+		e.runLimitsValue = s
+	})
+	return e.runLimitsValue
 }
 
 // WithDefaultWorkflowTimeout sets the total workflow timeout.
 func WithDefaultWorkflowTimeout(d time.Duration) EngineOption {
 	return func(e *Engine) { e.defaultWorkflowTimeout = d }
+}
+
+// DefaultDeferPassBudget bounds one whole cleanup pass -- every defer a failed
+// workflow registered, together -- rather than each defer separately.
+//
+// It is deliberately generous rather than tight. The bound that was missing is
+// an *aggregate* one: before it, N defers each got a fresh copy of the
+// backend's per-invocation budget, so the worst case grew without limit in N
+// (see runDefers for the measurements). Five minutes leaves every plausible
+// legitimate cleanup pass untouched -- a defer that needs longer than the
+// workflow's own instance timeout is already outside what this engine bounds --
+// while turning "unbounded in N" into a fixed ceiling.
+//
+// Set it deliberately with WithDeferPassBudget if a workload has many slow,
+// legitimate defers.
+const DefaultDeferPassBudget = 5 * time.Minute
+
+// WithDeferPassBudget bounds a whole runDefers pass. d <= 0 keeps
+// DefaultDeferPassBudget.
+//
+// The budget is shared by every defer in the pass: configureStore takes the
+// tighter of the remaining time and the backend's own timeout, so a defer that
+// runs long leaves less for the ones after it. That is the intent -- the thing
+// being bounded is the worker slot, not any individual callback.
+func WithDeferPassBudget(d time.Duration) EngineOption {
+	return func(e *Engine) { e.deferPassBudget = d }
+}
+
+// WithDeferPhase marks this execution as a defer segment: the workflow is
+// replayed for the sole purpose of running its outstanding defers, because its
+// terminal outcome has already been decided elsewhere and no instance existed
+// to run them in. IMPROVEMENT-PLAN 3.35 phase 5.
+//
+// It changes one thing: when the replay ends in a suspension -- which is the
+// normal way it ends, because a workflow worth terminating is usually one that
+// is waiting -- the host drains the guest's defer table on the still-live
+// instance instead of letting the segment end there. See
+// wasmtimeBackend.runGuestDefersAfterSuspend for why the suspension is what
+// makes this possible rather than an obstacle to it.
+//
+// The engine fails the execution rather than proceeding if the backend cannot
+// honour it. A defer segment that silently skipped the drain would report the
+// workflow's cleanup as done, which is the failure mode 3.81 exists to record.
+func WithDeferPhase() EngineOption {
+	return func(e *Engine) { e.deferPhase = true }
 }
 
 // WithContinueAsNewHandler sets a handler for atomic ContinueAsNew transitions.
@@ -381,6 +821,90 @@ func WithBackend(language string, backend WasmBackend) EngineOption {
 // See IMPROVEMENT-PLAN.md 2.72 and 1.5/2.28.
 var WasmtimeLanguages = []string{"go", "assemblyscript", "java", "rust", "python"}
 
+// deferSegmentLanguages are the guest languages whose SDK decodes
+// callSuspendSentinel, and so can be run as a defer segment.
+//
+// Membership means *verified to unwind on the sentinel*, in the same sense as
+// WasmtimeLanguages above -- not "ought to". A guest whose SDK does not decode
+// it reads the word through whichever layout the call it made returns, and
+// every one of those readings is a plausible ordinary result: responseLen=0,
+// errCode=0 from a durable call is an EMPTY SUCCESSFUL RESPONSE, and bit 31 in
+// the await-signals layout lands in the timed-out field and reads as a
+// TIMEOUT. It would carry on past the stop, do the new work the segment exists
+// to prevent, and report the terminated workflow as completed -- the exact
+// defect of IMPROVEMENT-PLAN 3.83, silently, with no error anywhere.
+//
+// That failure mode is why this is a list rather than a comment. The host half
+// and the guest half of a sentinel are two green tests and no working feature
+// unless something crosses them (3.73); this list is what makes the uncrossed
+// languages fail loudly instead.
+//
+// Add a language here in the same change that lands its decode, with a test
+// that exercises it end to end.
+//
+//   - go: testdata/deferfunc + engine/defer_segment_test.go.
+//   - java: examples/saga-java-port's defer_order entry point +
+//     engine/java_defer_segment_e2e_test.go, which builds the real TeaVM module
+//     and measures that a defer segment records the two cleanup calls and not
+//     the body's (3.105).
+//   - assemblyscript: examples/as-workflow's defer_order entry point +
+//     engine/as_defer_segment_e2e_test.go (3.106). Note this one does NOT stop
+//     by unwinding -- the SDK has no exceptions, so the body runs on past the
+//     stop with every further call refused, and what ends the segment is the
+//     transformer-generated wrapper checking isWorkflowSuspended() before it
+//     drains. Membership still means the same thing (the segment runs only the
+//     defers, measured), but read that test's comment for how it gets there.
+//   - rust: examples/rust-workflow's defer_order entry point +
+//     engine/rust_defer_segment_e2e_test.go (3.107). That fixture DISCARDS the
+//     error from its body call, which is the case worth having: six of the
+//     eight guarded calls return (String, Option<String>) rather than Result,
+//     so what ends the segment is the flag suspend() sets and #[cleat_entry]
+//     reads, not the Err itself.
+//   - python: python-sdk/examples/defer_order_workflow.py +
+//     engine/python_defer_segment_e2e_test.go, which builds a real component
+//     and measures the same two calls (3.110).
+//
+// Python is in the list for the same REASON and by TWO mechanisms, and this
+// paragraph used to describe only one of them. It said: Python is a Component
+// Model guest, its host calls return `result<string, call-failure>`, so a stop
+// is a case of the return type rather than a bit in a packed word -- "there is
+// no sentinel to decode and no ordinary reading to fall into".
+//
+// That is true of 8 of the 53 functions in python-sdk/wit/cleat.wit, and they
+// are exactly the ones 3.110 changed: durable-call, -call-retry,
+// -call-heartbeat, -child-workflow, -child-workflow-with-options, plugin-call,
+// plugin-call-streaming, fetch. Those go through decodeCallOutcome
+// (engine/component_cgo.go), which tests the sentinel first and by mask and
+// hands the guest a `suspended` case it cannot misread. Re-derive:
+//
+//	python3 -c "
+//	import re,pathlib,collections
+//	flat=re.sub(r'\s+',' ',pathlib.Path('python-sdk/wit/cleat.wit').read_text())
+//	print(collections.Counter((m.group(4) or 'NONE').strip().split('<')[0]
+//	  for m in re.finditer(r'([a-z0-9-]+): func\((.*?)\)\s*(->\s*([^;]+?))?\s*;',flat)))"
+//
+// The other 45 return plain scalars or strings, and one of them is a stop site:
+// durable-await-signals returns u64, dispatchAwaitSignals passes the word
+// through with a raw setResultU64, and DurableAwaitSignals returns
+// callSuspendSentinel from stopBeforeNewWork. So the failure mode the rest of
+// this comment describes WAS available to Python, on the one layout where bit
+// 31 lands inside the timed-out field -- a stop decoded as
+// SignalResult(timed_out=True) and the segment ran on. Fixed in 3.202; the
+// guest half is _raise_if_stopped in python-sdk/cleat_sdk/host_calls.py.
+//
+// The general form is worth keeping: "this guest cannot misread a stop" is a
+// claim about a call's RETURN SHAPE, not about a language. Ask it per call.
+//
+// This map now covers every language in WasmtimeLanguages, and that changes
+// what the fence below is FOR. It stopped being a list of the languages that
+// work and became the thing a sixth language has to earn its way onto: the
+// engine still fails a defer segment closed for anything absent, so a new
+// backend language starts refused rather than silently running a segment it
+// cannot be stopped in. Do not delete it for being full.
+var deferSegmentLanguages = map[string]bool{
+	"go": true, "java": true, "assemblyscript": true, "rust": true, "python": true,
+}
+
 // RunsOnWasmtime reports whether a detected guest language is served by the
 // wasmtime backend.
 //
@@ -419,6 +943,81 @@ func WithReplayStepCallback(cb ReplayStepCallback) EngineOption {
 	return func(e *Engine) { e.stepCallback = cb }
 }
 
+// realNowMs is the wall clock used to decide whether a sleep's deadline has
+// already passed.
+//
+// Deliberately not the package-level nowMs seed: that is a cached value
+// refreshed by the worker's dispatch loop (UpdateNowMs), and nothing refreshes
+// it in the CLI and embedded paths, where it stays at its zero value. A sleep
+// decision read off a clock stuck at the epoch would never complete.
+func (e *Engine) realNowMs() int64 {
+	if e.nowFn != nil {
+		return e.nowFn()
+	}
+	return time.Now().UnixMilli()
+}
+
+// WithWorkflowStartTime supplies the workflow row's created_at, in ms since
+// the Unix epoch, as the session's clock anchor when there is no history yet.
+//
+// A sleep decides by comparing its deadline against real time, and the anchor
+// that deadline is measured from is the last recorded event. A workflow whose
+// FIRST durable operation is a sleep has no such event, so without this the
+// anchor was re-seeded from the wall clock on every segment and the deadline
+// moved forward with it -- the workflow woke, re-executed, and re-suspended
+// forever. created_at is fixed, so the deadline stops moving.
+//
+// It also makes Now() deterministic for a fresh workflow's first steps, which
+// the wall-clock seed was not: two replays of the same empty history used to
+// produce different values.
+//
+// Zero leaves the previous behaviour, for embedders that have no such
+// timestamp to give.
+func WithWorkflowStartTime(ms int64) EngineOption {
+	return func(e *Engine) { e.workflowStartMs = ms }
+}
+
+// seedNowMs picks the session's starting virtual clock.
+//
+// Preference order: the workflow's created_at, then the first recorded event's
+// timestamp, then the process wall clock.
+//
+// created_at comes FIRST, and the order matters more than it looks. The two
+// branches are not two ways of spelling the same instant -- they are read on
+// different executions. A fresh run has no history, so it took created_at; a
+// resume has history, so it took the first event's timestamp. Those differ by
+// however long passed between the row being created and the first event being
+// recorded, so Now() called before any event was recorded returned one value on
+// the original run and another on the replay. Measured at 109ms apart, and
+// fatal inside a SideEffect, which validates the recomputed value against
+// history.
+//
+// created_at is the only one of the three that is the same on both executions:
+// it is a column on the workflow row, read back identically every time. The
+// first event's timestamp is stable across REPLAYS, which is what the previous
+// order was reasoning about, but the first execution is not a replay.
+//
+// Zero leaves the old behaviour for embedders with no such timestamp, and the
+// history branch still beats the wall clock there.
+func (e *Engine) seedNowMs(replayHistory []EventRecord) int64 {
+	if e.workflowStartMs > 0 {
+		return e.workflowStartMs
+	}
+	if len(replayHistory) > 0 && replayHistory[0].TimestampMs > 0 {
+		return replayHistory[0].TimestampMs
+	}
+	return nowMs.Load()
+}
+
+// WithClock overrides the wall clock DurableSleep compares deadlines against.
+//
+// Sleep completion is a function of elapsed real time, so a test that wants to
+// exercise resume-after-a-long-sleep has to be able to say that the time
+// passed. Without this such a test would either sleep for real or assert
+// nothing. It does not affect Now(): the guest-visible clock is virtual and
+// advances only by the durations the workflow asked for.
+func WithClock(fn func() int64) EngineOption { return func(e *Engine) { e.nowFn = fn } }
+
 // WithLogger sets the structured logger (default: slog.Default()).
 func WithLogger(l *slog.Logger) EngineOption { return func(e *Engine) { e.logger = l } }
 
@@ -443,6 +1042,17 @@ func WithNoPerStepFlush(v bool) EngineOption { return func(e *Engine) { e.noPerS
 // direct per-step flushing and batched event persistence.
 func WithFlusherRegistry(r *TenantFlusherRegistry) EngineOption {
 	return func(e *Engine) { e.flusherRegistry = r }
+}
+
+// WithFlushRetryWindow bounds how long a failed event flush is retried before
+// recordEvent reports eventFlushFailed. Zero means DefaultFlushRetryWindow.
+//
+// It governs the DIRECT flush path. The batch path reads the same value from
+// its flusher (FlusherConfig.RetryWindow) because one flusher serves every
+// workflow of a tenant on this worker and so cannot take it from a per-execution
+// engine; the worker sets both from one flag.
+func WithFlushRetryWindow(d time.Duration) EngineOption {
+	return func(e *Engine) { e.flushRetryWindow = d }
 }
 
 // WithCancellationCheckInterval sets the minimum wall-clock interval between
@@ -474,12 +1084,51 @@ func (e *Engine) DB() *sql.DB { return e.db }
 func (e *Engine) TenantID() string { return e.tenantID }
 
 // getAdaptiveFlusher returns the tenant-specific AdaptiveFlusher from the
-// registry, or nil if no registry is configured.
+// registry, or nil if no registry is configured or the store's database cannot
+// run the batch writer.
+//
+// THE BATCH WRITER IS POSTGRESQL-ONLY. Its fence check and its INSERT are
+// written in PostgreSQL's dialect (set_config, `$1::jsonb`,
+// jsonb_populate_recordset, ON CONFLICT), and the flusher was given whatever
+// *sql.DB the --db DSN produced. Batch mode is on by default and is entered on
+// the step rate alone, so a busy MySQL or SQL Server worker switched into a
+// writer that could not succeed: each event was retried for the whole retry
+// window (750ms by default) and then dropped, with the workflow carrying on
+// (cleat#2348). Returning nil here sends those two dialects down the direct
+// per-step flush (flushEvent -> perStepEventFlusher), which is the path they
+// have always been correct on.
 func (e *Engine) getAdaptiveFlusher() *AdaptiveFlusher {
-	if e.flusherRegistry == nil {
+	if e.flusherRegistry == nil || !batchFlushSupported(e.workflowStore) {
 		return nil
 	}
 	return e.flusherRegistry.For(e.tenantID)
+}
+
+// batchFlushSupported reports whether the store's database speaks the dialect
+// AdaptiveFlusher's SQL is written in, which is PostgreSQL's.
+//
+// KEYED ON perStepEventFlusher, which is the engine's own statement that a
+// store's database is NOT PostgreSQL: it is implemented by exactly the stores
+// whose per-step flush cannot use flush.go's PostgreSQL insert. An interface
+// check follows embedding, which a list of concrete types does not -- a
+// `type w struct{ *MySQLStore }` is not a *MySQLStore but does have its
+// flushEventForStep, and would have been sent to the batch writer (cleat#2350).
+//
+// A store may opt back in with standsInForPostgres, which exists so the tests
+// in this package can build fake stores that stand in for PostgreSQL on the
+// batch path. No non-test type may implement it:
+// TestNoProductionStoreOptsBackIntoBatchMode reads the sources to keep it so.
+func batchFlushSupported(store WorkflowStore) bool {
+	if _, notPostgres := store.(perStepEventFlusher); !notPostgres {
+		return true
+	}
+	standIn, ok := store.(batchWriterStandIn)
+	return ok && standIn.standsInForPostgres()
+}
+
+// batchWriterStandIn is the test-only opt-in described on batchFlushSupported.
+type batchWriterStandIn interface {
+	standsInForPostgres() bool
 }
 
 // EncryptSensitivePayloads returns whether sensitive payload encryption is enabled.
@@ -505,15 +1154,31 @@ func NewEngine(rt *Runtime, caller ServiceCaller, opts ...EngineOption) *Engine 
 // If the WASM binary uses the Component Model format, it decomposes it into
 // constituent core modules following the component instance DAG.
 func (e *Engine) Execute(ctx context.Context, wasmBytes []byte, entryPoint string, input json.RawMessage) (result string, history []EventRecord, suspended *SuspendResult, deferrals map[string]string, queryState map[string]string, err error) {
-	if backend := e.backendForWasm(wasmBytes); backend != nil {
+	backend, resolveErr := e.resolveBackend(wasmBytes)
+	if backend != nil {
 		return e.executeWithBackend(ctx, backend, wasmBytes, entryPoint, input, nil)
 	}
+	// A Component Model binary reaching here has no backend to run it, and
+	// there is no longer a second implementation to try.
+	//
+	// This used to decompose the component and instantiate its core modules on
+	// wazero. That path failed at instance 8 of 85 on the only Component Model
+	// binary in the repo -- "memory is not exported in module env" -- and was
+	// deleted along with the wasmtime one it mirrored. Measured 2026-09-01;
+	// see IMPROVEMENT-PLAN 3.65.
+	//
+	// The message names the fix rather than the failure, because for this
+	// engine shape -- cleatctl replay|debug, cleat run_embedded, cleat-bench,
+	// cleat/wasmtest -- the fix is real: components execute on the wasmtime
+	// backend's native Component Model path, which does run them.
 	if isComponentWasm(wasmBytes) {
-		bundle, parseErr := wasm.ParseComponentBundle(wasmBytes)
-		if parseErr != nil {
-			return "", nil, nil, nil, nil, fmt.Errorf("host: parse component bundle: %w", parseErr)
-		}
-		return e.executeComponent(ctx, bundle, entryPoint, input)
+		return "", nil, nil, nil, nil, fmt.Errorf(
+			"host: this is a WASM Component Model binary and this engine has no WASM backend "+
+				"registered for it; components run on the wasmtime backend's native component "+
+				"path, so register one with WithBackend (entry point %q)", entryPoint)
+	}
+	if resolveErr != nil {
+		return "", nil, nil, nil, nil, resolveErr
 	}
 	if e.rt == nil {
 		return "", nil, nil, nil, nil, fmt.Errorf("host: no runtime available for WASM compilation; register a backend for this language with WithBackend")

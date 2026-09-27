@@ -18,7 +18,16 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	if scope == nil {
 		return fmt.Errorf("feature-flags: nil function registry")
 	}
-	if err := scope.Register(plugin.FuncOptions{Name: "evaluate_flag", Idempotent: true}, p.evaluateFlag); err != nil {
+	if err := scope.Register(plugin.FuncOptions{
+		Name: "evaluate_flag",
+		// Idempotent -- evaluating writes nothing. NOT stable, and this is the
+		// clearest case in the set: a feature flag exists in order to be
+		// toggled. A workflow that branched on enabled=true, suspended, and
+		// replayed after a toggle would evaluate false, so history and the live
+		// call disagree about a decision already taken. cleat#1318.
+		Idempotent:        true,
+		SameValueOnReplay: false,
+	}, p.evaluateFlag); err != nil {
 		return err
 	}
 	return nil
@@ -68,11 +77,11 @@ func (p *Plugin) evaluateFlag(ctx context.Context, inputJSON string) (string, er
 		rolloutPercentage int
 	)
 
-	err := p.db.QueryRow(ctx, plugin.Rebind(`
+	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
 			SELECT id, tenant_id, `+plugin.QuoteIdent("key", p.dialect)+`, name, description, enabled, rules, rollout_percentage
 			FROM feature_flags
 			WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2
-		`, p.dialect), cc.TenantID, input.Key).Scan(
+		`, p.dialect), cc.TenantID, input.Key),
 		&id, &tenantID, &key, &name, &description,
 		&enabled, &rulesJSON, &rolloutPercentage,
 	)
@@ -106,7 +115,7 @@ func (p *Plugin) evaluateFlag(ctx context.Context, inputJSON string) (string, er
 	// evaluateFlagOutput and marshal EvaluationResult directly. A conversion
 	// is the worst of the two: it keeps both names, so the wire format still
 	// looks independent, while coupling them so it is not.
-	output := evaluateFlagOutput{ //nolint:gosimple // deliberate: wire contract, see above
+	output := evaluateFlagOutput{ //nolint:staticcheck // deliberate: wire contract, see above
 		Enabled:    result.Enabled,
 		Key:        result.Key,
 		Evaluation: result.Evaluation,

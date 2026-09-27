@@ -1,0 +1,270 @@
+# ---------------------------------------------------------------------------
+# Stream Trailer Check — every commit names the workstream that wrote it
+#
+# Commits carry `Claude-Stream: <WS-1|WS-2|WS-3|WS-4|coordinator|cleat-review>`. The convention
+# replaced a session id on 2026-09-17 for one reason: a session id does not
+# survive a host restart and a stream does. After the 2026-09-16 reboot every
+# recorded `session_…` mapping named a session that no longer existed, three
+# PRs could not be attributed at all, and one session merged two PRs it had not
+# authored on the strength of a dead id.
+#
+# WHY A CHECK RATHER THAN A CONVENTION. Measured 2026-09-17, over the commits
+# since the convention began at 02:45 rather than over all of develop -- the
+# denominator matters, and "9 of the last 60" would have said 15%:
+#
+#   first=$(git log origin/develop --format='%H' -200 | while read -r c; do \
+#     git log -1 --format='%B' "$c" | grep -qE '^Claude-Stream:' && echo "$c"; done | tail -1)
+#   git log --format='%H' "$first"..origin/develop   # 17 commits
+#                                                    # 9 carry the trailer -> 53%
+#
+# Half. The repo's own answer to "a discipline people have to remember" is the
+# DCO arrangement -- a hook that adds it, a check that enforces it -- and this
+# is the second half of that pair for this trailer.
+#
+# WHICH COMMITS THIS READS, AND WHY IT IS NOT NEGOTIABLE.
+#
+# `%(trailers:key=…)` returns EMPTY on develop's commits even when they plainly
+# carry the line: 9 of 9 measured on 2026-09-17. They are SQUASH commits, and
+# `squash_merge_commit_message=COMMIT_MESSAGES` concatenates every constituent
+# message, so each one's trailer block lands mid-body and git parses only the
+# final paragraph -- whichever `Signed-off-by` the hook appended last.
+#
+# On the PULL REQUEST's own commits the trailer parses correctly. So:
+#
+#   base..head, %(trailers:…)          <- robust, ignores prose. This job.
+#   develop's squashes, ^-anchored grep <- the only thing that works there.
+#
+# Both predicates are right in one place and wrong in the other. A version of
+# this job that read develop would fail every commit in the repo, including the
+# correctly-marked ones.
+#
+# WHAT THIS DELIBERATELY DOES NOT DO. It does not try to verify that the stream
+# named is the stream that wrote it. It cannot: the trailer is a CLAIM, exactly
+# as the session id was, and the gain is stability under restart rather than
+# unforgeability. The reflog says which working tree produced an object and no
+# working tree here has a single occupant. See WORKSTREAM.md, "Shared files".
+# ---------------------------------------------------------------------------
+name: Stream Trailer Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+  # The merge queue tests required checks against the projected tip on a
+  # `gh-readonly-queue/...` ref, which fires merge_group and not pull_request.
+  # Without this the check never starts in queue context and nothing merges,
+  # with no check going red.
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  stream-trailer:
+    name: Stream Trailer
+    runs-on: ubuntu-latest
+
+    steps:
+      # REPORTS rather than skipping, for the reason the DCO check gives: a job
+      # that fails to start is indistinguishable to the queue from one that has
+      # not finished, and it waits forever. A commit's trailers cannot change
+      # between the pull request and here.
+      - name: Already checked on the pull request
+        if: github.event_name == 'merge_group'
+        run: echo "stream trailer validated when the pull request was opened"
+
+      - if: github.event_name != 'merge_group'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Check stream trailers
+        if: github.event_name != 'merge_group'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          # pipefail: without it a `git log` that fails on a bad range yields an
+          # empty FAILING, which reads as "every commit is marked" -- a green
+          # that measured nothing, which is the failure mode the DCO check spent
+          # months in.
+          set -euo pipefail
+
+          # Bots do not belong to a workstream. Matched on the AUTHOR, not on a
+          # branch-name prefix: a prefix is a pattern someone can land on by
+          # accident, and an exemption list keyed on one is the shape that has
+          # gone wrong twice in this repo (scripts/check-go-mod-tidy.sh's
+          # EXEMPT_PREFIX, where blanking the variable made the pattern `*`).
+          # QUOTED. Unquoted, `[bot]` is a character class matching one of
+          # b/o/t, so `dependabot[bot]` matches the login `dependabob` and NOT
+          # the actual `dependabot[bot]`. The exemption would then never fire
+          # and every bot pull request would fail this required check. Caught by
+          # the known-positive below, not by reading.
+          case "$PR_AUTHOR" in
+            "dependabot[bot]"|"dependabot-preview[bot]"|"github-actions[bot]")
+              echo "author $PR_AUTHOR is a bot and belongs to no workstream; nothing to check."
+              exit 0
+              ;;
+          esac
+
+          # cleat-review is a REVIEW session rather than a delivery stream: it
+          # reads the tree and opens a pull request only for what that reading
+          # turns up. Added 2026-09-17 because the set had no value for one and
+          # the nearest was actively wrong -- two of its PRs went out as
+          # `coordinator`, which is not "unattributed", it is attributed to
+          # someone else. The coordinator session found a red PR carrying its
+          # own name that it had not opened, and correctly declined to touch 80
+          # files of WASM host ABI on that basis.
+          #
+          # An enumerated set is still right: this check exists to catch a typo,
+          # and an open set catches none. What it costs is exactly this -- a new
+          # participant is a CI change, and cannot land it under its own name.
+          VALID='^(WS-1|WS-2|WS-3|WS-4|coordinator|cleat-review)$'
+
+          # Commits that PREDATE the convention cannot carry the trailer, and a
+          # check that demands one of them is asking for something impossible.
+          #
+          # Not a hypothetical, and not a loophole for forgetting. A pull
+          # request that merges `main` into `develop` -- the only shape that can
+          # make v0.2.0 an ancestor of the release branch and stop `git
+          # describe` answering v0.1.0 (cleat#1779) -- necessarily carries
+          # fb4347d3 (2026-08-10) and 467a689f (2026-06-06) into base..head.
+          # Neither can be amended without rewriting `main`, which is a far
+          # worse thing to do than the problem being fixed. Measured: that PR
+          # fails this check on exactly those two and nothing else.
+          #
+          # The boundary is the first commit on develop that carries a trailer:
+          #
+          #   git log origin/develop --format='%H' -400 | while read -r c; do \
+          #     git log -1 --format='%B' "$c" | grep -qE '^Claude-Stream:' && echo "$c"; done | tail -1
+          #   # 5de97608  2026-09-17T02:45:03Z  (#1739)   -> %ct 1789613103
+          #
+          # EPOCH SECONDS, not an ISO string. `%cI` carries a local offset, so
+          # comparing two of them as text silently compares different instants
+          # -- the error CLAUDE.md records costing a measured count its meaning.
+          # An integer has no timezone.
+          #
+          # The two commits this exempts are five weeks the wrong side of it, so
+          # nothing here turns on the boundary being exact to the second.
+          CONVENTION_START=1789613103
+
+          # AN EXEMPTION KEYED ON A CONSTANT CAN BE WIDENED BY A TYPO, and this
+          # one widens in the dangerous direction: a boundary in the future
+          # exempts EVERY commit, and the run below would print a clean pass
+          # with nothing checked. A digit is all it takes. So the constant is
+          # asserted rather than trusted -- it must be in the past, which a
+          # future-dated typo cannot be.
+          if [ "$CONVENTION_START" -gt "$(date -u +%s)" ]; then
+            echo "UNMEASURED: CONVENTION_START ($CONVENTION_START) is in the future, so every" >&2
+            echo "commit would be exempt and this check would pass having examined none." >&2
+            echo "This is a failure of the check, not a finding about the pull request." >&2
+            exit 2
+          fi
+
+          TOTAL=0
+          EXEMPT=0
+          FAILING=$(git log --no-merges "${BASE}..${HEAD}" --format='%H' | while read -r commit; do
+            if [ "$(git show -s --format='%ct' "$commit")" -lt "$CONVENTION_START" ]; then
+              continue
+            fi
+            value=$(git show -s --format='%(trailers:key=Claude-Stream,valueonly)' "$commit" | head -1 | tr -d '\r')
+            if [ -z "$value" ]; then
+              # TWO CAUSES, ONE SYMPTOM, DIFFERENT REPAIRS. An empty parse means
+              # either there is no such line, or there IS one and git will not
+              # read it as a trailer -- because it is not in the message's FINAL
+              # paragraph. A blank line between it and Signed-off-by is enough:
+              #
+              #     Claude-Stream: WS-2
+              #                             <- this blank line is the defect
+              #     Signed-off-by: ...
+              #
+              # The second looks exactly like the first from outside, and cost a
+              # session ten minutes on this check's first run. Distinguish them,
+              # because "add the trailer" is the wrong instruction for a commit
+              # that already has one.
+              if git log -1 --format='%B' "$commit" | grep -qE '^Claude-Stream:'; then
+                echo "  $(git log -1 --format='%h %s' "$commit")  -- has a Claude-Stream: line that git does NOT parse as a trailer (it is not in the final paragraph -- remove the blank line before the trailer block)"
+              else
+                echo "  $(git log -1 --format='%h %s' "$commit")  -- no Claude-Stream trailer"
+              fi
+            elif ! printf '%s' "$value" | grep -qE "$VALID"; then
+              echo "  $(git log -1 --format='%h %s' "$commit")  -- Claude-Stream: '$value' is not one of WS-1, WS-2, WS-3, WS-4, coordinator, cleat-review"
+            fi
+          done)
+
+          # A range with no commits is not a pass. An empty base..head means the
+          # range was wrong, not that every commit is marked -- the same
+          # zero-denominator trap this repo records about check-runs, grep and
+          # docker ps.
+          #
+          # THE DENOMINATOR IS THE RAW RANGE, NOT THE CHECKED SUBSET, and the
+          # distinction is the whole reason the exemption above is safe. If
+          # UNMEASURED were keyed on what survived the exemption, a bug that
+          # exempted EVERYTHING would report "nothing to check" and exit 0 --
+          # a zero-denominator pass introduced by the very change meant to stop
+          # one. So: TOTAL == 0 is still UNMEASURED, and all three numbers are
+          # printed, per CLAUDE.md's rule that a verdict without its
+          # preconditions cannot say "I did not look".
+          TOTAL=$(git log --no-merges "${BASE}..${HEAD}" --format='%H' | grep -c . || true)
+          EXEMPT=$(git log --no-merges "${BASE}..${HEAD}" --format='%H' | while read -r c; do
+            [ "$(git show -s --format='%ct' "$c")" -lt "$CONVENTION_START" ] && echo "$c"
+          done | grep -c . || true)
+          CHECKED=$((TOTAL - EXEMPT))
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "UNMEASURED: base..head contains no non-merge commits, so nothing was checked." >&2
+            echo "This is a failure of the check, not a finding about the pull request." >&2
+            exit 2
+          fi
+          echo "commits in range: $TOTAL, checked: $CHECKED, exempt (predate the convention): $EXEMPT"
+          # NAME WHAT WAS WAIVED. A count says "3 exempt"; a reviewer needs to
+          # see WHICH three, or a silent exemption is indistinguishable from a
+          # silent cap -- CLAUDE.md's "no silent caps" applied to a guard's own
+          # allowlist rather than to its coverage.
+          if [ "$EXEMPT" -gt 0 ]; then
+            echo "exempt as predating the convention:"
+            git log --no-merges "${BASE}..${HEAD}" --format='%H' | while read -r c; do
+              [ "$(git show -s --format='%ct' "$c")" -lt "$CONVENTION_START" ] &&
+                echo "  $(git show -s --format='%h  %cI  %s' "$c")"
+            done
+          fi
+          if [ "$CHECKED" -eq 0 ]; then
+            echo "Every commit in this range predates the stream-trailer convention."
+            echo "That is a pass, not an unmeasured run: the range is non-empty, every"
+            echo "member of it was examined, and each was found older than the boundary."
+          fi
+
+          if [ -n "$FAILING" ]; then
+            echo "============================================"
+            echo "  STREAM TRAILER CHECK — FAILED"
+            echo "============================================"
+            echo ""
+            echo "$FAILING"
+            echo ""
+            echo "Add the trailer to each commit, e.g.:"
+            echo "  git commit --amend --trailer 'Claude-Stream: WS-1'"
+            echo "  git rebase --exec \"git commit --amend --no-edit --trailer 'Claude-Stream: WS-1'\" ${BASE}"
+            echo "  git push --force-with-lease"
+            echo ""
+            echo "Valid values: WS-1, WS-2, WS-3, WS-4, coordinator, cleat-review."
+            echo ""
+            echo "If a commit is reported as carrying a line git will not parse:"
+            echo "  the trailer must be in the message's FINAL paragraph, with no"
+            echo "  blank line between it and Signed-off-by. Check with:"
+            echo "    git show -s --format='%(trailers:key=Claude-Stream,valueonly)' <sha>"
+            echo "It is a claim about which workstream wrote the commit, not a"
+            echo "credential -- see WORKSTREAM.md, 'Shared files'."
+            exit 1
+          fi
+
+          # Only when something WAS checked. Printed unconditionally it says
+          # "all commits carry a valid trailer" about a run that examined none
+          # -- vacuously true, and the exact register this check exists to
+          # refuse. The CHECKED == 0 branch above has already said what happened.
+          if [ "$CHECKED" -gt 0 ]; then
+            echo "All $CHECKED checked commit(s) carry a valid Claude-Stream trailer."
+          fi

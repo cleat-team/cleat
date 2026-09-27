@@ -20,24 +20,42 @@ func TestInMemorySignalStore_DeliverAndPoll(t *testing.T) {
 	}
 
 	// Poll for it.
-	payload, found, err := s.PollSignal(ctx, "wf-1", "payment-received")
+	d, found, err := s.PollSignal(ctx, "wf-1", "payment-received")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
 	if !found {
 		t.Fatal("expected signal to be found")
 	}
-	if payload != `{"amount":100}` {
-		t.Fatalf("expected payload %q, got %q", `{"amount":100}`, payload)
+	if d.Payload != `{"amount":100}` {
+		t.Fatalf("expected payload %q, got %q", `{"amount":100}`, d.Payload)
 	}
 
-	// Second poll should not find it (consumed).
+	// Second poll STILL finds it: PollSignal does not consume. This assertion
+	// is inverted from what it was -- this double used to delete the entry it
+	// returned, which was the intended end-to-end behaviour but not the
+	// contract of the method (IMPROVEMENT-PLAN 3.215).
+	again, found, err := s.PollSignal(ctx, "wf-1", "payment-received")
+	if err != nil {
+		t.Fatalf("PollSignal: %v", err)
+	}
+	if !found {
+		t.Fatal("PollSignal must not consume; the second poll should still find the delivery")
+	}
+	if again.ID != d.ID {
+		t.Fatalf("expected the same delivery back, got id %d then %d", d.ID, again.ID)
+	}
+
+	// Consuming it is what makes it go away.
+	if err := s.ConsumeSignal(ctx, "wf-1", d.ID); err != nil {
+		t.Fatalf("ConsumeSignal: %v", err)
+	}
 	_, found, err = s.PollSignal(ctx, "wf-1", "payment-received")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
 	if found {
-		t.Fatal("expected signal to be consumed after first poll")
+		t.Fatal("expected the delivery to be gone after ConsumeSignal")
 	}
 }
 
@@ -45,15 +63,15 @@ func TestInMemorySignalStore_PollNonExistent(t *testing.T) {
 	s := NewInMemorySignalStore()
 	ctx := context.Background()
 
-	payload, found, err := s.PollSignal(ctx, "wf-1", "nonexistent")
+	d, found, err := s.PollSignal(ctx, "wf-1", "nonexistent")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
 	if found {
 		t.Fatal("expected not found")
 	}
-	if payload != "" {
-		t.Fatalf("expected empty payload, got %q", payload)
+	if d.Payload != "" {
+		t.Fatalf("expected empty payload, got %q", d.Payload)
 	}
 }
 
@@ -135,7 +153,7 @@ func TestInMemoryPromiseStore_Resolve(t *testing.T) {
 	ctx := context.Background()
 
 	s.CreatePromise(ctx, "wf-1", "my-promise", "prom-1")
-	if err := s.ResolvePromise(ctx, "wf-1", "prom-1", `{"status":"done"}`); err != nil {
+	if err := s.ResolvePromise(ctx, "prom-1", `{"status":"done"}`); err != nil {
 		t.Fatalf("ResolvePromise: %v", err)
 	}
 
@@ -156,7 +174,7 @@ func TestInMemoryPromiseStore_Reject(t *testing.T) {
 	ctx := context.Background()
 
 	s.CreatePromise(ctx, "wf-1", "my-promise", "prom-1")
-	if err := s.RejectPromise(ctx, "wf-1", "prom-1", "something went wrong"); err != nil {
+	if err := s.RejectPromise(ctx, "prom-1", "something went wrong"); err != nil {
 		t.Fatalf("RejectPromise: %v", err)
 	}
 
@@ -188,7 +206,9 @@ func TestInMemoryChildWorkflowStore_StartAndGetResult(t *testing.T) {
 		t.Fatal("expected non-empty runID")
 	}
 
-	result, completed, err := s.GetChildResult(ctx, runID)
+	_outcome, err := s.GetChildResult(ctx, runID)
+	result := _outcome.Result
+	completed := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -222,7 +242,9 @@ func TestInMemoryChildWorkflowStore_PreconfiguredResult(t *testing.T) {
 		t.Fatalf("StartChildWorkflow: %v", err)
 	}
 
-	result, completed, err := s.GetChildResult(ctx, runID)
+	_outcome, err := s.GetChildResult(ctx, runID)
+	result := _outcome.Result
+	completed := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -231,6 +253,40 @@ func TestInMemoryChildWorkflowStore_PreconfiguredResult(t *testing.T) {
 	}
 	if result != `{"custom":"result"}` {
 		t.Fatalf("expected custom result, got %q", result)
+	}
+}
+
+// TestInMemoryChildWorkflowStore_PreconfiguredError pins the shape a FAILED
+// child comes back in. SetError is public API of this fake and nothing
+// exercised it, which mattered: until cleat#1115 it reported a failed child by
+// RETURNING AN ERROR -- the child's failure smuggled through the store error
+// return -- so this fake behaved correctly while every real store reported a
+// failed child as an empty success. A fake that is right for a reason the
+// production path does not share cannot fail with it.
+func TestInMemoryChildWorkflowStore_PreconfiguredError(t *testing.T) {
+	s := NewInMemoryChildWorkflowStore()
+	ctx := context.Background()
+
+	s.SetError("child-workflow", "child blew up")
+	runID, err := s.StartChildWorkflow(ctx, "parent-1", "child-workflow", `{}`, 0, "", 0)
+	if err != nil {
+		t.Fatalf("StartChildWorkflow: %v", err)
+	}
+
+	out, err := s.GetChildResult(ctx, runID)
+	if err != nil {
+		t.Fatalf("GetChildResult returned a STORE error for a child that merely failed: %v.\n\n"+
+			"A child's own failure is a successful call with Failed set; conflating the two is "+
+			"what made this fake disagree with every real store (cleat#1115).", err)
+	}
+	if !out.Completed || !out.Failed {
+		t.Errorf("a failed child reports Completed=%v Failed=%v, want true/true", out.Completed, out.Failed)
+	}
+	if out.Error != "child blew up" {
+		t.Errorf("the outcome carries Error=%q, want the child's own message", out.Error)
+	}
+	if out.Result != "" {
+		t.Errorf("a failed child also presents a result %q; it must not", out.Result)
 	}
 }
 
@@ -247,7 +303,9 @@ func TestInMemoryChildWorkflowStore_Handler(t *testing.T) {
 		t.Fatalf("StartChildWorkflow: %v", err)
 	}
 
-	result, completed, err := s.GetChildResult(ctx, runID)
+	_outcome, err := s.GetChildResult(ctx, runID)
+	result := _outcome.Result
+	completed := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -294,7 +352,7 @@ func TestInMemoryConcurrencyKeyStore_AcquireAndRelease(t *testing.T) {
 	}
 
 	// Release.
-	if err := s.ReleaseConcurrencyKey(ctx, "key-1"); err != nil {
+	if _, err := s.ReleaseConcurrencyKey(ctx, "key-1", "wf-1"); err != nil {
 		t.Fatalf("ReleaseConcurrencyKey: %v", err)
 	}
 

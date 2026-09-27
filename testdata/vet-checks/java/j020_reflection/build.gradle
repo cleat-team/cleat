@@ -1,0 +1,5 @@
+// Present so `cleat build --target java` reaches the determinism gate at all:
+// runBuildJava validates a build file before anything else and exits if there
+// is none, which would refuse this fixture for a reason unrelated to
+// determinism. Nothing here is ever executed by a test -- no gradle task runs.
+plugins { id 'java' }

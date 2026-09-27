@@ -9,6 +9,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"io"
 	"log/slog"
 	"net/http"
@@ -245,7 +246,7 @@ func (c *fakeConn) execUpdateConfig(query string, args []driver.NamedValue) (dri
 				// Ineffectual only because this is the last SET clause. It
 				// keeps the positional counter correct so the next clause
 				// added below cannot silently reuse this one's $N.
-				argIdx++ //nolint:ineffassign // trailing counter; see above
+				argIdx++ //nolint:ineffassign,staticcheck // trailing counter; see above
 			}
 
 			cfg.updatedAt = time.Now()
@@ -507,7 +508,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 	return p, handler, store
 }
 
@@ -520,6 +521,49 @@ func authedRequest(method, target string, body io.Reader) *http.Request {
 // ---------------------------------------------------------------------------
 // Behavioral tests
 // ---------------------------------------------------------------------------
+
+// TestDefaultTenantAPIKeyIsAccepted is cleat#2183's known-positive: the
+// seeded default tenant (uuid.Nil) authenticating with its own valid API key
+// must reach the handler and get a real response, not the 401 that comparing
+// the resolved tenant ID to uuid.Nil produced on every route of this shape
+// before the fix -- see auth.TenantIDFromRequest's doc comment.
+//
+// setupTestPlugin (above) seeds its key for testTenantID
+// (...-000000000001) specifically so ordinary tests are not accidentally
+// exercising the one tenant ID this bug could not distinguish from "no
+// tenant". This test is the one place that ID is deliberately used.
+func TestDefaultTenantAPIKeyIsAccepted(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("default-tenant-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = uuid.Nil.String()
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{
+		db:         &engine.SQLDBAdapter{DB: db},
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+	mux := http.NewServeMux()
+	if err := p.RegisterRoutes(mux); err != nil {
+		t.Fatalf("RegisterRoutes: %v", err)
+	}
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
+
+	req := httptest.NewRequest("GET", "/slack/configs", nil)
+	req.Header.Set("Authorization", "Bearer default-tenant-key")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusUnauthorized {
+		t.Fatalf("default tenant's own valid API key got 401 (cleat#2183 regression): %s", rec.Body.String())
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for the default tenant listing its (empty) configs, got %d: %s",
+			rec.Code, rec.Body.String())
+	}
+}
 
 // TestConfigCreateAndGet verifies creating a Slack notification config and
 // retrieving it by ID.
@@ -960,17 +1004,12 @@ func TestSN_Migrations(t *testing.T) {
 	if len(migrations) == 0 {
 		t.Fatal("expected at least one migration")
 	}
-	for i, m := range migrations {
-		if m.Version == 0 {
-			t.Errorf("migration %d: version must be non-zero", i)
-		}
-		if m.Up == "" {
-			t.Errorf("migration %d: Up SQL is empty", i)
-		}
-		if m.Down == "" {
-			t.Errorf("migration %d: Down SQL is empty", i)
-		}
-	}
+	// One shared predicate for what a migration must do, rather than a copy
+	// per plugin. Thirteen plugins carried their own and they had already
+	// drifted -- three checked Up and not Down. A TenantScoped migration has
+	// no SQL in either direction by design, so the old wording rejected it by
+	// construction. cleat#1278.
+	plugintest.AssertMigrationsDoSomething(t, migrations)
 }
 
 // ===========================================================================

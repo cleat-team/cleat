@@ -46,7 +46,7 @@ graph TD
     PG -->|workflow_instances| W2
     PG -->|event_history| W2
     PG -->|workflow_signals| W2
-    W1 --> WR[WASM Runtime wazero]
+    W1 --> WR[WASM Backend wasmtime<br/>epoch + fuel + memory limits]
     W2 --> WR
     W1 -.->|horizontally scale| W2
     W1 --> UI[Optional: Web UI Svelte<br/>REST API /api/*<br/>Prometheus /metrics<br/>Plugin routes /plugins/*]
@@ -123,27 +123,37 @@ Go `embed.FS`. The UI provides:
 - Schedule management (create, enable, disable)
 - DAG visualization of workflow structure
 
-### WASM Runtime (wasmtime / wazero)
+### WASM Backend (wasmtime)
 
-> Corrected 2026-08-09: this section previously said execution "uses wazero"
-> and gave a stale host-function count (15). wasmtime is the backend of
-> record -- preferred automatically whenever CGO is available (the default),
-> per `cmd/cleat-worker/main.go` -- with epoch/fuel/memory limits wired;
-> wazero is the pure-Go, CGO-less fallback with no compute-bound fencing (see
-> `docs/explanation/security-model.md`). Host function count re-derived
-> 2026-08-09 via `engine/imports.go` (56 `cleat_*` exports plus `plugin_call`,
-> `plugin_call_streaming`, `set_query_state` = 59; both backends register the
-> same set -- see `ABI.md` §2).
+> Corrected 2026-09-06. This section said wasmtime was "the backend of record"
+> and wazero "the pure-Go, CGO-less fallback". **There is no fallback and no
+> second backend**: `engine/backend_wazero.go` was deleted in #459
+> (2026-08-10), a `CGO_ENABLED=0` build constructs no backend at all, and
+> `cleat-worker` exits 1 at startup. The host-function count was corrected in
+> the same pass, from 59 to 52; it was 54 by 2026-09-13, so that pass removed
+> the number rather than correcting it a third time (cleat#1414). See the note
+> under the list below, and `docs/explanation/security-model.md` for what
+> wazero still does.
 
-Execution uses [wasmtime](https://wasmtime.dev/) by default (the backend of
-record) or [wazero](https://wazero.io/), a zero-dependency WebAssembly
-runtime for Go, as a CGO-less fallback. Key characteristics:
+Execution uses [wasmtime](https://wasmtime.dev/), which is the only WASM
+backend cleat has. It requires CGO. Key characteristics:
 
-- wasmtime requires CGo; wazero does not.
-- Both implement the `wasip1` preview 1 ABI required by Go's WASM target.
-- 59 host functions registered on the `env` module (`cleat_call`,
+- wasmtime requires CGO, and a build without it has no backend: the worker
+  logs "wasmtime is the only WASM backend cleat has, there is no fallback"
+  and exits 1. Check any worker with `cleat-worker --verify-backend`.
+- It implements the `wasip1` preview 1 ABI required by Go's WASM target.
+- Host functions registered on the `env` module (`cleat_call`,
   `cleat_call_heartbeat`, `cleat_sleep`, `cleat_now`, etc. -- full list in
-  `ABI.md` §2).
+  `ABI.md` §2, held to `engine/imports.go` by
+  `scripts/check-doc-consistency.sh`). Exactly three carry no `cleat_` prefix --
+  `plugin_call`, `plugin_call_streaming`, `set_query_state` -- which is why a
+  prefix-anchored scan silently under-counts:
+
+      python3 -c "import re;print(len(set(re.findall(r'\.Export\("([^"]+)"\)',
+        open('engine/imports.go').read()))))"
+
+  It read 59 here until today. That was measured 2026-08-09 and was right
+  then; #582 and #767 have since removed seven calls between them.
 - WASM modules are compiled once and cached in memory keyed by
   `def_name:def_version`.
 - String marshalling uses a scratch region in the module's linear memory
@@ -181,7 +191,7 @@ sequenceDiagram
 sequenceDiagram
     participant W as Worker
     participant PG as PostgreSQL
-    participant WZ as wazero WASM
+    participant WZ as wasmtime WASM
 
     W->>PG: 1. SELECT ... FOR UPDATE SKIP LOCKED WHERE status='ready'
     W->>PG: 2. Load WASM blob
@@ -192,7 +202,7 @@ sequenceDiagram
         Note over W: a. Record request<br/>b. Execute call<br/>c. Store response
         W->>PG: d. Persist event
     end
-    W->>PG: 6. UPDATE status='completed'
+    W->>PG: 6. UPDATE status='done'
 ```
 
 ### Execution (Replay)
@@ -201,7 +211,7 @@ sequenceDiagram
 sequenceDiagram
     participant W as Worker
     participant PG as PostgreSQL
-    participant WZ as wazero WASM
+    participant WZ as wasmtime WASM
 
     W->>PG: 1. Claim instance
     W->>PG: 2. Load WASM + event history

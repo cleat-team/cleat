@@ -6,7 +6,34 @@ workflows that compile to WebAssembly.
 
 ## Installation
 
-Add to your `Cargo.toml`:
+`cleat-sdk` and `cleat-macro` are not published to crates.io (`publish = false`
+in both `Cargo.toml`s). Outside a cleat checkout, depend on them from git at a
+release tag -- Cargo resolves a crate by its `[package].name` anywhere inside
+the cloned repo, so no `path` is needed even though both crates live under
+`crates/`:
+
+```toml
+[dependencies]
+cleat-sdk = { git = "https://github.com/cleat-team/cleat", tag = "v0.3.0" }
+cleat-macro = { git = "https://github.com/cleat-team/cleat", tag = "v0.3.0" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+```
+
+Before `v0.3.0` is tagged, pin a commit instead with `rev = "<sha>"` in place
+of `tag`.
+
+Verified 2026-09-24 outside a checkout, pinned to a `develop` commit (`cargo
+build` and `cargo build --target wasm32-wasip1 --release` both succeeded,
+resolving and compiling both crates from git):
+
+```toml
+cleat-sdk = { git = "https://github.com/cleat-team/cleat", rev = "a5467370496ee41b5edd068a0ea325e5d4ee0e8c" }
+cleat-macro = { git = "https://github.com/cleat-team/cleat", rev = "a5467370496ee41b5edd068a0ea325e5d4ee0e8c" }
+```
+
+Inside a cleat checkout (e.g. contributing to the repo itself), use a path
+dependency instead:
 
 ```toml
 [dependencies]
@@ -31,9 +58,16 @@ fn greet_workflow(h: &HostCalls, input: GreetInput) -> Result<String, String> {
     h.cleat_log(&format!("Hello workflow started for {}", input.name));
     let (resp, err) = h.cleat_call("greeter", "Greet",
         &serde_json::json!({"name": input.name}).to_string());
-    resp.ok_or_else(|| err.unwrap_or_else(|| "unknown error".into()))
+    match err {
+        Some(e) => Err(e),
+        None => Ok(resp),
+    }
 }
 ```
+
+`cleat_call` returns `(String, Option<String>)`, not `(Option<String>, Option<String>)`
+-- `resp` is always a `String` (empty on error), so match on `err` rather than
+calling `Option` methods on `resp`.
 
 ## The `#[cleat_entry]` Macro
 
@@ -47,12 +81,39 @@ Transforms a function into a `#[no_mangle]` WASM export with the ABI signature
 - Function must **not** be `async` (WASM does not support futures).
 
 **Generated wrapper behavior:**
-- Wraps the body in `std::panic::catch_unwind` to intercept
-  `SuspendSentinel` panics and propagate suspension back to the host.
+- Calls the body directly. Suspension is a **return value**, not a panic:
+  every host call that can suspend returns `Result<T, CallError>`, and the
+  workflow propagates it with `?`.
+- After the body returns, checks `cleat_sdk::is_suspended()` and returns the
+  host's sentinel value if set — the backstop for a body that discards the
+  `Err` instead of propagating it.
 - Normalizes output JSON through the host's `encoding/json` for cross-language
   deterministic serialization.
-- On panic with `SuspendSentinel`, returns the sentinel value to the host
-  engine (workflow suspension). All other panics are re-dispatched.
+
+> This wrapper used to intercept a `SuspendSentinel` panic with
+> `std::panic::catch_unwind`. That could never work: `wasm32-wasip1` builds with
+> `panic=abort` (`rustc --print cfg --target wasm32-wasip1 | grep panic`), so
+> there is no unwinding and the panic aborted — `unreachable`, a trap. Every
+> Rust suspension was a trapped guest, masked because the host records its own
+> suspension on those paths and lets it win over the error beside it. See
+> IMPROVEMENT-PLAN §3.87.
+
+**Suspension in a workflow body:**
+
+```rust
+#[cleat_entry]
+fn order(h: &HostCalls, input: Input) -> Result<Output, String> {
+    h.cleat_sleep_ms(60_000)?;          // suspends; resumes in a later segment
+    let result = h.await_child(&run_id)?;
+    Ok(Output { result })
+}
+```
+
+`CallError` converts into `String`, so `?` works in a workflow returning
+`Result<T, String>` without any annotation.
+
+**A defer body must not panic.** Nothing can catch it — the guest aborts.
+Return `Err(CallError::Failed(..))` instead; the remaining defers still run.
 
 **Compile-time validation errors:**
 
@@ -77,7 +138,7 @@ The `HostCalls` struct wraps all WASM imports from the `"env"` module.
 | `cleat_call_with_retry` | Server-side retry with `RetryPolicy` |
 | `cleat_call_heartbeat` | Long-running call with progress heartbeats |
 | `cleat_sleep` / `cleat_sleep_ms` | Suspend for a duration (survives restarts) |
-| `cleat_log` | Emit a log message (recorded in event history) |
+| `cleat_log` | Emit a log message to the worker's logger, suppressed on replay (NOT recorded in event history -- cleat#1308) |
 | `cleat_fetch` | Durable HTTP fetch, returns `Result<FetchResult, String>` |
 | `cleat_send` | Fire-and-forget (no response) |
 | `schedule_invoke` | Delayed one-shot invocation |
@@ -100,7 +161,6 @@ The `HostCalls` struct wraps all WASM imports from the `"env"` module.
 |--------|-------------|
 | `child_workflow` | Start child, returns `(run_id, error)` |
 | `child_workflow_with_options` | Start with `ChildWorkflowOptions` (version, priority, policy) |
-| `child_workflow_in_schema` | Start child in a different schema |
 | `child_workflow_typed` | Typed child start via serde |
 | `await_child` / `await_child_typed` | Await single child completion |
 | `await_all_children` | Await multiple children concurrently |
@@ -111,8 +171,6 @@ The `HostCalls` struct wraps all WASM imports from the `"env"` module.
 
 | Method | Description |
 |--------|-------------|
-| `set_state` / `get_state` / `delete_state` | Typed state operations |
-| `incr_state` / `has_state` / `list_state` | Numeric state, existence, prefix listing |
 | `set_query_state` | Set externally-queryable state |
 | `create_promise` / `await_promise` | Durable promise creation and awaiting |
 | `resolve_promise` / `reject_promise` | Promise resolution |
@@ -210,8 +268,8 @@ Key test harness methods:
 | `assert_not_called(service, op)` | Verify call was not made |
 | `assert_state(key, value)` | Verify workflow state |
 
-The `#[cleat_test]` attribute (from `cleat_macro`) wraps tests in
-`catch_unwind` so `SuspendSentinel` panics are safely intercepted:
+The `#[cleat_test]` attribute (from `cleat_macro`) treats a suspension as an
+ordinary outcome rather than a test failure:
 
 ```rust
 use cleat_macro::cleat_test;
@@ -219,9 +277,14 @@ use cleat_macro::cleat_test;
 #[cleat_test]
 fn test_workflow_with_suspend() {
     let mut mock = MockHostCalls::new();
-    // Test code that may encounter SuspendSentinel
+    // Test code that may suspend the workflow
 }
 ```
+
+Note these tests run on the **host** target, where unwinding exists. That is
+only safe because nothing in the suspension path relies on unwinding any more —
+before §3.87 it did, so the suspend mechanism tested green here and trapped in
+the shipped `wasm32-wasip1` build.
 
 ## Typed Plugins
 

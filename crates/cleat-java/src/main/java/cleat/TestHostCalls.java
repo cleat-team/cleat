@@ -197,7 +197,6 @@ public class TestHostCalls {
     private final Map<String, Integer> retrySimAttempts = new HashMap<>();
 
     // Signal reply channels
-    private final Map<String, String> signalReplyChannels = new HashMap<>();
 
     // Metadata
     private String workflowId = "test-workflow";
@@ -379,8 +378,17 @@ public class TestHostCalls {
             PendingSignal sig = pendingSignals.get(i);
             if (contains(signalNames, sig.name)) {
                 pendingSignals.remove(i);
+                // Strip the reply envelope so the receiver sees the payload as
+                // sent and gets the address separately. IMPROVEMENT-PLAN 3.220.
+                String replyTo = "";
+                String payload = sig.payload;
+                String[] unwrapped = SignalEnvelope.decode(payload);
+                if (unwrapped != null) {
+                    replyTo = unwrapped[0];
+                    payload = unwrapped[1];
+                }
                 return CleatResult.ok(
-                    new HostCalls.AwaitSignalsResult(sig.name, sig.payload, false));
+                    new HostCalls.AwaitSignalsResult(sig.name, payload, false, replyTo));
             }
         }
 
@@ -450,6 +458,132 @@ public class TestHostCalls {
      */
     public void registerUpdateHandler(String name) {
         // No-op in mock mode — we just acknowledge it was called
+    }
+
+    // ------------------------------------------------------------------
+    // Workflow updates
+    //
+    // The queue the engine keeps in workflow_update_requests, so a test can
+    // enqueue an update and assert the handler ran, the workflow state changed,
+    // and the caller's promise settled. A delivery leaves the queue only when
+    // it is COMPLETED, mirroring the engine: the request row leaves 'pending'
+    // on completion, not on delivery, so a handler that throws leaves the
+    // update to be redelivered.
+    // ------------------------------------------------------------------
+
+    /** One update request waiting to be delivered. */
+    public static final class PendingUpdate {
+        public final String name;
+        public final String payload;
+        public final String requestId;
+        public final String promiseId;
+
+        PendingUpdate(String name, String payload, String requestId, String promiseId) {
+            this.name = name;
+            this.payload = payload;
+            this.requestId = requestId;
+            this.promiseId = promiseId;
+        }
+    }
+
+    /**
+     * One handled update. Exactly one of result and error is meaningful,
+     * distinguished by error being non-empty.
+     */
+    public static final class UpdateOutcome {
+        public final String name;
+        public final String requestId;
+        public final String result;
+        public final String error;
+
+        UpdateOutcome(String name, String requestId, String result, String error) {
+            this.name = name;
+            this.requestId = requestId;
+            this.result = result;
+            this.error = error;
+        }
+    }
+
+    private final java.util.List<PendingUpdate> pendingUpdates = new java.util.ArrayList<>();
+    private final java.util.List<UpdateOutcome> completedUpdates = new java.util.ArrayList<>();
+    private final java.util.Map<String, java.util.function.Function<String, String>> updateHandlers =
+        new java.util.HashMap<>();
+    private final java.util.Map<String, java.util.function.Function<String, String>> updateValidators =
+        new java.util.HashMap<>();
+    private int updateCounter = 0;
+
+    /** Register an update handler with an optional validator. */
+    public void registerUpdateHandler(String name,
+                                      java.util.function.Function<String, String> handler,
+                                      java.util.function.Function<String, String> validator) {
+        updateHandlers.put(name, handler);
+        if (validator != null) {
+            updateValidators.put(name, validator);
+        }
+    }
+
+    /**
+     * Make an update request pending, as POST /api/workflows/:id/update/:name
+     * does. promiseId may be empty for a request with no caller waiting.
+     *
+     * @return the request id
+     */
+    public String enqueueUpdate(String name, String payload, String promiseId) {
+        updateCounter++;
+        String requestId = "upd-" + name + "-" + updateCounter;
+        pendingUpdates.add(new PendingUpdate(name, payload, requestId, promiseId));
+        return requestId;
+    }
+
+    /** The updates that have been handled, in order. */
+    public java.util.List<UpdateOutcome> completedUpdates() {
+        return new java.util.ArrayList<>(completedUpdates);
+    }
+
+    /**
+     * Deliver and run every pending update.
+     *
+     * <p>Every path completes the request: an unregistered handler, a validator
+     * that refuses and a handler that throws are all answers the caller is
+     * entitled to. Leaving any of them uncompleted would leave the caller
+     * holding a promise nothing settles, which is the defect updates exist to
+     * end.
+     */
+    public void dispatchUpdates() {
+        while (!pendingUpdates.isEmpty()) {
+            PendingUpdate u = pendingUpdates.get(0);
+            java.util.function.Function<String, String> handler = updateHandlers.get(u.name);
+            if (handler == null) {
+                settleUpdate(u, "", "cleat: no update handler registered for \"" + u.name + "\"");
+                continue;
+            }
+            java.util.function.Function<String, String> validator = updateValidators.get(u.name);
+            if (validator != null) {
+                String refusal = validator.apply(u.payload);
+                if (refusal != null && !refusal.isEmpty()) {
+                    settleUpdate(u, "", refusal);
+                    continue;
+                }
+            }
+            try {
+                settleUpdate(u, handler.apply(u.payload), "");
+            } catch (RuntimeException e) {
+                settleUpdate(u, "", String.valueOf(e.getMessage()));
+            }
+        }
+    }
+
+    private void settleUpdate(PendingUpdate u, String result, String error) {
+        pendingUpdates.remove(0);
+        completedUpdates.add(new UpdateOutcome(u.name, u.requestId, result, error));
+        if (u.promiseId == null || u.promiseId.isEmpty()) {
+            return;
+        }
+        if (error != null && !error.isEmpty()) {
+            rejectPromise(u.promiseId, error);
+        } else {
+            resolvePromise(u.promiseId, result);
+        }
     }
 
     /**
@@ -564,83 +698,11 @@ public class TestHostCalls {
         return CleatResult.ok(null);
     }
 
-    /**
-     * Set a state value.
-     */
-    public CleatResult<Void> setState(String key, String value) {
-        workflowState.put(scopedKey(key), value);
-        return CleatResult.ok(null);
-    }
 
-    /**
-     * Get a state value.
-     */
-    public CleatResult<String> getState(String key) {
-        String val = workflowState.get(scopedKey(key));
-        if (val != null) {
-            return CleatResult.ok(val);
-        }
-        return CleatResult.err("no such key: " + key);
-    }
 
-    /**
-     * Delete a state key.
-     */
-    public CleatResult<Void> deleteState(String key) {
-        workflowState.remove(scopedKey(key));
-        return CleatResult.ok(null);
-    }
 
-    /**
-     * Atomically increment a numeric state value.
-     */
-    public long incrState(String key, long delta) {
-        String scoped = scopedKey(key);
-        long current = 0;
-        String existing = workflowState.get(scoped);
-        if (existing != null) {
-            try {
-                current = Long.parseLong(existing);
-            } catch (NumberFormatException e) {
-                System.err.println("Warning: non-numeric state value for key '" + key + "': " + existing + ". Resetting to 0.");
-            }
-        }
-        current += delta;
-        workflowState.put(scoped, String.valueOf(current));
-        return current;
-    }
 
-    /**
-     * Check if a state key exists.
-     * Uses the raw (unscoped) key, so that scoped state is isolated
-     * from unscoped lookups.  This allows tests to verify scope isolation:
-     * after {@link #setState} with a scope active, {@code hasState}
-     * with the same raw key returns {@code false} because the stored
-     * key is prefixed.
-     */
-    public boolean hasState(String key) {
-        return workflowState.containsKey(key);
-    }
 
-    /**
-     * List state keys matching a prefix.
-     */
-    public CleatResult<String> listState(String prefix) {
-        String scoped = scopedKey(prefix);
-        StringBuilder sb = new StringBuilder("[");
-        boolean first = true;
-        for (String k : workflowState.keySet()) {
-            if (k.startsWith(scoped)) {
-                if (!first) {
-                    sb.append(",");
-                }
-                sb.append("\"").append(k).append("\"");
-                first = false;
-            }
-        }
-        sb.append("]");
-        return CleatResult.ok(sb.toString());
-    }
 
     /**
      * Await all children workflows.
@@ -679,37 +741,45 @@ public class TestHostCalls {
      */
     public CleatResult<String> sendSignalAndWait(
             String targetRunId, String signalName, String payload, long timeoutMs) {
-        signalReplyCorrIdCounter++;
-        String correlationId = "corr-" + targetRunId + "-"
-            + signalName + "-" + signalReplyCorrIdCounter;
+        // Composed over this harness's own promises, exactly as the SDK
+        // composes over the host's (IMPROVEMENT-PLAN 3.220). The version this
+        // replaces minted a "corr-<target>-<name>-<n>" ID into a private
+        // channel map -- a protocol that existed in no other environment, so a
+        // receiver written against it could not work in a real workflow.
+        CleatResult<String> promise = createPromise("__reply:" + signalName);
+        if (promise.isErr()) {
+            return CleatResult.err("sendSignalAndWait: create reply promise: " + promise.getError());
+        }
+        String replyTo = promise.getValue();
 
-        // Register a reply channel
-        signalReplyChannels.put(correlationId, "__pending__");
-
-        // Send the signal
-        signalWorkflow(targetRunId, signalName, payload);
-
-        // Check if reply already arrived
-        String reply = signalReplyChannels.get(correlationId);
-        if (!"__pending__".equals(reply)) {
-            signalReplyChannels.remove(correlationId);
-            return CleatResult.ok(reply);
+        CleatResult<Void> sent = signalWorkflow(
+            targetRunId, signalName, SignalEnvelope.encode(replyTo, payload));
+        if (sent.isErr()) {
+            return CleatResult.err("sendSignalAndWait: send signal: " + sent.getError());
         }
 
-        // Simulate timeout
-        nowMs += timeoutMs;
-        return CleatResult.err("SendSignalAndWait(target=" + targetRunId + ", signal=" + signalName + ") timed out after " + timeoutMs + "ms");
+        CleatResult<HostCalls.AwaitPromiseResult> awaited = awaitPromise(replyTo, timeoutMs);
+        if (awaited.isErr()) {
+            return CleatResult.err("sendSignalAndWait: await reply to signal \""
+                + signalName + "\": " + awaited.getError());
+        }
+        if (awaited.getValue().timedOut) {
+            return CleatResult.err("sendSignalAndWait: no reply to signal \"" + signalName
+                + "\" from workflow \"" + targetRunId + "\" within " + timeoutMs + "ms");
+        }
+        return CleatResult.ok(awaited.getValue().result);
     }
 
     /**
      * Reply to a signal from within a handler.
      */
     public CleatResult<Void> replyToSignal(String correlationId, String response) {
-        if (signalReplyChannels.containsKey(correlationId)) {
-            signalReplyChannels.put(correlationId, response);
-            return CleatResult.ok(null);
+        if (correlationId == null || correlationId.isEmpty()) {
+            return CleatResult.err("replyToSignal: empty correlation ID. Pass "
+                + "AwaitSignalsResult.replyTo from the signal being answered; it is empty "
+                + "when the sender used signalWorkflow and is not waiting for a reply.");
         }
-        return CleatResult.err("no pending signal for correlation ID: " + correlationId);
+        return resolvePromise(correlationId, response);
     }
 
     /**
@@ -926,7 +996,6 @@ public class TestHostCalls {
         promises.clear();
         promiseResults.clear();
         promiseErrors.clear();
-        signalReplyChannels.clear();
         signalReplyCorrIdCounter = 0;
         sentSignals.clear();
         cancelled = false;

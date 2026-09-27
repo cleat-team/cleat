@@ -141,6 +141,25 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP TABLE IF EXISTS pgvector_embeddings;
 				DROP TABLE IF EXISTS pgvector_collections;
 			`,
+			// pgvector_collections is NOT here: it carries no tenant_id, so a
+			// policy on cleat.tenant_row_is_visible(tenant_id) would fail the
+			// migration on "column tenant_id does not exist". Collections are
+			// global by construction -- `name TEXT NOT NULL UNIQUE` is unique
+			// across the deployment, not per tenant -- and the per-tenant
+			// thing is the embedding.
+			//
+			// pgvector_embeddings qualifies: every statement this plugin
+			// issues against it already names tenant_id, and it runs no
+			// background sweep, which is the condition the field's own doc
+			// sets. The policy is a backstop behind those WHERE clauses
+			// rather than a replacement for them.
+			//
+			// This does nothing at runtime today -- cmd/cleat-worker does not
+			// link pgvector (see the comment above its commented-out import in
+			// main.go) -- and that is the reason to write it now rather than
+			// later: whoever links it gets the policy, instead of discovering
+			// it is the one plugin table without one. cleat#1277, cleat#1512.
+			TenantScoped: []string{"pgvector_embeddings"},
 		},
 	}
 }

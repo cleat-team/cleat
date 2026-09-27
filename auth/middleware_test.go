@@ -43,16 +43,16 @@ func newTestDB(store *fakeDBStore) *sql.DB {
 // parsedTestTenantID is the uuid.UUID form of testTenantID.
 var parsedTestTenantID = uuid.MustParse(testTenantID)
 
-// --- Middleware tests -------------------------------------------------------
+// --- MiddlewareWithMux tests -------------------------------------------------
 
-func TestMiddleware_NoAuth_PassesThrough(t *testing.T) {
+func TestMiddlewareWithMux_NoAuth_PassesThrough(t *testing.T) {
 	store := newFakeDBStore()
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
 	var hadTenant bool
-	mw := Middleware(engine.NewPostgresStore(db), false)
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), false, nil)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		_, hadTenant = TenantIDFromContext(r.Context())
@@ -74,7 +74,7 @@ func TestMiddleware_NoAuth_PassesThrough(t *testing.T) {
 	}
 }
 
-func TestMiddleware_BearerToken_Valid_SetsTenantContext(t *testing.T) {
+func TestMiddlewareWithMux_BearerToken_Valid_SetsTenantContext(t *testing.T) {
 	store := newFakeDBStore()
 	addTestKey(store)
 	db := newTestDB(store)
@@ -83,7 +83,7 @@ func TestMiddleware_BearerToken_Valid_SetsTenantContext(t *testing.T) {
 	var handlerCalled bool
 	var gotTenant uuid.UUID
 	var gotOK bool
-	mw := Middleware(engine.NewPostgresStore(db), false)
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), false, nil)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		gotTenant, gotOK = TenantIDFromContext(r.Context())
@@ -109,7 +109,7 @@ func TestMiddleware_BearerToken_Valid_SetsTenantContext(t *testing.T) {
 	}
 }
 
-func TestMiddleware_XCleatAPIKey_Valid_SetsTenantContext(t *testing.T) {
+func TestMiddlewareWithMux_XCleatAPIKey_Valid_SetsTenantContext(t *testing.T) {
 	store := newFakeDBStore()
 	addTestKey(store)
 	db := newTestDB(store)
@@ -118,7 +118,7 @@ func TestMiddleware_XCleatAPIKey_Valid_SetsTenantContext(t *testing.T) {
 	var handlerCalled bool
 	var gotTenant uuid.UUID
 	var gotOK bool
-	mw := Middleware(engine.NewPostgresStore(db), false)
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), false, nil)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		gotTenant, gotOK = TenantIDFromContext(r.Context())
@@ -144,14 +144,14 @@ func TestMiddleware_XCleatAPIKey_Valid_SetsTenantContext(t *testing.T) {
 	}
 }
 
-func TestMiddleware_InvalidToken_ReturnsUnauthorized(t *testing.T) {
+func TestMiddlewareWithMux_InvalidToken_ReturnsUnauthorized(t *testing.T) {
 	// An API key that hasn't been stored should get 401.
 	store := newFakeDBStore()
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
-	mw := Middleware(engine.NewPostgresStore(db), false)
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), false, nil)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
@@ -177,7 +177,7 @@ func TestMiddleware_InvalidToken_ReturnsUnauthorized(t *testing.T) {
 	}
 }
 
-func TestMiddleware_RevokedToken_ReturnsUnauthorized(t *testing.T) {
+func TestMiddlewareWithMux_RevokedToken_ReturnsUnauthorized(t *testing.T) {
 	store := newFakeDBStore()
 	addTestKey(store)
 	// Immediately revoke the key we just added.
@@ -186,7 +186,7 @@ func TestMiddleware_RevokedToken_ReturnsUnauthorized(t *testing.T) {
 	store.mu.Lock()
 	k := store.apiKeys[hashHex]
 	now := time.Now()
-	k.revokedAt = &now
+	k.disabledAt = &now
 	store.apiKeys[hashHex] = k
 	store.mu.Unlock()
 
@@ -194,7 +194,7 @@ func TestMiddleware_RevokedToken_ReturnsUnauthorized(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
-	mw := Middleware(engine.NewPostgresStore(db), false)
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), false, nil)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
@@ -213,7 +213,7 @@ func TestMiddleware_RevokedToken_ReturnsUnauthorized(t *testing.T) {
 	}
 }
 
-func TestMiddleware_MalformedAuthHeader_NotBearer(t *testing.T) {
+func TestMiddlewareWithMux_MalformedAuthHeader_NotBearer(t *testing.T) {
 	// "Authorization: Basic ..." (not Bearer) should not panic. It should be
 	// silently ignored (falls through to X-Cleat-API-Key), and if that is also
 	// absent, the request passes through without tenant context.
@@ -222,7 +222,7 @@ func TestMiddleware_MalformedAuthHeader_NotBearer(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
-	mw := Middleware(engine.NewPostgresStore(db), false)
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), false, nil)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
@@ -241,7 +241,7 @@ func TestMiddleware_MalformedAuthHeader_NotBearer(t *testing.T) {
 	}
 }
 
-func TestMiddleware_MalformedAuthHeader_OnlyBearerKeyword(t *testing.T) {
+func TestMiddlewareWithMux_MalformedAuthHeader_OnlyBearerKeyword(t *testing.T) {
 	// "Authorization: Bearer" (no key after it) should not panic and should
 	// pass through (extracted key is empty).
 	store := newFakeDBStore()
@@ -249,7 +249,7 @@ func TestMiddleware_MalformedAuthHeader_OnlyBearerKeyword(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
-	mw := Middleware(engine.NewPostgresStore(db), false)
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), false, nil)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
@@ -268,7 +268,7 @@ func TestMiddleware_MalformedAuthHeader_OnlyBearerKeyword(t *testing.T) {
 	}
 }
 
-func TestMiddleware_BearerTakesPriorityOverXCleatKey(t *testing.T) {
+func TestMiddlewareWithMux_BearerTakesPriorityOverXCleatKey(t *testing.T) {
 	// When both headers are present, the Bearer token is used.
 	store := newFakeDBStore()
 	addTestKey(store)
@@ -288,7 +288,7 @@ func TestMiddleware_BearerTakesPriorityOverXCleatKey(t *testing.T) {
 	}
 	store.mu.Unlock()
 
-	mw := Middleware(engine.NewPostgresStore(db), false)
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), false, nil)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tid, ok := TenantIDFromContext(r.Context())
 		if !ok || tid != parsedTestTenantID {
@@ -309,7 +309,7 @@ func TestMiddleware_BearerTakesPriorityOverXCleatKey(t *testing.T) {
 	}
 }
 
-func TestMiddleware_TenantIDPropagation(t *testing.T) {
+func TestMiddlewareWithMux_TenantIDPropagation(t *testing.T) {
 	// Verify that the tenant ID from a valid token is propagated through a
 	// chain of middlewares.
 	store := newFakeDBStore()
@@ -317,7 +317,7 @@ func TestMiddleware_TenantIDPropagation(t *testing.T) {
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
-	outerMW := Middleware(engine.NewPostgresStore(db), false)
+	outerMW := MiddlewareWithMux(engine.NewPostgresStore(db), false, nil)
 	innerMW := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			tid, ok := TenantIDFromContext(r.Context())
@@ -359,13 +359,13 @@ func TestMiddleware_TenantIDPropagation(t *testing.T) {
 // (not the specific patterns cmd/cleat-worker/main.go wires up, which live
 // outside this package).
 
-func TestMiddleware_PublicPattern_PassesThroughWithoutKey(t *testing.T) {
+func TestMiddlewareWithMux_PublicPattern_PassesThroughWithoutKey(t *testing.T) {
 	store := newFakeDBStore()
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
-	mw := Middleware(engine.NewPostgresStore(db), true, "POST /ingest/{source_id}")
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), true, nil, "POST /ingest/{source_id}")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
@@ -383,7 +383,7 @@ func TestMiddleware_PublicPattern_PassesThroughWithoutKey(t *testing.T) {
 	}
 }
 
-func TestMiddleware_PublicPattern_DoesNotWidenToSiblingPath(t *testing.T) {
+func TestMiddlewareWithMux_PublicPattern_DoesNotWidenToSiblingPath(t *testing.T) {
 	// "POST /ingest/{source_id}" is public; "/ingest/sources" (a different,
 	// tenant-scoped route registered by the same plugin) must not become
 	// public as a side effect of sharing the "/ingest/" prefix.
@@ -392,7 +392,7 @@ func TestMiddleware_PublicPattern_DoesNotWidenToSiblingPath(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
-	mw := Middleware(engine.NewPostgresStore(db), true, "POST /ingest/{source_id}")
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), true, nil, "POST /ingest/{source_id}")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
@@ -410,7 +410,7 @@ func TestMiddleware_PublicPattern_DoesNotWidenToSiblingPath(t *testing.T) {
 	}
 }
 
-func TestMiddleware_PublicPattern_MethodIsRespected(t *testing.T) {
+func TestMiddlewareWithMux_PublicPattern_MethodIsRespected(t *testing.T) {
 	// "POST /ingest/{source_id}" is public; a GET to the same path shape is a
 	// different route (it does not exist here) and must still be rejected,
 	// not silently treated as public because the path matched.
@@ -419,7 +419,7 @@ func TestMiddleware_PublicPattern_MethodIsRespected(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
-	mw := Middleware(engine.NewPostgresStore(db), true, "POST /ingest/{source_id}")
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), true, nil, "POST /ingest/{source_id}")
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
@@ -437,17 +437,17 @@ func TestMiddleware_PublicPattern_MethodIsRespected(t *testing.T) {
 	}
 }
 
-func TestMiddleware_NoPublicPatterns_StillRequiresAuth(t *testing.T) {
-	// Baseline: calling Middleware without the variadic publicPatterns
-	// (as every call site outside cmd/cleat-worker/main.go does) must behave
-	// exactly as before -- requireAuth=true rejects an unauthenticated
-	// request to any non-/healthz, non-/metrics path.
+func TestMiddlewareWithMux_NoPublicPatterns_StillRequiresAuth(t *testing.T) {
+	// Baseline: calling MiddlewareWithMux with a nil mux and no variadic
+	// publicPatterns must behave exactly as before -- requireAuth=true
+	// rejects an unauthenticated request to any non-/healthz, non-/metrics
+	// path.
 	store := newFakeDBStore()
 	db := newTestDB(store)
 	t.Cleanup(func() { db.Close() })
 
 	var handlerCalled bool
-	mw := Middleware(engine.NewPostgresStore(db), true)
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), true, nil)
 	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerCalled = true
 		w.WriteHeader(http.StatusOK)
@@ -462,6 +462,105 @@ func TestMiddleware_NoPublicPatterns_StillRequiresAuth(t *testing.T) {
 	}
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestMiddlewareWithMux_LiteralSiblingOfPublicWildcardStaysProtected(t *testing.T) {
+	// cleat#2274: POST /ingest/sources is a real, non-public route registered
+	// on the same mux as the public POST /ingest/{source_id}. A nil-mux
+	// throwaway matcher -- built from only the public pattern -- has no
+	// sibling to lose to, so a same-method, same-prefix literal path like
+	// this one wrongly matches the wildcard and skips key resolution
+	// entirely. TestMiddlewareWithMux_PublicPattern_DoesNotWidenToSiblingPath
+	// above does not catch this: it sends a GET, a different method, which the
+	// throwaway matcher already rejects for an unrelated reason. This test
+	// uses the SAME method as the public pattern, which is what actually
+	// shadowed.
+	//
+	// MiddlewareWithMux, given the real mux both patterns are registered on,
+	// must not have this gap: net/http's mux prefers the literal pattern over
+	// the wildcard for an exact path match, the same way it will when this
+	// mux really serves the request.
+	store := newFakeDBStore()
+	addTestKey(store)
+	db := newTestDB(store)
+	t.Cleanup(func() { db.Close() })
+
+	var sourcesCalled, sourceIDCalled bool
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /ingest/{source_id}", func(w http.ResponseWriter, r *http.Request) {
+		sourceIDCalled = true
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("POST /ingest/sources", func(w http.ResponseWriter, r *http.Request) {
+		sourcesCalled = true
+		w.WriteHeader(http.StatusCreated)
+	})
+
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), true, mux, "POST /ingest/{source_id}")
+	handler := mw(mux)
+
+	// The literal sibling must require a key, not pass through as public.
+	req := httptest.NewRequest("POST", "/ingest/sources", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if sourcesCalled {
+		t.Error("expected POST /ingest/sources NOT to be reached without a key")
+	}
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for POST /ingest/sources without a key, got %d", rec.Code)
+	}
+
+	// With a valid key, the literal sibling must still work (proving this
+	// isn't merely rejecting every request to that path).
+	sourcesCalled = false
+	req = httptest.NewRequest("POST", "/ingest/sources", nil)
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if !sourcesCalled {
+		t.Error("expected POST /ingest/sources to be reached with a valid key")
+	}
+	if rec.Code != http.StatusCreated {
+		t.Errorf("expected 201 for POST /ingest/sources with a valid key, got %d", rec.Code)
+	}
+
+	// The actual public wildcard must still pass through with no key.
+	req = httptest.NewRequest("POST", "/ingest/abc-123", nil)
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if !sourceIDCalled {
+		t.Error("expected POST /ingest/{source_id} to stay public")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for the public wildcard, got %d", rec.Code)
+	}
+}
+
+func TestMiddlewareWithMux_NilMuxFallsBackToThrowawayMatcher(t *testing.T) {
+	// mux may be nil (e.g. a caller with no real serving mux to hand); that
+	// must fall back to the throwaway matcher correctly, not panic or
+	// silently deny everything.
+	store := newFakeDBStore()
+	db := newTestDB(store)
+	t.Cleanup(func() { db.Close() })
+
+	var handlerCalled bool
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), true, nil, "POST /ingest/{source_id}")
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handlerCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("POST", "/ingest/abc-123", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if !handlerCalled {
+		t.Error("expected downstream handler to be called for a declared public pattern")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d", rec.Code)
 	}
 }
 
@@ -633,5 +732,37 @@ func TestWithTenantID_Override(t *testing.T) {
 	}
 	if got != second {
 		t.Errorf("TenantIDFromContext = %v, want %v (the latest)", got, second)
+	}
+}
+
+// The health endpoints are answered without a credential, and the ADMIN health route is not. One list
+// (IsInfrastructurePath) serves this middleware, HostBindingMiddleware and the oauthprovider plugin;
+// cleat#2007 added /livez and /readyz, and the admin route is the known-positive that the list has not
+// simply been widened to everything under /.
+func TestMiddlewareWithMux_InfrastructurePathsNeedNoKeyAndTheAdminHealthRouteDoes(t *testing.T) {
+	store := newFakeDBStore()
+	db := newTestDB(store)
+	t.Cleanup(func() { db.Close() })
+	mw := MiddlewareWithMux(engine.NewPostgresStore(db), true, nil)
+	reached := false
+	handler := mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reached = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	for _, path := range []string{"/healthz", "/livez", "/readyz", "/metrics"} {
+		reached = false
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if !reached || rec.Code != http.StatusOK {
+			t.Errorf("%s without a key: reached=%v code=%d, want the handler and 200", path, reached, rec.Code)
+		}
+	}
+	for _, path := range []string{"/api/admin/health", "/healthz/", "/readyz/verbose", "/metrics/x"} {
+		reached = false
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if reached || rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s without a key: reached=%v code=%d, want 401 and the handler not called", path, reached, rec.Code)
+		}
 	}
 }

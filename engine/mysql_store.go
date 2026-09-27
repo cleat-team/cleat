@@ -44,6 +44,37 @@ func isDeadlockError(err error) bool {
 	return false
 }
 
+// isSignalsWorkflowFKViolation checks for a foreign-key violation (error
+// 1452) on workflow_signals' FK to workflow_instances(id)
+// (migrations/mysql/001_schema.sql). MySQL auto-names this constraint
+// rather than carrying a fixed one, so it is identified by the CHILD table
+// -- "workflow_signals" -- which a 1452 message always includes and which
+// this table's schema references in exactly one FK, rather than by a name
+// that depends on creation order and could change across a schema rebuild.
+//
+// deliverSignalTx's EXISTS-gated INSERT (this file) reads
+// workflow_instances as a plain, non-locking SELECT: the EXISTS predicate
+// can be true when it is evaluated and false by the time the INSERT's own
+// FK check runs a moment later, if the target is hard-deleted in between --
+// a purge racing a signal, in the caller's own tenant. When that race is
+// lost, the INSERT fails HERE instead of the EXISTS predicate simply being
+// false, and without this check the raw FK error would reach the caller
+// unwrapped, indistinguishable from an unrelated database failure and
+// invisible to a caller checking errors.Is(err, ErrWorkflowNotFound) --
+// including eventtriggers.signalAwaiters, which unregisters on that
+// specifically and would otherwise treat this race as a transient failure
+// and retry it forever against a workflow that is never coming back.
+func isSignalsWorkflowFKViolation(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if !errors.As(err, &mysqlErr) {
+		return false
+	}
+	if mysqlErr.Number != 1452 {
+		return false
+	}
+	return strings.Contains(mysqlErr.Message, "workflow_signals")
+}
+
 // ---------------------------------------------------------------------------
 // MySQLStore
 // ---------------------------------------------------------------------------
@@ -171,11 +202,24 @@ func (s *MySQLStore) log() *slog.Logger {
 // that skip into a failure, which is how this surfaced.
 //
 // Scope, stated plainly: this guard is currently applied to
-// GetActiveInstanceCountsByVersion only, the one method the test covers.
-// Auditing the other ~89 tenant-scoped MySQL call sites, and deciding which
-// legitimately run without a tenant, is IMPROVEMENT-PLAN.md 1.7 and is not
-// done. Do not read the presence of this helper as a claim that MySQL tenant
-// scoping is enforced.
+// GetActiveInstanceCountsByVersion only, the one method the test covers. Do not
+// read the presence of this helper as a claim that MySQL tenant scoping is
+// enforced.
+//
+// This used to point at "auditing the other ~89 tenant-scoped MySQL call
+// sites" as IMPROVEMENT-PLAN.md 1.7 work that "is not done". Corrected
+// 2026-08-31: tiers.yaml records multi-tenancy-mysql as NOT SUPPORTED --
+// single-tenant only (D1, 2026-08-06), "a documented product boundary, not an
+// open engineering item", because emulating RLS costs 6.1x on scans. So there
+// is no tenant-isolation audit outstanding here, and a comment sending the
+// next reader at one is worse than no comment.
+//
+// What this guard is actually for survives that decision, which is why it
+// stays: it is a wrong-answer guard, not a multi-tenancy guard. An empty
+// tenantID makes every tenant_id predicate a comparison against the empty
+// string -- no rows, no error -- so a query with no identity reads to the
+// caller as "this tenant has no data". That is just as wrong in the
+// single-tenant deployment MySQL is supported for.
 func (s *MySQLStore) requireTenant(op string) error {
 	if s.tenantID == "" {
 		return fmt.Errorf("%s: tenant ID must be set; MySQL has no row-level "+
@@ -201,6 +245,22 @@ func (s *MySQLStore) beginTx(ctx context.Context) (*sql.Tx, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	return tx, nil
+}
+
+// beginTxReadCommitted starts a claim transaction at READ COMMITTED isolation.
+//
+// cleat#1116. MySQL's default REPEATABLE READ fixes a consistent-read snapshot
+// at the transaction's first read, so a plain SELECT count(*) of queue_holders
+// taken after the queues row is locked would still read the stale snapshot and
+// two concurrent claims could both see "one slot free" and both insert. READ
+// COMMITTED makes each statement read the latest committed rows, so the count
+// under the queues lock is the authoritative number of holders.
+func (s *MySQLStore) beginTxReadCommitted(ctx context.Context) (*sql.Tx, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
+	if err != nil {
+		return nil, fmt.Errorf("begin tx read committed: %w", err)
 	}
 	return tx, nil
 }
@@ -287,11 +347,11 @@ func (s *MySQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, 
 	} else {
 		_, err = s.db.ExecContext(ctx, `
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
-			VALUES (?, ?, (SELECT COALESCE(MAX(version), 0) FROM workflow_defs WHERE name = ? AND NOT deprecated), 'ready', ?, ?,
+			VALUES (?, ?, (SELECT COALESCE(MAX(version), 0) FROM workflow_defs WHERE name = ? AND disabled_at IS NULL AND tenant_id = ?), 'ready', ?, ?,
 			        COALESCE(NULLIF(?, ''), 'ABANDON'),
 			        COALESCE((SELECT t.task_queue FROM (SELECT task_queue FROM workflow_instances WHERE id = ?) AS t), 'default'),
 			        ?, ?)
-		`, runID, defName, defName, inputJSON, parentID, parentClosePolicy, parentID, s.tenantID, priority)
+		`, runID, defName, defName, s.tenantID, inputJSON, parentID, parentClosePolicy, parentID, s.tenantID, priority)
 	}
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
@@ -324,11 +384,11 @@ func (s *MySQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 	} else {
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, tenant_id, priority)
-			VALUES (?, ?, (SELECT COALESCE(MAX(version), 0) FROM workflow_defs WHERE name = ? AND NOT deprecated), 'ready', ?, ?,
+			VALUES (?, ?, (SELECT COALESCE(MAX(version), 0) FROM workflow_defs WHERE name = ? AND disabled_at IS NULL AND tenant_id = ?), 'ready', ?, ?,
 			        COALESCE(NULLIF(?, ''), 'ABANDON'),
 			        COALESCE((SELECT t.task_queue FROM (SELECT task_queue FROM workflow_instances WHERE id = ?) AS t), 'default'),
 			        ?, ?)
-		`, childID, defName, defName, inputJSON, parentID, parentClosePolicy, parentID, s.tenantID, priority)
+		`, childID, defName, defName, s.tenantID, inputJSON, parentID, parentClosePolicy, parentID, s.tenantID, priority)
 	}
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert child: %w", err)
@@ -336,19 +396,39 @@ func (s *MySQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 
 	// 2. INSERT IGNORE child_workflow event into parent's event_history.
 	event.RunID = childID
-	var prevCS string
-	if event.Step > 1 {
-		s.db.QueryRowContext(ctx,
-			`SELECT COALESCE(checksum, '') FROM event_history WHERE workflow_id = ? AND step = ? AND tenant_id = ?`,
-			parentID, event.Step-1, s.tenantID).Scan(&prevCS)
+	// previousStoredChecksum, not a hand-rolled read: it runs on tx (so it sees
+	// this transaction and carries its RLS/tenant context), qualifies by
+	// tenant_id, and distinguishes "no predecessor" from a failed read. The
+	// copy that used to be here ran on s.db -- the raw pool, no RLS context --
+	// and discarded the error, so under a non-superuser role it silently
+	// checksummed against an empty predecessor and broke the chain.
+	prevCS, err := s.previousStoredChecksum(ctx, tx, parentID, event.Step)
+	if err != nil {
+		return "", fmt.Errorf("start child workflow atomic: previous checksum: %w", err)
 	}
 	checksum := computeEventChecksum(event, prevCS)
+
+	// The same encoder every other event_history writer calls (cleat#2328;
+	// see PostgresStore.StartChildWorkflowAtomic). MySQL does not support
+	// encryption at rest -- s.encryptSensitivePayloads is always false here,
+	// so this is a no-op transform today -- but routing through it anyway
+	// means there is exactly one place that builds the payload column and
+	// the payload_encoding column, rather than a second hand-rolled copy
+	// that would need to be found again if MySQL ever gains encryption.
+	// The checksum above is computed BEFORE this call, over the plaintext
+	// event, for the same reason encodeEventForStorage's doc gives: it must
+	// match what VerifyWorkflowEvents recomputes from the decrypted record.
+	stored, err := encodeEventForStorage(event, s.encryption, s.encryptSensitivePayloads, tenantForAAD(s.tenantID))
+	if err != nil {
+		return "", fmt.Errorf("start child workflow atomic: encode event: %w", err)
+	}
+
 	_, err = tx.ExecContext(ctx, `
-		INSERT IGNORE INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum, tenant_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT IGNORE INTO event_history (workflow_id, step, event_type, child_name, child_input, run_id, created_at, checksum, tenant_id, payload, payload_encoding)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, parentID, event.Step, string(event.EventType),
-		nullStr(event.ChildName), nullStr(event.ChildInput), nullStr(childID),
-		time.UnixMilli(event.TimestampMs), checksum, s.tenantID)
+		nullStr(event.ChildName), nullStr(stored.ChildInput), nullStr(childID),
+		time.UnixMilli(event.TimestampMs), checksum, s.tenantID, stored.Payload, stored.Encoding)
 	if err != nil {
 		return "", fmt.Errorf("start child workflow atomic: insert event: %w", err)
 	}
@@ -359,23 +439,39 @@ func (s *MySQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, pare
 	return childID, nil
 }
 
-// GetChildResult checks whether a child workflow has completed and returns its result.
-func (s *MySQLStore) GetChildResult(ctx context.Context, runID string) (string, bool, error) {
+// GetChildResult reports what a child workflow left behind -- see the
+// ChildWorkflowStore interface. The returned error is a STORE error; a child
+// that ran and failed is a successful call with Failed set (cleat#1115).
+func (s *MySQLStore) GetChildResult(ctx context.Context, runID string) (ChildOutcome, error) {
+	// Resolve the chain first -- see PostgresStore.GetChildResult for why: a
+	// child that continued as new leaves its first run 'done' with an empty
+	// result, and that is the run the parent holds the id of (cleat#955).
+	runID, err := terminalRunID(ctx, runID, s.successorOfRun)
+	if err != nil {
+		return ChildOutcome{}, err
+	}
 	var result string
 	var status string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT COALESCE(result, '{}'), status FROM workflow_instances WHERE id = ? AND tenant_id = ?
-	`, runID, s.tenantID).Scan(&result, &status)
+	var errMsg sql.NullString
+	err = s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(result, '{}'), status, error_msg FROM workflow_instances WHERE id = ? AND tenant_id = ?
+	`, runID, s.tenantID).Scan(&result, &status, &errMsg)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
+		return ChildOutcome{}, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("get child result: %w", err)
+		return ChildOutcome{}, fmt.Errorf("get child result: %w", err)
 	}
-	if status == "done" || status == "failed" {
-		return compactJSONString(result), true, nil
+	// See PostgresStore.GetChildResult (store_children.go) for why this
+	// derives from childOutcomeForSettledStatus rather than its own
+	// "failed"/"dead_lettered"/"done" literals -- cleat#1213 and cleat#1974
+	// are both a hand-written terminal-status list here falling behind the
+	// one settledStatusList spells.
+	if status == statusDone {
+		result = compactJSONString(result)
 	}
-	return "", false, nil
+	outcome, _ := childOutcomeForSettledStatus(status, result, errMsg)
+	return outcome, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -397,54 +493,179 @@ func (s *MySQLStore) GetQueryState(ctx context.Context, workflowID, key string) 
 	return value.String, nil
 }
 
+// ListQueryState returns every key a run published. See the PostgreSQL
+// implementation for why this reads the whole column rather than using MySQL's
+// JSON functions.
+func (s *MySQLStore) ListQueryState(ctx context.Context, workflowID string) (map[string]string, error) {
+	var raw sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT query_state FROM workflow_instances WHERE id = ? AND tenant_id = ?`,
+		workflowID, s.tenantID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return map[string]string{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("list query state: %w", err)
+	}
+	return decodeQueryState(raw)
+}
+
 // ---------------------------------------------------------------------------
 // DeliverSignal / PollSignal / PollCancellation / PollAndClaimSignal
 // ---------------------------------------------------------------------------
 
-// DeliverSignal stores a signal for a workflow. Uses ON DUPLICATE KEY UPDATE
-// so that re-delivering the same signal name replaces the payload.
+// DeliverSignal stores a signal for a workflow, as its own row.
+//
+// It used ON DUPLICATE KEY UPDATE until IMPROVEMENT-PLAN 3.215, which made a
+// second signal of the same name silently replace the first. The clause is
+// gone because the duplicate key is gone.
 func (s *MySQLStore) DeliverSignal(ctx context.Context, workflowID, signalName, payload string) error {
 	tx, err := s.beginTx(ctx)
 	if err != nil {
 		return fmt.Errorf("deliver signal: begin: %w", err)
 	}
 	defer tx.Rollback()
-
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
-		VALUES (?, ?, ?, ?)
-		ON DUPLICATE KEY UPDATE payload = VALUES(payload), delivered_at = NOW(6)
-	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID)
-	if err != nil {
-		return err
-	}
-
-	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_instances
-		SET next_wake_at = NOW(6)
-		WHERE id = ? AND status = 'ready' AND tenant_id = ?
-	`, workflowID, s.tenantID)
-	if err != nil {
+	if err := s.deliverSignalTx(ctx, tx, workflowID, signalName, payload); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-// PollSignal checks for a delivered signal without consuming it.
-// This is non-destructive — the signal remains available after polling.
-func (s *MySQLStore) PollSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
+// DeliverSignalIdempotent implements SignalIdempotencyStore. See the
+// PostgreSQL implementation for why the key insert comes first.
+//
+// INSERT IGNORE rather than ON CONFLICT, and RowsAffected rather than
+// RETURNING: MySQL has neither of the latter. A zero-row insert is the
+// duplicate, which is the same decision by a different spelling.
+func (s *MySQLStore) DeliverSignalIdempotent(ctx context.Context, workflowID, signalName, payload, idempotencyKey string) (bool, error) {
+	if idempotencyKey == "" {
+		return false, s.DeliverSignal(ctx, workflowID, signalName, payload)
+	}
+
+	tx, err := s.beginTx(ctx)
+	if err != nil {
+		return false, fmt.Errorf("deliver signal: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// expires_at from the CONFIGURED TTL, not the column default.
+	//
+	// idempotency_keys.expires_at defaults to now() + 7 days, and the
+	// store's idempotencyKeyTTL defaults to 720 hours. The start path sets
+	// it explicitly; this one did not when it was added in cleat#1266, so a
+	// SIGNAL token silently stopped working after 7 days while the
+	// configured and documented lifetime was 30 -- a retry on day 8 would
+	// be delivered a second time, which is the whole thing the token exists
+	// to prevent.
+	//
+	// Same shape as cleat#1261, where cleanup deleted at created_at + 7
+	// days against the same 720h default and swept LIVE keys 23 days early:
+	// idempotency that stops working long before it says it does, silently,
+	// because nothing compares the two numbers.
+	res, err := tx.ExecContext(ctx, `
+		INSERT IGNORE INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
+		VALUES (?, ?, DATE_ADD(NOW(6), INTERVAL ? SECOND), ?)
+	`, signalIdempotencyHash(idempotencyKey), workflowID,
+		int(s.idempotencyKeyTTL.Seconds()), s.tenantID)
+	if err != nil {
+		return false, fmt.Errorf("deliver signal: claim idempotency key: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("deliver signal: rows affected: %w", err)
+	}
+	if n == 0 {
+		return true, tx.Commit()
+	}
+
+	if err := s.deliverSignalTx(ctx, tx, workflowID, signalName, payload); err != nil {
+		return false, err
+	}
+	return false, tx.Commit()
+}
+
+// deliverSignalTx is the body of a delivery, inside a caller's transaction.
+// Extracted so the two entry points above cannot drift.
+func (s *MySQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID, signalName, payload string) error {
+	// Gated on EXISTS rather than a plain VALUES INSERT -- cleat#2218.
+	// workflow_signals carries FOREIGN KEY (workflow_id) REFERENCES
+	// workflow_instances(id), so a nonexistent workflowID throws instead of
+	// writing an orphan row, while a workflowID that exists under a DIFFERENT
+	// tenant satisfies the FK and writes one silently -- an existence oracle
+	// by error-versus-nil. MySQL has no RLS, so the WHERE clause is the only
+	// tenant check there is; adding it here (rather than only on the UPDATE
+	// below) makes "foreign tenant" and "does not exist" the same outcome.
+	//
+	// RowsAffected()==0 now returns ErrWorkflowNotFound rather than nil --
+	// cleat#2227. See the identical comment on PostgresStore's deliverSignalTx
+	// (engine/store_signals.go) for why: it is loud again without reopening
+	// the oracle, because "foreign tenant" and "does not exist" still cannot
+	// be told apart here.
+	//
+	// The EXISTS predicate above is a plain, non-locking read: it takes no
+	// lock on the workflow_instances row it checks. A hard delete of the
+	// target, in the caller's own tenant, racing this signal can commit in
+	// the gap between that read and this INSERT's own FK enforcement -- the
+	// predicate was true when read, the row is gone by the time the FK is
+	// checked, and the INSERT fails with a foreign-key violation instead of
+	// RowsAffected()==0. isSignalsWorkflowFKViolation catches that shape and
+	// reports it the same way -- see its own doc comment for why the race
+	// exists and who depends on the two being indistinguishable.
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO workflow_signals (workflow_id, signal_name, payload, tenant_id)
+		SELECT ?, ?, ?, ?
+		WHERE EXISTS (SELECT 1 FROM workflow_instances WHERE id = ? AND tenant_id = ?)
+	`, workflowID, signalName, encodeJSONPayload(payload), s.tenantID, workflowID, s.tenantID)
+	if err != nil {
+		if isSignalsWorkflowFKViolation(err) {
+			return ErrWorkflowNotFound
+		}
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("deliver signal: rows affected: %w", err)
+	} else if n == 0 {
+		return ErrWorkflowNotFound
+	}
+	// This UPDATE only runs once the INSERT above has proven the EXISTS
+	// predicate true, under this same tenant, in this same transaction, so
+	// the explicit "AND tenant_id = ?" here is a second, redundant guard --
+	// the row cannot have gone missing between the two statements.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET signal_seq = signal_seq + 1,
+		    next_wake_at = CASE WHEN status = 'ready' THEN NOW(6) ELSE next_wake_at END
+		WHERE id = ? AND tenant_id = ?
+	`, workflowID, s.tenantID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// PollSignal returns the oldest unconsumed delivery with this name without
+// consuming it. This is non-destructive — the delivery remains available until
+// ConsumeSignal removes it by id.
+func (s *MySQLStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
+	var id int64
 	var payload string
+	var deliveredAt time.Time
 	err := s.db.QueryRowContext(ctx, `
-		SELECT payload FROM workflow_signals
+		SELECT id, payload, delivered_at FROM workflow_signals
 		WHERE workflow_id = ? AND signal_name = ? AND tenant_id = ?
-	`, workflowID, signalName, s.tenantID).Scan(&payload)
+		ORDER BY id
+		LIMIT 1
+	`, workflowID, signalName, s.tenantID).Scan(&id, &payload, &deliveredAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
+		return SignalDelivery{}, false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("poll signal: %w", err)
+		return SignalDelivery{}, false, fmt.Errorf("poll signal: %w", err)
 	}
-	return decodeJSONPayload(payload), true, nil
+	return SignalDelivery{
+		ID:            id,
+		Payload:       decodeJSONPayload(payload),
+		DeliveredAtMs: deliveredAt.UnixMilli(),
+	}, true, nil
 }
 
 // PollCancellation checks whether the workflow has been cancelled.
@@ -453,13 +674,17 @@ func (s *MySQLStore) PollCancellation(ctx context.Context, workflowID string) (b
 }
 
 // GetAllowedSignalCallers returns the allowed_signals list for a workflow.
+// Returns nil, with no error, when the workflow exists but allowed_signals
+// is NULL or empty (deny-all semantics). Returns ErrWorkflowNotFound when no
+// workflow with this id is visible to the calling store's tenant -- see that
+// error's doc comment (engine/store_signals.go).
 func (s *MySQLStore) GetAllowedSignalCallers(ctx context.Context, workflowID string) ([]string, error) {
 	var raw sql.NullString
 	err := s.db.QueryRowContext(ctx,
 		`SELECT allowed_signals FROM workflow_instances WHERE id = ? AND tenant_id = ?`,
 		workflowID, s.tenantID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
+		return nil, ErrWorkflowNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get allowed signal callers: %w", err)
@@ -474,41 +699,75 @@ func (s *MySQLStore) GetAllowedSignalCallers(ctx context.Context, workflowID str
 	return callers, nil
 }
 
+// SetAllowedSignalCallers replaces the allowed_signals list for a workflow.
+// See PostgresStore.SetAllowedSignalCallers. IMPROVEMENT-PLAN 3.15.
+//
+// Scoped by tenant: MySQL has no row-level security, so this predicate is the
+// whole of the isolation -- without it one tenant could grant callers on
+// another tenant's workflow by id.
+func (s *MySQLStore) SetAllowedSignalCallers(ctx context.Context, workflowID string, callers []string) error {
+	encoded, err := encodeAllowedSignals(callers)
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: %w", err)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE workflow_instances SET allowed_signals = ? WHERE id = ? AND tenant_id = ?`,
+		encoded, workflowID, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set allowed signal callers: rows affected: %w", err)
+	}
+	if n == 0 {
+		// MySQL reports 0 for "matched but unchanged" as well as "no such row",
+		// so confirm the row is genuinely absent before reporting not-found --
+		// otherwise setting a list to the value it already holds looks like a
+		// missing workflow.
+		var exists int
+		err := s.db.QueryRowContext(ctx,
+			`SELECT 1 FROM workflow_instances WHERE id = ? AND tenant_id = ?`,
+			workflowID, s.tenantID).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrWorkflowNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("set allowed signal callers: confirm: %w", err)
+		}
+	}
+	return nil
+}
+
 // PollAndClaimSignal atomically checks for and claims a pending signal.
-// Uses SELECT ... FOR UPDATE followed by DELETE in a transaction to emulate
-// PostgreSQL's DELETE ... RETURNING.
-func (s *MySQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalName string) (string, bool, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return "", false, err
-	}
-	defer tx.Rollback()
-
-	// Step 1: SELECT ... FOR UPDATE to lock the row.
-	var payload string
-	err = tx.QueryRowContext(ctx, `
-		SELECT payload FROM workflow_signals
-		WHERE workflow_id = ? AND signal_name = ? AND tenant_id = ?
-		FOR UPDATE
-	`, workflowID, signalName, s.tenantID).Scan(&payload)
-	if errors.Is(err, sql.ErrNoRows) {
-		tx.Rollback()
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("poll and claim signal: select: %w", err)
-	}
-
-	// Step 2: DELETE the claimed row.
-	_, err = tx.ExecContext(ctx, `
+// ConsumeSignal removes one delivery by id.
+//
+// No SELECT ... FOR UPDATE, and no transaction: the previous method here read
+// and deleted in one step, which needed a lock to be atomic. Deleting a known
+// id is already atomic, and deleting one that is already gone is the
+// documented no-op, so there is nothing left for the lock to protect.
+func (s *MySQLStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
+	// The consumed counter, bumped in the same statement batch as the delete.
+	//
+	// finalize wakes a segment that CONSUMED something and still has rows
+	// waiting, because a segment that consumed once can consume again --
+	// progress is what separates a burst worth draining from an unrelated
+	// pending signal that would spin (cleat#953). Bumped here rather than
+	// through a new store method, because ConsumeSignal already writes.
+	_, err := s.db.ExecContext(ctx, `
 		DELETE FROM workflow_signals
-		WHERE workflow_id = ? AND signal_name = ? AND tenant_id = ?
-	`, workflowID, signalName, s.tenantID)
+		WHERE id = ? AND workflow_id = ? AND tenant_id = ?
+	`, id, workflowID, s.tenantID)
 	if err != nil {
-		return "", false, fmt.Errorf("poll and claim signal: delete: %w", err)
+		return fmt.Errorf("consume signal: %w", err)
 	}
-
-	return decodeJSONPayload(payload), true, tx.Commit()
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE workflow_instances SET signal_consumed_seq = signal_consumed_seq + 1
+		WHERE id = ? AND tenant_id = ?
+	`, workflowID, s.tenantID); err != nil {
+		return fmt.Errorf("consume signal: bump consumed counter: %w", err)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +776,11 @@ func (s *MySQLStore) PollAndClaimSignal(ctx context.Context, workflowID, signalN
 
 // UpdateStickyWorker sets the sticky worker for a workflow.
 func (s *MySQLStore) UpdateStickyWorker(ctx context.Context, workflowID, workerID string) error {
+	// The `AND tenant_id` is load-bearing HERE and absent on the other two
+	// dialects on purpose: MySQL has no row-level security, so this statement
+	// is the tenant boundary. Postgres enforces it with a FOR ALL RLS policy
+	// and SQL Server with session-context policies -- see the note on
+	// PostgresStore.UpdateStickyWorker before concluding the others have a gap.
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE workflow_instances SET sticky_worker_id = ? WHERE id = ? AND tenant_id = ?
 	`, workerID, workflowID, s.tenantID)
@@ -529,6 +793,9 @@ func (s *MySQLStore) UpdateStickyWorker(ctx context.Context, workflowID, workerI
 // ClearStickyWorker removes the sticky worker assignment.
 func (s *MySQLStore) ClearStickyWorker(ctx context.Context, workflowID string) error {
 	_, err := s.db.ExecContext(ctx, `
+		-- The AND tenant_id is the tenant boundary on MySQL, which has no RLS.
+		-- Postgres and SQL Server omit it on purpose; see the note on
+		-- PostgresStore.UpdateStickyWorker.
 		UPDATE workflow_instances SET sticky_worker_id = NULL WHERE id = ? AND tenant_id = ?
 	`, workflowID, s.tenantID)
 	if err != nil {
@@ -546,6 +813,12 @@ func (s *MySQLStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflo
 	if err != nil {
 		return fmt.Errorf("release workflow concurrency keys: %w", err)
 	}
+	// A registered queue's slot lives in queue_holders; release it with the bare
+	// keys so a finished run frees its queue slot the same way it frees a mutex.
+	_, err = s.db.ExecContext(ctx, `DELETE FROM queue_holders WHERE workflow_id = ? AND tenant_id = ?`, workflowID, s.tenantID)
+	if err != nil {
+		return fmt.Errorf("release workflow concurrency keys: queue holders: %w", err)
+	}
 	return nil
 }
 
@@ -554,7 +827,7 @@ func (s *MySQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte
 	var tenantID uuid.UUID
 	err := s.db.QueryRowContext(ctx,
 		`SELECT tenant_id FROM tenant_api_keys
-		 WHERE key_hash = ? AND revoked_at IS NULL`, keyHash).Scan(&tenantID)
+		 WHERE key_hash = ? AND disabled_at IS NULL`, keyHash).Scan(&tenantID)
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -583,10 +856,20 @@ type MySQLStoreFactory struct {
 	baseDSN string
 
 	// tenantDBs maps tenantID -> per-tenant connection pool.
-	tenantDBs map[string]*sql.DB
+	//
+	// Leased rather than bare, so EvictIdle can reclaim a pool no store is
+	// holding. See leasedPool for why a timestamp alone is not enough.
+	tenantDBs map[string]*leasedPool
 
 	idempotencyKeyTTL  time.Duration
 	tenantPoolMaxConns int
+
+	// clock is time.Now unless a test replaces it, so eviction can be tested
+	// without sleeping. Same reasoning as plugin.TenantPools.clock: a test
+	// that waits for real time to pass is measuring the scheduler as much as
+	// the code, and the usual repair -- widening the window -- makes it slower
+	// and no more truthful.
+	clock func() time.Time
 
 	logger *slog.Logger
 }
@@ -604,10 +887,18 @@ func NewMySQLStoreFactory(masterDB *sql.DB, baseDSN string, idempotencyKeyTTL ..
 	return &MySQLStoreFactory{
 		masterDB:           masterDB,
 		baseDSN:            baseDSN,
-		tenantDBs:          make(map[string]*sql.DB),
+		tenantDBs:          make(map[string]*leasedPool),
 		idempotencyKeyTTL:  ttl,
 		tenantPoolMaxConns: 25,
 	}
+}
+
+// now reports the current time through the injectable clock.
+func (f *MySQLStoreFactory) now() time.Time {
+	if f.clock == nil {
+		return time.Now()
+	}
+	return f.clock()
 }
 
 // WithLogger sets the structured logger on the factory. Stores created by
@@ -615,6 +906,19 @@ func NewMySQLStoreFactory(masterDB *sql.DB, baseDSN string, idempotencyKeyTTL ..
 func (f *MySQLStoreFactory) WithLogger(l *slog.Logger) *MySQLStoreFactory {
 	f.logger = l
 	return f
+}
+
+// log returns the configured logger, or slog.Default() when none was set.
+//
+// Mirrors wasmtimeBackend.log(). The nil case is slog.Default() rather than a
+// discard because the caller that most needs these records -- cmd/cleat-worker
+// at startup -- is also the one most likely to reach here before a logger has
+// been attached.
+func (f *MySQLStoreFactory) log() *slog.Logger {
+	if f.logger != nil {
+		return f.logger
+	}
+	return slog.Default()
 }
 
 // WithTenantPoolMaxConns sets the max open connections per tenant pool.
@@ -638,6 +942,28 @@ func (f *MySQLStoreFactory) buildTenantDSN(dbName string) string {
 	return base[:slash+1] + dbName + base[slash+1:]
 }
 
+// MySQLTenantDatabaseName is the database a tenant's per-tenant tables live in
+// on MySQL, which has no schemas and no row-level security and so isolates
+// those tables with one database per tenant instead.
+//
+// Exported, and the ONLY definition of the rule, because the name is now needed
+// outside this package: cleatctl has to reach a tenant's database to read or
+// write a per-tenant table (cleat#1956), and a reader that only wants to LOOK
+// must be able to name the database without calling CreateTenantDatabase, which
+// creates it. A diagnostic that creates what it is checking for cannot report
+// its absence. The rule was written out twice inside this file before that, and
+// a third copy in another package is how the three come to disagree.
+//
+// It does NOT validate tenantID -- callers that go on to interpolate the result
+// into an identifier must uuid.Parse it first, as CreateTenantDatabase does.
+// Returning a name for an unvalidated string is safe; putting one in a
+// statement is not.
+func MySQLTenantDatabaseName(tenantID string) string {
+	// Hyphens are not legal unquoted in an identifier, and backtick-quoting a
+	// name with them is a trap rather than a fix.
+	return "cleat_" + strings.ReplaceAll(tenantID, "-", "_")
+}
+
 // CreateTenantDatabase creates a new database for the given tenant and
 // returns a connection pool scoped to that database. It is idempotent —
 // if the database already exists, it just opens a new pool to it.
@@ -647,16 +973,28 @@ func (f *MySQLStoreFactory) CreateTenantDatabase(ctx context.Context, tenantID s
 	if _, err := uuid.Parse(tenantID); err != nil {
 		return nil, fmt.Errorf("invalid tenant ID %q: %w", tenantID, err)
 	}
-	// Replace hyphens with underscores for use as a database name suffix.
-	dbName := "cleat_" + strings.ReplaceAll(tenantID, "-", "_")
+	dbName := MySQLTenantDatabaseName(tenantID)
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	// Check if we already have a pool for this tenant.
 	if existing, ok := f.tenantDBs[tenantID]; ok {
-		return existing, nil
+		return existing.db, nil
 	}
+
+	// Creating the database and opening its pool is the longest unlogged
+	// stretch of a MySQL worker's startup, and MySQL is the only dialect that
+	// reaches it -- cmd/cleat-worker runs the whole migration set a second
+	// time against the tenant database (main.go, `if *driver == "mysql"`).
+	//
+	// Measured 2026-09-09 over four cold starts: each migration pass was a
+	// steady 2s, while THIS region ranged 1s to 9s with nothing written in
+	// between. Anything watching log output to decide whether a starting
+	// worker is alive -- cleat-ports' scripts/worker.sh does exactly that --
+	// sees a healthy worker as a hung one. cleat#1084.
+	f.log().InfoContext(ctx, "creating tenant database", "tenant_id", tenantID, "database", dbName)
+	started := time.Now()
 
 	// Create the database via the master connection.
 	_, err := f.masterDB.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS `"+dbName+"`")
@@ -682,19 +1020,28 @@ func (f *MySQLStoreFactory) CreateTenantDatabase(ctx context.Context, tenantID s
 		return nil, fmt.Errorf("ping tenant db %s: %w", dbName, err)
 	}
 
-	f.tenantDBs[tenantID] = tenantDB
+	f.tenantDBs[tenantID] = newLeasedPool(tenantDB, f.now())
+	// Duration rather than a bare "done": how long this took is the fact that
+	// had to be reconstructed by hand from migration timestamps when it was
+	// slow, and it is free to report here.
+	f.log().InfoContext(ctx, "tenant database ready", "tenant_id", tenantID, "database", dbName,
+		"duration_ms", time.Since(started).Milliseconds())
 	return tenantDB, nil
 }
 
 // DropTenantDatabase removes a tenant database and closes its connection pool.
 func (f *MySQLStoreFactory) DropTenantDatabase(tenantID string) error {
-	dbName := "cleat_" + strings.ReplaceAll(tenantID, "-", "_")
+	dbName := MySQLTenantDatabaseName(tenantID)
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	if db, ok := f.tenantDBs[tenantID]; ok {
-		db.Close()
+	// Closed regardless of any outstanding lease, unlike EvictIdle. Dropping
+	// the database underneath a store is the point of this command; leaving
+	// the pool open so a doomed query can reach a dropped schema would be the
+	// worse answer, and an operator asking for a drop is not asking to wait.
+	if p, ok := f.tenantDBs[tenantID]; ok {
+		p.db.Close()
 		delete(f.tenantDBs, tenantID)
 	}
 
@@ -702,22 +1049,48 @@ func (f *MySQLStoreFactory) DropTenantDatabase(tenantID string) error {
 	return err
 }
 
-// getOrCreateTenantDB returns the connection pool for a tenant,
-// creating the tenant database if needed.
-func (f *MySQLStoreFactory) getOrCreateTenantDB(ctx context.Context, tenantID string) (*sql.DB, error) {
+// getOrCreateTenantPool returns the leased pool for a tenant, creating the
+// tenant database if needed.
+func (f *MySQLStoreFactory) getOrCreateTenantPool(ctx context.Context, tenantID string) (*leasedPool, error) {
 	f.mu.RLock()
-	db, ok := f.tenantDBs[tenantID]
+	p, ok := f.tenantDBs[tenantID]
 	f.mu.RUnlock()
 	if ok {
-		return db, nil
+		return p, nil
 	}
-	return f.CreateTenantDatabase(ctx, tenantID)
+	if _, err := f.CreateTenantDatabase(ctx, tenantID); err != nil {
+		return nil, err
+	}
+	f.mu.RLock()
+	p, ok = f.tenantDBs[tenantID]
+	f.mu.RUnlock()
+	if !ok {
+		// CreateTenantDatabase succeeded, so the entry it installed was
+		// removed between its unlock and this read -- only DropTenantDatabase
+		// or Close does that. Reporting it beats returning a nil pool to a
+		// caller that will dereference it.
+		return nil, fmt.Errorf("tenant pool for %s was removed while it was being opened", tenantID)
+	}
+	return p, nil
 }
 
 // TenantDB returns a *sql.DB connection pool for the given tenant, creating
 // a new per-tenant database and connection pool if one does not already exist.
+//
+// The returned pool carries NO LEASE, so a caller that holds it across an
+// eviction window can have it closed underneath. Every in-tree caller uses it
+// briefly and immediately (migrations at startup, cleatctl); anything holding
+// one for the length of a workflow should go through OpenStore, whose closer
+// is the lease.
 func (f *MySQLStoreFactory) TenantDB(ctx context.Context, tenantID string) (*sql.DB, error) {
-	return f.getOrCreateTenantDB(ctx, tenantID)
+	p, err := f.getOrCreateTenantPool(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	// Stamped, so a caller using this path keeps the pool out of the sweep's
+	// way for the idle window even without a lease.
+	p.lastUsed.Store(f.now().UnixNano())
+	return p.db, nil
 }
 
 // OpenStore creates a MySQLStore scoped to the given tenant and task queues.
@@ -726,18 +1099,72 @@ func (f *MySQLStoreFactory) TenantDB(ctx context.Context, tenantID string) (*sql
 // NOTE: Encryption at rest (--encrypt-sensitive-payloads) is not yet supported
 // on MySQL backends. See PostgresStore.WithEncryption for the reference implementation.
 func (f *MySQLStoreFactory) OpenStore(ctx context.Context, tenantID string, taskQueues ...string) (WorkflowStore, io.Closer, error) {
-	tenantDB, err := f.getOrCreateTenantDB(ctx, tenantID)
+	p, err := f.getOrCreateTenantPool(ctx, tenantID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open store for tenant %s: %w", tenantID, err)
 	}
+	// THE RETURNED CLOSER IS A LEASE, not a pool shutdown: it says this caller
+	// is finished with the store. Callers that hold a store for an unbounded
+	// time -- a workflow execution, the worker's process-wide store -- must
+	// hold the lease for exactly as long, or EvictIdle will close the pool
+	// underneath them.
+	lease := p.acquire(f.now)
 
-	store := NewMySQLStore(tenantDB, taskQueues...)
+	store := NewMySQLStore(p.db, taskQueues...)
 	store.tenantID = tenantID
 	store = store.WithLogger(f.logger)
 	// Set last: WithLogger returns a copy, so anything set before it survives
 	// only by accident of struct copying. See ClaimWorkflowsAcrossTenants.
 	store.perTenantDatabase = true
-	return store, nopCloser{}, nil
+	return store, lease, nil
+}
+
+// OpenIsolatedStore is OpenStore's shape, on a pool of its own rather than
+// the tenant's shared leased pool -- for a caller (cleat#2009's heartbeat
+// pool) that wants MySQL's per-tenant topology (the tenant DSN, its own
+// database) without competing with execution traffic for f.tenantDBs'
+// connections or being subject to EvictIdle closing that pool underneath it.
+//
+// A bare sql.Open(driver, baseDSN) is NOT equivalent to this: MySQL has no
+// RLS, so which physical database a connection is pointed at IS the tenant
+// scoping. Opening against the base database silently reaches a database
+// with none of the tenant's rows -- see the doc comment on OpenStore and
+// cleat#2009's own history, where exactly that mistake shipped once already.
+//
+// The returned closer owns this pool outright and closes it -- unlike
+// OpenStore's lease, there is nothing shared here for EvictIdle to reclaim.
+func (f *MySQLStoreFactory) OpenIsolatedStore(ctx context.Context, tenantID string, maxConns int, taskQueues ...string) (WorkflowStore, io.Closer, error) {
+	if _, err := uuid.Parse(tenantID); err != nil {
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: invalid tenant ID: %w", tenantID, err)
+	}
+	dbName := MySQLTenantDatabaseName(tenantID)
+
+	// Idempotent, and needed here independent of whether OpenStore has
+	// already been called for this tenant: nothing else guarantees ordering
+	// between the two, and CREATE DATABASE IF NOT EXISTS costs one round trip
+	// against a database that already exists.
+	if _, err := f.masterDB.ExecContext(ctx, "CREATE DATABASE IF NOT EXISTS `"+dbName+"`"); err != nil {
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: create tenant database: %w", tenantID, err)
+	}
+
+	tenantDSN := f.buildTenantDSN(dbName)
+	isolatedDB, err := sql.Open("mysql", tenantDSN)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: %w", tenantID, err)
+	}
+	isolatedDB.SetMaxOpenConns(maxConns)
+	isolatedDB.SetMaxIdleConns(maxConns)
+	isolatedDB.SetConnMaxLifetime(5 * time.Minute)
+	if err := isolatedDB.PingContext(ctx); err != nil {
+		isolatedDB.Close()
+		return nil, nil, fmt.Errorf("open isolated store for tenant %s: ping: %w", tenantID, err)
+	}
+
+	store := NewMySQLStore(isolatedDB, taskQueues...)
+	store.tenantID = tenantID
+	store = store.WithLogger(f.logger)
+	store.perTenantDatabase = true
+	return store, isolatedDB, nil
 }
 
 // Close closes all tenant connection pools.
@@ -745,11 +1172,25 @@ func (f *MySQLStoreFactory) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	for tenantID, db := range f.tenantDBs {
-		db.Close()
+	for tenantID, p := range f.tenantDBs {
+		p.db.Close()
 		delete(f.tenantDBs, tenantID)
 	}
 	return nil
+}
+
+// EvictIdle closes every tenant pool that no store holds and that nothing has
+// opened or released within maxIdle, and reports how many were closed.
+// See engine.TenantPoolReaper.
+func (f *MySQLStoreFactory) EvictIdle(maxIdle time.Duration) int {
+	return evictIdleLeasedPools(&f.mu, f.tenantDBs, maxIdle, f.now)
+}
+
+// TenantPoolCount reports how many tenant pools are open right now.
+func (f *MySQLStoreFactory) TenantPoolCount() int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return len(f.tenantDBs)
 }
 
 // DriverName returns "mysql".
@@ -757,3 +1198,28 @@ func (f *MySQLStoreFactory) DriverName() string { return "mysql" }
 
 // Dialect returns DialectMySQL.
 func (f *MySQLStoreFactory) Dialect() Dialect { return DialectMySQL }
+
+// GetChildCompletedAtMs returns the child's completion instant in Unix
+// milliseconds. See ChildWorkflowStore and engine/children.go's
+// pollChildIsDeterministic. This is the DATABASE clock.
+func (s *MySQLStore) GetChildCompletedAtMs(ctx context.Context, runID string) (int64, bool, error) {
+	var completedAt sql.NullTime
+	err := s.db.QueryRowContext(ctx, `
+		SELECT completed_at FROM workflow_instances WHERE id = ? AND tenant_id = ?
+	`, runID, s.tenantID).Scan(&completedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("get child completed_at: %w", err)
+	}
+	if !completedAt.Valid {
+		return 0, false, nil
+	}
+	return completedAt.Time.UnixMilli(), true, nil
+}
+
+// TenantPoolMaxConns reports this factory's per-tenant pool ceiling. See
+// engine.PerTenantPooler: each tenant has its own database here, so its own
+// pool.
+func (f *MySQLStoreFactory) TenantPoolMaxConns() int { return f.tenantPoolMaxConns }

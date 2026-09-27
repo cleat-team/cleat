@@ -16,15 +16,19 @@ func TestEnvCredentialProvider_DBFlag(t *testing.T) {
 	}
 }
 
-func TestEnvCredentialProvider_DATABASE_URL(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://env-db/db")
+// INVERTED DELIBERATELY. This asserted that the generic DATABASE_URL was read.
+// It no longer is, on any path: every other service in a shared pod or
+// container also sets that name, so reading it lets an unrelated application's
+// database silently become cleat's -- and connecting to the wrong database
+// SUCCEEDS, so nothing reports it.
+func TestEnvCredentialProvider_IgnoresTheGenericDatabaseURL(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://someone-elses-db/db")
+	t.Setenv("CLEAT_DATABASE_URL", "")
 	p := NewEnvCredentialProvider("")
 	got, err := p.GetConnectionString(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got != "postgres://env-db/db" {
-		t.Errorf("expected DATABASE_URL value, got %q", got)
+	if err == nil {
+		t.Fatalf("resolved %q from the generic DATABASE_URL; cleat must not adopt a "+
+			"connection string another service set", got)
 	}
 }
 
@@ -51,9 +55,12 @@ func TestEnvCredentialProvider_NoURL(t *testing.T) {
 	}
 }
 
+// THE CASE THAT MATTERS IS BOTH SET AT ONCE, because that is the shared pod
+// this namespace exists to survive -- and the old order got it exactly
+// backwards: the generic name won.
 func TestEnvCredentialProvider_PriorityOrder(t *testing.T) {
-	// --db flag wins over env vars.
-	t.Setenv("DATABASE_URL", "postgres://env/db")
+	// --db flag wins over the environment.
+	t.Setenv("DATABASE_URL", "postgres://someone-elses-db/db")
 	t.Setenv("CLEAT_DATABASE_URL", "postgres://cleat/db")
 	p := NewEnvCredentialProvider("postgres://flag/db")
 	got, err := p.GetConnectionString(context.Background())
@@ -64,17 +71,21 @@ func TestEnvCredentialProvider_PriorityOrder(t *testing.T) {
 		t.Errorf("expected --db flag to take priority, got %q", got)
 	}
 
-	// DATABASE_URL wins over CLEAT_DATABASE_URL.
+	// BOTH SET: the namespaced name wins and the generic one is not consulted.
+	// This used to assert the opposite, which meant an unrelated service's
+	// DATABASE_URL silently displaced cleat's own configuration.
 	p2 := NewEnvCredentialProvider("")
 	got2, err := p2.GetConnectionString(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got2 != "postgres://env/db" {
-		t.Errorf("expected DATABASE_URL to take priority, got %q", got2)
+	if got2 != "postgres://cleat/db" {
+		t.Errorf("resolved %q with both set, want the namespaced CLEAT_DATABASE_URL. "+
+			"Preferring the generic name is how another application's database "+
+			"becomes cleat's, silently, because connecting to it succeeds.", got2)
 	}
 
-	// CLEAT_DATABASE_URL used when DATABASE_URL is empty.
+	// And with only the namespaced one set, unchanged.
 	t.Setenv("DATABASE_URL", "")
 	p3 := NewEnvCredentialProvider("")
 	got3, err := p3.GetConnectionString(context.Background())
@@ -82,7 +93,7 @@ func TestEnvCredentialProvider_PriorityOrder(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got3 != "postgres://cleat/db" {
-		t.Errorf("expected CLEAT_DATABASE_URL fallback, got %q", got3)
+		t.Errorf("expected CLEAT_DATABASE_URL, got %q", got3)
 	}
 }
 

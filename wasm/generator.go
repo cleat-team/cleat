@@ -54,6 +54,62 @@ var importDefs = map[string]importDef{
 			{"response", kindOutString},
 		},
 	},
+	// cleat_send: three input strings, no output buffer. Fire-and-forget --
+	// the request goes out and nothing comes back but an error code. This is
+	// cleat_schedule_invoke below without the delay. IMPROVEMENT-PLAN 3.226.
+	"cleat_send": {
+		ImportName: "cleat_send",
+		Params: []paramSpec{
+			{"service", kindInString},
+			{"operation", kindInString},
+			{"requestJSON", kindInString},
+		},
+	},
+	// cleat_resolve_promise: two input strings, no output buffer.
+	// Matches engine/imports.go's (idPtr,idLen, valPtr,valLen) -> i64.
+	// IMPROVEMENT-PLAN 3.226.
+	"cleat_resolve_promise": {
+		ImportName: "cleat_resolve_promise",
+		Params: []paramSpec{
+			{"id", kindInString},
+			{"value", kindInString},
+		},
+	},
+	// cleat_reject_promise: two input strings, no output buffer. The mirror of
+	// cleat_resolve_promise above. IMPROVEMENT-PLAN 3.226.
+	"cleat_reject_promise": {
+		ImportName: "cleat_reject_promise",
+		Params: []paramSpec{
+			{"id", kindInString},
+			{"errMsg", kindInString},
+		},
+	},
+	// cleat_schedule_invoke: three input strings and a delay, no output buffer.
+	// IMPROVEMENT-PLAN 3.224, same four-piece omission as cleat_signal_workflow.
+	// Matches engine/imports.go's (svcPtr,svcLen, opPtr,opLen, reqPtr,reqLen,
+	// delayMs) -> i64.
+	"cleat_schedule_invoke": {
+		ImportName: "cleat_schedule_invoke",
+		Params: []paramSpec{
+			{"service", kindInString},
+			{"operation", kindInString},
+			{"requestJSON", kindInString},
+			{"delayMs", kindInt64},
+		},
+	},
+	// cleat_signal_workflow: three input strings, no output buffer.
+	// IMPROVEMENT-PLAN 3.224 -- this entry was missing along with the
+	// hostFunctions row and the adapterDef, which is why a Go guest got no
+	// import for it. Matches engine/imports.go's
+	// (targetPtr,targetLen, sigPtr,sigLen, payloadPtr,payloadLen) -> i64.
+	"cleat_signal_workflow": {
+		ImportName: "cleat_signal_workflow",
+		Params: []paramSpec{
+			{"targetRunID", kindInString},
+			{"signalName", kindInString},
+			{"payload", kindInString},
+		},
+	},
 	"cleat_sleep": {
 		ImportName: "cleat_sleep",
 		Params: []paramSpec{
@@ -67,6 +123,26 @@ var importDefs = map[string]importDef{
 			{"timeoutMs", kindInt64},
 			{"signalName", kindOutString},
 			{"payload", kindOutString},
+		},
+	},
+	// The scope pair. cleat_set_scope takes both strings and hands back the
+	// PREVIOUS scope prefix; passing two empty strings is the documented
+	// "clear" call (engine/scope.go freshSetScope), so both inputs are
+	// legitimately empty and the host reads them with
+	// readOptionalServiceName rather than rejecting a zero length.
+	"cleat_set_scope": {
+		ImportName: "cleat_set_scope",
+		Params: []paramSpec{
+			{"objectType", kindInString},
+			{"instanceKey", kindInString},
+			{"prevScope", kindOutString},
+		},
+	},
+	"cleat_get_scope": {
+		ImportName: "cleat_get_scope",
+		Params: []paramSpec{
+			{"objectType", kindOutString},
+			{"instanceKey", kindOutString},
 		},
 	},
 	"cleat_defer": {
@@ -185,6 +261,25 @@ var importDefs = map[string]importDef{
 	"cleat_min_version": {
 		ImportName: "cleat_min_version",
 	},
+	"cleat_run_detached": {
+		ImportName: "cleat_run_detached",
+		Params: []paramSpec{
+			{"name", kindInString},
+			{"inputJSON", kindInString},
+		},
+	},
+	// cleat_start_detached is cleat_run_detached with the run id written back
+	// (cleat#1154). A separate import rather than a third parameter on the one
+	// above: a host call's arity is part of its import type, so widening it
+	// stops every already-deployed binary instantiating. See ABI.md 2.24a.
+	"cleat_start_detached": {
+		ImportName: "cleat_start_detached",
+		Params: []paramSpec{
+			{"name", kindInString},
+			{"inputJSON", kindInString},
+			{"runID", kindOutString},
+		},
+	},
 	"set_query_state": {
 		ImportName: "set_query_state",
 		Params: []paramSpec{
@@ -196,15 +291,15 @@ var importDefs = map[string]importDef{
 		ImportName: "cleat_create_promise",
 		Params: []paramSpec{
 			{"name", kindInString},
-			{"promise_id_out", kindOutString},
+			{"promiseIDOut", kindOutString},
 		},
 	},
 	"cleat_await_promise": {
 		ImportName: "cleat_await_promise",
 		Params: []paramSpec{
-			{"promise_id", kindInString},
-			{"timeout_ms", kindInt64},
-			{"result_out", kindOutString},
+			{"promiseID", kindInString},
+			{"timeoutMs", kindInt64},
+			{"resultOut", kindOutString},
 		},
 	},
 	"cleat_now": {
@@ -217,6 +312,23 @@ var importDefs = map[string]importDef{
 		ImportName: "cleat_register_update_handler",
 		Params: []paramSpec{
 			{"name", kindInString},
+		},
+	},
+	// cleat_poll_update writes a JSON envelope into one out buffer. The
+	// generated adapter's buffer is named <param>Buf, so "envelope" here has to
+	// match the envelopeBuf/envelopeLen the PollUpdate ResultStmts refer to.
+	"cleat_poll_update": {
+		ImportName: "cleat_poll_update",
+		Params: []paramSpec{
+			{"envelope", kindOutString},
+		},
+	},
+	"cleat_complete_update": {
+		ImportName: "cleat_complete_update",
+		Params: []paramSpec{
+			{"requestID", kindInString},
+			{"resultJSON", kindInString},
+			{"errMsg", kindInString},
 		},
 	},
 	"plugin_call": {
@@ -241,13 +353,13 @@ var importDefs = map[string]importDef{
 		ImportName: "cleat_acquire_lock",
 		Params: []paramSpec{
 			{"key", kindInString},
-			{"ttl_ms", kindInt64},
+			{"ttlMs", kindInt64},
 		},
 	},
 	"cleat_side_effect": {
 		ImportName: "cleat_side_effect",
 		Params: []paramSpec{
-			{"result", kindInString},
+			{"computedResult", kindInString},
 			{"cachedResult", kindOutString},
 		},
 	},
@@ -307,6 +419,23 @@ var importDefs = map[string]importDef{
 	},
 }
 
+// outBufSize is DEAD and is kept only so this comment has somewhere to live.
+//
+// cleat#1312 cites it as the guest's output buffer size. It is not: nothing
+// reads it. Verified by setting it to 777777 and regenerating -- the emitted
+// gen_host_adapter.go and gen_main_stub.go were unchanged. The live constants
+// are _cleatOutBufFloor / _cleatOutBufCeiling / _cleatOutBufCap, emitted by
+// adapter_component.go, and argsBufSize in build.go's main stub.
+//
+// (Named _cleatOutBufSize until cleat#1384 made the output buffer adaptive --
+// it starts at the floor and doubles toward the ceiling as the host reports
+// truncation. This comment kept the old name for a while, which is the exact
+// failure it exists to warn about: a reader greps for the constant it names
+// and finds nothing.)
+//
+// An unreferenced package-level const is legal Go, so nothing has ever
+// complained, and a reader who changes this to fix a truncation bug will
+// change nothing and believe they have.
 const outBufSize = 65536
 
 // importParamDecl returns a Go parameter declaration for the given spec.
@@ -362,11 +491,21 @@ func GenerateImports(pkgName string, usage *UsageInfo) []byte {
 
 	// Always include cleat_complete — the export wrapper calls it
 	// to signal workflow completion before the Go WASI runtime exits.
+	//
+	// cleat_defer_phase is here for the same reason and not in hostFunctions:
+	// that table maps an import to a HostCalls METHOD, and this one has none.
+	// It is called by the generated defer table, which is emitted into every
+	// module, so it is needed whenever the generated code is -- exactly like
+	// cleat_complete. Putting it in hostFunctions instead generated a bogus
+	// adapter field and a call with no arguments. cleat#1155.
 	buf.WriteString(`//go:wasmimport env cleat_complete
 func cleatCompleteImport(status uint32, resultPtr unsafe.Pointer, resultLen uint32) int64
 
 //go:wasmimport env cleat_poll_work
 func cleatPollWorkImport(entryNamePtr unsafe.Pointer, entryNameMaxLen uint32, argsPtr unsafe.Pointer, argsMaxLen uint32) int64
+
+//go:wasmimport env cleat_defer_phase
+func cleatDeferPhaseImport(on uint32) int64
 
 `)
 
@@ -424,7 +563,7 @@ func callErrorMessage(callName string, responseBuf []byte, responseLen uint32, c
 	if responseLen > 0 && int(responseLen) <= len(responseBuf) {
 		return string(responseBuf[:responseLen])
 	}
-	return fmt.Sprintf("%s: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied)", callName, callErrorCode)
+	return fmt.Sprintf("%s: error %d (0=unknown 1=timeout 2=transient 3=not_found 4=invalid 5=permission_denied 6=retry_policy_too_long)", callName, callErrorCode)
 }
 
 // hostErrMessage returns the reason a host call wrote into its output buffer.

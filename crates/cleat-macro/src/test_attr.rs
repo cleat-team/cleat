@@ -45,7 +45,7 @@ fn is_unit_return(return_type: &ReturnType) -> bool {
 /// This is a lightweight wrapper for native (non-WASM) test execution that:
 ///
 /// 1. Wraps the function body in `std::panic::catch_unwind`.
-/// 2. If a [`SuspendSentinel`] panic is caught, converts it to a test-friendly
+/// 2. If the body suspended the workflow, converts it to a test-friendly
 ///    result (`Ok(())` for `Result<(), E>` returns, or a plain `return` for
 ///    unit returns) so the test does not crash.
 /// 3. Adds `#[test]` to make the function discoverable by `cargo test`.
@@ -89,42 +89,40 @@ pub fn cleat_test_impl(item: TokenStream) -> TokenStream {
             &fn_sig.output,
             "#[cleat_test] requires the function to return `()` or `Result<(), E>`. \
              Other return types are not supported because the macro cannot construct \
-             a default success value when SuspendSentinel is caught.",
+             a default success value when the body suspends.",
         )
         .to_compile_error();
     }
 
-    let sentinel_handler = if is_result_unit {
-        quote! {
-            Err(panic_err) => {
-                if panic_err.downcast_ref::<cleat_sdk::SuspendSentinel>().is_some() {
-                    return ::std::result::Result::Ok(());
-                }
-                ::std::panic::resume_unwind(panic_err);
-            }
-        }
+    // What to return when the body suspended rather than finished. Suspension
+    // is an ordinary outcome for a workflow under test, not a failure.
+    let suspended_value = if is_result_unit {
+        quote! { return ::std::result::Result::Ok(()); }
     } else {
-        quote! {
-            Err(panic_err) => {
-                if panic_err.downcast_ref::<cleat_sdk::SuspendSentinel>().is_some() {
-                    return;
-                }
-                ::std::panic::resume_unwind(panic_err);
-            }
-        }
+        quote! { return; }
     };
 
+    // No catch_unwind. It used to wrap the body to intercept a `SuspendSentinel`
+    // panic, and it was worse than dead code: this macro runs on the HOST
+    // target, where unwinding works, so suspension looked catchable in tests
+    // while the shipped `wasm32-wasip1` guest -- built with panic=abort -- was
+    // trapping on the same path. A test suite that passes on a target the
+    // product does not ship is the shape IMPROVEMENT-PLAN 3.87 is about.
     let expanded = quote! {
         #(#fn_attrs)*
         #[test]
         #fn_vis #fn_sig {
-            let __cleat_test_result = ::std::panic::catch_unwind(|| {
-                #fn_block
-            });
-            match __cleat_test_result {
-                Ok(inner) => inner,
-                #sentinel_handler
+            // Cleared before, not only after: the flag is a thread-local and
+            // `cargo test` reuses threads across tests, so one suspending test
+            // would otherwise make every later test on that thread look
+            // suspended.
+            cleat_sdk::clear_suspended();
+            let __cleat_test_result = { #fn_block };
+            if cleat_sdk::is_suspended() {
+                cleat_sdk::clear_suspended();
+                #suspended_value
             }
+            __cleat_test_result
         }
     };
 

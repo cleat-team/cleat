@@ -183,3 +183,145 @@ mod tests {
         assert_eq!(duration, 5000);
     }
 }
+
+/// An entry point whose cleanup has a body.
+///
+/// `h.cleat_defer(description)` registers a description and nothing more: the
+/// host records that a defer exists and no code anywhere runs it. That was true
+/// of every Rust workflow until IMPROVEMENT-PLAN §3.73, and the SDK documented
+/// it as cleanup that runs.
+///
+/// `defer_func` is the one with a closure attached. The generated
+/// `#[cleat_entry]` wrapper drains the table when this returns, so the calls
+/// below arrive in the order body, second, first -- LIFO, because a defer
+/// releases what the defer before it acquired.
+#[cleat_entry]
+fn defer_order(h: &HostCalls, input: PlaceOrderInput) -> Result<String, String> {
+    let user = input.user_id.clone();
+    h.defer_func(move || {
+        HostCalls.cleat_call("notifications", "first", &format!("{{\"user\":\"{}\"}}", user));
+        Ok(())
+    });
+    h.defer_func(|| {
+        HostCalls.cleat_call("notifications", "second", "{}");
+        Ok(())
+    });
+
+    h.cleat_call("inventory", "body", "{}");
+    Ok("{\"deferred\":true}".to_string())
+}
+
+/// Suspension declared with NO host call in the way -- the mask-free probe.
+///
+/// Before IMPROVEMENT-PLAN 3.87 this raised
+/// `std::panic::panic_any(SuspendSentinel)` and `#[cleat_entry]` was documented
+/// as intercepting it with `catch_unwind`. It never could: `wasm32-wasip1`
+/// builds with `panic=abort`, so the panic aborted -- `unreachable`, a trap --
+/// and every Rust suspension was a trapped guest.
+///
+/// Why no host call: the suspending host functions (`cleat_sleep`,
+/// `cleat_await_child`, `cleat_await_signals`) record the suspension on the
+/// HOST before returning, and `engine/executor.go` lets that win over any error
+/// beside it. A probe that went through one of them would report a clean
+/// suspension whether the guest worked or trapped -- which is exactly how this
+/// bug hid for as long as the SDK existed. Setting the flag directly leaves the
+/// host with nothing recorded, so the only thing that can produce a suspension
+/// here is the guest's own wrapper.
+///
+/// Keep this entry point; `engine/rust_suspend_test.go` is its only caller.
+#[cleat_entry]
+fn suspend_probe(_h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
+    cleat_sdk::mark_suspended();
+    Ok("{\"unreachable\":true}".to_string())
+}
+
+/// The ordinary shape: a real sleep, propagated with `?`.
+#[cleat_entry]
+fn sleep_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
+    // The `?` is the mechanism -- the compiler will not let the value be used,
+    // so the segment ends here.
+    h.cleat_sleep_ms(300_000)?;
+    Ok("{\"unreachable\":true}".to_string())
+}
+
+/// The same sleep, DISCARDED rather than propagated -- the backstop probe.
+///
+/// This is the case the type system cannot reach: `let _ = ...` throws the
+/// `Err(CallError::Suspended)` away and the body returns a value of its own.
+/// Reporting that value would complete a workflow the host has already recorded
+/// as suspended -- the exact failure the panic version had, reintroduced by the
+/// fix for it.
+///
+/// `#[cleat_entry]` checks `cleat_sdk::is_suspended()` before it formats the
+/// result, so the body's value must never reach the host. The test asserts on
+/// the returned result string, not on the suspension: the host records this
+/// sleep itself, so `susp != nil` here proves nothing on its own.
+/// IMPROVEMENT-PLAN 3.87.
+#[cleat_entry]
+fn sleep_discard_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
+    let _ = h.cleat_sleep_ms(300_000);
+    Ok("{\"discarded_the_suspension\":true}".to_string())
+}
+
+/// A workflow that exhausts a retry policy through the HOST-side retry loop.
+///
+/// This is the half of the retry story the Go SDK cannot reach.
+/// `HostCalls::cleat_call_with_retry` calls the `cleat_call_retry` import
+/// directly, so the loop -- attempts, backoff, exhaustion -- runs on the host
+/// inside a single host call, and the whole thing is ONE history event and ONE
+/// segment. Go's `DurableCallWithOptions` falls back to an SDK-level loop that
+/// backs off with a durable sleep instead, turning an N-attempt policy into N
+/// segments; see `engine/retry_backoff_test.go`.
+///
+/// The error the host mints when the policy exhausts is prefixed
+/// `retries exhausted: `, which is exactly the substring the worker's
+/// dead-letter predicate matches (`cmd/cleat-worker/setup.go`). So the two SDKs
+/// currently disagree about whether an exhausting retry is dead-letterable, and
+/// this entry point is the evidence for the Rust side of that.
+///
+/// Intervals are 1ms because the point is the exhaustion, not the wait. Unlike
+/// the Go fixture this does not make the timing load-bearing: the host loop
+/// sleeps in-process and never consults a clock the test can race.
+///
+/// Keep this entry point: it is the whole of `engine/rust_host_retry_test.go`'s
+/// evidence and has no other caller.
+#[cleat_entry]
+fn retry_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
+    let policy = cleat_sdk::RetryPolicy {
+        max_attempts: 2,
+        initial_interval_ms: 1,
+        backoff_multiplier: 1.0,
+        maximum_interval_ms: 1,
+        non_retryable_errors: vec![],
+    };
+    let _: serde_json::Value =
+        h.cleat_call_with_retry("always-fails", "op", &serde_json::json!({}), &policy)?;
+    Ok("{\"unreachable\":true}".to_string())
+}
+
+/// A retry policy too long to hold a worker for, on the Rust SDK.
+///
+/// The mirror of testdata/deferfunc's DeferOnLongRetryPolicy, and the other
+/// side of the threshold from `retry_probe`. IMPROVEMENT-PLAN 3.88: three
+/// attempts two minutes apart is four minutes of waiting, which must suspend
+/// between attempts rather than run on the host -- holding a worker that long
+/// would exceed --wasm-wall-clock-ceiling and get the invocation killed, where
+/// suspending completes it.
+///
+/// Before 2026-09-03 this SDK took the host path for ANY policy, so this entry
+/// point would have held the worker for four minutes. Keep it: it and
+/// `retry_probe` together are what stop the threshold regressing to
+/// always-host or always-SDK, and neither alone would catch that.
+#[cleat_entry]
+fn retry_long_probe(h: &HostCalls, _input: PlaceOrderInput) -> Result<String, String> {
+    let policy = cleat_sdk::RetryPolicy {
+        max_attempts: 3,
+        initial_interval_ms: 120_000,
+        backoff_multiplier: 1.0,
+        maximum_interval_ms: 120_000,
+        non_retryable_errors: vec![],
+    };
+    let _: serde_json::Value =
+        h.cleat_call_with_retry("always-fails", "op", &serde_json::json!({}), &policy)?;
+    Ok("{\"unreachable\":true}".to_string())
+}

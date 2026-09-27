@@ -5,17 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
-	"github.com/google/uuid"
 )
 
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
 		return fmt.Errorf("kvstore: nil mux")
 	}
@@ -38,18 +36,11 @@ func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
 }
 
-// tenantID extracts the tenant UUID from the request context. Returns the
-// zero UUID if no tenant is set.
-func (p *Plugin) tenantID(r *http.Request) uuid.UUID {
-	tid, _ := auth.TenantIDFromContext(r.Context())
-	return tid
-}
-
 // ---- GET /kv/{key} ----
 
 func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -95,8 +86,8 @@ func (p *Plugin) handleGet(w http.ResponseWriter, r *http.Request) {
 // ---- PUT /kv/{key} ----
 
 func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -107,13 +98,10 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		p.logger.Error("kvstore: read body", "error", err)
-		p.writeError(w, 500, "failed to read body")
+	body, ok := plugin.ReadBody(w, r)
+	if !ok {
 		return
 	}
-	defer r.Body.Close()
 
 	if len(body) == 0 {
 		p.writeError(w, 400, "empty body")
@@ -180,6 +168,7 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 
 	// No If-Match header: upsert (insert or overwrite unconditionally).
 	var newVersion int
+	var err error
 	if p.dialect == plugin.DialectMySQL {
 		// MySQL: upsert without RETURNING, then select version
 		_, execErr := p.db.Exec(r.Context(), plugin.Rebind(upsertKV.For(p.dialect), p.dialect),
@@ -217,8 +206,8 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 // ---- DELETE /kv/{key} ----
 
 func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}
@@ -250,8 +239,8 @@ func (p *Plugin) handleDelete(w http.ResponseWriter, r *http.Request) {
 // ---- GET /kv ----
 
 func (p *Plugin) handleList(w http.ResponseWriter, r *http.Request) {
-	tid := p.tenantID(r)
-	if tid == uuid.Nil {
+	tid, ok := auth.TenantIDFromRequest(r)
+	if !ok {
 		p.writeError(w, 401, "tenant required")
 		return
 	}

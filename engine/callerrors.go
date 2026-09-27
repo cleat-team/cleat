@@ -1,5 +1,7 @@
 package engine
 
+import "errors"
+
 // Call error classification.
 //
 // These mirror the guest SDK's CallErrorCode enum, which is what a workflow
@@ -35,6 +37,32 @@ const (
 	// callErrorInvalidRequest is the classification for a request the host
 	// refused to interpret. See badParamDurableCall in memory.go.
 	callErrorInvalidRequest byte = 4
+	// callErrorRetryPolicyTooLong is the classification for a cleat_call_retry
+	// whose policy the host declined to run in one segment, because its
+	// worst-case total backoff exceeds the tenant's resolved host-retry
+	// budget. The call is not made and no event is recorded, so the guest has
+	// not consumed an attempt and replay sees nothing.
+	//
+	// Non-retryable: re-issuing the same policy would be refused on identical
+	// grounds. The guest's obligation is to run the policy itself, suspending
+	// between attempts. See ABI.md, "Retry refusal -- cleat_call_retry only,
+	// and NOT a sentinel bit".
+	callErrorRetryPolicyTooLong byte = 6
+	// callErrorOutputTruncated is the classification for a call whose response
+	// did not fit in the buffer the guest supplied. cleat#1312: writeResult cut
+	// the value to the guest's maxLen and reported only how many bytes it had
+	// written, so a truncated response and a short one were the same thing from
+	// the guest's side. The usual symptom was a JSON unmarshal error pointing at
+	// the response body rather than at a buffer limit.
+	//
+	// Non-retryable, for the reason callErrorRetryPolicyTooLong is: reissuing
+	// the identical call with the identical buffer fails identically. The fix is
+	// a larger buffer or a smaller payload, and both are the caller's.
+	//
+	// 7 in this space and in the simple-result errCode byte, which is free in
+	// both -- so a guest recognises this failure without first having to know
+	// which result layout it is decoding.
+	callErrorOutputTruncated byte = 7
 )
 
 // callFailureCode is the code reported for a call that the *service* failed
@@ -81,6 +109,8 @@ var guestCallErrorCodes = []GuestCallErrorCode{
 	{Name: "NotFound", Code: 3, Retryable: false},
 	{Name: "InvalidRequest", Code: 4, Retryable: false},
 	{Name: "PermissionDenied", Code: 5, Retryable: false},
+	{Name: "RetryPolicyTooLong", Code: 6, Retryable: false},
+	{Name: "OutputTruncated", Code: 7, Retryable: false},
 }
 
 // GuestCallErrorCodes returns the engine's copy of the guest SDK's
@@ -102,6 +132,46 @@ func GuestCallErrorCodes() []GuestCallErrorCode {
 // non-retryable: repeating it is the one thing a cancelled workflow must not do.
 const cancelledCallError = "workflow cancelled"
 
+// eventCapCallError is the message a durable call reports when the workflow has
+// reached --max-quota-events and the engine has decided to continue it as new.
+//
+// Like cancelledCallError this is a refusal, not a failure: the call was never
+// dispatched, so no side effect happened and there is nothing to retry. The
+// guest sees an error, unwinds through its entry-point wrapper -- draining its
+// defers on the way, as it does for an explicit ContinueAsNew -- and the
+// executor reports the continue_as_new suspension that freshCall recorded
+// before refusing. The run that starts next carries a reset event count and
+// makes this call for real.
+const eventCapCallError = "event cap reached; workflow continuing as new"
+
+// heartbeatPresumedLostCallError is the message a durable call reports when
+// the worker's own heartbeats have been failing (or timing out) longer than
+// the reclaim window, so it can no longer vouch that it still holds this
+// run's fence. cleat#2008 decision 2.
+//
+// Retryable, unlike cancelledCallError and eventCapCallError: nothing about
+// THIS run is known to be wrong, only that the worker cannot currently
+// confirm it. packed with callFailureCode, the same classification an
+// ordinary transient service failure gets, so a workflow's existing retry
+// policy handles it with no new branch. The call is never dispatched, so
+// there is no side effect to worry about repeating.
+const heartbeatPresumedLostCallError = "worker heartbeat presumed lost; refusing to start new work until it recovers"
+
+// shutdownCallError is the message a durable call reports when the worker
+// hard-stopped mid-call at grace expiry (cleat#2287). The call WAS dispatched
+// but its outcome is unknown, so the run must suspend, not fail and not
+// complete: freshCall sets suspendErr before returning this, and executor.go's
+// suspend path requeues the run for another worker, which replays from before
+// the call under the same idempotency key. Non-retryable in the guest's eyes
+// for the same reason as cancelledCallError -- the guest unwinds, it does not
+// re-dispatch.
+const shutdownCallError = "worker shutting down; this call was interrupted"
+
+// shutdownSuspendReason is the SuspendError.Reason a hard-stopped call records,
+// so the suspend is distinguishable in the event history and in the /readyz
+// drain reason from a guest-requested suspension.
+const shutdownSuspendReason = "worker shutdown"
+
 // recordedFailureCode maps a recorded call failure to the code the guest sees.
 //
 // Both the fresh path and the replay path must go through this function. A
@@ -120,14 +190,70 @@ const cancelledCallError = "workflow cancelled"
 // Reporting InvalidRequest would tell the workflow author their request was
 // malformed, which is a claim nothing here supports.
 //
-// This is the narrow half of IMPROVEMENT-PLAN 2.35. The full error class still
-// has nowhere to come from: no ServiceCaller in the repo returns anything but a
-// bare fmt.Errorf, so a richer taxonomy would be values nothing populates --
-// which is how engine/flush.go accumulated 350 lines of durability code that
-// had never run (docs/durable-call-intent-design.md).
+// This is the narrow half of IMPROVEMENT-PLAN 2.35, and it stays narrow on
+// purpose even though the wide half now exists.
+//
+// The paragraph here used to read "no ServiceCaller in the repo returns
+// anything but a bare fmt.Errorf, so a richer taxonomy would be values nothing
+// populates". That was true when written and stopped being true in the same
+// section's next update: dbServiceCaller (cmd/cleat-worker/setup.go), the only
+// ServiceCaller that runs in production, returns NewPermanentError /
+// NewTransientError throughout. The class is recorded now --
+// EventRecord.ErrCode, written by recordedErrorClass.
+//
+// What has not changed is that this function must not read it. The recorded
+// class and the recorded bit can legitimately disagree, because
+// DurableCallWithRetry's nonRetryableErrors list comes from the guest's own
+// retry policy across the ABI: a workflow author can declare a substring
+// non-retryable for an error whose CleatError says ErrTransient. The bit is
+// what the engine acted on, so the bit is what the guest must be told, and
+// deriving the code from the class instead would change the retry behaviour of
+// workflows already in flight.
 func recordedFailureCode(nonRetryable bool) byte {
 	if nonRetryable {
 		return callErrorUnknown
 	}
 	return callFailureCode
+}
+
+// recordedErrorClass returns the engine's classification of a failed call, as
+// the string EventRecord.ErrCode stores, or "" when the error carries none.
+//
+// "" rather than "unknown" for an unclassified error, which is the whole
+// reason this does not just call ErrorCode.String(): ErrUnknown is the iota
+// zero value, so an error that no ServiceCaller classified and one classified
+// *as* unknown would otherwise be written identically. Empty means "nobody
+// said", and it is also what every event written before IMPROVEMENT-PLAN 2.35's
+// second half reads back as.
+//
+// errors.As, not a type assertion: a CleatError is routinely wrapped by the
+// time it reaches here -- DurableCallWithRetry's loop adds context -- and the
+// same traversal is what isDefinitelyNonRetryable already uses to find
+// RetryableError, so the two agree about which error in a chain is speaking.
+func recordedErrorClass(err error) string {
+	if err == nil {
+		return ""
+	}
+	var ce *CleatError
+	if !errors.As(err, &ce) {
+		return ""
+	}
+	if ce.Code == ErrUnknown {
+		return ""
+	}
+	return ce.Code.String()
+}
+
+// truncClass maps a truncation errCode onto the durable-call classification
+// field, and 0 onto 0.
+//
+// The two fields are separate on purpose -- errCode says the call failed,
+// callErrorCode says what kind -- and a guest decoding a durable call builds
+// its CallError from the classification. Setting only the low byte would leave
+// the guest reporting CallErrorUnknown for a failure the host had classified.
+func truncClass(errCode byte) byte {
+	if errCode == errCodeOutputTruncated {
+		return callErrorOutputTruncated
+	}
+	return 0
 }

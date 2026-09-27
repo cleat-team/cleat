@@ -2,6 +2,15 @@
 
 ## A design for resilient, composable, observable workflows with near-standard Go
 
+> **This is an original design document, not a description of the shipped system.**
+> Read it for intent; check `tiers.yaml` and the source for what is true now.
+> Marked 2026-09-06 while sweeping stale wazero references: every mention of
+> wazero as *the* runtime below dates from before #459 (2026-08-10) deleted the
+> wazero backend. wasmtime is the only WASM backend cleat has; the wazero
+> `engine.Runtime` survives for CLI and test tooling only. The body is left as
+> written, because rewriting a design document to match what was built destroys
+> the only record of what was intended.
+
 ---
 
 ## 1. Overview
@@ -13,6 +22,22 @@ The system has three goals:
 1. **Write normal Go.** Developers write business logic using ordinary Go functions, conditionals, loops, and library calls. Composability through function calls at arbitrary depth is a first-class requirement — a workflow can call a helper which calls another helper which makes an API call, and the system tracks the transitive closure automatically.
 
 2. **Operational simplicity.** The entire infrastructure is a PostgreSQL database plus a pool of stateless worker processes. No separate queue service, no history service, no matching service. Deploying a new workflow version is an `INSERT`. Rolling back is an `UPDATE`.
+
+   **Scope of that claim, stated because it does not cover everything a reader
+   will assume.** "Deploying a new workflow version is an `INSERT`" is true of
+   *workflow definitions* — the business logic — and it is true of generic
+   outbound HTTP, which `DurableFetch` and the built-in `http.fetch` service
+   handle without any worker change. It is **not** true of a new *named*
+   service. `dbServiceCaller.call` (`cmd/cleat-worker/setup.go:200`) handles
+   `http.fetch`, then one optional `--bench-svc-url`, and otherwise returns a
+   permanent `service X.Y not configured: no endpoint registered`. There is no
+   endpoint table, no service registry, and no `RegisterService`. Integrating a
+   new CRM, payment processor or internal RPC service therefore means writing a
+   Go plugin and rebuilding the worker — the CI/CD pipeline this section says
+   you do not need.
+
+   The honest split is still a good story, and it survives contact: **fully true
+   for business logic and generic HTTP, fully false for new named services.**
 
 3. **Built-in observability.** Because every external interaction must be recorded for durability (replay-after-crash), that same record serves as structured logging, distributed tracing, metrics, and business-level querying. The developer writes zero observability code.
 
@@ -309,17 +334,59 @@ The entire system runs on a single PostgreSQL database (plus Patroni for HA). Po
 
 **Resilience** is achieved through synchronous streaming replication (no lost commits), Patroni for automatic failover (~30s MTTR), WAL archiving to S3 for point-in-time recovery (protection against operator error), and application-level restricted database users (the worker app has `INSERT` and `UPDATE` permissions only — no `DROP`, `TRUNCATE`, or `DELETE`).
 
-**Multiple cleat instances share one PostgreSQL cluster.** Because cleat is
-stateless workers connecting to YOUR database, multiple worker pools can share
-a single Postgres cluster. The `--schema` flag assigns each worker pool its own
-PostgreSQL schema, providing full table-level isolation:
-`team_a.workflow_instances` is a separate table from
-`team_b.workflow_instances`.
-The `--peer-schemas` flag enables cross-pool cooperation: if `team_a` starts a
-child workflow defined in `team_b`'s schema, the host can resolve and claim it.
-This gives teams the flexibility to operate isolated worker pools while still
-enabling cross-team workflow composition when needed. Each schema gets its own
-migration state, so schema changes are rolled out per pool, not globally.
+**Multiple cleat instances can share one PostgreSQL server — one DATABASE per
+pool. This is a future feature and cleat does not expose it yet.** Because
+cleat is stateless workers connecting to YOUR database, multiple worker pools
+can share a server by taking a database each. Nothing in cleat provisions that
+arrangement today, and the constraint below is enforced nowhere.
+
+This paragraph described schema-per-pool via `--schema`, with "full table-level
+isolation", until cleat#1363. That was wrong in three ways and none of them was
+about tables:
+
+  * `admin` and `cleat` are *schemas inside a database*, so two pools sharing a
+    database share them — including `admin.tenants`, which `tenant_settings`
+    cascades off, so dropping a tenant in one pool deletes the other pool's
+    settings rows.
+  * Migrations `CREATE OR REPLACE` routines in those fixed schemas
+    (`cleat.assert_tenant_set`, `admin.claim_workflows`, `admin.drop_tenant`),
+    so a pool upgrading rewrites functions another pool is executing while that
+    pool's own migration state still reads the older version. "Rolled out per
+    pool" was true of tables and false of behaviour — cleat#1368.
+  * The documented deploy path could not build the configuration at all:
+    migration 033's `CREATE EXTENSION IF NOT EXISTS pg_trgm` no-ops for the
+    second pool, and the GIN index then fails because `gin_trgm_ops` is not on
+    its `search_path` — cleat#1366.
+
+Database-per-pool dissolves all three by construction, because PostgreSQL has
+no cross-database references: `admin` and `cleat` exist once per database, the
+cascade cannot span databases, and extensions are database-scoped.
+
+**The constraint that does NOT dissolve: a tenant id must belong to exactly one
+pool.** Roles are cluster-global while everything else is per-database, and
+`admin.create_tenant_role` writes to that global namespace. Registering the
+same tenant in two pools silently invalidates the first pool's stored
+credential — its own password is then refused — and `admin.drop_tenant` for
+that tenant afterwards aborts on the role's remaining dependencies rather than
+deleting anything. The abort is loud; the credential invalidation is not.
+
+Two things are **measured** and two are **not**, and the difference is kept
+deliberately. Measured: the schema sharing above, and that separate databases
+do not share it. Not measured: per-pool migration state under
+database-per-pool (the fixture applied the files with `psql` rather than
+through `migration.Runner`), and whether each tenant role's
+`CONNECTION LIMIT 10` — a per-role and therefore cross-pool budget — matters in
+practice.
+
+`--schema` is not the mechanism for any of this. It puts one worker's tables
+somewhere other than `public`; see `docs/reference/worker-config.md` for what
+does and does not follow it.
+
+Pools do **not** cooperate through the database. A worker pool reads and writes
+its own database and nothing else; cross-pool work goes through the other
+pool's API, the same way any two services talk. A host call that wrote a child workflow
+directly into a peer schema existed until 2026-09-02 and was removed — see
+IMPROVEMENT-PLAN §3.78 for why.
 
 ### 3.8 Built-in observability
 
@@ -1162,12 +1229,23 @@ ALTER TABLE workflow_instances ADD COLUMN query_state JSONB DEFAULT '{}'::jsonb;
 **Host API:**
 
 ```
-GET /api/v1/workflows/{workflow_id}/query
-Response: {"status": "awaiting_approval", "reservation_id": "resv_abc123", ...}
-
-GET /api/v1/workflows/{workflow_id}/query?key=status
-Response: "awaiting_approval"
+GET /api/workflows/{workflow_id}/query?key=status
+Response: {"key": "status", "value": "awaiting_approval"}
 ```
+
+**The key is required, and there is no keyless form.** This block used to show a
+keyless `GET .../query` returning the whole map. No such endpoint exists, and the
+question of whether one should was answered NO in cleat#1119, at the owner's
+direction — published state is a contract with callers that know what to ask
+for, not a bag whose shape is discovered at runtime. `docs/how-to/common-patterns.md`,
+"Reading a key you do not know", carries the reasoning and points at
+`cleatctl debug` for the operator case.
+
+Omitting `key` is a **400** as of cleat#1224. It previously answered
+`200 {"key":"","value":""}`, which is what made this documented call look real.
+
+The prefix was also wrong: the server trims `/api/workflows/`, and no `/api/v1`
+route exists anywhere (`cmd/cleat-worker/server.go:513`).
 
 The optional `key` parameter returns the value for a single key. If the key is absent from the snapshot, the endpoint returns `404`.
 

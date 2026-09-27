@@ -11,45 +11,146 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/cleat-team/cleat/engine"
 	"github.com/google/uuid"
+
+	"github.com/cleat-team/cleat/internal/tenantctx"
 )
 
-type tenantIDKey struct{}
-
-// WithTenantID sets the tenant ID in the context. Primarily for testing.
+// WithTenantID sets the tenant ID in the context.
+//
+// Delegates to internal/tenantctx so that engine can read the same value
+// without importing this package -- auth's own tests import engine, so that
+// direction is a cycle. These two functions stay the way everything outside
+// engine refers to the tenant; only the key moved.
 func WithTenantID(ctx context.Context, tenantID uuid.UUID) context.Context {
-	return context.WithValue(ctx, tenantIDKey{}, tenantID)
+	return tenantctx.With(ctx, tenantID)
 }
 
 // TenantIDFromContext extracts the tenant ID from the request context.
 func TenantIDFromContext(ctx context.Context) (uuid.UUID, bool) {
-	tid, ok := ctx.Value(tenantIDKey{}).(uuid.UUID)
-	return tid, ok
+	return tenantctx.From(ctx)
+}
+
+// TenantIDFromRequest is TenantIDFromContext for the common case of an
+// *http.Request, so a plugin route handler does not need its own copy of
+// this call.
+//
+// ok is false exactly when MiddlewareWithMux set no tenant -- an unauthenticated
+// request on a route with requireAuth false, or a public path. It is true
+// for every authenticated request, INCLUDING one authenticated as the
+// seeded default tenant (00000000-0000-0000-0000-000000000000), whose ID
+// is the zero uuid.UUID. Comparing the returned UUID to uuid.Nil instead of
+// checking ok cannot tell those two apart, and rejects the default tenant's
+// own valid API key with a 401 on every route that does it -- cleat#2183.
+func TenantIDFromRequest(r *http.Request) (uuid.UUID, bool) {
+	return TenantIDFromContext(r.Context())
+}
+
+// subjectContextKey is unexported, so a second declaration of an identical
+// struct elsewhere is a DIFFERENT key that silently reads nothing -- the same
+// reason tenantctx exists as its own package (see WithTenantID above). This
+// one does not need that package: nothing outside plugins reads or writes a
+// subject, so there is no cross-package cycle to avoid, and a plain
+// unexported type here is the whole mechanism.
+type subjectContextKey struct{}
+
+// WithSubject sets the authenticated identity string in the context -- the
+// end of a durable call chain, not a display name: whatever an authentication
+// plugin resolved a request to (an email, a subject claim, an API key's
+// owner), for another plugin to attribute an action to without depending on
+// which authentication method produced it. cleat#1881.
+//
+// Deliberately neutral rather than named after OAuth. oauthprovider is the
+// only plugin that populates it today, but it is not the only way a request
+// could be authenticated -- an API-key caller has nowhere else to put a
+// subject, and a helper only OAuth could fill would need replacing the first
+// time someone audits an API-key request.
+func WithSubject(ctx context.Context, subject string) context.Context {
+	return context.WithValue(ctx, subjectContextKey{}, subject)
+}
+
+// SubjectFromContext extracts the authenticated identity string set by
+// WithSubject. ok is false when nothing set one -- an unauthenticated
+// request, or an authentication method that has not been wired to call
+// WithSubject yet -- and callers should treat that the same as an empty
+// subject rather than an error: recording that a caller's identity was not
+// captured is not a reason to refuse the request that revealed it.
+func SubjectFromContext(ctx context.Context) (string, bool) {
+	subject, ok := ctx.Value(subjectContextKey{}).(string)
+	return subject, ok
+}
+
+// TenantResolver is the only thing this middleware needs from a store: turning
+// an API key hash into a tenant.
+//
+// Narrowed from engine.WorkflowStore (99 methods) so that the resolver can be
+// something that is NOT tenant-scoped. On MySQL it must be: tenant isolation
+// there is one database per tenant, so a tenant-scoped store looks for the key
+// in the tenant's database while every writer puts it in the base one. Both
+// engine.WorkflowStore and auth.TenantStore satisfy this. See cleat#866.
+// cleat#2352: expiry is enforced only by auth.TenantStore's implementation,
+// not by the engine stores' (PostgresStore/MySQLStore/MSSQLStore) -- production
+// builds the enforcing resolver, but this interface does not guarantee it.
+type TenantResolver interface {
+	ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error)
 }
 
 // TenantFromAPIKey looks up a tenant by API key hash.
-func TenantFromAPIKey(ctx context.Context, store engine.WorkflowStore, keyHash []byte) (uuid.UUID, error) {
+func TenantFromAPIKey(ctx context.Context, store TenantResolver, keyHash []byte) (uuid.UUID, error) {
 	return store.ResolveTenantFromAPIKey(ctx, keyHash)
 }
 
-// Middleware authenticates requests using a cleat API key.
+// infrastructurePaths are answered without a credential because the things that call them (a kubelet,
+// a load balancer, a Prometheus scraper) hold none and address the worker by IP. There used to be
+// three hand-kept copies of this list (here, host_binding.go, plugins/oauthprovider) that could drift
+// apart, and a new endpoint had to be added to each. cleat#2007 added /livez and /readyz and made it one.
+//
+// These bodies are public, so what they say is limited to ok, degraded and reason codes
+// (cmd/cleat-worker/health.go). The detail is on /api/admin/health, which is NOT in this list.
+var infrastructurePaths = map[string]struct{}{
+	"/healthz": {}, // alias of /livez
+	"/livez":   {},
+	"/readyz":  {},
+	"/metrics": {},
+}
+
+// IsInfrastructurePath reports whether path is answered without authentication.
+func IsInfrastructurePath(path string) bool {
+	_, ok := infrastructurePaths[path]
+	return ok
+}
+
+// MiddlewareWithMux authenticates requests using a cleat API key.
 // Supports: Authorization: Bearer cleat_sk_<key>
 // Also supports: X-Cleat-API-Key: <key>
 // When requireAuth is true, requests without a valid API key are rejected with 401,
-// except for public paths (/healthz, /metrics, and any additional patterns passed via
+// except for public paths (IsInfrastructurePath, and any additional patterns passed via
 // publicPatterns).
+//
+// It decides whether a request is public by asking mux -- the real,
+// fully-registered *http.ServeMux that will go on to serve it -- which
+// pattern it resolves to. Always pass the real serving mux; see
+// isPublicRoute's doc comment (public_route.go) for why that distinction
+// matters: a literal same-method sibling of a public wildcard, registered
+// anywhere on mux ("POST /ingest/sources" beside the public "POST
+// /ingest/{source_id}"), is what makes the difference. A nil mux falls back
+// to a throwaway mux built from only publicPatterns, which has no such
+// sibling to lose to and so wrongly reports the sibling itself as public --
+// cleat#2274. There used to be a mux-less Middleware wrapper that always
+// took this fallback; every plugin test that called it was therefore
+// testing pre-#2274 route matching regardless of what it claimed to cover,
+// and it was removed for exactly that reason -- cleat#2320. The nil path
+// still exists here, for this package's own tests of the fallback itself.
 //
 // publicPatterns is a hand-maintained allowlist, not a generic plugin-declared
 // mechanism. It exists for endpoints that are meant to be called by parties who cannot
 // present a cleat API key -- an inbound webhook receiver with its own HMAC check
-// (plugins/webhookingest), a third-party IdP's OAuth redirect target
-// (plugins/oauthprovider) -- and would otherwise 401 before that endpoint's own
+// (plugins/webhookingest), an anonymous browser starting an OAuth login and the
+// third-party IdP's redirect back that completes it (plugins/oauthprovider,
+// cleat#2319) -- and would otherwise 401 before that endpoint's own
 // verification ever runs. Each entry is a Go 1.22+ http.ServeMux pattern
 // ("POST /ingest/{source_id}"), matched with the exact same method+wildcard semantics
-// the real mux uses, via a throwaway ServeMux built only for matching (see
-// buildPublicMatcher) -- so "POST /ingest/{source_id}" does not also make
-// "GET /ingest/sources" public.
+// the real mux uses.
 //
 // A plugin-declared version of this (a PublicRoutes() method plugins implement
 // themselves) would need changes to plugin/plugin.go and to each plugin, which are
@@ -57,21 +158,20 @@ func TenantFromAPIKey(ctx context.Context, store engine.WorkflowStore, keyHash [
 // cmd/cleat-worker/main.go is the option available without those changes. Anyone
 // adding a new externally-triggered plugin endpoint must add it here too -- nothing
 // enforces that the two stay in sync.
-func Middleware(store engine.WorkflowStore, requireAuth bool, publicPatterns ...string) func(http.Handler) http.Handler {
+func MiddlewareWithMux(store TenantResolver, requireAuth bool, mux *http.ServeMux, publicPatterns ...string) func(http.Handler) http.Handler {
 	publicMatcher := buildPublicMatcher(publicPatterns)
+	patternSet := publicPatternSet(publicPatterns)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Public paths are always accessible without authentication.
 			path := r.URL.Path
-			if path == "/healthz" || path == "/metrics" {
+			if IsInfrastructurePath(path) {
 				next.ServeHTTP(w, r)
 				return
 			}
-			if publicMatcher != nil {
-				if _, pattern := publicMatcher.Handler(r); pattern != "" {
-					next.ServeHTTP(w, r)
-					return
-				}
+			if isPublicRoute(mux, publicMatcher, patternSet, r) {
+				next.ServeHTTP(w, r)
+				return
 			}
 
 			key := extractAPIKey(r)
@@ -90,7 +190,7 @@ func Middleware(store engine.WorkflowStore, requireAuth bool, publicPatterns ...
 				http.Error(w, `{"error":"invalid or revoked API key"}`, http.StatusUnauthorized)
 				return
 			}
-			ctx := context.WithValue(r.Context(), tenantIDKey{}, tenantID)
+			ctx := tenantctx.With(r.Context(), tenantID)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
@@ -103,7 +203,7 @@ func Middleware(store engine.WorkflowStore, requireAuth bool, publicPatterns ...
 // "POST /ingest/{source_id}" matches only a POST to that exact shape and not, say, a
 // GET to the same path or a request to a same-prefixed but different route such as
 // "/ingest/sources". Returns nil when there is nothing to match, so the hot path in
-// Middleware can skip the check entirely for the common case (no publicPatterns).
+// MiddlewareWithMux can skip the check entirely for the common case (no publicPatterns).
 func buildPublicMatcher(patterns []string) *http.ServeMux {
 	if len(patterns) == 0 {
 		return nil

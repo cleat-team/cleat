@@ -21,6 +21,7 @@ func (s *MSSQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
+		       payload_encoding,
 		       promise_name, promise_id, promise_result, promise_error,
 		       created_at,
 		       CAST(CASE WHEN intent_at IS NOT NULL AND checksum IS NULL THEN 1 ELSE 0 END AS BIT) AS pending
@@ -45,6 +46,7 @@ func (s *MSSQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 		var payload sql.NullString
 		var promiseName, promiseID, promiseResult, promiseError sql.NullString
 		var createdAt time.Time
+		var payloadEnc sql.NullInt16
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
@@ -52,16 +54,17 @@ func (s *MSSQLStore) LoadEventHistory(ctx context.Context, workflowID string) ([
 			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
+			&payloadEnc,
 			&promiseName, &promiseID, &promiseResult, &promiseError,
 			&createdAt, &rec.Pending); err != nil {
 			return nil, fmt.Errorf("scan history: %w", err)
 		}
 
-		rec.TimestampMs = createdAt.UnixMilli()
+		applyCreatedAt(&rec, createdAt)
 		rec.Service = service.String
 		rec.Op = op.String
-		rec.Request = tryDecodeBase64(request.String)
-		rec.Response = tryDecodeBase64(response.String)
+		rec.Request = decodePayload(request.String, payloadEnc)
+		rec.Response = decodePayload(response.String, payloadEnc)
 		rec.Err = errMsg.String
 		rec.DurationMs = durationMs.Int64
 		rec.SignalNames = signalNames.String
@@ -136,6 +139,7 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				       defer_description, defer_id, child_name, child_input, run_id, new_input,
 				       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 				       payload,
+				       payload_encoding,
 				       promise_name, promise_id, promise_result, promise_error,
 				       created_at
 				FROM event_history
@@ -161,6 +165,7 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				var payload sql.NullString
 				var promiseName, promiseID, promiseResult, promiseError sql.NullString
 				var createdAt time.Time
+				var payloadEnc sql.NullInt16
 
 				if err := rows.Scan(&rec.Step, &rec.EventType,
 					&service, &op, &request, &response, &errMsg,
@@ -168,6 +173,7 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 					&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 					&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 					&payload,
+					&payloadEnc,
 					&promiseName, &promiseID, &promiseResult, &promiseError,
 					&createdAt); err != nil {
 					rows.Close()
@@ -175,11 +181,11 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 					return
 				}
 
-				rec.TimestampMs = createdAt.UnixMilli()
+				applyCreatedAt(&rec, createdAt)
 				rec.Service = service.String
 				rec.Op = op.String
-				rec.Request = tryDecodeBase64(request.String)
-				rec.Response = tryDecodeBase64(response.String)
+				rec.Request = decodePayload(request.String, payloadEnc)
+				rec.Response = decodePayload(response.String, payloadEnc)
 				rec.Err = errMsg.String
 				rec.DurationMs = durationMs.Int64
 				rec.SignalNames = signalNames.String
@@ -207,28 +213,28 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 				// NOTE: On MSSQL this block is a forward-compatibility guard only --
 				// encryption is not yet supported and will never be true.
 				if s.encryption != nil && s.encryptSensitivePayloads {
-					if decrypted, err := s.encryption.Decrypt([]byte(rec.Request)); err == nil {
+					if decrypted, err := s.encryption.Decrypt(tenantForAAD(s.tenantID), []byte(rec.Request)); err == nil {
 						rec.Request = string(decrypted)
 					}
-					if decrypted, err := s.encryption.Decrypt([]byte(rec.Response)); err == nil {
+					if decrypted, err := s.encryption.Decrypt(tenantForAAD(s.tenantID), []byte(rec.Response)); err == nil {
 						rec.Response = string(decrypted)
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.Err); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.Err); err == nil {
 						rec.Err = decrypted
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.SignalPayload); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.SignalPayload); err == nil {
 						rec.SignalPayload = decrypted
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.ChildInput); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.ChildInput); err == nil {
 						rec.ChildInput = decrypted
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.NewInput); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.NewInput); err == nil {
 						rec.NewInput = decrypted
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.PluginInput); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.PluginInput); err == nil {
 						rec.PluginInput = decrypted
 					}
-					if decrypted, err := s.encryption.DecryptString(rec.PluginOutput); err == nil {
+					if decrypted, err := s.encryption.DecryptString(tenantForAAD(s.tenantID), rec.PluginOutput); err == nil {
 						rec.PluginOutput = decrypted
 					}
 				}
@@ -255,7 +261,7 @@ func (s *MSSQLStore) StreamEventHistory(ctx context.Context, workflowID string, 
 					// Decrypt payload before populateFromPayload if encryption is enabled.
 					// NOTE: Forward-compatibility guard only on MSSQL.
 					if s.encryption != nil && s.encryptSensitivePayloads {
-						if decrypted, err := s.encryption.DecryptJSON([]byte(payloadStr)); err == nil {
+						if decrypted, err := s.encryption.DecryptJSON(tenantForAAD(s.tenantID), []byte(payloadStr)); err == nil {
 							payloadStr = string(decrypted)
 						}
 					}
@@ -303,7 +309,9 @@ func (s *MSSQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 		       defer_description, defer_id, child_name, child_input, run_id, new_input,
 		       plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 		       payload,
-		       promise_name, promise_id, promise_result, promise_error
+		       payload_encoding,
+		       promise_name, promise_id, promise_result, promise_error,
+		       created_at
 		FROM event_history
 		WHERE workflow_id = @p1 AND tenant_id = @p2
 		ORDER BY step
@@ -325,6 +333,11 @@ func (s *MSSQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 		var pluginName, pluginFunc, pluginInput, pluginOutput, pluginErr sql.NullString
 		var payload sql.NullString
 		var promiseName, promiseID, promiseResult, promiseError sql.NullString
+		// NullTime here rather than the plain time.Time the other two paths
+		// use, because this SELECT did not read created_at at all before
+		// 2026-09-03 and a NULL must not fail the page.
+		var createdAt sql.NullTime
+		var payloadEnc sql.NullInt16
 
 		if err := rows.Scan(&rec.Step, &rec.EventType,
 			&service, &op, &request, &response, &errMsg,
@@ -332,14 +345,20 @@ func (s *MSSQLStore) LoadEventHistoryPaginated(ctx context.Context, workflowID s
 			&deferDesc, &deferID, &childName, &childInput, &runID, &newInput,
 			&pluginName, &pluginFunc, &pluginInput, &pluginOutput, &pluginErr,
 			&payload,
-			&promiseName, &promiseID, &promiseResult, &promiseError); err != nil {
+			&payloadEnc,
+			&promiseName, &promiseID, &promiseResult, &promiseError,
+			&createdAt); err != nil {
 			return nil, fmt.Errorf("scan history paginated: %w", err)
+		}
+
+		if createdAt.Valid {
+			applyCreatedAt(&rec, createdAt.Time)
 		}
 
 		rec.Service = service.String
 		rec.Op = op.String
-		rec.Request = tryDecodeBase64(request.String)
-		rec.Response = tryDecodeBase64(response.String)
+		rec.Request = decodePayload(request.String, payloadEnc)
+		rec.Response = decodePayload(response.String, payloadEnc)
 		rec.Err = errMsg.String
 		rec.DurationMs = durationMs.Int64
 		rec.SignalNames = signalNames.String
@@ -392,13 +411,40 @@ func (s *MSSQLStore) CountEventHistory(ctx context.Context, workflowID string) (
 	return count, err
 }
 
+// IsHistorySwept reports whether DeleteExpiredEvents has ever swept this
+// workflow's event_history. cleat#2038.
+func (s *MSSQLStore) IsHistorySwept(ctx context.Context, workflowID string) (bool, error) {
+	var sweptAt sql.NullTime
+	err := s.db.QueryRowContext(ctx,
+		`SELECT history_swept_at FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2`,
+		workflowID, s.tenantID).Scan(&sweptAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return sweptAt.Valid, nil
+}
+
 // AppendEventHistory appends a single event to the history.
 func (s *MSSQLStore) AppendEventHistory(ctx context.Context, workflowID string, rec EventRecord) error {
 	return s.AppendEventHistoryBatch(ctx, workflowID, []EventRecord{rec})
 }
 
 // AppendEventHistoryBatch appends multiple events to the history atomically.
+//
+// Retried on a rollback-guaranteed error, like every other MSSQL transaction
+// boundary. IMPROVEMENT-PLAN.md 2.26 deferred this file and
+// mssql_signals_promises.go because 2.60 was rewriting them; 2.60 landed as
+// #283 on 2026-08-04 and the deferral was never lifted.
 func (s *MSSQLStore) AppendEventHistoryBatch(ctx context.Context, workflowID string, recs []EventRecord) error {
+	return withRollbackGuaranteedRetry(ctx, "append history batch", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.appendEventHistoryBatchOnce(ctx, workflowID, recs)
+	})
+}
+
+func (s *MSSQLStore) appendEventHistoryBatchOnce(ctx context.Context, workflowID string, recs []EventRecord) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("append history batch: begin tx: %w", err)
@@ -450,8 +496,59 @@ func (s *MSSQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 		return nil
 	}
 
-	// Use INSERT...SELECT WHERE NOT EXISTS for idempotent event insertion.
-	// This is the SQL Server equivalent of PostgreSQL's ON CONFLICT DO NOTHING.
+	// A MERGE, not INSERT...SELECT WHERE NOT EXISTS. That was the SQL Server
+	// equivalent of PostgreSQL's ON CONFLICT DO NOTHING, and DO NOTHING is not
+	// what a re-flush of an existing step needs: AwaitChild (and its
+	// siblings) suspend by writing a pending row -- response and error both
+	// NULL -- and complete by writing the SAME step again once the result is
+	// known, with no CompleteCallIntent-style direct UPDATE of its own to fall
+	// back on. WHERE NOT EXISTS discarded that second write unconditionally,
+	// so the completing response never reached event_history on this dialect,
+	// and a later step's checksum -- chained, in the worker's memory, from the
+	// completed record -- could never be reproduced by a replay that could
+	// only ever load the stale pending one. cleat#2333, the same defect
+	// Postgres's dead ON CONFLICT WHERE clause had, reached here by
+	// unconditional discarding rather than by a guard that never fired.
+	//
+	// WHEN MATCHED is gated on the EXISTING row's event_type, response,
+	// error, promise_result and promise_error, not the incoming row's, so a
+	// row that already carries a result stays immutable -- the same "only
+	// complete a still-pending row" contract flush.go's insertEventSQL
+	// states for Postgres and mysql_events.go's IF()-gated ON DUPLICATE KEY
+	// UPDATE states for MySQL. promise_result/promise_error are in the guard
+	// and the UPDATE SET for the same reason they are on those two:
+	// AwaitPromise is the same suspend-then-complete same-step write
+	// AwaitChild is, but its outcome lives in those columns. (LoadEventHistory
+	// scans the raw columns AND overlays from the payload blob afterwards
+	// via populateFromPayload, which wins when it applies -- so payload
+	// alone would suffice for replay correctness; the raw columns are kept
+	// in sync here for any reader that queries them directly.)
+	//
+	// event_type IN (...) is not optional, and dropping it reopens
+	// cleat#1379's corruption case: store_intent.go's CompleteCallIntent
+	// completes a call intent with a genuinely empty response by storing
+	// NULL, same as flush.go's insertEventSQL does, and a row completed that
+	// way is bit-for-bit identical -- response/error/promise_result/
+	// promise_error all NULL, checksum set -- to a row from one of these
+	// three event types that was never completed at all. Only event_type
+	// tells them apart: a "call" row's event_type never changes, so
+	// restricting WHEN MATCHED's pending test to await_child/await_promise/
+	// await_all_children leaves a call-intent-completed row alone
+	// regardless of how empty its response was. See flush.go's insertEventSQL
+	// doc for the full writeup and TestACompletedIntentIsNotOverwrittenByALaterAppend,
+	// which is what caught this omission.
+	//
+	// WITH (HOLDLOCK) upgrades the MATCH's shared lock to hold through the
+	// statement: without it, two concurrent MERGEs against the same
+	// (workflow_id, step) can both evaluate WHEN NOT MATCHED true (neither
+	// sees the other's still-uncommitted insert) and both attempt the
+	// INSERT, and the loser fails on the unique constraint instead of
+	// falling through to WHEN MATCHED. This is the standard, documented
+	// MERGE race (Microsoft's own MERGE reference warns of it under
+	// concurrent load) and not specific to this statement; HOLDLOCK is the
+	// standard fix, forcing the second writer to wait for the first's
+	// commit and then evaluate WHEN MATCHED against the now-visible row.
+	//
 	// Chain in step order, seeded from what is already stored -- see
 	// chainOrder and PostgresStore.previousStoredChecksum for why both halves
 	// are required.
@@ -472,20 +569,25 @@ func (s *MSSQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 		prevChecksum = checksum
 
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO event_history (
+			MERGE event_history WITH (HOLDLOCK) AS target
+			USING (SELECT @p1 AS workflow_id, @p2 AS step) AS source
+			ON target.workflow_id = source.workflow_id AND target.step = source.step
+			WHEN NOT MATCHED THEN INSERT (
 				workflow_id, step, event_type, service, operation, request, response, error,
 				duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 				defer_description, defer_id, child_name, child_input, run_id, new_input,
 				plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
 				promise_name, promise_id, promise_result, promise_error, payload,
-				created_at, checksum, tenant_id
+				created_at, checksum, tenant_id, payload_encoding
 			)
-			SELECT @p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10,
-			       @p11, @p12, @p13, @p14, @p15, @p16, @p17, @p18, @p19, @p20,
-			       @p21, @p22, @p23, @p24, @p25, @p26, @p27, @p28, @p29, @p30, @p31, @p32
-			WHERE NOT EXISTS (
-				SELECT 1 FROM event_history WHERE workflow_id = @p1 AND step = @p2
-			)
+			VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10,
+			        @p11, @p12, @p13, @p14, @p15, @p16, @p17, @p18, @p19, @p20,
+			        @p21, @p22, @p23, @p24, @p25, @p26, @p27, @p28, @p29, @p30, @p31, @p32, @p33)
+			WHEN MATCHED AND target.event_type IN ('await_child', 'await_promise', 'await_all_children')
+			     AND target.response IS NULL AND target.error IS NULL
+			     AND target.promise_result IS NULL AND target.promise_error IS NULL THEN UPDATE SET
+				response = @p7, error = @p8, promise_result = @p27, promise_error = @p28,
+				checksum = @p31, payload = @p29, payload_encoding = @p33, event_type = @p3;
 		`, workflowID, rec.Step, rec.EventType,
 			nullStr(rec.Service), nullStr(rec.Op), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Request))), nullStr(base64.StdEncoding.EncodeToString([]byte(rec.Response))), nullStr(rec.Err),
 			nullInt64(rec.DurationMs), nullStr(rec.SignalNames), nullInt64(rec.TimeoutMs),
@@ -495,9 +597,10 @@ func (s *MSSQLStore) appendEventsInTxOpts(ctx context.Context, tx *sql.Tx, workf
 			nullStr(rec.PluginName), nullStr(rec.PluginFunc), nullStr(rec.PluginInput), nullStr(rec.PluginOutput), nullStr(rec.PluginError),
 			nullStr(rec.PromiseName), nullStr(rec.PromiseID), nullStr(rec.PromiseResult), nullStr(rec.PromiseError),
 			payloadArg,
-			time.UnixMilli(rec.TimestampMs),
+			eventCreatedAt(rec),
 			checksum,
-			s.tenantID)
+			s.tenantID,
+			payloadEncodingFor(rec))
 		if err != nil {
 			return fmt.Errorf("append events in tx: exec step %d: %w", rec.Step, err)
 		}

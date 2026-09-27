@@ -12,6 +12,15 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+  # The merge queue tests the required checks against the PROJECTED tip on a
+  # temporary `gh-readonly-queue/...` ref, which fires `merge_group` and not
+  # `pull_request`. Without this trigger the check never starts in queue
+  # context, the queue waits for a status that cannot arrive, and NOTHING
+  # MERGES -- with no check going red. EVERY required context on develop has to
+  # report here. The list is tiers.yaml's `required_contexts` block; the count
+  # is deliberately not repeated here, because it was -- in nine workflow files
+  # at once -- and all nine said 32 while develop required 33 (cleat#1937).
+  merge_group:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -24,8 +33,26 @@ jobs:
     name: Validate branch name
     runs-on: ubuntu-latest
     steps:
+      # In the merge queue this check is both impossible and pointless.
+      #
+      # Impossible - a merge_group event carries no pull_request payload, so
+      # every `github.event.pull_request.*` reference below is null.
+      #
+      # Pointless - whatever it would examine was examined on the pull request
+      # and cannot change between there and here.
+      #
+      # It REPORTS rather than being skipped. A skipped job satisfies a
+      # required check, but a job that fails to start does not, and the queue
+      # cannot tell that from a check which has not finished yet - so it waits
+      # forever and nothing merges. That is one chance to deadlock the repository
+      # silently per required context on develop, and tiers.yaml's
+      # `required_contexts` block is the list of them.
+      - name: Already checked on the pull request
+        if: github.event_name == 'merge_group'
+        run: echo "validated when the pull request was opened"
       - name: Check branch naming convention
-        uses: actions/github-script@v8
+        if: github.event_name != 'merge_group'
+        uses: actions/github-script@v9
         with:
           script: |
             const branch = context.payload.pull_request.head.ref;

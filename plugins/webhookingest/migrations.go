@@ -150,5 +150,233 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE webhook_events DROP COLUMN IF EXISTS retry_count;
 			`,
 		},
+		{
+			// Tenant isolation for both webhook tables. cleat#1512.
+			//
+			// Version 5, not 2: this plugin's versions run 1, 3, 4 -- there is
+			// no 2 -- so the next free number is 5 rather than the count of
+			// entries. A new version rather than TenantScoped on an existing
+			// one, because a recorded migration never runs again and editing
+			// one would protect new databases while leaving every existing one
+			// open.
+			//
+			// Up is empty on purpose: the runtime emits ENABLE / FORCE / the
+			// policy from TenantScoped via plugin.applyTenantScoping.
+			//
+			// Both tables, not just webhook_events: the retry scan LEFT JOINs
+			// webhook_sources, and scoping one side of a join while leaving
+			// the other open would make the pair's isolation depend on which
+			// table a query happened to start from.
+			Version:      5,
+			TenantScoped: []string{"webhook_events", "webhook_sources"},
+		},
+		{
+			// A caller's JSON is stored as TEXT on MySQL, as it already is on
+			// SQL Server.
+			//
+			// cleat#1622, the plugin half of cleat#1022. MySQL's JSON type
+			// keeps an integer as INT64 or UINT64 and falls back to DOUBLE
+			// when it fits neither, so a value outside [-2^63, 2^64-1] -- and
+			// any decimal needing more precision than a float64 holds -- is
+			// REWRITTEN on the way in. Nothing errors, and the result is still
+			// valid JSON of the right shape:
+			//
+			//     sent    {"x":123456789012345678901234567890}
+			//     stored  {"x": 1.2345678901234566e29}
+			//
+			// The narrowing belongs to the JSON TYPE, not to any column: the
+			// same INSERT into a TEXT column in the same row keeps the digits.
+			// This is migrations/mysql/070 applied to webhookingest, including the
+			// CHECK that restores the validation LONGTEXT gives up.
+			//
+			// The CHECK is not optional: dropping to LONGTEXT surrenders the
+			// JSON type's validation, and invalid JSON would become storable
+			// where the column refuses it today. JSON_VALID restores that and
+			// nothing else. It is parsed and IGNORED before MySQL 8.0.16, a
+			// pre-existing dependency this repo already has.
+			//
+			// Existing rows are untouched and already-degraded values stay as
+			// they are -- the digits were lost at write time and there is
+			// nothing to recover. What changes is every write from here on.
+			//
+			// PostgreSQL and SQL Server need nothing: JSONB preserves, and
+			// SQL Server has always used NVARCHAR(MAX) + ISJSON here.
+			Version:         6,
+			Up:              "",
+			DialectSpecific: "MySQL only: converting this plugin's JSON columns to LONGTEXT. PostgreSQL's JSONB preserves a large number already and SQL Server has always used NVARCHAR(MAX) here, so neither has anything to do and an arm for them would be a statement that must not exist. cleat#1622.",
+			UpMySQL: `
+				ALTER TABLE webhook_events
+					MODIFY payload LONGTEXT NOT NULL DEFAULT ('{}');
+
+				ALTER TABLE webhook_events
+					ADD CONSTRAINT ck_webhook_events_payload CHECK (JSON_VALID(payload));
+			`,
+			// Reversal is MySQL-only because the change is. It restores the
+			// JSON type and with it the narrowing -- a value stored intact
+			// while this migration was applied is rewritten by the ALTER
+			// itself, so this is lossy and is only here because a migration
+			// that writes SQL must be reversible.
+			DownMySQL: `
+				ALTER TABLE webhook_events
+					DROP CONSTRAINT ck_webhook_events_payload;
+
+				ALTER TABLE webhook_events
+					MODIFY payload JSON NOT NULL DEFAULT ('{}');
+			`,
+		},
+		{
+			// webhook_sources.secret moves into tenant secrets, sealed under the
+			// same envelope encryption every other tenant secret uses. cleat#1992.
+			// Mirrors plugins/notifications/migrations.go's v5, which this
+			// plugin's #1992 sibling did first -- same column shape (DEFAULT
+			// ''), same reasoning, same fix.
+			//
+			// secret_configured REPLACES it rather than merely accompanying it.
+			// handleIngestWebhook can no longer answer "does this source have a
+			// signing secret" by looking at its own secret column -- that value
+			// now lives in a different store, envelope-encrypted, unreadable to
+			// a WHERE clause -- so the row carries the answer itself instead.
+			// The marker is honoured at ingest: unset means today's unsigned
+			// behaviour, unchanged; set means the secret MUST be readable, and
+			// any lookup failure (not found, empty, error) refuses the request
+			// rather than silently accepting an unsigned payload for a source
+			// that was supposed to require one.
+			//
+			// NO BACKFILL: 0.3.0 requires a fresh database, with no upgrade path
+			// from v0.2.0 (cleat#2058, owner decision 3), so no deployment ever
+			// has an existing plaintext secret to move -- ADD then DROP is
+			// unconditionally correct.
+			Version: 7,
+			Up: `
+				ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS secret_configured BOOLEAN NOT NULL DEFAULT false;
+				ALTER TABLE webhook_sources DROP COLUMN IF EXISTS secret;
+			`,
+			UpMySQL: `
+				ALTER TABLE webhook_sources ADD COLUMN secret_configured TINYINT(1) NOT NULL DEFAULT 0;
+				ALTER TABLE webhook_sources DROP COLUMN secret;
+			`,
+			// v1's secret column carries DEFAULT '', which SQL Server backs
+			// with an unnamed default constraint. DROP COLUMN refuses while
+			// any object still depends on the column (error 5074), so the
+			// constraint has to be found by its parent (object_id, column_id)
+			// and dropped by name before the column can go -- the same move
+			// plugins/tenantquota/migrations.go and
+			// plugins/notifications/migrations.go's v5 use.
+			//
+			// NO BEGIN/END, on purpose: plugin.splitStatements shreds a
+			// migration's SQL into separate exec calls on every literal ';',
+			// with no awareness of T-SQL block structure -- a BEGIN in one
+			// fragment and its END in another is two batches, neither valid
+			// on its own. Each statement below has to be independently
+			// complete. A missing 'secret' column makes the DECLARE/SELECT
+			// above set @dfname to NULL rather than error, so the
+			// constraint-drop step needs no existence guard of its own; only
+			// the column DROP does.
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'secret_configured')
+				ALTER TABLE webhook_sources ADD secret_configured BIT NOT NULL DEFAULT 0;
+
+				DECLARE @dfname sysname
+				SELECT @dfname = dc.name
+					FROM sys.default_constraints dc
+					JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+					WHERE dc.parent_object_id = OBJECT_ID('webhook_sources') AND c.name = 'secret'
+				IF @dfname IS NOT NULL EXEC('ALTER TABLE webhook_sources DROP CONSTRAINT [' + @dfname + ']');
+
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'secret')
+				ALTER TABLE webhook_sources DROP COLUMN secret;
+			`,
+			// Down restores the SCHEMA, not the data -- the value is gone
+			// from webhook_sources the moment Up runs; it now lives in tenant
+			// secrets, a different store. No attempt to recover
+			// secret_configured's state into the restored column either:
+			// existing rows have nothing to put there.
+			Down: `
+				ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS secret TEXT NOT NULL DEFAULT '';
+				ALTER TABLE webhook_sources DROP COLUMN IF EXISTS secret_configured;
+			`,
+			DownMySQL: `
+				ALTER TABLE webhook_sources ADD COLUMN secret VARCHAR(255) NOT NULL DEFAULT '';
+				ALTER TABLE webhook_sources DROP COLUMN secret_configured;
+			`,
+			// Mirrors Up's DROP COLUMN secret above -- secret_configured's own
+			// DEFAULT 0 gets an unnamed constraint too, and no BEGIN/END for
+			// the same splitStatements reason given on UpMSSQL.
+			DownMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'secret')
+				ALTER TABLE webhook_sources ADD secret NVARCHAR(MAX) NOT NULL DEFAULT '';
+
+				DECLARE @dfname sysname
+				SELECT @dfname = dc.name
+					FROM sys.default_constraints dc
+					JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+					WHERE dc.parent_object_id = OBJECT_ID('webhook_sources') AND c.name = 'secret_configured'
+				IF @dfname IS NOT NULL EXEC('ALTER TABLE webhook_sources DROP CONSTRAINT [' + @dfname + ']');
+
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'secret_configured')
+				ALTER TABLE webhook_sources DROP COLUMN secret_configured;
+			`,
+		},
+		{
+			// A deleted source is soft-deleted, not removed. cleat#2199:
+			// webhook_events.source_id REFERENCES webhook_sources(id) with no
+			// ON DELETE action, so a hard DELETE on webhook_sources 500s on
+			// PostgreSQL and SQL Server for any source with at least one event,
+			// and on MySQL succeeds while orphaning that source's
+			// webhook_events rows (InnoDB ignores an inline-column REFERENCES).
+			//
+			// Nothing is removed either way now -- handleDeleteSource sets
+			// enabled = false and deleted_at, so the FK is never exercised on
+			// any of the three dialects, and a source's ingested events (its
+			// audit trail) survive the source that received them, which
+			// matters most exactly when a source is deleted for a leaked
+			// secret: that is an incident, and the history of what was
+			// ingested during the compromise window is what an operator needs
+			// kept, not erased.
+			Version: 8,
+			Up: `
+					ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+				`,
+			// cleat-review on #2221: a bare `ALTER TABLE ... ADD COLUMN` here
+			// is not idempotent on MySQL the way the Postgres and MSSQL arms
+			// above are -- MySQL DDL is not transactional, so a crash between
+			// this ALTER and plugin_migrations recording version 8 leaves a
+			// worker that re-runs it on its next start and gets
+			// `ERROR 1060 (42S21): Duplicate column name 'deleted_at'` and
+			// never boots. Guarded through information_schema.columns, the
+			// same prepared-statement shape migrations/mysql/055 uses for the
+			// identical hazard on workflow_instances.started_at -- MySQL has
+			// no bare conditional DDL statement, so the ALTER itself has to be
+			// built as text and executed through PREPARE/EXECUTE rather than
+			// wrapped in a plain IF the way UpMSSQL's sys.columns check is.
+			UpMySQL: `
+					SET @col := (
+						SELECT COUNT(*) FROM information_schema.columns
+						WHERE table_schema = DATABASE()
+						  AND table_name = 'webhook_sources'
+						  AND column_name = 'deleted_at'
+					);
+					SET @ddl := IF(@col = 0,
+						'ALTER TABLE webhook_sources ADD COLUMN deleted_at TIMESTAMP(6) NULL',
+						'DO 0');
+					PREPARE stmt FROM @ddl;
+					EXECUTE stmt;
+					DEALLOCATE PREPARE stmt;
+				`,
+			UpMSSQL: `
+					IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'deleted_at')
+					ALTER TABLE webhook_sources ADD deleted_at DATETIMEOFFSET NULL;
+				`,
+			Down: `
+					ALTER TABLE webhook_sources DROP COLUMN IF EXISTS deleted_at;
+				`,
+			DownMySQL: `
+					ALTER TABLE webhook_sources DROP COLUMN deleted_at;
+				`,
+			DownMSSQL: `
+					IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'deleted_at')
+					ALTER TABLE webhook_sources DROP COLUMN deleted_at;
+				`,
+		},
 	}
 }

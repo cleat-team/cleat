@@ -3,8 +3,11 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
@@ -43,6 +46,20 @@ func (s *apiServer) handleAdminRoutes(w http.ResponseWriter, r *http.Request) {
 		action = s.handleAdminForceFail
 	case len(parts) == 2 && parts[1] == "re-replay" && r.Method == http.MethodPost:
 		action = s.handleAdminReReplay
+	case len(parts) == 4 && parts[1] == "steps" && parts[3] == "resolve" && r.Method == http.MethodPost:
+		// The step travels in the path, and the action signature carries only
+		// the workflow ID, so it is bound here rather than re-parsed in the
+		// handler. Parsed before the ownership check below runs, so a
+		// malformed step is a 400 rather than a 404 that implies the workflow
+		// does not exist.
+		step, err := strconv.Atoi(parts[2])
+		if err != nil || step < 0 {
+			s.writeError(w, 400, "step must be a non-negative integer")
+			return
+		}
+		action = func(w http.ResponseWriter, r *http.Request, id string, st engine.WorkflowStore) {
+			s.handleAdminResolveStep(w, r, id, step, st)
+		}
 	default:
 		s.writeError(w, 404, "not found")
 		return
@@ -93,12 +110,25 @@ func (s *apiServer) callerOwnsTarget(w http.ResponseWriter, r *http.Request, id 
 		return st, true
 	}
 
+	// This check was inert on two of three dialects until 3.99: PostgreSQL and
+	// SQL Server's GetWorkflowByID did not SELECT tenant_id at all, so
+	// wf.TenantID was "" and the comparison below was `"" != "<caller uuid>"`
+	// -- true for every request, including the caller's own. Every
+	// /api/admin/instances/* route answered 404 whenever --require-auth was on.
+	// It failed CLOSED, which is why nothing noticed: the gate was doing its
+	// job for attackers and for everybody else equally.
 	wf, err := st.GetWorkflowByID(r.Context(), id)
 	if err != nil {
 		s.writeError(w, 500, err.Error())
 		return nil, false
 	}
-	if wf == nil || wf.TenantID != caller.String() {
+	// EqualFold, not ==. A UUID is case-insensitive by definition, and SQL
+	// Server hands one back as whatever CONVERT produced -- uppercase, until
+	// GetWorkflowByID started wrapping it in LOWER(). Normalising at the source
+	// is the real fix; this is here so that a dialect which stops doing so
+	// fails visibly in a test rather than by 404ing every request forever.
+	// IMPROVEMENT-PLAN 3.99.
+	if wf == nil || !strings.EqualFold(wf.TenantID, caller.String()) {
 		// Same response for "does not exist" and "belongs to someone else",
 		// deliberately: distinguishing them turns this endpoint into an oracle
 		// for which workflow IDs are real.
@@ -126,12 +156,8 @@ func (s *apiServer) handleAdminForceComplete(w http.ResponseWriter, r *http.Requ
 		Generation int64  `json:"generation"`
 		Result     string `json:"result"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			s.writeError(w, 400, "invalid JSON: "+err.Error())
-			return
-		}
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
+		return
 	}
 
 	op := operatorFromContext(r)
@@ -154,12 +180,8 @@ func (s *apiServer) handleAdminForceFail(w http.ResponseWriter, r *http.Request,
 		ErrorMsg   string `json:"error_message"`
 		ErrorCode  string `json:"error_code"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			s.writeError(w, 400, "invalid JSON: "+err.Error())
-			return
-		}
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
+		return
 	}
 
 	op := operatorFromContext(r)
@@ -171,6 +193,37 @@ func (s *apiServer) handleAdminForceFail(w http.ResponseWriter, r *http.Request,
 	s.writeJSON(w, 200, map[string]string{"status": "failed"})
 }
 
+// handleAdminResolveStep records an outcome for a call left ambiguous by a
+// crash -- IMPROVEMENT-PLAN 1.4 phase F.
+//
+// The X-Confirm header matches force-complete and force-fail, and for a
+// stronger reason than symmetry: this writes an outcome that replay will treat
+// as the call's real result for the life of the workflow. An operator who has
+// not checked the external service can silently convert "we do not know" into
+// "it succeeded", which is the one thing the [AMBIGUOUS] state exists to
+// prevent.
+func (s *apiServer) handleAdminResolveStep(w http.ResponseWriter, r *http.Request, id string, step int, st engine.WorkflowStore) {
+	if r.Header.Get("X-Confirm") != "resolve-step" {
+		s.writeError(w, 400, "X-Confirm header must be 'resolve-step'")
+		return
+	}
+
+	var req struct {
+		Response string `json:"response"`
+	}
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
+		return
+	}
+
+	op := operatorFromContext(r)
+	if err := engine.ResolveStep(r.Context(), st, id, step, req.Response, op); err != nil {
+		s.handleAdminOpError(w, err)
+		return
+	}
+
+	s.writeJSON(w, 200, map[string]any{"status": "resolved", "step": step, "resolved_by": op})
+}
+
 func (s *apiServer) handleAdminReReplay(w http.ResponseWriter, r *http.Request, id string, st engine.WorkflowStore) {
 	if r.Header.Get("X-Confirm") != "re-replay" {
 		s.writeError(w, 400, "X-Confirm header must be 're-replay'")
@@ -180,12 +233,8 @@ func (s *apiServer) handleAdminReReplay(w http.ResponseWriter, r *http.Request, 
 	var req struct {
 		Generation int64 `json:"generation"`
 	}
-	if r.Body != nil {
-		r.Body = http.MaxBytesReader(w, r.Body, s.maxBodySize)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			s.writeError(w, 400, "invalid JSON: "+err.Error())
-			return
-		}
+	if !s.decodeJSONBody(w, r, s.configuredBodyLimit(), &req) {
+		return
 	}
 
 	op := operatorFromContext(r)
@@ -199,24 +248,151 @@ func (s *apiServer) handleAdminReReplay(w http.ResponseWriter, r *http.Request, 
 
 // handleAdminOpError maps engine admin operation errors to HTTP status codes.
 //
-// 501 is separated from 500 deliberately. Every one of these operations was a
-// stub returning "not implemented yet", and the caller was told 500 -- the
-// same answer as a database failure, for an operation that had never existed.
-// force-complete and force-fail are real now; re-replay still is not, and says
-// so in the status line rather than in prose inside a 500 body.
+// By CLASS, not by substring. It used to switch on `strings.Contains(msg,
+// "not found")` and `strings.Contains(msg, "generation mismatch")`, which made
+// an operator-facing sentence part of the API contract -- store_admin.go said
+// so: "the wording is load-bearing". Two things followed from that:
+//
+//   - Every refusal whose wording matched no pattern was a 500. Re-replaying a
+//     `done` workflow and re-replaying one with an unresolved ambiguous call
+//     are decisions the server makes on purpose, and both were reported as the
+//     server having broken. Measured 2026-09-06 against a live worker:
+//     POST .../re-replay on a done workflow returned 500 with the correct
+//     explanation in the body.
+//   - Any error whose text merely contained "not found" was claimed as a 404.
+//     A driver reporting a missing relation is a server fault, and it answered
+//     as though the workflow did not exist.
+//
+// 501 is separated from 500 deliberately. Every one of these operations was
+// once a stub returning "not implemented yet", and the caller was told 500 --
+// the same answer as a database failure, for an operation that had never
+// existed. All three are real now, so no store in this repo returns
+// ErrAdminOpNotImplemented; the branch is kept because WorkflowStore is a
+// public interface and an out-of-tree store may implement some of it and not
+// the rest.
+//
+// The default is still 500, and that is the point of classifying: an
+// unclassified error is a genuine server fault, not a refusal nobody got round
+// to labelling.
 func (s *apiServer) handleAdminOpError(w http.ResponseWriter, err error) {
 	msg := err.Error()
 	switch {
 	case errors.Is(err, engine.ErrAdminOpNotImplemented):
 		s.writeError(w, 501, msg)
-	case strings.Contains(msg, "generation mismatch"):
+	case errors.Is(err, engine.ErrAdminGenerationMismatch):
+		// detail is a stable machine-readable discriminator, so a client can
+		// tell "you raced another writer" from the other 409 without parsing
+		// the message. The state conflict below carries its own.
 		s.writeJSON(w, 409, map[string]string{"error": msg, "detail": "generation_mismatch"})
-	case strings.Contains(msg, "not found"):
+	case errors.Is(err, engine.ErrAdminStateConflict):
+		s.writeJSON(w, 409, map[string]string{"error": msg, "detail": "state_conflict"})
+	case errors.Is(err, engine.ErrAdminNotFound):
 		s.writeError(w, 404, msg)
-	case strings.Contains(msg, "must be valid JSON"), strings.Contains(msg, "is required"),
-		strings.Contains(msg, "must be >= 0"):
+	case errors.Is(err, engine.ErrAdminBadRequest):
 		s.writeError(w, 400, msg)
 	default:
 		s.writeError(w, 500, msg)
 	}
+}
+
+// handleRetentionSweep handles POST /api/admin/retention/sweep.
+//
+// cleat#1130. Retention was unobservable from outside the engine: the window is
+// integer DAYS with 0 meaning disabled, the predicate is `completed_at <
+// cutoff`, and nothing on the HTTP surface started a sweep. An out-of-process
+// observer could not produce a swept row without waiting a day or ageing
+// `completed_at` in the database directly. It also left operators with no way
+// to see a configuration change take effect for up to --retention-interval.
+//
+// THE WINDOW OVERRIDE IS WHAT MAKES THIS MORE THAN A BUTTON. `{"older_than":
+// "5s"}` supplies the cutoff the flags cannot express. Without it, a trigger
+// running the configured sweep would match nothing for any run completed today,
+// on every call, and report success -- an endpoint that ships as a working
+// feature and is provably inert.
+//
+// It does NOT enable a disabled arm. A flag at 0 is a decision --
+// --completed-workflow-retention-days deletes the workflow record itself and is
+// off by default for exactly that reason -- and a request body is not where
+// that gets reversed. Disabled arms come back in `skipped`, so a zero count is
+// never ambiguous between "disabled" and "found nothing".
+//
+// `{"dry_run": true}` REPORTS WITHOUT DELETING. cleat#1457: retention was the
+// only one of cleat's destructive operations with no preview, while
+// cleatctl drop-tenant, revokeapikey, the version GC and --uninstall-dry-run all
+// have one -- and it is the least reversible of them, since none of the others
+// deletes event history. An `older_than` an operator can mistype, with no way to
+// see the blast radius first, is the case this closes.
+//
+// The preview counts are BEST EFFORT, and the response marks itself `dry_run`
+// so a caller cannot mistake one for a sweep. They are read at one instant from
+// a live database: by the time a sweep runs, workflows have completed and rows
+// have aged past the cutoff. The number is sized to catch a mistyped window, not
+// to predict a later sweep exactly.
+//
+// The preview shares the sweep's response shape deliberately, so "what it said
+// it would do" and "what it did" can be diffed directly, and shares its
+// PREDICATES so the two cannot drift -- see engine/retention_predicates.go.
+//
+// Gated on *enableAdminAPI like the other destructive admin routes, so it
+// inherits that exposure decision rather than making a new one.
+func (s *apiServer) handleRetentionSweep(w http.ResponseWriter, r *http.Request) {
+	if !*enableAdminAPI {
+		s.writeError(w, 404, "not found")
+		return
+	}
+	if r.Method != http.MethodPost {
+		s.writeError(w, 405, "method not allowed")
+		return
+	}
+
+	var req struct {
+		OlderThan string `json:"older_than"`
+		// DryRun reports what the sweep would remove and removes nothing.
+		// cleat#1457.
+		DryRun bool `json:"dry_run"`
+	}
+	if r.Body != nil {
+		// An absent or empty body means "use the configured windows", which is
+		// the operator-facing case: apply my config change now.
+		dec := json.NewDecoder(r.Body)
+		if err := dec.Decode(&req); err != nil && err != io.EOF {
+			s.writeError(w, 400, "invalid JSON body")
+			return
+		}
+	}
+
+	var window time.Duration
+	if req.OlderThan != "" {
+		d, err := time.ParseDuration(req.OlderThan)
+		if err != nil {
+			s.writeError(w, 400, "older_than must be a Go duration such as \"5s\" or \"48h\": "+err.Error())
+			return
+		}
+		if d <= 0 {
+			// A non-positive window would make the cutoff now-or-later and
+			// sweep live work. The flags cannot express it and neither can
+			// this.
+			s.writeError(w, 400, "older_than must be positive")
+			return
+		}
+		window = d
+	}
+
+	var res retentionSweepResult
+	if req.DryRun {
+		res = s.worker.previewRetentionSweepWindow(
+			*retentionDays, *completedWorkflowRetentionDays, *deadLetterRetentionDays, window)
+	} else {
+		res = s.worker.runRetentionSweepWindow(
+			*retentionDays, *completedWorkflowRetentionDays, *deadLetterRetentionDays, window)
+	}
+
+	status := 200
+	if len(res.Errors) > 0 {
+		// Partial failure is reported as such rather than as success: the arms
+		// are independent and one failing does not stop the others, so the
+		// counts above it are real.
+		status = 207
+	}
+	s.writeJSON(w, status, res)
 }

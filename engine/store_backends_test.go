@@ -171,6 +171,72 @@ func openMSSQLTenantStore(t *testing.T, tenantID string) *MSSQLStore {
 	return store
 }
 
+// mssqlRowDisappearanceReporter returns cleat#982's instrument as a function
+// the teardown calls FIRST, so a SQL Server failure says whether the row it
+// could not find was DELETED or merely INVISIBLE to the pool that looked.
+//
+// IT IS NOT REGISTERED WITH t.Cleanup, AND THAT IS THE WHOLE POINT. Both
+// obvious placements were tried and both report UNMEASURED or a clean reading
+// on every real failure -- measured 2026-09-16 by forcing a failure through
+// Setup rather than by reasoning about the ordering:
+//
+//	placement                     what defeats it                 reading
+//	----------------------------  ------------------------------  ---------------
+//	t.Cleanup in Setup            the test's `defer teardown()`    UNMEASURED:
+//	                              closes db first                  "database is closed"
+//	t.Cleanup, pools kept open    teardown's CleanupMSSQLTestData  truth=0 visible=0
+//	                              wipes the table first            "consistent"
+//
+// A deferred call in the test body runs before any t.Cleanup callback, and
+// every backend test in this suite is written `defer teardown()`. So the
+// handle is closed, and -- worse, because it survives the obvious fix -- the
+// blanket DELETE that teardown issues has already removed the rows the
+// instrument exists to count.
+//
+// The second row is the dangerous one and was measured with the pools
+// deliberately left open, so "closed" could not be the explanation. The SAME
+// readers, over the SAME run, read `truth=5 visible=0 PRESENT BUT INVISIBLE`
+// at failure time and `truth=0 visible=0 consistent` from a t.Cleanup a moment
+// later. Nothing reports an error in between; the instrument simply arrives
+// after the evidence has gone, and prints the reassuring branch.
+//
+// THE READER HAS TO BE THE STORE. Arming this in testutil.TestDB beside
+// ReportForeignSessionsOnFailure is the other obvious placement; it cannot
+// work either, because the handle TestDB returns is a plain pool with no
+// session context and since migration 075 the shipped fn_tenant_filter grants
+// sa no exemption -- so it reads physical=1 visible=0 on a HEALTHY database, a
+// verdict that never changes. The four measurements are in
+// testutil.MSSQLRowDisappearanceReaders' doc comment.
+//
+// A passing test runs no query: the returned function checks t.Failed() first.
+func mssqlRowDisappearanceReporter(t *testing.T, db *sql.DB, store *MSSQLStore) func() {
+	t.Helper()
+	// Resolved at Setup time, while db is certainly open.
+	//
+	// Stats is a process-lived pool rather than db, because db is closed by
+	// the same teardown that calls this. Truth needs to read across tenants;
+	// MSSQLAdminDB returns db unchanged when the database has no policies, and
+	// in that case the stats pool is the right answer anyway -- with no policy
+	// there is nothing to be invisible behind, and sa can see everything.
+	stats := testutil.MSSQLStatsDB(t)
+	truth := testutil.MSSQLAdminDB(t, db)
+	if truth == db {
+		truth = stats
+	}
+	readers := testutil.MSSQLRowDisappearanceReaders{
+		Stats:    stats,
+		Truth:    truth,
+		TenantID: store.tenantID,
+		Reader:   store.db,
+	}
+	return func() {
+		if !t.Failed() {
+			return
+		}
+		t.Log(testutil.MSSQLRowDisappearanceReportFor(readers))
+	}
+}
+
 func (b *MSSQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	t.Helper()
 	if !b.Enabled() {
@@ -179,9 +245,17 @@ func (b *MSSQLBackend) Setup(t *testing.T) (WorkflowStore, func()) {
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
 	applyMSSQLProcedures(t, db)
+	// cleat#982: arm the deletion audit and clear it, so this test's report sees
+	// only this test's deletes rather than every cleanup accumulated before it.
+	// Both are no-ops unless CLEAT_TEST_MSSQL_ROW_AUDIT is set.
+	testutil.InstallMSSQLRowDisappearanceAudit(t, db)
+	testutil.ClearMSSQLRowDisappearanceAudit(t, db)
 	testutil.CleanupMSSQLTestData(t, db)
 	store := openMSSQLTenantStore(t, DefaultTenantUUID)
+	report := mssqlRowDisappearanceReporter(t, db, store)
 	teardown := func() {
+		// Before the cleanup below, which would wipe what it counts.
+		report()
 		testutil.CleanupMSSQLTestData(t, db)
 		db.Close()
 	}
@@ -195,9 +269,17 @@ func (b *MSSQLBackend) SetupForTenant(t *testing.T, tenantID string) (WorkflowSt
 	}
 	db := testutil.MSSQLTestDB(t)
 	testutil.SetupMSSQLFullSchema(t, db)
+	// cleat#982: arm the deletion audit and clear it, so this test's report sees
+	// only this test's deletes rather than every cleanup accumulated before it.
+	// Both are no-ops unless CLEAT_TEST_MSSQL_ROW_AUDIT is set.
+	testutil.InstallMSSQLRowDisappearanceAudit(t, db)
+	testutil.ClearMSSQLRowDisappearanceAudit(t, db)
 	testutil.CleanupMSSQLTestData(t, db)
 	store := openMSSQLTenantStore(t, tenantID)
+	report := mssqlRowDisappearanceReporter(t, db, store)
 	teardown := func() {
+		// Before the cleanup below, which would wipe what it counts.
+		report()
 		testutil.CleanupMSSQLTestData(t, db)
 		db.Close()
 	}
@@ -227,18 +309,61 @@ func setupTestData(t *testing.T, store WorkflowStore) {
 		t.Fatalf("setupTestData: DeployWorkflowDef: %v", err)
 	}
 
+	// The runs below are started for DefaultTenantUUID explicitly, while the
+	// deploy above lands under whatever tenant the store carries -- which for
+	// some callers is not the default. Since D7 the FK on workflow_instances
+	// carries tenant_id (IMPROVEMENT-PLAN 3.77), so the default tenant needs
+	// its own row of the same definition or those runs are refused.
+	//
+	// Done through a tenant-scoped store rather than by changing the runs to
+	// use the store's tenant: the callers that pass a non-default tenant here
+	// are asserting exactly that mismatch, so making it disappear would remove
+	// what they test.
+	switch st := store.(type) {
+	case *PostgresStore:
+		if err := st.WithTenant(DefaultTenantUUID).DeployWorkflowDef(context.Background(), def); err != nil {
+			t.Fatalf("setupTestData: DeployWorkflowDef(default tenant): %v", err)
+		}
+	case *MySQLStore:
+		if err := st.WithTenant(DefaultTenantUUID).DeployWorkflowDef(context.Background(), def); err != nil {
+			t.Fatalf("setupTestData: DeployWorkflowDef(default tenant): %v", err)
+		}
+	case *MSSQLStore:
+		if err := st.WithTenant(DefaultTenantUUID).DeployWorkflowDef(context.Background(), def); err != nil {
+			t.Fatalf("setupTestData: DeployWorkflowDef(default tenant): %v", err)
+		}
+	}
+
 	// Create workflow instances in various states for testing
 	now := time.Now()
 
+	// runner is store, except on SQL Server when store's own tenant is not
+	// DefaultTenantUUID. The two StartNewRun calls below deliberately write
+	// for DefaultTenantUUID regardless of what tenant store carries (see the
+	// comment above) -- fine for the write's own row, but unlike
+	// DeployWorkflowDef, StartNewRun sets no SESSION_CONTEXT of its own
+	// (mssql_lifecycle.go's startNewRunOnce opens a plain s.db.BeginTx and
+	// relies entirely on the connector). So when store's pool is
+	// connectored for a DIFFERENT tenant, cleat#2205's block predicate
+	// refuses the write outright: the row names DefaultTenantUUID, the
+	// connection's session context names store's own tenant. A store
+	// connectored for DefaultTenantUUID specifically is opened here for
+	// exactly these two calls, the same way the deploy above already
+	// handles the identical mismatch for DeployWorkflowDef.
+	runner := store
+	if st, ok := store.(*MSSQLStore); ok && st.tenantID != DefaultTenantUUID {
+		runner = openMSSQLTenantStore(t, DefaultTenantUUID)
+	}
+
 	// A "ready" workflow instance
-	readyWfID, _, err := store.StartNewRun(context.Background(), "", "test-workflow", 1,
+	readyWfID, _, err := runner.StartNewRun(context.Background(), "", "test-workflow", 1,
 		json.RawMessage(`{"key":"value"}`), "setup-ready-1", DefaultTenantUUID, 0)
 	if err != nil {
 		t.Fatalf("setupTestData: StartNewRun ready: %v", err)
 	}
 
 	// A "running" workflow instance
-	_, _, err = store.StartNewRun(context.Background(), "", "test-workflow", 1,
+	_, _, err = runner.StartNewRun(context.Background(), "", "test-workflow", 1,
 		json.RawMessage(`{"key":"running"}`), "setup-running-1", DefaultTenantUUID, 0)
 	if err != nil {
 		t.Fatalf("setupTestData: StartNewRun running: %v", err)
@@ -256,7 +381,6 @@ func setupTestData(t *testing.T, store WorkflowStore) {
 		EntryPoint:     "main",
 		CronExpression: "* * * * *",
 		Input:          json.RawMessage(`{}`),
-		Enabled:        true,
 		NextRunAt:      now.Add(-1 * time.Hour), // due now
 	})
 	if err != nil {
@@ -433,8 +557,11 @@ func TestCascadeDelete(t *testing.T) {
 
 			db := testutil.TestDB(t, d.dialect)
 			testutil.SetupFullSchema(t, db, d.dialect)
-			// Clean any data left from previous test runs.
-			testutil.CleanupPostgresTestData(t, db)
+			// Clean any data left from previous test runs. Dispatched by
+			// dialect: this loop runs against all three, and calling the
+			// PostgreSQL cleanup for every one of them worked only for as long
+			// as that helper issued dialect-neutral SQL.
+			testutil.CleanupAllTestData(t, db, d.dialect)
 
 			addCascadeFKs(t, db, d.dialect)
 
@@ -453,6 +580,36 @@ func TestCascadeDelete(t *testing.T) {
 			// no longer see is the failure mode this handle exists to remove.
 			verify := testutil.AdminDB(t, db, d.dialect)
 
+			// The seeding handle. On SQL Server, cleat#2205's migration 103
+			// added AFTER INSERT / AFTER UPDATE block predicates to every
+			// table this test writes, and a block predicate checks
+			// SESSION_CONTEXT('tenant_id') regardless of the tenant_id value a
+			// statement names -- so an INSERT on db (a plain pool with no
+			// session context) is refused outright, not merely filtered.
+			// sp_set_session_context is connection-scoped and
+			// database/sql's ResetSession clears it between pool checkouts
+			// (see mssql_double_claim_test.go), so a plain db.Exec cannot
+			// carry it: one dedicated *sql.Conn is pinned instead, matching
+			// what every row this test seeds relies on by default
+			// (tenant_id DEFAULT '00000000-0000-0000-0000-000000000000', i.e.
+			// DefaultTenantUUID). The other two dialects have no such
+			// requirement, so seed is just db there.
+			var seed dbExecer = db
+			if d.dialect == testutil.DialectMSSQL {
+				cascadeCtx := context.Background()
+				conn, err := db.Conn(cascadeCtx)
+				if err != nil {
+					t.Fatalf("pin a connection for seeding: %v", err)
+				}
+				defer conn.Close()
+				if _, err := conn.ExecContext(cascadeCtx,
+					`EXEC sp_set_session_context @key=N'tenant_id', @value=N'`+DefaultTenantUUID+`'`,
+				); err != nil {
+					t.Fatalf("set the tenant session context: %v", err)
+				}
+				seed = pinnedConnExecer{conn}
+			}
+
 			// Insert a workflow def so workflow_instances FK is satisfied.
 			// The DELETE is what makes a re-run possible, so it goes through
 			// verify: on db it would match nothing on SQL Server and the
@@ -466,7 +623,7 @@ func TestCascadeDelete(t *testing.T) {
 			default:
 				emptyBlob = "'\\x'" // Postgres/MySQL accept hex string
 			}
-			_, err := db.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes) VALUES ('cascade-test-def', 1, ` + emptyBlob + `)`)
+			_, err := seed.Exec(`INSERT INTO workflow_defs (name, version, wasm_bytes) VALUES ('cascade-test-def', 1, ` + emptyBlob + `)`)
 			if err != nil {
 				t.Fatalf("insert workflow_defs: %v", err)
 			}
@@ -474,10 +631,10 @@ func TestCascadeDelete(t *testing.T) {
 			wfID := "cascade-test-001"
 
 			// Insert workflow instance.
-			insertWorkflowInstance(t, db, d.dialect, wfID)
+			insertWorkflowInstance(t, seed, d.dialect, wfID)
 
 			// Insert child rows in all 5 tables.
-			insertChildRows(t, db, d.dialect, wfID)
+			insertChildRows(t, seed, d.dialect, wfID)
 
 			// Delete the workflow instance - cascade should clean up children.
 			res, err := verify.Exec(`DELETE FROM workflow_instances WHERE id = '` + wfID + `'`)
@@ -541,6 +698,20 @@ func TestCascadeDelete(t *testing.T) {
 	}
 }
 
+// mysqlCascadeChildTables are the tables the shipped MySQL migrations declare
+// with a FOREIGN KEY to workflow_instances ON DELETE CASCADE -- five in
+// 001_schema.sql, plus queue_holders in 093 (cleat#1116). Re-derive with:
+//
+//	grep -rc "REFERENCES workflow_instances(id) ON DELETE CASCADE" migrations/mysql/*.sql
+var mysqlCascadeChildTables = []string{
+	"event_history",
+	"workflow_signals",
+	"workflow_promises",
+	"workflow_update_requests",
+	"concurrency_keys",
+	"queue_holders",
+}
+
 // addCascadeFKs adds ON DELETE CASCADE foreign keys to the test schema.
 // The approach differs by dialect because the test schemas have different FK states:
 //   - Postgres: no FKs at all, so add them directly.
@@ -578,42 +749,55 @@ func addCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 		exec(`ALTER TABLE workflow_update_requests ADD CONSTRAINT fk_test_cascade_wu FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
 
 	case testutil.DialectMySQL:
-		// The inline FK in CREATE TABLE already has ON DELETE CASCADE for
-		// event_history, workflow_signals, workflow_promises, and
-		// workflow_update_requests. Drop and re-add them idempotently.
-		exec(`SET @cname = (SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = 'event_history' AND CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = 'workflow_instances')`)
-		exec(`SET @sql = IF(@cname IS NOT NULL, CONCAT('ALTER TABLE event_history DROP FOREIGN KEY ', @cname), 'SELECT 1')`)
-		exec(`PREPARE stmt FROM @sql`)
-		exec(`EXECUTE stmt`)
-		exec(`DEALLOCATE PREPARE stmt`)
-		exec(`ALTER TABLE event_history ADD FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
-
-		// workflow_signals
-		exec(`SET @cname = (SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = 'workflow_signals' AND CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = 'workflow_instances')`)
-		exec(`SET @sql = IF(@cname IS NOT NULL, CONCAT('ALTER TABLE workflow_signals DROP FOREIGN KEY ', @cname), 'SELECT 1')`)
-		exec(`PREPARE stmt FROM @sql`)
-		exec(`EXECUTE stmt`)
-		exec(`DEALLOCATE PREPARE stmt`)
-		exec(`ALTER TABLE workflow_signals ADD FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
-
-		// workflow_promises
-		exec(`SET @cname = (SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = 'workflow_promises' AND CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = 'workflow_instances')`)
-		exec(`SET @sql = IF(@cname IS NOT NULL, CONCAT('ALTER TABLE workflow_promises DROP FOREIGN KEY ', @cname), 'SELECT 1')`)
-		exec(`PREPARE stmt FROM @sql`)
-		exec(`EXECUTE stmt`)
-		exec(`DEALLOCATE PREPARE stmt`)
-		exec(`ALTER TABLE workflow_promises ADD FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
-
-		// workflow_update_requests
-		exec(`SET @cname = (SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = 'workflow_update_requests' AND CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = 'workflow_instances')`)
-		exec(`SET @sql = IF(@cname IS NOT NULL, CONCAT('ALTER TABLE workflow_update_requests DROP FOREIGN KEY ', @cname), 'SELECT 1')`)
-		exec(`PREPARE stmt FROM @sql`)
-		exec(`EXECUTE stmt`)
-		exec(`DEALLOCATE PREPARE stmt`)
-		exec(`ALTER TABLE workflow_update_requests ADD FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
-
-		// concurrency_keys: add FK (skips if already exists with a different name)
-		db.Exec(`ALTER TABLE concurrency_keys ADD FOREIGN KEY (workflow_id) REFERENCES workflow_instances(id) ON DELETE CASCADE`)
+		// NOTHING IS ADDED HERE, AND NOTHING IS REMOVED LATER. cleat#1364.
+		//
+		// The shipped migrations declare these foreign keys with ON DELETE
+		// CASCADE already (001_schema.sql plus queue_holders in 093) -- which is
+		// exactly what this test needs, so there was never anything to add. What
+		// the code here used to do was drop each shipped constraint and re-add an
+		// equivalent, and removeCascadeFKs then dropped it again on the way out,
+		// leaving the test database permanently without the constraints its own
+		// schema ships. Measured on a database created empty: 5 before
+		// TestCascadeDelete, 0 after, with the test PASSING.
+		//
+		// The damage landed on other tests. MySQL's DeleteCompletedWorkflows
+		// and DeleteDeadLetteredWorkflows rely on that cascade for the child
+		// tables, deliberately and documented as such, so
+		// TestRetentionDeletesEveryChildRowOnPostgresAndMySQL failed its MySQL
+		// arm on every full-suite run and passed in isolation.
+		//
+		// PostgreSQL and SQL Server are different and their arms are correct:
+		// there the constraints are genuinely test-only (fk_test_cascade_* and
+		// fk_*_workflow), added here and dropped by name afterwards. Only
+		// MySQL's were the shipped ones, and only MySQL's teardown searched for
+		// "any constraint referencing workflow_instances" rather than naming
+		// what it had created.
+		//
+		// VERIFIED RATHER THAN RECREATED. A test that silently proceeds when
+		// its precondition is absent proves nothing, so this asserts the shape
+		// it depends on instead of imposing it -- and if a migration ever drops
+		// one of these, this fails here with the table named rather than
+		// somewhere downstream.
+		for _, tbl := range mysqlCascadeChildTables {
+			var rule string
+			err := db.QueryRow(`
+				SELECT rc.DELETE_RULE
+				FROM information_schema.REFERENTIAL_CONSTRAINTS rc
+				WHERE rc.CONSTRAINT_SCHEMA = DATABASE()
+				  AND rc.TABLE_NAME = ?
+				  AND rc.REFERENCED_TABLE_NAME = 'workflow_instances'`, tbl).Scan(&rule)
+			if err != nil {
+				t.Fatalf("%s has no foreign key to workflow_instances: %v\n\n"+
+					"migrations/mysql/001_schema.sql declares one with ON DELETE CASCADE, "+
+					"and MySQL's retention sweeps depend on it. If a test dropped it, that "+
+					"test is the defect (cleat#1364); if a migration did, this test is "+
+					"reporting a real schema change.", tbl, err)
+			}
+			if rule != "CASCADE" {
+				t.Fatalf("%s foreign key to workflow_instances has DELETE_RULE %q, want CASCADE",
+					tbl, rule)
+			}
+		}
 
 	case testutil.DialectMSSQL:
 		exec(`IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'fk_event_history_workflow') ALTER TABLE dbo.event_history DROP CONSTRAINT fk_event_history_workflow`)
@@ -633,8 +817,30 @@ func addCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 	}
 }
 
+// dbExecer is satisfied by both *sql.DB and pinnedConnExecer, so
+// TestCascadeDelete's SQL Server arm can hand insertWorkflowInstance and
+// insertChildRows a single dedicated connection (see pinnedConnExecer)
+// without those two functions needing to know which dialect they got.
+type dbExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+// pinnedConnExecer adapts a *sql.Conn -- which has no Exec, only
+// ExecContext -- to dbExecer. It exists for cleat#2205: on SQL Server,
+// sp_set_session_context is connection-scoped and does not survive
+// database/sql's ResetSession between pool checkouts (see
+// mssql_double_claim_test.go's identical need), so a write gated by one of
+// migration 103's block predicates has to run on the SAME *sql.Conn the
+// session context was set on, not on a plain *sql.DB that may hand back a
+// different pooled connection per call.
+type pinnedConnExecer struct{ conn *sql.Conn }
+
+func (p pinnedConnExecer) Exec(query string, args ...any) (sql.Result, error) {
+	return p.conn.ExecContext(context.Background(), query, args...)
+}
+
 // insertWorkflowInstance inserts a single workflow_instances row for cascade testing.
-func insertWorkflowInstance(t *testing.T, db *sql.DB, dialect testutil.Dialect, wfID string) {
+func insertWorkflowInstance(t *testing.T, db dbExecer, dialect testutil.Dialect, wfID string) {
 	t.Helper()
 
 	switch dialect {
@@ -657,7 +863,7 @@ func insertWorkflowInstance(t *testing.T, db *sql.DB, dialect testutil.Dialect, 
 }
 
 // insertChildRows inserts one row into each of the 5 child tables for cascade testing.
-func insertChildRows(t *testing.T, db *sql.DB, dialect testutil.Dialect, wfID string) {
+func insertChildRows(t *testing.T, db dbExecer, dialect testutil.Dialect, wfID string) {
 	t.Helper()
 
 	// event_history
@@ -711,7 +917,17 @@ func insertChildRows(t *testing.T, db *sql.DB, dialect testutil.Dialect, wfID st
 			t.Fatalf("insert workflow_promises (mysql): %v", err)
 		}
 	case testutil.DialectMSSQL:
-		_, err := db.Exec(`INSERT INTO workflow_promises (workflow_id, promise_id, promise_name, tenant_id) VALUES (@p1, 'promise-1', 'test-promise', '')`, wfID)
+		// tenant_id, not '': the column is NVARCHAR(255), but
+		// TenantFilter_Promises binds it through dbo.fn_tenant_filter(@tenant_id
+		// UNIQUEIDENTIFIER) same as every other table this migration protects,
+		// so SQL Server converts the stored value to UNIQUEIDENTIFIER to
+		// evaluate the predicate -- on INSERT since cleat#2205's migration 103,
+		// and already on any policy-enforced SELECT before it. '' is not a
+		// UUID, so it fails that conversion outright now rather than merely
+		// being unreadable later. seed (above, this test's dbExecer) already
+		// runs as DefaultTenantUUID's session context, so this value has to
+		// match it.
+		_, err := db.Exec(`INSERT INTO workflow_promises (workflow_id, promise_id, promise_name, tenant_id) VALUES (@p1, 'promise-1', 'test-promise', '`+DefaultTenantUUID+`')`, wfID)
 		if err != nil {
 			t.Fatalf("insert workflow_promises (mssql): %v", err)
 		}
@@ -739,17 +955,17 @@ func insertChildRows(t *testing.T, db *sql.DB, dialect testutil.Dialect, wfID st
 	// workflow_update_requests
 	switch dialect {
 	case testutil.DialectPostgres:
-		_, err := db.Exec(`INSERT INTO workflow_update_requests (workflow_id, update_name) VALUES ($1, 'test-update')`, wfID)
+		_, err := db.Exec(`INSERT INTO workflow_update_requests (workflow_id, request_id, update_name) VALUES ($1, 'ureq-' || $1, 'test-update')`, wfID)
 		if err != nil {
 			t.Fatalf("insert workflow_update_requests (postgres): %v", err)
 		}
 	case testutil.DialectMySQL:
-		_, err := db.Exec(`INSERT INTO workflow_update_requests (workflow_id, update_name, payload) VALUES (?, 'test-update', '{}')`, wfID)
+		_, err := db.Exec(`INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, payload) VALUES (?, CONCAT('ureq-', ?), 'test-update', '{}')`, wfID, wfID)
 		if err != nil {
 			t.Fatalf("insert workflow_update_requests (mysql): %v", err)
 		}
 	case testutil.DialectMSSQL:
-		_, err := db.Exec(`INSERT INTO workflow_update_requests (workflow_id, update_name, payload) VALUES (@p1, 'test-update', '{}')`, wfID)
+		_, err := db.Exec(`INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, payload) VALUES (@p1, 'ureq-'+@p1, 'test-update', '{}')`, wfID)
 		if err != nil {
 			t.Fatalf("insert workflow_update_requests (mssql): %v", err)
 		}
@@ -777,23 +993,12 @@ func removeCascadeFKs(t *testing.T, db *sql.DB, dialect testutil.Dialect) {
 		exec(`ALTER TABLE concurrency_keys DROP CONSTRAINT IF EXISTS fk_test_cascade_ck`)
 		exec(`ALTER TABLE workflow_update_requests DROP CONSTRAINT IF EXISTS fk_test_cascade_wu`)
 	case testutil.DialectMySQL:
-		for _, tbl := range []string{"event_history", "workflow_signals", "workflow_promises", "workflow_update_requests", "concurrency_keys"} {
-			cnameQuery := "SELECT CONSTRAINT_NAME FROM information_schema.REFERENTIAL_CONSTRAINTS WHERE TABLE_NAME = '" + tbl + "' AND CONSTRAINT_SCHEMA = DATABASE() AND REFERENCED_TABLE_NAME = 'workflow_instances'"
-			rows, err := db.Query(cnameQuery)
-			if err != nil {
-				t.Logf("remove MySQL CASCADE FK for %s (non-fatal): %v", tbl, err)
-				continue
-			}
-			var cname string
-			for rows.Next() {
-				if err := rows.Scan(&cname); err != nil {
-					t.Logf("remove MySQL CASCADE FK for %s (non-fatal): %v", tbl, err)
-					break
-				}
-				exec("ALTER TABLE " + tbl + " DROP FOREIGN KEY " + cname)
-			}
-			rows.Close()
-		}
+		// Deliberately empty. addCascadeFKs adds nothing on this dialect -- the
+		// shipped schema already provides the cascade -- so there is nothing to
+		// take away, and the version of this arm that searched for "any
+		// constraint referencing workflow_instances" was dropping the shipped
+		// ones (cleat#1364).
+
 	case testutil.DialectMSSQL:
 		exec(`IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'fk_event_history_workflow') ALTER TABLE event_history DROP CONSTRAINT fk_event_history_workflow`)
 		exec(`IF EXISTS (SELECT 1 FROM sys.foreign_keys WHERE name = N'fk_signals_workflow') ALTER TABLE workflow_signals DROP CONSTRAINT fk_signals_workflow`)

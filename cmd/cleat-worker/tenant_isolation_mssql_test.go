@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/migration"
 )
 
 // mssqlIsolationDB is the dedicated database this test applies the real
@@ -99,18 +100,30 @@ func TestTenantIsolationOverHTTP_MSSQL(t *testing.T) {
 	}
 	defer testDB.Close()
 
-	schema, err := os.ReadFile("../../migrations/mssql/001_schema.sql")
-	if err != nil {
-		t.Fatalf("read mssql schema migration: %v", err)
-	}
-	// 001_schema.sql uses GO batch separators. GO is a sqlcmd client directive,
-	// not T-SQL, so the driver rejects it -- each batch must be sent
-	// separately. (Note this differs from the procedure migrations, which
-	// engine/store_backends_procedures_test.go sends whole for that reason.)
-	for i, batch := range splitTSQLBatches(string(schema)) {
-		if _, err := testDB.ExecContext(ctx, batch); err != nil {
-			t.Fatalf("apply mssql schema migration, batch %d: %v\nbatch:\n%s", i, err, batch)
-		}
+	// Apply the shipped migrations through migration.Runner -- ALL of them,
+	// not 001_schema.sql alone.
+	//
+	// This test read exactly one file until cleat#1123, and 001 is the base
+	// schema: every column added by a later migration was absent from the
+	// database it built. That is invisible for as long as no shared SELECT
+	// names one, and it fails the moment one does -- `reclaim_count` reached
+	// ListWorkflows and Tier 1 went red with
+	//
+	//     mssql: Invalid column name 'reclaim_count'
+	//
+	// on a column migrations/mssql/055 adds and this test never applied. The
+	// failure looks like the change under review and is not: any of the other
+	// columns added since 001 would have done the same to whoever named one
+	// first.
+	//
+	// The Runner is also what the harness and engine/testutil call, and its
+	// own comment says why: "Two implementations of 'apply the shipped
+	// migrations' was the defect, not a detail of one of them." This was a
+	// third -- a hand-rolled GO-batch loop. It handles the batch splitting,
+	// wraps each file in one transaction (which 001's drop-then-recreate
+	// ordering depends on), and records what it applied.
+	if err := migration.NewRunner(testDB, migration.DialectMSSQL, "../../migrations").Run(ctx); err != nil {
+		t.Fatalf("apply mssql migrations: %v", err)
 	}
 
 	// Assert the mechanism is actually present before asserting anything about
@@ -182,27 +195,6 @@ func TestTenantIsolationOverHTTP_MSSQL(t *testing.T) {
 			t.Errorf("tenant %s saw the other tenant's run %s: %s", tc.tenant, tc.notWant, body)
 		}
 	}
-}
-
-// splitTSQLBatches splits T-SQL source on standalone GO separators, which are
-// a sqlcmd client directive rather than something the driver understands.
-func splitTSQLBatches(src string) []string {
-	var batches []string
-	var cur []string
-	for _, line := range strings.Split(src, "\n") {
-		if strings.EqualFold(strings.TrimSpace(line), "GO") {
-			if b := strings.TrimSpace(strings.Join(cur, "\n")); b != "" {
-				batches = append(batches, b)
-			}
-			cur = nil
-			continue
-		}
-		cur = append(cur, line)
-	}
-	if b := strings.TrimSpace(strings.Join(cur, "\n")); b != "" {
-		batches = append(batches, b)
-	}
-	return batches
 }
 
 // redactMSSQLDSN strips credentials from a connection string so a failure

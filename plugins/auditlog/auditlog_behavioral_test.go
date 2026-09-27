@@ -8,6 +8,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"io"
 	"log/slog"
 	"net/http"
@@ -45,12 +46,22 @@ type fakeDBStore struct {
 	mu      sync.RWMutex
 	events  []auditEventRow
 	apiKeys map[string]string // key_hash_hex -> tenant_id string
+	// heads is audit_chain_heads: tenant -> {seq, hash}. The chain's append is a
+	// lock-read-insert-move sequence against it, and this double honours the sequence
+	// rather than ignoring it, so a regression that skips the head is not papered over.
+	heads map[string]*fakeHead
+}
+
+type fakeHead struct {
+	seq  int64
+	hash string
 }
 
 func newFakeDBStore() *fakeDBStore {
 	return &fakeDBStore{
 		events:  make([]auditEventRow, 0),
 		apiKeys: make(map[string]string),
+		heads:   make(map[string]*fakeHead),
 	}
 }
 
@@ -95,6 +106,42 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 	defer c.store.mu.Unlock()
 
 	switch {
+	case strings.Contains(query, "INSERT INTO audit_chain_heads"):
+		tid, err := argString(args, 1)
+		if err != nil {
+			return nil, err
+		}
+		hash, err := argString(args, 2)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := c.store.heads[tid]; !ok {
+			c.store.heads[tid] = &fakeHead{hash: hash}
+		}
+		return &fakeResult{rowsAffected: 1}, nil
+	case strings.Contains(query, "UPDATE audit_chain_heads SET seq"):
+		seq, err := argInt64(args, 1)
+		if err != nil {
+			return nil, err
+		}
+		hash, err := argString(args, 2)
+		if err != nil {
+			return nil, err
+		}
+		tid, err := argString(args, 3)
+		if err != nil {
+			return nil, err
+		}
+		was, err := argInt64(args, 4)
+		if err != nil {
+			return nil, err
+		}
+		h, ok := c.store.heads[tid]
+		if !ok || h.seq != was {
+			return &fakeResult{rowsAffected: 0}, nil
+		}
+		h.seq, h.hash = seq, hash
+		return &fakeResult{rowsAffected: 1}, nil
 	case strings.Contains(query, "INSERT INTO audit_events"):
 		return c.execInsertAuditEvent(args)
 	case strings.Contains(query, "DELETE FROM audit_events"):
@@ -108,6 +155,18 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 
 func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	switch {
+	case strings.Contains(query, "FROM audit_chain_heads"):
+		c.store.mu.RLock()
+		defer c.store.mu.RUnlock()
+		tid, err := argString(args, 1)
+		if err != nil {
+			return nil, err
+		}
+		h, ok := c.store.heads[tid]
+		if !ok {
+			return &fakeRows{columns: []string{"seq", "hash"}}, nil
+		}
+		return &fakeRows{columns: []string{"seq", "hash"}, data: [][]driver.Value{{h.seq, h.hash}}}, nil
 	case strings.Contains(query, "SELECT id, tenant_id, timestamp, method, path, status_code"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
@@ -126,41 +185,61 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 // ---------------------------------------------------------------------------
 
 func (c *fakeConn) execInsertAuditEvent(args []driver.NamedValue) (driver.Result, error) {
-	tenantID, err := argString(args, 1)
+	// The id is arg 1 and every other argument shifted by one when cleat#958
+	// made the caller supply it. Before that this fake INVENTED an id with
+	// uuid.New(), which is the shape that hid the defect: the double had an
+	// opinion the database did not share, so a statement MySQL rejected --
+	// `Field 'id' doesn't have a default value` -- looked fine here.
+	//
+	// It now reads what the caller actually sent and rejects anything that is
+	// not a UUID, so a regression to omitting the id fails rather than being
+	// papered over.
+	idStr, err := argString(args, 1)
 	if err != nil {
 		return nil, err
 	}
-	method, err := argString(args, 2)
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		return nil, fmt.Errorf("audit insert supplied %q as the id, which is not a UUID: %w\n\n"+
+			"The caller must supply the id: MySQL's audit_events.id is CHAR(36) with no default, "+
+			"so an insert that omits it fails there while succeeding on PostgreSQL and SQL Server "+
+			"(cleat#958)", idStr, err)
+	}
+	tenantID, err := argString(args, 2)
 	if err != nil {
 		return nil, err
 	}
-	path, err := argString(args, 3)
+	method, err := argString(args, 4)
 	if err != nil {
 		return nil, err
 	}
-	statusCode, err := argInt64(args, 4)
+	path, err := argString(args, 5)
 	if err != nil {
 		return nil, err
 	}
-	userID, err := argString(args, 5)
+	statusCode, err := argInt64(args, 6)
 	if err != nil {
 		return nil, err
 	}
-	ipAddress, err := argString(args, 6)
+	userID, err := argString(args, 7)
 	if err != nil {
 		return nil, err
 	}
-	userAgent, err := argString(args, 7)
+	ipAddress, err := argString(args, 8)
 	if err != nil {
 		return nil, err
 	}
-	durationMs, err := argInt64(args, 8)
+	userAgent, err := argString(args, 9)
+	if err != nil {
+		return nil, err
+	}
+	durationMs, err := argInt64(args, 10)
 	if err != nil {
 		return nil, err
 	}
 
 	c.store.events = append(c.store.events, auditEventRow{
-		id:         uuid.New(),
+		id:         id,
 		tenantID:   uuid.MustParse(tenantID),
 		timestamp:  time.Now(),
 		method:     method,
@@ -485,7 +564,7 @@ func setupTestPlugin(t *testing.T) (*Plugin, http.Handler, *fakeDBStore) {
 	}
 
 	// Auth middleware -> Plugin middleware -> Mux.
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(p.Middleware(mux))
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(p.Middleware(mux))
 	return p, handler, store
 }
 
@@ -636,7 +715,7 @@ func TestFilterByTenant(t *testing.T) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(p.Middleware(mux))
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(p.Middleware(mux))
 
 	// Query as tenant A — should only see the GET /tenant-a event.
 	req := httptest.NewRequest("GET", "/audit/events", nil)
@@ -710,7 +789,7 @@ func TestFilterByTimeRange(t *testing.T) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	// Query with from=now-1h, to=now+1h — should only get /current.
 	from := now.Add(-1 * time.Hour).Format(time.RFC3339)
@@ -762,7 +841,7 @@ func TestFilterByMethod(t *testing.T) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	req := authedRequest("GET", "/audit/events?method=POST", nil)
 	rec := httptest.NewRecorder()
@@ -810,7 +889,7 @@ func TestFilterByStatus(t *testing.T) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	req := authedRequest("GET", "/audit/events?status=404", nil)
 	rec := httptest.NewRecorder()
@@ -831,56 +910,9 @@ func TestFilterByStatus(t *testing.T) {
 	}
 }
 
-// TestRetentionCleanup verifies the background retention cleanup deletes
-// old events beyond the configured retention period.
-func TestRetentionCleanup(t *testing.T) {
-	store := newFakeDBStore()
-
-	// Add some old events (beyond 90-day retention).
-	oldTime := time.Now().Add(-100 * 24 * time.Hour)
-	store.events = append(store.events,
-		auditEventRow{id: uuid.New(), tenantID: testTenantID, timestamp: oldTime, method: "GET", path: "/old1"},
-		auditEventRow{id: uuid.New(), tenantID: testTenantID, timestamp: oldTime.Add(-1 * time.Hour), method: "GET", path: "/old2"},
-	)
-
-	// Add a recent event (within retention).
-	store.events = append(store.events,
-		auditEventRow{id: uuid.New(), tenantID: testTenantID, timestamp: time.Now(), method: "GET", path: "/recent"},
-	)
-
-	db := sql.OpenDB(&fakeConnector{store: store})
-	defer db.Close()
-
-	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		config: Config{RetentionDays: 90},
-	}
-
-	// Run cleanup directly.
-	affected, err := p.cleanupRetention(context.Background())
-	if err != nil {
-		t.Fatalf("cleanupRetention: %v", err)
-	}
-	if affected != 2 {
-		t.Errorf("expected 2 deleted events, got %d", affected)
-	}
-
-	// Verify only the recent event remains.
-	store.mu.RLock()
-	remaining := len(store.events)
-	store.mu.RUnlock()
-	if remaining != 1 {
-		t.Fatalf("expected 1 remaining event, got %d", remaining)
-	}
-
-	store.mu.RLock()
-	lastEvent := store.events[0]
-	store.mu.RUnlock()
-	if lastEvent.path != "/recent" {
-		t.Errorf("expected remaining event path /recent, got %s", lastEvent.path)
-	}
-}
+// Retention is exercised against real databases, in chain_retention_test.go: it moves
+// a per-tenant floor in the same transaction as the delete, and a double that ignored
+// that would pass while proving nothing (cleat#2047).
 
 // TestQueryEventsLimit verifies the limit parameter.
 func TestQueryEventsLimit(t *testing.T) {
@@ -911,7 +943,7 @@ func TestQueryEventsLimit(t *testing.T) {
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	req := authedRequest("GET", "/audit/events?limit=2", nil)
 	rec := httptest.NewRecorder()
@@ -939,17 +971,10 @@ func TestAL_Migrations(t *testing.T) {
 	if len(migrations) == 0 {
 		t.Fatal("expected at least 1 migration")
 	}
-	for _, m := range migrations {
-		if m.Version == 0 {
-			t.Error("migration version must be non-zero")
-		}
-		if m.Up == "" {
-			t.Error("migration Up SQL must be non-empty")
-		}
-		if m.Down == "" {
-			t.Error("migration Down SQL must be non-empty")
-		}
-	}
+	// One shared predicate, not a seventh inline copy. cleat#1513 extracted it
+	// after thirteen plugins were found carrying their own and already
+	// drifting -- three checked Up and not Down.
+	plugintest.AssertMigrationsDoSomething(t, migrations)
 }
 
 // =========================================================================
@@ -1058,29 +1083,5 @@ func TestAL_PluginInfo(t *testing.T) {
 	}
 	if info.Version == "" {
 		t.Error("version should not be empty")
-	}
-}
-
-// =========================================================================
-// cleanupRetention — no events to delete
-// =========================================================================
-
-func TestAL_CleanupRetention_NoEvents(t *testing.T) {
-	store := newFakeDBStore()
-	db := sql.OpenDB(&fakeConnector{store: store})
-	defer db.Close()
-
-	p := &Plugin{
-		db:     &engine.SQLDBAdapter{DB: db},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		config: Config{RetentionDays: 90},
-	}
-
-	affected, err := p.cleanupRetention(context.Background())
-	if err != nil {
-		t.Fatalf("cleanupRetention: %v", err)
-	}
-	if affected != 0 {
-		t.Errorf("expected 0 deleted events with empty store, got %d", affected)
 	}
 }

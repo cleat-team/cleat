@@ -21,8 +21,9 @@ cleat build -o /tmp/out ./examples/onboarding/
 ## Run
 
 ```bash
-cleat deploy onboarding /tmp/out/onboarding.wasm
-cleat run RegisterUser '{"email":"alice@example.com","name":"Alice Smith","password":"s3cret"}'
+cleat deploy --name onboarding /tmp/out/register_user.wasm
+cleat run --wasm /tmp/out/register_user.wasm --entry-point register_user \
+  --input '{"email":"alice@example.com","name":"Alice Smith","password":"s3cret"}'
 ```
 
 ## Key files

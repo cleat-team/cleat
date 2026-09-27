@@ -79,12 +79,13 @@ All API calls are defined in `src/lib/api.ts` and return typed promises. The API
 |--------------------------------|--------|--------------------------------|
 | `/api/workflows`               | GET    | List workflow instances        |
 | `/api/workflows/:id`           | GET    | Get single workflow instance   |
+| `/api/workflows/:id/terminal`  | GET    | Get the last run in this id's continue-as-new chain (may still be running — poll on `status`) |
 | `/api/workflows/:name/start`   | POST   | Start a new workflow           |
 | `/api/workflows/:id/signal`    | POST   | Signal a running workflow      |
 | `/api/workflows/:id/cancel`    | POST   | Cancel a workflow              |
 | `/api/workflows/:id/history`   | GET    | Get workflow event history     |
 | `/api/workflows/:id/dag`       | GET    | Get workflow DAG structure     |
-| `/api/workflows/:id/query`     | GET    | Get queryable workflow state   |
+| `/api/workflows/:id/query?key=` | GET   | Read ONE published key (required) |
 | `/api/workflows/batch-history` | POST   | Get histories for comparison   |
 | `/api/definitions`             | GET    | List workflow definitions      |
 | `/api/schedules`               | GET    | List schedules                 |
@@ -281,7 +282,7 @@ Browses registered workflow definitions. Shows for each definition: name, versio
 
 ### DeadLetters (DeadLetters.svelte)
 
-Manages the dead-letter queue -- workflow instances that failed with non-retryable errors. Lists failed instances with their error details and provides actions to reprocess or terminate.
+Manages the dead-letter queue -- workflow instances whose last durable call exhausted its retry policy. Lists failed instances with their error details and provides actions to reprocess or terminate.
 
 ### ScheduleManagement (ScheduleManagement.svelte)
 

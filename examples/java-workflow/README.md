@@ -14,15 +14,27 @@ Demonstrates a durable order processing workflow written in Java and compiled to
 ## Build
 
 ```bash
-cd examples/java-workflow
-./gradlew build
+cleat build --target java -o /tmp/out ./examples/java-workflow/
 ```
+
+`./gradlew build` alone is not enough to produce a `.wasm` -- it compiles the
+Java sources but never runs the `generateWasm` task, which `cleat build`
+invokes directly. Use `./gradlew build` only to check that the project
+compiles; use `cleat build` to actually produce the artifact.
 
 ## Run
 
 ```bash
-cleat deploy java-workflow build/wasm/workflow.wasm
-cleat run place_order '{"product":"widget","quantity":2}'
+cleat run --wasm /tmp/out/java_workflow.wasm --entry-point place_order \
+  --input '{"product":"widget","quantity":2}'
+```
+
+`cleat run` executes the module standalone against its built-in mock hosts
+(each `HostCalls.cleatCall` echoes a synthetic response) and prints the
+result -- no `cleat deploy` or database required. Verified output:
+
+```
+Result: "{\"status\":\"shipped\"}"
 ```
 
 ## Key files

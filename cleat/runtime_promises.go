@@ -61,6 +61,7 @@ func (h *HostCallsImpl) CreatePromise(name string) (string, error) {
 }
 
 func (h *HostCallsImpl) AwaitPromise(promiseID string, timeout time.Duration) (string, bool, error) {
+	h.DispatchUpdates() // dispatch point; see DispatchUpdates
 	if h.awaitPromise == nil {
 		return "", false, errors.New("durable: AwaitPromise can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
@@ -68,6 +69,10 @@ func (h *HostCallsImpl) AwaitPromise(promiseID string, timeout time.Duration) (s
 }
 
 func (h *HostCallsImpl) AwaitPromiseMs(promiseID string, timeoutMs int64) (result string, timedOut bool, err error) {
+	// No dispatch point here: this delegates to AwaitPromise, which has one.
+	// It was here first, which meant calling AwaitPromise directly -- what
+	// every workflow and the SendSignalAndWait composite actually do -- skipped
+	// the dispatch entirely.
 	return h.AwaitPromise(promiseID, time.Duration(timeoutMs)*time.Millisecond)
 }
 

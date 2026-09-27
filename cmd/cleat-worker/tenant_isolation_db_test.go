@@ -35,8 +35,7 @@ func TestTenantIsolationOverHTTP_Postgres(t *testing.T) {
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping database-backed tenant isolation test")
 	}
 
-	db := testutil.TestDB(t, testutil.DialectPostgres)
-	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
+	db := testutil.SuiteTestDB(t, "cleat_worker")
 
 	// The factory must run on a NON-superuser connection or this test proves
 	// nothing. PostgreSQL bypasses RLS unconditionally for superusers, and

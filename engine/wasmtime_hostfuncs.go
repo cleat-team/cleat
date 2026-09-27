@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/bytecodealliance/wasmtime-go/v44"
+	"github.com/bytecodealliance/wasmtime-go/v48"
 )
 
 // skipIfNotNeeded returns true if the named import should be skipped because
@@ -21,7 +21,7 @@ func (b *wasmtimeBackend) registerCleatCall(linker *wasmtime.Linker, completeRes
 	if b.skipIfNotNeeded("cleat_call") {
 		return nil
 	}
-	return linker.FuncWrap("env", "cleat_call", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_call", func(caller *wasmtime.Caller,
 		svcPtr, svcLen, opPtr, opLen, reqPtr, reqLen, respPtr, respMaxLen int32) int64 {
 		t0 := time.Now()
 		h := b.handler
@@ -59,7 +59,7 @@ func (b *wasmtimeBackend) registerCleatComplete(linker *wasmtime.Linker, complet
 	if b.skipIfNotNeeded("cleat_complete") {
 		return nil
 	}
-	return linker.FuncWrap("env", "cleat_complete", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_complete", func(caller *wasmtime.Caller,
 		status int32, resultPtr int32, resultLen int32) int64 {
 		buf, _, err := callerMemBuf(caller)
 		if err != nil {
@@ -81,7 +81,7 @@ func (b *wasmtimeBackend) registerCleatPollWork(linker *wasmtime.Linker) error {
 	if b.skipIfNotNeeded("cleat_poll_work") {
 		return nil
 	}
-	return linker.FuncWrap("env", "cleat_poll_work", func(caller *wasmtime.Caller,
+	return b.hostFunc(linker, "env", "cleat_poll_work", func(caller *wasmtime.Caller,
 		entryNamePtr int32, entryNameMaxLen int32,
 		argsPtr int32, argsMaxLen int32) int64 {
 		buf, _, err := callerMemBuf(caller)
@@ -89,23 +89,22 @@ func (b *wasmtimeBackend) registerCleatPollWork(linker *wasmtime.Linker) error {
 			return errBadParamInt64
 		}
 
-		// Write entry point name.
+		// Both destinations are guest-supplied and must be range-checked
+		// before either is written. Doing it up front also makes the call
+		// all-or-nothing: a guest that gets its second pointer wrong does not
+		// come back to a half-populated first buffer.
 		entryBytes := []byte(b.workEntryPoint)
-		entryLen := len(entryBytes)
-		if entryLen > int(entryNameMaxLen) {
-			entryLen = int(entryNameMaxLen)
-		}
-		if entryLen > 0 {
-			copy(buf[entryNamePtr:entryNamePtr+int32(entryLen)], entryBytes[:entryLen])
+		entryLen := clampToMaxLen(len(entryBytes), entryNameMaxLen)
+		argsLen := clampToMaxLen(len(b.workInput), argsMaxLen)
+		if !guestRangeOK(buf, entryNamePtr, entryLen) || !guestRangeOK(buf, argsPtr, argsLen) {
+			return errBadParamInt64
 		}
 
-		// Write input JSON.
-		argsLen := len(b.workInput)
-		if argsLen > int(argsMaxLen) {
-			argsLen = int(argsMaxLen)
+		if entryLen > 0 {
+			copy(buf[uint32(entryNamePtr):], entryBytes[:entryLen])
 		}
 		if argsLen > 0 {
-			copy(buf[argsPtr:argsPtr+int32(argsLen)], b.workInput[:argsLen])
+			copy(buf[uint32(argsPtr):], b.workInput[:argsLen])
 		}
 		return int64(argsLen) | int64(entryLen)<<32
 	})

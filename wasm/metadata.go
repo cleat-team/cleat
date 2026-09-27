@@ -9,6 +9,7 @@ package wasm
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -24,6 +25,21 @@ type Metadata struct {
 	ChildVersions        map[string]int    `json:"child_versions,omitempty"`
 	ChildBindingPolicy   string            `json:"child_binding_policy,omitempty"` // deployment channel / binding policy
 	Language             string            `json:"language,omitempty"`
+
+	// EntryPoints names the WASM exports a caller may start this workflow at,
+	// in source declaration order -- nothing about their parameters, types or
+	// signature. cleat#2066: none of this repo's SDKs ever export a
+	// "handle_"-prefixed function by convention, so a worker guessing from
+	// export names alone cannot tell a workflow's entry point from a helper,
+	// and cannot disambiguate a binary with more than one. Codegen already
+	// computes this list to generate the exports in the first place; this
+	// carries it to the host instead of discarding it.
+	//
+	// See wasm/metadata_carries_no_entry_point_parameters_test.go for why this
+	// field is allowed to exist at all: it is named and structurally
+	// constrained ([]string, names only) so it cannot become the parameter
+	// list cleat#1065/#1705 documented the host as unable to validate against.
+	EntryPoints []string `json:"entry_points,omitempty"`
 }
 
 // EffectivePolicy returns the effective child binding policy after applying
@@ -98,6 +114,80 @@ func WriteMetadata(wasmBytes []byte, meta *Metadata) ([]byte, error) {
 	return result, nil
 }
 
+// entryPointsSectionName is the WASM custom section an SDK's own compiled
+// output carries its entry-point names in -- cleat#2113. Unlike
+// "cleat.metadata" (sectionName, above), which cleat build writes itself
+// after compilation from a source-level prediction, this section is written
+// by the SDK's own build process (the Rust #[cleat_entry] proc macro, at
+// present -- see crates/cleat-macro/src/entry.rs). Its presence is therefore
+// proof the compiler itself saw each declared entry point, not a guess at
+// what it would produce.
+const entryPointsSectionName = "cleat_entry_points"
+
+// ErrEntryPointsSectionMissing is returned by ReadEntryPointsSection when a
+// WASM binary carries no "cleat_entry_points" custom section -- an SDK
+// version built before it started emitting one. Callers should fail the
+// build rather than fall back to a source-level guess: a name a regex
+// predicts and the compiler never actually saw is exactly the silent-miss
+// risk this section exists to remove (cleat#2113).
+var ErrEntryPointsSectionMissing = errors.New("no cleat_entry_points section found in WASM binary")
+
+// ReadEntryPointsSection extracts and parses the "cleat_entry_points" custom
+// section: one export name per line, in the order the linker assembled them
+// from however many #[cleat_entry]-style expansions contributed one. Returns
+// ErrEntryPointsSectionMissing if the section is absent, and an error naming
+// every name that appears more than once if any does.
+func ReadEntryPointsSection(wasmBytes []byte) ([]string, error) {
+	payload, err := readCustomSection(wasmBytes, entryPointsSectionName)
+	if err != nil {
+		return nil, ErrEntryPointsSectionMissing
+	}
+	var names []string
+	seen := make(map[string]bool)
+	var dups []string
+	dupSeen := make(map[string]bool)
+	for _, line := range strings.Split(string(payload), "\n") {
+		if line == "" {
+			continue
+		}
+		if seen[line] {
+			if !dupSeen[line] {
+				dups = append(dups, line)
+				dupSeen[line] = true
+			}
+			continue
+		}
+		seen[line] = true
+		names = append(names, line)
+	}
+	if len(dups) > 0 {
+		return nil, fmt.Errorf("cleat_entry_points: duplicate entry point name(s): %s", strings.Join(dups, ", "))
+	}
+	return names, nil
+}
+
+// WriteEntryPointsSection embeds names as the "cleat_entry_points" custom
+// section, replacing any existing one -- the same section
+// ReadEntryPointsSection reads back, and in the same format: one name per
+// line. cleat#2145: AssemblyScript and Java have no linker-level mechanism
+// equivalent to Rust's `#[link_section]` statics (crates/cleat-macro), so
+// their `cleat build` paths call this to embed, post-compilation, the list
+// their own codegen (the AS transform's AST walk, the Java annotation
+// processor) already computed at compile time -- not a source-level guess
+// assembled separately, but the same computation that decided what to
+// export, written down where the Rust path gets it for free from the
+// linker. Callers should immediately re-read the result with
+// ReadEntryPointsSection: that gets duplicate-name detection for free,
+// rather than duplicating it here, and confirms the round-trip.
+func WriteEntryPointsSection(wasmBytes []byte, names []string) ([]byte, error) {
+	var payload strings.Builder
+	for _, n := range names {
+		payload.WriteString(n)
+		payload.WriteByte('\n')
+	}
+	return writeCustomSection(wasmBytes, entryPointsSectionName, []byte(payload.String()))
+}
+
 // --- low-level WASM custom section helpers ---
 
 func readCustomSection(wasmBytes []byte, name string) ([]byte, error) {
@@ -147,7 +237,7 @@ func readCustomSection(wasmBytes []byte, name string) ([]byte, error) {
 		// Not the section we want; skip payload.
 		offset = sectionEnd
 	}
-	return nil, fmt.Errorf("no cleat.metadata section found in WASM binary")
+	return nil, fmt.Errorf("no %s section found in WASM binary", name)
 }
 
 func writeCustomSection(wasmBytes []byte, name string, payload []byte) ([]byte, error) {

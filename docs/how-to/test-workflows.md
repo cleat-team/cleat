@@ -20,7 +20,6 @@ import (
 
 func TestMyWorkflow(t *testing.T) {
     env := cleattest.NewTestEnv()
-    defer env.Close() // not strictly required but good practice
 
     h := env.H() // returns the HostCalls interface
     // ... run your workflow via h
@@ -237,7 +236,6 @@ import (
 
 func TestApprovalWorkflow_Success(t *testing.T) {
     env := cleattest.NewTestEnv()
-    defer env.Close()
 
     // Mock the notification plugin.
     env.OnPluginCall("slack-notify", "send_message").Return(

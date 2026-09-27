@@ -61,7 +61,7 @@ func TestKVStoreBehavioral_MultiBackend(t *testing.T) {
 			// Initialise the plugin with the real database connection.
 			//
 			// p.dialect is load-bearing and was previously left unset. The
-			// plugin builds its SQL with plugin.Rebind(query, p.dialect), and
+			// plugin builds its SQL with query, and
 			// Rebind passes a query through unchanged for a dialect it does
 			// not recognise -- so with the zero value the plugin sent
 			// PostgreSQL $1 placeholders to MySQL and SQL Server. Every
@@ -69,7 +69,7 @@ func TestKVStoreBehavioral_MultiBackend(t *testing.T) {
 			// produces: Init sets this field, and the test built the plugin
 			// field by field instead.
 			p.dialect = pluginDialect
-			p.db = &engine.SQLDBAdapter{DB: be.DB}
+			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: plugin.Dialect(be.Dialect)}
 			p.mux = http.NewServeMux()
 			p.logger = slog.Default()
 			p.config = Config{MaxValueSize: 1_048_576}
@@ -123,8 +123,18 @@ func cleanupKVStore(t *testing.T, p *Plugin) {
 	}
 	// Rebound like every other query the plugin issues: an unrebound $1 is
 	// an unknown column on MySQL and a money literal on SQL Server.
-	_, err := p.db.Exec(context.Background(),
-		plugin.Rebind(`DELETE FROM kv_store WHERE tenant_id = $1`, p.dialect), testTenantID)
+	//
+	// AND SCOPED TO THE TENANT, which context.Background() is not. The
+	// statement already names the tenant in its WHERE clause, and that is not
+	// what a policy reads -- SQL Server's filter predicate reads
+	// SESSION_CONTEXT, which only engine.beginTenantTx sets, and only when the
+	// context carries a tenant. Without this the DELETE matched nothing,
+	// removed nothing, and reported success; the next scenario then counted
+	// one row too many and blamed its own SELECT (cleat#1552). PostgreSQL
+	// would have RAISED here, which is why this was only ever wrong on SQL
+	// Server.
+	_, err := p.db.Exec(plugin.ForTenant(context.Background(), testTenantID),
+		`DELETE FROM kv_store WHERE tenant_id = $1`, testTenantID)
 	if err != nil {
 		// Not a log: every scenario below counts rows, so a cleanup that did
 		// not happen silently invalidates the assertions that follow it.

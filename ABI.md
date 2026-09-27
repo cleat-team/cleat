@@ -139,11 +139,204 @@ Make a recorded API call to an external service.
 
 | Bits | Meaning |
 |---|---|
-| 0-7 | `errCode` — 0 = success, 1 = error |
+| 0-7 | `errCode` — 0 = success, 1 = error, 7 = output truncated (§ "Output truncation") |
 | 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 
 If `errCode == 0`, the response buffer contains valid JSON. If `errCode == 1`, the response buffer contains an error message string.
+
+##### Stop sentinel — check this before decoding any field
+
+If **bit 31** is set, the word is not a result. It is the host telling the guest to stop and
+unwind without doing new work, and the SDK must propagate a suspend exactly as it does for
+`cleat_await_child` (§1) rather than decoding the fields.
+
+```
+0x0000000080000000  (1 << 31)
+```
+
+The host emits it for a call made by the workflow body during a *defer segment* — a replay whose
+only purpose is to run an already-terminated workflow's outstanding defers. Calls made by the
+defer bodies themselves are **not** stopped, so an SDK must not treat the sentinel as "this
+workflow is over"; it means "this call must not happen".
+
+**The same bit, on every host call that can start fresh work.** It is not specific to
+`cleat_call`:
+
+**Nineteen host calls can return it, in six result layouts.** The last column is the one an SDK
+acts on: it names the field bit 31 lands inside, which is the field a decoder misreads if it
+fills its fields before testing the sentinel.
+
+| host call | result layout | bit 31 lands in |
+|---|---|---|
+| `cleat_call`, `cleat_call_retry`, `cleat_call_heartbeat`, `plugin_call`, `plugin_call_streaming` | `responseLen` 40-63, `callErrorCode` 8-39, `errCode` 0-7 | `callErrorCode` |
+| `cleat_child_workflow`, `cleat_child_workflow_with_options`, `cleat_side_effect`, `cleat_fetch`, `cleat_schedule_cron`, `cleat_start_detached` | upper field 32-63, `errCode` 0-31 | `errCode` (top bit) |
+| `cleat_await_signals` | `sigNameLen` 48-63, `payloadLen` 32-47, `timedOut` 16-31, `errCode` 0-15 | `timedOut` |
+| `cleat_send`, `cleat_schedule_invoke`, `cleat_signal_workflow`, `cleat_run_detached`, `cleat_complete_update` | `errCode` 0-31 | `errCode` (top bit) |
+| `cleat_poll_update` | `written` 32-63, `found` bit 8, `errCode` 0-7 | no field |
+| `cleat_acquire_lock` | `acquired` bit 8, `errCode` 0-7 | no field |
+
+Four of the six layouts put bit 31 inside a live field, so "check the sentinel first" is load
+bearing for seventeen of the nineteen calls, not just for `cleat_await_signals`.
+
+The two `no field` rows are not exceptions to the rule. Bit 31 being unoccupied there is a
+property of today's layouts, not a guarantee to decode against — and both calls still return the
+sentinel, so a guest that skips the check runs on past a stop regardless of which field it read.
+
+`cleat_sleep` is deliberately absent. Its 56-bit duration field covers bit 31, and it needs no
+sentinel: a sleeping guest already suspends through its status byte before any fresh call. That
+is the seventh layout, and `engine/memory.go` states the window over the other six for exactly
+this reason.
+
+**Re-derive the call list rather than trusting this table** — it is a property of the engine, and
+this table is a copy of it. The rows above were reconstructed this way on 2026-09-07, when the
+table listed seven calls in four layouts and named two of them by a binding name no guest can
+import (see the changelog row for this date):
+
+    # every host call that can return the sentinel, by WASM import name -> 19
+    python3 - <<'EOF'
+    import re, glob
+    bodies = {}
+    for f in glob.glob('engine/*.go'):
+        if f.endswith('_test.go'): continue
+        t = open(f).read()
+        for m in re.finditer(r'^func \(s \*execSession\) ([A-Za-z_]\w*)\(', t, re.M):
+            nxt = re.search(r'^func ', t[m.end():], re.M)
+            bodies[m.group(1)] = t[m.start(): m.end() + (nxt.start() if nxt else len(t))]
+    # Transitive, and that is not a refinement -- it is the difference between
+    # 18 and 16. cleat_child_workflow and cleat_child_workflow_with_options
+    # return the sentinel only through childWorkflowWithVersion, so a scan that
+    # reads one level of body misses both and reports a clean 16.
+    sites = {n for n, b in bodies.items() if 'callSuspendSentinel' in b}
+    changed = True
+    while changed:
+        changed = False
+        for n, b in bodies.items():
+            if n not in sites and set(re.findall(r's\.([A-Za-z_]\w*)\(', b)) & sites:
+                sites.add(n); changed = True
+    src = open('engine/imports.go').read()
+    for b in src.split('NewFunctionBuilder()')[1:]:
+        e = re.search(r'\.Export\("([^"]+)"\)', b)
+        if e and set(re.findall(r'\.([A-Za-z_]\w*)\(', b[:e.start()])) & sites:
+            print(e.group(1))
+    EOF
+
+`cleat_sleep` is the negative control and must not appear; `cleat_call_heartbeat` is the
+known-positive, and deleting the sentinel from `DurableCallWithHeartbeat` must drop it to 18.
+
+The transitive closure is what puts `cleat_start_detached` on the list (cleat#1154): its
+`StartDetached` reaches `callSuspendSentinel` only through the shared `runDetached` body, exactly
+as the two child-workflow calls reach it through `childWorkflowWithVersion`. A one-level scan
+misses all three.
+
+**Check the sentinel before reading any field, not after.** This is a hard ordering requirement,
+not a style preference. In the `cleat_await_signals` layout bit 31 falls inside the timed-out
+field, which SDKs read as `(result >> 16) & 0xFFFF != 0` — so a decoder that fills its fields
+first sees an ordinary *timeout*, returns normally, and the guest runs on past a stop it was
+told about.
+
+**Test it with a mask (`result & (1 << 31)`), not equality.** The host currently emits exactly
+`1 << 31` with every other field zero, so a whole-word comparison also works today, but these
+are payload-carrying words and the mask is the form that stays correct.
+
+Note this is a *different* bit from the `1 << 62` used by the workflow-export return and by
+`cleat_await_child`, and a different bit from the `1 << 39` earlier revisions of this document
+specified. Bit 62 is a 1 GiB length in the 32-bit-length layouts and 4 MiB in `cleat_call`'s,
+both reachable, since the host's buffer limits are operator-settable with no upper bound. Bit 39
+is free in `cleat_call`'s layout only: in the run-ID layouts it means a 128-byte run ID, an
+ordinary value. **Bit 31 is the only region free across all six** — bits 17-31 are, and bit 31 is
+the one used.
+
+An SDK that does not implement this reads the sentinel as an ordinary result — an empty
+*successful* response from `cleat_call`, a *timeout* from `cleat_await_signals` — and will
+silently continue past the stop. The host therefore refuses to run a defer segment for any guest
+language not known to decode it.
+
+##### Output truncation — `errCode` 7, on every call that writes a value
+
+**Added 2026-09-12, cleat#1312.**
+
+When the host has more to write than the guest's output buffer can hold, it writes the prefix and
+returns an error result classified as truncation:
+
+| field | value |
+|---|---|
+| `errCode` (0-7) | `7` — `OutputTruncated`; the call **failed** |
+| `callErrorCode` (8-15), durable-call layouts only | `7` — `OutputTruncated` |
+| the output buffer | holds a **prefix** of the value; do not use it |
+
+**Before this the truncation was invisible.** `writeResult` cut the value to `maxLen` and returned
+only how many bytes it had written — never how many there were — so a truncated response and a
+genuinely short one were the same observation from the guest. The usual symptom was a JSON
+unmarshal error pointing at the response body, which sends the author to debug the service they
+called.
+
+**Why `7` in both fields rather than a value in each.** A guest recognising this failure would
+otherwise have to know which result layout it was decoding first. Seven is free in both spaces: the
+simple-result `errCode` byte uses 0, 1, 3, 4 and 5, and `guestCallErrorCodes` ends at 6 with
+`RetryPolicyTooLong`.
+
+**Why a classification and not a sentinel bit** — the same reasoning as retry refusal below, and it
+applies more strongly. Truncation can come from *any* call that writes a value, so a bit would need
+to be free in every layout, which is the constraint that made the stop sentinel expensive. An SDK
+that does not know code 7 reads a generic call error and fails loudly, rather than proceeding on a
+prefix.
+
+**`OutputTruncated` must be non-retryable.** Re-issuing the identical call with the identical buffer
+fails identically. The remedy is a larger buffer or a smaller payload, and both belong to the
+caller.
+
+**The prefix is still written, deliberately.** A host call site that has not been taught to
+propagate the code behaves exactly as it did before, so introducing the signal could not itself
+change what any guest received.
+
+##### Retry refusal — `cleat_call_retry` only, and NOT a sentinel bit
+
+**Decided 2026-09-03, IMPROVEMENT-PLAN §3.94 step 1; implemented 2026-09-03 in step 4.**
+
+The host side is `execSession.DurableCallWithRetry` (`engine/durablecalls.go`), which refuses
+after the stop-sentinel check and after the replay return — the ordering below is not advice,
+it is what that function does. The Go SDK decodes it in `DurableCallWithOptions` and the Rust
+SDK as `CallError::RetryPolicyTooLong`; both fall back to their suspending loop.
+
+When the host declines to run a retry policy because the policy's total backoff exceeds the
+tenant's host-retry budget, it returns an ordinary error result carrying a **new
+`callErrorCode` classification**, not a new sentinel bit:
+
+| field | value |
+|---|---|
+| `errCode` (0-7) | non-zero — this *is* an error result |
+| `callErrorCode` (8-15) | `6` — `RetryPolicyTooLong` |
+| `responseLen` (40-63) | the refusal message, as with any call error |
+
+The guest's obligation is to **retry the call itself**, with its own loop, backing off with a
+durable sleep between attempts. The host records **no event** for a refusal, so replay sees
+nothing and the guest has not consumed an attempt — the same "refuse rather than half-do it"
+shape as the event-cap refusal.
+
+**Why a classification and not a bit, given §3.84 just established a sentinel on this exact
+layout.** The deciding question is what an SDK that has *not* implemented this does, because
+already-deployed guest modules cannot be upgraded in step with the host:
+
+| encoding | an SDK that does not know it |
+|---|---|
+| new sentinel bit, `errCode = 0` | reads a **successful** empty response and runs on with a bogus result — silently wrong |
+| new sentinel bit, `errCode != 0` | a generic call error — but then the bit adds nothing the classification does not |
+| **new `callErrorCode`** | a generic call error: the workflow **fails loudly** rather than proceeding on garbage |
+
+So the bit is either unsafe or redundant. The classification is also the documented extension
+path — `guestCallErrorCodes` in `engine/callerrors.go` says a member may be added while an
+existing value may never change — and it costs no bits in a word where bit 31 is already spent.
+
+The narrowness matters too. §3.84's stop sentinel had to be free in **six** layouts because any
+host call can start fresh work. A retry refusal can only ever come from `cleat_call_retry`, so
+the six-layout constraint that forced a bit does not apply here.
+
+**`RetryPolicyTooLong` must be non-retryable** (`Retryable()` = false). An SDK that treats it as
+retryable would re-issue `cleat_call_retry`, be refused again on the same grounds, and loop.
+
+**The stop sentinel still wins.** Check bit 31 *before* decoding any field, including this
+classification — the ordering requirement above is unchanged, and a refusal is a field.
 
 ##### At-Least-Once Semantics
 
@@ -189,13 +382,15 @@ Server-side retry variant of `cleat_call`. Retries happen inside the host; one e
 
 | Bits | Meaning |
 |---|---|
-| 0-7 | `errCode` — 0 = success, 1 = error |
+| 0-7 | `errCode` — 0 = success, 1 = error, 7 = output truncated (§ "Output truncation") |
 | 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 
 #### 2.3 `cleat_call_heartbeat`
 
-Long-running call with progress updates. The host sends periodic progress updates; the progress callback is handled at the SDK layer.
+Long-running call. The host heartbeats the claim every `heartbeatIntervalMs` so a call that outlives the ordinary lease is not reaped as a stale instance.
+
+There is no progress channel here and there never has been. The Go and Python SDKs carried an `onProgress`/`progress` callback parameter until cleat#854; it was never passed to this import, and could not have been — the guest is suspended inside this call for its whole duration, so the host has no moment in which to run guest code.
 
 ```
 (func (import "env" "cleat_call_heartbeat")
@@ -219,7 +414,7 @@ Long-running call with progress updates. The host sends periodic progress update
 
 | Bits | Meaning |
 |---|---|
-| 0-7 | `errCode` — 0 = success, 1 = error |
+| 0-7 | `errCode` — 0 = success, 1 = error, 7 = output truncated (§ "Output truncation") |
 | 8-39 | `callErrorCode` — 0 or 1 (reserved for structured error codes) |
 | 40-63 | `responseLen` — bytes written to response buffer |
 
@@ -327,6 +522,43 @@ Register a cleanup callback to run on workflow exit.
 | 0-31 | `errCode` — 0 = success |
 | 32-63 | `deferIDLen` — bytes written to defer ID buffer |
 
+#### 2.10a `cleat_defer_phase`
+
+Report that the guest has started or finished draining its defer table.
+
+```
+(func (import "env" "cleat_defer_phase")
+  (param i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `on` | `i32` | 1 when the drain begins, 0 when it ends |
+
+**Return:** always `0`. There is nothing for the guest to read.
+
+**This host call records no event.** It sets a flag that the host stamps onto
+events recorded while it is on (`in_defer_phase` in the event payload), which is
+what lets the engine tell a defer body's durable calls from the workflow body's.
+
+**SDK obligation.** An SDK that runs defer bodies must call this with `1`
+immediately before draining its defer table and `0` on every exit from the
+drain, including the suspension path. An SDK that never runs defers need not
+import it.
+
+The host cannot observe the boundary itself: on the ordinary failure path the
+guest's own wrapper runs the registered defers, so the host is not in the loop.
+Every SDK already tracks this internally in order to refuse defer registration
+from inside a defer body; this reports what it already knows.
+
+**If an SDK does not call it,** events produced by its defer bodies are
+indistinguishable from body events, which is the behaviour that existed before
+this call and the defect it exists to fix: a workflow that exhausts its retries
+and then runs a defer that touches the host is classified `failed` rather than
+`dead_lettered`, and so is deleted by retention rather than retained for an
+operator. See cleat#1155.
+
 #### 2.11 `cleat_poll_cancellation`
 
 Check if workflow cancellation has been requested.
@@ -405,57 +637,17 @@ Wait for one or more external signals, with a timeout.
 | 32-47 | `payloadLen` — bytes written to payload buffer |
 | 48-63 | `sigNameLen` — bytes written to signal name buffer |
 
-#### 2.14 `cleat_send_signal_and_wait`
+#### 2.14, 2.15 — removed
 
-Send a signal to another workflow and wait for a correlated reply.
+`cleat_send_signal_and_wait` and `cleat_reply_to_signal` were ABI 2.14 and 2.15 until 2026-09-06.
+Both were **inert**: the first never delivered the signal it then waited for, and the second
+recorded a local event and wrote nothing anywhere. Request/reply is now composed in every SDK from
+`cleat_create_promise` + `cleat_signal_workflow` + `cleat_await_promise` + `cleat_resolve_promise`
+— the reply promise's ID is the correlation ID, so the reply address is data rather than protocol.
+See IMPROVEMENT-PLAN §3.220.
 
-```
-(func (import "env" "cleat_send_signal_and_wait")
-  (param i32 i32 i32 i32 i32 i32 i64 i32 i32)
-  (result i64))
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `target_ptr` | `i32` | Target workflow run ID pointer |
-| `target_len` | `i32` | Target workflow run ID length |
-| `sig_ptr` | `i32` | Signal name pointer |
-| `sig_len` | `i32` | Signal name length |
-| `payload_ptr` | `i32` | Signal payload pointer |
-| `payload_len` | `i32` | Signal payload length |
-| `timeout_ms` | `i64` | Timeout in milliseconds |
-| `resp_ptr` | `i32` | Output buffer for reply response |
-| `resp_max_len` | `i32` | Output buffer capacity (1048576) |
-
-**Return packing:**
-
-| Bits | Meaning |
-|---|---|
-| 0-31 | `errCode` — 0 = success |
-| 32-63 | `responseLen` — bytes written to response buffer |
-
-#### 2.15 `cleat_reply_to_signal`
-
-Reply to a correlated signal with a response payload.
-
-```
-(func (import "env" "cleat_reply_to_signal")
-  (param i32 i32 i32 i32)
-  (result i64))
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `correlation_ptr` | `i32` | Correlation ID pointer |
-| `correlation_len` | `i32` | Correlation ID length |
-| `resp_ptr` | `i32` | Response payload pointer |
-| `resp_len` | `i32` | Response payload length |
-
-**Return packing:**
-
-| Bits | Meaning |
-|---|---|
-| 0-31 | `errCode` — 0 = success |
+The numbers are **not reused**: 2.16 below is still `cleat_signal_workflow`. A renumbering would
+silently change what an older document's "2.16" refers to.
 
 #### 2.16 `cleat_signal_workflow`
 
@@ -586,37 +778,6 @@ Start a child workflow instance with configurable version and parent close polic
 | 0-31 | `errCode` |
 | 32-63 | `runIDLen` — bytes written to run ID buffer |
 
-#### 2.21 `cleat_child_workflow_in_schema`
-
-Start a child workflow instance in a different PostgreSQL schema for cross-instance cooperation.
-
-```
-(func (import "env" "cleat_child_workflow_in_schema")
-  (param i32 i32 i32 i32 i32 i32 i64 i32 i32 i32 i32)
-  (result i64))
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `schema_ptr` | `i32` | Target schema name pointer |
-| `schema_len` | `i32` | Target schema name length |
-| `name_ptr` | `i32` | Child workflow definition name pointer |
-| `name_len` | `i32` | Child workflow name length |
-| `input_ptr` | `i32` | Input JSON pointer |
-| `input_len` | `i32` | Input JSON length |
-| `version` | `i64` | Child workflow definition version |
-| `policy_ptr` | `i32` | Parent close policy pointer |
-| `policy_len` | `i32` | Parent close policy length |
-| `run_id_ptr` | `i32` | Output buffer for run ID |
-| `run_id_max_len` | `i32` | Output buffer capacity (1048576) |
-
-**Return packing:**
-
-| Bits | Meaning |
-|---|---|
-| 0-31 | `errCode` |
-| 32-63 | `runIDLen` — bytes written to run ID buffer |
-
 #### 2.22 `cleat_await_child`
 
 Wait for a child workflow to complete.
@@ -690,6 +851,47 @@ Run a detached child workflow (fire-and-forget, no result expected).
 |---|---|
 | 0-31 | `errCode` — 0 = success |
 
+#### 2.24a `cleat_start_detached`
+
+`cleat_run_detached` that hands back the run id, so a caller has a handle for
+the work it started — status, result and cancellation all address a run by id,
+and without one a detached run is unaddressable from the guest that began it
+(cleat#1154).
+
+**Both calls exist and `cleat_run_detached` is unchanged.** A host call's arity
+is part of its import type, and an arity mismatch is a hard link error that
+stops a module instantiating at all — not a failure of the one call. Every
+workflow binary already deployed imports `cleat_run_detached` with four
+parameters, so widening it in place would stop all of them loading. See §3.55 in
+`IMPROVEMENT-PLAN.md`, which measured exactly that for `cleat_create_promise`.
+
+```
+(func (import "env" "cleat_start_detached")
+  (param i32 i32 i32 i32 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `name_ptr` | `i32` | Child workflow definition name pointer |
+| `name_len` | `i32` | Child workflow name length |
+| `input_ptr` | `i32` | Input JSON pointer |
+| `input_len` | `i32` | Input JSON length |
+| `run_id_ptr` | `i32` | Output buffer for the run id |
+| `run_id_max_len` | `i32` | Output buffer capacity |
+
+**Return packing:**
+
+| Bits | Meaning |
+|---|---|
+| 0-31 | `errCode` — 0 = success |
+| 32-63 | `written` — bytes written to the run id buffer |
+
+**On replay the id comes from the recorded event, not from a fresh start.** Both
+calls record the same `run_detached` event and match on it, so a workflow whose
+history was written by `cleat_run_detached` replays correctly after being
+recompiled to call this one.
+
 ### Query and update handlers
 
 #### 2.25 `cleat_register_query_handler`
@@ -745,6 +947,80 @@ Register an update handler for workflow updates (bi-directional RPC). Handler re
 |---|---|
 | 0-31 | `errCode` — 0 = success |
 
+#### 2.26a `cleat_poll_update`
+
+Deliver the next pending update request, or report that there is none.
+
+Registration (2.26) records a handler *name*; this is what delivers work to it.
+The handler itself is a closure in guest memory, so the host cannot invoke it —
+the guest polls at fixed program positions (the SDK does so before each
+suspension) and runs the handler itself.
+
+**Delivery is recorded in the event history**, as an `update_received` event, at
+the step the guest polled. That is what makes an update replayable: on replay
+the poll reads that event rather than the request table, so the handler sees the
+same input at the same point in the program. A request that arrived after the
+original run is therefore not delivered at an earlier step.
+
+```
+(func (import "env" "cleat_poll_update")
+  (param i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `out_ptr` | `i32` | Output buffer pointer |
+| `out_max_len` | `i32` | Output buffer capacity |
+
+The buffer receives a JSON object `{"name","payload","request_id"}`. One buffer
+rather than three out-params: three lengths plus a found flag do not fit an
+`i64` alongside each other.
+
+**Return packing:**
+
+| Bits | Meaning |
+|---|---|
+| 32-63 | bytes written |
+| 8 | `found` — 1 when an update was delivered |
+| 0-7 | `errCode` — 0 = success |
+
+`request_id` is opaque to the guest: it is received here and returned unchanged
+to `cleat_complete_update`.
+
+#### 2.26b `cleat_complete_update`
+
+Record an update handler's outcome and settle the caller's promise.
+
+Recorded as an `update_completed` event. Without it every replay would settle
+the caller's promise again, and a settle matching no promise reports not-found —
+so replay would begin erroring on a workflow that had done nothing wrong.
+
+```
+(func (import "env" "cleat_complete_update")
+  (param i32 i32 i32 i32 i32 i32)
+  (result i64))
+```
+
+| Param | Type | Description |
+|---|---|---|
+| `request_id_ptr` | `i32` | Request id pointer (as delivered by `cleat_poll_update`) |
+| `request_id_len` | `i32` | Request id length |
+| `result_ptr` | `i32` | Result JSON pointer |
+| `result_len` | `i32` | Result JSON length |
+| `err_ptr` | `i32` | Error message pointer |
+| `err_len` | `i32` | Error message length |
+
+A non-empty error rejects the caller's promise; an empty error resolves it. An
+empty *result* with an empty error resolves — an empty result is an outcome, not
+a missing one.
+
+**Return packing:**
+
+| Bits | Meaning |
+|---|---|
+| 0-31 | `errCode` — 0 = success |
+
 #### 2.27 `set_query_state`
 
 Set a key-value pair in the workflow's query state.
@@ -765,145 +1041,6 @@ Set a key-value pair in the workflow's query state.
 Return value is ignored.
 
 ### Durable key-value state operations
-
-#### 2.28 `cleat_set_state`
-
-Set a key-value pair in the workflow's durable state.
-
-```
-(func (import "env" "cleat_set_state")
-  (param i32 i32 i32 i32)
-  (result i64))
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `key_ptr` | `i32` | Key pointer |
-| `key_len` | `i32` | Key length |
-| `val_ptr` | `i32` | Value pointer |
-| `val_len` | `i32` | Value length |
-
-**Return packing:**
-
-| Bits | Meaning |
-|---|---|
-| 0-31 | `errCode` — 0 = success |
-
-#### 2.29 `cleat_get_state`
-
-Get the value for a key in the workflow's durable state.
-
-```
-(func (import "env" "cleat_get_state")
-  (param i32 i32 i32 i32)
-  (result i64))
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `key_ptr` | `i32` | Key pointer |
-| `key_len` | `i32` | Key length |
-| `value_ptr` | `i32` | Output buffer for value |
-| `value_max_len` | `i32` | Output buffer capacity (1048576) |
-
-**Return packing:**
-
-| Bits | Meaning |
-|---|---|
-| 0-31 | `errCode` — 0 = success |
-| 32-63 | `valueLen` — bytes written to value buffer |
-
-#### 2.30 `cleat_delete_state`
-
-Delete a key from the workflow's durable state.
-
-```
-(func (import "env" "cleat_delete_state")
-  (param i32 i32)
-  (result i64))
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `key_ptr` | `i32` | Key pointer |
-| `key_len` | `i32` | Key length |
-
-**Return packing:**
-
-| Bits | Meaning |
-|---|---|
-| 0-31 | `errCode` — 0 = success |
-
-#### 2.31 `cleat_incr_state`
-
-Atomically increment a numeric state value by a delta.
-
-```
-(func (import "env" "cleat_incr_state")
-  (param i32 i32 i64)
-  (result i64))
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `key_ptr` | `i32` | Key pointer |
-| `key_len` | `i32` | Key length |
-| `delta` | `i64` | Amount to increment (may be negative) |
-
-**Return packing:**
-
-| Bits | Meaning |
-|---|---|
-| 0-31 | `errCode` — 0 = success |
-| 32-63 | `newValue` — new value after increment |
-
-#### 2.32 `cleat_has_state`
-
-Check if a key exists in the workflow's durable state.
-
-```
-(func (import "env" "cleat_has_state")
-  (param i32 i32)
-  (result i64))
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `key_ptr` | `i32` | Key pointer |
-| `key_len` | `i32` | Key length |
-
-**Return packing:**
-
-| Bits | Meaning |
-|---|---|
-| 0-31 | `errCode` — 0 = success |
-| 32-63 | `exists` — 1 if key exists, 0 otherwise |
-
-#### 2.33 `cleat_list_state`
-
-List state keys matching a given prefix.
-
-```
-(func (import "env" "cleat_list_state")
-  (param i32 i32 i32 i32)
-  (result i64))
-```
-
-| Param | Type | Description |
-|---|---|---|
-| `prefix_ptr` | `i32` | Key prefix pointer |
-| `prefix_len` | `i32` | Key prefix length |
-| `keys_ptr` | `i32` | Output buffer for JSON array of keys |
-| `keys_max_len` | `i32` | Output buffer capacity (1048576) |
-
-**Return packing:**
-
-| Bits | Meaning |
-|---|---|
-| 0-31 | `errCode` — 0 = success |
-| 32-63 | `keysLen` — bytes written to keys buffer |
-
-### Durable promises
 
 #### 2.34 `cleat_create_promise`
 
@@ -1252,6 +1389,26 @@ Schedule a delayed one-shot invocation of an external service operation.
 
 #### 2.48 `cleat_fetch`
 
+> **Embedder-only. A stock `cleat-worker` cannot serve this call and never could.**
+> cleat ships no default `Fetcher` and `cmd/cleat-worker` sets none, so every
+> `cleat_fetch` from a worker takes the failure branch in `engine/lifecycle.go`.
+> It works only when the engine is embedded as a library and the host supplies
+> one:
+>
+>     eng := engine.New(..., engine.WithFetcher(myFetcher))
+>
+> Re-derive — the only reference outside test files is the declaration itself:
+>
+>     git ls-files '*.go' | xargs grep -n 'WithFetcher(' | grep -v _test.go
+>
+> This entry described the call without qualification until 2026-09-08, so an
+> SDK author had every reason to bind it and expect it to work. Whether a stock
+> worker should get a default fetcher is open (IMPROVEMENT-PLAN 3.317): it would
+> grant every workflow arbitrary outbound HTTP from the worker, which is a
+> capability decision rather than a missing line of wiring. Documenting the
+> present behaviour does not settle that question — it stops the document
+> claiming the opposite of what happens.
+
 Perform an HTTP fetch request. The method, URL, headers (JSON), and body are all configurable.
 
 ```
@@ -1394,19 +1551,73 @@ Host-only extension for streaming plugin function calls. Same signature as `plug
 
 ### Previously undocumented functions
 
-> Added 2026-08-09. This document said "52 host functions" while the actual
-> registered set is 59 on both backends (56 `cleat_*` exports plus
-> `plugin_call`, `plugin_call_streaming`, `set_query_state`). Re-derived with:
+> Added 2026-08-09, re-derived 2026-09-06 and again 2026-09-13. **Exactly three
+> exports carry no `cleat_` prefix** — `plugin_call`, `plugin_call_streaming`,
+> `set_query_state` — which is the part that does not drift, and the reason a
+> prefix-anchored scan under-counts by three while still returning a plausible
+> total. The total itself is a query, not a number; run the commands below.
 >
 > ```
-> grep -oE '\.Export\("[a-zA-Z_]+"\)' engine/imports.go | sort -u | wc -l   # wazero: 59
+> python3 -c "import re;print(len(set(re.findall(r'\.Export\("([^"]+)"\)',
+>   open('engine/imports.go').read()))))"
 > grep -oE '"cleat_[a-zA-Z_]+"|"set_query_state"|"plugin_call[a-zA-Z_]*"' \
->   engine/wasmtime_hostfuncs*.go engine/backend_wasmtime*.go | cut -d: -f2 | sort -u | wc -l   # wasmtime: 59
+>   engine/wasmtime_hostfuncs*.go engine/backend_wasmtime*.go | cut -d: -f2 | sort -u | wc -l
 > ```
 >
-> Both backends register the identical set — there is no wazero/wasmtime
-> split in what is importable, only in how it is enforced (see
-> `docs/explanation/security-model.md`). The seven functions below existed in
+> The two must agree. They are the registration table and the wasmtime binding
+> site, and #452 is what happens when they do not: expected values are omitted
+> here on purpose, because a stale annotation beside a live command is read as
+> the answer and the command is not run.
+>
+> **The registered count has moved twice since this note was added**: 59 → 58
+> when #582 removed `cleat_child_workflow_in_schema` (2026-09-02) → 52 when
+> #767 removed the six-call durable-state family (2026-09-05).
+>
+> That lands on the same number this document *claimed* before the note was
+> written, and the two 52s are different sets — the old one was the 59
+> registered minus the seven listed below, which were registered but
+> undocumented; today's is the 59 minus `cleat_child_workflow_in_schema` and
+> the six state calls, with all seven below now documented. Naming the
+> coincidence because it is the kind that reads as corroboration: a number
+> that matches a remembered one is the number least likely to be re-derived.
+>
+> **That is no longer true, and the sentence it replaces is a worked example of
+> its own subject.** It read "Seven entries in this document describe host calls
+> that no longer exist — the six `cleat_*_state` calls and
+> `cleat_child_workflow_in_schema`", and it was correct when written. The
+> entries went with #767 and #582; the sentence announcing them did not, so it
+> outlived its referent by two days and was repeated to a user as an open
+> defect on 2026-09-07.
+>
+> **Its evidence could not have caught that**, which is the part worth keeping.
+> The citation was `grep -c cleat_set_state ABI.md engine/imports.go` → 2 and 0,
+> and `grep -c` counts lines containing a name. Every remaining occurrence in
+> this file is a *retraction* — a changelog row recording the removal, and the
+> sentence above — so the count it returns rises as the entries are more
+> thoroughly documented as gone. It reads 3 today, with zero entries left. That
+> is the "a text search cannot tell a thing from a sentence about the thing"
+> trap in CLAUDE.md §Build, and the fix there applies unchanged: **anchor to
+> where the artifact lives.** An entry is a heading; a retraction is prose in a
+> body and can never start one.
+>
+>     # documented entries vs engine exports -- both differences must be empty
+>     comm -3 <(grep -oE '^#### 2\.[0-9]+[a-z]? `[a-z_]+`' ABI.md \
+>                 | sed 's/.*`\(.*\)`/\1/' | sort -u) \
+>             <(grep -oE '\.Export\("[^"]+"\)' engine/imports.go \
+>                 | sed 's/.*Export("//;s/")//' | sort -u)
+>
+> Measured 2026-09-07: 52 documented, 52 exported, both differences empty. Run
+> it before quoting either number — this note has now been wrong in both
+> directions.
+>
+> The two commands at the top of this note — not the `comm` above, which
+> compares this document against the engine — read two different
+> registrations, and they must agree. `engine/imports.go` is the wazero
+> `engine.Runtime` used by CLI and test tooling; the other is the wasmtime
+> backend a worker runs. `engine/hostabi_runtime_parity_test.go` enforces it. Until 2026-09-06 this
+> note called them "both backends". There is only one backend: the wazero one
+> was deleted in #459 (2026-08-10). What is importable does not differ between
+> them; how it is fenced does (see `docs/explanation/security-model.md`). The seven functions below existed in
 > `engine/imports.go` and the wasmtime registration files with no ABI entry
 > at all. The first five are ordinary host calls; the last two
 > (`cleat_poll_work`, `cleat_complete`) are internal plumbing specific to the
@@ -1611,7 +1822,10 @@ every `*_max_len` parameter in this document.
 
 To add support for a new language, you need:
 
-1. **Host function declarations** — Declare the 50 `env` imports with correct WASM types.
+1. **Host function declarations** — Declare every `env` import with correct WASM types. The count
+   moves — 59 → 58 → 52 → 54 over three months, each value correct when written — so re-derive it
+   rather than quoting one: `grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sort -u | grep -c .`
+   Do not put `cleat_` in that pattern: three exports are unprefixed.
 2. **String helpers** — Read/write strings from linear memory at `(ptr, len)` pairs.
 3. **Bit-packing decode** — Extract result values from packed `i64` returns per the tables above.
 4. **Export wrapper** — A function with signature `(args_ptr, args_len, out_ptr, max_out_len) -> i64` that deserializes JSON args, calls the workflow, serializes the result, and encodes the packed return.
@@ -1625,6 +1839,10 @@ The Rust implementation at `examples/rust-workflow/src/` serves as a reference f
 
 | Version | Date | Changes |
 |---|---|---|
+| — | 2026-09-11 | **Added `cleat_start_detached`** (§2.24a), which is `cleat_run_detached` with the run id written back — `engine/children.go` already computed it and discarded it, leaving a detached run unaddressable from the guest that started it (cleat#1154). **`cleat_run_detached` is unchanged and both stay registered**, because a host call's arity is part of its import type: widening the existing one is a hard link error that stops every already-deployed binary instantiating, measured for `cleat_create_promise` in IMPROVEMENT-PLAN §3.55. Same shape as `cleat_poll_update`/`cleat_complete_update` in #868. Documented count 52 → **54 exports total**. Both calls share one host body, so a history written by either replays against the other, and on replay the id comes from the recorded `run_detached` event rather than a fresh start. The stop-sentinel table in §2 goes 18 → **19**: `StartDetached` reaches `callSuspendSentinel` only through the shared body, so the transitive closure in that section's query is what finds it — a one-level scan would miss it exactly as it missed both child-workflow calls. Bound in Go, Rust (`start_detached`), Java (`startDetached`) and AssemblyScript (`startDetached`); **not Python**, because a string return cannot use the `-> u64` WIT shape `durable-run-detached` has and an out-pointer does not survive component dispatch, which writes into a host buffer — recorded in `sdkUnreachedBaseline`. |
+| — | 2026-09-07 | **Corrected the stop-sentinel table in §2, which was wrong in both directions.** It named `cleat_plugin_call` and `cleat_plugin_call_streaming` — neither is a WASM import name. The imports are `plugin_call` and `plugin_call_streaming`, unprefixed, as §2.49 and §2.50 have always said; the `cleat_`-prefixed forms are the *Rust* function names in `crates/cleat-sdk/src/host_calls.rs`, which carry `#[link_name = "plugin_call"]`. A binding written from that table alone fails to instantiate. This is the prefix assumption CLAUDE.md §Build warns about, reaching a document whose own headings had it right. And the table was incomplete: **18** host calls return the sentinel across **six** result layouts, not the 7 across 4 that were listed. The eleven missing were `cleat_call_heartbeat`, `cleat_send`, `cleat_schedule_invoke`, `cleat_run_detached`, `cleat_poll_update`, `cleat_complete_update`, `cleat_side_effect`, `cleat_fetch`, `cleat_acquire_lock`, `cleat_schedule_cron` and `cleat_signal_workflow` — and bit 31 falls inside a live field for all but two of the eighteen, so the "check the sentinel first" ordering requirement applied to sixteen calls while being stated for one. Six layouts independently matches `engine/memory.go`, which states the free window over "all six layouts that can start fresh work" with `packSleepResult` as the seventh. §2 now carries the query that regenerates the list, with a negative control (`cleat_sleep`) and a known-positive (deleting the sentinel from `DurableCallWithHeartbeat` must drop 18 to 17); the first draft of that query read one level of function body and returned **16**, silently missing both child-workflow calls, whose sentinel is reached only through `childWorkflowWithVersion`. Also retired the note claiming seven entries describe removed host calls — true when written, false since #767 and #582, and cited by a `grep -c` that counts retractions. |
+| — | 2026-09-05 | **Removed the durable-state family** — `cleat_set_state`, `cleat_get_state`, `cleat_delete_state`, `cleat_incr_state`, `cleat_has_state`, `cleat_list_state` (was §2.28-§2.33) — together with the `cleat:host-calls/durable-stream-state` component interface. Neither Temporal nor DBOS has state scoped beyond a single workflow; only Restate does, and cleat's was run-scoped, so it looked like Restate's and behaved like a local variable. Within a run the API was exactly equivalent to one, because replay re-executes the workflow and rebuilds either. Documented count 58 → **52 exports total**, of which **49 are `cleat_`-prefixed**. Both numbers are true and they will be quoted interchangeably unless a doc says which it means: `plugin_call`, `plugin_call_streaming` and `set_query_state` carry no prefix, so a `grep 'cleat_'` over this surface undercounts by three and any table driven off that prefix silently omits them. Count with `grep -oE '\.Export\("[^"]+"\)' engine/imports.go | sort -u | grep -c .` **§2.28-§2.33 are left vacant rather than renumbering**, per the §2.21 precedent. `set_query_state` is unaffected and remains the queryable-state mechanism (the DBOS `setEvent` equivalent), as does the `set_scope`/`get_scope` family, which acquires a concurrency key and is not a state feature. `EventCodeStateMutation = 16` is RETIRED, not reused: the compaction decoder has no default case, so reusing the number would make pre-existing histories decode silently into empty records. See IMPROVEMENT-PLAN §3.216. |
+| — | 2026-09-02 | **Removed `cleat_child_workflow_in_schema`** (was §2.21) and the `cleat:host-calls/durable-extended-children` component interface that wrapped it. It wrote a child workflow row directly into another PostgreSQL schema, which made the other deployment's schema part of this one's API and had no settled answer for whose tenant the child belonged to. Cross-pool work goes through the other pool's API instead. Documented count 59 → 58 on both backends. No `CurrentABIVersion` bump: nothing that remains changed shape, and there are no deployed guests importing it. **§2.21 is left vacant rather than renumbering §2.22-§2.59**, because the numbers are referenced from commit messages and IMPROVEMENT-PLAN entries; a gap is cheaper to read than a shift. See IMPROVEMENT-PLAN §3.78. |
 | — | 2026-08-09 | Documentation-only: added §2.53-2.59 for seven host functions (`cleat_await_any_child`, `cleat_poll_child`, `cleat_schedule_cron`, `cleat_delete_cron`, `cleat_list_crons`, `cleat_poll_work`, `cleat_complete`) that were registered in `engine/imports.go` and the wasmtime backend with no ABI entry at all. Updated documentation count from 52 to 59. As with the version-number note at the top of this file: no `CurrentABIVersion` bump, because nothing about the wire contract changed -- only what this document said about it. |
 | 5 | 2026-05-15 | Added Section 6: Cross-Language Determinism specification covering IEEE 754 floats, map iteration order, JSON canonicalization, GC timing, and RNG. Added cross-language replay guarantee. |
 | 4 | 2026-05-13 | Added `cleat_json_parse` (2.51) and `cleat_json_stringify` (2.52) host functions for JSON validation and normalization via the host runtime. Bumped ABI_VERSION to 4. |

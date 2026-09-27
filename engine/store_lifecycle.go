@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,6 +33,137 @@ func (s *PostgresStore) claimWorkflowImpl(ctx context.Context, workerID string) 
 // ClaimWorkflows atomically claims up to limit runnable workflow instances.
 // Like ClaimWorkflow but batches multiple claims into one query.
 
+// CountRunnableWorkflows mirrors ClaimWorkflows' candidate predicate exactly,
+// minus the lock and the LIMIT.
+//
+// Tenant scoping is beginTxWithRLS, as the claim's is: PostgreSQL carries no
+// explicit tenant_id predicate here because the application role is genuinely
+// subject to RLS. Adding one would not be harmless -- it would make this count
+// disagree with the claim on a connection where RLS is off, which is exactly
+// the case cross_tenant_claim_test.go exists to catch.
+func (s *PostgresStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("count runnable workflows: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// Mirrors ClaimWorkflows' candidate predicate exactly, minus the lock and
+	// the LIMIT -- the same relationship the old count had to the old claim.
+	// A registered queue at capacity is not runnable, exactly as it is not
+	// claimable.
+	var n int
+	if err := tx.QueryRowContext(ctx, `
+		SELECT count(*) FROM workflow_instances w
+		LEFT JOIN queues q ON q.tenant_id = w.tenant_id
+		                  AND q.name = w.concurrency_key
+		                  AND q.disabled_at IS NULL
+		WHERE w.status IN ('ready', 'terminating')
+		  AND w.next_wake_at <= now()
+		  AND w.task_queue = ANY($1)
+		  AND (
+		    (q.name IS NULL AND (
+		      w.concurrency_key_hash IS NULL
+		      OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+		                      WHERE (ck.key_hash = w.concurrency_key_hash
+		                        AND ck.tenant_id = w.tenant_id
+		                        AND ck.workflow_id <> w.id)
+		                        AND EXISTS (SELECT 1 FROM workflow_instances wi
+		                                     WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
+		                                       AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')))
+		    ))
+		    OR
+		    (q.name IS NOT NULL AND (
+		      (
+		        (SELECT count(*) FROM queue_holders qh
+		          WHERE qh.tenant_id = w.tenant_id
+		            AND qh.queue_name = q.name
+		            AND qh.workflow_id <> w.id
+		            AND EXISTS (SELECT 1 FROM workflow_instances wi
+		                         WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
+		                           AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))) < q.concurrency_limit
+		      )
+		      AND (
+		        q.rate_limit IS NULL OR
+		        (SELECT count(*) FROM queue_rate_tokens qrt
+		          WHERE qrt.tenant_id = w.tenant_id
+		            AND qrt.queue_name = q.name
+		            AND qrt.expires_at > now()) < q.rate_limit
+		      )
+		    ))
+		  )
+	`, pq.Array(s.taskQueues)).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
+}
+
+// claimCandidate is one runnable workflow read by a claim statement, carrying
+// the fields the acquisition step needs to decide and take its concurrency key.
+// `registered` is true when the key names a registered, non-disabled queue.
+type claimCandidate struct {
+	id         string
+	tenantID   string
+	key        *string
+	hash       []byte
+	registered bool
+}
+
+// registeredQueueLimits is what lockRegisteredQueueLimits reads off a locked
+// queues row: the concurrency semaphore's capacity, and -- cleat#1918 -- the
+// rate limiter's capacity and window. RateLimit and RatePeriodSeconds are nil
+// together when the queue has no rate limit, the same nil/nil convention
+// Queue itself uses (queue_store.go). workerConcurrency is cleat#1917: nil
+// means no per-worker cap, the same lone-nullable shape Queue.WorkerConcurrency
+// carries.
+type registeredQueueLimits struct {
+	concurrencyLimit  int
+	rateLimit         *int
+	ratePeriodSeconds *int
+	workerConcurrency *int
+}
+
+// logClaimKeyDecision records what a claim decided about one candidate's
+// concurrency key: which key, whether that key named a registered queue, and
+// whether the candidate was admitted.
+//
+// WHY THE ENGINE LOGS THIS AND NOT THE WORKER. cleat#1955 is a nightly failure
+// whose whole subject is queue admission -- a queue declaring a limit of 2 that
+// appeared to admit 1 -- and it could not be diagnosed from the run's own
+// artifacts. The worker's "claimed workflow" line carries worker_id,
+// workflow_id, def_name and def_version; across all 38 claim lines of the
+// failing leg the concurrency key appeared ZERO times. Two workflows claimed in
+// the same millisecond were therefore equally consistent with "the semaphore
+// admitted two on one queue" and with "two unrelated keys ran at once", which
+// is precisely the distinction the failure turns on.
+//
+// The worker cannot log it: engine.WorkflowInstance has no concurrency-key
+// field, and adding one would mean every construction site that did not
+// populate it reported the empty string -- indistinguishable from "this run had
+// no key", which is the same ambiguity moved rather than removed. The claim
+// candidate holds the key already and cannot be wrong about it, so the decision
+// is logged where it is made.
+//
+// REFUSALS ARE LOGGED, NOT JUST ADMISSIONS, and the refusal is the more
+// informative half: "admitted 1 of 3" and "refused 2 of 3 at capacity" answer
+// different questions, and only the second distinguishes a semaphore at its
+// limit from three runs that never overlapped.
+//
+// Unkeyed candidates log nothing. Most workflows carry no key, so logging them
+// would make the volume proportional to all claims rather than to keyed ones,
+// for a line that would say only that there was nothing to decide.
+func logClaimKeyDecision(log *slog.Logger, c claimCandidate, admitted bool) {
+	if log == nil || c.key == nil {
+		return
+	}
+	log.Info("concurrency key decision",
+		"workflow_id", c.id,
+		"concurrency_key", *c.key,
+		"registered", c.registered,
+		"admitted", admitted,
+	)
+}
+
 func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -39,69 +171,143 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// The candidate set is selected in a CTE rather than an
-	// `id IN (SELECT ... LIMIT n FOR UPDATE SKIP LOCKED)` sublink. Both forms
-	// respect the limit; this one is kept because it is evaluated once by
-	// construction rather than by argument.
+	// cleat#1116. This claim is now three statements inside one transaction,
+	// where it used to be one data-modifying CTE. The generalisation from mutex
+	// (N=1) to semaphore (N>1 for a registered queue) cannot live in a single
+	// statement: enforcing "at most N holders" needs a serialisation point that
+	// a statement's own snapshot cannot provide -- two concurrent claims could
+	// each read "one slot free" and both insert, silently exceeding the limit.
+	// The serialisation point is the queues row (the capacity), locked FOR
+	// UPDATE before any count of holders.
 	//
-	// This comment used to claim the sublink form was unsafe -- that an
-	// EvalPlanQual recheck re-executes it and a claim for n could update far
-	// more than n. That explanation is wrong, and is corrected here rather
-	// than left in place, because a plausible-sounding false mechanism in a
-	// comment is worse than no comment. Two independent reasons it cannot
-	// happen, on PostgreSQL 16:
+	// Statement 1 (below) reads the candidates and locks them FOR UPDATE SKIP
+	// LOCKED, as before. Its predicate branches on whether the key names a
+	// registered queue. A bare key keeps the NOT EXISTS mutex predicate; a
+	// registered queue uses a snapshot count (< concurrency_limit) that is
+	// deliberately NOT the guarantee -- it only stops a full queue from wasting
+	// a candidate slot. The guarantee is statement 3, re-counted under the lock.
 	//
-	//   - The sublink is uncorrelated, so the planner pulls it up into a
-	//     semi-join. EXPLAIN (ANALYZE, VERBOSE) of the old form shows the
-	//     candidate subquery as the *outer* side of a nested loop, executed
-	//     once (loops=1) and unique-ified through a HashAggregate, with a
-	//     primary-key index scan on the inner side. The UPDATE therefore
-	//     visits exactly the candidate rows and no others. EvalPlanQual can
-	//     only keep or drop a row the UPDATE already visits; it cannot add
-	//     rows to the update set.
-	//   - The sublink's LockRows node takes FOR UPDATE on the candidates
-	//     before the outer UPDATE reaches them, so no concurrent transaction
-	//     can modify those rows mid-statement. EvalPlanQual has nothing to
-	//     fire on.
+	// Statement 2 locks the registered queues' rows in sorted (name) order, so
+	// two claims spanning the same queues in opposite orders cannot deadlock.
 	//
-	// Also checked empirically against the old form: 24,000 claims with 12
-	// concurrent claimers and 10 disrupting transactions committing mid-claim
-	// -- including ones mutating `status`, which the sublink's own WHERE
-	// clause reads -- over candidate sets of 40, 400 and 5010 rows. The most
-	// any single claim ever returned was exactly the limit.
-	//
-	// So the "asked for 3, got 10" observation in IMPROVEMENT-PLAN.md 2.11 is
-	// still unexplained, but it is not this. Do not treat the CTE as the fix
-	// for it.
+	// Statement 3 acquires each candidate's key. A bare key keeps the
+	// ON CONFLICT (key_hash, tenant_id) DO NOTHING that is the whole of today's
+	// mutex; a registered queue re-counts under the lock and inserts a
+	// queue_holders row only if the count admits it. Both arms handle the
+	// re-claim case -- a run re-claiming its own held key after a lost fence.
 	rows, err := tx.QueryContext(ctx, `
-		WITH candidates AS (
-			SELECT id FROM workflow_instances
-			WHERE status = 'ready'
-			  AND next_wake_at <= now()
-			  AND task_queue = ANY($2)
-			ORDER BY priority ASC, created_at
-			LIMIT $3
-			FOR UPDATE SKIP LOCKED
-		)
-		UPDATE workflow_instances w
-		SET status = 'running',
-		    assigned_to = $1,
-		    heartbeat_at = now(),
-		    generation = generation + 1
-		FROM candidates c
-		WHERE w.id = c.id
-		RETURNING w.id, w.def_name, w.def_version, w.status, w.input, w.assigned_to, w.next_wake_at, w.tenant_id, w.created_at, w.error_code, w.error_op, w.generation, COALESCE(w.priority, 0) AS priority, COALESCE(w.trace_id, '') AS trace_id
-	`, workerID, pq.Array(s.taskQueues), limit)
+		SELECT c.id, c.tenant_id, c.concurrency_key, c.concurrency_key_hash, c.registered
+		FROM (
+			SELECT w.id, w.tenant_id, w.concurrency_key, w.concurrency_key_hash,
+			       q.name IS NOT NULL AS registered
+			FROM workflow_instances w
+			LEFT JOIN queues q ON q.tenant_id = w.tenant_id
+			                  AND q.name = w.concurrency_key
+			                  AND q.disabled_at IS NULL
+			WHERE w.status IN ('ready', 'terminating')
+			  AND w.next_wake_at <= now()
+			  AND w.task_queue = ANY($1)
+			  AND (
+			    (q.name IS NULL AND (
+			      w.concurrency_key_hash IS NULL
+			      OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+			                      WHERE (ck.key_hash = w.concurrency_key_hash
+			                        AND ck.tenant_id = w.tenant_id
+			                        AND ck.workflow_id <> w.id)
+			                        AND EXISTS (SELECT 1 FROM workflow_instances wi
+			                                     WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
+			                                       AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')))
+			    ))
+			    OR
+			    (q.name IS NOT NULL AND (
+			      (
+			        (SELECT count(*) FROM queue_holders qh
+			          WHERE qh.tenant_id = w.tenant_id
+			            AND qh.queue_name = q.name
+			            AND qh.workflow_id <> w.id
+			            AND EXISTS (SELECT 1 FROM workflow_instances wi
+			                         WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
+			                           AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))) < q.concurrency_limit
+			      )
+			      AND (
+			        q.rate_limit IS NULL OR
+			        (SELECT count(*) FROM queue_rate_tokens qrt
+			          WHERE qrt.tenant_id = w.tenant_id
+			            AND qrt.queue_name = q.name
+			            AND qrt.expires_at > now()) < q.rate_limit
+			      )
+			    ))
+			  )
+			ORDER BY w.priority ASC, w.created_at
+			LIMIT $2
+			FOR UPDATE OF w SKIP LOCKED
+		) c
+	`, pq.Array(s.taskQueues), limit)
 	if err != nil {
-		return nil, fmt.Errorf("claim workflows: %w", err)
+		return nil, fmt.Errorf("claim workflows: select candidates: %w", err)
 	}
-	defer rows.Close()
+	var cands []claimCandidate
+	for rows.Next() {
+		var c claimCandidate
+		if err := rows.Scan(&c.id, &c.tenantID, &c.key, &c.hash, &c.registered); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("claim workflows: scan candidate: %w", err)
+		}
+		cands = append(cands, c)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("claim workflows: candidates rows: %w", err)
+	}
+	rows.Close()
 
-	wfs, err := scanClaimedWorkflows(rows)
+	// Statement 2: lock the registered queues among the candidate keys, sorted.
+	limits, err := s.lockRegisteredQueueLimits(ctx, tx, cands)
 	if err != nil {
 		return nil, err
 	}
-	if err := rows.Err(); err != nil {
+
+	// Statement 3: acquire each candidate's key and keep the winners.
+	var ids []string
+	for _, c := range cands {
+		ok, err := s.acquireCandidateConcurrencyKey(ctx, tx, c, limits, workerID)
+		if err != nil {
+			return nil, err
+		}
+		logClaimKeyDecision(s.log(), c, ok)
+		if ok {
+			ids = append(ids, c.id)
+		}
+	}
+	if len(ids) == 0 {
+		_ = tx.Rollback()
+		return nil, nil
+	}
+
+	// The UPDATE is the same as before, except the winners were already decided
+	// above, so the predicate is just membership in ids.
+	rows2, err := tx.QueryContext(ctx, `
+		UPDATE workflow_instances w
+		SET status = 'running',
+		    signal_seq_at_claim = signal_seq,
+		    signal_consumed_at_claim = signal_consumed_seq,
+		    assigned_to = $1,
+		    heartbeat_at = now(),
+		    started_at = COALESCE(started_at, now()),
+		    generation = generation + 1
+		WHERE w.id = ANY($2)
+		RETURNING w.id, w.def_name, w.def_version, w.status, w.input, w.assigned_to, w.next_wake_at, w.tenant_id, w.created_at, w.error_code, w.error_op, w.generation, COALESCE(w.priority, 0) AS priority, COALESCE(w.trace_id, '') AS trace_id, COALESCE(w.pending_terminal_status, '') AS pending_terminal_status
+	`, workerID, pq.Array(ids))
+	if err != nil {
+		return nil, fmt.Errorf("claim workflows: update: %w", err)
+	}
+	defer rows2.Close()
+
+	wfs, err := scanClaimedWorkflows(rows2)
+	if err != nil {
+		return nil, err
+	}
+	if err := rows2.Err(); err != nil {
 		return nil, fmt.Errorf("claim workflows rows: %w", err)
 	}
 
@@ -110,6 +316,220 @@ func (s *PostgresStore) ClaimWorkflows(ctx context.Context, workerID string, lim
 		return nil, nil
 	}
 	return s.finishClaim(ctx, tx, workerID, limit, wfs)
+}
+
+// lockRegisteredQueueLimits locks, in sorted (name) order, the rows of the
+// registered non-disabled queues named by the candidates, and returns each
+// name's concurrency_limit. The locks are held until the transaction commits,
+// which is what makes the count in acquireCandidateConcurrencyKey see a stable
+// number of holders: no other claim can be between its own count and insert for
+// the same queue while this transaction holds the queue's row.
+func (s *PostgresStore) lockRegisteredQueueLimits(ctx context.Context, tx *sql.Tx, cands []claimCandidate) (map[string]registeredQueueLimits, error) {
+	limits := map[string]registeredQueueLimits{}
+	seen := map[string]bool{}
+	var keys []string
+	for _, c := range cands {
+		if c.registered && !seen[*c.key] {
+			seen[*c.key] = true
+			keys = append(keys, *c.key)
+		}
+	}
+	if len(keys) == 0 {
+		return limits, nil
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT name, concurrency_limit, rate_limit, rate_period_seconds, worker_concurrency FROM queues
+		WHERE tenant_id = $1 AND name = ANY($2) AND disabled_at IS NULL
+		ORDER BY name
+		FOR UPDATE
+	`, s.tenantID, pq.Array(keys))
+	if err != nil {
+		return nil, fmt.Errorf("claim workflows: lock registered queues: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var ql registeredQueueLimits
+		var rateLimit, ratePeriodSeconds, workerConcurrency sql.NullInt64
+		if err := rows.Scan(&name, &ql.concurrencyLimit, &rateLimit, &ratePeriodSeconds, &workerConcurrency); err != nil {
+			return nil, fmt.Errorf("claim workflows: scan queue limit: %w", err)
+		}
+		ql.rateLimit, ql.ratePeriodSeconds = nullInt64Pair(rateLimit, ratePeriodSeconds)
+		ql.workerConcurrency = nullableIntFromSQL(workerConcurrency)
+		limits[name] = ql
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("claim workflows: queue limits rows: %w", err)
+	}
+	return limits, nil
+}
+
+// acquireCandidateConcurrencyKey acquires one candidate's concurrency key and
+// reports whether the candidate is claimed. A bare key keeps the mutex path; a
+// registered queue uses the semaphore path, safe because the queue's row was
+// locked by lockRegisteredQueueLimits. cleat#1918: a registered queue's rate
+// limit, if it has one, is a second and independent gate checked under the
+// same lock. cleat#1917: workerID's own per-worker cap, if the queue has one,
+// is a third -- all three must admit for the candidate to be claimed.
+func (s *PostgresStore) acquireCandidateConcurrencyKey(ctx context.Context, tx *sql.Tx, c claimCandidate, limits map[string]registeredQueueLimits, workerID string) (bool, error) {
+	if !c.registered {
+		if c.hash == nil {
+			return true, nil // no key at all
+		}
+		// Bare key: mutex via ON CONFLICT, exactly the old acquired-CTE shape.
+		var returned string
+		err := tx.QueryRowContext(ctx, `
+			INSERT INTO concurrency_keys (key_hash, key_text, workflow_id, expires_at, tenant_id)
+			VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5)
+			ON CONFLICT (key_hash, tenant_id) DO NOTHING
+			RETURNING workflow_id
+		`, c.hash, c.key, c.id, claimedKeyTTL.Seconds(), c.tenantID).Scan(&returned)
+		if err == nil {
+			return true, nil // this call took the key
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, fmt.Errorf("claim workflows: acquire bare key: %w", err)
+		}
+		// Conflict: either this run already holds the key (a re-claim after a
+		// lost fence) or another run took it. Only the first is claimable.
+		var holder string
+		err = tx.QueryRowContext(ctx,
+			`SELECT workflow_id FROM concurrency_keys WHERE key_hash = $1 AND tenant_id = $2`,
+			c.hash, c.tenantID).Scan(&holder)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil // released between insert and read; not ours
+		}
+		if err != nil {
+			return false, fmt.Errorf("claim workflows: concurrency key holder: %w", err)
+		}
+		return holder == c.id, nil
+	}
+
+	// Registered queue: semaphore under the queues lock.
+	ql, ok := limits[*c.key]
+	if !ok {
+		// The candidate predicate saw it registered, but the lock step did not
+		// (disabled or deleted between the two statements). Not claimable; the
+		// next poll re-evaluates it, this time as a bare key.
+		return false, nil
+	}
+	// Does this workflow already hold a live slot on this queue, and whose
+	// worker_id does it carry? cleat#1917 decision 4: a holder owned by the
+	// CLAIMING worker is the original re-claim shortcut, unchanged. A holder
+	// that exists but belongs to nobody (pre-#1917 row) or to a DIFFERENT
+	// worker (a parked run waking and being claimed elsewhere) is not free --
+	// it must pass every gate below for the claiming worker, and if admitted,
+	// the holder MOVES to it rather than a second row being inserted.
+	var existingWorker sql.NullString
+	holderExists := true
+	err := tx.QueryRowContext(ctx, `
+		SELECT worker_id FROM queue_holders
+		WHERE tenant_id = $1 AND queue_name = $2 AND workflow_id = $3
+	`, c.tenantID, *c.key, c.id).Scan(&existingWorker)
+	if errors.Is(err, sql.ErrNoRows) {
+		holderExists = false
+	} else if err != nil {
+		return false, fmt.Errorf("claim workflows: queue self-hold check: %w", err)
+	}
+	if holderExists && existingWorker.Valid && existingWorker.String == workerID {
+		// Re-claim: a run that already holds its own slot on THIS worker claims
+		// again after a lost fence, without counting against any limit or
+		// taking a new rate token -- it is continuing an admission already
+		// granted, not a new one.
+		return true, nil
+	}
+	// A fresh admission, or a holder about to move to this worker. Either way,
+	// count OTHER holders: `<> $3` excludes this workflow's own row so a move
+	// (which changes no total) is not double-counted against the global cap.
+	var held int
+	err = tx.QueryRowContext(ctx, `
+		SELECT count(*) FROM queue_holders qh
+		WHERE qh.tenant_id = $1 AND qh.queue_name = $2 AND qh.workflow_id <> $3
+		  AND EXISTS (SELECT 1 FROM workflow_instances wi
+		               WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
+		                 AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
+	`, c.tenantID, *c.key, c.id).Scan(&held)
+	if err != nil {
+		return false, fmt.Errorf("claim workflows: count queue holders: %w", err)
+	}
+	if held >= ql.concurrencyLimit {
+		return false, nil // at capacity
+	}
+	// cleat#1917: the per-worker cap, if declared, is checked under this same
+	// lock -- a free global slot does not admit past a worker already at its
+	// own cap. Unlike the count above, this one does not need to exclude this
+	// workflow's own row: the same-worker case already returned true above, so
+	// any existing holder for this workflow belongs to nobody or to a
+	// DIFFERENT worker and cannot match `worker_id = workerID`.
+	if ql.workerConcurrency != nil {
+		var workerHeld int
+		err = tx.QueryRowContext(ctx, `
+			SELECT count(*) FROM queue_holders qh
+			WHERE qh.tenant_id = $1 AND qh.queue_name = $2 AND qh.worker_id = $3
+			  AND EXISTS (SELECT 1 FROM workflow_instances wi
+			               WHERE wi.id = qh.workflow_id AND wi.tenant_id = qh.tenant_id
+			                 AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))
+		`, c.tenantID, *c.key, workerID).Scan(&workerHeld)
+		if err != nil {
+			return false, fmt.Errorf("claim workflows: count worker queue holders: %w", err)
+		}
+		if workerHeld >= *ql.workerConcurrency {
+			return false, nil // this worker is at its own cap
+		}
+	}
+	// cleat#1918: the rate limit, if declared, is checked under this same
+	// queues-row lock -- independent of the concurrency and worker checks
+	// above. It applies only to a genuinely fresh admission: a holder that
+	// already exists consumed its rate token when it was first admitted, and
+	// moving it to a new worker is not a new admission.
+	if !holderExists && ql.rateLimit != nil {
+		var rateHeld int
+		err = tx.QueryRowContext(ctx, `
+			SELECT count(*) FROM queue_rate_tokens qrt
+			WHERE qrt.tenant_id = $1 AND qrt.queue_name = $2 AND qrt.expires_at > now()
+		`, c.tenantID, *c.key).Scan(&rateHeld)
+		if err != nil {
+			return false, fmt.Errorf("claim workflows: count queue rate tokens: %w", err)
+		}
+		if rateHeld >= *ql.rateLimit {
+			return false, nil // rate-limited
+		}
+	}
+	if holderExists {
+		// Move: the slot already exists (owned by nobody or by a different
+		// worker). Refresh its lease and reassign it to the claiming worker.
+		res, err := tx.ExecContext(ctx, `
+			UPDATE queue_holders
+			SET worker_id = $4, expires_at = now() + make_interval(secs => $5)
+			WHERE tenant_id = $1 AND queue_name = $2 AND workflow_id = $3
+		`, c.tenantID, *c.key, c.id, workerID, claimedKeyTTL.Seconds())
+		if err != nil {
+			return false, fmt.Errorf("claim workflows: move queue holder: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		return n > 0, nil
+	}
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO queue_holders (tenant_id, queue_name, workflow_id, expires_at, worker_id)
+		VALUES ($1, $2, $3, now() + make_interval(secs => $4), $5)
+		ON CONFLICT (tenant_id, queue_name, workflow_id) DO NOTHING
+	`, c.tenantID, *c.key, c.id, claimedKeyTTL.Seconds(), workerID)
+	if err != nil {
+		return false, fmt.Errorf("claim workflows: acquire queue holder: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return false, nil
+	}
+	if ql.rateLimit != nil {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO queue_rate_tokens (tenant_id, queue_name, workflow_id, expires_at)
+			VALUES ($1, $2, $3, now() + make_interval(secs => $4))
+		`, c.tenantID, *c.key, c.id, *ql.ratePeriodSeconds); err != nil {
+			return false, fmt.Errorf("claim workflows: record rate token: %w", err)
+		}
+	}
+	return true, nil
 }
 
 // ClaimStickyWorkflows atomically claims up to limit runnable workflow instances
@@ -133,14 +553,25 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 			  AND next_wake_at <= now()
 			  AND sticky_worker_id = $1
 			  AND task_queue = ANY($2)
+  AND (workflow_instances.concurrency_key_hash IS NULL
+       OR NOT EXISTS (SELECT 1 FROM concurrency_keys ck
+                       WHERE (ck.key_hash = workflow_instances.concurrency_key_hash
+                         AND ck.tenant_id = workflow_instances.tenant_id
+                         AND ck.workflow_id <> workflow_instances.id)
+                         AND EXISTS (SELECT 1 FROM workflow_instances wi
+                                      WHERE wi.id = ck.workflow_id AND wi.tenant_id = ck.tenant_id
+                                        AND wi.status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled'))))
 			ORDER BY priority ASC, created_at
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
 		)
 		UPDATE workflow_instances w
 		SET status = 'running',
+		    signal_seq_at_claim = signal_seq,
+		    signal_consumed_at_claim = signal_consumed_seq,
 		    assigned_to = $1,
 		    heartbeat_at = now(),
+		    started_at = COALESCE(started_at, now()),
 		    generation = generation + 1
 		FROM candidates c
 		WHERE w.id = c.id
@@ -191,6 +622,18 @@ func (s *PostgresStore) ClaimStickyWorkflows(ctx context.Context, workerID strin
 // LoadEventHistory returns all event records for a workflow, ordered by step.
 
 func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerID string, generation int64, defName string, defVersion int, newInput json.RawMessage, newEvents []EventRecord, result string, queryState map[string]string, priority int) (string, error) {
+	// Coerce, as FinalizeWorkflowSegment does. The result column is jsonb on
+	// PostgreSQL and JSON on MySQL, and the raw string is not guaranteed to be
+	// either -- a workflow that continues as new never returned a value, so the
+	// result here is "", which is not valid JSON. Writing it raw failed the
+	// whole run with
+	//
+	//	pq: invalid input syntax for type json (22P02)
+	//
+	// so continue-as-new did not work at all on PostgreSQL. coerceResultJSON
+	// existed for exactly this and was called from one path out of three.
+	resultJSON := coerceResultJSON(ctx, s.log(), currentRunID, result)
+
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: begin: %w", err)
@@ -206,23 +649,51 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 	// Use the store's tenant scope to preserve tenant isolation.
 	var newRunID string
 	err = tx.QueryRowContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, continued_from, parent_workflow_id, parent_close_policy)
+		-- parent_workflow_id and parent_close_policy are INHERITED from the run
+		-- being continued, not left NULL. A child that continues as new is
+		-- still its parent's child: enforceParentClosePolicy selects on
+		-- parent_workflow_id and NULL matches nothing, so a TERMINATE parent
+		-- left every continued iteration running while reporting that it had
+		-- stopped its child (cleat#955). Measured against a plain sibling
+		-- child as a control -- that one WAS stopped by the same call, so the
+		-- policy was working and only the link was missing.
 		VALUES (gen_random_uuid(), $1, $2, 'ready', $3,
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2), 'default'),
-			$4, $5, now() - INTERVAL '1 millisecond')
+		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $4), 'default'),
+			$4, $5, now() - INTERVAL '1 millisecond', $6,
+			(SELECT parent_workflow_id FROM workflow_instances WHERE id = $6),
+			(SELECT parent_close_policy FROM workflow_instances WHERE id = $6))
 		RETURNING id
-		`, defName, defVersion, newInput, s.tenantID, priority).Scan(&newRunID)
+		`, defName, defVersion, newInput, s.tenantID, priority, currentRunID).Scan(&newRunID)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: start new run: %w", err)
 	}
 
 	// Complete the current run.
 	qsJSON := marshalQueryState(queryState)
+	// `assigned_to = NULL` is the exclusion, not the WHERE clause.
+	//
+	// Nothing here bumps `generation`. Claiming does, so `generation = $5`
+	// excludes a caller from an EARLIER claim and `assigned_to = $2` excludes a
+	// DIFFERENT worker -- but two callers holding the SAME claim are
+	// indistinguishable to both. What refuses the second is that the first set
+	// assigned_to to NULL, so `assigned_to = $2` no longer matches.
+	//
+	// Measured, not asserted: delete the generation predicate and
+	// TestASecondContinueAsNewOnTheSameClaimIsRefused_MultiBackend still
+	// passes; keep assigned_to instead of NULLing it and the second call
+	// SUCCEEDS, leaving the predecessor with two successors -- a forked chain.
+	//
+	// That second mutation is the cheapest implementation of decision 4, a
+	// durable record of which worker ran a workflow. CLAUDE.md 3.112 records
+	// the same clause doing the same unnamed job in the finalize path, where a
+	// test named for the marker predicate stayed green with that predicate
+	// deleted. cleat#1175.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
+		SET status = 'done', result = $3, completed_at = now(), completed_by = assigned_to, assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2 AND generation = $5
-	`, currentRunID, workerID, result, qsJSON, generation)
+	`, currentRunID, workerID, resultJSON, qsJSON, generation)
 	if err != nil {
 		return "", fmt.Errorf("continue as new: complete old run: %w", err)
 	}
@@ -242,10 +713,9 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 		return "", err
 	}
 
-	// Best-effort cleanup after commit.
-	_ = s.ClearStickyWorker(context.Background(), currentRunID)
-	_ = s.ReleaseWorkflowConcurrencyKeys(context.Background(), currentRunID)
-	s.enforceParentClosePolicy(context.Background(), currentRunID)
+	releaseWorkflowResources(s.log(), s, currentRunID)
+	s.enforceParentClosePolicy(context.Background(), currentRunID,
+		fmt.Sprintf("parent continued as new (run %s)", newRunID))
 
 	return newRunID, nil
 }
@@ -256,13 +726,15 @@ func (s *PostgresStore) ContinueAsNew(ctx context.Context, currentRunID, workerI
 // FailWorkflow / ReleaseWorkflow call.
 //
 // finalStatus must be one of:
-//   - "done"   — marks the workflow as completed with the given result
-//   - "failed" — marks the workflow as failed with the given error info
-//   - "ready"  — returns the workflow to the ready queue (suspend)
+//   - "done"  — marks the workflow as completed with the given result
+//   - "ready" — returns the workflow to the ready queue (suspend)
+//
+// There is no "failed" here. A real failure goes through FailWorkflow, not
+// this method or the finalize_workflow_status procedure it calls -- cleat#1973.
 //
 // Fields not relevant to the chosen status are ignored.
 
-func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+func (s *PostgresStore) finalizeWorkflowSegmentInner(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
 	if !validFinalStatus(finalStatus) {
 		return fmt.Errorf("finalize workflow: unknown final status: %s", finalStatus)
 	}
@@ -310,18 +782,22 @@ func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, work
 
 	// Best-effort cleanup for terminal statuses (post-commit).
 	if finalStatus == "done" || finalStatus == "failed" {
-		_ = s.ClearStickyWorker(context.Background(), runID)
-		_ = s.ReleaseWorkflowConcurrencyKeys(context.Background(), runID)
-		s.enforceParentClosePolicy(context.Background(), runID)
+		releaseWorkflowResources(s.log(), s, runID)
+		s.enforceParentClosePolicy(context.Background(), runID, parentOutcomeMessage(finalStatus))
 	}
 
 	return nil
 }
 
 // validFinalStatus returns true for status values accepted by finalize_workflow_status.
+//
+// No "failed" here: the procedure's 'failed' arm was dead code -- nothing
+// ever called it that way -- and was removed in migration
+// .../101_the_finalize_procedure_stops_deleting_failed_history.sql
+// (cleat#1973). A real failure goes through FailWorkflow instead.
 func validFinalStatus(status string) bool {
 	switch status {
-	case "done", "failed", "ready", "suspended":
+	case "done", "ready", "suspended":
 		return true
 	}
 	return false
@@ -330,6 +806,18 @@ func validFinalStatus(status string) bool {
 // AppendEventHistory appends a single event to the history.
 
 func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, workerID string, generation int64, result string, queryState map[string]string) error {
+	// Coerce, as FinalizeWorkflowSegment does. The result column is jsonb on
+	// PostgreSQL and JSON on MySQL, and the raw string is not guaranteed to be
+	// either -- a workflow that continues as new never returned a value, so the
+	// result here is "", which is not valid JSON. Writing it raw failed the
+	// whole run with
+	//
+	//	pq: invalid input syntax for type json (22P02)
+	//
+	// so continue-as-new did not work at all on PostgreSQL. coerceResultJSON
+	// existed for exactly this and was called from one path out of three.
+	resultJSON := coerceResultJSON(ctx, s.log(), workflowID, result)
+
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("complete workflow: begin: %w", err)
@@ -337,11 +825,29 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	defer tx.Rollback()
 
 	qsJSON := marshalQueryState(queryState)
+	// `assigned_to = NULL` is the exclusion, not the WHERE clause.
+	//
+	// Nothing here bumps `generation`. Claiming does, so `generation = $5`
+	// excludes a caller from an EARLIER claim and `assigned_to = $2` excludes a
+	// DIFFERENT worker -- but two callers holding the SAME claim are
+	// indistinguishable to both. What refuses the second is that the first set
+	// assigned_to to NULL, so `assigned_to = $2` no longer matches.
+	//
+	// Measured, not asserted: delete the generation predicate and
+	// TestASecondContinueAsNewOnTheSameClaimIsRefused_MultiBackend still
+	// passes; keep assigned_to instead of NULLing it and the second call
+	// SUCCEEDS, leaving the predecessor with two successors -- a forked chain.
+	//
+	// That second mutation is the cheapest implementation of decision 4, a
+	// durable record of which worker ran a workflow. CLAUDE.md 3.112 records
+	// the same clause doing the same unnamed job in the finalize path, where a
+	// test named for the marker predicate stayed green with that predicate
+	// deleted. cleat#1175.
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'done', result = $3, completed_at = now(), assigned_to = NULL, query_state = $4
+		SET status = 'done', result = $3, completed_at = now(), completed_by = assigned_to, assigned_to = NULL, query_state = $4
 		WHERE id = $1 AND assigned_to = $2 AND generation = $5
-	`, workflowID, workerID, result, qsJSON, generation)
+	`, workflowID, workerID, resultJSON, qsJSON, generation)
 	if err != nil {
 		return err
 	}
@@ -351,41 +857,26 @@ func (s *PostgresStore) CompleteWorkflow(ctx context.Context, workflowID, worker
 	}
 	if n == 0 {
 		// Another worker now owns this workflow. Roll back rather than
-		// commit: the idempotency-key write and post-commit cleanup below
-		// are not safe to run on the new owner's behalf.
+		// commit: the post-commit cleanup below is not safe to run on the
+		// new owner's behalf.
 		return ErrFenceLost
 	}
 
-	// Record idempotency result within the transaction (best-effort).
-	//
-	// AND tenant_id = $3, not workflow_id alone: this UPDATE ran unscoped by
-	// tenant, so it matched any row across every tenant whose workflow_id
-	// happened to equal this one. workflow_id is generated per call
-	// (uuid.New() when the caller supplies none) so a same-tenant collision
-	// is astronomically unlikely, but a caller-supplied runID is not
-	// guaranteed unique *across* tenants the way it is guaranteed unique
-	// *within* one (StartNewRun's idempotency_keys primary key is now
-	// (key_hash, tenant_id), migrations/postgres/010). s.tenantID is set
-	// on this tx already -- beginTxWithRLS calls setRLSOnTx before any
-	// caller reaches here -- so this is a Go-level filter matching the RLS
-	// policy's own scope, not a new source of truth for it.
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE idempotency_keys SET result = $2 WHERE workflow_id = $1 AND tenant_id = $3`,
-		workflowID, result, s.tenantID); err != nil {
-		s.log().WarnContext(ctx, "idempotency update failed", "error", err)
-	}
+	// No idempotency write on the success path. idempotency_keys.result was
+	// written here and read nowhere, so cleat#1049 dropped the column; a
+	// completed run now records nothing on that table. The failure path is
+	// unchanged -- FailWorkflow and MoveToDeadLetterQueue still write
+	// error_msg, still filtered `AND tenant_id`, which is where the Finding
+	// S1 tenant-scope guard now lives.
 
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 
-	// Best-effort: clear sticky worker assignment (Feature 10).
-	_ = s.ClearStickyWorker(context.Background(), workflowID)
-	// Best-effort: release all concurrency keys (Feature 5).
-	_ = s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
 
 	// Enforce ParentClosePolicy on children.
-	s.enforceParentClosePolicy(context.Background(), workflowID)
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(statusDone))
 
 	return nil
 }
@@ -407,7 +898,7 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 		    error_code = $4,
 		    error_op = $5,
 		    completed_at = now(),
-		    assigned_to = NULL,
+		    completed_by = assigned_to, assigned_to = NULL,
 		    query_state = $6
 		WHERE id = $1 AND assigned_to = $2 AND generation = $7
 	`, workflowID, workerID, errorMsg, errorCode, errorOp, string(qsJSON), generation)
@@ -440,13 +931,10 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 		return err
 	}
 
-	// Best-effort: clear sticky worker assignment (Feature 10).
-	s.ClearStickyWorker(context.Background(), workflowID)
-	// Best-effort: release all concurrency keys (Feature 5).
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
 
 	// Enforce ParentClosePolicy on children.
-	s.enforceParentClosePolicy(context.Background(), workflowID)
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(statusFailed))
 
 	return nil
 }
@@ -466,43 +954,229 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 //
 // It stays void: the contract with callers has not changed, only whether a
 // failure is observable.
-func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID string) {
+//
+// outcomeMsg names what happened to the closing parent -- cleat#1978. It
+// becomes the TERMINATE child's error_msg, replacing the hardcoded "parent
+// workflow terminated" that used to run regardless of why the parent
+// actually closed (completion, failure, dead-lettering, an operator's
+// TerminateWorkflow call, or continue-as-new all reach here). Build it with
+// parentOutcomeMessage.
+func (s *PostgresStore) enforceParentClosePolicy(ctx context.Context, parentWorkflowID, outcomeMsg string) {
+	s.enforceParentClosePolicyAt(ctx, parentWorkflowID, 0, outcomeMsg)
+}
+
+// parentOutcomeMessage describes, for a TERMINATE child's error_msg, what
+// happened to the parent that closed it -- cleat#1978. Must stay in sync with
+// the five terminal values workflow_instances.status actually takes; see
+// enforceParentClosePolicyAt's own census of them, a few lines below.
+func parentOutcomeMessage(parentStatus string) string {
+	switch parentStatus {
+	case statusDone:
+		return "parent workflow completed"
+	case statusFailed:
+		return "parent workflow failed"
+	case statusDeadLettered:
+		return "parent workflow was dead-lettered"
+	case statusTerminated:
+		return "parent workflow was terminated"
+	case statusCancelled:
+		return "parent workflow was cancelled"
+	default:
+		return "parent workflow closed (status " + parentStatus + ")"
+	}
+}
+
+// enforceParentClosePolicyAt is enforceParentClosePolicy with the recursion
+// depth carried explicitly. See cascadeIntoClosedChildren.
+func (s *PostgresStore) enforceParentClosePolicyAt(ctx context.Context, parentWorkflowID string, depth int, outcomeMsg string) {
 	steps := []struct {
 		policy string
 		query  string
+		args   []any
 	}{
+		// Both arms fence the child out. `generation = generation + 1` and
+		// `assigned_to = NULL` are not bookkeeping: without them a child that a
+		// worker is currently holding overwrites its own termination. The
+		// worker's fence is (assigned_to, generation), finalize_workflow_status
+		// checks it, and an UPDATE that changes only the status leaves that
+		// fence valid -- so the next FinalizeWorkflowSegment matches, sets the
+		// child back to 'ready' or on to 'done', and the termination is gone.
+		// The error_msg survives, because the 'done' branch does not clear it,
+		// leaving a row that says status='done' AND 'parent workflow
+		// terminated'. Measured 2026-09-06 before this line existed: 4 runs of
+		// 4, every TERMINATE child completed anyway carrying that message.
+		//
+		// The defer-phase arm below always had the bump, for the same reason
+		// ExpireDeferPhases has it. Only this arm lacked it -- and this is the
+		// arm most children take, since it is the one for children that owe no
+		// cleanup.
+		//
+		// Two TERMINATE arms, and the predicate is what splits them:
+		// a child that owes cleanup goes to 'terminating' with the outcome
+		// recorded, and is failed later by FinalizeDeferPhase once its
+		// defers have run. IMPROVEMENT-PLAN 3.114.
+		//
+		// `AND NOT` here rather than a status filter, so the two arms
+		// partition the children exactly. deferPhaseOwedSQL is never NULL --
+		// it is an IN over a NOT NULL column ANDed with an IS NOT NULL and an
+		// EXISTS -- so NOT is total and no child falls between them.
+		// WHAT COUNTS AS ALREADY-TERMINAL HERE, and why the list is five values
+		// rather than two.
+		//
+		// It was `NOT IN ('done', 'failed')`, and the engine writes three more
+		// terminal statuses than that: 'dead_lettered', 'terminated' and
+		// 'cancelled'. So a dead-lettered child MATCHED, and a parent closing with
+		// TERMINATE overwrote it (cleat#1227, measured on all three dialects):
+		//
+		//	BEFORE  status=dead_lettered  error_msg="retries exhausted"           error_code=E_RETRY
+		//	AFTER   status=failed         error_msg="parent workflow terminated"  error_code=E_RETRY
+		//
+		// (That AFTER line is what this arm wrote before cleat#1978; TERMINATE
+		// writes 'terminated' now, not 'failed' -- see the SET clause below. The
+		// lesson the example carries is unchanged: an incomplete exclusion list
+		// lets a settled child's status get overwritten at all.)
+		//
+		// Three losses in one UPDATE, as it stood then. The run left the
+		// dead-letter queue; its original failure reason was replaced; and
+		// error_code was not in the SET list, so the surviving row reported TWO
+		// DIFFERENT CAUSES at once. That last part is what made it worse than a
+		// plain overwrite -- nothing about the result looked wrong.
+		//
+		// 'terminating' is deliberately NOT here. A child mid-shutdown is not
+		// terminal, and the two arms below split on deferPhaseOwedSQL precisely to
+		// give it a defer phase rather than a terminal write.
+		//
+		// 'cancelled' IS one of the five values in the NOT IN list two lines below
+		// -- CancelWorkflow (preemptivelySettle) writes it to
+		// workflow_instances.status, exactly as TerminateWorkflow writes
+		// 'terminated'. This comment claimed the opposite ("nothing writes it") for
+		// months, directly contradicted by the SQL it sat above and by
+		// CancelWorkflow's own doc comment in db.go -- found stale while building
+		// cleat#1997's model of every status writer, and by cleat-review's
+		// independent read of the same code the same day. There is no CHECK
+		// constraint to consult, so the vocabulary has to come from what
+		// production actually WRITES, and the whole of it is eight values:
+		//
+		//	cancelled  dead_lettered  done  failed  ready  running  terminated  terminating
+		//
+		// 'suspended' is the sharpest illustration of a name that is NOT one of them.
+		// Thirty-five predicates read `status IN ('ready', 'suspended')` and no
+		// statement anywhere sets it -- a suspension is written as 'ready' with a
+		// next_wake_at, so those predicates are correct and merely carry a dead
+		// branch. A name can be part of this codebase's vocabulary without ever
+		// being part of its data, and with no CHECK constraint nothing catches
+		// that. 'completed', 'pending', 'rejected' and 'resolved' are the same
+		// shape from the other side: real statuses, of promises and schedules,
+		// not of this table.
+		//
+		// REQUEST_CANCEL gets the same predicate though it overwrites nothing --
+		// it only sets cancellation_requested. Setting that flag on a run that has
+		// already finished is not data loss today, but it leaves a latent
+		// instruction on a row a reprocess could pick up, and one rule stated once
+		// is what stops the four-way split cleat#1227 is really about.
 		{"TERMINATE", `
 		UPDATE workflow_instances
-		SET status = 'failed', error_msg = 'parent workflow terminated'
+		SET status = 'terminated', error_msg = $2, error_op = 'parent_close', error_code = NULL,
+		    pending_terminal_status = NULL, defer_phase_deadline = NULL,
+		    completed_at = now(),
+		    completed_by = assigned_to, assigned_to = NULL, generation = generation + 1
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'TERMINATE'
-		  AND status NOT IN ('done', 'failed')
-	`},
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
+		  AND NOT ` + deferPhaseOwedSQL + `
+	`, []any{parentWorkflowID, outcomeMsg}},
+		{"TERMINATE (defer phase)", `
+		UPDATE workflow_instances
+		SET status = '` + statusTerminating + `',
+		    pending_terminal_status = 'terminated',
+		    defer_phase_deadline = ` + deferPhaseDeadlinePostgres + `,
+		    error_msg = $2, error_op = 'parent_close', error_code = NULL,
+		    next_wake_at = now(),
+		    assigned_to = NULL,
+		    generation = generation + 1
+		WHERE parent_workflow_id = $1
+		  AND parent_close_policy = 'TERMINATE'
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
+		  AND ` + deferPhaseOwedSQL + `
+	`, []any{parentWorkflowID, outcomeMsg}},
 		{"REQUEST_CANCEL", `
 		UPDATE workflow_instances
 		SET cancellation_requested = true
 		WHERE parent_workflow_id = $1
 		  AND parent_close_policy = 'REQUEST_CANCEL'
-		  AND status NOT IN ('done', 'failed')
-	`},
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
+	`, []any{parentWorkflowID}},
+	}
+
+	// Collected before the UPDATE: see releaseTerminatedChildren for why not
+	// RETURNING. A failure here costs the release, not the close policy.
+	terminated, err := s.childrenClosedByTerminate(ctx, parentWorkflowID)
+	if err != nil {
+		s.log().WarnContext(ctx, "enforceParentClosePolicy: could not list TERMINATE children; their concurrency keys and sticky-worker assignments stay held until TTL",
+			"parent_workflow_id", parentWorkflowID, "error", err)
 	}
 
 	for _, step := range steps {
-		if err := s.runParentClosePolicyStep(ctx, step.query, parentWorkflowID); err != nil {
+		if err := s.runParentClosePolicyStep(ctx, step.query, step.args...); err != nil {
 			s.log().WarnContext(ctx, "enforceParentClosePolicy failed; children of a closed parent are unaffected by its close policy",
 				"policy", step.policy, "parent_workflow_id", parentWorkflowID, "error", err)
+			if step.policy == "TERMINATE" {
+				terminated = nil
+			}
 		}
 	}
+
+	releaseTerminatedChildren(s.log(), s, terminated)
+	// A child this cascade just closed was, by construction, TERMINATEd --
+	// the plain TERMINATE arm's children are the only ones passed here (see
+	// this function's own doc comment on cascadeIntoClosedChildren's caller).
+	// So its own outcome, for ITS children's error_msg, is always "parent
+	// workflow was terminated" -- not outcomeMsg, which describes the ROOT
+	// parent's outcome and would be wrong for every level below it.
+	childOutcomeMsg := parentOutcomeMessage(statusTerminated)
+	cascadeIntoClosedChildren(s.log(), depth, terminated, func(id string, d int) {
+		s.enforceParentClosePolicyAt(ctx, id, d, childOutcomeMsg)
+	})
 }
 
-func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query, parentWorkflowID string) error {
+// terminateChildrenQuery selects the children the TERMINATE arm is about to
+// fail, so their resources can be released after it commits. Its WHERE must
+// stay identical to that UPDATE's, or the two disagree about which children
+// were closed.
+//
+// Which is why it carries `AND NOT deferPhaseOwedSQL` too, and why that matters
+// more than the symmetry: a child entering a defer phase is NOT terminal yet,
+// and releasing its concurrency keys here would be the exact pre-emption
+// IMPROVEMENT-PLAN 3.112 removed from TerminateWorkflow -- the host dropping
+// the resource before the defer that releases it has run. Those children are
+// released by FinalizeDeferPhase instead.
+func (s *PostgresStore) childrenClosedByTerminate(ctx context.Context, parentWorkflowID string) ([]string, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id FROM workflow_instances
+		WHERE parent_workflow_id = $1
+		  AND parent_close_policy = 'TERMINATE'
+		  AND status NOT IN ('done', 'failed', 'dead_lettered', 'terminated', 'cancelled')
+		  AND NOT `+deferPhaseOwedSQL+`
+	`, parentWorkflowID)
+	if err != nil {
+		return nil, err
+	}
+	return scanWorkflowIDs(rows)
+}
+
+func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query string, args ...any) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, query, parentWorkflowID); err != nil {
+	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -521,7 +1195,7 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = $3, error_code = $4, error_op = $5,
-		    completed_at = now(), assigned_to = NULL
+		    completed_at = now(), completed_by = assigned_to, assigned_to = NULL
 		WHERE id = $1 AND assigned_to = $2 AND generation = $6
 	`, workflowID, workerID, errMsg, errorCode, errorOp, generation)
 	if err != nil {
@@ -552,13 +1226,10 @@ func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, w
 		return err
 	}
 
-	// Best-effort: clear sticky worker assignment (Feature 10).
-	s.ClearStickyWorker(context.Background(), workflowID)
-	// Best-effort: release all concurrency keys (Feature 5).
-	s.ReleaseWorkflowConcurrencyKeys(context.Background(), workflowID)
+	releaseWorkflowResources(s.log(), s, workflowID)
 
 	// Enforce ParentClosePolicy on children.
-	s.enforceParentClosePolicy(context.Background(), workflowID)
+	s.enforceParentClosePolicy(context.Background(), workflowID, parentOutcomeMessage(statusDeadLettered))
 
 	return nil
 }
@@ -574,7 +1245,7 @@ func (s *PostgresStore) RetryWorkflow(ctx context.Context, workflowID string) er
 
 	_, err = tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL,
+		SET status = 'ready', completed_by = assigned_to, assigned_to = NULL, heartbeat_at = NULL,
 		    error_msg = NULL, error_code = NULL, error_op = NULL,
 		    next_wake_at = now()
 		WHERE id = $1 AND status = 'dead_lettered'
@@ -587,6 +1258,19 @@ func (s *PostgresStore) RetryWorkflow(ctx context.Context, workflowID string) er
 }
 
 // ReleaseWorkflow returns a workflow to the queue with a next wake time.
+//
+// This is the other end of the pair described on ReapStaleInstances, and the
+// pairing is invisible from either side alone. The row this writes -- 'ready'
+// or 'terminating', assigned_to NULL, next_wake_at set -- is UNREACHABLE BY THE
+// REAPER, which matches status='running'. That is correct: a parked workflow
+// has no owner, so losing the worker that parked it costs nothing and there is
+// nothing to reclaim. It resumes through the ordinary claim predicate at its
+// wake time, whichever worker gets there.
+//
+// Worth stating because it is routinely mistaken for crash recovery. A test
+// that kills a worker while its workflow is mid-DurableSleep is not exercising
+// the reaper at all -- the workflow was already parked and unowned before the
+// kill, and it comes back when the sleep expires (cleat#1429).
 
 func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerID string, generation int64, nextWakeAt time.Time) error {
 	tx, err := s.beginTxWithRLS(ctx)
@@ -595,13 +1279,38 @@ func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerI
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
+	// Same CASE as ReapStaleInstances, for the same reason: a workflow whose
+	// terminal outcome is already recorded is not runnable work, and a release
+	// that called it 'ready' would undo the distinction D6 created the
+	// 'terminating' status to make. Either status is claimable, so the phase
+	// runs again either way -- this is about the status telling the truth
+	// while it waits.
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, next_wake_at = $3
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
+		    assigned_to = NULL, next_wake_at = $3
 		WHERE id = $1 AND assigned_to = $2 AND generation = $4
 	`, workflowID, workerID, nextWakeAt, generation)
 	if err != nil {
 		return err
+	}
+
+	// A zero-row update is a lost fence, not a failure and not a success.
+	// Reported rather than discarded because the caller branches on it:
+	// cmd/cleat-worker's releaseWorkflow treats ErrFenceLost as "the no-op it
+	// is" and logs at Debug, while any OTHER error is logged as "release
+	// failed, workflow stays claimed until its lease expires" -- untrue of a
+	// stale release on both counts. Until cleat#1223 that branch was dead on
+	// PostgreSQL and MySQL, and the three sibling fenced writes (Complete,
+	// Fail, Finalize) already reported a lost fence this way on all three
+	// dialects.
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("release workflow: rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrFenceLost
 	}
 
 	pgNotify(ctx, tx, s.notifyChannel)
@@ -610,12 +1319,71 @@ func (s *PostgresStore) ReleaseWorkflow(ctx context.Context, workflowID, workerI
 
 // RequestCancellation sets the cancellation flag.
 
+// StartNewRun is the ConcurrencyKeyStore-free entry point: no concurrency key.
 func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int) (string, bool, error) {
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, StartOptions{})
+}
+
+// StartNewRunWithConcurrencyKey records the key the run wants ON THE ROW, in
+// the same INSERT that creates it.
+//
+// cleat#1186. The key has to be written by the insert rather than by a second
+// statement afterwards: the row is created 'ready' with next_wake_at already
+// in the past, so a poller can claim it between the two -- and a run claimed
+// before its key is recorded is exactly the case the claim predicate exists to
+// prevent. There is no window here because there is no second statement.
+//
+// NOT on the WorkflowStore interface, deliberately. StartNewRun has four real
+// implementations and NINE test doubles; adding a parameter would edit all
+// thirteen for a field twelve of them do not care about. The HTTP layer asks
+// for this through an optional interface assertion, as it already does for
+// CountRunnableWorkflows and GetConcurrencyKeyHolder.
+func (s *PostgresStore) StartNewRunWithConcurrencyKey(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, concurrencyKey string) (string, bool, error) {
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, StartOptions{ConcurrencyKey: concurrencyKey})
+}
+
+// StartNewRunWithOptions records every per-run value a start can set, in the
+// INSERT that creates the run. See StartOptions for why the two suffixed
+// methods collapsed into one.
+func (s *PostgresStore) StartNewRunWithOptions(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, opts StartOptions) (string, bool, error) {
+	return s.startNewRun(ctx, runID, defName, defVersion, input, idempotencyKey, tenantID, priority, opts)
+}
+
+func (s *PostgresStore) startNewRun(ctx context.Context, runID, defName string, defVersion int, input json.RawMessage, idempotencyKey string, tenantID string, priority int, opts StartOptions) (string, bool, error) {
+	concurrencyKey := opts.ConcurrencyKey
+	runInstanceMs := msOrNil(opts.RunLimits.WasmInstanceTimeout)
+	runWallClockMs := msOrNil(opts.RunLimits.WasmWallClockCeiling)
+	runRetryMs := msOrNil(opts.RunLimits.HostRetryBudget)
+	runMaxWorkflowMs := msOrNil(opts.RunLimits.MaxWorkflowDuration)
 	if runID == "" {
 		runID = uuid.New().String()
 	}
 	if idempotencyKey != "" {
 		keyHash := sha256.Sum256([]byte(idempotencyKey))
+		inputDigest := IdempotencyInputDigest(input)
+
+		// EVERY statement against idempotency_keys below runs on a transaction
+		// with the tenant established, the two lookups included. They ran on
+		// the pool until cleat#1534, which is correct for a table with no
+		// policy and unable to run at all once it has one: a policy's USING is
+		// evaluated per candidate row and cleat.assert_tenant_set() raises
+		// there, so the `AND tenant_id = $2` these statements already carry is
+		// not what scopes them. Nothing about the statements changes; where
+		// they run does.
+		//
+		// This adds no precondition. The no-key path at the bottom of this
+		// function has always opened with beginTxWithRLS, so a start already
+		// required a tenant on the majority of its calls; presenting an
+		// Idempotency-Key was the way to reach the database without one.
+		tx, err := s.beginTxWithRLS(ctx)
+		if err != nil {
+			return "", false, fmt.Errorf("start new run: begin: %w", err)
+		}
+		// The rollback covers the early returns below as well as the failure
+		// paths. An explicit tx.Rollback() still precedes the concurrent-insert
+		// re-read, where releasing the lock immediately is the point rather
+		// than a tidy-up.
+		defer tx.Rollback()
 
 		// Check for existing idempotency key, within this tenant.
 		//
@@ -629,11 +1397,24 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 		// migrations/*/010_idempotency_keys_tenant_id.sql, IMPROVEMENT-PLAN
 		// 3.10.
 		var existingWfID string
-		err := s.db.QueryRowContext(ctx,
-			`SELECT workflow_id FROM idempotency_keys
+		var existingDef sql.NullString
+		var existingDigest sql.NullString
+		err = tx.QueryRowContext(ctx,
+			`SELECT workflow_id, def_name, input_digest FROM idempotency_keys
 			 WHERE key_hash = $1 AND tenant_id = $2 AND expires_at > now()`,
-			keyHash[:], tenantID).Scan(&existingWfID)
+			keyHash[:], tenantID).Scan(&existingWfID, &existingDef, &existingDigest)
 		if err == nil {
+			// A hit must be for the SAME definition. NULL means the row predates
+			// cleat#1047's backfill or its workflow has been purged -- unknown
+			// rather than mismatched, so it is allowed through, which is exactly
+			// today's behaviour for those rows.
+			if existingDef.Valid && existingDef.String != defName {
+				return "", false, fmt.Errorf("%w: key already started %q, this request names %q",
+					ErrIdempotencyKeyDefMismatch, existingDef.String, defName)
+			}
+			if err := checkIdempotencyInput(existingDigest, inputDigest); err != nil {
+				return "", false, err
+			}
 			return existingWfID, true, nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -642,49 +1423,105 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 
 		// Use the provided runID (already generated above).
 
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return "", false, err
+		// Clear this key's row if its TTL has passed, so the INSERT below can
+		// take the key over.
+		//
+		// WITHOUT THIS, `n == 0` BELOW HAS TWO CAUSES AND THE CODE ASSUMES
+		// ONE. `ON CONFLICT (key_hash, tenant_id)` says nothing about expiry,
+		// so an expired row still conflicts and still reports no rows
+		// affected -- identical to the concurrent-insert case it is read as.
+		// Only one of the two has a winner to re-read, and the re-read filters
+		// on `expires_at > now()`, so for the other it looks for a row it
+		// cannot see and the caller gets sql.ErrNoRows instead of a new run.
+		// cleat#1671.
+		//
+		// Not a visibility fix: making the re-read see the expired row would
+		// hand the caller a workflow id whose key the TTL already retired,
+		// which is worse than the error. The dead row has to go.
+		//
+		// `expires_at <= now()` and not the key alone -- a row refreshed by a
+		// concurrent starter between the lookup above and here is LIVE, and
+		// deleting it would let two runs hold one key. In that case this
+		// matches nothing and the INSERT below reports the conflict, which is
+		// the outcome that path already handles correctly.
+		//
+		// Inside this transaction, so the delete and the insert commit or roll
+		// back together. Scoped by the primary key, so it is a no-op lookup on
+		// every start whose key is live or absent -- which is nearly all of
+		// them.
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM idempotency_keys
+			 WHERE key_hash = $1 AND tenant_id = $2 AND expires_at <= now()`,
+			keyHash[:], tenantID); err != nil {
+			return "", false, fmt.Errorf("start new run: clear expired idempotency key: %w", err)
 		}
-		defer tx.Rollback() // Note: explicit tx.Rollback() below when wfs is empty is intentional — the defer would also catch it, but early rollback releases the lock immediately rather than waiting for function return.
 
 		// Insert idempotency key record. ON CONFLICT DO NOTHING handles the
-		// race where two requests arrive with the same key simultaneously.
+		// race where two requests arrive with the same key simultaneously --
+		// and, since the delete above, ONLY that: a row that conflicts here is
+		// necessarily live.
 		ttlSeconds := int(s.idempotencyKeyTTL.Seconds())
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id)
-			 VALUES ($1, $2, now() + ($3 * INTERVAL '1 second'), $4)
+			`INSERT INTO idempotency_keys (key_hash, workflow_id, expires_at, tenant_id, def_name, input_digest)
+			 VALUES ($1, $2, now() + ($3 * INTERVAL '1 second'), $4, $5, $6)
 			 ON CONFLICT (key_hash, tenant_id) DO NOTHING`,
-			keyHash[:], runID, ttlSeconds, tenantID)
+			keyHash[:], runID, ttlSeconds, tenantID, defName, inputDigest)
 		if err != nil {
 			return "", false, err
 		}
 
 		n, _ := res.RowsAffected()
 		if n == 0 {
-			// Key was inserted concurrently — rollback and return the existing one.
+			// A LIVE row exists, so someone else won the race. The expired
+			// case cannot reach here any more (cleat#1671): the delete above
+			// removed it, so a conflict means a row whose TTL has not passed,
+			// and the re-read's own `expires_at > now()` will find it.
+			//
+			// Roll back to release the lock at once, then re-read the winner.
+			//
+			// The re-read needs a transaction of its own: this one is being
+			// abandoned, and the row it is looking for belongs to whoever won
+			// the race. It ran on the pool until cleat#1534, which is the same
+			// statement as the lookup above and the same reason it had to move.
 			_ = tx.Rollback()
-			err := s.db.QueryRowContext(ctx,
-				`SELECT workflow_id FROM idempotency_keys
-				 WHERE key_hash = $1 AND tenant_id = $2 AND expires_at > now()`,
-				keyHash[:], tenantID).Scan(&existingWfID)
+			tx2, err := s.beginTxWithRLS(ctx)
 			if err != nil {
+				return "", false, fmt.Errorf("start new run: begin re-read: %w", err)
+			}
+			defer tx2.Rollback()
+			err = tx2.QueryRowContext(ctx,
+				`SELECT workflow_id, def_name, input_digest FROM idempotency_keys
+				 WHERE key_hash = $1 AND tenant_id = $2 AND expires_at > now()`,
+				keyHash[:], tenantID).Scan(&existingWfID, &existingDef, &existingDigest)
+			if err != nil {
+				return "", false, err
+			}
+			// The concurrent winner must also be for THIS definition. Without
+			// this the race path returns the other workflow's id even though
+			// the lookup above refuses it -- the same defect, reachable only
+			// under contention, which is where it would be hardest to see.
+			if existingDef.Valid && existingDef.String != defName {
+				return "", false, fmt.Errorf("%w: key already started %q, this request names %q",
+					ErrIdempotencyKeyDefMismatch, existingDef.String, defName)
+			}
+			if err := checkIdempotencyInput(existingDigest, inputDigest); err != nil {
 				return "", false, err
 			}
 			return existingWfID, true, nil
 		}
 
-		if err := s.setRLSOnTx(tx); err != nil {
-			return "", false, fmt.Errorf("start new run: set rls: %w", err)
-		}
+		// The tenant was established when this transaction was opened, above.
+		// It used to be set HERE, after the idempotency_keys work, and that
+		// ordering is the whole of cleat#1534.
 
 		// Insert the workflow instance.
 		_, err = tx.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at)
+			INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
 			VALUES ($1, $2, $3, 'ready', $4,
-			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'),
-			$5, $6, now() - INTERVAL '1 millisecond')
-		`, runID, defName, defVersion, input, tenantID, priority)
+			        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $5), 'default'),
+			$5, $6, now() - INTERVAL '1 millisecond',
+			NULLIF($7, ''), CASE WHEN $7 = '' THEN NULL ELSE digest($7, 'sha256') END, $8, $9, $10, $11)
+		`, runID, defName, defVersion, input, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
 		if err != nil {
 			return "", false, fmt.Errorf("start new run: %w", err)
 		}
@@ -701,11 +1538,12 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at)
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input, task_queue, tenant_id, priority, next_wake_at, concurrency_key, concurrency_key_hash, run_wasm_instance_timeout_ms, run_wasm_wall_clock_ceiling_ms, run_host_retry_budget_ms, run_max_workflow_duration_ms)
 		VALUES ($1, $2, $3, 'ready', $4,
-		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3), 'default'),
-			$5, $6, now() - INTERVAL '1 millisecond')
-	`, runID, defName, defVersion, input, tenantID, priority)
+		        COALESCE((SELECT task_queue FROM workflow_defs WHERE name = $2 AND version = $3 AND tenant_id = $5), 'default'),
+			$5, $6, now() - INTERVAL '1 millisecond',
+			NULLIF($7, ''), CASE WHEN $7 = '' THEN NULL ELSE digest($7, 'sha256') END, $8, $9, $10, $11)
+	`, runID, defName, defVersion, input, tenantID, priority, concurrencyKey, runInstanceMs, runWallClockMs, runRetryMs, runMaxWorkflowMs)
 	if err != nil {
 		return "", false, fmt.Errorf("start new run: %w", err)
 	}
@@ -716,26 +1554,107 @@ func (s *PostgresStore) StartNewRun(ctx context.Context, runID, defName string, 
 // StartChildWorkflow creates a child workflow instance linked to a parent.
 // The child is created with its own independent workflow instance.
 // If defVersion > 0, that version is used explicitly; otherwise the latest
-// non-deprecated version is used (SELECT MAX(version)).
+// non-disabled version is used (SELECT MAX(version)).
 
-func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Duration) (int, error) {
+// reapLimitArg turns the interface's "limit <= 0 is unbounded" into a value a
+// LIMIT clause accepts on every dialect. math.MaxInt32 rather than NULL: NULL
+// means unbounded to PostgreSQL's LIMIT and means "no rows" to MySQL's, and a
+// sweep that silently reclaimed nothing is the failure this whole bound exists
+// to make visible.
+func reapLimitArg(limit int) int {
+	if limit <= 0 {
+		return math.MaxInt32
+	}
+	return limit
+}
+
+func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: begin: %w", err)
 	}
 	defer tx.Rollback()
 
+	// A workflow reaped mid-defer-phase goes back to 'terminating', not to
+	// 'ready'. The marker on the row is what makes the next claim a defer
+	// segment either way -- the executor reads pending_terminal_status, not
+	// the status -- so this is not what keeps the phase correct. It is what
+	// keeps the status honest: a workflow whose terminal outcome is already
+	// decided is not runnable work, and reporting it as 'ready' would undo
+	// exactly the distinction D6 created the status to make.
+	//
+	// The inner SELECT is what bounds the sweep -- see the interface doc for
+	// why it is bounded at all. ORDER BY heartbeat_at reclaims the
+	// longest-stale first, so a bound that binds delays the freshest rather
+	// than picking arbitrarily.
 	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
-		SET status = 'ready', assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1
-		WHERE status = 'running'
-		  AND heartbeat_at < now() - $1::interval
-	`, fmt.Sprintf("%d seconds", int(timeout.Seconds())))
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
+		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
+		    reclaim_count = reclaim_count + 1
+		WHERE id IN (
+		    SELECT id FROM workflow_instances
+		    WHERE status = 'running'
+		      AND heartbeat_at < now() - $1::interval
+		    ORDER BY heartbeat_at
+		    LIMIT $2
+		)
+	`, fmt.Sprintf("%d milliseconds", timeout.Milliseconds()), reapLimitArg(limit))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}
 	n, _ := result.RowsAffected()
 	return int(n), tx.Commit()
+}
+
+// PingDB satisfies DBPinger: a bounded round trip with no workflow-specific
+// query, so a worker with nothing in flight still has a way to prove it can
+// reach the database. See DBPinger's doc comment for why this exists.
+func (s *PostgresStore) PingDB(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
+// StaleSetShape satisfies DBStallDetector. Same RLS scoping and same
+// status='running' population as ReapStaleInstances, so the shape this
+// reports is the shape ReapStaleInstances would actually act on -- see
+// that method's doc for why 'running' is the whole population and why
+// nothing here should widen it.
+func (s *PostgresStore) StaleSetShape(ctx context.Context, timeout, missedBeatTimeout time.Duration) (StaleSetShape, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return StaleSetShape{}, fmt.Errorf("stale set shape: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	var shape StaleSetShape
+	var oldest, newest sql.NullTime
+	err = tx.QueryRowContext(ctx, `
+		SELECT
+		    COUNT(*),
+		    COUNT(*) FILTER (WHERE heartbeat_at < now() - $1::interval),
+		    COUNT(DISTINCT assigned_to) FILTER (WHERE heartbeat_at < now() - $1::interval),
+		    MIN(heartbeat_at) FILTER (WHERE heartbeat_at < now() - $1::interval),
+		    MAX(heartbeat_at) FILTER (WHERE heartbeat_at < now() - $1::interval),
+		    COUNT(*) FILTER (WHERE heartbeat_at < now() - $2::interval),
+		    (CASE WHEN MAX(heartbeat_at) < now() - $1::interval THEN true ELSE false END),
+		    COUNT(DISTINCT assigned_to)
+		FROM workflow_instances
+		WHERE status = 'running'
+	`, fmt.Sprintf("%d milliseconds", missedBeatTimeout.Milliseconds()),
+		fmt.Sprintf("%d milliseconds", timeout.Milliseconds()),
+	).Scan(&shape.Running, &shape.MissedBeat, &shape.MissedBeatDistinctAssignedTo,
+		&oldest, &newest, &shape.Stale, &shape.NoRecentHeartbeat, &shape.DistinctAssignedTo)
+	if err != nil {
+		return StaleSetShape{}, fmt.Errorf("stale set shape: %w", err)
+	}
+	if oldest.Valid {
+		shape.MissedBeatOldest = oldest.Time
+	}
+	if newest.Valid {
+		shape.MissedBeatNewest = newest.Time
+	}
+	return shape, tx.Commit()
 }
 
 // ---- SignalStore interface implementation ----
@@ -839,7 +1758,7 @@ func scanClaimedWorkflows(rows *sql.Rows) ([]*WorkflowInstance, error) {
 
 		if err := rows.Scan(&wf.ID, &wf.DefName, &wf.DefVersion, &wf.Status, &wf.Input,
 			&wf.AssignedTo, &nextWakeAt, &tenantID, &createdAt, &errorCode, &errorOp,
-			&wf.Generation, &wf.Priority, &wf.TraceID); err != nil {
+			&wf.Generation, &wf.Priority, &wf.TraceID, &wf.PendingTerminalStatus); err != nil {
 			return nil, fmt.Errorf("claim workflows scan: %w", err)
 		}
 
@@ -859,171 +1778,6 @@ func scanClaimedWorkflows(rows *sql.Rows) ([]*WorkflowInstance, error) {
 	return wfs, rows.Err()
 }
 
-// ErrCrossTenantClaimUnsupported is returned by a store that implements
-// CrossTenantClaimer but cannot honour it in the topology it finds itself in.
-//
-// Implementing the interface and quietly returning one tenant's work would be
-// worse than not implementing it: the caller would believe it was claiming for
-// everyone. MySQL is the case that forced this -- MySQLStoreFactory gives each
-// tenant its own physical database, so there is no predicate to drop; the other
-// tenants' rows are not filtered out, they are in a different database. The
-// same type is also used against a single shared database, where the claim IS
-// meaningful, so the answer depends on how the store was built rather than on
-// which type it is.
-var ErrCrossTenantClaimUnsupported = errors.New("cross-tenant claim not supported by this store's topology")
-
-// CrossTenantClaimer is implemented by stores that can claim runnable work for
-// every tenant in a single query.
-//
-// It is deliberately NOT part of WorkflowStore. A store that cannot do it --
-// because its dialect has no mechanism, or because the deployment has not
-// granted one -- simply does not implement it, and the caller falls back to the
-// ordinary tenant-scoped claim. Putting it on WorkflowStore would force every
-// implementation and every test double to answer a question most of them have
-// no business answering.
-//
-// The returned instances carry TenantID, and the caller MUST re-scope to it
-// before touching anything else. That is the whole bargain: one query sees
-// across tenants so the dispatch loop does not have to poll each one, and
-// everything downstream of it is scoped again immediately. See
-// cmd/cleat-worker's storeForTenant.
-type CrossTenantClaimer interface {
-	ClaimWorkflowsAcrossTenants(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error)
-}
-
-// ClaimWorkflowsAcrossTenants claims runnable workflows for every tenant.
-//
-// It calls admin.claim_workflows (migrations/postgres/023_cross_tenant_claim.sql)
-// rather than issuing the claim directly, because the exemption that lets it
-// see across tenants belongs to that function's owner and nowhere else. The
-// statement inside is the same one ClaimWorkflows runs; the column list here is
-// the contract with it.
-//
-// No beginTxWithRLS. That helper exists to set the tenant GUC the policies read,
-// and this call must not be scoped to a tenant -- setting one would filter the
-// very rows it exists to find. The function performs its own UPDATE, so a single
-// statement is already atomic.
-func (s *PostgresStore) ClaimWorkflowsAcrossTenants(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, def_name, def_version, status, input, assigned_to, next_wake_at,
-		       tenant_id, created_at, error_code, error_op, generation, priority, trace_id
-		FROM admin.claim_workflows($1, $2, $3)
-	`, workerID, pq.Array(s.taskQueues), limit)
-	if err != nil {
-		if reason := crossTenantProvisioningGap(err); reason != "" {
-			return nil, fmt.Errorf("claim workflows across tenants: %s: %w", reason, ErrCrossTenantClaimUnsupported)
-		}
-		return nil, fmt.Errorf("claim workflows across tenants: %w", err)
-	}
-	defer rows.Close()
-
-	return scanClaimedWorkflows(rows)
-}
-
-// crossTenantProvisioningGap distinguishes "this deployment never provisioned
-// the cross-tenant claim" from "the claim ran and something went wrong".
-//
-// The distinction decides whether the worker keeps running. A provisioning gap
-// is answered by falling back to the per-tenant claim and warning once, which
-// keeps dispatch alive on a deployment that opted into a flag it had not yet
-// granted; anything else propagates, because a claim that fails for a reason
-// nobody anticipated should not be quietly downgraded into a narrower one that
-// works.
-//
-// Both codes here mean the same thing from the operator's side -- migration 023
-// has not been applied and granted -- and neither is reachable once it has:
-//
-//	42883 undefined_function     admin.claim_workflows does not exist
-//	42501 insufficient_privilege it exists, but EXECUTE was never granted
-//	                             (023 revokes from PUBLIC, so this is the
-//	                             default state until a role is granted)
-//
-// A missing BYPASSRLS on the owner is deliberately NOT in this list. It does
-// not raise: the function runs and returns only the rows RLS admits, which is
-// the silent-wrong-answer case this whole mechanism exists to avoid. Nothing
-// here can detect it, which is why 023 sets the attribute in the same migration
-// that creates the role rather than leaving it to a deployment step.
-func crossTenantProvisioningGap(err error) string {
-	var pqErr *pq.Error
-	if !errors.As(err, &pqErr) {
-		return ""
-	}
-	switch pqErr.Code {
-	case "42883":
-		return "admin.claim_workflows does not exist; apply migrations/postgres/023_cross_tenant_claim.sql"
-	case "42501":
-		return "this connection may not EXECUTE admin.claim_workflows; grant it as " +
-			"migrations/postgres/023_cross_tenant_claim.sql documents"
-	}
-	return ""
-}
-
-// CrossTenantScheduleReader is implemented by stores that can read due
-// schedules for every tenant in a single query.
-//
-// Separate from CrossTenantClaimer rather than folded into it, because the two
-// are provisioned separately and a deployment can legitimately have one and not
-// the other: 023 grants the claim, 024 grants this, and a database that applied
-// only the first should get a working dispatch loop and a loud warning about
-// schedules rather than a worker that refuses both.
-//
-// The returned schedules carry TenantID, and the caller MUST re-scope to it
-// before doing anything else -- starting the run, and claiming the schedule.
-// The widened view covers the read and nothing after it. See
-// cmd/cleat-worker's scheduleLoop.
-type CrossTenantScheduleReader interface {
-	GetDueSchedulesAcrossTenants(ctx context.Context) ([]Schedule, error)
-}
-
-// GetDueSchedulesAcrossTenants returns every tenant's due schedules.
-//
-// It calls admin.get_due_schedules (migrations/postgres/024_cross_tenant_schedules.sql)
-// for the same reason ClaimWorkflowsAcrossTenants calls admin.claim_workflows:
-// the exemption that lets it see across tenants belongs to that function's
-// owner and nowhere else.
-//
-// No beginTxWithRLS. That helper sets the tenant GUC the policies read, and
-// this call must not be scoped to a tenant -- setting one would filter the very
-// rows it exists to find.
-func (s *PostgresStore) GetDueSchedulesAcrossTenants(ctx context.Context) ([]Schedule, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT name, def_name, entry_point, cron_expression, input, enabled,
-		       next_run_at, last_run_at, timezone, tenant_id, misfire_policy,
-		       catch_up_limit, overlap_policy, last_run_id
-		FROM admin.get_due_schedules()
-	`)
-	if err != nil {
-		if reason := crossTenantScheduleProvisioningGap(err); reason != "" {
-			return nil, fmt.Errorf("get due schedules across tenants: %s: %w", reason, ErrCrossTenantClaimUnsupported)
-		}
-		return nil, fmt.Errorf("get due schedules across tenants: %w", err)
-	}
-	defer rows.Close()
-
-	return scanDueSchedules(rows)
-}
-
-// crossTenantScheduleProvisioningGap is crossTenantProvisioningGap for 024.
-//
-// Same two SQLSTATEs and the same reasoning -- see that function -- pointing at
-// the migration that provisions this call rather than the claim. Kept separate
-// so the remediation an operator is handed names the file they actually need to
-// apply; a worker can have 023 and not 024.
-func crossTenantScheduleProvisioningGap(err error) string {
-	var pqErr *pq.Error
-	if !errors.As(err, &pqErr) {
-		return ""
-	}
-	switch pqErr.Code {
-	case "42883":
-		return "admin.get_due_schedules does not exist; apply migrations/postgres/024_cross_tenant_schedules.sql"
-	case "42501":
-		return "this connection may not EXECUTE admin.get_due_schedules; grant it as " +
-			"migrations/postgres/024_cross_tenant_schedules.sql documents"
-	}
-	return ""
-}
-
 // scanDueSchedules reads the rows a due-schedule query returns.
 //
 // Shared by the cross-tenant read and, on PostgreSQL, by the tenant-scoped one
@@ -1036,7 +1790,7 @@ func scanDueSchedules(rows *sql.Rows) ([]Schedule, error) {
 		var sch Schedule
 		var lastRunAt sql.NullTime
 		if err := rows.Scan(&sch.Name, &sch.DefName, &sch.EntryPoint, &sch.CronExpression,
-			&sch.Input, &sch.Enabled, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
+			&sch.Input, &sch.DisabledAt, &sch.NextRunAt, &lastRunAt, &sch.Timezone, &sch.TenantID,
 			&sch.MisfirePolicy, &sch.CatchUpLimit, &sch.OverlapPolicy, &sch.LastRunID); err != nil {
 			return nil, fmt.Errorf("get due schedules scan: %w", err)
 		}
@@ -1046,118 +1800,6 @@ func scanDueSchedules(rows *sql.Rows) ([]Schedule, error) {
 		schedules = append(schedules, sch)
 	}
 	return schedules, rows.Err()
-}
-
-// CrossTenantCapability reports whether a store can actually honour the
-// cross-tenant paths, and why not when it cannot.
-//
-// Both fields are answered independently because 023 and 024 are separate
-// migrations with separate grants: a deployment can execute workflows for every
-// tenant and still fire cron for only one.
-type CrossTenantCapability struct {
-	Claim           bool
-	ClaimReason     string
-	Schedules       bool
-	SchedulesReason string
-}
-
-// CrossTenantCapabilityChecker is implemented by stores that can answer "would
-// the cross-tenant paths work" WITHOUT exercising them.
-//
-// Exercising them is not an option at startup. The claim is a write: running it
-// to see whether it works would claim real workflows into a worker whose
-// dispatch loop has not started, leaving them 'running' with no executor until
-// the lease expires. So each dialect answers from its own catalog instead.
-type CrossTenantCapabilityChecker interface {
-	CheckCrossTenantCapability(ctx context.Context) CrossTenantCapability
-}
-
-// CheckCrossTenantCapability answers from the PostgreSQL catalog.
-//
-// It checks three things per function, and the third is the reason this exists
-// at all:
-//
-//	does it exist        migration not applied -- would raise 42883 at runtime
-//	may this role EXECUTE  grant not made      -- would raise 42501 at runtime
-//	does its OWNER have BYPASSRLS
-//
-// The first two are detected at runtime too, as 42883 and 42501, and answered by
-// falling back to the tenant-scoped path with a warning.
-//
-// The third is different, and it is the reason this check earns its place. A
-// function whose owner has lost BYPASSRLS is subject to the same policies as
-// its caller, and these functions are called outside beginTxWithRLS so no
-// tenant GUC is set on that connection. 001_schema.sql's policies are
-// fail-closed -- cleat.assert_tenant_set() RAISES on an unset GUC rather than
-// COALESCE-ing to a default -- so every call fails with
-//
-//	cleat.tenant_id is not set -- tenant context required for RLS-scoped query
-//
-// That is loud, which is good, and it was worth measuring rather than assuming:
-// an earlier version of this comment (and of 023's header) claimed the call
-// would quietly return fewer rows instead. It does not, and the difference is
-// the fail-closed policy choice rather than luck.
-//
-// What it is NOT is useful. P0001 names neither the function nor the attribute,
-// it does not map to the provisioning-gap sentinel, so it propagates as a hard
-// error on every tick, and an operator reading it has no path from "tenant
-// context required" to "a role lost a privilege". This check names the cause,
-// before the first tick.
-//
-// 023 and 024 set the attribute in the same migration that creates the role so
-// it cannot drift on install, but a role is a database-wide object an operator
-// can ALTER afterwards.
-func (s *PostgresStore) CheckCrossTenantCapability(ctx context.Context) CrossTenantCapability {
-	const q = `
-		WITH f AS (
-			SELECT to_regprocedure('admin.claim_workflows(text, text[], integer)') AS claim,
-			       to_regprocedure('admin.get_due_schedules()')                    AS sched
-		)
-		SELECT
-			f.claim IS NOT NULL,
-			CASE WHEN f.claim IS NOT NULL THEN has_function_privilege(f.claim, 'EXECUTE') ELSE false END,
-			COALESCE((SELECT r.rolbypassrls FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE p.oid = f.claim), false),
-			f.sched IS NOT NULL,
-			CASE WHEN f.sched IS NOT NULL THEN has_function_privilege(f.sched, 'EXECUTE') ELSE false END,
-			COALESCE((SELECT r.rolbypassrls FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner WHERE p.oid = f.sched), false)
-		FROM f
-	`
-	var claimExists, claimExec, claimBypass, schedExists, schedExec, schedBypass bool
-	if err := s.db.QueryRowContext(ctx, q).Scan(
-		&claimExists, &claimExec, &claimBypass,
-		&schedExists, &schedExec, &schedBypass); err != nil {
-		// Inconclusive is not the same as unsupported. Reported as the reason
-		// so the caller can say so rather than assert something it did not
-		// establish.
-		reason := fmt.Sprintf("could not check: %v", err)
-		return CrossTenantCapability{ClaimReason: reason, SchedulesReason: reason}
-	}
-
-	cap := CrossTenantCapability{}
-	cap.Claim, cap.ClaimReason = crossTenantVerdict(claimExists, claimExec, claimBypass,
-		"admin.claim_workflows", "migrations/postgres/023_cross_tenant_claim.sql")
-	cap.Schedules, cap.SchedulesReason = crossTenantVerdict(schedExists, schedExec, schedBypass,
-		"admin.get_due_schedules", "migrations/postgres/024_cross_tenant_schedules.sql")
-	return cap
-}
-
-func crossTenantVerdict(exists, exec, bypass bool, fn, migration string) (bool, string) {
-	switch {
-	case !exists:
-		return false, fn + " does not exist; apply " + migration
-	case !exec:
-		return false, "this connection may not EXECUTE " + fn + "; grant it as " + migration + " documents"
-	case !bypass:
-		// This one does raise at runtime -- measured, see below -- but it raises
-		// something that names neither the function nor the attribute, so the
-		// operator gets "cleat.tenant_id is not set" and no way to connect it to
-		// a role privilege. Naming it here is the whole value.
-		return false, fn + " exists and is executable, but its owner does not have BYPASSRLS, so " +
-			"it is subject to the same policies as the caller. Every call will fail with " +
-			"\"cleat.tenant_id is not set\" (P0001), which names neither this function nor the " +
-			"missing attribute. Restore it with: ALTER ROLE cleat_dispatcher BYPASSRLS"
-	}
-	return true, ""
 }
 
 // looksLikeJSONObject reports whether a result is a JSON object.
@@ -1178,4 +1820,20 @@ func looksLikeJSONObject(result string) bool {
 		}
 	}
 	return false
+}
+
+// FinalizeWorkflowSegment wraps finalizeWorkflowSegmentInner so that a backend
+// refusing a JSON value it was handed becomes a classified error rather than
+// driver text. cleat#1460.
+//
+// WRAPPED AT THE BOUNDARY, not at each return, and that is the point: this
+// function has a dozen error paths and will grow more, and a classification
+// applied at one of them is a classification the next one silently lacks.
+// wrapRejectedResult returns anything it does not recognise unchanged, so the
+// blanket wrap costs nothing and cannot mislabel an unrelated failure.
+func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
+	return wrapRejectedResult(
+		s.finalizeWorkflowSegmentInner(ctx, runID, workerID, generation, newEvents,
+			finalStatus, result, errorCode, errorOp, queryState, nextWakeAt),
+		runID, result)
 }

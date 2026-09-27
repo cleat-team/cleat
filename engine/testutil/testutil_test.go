@@ -61,7 +61,7 @@ func TestPluginTestBackends(t *testing.T) {
 }
 
 func TestSetupMinimalSchema(t *testing.T) {
-	db := TestDB(t, DialectPostgres)
+	db := SuiteTestDB(t, "testutil")
 	defer db.Close()
 
 	CleanupPostgresTestData(t, db)
@@ -89,7 +89,7 @@ func TestSetupMinimalSchema(t *testing.T) {
 }
 
 func TestSetupFullSchema(t *testing.T) {
-	db := TestDB(t, DialectPostgres)
+	db := SuiteTestDB(t, "testutil")
 	defer db.Close()
 
 	CleanupPostgresTestData(t, db)
@@ -129,7 +129,7 @@ func insertTestDef(t *testing.T, db *sql.DB) {
 }
 
 func TestCleanupPostgresTestData(t *testing.T) {
-	db := TestDB(t, DialectPostgres)
+	db := SuiteTestDB(t, "testutil")
 	defer db.Close()
 
 	SetupFullSchema(t, db, DialectPostgres)
@@ -165,6 +165,13 @@ func TestCleanupPostgresTestData(t *testing.T) {
 	}
 }
 
+// TestTestDB covers TestDB itself, so it deliberately keeps using it rather
+// than SuiteTestDB -- swapping it would leave the function under test
+// uncovered while the name went on claiming otherwise.
+//
+// It is safe on the shared database because it only reads: a SELECT racing
+// another package's cleanup returns a different count, and this asserts
+// nothing about the count.
 func TestTestDB(t *testing.T) {
 	db := TestDB(t, DialectPostgres)
 	if db == nil {
@@ -191,7 +198,7 @@ func TestTestDB(t *testing.T) {
 // statement-level IF NOT EXISTS plus swallowed duplicate-object errors.
 
 func TestCleanupTestData(t *testing.T) {
-	db := TestDB(t, DialectPostgres)
+	db := SuiteTestDB(t, "testutil")
 	defer db.Close()
 
 	SetupFullSchema(t, db, DialectPostgres)

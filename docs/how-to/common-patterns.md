@@ -56,7 +56,7 @@ For simpler compensation patterns, use `DurableDeferFunc`:
 
 ```go
 func CreateOrder(h cleat.HostCalls, input string) error {
-    defer h.DurableDeferFunc(func() {
+    h.DurableDeferFunc(func() {
         h.DurableCall("inventory", "ReleaseReservation", "order-123")
         h.DurableCall("payments", "Refund", "order-123")
     })
@@ -66,8 +66,20 @@ func CreateOrder(h cleat.HostCalls, input string) error {
 }
 ```
 
-The deferred block runs only if the function returns an error. On replay, the
-compensation is not re-executed if it already ran.
+Call `DurableDeferFunc` directly — do not put Go's own `defer` in front of it.
+That would delay the *registration* until the function returns, which reverses
+the order of two or more registrations.
+
+The block runs when the entry point finishes, on the success path as well as
+the error path, exactly like Go's `defer`. If you want cleanup only on failure,
+test for it inside the block. It does not run when the workflow suspends: a
+sleeping workflow has not exited, and the segment that finally completes runs
+it then.
+
+On replay the block runs again, but the durable calls inside it are served from
+the recorded history rather than re-executed, so their effects are not
+repeated. Anything in there that is *not* a durable call can run more than
+once.
 
 ### Key differences: Saga vs DurableDefer
 
@@ -190,11 +202,45 @@ curl -X POST http://localhost:8080/api/events/subscriptions \
         "def_name": "signup-workflow",
         "entry_point": "HandleSignup",
         "input_template": {
-            "user_id": "{{.event.data.user_id}}",
-            "email": "{{.event.data.email}}"
+            "user_id": "",
+            "email": "unknown@example.com",
+            "name": "New User"
         }
     }'
 ```
+
+`input_template` is not a template -- there is no placeholder syntax and
+nothing renders `{{...}}` expressions. It declares the workflow input's
+*default* top-level fields. When a matching event is published, its `data`
+payload is overlaid on top: for each of the event data's own top-level keys,
+the event's value replaces the template's value for that key (or adds it, if
+the template didn't have it); every other template field is left as its
+default. Publishing
+
+```json
+{"event_type": "user.signup", "data": {"user_id": "usr_abc123", "email": "alice@example.com"}}
+```
+
+against the subscription above starts the workflow with
+`{"user_id": "usr_abc123", "email": "alice@example.com", "name": "New User"}`
+-- `user_id` and `email` came from the event, `name` kept its template
+default because the event didn't supply one.
+
+Nested data passes through untouched, because the overlay is a plain key
+replacement, not a merge that descends into each value: if the event's data
+has a top-level key whose value is itself an object, that whole object
+becomes the input's value for that key. Given a template of
+`{"user_id": "", "profile": {}}`, publishing
+`{"data": {"user_id": "usr_abc123", "profile": {"city": "Seattle", "plan": "pro"}}}`
+produces `{"user_id": "usr_abc123", "profile": {"city": "Seattle", "plan": "pro"}}`.
+
+What doesn't work: pulling a *nested* field up into a *different* top-level
+name (the `{{.event.data.profile.city}}` shape the old example implied).
+There is no expression language to do that -- `mergeInputAndTemplate`
+(`plugins/eventtriggers/routes.go`) only overlays matching top-level keys. If
+a workflow needs a nested field under its own name, either publish the event
+with that field already at the top level, or have the workflow's own code
+read it out of the nested value it receives.
 
 See the [event-driven example](../examples/event-driven/subscription_workflow.go)
 for a complete signup workflow.
@@ -254,9 +300,25 @@ case "escalated":
 | Field | Type | Description |
 |-------|------|-------------|
 | Name | string | Name of the received signal (empty if timed out) |
-| Payload | string | JSON payload from the signal |
+| Payload | string | JSON payload from the signal, exactly as the sender passed it |
+| ReplyTo | string | Address to answer at, or empty for a one-way signal (see below) |
 | TimedOut | bool | True if no signal arrived before the timeout |
 | Err | error | Error if signal delivery failed |
+
+`ReplyTo` is non-empty only when the sender used `SendSignalAndWait` and is
+suspended waiting for an answer. Pass it to `ReplyToSignal` to wake them:
+
+```go
+sig := h.AwaitSignals([]string{"approve"}, time.Hour)
+if sig.ReplyTo != "" {
+    h.ReplyToSignal(sig.ReplyTo, `{"approved":true}`)
+}
+```
+
+A signal sent with `SignalWorkflow` leaves `ReplyTo` empty, so checking it is
+how you tell a request that wants an answer from a notification that does not.
+`Payload` is unaffected either way — the reply address travels in an envelope
+that `AwaitSignals` and `PollSignals` strip before you see it.
 
 See the [onboarding example](../examples/onboarding/signup.go) for a complete
 signal-based email verification workflow.
@@ -281,6 +343,34 @@ if err != nil {
     return "", fmt.Errorf("child failed: %w", err)
 }
 ```
+
+### Distinguishing why a child failed
+
+`AwaitChild`'s error covers every way a child can end without a result: it
+failed after exhausting retries, it was dead-lettered, or an operator
+terminated or cancelled it directly. There is no separate error type for
+each -- like `ErrAmbiguous`'s `[AMBIGUOUS]` prefix (see
+[durable-calls.md](../durable-calls.md#52-handling-errambiguous-in-workflow-code)),
+the kind travels as a stable prefix on the error message:
+
+```go
+result, err := h.AwaitChild(runID)
+if err != nil {
+    switch {
+    case strings.HasPrefix(err.Error(), "[TERMINATED]"):
+        // An operator force-terminated the child.
+    case strings.HasPrefix(err.Error(), "[CANCELLED]"):
+        // An operator cancelled the child.
+    default:
+        // The child failed on its own (retries exhausted, or dead-lettered).
+    }
+    return "", fmt.Errorf("child failed: %w", err)
+}
+```
+
+A child that failed on its own, was dead-lettered, was terminated, or was
+cancelled are all reported as a failed `AwaitChild` -- there is no separate
+"completed but not successful" state to check for.
 
 ### Typed child workflows
 
@@ -327,12 +417,6 @@ func ProcessItem(h cleat.HostCalls, input ChildInput) (*ChildResult, error) {
         map[string]string{"item": input.Item},
         &fetchData,
         5*time.Second, // heartbeat interval
-        func(progressJSON string) {
-            // Progress callback -- update queryable state.
-            var p struct{ Percent int }
-            json.Unmarshal([]byte(progressJSON), &p)
-            h.SetQueryState("fetch_progress", fmt.Sprintf("%d%%", p.Percent))
-        },
     )
     if err != nil {
         return nil, fmt.Errorf("fetch failed: %w", err)
@@ -617,3 +701,43 @@ curl "http://localhost:8080/api/workflows/<id>/query?key=driver_name"
 ```
 
 Query state persists across replays and ContinueAsNew.
+
+### Reading a key you do not know
+
+Omit `?key=` and the endpoint lists everything the run published:
+
+```bash
+curl -H "Authorization: Bearer $KEY" \
+  "$BASE/api/workflows/$ID/query"
+# {"state":{"stage":"packing","order_id":"A-11"}}
+```
+
+**This changed in cleat#1571.** It used to 400, on the reasoning that a
+keyed-only reader keeps published state a contract between the workflow and the
+callers that know what to ask for, rather than a bag whose shape callers
+discover at runtime. That reasoning still describes how published state is best
+*used* — it is a semantically limited interface, and anything elaborate belongs
+in application code rather than being shoehorned into cleat. What it did not
+justify was refusing to let you **see** what a run published, which is the
+operational case the original decision itself named.
+
+`?key=` with an empty value is still a lookup of the key published as `""`, not
+a request to list. Only the complete absence of the parameter lists.
+
+For a run you cannot reach over HTTP at all — no tenant API key to hand — the
+debugger is DBA-authenticated by connection string instead:
+
+```bash
+cleatctl --db "$DSN" debug <workflow-id> --entry-point <name>
+# then, at the prompt:
+state
+```
+
+`state` dumps the whole map. Because the debugger works by replaying the
+workflow, it shows keys appearing step by step rather than only the final set,
+which is usually what you want when diagnosing one.
+
+Decided in cleat#1119, which asked whether published state should be enumerable
+over the API. The answer was no: the operational case behind the request is
+debugging, and `cleatctl debug` already serves it without making the caller
+contract looser.

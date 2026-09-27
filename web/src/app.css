@@ -42,6 +42,9 @@ tr:hover { background: #f8f9fa; }
 .badge-completed { background: #e8f5e9; color: #2e7d32; }
 .badge-failed { background: #ffebee; color: #c62828; }
 .badge-dead_letter { background: #fce4ec; color: #880e4f; }
+.badge-terminated { background: #efebe9; color: #4e342e; }
+.badge-cancelled { background: #eceff1; color: #37474f; }
+.badge-terminating { background: #fff8e1; color: #f57f17; }
 
 .btn { display: inline-block; padding: 0.4rem 0.9rem; border-radius: 6px; border: none; cursor: pointer; font-size: 0.85rem; font-weight: 500; }
 .btn-primary { background: var(--color-primary); color: #fff; }

@@ -83,5 +83,32 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP INDEX IF EXISTS idx_kafka_config_enabled;
 			`,
 		},
+		{
+			// Tenant isolation for kafka_config. cleat#1278.
+			//
+			// A separate version rather than a TenantScoped on an existing one:
+			// v1 and v2 are already recorded as applied wherever kafkaconnect
+			// runs, and a recorded migration never runs again -- editing either
+			// would protect new databases and leave every existing one open.
+			//
+			// Numbered 3, not 2. This plugin already HAS a v2 (it adds
+			// event_type); the first draft of this migration collided with it,
+			// which surfaced as TestMigrations reporting "expected 2
+			// migrations, got 3" and, more confusingly, as the policy never
+			// being created at all -- so the scoping arm saw both tenants' rows
+			// and read as "the policy does not filter".
+			//
+			// kafka_config is the only table this plugin owns, and it is
+			// unambiguously tenant-scoped: a row is an operator of ONE tenant
+			// saying "consume this topic for me". Unlike datadogexport there is
+			// no global-by-design sibling here to tell it apart from -- that
+			// plugin's plugin_lease has no tenant_id and must not be listed.
+			//
+			// Up is empty on purpose: the runtime emits the policy from
+			// TenantScoped. On MySQL and SQL Server this version is recorded
+			// and does nothing.
+			Version:      3,
+			TenantScoped: []string{"kafka_config"},
+		},
 	}
 }

@@ -198,7 +198,7 @@ func cleanupRan(log string) bool {
 	markers := []string{
 		"sticky_worker_id = NULL",       // ClearStickyWorker
 		"DELETE FROM concurrency_keys",  // ReleaseWorkflowConcurrencyKeys
-		"parent workflow terminated",    // enforceParentClosePolicy (TERMINATE)
+		"error_op = 'parent_close'",     // enforceParentClosePolicy (TERMINATE) -- cleat#1978 moved the message itself to a bind param
 		"cancellation_requested = true", // enforceParentClosePolicy (REQUEST_CANCEL)
 		"idempotency_keys",              // in-tx idempotency write
 	}

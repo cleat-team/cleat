@@ -48,11 +48,11 @@ $ cleat build -o ./out ./examples/order/
 Use `cleat deploy` to insert the built WASM binary into the `workflow_defs` database table:
 
 ```bash
-# Deploy with a specific name and namespace.
-cleat deploy --db "$DATABASE_URL" --name place_order --namespace staging ./out/place_order.wasm
+# Deploy with a specific name.
+cleat deploy --db "$CLEAT_DATABASE_URL" --name place_order ./out/place_order.wasm
 
 # Deploy to a specific task queue.
-cleat deploy --db "$DATABASE_URL" --name place_order --task-queue high-memory ./out/place_order.wasm
+cleat deploy --db "$CLEAT_DATABASE_URL" --name place_order --task-queue high-memory ./out/place_order.wasm
 ```
 
 The deploy command:
@@ -62,25 +62,62 @@ The deploy command:
 3. Auto-assigns the next version number (`SELECT COALESCE(MAX(version), 0) + 1`)
 4. Inserts a row into `workflow_defs` with the WASM bytes, version, ABI compatibility info, and plugin dependencies
 
+### Dry-run preview
+
+`cleat deploy` needs a database -- either `--db` or `CLEAT_DATABASE_URL` -- to
+actually deploy. Without one, it refuses rather than silently doing nothing:
+
+```bash
+$ cleat deploy --name place_order ./out/place_order.wasm
+Error: no database configured. Set CLEAT_DATABASE_URL or --db to deploy, or pass --dry-run to preview without one.
+$ echo $?
+1
+```
+
+Pass `--dry-run` to preview what would be deployed without connecting to a
+database at all -- the same name and behavior as `cleat plugin install
+--dry-run`. It exits 0 whether or not a database is configured, so it is safe
+to run in a script that has neither:
+
+```bash
+$ cleat deploy --dry-run --name place_order ./out/place_order.wasm
+Would deploy workflow "place_order" (version 1) from ./out/place_order.wasm (2.3 MB) to queue "default"
+  Metadata: place_order v1 (ABI: 1, min ver: 1)
+Dry run: no changes were made.
+```
+
+### Database role and tenant
+
+`workflow_defs` carries row-level security, so `deploy` needs a connection
+that can satisfy it. Use the same `cleat_app` role the worker itself runs as
+-- the worker refuses a superuser or `BYPASSRLS` connection outright and its
+own error messages name `cleat_app` as the role to use instead, so a DSN that
+gets the worker running will also deploy.
+
+`deploy` sets the RLS tenant context for its own transaction from the global
+`--tenant` flag (default: the single-tenant default), the same way `cleat
+lock` resolves it -- flag, then `CLEAT_TENANT_ID`, then the default. Pass it
+before the subcommand: `cleat --tenant <tenant-uuid> deploy --db "$CLEAT_DATABASE_URL" ...`.
+
 ### Version management
 
 Each `cleat deploy` creates a new version. Versions are auto-incremented integer values:
 
 ```bash
 # Deploy v1.
-cleat deploy --db "$DATABASE_URL" --name place_order ./out/place_order.wasm
+cleat deploy --db "$CLEAT_DATABASE_URL" --name place_order ./out/place_order.wasm
 # Deployed workflow "place_order" version 1
 
 # Deploy v2 after making changes.
 cleat build -o ./out ./path/to/workflow/
-cleat deploy --db "$DATABASE_URL" --name place_order ./out/place_order.wasm
+cleat deploy --db "$CLEAT_DATABASE_URL" --name place_order ./out/place_order.wasm
 # Deployed workflow "place_order" version 2
 ```
 
 ### Listing versions
 
 ```bash
-cleat versions --db "$DATABASE_URL" place_order
+cleat --db "$CLEAT_DATABASE_URL" versions place_order
 # 2
 # 1
 ```
@@ -88,7 +125,7 @@ cleat versions --db "$DATABASE_URL" place_order
 ### Rollback
 
 ```bash
-cleat rollback --db "$DATABASE_URL" place_order 1
+cleat --db "$CLEAT_DATABASE_URL" rollback place_order 1
 # Rolled back "place_order" to version 1.
 # New instances will use version 1.
 ```
@@ -97,7 +134,7 @@ The WASM blob IS the version. Rolling back changes which WASM binary new workflo
 
 ## Step 3: Deploy via REST API
 
-When the worker runs with `--api-addr`, you can deploy workflows programmatically via the `POST /api/definitions` endpoint:
+When the worker runs with `--api-addr`, you can deploy workflows programmatically via the `POST /api/definitions` endpoint. `--require-auth` defaults to true, so most deployments need an API key (`cleat-worker --generate-api-key <tenant-id> --db "$CLEAT_DATABASE_URL"`) in the `Authorization` header:
 
 ```bash
 # Encode the WASM binary as base64 and POST.
@@ -105,23 +142,21 @@ WASM_B64=$(base64 -w0 ./out/place_order.wasm)
 
 curl -X POST http://localhost:8080/api/definitions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $CLEAT_API_KEY" \
   -d "{
     \"name\": \"place_order\",
-    \"namespace\": \"staging\",
-    \"wasm_base64\": \"$WASM_B64\",
-    \"task_queue\": \"default\"
+    \"wasm_bytes_base64\": \"$WASM_B64\"
   }"
 ```
 
-The API response includes the assigned version:
+There is no `namespace` or `task_queue` field: neither is a concept this endpoint knows about. The response is a `201` with the assigned version:
 
 ```json
 {
+  "created": true,
   "name": "place_order",
   "version": 1,
-  "namespace": "staging",
-  "task_queue": "default",
-  "status": "deployed"
+  "plugin_deps": null
 }
 ```
 
@@ -131,10 +166,10 @@ If your workflow calls child workflows, pin their versions at build time for rep
 
 ```bash
 # Resolve child versions from the database and write a lock file.
-cleat build -o ./out --db "$DATABASE_URL" ./path/to/workflow/
+cleat --db "$CLEAT_DATABASE_URL" build -o ./out ./path/to/workflow/
 
 # Or manually create/update the lock file.
-cleat lock --db "$DATABASE_URL" ./path/to/workflow/
+cleat lock --db "$CLEAT_DATABASE_URL" ./path/to/workflow/
 ```
 
 This generates a `cleat.lock` file that pins each child workflow to a specific version. During deployment, the lock file ensures the parent is paired with the correct child versions.
@@ -143,7 +178,6 @@ This generates a `cleat.lock` file that pins each child workflow to a specific v
 
 Before deploying to production:
 
-- [ ] Specify a namespace for environment isolation (`--namespace production`)
 - [ ] Use a database connection string with `sslmode=require`
 - [ ] Verify the WASM binary size is reasonable (monitor with `ls -lh`)
 - [ ] Test the workflow with `cleat run --input <json> <package>` before deploying

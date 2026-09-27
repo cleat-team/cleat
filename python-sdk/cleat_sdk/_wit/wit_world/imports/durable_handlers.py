@@ -3,6 +3,14 @@
 """
 Update and query handler registration.
 """
+from typing import TypeVar, Generic, Union, Optional, Protocol, Tuple, List, Any, Self, Callable
+from types import TracebackType
+from enum import Flag, Enum, auto
+from dataclasses import dataclass
+from abc import abstractmethod
+import weakref
+
+from componentize_py_types import Result, Ok, Err, Some
 
 
 
@@ -14,5 +22,24 @@ def durable_register_update_handler(name: str) -> int:
 def durable_register_query_handler(name: str) -> int:
     """
     Register a read-only query handler for external queries.
+    """
+    raise NotImplementedError
+def durable_poll_update() -> str:
+    """
+    Deliver the next pending update request.
+    
+    Returns a JSON envelope {"name","payload","request_id"}, or an empty
+    string when nothing is pending. Delivery is recorded in the event
+    history, which is what makes an update replayable: the handler sees the
+    same input at the same point in the program on every run.
+    """
+    raise NotImplementedError
+def durable_complete_update(request_id: str, outcome: str, err: str) -> int:
+    """
+    Record an update handler's outcome and settle the caller's promise.
+    
+    A non-empty err rejects; an empty one resolves. outcome carries the
+    handler result. request-id is the value
+    durable-poll-update returned, unchanged.
     """
     raise NotImplementedError

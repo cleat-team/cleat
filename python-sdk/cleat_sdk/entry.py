@@ -28,10 +28,42 @@ import typing
 from collections.abc import Callable
 from typing import Any, get_type_hints
 
+from .defer import run_deferred
 from .host_calls import HostCalls, SuspendSentinel
 
-# String sentinel for workflow suspension (matches Go side check).
-SUSPEND_SENTINEL_STR = "__CLEAT_SUSPEND__"
+try:
+    from wit_world import RunOutcome_Completed, RunOutcome_Suspended
+except ImportError:  # not running in WASM -- see host_calls._USING_WASM
+
+    class RunOutcome_Completed:  # type: ignore[no-redef]
+        """Stand-in for the generated binding outside the WASM runtime."""
+
+        def __init__(self, value: str) -> None:
+            self.value = value
+
+    class RunOutcome_Suspended:  # type: ignore[no-redef]
+        """Stand-in for the generated binding outside the WASM runtime."""
+
+
+class _Suspended:
+    """What the entry wrapper returns when the workflow did not finish.
+
+    A singleton object rather than the string ``"__CLEAT_SUSPEND__"``, which
+    is what this used to be and what engine/component_cgo.go compared the
+    ``run`` export's result against verbatim. That comparison is gone -- a
+    suspension is a case of ``run-outcome`` now (wit/cleat.wit) -- and with it
+    the reason to spell one as text. An object cannot be produced by
+    ``json.dumps`` of anything a workflow returns, which is a stronger
+    statement than "no workflow has returned that string yet".
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "<cleat: workflow suspended>"
+
+
+SUSPENDED = _Suspended()
 
 
 # ---------------------------------------------------------------------------
@@ -208,8 +240,8 @@ def _inject_witworld(func: Callable, export_wrapper: Callable, entry_name: str) 
     # Store this wrapper keyed by entry name.
     module._cleat_entry_wrappers[entry_name] = export_wrapper
 
-    def _dispatcher_run(args_str: str) -> str:
-        """WitWorld.run dispatcher -- selects the right entry and delegates."""
+    def _select(args_str: str) -> Any:
+        """Select the right entry wrapper and delegate to it."""
         wrappers = module._cleat_entry_wrappers
         if not wrappers:
             raise RuntimeError("No cleat_entry functions registered")
@@ -238,8 +270,43 @@ def _inject_witworld(func: Callable, export_wrapper: Callable, entry_name: str) 
         modified_json = json.dumps(input_data)
         return wrapper(modified_json)
 
-    wrapped = staticmethod(_dispatcher_run)
-    module.WitWorld = type("WitWorld", (), {"run": wrapped})
+    def _dispatcher_run(args_str: str) -> Any:
+        """WitWorld.run -- the world's entry point, returning a ``run-outcome``.
+
+        The conversion from the wrapper's Python-level result to the WIT
+        variant happens HERE and nowhere else, so ``export_wrapper`` keeps
+        returning a plain JSON string and every test that calls a decorated
+        workflow directly keeps working.
+        """
+        out = _select(args_str)
+        if out is SUSPENDED:
+            return RunOutcome_Suspended()
+        return RunOutcome_Completed(out)
+
+    def _dispatcher_run_deferred() -> int:
+        """WitWorld.run-deferred -- the HOST's drain of the defer table.
+
+        Reached only after ``run`` returned ``suspended`` during a defer
+        segment, and only because the host calls it: the guest deliberately
+        does not drain on suspension. The host brackets this call so the defer
+        bodies' own durable calls go through while the workflow body's are
+        stopped, which is the whole reason the drain is a separate export
+        rather than something the wrapper does on its way out.
+
+        ``propagate_suspend=False`` because there is no result left to protect
+        and the bodies are already off the table -- see run_deferred's
+        docstring for the two drains and why they differ.
+        """
+        return run_deferred(propagate_suspend=False)
+
+    module.WitWorld = type(
+        "WitWorld",
+        (),
+        {
+            "run": staticmethod(_dispatcher_run),
+            "run_deferred": staticmethod(_dispatcher_run_deferred),
+        },
+    )
 
 
 def cleat_entry(name: str | None = None) -> Callable:
@@ -310,6 +377,43 @@ def cleat_entry(name: str | None = None) -> Callable:
         sig = inspect.signature(func)
         all_param_names = list(sig.parameters.keys())
 
+        # REFUSE AN UNANNOTATED HostCalls AT DECORATION TIME. cleat#1637.
+        #
+        # The injected parameter is identified by its TYPE HINT below. Without
+        # the hint it is not skipped, so it joins workflow_param_names and --
+        # having no default -- required_param_names, and the presence check
+        # refuses every payload: no caller ever sends a key called "h", because
+        # the framework injects it. The workflow never runs, on any input.
+        #
+        # THE OLD FAILURE NAMED THE WRONG THING, which is why this is an error
+        # and not a doc note. It said "Missing required parameters: h", which
+        # reads as a caller problem -- and adding "h" to the start payload DOES
+        # make it go away, handing the workflow a JSON value where it expects a
+        # HostCalls. The fix that suggests itself is worse than the defect.
+        #
+        # Java refuses the analogous shape in its annotation processor ("@CleatEntry
+        # method first parameter must be cleat.HostCalls, got ..."), so this
+        # brings Python to the same place: caught where it is written, not on
+        # the first start.
+        #
+        # SCOPED TO "a first parameter that is not HostCalls". A function with NO
+        # parameters is left alone: testdata/vet-checks/python/* declares several
+        # (`def workflow() -> None`) as fixtures for other rules, and whether a
+        # zero-parameter entry should be legal is a separate question this must
+        # not decide by accident.
+        if all_param_names:
+            first = all_param_names[0]
+            if hints.get(first) is not HostCalls:
+                raise TypeError(
+                    f"@cleat_entry {func.__name__}({first}, ...): the first parameter is the "
+                    f"injected HostCalls runtime and must be annotated "
+                    f"`{first}: HostCalls`. Without the annotation it is treated as a workflow "
+                    f"parameter, and every start fails with "
+                    f'"Missing required parameters: {first}" -- which names the payload rather '
+                    f"than the annotation. Import it with "
+                    f"`from cleat_sdk.host_calls import HostCalls`."
+                )
+
         workflow_param_names: list[str] = []
         required_param_names: list[str] = []
         for pname in all_param_names:
@@ -362,13 +466,28 @@ def cleat_entry(name: str | None = None) -> Callable:
                 result = func(h, **kwargs)
                 result = _unwrap_result(result)
 
-                # (e) Serialise the return value and return as a string.
+                # (e) Run the workflow's own defers before reporting, so
+                #     anything they record lands inside this segment. See
+                #     IMPROVEMENT-PLAN 3.73. A defer that itself suspends
+                #     raises SuspendSentinel, which the handler below catches
+                #     -- suspension wins over the result, exactly as it does
+                #     when the workflow body suspends.
+                run_deferred()
+
+                # (f) Serialise the return value and return as a string.
                 return json.dumps(result, default=str)
 
             except SuspendSentinel:
                 # The workflow signalled suspension (e.g. sleep on a
                 # fresh execution).  Propagate a sentinel string.
-                return SUSPEND_SENTINEL_STR
+                #
+                # Defers deliberately do NOT run here. A suspended workflow has
+                # not exited; its cleanup is still pending, and firing it at the
+                # first sleep would release locks a workflow that is about to
+                # continue still holds. The final segment replays the entry
+                # point, re-registers the same defers, and runs them when it
+                # completes.
+                return SUSPENDED
 
             # Deliberate, and load-bearing: this is the workflow error
             # boundary. Everything the user's workflow body can raise has to
@@ -376,6 +495,17 @@ def cleat_entry(name: str | None = None) -> Callable:
             # a trap and the engine sees a dead guest instead of a failed step.
             except Exception as exc:  # noqa: BLE001
                 # Any other exception is treated as a workflow error.
+                #
+                # Defers still run: cleanup exists for the run that did not
+                # finish the way it meant to, and a defer that only fires on
+                # the happy path is close to useless. A defer that suspends
+                # here turns the segment into a suspension, which is why this
+                # is a nested try rather than a bare call -- the outer
+                # SuspendSentinel handler is already committed to this branch.
+                try:
+                    run_deferred()
+                except SuspendSentinel:
+                    return SUSPENDED
                 return json.dumps({"error": str(exc)})
 
         # Mark the wrapper for introspection tooling.
@@ -461,7 +591,6 @@ def query_handler(name: str | None = None) -> Callable:
         @query_handler("get_status")
         def get_status(h: HostCalls, order_id: str) -> str:
             # Read-only — no call, sleep, etc.
-            state = h.get_state(order_id, dict)
             return json.dumps({"status": state.get("status", "unknown")})
 
     The decorated function carries ``wrapper._is_query_handler = True``

@@ -1,6 +1,6 @@
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{FnArg, ItemFn, Pat};
+use syn::{FnArg, ItemFn, LitByteStr, Pat};
 
 #[allow(clippy::collapsible_match)]
 pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
@@ -151,10 +151,54 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
         quote! {}
     };
 
+    // cleat#2113: emit this entry's export name into a "cleat_entry_points"
+    // linker section, one name per #[cleat_entry] expansion. `#[link_section]`
+    // statics sharing a name are concatenated by wasm-ld into ONE WASM custom
+    // section in link order -- the same mechanism wasm-bindgen already relies
+    // on for wasm32-unknown-unknown, verified directly against this target
+    // (LTO+strip, incremental, and a fully-cached no-op rebuild all keep the
+    // section correct) before this was written. `cleat build`'s Rust path
+    // reads that section as the AUTHORITATIVE entry-point list: because it is
+    // assembled by the linker from what actually got compiled, its presence
+    // is proof the compiler itself saw this attribute, not a source-level
+    // regex's guess at what cargo would produce. See
+    // wasm.ReadEntryPointsSection and cmd/cleat/build_rust.go.
+    //
+    // #[used] keeps the static alive even though nothing in this crate ever
+    // reads it -- without it, an unreferenced static is exactly the kind of
+    // dead code aggressive LTO removes.
+    //
+    // The static's own name only has to be unique within this function's
+    // enclosing module (Rust items are module-scoped; two #[cleat_entry]
+    // functions cannot share an identifier in the same module already, since
+    // that would itself be a duplicate-definition error), so deriving it from
+    // fn_name is sufficient -- no crate-wide counter or hash needed.
+    let entry_point_static_name = quote::format_ident!("__CLEAT_ENTRY_POINT_{}", fn_name);
+    let entry_point_bytes = format!("{}\n", fn_name).into_bytes();
+    let entry_point_len = entry_point_bytes.len();
+    let entry_point_lit = LitByteStr::new(&entry_point_bytes, fn_name.span());
+
     let expanded = quote! {
         #compile_errors
         #[allow(non_snake_case)]
         #fn_vis fn #inner_name(#(#inner_params),*) #fn_ret #fn_block
+
+        // wasm32-only: `#[link_section]`'s accepted syntax is
+        // target-specific -- a plain name is valid for a WASM object file's
+        // custom sections, but invalid for Mach-O (which requires
+        // "segment,section") and has its own rules again on PE. cleat-macro's
+        // own native test suite (tests/basic.rs) compiles #[cleat_entry]
+        // expansions for a non-WASM host deliberately (see that file's own
+        // top-of-file comment) to test the generated wrapper without needing
+        // a WASM runtime, so this must not be emitted there -- confirmed by
+        // it failing rustc's Mach-O section-specifier check on macOS before
+        // this cfg was added.
+        #[cfg(target_arch = "wasm32")]
+        #[used]
+        #[link_section = "cleat_entry_points"]
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals)]
+        static #entry_point_static_name: [u8; #entry_point_len] = *#entry_point_lit;
 
         #[no_mangle]
         pub unsafe extern "C" fn #fn_name(
@@ -169,37 +213,66 @@ pub fn cleat_entry_impl(item: TokenStream) -> TokenStream {
 
             let h = cleat_sdk::HostCalls;
 
-            let result = std::panic::catch_unwind(|| {
-                #inner_name(#(#inner_call_args),*)
-            });
+            // Clear before the body runs, not only after. One WASM instance
+            // can serve more than one call, and a flag left set by an earlier
+            // segment would suspend this one before it did anything.
+            cleat_sdk::clear_suspended();
 
-            match result {
-                Ok(inner_result) => {
-                    match cleat_sdk::format_cleat_result(inner_result) {
-                        Ok(output_json) => {
-                            // Normalize through host encoding/json for cross-language
-                            // determinism (sorted keys, canonical float representation).
-                            if let Some(canonical) = cleat_sdk::HostCalls.json_stringify(&output_json) {
-                                let n = unsafe { cleat_sdk::memory::write_string(out_ptr, max_out_len, &canonical) };
-                                cleat_sdk::memory::encode_export_result(0, n)
-                            } else {
-                                // Fallback: write original JSON if normalization fails.
-                                let n = unsafe { cleat_sdk::memory::write_string(out_ptr, max_out_len, &output_json) };
-                                cleat_sdk::memory::encode_export_result(0, n)
-                            }
-                        }
-                        Err(err_msg) => {
-                            let err_json = serde_json::json!({"error": err_msg}).to_string();
-                            let n = unsafe { cleat_sdk::memory::write_string(out_ptr, max_out_len, &err_json) };
-                            cleat_sdk::memory::encode_export_result(1, n)
-                        }
+            // Called directly. This used to be wrapped in
+            // `std::panic::catch_unwind` to intercept a `SuspendSentinel`
+            // panic, which could never work: wasm32-wasip1 builds with
+            // panic=abort, so the panic aborted -- `unreachable`, a trap --
+            // and the catch arm was dead code. IMPROVEMENT-PLAN 3.87.
+            let inner_result = #inner_name(#(#inner_call_args),*);
+
+            // Suspension is decided by the flag, not by the body's return
+            // value, and it is checked BEFORE the result is formatted.
+            //
+            // Checking the flag rather than only matching on
+            // `Err(CallError::Suspended)` is what makes this robust: a body
+            // that receives the Err and discards it -- `let _ = h.sleep_ms(..)`
+            // -- still returns a value of its own, and reporting that value
+            // would complete a workflow the host has already recorded as
+            // suspended. That is precisely the failure the panic version had,
+            // so the replacement must not reintroduce it.
+            //
+            // run_deferred is NOT called here. A suspended workflow has not
+            // exited and its cleanup is still pending; firing it at the first
+            // sleep would release locks a workflow that is about to continue
+            // still holds.
+            if cleat_sdk::is_suspended() {
+                return cleat_sdk::memory::SUSPEND_SENTINEL;
+            }
+
+            // Run the workflow's own defers before reporting, so anything they
+            // record lands inside this segment. On the error path too -- a
+            // defer is FOR the run that did not finish the way it meant to.
+            cleat_sdk::run_deferred();
+
+            // A defer body can itself suspend, so the flag is re-read after the
+            // drain. Without this the segment would report a result for a
+            // workflow whose cleanup asked to continue in a later segment.
+            if cleat_sdk::is_suspended() {
+                return cleat_sdk::memory::SUSPEND_SENTINEL;
+            }
+
+            match cleat_sdk::format_cleat_result(inner_result) {
+                Ok(output_json) => {
+                    // Normalize through host encoding/json for cross-language
+                    // determinism (sorted keys, canonical float representation).
+                    if let Some(canonical) = cleat_sdk::HostCalls.json_stringify(&output_json) {
+                        let n = unsafe { cleat_sdk::memory::write_string(out_ptr, max_out_len, &canonical) };
+                        cleat_sdk::memory::encode_export_result(0, n)
+                    } else {
+                        // Fallback: write original JSON if normalization fails.
+                        let n = unsafe { cleat_sdk::memory::write_string(out_ptr, max_out_len, &output_json) };
+                        cleat_sdk::memory::encode_export_result(0, n)
                     }
                 }
-                Err(panic_err) => {
-                    if panic_err.downcast_ref::<cleat_sdk::SuspendSentinel>().is_some() {
-                        return cleat_sdk::memory::SUSPEND_SENTINEL;
-                    }
-                    std::panic::resume_unwind(panic_err);
+                Err(err_msg) => {
+                    let err_json = serde_json::json!({"error": err_msg}).to_string();
+                    let n = unsafe { cleat_sdk::memory::write_string(out_ptr, max_out_len, &err_json) };
+                    cleat_sdk::memory::encode_export_result(1, n)
                 }
             }
         }

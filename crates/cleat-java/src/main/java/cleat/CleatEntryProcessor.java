@@ -13,9 +13,12 @@ import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import javax.tools.Diagnostic;
+import javax.tools.FileObject;
 import javax.tools.JavaFileObject;
+import javax.tools.StandardLocation;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.io.Writer;
 import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.HashSet;
@@ -67,6 +70,21 @@ public class CleatEntryProcessor extends AbstractProcessor {
 
     /** Whether the aggregator and WorkflowEntry have been generated. */
     private boolean aggregatorGenerated = false;
+
+    /**
+     * The name the HOST looks up to drain a killed workflow's defers.
+     *
+     * <p>Must stay equal to {@code deferRunnerExport} in
+     * {@code engine/backend_wasmtime.go}. The two are pinned together by
+     * {@code TestJavaExportsTheDeferRunner}, which asserts the generated
+     * source against the engine's own constant rather than a second copy of
+     * the literal -- a test with the string written out twice passes while
+     * the halves drift apart.
+     */
+    private static final String DEFER_RUNNER_EXPORT = "__cleat_run_deferred";
+
+    /** Whether {@link #generateDeferRunner()} produced a class this run. */
+    private boolean generatedDeferRunner = false;
 
     @Override
     public boolean process(Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
@@ -123,8 +141,12 @@ public class CleatEntryProcessor extends AbstractProcessor {
         // annotation processing, even when there are no @CleatEntry methods.
         // This ensures the TeaVM analysis root class always exists.
         if (roundEnv.processingOver() && !aggregatorGenerated) {
+            if (!generatedWrappers.isEmpty()) {
+                generateDeferRunner();
+            }
             generateAggregator();
             generateWorkflowEntry();
+            generateEntryPointManifest();
             aggregatorGenerated = true;
         }
         return true;
@@ -160,6 +182,28 @@ public class CleatEntryProcessor extends AbstractProcessor {
 
         int userParamCount = params.size() - 1; // Exclude HostCalls
 
+        // Refuse more than one user parameter, with the reason.
+        //
+        // cleat#1636. There was no check at all: the count was taken, params.get(1)
+        // was used, and the rest were ignored -- so the generated wrapper called
+        // `Class.method(hostCalls, firstParam)` for a two-parameter method and the
+        // author's first sight of the problem was an arity error inside generated
+        // source they did not write.
+        //
+        // Rust refuses the same thing for the same reason and its message is the
+        // model (crates/cleat-macro/src/entry.rs:79). The constraint is the ABI's,
+        // not this SDK's: a WASM export receives one JSON payload.
+        if (userParamCount > 1) {
+            processingEnv.getMessager().printMessage(
+                Diagnostic.Kind.ERROR,
+                "@CleatEntry methods must have exactly one user parameter (beyond "
+                    + "cleat.HostCalls).  Found " + userParamCount + ".  Reason: a WASM "
+                    + "export receives a single JSON payload, so only one user parameter "
+                    + "can be bound.  Combine them into a Map parameter and read the keys.",
+                method);
+            return;
+        }
+
         // Determine return type
         String returnType = method.getReturnType().toString();
         boolean returnsVoid = "void".equals(returnType);
@@ -180,9 +224,12 @@ public class CleatEntryProcessor extends AbstractProcessor {
                     Diagnostic.Kind.ERROR,
                     "Unsupported parameter type '" + inputType + "' for parameter '"
                         + paramName + "' in method '" + method.getSimpleName()
-                        + "'.  Supported types are: String, int, Integer, long, Long, "
-                        + "double, Double, boolean, Boolean, and custom reference types "
-                        + "that are JSON-serializable.",
+                        + "'.  Supported types are exactly what JsonHelper.parse can "
+                        + "decode: String, Object, Map, HashMap, List, ArrayList, and "
+                        + "int/long/double/float/short/boolean with their boxed forms.  "
+                        + "A custom type is NOT supported -- JsonHelper.parse throws "
+                        + "UnsupportedOperationException for it.  Take a Map and read "
+                        + "the fields, or take a String and parse it yourself.",
                     userParam);
             }
         }
@@ -275,7 +322,24 @@ public class CleatEntryProcessor extends AbstractProcessor {
             out.println("            String inputJSON = Memory.readString(argsPtr, argsLen);");
             out.println();
             out.println("            // Deserialize the workflow input.");
-            out.println("            " + inputType + " " + paramName + " = JsonHelper.parse(inputJSON, " + inputType + ".class);");
+            // ERASE GENERICS FOR THE CLASS LITERAL. `Map<String,Object>.class`
+            // is not legal Java, so a parameterised parameter generated a
+            // wrapper that did not compile -- reported at the generated file,
+            // which the author did not write. A RAW Map always worked, which is
+            // why this went unnoticed: the difference is invisible from the
+            // workflow's own source. cleat#1636.
+            //
+            // The declaration keeps its generics so the workflow method still
+            // type-checks against it; only the literal is erased. That makes the
+            // assignment unchecked, which is what JsonHelper.parse already is.
+            String classLiteralType = inputType;
+            int typeArgs = classLiteralType.indexOf('<');
+            if (typeArgs >= 0) {
+                classLiteralType = classLiteralType.substring(0, typeArgs);
+            }
+            out.println("            @SuppressWarnings(\"unchecked\")");
+            out.println("            " + inputType + " " + paramName + " = (" + inputType
+                + ") JsonHelper.parse(inputJSON, " + classLiteralType + ".class);");
             out.println();
         }
 
@@ -295,6 +359,15 @@ public class CleatEntryProcessor extends AbstractProcessor {
         out.println(");");
         out.println();
 
+        out.println();
+        out.println("            // Run the workflow's own defers before reporting, so");
+        out.println("            // anything they record lands inside this segment. A defer");
+        out.println("            // that itself suspends throws SuspendSignal, which the");
+        out.println("            // handler below catches -- suspension wins over the result,");
+        out.println("            // exactly as when the workflow body suspends. 3.73.");
+        out.println("            cleat.Defer.runDeferred();");
+        out.println();
+
         if (!returnsVoid) {
             out.println("            // Serialize the result to JSON.");
             out.println("            String resultJSON = JsonHelper.stringify(result);");
@@ -310,12 +383,29 @@ public class CleatEntryProcessor extends AbstractProcessor {
         out.println();
 
         // Catch block — TerminalError first (non-retryable), then general Exception.
+        // Suspension first: it is not a failure and must not be caught by the
+        // Exception handler below, which would turn a suspended workflow into
+        // one that "failed" with the message "cleat: workflow suspended".
+        //
+        // IMPROVEMENT-PLAN 3.74. This branch did not exist, so no generated
+        // wrapper could ever return the sentinel the host checks for
+        // (engine/backend_wasmtime.go: `if raw == (1 << 62)`). The host half
+        // was ready; the guest half was missing.
+        out.println("        } catch (cleat.SuspendSignal e) {");
+        out.println("            return cleat.Memory.SUSPEND_SENTINEL;");
         out.println("        } catch (cleat.TerminalError e) {");
+        out.println("            // Cleanup exists for the run that did not finish the way it");
+        out.println("            // meant to, so defers run on the error paths too. Drained for");
+        out.println("            // the host rather than plainly, because a defer that suspends");
+        out.println("            // here has no segment left to suspend: the result is already");
+        out.println("            // decided.");
+        out.println("            cleat.Defer.runDeferredForHost();");
         out.println("            String errorJSON = JsonHelper.errorJson(");
         out.println("                e.getMessage() != null ? e.getMessage() : \"Terminal error\");");
         out.println("            int written = Memory.writeString(outPtr, maxOutLen, errorJSON);");
         out.println("            return Memory.encodeExportResult(cleat.Memory.TERMINAL_ERROR_CODE, written);");
         out.println("        } catch (Exception e) {");
+        out.println("            cleat.Defer.runDeferredForHost();");
         out.println("            // Catch all exceptions and return as error JSON.");
         out.println("            String errorJSON = JsonHelper.errorJson(");
         out.println("                e.getMessage() != null ? e.getMessage() : \"Unknown error\");");
@@ -331,12 +421,51 @@ public class CleatEntryProcessor extends AbstractProcessor {
     }
 
     /**
-     * Returns true if the given type is supported as a workflow input parameter.
+     * The types {@link JsonHelper#parse} can decode, by fully-qualified name.
      * <p>
-     * Supported types include {@link String}, the common primitives and their
-     * boxed equivalents ({@code int}/{@link Integer}, {@code long}/{@link Long},
-     * {@code double}/{@link Double}, {@code boolean}/{@link Boolean}), and any
-     * custom reference type (which {@link JsonHelper} will attempt to deserialize).
+     * THIS LIST IS THE DECODER'S, NOT THIS PROCESSOR'S, and that is the whole
+     * point of cleat#1636. Two hand-maintained sets drifted apart in opposite
+     * directions: this check accepted every reference type, including POJOs
+     * that {@code JsonHelper.parse} throws {@code UnsupportedOperationException}
+     * for at run time, while rejecting the primitives {@code float} and
+     * {@code short}, which it decodes perfectly well.
+     * <p>
+     * A typed parameter therefore compiled cleanly, passed this check, and
+     * failed on the first start with a message telling the author to hand-parse.
+     * <p>
+     * {@code CleatEntryProcessorConformanceTest} derives both sets from their
+     * real implementations -- this list, and {@code JsonHelper.parse} actually
+     * invoked -- and fails on any disagreement, so the two cannot drift apart
+     * again without a red test.
+     */
+    private static final java.util.Set<String> DECODABLE_TYPES =
+        java.util.Collections.unmodifiableSet(new java.util.HashSet<>(java.util.Arrays.asList(
+            "java.lang.String",
+            "java.lang.Integer", "java.lang.Long", "java.lang.Double",
+            "java.lang.Float", "java.lang.Short", "java.lang.Boolean",
+            "java.lang.Object",
+            "java.util.Map", "java.util.HashMap",
+            "java.util.List", "java.util.ArrayList")));
+
+    /**
+     * The primitives {@link JsonHelper#parse} can decode.
+     * <p>
+     * {@code float} and {@code short} are here because the decoder handles them
+     * ({@code JsonHelper.java:96,105}); they were absent from this check and so
+     * refused at compile time, which is the second half of cleat#1636 and the
+     * direction nobody was looking for.
+     */
+    private static final java.util.Set<String> DECODABLE_PRIMITIVES =
+        java.util.Collections.unmodifiableSet(new java.util.HashSet<>(java.util.Arrays.asList(
+            "int", "long", "double", "float", "short", "boolean")));
+
+    /**
+     * Returns true if the given type is one {@link JsonHelper#parse} can decode.
+     * <p>
+     * A type this returns false for is refused at compile time, with a
+     * diagnostic naming what to use instead. Previously any reference type
+     * returned true and the refusal arrived at run time, inside a generated
+     * wrapper the author did not write.
      * </p>
      */
     private static boolean isSupportedParameterType(TypeMirror type) {
@@ -344,13 +473,33 @@ public class CleatEntryProcessor extends AbstractProcessor {
         if (kind == TypeKind.VOID || kind == TypeKind.ARRAY) {
             return false;
         }
-        if (kind.isPrimitive()) {
-            String name = type.toString();
-            return "int".equals(name) || "long".equals(name)
-                || "double".equals(name) || "boolean".equals(name);
+        return isSupportedParameterTypeByName(type.toString(), kind.isPrimitive());
+    }
+
+    /**
+     * The rule behind {@link #isSupportedParameterType}, reachable without a
+     * {@code TypeMirror}.
+     * <p>
+     * A {@code TypeMirror} exists only during annotation processing, so a test
+     * cannot ask the real check anything. This split exists so
+     * {@code EntryParameterTypesMatchTheDecoderTest} can compare THIS rule
+     * against {@code JsonHelper.parse} actually invoked, rather than against a
+     * copy of the rule -- and a copy is exactly how the two sets drifted apart
+     * in cleat#1636.
+     * <p>
+     * Package-private on purpose. It is not API; it is the seam that makes the
+     * production rule testable, and that test asserts this method still exists.
+     */
+    static boolean isSupportedParameterTypeByName(String typeName, boolean primitive) {
+        if (primitive) {
+            return DECODABLE_PRIMITIVES.contains(typeName);
         }
-        // All other reference types (String, custom types, etc.) are allowed.
-        return true;
+        // Erase generic arguments: Map<String,Object> must match java.util.Map.
+        int lt = typeName.indexOf('<');
+        if (lt >= 0) {
+            typeName = typeName.substring(0, lt);
+        }
+        return DECODABLE_TYPES.contains(typeName);
     }
 
     /**
@@ -385,6 +534,72 @@ public class CleatEntryProcessor extends AbstractProcessor {
             }
         }
         return sb.toString();
+    }
+
+    /**
+     * Generate the WASM export the HOST calls to drain a killed workflow's
+     * defers. IMPROVEMENT-PLAN 3.35 phase 4 / 3.73 piece 4.
+     *
+     * <p>The wrappers above drain the defer table when a workflow RETURNS,
+     * which covers every workflow that gets to return. A workflow the host
+     * killed -- execution fence, instruction limit, memory ceiling -- never
+     * reaches one, and its cleanup would simply never happen: the lock stays
+     * held, the charge stays uncompensated.
+     * {@code runGuestDefersAfterKill} in {@code engine/backend_wasmtime.go}
+     * looks this export up by name on the killed instance; before it existed
+     * that lookup returned null for every Java guest and the host's kill-path
+     * cleanup silently did nothing.
+     *
+     * <p>Generated once per compilation, not once per entry point: it is one
+     * export for the whole module, and emitting it per wrapper would be a
+     * duplicate-export failure the moment a module declares two workflows.
+     *
+     * <p>It calls {@link Defer#runDeferredForHost()} rather than
+     * {@link Defer#runDeferred()}, which is the difference that matters. The
+     * wrapper needs {@link SuspendSignal} to escape so its segment suspends;
+     * this caller must swallow it, because a workflow reached this way is
+     * already dead and has no segment left. Letting it out would turn the
+     * host's cleanup call into a trap.
+     */
+    private void generateDeferRunner() {
+        try {
+            JavaFileObject file = processingEnv.getFiler()
+                .createSourceFile("cleat.generated.CleatDeferRunner");
+
+            try (PrintWriter out = new PrintWriter(file.openWriter())) {
+                out.println("package cleat.generated;");
+                out.println();
+                out.println("import org.teavm.interop.Export;");
+                out.println();
+                out.println("/**");
+                out.println(" * Auto-generated by CleatEntryProcessor. The host's entry point");
+                out.println(" * for running the defers of a workflow it killed.");
+                out.println(" */");
+                out.println("public final class CleatDeferRunner {");
+                out.println();
+                out.println("    private CleatDeferRunner() {");
+                out.println("        // static only");
+                out.println("    }");
+                out.println();
+                out.println("    /**");
+                out.println("     * Run outstanding defer bodies; return how many ran.");
+                out.println("     * <p>");
+                out.println("     * Idempotent: the table is drained before the first body");
+                out.println("     * runs, so a guest that already ran its defers returns 0.");
+                out.println("     */");
+                out.println("    @Export(name = \"" + DEFER_RUNNER_EXPORT + "\")");
+                out.println("    public static long " + DEFER_RUNNER_EXPORT + "() {");
+                out.println("        return (long) cleat.Defer.runDeferredForHost();");
+                out.println("    }");
+                out.println("}");
+            }
+            generatedDeferRunner = true;
+        } catch (IOException e) {
+            processingEnv.getMessager().printMessage(
+                Diagnostic.Kind.ERROR,
+                "Failed to generate CleatDeferRunner: " + e.getMessage(),
+                (Element) null);
+        }
     }
 
     /**
@@ -423,6 +638,15 @@ public class CleatEntryProcessor extends AbstractProcessor {
                     out.print(fqcn);
                     out.println(".class,");
                 }
+                if (generatedDeferRunner) {
+                    // Not an entry point, and deliberately not in getEntries()
+                    // below -- but it needs the same protection from TeaVM's
+                    // dead-code elimination, because nothing in the guest calls
+                    // it. Its only caller is the host, after it has killed the
+                    // workflow, and a tree-shaken export is indistinguishable
+                    // from one that was never generated.
+                    out.println("        cleat.generated.CleatDeferRunner.class,");
+                }
                 out.println("    };");
                 out.println();
                 out.println("    /**");
@@ -450,6 +674,53 @@ public class CleatEntryProcessor extends AbstractProcessor {
                 Diagnostic.Kind.ERROR,
                 "Failed to generate CleatEntryIndex: " + e.getMessage(),
             (Element) null);
+        }
+    }
+
+    /**
+     * Emit the sidecar manifest {@code cleat build} reads to embed the
+     * {@code cleat_entry_points} WASM custom section (cleat#2145).
+     * <p>
+     * Written unconditionally, even with zero {@code @CleatEntry} methods --
+     * same reasoning as {@link #generateAggregator}'s {@code getEntries()}
+     * returning an empty array rather than nothing: "manifest missing"
+     * downstream must mean only one thing, an annotation processor old
+     * enough to predate this mechanism, never "zero entry points", which is
+     * a distinct, later error ({@code wasm.Metadata.Validate}).
+     * <p>
+     * {@code wrapperExportNames} is exactly the list {@link #generateAggregator}
+     * already writes into {@code CleatEntryIndex.getEntries()} -- this is not
+     * a second, separate computation of what got exported, it is the same
+     * one this processor already made deciding what to generate a wrapper
+     * for, written where {@code cleat build} (a separate Go process; it
+     * cannot call into the compiled class to ask {@code getEntries()}) can
+     * read it without running a JVM.
+     * <p>
+     * {@link StandardLocation#CLASS_OUTPUT} with an empty package name
+     * places the resource at the build's class output root (Gradle:
+     * {@code build/classes/java/main/}), alongside the {@code .class} files
+     * {@code generateWasm} compiles from -- not inside {@code build/wasm/}
+     * or {@code build/generated/teavm/}, which don't exist yet at annotation
+     * -processing time.
+     */
+    private void generateEntryPointManifest() {
+        try {
+            FileObject file = processingEnv.getFiler().createResource(
+                StandardLocation.CLASS_OUTPUT, "", "cleat-entry-points.txt");
+            try (Writer out = file.openWriter()) {
+                for (String fqcn : generatedWrappers) {
+                    String exportName = wrapperExportNames.get(fqcn);
+                    if (exportName != null) {
+                        out.write(exportName);
+                        out.write("\n");
+                    }
+                }
+            }
+        } catch (IOException e) {
+            processingEnv.getMessager().printMessage(
+                Diagnostic.Kind.ERROR,
+                "Failed to write cleat-entry-points.txt: " + e.getMessage(),
+                (Element) null);
         }
     }
 

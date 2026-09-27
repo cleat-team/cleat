@@ -8,6 +8,7 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"io"
 	"log/slog"
 	"net/http"
@@ -604,7 +605,7 @@ func setupTestPlugin(t *testing.T, clock *controllableClock) (*Plugin, http.Hand
 		t.Fatalf("RegisterRoutes: %v", err)
 	}
 
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 	return p, handler, store
 }
 
@@ -944,7 +945,7 @@ func TestRunDueSchedules(t *testing.T) {
 	startWorkflowCalls := 0
 	p.env = &plugin.Environment{
 		DB: p.db,
-		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
 			startWorkflowCalls++
 			return uuid.New().String(), nil
 		},
@@ -1124,10 +1125,17 @@ func TestMigrations(t *testing.T) {
 		if m.Version <= 0 {
 			t.Errorf("migration %d: expected Version > 0, got %d", i, m.Version)
 		}
-		if m.Up == "" {
-			t.Errorf("migration %d: expected non-empty Up SQL", i)
-		}
 	}
+
+	// cleat#1513 has landed, so the instruction above is carried out rather
+	// than deferred again: this block is the helper now, not a variant of it.
+	//
+	// It had already drifted in the way that comment predicts. The predicate
+	// was `m.Up == ""`, which reports a MySQL-only migration as doing nothing
+	// -- while the migration RUNNER and the reversal path both ask about all
+	// three arms. cleat#1622 needed exactly such a migration and found five
+	// copies of this one predicate, four of them wrong.
+	plugintest.AssertMigrationsDoSomething(t, migrations)
 }
 
 // ---------------------------------------------------------------------------
@@ -1414,7 +1422,7 @@ func TestRunDueSchedules_WorkflowFailure(t *testing.T) {
 	startWorkflowCalls := 0
 	p.env = &plugin.Environment{
 		DB: p.db,
-		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
 			startWorkflowCalls++
 			return "", fmt.Errorf("workflow deployment not found")
 		},
@@ -2007,7 +2015,7 @@ func TestRunDueSchedules_ScanError(t *testing.T) {
 	p, _, store := setupTestPlugin(t, clock)
 	p.env = &plugin.Environment{
 		DB: p.db,
-		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
 			return uuid.New().String(), nil
 		},
 	}
@@ -2084,7 +2092,7 @@ func TestRunDueSchedules_ExecError(t *testing.T) {
 	p, _, store := setupTestPlugin(t, clock)
 	p.env = &plugin.Environment{
 		DB: p.db,
-		StartWorkflow: func(ctx context.Context, defName string, input json.RawMessage) (string, error) {
+		StartWorkflow: func(ctx context.Context, req plugin.StartRequest) (string, error) {
 			return uuid.New().String(), nil
 		},
 	}

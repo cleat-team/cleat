@@ -37,6 +37,7 @@ type Plugin struct {
 	httpClient *http.Client
 	config     Config
 	dialect    plugin.Dialect
+	secrets    plugin.Secrets
 }
 
 // Config holds optional configuration for the pagerduty-alert plugin.
@@ -63,8 +64,14 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 
 	p.db = env.DB
 	p.dialect = env.Dialect
+	p.secrets = env.Secrets
 	p.httpClient = &http.Client{
-		Timeout: 30 * time.Second,
+		// cleat#1565: every outbound request goes through the egress guard.
+		// Nil in tests that build an Environment directly, which falls back to
+		// the default transport -- TestEveryPluginRoutesItsEgressThroughTheGuard
+		// is what keeps that from being how production works.
+		Transport: env.HTTPTransport,
+		Timeout:   30 * time.Second,
 	}
 
 	// Parse optional config.
@@ -81,7 +88,19 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 // Health returns nil if at least one enabled PagerDuty config exists.
 func (p *Plugin) Health() error {
 	var count int
-	err := p.db.QueryRow(context.Background(), `SELECT COUNT(*) FROM pd_config WHERE enabled = true`).Scan(&count)
+	// CROSS-TENANT, and genuinely so. cleat#1512. The question is "does this
+	// worker have ANY enabled PagerDuty config", which is a property of the
+	// deployment rather than of a tenant -- there is no tenant to ask it as,
+	// and a health check has no request to inherit one from.
+	//
+	// Once pd_config carries a policy calling cleat.assert_tenant_set(), the
+	// unmarked form does not return 0 and report unhealthy; it RAISES, and the
+	// plugin reports unhealthy for a reason that has nothing to do with its
+	// configuration. This is the same non-request, non-loop path that the CLI
+	// occupies in other plugins (cleat#1517).
+	ctx := plugin.AcrossAllTenants(context.Background(),
+		"pagerduty health check: asks whether the deployment has any enabled config, which belongs to no tenant")
+	err := p.db.QueryRow(ctx, `SELECT COUNT(*) FROM pd_config WHERE enabled = true`).Scan(&count)
 	if err != nil {
 		return fmt.Errorf("pagerduty: health check failed: %w", err)
 	}

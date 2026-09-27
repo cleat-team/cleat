@@ -84,18 +84,29 @@ func TestPostgresStore_FinalizeWorkflowSegment_Done(t *testing.T) {
 	}
 }
 
+// TestPostgresStore_FinalizeWorkflowSegment_Failed used to assert that
+// "failed" succeeds here, mocking finalize_workflow_status's now-removed
+// 'failed' arm. cleat#1973 removed that arm -- nothing in production ever
+// called it that way, and a real failure goes through FailWorkflow instead
+// -- so this must now assert the opposite: "failed" is refused, in Go,
+// before any query reaches the mock. newNoopDB (not newMockDBForPostgres)
+// is deliberate: a query the store issues here is itself a failure, since
+// validFinalStatus must reject "failed" before finalizeWorkflowSegmentInner
+// ever opens a transaction.
 func TestPostgresStore_FinalizeWorkflowSegment_Failed(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "SELECT finalize_workflow_status", data: [][]driver.Value{{true}}},
-	}, nil)
+	db := newNoopDB(t)
 	defer db.Close()
 
 	store := NewPostgresStore(db)
 	err := store.FinalizeWorkflowSegment(testCtx, "wf-1", "worker-1", 0,
 		[]EventRecord{{Step: 0, EventType: "call", Service: "svc", Op: "op"}},
 		"failed", "something broke", "E_TEST", "test_op", map[string]string{}, time.Time{})
-	if err != nil {
-		t.Fatalf("FinalizeWorkflowSegment (failed): %v", err)
+	if err == nil {
+		t.Fatal(`FinalizeWorkflowSegment(finalStatus="failed") returned nil -- cleat#1973 ` +
+			"removed the procedure's 'failed' arm; this must be refused")
+	}
+	if !strings.Contains(err.Error(), "unknown final status") {
+		t.Errorf("expected 'unknown final status' error, got: %v", err)
 	}
 }
 
@@ -196,15 +207,21 @@ func TestPostgresStore_StartChildWorkflowAtomic_WithChecksumChain(t *testing.T) 
 // LoadEventHistoryPaginated tests
 // ---------------------------------------------------------------------------
 
-// loadHistoryRow builds a 29-column mock row for LoadEventHistoryPaginated.
+// loadHistoryRow builds a 30-column mock row for LoadEventHistoryPaginated.
 // Columns: step, event_type, service, operation, request, response, error,
 //
 //	duration_ms, signal_names, timeout_ms, signal_name, signal_payload,
 //	defer_description, defer_id, child_name, child_input, run_id, new_input,
 //	plugin_name, plugin_func, plugin_input, plugin_output, plugin_error,
-//	payload, promise_name, promise_id, promise_result, promise_error, created_at
+//	payload, payload_encoding, promise_name, promise_id, promise_result,
+//	promise_error, created_at
+//
+// payload_encoding (index 24) is nil here, which is the truthful default for a
+// mock: NULL means "written before cleat#1319 recorded the encoding", so the
+// read falls back to the historical guess. Every caller below sets indices at
+// or under 7, so widening did not shift anything they address.
 func loadHistoryRow(step int, eventType string) []driver.Value {
-	row := make([]driver.Value, 29)
+	row := make([]driver.Value, 30)
 	row[0] = int64(step)
 	row[1] = eventType
 	// All other columns are nil (NULL) by default in Go
@@ -299,25 +316,40 @@ func TestPostgresStore_LoadEventHistoryPaginated_SecondPage(t *testing.T) {
 // VerifyWorkflowEvents tests
 // ---------------------------------------------------------------------------
 
-// fullHistoryRow builds a 31-column mock row for LoadEventHistory (called by VerifyWorkflowEvents).
-// Column 28 is timestamp_ms (int64, scanned directly into rec.TimestampMs — must be non-nil).
-// Column 29 is created_at (scanned into sql.NullTime — nil is fine for "invalid").
-// Column 30 is pending, the intent_at IS NOT NULL AND checksum IS NULL expression
+// fullHistoryRow builds a 30-column mock row for LoadEventHistory (called by VerifyWorkflowEvents).
+// Column 28 is created_at (scanned into sql.NullTime — nil is fine for "invalid").
+// Column 29 is pending, the intent_at IS NOT NULL AND checksum IS NULL expression
 // (bool, scanned directly into rec.Pending — must be non-nil). See 1.4 phase D.
+//
+// It was 31 columns until 2026-09-03, when the SELECT's
+// `EXTRACT(EPOCH FROM created_at)::BIGINT * 1000 AS timestamp_ms` was removed:
+// TimestampMs is now derived in Go from created_at, on every read path and
+// every dialect, because the nine paths gave four different answers for the
+// same row and that expression was the one that silently truncated the replay
+// clock to whole seconds.
 func fullHistoryRow(step int, eventType string) []driver.Value {
+	// 31 columns since cleat#1319 inserted payload_encoding after payload.
+	// It stays nil: NULL is the truthful default for a mock of a row written
+	// before the encoding was recorded, and it keeps these tests exercising
+	// the historical fallback rather than the new path.
 	row := make([]driver.Value, 31)
 	row[0] = int64(step)
 	row[1] = eventType
-	row[28] = int64(0) // timestamp_ms — must be non-nil (scanned into int64)
-	row[30] = false    // pending — must be non-nil (scanned into bool)
+	row[30] = false // pending — must be non-nil (scanned into bool)
 	return row
 }
 
-// shadowHistoryRow builds a row for the 17-column shadow-column query in
+// shadowHistoryRow builds a row for the shadow-column query in
 // verifyShadowColumns: step, event_type, service, operation, duration_ms,
 // signal_names, timeout_ms, signal_name, defer_description, defer_id,
 // child_name, run_id, plugin_name, plugin_func, promise_name, promise_id,
 // payload.
+// shadowHistoryRow builds a mock row for the shadow-history SELECT that
+// VerifyWorkflowEvents issues.
+//
+// The shadow query is UNCHANGED by cleat#1319: it selects the columns that
+// duplicate the payload JSON, and request/response are not among them, so it
+// never needed the encoding.
 func shadowHistoryRow(step int, eventType, service, op, payload string) []driver.Value {
 	row := make([]driver.Value, 17)
 	row[0] = int64(step)

@@ -1,13 +1,14 @@
 {
   "name": "@cleat/sdk",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "AssemblyScript SDK for the cleat durable execution framework",
   "main": "assembly/index.ts",
   "types": "assembly/index.ts",
   "scripts": {
     "build": "asc assembly/index.ts --target release",
     "build:debug": "asc assembly/index.ts --target debug",
-    "test": "asp -c as-pect.config.mjs"
+    "test": "npm run check:host-calls && asp -c as-pect.config.mjs",
+    "check:host-calls": "asc assembly/__compile__/all-host-calls.ts --noEmit"
   },
   "repository": {
     "type": "git",
@@ -31,12 +32,12 @@
     "README.md"
   ],
   "peerDependencies": {
-    "assemblyscript": "^0.27.32"
+    "assemblyscript": "^0.28.19"
   },
   "devDependencies": {
-    "assemblyscript": "^0.27.32",
-    "@as-pect/cli": "^8.1.0",
-    "@as-pect/core": "^8.1.0"
+    "assemblyscript": "^0.28.19",
+    "@as-pect/cli": "^9.0.0",
+    "@as-pect/core": "^9.0.0"
   },
   "ascMain": "assembly/index.ts"
 }

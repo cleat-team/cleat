@@ -14,6 +14,25 @@ func (s *execSession) DurableCallWithHeartbeat(ctx context.Context, m api.Module
 	if s.isReplay {
 		return s.replayCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen)
 	}
+	// The eighth fresh path, and the last one in the durable-call family --
+	// IMPROVEMENT-PLAN 3.84 guarded DurableCall and DurableCallWithRetry and
+	// did not list this one, so a defer segment could still reach a service
+	// through cleat_call_heartbeat.
+	//
+	// The ordering is DurableCall's, and both halves of it matter: replay
+	// first, because a refusal records no event and a replay that reached this
+	// would find nothing where an event should be; the stop second, because
+	// ABI.md requires bit 31 to win over any field this layout carries.
+	//
+	// This one is worse than an ordinary unguarded call rather than equal to
+	// it. freshCallWithHeartbeat starts a goroutine and a ticker, and every
+	// tick writes an EventTypeHeartbeat through recordEvent -- so an unstopped
+	// heartbeat call in a defer segment does not merely perform the side effect
+	// once, it appends history to a workflow that has already terminated, for
+	// as long as the call runs.
+	if s.stopBeforeNewWork() {
+		return callSuspendSentinel
+	}
 	return s.freshCallWithHeartbeat(ctx, m, service, operation, requestJSON, heartbeatIntervalMs, responsePtr, responseMaxLen)
 }
 
@@ -108,9 +127,18 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 			// failure, so the same step would be non-retryable on the first run
 			// and retryable on the replay of it. recordedFailureCode exists to
 			// stop exactly that.
+			// errClass is the third half of the same story, added by
+			// IMPROVEMENT-PLAN 2.35: the bit above says what the engine did,
+			// this says how the failure was classified. A cancellation is the
+			// one case here the engine classifies itself rather than reading
+			// off the caller, and it is worth recording as a class -- it is
+			// what lets an operator query for calls cut short by a
+			// cancellation instead of grepping for the message.
+			errClass := recordedErrorClass(res.err)
 			if cancelledByWorkflow && res.err != nil {
 				callErr = cancelledCallError
 				nonRetryable = true
+				errClass = ErrCancelled.String()
 			}
 
 			rec := EventRecord{
@@ -122,6 +150,7 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 				Response:        res.resp,
 				Err:             callErr,
 				ErrNonRetryable: nonRetryable,
+				ErrCode:         errClass,
 			}
 			s.recordEvent(rec)
 
@@ -129,8 +158,8 @@ func (s *execSession) freshCallWithHeartbeat(ctx context.Context, m api.Module, 
 				written, _ := s.writeResult(ctx, m, responsePtr, callErr, responseMaxLen)
 				return packDurableCallResult(int(written), recordedFailureCode(nonRetryable), 1)
 			}
-			written, _ := s.writeResult(ctx, m, responsePtr, res.resp, responseMaxLen)
-			return packDurableCallResult(int(written), 0, 0)
+			written, writtenEC := s.writeOut(ctx, m, responsePtr, res.resp, responseMaxLen)
+			return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
 		}
 	}
 }
@@ -191,6 +220,10 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 			if s.engine != nil && s.engine.Metrics != nil {
 				s.engine.Metrics.RecordAmbiguousCall(ctx)
 			}
+			// See the identical call in durablecalls.go: the structural
+			// record is what makes this queryable; the message below is not.
+			s.recordAmbiguity(rec)
+
 			ambiguousErr := fmt.Sprintf(
 				"[AMBIGUOUS] call outcome unknown at step %d: the external call to %s.%s was dispatched but the response was not recorded before a crash. Check the external service before retrying.",
 				rec.Step, rec.Service, rec.Op)
@@ -215,8 +248,8 @@ func (s *execSession) replayCallWithHeartbeat(ctx context.Context, m api.Module,
 			return packDurableCallResult(int(written), recordedFailureCode(rec.ErrNonRetryable), 1)
 		}
 
-		written, _ := s.writeResult(ctx, m, responsePtr, rec.Response, responseMaxLen)
-		return packDurableCallResult(int(written), 0, 0)
+		written, writtenEC := s.writeOut(ctx, m, responsePtr, rec.Response, responseMaxLen)
+		return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
 	}
 
 	// Past recorded history — switch to fresh execution.

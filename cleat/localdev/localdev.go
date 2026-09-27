@@ -256,6 +256,7 @@ func NewLocalRunner(opts ...Option) *LocalRunner {
 		AwaitPromise:                  r.awaitPromiseImpl,
 		RegisterUpdateHandler:         r.registerUpdateHandler,
 		RunDetached:                   r.runDetached,
+		StartDetached:                 r.startDetached,
 		PluginCall:                    r.pluginCallImpl,
 		AcquireLock:                   r.acquireLockImpl,
 		ReleaseLock:                   r.releaseLockImpl,
@@ -632,16 +633,16 @@ func (r *LocalRunner) awaitChildTyped(runID string, result interface{}) error {
 	return json.Unmarshal([]byte(resp), result)
 }
 
-func (r *LocalRunner) durableCallWithHeartbeat(service, operation, requestJSON string, heartbeatInterval time.Duration, onProgress func(string)) (string, error) {
+func (r *LocalRunner) durableCallWithHeartbeat(service, operation, requestJSON string, heartbeatInterval time.Duration) (string, error) {
 	return r.durableCall(service, operation, requestJSON)
 }
 
-func (r *LocalRunner) durableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration, onProgress func(string)) error {
+func (r *LocalRunner) durableCallTypedWithHeartbeat(service, operation string, request, result interface{}, heartbeatInterval time.Duration) error {
 	reqJSON, err := json.Marshal(request)
 	if err != nil {
 		return fmt.Errorf("localdev: marshaling request for %s.%s: %w", service, operation, err)
 	}
-	resp, err := r.durableCallWithHeartbeat(service, operation, string(reqJSON), heartbeatInterval, onProgress)
+	resp, err := r.durableCallWithHeartbeat(service, operation, string(reqJSON), heartbeatInterval)
 	if err != nil {
 		return err
 	}
@@ -716,15 +717,42 @@ func (r *LocalRunner) registerUpdateHandler(name string) {
 	r.logEvent("[%.3fs] register_update_handler %s", r.elapsed().Seconds(), name)
 }
 
-func (r *LocalRunner) runDetached(fn func(h cleat.HostCalls) error) error {
+// runDetached records the request. It does not start the workflow: localdev
+// runs a single workflow and has no scheduler to hand a detached one to.
+//
+// Recording rather than executing is deliberate. The previous version took a
+// closure and ran it inline, which made localdev the only place RunDetached
+// appeared to work -- in a compiled workflow the field was never set and the
+// call silently did nothing. Matching production's shape here means a workflow
+// that runs under localdev and then fails in production fails for a reason the
+// developer can see, rather than behaving differently in each.
+func (r *LocalRunner) runDetached(name, inputJSON string) error {
 	r.mu.Lock()
 	r.events = append(r.events, Event{
 		Type:    "run_detached",
-		Message: "starting detached execution",
+		Message: "detached workflow requested: " + name,
 	})
 	r.mu.Unlock()
-	r.logEvent("[%.3fs] run_detached", r.elapsed().Seconds())
-	return fn(r.h)
+	r.logEvent("[%.3fs] run_detached %s", r.elapsed().Seconds(), name)
+	return nil
+}
+
+// startDetached records the request and returns a synthetic run id.
+//
+// Synthetic because localdev starts nothing, for the reason runDetached above
+// gives. The id is shaped like the engine's own fallback so a developer reading
+// the event log sees the same thing either way, and it is recorded in the event
+// so that following it is possible here too.
+func (r *LocalRunner) startDetached(name, inputJSON string) (string, error) {
+	r.mu.Lock()
+	runID := fmt.Sprintf("detached-%s-%d", name, len(r.events))
+	r.events = append(r.events, Event{
+		Type:    "run_detached",
+		Message: "detached workflow requested: " + name + " -> " + runID,
+	})
+	r.mu.Unlock()
+	r.logEvent("[%.3fs] start_detached %s -> %s", r.elapsed().Seconds(), name, runID)
+	return runID, nil
 }
 
 func (r *LocalRunner) awaitPromiseImpl(promiseID string, timeout time.Duration) (string, bool, error) {

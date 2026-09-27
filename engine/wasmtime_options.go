@@ -1,6 +1,9 @@
 package engine
 
-import "time"
+import (
+	"log/slog"
+	"time"
+)
 
 // This file has no build constraint (unlike backend_wasmtime.go, which
 // requires cgo) so that cmd/cleat-worker and other callers can construct
@@ -30,11 +33,18 @@ const DefaultWasmtimeExecutionTimeout = 30 * time.Second
 const DefaultWasmtimeMemoryLimitBytes = int64(DefaultMemoryLimitPages) * int64(wasmPageSize)
 
 // DefaultWasmtimeTableElementsLimit bounds indirect-function-table growth
-// per wasmtime store. Component-model bundles in this codebase size their
-// largest table at 1,048,576 elements (see tblMinSize in
-// wasmtimeBackend.ExecuteComponent); 8x that headroom keeps existing
-// workflows working while still capping unbounded/attacker-controlled
-// table growth.
+// per wasmtime store.
+//
+// The 1,048,576-element figure it is derived from came from `tblMinSize` in
+// wasmtimeBackend.ExecuteComponent -- the decomposition path, deleted
+// 2026-09-01 (IMPROVEMENT-PLAN 3.65). The number is kept rather than
+// re-derived: it was measured from real componentize-py bundles, those bundles
+// have not changed, and the native Component Model path instantiates the same
+// core modules with the same tables. 8x that headroom keeps existing workflows
+// working while still capping unbounded/attacker-controlled table growth.
+//
+// If it ever needs re-deriving, the source is the largest `(table ...)` minimum
+// in a componentize-py component's core modules, not anything in this repo.
 const DefaultWasmtimeTableElementsLimit = 8 * 1024 * 1024
 
 // DefaultWasmtimeInstancesLimit bounds how many module instances a single
@@ -42,6 +52,20 @@ const DefaultWasmtimeTableElementsLimit = 8 * 1024 * 1024
 // (CPython runtime + adapters) use at most a few dozen instances; 256
 // leaves generous headroom while still bounding runaway instantiation.
 const DefaultWasmtimeInstancesLimit = 256
+
+// DefaultWasmtimeDeferBudget bounds the cleanup pass the host runs on a guest
+// it has just killed (IMPROVEMENT-PLAN 3.35 phase 4).
+//
+// This is EXTRA execution granted to a workflow the fence has already stopped,
+// so it has to be small enough not to undo the bound it is being granted
+// against. 5s next to the 30s DefaultWasmtimeExecutionTimeout raises the
+// worst case a workflow can hold a worker by about a sixth rather than
+// doubling it, and a cleanup pass is a handful of host calls -- releasing a
+// lock, refunding a charge -- not a workload.
+//
+// It is a wall-clock bound and it is the binding one: it stops a defer body
+// that loops forever exactly the way the fence stops an entry point that does.
+const DefaultWasmtimeDeferBudget = 5 * time.Second
 
 // wasmtimeLimits bundles the resource bounds applied to a wasmtime
 // execution. Zero/negative fields mean "use the backend's built-in
@@ -54,12 +78,57 @@ type wasmtimeLimits struct {
 	memoryLimitBytes   int64
 	tableElementsLimit int64
 	instancesLimit     int64
+	deferBudget        time.Duration
 }
 
-// WasmtimeOption configures resource limits for a wasmtimeBackend, applied
-// at construction time (NewWasmtimeBackend) and enforced on every store it
-// creates thereafter (see wasmtimeBackend.configureStore).
-type WasmtimeOption func(*wasmtimeLimits)
+// wasmtimeConfig is everything NewWasmtimeBackend accepts: the resource
+// bounds, plus the things that are not bounds.
+//
+// The options used to be func(*wasmtimeLimits), which was accurate while
+// limits were all there was. A logger is not a limit, and putting one in a
+// struct called "limits" is the kind of small dishonesty that later gets read
+// as a fact about the type.
+type wasmtimeConfig struct {
+	limits wasmtimeLimits
+	logger *slog.Logger
+
+	// moduleCacheMaxEntries bounds the compiled-module cache. 0 means
+	// DefaultModuleCacheMaxEntries; see moduleLRU. Not in wasmtimeLimits
+	// because it bounds a process-wide CACHE rather than anything one
+	// execution may consume, which is what the fields in that struct are.
+	moduleCacheMaxEntries int
+
+	// moduleCacheMaxBytes bounds the same cache by estimated resident size.
+	// 0 means DefaultModuleCacheMaxBytes. Both bounds apply; see moduleLRU
+	// for why a count alone could not say what a hundred entries cost.
+	moduleCacheMaxBytes int64
+}
+
+// WasmtimeOption configures a wasmtimeBackend, applied at construction time
+// (NewWasmtimeBackend). Resource bounds are enforced on every store it creates
+// thereafter (see wasmtimeBackend.configureStore).
+type WasmtimeOption func(*wasmtimeConfig)
+
+// WithWasmtimeLogger routes the backend's own log records to l.
+//
+// Without it the backend writes to slog.Default(), which is not where an
+// operator who configured a logger is looking. That mattered most on the one
+// path where the backend has something to say that nothing else can: whether a
+// KILLED workflow's defers ran (§3.35 phase 4). Three records -- the success
+// line, the "could not be run" line, and the refuel warning -- all went to the
+// default logger, so a worker with a configured handler reported nothing at
+// all about the cleanup of a workflow it had just killed.
+//
+// Found while writing a test that asserted on that line and could not see it.
+//
+// nil keeps slog.Default().
+func WithWasmtimeLogger(l *slog.Logger) WasmtimeOption {
+	return func(c *wasmtimeConfig) {
+		if l != nil {
+			c.logger = l
+		}
+	}
+}
 
 // WithWasmtimeExecutionTimeout bounds a single wasmtime invocation via
 // epoch interruption. d <= 0 keeps DefaultWasmtimeExecutionTimeout. A
@@ -67,7 +136,7 @@ type WasmtimeOption func(*wasmtimeLimits)
 // engine.WithDefaultWorkflowTimeout), when tighter than this, still wins —
 // see wasmtimeBackend.configureStore.
 func WithWasmtimeExecutionTimeout(d time.Duration) WasmtimeOption {
-	return func(l *wasmtimeLimits) { l.executionTimeout = d }
+	return func(c *wasmtimeConfig) { c.limits.executionTimeout = d }
 }
 
 // WithWasmtimeInstructionLimit bounds fuel (roughly one unit per WASM
@@ -85,7 +154,7 @@ func WithWasmtimeExecutionTimeout(d time.Duration) WasmtimeOption {
 // is why it is the primary, always-on bound and fuel is an optional,
 // opt-in secondary one.
 func WithWasmtimeInstructionLimit(n uint64) WasmtimeOption {
-	return func(l *wasmtimeLimits) { l.instructionLimit = n }
+	return func(c *wasmtimeConfig) { c.limits.instructionLimit = n }
 }
 
 // WithWasmtimeMemoryLimits bounds linear memory, table elements, and
@@ -93,9 +162,69 @@ func WithWasmtimeInstructionLimit(n uint64) WasmtimeOption {
 // Values <= 0 keep the backend's built-in default for that dimension
 // (see the Default* constants above).
 func WithWasmtimeMemoryLimits(memoryBytes, tableElements, instances int64) WasmtimeOption {
-	return func(l *wasmtimeLimits) {
-		l.memoryLimitBytes = memoryBytes
-		l.tableElementsLimit = tableElements
-		l.instancesLimit = instances
+	return func(c *wasmtimeConfig) {
+		c.limits.memoryLimitBytes = memoryBytes
+		c.limits.tableElementsLimit = tableElements
+		c.limits.instancesLimit = instances
 	}
 }
+
+// WithWasmtimeDeferBudget bounds the cleanup pass the host runs on a killed
+// guest. d <= 0 keeps DefaultWasmtimeDeferBudget.
+//
+// Raise it for workflows whose cleanup genuinely needs longer -- a defer that
+// makes several slow external calls -- knowing that the worst case a runaway
+// workflow can occupy a worker is the execution timeout plus this.
+func WithWasmtimeDeferBudget(d time.Duration) WasmtimeOption {
+	return func(c *wasmtimeConfig) { c.limits.deferBudget = d }
+}
+
+// WithWasmtimeModuleCacheMaxEntries bounds how many compiled modules the
+// backend retains, evicting least-recently-used beyond that.
+//
+// cleat#1563: this cache had no eviction at all, so a long-lived worker
+// retained one compiled module per distinct WASM artifact it had ever run,
+// across every tenant, for the life of the process.
+//
+// ENTRIES, NOT BYTES, and the flag help says so rather than implying a memory
+// It bounds map and list overhead independently of artifact size, which is why
+// it survives alongside the byte bound rather than being replaced by it: a
+// deployment with thousands of tiny artifacts is bounded by this one.
+//
+// n <= 0 uses DefaultModuleCacheMaxEntries.
+func WithWasmtimeModuleCacheMaxEntries(n int) WasmtimeOption {
+	return func(c *wasmtimeConfig) {
+		c.moduleCacheMaxEntries = n
+	}
+}
+
+// WithWasmtimeModuleCacheMaxBytes bounds the compiled-module cache by
+// ESTIMATED resident size -- CompiledSizeEstimate over each entry's wasm.
+//
+// This is the bound a deployment can actually size against. The entry count
+// could not say whether a hundred modules was 8.6 MB or 4.6 GB; measured on
+// this repo's own artifacts, both are true depending on the guest language.
+// cleat#1907.
+//
+// n <= 0 uses DefaultModuleCacheMaxBytes.
+func WithWasmtimeModuleCacheMaxBytes(n int64) WasmtimeOption {
+	return func(c *wasmtimeConfig) {
+		c.moduleCacheMaxBytes = n
+	}
+}
+
+// DefaultModuleCacheMaxEntries bounds the compiled-module cache when the
+// operator sets no limit.
+//
+// 100 matches --wasm-cache-max-entries, the BYTE cache's default, deliberately:
+// the two caches are keyed the same way and hold entries for the same
+// artifacts, so a worker that can hold 100 distinct WASM binaries has no reason
+// to hold a different number of compiled forms of them.
+//
+// DECLARED HERE, IN AN UNTAGGED FILE, and that placement is load-bearing.
+// moduleLRU lives in a //go:build cgo file because it names *wasmtime.Module,
+// but cmd/cleat-worker/config.go reads this constant for its flag default and
+// is built in every configuration. Putting it beside the type would break the
+// CGO-less build of the whole command -- which `go build ./...` does not catch,
+// because CGO is on by default and that is what CLAUDE.md tells you to use.
+const DefaultModuleCacheMaxEntries = 100

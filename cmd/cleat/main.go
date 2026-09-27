@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -43,14 +44,23 @@ var buildTenantID string
 
 func main() {
 	flag.StringVar(&dbConnStr, "db", "", "PostgreSQL connection string (or set CLEAT_DATABASE_URL)")
-	flag.StringVar(&buildTenantID, "tenant", "", "tenant UUID for build-time resolution (default: zero UUID for single-tenant)")
+	// Global, not per-subcommand, so it must precede the subcommand:
+	// `cleat --tenant X deploy foo.wasm`, never `cleat deploy --tenant X`.
+	// flag.Parse() stops at the first non-flag argument and each subcommand
+	// builds its own ExitOnError FlagSet, so the trailing form exits 2 with
+	// "flag provided but not defined: -tenant".
+	//
+	// That was inert until cleat#1038 -- `--tenant` did nothing on `deploy` in
+	// either position, so the position did not matter. It does now, which is
+	// why it is named in Usage below rather than left to be discovered.
+	flag.StringVar(&buildTenantID, "tenant", "", "tenant UUID for build-time child-version resolution and for `deploy` (default: zero UUID for single-tenant)")
 	flag.StringVar(&dbCredProviderName, "db-credential-provider", "env", "DB credential provider: env, vault, or aws-secrets-manager")
 	flag.StringVar(&dbCredPath, "db-credential-path", "", "Path/name for credential provider (vault path or AWS secret name)")
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: cleat <build|vet|deploy|versions|rollback|dev|schedule|run|dag|plugin|lock|init|version> [flags] <args>\n")
 		fmt.Fprintf(os.Stderr, "  cleat build [-o <dir>] [--target <target>] <package>\n")
 		fmt.Fprintf(os.Stderr, "  cleat vet [--lang go|rust|java|as|python] [--json] [--ci] <package>\n")
-		fmt.Fprintf(os.Stderr, "  cleat deploy [--name <name>] [--task-queue <queue>] <wasm-file>\n")
+		fmt.Fprintf(os.Stderr, "  cleat deploy [--db <conn>] [--name <name>] [--task-queue <queue>] <wasm-file>\n")
 		fmt.Fprintf(os.Stderr, "  cleat versions <workflow-name>\n")
 		fmt.Fprintf(os.Stderr, "  cleat rollback <workflow-name> <version>\n")
 		fmt.Fprintf(os.Stderr, "  cleat dev [--input <json>] [--entry-point <name>] [--concurrency-key <key>] [--watch] <package>\n")
@@ -65,6 +75,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  cleat version\n")
 		fmt.Fprintf(os.Stderr, "Common flags:\n")
 		fmt.Fprintf(os.Stderr, "  --db <connstr>  PostgreSQL connection string\n")
+		fmt.Fprintf(os.Stderr, "  --tenant <uuid> tenant for deploy and build-time resolution;\n")
+		fmt.Fprintf(os.Stderr, "                  must come BEFORE the subcommand\n")
 		fmt.Fprintf(os.Stderr, "Example: cleat build -o ./out ./testdata/basic/\n")
 	}
 	flag.Parse()
@@ -139,6 +151,7 @@ func main() {
 			}
 		}
 		remainder := fs.Args()
+		refuseTrailingFlags("build", remainder)
 		if len(remainder) > 0 {
 			pattern = remainder[0]
 		}
@@ -155,6 +168,7 @@ func main() {
 		vetCI := fs.Bool("ci", false, "output in GitHub Actions annotation format (takes precedence over --json)")
 		fs.Parse(os.Args[2:])
 		remainder := fs.Args()
+		refuseTrailingFlags("vet", remainder)
 		if len(remainder) > 0 {
 			pattern = remainder[0]
 		}
@@ -191,8 +205,17 @@ func main() {
 	case "versions":
 		runVersions(args[1])
 	case "rollback":
+		// `rollback --clear <name>` removes the pin and returns the workflow
+		// to latest-wins. Parsed positionally like the rest of this dispatch
+		// rather than with a FlagSet, to match `rollback <name> <version>`
+		// beside it; cleat#1887.
+		if len(args) >= 3 && args[1] == "--clear" {
+			runRollbackClear(args[2])
+			return
+		}
 		if len(args) < 3 {
-			fmt.Fprintf(os.Stderr, "Usage: cleat rollback <workflow-name> <version>\n")
+			fmt.Fprintf(os.Stderr, "Usage: cleat rollback <workflow-name> <version>\n"+
+				"       cleat rollback --clear <workflow-name>\n")
 			os.Exit(1)
 		}
 		version, err := strconv.Atoi(args[2])
@@ -226,21 +249,21 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildJava(pattern, outDir, channel)
+		runBuildJava(pattern, outDir, channel, workflowVersion)
 		return
 	}
 	if target == "assemblyscript" {
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildAssemblyScript(pattern, outDir, channel)
+		runBuildAssemblyScript(pattern, outDir, channel, workflowVersion)
 		return
 	}
 	if target == "rust" {
 		if outDir == "" {
 			outDir = "."
 		}
-		runBuildRust(pattern, outDir, channel)
+		runBuildRust(pattern, outDir, channel, workflowVersion)
 		return
 	}
 	if target == wasm.PythonTarget {
@@ -265,24 +288,38 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 			os.Exit(1)
 		}
 	} else {
-		fmt.Printf("  Analyzing package %s...\n", result.TargetPkg.Path)
+		fmt.Fprintf(os.Stderr, "  Analyzing package %s...\n", result.TargetPkg.Path)
 
 		leafCount := len(cr.DurableLeaves)
 		closureCount := len(cr.DurableClosure)
-		fmt.Printf("  Found %d functions, %d entry point(s), %d in cleat closure.\n",
+		fmt.Fprintf(os.Stderr, "  Found %d functions, %d entry point(s), %d in cleat closure.\n",
 			result.NumFuncs, len(result.EntryPoints), leafCount+closureCount)
-		fmt.Printf("  Durable leaves: %s\n", formatDurableLeaves(result, cr))
-		fmt.Printf("  Verifying HostCalls threading... %s\n", formatThreadingStatus(threadingErrs))
+		fmt.Fprintf(os.Stderr, "  Durable leaves: %s\n", formatDurableLeaves(result, cr))
+		// VerifyThreading reports the PRE-TRANSFORM state, deliberately -- see
+		// TestVerifyThreadingAutothreadReportsPassThroughErrors, whose comment
+		// says pass-through functions in a global-h package "are correctly
+		// reported as unthreaded BEFORE the transform runs. After the transform
+		// they get h added as a parameter."
+		//
+		// So an error naming a function the transform auto-threaded is not a
+		// build failure; it is a stale reading of a state that no longer
+		// exists. Failing on it made `cleat build` reject packages the very
+		// next stage was designed to fix -- examples/fooddash, where the error
+		// told the author to declare a package-level var h that order.go:36
+		// already declares. IMPROVEMENT-PLAN 3.229.
+		threadingErrs = dropAutoThreaded(threadingErrs, tr)
+
+		fmt.Fprintf(os.Stderr, "  Verifying HostCalls threading... %s\n", formatThreadingStatus(threadingErrs))
 
 		if len(threadingErrs) > 0 {
-			fmt.Println()
+			fmt.Fprintln(os.Stderr)
 			for _, e := range threadingErrs {
-				fmt.Printf("  Error: %s\n", e.Message)
+				fmt.Fprintf(os.Stderr, "  Error: %s\n", e.Message)
 				if len(e.Chain) > 0 {
-					fmt.Printf("         Call chain: %s\n", strings.Join(e.Chain, " → "))
+					fmt.Fprintf(os.Stderr, "         Call chain: %s\n", strings.Join(e.Chain, " → "))
 				}
 				if e.Line > 0 {
-					fmt.Printf("         At: %d\n", e.Line)
+					fmt.Fprintf(os.Stderr, "         At: %d\n", e.Line)
 				}
 			}
 			os.Exit(1)
@@ -290,58 +327,46 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 
 		warnCount := cr.NumWarnings()
 		if warnCount > 0 {
-			fmt.Println()
-			for funcName, warns := range cr.Warnings {
-				for _, w := range warns {
-					msg := fmt.Sprintf("  Warning: %s:%d: %s [%s]",
-						analyzer.ShortName(funcName), w.Line, w.Message, w.Code)
-					fmt.Println(msg)
-					if w.Suggestion != "" {
-						fmt.Printf("    suggestion: %s\n", w.Suggestion)
-					}
+			fmt.Fprintln(os.Stderr)
+			for _, w := range cr.SortedWarnings() {
+				msg := fmt.Sprintf("  Warning: %s:%d: %s [%s]",
+					analyzer.ShortName(w.FuncName), w.Line, w.Message, w.Code)
+				fmt.Fprintln(os.Stderr, msg)
+				if w.Suggestion != "" {
+					fmt.Fprintf(os.Stderr, "    suggestion: %s\n", w.Suggestion)
 				}
 			}
 		}
 
 		errCount := cr.NumErrors()
 		if errCount > 0 {
-			fmt.Println()
-			for funcName, errs := range cr.Errors {
-				for _, e := range errs {
-					fmt.Printf("  %s: %s:%d: %s\n", e.Code, analyzer.ShortName(funcName), e.Line, e.Message)
-					if e.Suggestion != "" {
-						fmt.Printf("    → %s\n", e.Suggestion)
-					}
+			fmt.Fprintln(os.Stderr)
+			for _, e := range cr.SortedErrors() {
+				fmt.Fprintf(os.Stderr, "  %s: %s:%d: %s\n", e.Code, analyzer.ShortName(e.FuncName), e.Line, e.Message)
+				if e.Suggestion != "" {
+					fmt.Fprintf(os.Stderr, "    → %s\n", e.Suggestion)
 				}
 			}
 			os.Exit(1)
 		}
 
-		fmt.Println()
+		// Trailing break after the analysis summary. Commentary, so it goes where the commentary went.
+		fmt.Fprintln(os.Stderr)
 	}
 
 	outputs := wasm.BuildOutputs("main", usage, result, target)
 	hostCount := usage.Count()
-	if jsonOut {
-		fmt.Fprintf(os.Stderr, "  Generating WASM imports (%d host functions used)... ", hostCount)
-		fmt.Fprintln(os.Stderr, "OK")
-		fmt.Fprintf(os.Stderr, "  Generating host adapter... OK\n")
-		fmt.Fprintf(os.Stderr, "  Generating WASM exports (%d entry point(s))... OK\n", len(result.EntryPoints))
-		if len(tr.AddedH) > 0 {
-			fmt.Fprintf(os.Stderr, "  Auto-threading HostCalls into: %s\n", strings.Join(tr.AddedH, ", "))
-		} else {
-			fmt.Fprintf(os.Stderr, "  Auto-threading: no changes needed\n")
-		}
+	// One stream, not two. The two arms of this block were byte-identical apart
+	// from the writer, which is what cleat#1128 is about: the same commentary
+	// reached stdout or stderr depending on a flag the reader does not control.
+	fmt.Fprintf(os.Stderr, "  Generating WASM imports (%d host functions used)... ", hostCount)
+	fmt.Fprintln(os.Stderr, "OK")
+	fmt.Fprintf(os.Stderr, "  Generating host adapter... OK\n")
+	fmt.Fprintf(os.Stderr, "  Generating WASM exports (%d entry point(s))... OK\n", len(result.EntryPoints))
+	if len(tr.AddedH) > 0 {
+		fmt.Fprintf(os.Stderr, "  Auto-threading HostCalls into: %s\n", strings.Join(tr.AddedH, ", "))
 	} else {
-		fmt.Printf("  Generating WASM imports (%d host functions used)... ", hostCount)
-		fmt.Println("OK")
-		fmt.Printf("  Generating host adapter... OK\n")
-		fmt.Printf("  Generating WASM exports (%d entry point(s))... OK\n", len(result.EntryPoints))
-		if len(tr.AddedH) > 0 {
-			fmt.Printf("  Auto-threading HostCalls into: %s\n", strings.Join(tr.AddedH, ", "))
-		} else {
-			fmt.Printf("  Auto-threading: no changes needed\n")
-		}
+		fmt.Fprintf(os.Stderr, "  Auto-threading: no changes needed\n")
 	}
 
 	if diffOut && len(tr.Diffs) > 0 {
@@ -367,6 +392,25 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		}()
 	}
 
+	// cleat#1889: made absolute HERE, before anything below computes a path
+	// from it. wasmPath (below) is `filepath.Join(outDir, wasmFile)`, which
+	// if outDir were left relative is relative to THIS process's cwd -- but
+	// buildCmd.Dir (below) is set to outDir too, so the "go build -o
+	// wasmPath" subprocess resolves that SAME relative wasmPath against ITS
+	// OWN cwd (outDir), landing one directory too deep
+	// (outDir/outDir/<wasmFile>) and leaving nothing at the path this
+	// process then os.Stat's, reporting a build that actually succeeded as
+	// "WASM binary not found". os.MkdirTemp above already returns an
+	// absolute path, so this changes nothing for the outDir=="" case --
+	// only for the -o <relative-path> case, which is the common, documented
+	// one (README.md's own Quick Start uses `-o ./out`).
+	abs, err := filepath.Abs(outDir)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: could not resolve %s to an absolute path: %v\n", outDir, err)
+		os.Exit(1)
+	}
+	outDir = abs
+
 	goVersion := result.GoVersion
 	if goVersion == "" {
 		goVersion = "1.26"
@@ -391,7 +435,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		os.Exit(1)
 	}
 
-	logBuildProgress("  Build directory: %s\n", jsonOut, outDir)
+	logBuildProgress("  Build directory: %s\n", outDir)
 
 	// Run go mod tidy in the build directory to generate go.sum entries
 	// before compilation. The replace directive points directly to the
@@ -411,7 +455,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	wasmPath := filepath.Join(outDir, wasmFile)
 
 	// Standard Go wasip1 compilation.
-	logBuildProgress("  Compiling WASM module (go/wasip1)...\n", jsonOut)
+	logBuildProgress("  Compiling WASM module (go/wasip1)...\n")
 	buildCmd := exec.Command("go", "build",
 		"-o", wasmPath,
 		".",
@@ -433,7 +477,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		fmt.Fprintf(os.Stderr, "Error: WASM binary not found at %s\n", wasmPath)
 		os.Exit(1)
 	}
-	logBuildProgress("  Wrote %s (%s)\n", jsonOut, wasmPath, formatSize(fi.Size()))
+	logBuildProgress("  Wrote %s (%s)\n", wasmPath, formatSize(fi.Size()))
 
 	// Embed cleat.metadata custom section for deployment.
 	wasmBytes, err := os.ReadFile(wasmPath)
@@ -457,6 +501,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		PluginDeps:           derivePluginDeps(usage),
 		ChildVersions:        childVersions,
 		ChildBindingPolicy:   channel,
+		EntryPoints:          exportedEntryPointNames(result),
 	}
 	wasmWithMeta, err := wasm.WriteMetadata(wasmBytes, meta)
 	if err != nil {
@@ -467,7 +512,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		fmt.Fprintf(os.Stderr, "Error writing WASM binary with metadata: %v\n", err)
 		os.Exit(1)
 	}
-	logBuildProgress("  Embedded metadata: %s v%d (ABI v%d)\n", jsonOut,
+	logBuildProgress("  Embedded metadata: %s v%d (ABI v%d)\n",
 		meta.WorkflowName, meta.WorkflowVersion, meta.ABIVersion)
 	keepTempDir = true
 
@@ -480,7 +525,15 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	// not predict. These could indicate a bug in the closure analysis
 	// or unused imports the developer should investigate.
 	if orphans := wasm.FindCleatOrphanedImports(wasmBytes, usage.Used); len(orphans) > 0 {
-		fmt.Println()
+		// The separator goes where its warnings go. It used to be a bare
+		// fmt.Println() -- stdout -- immediately before warnings on stderr, so
+		// a reader of either stream got half of the formatting: an unexplained
+		// blank line on one, warnings with no leading break on the other. This
+		// is cleat#1128's defect in miniature, and it was already present
+		// before that issue's change, which is why it is worth naming: a sweep
+		// phrased in terms of "Warning:" or os.Stderr cannot see a line that
+		// contains neither.
+		fmt.Fprintln(os.Stderr)
 		for _, orphan := range orphans {
 			fmt.Fprintf(os.Stderr, "  Warning: %s\n", orphan)
 		}
@@ -489,129 +542,122 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 
 // printSizeReport outputs a size breakdown of the compiled WASM binary by
 // package. This helps developers identify which imports contribute the most
-// to binary size.
+
+// printSizeReport prints a MEASURED per-package breakdown of the compiled
+// artifact.
 //
-// The analysis uses the transformer's UsageInfo (which packages the workflow
-// imports) combined with typical per-package size contributions. For a more
-// precise breakdown, pipe the WASM binary through wasm-objdump or twiggy.
+// It used to print `totalSize * <a literal>` for each of twenty-odd packages --
+// reflect 0.25, net/http 0.20, and so on -- so the only input from the artifact
+// was its length and every binary got the same answer in different absolute
+// numbers. The constants could also sum past 100% (an import set of reflect,
+// encoding/json, fmt, net/http, crypto/tls, time, os and strings reached 108%),
+// at which point the "other" remainder line silently disappeared because it had
+// gone negative. cleat#1314.
+//
+// wasm.AnalyzeSize reads the code section and the custom `name` section and
+// attributes real bytes to real packages. Where that is impossible -- a binary
+// with no name section -- this says so rather than falling back to the model.
 func printSizeReport(wasmPath string, totalSize int64, result *analyzer.AnalysisResult, usage *wasm.UsageInfo, target string) {
 	fmt.Println()
 	fmt.Println("  ===== WASM Size Report =====")
 	fmt.Printf("  Binary: %s (%s)\n", filepath.Base(wasmPath), formatSize(totalSize))
 	fmt.Printf("  Target: %s\n", target)
 
-	// Estimate package contributions based on known typical sizes.
-	// These are approximate and based on measurements of Go wasip1 builds.
-	type pkgSize struct {
-		name string
-		size int64
+	wasmBytes, err := os.ReadFile(wasmPath)
+	if err != nil {
+		fmt.Printf("  Breakdown unavailable: cannot read the artifact: %v\n\n", err)
+		return
 	}
-	pkgSizes := []pkgSize{
-		{"runtime", int64(float64(totalSize) * 0.15)}, // Go runtime + GC
-		{"main (workflow code)", int64(float64(totalSize) * 0.05)},
-	}
-	knownContributions := map[string]float64{
-		"reflect":         0.25,
-		"encoding/json":   0.12,
-		"fmt":             0.08,
-		"net/http":        0.20,
-		"crypto/tls":      0.15,
-		"regexp":          0.04,
-		"net/url":         0.03,
-		"time":            0.03,
-		"os":              0.04,
-		"database/sql":    0.10,
-		"text/template":   0.06,
-		"sync":            0.02,
-		"strconv":         0.02,
-		"math/rand":       0.01,
-		"crypto/rand":     0.01,
-		"encoding/hex":    0.005,
-		"encoding/base64": 0.005,
-		"unicode":         0.005,
-		"unicode/utf8":    0.005,
-		"sort":            0.01,
-		"strings":         0.01,
-		"bytes":           0.01,
-		"math":            0.02,
+	br, err := wasm.AnalyzeSize(wasmBytes)
+	if err != nil {
+		fmt.Printf("  Breakdown unavailable: %v\n\n", err)
+		return
 	}
 
-	var accounted float64
-	for _, ps := range pkgSizes {
-		accounted += float64(ps.size) / float64(totalSize)
+	fmt.Printf("  Code section: %s of %s (%.1f%%)\n",
+		formatSize(br.CodeSize), formatSize(br.TotalSize), pctOf(br.CodeSize, br.TotalSize))
+
+	if !br.HaveNames {
+		fmt.Println()
+		fmt.Println("  Per-package breakdown unavailable: this binary carries no WASM name")
+		fmt.Println("  section, so its functions cannot be attributed to packages. Build")
+		fmt.Println("  without stripping to get one.")
+		fmt.Println()
+		return
 	}
 
-	// Scan result for packages that were imported and estimate their size.
-	var extras []pkgSize
-	seenPkgs := make(map[string]bool)
-	for _, fd := range result.Funcs {
-		if fd.Pkg != nil {
-			for _, file := range fd.Pkg.Files {
-				for _, imp := range file.Imports {
-					pkg := strings.Trim(imp.Path.Value, `"`)
-					if seenPkgs[pkg] {
-						continue
-					}
-					seenPkgs[pkg] = true
-					shortName := pkg
-					if parts := strings.Split(pkg, "/"); len(parts) > 0 {
-						shortName = parts[len(parts)-1]
-						if len(parts) > 1 && parts[len(parts)-2] == "encoding" && shortName != "json" {
-							shortName = parts[len(parts)-2] + "/" + shortName
-						}
-					}
-					if frac, ok := knownContributions[pkg]; ok {
-						sz := int64(float64(totalSize) * frac)
-						extras = append(extras, pkgSize{name: pkg, size: sz})
-						accounted += frac
-					} else if frac, ok := knownContributions[shortName]; ok {
-						sz := int64(float64(totalSize) * frac)
-						extras = append(extras, pkgSize{name: pkg, size: sz})
-						accounted += frac
-					}
-				}
-			}
+	fmt.Println()
+	fmt.Println("  Code size by package (measured from the binary's name section;")
+	fmt.Println("  the Go linker encodes '/' as '_' in these names):")
+	shown := 0
+	for _, ps := range br.Packages {
+		if shown >= sizeReportTopN {
+			break
+		}
+		fmt.Printf("    %-45s %10s  (%.1f%% of binary, %d funcs)\n",
+			ps.Package, formatSize(ps.Size), pctOf(ps.Size, br.TotalSize), ps.Funcs)
+		shown++
+	}
+	if rest := len(br.Packages) - shown; rest > 0 {
+		fmt.Printf("    %-45s %10s\n", fmt.Sprintf("... and %d more package(s)", rest), "")
+	}
+	if br.Unattributed > 0 {
+		fmt.Printf("    %-45s %10s  (%.1f%% of binary)\n", "unattributed (compiler-generated)",
+			formatSize(br.Unattributed), pctOf(br.Unattributed, br.TotalSize))
+	}
+	if nonCode := br.TotalSize - br.CodeSize; nonCode > 0 {
+		fmt.Printf("    %-45s %10s  (%.1f%% of binary)\n", "non-code sections (data, types, names)",
+			formatSize(nonCode), pctOf(nonCode, br.TotalSize))
+	}
+
+	// Recommendations derived from what was MEASURED, not from a table. A
+	// suggestion that quotes a saving has to quote the number this binary
+	// actually spends, or it is the same defect in a different sentence.
+	var recs []string
+	for _, ps := range br.Packages {
+		pct := pctOf(ps.Size, br.TotalSize)
+		if pct < 1.0 {
+			continue
+		}
+		switch ps.Package {
+		case "reflect":
+			recs = append(recs, fmt.Sprintf("reflect costs %s (%.1f%%) here -- it is usually pulled in by encoding/json; a hand-written marshaller removes both",
+				formatSize(ps.Size), pct))
+		case "net_http":
+			recs = append(recs, fmt.Sprintf("net/http costs %s (%.1f%%) here -- h.DurableFetch() reaches the host instead",
+				formatSize(ps.Size), pct))
+		case "fmt":
+			recs = append(recs, fmt.Sprintf("fmt costs %s (%.1f%%) here -- h.DurableLog() and strconv avoid it",
+				formatSize(ps.Size), pct))
+		case "database_sql":
+			recs = append(recs, fmt.Sprintf("database/sql costs %s (%.1f%%) here -- h.DurableCall() reaches the host instead",
+				formatSize(ps.Size), pct))
+		case "regexp":
+			recs = append(recs, fmt.Sprintf("regexp costs %s (%.1f%%) here -- strings.Contains/HasPrefix is often enough",
+				formatSize(ps.Size), pct))
 		}
 	}
-
-	// Print all known package sizes.
-	fmt.Println()
-	fmt.Println("  Estimated size breakdown by package:")
-	for _, ps := range pkgSizes {
-		pct := float64(ps.size) * 100 / float64(totalSize)
-		fmt.Printf("    %-25s %s  (%.1f%%)\n", ps.name, formatSize(ps.size), pct)
-	}
-	for _, ps := range extras {
-		pct := float64(ps.size) * 100 / float64(totalSize)
-		fmt.Printf("    %-25s %s  (%.1f%%)\n", ps.name, formatSize(ps.size), pct)
-	}
-
-	// Unaccounted portion.
-	unaccounted := float64(totalSize) * (1.0 - accounted)
-	if unaccounted > 0 {
-		pct := unaccounted * 100 / float64(totalSize)
-		fmt.Printf("    %-25s %s  (%.1f%%)\n", "other (stdlib + deps)", formatSize(int64(unaccounted)), pct)
-	}
-
-	// Recommendations.
-	fmt.Println()
-	fmt.Println("  Recommendations:")
-	if seenPkgs["reflect"] {
-		fmt.Println("    - Remove \"reflect\" import: reduces binary ~25%")
-	}
-	if seenPkgs["net/http"] {
-		fmt.Println("    - Replace \"net/http\" with h.DurableFetch(): reduces binary ~20%")
-	}
-	if seenPkgs["database/sql"] {
-		fmt.Println("    - Replace \"database/sql\" with h.DurableCall(): reduces binary ~10%")
-	}
-	if seenPkgs["regexp"] {
-		fmt.Println("    - Replace \"regexp\" with strings.Contains/strings.HasPrefix: reduces binary ~4%")
-	}
-	if seenPkgs["fmt"] {
-		fmt.Println("    - Replace fmt.Printf/fmt.Println with h.DurableLog(): removes fmt binary overhead")
+	if len(recs) > 0 {
+		fmt.Println()
+		fmt.Println("  Recommendations:")
+		for _, r := range recs {
+			fmt.Printf("    - %s\n", r)
+		}
 	}
 	fmt.Println()
+	_ = usage
+	_ = result
+}
+
+// sizeReportTopN bounds the package list. A build pulls in well over a hundred
+// packages and the tail is all sub-0.1% noise.
+const sizeReportTopN = 15
+
+func pctOf(part, whole int64) float64 {
+	if whole == 0 {
+		return 0
+	}
+	return float64(part) * 100 / float64(whole)
 }
 
 func runVet(pattern string, jsonOut bool, ciOut bool) int {
@@ -630,24 +676,20 @@ func runVet(pattern string, jsonOut bool, ciOut bool) int {
 			fmt.Printf("::error file=%s,line=%d,title=Threading::%s\n", f, e.Line, e.Message)
 			exitCode = 1
 		}
-		for funcName, errs := range cr.Errors {
-			f := lookupFile(result, funcName)
+		for _, e := range cr.SortedErrors() {
+			f := lookupFile(result, e.FuncName)
 			if f == "" {
 				f = "unknown"
 			}
-			for _, e := range errs {
-				fmt.Printf("::error file=%s,line=%d,title=%s::%s\n", f, e.Line, e.Code, e.Message)
-				exitCode = 1
-			}
+			fmt.Printf("::error file=%s,line=%d,title=%s::%s\n", f, e.Line, e.Code, e.Message)
+			exitCode = 1
 		}
-		for funcName, warns := range cr.Warnings {
-			f := lookupFile(result, funcName)
+		for _, w := range cr.SortedWarnings() {
+			f := lookupFile(result, w.FuncName)
 			if f == "" {
 				f = "unknown"
 			}
-			for _, w := range warns {
-				fmt.Printf("::warning file=%s,line=%d,title=%s::%s\n", f, w.Line, w.Code, w.Message)
-			}
+			fmt.Printf("::warning file=%s,line=%d,title=%s::%s\n", f, w.Line, w.Code, w.Message)
 		}
 		return exitCode
 	}
@@ -682,22 +724,18 @@ func runVet(pattern string, jsonOut bool, ciOut bool) int {
 		}
 		exitCode = 1
 	}
-	for funcName, errs := range cr.Errors {
-		for _, e := range errs {
-			fmt.Printf("  %s:%d: %s: %s\n", analyzer.ShortName(funcName), e.Line, e.Code, e.Message)
-			if e.Suggestion != "" {
-				fmt.Printf("    → %s\n", e.Suggestion)
-			}
-			exitCode = 1
+	for _, e := range cr.SortedErrors() {
+		fmt.Printf("  %s:%d: %s: %s\n", analyzer.ShortName(e.FuncName), e.Line, e.Code, e.Message)
+		if e.Suggestion != "" {
+			fmt.Printf("    → %s\n", e.Suggestion)
 		}
+		exitCode = 1
 	}
-	for funcName, warns := range cr.Warnings {
-		for _, w := range warns {
-			msg := fmt.Sprintf("  %s:%d: %s: %s", analyzer.ShortName(funcName), w.Line, w.Code, w.Message)
-			fmt.Println(msg)
-			if w.Suggestion != "" {
-				fmt.Printf("    suggestion: %s\n", w.Suggestion)
-			}
+	for _, w := range cr.SortedWarnings() {
+		msg := fmt.Sprintf("  %s:%d: %s: %s", analyzer.ShortName(w.FuncName), w.Line, w.Code, w.Message)
+		fmt.Println(msg)
+		if w.Suggestion != "" {
+			fmt.Printf("    suggestion: %s\n", w.Suggestion)
 		}
 	}
 
@@ -771,6 +809,28 @@ func detectVetLang(dir string) (string, error) {
 	return "", fmt.Errorf("could not auto-detect language in %s. Use --lang to specify", dir)
 }
 
+// The three things a vet run can report, kept apart because they send the
+// reader to different places. cleat#1801.
+//
+//	0  the file was inspected and is clean
+//	1  the file was inspected and has violations -- go and look at them
+//	2  the vet could NOT be run (no interpreter, SDK not importable, too old an
+//	   interpreter) -- the check is broken, the file may be fine
+//
+// 0 and 2 must differ because a vet that could not look agrees with every file,
+// clean or not. 1 and 2 must differ because a build gate refusing on 2 needs to
+// say "I could not check this", not "this is non-deterministic" -- a message
+// that names the wrong problem is worse than no message.
+//
+// Both 1 and 2 are non-zero, so every existing `if err != nil` caller and every
+// `cleat vet && deploy` shell chain keeps behaving the same way; the added
+// information is only available to anything that looks at the value.
+const (
+	vetExitOK         = 0
+	vetExitViolations = 1
+	vetExitUnmeasured = 2
+)
+
 // runVetPython runs the Python AST-based vet via subprocess.
 func runVetPython(dir string, jsonOut bool) int {
 	// Find .py files in the directory.
@@ -778,15 +838,26 @@ func runVetPython(dir string, jsonOut bool) int {
 	if dir == "" {
 		dir = "."
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: cannot read directory %s: %v\n", dir, err)
-		return 1
-	}
-	// Also check if dir itself is a .py file.
+	// THE SINGLE-FILE CASE IS CHECKED FIRST, and the order was the whole bug.
+	//
+	// os.ReadDir ran before this, so `cleat vet --lang python workflow.py` --
+	// the form the flag's help text shows -- died on "cannot read directory
+	// workflow.py: not a directory" and never reached the branch written three
+	// lines below to handle it. The branch was correct; it was unreachable.
+	// cleat#1825.
 	if fi, err := os.Stat(dir); err == nil && !fi.IsDir() && strings.HasSuffix(dir, ".py") {
 		pyFiles = append(pyFiles, dir)
 	} else {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: cannot read %s: %v\n", dir, err)
+			// UNMEASURED, NOT A FINDING. Nothing was inspected, so this says
+			// nothing about any workflow. Returning 1 here reported a mistyped
+			// path as a determinism violation -- the same category error as a
+			// skip that hides a crash, and precisely what cleat#1801's third
+			// outcome exists to prevent.
+			return vetExitUnmeasured
+		}
 		for _, e := range entries {
 			if !e.IsDir() && strings.HasSuffix(e.Name(), ".py") {
 				pyFiles = append(pyFiles, filepath.Join(dir, e.Name()))
@@ -795,7 +866,11 @@ func runVetPython(dir string, jsonOut bool) int {
 	}
 	if len(pyFiles) == 0 {
 		fmt.Fprintf(os.Stderr, "Error: no .py files found in %s\n", dir)
-		return 1
+		// Also UNMEASURED, and since cleat#1825 reordered the checks above this
+		// is the LOUDER of the two: a mistyped path no longer dies at ReadDir,
+		// it lands here. An empty directory and a missing one are unmeasurable
+		// for the same reason -- there was nothing to inspect either way.
+		return vetExitUnmeasured
 	}
 
 	sdkDir := findPythonSDKDir()
@@ -816,15 +891,54 @@ func runVetPython(dir string, jsonOut bool) int {
 			cmd.Env = append(os.Environ(), "PYTHONPATH="+sdkDir)
 		}
 
-		if err := cmd.Run(); err != nil {
-			// Exit code 1 = errors found (normal for vet). Only fail on >1.
-			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() > 1 {
+		runErr := cmd.Run()
+		if runErr != nil {
+			// EXIT CODE 1 IS OVERLOADED, and that is the whole reason for the
+			// stdout check below.
+			//
+			// cleat_sdk.vet exits 1 when it finds violations, which is normal
+			// and must not be reported as a failure. But python3 ALSO exits 1
+			// when the module cannot be imported at all -- and this branch used
+			// to treat that as "violations found", discard the traceback, and
+			// fall through to print an empty stdout. `cleat vet --lang python`
+			// then exited non-zero having said nothing on either stream, which
+			// left every caller to invent a reason for the failure. TestVetPython's
+			// message named one cause and hedged the rest, and two different
+			// machines with two different interpreters got the same sentence.
+			//
+			// The discriminator is stdout. A run that got as far as inspecting
+			// the file produces output -- JSON under --json, a report otherwise
+			// -- whether or not it found anything. Nothing on stdout means the
+			// module never ran.
+			exitErr, isExit := runErr.(*exec.ExitError)
+			toolingFailure := !isExit || exitErr.ExitCode() > 1 || stdout.Len() == 0
+			if toolingFailure {
 				if stderr.Len() > 0 {
 					fmt.Fprint(os.Stderr, stderr.String())
 				}
-				fmt.Fprintf(os.Stderr, "Python vet failed for %s: %v\n", pyFile, err)
-				exitCode = 1
+				fmt.Fprintf(os.Stderr, "Python vet failed for %s: %v\n", pyFile, runErr)
+				if hint := pythonVetFailureHint(stderr.String()); hint != "" {
+					fmt.Fprint(os.Stderr, hint)
+				}
+				exitCode = vetExitUnmeasured
 				continue
+			}
+
+			// Not a tooling failure: the module ran, inspected the file, and
+			// exited 1 because it found violations. THAT IS A FAILING VET, and
+			// until cleat#1801 nothing said so -- the only path to a non-zero
+			// exit below is a non-empty stderr, and the violation report goes
+			// to stdout. So `cleat vet --lang python` exited 0 on a file it had
+			// just printed "2 errors" for, while go, rust and java all exit 1
+			// on their own violating fixtures.
+			//
+			// It is worth being precise about what was wrong, because the code
+			// above is right and was easy to mistake for the bug: separating
+			// "could not run" from "found violations" is exactly correct, and
+			// the stdout discriminator works. The defect is that only one of
+			// those two branches set an exit code.
+			if exitCode == vetExitOK {
+				exitCode = vetExitViolations
 			}
 		}
 
@@ -837,8 +951,8 @@ func runVetPython(dir string, jsonOut bool) int {
 				fmt.Fprint(os.Stderr, stderr.String())
 			}
 		}
-		if exitCode == 0 && stderr.Len() > 0 {
-			exitCode = 1
+		if exitCode == vetExitOK && stderr.Len() > 0 {
+			exitCode = vetExitUnmeasured
 		}
 	}
 
@@ -909,7 +1023,7 @@ func runVetAS(dir string) int {
 	// --noEmit runs parse and the transform, including the E001-E005
 	// determinism diagnostics, without producing a .wasm. Everything else
 	// matches the build invocation so vet and build agree about what compiles.
-	cmd := exec.Command("npx",
+	cmd := exec.Command("npx", //nolint:gosec // G204: fixed binary, arguments passed as an array, no shell. The variable part is a project path the developer just typed.
 		"asc", filepath.Join("assembly", "index.ts"),
 		"--runtime", "stub",
 		"--transform", "@cleat/transform",
@@ -931,16 +1045,39 @@ func runVetAS(dir string) int {
 }
 
 // runDeploy deploys a compiled WASM workflow to the database.
-// Usage: cleat deploy [--name <name>] [--task-queue <queue>] <wasm-file>
+// Usage: cleat deploy [--db <conn>] [--name <name>] [--task-queue <queue>] <wasm-file>
 func runDeploy(args []string) {
 	fs := flag.NewFlagSet("deploy", flag.ExitOnError)
+	// deploy's own --db, mirroring `cleat lock` (cmd/cleat/main.go's runLock):
+	// the global --db (registered on the top-level FlagSet in main) must
+	// precede the subcommand -- `cleat --db X deploy` -- because flag.Parse()
+	// stops at the first non-flag argument. Every doc that showed
+	// `cleat deploy --db X` (README.md, docs/reference/cli.md, and others;
+	// cleat#1970) was demonstrating a form that exited 2 with "flag provided
+	// but not defined: -db", because this FlagSet never declared it. Declare
+	// it here and let getDBConnStr's own fallback (global --db, then a
+	// credential provider that checks CLEAT_DATABASE_URL) supply the rest.
+	dbFlag := fs.String("db", "", "PostgreSQL connection string (or set CLEAT_DATABASE_URL)")
 	nameFlag := fs.String("name", "", "workflow name (derived from filename if not set)")
 	taskQueueFlag := fs.String("task-queue", "default", "task queue for this workflow (e.g. default, gpu, high-memory)")
+	// 0 keeps the column default, which means "use the global threshold". Set
+	// per definition rather than per instance because the column is keyed
+	// (tenant_id, name, version) -- see WorkflowDef.MaxHistoryLength and #889.
+	maxHistoryLengthFlag := fs.Int("max-history-length", 0, "cap this definition's event history before compaction, overriding the global threshold (0 = use the global)")
+	// cleat#2065. Without this, an unset --db/CLEAT_DATABASE_URL silently
+	// printed a preview and exited 0 -- the fullstack template's `make
+	// deploy` hit this on every run, and the operator had no way to tell
+	// "deployed" from "nothing happened" short of reading stdout. Explicit
+	// beats implicit-but-nonzero here: a scripted `make deploy` that checks
+	// only the exit code now fails loudly instead of quietly skipping, and
+	// `--dry-run` gives a real, opt-in way to preview without a database --
+	// the same flag name and behavior as `cleat plugin install --dry-run`.
+	dryRunFlag := fs.Bool("dry-run", false, "print what would be deployed without connecting to a database")
 	fs.Parse(args)
 
 	remainder := fs.Args()
 	if len(remainder) < 1 {
-		fmt.Fprintf(os.Stderr, "Usage: cleat deploy [--name <name>] [--task-queue <queue>] <wasm-file>\n")
+		fmt.Fprintf(os.Stderr, "Usage: cleat deploy [--db <conn>] [--name <name>] [--task-queue <queue>] [--max-history-length <n>] [--dry-run] <wasm-file>\n")
 		os.Exit(1)
 	}
 	wasmPath := remainder[0]
@@ -978,9 +1115,17 @@ func runDeploy(args []string) {
 		}
 	}
 
-	connStr := getDBConnStr()
-
+	connStr := *dbFlag
 	if connStr == "" {
+		connStr = getDBConnStr()
+	}
+
+	if connStr == "" && !*dryRunFlag {
+		fmt.Fprintln(os.Stderr, "Error: no database configured. Set CLEAT_DATABASE_URL or --db to deploy, or pass --dry-run to preview without one.")
+		os.Exit(1)
+	}
+
+	if *dryRunFlag {
 		version := 1
 		if metaErr == nil && meta.WorkflowVersion > 0 {
 			version = meta.WorkflowVersion
@@ -992,7 +1137,7 @@ func runDeploy(args []string) {
 				meta.WorkflowName, meta.WorkflowVersion,
 				meta.ABIVersion, meta.MinCompatibleVersion)
 		}
-		fmt.Println("Dry run; set CLEAT_DATABASE_URL or --db to deploy.")
+		fmt.Println("Dry run: no changes were made.")
 		return
 	}
 
@@ -1008,20 +1153,6 @@ func runDeploy(args []string) {
 		os.Exit(1)
 	}
 
-	// Use the version embedded in WASM metadata if available; otherwise
-	// auto-increment.  Deploying the same version multiple times updates
-	// the existing row (idempotent).
-	version := 1
-	if metaErr == nil && meta.WorkflowVersion > 0 {
-		version = meta.WorkflowVersion
-	} else {
-		err = db.QueryRow("SELECT COALESCE(MAX(version), 0) + 1 FROM workflow_defs WHERE name = $1", name).Scan(&version)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error querying max version: %v\n", err)
-			os.Exit(1)
-		}
-	}
-
 	// Build the SQL with metadata columns if available.
 	abiVersion := 1
 	minVersion := 1
@@ -1034,20 +1165,75 @@ func runDeploy(args []string) {
 		}
 	}
 
-	_, err = db.Exec(
-		`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue)
-		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
-		 ON CONFLICT (name, version) DO UPDATE SET
+	// The tenant this deploy belongs to, resolved the way `cleat lock` already
+	// resolves it: flag, then environment, then the single-tenant default.
+	//
+	// Until cleat#1038 this INSERT did not list tenant_id at all, so the column
+	// took its schema DEFAULT and every deploy landed on the default tenant
+	// whatever the configuration said. That is not merely misattribution: the
+	// conflict target below is (tenant_id, name, version), so a second tenant
+	// deploying the same name and version OVERWROTE the first one's binary.
+	deployTenantID := resolveDeployTenant(buildTenantID, os.Getenv("CLEAT_TENANT_ID"))
+
+	// cleat#2065. workflow_defs carries row-level security (migrations/postgres/
+	// 001_schema.sql's tenant_isolation_defs), so both the version query below
+	// and the INSERT are RLS-scoped reads/writes: on the cleat_app role -- the
+	// one the worker's own error messages tell an operator to use, since the
+	// worker refuses a superuser or BYPASSRLS connection -- they fail with
+	// "cleat.tenant_id is not set" unless something sets it first. Setting
+	// --tenant alone did nothing before this fix: deployTenantID was computed
+	// but never told to Postgres. Mirror engine/db.go's beginTxWithRLS: open a
+	// transaction and set_config('cleat.tenant_id', ...) before any
+	// tenant-scoped statement in it. (The role that owns migrations bypasses
+	// RLS, so this only bites the app role -- which is the one deploy is
+	// supposed to work under.)
+	tx, err := db.Begin()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting deploy transaction: %v\n", err)
+		os.Exit(1)
+	}
+	if _, err := tx.Exec("SELECT set_config('cleat.tenant_id', $1, true)", deployTenantID); err != nil {
+		_ = tx.Rollback()
+		fmt.Fprintf(os.Stderr, "Error setting tenant context: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Use the version embedded in WASM metadata if available; otherwise
+	// auto-increment.  Deploying the same version multiple times updates
+	// the existing row (idempotent).
+	version := 1
+	if metaErr == nil && meta.WorkflowVersion > 0 {
+		version = meta.WorkflowVersion
+	} else {
+		err = tx.QueryRow("SELECT COALESCE(MAX(version), 0) + 1 FROM workflow_defs WHERE name = $1", name).Scan(&version)
+		if err != nil {
+			_ = tx.Rollback()
+			fmt.Fprintf(os.Stderr, "Error querying max version: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	_, err = tx.Exec(
+		`INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, plugin_deps, min_version, entry_points, task_queue, max_history_length, tenant_id)
+		 VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10)
+		 ON CONFLICT (tenant_id, name, version) DO UPDATE SET
 		   wasm_bytes = EXCLUDED.wasm_bytes,
 		   abi_version = EXCLUDED.abi_version,
 		   plugin_deps = EXCLUDED.plugin_deps,
 		   min_version = EXCLUDED.min_version,
 		   entry_points = EXCLUDED.entry_points,
-		   task_queue = EXCLUDED.task_queue`,
-		name, version, wasmBytes, abiVersion, pluginDepsJSON, minVersion, []string{}, *taskQueueFlag,
+		   task_queue = EXCLUDED.task_queue,
+		   max_history_length = EXCLUDED.max_history_length`,
+		name, version, wasmBytes, abiVersion, pluginDepsJSON, minVersion, []string{}, *taskQueueFlag, *maxHistoryLengthFlag,
+		deployTenantID,
 	)
 	if err != nil {
+		_ = tx.Rollback()
 		fmt.Fprintf(os.Stderr, "Error inserting workflow definition: %v\n", err)
+		os.Exit(1)
+	}
+	if err := tx.Commit(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error committing deploy transaction: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -1057,6 +1243,22 @@ func runDeploy(args []string) {
 			meta.WorkflowName, meta.WorkflowVersion,
 			meta.ABIVersion, meta.MinCompatibleVersion, meta.PluginDeps)
 	}
+}
+
+// resolveDeployTenant picks the tenant a deploy is written under: the --tenant
+// flag, then CLEAT_TENANT_ID, then the single-tenant default.
+//
+// Same order `cleat lock` already uses. Extracted so the order is testable
+// without a database -- the deploy itself needs one, and the ordering is the
+// part that decides which tenant owns the row.
+func resolveDeployTenant(flagValue, envValue string) string {
+	if flagValue != "" {
+		return flagValue
+	}
+	if envValue != "" {
+		return envValue
+	}
+	return engine.DefaultTenantUUID
 }
 
 func analyze(pattern string) (*analyzer.AnalysisResult, *callgraph.Graph, *closure.Result, []closure.ThreadingError, *wasm.UsageInfo, *transform.Result) {
@@ -1099,12 +1301,35 @@ func analyze(pattern string) (*analyzer.AnalysisResult, *callgraph.Graph, *closu
 // buildJSONDiagnostics builds a JSON representation of all diagnostics.
 // logBuildProgress prints a build progress message. In JSON output mode,
 // the message goes to stderr so stdout contains only the JSON diagnostics.
-func logBuildProgress(format string, jsonOut bool, args ...any) {
-	if jsonOut {
-		fmt.Fprintf(os.Stderr, format, args...)
-	} else {
-		fmt.Printf(format, args...)
+// logBuildProgress writes build commentary to stderr, always.
+//
+// It used to take jsonOut and pick the stream from it: stderr when --json was
+// set so the JSON on stdout stayed parseable, stdout otherwise. That was option
+// A already implemented, for one flag. cleat#1128's decision generalises it --
+// stdout carries what the caller asked for, stderr carries commentary about the
+// build -- so the parameter and the branch both go away rather than a third
+// case being added.
+func logBuildProgress(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, format, args...)
+}
+
+// dropAutoThreaded removes threading errors for functions the transform gave
+// an h parameter to. See the call site for why they are not failures.
+func dropAutoThreaded(errs []closure.ThreadingError, tr *transform.Result) []closure.ThreadingError {
+	if tr == nil || len(tr.AddedH) == 0 || len(errs) == 0 {
+		return errs
 	}
+	added := make(map[string]bool, len(tr.AddedH))
+	for _, name := range tr.AddedH {
+		added[name] = true
+	}
+	kept := errs[:0:0]
+	for _, e := range errs {
+		if !added[e.FuncName] {
+			kept = append(kept, e)
+		}
+	}
+	return kept
 }
 
 // vetJSONOutput builds a VetOutput from analysis results.
@@ -1125,31 +1350,27 @@ func vetJSONOutput(result *analyzer.AnalysisResult, cr *closure.Result, threadin
 	}
 
 	// Validation errors.
-	for funcName, errs := range cr.Errors {
-		for _, e := range errs {
-			out.Errors = append(out.Errors, VetResult{
-				Code:       e.Code,
-				File:       lookupFile(result, funcName),
-				Line:       e.Line,
-				Column:     0,
-				Message:    e.Message,
-				Suggestion: e.Suggestion,
-			})
-		}
+	for _, e := range cr.SortedErrors() {
+		out.Errors = append(out.Errors, VetResult{
+			Code:       e.Code,
+			File:       lookupFile(result, e.FuncName),
+			Line:       e.Line,
+			Column:     0,
+			Message:    e.Message,
+			Suggestion: e.Suggestion,
+		})
 	}
 
 	// Warnings.
-	for funcName, warns := range cr.Warnings {
-		for _, w := range warns {
-			out.Warnings = append(out.Warnings, VetResult{
-				Code:       w.Code,
-				File:       lookupFile(result, funcName),
-				Line:       w.Line,
-				Column:     0,
-				Message:    w.Message,
-				Suggestion: w.Suggestion,
-			})
-		}
+	for _, w := range cr.SortedWarnings() {
+		out.Warnings = append(out.Warnings, VetResult{
+			Code:       w.Code,
+			File:       lookupFile(result, w.FuncName),
+			Line:       w.Line,
+			Column:     0,
+			Message:    w.Message,
+			Suggestion: w.Suggestion,
+		})
 	}
 
 	// Summary.
@@ -1199,6 +1420,21 @@ func shortEntryPoints(result *analyzer.AnalysisResult) []string {
 	var names []string
 	for _, ep := range result.EntryPoints {
 		names = append(names, analyzer.ShortName(ep))
+	}
+	return names
+}
+
+// exportedEntryPointNames returns the actual WASM export names generateExport
+// (wasm/exports.go) will give each entry point -- ToSnakeCase of the short Go
+// name, the same conversion wasmOutputName below already applies to the
+// first one. cleat#2066: this is what cmd/cleat-worker/setup.go's
+// determineEntryPoint needs in wasm.Metadata to resolve a start with no
+// explicit __entry_point, so it has to be the export name a caller can
+// actually invoke, not the Go source name nothing outside this build knows.
+func exportedEntryPointNames(result *analyzer.AnalysisResult) []string {
+	var names []string
+	for _, short := range shortEntryPoints(result) {
+		names = append(names, wasm.ToSnakeCase(short))
 	}
 	return names
 }
@@ -1255,7 +1491,10 @@ func getDBConnStr() string {
 		return dbConnStr
 	}
 	// Fall back to credential provider.
-	// For the "env" provider this checks --db, DATABASE_URL, then CLEAT_DATABASE_URL.
+	// For the "env" provider this checks --db, then CLEAT_DATABASE_URL.
+	// It used to check the generic DATABASE_URL in between, and prefer it; #1904
+	// removed that, because the generic name is what an unrelated service in the
+	// same pod also sets. See engine/credentials.go.
 	if dbCredProviderName != "" {
 		provider, err := engine.NewDBCredentialProvider(dbCredProviderName, "", dbCredPath)
 		if err == nil {
@@ -1316,37 +1555,147 @@ func runVersions(name string) {
 
 // runRollback sets the active version for a workflow by confirming the version
 // exists and printing instructions for new instances.
+// runRollback pins new runs of a workflow to a specific version.
+//
+// WHAT IT WRITES, AND WHY THERE. workflow_defs has no active-version column
+// (only disabled_at and gc_eligible), and adding one would put a SECOND
+// mechanism in front of the same question -- new-run version resolution --
+// whose failure mode when the two disagree is silent. workflow_routing is
+// already that mechanism: server.go consults PickVersionByRouting BEFORE
+// falling back to the latest version, the table has a foreign key to
+// (name, version) so the target cannot dangle, and its reads are RLS-scoped.
+// A rollback is therefore a routing rule at weight 1.0, and needs no new
+// resolution path at all.
+//
+// TENANT SCOPE, which cleat#1893 correctly refused to guess. This resolves it
+// exactly as `deploy` does -- resolveDeployTenant: --tenant flag, then
+// CLEAT_TENANT_ID, then the single-tenant default. Matching deploy is the
+// whole argument: a rollback that landed on a different tenant than the
+// deploy it reverses would be worse than the no-op this replaces, and the
+// only way to be sure they agree is to call the same function.
+//
+// REPLACE, NOT ADD. Existing rules for this workflow are deleted in the same
+// transaction, so a rollback is never partially applied on top of a weighted
+// experiment. If an experiment is live, the command refuses rather than
+// silently discarding it -- see the weight check below.
+//
+// THE PIN PERSISTS across later deploys, and `--clear` removes it. The
+// alternative -- a deploy silently clearing it -- means shipping N+2 after a
+// rollback re-exposes the version the operator withdrew, which is the same
+// class of surprise this command was fixed for. `deploy` warns when a pin
+// exists instead.
 func runRollback(name string, version int) {
-	connStr := getDBConnStr()
-	if connStr == "" {
-		fmt.Fprintf(os.Stderr, "Error: --db flag or CLEAT_DATABASE_URL is required\n")
-		os.Exit(1)
-	}
-
-	db, err := openPostgresDB(connStr)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
-		os.Exit(1)
-	}
+	db := openRollbackDB()
 	defer db.Close()
 
-	if err := db.Ping(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error pinging database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
+	tenantID := resolveDeployTenant(buildTenantID, os.Getenv("CLEAT_TENANT_ID"))
+
+	tx, err := db.Begin()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error starting transaction: %v\n", err)
 		os.Exit(1)
 	}
+	defer tx.Rollback()
 
 	var exists bool
-	err = db.QueryRow("SELECT EXISTS(SELECT 1 FROM workflow_defs WHERE name = $1 AND version = $2)", name, version).Scan(&exists)
+	err = tx.QueryRow(
+		"SELECT EXISTS(SELECT 1 FROM workflow_defs WHERE name = $1 AND version = $2 AND tenant_id = $3)",
+		name, version, tenantID).Scan(&exists)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error checking version: %v\n", err)
 		os.Exit(1)
 	}
 	if !exists {
-		fmt.Fprintf(os.Stderr, "Error: workflow %q version %d not found\nUse 'cleat versions <name>' to list available versions.\n", name, version)
+		fmt.Fprintf(os.Stderr, "Error: workflow %q version %d not found for tenant %s\n"+
+			"Use 'cleat versions <name>' to list available versions.\n", name, version, tenantID)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Rolled back %q to version %d. New instances will use version %d.\n", name, version, version)
+	// A weighted experiment is someone else's deliberate state. Refusing is
+	// recoverable (clear it, then roll back); silently discarding it is not.
+	var experiment int
+	err = tx.QueryRow(
+		"SELECT COUNT(*) FROM workflow_routing WHERE workflow_name = $1 AND tenant_id = $2 AND weight < 1.0",
+		name, tenantID).Scan(&experiment)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error reading routing rules: %v\n", err)
+		os.Exit(1)
+	}
+	if experiment > 0 {
+		fmt.Fprintf(os.Stderr, "Error: %q has %d weighted routing rule(s) -- a rollback would "+
+			"discard a live experiment.\nRun 'cleat rollback --clear %s' first if that is what you want.\n",
+			name, experiment, name)
+		os.Exit(1)
+	}
+
+	if _, err = tx.Exec(
+		"DELETE FROM workflow_routing WHERE workflow_name = $1 AND tenant_id = $2",
+		name, tenantID); err != nil {
+		fmt.Fprintf(os.Stderr, "Error clearing existing routing: %v\n", err)
+		os.Exit(1)
+	}
+	if _, err = tx.Exec(
+		"INSERT INTO workflow_routing (workflow_name, target_version, weight, tenant_id) VALUES ($1, $2, 1.0, $3)",
+		name, version, tenantID); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing routing rule: %v\n", err)
+		os.Exit(1)
+	}
+
+	// The success message comes AFTER the commit returns, which is the whole
+	// defect cleat#1887 recorded: the previous version printed it having
+	// written nothing at all.
+	if err := tx.Commit(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error committing rollback: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Rolled back %q to version %d. New runs will use version %d until "+
+		"'cleat rollback --clear %s'.\n", name, version, version, name)
+}
+
+// runRollbackClear removes the pin, returning the workflow to latest-wins.
+func runRollbackClear(name string) {
+	db := openRollbackDB()
+	defer db.Close()
+
+	tenantID := resolveDeployTenant(buildTenantID, os.Getenv("CLEAT_TENANT_ID"))
+
+	res, err := db.Exec(
+		"DELETE FROM workflow_routing WHERE workflow_name = $1 AND tenant_id = $2",
+		name, tenantID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error clearing routing for %q: %v\n", name, err)
+		os.Exit(1)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		// Not an error: clearing an unpinned workflow is the state the caller
+		// asked for. Said plainly so it is not read as a silent success on a
+		// misspelled name.
+		fmt.Printf("%q had no routing rules; new runs already use the latest version.\n", name)
+		return
+	}
+	fmt.Printf("Cleared %d routing rule(s) for %q. New runs will use the latest version.\n", n, name)
+}
+
+// openRollbackDB is the connection both rollback paths share.
+func openRollbackDB() *sql.DB {
+	connStr := getDBConnStr()
+	if connStr == "" {
+		fmt.Fprintf(os.Stderr, "Error: --db flag or CLEAT_DATABASE_URL is required\n")
+		os.Exit(1)
+	}
+	db, err := openPostgresDB(connStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error connecting to database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
+		os.Exit(1)
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		fmt.Fprintf(os.Stderr, "Error pinging database: %v\nCheck that CLEAT_DATABASE_URL is correct and the database is running.\n", err)
+		os.Exit(1)
+	}
+	return db
 }
 
 // runSchedule manages cron schedules for recurring workflow execution.
@@ -1438,12 +1787,12 @@ func runSchedule(args []string) {
 			EntryPoint:     *entryPoint,
 			CronExpression: *cronExpr,
 			Input:          json.RawMessage(*inputJSON),
-			Enabled:        true,
-			NextRunAt:      nextRun,
-			Timezone:       *timezone,
-			MisfirePolicy:  *misfire,
-			CatchUpLimit:   *catchUp,
-			OverlapPolicy:  *overlap,
+			// A new schedule is live, which after cleat#1702 is the zero value.
+			NextRunAt:     nextRun,
+			Timezone:      *timezone,
+			MisfirePolicy: *misfire,
+			CatchUpLimit:  *catchUp,
+			OverlapPolicy: *overlap,
 		}
 
 		if err := store.CreateSchedule(ctx, sch); err != nil {
@@ -1470,8 +1819,12 @@ func runSchedule(args []string) {
 		// they do not look like they agree.
 		fmt.Printf("%-20s %-20s %-20s %-7s %-20s %s\n", "NAME", "DEFINITION", "CRON", "ENABLED", "TIMEZONE", "NEXT RUN")
 		for _, sch := range schedules {
+			// The ENABLED column stays yes/no: this is operator-facing text,
+			// not the API surface cleat#1702 changed. The instant a schedule
+			// was retired is in disabled_at, which `GET /api/schedules`
+			// returns; a fixed-width table column is not the place for it.
 			enabled := "no"
-			if sch.Enabled {
+			if !sch.Disabled() {
 				enabled = "yes"
 			}
 			loc, _ := engine.LoadScheduleLocation(sch.Timezone)
@@ -1595,7 +1948,7 @@ func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut
 			Entries: entries,
 		}
 		if err := wasm.WriteLockFile(".", lf); err != nil {
-			logBuildProgress("  Warning: could not write %s: %v\n", jsonOut, wasm.LockFileName, err)
+			logBuildProgress("  Warning: could not write %s: %v\n", wasm.LockFileName, err)
 		} else if !jsonOut {
 			fmt.Printf("  Wrote %s (%d child workflow version(s))\n", wasm.LockFileName, len(entries))
 		}
@@ -1614,7 +1967,7 @@ func resolveBuildChildVersions(children map[string]bool, channel string, jsonOut
 		return result
 	}
 
-	logBuildProgress("  Warning: no %s and no --db flag. Child workflow versions will be resolved dynamically at runtime.\n", jsonOut, wasm.LockFileName)
+	logBuildProgress("  Warning: no %s and no --db flag. Child workflow versions will be resolved dynamically at runtime.\n", wasm.LockFileName)
 	return nil
 }
 

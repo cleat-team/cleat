@@ -4,6 +4,44 @@ This guide covers all upgrade scenarios for a cleat deployment: worker binary
 upgrades, database schema migrations, workflow definition version changes,
 rollback procedures, and PostgreSQL major version upgrades.
 
+## Migration is a deploy step
+
+**A worker does not migrate the database when it starts** (cleat#2117; this changed
+in 0.3.0). A normal start *verifies* that the schema is not behind the binary and
+refuses to start, with the remediation in its message, if it is. So every release
+migrates first, then rolls the workers:
+
+```bash
+# 1. Once per release, from anywhere that can reach the database. Use a role with
+#    DDL rights (--migrate-db), which the workers' runtime role should not have.
+cleat-worker --migrate-only --db "$CLEAT_DATABASE_URL" [--migrate-db "$MIGRATOR_DATABASE_URL"]
+
+# 2. Then start or restart the workers (the rolling restart below).
+```
+
+`--migrate-only` applies the core and plugin migrations and exits `0`; any failure is
+non-zero. It is idempotent, needs no master key, and is safe if two run at once. How
+each deployment shape does step 1:
+
+| deployment | the migration step |
+|---|---|
+| Helm | a `pre-install`/`pre-upgrade` hook Job (`charts/cleat/templates/migrate-job.yaml`); `migration.*` values |
+| raw Kubernetes | apply `k8s/migrate-job.yaml`, `kubectl wait`, then apply the Deployment |
+| systemd / .deb | `ExecStartPre=cleat-worker --migrate-only` in the shipped unit |
+| docker compose | a one-shot `migrate` service the workers `depends_on` (`docker-compose.cluster.yml`) |
+| single node, development | `cleat-worker --migrate-on-start`: the worker migrates itself, as before |
+
+**A schema ahead of the binary starts.** During a rolling upgrade the migration job
+runs before the last old workers have been replaced; those workers see a schema newer
+than they know. They start, with a warning naming both versions, rather than refuse and
+wedge the rollout. This relies on migrations staying additive within a release line.
+A schema *behind* the binary is refused.
+
+**Before you upgrade from a release that migrated on start:** anything that started a
+worker against a fresh or older database and relied on it migrating now needs a
+`--migrate-only` step or `--migrate-on-start`. A worker started without either on an
+un-migrated database exits with the message above.
+
 ## Worker binary upgrade (rolling restart)
 
 Cleat workers are stateless and horizontally scalable, making rolling upgrades
@@ -24,20 +62,22 @@ kill -TERM $(pgrep cleat-worker)
 
 # 3. Wait for the worker to shut down gracefully,
 #    then start the new binary
-cleat-worker --db "$DATABASE_URL" --concurrency 20
+cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 20
 ```
 
 The worker on SIGTERM will:
 
 1. Stop claiming new workflow instances from the database
-2. Wait for all in-flight workflow executions to complete (with an internal
-   timeout)
-3. Release claimed instances by clearing `assigned_to` and updating
-   `heartbeat_at` to a past timestamp
+2. Wait for all in-flight workflow executions to complete, for at most
+   `--shutdown-grace` (default 20s)
+3. Cancel whatever is still running and **release** it (never fail it) by
+   clearing `assigned_to`, so another worker replays it from its durable history
 4. Exit
 
 Other workers in the pool immediately pick up any instances the shutting-down
-worker releases.
+worker releases. A durable call that was still running when the grace ended can
+run again on the worker that picks the run up (at-least-once); see
+[What SIGTERM does](zero-downtime-deploy.md#what-sigterm-does).
 
 ### Kubernetes rolling update
 
@@ -72,7 +112,7 @@ startup, so you must coordinate the binary and configuration change:
 
 ```bash
 # Good: update config and binary together
-cleat-worker --db "$DATABASE_URL" --concurrency 20 --new-flag value
+cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 20 --new-flag value
 
 # Bad: mismatched binary and config
 # cleat-worker v1 with --new-flag => error
@@ -83,42 +123,55 @@ cleat-worker --db "$DATABASE_URL" --concurrency 20 --new-flag value
 
 ### Automatic migration (recommended)
 
-Starting from cleat v0.7.0, the worker checks the schema version at startup
-and applies pending migrations automatically before entering the dispatch loop.
-No manual steps are needed:
+**0.3.0 requires a fresh database. There is no upgrade path from v0.2.0** --
+the schema rebaseline (`event_history` partitioning plus migration
+compaction, cleat#2059) breaks compatibility with any pre-0.3.0 database on
+purpose, and is the last change before the 0.3.0 tag. Provision a fresh
+database for 0.3.0; there is no cleat v0.7.0, and no version of cleat before
+0.3.0 to migrate from.
+
+The guidance below describes ordinary migrations between later releases,
+once those exist: migrate as a deploy step (see
+[Migration is a deploy step](#migration-is-a-deploy-step)), then start the workers,
+which verify the schema at startup and refuse to start if it is behind:
 
 ```bash
-# Simply start the worker -- it applies migrations if needed
-cleat-worker --db "$DATABASE_URL"
+cleat-worker --migrate-only --db "$CLEAT_DATABASE_URL"
+cleat-worker --db "$CLEAT_DATABASE_URL"     # verifies; does not migrate
 ```
 
-The worker logs applied migrations:
+The migration run logs what it applies:
 
 ```
 INFO[0000] Applied schema migration 002_add_promises_table  duration=12ms
 INFO[0000] Schema is up to date at version 003
 ```
 
-### Manual migration
+### The migration command
 
-If you prefer to apply migrations outside the worker startup path, run the
-migration tool directly:
+**Migrations are applied by `cleat-worker --migrate-only`** (cleat#2117), a deploy
+step described [above](#migration-is-a-deploy-step). It builds the same runner a worker
+used to run at startup, applies every pending migration (core, then plugin) and exits.
+There is still no `migrate` subcommand on `cleat` or on `cleatctl` (cleat#1315); an
+older version of this section offered `cleat migrate up` and `cleat migrate status`,
+which never existed. Check the surface rather than trusting this paragraph:
 
 ```bash
-# Apply all pending migrations
-cleat migrate up --db "$DATABASE_URL"
-
-# Check migration status
-cleat migrate status --db "$DATABASE_URL"
-
-# Output:
-# Migration 001_initial_schema ........ applied (2025-01-15)
-# Migration 002_add_promises_table ... applied (2025-02-01)
-# Migration 003_add_concurrency_keys . pending
+cleat 2>&1 | grep 'Valid commands'
 ```
 
-Migrations are idempotent. Running `cleat migrate up` multiple times only
-applies migrations that have not yet been applied.
+Migrations are idempotent: the runner records each applied version in
+`schema_migrations` and skips it thereafter, so running `--migrate-only` repeatedly
+applies nothing twice.
+
+**To see what has been applied**, read the tracking table directly:
+
+```sql
+SELECT version, applied_at FROM schema_migrations ORDER BY version;
+```
+
+**To see what a worker would refuse**, start it without `--migrate-on-start`: it
+verifies the schema, changes nothing, and if a migration is missing says which.
 
 ### Migration files
 
@@ -149,75 +202,101 @@ Before applying a migration, the worker or migration tool runs sanity checks:
 If a migration fails, the worker logs the error and exits. Fix the migration
 and restart.
 
-### Migration 007: Foreign Key CASCADE
+### Lock risk: set `lock_timeout` yourself, because no migration sets it
 
-Migration 007 adds `ON DELETE CASCADE` to all foreign keys referencing
-`workflow_instances(id)`. This affects five child tables: `event_history`,
-`workflow_signals`, `workflow_promises`, `concurrency_keys`, and
-`workflow_update_requests`.
+**Nothing in this repo sets `lock_timeout` or `lock_wait_timeout`.** A session
+value you set before running the migrations is the only thing bounding how long
+a migration waits for its lock — and how long your writers queue behind it.
 
-**What changes**: Each FK is dropped and re-added with `ON DELETE CASCADE`.
-In MySQL, `concurrency_keys` also receives its FK constraint for the first
-time (it was missing in the original schema).
+Re-derive rather than trusting this paragraph; it is the kind of claim that
+rots, and the version of this section before cleat#1334 asserted the opposite:
 
-**Why**: Without CASCADE, deleting a workflow instance required manually
-deleting child rows first. The `DeleteDeadLetteredWorkflows` reaper did this,
-but other code paths that deleted workflow instances could leave orphaned
-rows in child tables.
+```
+git grep -c lock_timeout -- migrations/ migration/ '*.go' plugins/
+# no matches. Every occurrence in the repo is prose.
+```
 
-**Lock risk — HIGH**: Each `ALTER TABLE ... DROP CONSTRAINT ... ADD CONSTRAINT`
-takes an `ACCESS EXCLUSIVE` lock (Postgres) or equivalent on the child table.
-On large `event_history` tables (millions of rows), this blocks all writes for
-the duration of the constraint validation scan.
+**Which migrations are exposed**: every one that runs `ALTER TABLE`. Do not work
+from a list — it grows with each release, and the risk is not confined to the
+expensive statements. `docs/schema-partitioning-design.md` measures a
+*metadata-only* `ALTER` queued behind a single 10-second open reader at
+`0.08s → 9.43s`, with `SELECT`s arriving after it blocked for 7.8–8.4s:
+
+> Outage length is set by your longest open transaction, not by the DDL.
+
+So an `ADD COLUMN` with no default is exposed on the same terms as a constraint
+rebuild. List them for a given release with:
+
+```
+git diff --name-only <previous-tag>..<this-tag> -- migrations/ |
+  while read -r f; do grep -l 'ALTER TABLE' "$f"; done
+```
 
 **Mitigation**:
-- The Postgres migration itself uses `SET LOCAL lock_timeout = '30s'` within the
-  DO block, which overrides any session-level `lock_timeout` you may have set.
-  If you want a shorter timeout for the migration, you must edit the migration
-  SQL (the `SET LOCAL` inside the DO block takes precedence).
-- Set `lock_timeout` before running for the migration runner's other statements:
-  `SET lock_timeout = '5s';` (Postgres) or `SET SESSION lock_wait_timeout = 5;`
-  (MySQL)
-- Run during a maintenance window or off-peak hours
-- For Postgres, the entire DO block runs in a single transaction; no intermediate
-  states are visible to other sessions
-- For MySQL, ALTER TABLE implicitly commits, creating a brief no-FK window between
-  DROP and re-ADD on each table. Run during a quiet period
-- Pre-validate by checking for orphaned rows:
-  ```sql
-  SELECT COUNT(*) FROM event_history eh
-  LEFT JOIN workflow_instances wi ON eh.workflow_id = wi.id
-  WHERE wi.id IS NULL;
+- **Set the timeout on the connection the migration tool makes, not in a `psql`
+  session.** This is the protection, not a supplement to one — and the
+  distinction is the part that is easy to get wrong. Migrations are applied by
+  `cleat-worker --migrate-only --db "$CLEAT_DATABASE_URL"` (or by a `--migrate-on-start` worker), which opens its
+  own connection from the DSN; a `SET lock_timeout = '5s';` you type into a
+  separate `psql` session has no effect on it whatsoever. Put it in the DSN or
+  the environment:
+
   ```
-  This should return 0 on a healthy installation.
-- Estimated time: proportional to the largest child table. On a table with 10M
-  rows, expect 30-120 seconds per ALTER.
+  # Postgres. lib/pq forwards `options` in the startup packet and reads
+  # PGOPTIONS (connector.go: `Options string `postgres:"options" env:"PGOPTIONS"``).
+  CLEAT_DATABASE_URL='postgres://.../cleat?options=-c%20lock_timeout%3D5s'
+  # or, equivalently:
+  PGOPTIONS='-c lock_timeout=5s' cleat-worker --migrate-only --db "$CLEAT_DATABASE_URL"
 
-**MySQL orphan check for concurrency_keys**: Before the migration, verify there
-are no orphaned `concurrency_keys` rows:
-```sql
-SELECT COUNT(*) FROM concurrency_keys ck
-LEFT JOIN workflow_instances wi ON ck.workflow_id = wi.id
-WHERE wi.id IS NULL;
-```
-If this returns > 0, clean up orphaned rows first:
-```sql
-DELETE ck FROM concurrency_keys ck
-LEFT JOIN workflow_instances wi ON ck.workflow_id = wi.id
-WHERE wi.id IS NULL;
-```
+  # MySQL. go-sql-driver sends unrecognised DSN parameters as session
+  # system variables on connect (dsn.go: `Params map[string]string`).
+  CLEAT_DATABASE_URL='user:pw@tcp(host:3306)/cleat?lock_wait_timeout=5'
+  ```
 
-**Re-running the migration**: The migration runner prevents re-execution via
-`schema_migrations` tracking. If manually re-applied: the Postgres DO block is
-idempotent (DROP + re-ADD arrives at the same state); MSSQL `IF EXISTS` guards
-make it idempotent; MySQL re-application would fail on the `ADD FOREIGN KEY`
-step for concurrency_keys (FK already exists). Do not re-apply migration 007
-manually.
+  A migration that cannot take its lock then fails fast and can be retried,
+  instead of holding the write queue open behind it.
+- **Check for long-running transactions first**, since they are what the
+  timeout is protecting you from:
+  ```sql
+  SELECT pid, state, now() - xact_start AS age, query
+  FROM pg_stat_activity
+  WHERE xact_start IS NOT NULL AND now() - xact_start > interval '30 seconds'
+  ORDER BY age DESC;
+  ```
+- Run during a maintenance window or off-peak hours.
+- On Postgres each migration file runs in a single transaction, so a failed
+  migration leaves no intermediate state visible to other sessions.
+- On MySQL, `ALTER TABLE` implicitly commits. A migration that rebuilds a
+  foreign key therefore has a brief window with no constraint in force, and a
+  failure part-way through leaves the earlier statements applied.
 
-**Rollback**: Migration 007 has no automatic rollback. Once CASCADE is applied,
-deletes are silently destructive. To undo, re-apply the constraints without
-`ON DELETE CASCADE` (reverse of the migration DDL). Contact support for a
-rollback script if needed.
+**What this section used to say, recorded because it was actively harmful.**
+Until cleat#1334 this was headed "Migration 007: Foreign Key CASCADE" and told
+operators that the Postgres migration set `SET LOCAL lock_timeout = '30s'`
+inside a `DO` block, that this *overrode* any session value they set, and that
+shortening it meant editing the migration SQL.
+
+Every part of that was false. There is no migration 007 on either dialect
+(`ls migrations/postgres/007*`), the five `ON DELETE CASCADE` foreign keys it
+claimed to add are declared in `001_schema.sql` from the beginning, and no
+migration has ever set `lock_timeout`. The cost was not the missing guard on its
+own: an operator who did the right thing was told their setting was inert, which
+is a gap plus a reason not to look for it.
+
+**Its second bullet was inert too, which is why this section is rewritten rather
+than patched.** That one read "Set `lock_timeout` before running for the
+migration runner's *other* statements: `SET lock_timeout = '5s';`" — correct
+advice in the wrong place twice over. It scoped the setting to the statements
+the phantom `DO` block supposedly did not cover, and it named a bare `SET`,
+which applies to whichever session runs it. The migration runner connects from
+the DSN, so a value set anywhere else never reaches it. Both bullets pointed an
+operator away from the only thing that works.
+
+Three further paragraphs went with it -- a pre-migration orphan check for
+`concurrency_keys`, a "do not re-apply migration 007 manually" warning citing
+the idempotency of its Postgres `DO` block and its MSSQL `IF EXISTS` guards, and
+a rollback procedure for undoing the CASCADE. All three described the same
+migration, so all three were instructions about a file that is not there.
 
 ## Running old and new workers side by side
 
@@ -249,16 +328,16 @@ rules are:
 ```bash
 # Phase 1: both worker versions run concurrently
 # Old workers (v1) handling existing workflows
-cleat-worker-v1 --db "$DATABASE_URL"
+cleat-worker-v1 --db "$CLEAT_DATABASE_URL"
 
 # New workers (v2) also connect and claim from the queue
-cleat-worker-v2 --db "$DATABASE_URL"
+cleat-worker-v2 --db "$CLEAT_DATABASE_URL"
 
 # Phase 2: old workers are drained (see zero-downtime deploy guide)
 kill -TERM $(pgrep cleat-worker-v1)
 
 # Phase 3: only new workers remain
-cleat-worker-v2 --db "$DATABASE_URL"
+cleat-worker-v2 --db "$CLEAT_DATABASE_URL"
 ```
 
 During the coexistence window:
@@ -285,7 +364,7 @@ kill -TERM $(pgrep cleat-worker)
 cp cleat-worker-v1 /usr/local/bin/cleat-worker
 
 # 3. Restart
-cleat-worker --db "$DATABASE_URL"
+cleat-worker --db "$CLEAT_DATABASE_URL"
 ```
 
 ### Kubernetes rollback
@@ -301,28 +380,40 @@ kubectl rollout undo deployment/cleat-worker --to-revision=3
 kubectl rollout status deployment/cleat-worker
 ```
 
-### Rolling back a schema migration
+### Rolling back a schema migration — there is no down path
 
-If a database migration is the source of the problem, you can roll it back
-using the down migration:
+**Schema migrations are one-way. Nothing in cleat reverses them**, and the
+answer to "the migration is the problem" is not a command:
 
-```bash
-# Rollback the last migration
-cleat migrate down --db "$DATABASE_URL"
+| | |
+|---|---|
+| `*.down.sql` files in the tree | **0** (`git ls-files 'migrations/**/*.down.sql'`) |
+| a `Down` function in `migration/runner.go` | none |
+| a `migrate` subcommand on `cleat` or `cleatctl` | none |
 
-# Rollback to a specific version
-cleat migrate down --db "$DATABASE_URL" --target 001
-```
+This section used to prescribe `cleat migrate down --db "$CLEAT_DATABASE_URL"` and
+`--target 001`. The command, the flag and the migration files are all absent
+(cleat#1315), so an operator reaching for the documented way back was reaching
+for something that has never existed — at the moment they could least afford
+the detour.
 
-After the migration rollback, start the old worker binary:
+**What to do instead**, in order of preference:
 
-```bash
-cleat-worker-v1 --db "$DATABASE_URL"
-```
+1. **Roll the worker binary back and leave the schema forward.** This is the
+   supported path for a minor or patch upgrade, because those schema changes
+   are backward compatible by policy — see *Database schema compatibility*
+   below. An older worker runs against a newer schema.
+2. **Restore from backup** if the schema change itself must be undone. Take the
+   backup *before* the upgrade; this is the only way back from a major-version
+   schema change, and it is why the checklist asks for one.
+3. **Write a forward migration** that undoes what the previous one did, if the
+   database cannot be taken offline for a restore. It is a new numbered file,
+   not a rollback.
 
-**Important**: Rolling back a migration may cause data loss if the rolled-back
-migration added columns or tables that are now in use. Down migrations should
-be tested in a staging environment before production use.
+Removing a column or table by hand is not on this list. The schema is reached
+by procedures as well as by Go (`finalize_workflow_status` and its siblings),
+so a hand-edited schema can satisfy every Go query and still break at a call
+this document cannot enumerate.
 
 ## Rolling back a workflow definition version
 
@@ -354,15 +445,31 @@ After rollback:
 
 ### What `cleat rollback` does
 
-`cleat rollback` updates the active version pointer in `workflow_defs`. It
-does **not**:
+`cleat rollback` writes a routing rule pinning new runs to the named version.
+
+It is a row in `workflow_routing` at weight 1.0, replacing any existing rules
+for that workflow in one transaction. That table is what the worker already
+consults before falling back to the latest version, so a rollback needs no
+separate resolution path. **`workflow_defs` has no active-version column** --
+an earlier version of this document said it did, and the command wrote nothing
+at all (cleat#1887).
+
+The pin **persists** across later deploys. Deploying a newer version after a
+rollback does not re-expose it; run `cleat rollback --clear <name>` to return
+the workflow to latest-wins. This is deliberate: a deploy silently clearing the
+pin would re-ship the version an operator had withdrawn.
+
+A rollback is refused if the workflow has weighted routing rules, rather than
+discarding a live experiment; clear them first.
+
+It does **not**:
 
 - Terminate running instances
 - Delete the newer version from the database
 - Change the WASM binary stored for any version
 - Replay completed instances
 
-The active version is used only for **new** workflow instances. Running
+The pinned version is used only for **new** workflow instances. Running
 instances continue with the version they started on, which is correct for
 deterministic replay.
 
@@ -381,7 +488,13 @@ deterministic replay.
 
 ## PostgreSQL major version upgrade
 
-Cleat requires PostgreSQL 16+. When upgrading PostgreSQL to a new major version,
+Cleat requires PostgreSQL 16+, and since migration 077 that is enforced rather
+than advisory: the runner refuses to apply anything to an older server, naming
+the version and the reason. `WITH INHERIT FALSE` in 077 is PostgreSQL 16 syntax
+and carries the cross-tenant isolation boundary -- see
+`docs/explanation/postgresql-schema.md`, "PostgreSQL 16 is required".
+
+When upgrading PostgreSQL to a new major version,
 follow this procedure.
 
 ### Procedure
@@ -402,13 +515,15 @@ your database size (system catalog upgrade is I/O intensive).
 Drain the worker pool before taking the database offline:
 
 ```bash
-# Set all workers to drain mode via the admin API
-curl -X POST http://localhost:8080/api/admin/drain
+# Set all workers to drain mode via the admin API (needs --enable-admin-api and an API key:
+# see admin-api.md)
+curl -X POST -H "Authorization: Bearer $CLEAT_API_KEY" http://localhost:8080/api/admin/drain
 
-# Or send SIGTERM to each worker
+# Or send SIGTERM to each worker. It waits up to --shutdown-grace for runs to finish, then exits.
 pkill -TERM cleat-worker
 
-# Wait for all workers to exit (check with pgrep)
+# Wait for all workers to exit (check with pgrep). The admin API drain only cordons (stops claiming); it does
+# not exit the process.
 ```
 
 #### 3. Verify no in-flight workflows

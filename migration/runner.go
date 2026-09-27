@@ -9,14 +9,20 @@ package migration
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/cleat-team/cleat/internal/pinnedtx"
 )
 
 // Dialect identifies the SQL dialect a Runner applies migrations for.
@@ -47,6 +53,9 @@ type Runner struct {
 	db            *sql.DB
 	dialect       Dialect
 	migrationsDir string
+	overrideFS    fs.FS
+	schema        string
+	lockTimeout   time.Duration
 }
 
 // migration represents a single versioned SQL migration file.
@@ -78,17 +87,13 @@ const migrationsLockKey int64 = 7215842093104561
 // dialect.
 //
 // On PostgreSQL it is schema-qualified, and that qualification is load-bearing
-// rather than stylistic. The migration files begin with
-//
-//	SET search_path = public;
-//
-// (see the header of migrations/postgres/001_schema.sql for why). A bare SET
-// is session-scoped, not transaction-scoped, so it outlives the transaction
-// that applyMigration runs the file in and changes name resolution for every
-// later statement on that pooled connection -- including this runner's own
-// bookkeeping. Unqualified, the tracking table was created under the default
-// search_path ("$user", public) before any migration ran, and then looked up
-// under the changed one afterwards:
+// rather than stylistic. A bare SET is session-scoped, not
+// transaction-scoped, so a migration file that changed search_path would
+// outlive the transaction applyMigration runs it in and change name
+// resolution for every later statement on this pinned connection -- including
+// the runner's own bookkeeping. Unqualified, the tracking table was created
+// under one search_path before any migration ran and then looked up under
+// another afterwards:
 //
 //	[migration] applying 001_schema.sql
 //	ERROR: relation "schema_migrations" does not exist (42P01)
@@ -96,17 +101,95 @@ const migrationsLockKey int64 = 7215842093104561
 //
 // which aborted the transaction, rolled 001 back, and failed the worker's
 // boot outright. Qualifying the name makes the runner independent of whatever
-// the migration files do to search_path.
+// a migration file does to search_path -- which matters less now that the
+// files no longer set it (cleat#1287, see WithSchema) and is kept because
+// "no file does this today" is not a property anything checks.
 //
-// SET LOCAL is not an alternative: the same files are also applied by
-// docker-entrypoint-initdb.d via psql, where each statement runs in its own
-// implicit transaction and a LOCAL setting would be discarded immediately.
+// What the qualifier IS depends on the configured schema. It was the literal
+// public until cleat#1287; with --schema it has to follow, or the runner
+// records its bookkeeping in a different schema from the one it is building
+// into and every boot re-applies every migration.
+//
+// SET LOCAL is not an alternative to the session-level SET in session(): the
+// same files are also applied by docker-entrypoint-initdb.d via psql
+// (deploy/postgres/100-apply-migrations.sh), where each statement runs in its
+// own implicit transaction and a LOCAL setting would be discarded
+// immediately. That path sets search_path through PGOPTIONS instead.
 func (r *Runner) trackingTable() string {
 	if r.dialect == DialectPostgres {
-		return "public.schema_migrations"
+		return r.schemaIdent() + ".schema_migrations"
 	}
 	return "schema_migrations"
 }
+
+// schemaIdent is the PostgreSQL schema this runner builds into, ready to
+// interpolate. It defaults to public, which is what every caller that does not
+// call WithSchema gets and what cleat has always done.
+//
+// Interpolated rather than parameterised because a schema name cannot be a
+// bind parameter in SET or in a qualified table name. WithSchema is what makes
+// that safe: it rejects anything that is not a plain identifier at
+// construction time, so the value reaching here is [A-Za-z_][A-Za-z0-9_]* and
+// needs no quoting. An invalid name fails the Run rather than being escaped
+// into something that would work -- a schema called "my schema" is far more
+// likely to be a mistake than an intention.
+func (r *Runner) schemaIdent() string {
+	if r.schema == "" {
+		return "public"
+	}
+	return r.schema
+}
+
+// searchPath is what the runner sets on its connection: the configured schema
+// followed by pg_temp.
+//
+// The trailing pg_temp is not decoration. The SECURITY DEFINER functions in
+// migrations/postgres/ that carry `SET search_path FROM CURRENT` freeze
+// whatever this value is onto themselves at creation time -- that is how they
+// follow --schema without any substitution step.
+//
+// No count, deliberately. This said "four" and there were three: five files
+// contain the statement and 040's admin.claim_workflows is superseded by
+// 055's, so counting statements over-reports the functions by one. Both
+// numbers are also a census of a growing population. Re-derive if you need
+// the set, deduping by name so the last definition wins:
+//
+//	grep -rln 'SET search_path FROM CURRENT' migrations/postgres/ PostgreSQL searches
+//
+// pg_temp FIRST when it is not named explicitly, so a captured path of
+// "cleat_prod" alone would let a temporary table shadow a real one inside a
+// function that holds an RLS exemption. Naming it last is the standard
+// hardening and is the whole reason it is here rather than in schemaIdent.
+func (r *Runner) searchPath() string {
+	return r.schemaIdent() + ", pg_temp"
+}
+
+// DefaultLockTimeout bounds how long a migration statement waits for a lock
+// before failing. cleat#1775.
+//
+// # Why a bound at all
+//
+// Without one, a migration that needs an ACCESS EXCLUSIVE lock -- ALTER TABLE,
+// CREATE INDEX without CONCURRENTLY, DROP -- waits forever behind whatever
+// holds a conflicting lock, and an idle-in-transaction session is enough. It
+// also queues every later reader behind itself, so one blocked migration takes
+// the table down rather than merely being slow.
+//
+// It is worse than that here, and the reason is why this is not cosmetic: every
+// worker migrates at boot, and a worker stuck in migrations is not
+// heartbeating. Its runs go stale and the reaper picks them up while the
+// database is mid-DDL. cleat#1775 records `--max-reclaim-per-tick` (598712a1)
+// as the bound on the CONSEQUENCE; this is the bound on the cause.
+//
+// # Why thirty seconds
+//
+// Long enough that a migration briefly queued behind an ordinary transaction
+// still completes -- the alternative failure, a migration that gives up under
+// normal load, is worse than the one being fixed. Short enough that a worker
+// blocked on a lock fails and says so inside the reclaim window rather than
+// after it. Not derived from a measurement; it is a starting point, and the
+// flag exists so an operator who measures something different can say so.
+const DefaultLockTimeout = 30 * time.Second
 
 // NewRunner creates a migration runner that reads .sql files from the
 // dialect-specific subdirectory under dir and applies pending ones against db.
@@ -115,8 +198,72 @@ func NewRunner(db *sql.DB, dialect Dialect, dir string) *Runner {
 		db:            db,
 		dialect:       dialect,
 		migrationsDir: dir,
+		lockTimeout:   DefaultLockTimeout,
 	}
 }
+
+// WithLockTimeout overrides DefaultLockTimeout. Zero or negative disables the
+// bound, restoring the historical behaviour of waiting indefinitely.
+//
+// Disabling is a real choice rather than an oversight guard: a first migration
+// onto a large, busy table can legitimately need longer than any default, and
+// an operator who has decided that should not have to fight the runner.
+func (r *Runner) WithLockTimeout(d time.Duration) *Runner {
+	r.lockTimeout = d
+	return r
+}
+
+// WithFS overrides where migrations are read from: instead of the dialect
+// subdirectories under dir (NewRunner's disk path), the dialect subdirectory
+// is read from fsys directly -- e.g. an embed.FS, so a binary can apply its
+// own migrations without depending on its working directory being a source
+// checkout. cmd/cleat-worker uses this with migrations.FS; see cleat#1968.
+func (r *Runner) WithFS(fsys fs.FS) *Runner {
+	r.overrideFS = fsys
+	return r
+}
+
+// WithSchema directs the runner at a PostgreSQL schema other than public,
+// which is what cmd/cleat-worker's --schema flag names.
+//
+// WHY THIS IS NOT JUST A PREFIX ON THE TRACKING TABLE. Before cleat#1287 the
+// schema every migration built into was a literal: nineteen of the files in
+// migrations/postgres/ opened with `SET search_path = public;` and this
+// package's tracking table was hardcoded public.schema_migrations. The other
+// twenty-five files did not pin, so they ran under whatever the connection
+// carried -- and with --schema set, that is the configured schema. The core
+// schema was therefore built across two schemas at once and the run died
+// partway:
+//
+//	migration 020_event_intent.sql: execute: pq: relation "event_history"
+//	does not exist (42P01)
+//
+// 020 is simply the first file in version order that does not pin. So the
+// runner owns search_path now and the files no longer state it, which is the
+// only arrangement where the answer cannot depend on which file you are in.
+//
+// WHY THE LITERAL WAS THERE AND WHAT STILL DEFENDS AGAINST IT. The default
+// search_path is "$user", public, so an unqualified CREATE lands in a schema
+// named after the connecting role whenever one exists -- and 001_schema.sql
+// creates a schema called "cleat" while docker-compose.cluster.yml connects as
+// POSTGRES_USER=cleat, so the entire schema was once built inside "cleat"
+// instead of public. Setting search_path explicitly, to public or to anything
+// else, still defeats that. What is gone is the assumption that the answer is
+// always public.
+//
+// An empty schema, or "public", leaves the runner exactly as it was.
+func (r *Runner) WithSchema(schema string) *Runner {
+	r.schema = schema
+	return r
+}
+
+// plainIdentifier matches a PostgreSQL identifier that needs no quoting.
+//
+// Declared here rather than shared with plugin.isPlainIdentifier because this
+// package is deliberately a leaf -- see the Dialect comment above for what
+// importing upward costs in test-only import cycles. The duplication is four
+// tokens of regexp; the cycle is not.
+var plainIdentifier = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // Run applies all pending migrations in version order within individual
 // transactions. It creates the schema_migrations tracking table if it
@@ -137,6 +284,13 @@ func (r *Runner) Run(ctx context.Context) error {
 		return err
 	}
 	defer release()
+
+	// 0a. Refuse a server too old to hold this schema, before anything is
+	//     applied. See minimum_server_version.go for why this is a pre-flight
+	//     rather than a migration.
+	if err := r.checkServerVersion(ctx, session); err != nil {
+		return err
+	}
 
 	// 1. Ensure the tracking table exists.
 	if err := r.ensureMigrationsTable(ctx, session); err != nil {
@@ -175,6 +329,141 @@ func (r *Runner) Run(ctx context.Context) error {
 	return nil
 }
 
+// SchemaState is what Verify found, and the answer to "may a worker start here".
+//
+// THE RULE (cleat#2117), stated once because a rolling upgrade exercises every arm:
+//
+//	behind  a migration this binary ships is not applied   -> REFUSE, with the remediation
+//	equal   every shipped migration is applied              -> start
+//	ahead   applied versions this binary does not ship      -> START, and say so
+//
+// Ahead is not refused because during a rolling upgrade the deploy job migrates to
+// N+1 while workers still on N are running or restarting; refusing there would wedge
+// the rollout on the very workers it is trying to replace. It relies on migrations
+// staying additive within a release line, which is what makes an N binary able to
+// run against an N+1 schema, and the warning names both versions so the reliance is
+// visible. Behind is refused because a binary running against a schema older than
+// its code fails later and less legibly, on the first query that needs the missing
+// column.
+type SchemaState struct {
+	// Shipped is how many migrations this binary carries.
+	Shipped int
+	// LatestShipped is the highest version this binary carries.
+	LatestShipped int
+	// Pending are the shipped migrations that are not applied, in order.
+	Pending []string
+	// TrackingTableMissing means schema_migrations does not exist: nothing has
+	// ever been applied, so every shipped migration is pending.
+	TrackingTableMissing bool
+	// LatestApplied is the highest applied version, 0 if none.
+	LatestApplied int
+	// Ahead are applied versions this binary does not ship, ascending.
+	Ahead []int
+}
+
+// Behind reports whether a shipped migration is not applied.
+func (s SchemaState) Behind() bool { return len(s.Pending) > 0 }
+
+// SchemaBehindError is what a worker start reports when Behind. Its message is the
+// remediation; a refusal that only says "schema behind" sends the operator to read
+// source.
+type SchemaBehindError struct {
+	State SchemaState
+}
+
+func (e *SchemaBehindError) Error() string {
+	s := e.State
+	first := s.Pending[0]
+	shown := first
+	if len(s.Pending) > 1 {
+		shown = fmt.Sprintf("%s ... %s", first, s.Pending[len(s.Pending)-1])
+	}
+	state := fmt.Sprintf("%d of %d migration(s) this binary ships are not applied (%s)",
+		len(s.Pending), s.Shipped, shown)
+	if s.TrackingTableMissing {
+		state = fmt.Sprintf("the database has no schema_migrations table: it has never been migrated, "+
+			"and all %d migration(s) this binary ships are pending", s.Shipped)
+	}
+	return "the database schema is behind this worker: " + state + ".\n" +
+		"A worker does not migrate the database on start. Run the migrations as a deploy step:\n\n" +
+		"    cleat-worker --migrate-only --db <dsn> [--migrate-db <owner dsn>]\n\n" +
+		"and then start the workers. (If a --migrate-only run is already in progress, wait for it. " +
+		"For a single-node install or development, --migrate-on-start restores the old behaviour.)"
+}
+
+// Verify reads the schema and reports its state WITHOUT changing it: it creates no
+// table, takes no lock and applies nothing. It is what a normal worker start does
+// in place of Run.
+//
+// It takes no lock on purpose. A start that raced a migration in progress and read
+// "behind" refuses, the supervisor restarts it, and the next attempt sees the
+// finished schema; waiting on the migration lock would instead make every booting
+// worker queue behind the deploy step and hold a connection while it does.
+func (r *Runner) Verify(ctx context.Context) (SchemaState, error) {
+	var st SchemaState
+	migrations, err := r.readMigrations()
+	if err != nil {
+		return st, fmt.Errorf("read migrations: %w", err)
+	}
+	st.Shipped = len(migrations)
+	shipped := make(map[int]bool, len(migrations))
+	for _, m := range migrations {
+		shipped[m.version] = true
+		if m.version > st.LatestShipped {
+			st.LatestShipped = m.version
+		}
+	}
+
+	exists, err := r.trackingTableExists(ctx)
+	if err != nil {
+		return st, fmt.Errorf("check for schema_migrations: %w", err)
+	}
+	applied := map[int]bool{}
+	if !exists {
+		st.TrackingTableMissing = true
+	} else if applied, err = r.getAppliedVersions(ctx, r.db); err != nil {
+		return st, fmt.Errorf("get applied versions: %w", err)
+	}
+
+	for _, m := range migrations {
+		if !applied[m.version] {
+			st.Pending = append(st.Pending, m.name)
+		}
+	}
+	for v := range applied {
+		if v > st.LatestApplied {
+			st.LatestApplied = v
+		}
+		if !shipped[v] {
+			st.Ahead = append(st.Ahead, v)
+		}
+	}
+	sort.Ints(st.Ahead)
+	return st, nil
+}
+
+// trackingTableExists asks the catalog rather than catching the error a missing
+// table raises, so "has never been migrated" is told apart from every other read
+// failure (a permission error, a dead connection) and the latter is not reported
+// to an operator as an un-migrated database.
+func (r *Runner) trackingTableExists(ctx context.Context) (bool, error) {
+	var n int
+	var err error
+	switch r.dialect {
+	case DialectPostgres:
+		err = r.db.QueryRowContext(ctx, "SELECT CASE WHEN to_regclass($1) IS NULL THEN 0 ELSE 1 END",
+			r.trackingTable()).Scan(&n)
+	case DialectMySQL:
+		err = r.db.QueryRowContext(ctx, "SELECT count(*) FROM information_schema.tables "+
+			"WHERE table_schema = DATABASE() AND table_name = 'schema_migrations'").Scan(&n)
+	case DialectMSSQL:
+		err = r.db.QueryRowContext(ctx, "SELECT count(*) FROM sys.tables WHERE name = 'schema_migrations'").Scan(&n)
+	default:
+		return false, fmt.Errorf("unsupported dialect: %s", r.dialect)
+	}
+	return n > 0, err
+}
+
 // sqlSession is the subset of *sql.DB and *sql.Conn the runner uses. Both
 // types satisfy it, which lets Run pin a single connection on PostgreSQL while
 // the other dialects keep using the pool.
@@ -191,14 +480,37 @@ type sqlSession interface {
 // migrates at boot and docker-compose.cluster.yml starts four at once; see
 // migrationsLockKey for what that produced without the lock.
 //
-// Only PostgreSQL is covered. MySQL (GET_LOCK) and SQL Server (sp_getapplock)
-// have equivalents, but cleat only ships a multi-worker topology for
-// PostgreSQL, and untested locking code for the other two would be worse than
-// none: there, this returns the pool unchanged and the behaviour is exactly
-// what it was before.
+// MySQL and SQL Server are serialised too, by lockedSession below. That was
+// not always so: this comment used to call the absence deliberate because
+// "cleat only ships a multi-worker topology for PostgreSQL". Measured on
+// 2026-09-23 for cleat#2117, four concurrent Runs against an empty database
+// (`migration/a_concurrent_migrators_*_test.go` keeps the measurement): PostgreSQL
+// 4 of 4 succeed; MySQL 3 of 4 FAIL ("Duplicate key name" from 001_schema.sql);
+// SQL Server 3 of 4 FAIL (deadlock victim 1205, "referenced entity was modified
+// during DDL" 2021, "already an object named" 2714). Every failure is a worker
+// that exits at boot. Migration is now a deploy step (cleat-worker --migrate-only)
+// so the concurrent case is the one a deploy job and a straggling worker produce.
+//
+// The lock TIMEOUT set below has the same boundary, and for a reason that
+// follows from the line above rather than a second judgement: the other two
+// dialects have no pinned session here, only the pool. MySQL's
+// innodb_lock_wait_timeout / lock_wait_timeout and SQL Server's SET LOCK_TIMEOUT
+// are connection-scoped, so setting either on a pooled handle applies it to one
+// arbitrary connection and then leaks it back into the pool for application
+// traffic. Covering them means pinning a connection for those dialects too,
+// which is the same change as extending the advisory lock and should be made
+// with it, not before it. So: PostgreSQL is bounded, MySQL and SQL Server are
+// NOT, and that is stated here rather than implied by a flag that sounds
+// dialect-neutral.
 func (r *Runner) session(ctx context.Context) (sqlSession, func(), error) {
 	if r.dialect != DialectPostgres {
-		return r.db, func() {}, nil
+		return r.lockedSession(ctx)
+	}
+
+	if r.schema != "" && !plainIdentifier.MatchString(r.schema) {
+		return nil, nil, fmt.Errorf(
+			"schema %q is not a plain identifier; --schema takes an unquoted "+
+				"PostgreSQL schema name", r.schema)
 	}
 
 	conn, err := r.db.Conn(ctx)
@@ -210,13 +522,152 @@ func (r *Runner) session(ctx context.Context) (sqlSession, func(), error) {
 		conn.Close()
 		return nil, nil, fmt.Errorf("acquire migration lock: %w", err)
 	}
+	// The schema has to exist before search_path can usefully point at it.
+	// SET against a schema that does not exist is NOT an error in PostgreSQL
+	// -- resolution is lazy -- so skipping this would surface much later and
+	// much less clearly, as "no schema has been selected to create in" from
+	// the first CREATE TABLE. Creating it here rather than relying on
+	// PostgresStoreFactory (engine/db.go) is deliberate: the runner is the
+	// first thing that needs the schema and runs before the factory builds
+	// anything, so depending on the factory would make boot order load-bearing.
+	if r.schemaIdent() != "public" {
+		if _, err := conn.ExecContext(ctx,
+			"CREATE SCHEMA IF NOT EXISTS "+r.schemaIdent()); err != nil {
+			conn.Close()
+			return nil, nil, fmt.Errorf("create schema %s: %w", r.schemaIdent(), err)
+		}
+	}
+	// Pin the creation target for every unqualified name in every migration
+	// file. This is the statement the files used to carry themselves; see
+	// WithSchema for why it moved here.
+	if _, err := conn.ExecContext(ctx, "SET search_path = "+r.searchPath()); err != nil {
+		conn.Close()
+		return nil, nil, fmt.Errorf("pin search_path to %s: %w", r.schemaIdent(), err)
+	}
+	// Bound the wait for every lock the migrations themselves take. cleat#1775.
+	//
+	// AFTER the advisory lock above, deliberately. Whether lock_timeout applies
+	// to pg_advisory_lock is a question this code should not have to be right
+	// about -- setting it here means the advisory wait keeps the bound the
+	// comment above already claims for it, which is ctx, and nothing changes
+	// about how workers serialise at boot.
+	//
+	// Session-scoped, not SET LOCAL. MySQL commits DDL implicitly, and the
+	// Postgres path is the one place a transaction-scoped setting would work --
+	// using the same scope on the one dialect that is pinned keeps "what bounds
+	// this statement" a property of the run rather than of the statement.
+	if r.lockTimeout > 0 {
+		ms := r.lockTimeout.Milliseconds()
+		if _, err := conn.ExecContext(ctx,
+			fmt.Sprintf("SET lock_timeout = %d", ms)); err != nil {
+			conn.Close()
+			return nil, nil, fmt.Errorf("set lock_timeout to %dms: %w", ms, err)
+		}
+	}
 	return conn, func() {
+		free := context.WithoutCancel(ctx)
+		// Undo the pin before letting go. *sql.Conn.Close() RETURNS the
+		// connection to the pool rather than closing it, so the session-level
+		// SET above would otherwise ride back into the pool and leave one
+		// connection resolving unqualified names differently from every other
+		// one in it -- a difference that only shows up under load, when that
+		// particular connection happens to be the one handed out.
+		// TestRunner_LeavesSearchPathUnchanged is the regression test, and it
+		// caught exactly this when the pin moved here from the files.
+		_, _ = conn.ExecContext(free, "RESET search_path")
+		// And the timeout, for the same reason spelled out above: Close()
+		// RETURNS this connection to the pool, so a session-level setting left
+		// on it would ride back in and bound locks for ordinary application
+		// traffic on whichever caller happened to be handed this connection.
+		// RESET rather than SET DEFAULT: the historical value is whatever the
+		// server or the DSN configured, which the runner does not know.
+		_, _ = conn.ExecContext(free, "RESET lock_timeout")
 		// Closing the connection releases the lock on its own, but unlocking
 		// explicitly returns it promptly even if the driver keeps the
 		// connection around. WithoutCancel so release still works when the
 		// run was cut short by a cancelled context.
-		_, _ = conn.ExecContext(context.WithoutCancel(ctx),
+		_, _ = conn.ExecContext(free,
 			"SELECT pg_advisory_unlock($1)", migrationsLockKey)
+		conn.Close()
+	}, nil
+}
+
+// migrationsMySQLLock and migrationsMSSQLLock name the lock. MySQL's GET_LOCK
+// namespace is SERVER-wide, so the name carries a hash of the database: two
+// databases on one server (the per-tenant MySQL databases) must not queue behind
+// each other. SQL Server's application locks are already scoped to the current
+// database. The hash keeps the name under MySQL's 64-character limit whatever the
+// database is called. Like migrationsLockKey, these are an identity and never change.
+const (
+	migrationsMySQLLockPrefix = "cleat.migrations."
+	migrationsMSSQLLock       = "cleat.migrations"
+)
+
+// migrationLockWait bounds the wait for the migration lock on MySQL and SQL
+// Server. A migration can legitimately take a long time and the run that holds the
+// lock is doing real work, so this is generous -- it exists so a wedged holder is
+// an error that says so and not a hang.
+const migrationLockWait = 15 * time.Minute
+
+// lockedSession pins ONE connection and takes the migration lock on it, for the
+// two dialects whose lock is SESSION-scoped (MySQL GET_LOCK, SQL Server
+// sp_getapplock with a Session owner). Both survive COMMIT -- MySQL commits DDL
+// implicitly, so a transaction-scoped lock could not span a migration there -- and
+// both stay with the connection, which is why the connection is pinned and why the
+// release runs on it, in a defer, on every exit. If the release itself fails the
+// connection is discarded, which ends the session and so the lock: a lock that
+// outlived its holder would block every later migrator for migrationLockWait.
+func (r *Runner) lockedSession(ctx context.Context) (sqlSession, func(), error) {
+	conn, err := r.db.Conn(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("acquire migration lock: connection: %w", err)
+	}
+	secs := int(migrationLockWait / time.Second)
+	var release string
+	switch r.dialect {
+	case DialectMySQL:
+		var got sql.NullInt64
+		if err := conn.QueryRowContext(ctx,
+			"SELECT GET_LOCK(CONCAT('"+migrationsMySQLLockPrefix+"', MD5(DATABASE())), ?)", secs).Scan(&got); err != nil {
+			conn.Close()
+			return nil, nil, fmt.Errorf("acquire migration lock: GET_LOCK: %w", err)
+		}
+		if !got.Valid || got.Int64 != 1 {
+			conn.Close()
+			return nil, nil, fmt.Errorf("acquire migration lock: another migration has held it for %s "+
+				"(GET_LOCK returned %v); is a --migrate-only run stuck?", migrationLockWait, got)
+		}
+		release = "SELECT RELEASE_LOCK(CONCAT('" + migrationsMySQLLockPrefix + "', MD5(DATABASE())))"
+	case DialectMSSQL:
+		var code int
+		if err := conn.QueryRowContext(ctx,
+			"DECLARE @r int; EXEC @r = sp_getapplock @Resource = N'"+migrationsMSSQLLock+
+				"', @LockMode = N'Exclusive', @LockOwner = N'Session', @LockTimeout = @p1; SELECT @r",
+			secs*1000).Scan(&code); err != nil {
+			conn.Close()
+			return nil, nil, fmt.Errorf("acquire migration lock: sp_getapplock: %w", err)
+		}
+		if code < 0 {
+			conn.Close()
+			return nil, nil, fmt.Errorf("acquire migration lock: sp_getapplock returned %d "+
+				"(-1 = timed out after %s: is a --migrate-only run stuck?)", code, migrationLockWait)
+		}
+		release = "DECLARE @r int; EXEC @r = sp_releaseapplock @Resource = N'" + migrationsMSSQLLock +
+			"', @LockOwner = N'Session'; SELECT @r"
+	default:
+		// Not reachable from session(); a dialect with no lock is refused
+		// rather than run unserialised, because that is the bug this fixes.
+		conn.Close()
+		return nil, nil, fmt.Errorf("unsupported dialect: %s", r.dialect)
+	}
+	return conn, func() {
+		free := context.WithoutCancel(ctx)
+		var out sql.NullInt64
+		if err := conn.QueryRowContext(free, release).Scan(&out); err != nil ||
+			(r.dialect == DialectMySQL && (!out.Valid || out.Int64 != 1)) ||
+			(r.dialect == DialectMSSQL && out.Int64 < 0) {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
 		conn.Close()
 	}, nil
 }
@@ -259,10 +710,24 @@ func (r *Runner) ensureMigrationsTable(ctx context.Context, session sqlSession) 
 // matching the NNN_name.sql naming convention and returns them sorted by
 // version number. Files that do not match the convention are silently skipped.
 func (r *Runner) readMigrations() ([]migration, error) {
-	migDir := filepath.Join(r.migrationsDir, string(r.dialect))
-	entries, err := os.ReadDir(migDir)
+	// fs.FS paths are always forward-slash and never absolute, unlike
+	// filepath.Join's OS-native separator -- dialect is a single path
+	// segment ("postgres"), so it is valid either way, and os.DirFS makes
+	// the disk case behave exactly as the old os.ReadDir/os.ReadFile calls
+	// did. displayDir is for error messages only; it plays no part in
+	// resolving the path.
+	fsys := r.overrideFS
+	displayDir := filepath.Join(r.migrationsDir, string(r.dialect))
+	if fsys == nil {
+		fsys = os.DirFS(r.migrationsDir)
+	} else {
+		displayDir = string(r.dialect) + " (embedded)"
+	}
+	migDir := string(r.dialect)
+
+	entries, err := fs.ReadDir(fsys, migDir)
 	if err != nil {
-		return nil, fmt.Errorf("read directory %s: %w", migDir, err)
+		return nil, fmt.Errorf("read directory %s: %w", displayDir, err)
 	}
 
 	var migrations []migration
@@ -286,7 +751,7 @@ func (r *Runner) readMigrations() ([]migration, error) {
 			continue
 		}
 
-		data, err := os.ReadFile(filepath.Join(migDir, name))
+		data, err := fs.ReadFile(fsys, path.Join(migDir, name))
 		if err != nil {
 			return nil, fmt.Errorf("read %s: %w", name, err)
 		}
@@ -340,7 +805,11 @@ func (r *Runner) getAppliedVersions(ctx context.Context, session sqlSession) (ma
 // transaction is committed. On failure the transaction is rolled back
 // and the error is returned.
 func (r *Runner) applyMigration(ctx context.Context, session sqlSession, m migration) error {
-	tx, err := session.BeginTx(ctx, nil)
+	// pinnedtx.Begin, not session.BeginTx(ctx, ...): on the pinned PostgreSQL
+	// connection a ctx that ends mid-migration must not have database/sql close
+	// the connection from another goroutine while release() is still using it
+	// (cleat#2215). Statements below still take ctx.
+	tx, err := pinnedtx.Begin(ctx, session, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
@@ -370,14 +839,21 @@ func (r *Runner) applyMigration(ctx context.Context, session sqlSession, m migra
 		}
 	}
 
-	// Undo any session-level SET the migration file performed, so that this
-	// connection goes back into the pool configured the same way as every
-	// other one. The files do set search_path (see trackingTable), and a pool
-	// where one connection resolves unqualified names differently from the
-	// rest is a source of failures that only reproduce under load.
+	// Restore the runner's search_path, in case the migration file changed it.
+	// A bare SET in a file is session-scoped, not transaction-scoped, so it
+	// outlives this transaction and would change name resolution for every
+	// later file on this pinned connection.
+	//
+	// This used to be RESET, and RESET is the wrong instruction now: it
+	// returns the connection to the value from the startup packet, which for a
+	// pool opened without search_path in its DSN is the default "$user",
+	// public -- so from the second file onward the runner would be building
+	// into a role-named schema again, which is the original cleat#1287 defect
+	// wearing a different hat. Setting it back to the configured value is what
+	// makes "which file am I in" stop mattering.
 	if r.dialect == DialectPostgres {
-		if _, err := tx.ExecContext(ctx, "RESET search_path"); err != nil {
-			return fmt.Errorf("reset search_path: %w", err)
+		if _, err := tx.ExecContext(ctx, "SET search_path = "+r.searchPath()); err != nil {
+			return fmt.Errorf("restore search_path: %w", err)
 		}
 	}
 

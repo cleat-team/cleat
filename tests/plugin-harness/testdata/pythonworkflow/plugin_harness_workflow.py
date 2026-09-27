@@ -6,7 +6,7 @@ AssemblyScript workflows in the same testdata directory.
 
 Usage (when the Python WASM FFI is ready):
     cleat build --target python --entry plugin_harness_workflow.py:call_all_plugins
-    cleat run call_all_plugins '{}'
+    cleat run --wasm call_all_plugins.wasm --entry-point CallAllPlugins --input '{}'
 """
 
 import json

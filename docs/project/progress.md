@@ -7,7 +7,7 @@
 ### Transformer pipeline (Phases 1-8)
 - Package loading, type resolution, entry point detection
 - Call graph construction with durable leaf identification
-- Transitive closure computation and construct validation (E001-E007, W001)
+- Transitive closure computation and construct validation (E001-E021, W002-W003)
 - HostCalls threading verification (E010) including global var h pattern
 - Auto-threading transform (context object to param injection)
 - WASM import/export/adapter code generation
@@ -37,8 +37,11 @@
 - Eliminates magic strings from service/operation calls
 
 ### Production host runtime
-- wazero-based Runtime, Engine with Execute/Replay
-- 14 host function imports, WASM memory management
+- Engine with Execute/Replay on the wasmtime backend (this read "wazero-based
+  Runtime" until 2026-09-06; the wazero backend was deleted in #459, and the
+  wazero `Runtime` that remains serves CLI and test tooling only)
+- Host function imports (`ABI.md` §2 lists them; there were 14 when this line
+  was written and the count has more than tripled since), WASM memory management
 - Real DurableSleep: suspend/resume protocol via panic/recover sentinel
 - Signal delivery: SignalStore interface, PostgresStore, signals table
 - Cancellation: PollCancellation checks DB flag, RequestCancellation API

@@ -19,25 +19,33 @@
 //
 //	curl -X POST http://localhost:8080/api/events/subscriptions \
 //	  -H "Content-Type: application/json" \
-//	  -H "X-Tenant-ID: <tenant-uuid>" \
+//	  -H "Authorization: Bearer <api-key>" \
 //	  -d '{
 //	    "event_type": "user.signup",
 //	    "def_name": "event-driven",
 //	    "entry_point": "HandleSignup",
 //	    "input_template": {
-//	      "user_id": "{{.event.data.user_id}}",
-//	      "email": "{{.event.data.email}}",
-//	      "name": "{{.event.data.name}}"
+//	      "user_id": "",
+//	      "email": "",
+//	      "name": "New User"
 //	    }
 //	  }'
 //
-// Publish a signup event:
+// input_template is not a template: there is no placeholder syntax, and
+// nothing renders "{{...}}" expressions. It declares default top-level
+// fields; a published event's own top-level data keys overlay (replace)
+// the matching template fields, and any template field the event doesn't
+// name keeps its default -- see docs/how-to/common-patterns.md's
+// "Event-triggered workflows" section for the full explanation and a
+// nested-data example.
+//
+// Publish a signup event ("id" must be a UUID, not an arbitrary string):
 //
 //	curl -X POST http://localhost:8080/api/events/publish \
 //	  -H "Content-Type: application/json" \
-//	  -H "X-Tenant-ID: <tenant-uuid>" \
+//	  -H "Authorization: Bearer <api-key>" \
 //	  -d '{
-//	    "id": "unique-event-id",
+//	    "id": "5a1e7e7a-1b3d-4c2b-9b0e-1c9e6a0d2f11",
 //	    "event_type": "user.signup",
 //	    "data": {
 //	      "user_id": "usr_abc123",
@@ -46,9 +54,13 @@
 //	    }
 //	  }'
 //
-// Check event status:
-//
-//	curl http://localhost:8080/api/events/publish/<event-id>/status
+// The publish response is the status check -- there is no separate
+// get-event-by-id endpoint. `{"status":"published","matched":1}` means one
+// subscription matched and started a workflow; `"matched":0` means the event
+// was stored but nothing started (wrong event_type, a filter_expr that
+// didn't match, or no enabled subscription at all). A dead-lettered or
+// errored event can be re-dispatched with
+// `POST /api/events/{event_id}/retry`.
 package eventdriven
 
 import (
@@ -88,9 +100,18 @@ type WelcomeEmailResponse struct {
 
 // ---- Entry point ----
 
-func HandleSignup(h cleat.HostCalls, input SignupInput) (*SignupResult, error) {
+// HandleSignup returns its result as a JSON string, not as *SignupResult.
+//
+// A workflow entry point's result must be a string: a WASM entry point hands
+// back bytes, and string is the one shape every language SDK expresses
+// identically. IMPROVEMENT-PLAN 3.228.
+//
+// This defect was HIDDEN by the one above it. cleat vet stopped at E003 for
+// the time.Now() call, so the build never ran and the return type was never
+// reached. Fixing the clock is what surfaced it.
+func HandleSignup(h cleat.HostCalls, input SignupInput) (string, error) {
 	if input.UserID == "" || input.Email == "" {
-		return nil, fmt.Errorf("user_id and email are required")
+		return "", fmt.Errorf("user_id and email are required")
 	}
 
 	h.SetQueryState("stage", "processing")
@@ -106,14 +127,19 @@ func HandleSignup(h cleat.HostCalls, input SignupInput) (*SignupResult, error) {
 	}))
 	if err != nil {
 		h.SetQueryState("stage", "profile_failed")
-		return nil, fmt.Errorf("create profile failed: %w", err)
+		return "", fmt.Errorf("create profile failed: %w", err)
 	}
 
 	var profile ProfileInfo
 	if err := json.Unmarshal([]byte(profileResp), &profile); err != nil {
+		// h.Now(), not time.Now(): a workflow re-executes from step 0 on
+		// every resume, so a wall-clock read produces a different value on
+		// replay and the run diverges. cleat vet rejects this as E003, and
+		// rejected THIS FILE until 2026-09-06 -- a shipped example doing the
+		// thing the linter exists to forbid. IMPROVEMENT-PLAN 3.228.
 		profile = ProfileInfo{
 			DisplayName: input.Name,
-			JoinedAt:    time.Now().Format(time.RFC3339),
+			JoinedAt:    h.Now().Format(time.RFC3339),
 		}
 	}
 
@@ -165,12 +191,12 @@ func HandleSignup(h cleat.HostCalls, input SignupInput) (*SignupResult, error) {
 	h.DurableLog(fmt.Sprintf("Signup complete: user=%s welcome=%v activation=%s",
 		input.UserID, welcomeSent, activationStatus))
 
-	return &SignupResult{
+	return toJSON(SignupResult{
 		UserID:      input.UserID,
 		Email:       input.Email,
 		WelcomeSent: welcomeSent,
 		Profile:     profile,
-	}, nil
+	}), nil
 }
 
 func toJSON(v interface{}) string {

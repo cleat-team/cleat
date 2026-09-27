@@ -37,11 +37,11 @@ Create `plugin-config.json`:
 
 ```bash
 # Build the workflow to WASM
-cleat build -o ./out/agent.wasm .
+cleat build -o ./out .
 
 # Deploy to PostgreSQL
-cleat deploy --db "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable" \
-  --name agent ./out/agent.wasm
+cleat --db "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable" \
+  deploy --name agent ./out/agent_loop.wasm
 
 # Start the worker
 docker-compose up -d worker

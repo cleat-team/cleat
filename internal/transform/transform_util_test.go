@@ -20,7 +20,7 @@ func TestIsHostCallsFieldPositive(t *testing.T) {
 		t.Fatalf("ParseExpr failed: %v", err)
 	}
 	field := &ast.Field{Type: expr}
-	if !isHostCallsField(field) {
+	if !isHostCallsField(field, "durable") {
 		t.Error("expected isHostCallsField to return true for durable.HostCalls")
 	}
 }
@@ -32,7 +32,7 @@ func TestIsHostCallsFieldStarExpr(t *testing.T) {
 		t.Fatalf("ParseExpr failed: %v", err)
 	}
 	field := &ast.Field{Type: expr}
-	if !isHostCallsField(field) {
+	if !isHostCallsField(field, "durable") {
 		t.Error("expected isHostCallsField to return true for *durable.HostCalls")
 	}
 }
@@ -43,7 +43,7 @@ func TestIsHostCallsFieldWrongPackage(t *testing.T) {
 		t.Fatalf("ParseExpr failed: %v", err)
 	}
 	field := &ast.Field{Type: expr}
-	if isHostCallsField(field) {
+	if isHostCallsField(field, "durable") {
 		t.Error("expected isHostCallsField to return false for other.HostCalls")
 	}
 }
@@ -54,14 +54,14 @@ func TestIsHostCallsFieldWrongName(t *testing.T) {
 		t.Fatalf("ParseExpr failed: %v", err)
 	}
 	field := &ast.Field{Type: expr}
-	if isHostCallsField(field) {
+	if isHostCallsField(field, "durable") {
 		t.Error("expected isHostCallsField to return false for durable.SomethingElse")
 	}
 }
 
 func TestIsHostCallsFieldNotSelector(t *testing.T) {
 	field := &ast.Field{Type: &ast.Ident{Name: "string"}}
-	if isHostCallsField(field) {
+	if isHostCallsField(field, "durable") {
 		t.Error("expected isHostCallsField to return false for simple ident")
 	}
 }
@@ -147,13 +147,21 @@ func TestEnsureHostCallsImportAddsToExisting(t *testing.T) {
 import "fmt"
 `
 	file := parseImportFile(t, src)
-	ensureHostCallsImport(file, nil)
+	local := ensureHostCallsImport(file, nil)
 
-	// The import is added to Decls, not to file.Imports. Check Decls.
 	if !findImportInDecls(file, "github.com/cleat-team/cleat/cleat") {
 		t.Error("expected cleat/cleat import to be found in Decls")
 	}
-	// The import should have the "durable" alias. Check the new import spec.
+	if local != "cleat" {
+		t.Errorf("expected the local name %q, got %q", "cleat", local)
+	}
+
+	// The added import must be UNALIASED, and this assertion is inverted from
+	// what it was: it required the alias "durable", the SDK's package name
+	// before the 2026-06-01 rename. Requiring it was not merely cosmetic --
+	// the same code path renamed an EXISTING unaliased import to "durable",
+	// which broke every `cleat.X` reference already in that file with
+	// `undefined: cleat`. IMPROVEMENT-PLAN 3.230.
 	for _, decl := range file.Decls {
 		gen, ok := decl.(*ast.GenDecl)
 		if !ok || gen.Tok != token.IMPORT {
@@ -165,11 +173,44 @@ import "fmt"
 				continue
 			}
 			path := strings.Trim(imp.Path.Value, `"`)
-			if path == "github.com/cleat-team/cleat/cleat" {
-				if imp.Name == nil || imp.Name.Name != "durable" {
-					t.Error("import should be aliased to 'durable'")
-				}
+			if path == "github.com/cleat-team/cleat/cleat" && imp.Name != nil {
+				t.Errorf("the added import should be unaliased, got alias %q", imp.Name.Name)
 			}
+		}
+	}
+}
+
+// TestEnsureHostCallsImportDoesNotRenameAnExistingImport is the regression
+// test for IMPROVEMENT-PLAN 3.230.
+//
+// The old code ran, on the SDK import, unconditionally:
+//
+//	if imp.Name == nil || imp.Name.Name != "durable" {
+//	    imp.Name = ast.NewIdent("durable")
+//	}
+//
+// so a file importing the SDK the normal way had its import renamed out from
+// under 19 existing `cleat.X` references (examples/fooddash) and failed to
+// compile. Nothing caught it because auto-threading only engages for a package
+// declaring a global `var h`, and for those the threading check rejected the
+// build before the transform's output was ever compiled.
+func TestEnsureHostCallsImportDoesNotRenameAnExistingImport(t *testing.T) {
+	src := `package mypkg
+import "github.com/cleat-team/cleat/cleat"
+`
+	file := parseImportFile(t, src)
+	local := ensureHostCallsImport(file, nil)
+
+	if local != "cleat" {
+		t.Errorf("expected the file's own local name %q, got %q", "cleat", local)
+	}
+	for _, imp := range file.Imports {
+		if strings.Trim(imp.Path.Value, `"`) != "github.com/cleat-team/cleat/cleat" {
+			continue
+		}
+		if imp.Name != nil {
+			t.Errorf("an existing unaliased import was renamed to %q; every cleat.X "+
+				"reference already in the file now fails to compile", imp.Name.Name)
 		}
 	}
 }
@@ -284,11 +325,11 @@ func TestAddHostCallsParamAddsToNilParams(t *testing.T) {
 		Name: ast.NewIdent("testFunc"),
 		Type: &ast.FuncType{},
 	}
-	addHostCallsParam(fn)
+	addHostCallsParam(fn, "cleat")
 	if fn.Type.Params == nil || len(fn.Type.Params.List) != 1 {
 		t.Fatal("expected params to be created with 1 field")
 	}
-	// The parameter should be "h durable.HostCalls"
+	// The parameter should be "h cleat.HostCalls"
 	sel, ok := fn.Type.Params.List[0].Type.(*ast.SelectorExpr)
 	if !ok {
 		t.Fatal("expected selector expr for type")
@@ -319,7 +360,11 @@ func TestAddHostCallsParamAlreadyHasH(t *testing.T) {
 			},
 		},
 	}
-	addHostCallsParam(fn)
+	// The local name must match the fixture's qualifier: the point is that an
+	// EXISTING HostCalls parameter is recognised, and recognition is now
+	// relative to the name the file binds the SDK to rather than a hardcoded
+	// "durable" (IMPROVEMENT-PLAN 3.230).
+	addHostCallsParam(fn, "durable")
 	// Should still only have 1 param.
 	if len(fn.Type.Params.List) != 1 {
 		t.Errorf("expected 1 param, got %d", len(fn.Type.Params.List))
@@ -341,7 +386,7 @@ func TestAddHostCallsParamExistingNonHostCallsH(t *testing.T) {
 			},
 		},
 	}
-	addHostCallsParam(fn)
+	addHostCallsParam(fn, "cleat")
 	if len(fn.Type.Params.List) != 2 {
 		t.Fatalf("expected 2 params, got %d", len(fn.Type.Params.List))
 	}

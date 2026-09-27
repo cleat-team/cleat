@@ -33,6 +33,20 @@ func (h *HostCallsImpl) ChildWorkflow(name, inputJSON string) (string, error) {
 }
 
 func (h *HostCallsImpl) ChildWorkflowWithOptions(name, inputJSON string, opts ChildWorkflowOptions) (string, error) {
+	// Refused here as well as in the engine (cleat#936), so the error names the
+	// call that caused it instead of arriving as a host-call failure. The
+	// engine's check is the authoritative one -- it is the boundary every
+	// language SDK crosses -- and this one is the readable one.
+	if !opts.ParentClosePolicy.Valid() {
+		return "", fmt.Errorf(
+			"durable: child workflow %q: parent close policy %q is not recognised; "+
+				"must be one of %q, %q, %q, or empty for the default. Policies are "+
+				"matched exactly: a case-insensitive database collation would accept a "+
+				"mis-cased value while a case-sensitive one silently treats it as %q",
+			name, string(opts.ParentClosePolicy),
+			ParentClosePolicyAbandon, ParentClosePolicyTerminate, ParentClosePolicyRequestCancel,
+			ParentClosePolicyAbandon)
+	}
 	if h.childWorkflowWithOptions != nil {
 		return h.childWorkflowWithOptions(name, inputJSON, opts.Version, string(opts.ParentClosePolicy), opts.Priority)
 	}
@@ -42,6 +56,7 @@ func (h *HostCallsImpl) ChildWorkflowWithOptions(name, inputJSON string, opts Ch
 }
 
 func (h *HostCallsImpl) AwaitChild(runID string) (string, error) {
+	h.DispatchUpdates() // dispatch point; see DispatchUpdates
 	if h.awaitChild == nil {
 		return "", errors.New("durable: AwaitChild can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
@@ -49,6 +64,7 @@ func (h *HostCallsImpl) AwaitChild(runID string) (string, error) {
 }
 
 func (h *HostCallsImpl) AwaitAllChildren(runIDs []string) ([]ChildResult, error) {
+	h.DispatchUpdates() // dispatch point; see DispatchUpdates
 	if h.awaitAllChildren == nil {
 		return nil, errors.New("durable: AwaitAllChildren can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}
@@ -56,6 +72,7 @@ func (h *HostCallsImpl) AwaitAllChildren(runIDs []string) ([]ChildResult, error)
 }
 
 func (h *HostCallsImpl) AwaitAnyChild(runIDs []string) (string, string, error) {
+	h.DispatchUpdates() // dispatch point; see DispatchUpdates
 	if h.awaitAnyChild == nil {
 		return "", "", errors.New("durable: AwaitAnyChild can only be called from within a workflow function (the HostCalls runtime was not initialized). Ensure this call is inside a cleat_entry / #[cleat_entry] / @CleatEntry / @cleatEntry function.")
 	}

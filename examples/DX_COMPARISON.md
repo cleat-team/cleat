@@ -12,7 +12,7 @@ func ManageSubscription(h cleat.HostCalls, input SubscriptionInput) (string, err
     if err := chargeWithRetry(h, input); err != nil {
         return enterGracePeriod(h, input)
     }
-    h.Sleep(30 * 24 * time.Hour)
+    h.DurableSleep(30 * 24 * time.Hour)
     return h.ContinueAsNew(toJSON(input))
 }
 

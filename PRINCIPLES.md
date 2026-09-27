@@ -68,9 +68,13 @@ Rust, AssemblyScript, and more targets), and a security boundary (user code
 cannot access the host system except through explicit HostCalls). No user code
 ever runs in the worker process address space.
 
-**Do this:** Compile workflow code to WASM, execute it in a sandboxed wazero
-runtime, and route all external interactions through the 15 defined HostCall
-imports on the `env` module.
+**Do this:** Compile workflow code to WASM, execute it in the sandboxed
+wasmtime backend, and route all external interactions through the HostCall
+imports on the `env` module -- `ABI.md` §2 enumerates them, and
+`scripts/check-doc-consistency.sh` fails CI if that list and `engine/imports.go`
+disagree. No count is quoted here on purpose: this one read 52 from 2026-09-06
+and was 54 by 09-13, and a number a reader takes on trust is worse than a
+pointer they can re-derive.
 
 **Not that:** Load user code as a native Go plugin (`plugin.Open`), execute it
 via shared library FFI, or embed a scripting language interpreter in the worker
@@ -216,8 +220,11 @@ are welcome as community contributions, following the same HostCall boundary.
 
 Every workflow execution is observable by default. The worker exports
 Prometheus metrics (`/metrics`) covering throughput, latency, error rates,
-and queue depth. Structured logging through HostCalls (`LogKV`) is recorded
-in event history. The embedded Svelte web UI provides workflow list/detail
+and queue depth. Structured logging through HostCalls (`LogKV`) goes to
+the worker's logger, tagged with the workflow id and suppressed on replay so a
+resumed run does not re-emit lines the original already wrote. It is **not**
+recorded in event history -- this line said it was until cleat#1308, while the
+host call discarded the message entirely. The embedded Svelte web UI provides workflow list/detail
 views, schedule management, and live execution state. You should never need
 to wonder what your workflows are doing.
 

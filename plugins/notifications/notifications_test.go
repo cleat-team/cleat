@@ -5,9 +5,11 @@ package notifications
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,6 +24,7 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 	"github.com/google/uuid"
 )
 
@@ -30,14 +33,19 @@ import (
 // ---------------------------------------------------------------------------
 
 type testWebhookCfg struct {
-	tenantID  uuid.UUID
-	id        uuid.UUID
-	url       string
-	secret    string
-	events    string // JSON array
-	enabled   bool
-	createdAt time.Time
-	updatedAt time.Time
+	tenantID         uuid.UUID
+	id               uuid.UUID
+	url              string
+	secretConfigured bool
+	events           string // JSON array
+	enabled          bool
+	createdAt        time.Time
+	updatedAt        time.Time
+	// deletedAt mirrors webhook_config.deleted_at (cleat#2220). nil means the
+	// row is live; every read path below filters it out once set, matching
+	// the "AND deleted_at IS NULL" production adds to every SELECT and to
+	// handleUpdateWebhook's/handleDeleteWebhook's own WHERE clauses.
+	deletedAt *time.Time
 }
 
 type testDelivery struct {
@@ -135,8 +143,24 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 		return c.execInsertWebhookConfig(args)
 	case strings.Contains(query, "INSERT INTO webhook_delivery"):
 		return c.execInsertWebhookDelivery(args)
+	// Checked ahead of the generic "UPDATE webhook_config" case below:
+	// handleDeleteWebhook's soft-delete (routes.go, cleat#2220) sets both
+	// enabled and deleted_at to LITERAL values, not $N placeholders, so the
+	// generic case's placeholder-driven field-mapping loop would match zero
+	// fields and silently no-op the whole update -- this case has its own
+	// dedicated handler instead.
+	case strings.Contains(query, "SET enabled = false, deleted_at = now()"):
+		return c.execSoftDeleteWebhookConfig(args)
 	case strings.Contains(query, "UPDATE webhook_config"):
 		return c.execUpdateWebhookConfig(args, query)
+	// Also checked ahead of its generic sibling: handleDeleteWebhook's
+	// delivery-cancellation UPDATE (routes.go, cleat#2220) has a completely
+	// different WHERE shape (webhook_id + status IN (...), no delivery id at
+	// all) from execUpdateWebhookDelivery's single-row-by-id update -- routed
+	// generically, args[1] (a webhook_id) would be misread as a delivery id,
+	// match nothing, and silently cancel 0 rows.
+	case strings.Contains(query, "SET status = 'cancelled'"):
+		return c.execCancelPendingDeliveries(args)
 	case strings.Contains(query, "UPDATE webhook_delivery"):
 		return c.execUpdateWebhookDelivery(args, query)
 	case strings.Contains(query, "DELETE FROM webhook_config"):
@@ -158,7 +182,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryWebhookExists(args)
-	case strings.Contains(query, "SELECT url, secret FROM webhook_config"):
+	case strings.Contains(query, "SELECT url, tenant_id, secret_configured FROM webhook_config"):
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryWebhookConfigForDelivery(args)
@@ -206,7 +230,7 @@ func (c *fakeConn) execInsertWebhookConfig(args []driver.NamedValue) (driver.Res
 	if err != nil {
 		return nil, err
 	}
-	secret, err := argString(args, 4)
+	secretConfigured, err := argBool(args, 4)
 	if err != nil {
 		return nil, err
 	}
@@ -220,14 +244,14 @@ func (c *fakeConn) execInsertWebhookConfig(args []driver.NamedValue) (driver.Res
 	}
 
 	c.store.configs = append(c.store.configs, &testWebhookCfg{
-		tenantID:  tid,
-		id:        id,
-		url:       url,
-		secret:    secret,
-		events:    eventsJSON,
-		enabled:   true,
-		createdAt: now,
-		updatedAt: now,
+		tenantID:         tid,
+		id:               id,
+		url:              url,
+		secretConfigured: secretConfigured,
+		events:           eventsJSON,
+		enabled:          true,
+		createdAt:        now,
+		updatedAt:        now,
 	})
 	return &fakeResult{rowsAffected: 1}, nil
 }
@@ -298,7 +322,7 @@ func (c *fakeConn) execUpdateWebhookConfig(args []driver.NamedValue, query strin
 	id := uuid.MustParse(idStr)
 
 	cfg := findWebhookCfg(c.store.configs, id)
-	if cfg == nil || cfg.tenantID != tid {
+	if cfg == nil || cfg.tenantID != tid || cfg.deletedAt != nil {
 		return &fakeResult{rowsAffected: 0}, nil
 	}
 
@@ -310,9 +334,13 @@ func (c *fakeConn) execUpdateWebhookConfig(args []driver.NamedValue, query strin
 			if v, err := argString(args, ord); err == nil {
 				cfg.url = v
 			}
-		case strings.Contains(query, "secret = $"+ordStr):
-			if v, err := argString(args, ord); err == nil {
-				cfg.secret = v
+		case strings.Contains(query, "secret_configured = $"+ordStr):
+			for _, a := range args {
+				if a.Ordinal == ord {
+					if v, ok := a.Value.(bool); ok {
+						cfg.secretConfigured = v
+					}
+				}
 			}
 		case strings.Contains(query, "events = $"+ordStr):
 			if v, err := argString(args, ord); err == nil {
@@ -353,8 +381,18 @@ func (c *fakeConn) execUpdateWebhookDelivery(args []driver.NamedValue, query str
 	}
 
 	now := time.Now().UTC()
+	// Matched on "SET status = '...'" specifically, not a bare "'...'": the
+	// mark* UPDATEs (background.go) now all carry a trailing
+	// "AND status IN ('pending', 'retrying')" guard (cleat#2233 item 6), so
+	// markFailed's query text contains BOTH "'retrying'" (from that guard)
+	// and "'failed'" (from its own SET) -- a bare Contains("'retrying'")
+	// check ahead of the "'failed'" one matched markFailed's query too, and
+	// this fake driver reported every delivery reaching its 10th attempt as
+	// still "retrying". Anchoring on "SET status = " excludes the WHERE
+	// clause's literal entirely, so it cannot collide with a future one
+	// either.
 	switch {
-	case strings.Contains(query, "'delivered'"):
+	case strings.Contains(query, "SET status = 'delivered'"):
 		d.status = "delivered"
 		d.deliveredAt = &now
 		// response_code = $2
@@ -366,9 +404,9 @@ func (c *fakeConn) execUpdateWebhookDelivery(args []driver.NamedValue, query str
 		if body, err := argString(args, 3); err == nil {
 			d.responseBody = &body
 		}
-	case strings.Contains(query, "'retrying'"):
+	case strings.Contains(query, "SET status = 'retrying'"):
 		d.status = "retrying"
-	case strings.Contains(query, "'failed'"):
+	case strings.Contains(query, "SET status = 'failed'"):
 		d.status = "failed"
 	}
 
@@ -380,7 +418,39 @@ func (c *fakeConn) execUpdateWebhookDelivery(args []driver.NamedValue, query str
 	return &fakeResult{rowsAffected: 1}, nil
 }
 
+// execDeleteWebhookConfig is now the compensating hard delete
+// handleCreateWebhook issues when p.secrets.Put fails after the row is
+// written (routes.go: "DELETE FROM webhook_config WHERE id = $1", id only --
+// there is no tenant_id in that WHERE clause, since it runs right after the
+// INSERT this same request just made). handleDeleteWebhook itself no longer
+// issues any hard DELETE at all -- cleat#2220 replaced it with the soft
+// delete below.
 func (c *fakeConn) execDeleteWebhookConfig(args []driver.NamedValue) (driver.Result, error) {
+	idStr, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		return nil, err
+	}
+
+	for i, cfg := range c.store.configs {
+		if cfg.id == id {
+			c.store.configs = append(c.store.configs[:i], c.store.configs[i+1:]...)
+			return &fakeResult{rowsAffected: 1}, nil
+		}
+	}
+	return &fakeResult{rowsAffected: 0}, nil
+}
+
+// execSoftDeleteWebhookConfig simulates handleDeleteWebhook's
+// "SET enabled = false, deleted_at = now() WHERE id = $1 AND tenant_id = $2
+// AND deleted_at IS NULL" (routes.go, cleat#2220). Already-deleted rows do
+// not match -- the production WHERE clause's own "deleted_at IS NULL" makes a
+// second delete of the same webhook affect 0 rows, which is what turns a
+// repeat DELETE into 404 rather than a silent no-op success.
+func (c *fakeConn) execSoftDeleteWebhookConfig(args []driver.NamedValue) (driver.Result, error) {
 	idStr, err := argString(args, 1)
 	if err != nil {
 		return nil, err
@@ -398,13 +468,39 @@ func (c *fakeConn) execDeleteWebhookConfig(args []driver.NamedValue) (driver.Res
 		return nil, err
 	}
 
-	for i, cfg := range c.store.configs {
-		if cfg.id == id && cfg.tenantID == tid {
-			c.store.configs = append(c.store.configs[:i], c.store.configs[i+1:]...)
-			return &fakeResult{rowsAffected: 1}, nil
+	cfg := findWebhookCfg(c.store.configs, id)
+	if cfg == nil || cfg.tenantID != tid || cfg.deletedAt != nil {
+		return &fakeResult{rowsAffected: 0}, nil
+	}
+	now := time.Now().UTC()
+	cfg.enabled = false
+	cfg.deletedAt = &now
+	return &fakeResult{rowsAffected: 1}, nil
+}
+
+// execCancelPendingDeliveries simulates handleDeleteWebhook's
+// "UPDATE webhook_delivery SET status = 'cancelled' WHERE webhook_id = $1
+// AND status IN ('pending', 'retrying')" (routes.go, cleat#2220): the
+// proactive cancellation run in the same transaction as the soft-delete
+// above, mirroring cleat#2199's handleDeleteSource for webhookingest.
+func (c *fakeConn) execCancelPendingDeliveries(args []driver.NamedValue) (driver.Result, error) {
+	webhookIDStr, err := argString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+	webhookID, err := uuid.Parse(webhookIDStr)
+	if err != nil {
+		return nil, err
+	}
+
+	var n int64
+	for _, d := range c.store.deliveries {
+		if d.webhookID == webhookID && (d.status == "pending" || d.status == "retrying") {
+			d.status = "cancelled"
+			n++
 		}
 	}
-	return &fakeResult{rowsAffected: 0}, nil
+	return &fakeResult{rowsAffected: n}, nil
 }
 
 // --- Query implementations ---
@@ -445,7 +541,7 @@ func (c *fakeConn) queryWebhookExists(args []driver.NamedValue) (driver.Rows, er
 
 	exists := false
 	for _, cfg := range c.store.configs {
-		if cfg.id == id && cfg.tenantID == tid {
+		if cfg.id == id && cfg.tenantID == tid && cfg.deletedAt == nil {
 			exists = true
 			break
 		}
@@ -467,13 +563,14 @@ func (c *fakeConn) queryWebhookConfigForDelivery(args []driver.NamedValue) (driv
 		return nil, err
 	}
 
+	columns := []string{"url", "tenant_id", "secret_configured"}
 	cfg := findWebhookCfg(c.store.configs, id)
-	if cfg == nil {
-		return &fakeRows{columns: []string{"url", "secret"}}, nil
+	if cfg == nil || cfg.deletedAt != nil {
+		return &fakeRows{columns: columns}, nil
 	}
 	return &fakeRows{
-		columns: []string{"url", "secret"},
-		data:    [][]driver.Value{{cfg.url, cfg.secret}},
+		columns: columns,
+		data:    [][]driver.Value{{cfg.url, cfg.tenantID.String(), cfg.secretConfigured}},
 	}, nil
 }
 
@@ -481,16 +578,26 @@ func (c *fakeConn) queryPendingDeliveries(args []driver.NamedValue) (driver.Rows
 	columns := []string{"id", "webhook_id", "event_type", "payload", "attempt_count"}
 	var data [][]driver.Value
 	for _, d := range c.store.deliveries {
-		if d.status == "pending" || d.status == "retrying" {
-			// The payload must be []byte for driver.Value compatibility.
-			data = append(data, []driver.Value{
-				d.id.String(),
-				d.webhookID.String(),
-				d.eventType,
-				d.payload,
-				int64(d.attemptCount),
-			})
+		if d.status != "pending" && d.status != "retrying" {
+			continue
 		}
+		// Mirrors queryDueDeliveries' own
+		// "JOIN webhook_config wc ON wc.id = d.webhook_id AND
+		// wc.deleted_at IS NULL" (background.go, cleat#2220): an INNER join,
+		// not a LEFT one, so a delivery with no matching config row at all --
+		// not just a soft-deleted one -- is excluded too.
+		cfg := findWebhookCfg(c.store.configs, d.webhookID)
+		if cfg == nil || cfg.deletedAt != nil {
+			continue
+		}
+		// The payload must be []byte for driver.Value compatibility.
+		data = append(data, []driver.Value{
+			d.id.String(),
+			d.webhookID.String(),
+			d.eventType,
+			d.payload,
+			int64(d.attemptCount),
+		})
 	}
 	return &fakeRows{columns: columns, data: data}, nil
 }
@@ -582,15 +689,15 @@ func (c *fakeConn) queryGetWebhook(args []driver.NamedValue) (driver.Rows, error
 		return nil, err
 	}
 
-	columns := []string{"id", "url", "secret", "events", "enabled", "created_at", "updated_at"}
+	columns := []string{"id", "url", "secret_configured", "events", "enabled", "created_at", "updated_at"}
 	for _, cfg := range c.store.configs {
-		if cfg.id == id && cfg.tenantID == tid {
+		if cfg.id == id && cfg.tenantID == tid && cfg.deletedAt == nil {
 			return &fakeRows{
 				columns: columns,
 				data: [][]driver.Value{{
 					cfg.id.String(),
 					cfg.url,
-					cfg.secret,
+					cfg.secretConfigured,
 					[]byte(cfg.events),
 					cfg.enabled,
 					cfg.createdAt,
@@ -612,14 +719,14 @@ func (c *fakeConn) queryListWebhooks(args []driver.NamedValue) (driver.Rows, err
 		return nil, err
 	}
 
-	columns := []string{"id", "url", "secret", "events", "enabled", "created_at", "updated_at"}
+	columns := []string{"id", "url", "secret_configured", "events", "enabled", "created_at", "updated_at"}
 	var data [][]driver.Value
 	for _, cfg := range c.store.configs {
-		if cfg.tenantID == tid {
+		if cfg.tenantID == tid && cfg.deletedAt == nil {
 			data = append(data, []driver.Value{
 				cfg.id.String(),
 				cfg.url,
-				cfg.secret,
+				cfg.secretConfigured,
 				[]byte(cfg.events),
 				cfg.enabled,
 				cfg.createdAt,
@@ -674,6 +781,19 @@ func argInt64(args []driver.NamedValue, ordinal int) (int64, error) {
 		}
 	}
 	return 0, fmt.Errorf("arg %d not found", ordinal)
+}
+
+func argBool(args []driver.NamedValue, ordinal int) (bool, error) {
+	for _, a := range args {
+		if a.Ordinal == ordinal {
+			v, ok := a.Value.(bool)
+			if !ok {
+				return false, fmt.Errorf("arg %d: want bool, got %T", ordinal, a.Value)
+			}
+			return v, nil
+		}
+	}
+	return false, fmt.Errorf("arg %d not found", ordinal)
 }
 
 func argTime(args []driver.NamedValue, ordinal int) (time.Time, error) {
@@ -743,7 +863,8 @@ func setupTestPlugin(t *testing.T) (*Plugin, *fakeNotifyStore) {
 		httpClient: &http.Client{
 			Timeout: 5 * time.Second,
 		},
-		config: Config{},
+		config:  Config{},
+		secrets: plugintest.NewFakeSecrets(),
 	}
 
 	return p, store
@@ -785,7 +906,7 @@ func buildHandler(t *testing.T, p *Plugin, store *fakeNotifyStore) http.Handler 
 	}
 	db := sql.OpenDB(&fakeConnector{store: store})
 	t.Cleanup(func() { db.Close() })
-	return auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	return auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 }
 
 // ---------------------------------------------------------------------------
@@ -900,8 +1021,11 @@ func TestCreateAndGetWebhook(t *testing.T) {
 	if resp["url"] != "https://example.com/hook" {
 		t.Errorf("expected url %q, got %q", "https://example.com/hook", resp["url"])
 	}
-	if resp["secret"] != plugin.RedactedPlaceholder {
-		t.Errorf("expected secret to be redacted as %q, got %q", plugin.RedactedPlaceholder, resp["secret"])
+	if resp["secret_configured"] != true {
+		t.Errorf("expected secret_configured=true, got %v", resp["secret_configured"])
+	}
+	if _, hasSecret := resp["secret"]; hasSecret {
+		t.Errorf("response carries a 'secret' field at all: %v", resp["secret"])
 	}
 	if resp["enabled"] != true {
 		t.Errorf("expected enabled=true, got %v", resp["enabled"])
@@ -934,8 +1058,8 @@ func TestListAndGetWebhooksDoNotLeakSecret(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &getResp); err != nil {
 		t.Fatalf("GET webhook: failed to decode: %v", err)
 	}
-	if getResp["secret"] != plugin.RedactedPlaceholder {
-		t.Errorf("GET: expected secret %q, got %q", plugin.RedactedPlaceholder, getResp["secret"])
+	if getResp["secret_configured"] != true {
+		t.Errorf("GET: expected secret_configured=true, got %v", getResp["secret_configured"])
 	}
 
 	// GET /webhooks (list)
@@ -956,8 +1080,8 @@ func TestListAndGetWebhooksDoNotLeakSecret(t *testing.T) {
 	for _, w := range listResp {
 		if w["id"] == id.String() {
 			found = true
-			if w["secret"] != plugin.RedactedPlaceholder {
-				t.Errorf("LIST: expected secret %q, got %q", plugin.RedactedPlaceholder, w["secret"])
+			if w["secret_configured"] != true {
+				t.Errorf("LIST: expected secret_configured=true, got %v", w["secret_configured"])
 			}
 		}
 	}
@@ -1060,14 +1184,14 @@ func TestHostFunctionSendWebhook(t *testing.T) {
 	now := time.Now().UTC()
 	store.mu.Lock()
 	store.configs = append(store.configs, &testWebhookCfg{
-		tenantID:  testTenantID,
-		id:        webhookID,
-		url:       "https://example.com/hook",
-		secret:    "test-secret",
-		events:    `["test.event"]`,
-		enabled:   true,
-		createdAt: now,
-		updatedAt: now,
+		tenantID:         testTenantID,
+		id:               webhookID,
+		url:              "https://example.com/hook",
+		secretConfigured: true,
+		events:           `["test.event"]`,
+		enabled:          true,
+		createdAt:        now,
+		updatedAt:        now,
 	})
 	store.mu.Unlock()
 
@@ -1199,15 +1323,16 @@ func TestWebhookDelivery(t *testing.T) {
 	now := time.Now().UTC()
 	store.mu.Lock()
 	store.configs = append(store.configs, &testWebhookCfg{
-		tenantID:  testTenantID,
-		id:        webhookID,
-		url:       mockServer.URL + "/hook",
-		secret:    "test-hmac-secret",
-		events:    `["test.event"]`,
-		enabled:   true,
-		createdAt: now,
-		updatedAt: now,
+		tenantID:         testTenantID,
+		id:               webhookID,
+		url:              mockServer.URL + "/hook",
+		secretConfigured: true,
+		events:           `["test.event"]`,
+		enabled:          true,
+		createdAt:        now,
+		updatedAt:        now,
 	})
+	p.secrets.(*plugintest.FakeSecrets).Seed(testTenantID.String(), WebhookSecretName(webhookID), "test-hmac-secret")
 
 	// Create a pending delivery with next_attempt_at in the past.
 	past := now.Add(-1 * time.Hour)
@@ -1224,10 +1349,14 @@ func TestWebhookDelivery(t *testing.T) {
 	})
 	store.mu.Unlock()
 
-	// Call processDeliveries.
+	// Call processDeliveries. baseCtx == ctx here: this test drives
+	// processDeliveries directly rather than through Run, so there is no
+	// AcrossAllTenants marking to strip for the Secrets.ForTenant call --
+	// see Run's comment in background.go. The RLS-scoped marking itself is
+	// covered by webhook_config_rows_are_scoped_by_a_policy_test.go.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	attempted, succeeded, failed, err := p.processDeliveries(ctx)
+	attempted, succeeded, failed, err := p.processDeliveries(ctx, ctx)
 	if err != nil {
 		t.Fatalf("processDeliveries: %v", err)
 	}
@@ -1253,6 +1382,16 @@ func TestWebhookDelivery(t *testing.T) {
 	}
 	if !strings.HasPrefix(receivedSig, "sha256=") {
 		t.Errorf("expected signature to start with 'sha256=', got %q", receivedSig)
+	}
+	// The cleat#1992 known-positive: the signature was computed with the
+	// secret set via Seed above (the tenant-secrets store), not an empty key
+	// -- a naive "secret_configured true but Reveal()-less" implementation
+	// would sign with "" and this would still start with "sha256=".
+	mac := hmac.New(sha256.New, []byte("test-hmac-secret"))
+	mac.Write(receivedPayload)
+	wantSig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	if receivedSig != wantSig {
+		t.Errorf("signature %q does not match the secret set via the admin route (want %q)", receivedSig, wantSig)
 	}
 
 	// Verify the delivery was marked as delivered.
@@ -1438,14 +1577,14 @@ func TestSendWebhookNilPayload(t *testing.T) {
 	now := time.Now().UTC()
 	store.mu.Lock()
 	store.configs = append(store.configs, &testWebhookCfg{
-		tenantID:  testTenantID,
-		id:        webhookID,
-		url:       "https://example.com/hook",
-		secret:    "",
-		events:    `["test.event"]`,
-		enabled:   true,
-		createdAt: now,
-		updatedAt: now,
+		tenantID:         testTenantID,
+		id:               webhookID,
+		url:              "https://example.com/hook",
+		secretConfigured: false,
+		events:           `["test.event"]`,
+		enabled:          true,
+		createdAt:        now,
+		updatedAt:        now,
 	})
 	store.mu.Unlock()
 

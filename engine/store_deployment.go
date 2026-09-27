@@ -88,7 +88,7 @@ func (s *PostgresStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []b
 	var tenantID uuid.UUID
 	err := s.db.QueryRowContext(ctx,
 		`SELECT tenant_id FROM admin.tenant_api_keys
-		 WHERE key_hash = $1 AND revoked_at IS NULL`, keyHash).Scan(&tenantID)
+		 WHERE key_hash = $1 AND disabled_at IS NULL`, keyHash).Scan(&tenantID)
 	if err != nil {
 		return uuid.Nil, err
 	}
@@ -126,17 +126,33 @@ func (s *PostgresStore) LoadDAGSpec(ctx context.Context, defName string, defVers
 	}
 	defer tx.Rollback()
 
-	var spec json.RawMessage
+	// *[]byte, not json.RawMessage. dag_spec is `JSONB DEFAULT NULL`
+	// (001_schema.sql:202) and json.RawMessage does not implement sql.Scanner,
+	// so a NULL fails the scan outright:
+	//
+	//	sql: Scan error on column index 0, name "dag_spec": unsupported Scan,
+	//	storing driver.Value type <nil> into type *jsontext.Value
+	//
+	// Every workflow that is not a DAG has a NULL there, which is nearly all of
+	// them, so GET /api/workflows/{id}/dag answered with that raw driver error.
+	// The doc comment above already promised "or nil if none"; the code could
+	// not deliver it. MySQL (mysql_ops.go:683) and SQL Server
+	// (mssql_deployment.go:81) both got this right; PostgreSQL alone did not,
+	// which is the dialect nearly everyone runs.
+	var raw *[]byte
 	err = tx.QueryRowContext(ctx, `
 		SELECT dag_spec FROM workflow_defs WHERE name = $1 AND version = $2
-	`, defName, defVersion).Scan(&spec)
+	`, defName, defVersion).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("workflow def not found: %s v%d", defName, defVersion)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("load dag_spec: %w", err)
 	}
-	return spec, tx.Commit()
+	if raw == nil {
+		return nil, tx.Commit()
+	}
+	return json.RawMessage(*raw), tx.Commit()
 }
 
 // ListVersions returns all deployed versions of a workflow.
@@ -179,8 +195,18 @@ func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef)
 	}
 	defer tx.Rollback()
 
-	pluginDepsJSON, _ := json.Marshal(def.PluginDeps)
-	if pluginDepsJSON == nil {
+	// json.Marshal of a nil map returns the four bytes "null", not nil, so the
+	// guard this replaced -- `if pluginDepsJSON == nil` -- could never fire and
+	// every workflow that declares no plugin dependencies stored the literal
+	// `null`. PostgreSQL JSONB and MySQL JSON both accept a bare JSON scalar, so
+	// nothing noticed; SQL Server's ISJSON does not (`ISJSON('null')` = 0),
+	// which is how the CHECK constraint in migrations/mssql/036 found it.
+	//
+	// An error is folded in for the same reason the default exists: the column
+	// is NOT NULL DEFAULT '{}' on all three dialects, so "no dependencies" has
+	// one spelling and it is not `null`.
+	pluginDepsJSON, err := json.Marshal(def.PluginDeps)
+	if err != nil || len(pluginDepsJSON) == 0 || string(pluginDepsJSON) == "null" {
 		pluginDepsJSON = []byte("{}")
 	}
 
@@ -195,56 +221,25 @@ func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef)
 	// IMPROVEMENT-PLAN 3.12.
 	tenantID := s.tenantID
 
-	// Take the existing row's ownership under lock before writing over it.
-	//
-	// On PostgreSQL this SELECT runs inside the RLS transaction, so a
-	// definition owned by another tenant is not visible here at all and the
-	// INSERT below hits the primary key instead -- which is why the unique
-	// violation is mapped to the ownership error rather than surfaced as
-	// `duplicate key value violates unique constraint`, a message that says
-	// nothing about what actually went wrong.
-	var owner sql.NullString
-	err = tx.QueryRowContext(ctx,
-		`SELECT tenant_id::text FROM workflow_defs WHERE name = $1 AND version = $2 FOR UPDATE`,
-		def.Name, def.Version).Scan(&owner)
-	switch {
-	case err == nil:
-		if !canAdoptDef(owner.String, tenantID) {
-			return defOwnershipError(def.Name, def.Version)
-		}
-	case errors.Is(err, sql.ErrNoRows):
-		// No row visible: either it does not exist, or RLS is hiding another
-		// tenant's. The INSERT distinguishes them.
-	default:
-		return fmt.Errorf("deploy workflow def: read owner: %w", err)
-	}
-
-	// The guard is repeated in SQL rather than trusted to the read above: a
-	// concurrent deploy of a name that did not exist a moment ago cannot be
-	// excluded by a row lock on a row that was not there.
-	res, err := tx.ExecContext(ctx, `
-		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, deprecated, tenant_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (name, version) DO UPDATE SET
+	// No ownership check: under (tenant_id, name, version) another tenant's
+	// definition of the same name is a different row, so there is nothing to
+	// adjudicate. The ON CONFLICT below can now only fire for this tenant's own
+	// redeploy of the same version, which is an ordinary upsert.
+	// IMPROVEMENT-PLAN 3.77.
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, disabled_at, gc_eligible, tenant_id, max_history_length)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		ON CONFLICT (tenant_id, name, version) DO UPDATE SET
 			wasm_bytes = EXCLUDED.wasm_bytes,
 			abi_version = EXCLUDED.abi_version,
 			min_version = EXCLUDED.min_version,
 			plugin_deps = EXCLUDED.plugin_deps,
-			deprecated = EXCLUDED.deprecated,
-			tenant_id = EXCLUDED.tenant_id
-		WHERE workflow_defs.tenant_id = EXCLUDED.tenant_id
-		   OR workflow_defs.tenant_id = $9
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.Deprecated, tenantID, DefaultTenantUUID)
+			disabled_at = EXCLUDED.disabled_at,
+			gc_eligible = EXCLUDED.gc_eligible,
+			max_history_length = EXCLUDED.max_history_length
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.DisabledAt, def.GCEligible, tenantID, def.MaxHistoryLength)
 	if err != nil {
-		if isPostgresUniqueViolation(err) {
-			return defOwnershipError(def.Name, def.Version)
-		}
 		return fmt.Errorf("deploy workflow def: %w", err)
-	}
-	// DO UPDATE ... WHERE that matches nothing reports zero rows, and that is
-	// the refusal: the row exists, is visible, and belongs to someone else.
-	if n, err := res.RowsAffected(); err == nil && n == 0 {
-		return defOwnershipError(def.Name, def.Version)
 	}
 	return tx.Commit()
 }
@@ -262,12 +257,12 @@ func (s *PostgresStore) ListWorkflowDefs(ctx context.Context, name string) ([]Wo
 	var rows *sql.Rows
 	if name == "" {
 		rows, err = tx.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, deprecated
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
 			FROM workflow_defs ORDER BY name, version DESC
 		`)
 	} else {
 		rows, err = tx.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, deprecated
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
 			FROM workflow_defs WHERE name = $1 ORDER BY version DESC
 		`, name)
 	}
@@ -282,12 +277,12 @@ func (s *PostgresStore) ListWorkflowDefs(ctx context.Context, name string) ([]Wo
 		var pluginDepsRaw []byte
 		var createdAt time.Time
 		if err := rows.Scan(&def.Name, &def.Version, &def.ABIVersion, &def.MinVersion,
-			&pluginDepsRaw, &createdAt, &def.Deprecated); err != nil {
+			&pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible); err != nil {
 			return nil, fmt.Errorf("scan workflow def: %w", err)
 		}
 		def.CreatedAt = createdAt
 		if len(pluginDepsRaw) > 0 {
-			_ = json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
+			def.PluginDeps = decodePluginDeps(s.log(), pluginDepsRaw, def.Name, def.Version)
 		}
 		if def.PluginDeps == nil {
 			def.PluginDeps = make(map[string]string)
@@ -314,10 +309,10 @@ func (s *PostgresStore) GetWorkflowDef(ctx context.Context, name string, version
 	var wasmBytes []byte
 	var createdAt time.Time
 	err = tx.QueryRowContext(ctx, `
-		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, deprecated
+		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
 		FROM workflow_defs WHERE name = $1 AND version = $2
 	`, name, version).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
-		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.Deprecated)
+		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, tx.Commit()
 	}
@@ -327,7 +322,7 @@ func (s *PostgresStore) GetWorkflowDef(ctx context.Context, name string, version
 	def.WASMBytes = wasmBytes
 	def.CreatedAt = createdAt
 	if len(pluginDepsRaw) > 0 {
-		_ = json.Unmarshal(pluginDepsRaw, &def.PluginDeps)
+		def.PluginDeps = decodePluginDeps(s.log(), pluginDepsRaw, name, version)
 	}
 	if def.PluginDeps == nil {
 		def.PluginDeps = make(map[string]string)
@@ -335,8 +330,25 @@ func (s *PostgresStore) GetWorkflowDef(ctx context.Context, name string, version
 	return &def, tx.Commit()
 }
 
-// MarkVersionDeprecated sets the deprecated flag on a workflow version.
-
+// MarkVersionDeprecated retires a workflow version, or restores it.
+//
+// IT WRITES BOTH COLUMNS, AND THAT IS THE SAFETY PROPERTY OF cleat#1702's
+// SPLIT. `disabled_at` is admission control and `gc_eligible` is collection
+// eligibility; deprecating a version means both, which is what `cleatctl
+// versions deprecate` has always meant and keeps the operator workflow
+// unchanged. What the split removes is a GENERIC writer of `disabled_at` being
+// able to arm a deletion.
+//
+// A PARTIAL WRITE HERE WOULD BE WORSE THAN THE COLUMN IT REPLACED. This
+// function also UN-deprecates (the bool), so clearing retirement without
+// clearing eligibility leaves a version that is LIVE AND COLLECTABLE -- a state
+// neither the old `deprecated` boolean nor either new column can express alone.
+// The two writes are therefore one statement in one transaction, and
+// engine/gc_eligibility_is_not_retirement_test.go asserts they move together
+// rather than trusting the call sites to stay in step.
+//
+// COALESCE, not a bare now(): re-deprecating an already-disabled version must
+// not reset the instant it was disabled.
 func (s *PostgresStore) MarkVersionDeprecated(ctx context.Context, name string, version int, deprecated bool) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
@@ -345,7 +357,10 @@ func (s *PostgresStore) MarkVersionDeprecated(ctx context.Context, name string, 
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(ctx, `
-		UPDATE workflow_defs SET deprecated = $3 WHERE name = $1 AND version = $2
+		UPDATE workflow_defs
+		   SET disabled_at = CASE WHEN $3 THEN COALESCE(disabled_at, now()) ELSE NULL END,
+		       gc_eligible = $3
+		 WHERE name = $1 AND version = $2
 	`, name, version, deprecated)
 	if err != nil {
 		return fmt.Errorf("mark version deprecated: %w", err)
@@ -440,8 +455,8 @@ func (s *PostgresStore) ResolveLatestVersion(ctx context.Context, defName string
 	var version int
 	err = tx.QueryRowContext(ctx, `
 		SELECT COALESCE(MAX(version), 0) FROM workflow_defs
-		WHERE name = $1 AND NOT deprecated
-	`, defName).Scan(&version)
+		WHERE name = $1 AND disabled_at IS NULL AND tenant_id = $2
+	`, defName, s.tenantID).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("resolve latest version: %w", err)
 	}
@@ -452,7 +467,7 @@ func (s *PostgresStore) ResolveLatestVersion(ctx context.Context, defName string
 // exists and is not deprecated. Returns true if the version can be used.
 //
 //	SQL: SELECT EXISTS(SELECT 1 FROM workflow_defs
-//	     WHERE name = $1 AND version = $2 AND NOT deprecated)
+//	     WHERE name = $1 AND version = $2 AND disabled_at IS NULL)
 
 func (s *PostgresStore) ValidateVersion(ctx context.Context, defName string, defVersion int) (bool, error) {
 	tx, err := s.beginTxWithRLS(ctx)
@@ -465,7 +480,7 @@ func (s *PostgresStore) ValidateVersion(ctx context.Context, defName string, def
 	err = tx.QueryRowContext(ctx, `
 		SELECT EXISTS(
 			SELECT 1 FROM workflow_defs
-			WHERE name = $1 AND version = $2 AND NOT deprecated
+			WHERE name = $1 AND version = $2 AND disabled_at IS NULL
 		)
 	`, defName, defVersion).Scan(&exists)
 	if err != nil {

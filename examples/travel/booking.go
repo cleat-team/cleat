@@ -60,9 +60,20 @@ type BookingResult struct {
 
 // ---- Entry point ----
 
-func BookTravel(h cleat.HostCalls, input BookingInput) (*BookingResult, error) {
+// BookTravel returns its result as a JSON string, not as *BookingResult.
+//
+// A workflow entry point's result must be a string: a WASM entry point hands
+// back bytes, and string is the one shape every language SDK expresses
+// identically. Returning *BookingResult compiled here and then failed inside
+// cleat build with "cannot convert __r (variable of type *BookingResult) to
+// type []byte" -- a type error in generated code. cleat vet now rejects it up
+// front. IMPROVEMENT-PLAN 3.228.
+//
+// The struct PARAMETER is unaffected: the generator unmarshals those from the
+// args JSON, and BookingInput is why this example takes one.
+func BookTravel(h cleat.HostCalls, input BookingInput) (string, error) {
 	if err := validateInput(input); err != nil {
-		return nil, err
+		return "", err
 	}
 
 	bookingID := fmt.Sprintf("TRIP-%s-%d", input.UserID, h.Now().UnixMilli())
@@ -160,7 +171,7 @@ func BookTravel(h cleat.HostCalls, input BookingInput) (*BookingResult, error) {
 
 	if err := s.Run(h); err != nil {
 		h.SetQueryState("status", "failed")
-		return nil, fmt.Errorf("booking failed (all compensated): %w", err)
+		return "", fmt.Errorf("booking failed (all compensated): %w", err)
 	}
 
 	// Check for cancellation after booking.
@@ -183,13 +194,13 @@ func BookTravel(h cleat.HostCalls, input BookingInput) (*BookingResult, error) {
 	h.DurableLog(fmt.Sprintf("Travel booked: %s (flight=%s, hotel=%s, car=%s)",
 		bookingID, flightRef, hotelRef, carRef))
 
-	return &BookingResult{
+	return toJSON(BookingResult{
 		BookingID: bookingID,
 		FlightRef: flightRef,
 		HotelRef:  hotelRef,
 		CarRef:    carRef,
 		Status:    "confirmed",
-	}, nil
+	}), nil
 }
 
 // ---- Helpers ----
@@ -216,11 +227,13 @@ func cancelAll(h cleat.HostCalls, flightRef, hotelRef, carRef string) {
 	}
 }
 
-func canceled(bookingID, reason string) *BookingResult {
-	return &BookingResult{
+// canceled returns the JSON a cancelled booking reports, for the same reason
+// BookTravel returns a string.
+func canceled(bookingID, reason string) string {
+	return toJSON(BookingResult{
 		BookingID: bookingID,
 		Status:    fmt.Sprintf("canceled: %s", reason),
-	}
+	})
 }
 
 func toJSON(v interface{}) string {

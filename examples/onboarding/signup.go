@@ -39,9 +39,20 @@ type Profile struct {
 
 // ---- Entry point ----
 
-func RegisterUser(h cleat.HostCalls, input SignupInput) (*Profile, error) {
+// RegisterUser returns its result as a JSON string, not as *Profile.
+//
+// A workflow entry point's result must be a string: a WASM entry point hands
+// back bytes, and string is the one shape every language SDK expresses
+// identically. Returning *Profile compiled here and then failed inside
+// cleat build with "cannot convert __r (variable of type *Profile) to type
+// []byte" -- a type error in generated code. cleat vet now rejects it up
+// front. IMPROVEMENT-PLAN 3.228.
+//
+// The struct PARAMETER is unaffected: the generator unmarshals those from the
+// args JSON.
+func RegisterUser(h cleat.HostCalls, input SignupInput) (string, error) {
 	if input.Email == "" || input.Name == "" {
-		return nil, fmt.Errorf("email and name are required")
+		return "", fmt.Errorf("email and name are required")
 	}
 
 	// Step 1: Create pending registration.
@@ -50,7 +61,7 @@ func RegisterUser(h cleat.HostCalls, input SignupInput) (*Profile, error) {
 
 	resp, err := h.Call("users", "CreatePendingRegistration", toJSON(input))
 	if err != nil {
-		return nil, fmt.Errorf("registration failed: %w", err)
+		return "", fmt.Errorf("registration failed: %w", err)
 	}
 	var tempUser struct {
 		UserID string `json:"user_id"`
@@ -93,7 +104,7 @@ func RegisterUser(h cleat.HostCalls, input SignupInput) (*Profile, error) {
 		"verification_token": payload.Token,
 	}))
 	if err != nil {
-		return nil, fmt.Errorf("profile creation failed: %w", err)
+		return "", fmt.Errorf("profile creation failed: %w", err)
 	}
 
 	var profile Profile
@@ -110,10 +121,10 @@ func RegisterUser(h cleat.HostCalls, input SignupInput) (*Profile, error) {
 	h.SetQueryState("completed_at", h.Now().String())
 	h.DurableLog(fmt.Sprintf("Onboarding complete: user=%s", tempUser.UserID))
 
-	return &profile, nil
+	return toJSON(profile), nil
 }
 
-func handleVerificationTimeout(h cleat.HostCalls, userID string, input SignupInput) (*Profile, error) {
+func handleVerificationTimeout(h cleat.HostCalls, userID string, input SignupInput) (string, error) {
 	h.SetQueryState("stage", "timed_out")
 	h.DurableLog(fmt.Sprintf("Verification timed out: user=%s", userID))
 
@@ -131,7 +142,7 @@ func handleVerificationTimeout(h cleat.HostCalls, userID string, input SignupInp
 	}
 
 	h.SetQueryState("stage", "canceled")
-	return nil, fmt.Errorf("email verification timed out after 24h")
+	return "", fmt.Errorf("email verification timed out after 24h")
 }
 
 func toJSON(v interface{}) string {

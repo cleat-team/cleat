@@ -1,0 +1,13 @@
+# Deliberately-historical host-call counts, sanctioned for scripts/check-host-call-counts.py.
+#
+#   <path><TAB><count><TAB><verbatim substring that must still be in the file>
+#
+# Keyed on a substring rather than a line number on purpose: a line number
+# drifts silently onto a neighbouring sentence, and the entry then sanctions
+# something nobody approved. When the sentence is rewritten the entry stops
+# matching and the guard tells you to delete it.
+#
+# Empty is the correct state. A count that is genuinely about a past date
+# belongs in an archive (IMPROVEMENT-PLAN*, REVIEW-2026*, REMEDIATION-PLAN*,
+# CHANGELOG), which the guard does not cover at all -- so reaching for this file
+# usually means the sentence is in the wrong document. cleat#1414.

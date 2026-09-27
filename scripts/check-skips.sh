@@ -109,9 +109,45 @@ scan() {
           if (dir == "" || dir == ".") dir = "."
           fn = "<file scope>"
         }
-        /^func [A-Za-z_]/ {
-          fn = $2
-          sub(/\(.*$/, "", fn)
+        /^func[ \t]/ {
+          # A METHOD IS A DECLARATION TOO, and this used to miss them. The
+          # pattern was /^func [A-Za-z_]/, which cannot match
+          # `func (m *MySQLBackend) Setup(`, because the character after
+          # "func " is "(". A method therefore never updated fn, so every
+          # skip inside one was credited to whatever plain function happened
+          # to sit above it -- silently, and in a way that looks like a real
+          # attribution rather than a missing one. cleat#1740.
+          #
+          # Measured on develop before the fix: 4 of 247 skip sites, all in
+          # engine/store_backends_test.go, landing on TWO functions that
+          # contain no skip at all. Both were live in the baseline:
+          #
+          #     engine	RegisterBackend	2          (3 lines long, no skip)
+          #     engine	openMSSQLTenantStore	2   (no skip)
+          #
+          # RECEIVER-QUALIFIED, and that is not cosmetic. This file declares
+          # MySQLBackend.Setup and MSSQLBackend.Setup, and likewise two
+          # SetupForTenant. A bare method name collapses four distinct owners
+          # into two entries, so the baseline could not tell a skip moving
+          # between backends from one staying put -- which is the whole job of
+          # a per-name baseline.
+          if ($0 ~ /^func[ \t]+\(/) {
+            recv = $0
+            sub(/^func[ \t]+\(/, "", recv)
+            sub(/\).*$/, "", recv)          # "m *MySQLBackend" | "*Foo" | "Foo"
+            nparts = split(recv, rp, /[ \t]+/)
+            rtype = rp[nparts]
+            sub(/^\*/, "", rtype)
+
+            name = $0
+            sub(/^func[ \t]+\([^)]*\)[ \t]*/, "", name)
+            sub(/[\(\[].*$/, "", name)      # drop params, and any type params
+            fn = rtype "." name
+          } else {
+            fn = $0
+            sub(/^func[ \t]+/, "", fn)
+            sub(/[\(\[].*$/, "", fn)        # "[" so a generic func keeps its name
+          }
         }
         {
           # Drop whole-line comments. This repo documents its skips heavily --
@@ -163,7 +199,163 @@ total_skips() {
   awk -F'\t' '{ n += $3 } END { print n + 0 }' <<<"$1"
 }
 
+# stale_entries prints the baseline lines whose (dir, function) key the current
+# scan does not produce at all. cleat#1746.
+#
+# KEYED ON THE FIRST TWO FIELDS, not on the whole line. A key present with a
+# different count is already handled as grown or shrunk; this is for a key that
+# has vanished, which is the only case neither of those can see.
+#
+# A SEPARATE FUNCTION so the self-test can drive it against a fixture. The
+# comparison it belongs to is inline in the script body and cannot be exercised
+# without running the whole guard over a staged repo -- and a check whose
+# correctness is only ever asserted by running it on a healthy tree is the
+# defect this whole change is about.
+#
+# $1 is the current scan; the baseline path comes from $BASELINE, or $2 when
+# given, which is what the self-test passes.
+stale_entries() {
+  local current="$1" baseline="${2:-$BASELINE}" line key out=""
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in \#*) continue ;; esac
+    key="$(cut -f1,2 <<<"$line")"
+    # A literal tab terminates the key, so `engine Setup` cannot match
+    # `engine SetupForTenant` -- the prefix collision this file already has
+    # four live instances of.
+    # NOT `printf '%s\n' "$current" | grep -qF ...`. Under this script's own
+    # `set -uo pipefail` (line 47) that reports a key it MATCHED as stale: grep -q
+    # exits on the first match and closes its read end, printf dies of SIGPIPE (141),
+    # pipefail takes the pipeline status from that non-zero member, and `if !` reads
+    # the successful match as a failure. It is not even intermittent once $current is
+    # large. A here-string has no producer process, so there is nothing for pipefail
+    # to misread. Same defect and same fix as scripts/tier2-gate.sh.
+    if ! grep -qF "$key	" <<< "$current"; then
+      out="${out}${line}"$'\n'
+    fi
+  done < "$baseline"
+  printf '%s' "$out"
+}
+
+# self_test builds a fixture tree and asserts what scan() attributes a skip to.
+#
+# WHY THIS EXISTS AT ALL: until cleat#1740 this script had no self-test, and the
+# defect it now pins survived for exactly that reason. `/^func [A-Za-z_]/`
+# cannot match `func (m *MySQLBackend) Setup(`, so four skips were credited to
+# two functions containing none -- and both wrong names sat in the committed
+# baseline looking like ordinary entries. Nothing could notice, because nothing
+# ever asserted what the scanner attributes; the guard only ever compared its
+# own output to a baseline generated from that same output.
+#
+# THAT IS THE FAILURE MODE A REGENERATED BASELINE CANNOT CATCH. `--update`
+# agrees with whatever scan() does, correct or not, so "the diff looks right"
+# is a statement about the diff and not about the attribution. Hence a fixture
+# whose correct answer is known independently of this script.
+#
+# IT RUNS THE REAL scan(), not a copy of its awk. scan() walks `find .` from
+# the current directory, so cd-ing into the fixture is enough to point it at
+# known input -- and a second copy of the program would be a second thing to
+# keep correct, which is the defect this fix is about in another costume.
+self_test() {
+  local tmp ok=0 out
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' RETURN
+
+  mkdir -p "$tmp/pkg"
+  cat > "$tmp/pkg/fixture_test.go" <<'FIXTURE'
+package pkg
+
+// A plain function, and the control: its skip must stay attributed to it.
+func TestPlainFunction(t *testing.T) {
+	t.Skip("control")
+}
+
+// The bug: a skip inside a METHOD used to be credited to the function above.
+// This declaration sits directly above the methods for that reason.
+func helperAboveTheMethods() {}
+
+func (m *MySQLBackend) Setup(t *testing.T) {
+	t.Skip("belongs to MySQLBackend.Setup")
+}
+
+// The collision case: a bare method name would merge these two into one entry.
+func (m *MSSQLBackend) Setup(t *testing.T) {
+	t.Skip("belongs to MSSQLBackend.Setup")
+}
+
+// A value receiver and an unnamed receiver must resolve to the type too.
+func (v ValueBackend) Check(t *testing.T) {
+	t.Skip("belongs to ValueBackend.Check")
+}
+FIXTURE
+
+  out="$(cd "$tmp" && scan)"
+
+  _expect() {   # _expect <line> <why>
+    if grep -qF "$1" <<< "$out"; then
+      return 0
+    fi
+    echo "SELF-TEST FAILED: expected '$1' ($2)" >&2
+    ok=1
+  }
+  _refute() {
+    if grep -qF "$1" <<< "$out"; then
+      echo "SELF-TEST FAILED: did not expect '$1' ($2)" >&2
+      ok=1
+    fi
+  }
+
+  # The known-positive. Before cleat#1740 these four lines were absent and the
+  # skips appeared under helperAboveTheMethods instead.
+  _expect "pkg	MySQLBackend.Setup	1"      "a skip inside a method belongs to that method"
+  _expect "pkg	MSSQLBackend.Setup	1"      "two Setup methods must not collapse into one entry"
+  _expect "pkg	ValueBackend.Check	1"      "a value receiver resolves to its type"
+  # The negative control: a plain function still works.
+  _expect "pkg	TestPlainFunction	1"       "a plain function's skip is unchanged"
+  # The defect itself, stated as a refusal.
+  _refute "helperAboveTheMethods"            "no skip may be credited to the function above a method"
+
+  # cleat#1746: a baseline key the scan no longer produces must be REPORTED.
+  # Driven against a fixture baseline, because on a healthy tree "no stale
+  # entries" and "the check does not run" print identically -- which is exactly
+  # how this went unnoticed while develop carried one.
+  local fixture="$tmp/baseline.txt"
+  printf 'pkg\tTestPlainFunction\t1\npkg\tGoneAway\t2\npkg\tMySQLBackend.Setup\t1\n' > "$fixture"
+  local scan_out
+  scan_out="$(printf 'pkg\tTestPlainFunction\t1\npkg\tMySQLBackend.Setup\t1\n')"
+
+  local got
+  got="$(stale_entries "$scan_out" "$fixture")"
+  if ! grep -qF 'GoneAway' <<< "$got"; then
+    echo "SELF-TEST FAILED: a baseline entry the scan does not produce was not reported stale" >&2
+    ok=1
+  fi
+  # The negative control, and it is the half that catches an over-eager check:
+  # keys the scan DOES produce must not be reported, or every run fails and the
+  # guard gets switched off.
+  if grep -qE 'TestPlainFunction|MySQLBackend' <<< "$got"; then
+    echo "SELF-TEST FAILED: a live baseline entry was reported stale" >&2
+    ok=1
+  fi
+  # Prefix safety: `pkg Setup` must not be satisfied by `pkg SetupForTenant`.
+  # This file has four live keys with that shape.
+  printf 'pkg\tSetup\t1\n' > "$fixture"
+  if ! grep -qF 'Setup	1' <<< "$(stale_entries "$(printf 'pkg\tSetupForTenant\t1\n')" "$fixture")"; then
+    echo "SELF-TEST FAILED: a key matched a longer key sharing its prefix" >&2
+    ok=1
+  fi
+
+  if [ "$ok" -eq 0 ]; then
+    echo "self-test passed"
+  fi
+  return "$ok"
+}
+
 case "${1:-}" in
+  --self-test)
+    self_test
+    exit $?
+    ;;
   --update)
     fresh="$(scan)"
     die_if_scan_failed "$fresh"
@@ -200,6 +392,16 @@ die_if_scan_failed "$current"
 # and the CI runner.
 new="$(printf '%s\n' "$current" | grep -Fxv -f "$BASELINE" || true)"
 
+# AND THE OTHER DIRECTION, which this script did not compute until cleat#1746.
+# `new` is `current - BASELINE`. A baseline key the scanner no longer produces
+# AT ALL appears in neither set: not added, not grown, not even shrunk, because
+# every one of those is derived from a line that is present in `current`.
+#
+# So a grant covering something that is not there was invisible, and the guard
+# exited 0 over it. The skip LEDGER next door has always checked this -- "a line
+# matching fewer is stale ... and fails" -- and the baseline did not.
+stale="$(stale_entries "$current")"
+
 # An entry can be "new" for two different reasons, and they deserve different
 # messages: a function that had no skips before, or one whose count changed.
 # A count that fell is progress, so it is reported and not failed on.
@@ -233,6 +435,23 @@ if [ -n "$grown" ]; then
   echo "ERROR: skip count grew in:" >&2
   echo >&2
   printf '%s' "$grown" | sed 's/^/  /' >&2
+  status=1
+fi
+
+if [ -n "$stale" ]; then
+  echo "ERROR: baseline entries that match nothing in the tree:" >&2
+  echo >&2
+  printf '%s' "$stale" | sed 's/^/  /' >&2
+  echo >&2
+  echo "Each of these grants a skip for a function the scan no longer reports." >&2
+  echo "That is either progress -- the test was deleted or stopped skipping --" >&2
+  echo "or a stale regeneration that silently reinstated an older scan. Both" >&2
+  echo "are fixed the same way, and the point of failing is that the second" >&2
+  echo "one is otherwise invisible:" >&2
+  echo "  scripts/check-skips.sh --update" >&2
+  echo >&2
+  echo "cleat#1746: a baseline regenerated from a base that predates a change" >&2
+  echo "to this scanner merges CLEANLY over the newer one and reverts it." >&2
   status=1
 fi
 

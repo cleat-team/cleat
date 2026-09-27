@@ -27,10 +27,19 @@ Usage::
     run_id = host.child_workflow("order_processor", {"order_id": "ord-42"})
     result = host.await_child(run_id)
 
-**MVP note:** The 29 module-level ``_import_*`` functions are stubs that raise
-:exc:`NotImplementedError`.  They are replaced by actual WASM FFI functions
-when the SDK runs inside a cleat WASM runtime.  The stubs allow the SDK to be
-imported and tested without WASM.
+**Import stubs.** The module binds 48 host functions from the WIT bindings in
+a ``try`` at the top of this file, and defines ``NotImplementedError`` stubs in
+the matching ``except ImportError:`` so the SDK can be imported and tested
+without WASM.
+
+This note said "the 29 module-level ``_import_*`` functions" until 2026-09-13
+and every part of that was wrong. There are **7** module-level ``_import_*``
+definitions, not 29, and being module-level is a defect rather than the design:
+six of the seven shadow an import that succeeded higher up the file, so those
+six host calls raise ``NotImplementedError`` even inside the WASM runtime. See
+cleat#1432. The stubs that are correct are the indented ones inside the
+``except`` block; ``_import_cleat_extend_timeout`` is the only module-level one
+that shadows nothing.
 """
 
 from __future__ import annotations
@@ -42,6 +51,7 @@ from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 from .memory import (
+    CALL_SUSPEND_SENTINEL,
     OUT_BUF_SIZE,
     OUTPUT_OFFSET,
     SCRATCH_BASE,
@@ -49,13 +59,13 @@ from .memory import (
     SUSPEND_SENTINEL,
     decode_await_promise_result,
     decode_await_signals_result,
-    decode_cleat_call_result,
     decode_dual_string_result,
     decode_simple_result,
     decode_sleep_result,
     read_string,
     write_string,
 )
+from .signal_envelope import decode_signal_envelope, encode_signal_envelope
 
 # Message for host calls that have no WIT binding at all.
 #
@@ -83,6 +93,12 @@ _NO_WIT_BINDING = (
 # when not running in WASM ― the stubs are replaced by real WASM FFI
 # functions at runtime via the componentize-py host adaptor.
 try:
+    # The outcome types (wit/cleat.wit, interface `outcomes`). A host call that
+    # can be stopped or can fail returns `result<string, call-failure>`, which
+    # componentize-py lifts into "return the string, or raise Err(CallFailure)".
+    # That is what makes a stop unrepresentable as a response: there is no
+    # string a service could return that arrives here as one.
+    from componentize_py_types import Err as _WitErr
     from wit_world.imports.durable_call import (
         durable_call as _import_cleat_call,
     )
@@ -96,6 +112,9 @@ try:
         durable_await_all_children as _import_cleat_await_all_children,
     )
     from wit_world.imports.durable_children import (
+        durable_await_any_child as _import_cleat_await_any_child,
+    )
+    from wit_world.imports.durable_children import (
         durable_await_child as _import_cleat_await_child,
     )
     from wit_world.imports.durable_children import (
@@ -103,6 +122,9 @@ try:
     )
     from wit_world.imports.durable_children import (
         durable_child_workflow_with_options as _import_cleat_child_workflow_with_options,
+    )
+    from wit_world.imports.durable_children import (
+        durable_poll_child as _import_cleat_poll_child,
     )
     from wit_world.imports.durable_cron import (
         durable_delete_cron as _import_cleat_delete_cron,
@@ -113,17 +135,23 @@ try:
     from wit_world.imports.durable_cron import (
         durable_schedule_cron as _import_cleat_schedule_cron,
     )
-    from wit_world.imports.durable_extended_children import (
-        child_workflow_in_schema as _import_child_workflow_in_schema,
-    )
     from wit_world.imports.durable_extended_lifecycle import (
         continue_as_new_versioned as _import_continue_as_new_versioned,
+    )
+    from wit_world.imports.durable_extended_lifecycle import (
+        durable_run_detached as _import_cleat_run_detached,
     )
     from wit_world.imports.durable_extended_lifecycle import (
         side_effect as _import_side_effect,
     )
     from wit_world.imports.durable_fetch import (
         fetch as _import_fetch,
+    )
+    from wit_world.imports.durable_handlers import (
+        durable_complete_update as _import_cleat_complete_update,
+    )
+    from wit_world.imports.durable_handlers import (
+        durable_poll_update as _import_cleat_poll_update,
     )
     from wit_world.imports.durable_handlers import (
         durable_register_update_handler as _import_cleat_register_update_handler,
@@ -139,6 +167,9 @@ try:
     )
     from wit_world.imports.durable_lifecycle import (
         durable_defer as _import_cleat_defer,
+    )
+    from wit_world.imports.durable_lifecycle import (
+        durable_defer_phase as _import_cleat_defer_phase,
     )
     from wit_world.imports.durable_lifecycle import (
         durable_poll_cancellation as _import_cleat_poll_cancellation,
@@ -183,12 +214,6 @@ try:
         durable_poll_signal as _import_cleat_poll_signal,
     )
     from wit_world.imports.durable_signals import (
-        durable_reply_to_signal as _import_cleat_reply_to_signal,
-    )
-    from wit_world.imports.durable_signals import (
-        durable_send_signal_and_wait as _import_cleat_send_signal_and_wait,
-    )
-    from wit_world.imports.durable_signals import (
         durable_signal_workflow as _import_cleat_signal_workflow,
     )
     from wit_world.imports.durable_sleep import (
@@ -206,29 +231,14 @@ try:
     from wit_world.imports.durable_state import (
         set_query_state as _import_set_query_state,
     )
-    from wit_world.imports.durable_stream_state import (
-        delete_state as _import_stream_delete_state,
-    )
-    from wit_world.imports.durable_stream_state import (
-        get_state as _import_stream_get_state,
-    )
-    from wit_world.imports.durable_stream_state import (
-        has_state as _import_stream_has_state,
-    )
-    from wit_world.imports.durable_stream_state import (
-        incr_state as _import_stream_incr_state,
-    )
-    from wit_world.imports.durable_stream_state import (
-        list_state as _import_stream_list_state,
-    )
-    from wit_world.imports.durable_stream_state import (
-        set_state as _import_stream_set_state,
-    )
     from wit_world.imports.durable_version import (
         durable_min_version as _import_cleat_min_version,
     )
     from wit_world.imports.durable_version import (
         durable_version as _import_cleat_version,
+    )
+    from wit_world.imports.outcomes import (
+        CallFailure_Suspended as _CallFailureSuspended,
     )
     from wit_world.imports.plugin import (
         plugin_call as _import_plugin_call,
@@ -240,6 +250,20 @@ try:
     _USING_WASM = True
 except ImportError:
     _USING_WASM = False
+
+    class _WitErr(Exception):  # type: ignore[no-redef]
+        """Stand-in for componentize-py's Err outside the WASM runtime.
+
+        Never raised here: the import stubs below raise NotImplementedError
+        long before any host call could fail. It exists so ``except _WitErr``
+        in the call paths is a legal expression when the bindings are absent,
+        rather than each of them needing a ``_USING_WASM`` branch.
+        """
+
+        value: Any = None
+
+    class _CallFailureSuspended:  # type: ignore[no-redef]
+        """Stand-in for the suspended case outside the WASM runtime."""
 
 
 T = TypeVar("T")
@@ -320,6 +344,71 @@ _CALL_ERROR_CODE_MAP: dict[int, type[CleatCallError]] = {
     5: CleatCallPermanentError,  # CallErrorPermissionDenied
 }
 
+def _unwrap_call_result(service: str, operation: str, result: Any) -> str:
+    """Return a host call's response, or raise for the two cases that are not one.
+
+    Every WIT host call that can be stopped or can fail returns
+    ``result<string, call-failure>``. componentize-py turns the ``err`` case
+    into a raised ``Err`` whose ``.value`` is the ``call-failure`` variant, so
+    this is only ever reached with a plain response -- the raise is handled by
+    :func:`_call_or_raise` around it. This function exists for the *ok* half
+    and for the one thing that half must still not do: treat an error string as
+    a response.
+
+    It used to. ``durable-call`` returned a bare ``string`` documented as
+    carrying ``__CLEAT_ERROR__:`` on failure, and six call sites in this file
+    checked for that prefix -- against a host that has never written it. A
+    failed call arrived as an ordinary successful response holding the error
+    text, and a stopped one as an empty successful response. Both are gone with
+    the prefix; see IMPROVEMENT-PLAN 3.110.
+    """
+    if isinstance(result, str):
+        return result
+    # Not a string and not an Err: the packed-i64 ABI, from a core-module
+    # build. Left to the caller, which knows the layout its import uses.
+    raise TypeError(f"{service}.{operation} returned {type(result).__name__}, not a response string")
+
+
+def _raise_call_failure(service: str, operation: str, failure: Any) -> None:
+    """Raise for a ``call-failure``: a stop unwinds, a failure is an error.
+
+    ``suspended`` is not an error and must not be reported as one. The host
+    returns it for a call the workflow BODY makes past the frontier of a defer
+    segment -- the segment exists to run a terminated workflow's cleanup, and
+    the guest has to unwind so the host can drain the defer table on the
+    instance that still holds the closures. Raising :class:`SuspendSentinel` is
+    what does that: ``@cleat_entry`` catches it and reports
+    ``run-outcome.suspended`` without draining.
+    """
+    if isinstance(failure, _CallFailureSuspended):
+        raise SuspendSentinel()
+
+    # The other case is ``failed(call-error)``, whose payload carries the
+    # message and the host's ``callErrorCode``. The code is what picks the
+    # retryable or the permanent subclass, and the component path used to drop
+    # it -- so a Python workflow could not have told a timeout from a bad
+    # request even if it had seen the failure at all.
+    err = getattr(failure, "value", None)
+    code = getattr(err, "code", 0)
+    message = getattr(err, "message", None)
+    if message is None:
+        message = str(failure)
+    exc_cls = _CALL_ERROR_CODE_MAP.get(code, CleatCallError)
+    raise exc_cls(
+        service=service, operation=operation, message=message, call_error_code=code
+    )
+
+
+def _call_or_raise(service: str, operation: str, fn: Callable[..., Any], *args: Any) -> str:
+    """Invoke a WIT host call and turn its ``err`` case into the right exception."""
+    try:
+        result = fn(*args)
+    except _WitErr as err:
+        _raise_call_failure(service, operation, err.value)
+        raise  # unreachable; _raise_call_failure always raises
+    return _unwrap_call_result(service, operation, result)
+
+
 # Human-readable names for call error codes, matching _CALL_ERROR_CODE_MAP.
 _CALL_ERROR_NAMES: dict[int, str] = {
     0: "CallErrorUnknown",
@@ -329,6 +418,66 @@ _CALL_ERROR_NAMES: dict[int, str] = {
     4: "CallErrorInvalidRequest",
     5: "CallErrorPermissionDenied",
 }
+
+
+def _raise_if_stopped(result: int) -> None:
+    """Unwind if the host refused this call because the workflow is stopping.
+
+    Must be called before any field of ``result`` is decoded. Bit 31 is free in
+    every layout the host can pack -- "free" meaning the host cannot produce it
+    as an ordinary value, NOT that a field decode would ignore it. In the
+    await-signals layout it sits inside the timed-out field, so a decoder that
+    reads its fields first turns a stop into a timeout and carries on.
+
+    This is the Python half of ``callSuspendSentinel`` (``engine/memory.go``).
+    The Go SDK's half is ``suspendSentinelStmts`` in ``wasm/adapter_metadata.go``,
+    which is prefixed onto every guarded decoder by ``withSuspendCheck`` for the
+    same reason this is a function rather than a line copied to each site.
+    """
+    if result & CALL_SUSPEND_SENTINEL:
+        raise SuspendSentinel()
+
+
+def _check_host_result(result: int, what: str) -> int:
+    """Decode a packed host result word, raising on a stop or an error.
+
+    Every host import that returns a scalar goes through here, so the two
+    checks happen in one place and in one order rather than at each call site.
+
+    Order is load-bearing: the stop sentinel is tested FIRST, by mask, before
+    any field of the word is read. Bit 31 is a legal-looking value in several
+    of the layouts the host packs -- in the await-signals layout it sits inside
+    the timed-out field -- so a decoder that reads its fields first sees an
+    ordinary result and carries on past a stop it was supposed to obey. See
+    ``callSuspendSentinel`` in ``engine/memory.go``.
+
+    Parameters
+    ----------
+    result : int
+        The raw word the host import returned.
+    what : str
+        Call description used in the error message, e.g.
+        ``"signal_workflow(target_run_id='abc')"``.
+
+    Returns
+    -------
+    int
+        The word's upper 32 bits, which some callers use as a length or flag.
+        Callers that have nothing to read may ignore it.
+
+    Raises
+    ------
+    SuspendSentinel
+        If the host refused the call because the workflow is stopping.
+    RuntimeError
+        If the host reported a non-zero error code.
+    """
+    r = result & 0xFFFFFFFFFFFFFFFF
+    _raise_if_stopped(r)
+    err_code = r & 0xFF
+    if err_code != 0:
+        raise RuntimeError(f"{what} failed: {_error_code_name(err_code)} (code {err_code})")
+    return r >> 32
 
 
 def _error_code_name(code: int) -> str:
@@ -394,6 +543,17 @@ class SignalResult:
 
     timed_out: bool
     """``True`` if the timeout expired before any signal arrived."""
+
+    reply_to: str = ""
+    """Address to answer this signal at.
+
+    Non-empty only when the sender used :meth:`HostCalls.send_signal_and_wait`
+    and is suspended waiting for a reply; pass it to
+    :meth:`HostCalls.reply_to_signal`. A signal sent with
+    :meth:`HostCalls.signal_workflow` leaves it empty, which is how a receiver
+    tells a request that wants an answer from a one-way notification.
+    IMPROVEMENT-PLAN 3.220.
+    """
 
 
 @dataclass
@@ -527,6 +687,27 @@ if not _USING_WASM:
     def _import_cleat_defer(desc: str) -> str:
         """Stub for WASM import ``(import "env" "cleat_defer") (param i32 i32 i32 i32) (result i64)``."""
         raise NotImplementedError("cleat_defer can only be called within a cleat WASM runtime.")
+
+    def _import_cleat_defer_phase(on: bool) -> None:
+        """No-op stub for ``cleat_defer_phase`` off-WASM.
+
+        A NO-OP rather than a ``NotImplementedError``, unlike every other stub
+        in this block, and the difference is deliberate.
+
+        ``run_deferred`` is called directly by this SDK's own tests
+        (tests/test_defer.py, tests/test_call_outcomes.py), which run on
+        CPython with no host. Raising here would break them -- which is
+        precisely what happened in the other four SDKs when cleat#1155 added
+        this call: Rust needed a ``cfg`` gate, AssemblyScript an as-pect stub,
+        and Java a ``catch``. Three symptoms, one cause: a host call on a path
+        an SDK's unit tests reach fails wherever there is no WASM host.
+
+        Silence is safe for THIS call specifically because nothing reads its
+        result and it records no event. A guest that never reports the defer
+        phase gets the behaviour every language had before cleat#1155 -- the
+        pre-existing defect rather than a new one. It would be the wrong choice
+        for a stub whose return value the caller uses. cleat#1237.
+        """
 
 
 # -- 8. cleat_poll_cancellation ---------------------------------------------
@@ -821,6 +1002,24 @@ if not _USING_WASM:
         )
 
 
+# -- 26a. cleat_poll_update / cleat_complete_update --------------------------
+
+
+if not _USING_WASM:
+
+    def _import_cleat_poll_update() -> str:
+        """Stub for WASM import ``(import "env" "cleat_poll_update") (param i32 i32) (result i64)``."""
+        raise NotImplementedError(
+            "cleat_poll_update can only be called within a cleat WASM runtime."
+        )
+
+    def _import_cleat_complete_update(request_id: str, outcome: str, err: str) -> int:
+        """Stub for WASM import ``(import "env" "cleat_complete_update") (param i32 i32 i32 i32 i32 i32) (result i64)``."""
+        raise NotImplementedError(
+            "cleat_complete_update can only be called within a cleat WASM runtime."
+        )
+
+
 # -- 27. cleat_workflow_id ---------------------------------------------------
 
 
@@ -871,28 +1070,13 @@ if not _USING_WASM:
 # is no RegisterQueryHandler". Use set_query_state instead.
 
 
-# -- 32. cleat_send_signal_and_wait ----------------------------------------------
-
-
-if not _USING_WASM:
-
-    def _import_cleat_send_signal_and_wait(target_run_id: str, signal_name: str, payload: str, timeout_ms: int) -> str:
-        """Stub for WASM import ``(import "env" "cleat_send_signal_and_wait") (param i32 i32 i32 i32 i32 i32 i64 i32 i32) (result i64)``."""
-        raise NotImplementedError(
-            "cleat_send_signal_and_wait can only be called within a cleat WASM runtime."
-        )
-
-
-# -- 33. cleat_reply_to_signal ---------------------------------------------------
-
-
-if not _USING_WASM:
-
-    def _import_cleat_reply_to_signal(correlation_id: str, response: str) -> int:
-        """Stub for WASM import ``(import "env" "cleat_reply_to_signal") (param i32 i32 i32 i32) (result i64)``."""
-        raise NotImplementedError(
-            "cleat_reply_to_signal can only be called within a cleat WASM runtime."
-        )
+# There is no _import_cleat_send_signal_and_wait or
+# _import_cleat_reply_to_signal here (removed 2026-09-06, previously ABI
+# 2.23 / 2.24). Both host calls were inert engine-side -- send_signal_and_wait
+# never delivered the signal it then waited for -- and request/reply is now
+# composed from create_promise + signal_workflow + await_promise +
+# resolve_promise (IMPROVEMENT-PLAN 3.220). The WIT declarations went with
+# them, so a Python component no longer imports either name.
 
 
 # -- 34. cleat_signal_workflow ---------------------------------------------------
@@ -910,6 +1094,96 @@ if not _USING_WASM:
 # ========================================================================
 # HostCalls — high-level wrapper
 # ========================================================================
+
+
+def _quorum_over(
+    signal_names: list[str],
+    min_count: int,
+    max_rejections: int,
+    remaining_ms: Callable[[], int],
+    await_signals: Callable[[list[str], int], SignalResult],
+) -> list[SignalResult]:
+    """The quorum loop itself, over an injected ``await_signals``.
+
+    Split out from :meth:`HostCalls.await_signals_with_quorum` so it can be
+    TESTED without a host. cleat#1132 was a logic defect in this loop, present
+    in all five SDKs at once, and no test in any language could reach the logic
+    to fail on it. The shared cases live in ``tests/conformance/quorum_cases.json``
+    and every SDK runs them (cleat#1136).
+
+    ``remaining_ms`` is injected for the same reason and is not a clock
+    abstraction -- tests hand it a constant so the deadline never fires,
+    leaving the host's own ``timed_out`` as the only source of a timeout.
+    """
+    # A quorum of N over a set of M names is unsatisfiable when N > M, and it
+    # used to spin to the timeout and report "got k/N signals" -- a message
+    # that describes a slow sender rather than a caller asking for something
+    # arithmetic forbids. Once names narrow it is guaranteed to fail, so it is
+    # refused here as the programming error it is.
+    if min_count > len(signal_names):
+        raise RuntimeError(
+            f"await_signals_with_quorum: quorum of {min_count} over "
+            f"{len(signal_names)} name(s) {signal_names} is unsatisfiable; "
+            f"a quorum counts DISTINCT names, so it cannot exceed the size of the set"
+        )
+
+    results: list[SignalResult] = []
+    rejection_count = 0
+
+    # COPIED, not aliased. ``remaining`` narrows below and ``signal_names``
+    # belongs to the caller -- a workflow may still be holding that list.
+    remaining = list(signal_names)
+
+    while len(results) < min_count:
+        wait_ms = remaining_ms()
+        if wait_ms <= 0:
+            raise RuntimeError(f"quorum timeout: got {len(results)}/{min_count} signals")
+
+        result = await_signals(list(remaining), wait_ms)
+        if result.timed_out:
+            raise RuntimeError(f"quorum timeout: got {len(results)}/{min_count} signals")
+
+        # A name outside the requested set has not been asked for, and counting
+        # it would reinstate the defect through the other door: narrowing what
+        # we ASK for is only half the fix if we accept whatever arrives.
+        #
+        # A well-behaved host returns one of the names it was given, so this is
+        # unreachable through the engine's own await. It is here because the fix
+        # must not rest on that politeness.
+        if result.name not in remaining:
+            raise RuntimeError(
+                f"await_signals_with_quorum: awaited {remaining} and received "
+                f"{result.name!r}, which is not among them; a quorum counts "
+                f"distinct names and cannot count this one"
+            )
+
+        results.append(result)
+
+        # Narrow the set: this name has voted, and a quorum counts VOTERS.
+        #
+        # Without this, the full ``signal_names`` went to every await, so three
+        # deliveries of one name satisfied a quorum of three with the other two
+        # never sent (cleat#1132).
+        #
+        # A rejection narrows too. A voter that votes no has voted, and leaving
+        # it in the set would let one rejector trip ``max_rejections`` alone --
+        # the same defect wearing the other outcome.
+        remaining.remove(result.name)
+
+        # Check for rejection if max_rejections >= 0.
+        if max_rejections >= 0 and result.payload:
+            try:
+                payload_data = json.loads(result.payload)
+                if isinstance(payload_data, dict) and payload_data.get("rejected"):
+                    rejection_count += 1
+                    if rejection_count > max_rejections:
+                        raise RuntimeError(
+                            f"quorum exceeded max rejections ({max_rejections})"
+                        )
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    return results
 
 
 class HostCalls:
@@ -931,6 +1205,8 @@ class HostCalls:
         self._update_handlers: dict[
             str, tuple[Callable[[str], str], Callable[[str], bool] | None]
         ] = {}
+        # Reentrancy guard for dispatch_updates; see there.
+        self._dispatching_updates = False
         self._scope_prefix: str = ""
 
     # --------------------------------------------------------------------
@@ -1196,6 +1472,11 @@ class HostCalls:
         message : str
             The log message to record.
         """
+        # Not checked, and not an oversight. DurableLog is non-durable
+        # host-side (engine/durablecalls.go): it records no event, does no
+        # replay matching, and returns 0 unconditionally, so there is nothing
+        # for a check to read. Raising out of a log call would also be a poor
+        # trade even if the host could report something.
         _import_cleat_log(message)
 
     # --------------------------------------------------------------------
@@ -1288,7 +1569,10 @@ class HostCalls:
             non_retryable_str = "[]"
             backoff_100x = 100  # 1.0 * 100
 
-            result = _import_cleat_call_retry(
+            return _call_or_raise(
+                service,
+                operation,
+                _import_cleat_call_retry,
                 service,
                 operation,
                 req_str,
@@ -1298,39 +1582,10 @@ class HostCalls:
                 timeout_ms,
                 non_retryable_str,
             )
-            if isinstance(result, str):
-                if result.startswith("__CLEAT_ERROR__:"):
-                    err_msg = result[len("__CLEAT_ERROR__:"):]
-                    self._raise_for_call_error(service, operation, err_msg, 0)
-                return result
-            # Old packed-i64 ABI for the retry path.
-            response_len, call_error_code, err_code = decode_cleat_call_result(result)
-            if err_code != 0:
-                err_msg = read_string(OUTPUT_OFFSET, response_len)
-                if call_error_code != 0:
-                    self._raise_for_call_error(service, operation, err_msg, call_error_code)
-                raise RuntimeError(f"call({service}.{operation}) failed: {err_msg}")
-            return read_string(OUTPUT_OFFSET, response_len)
         else:
-            # String ABI: durable-call returns response directly as a string.
-            result = _import_cleat_call(
-                service,
-                operation,
-                req_str,
+            return _call_or_raise(
+                service, operation, _import_cleat_call, service, operation, req_str
             )
-            if isinstance(result, str):
-                if result.startswith("__CLEAT_ERROR__:"):
-                    err_msg = result[len("__CLEAT_ERROR__:"):]
-                    raise RuntimeError(f"call({service}.{operation}) failed: {err_msg}")
-                return result
-            # Fallback: old packed-i64 ABI for non-string result.
-            response_len, call_error_code, err_code = decode_cleat_call_result(result)
-            if err_code != 0:
-                err_msg = read_string(OUTPUT_OFFSET, response_len)
-                if call_error_code != 0:
-                    self._raise_for_call_error(service, operation, err_msg, call_error_code)
-                raise RuntimeError(f"call({service}.{operation}) failed: {err_msg}")
-            return read_string(OUTPUT_OFFSET, response_len)
 
     # --------------------------------------------------------------------
     # 7. call_typed — typed recorded API call
@@ -1408,7 +1663,10 @@ class HostCalls:
         non_retryable_str = json.dumps(retry.non_retryable_errors)
         backoff_100x = round(retry.backoff_coefficient * 100)
 
-        result = _import_cleat_call_retry(
+        return _call_or_raise(
+            service,
+            operation,
+            _import_cleat_call_retry,
             service,
             operation,
             req_str,
@@ -1418,21 +1676,6 @@ class HostCalls:
             retry.max_interval_ms,
             non_retryable_str,
         )
-
-        if isinstance(result, str):
-            if result.startswith("__CLEAT_ERROR__:"):
-                err_msg = result[len("__CLEAT_ERROR__:"):]
-                self._raise_for_call_error(service, operation, err_msg, 0)
-            return result
-
-        response_len, call_error_code, err_code = decode_cleat_call_result(result)
-        if err_code != 0:
-            err_msg = read_string(OUTPUT_OFFSET, response_len)
-            if call_error_code != 0:
-                self._raise_for_call_error(service, operation, err_msg, call_error_code)
-            raise RuntimeError(f"call_with_retry({service}.{operation}) failed: {err_msg}")
-
-        return read_string(OUTPUT_OFFSET, response_len)
 
     # --------------------------------------------------------------------
     # 9. call_with_heartbeat — long-running call with progress
@@ -1444,14 +1687,17 @@ class HostCalls:
         operation: str,
         request: Any,
         heartbeat_interval_ms: int,
-        progress: Callable[[str], None],
     ) -> str:
-        """Make a cleat call with periodic heartbeat / progress updates.
+        """Make a cleat call, heartbeating the claim while it runs.
 
-         The host sends periodic progress updates while the call is running.
-         Each progress update is delivered to the *progress* callback as a
-         JSON string.  (In the current MVP the callback is accepted but not
-        invoked by the stub; it will be wired in a future runtime.)
+         The host heartbeats every *heartbeat_interval_ms* so a call that
+         outlives the ordinary lease is not reaped as a stale instance.
+
+         This took a *progress* callback until cleat#854. It could never be
+         invoked: the guest is suspended inside the ``cleat_call_heartbeat``
+         import for the whole call, so there is no moment at which the host
+         could run guest code, and this method never passed it to the import
+         in the first place. Rust's equivalent never took one.
 
          Parameters
          ----------
@@ -1463,8 +1709,6 @@ class HostCalls:
              Request payload (dict or str).
          heartbeat_interval_ms : int
              Heartbeat interval in milliseconds.
-         progress : Callable[[str], None]
-             Callback invoked with progress JSON strings from the host.
 
          Returns
          -------
@@ -1478,24 +1722,15 @@ class HostCalls:
         """
         req_str = self._marshal(request)
 
-        result = _import_cleat_call_heartbeat(service, operation, req_str, heartbeat_interval_ms)
-
-        if isinstance(result, str):
-            if result.startswith("__CLEAT_ERROR__:"):
-                err_msg = result[len("__CLEAT_ERROR__:"):]
-                self._raise_for_call_error(service, operation, err_msg, 0)
-            return result
-
-        response_len, call_error_code, err_code = decode_cleat_call_result(result)
-        if err_code != 0:
-            err_msg = read_string(OUTPUT_OFFSET, response_len)
-            if call_error_code != 0:
-                self._raise_for_call_error(service, operation, err_msg, call_error_code)
-            raise RuntimeError(
-                f"call_with_heartbeat({service}.{operation}) failed: {err_msg}"
-            )
-
-        return read_string(OUTPUT_OFFSET, response_len)
+        return _call_or_raise(
+            service,
+            operation,
+            _import_cleat_call_heartbeat,
+            service,
+            operation,
+            req_str,
+            heartbeat_interval_ms,
+        )
 
     # --------------------------------------------------------------------
     # 10. sleep — suspend for a duration
@@ -1553,6 +1788,7 @@ class HostCalls:
         SuspendSentinel
             If the workflow should suspend (fresh execution).
         """
+        self.dispatch_updates()  # dispatch point; see dispatch_updates
         result = _import_cleat_sleep(timeout_ms)
 
         # Some host runtimes return SUSPEND_SENTINEL directly.
@@ -1800,6 +2036,7 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
+        self.dispatch_updates()  # dispatch point; see dispatch_updates
         names_json = json.dumps(signal_names)
 
         # Support indefinite wait: timeout_ms <= 0 means "wait forever".
@@ -1820,8 +2057,20 @@ class HostCalls:
             payload_max,
         )
 
-        # Host returns SUSPEND_SENTINEL when no signal is available and a
-        # non-zero timeout was specified.
+        # The stop sentinel, tested FIRST and by mask, before any field of the
+        # word below is read. This is not the same value as SUSPEND_SENTINEL
+        # and the difference is the entire defect this guards:
+        # DurableAwaitSignals is a stop site -- `stopBeforeNewWork` returns
+        # `callSuspendSentinel` (engine/signaller.go) because a fresh await
+        # inside a defer segment would leave a terminated workflow waiting for
+        # a signal instead of finishing its cleanup. callSuspendSentinel is bit
+        # 31, and bit 31 lands inside this layout's timed-out field: decoding
+        # first gives timed_out=True with err_code=0, an ORDINARY RESULT, and
+        # the workflow runs on past a stop it was told to obey.
+        _raise_if_stopped(result)
+
+        # SUSPEND_SENTINEL (1 << 62) is the older, unrelated case: no signal
+        # available with a non-zero timeout. Whole-word, not a mask.
         if result == SUSPEND_SENTINEL:
             raise SuspendSentinel()
 
@@ -1836,7 +2085,17 @@ class HostCalls:
             read_string(payload_offset, payload_len) if not timed_out and payload_len > 0 else ""
         )
 
-        return SignalResult(name=sig_name, payload=payload, timed_out=timed_out)
+        # Strip the reply envelope, if this is a request/reply signal, so the
+        # receiver reads its payload exactly as the sender passed it and gets
+        # the address separately rather than having to parse it out.
+        reply_to = ""
+        unwrapped = decode_signal_envelope(payload)
+        if unwrapped is not None:
+            reply_to, payload = unwrapped
+
+        return SignalResult(
+            name=sig_name, payload=payload, timed_out=timed_out, reply_to=reply_to
+        )
 
     # --------------------------------------------------------------------
     # 13. poll_signal — non-blocking signal check
@@ -1917,7 +2176,9 @@ class HostCalls:
             If the host reports an error starting the child.
         """
         input_str = self._marshal(input)
-        return _import_cleat_child_workflow(name, input_str)
+        return _call_or_raise(
+            "child-workflow", name, _import_cleat_child_workflow, name, input_str
+        )
 
     def child_workflow_with_options(
         self, name: str, input: Any, options: ChildWorkflowOptions | None = None
@@ -1950,56 +2211,16 @@ class HostCalls:
         if options is None:
             options = ChildWorkflowOptions()
         input_str = self._marshal(input)
-        return _import_cleat_child_workflow_with_options(name, input_str, options.version, options.priority, "")
-
-    # --------------------------------------------------------------------
-    # 15b. child_workflow_in_schema — cross-instance child workflow
-    # --------------------------------------------------------------------
-
-    def child_workflow_in_schema(
-        self,
-        schema: str,
-        name: str,
-        input: Any,
-        version: int = 0,
-        priority: int = 0,
-        policy: str = "",
-    ) -> str:
-        """Start a child workflow in a different schema (cross-instance).
-
-        Calls the host ``durable-extended-children.child-workflow-in-schema``
-        import.  The child runs in the specified schema namespace, enabling
-        cross-instance workflow cooperation.
-
-        Parameters
-        ----------
-        schema : str
-            Target schema name for the child workflow.
-        name : str
-            Child workflow definition name.
-        input : Any
-            Input for the child workflow.  Dicts are JSON-serialised
-            automatically.
-        version : int
-            Explicit workflow definition version (0 = host default).
-        priority : int
-            Scheduling priority (0 = highest).
-        policy : str
-            Parent-close policy (e.g. ``"abandon"``, ``"terminate"``).
-            Empty string means host default.
-
-        Returns
-        -------
-        str
-            The child workflow's run ID.
-
-        Raises
-        ------
-        RuntimeError
-            If the host reports an error starting the child.
-        """
-        input_str = self._marshal(input)
-        return _import_child_workflow_in_schema(schema, name, input_str, version, priority, policy)
+        return _call_or_raise(
+            "child-workflow",
+            name,
+            _import_cleat_child_workflow_with_options,
+            name,
+            input_str,
+            options.version,
+            options.priority,
+            "",
+        )
 
     # --------------------------------------------------------------------
     # 16. await_child — wait for a child workflow
@@ -2028,6 +2249,7 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
+        self.dispatch_updates()  # dispatch point; see dispatch_updates
         return _import_cleat_await_child(run_id)
 
     # --------------------------------------------------------------------
@@ -2060,6 +2282,64 @@ class HostCalls:
         results_data = json.loads(results_json)
         return [ChildResult(**item) for item in results_data]
 
+    def await_any_child(self, run_ids: list[str]) -> ChildResult:
+        """Wait for the FIRST of several child workflows to complete.
+
+        Distinct from :meth:`await_all_children`, which waits for every one:
+        this returns as soon as any single child finishes, which is the
+        primitive a race or a first-wins fan-out needs.
+
+        Parameters
+        ----------
+        run_ids : list[str]
+            Child workflow run IDs to race.
+
+        Returns
+        -------
+        ChildResult
+            The first child to complete.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error.
+        """
+        result_json = _import_cleat_await_any_child(json.dumps(run_ids))
+        if not result_json:
+            raise RuntimeError(
+                f"await_any_child(run_ids={run_ids!r}) returned nothing. "
+                "The host writes the winning child's result here, so an empty "
+                "response means no child was awaited rather than that none won."
+            )
+        return ChildResult(**json.loads(result_json))
+
+    def poll_child(self, run_id: str) -> ChildResult | None:
+        """Check a child workflow without waiting.
+
+        Non-blocking: unlike :meth:`await_child` this never suspends the
+        workflow. Returns ``None`` while the child is still running.
+
+        Parameters
+        ----------
+        run_id : str
+            The child workflow run ID.
+
+        Returns
+        -------
+        ChildResult | None
+            The child's result once it has completed, otherwise ``None``.
+        """
+        result_json = _import_cleat_poll_child(run_id)
+        if not result_json:
+            return None
+        data = json.loads(result_json)
+        # The host reports a still-running child as a status document rather
+        # than by writing nothing, so "not finished" has to be read out of the
+        # payload rather than inferred from an empty string.
+        if data.get("status") == "running":
+            return None
+        return ChildResult(**data)
+
     # --------------------------------------------------------------------
     # 18. set_query_state — set queryable key-value state
     # --------------------------------------------------------------------
@@ -2077,270 +2357,9 @@ class HostCalls:
         value : str
             Query state value (typically a JSON string).
         """
-        _import_set_query_state(key, value)
-
-    # --------------------------------------------------------------------
-    # 19. set_state — set typed cleat state
-    # --------------------------------------------------------------------
-
-    def set_state(self, key: str, value: Any) -> None:
-        """Set typed cleat state (marshals *value* to JSON).
-
-        Internally delegates to the ``"state"`` service via
-        :meth:`call`.
-
-        Parameters
-        ----------
-        key : str
-            State key.  If a scope is active via :meth:`set_scope`, the
-            key is automatically prefixed with the scope prefix.
-        value : Any
-            State value.  Dicts and lists are JSON-serialised automatically.
-        """
-        self.call("state", "set", {"key": self._scoped_key(key), "value": value})
-
-    # --------------------------------------------------------------------
-    # 20. get_state — get typed cleat state
-    # --------------------------------------------------------------------
-
-    def get_state(self, key: str, result_type: type[T]) -> T:
-        """Get typed cleat state, deserialised into *result_type*.
-
-        Internally delegates to the ``"state"`` service via
-        :meth:`call`.
-
-        Parameters
-        ----------
-        key : str
-            State key.
-        result_type : type[T]
-            Target type for deserialisation.  If the stored value is a JSON
-            object, ``result_type(**data)`` is used.
-
-        Returns
-        -------
-        T
-            An instance of *result_type* constructed from the stored state.
-        """
-        result = self.call("state", "get", {"key": key})
-        data = json.loads(result)
-        if isinstance(data, dict):
-            return result_type(**data)
-        return result_type(data)
-
-    # --------------------------------------------------------------------
-    # 21. delete_state — delete cleat state
-    # --------------------------------------------------------------------
-
-    def delete_state(self, key: str) -> None:
-        """Delete a cleat state key.
-
-        Internally delegates to the ``"state"`` service via
-        :meth:`call`.
-
-        Parameters
-        ----------
-        key : str
-            State key to delete.
-        """
-        self.call("state", "delete", {"key": key})
-
-    # --------------------------------------------------------------------
-    # 22. incr_state — atomically increment numeric state
-    # --------------------------------------------------------------------
-
-    def incr_state(self, key: str, delta: int = 1) -> int:
-        """Atomically increment a numeric cleat state value.
-
-        Internally delegates to the ``"state"`` service via
-        :meth:`call`.
-
-        Parameters
-        ----------
-        key : str
-            State key to increment.
-        delta : int
-            Amount to increment by (default ``1``).
-
-        Returns
-        -------
-        int
-            The new value after incrementing.
-        """
-        result = self.call("state", "incr", {"key": key, "delta": delta})
-        return int(json.loads(result))
-
-    # --------------------------------------------------------------------
-    # 23. has_state — check if a state key exists
-    # --------------------------------------------------------------------
-
-    def has_state(self, key: str) -> bool:
-        """Check if a cleat state key exists.
-
-        Internally delegates to the ``"state"`` service via
-        :meth:`call`.
-
-        Parameters
-        ----------
-        key : str
-            State key to check.
-
-        Returns
-        -------
-        bool
-            ``True`` if the key exists in cleat state.
-        """
-        result = self.call("state", "has", {"key": self._scoped_key(key)})
-        return bool(json.loads(result))
-
-    # --------------------------------------------------------------------
-    # 24. list_state — list state keys by prefix
-    # --------------------------------------------------------------------
-
-    def list_state(self, prefix: str = "") -> list[str]:
-        """List all cleat state keys matching the given prefix.
-
-        Internally delegates to the ``"state"`` service via
-        :meth:`call`.
-
-        Parameters
-        ----------
-        prefix : str
-            Optional prefix to filter keys by.  Empty string lists all
-            keys in the current scope.
-
-        Returns
-        -------
-        list[str]
-            List of matching state keys.
-        """
-        inp: dict = {"prefix": prefix}
-        result = self.call("state", "list", inp)
-        return json.loads(result)
-
-    # --------------------------------------------------------------------
-    # 24b-24g. Stream state operations (durable-stream-state ABI 2.37-2.44)
-    # --------------------------------------------------------------------
-
-    def stream_set_state(self, key: str, value: Any) -> None:
-        """Set a Stream R state key-value pair via the host ABI.
-
-        Calls the host ``durable-stream-state.set-state`` import.
-        Unlike :meth:`set_state` (which routes through the ``"state"``
-        service), this calls the direct WASM import for stream state.
-
-        Parameters
-        ----------
-        key : str
-            State key.
-        value : Any
-            State value.  Dicts are JSON-serialised automatically.
-        """
-        val_str = self._marshal(value)
-        _import_stream_set_state(key, val_str)
-
-    def stream_get_state(self, key: str) -> str:
-        """Get a Stream R state value via the host ABI.
-
-        Calls the host ``durable-stream-state.get-state`` import.
-
-        Parameters
-        ----------
-        key : str
-            State key to retrieve.
-
-        Returns
-        -------
-        str
-            The stored value as a JSON string, or empty string if the key
-            does not exist.
-        """
-        return _import_stream_get_state(key)
-
-    def stream_delete_state(self, key: str) -> None:
-        """Delete a Stream R state key via the host ABI.
-
-        Calls the host ``durable-stream-state.delete-state`` import.
-        """
-        _import_stream_delete_state(key)
-
-    def stream_incr_state(self, key: str, delta: int = 1) -> int:
-        """Atomically increment a Stream R numeric state value via the host ABI.
-
-        Calls the host ``durable-stream-state.incr-state`` import.
-
-        Parameters
-        ----------
-        key : str
-            State key to increment.
-        delta : int
-            Amount to increment by (default ``1``).
-
-        Returns
-        -------
-        int
-            The new value after incrementing.
-        """
-        result = _import_stream_incr_state(key, delta)
-        if isinstance(result, int):
-            return result
-        new_val, err_code = decode_simple_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"stream_incr_state(key='{key}') failed: {_error_code_name(err_code)} (code {err_code})"
-            )
-        return new_val
-
-    def stream_has_state(self, key: str) -> bool:
-        """Check if a Stream R state key exists via the host ABI.
-
-        Calls the host ``durable-stream-state.has-state`` import.
-
-        Parameters
-        ----------
-        key : str
-            State key to check.
-
-        Returns
-        -------
-        bool
-            ``True`` if the key exists.
-        """
-        result = _import_stream_has_state(key)
-        if isinstance(result, int):
-            return bool(result)
-        found, err_code = decode_simple_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"stream_has_state(key='{key}') failed: {_error_code_name(err_code)} (code {err_code})"
-            )
-        return bool(found)
-
-    def stream_list_state(self, prefix: str = "") -> list[str]:
-        """List Stream R state keys by prefix via the host ABI.
-
-        Calls the host ``durable-stream-state.list-state`` import.
-
-        Parameters
-        ----------
-        prefix : str
-            Optional prefix to filter keys by.
-
-        Returns
-        -------
-        list[str]
-            List of matching state keys.
-        """
-        result = _import_stream_list_state(prefix)
-        if isinstance(result, str):
-            return json.loads(result) if result else []
-        list_len, err_code = decode_simple_result(result)
-        if err_code != 0:
-            raise RuntimeError(
-                f"stream_list_state(prefix='{prefix}') failed: {_error_code_name(err_code)} (code {err_code})"
-            )
-        list_json = read_string(OUTPUT_OFFSET, list_len) if list_len > 0 else "[]"
-        return json.loads(list_json)
+        _check_host_result(
+            _import_set_query_state(key, value), f"set_query_state(key={key!r})"
+        )
 
     # --------------------------------------------------------------------
     # 25. create_promise — create a cleat promise
@@ -2423,6 +2442,7 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
+        self.dispatch_updates()  # dispatch point; see dispatch_updates
         result = _import_cleat_await_promise(promise_id, timeout_ms)
 
         if isinstance(result, str):
@@ -2463,7 +2483,10 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        _import_cleat_resolve_promise(promise_id, value)
+        _check_host_result(
+            _import_cleat_resolve_promise(promise_id, value),
+            f"resolve_promise(promise_id={promise_id!r})",
+        )
 
     # --------------------------------------------------------------------
     # 26. reject_promise — reject a cleat promise
@@ -2488,7 +2511,10 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        _import_cleat_reject_promise(promise_id, error)
+        _check_host_result(
+            _import_cleat_reject_promise(promise_id, error),
+            f"reject_promise(promise_id={promise_id!r})",
+        )
 
     # --------------------------------------------------------------------
     # 25. register_update_handler — register an update handler
@@ -2520,7 +2546,10 @@ class HostCalls:
             and returns True if the payload is valid.
         """
         self._update_handlers[name] = (handler, validator)
-        _import_cleat_register_update_handler(name)
+        _check_host_result(
+            _import_cleat_register_update_handler(name),
+            f"register_update_handler(name={name!r})",
+        )
 
     def _handle_update(self, name: str, payload: str) -> str:
         """Internal: look up and invoke a registered update handler.
@@ -2572,6 +2601,121 @@ class HostCalls:
             return True
         return validator(payload)
 
+    def poll_update(self) -> str:
+        """Return the next pending update as a JSON envelope, or "".
+
+        The envelope is ``{"name", "payload", "request_id"}``.
+
+        Low-level: prefer :meth:`dispatch_updates`, which pairs this with
+        handler lookup, validation, and the guarantee that every delivered
+        update is answered.  Delivery is durable, so an update returned here is
+        recorded as delivered whether or not you complete it.
+        """
+        return _import_cleat_poll_update()
+
+    def complete_update(self, request_id: str, result: str, err: str) -> None:
+        """Record an update handler's outcome and settle the caller's promise.
+
+        A non-empty ``err`` rejects; an empty one resolves.  An empty ``result``
+        with an empty ``err`` resolves -- an empty result is an outcome, not a
+        missing one.
+
+        Low-level: prefer :meth:`dispatch_updates`, which cannot forget to call
+        this.  An update delivered and never completed leaves its caller holding
+        a promise nothing settles.
+        """
+        _check_host_result(
+            _import_cleat_complete_update(request_id, result, err),
+            f"complete_update(request_id={request_id!r})",
+        )
+
+    def dispatch_updates(self) -> None:
+        """Deliver and run every update currently pending for this workflow.
+
+        The SDK already calls this before each suspension, so an ordinary
+        workflow needs no update-specific code.  It is public for workflows that
+        want to service updates at additional points.
+
+        An update handler is a Python callable held in guest memory, so only
+        guest code can invoke it -- an arriving update cannot interrupt the
+        workflow.  And it must be asked for at a fixed *program position* rather
+        than a moment in time, because replay re-executes the workflow and
+        matches host calls against the recorded history in order.  See
+        ``engine/updater.go``.
+
+        The consequence, stated rather than hidden: an update is handled at the
+        next dispatch point, not the instant it arrives.
+        """
+        if not _USING_WASM:
+            # No host, so no queue to drain. This mirrors the Go SDK's
+            # `if h.pollUpdate == nil` guard, and it is load-bearing rather
+            # than defensive: dispatch_updates runs before EVERY suspension, and
+            # the non-WASM import is a stub that raises. Without this, any test
+            # or local run that sleeps or awaits would die inside a dispatch it
+            # never asked for.
+            return
+        if self._dispatching_updates:
+            # Reentrancy guard.  Every dispatch point is a suspension point, and
+            # a handler is ordinary workflow code that may sleep or await -- so
+            # without this a handler doing either would re-enter and recurse.
+            # Nesting would also be wrong if it terminated: the inner dispatch
+            # would interleave a second update's events inside the first one's.
+            return
+        self._dispatching_updates = True
+        try:
+            while True:
+                envelope = self.poll_update()
+                if not envelope:
+                    return
+                try:
+                    d = json.loads(envelope)
+                except ValueError:
+                    # The envelope is written by the host, so this is not a
+                    # caller error.  Returning rather than continuing avoids
+                    # spinning on a delivery that decodes the same way next time.
+                    return
+                if not isinstance(d, dict):
+                    return
+                name = d.get("name")
+                request_id = d.get("request_id")
+                payload = d.get("payload", "")
+                # A key lookup alone cannot tell "absent" from "present but not
+                # a string", and an empty request id would make complete_update
+                # address nothing.
+                if not isinstance(name, str) or not isinstance(request_id, str):
+                    return
+                if not name or not request_id:
+                    return
+                if not isinstance(payload, str):
+                    payload = ""
+                self._run_update(name, payload, request_id)
+        finally:
+            self._dispatching_updates = False
+
+    def _run_update(self, name: str, payload: str, request_id: str) -> None:
+        """Apply one delivered update and report the outcome.
+
+        Every path completes the request.  An unregistered handler, a validator
+        that refuses and a handler that raises are all answers the caller is
+        entitled to -- leaving any of them uncompleted would leave the caller
+        holding a promise nothing settles, which is the defect updates exist to
+        end.
+        """
+        if name not in self._update_handlers:
+            self.complete_update(
+                request_id, "", f"cleat: no update handler registered for {name!r}"
+            )
+            return
+        try:
+            if not self._validate_update(name, payload):
+                self.complete_update(request_id, "", f"update {name!r} failed validation")
+                return
+            result = self._handle_update(name, payload)
+        except Exception as exc:  # noqa: BLE001 -- the caller is owed an answer
+            self.complete_update(request_id, "", str(exc))
+            return
+        self.complete_update(request_id, result if result is not None else "", "")
+
     # There is no register_query_handler / _handle_query here (removed
     # 2026-08-09). register_query_handler recorded a handler name with the
     # host but nothing ever routed an external query to it -- see
@@ -2585,10 +2729,19 @@ class HostCalls:
     # --------------------------------------------------------------------
 
     def defer(self, description: str) -> str:
-        """Register a deferred cleanup action to run on workflow exit.
+        """Record that a cleanup action exists. **Does not run anything.**
 
-        Deferred actions are executed in LIFO order, analogous to Python's
-        ``try/finally`` or Go's ``defer``.
+        This sends a *description* to the host and nothing else. The host adds
+        it to the workflow's deferrals so it is visible in history and in the
+        dashboard, but there is no body attached and nothing anywhere executes
+        one.
+
+        This docstring used to say the action "runs on workflow exit" and is
+        "executed in LIFO order, analogous to Python's ``try/finally`` or Go's
+        ``defer``". None of that was true, and could not be: the ABI carries a
+        string. See IMPROVEMENT-PLAN §3.73.
+
+        Use :meth:`defer_func` for cleanup that actually runs.
 
         Parameters
         ----------
@@ -2598,7 +2751,7 @@ class HostCalls:
         Returns
         -------
         str
-            The defer ID, which can be used to cancel the deferred action.
+            The defer ID the host minted.
 
         Raises
         ------
@@ -2606,6 +2759,43 @@ class HostCalls:
             If the host reports an error.
         """
         return _import_cleat_defer(description)
+
+    def defer_func(self, fn: Callable[[], None]) -> str:
+        """Register cleanup **with a body**, run when the workflow finishes.
+
+        The body runs in LIFO order when the entry point returns -- on the
+        success path and on the error path, because a defer is for the run that
+        did not finish the way it meant to. It does **not** run when the
+        workflow suspends: a suspended workflow has not exited, and its cleanup
+        is still pending.
+
+        The closure lives in this guest instance, so it can capture whatever it
+        needs from the workflow body.
+
+        Parameters
+        ----------
+        fn : Callable[[], None]
+            The cleanup to run. Exceptions it raises are swallowed so one bad
+            cleanup cannot stop the others.
+
+        Returns
+        -------
+        str
+            The defer ID the host minted, which is also the key the body is
+            stored under.
+        """
+        from .defer import defer_phase_refusal, in_defer_phase, register_defer
+
+        # Refused BEFORE the host call -- IMPROVEMENT-PLAN 3.35 phase 4.
+        # Registering here used to mint a real defer ID and write a durable
+        # ``defer`` event that nothing could ever run, because ``run_deferred``
+        # drains the table before the first body starts.
+        if in_defer_phase():
+            raise RuntimeError(defer_phase_refusal("defer_func"))
+
+        defer_id = _import_cleat_defer("deferred function")
+        register_defer(defer_id, fn)
+        return defer_id
 
     # --------------------------------------------------------------------
     # 27. continue_as_new — history compaction
@@ -2629,8 +2819,16 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
+        from .defer import defer_phase_refusal, in_defer_phase
+
+        # IMPROVEMENT-PLAN 3.35 phase 4. Before the host call: the workflow's
+        # result is already decided by the time defers run, so a recorded
+        # continuation is one the worker will never take.
+        if in_defer_phase():
+            raise RuntimeError(defer_phase_refusal("continue_as_new"))
+
         input_str = self._marshal(input)
-        _import_cleat_continue_as_new(input_str)
+        _check_host_result(_import_cleat_continue_as_new(input_str), "continue_as_new()")
 
     # --------------------------------------------------------------------
     # 27b. extend_timeout — extend workflow execution timeout
@@ -2686,8 +2884,17 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
+        from .defer import defer_phase_refusal, in_defer_phase
+
+        # IMPROVEMENT-PLAN 3.35 phase 4; see continue_as_new above.
+        if in_defer_phase():
+            raise RuntimeError(defer_phase_refusal("continue_as_new_versioned"))
+
         input_str = self._marshal(input)
-        _import_continue_as_new_versioned(input_str, new_version)
+        _check_host_result(
+            _import_continue_as_new_versioned(input_str, new_version),
+            f"continue_as_new_versioned(new_version={new_version})",
+        )
 
     # --------------------------------------------------------------------
     # 27d. side_effect — record non-deterministic computation result
@@ -2716,34 +2923,47 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        resp = _import_side_effect(result)
-        if isinstance(resp, str):
-            return resp
-        out_len, err_code = decode_simple_result(resp)
-        if err_code != 0:
-            raise RuntimeError(
-                f"side_effect failed: {_error_code_name(err_code)} (code {err_code})"
-            )
-        return read_string(OUTPUT_OFFSET, out_len)
+        # result<string, call-failure> since IMPROVEMENT-PLAN 3.300.
+        return _call_or_raise("lifecycle", "side_effect", _import_side_effect, result)
 
     # --------------------------------------------------------------------
     # 28. run_detached — execute detached from cancellation
     # --------------------------------------------------------------------
 
-    def run_detached(self, fn: Callable[[HostCalls], Any]) -> None:
-        """Execute a function that is detached from workflow cancellation.
+    def run_detached(self, name: str, input_json: str) -> None:
+        """Start a workflow that outlives this one (fire-and-forget).
 
-        The function receives this ``HostCalls`` instance so it can make
-        host calls.  In a full WASM runtime the host would ensure the
-        detached execution continues even if the parent workflow is
-        cancelled.
+        The started workflow is NOT a child: this workflow does not await it, is
+        not its parent, and completing or being cancelled does not affect it.
+
+        .. versionchanged:: 3.253
+           This took a callable and ran it INLINE, making no host call at all --
+           so the work it was supposed to detach ran inside the caller and was
+           cancelled with it, while the docstring promised the opposite. A
+           closure cannot cross the ABI, which is why it was never wired. The
+           signature now matches ``cleat_run_detached`` and the Rust SDK's
+           ``run_detached(name, input_json)``.
+
+           Callers passing a function must name a deployed workflow instead.
+           There is no mechanical translation: the point of the old signature
+           was to run local code, and the host cannot run local code.
 
         Parameters
         ----------
-        fn : Callable[[HostCalls], Any]
-            Function to execute in a detached context.
+        name : str
+            The workflow definition name to start.
+        input_json : str
+            The JSON input for the new workflow.
+
+        Raises
+        ------
+        RuntimeError
+            If the host reports an error.
         """
-        fn(self)
+        _check_host_result(
+            _import_cleat_run_detached(name, input_json),
+            f"run_detached(name={name!r})",
+        )
 
     # --------------------------------------------------------------------
     # 29. send — fire-and-forget
@@ -2766,7 +2986,10 @@ class HostCalls:
             Request payload.  Dicts are JSON-serialised automatically.
         """
         req_str = self._marshal(request)
-        _import_cleat_send(service, operation, req_str)
+        _check_host_result(
+            _import_cleat_send(service, operation, req_str),
+            f"send(service={service!r}, operation={operation!r})",
+        )
 
     # --------------------------------------------------------------------
     # 30. schedule_invoke — delayed one-shot
@@ -2797,7 +3020,10 @@ class HostCalls:
             Delay in milliseconds before the invocation is sent.
         """
         req_str = self._marshal(request)
-        _import_cleat_schedule_invoke(service, operation, req_str, delay_ms)
+        _check_host_result(
+            _import_cleat_schedule_invoke(service, operation, req_str, delay_ms),
+            f"schedule_invoke(service={service!r}, operation={operation!r})",
+        )
 
     # --------------------------------------------------------------------
     # 31. plugin_call — plugin host function call
@@ -2834,26 +3060,14 @@ class HostCalls:
         """
         input_str = self._marshal(input)
 
-        result = _import_plugin_call(plugin_name, function_name, input_str)
-
-        if isinstance(result, str):
-            if result.startswith("__CLEAT_ERROR__:"):
-                err_msg = result[len("__CLEAT_ERROR__:"):]
-                self._raise_for_call_error(f"plugin:{plugin_name}", function_name, err_msg, 0)
-            return result
-
-        response_len, call_error_code, err_code = decode_cleat_call_result(result)
-        if err_code != 0:
-            err_msg = read_string(OUTPUT_OFFSET, response_len)
-            if call_error_code != 0:
-                self._raise_for_call_error(
-                    f"plugin:{plugin_name}", function_name, err_msg, call_error_code
-                )
-            raise RuntimeError(
-                f"plugin_call(plugin_name='{plugin_name}', function_name='{function_name}') failed: {err_msg}"
-            )
-
-        return read_string(OUTPUT_OFFSET, response_len)
+        return _call_or_raise(
+            f"plugin:{plugin_name}",
+            function_name,
+            _import_plugin_call,
+            plugin_name,
+            function_name,
+            input_str,
+        )
 
     # --------------------------------------------------------------------
     # 31b. plugin_call_streaming — streaming plugin host function
@@ -2892,39 +3106,25 @@ class HostCalls:
 
         input_str = self._marshal(input)
 
-        while True:
-            result = _import_plugin_call_streaming(plugin_name, function_name, input_str)
-
-            if isinstance(result, str):
-                if result.startswith("__CLEAT_ERROR__:"):
-                    err_msg = result[len("__CLEAT_ERROR__:"):]
-                    self._raise_for_call_error(
-                        f"plugin:{plugin_name}", function_name, err_msg, 0
-                    )
-                if not result:
-                    break
-                yield _json.loads(result)
-                break
-
-            response_len, call_error_code, err_code = decode_cleat_call_result(result)
-            if err_code != 0:
-                err_msg = (
-                    read_string(OUTPUT_OFFSET, response_len)
-                    if response_len > 0
-                    else "unknown error"
-                )
-                if call_error_code != 0:
-                    self._raise_for_call_error(
-                        f"plugin:{plugin_name}", function_name, err_msg, call_error_code
-                    )
-                raise RuntimeError(
-                    f"plugin_call_streaming(plugin_name='{plugin_name}', function_name='{function_name}') failed: {err_msg}"
-                )
-
-            if response_len == 0:
-                break  # End of stream
-
-            event_json = read_string(OUTPUT_OFFSET, response_len)
+        event_json = _call_or_raise(
+            f"plugin:{plugin_name}",
+            function_name,
+            _import_plugin_call_streaming,
+            plugin_name,
+            function_name,
+            input_str,
+        )
+        # One call, one event -- unchanged. The `while True` this replaces
+        # never went round: its string branch yielded once and broke, and the
+        # branch that looped decoded a packed i64 the WIT binding cannot
+        # return. Multi-event streaming over the component ABI does not exist
+        # yet and did not before.
+        #
+        # An empty response is end-of-stream, and that is now the ONLY thing
+        # it can be: a stop arrives as Err(suspended) and a failure as
+        # Err(failed), so neither reaches here wearing the shape of a
+        # finished stream.
+        if event_json:
             yield _json.loads(event_json)
 
     def plugin_call_typed(
@@ -3022,20 +3222,37 @@ class HostCalls:
         RuntimeError
             If the host reports an error or the timeout expires.
         """
+        # Composed from three durable primitives rather than being a host call
+        # of its own: a promise is the reply channel, its ID is the correlation
+        # ID, and answering is resolving it (IMPROVEMENT-PLAN 3.220).
+        # cleat_send_signal_and_wait was inert engine-side -- it never
+        # delivered the signal it then waited for -- so this is the first
+        # version that works at all.
         payload_str = self._marshal(payload)
-        result = _import_cleat_send_signal_and_wait(target_run_id, signal_name, payload_str, timeout_ms)
+        reply_to = self.create_promise(f"__reply:{signal_name}")
+        self.signal_workflow(
+            target_run_id, signal_name, encode_signal_envelope(reply_to, payload_str)
+        )
 
-        if isinstance(result, str):
-            return result
-
-        response_len, err_code = decode_simple_result(result)
-        if err_code != 0:
-            err_msg = read_string(OUTPUT_OFFSET, response_len)
+        res = self.await_promise_ms(reply_to, timeout_ms)
+        if res.rejected:
             raise RuntimeError(
-                f"send_signal_and_wait(target_run_id='{target_run_id}', signal_name='{signal_name}') failed: {err_msg}"
+                f"send_signal_and_wait: reply to signal {signal_name!r} was rejected: {res.result}"
             )
-
-        return read_string(OUTPUT_OFFSET, response_len)
+        # Raising on timed_out is correct even though await_promise reports
+        # timed_out for a SUSPENSION as well as a real timeout. The host
+        # distinguishes them and this code does not have to: engine/promises.go
+        # sets session.suspendErr before returning, and engine/executor.go:264
+        # treats a workflow error as a failure only when suspendErr is nil --
+        # ":315 deliberately lets a suspension win over the error that
+        # accompanied it". There is nothing in the result to check: the engine
+        # signals suspension host-side, not through a sentinel.
+        if res.timed_out:
+            raise RuntimeError(
+                f"send_signal_and_wait: no reply to signal {signal_name!r} from "
+                f"workflow {target_run_id!r} within {timeout_ms}ms"
+            )
+        return res.result
 
     # --------------------------------------------------------------------
     # 33. reply_to_signal — respond to a signal from within a handler
@@ -3060,7 +3277,18 @@ class HostCalls:
         RuntimeError
             If the host reports an error.
         """
-        _import_cleat_reply_to_signal(correlation_id, response)
+        # correlation_id is SignalResult.reply_to, which is the reply promise's
+        # ID, so replying is resolving that promise. An ID matching no promise
+        # is an error rather than a silent success, which is what makes a stale
+        # address visible instead of leaving the sender suspended until its
+        # timeout. IMPROVEMENT-PLAN 3.220.
+        if not correlation_id:
+            raise RuntimeError(
+                "reply_to_signal: empty correlation ID. Pass SignalResult.reply_to "
+                "from the signal being answered; it is empty when the sender used "
+                "signal_workflow and is not waiting for a reply."
+            )
+        self.resolve_promise(correlation_id, response)
 
     # --------------------------------------------------------------------
     # 34. await_signals_with_quorum — wait for quorum of signals
@@ -3101,34 +3329,13 @@ class HostCalls:
             If the timeout expires or max rejections is exceeded.
         """
         deadline_ns = time.monotonic_ns() + timeout_ms * 1_000_000
-        results: list[SignalResult] = []
-        rejection_count = 0
-
-        while len(results) < min_count:
-            remaining_ms = max(0, (deadline_ns - time.monotonic_ns()) // 1_000_000)
-
-            if remaining_ms <= 0:
-                raise RuntimeError(f"quorum timeout: got {len(results)}/{min_count} signals")
-
-            result = self.await_signals_ms(signal_names, remaining_ms)
-            if result.timed_out:
-                raise RuntimeError(f"quorum timeout: got {len(results)}/{min_count} signals")
-            results.append(result)
-
-            # Check for rejection if max_rejections >= 0.
-            if max_rejections >= 0 and result.payload:
-                import json
-
-                try:
-                    payload_data = json.loads(result.payload)
-                    if isinstance(payload_data, dict) and payload_data.get("rejected"):
-                        rejection_count += 1
-                        if rejection_count > max_rejections:
-                            raise RuntimeError(f"quorum exceeded max rejections ({max_rejections})")
-                except (json.JSONDecodeError, TypeError):
-                    pass
-
-        return results
+        return _quorum_over(
+            signal_names,
+            min_count,
+            max_rejections,
+            lambda: max(0, (deadline_ns - time.monotonic_ns()) // 1_000_000),
+            self.await_signals_ms,
+        )
 
     # --------------------------------------------------------------------
     # 35. signal_workflow — send a signal to another workflow
@@ -3156,7 +3363,10 @@ class HostCalls:
             The signal payload. Dicts are JSON-serialised automatically.
         """
         payload_str = self._marshal(payload)
-        _import_cleat_signal_workflow(target_run_id, signal_name, payload_str)
+        _check_host_result(
+            _import_cleat_signal_workflow(target_run_id, signal_name, payload_str),
+            f"signal_workflow(target_run_id={target_run_id!r}, signal_name={signal_name!r})",
+        )
 
     # --------------------------------------------------------------------
     # 36b. schedule_cron — create a recurring cron-triggered workflow
@@ -3202,7 +3412,11 @@ class HostCalls:
         # Strings, not scratch-memory offsets: the component ABI lifts and
         # lowers them itself. The host raises on failure, which surfaces here as
         # an exception rather than an error code to decode.
-        return _import_cleat_schedule_cron(workflow_name, cron_expr, timezone, input_json)
+        # result<string, call-failure> since IMPROVEMENT-PLAN 3.300.
+        return _call_or_raise(
+            "cron", "schedule_cron", _import_cleat_schedule_cron,
+            workflow_name, cron_expr, timezone, input_json,
+        )
 
     # --------------------------------------------------------------------
     # 36c. delete_cron — remove a cron-triggered workflow schedule
@@ -3221,6 +3435,11 @@ class HostCalls:
         RuntimeError
             If the host reports an error deleting the schedule.
         """
+        # Cannot be checked from here: `durable-delete-cron` is declared
+        # with no return value at all in python-sdk/wit/cleat.wit -- the only
+        # function in that file that is. A failed deletion is therefore
+        # unreportable to a component guest, and closing that needs a WIT
+        # change rather than an SDK one. See IMPROVEMENT-PLAN 3.201.
         _import_cleat_delete_cron(schedule_id)
 
     # --------------------------------------------------------------------
@@ -3283,6 +3502,12 @@ class HostCalls:
         """
         key_len = write_string(SCRATCH_BASE, key, OUT_BUF_SIZE)
         result = _import_cleat_acquire_lock(SCRATCH_BASE, key_len, ttl_ms)
+
+        # Before decoding: this layout puts `acquired` at bit 8 and errCode in
+        # the low byte, so a stop would decode as errCode=0, acquired=False --
+        # an ordinary "someone else holds it" -- and the workflow would take its
+        # did-not-get-the-lock branch and run on. IMPROVEMENT-PLAN 3.301.
+        _raise_if_stopped(result)
 
         err_code = result & 0xFF
         acquired = bool((result >> 8) & 0x1)
@@ -3399,7 +3624,7 @@ def _import_cleat_extend_timeout(additional_ms: int) -> int:
 
 # ========================================================================
 # NEW: Module-level stubs for durable-scope, durable-stream-state,
-# durable-extended-lifecycle, durable-extended-children, and
+# durable-extended-lifecycle and
 # durable-fetch imports.
 #
 # TODO: When WIT bindings are regenerated with componentize-py, add
@@ -3412,125 +3637,115 @@ def _import_cleat_extend_timeout(additional_ms: int) -> int:
 # -- durable-scope.set-scope ---------------------------------------------------
 
 
-def _import_set_scope(obj_type: str, inst_key: str) -> str:
-    """Stub for WASM import ``(import "env" "cleat_set_scope")``."""
-    raise NotImplementedError("set_scope can only be called within a cleat WASM runtime.")
+# THE SIX BLOCKS BELOW ARE GUARDED, AND WERE NOT UNTIL cleat#1432.
+#
+# They sat at module level, so they ran unconditionally and REBOUND names the
+# try block at the top of this file had already bound to the real WIT imports.
+# Python binds in file order and these defs are ~3,400 lines below the import,
+# so the stub won: six host calls raised NotImplementedError inside the WASM
+# runtime, where they are supposed to work.
+#
+# Measured under Python 3.12 with the bindings present, before the fix:
+#
+#     _import_cleat_call                 -> the real WIT function   <- control
+#     _import_set_scope                  -> NotImplementedError
+#     _import_get_scope                  -> NotImplementedError
+#     _import_uuid                       -> NotImplementedError
+#     _import_side_effect                -> NotImplementedError
+#     _import_fetch                      -> NotImplementedError
+#     _import_continue_as_new_versioned  -> NotImplementedError
+#
+# The control is what makes the six mean anything: _import_cleat_call reaches
+# the real function through the same mechanism, so these are not "the bindings
+# were absent".
+#
+# `if not _USING_WASM:` is what the other 39 stubs in this file already do;
+# these six were the exception. DELETING them instead would leave the names
+# unbound when the import fails, turning a clear NotImplementedError into a
+# NameError on the very path the fallback exists for.
+#
+# _import_cleat_extend_timeout stays unguarded at module level, deliberately:
+# it is never imported, so it shadows nothing and is a genuine stub.
+
+if not _USING_WASM:
+
+    def _import_set_scope(obj_type: str, inst_key: str) -> str:
+        """Stub for WASM import ``(import "env" "cleat_set_scope")``."""
+        raise NotImplementedError("set_scope can only be called within a cleat WASM runtime.")
 
 
 # -- durable-scope.get-scope ---------------------------------------------------
 
 
-def _import_get_scope(
-    obj_type_ptr: int,
-    obj_type_max_len: int,
-    inst_key_ptr: int,
-    inst_key_max_len: int,
-) -> int:
-    """Stub for WASM import ``(import "env" "cleat_get_scope")``."""
-    raise NotImplementedError("get_scope can only be called within a cleat WASM runtime.")
+if not _USING_WASM:
+
+    def _import_get_scope(
+        obj_type_ptr: int,
+        obj_type_max_len: int,
+        inst_key_ptr: int,
+        inst_key_max_len: int,
+    ) -> int:
+        """Stub for WASM import ``(import "env" "cleat_get_scope")``."""
+        raise NotImplementedError("get_scope can only be called within a cleat WASM runtime.")
 
 
 # -- durable-scope.uuid --------------------------------------------------------
 
 
-def _import_uuid(seed: str) -> str:
-    """Stub for WASM import ``(import "env" "cleat_uuid")``."""
-    raise NotImplementedError("uuid can only be called within a cleat WASM runtime.")
+if not _USING_WASM:
+
+    def _import_uuid(seed: str) -> str:
+        """Stub for WASM import ``(import "env" "cleat_uuid")``."""
+        raise NotImplementedError("uuid can only be called within a cleat WASM runtime.")
 
 
 # -- durable-stream-state.set-state --------------------------------------------
 
 
-def _import_stream_set_state(key: str, val: str) -> int:
-    """Stub for WASM import ``(import "env" "cleat_stream_set_state")``."""
-    raise NotImplementedError(
-        "stream_set_state can only be called within a cleat WASM runtime."
-    )
-
-
 # -- durable-stream-state.get-state --------------------------------------------
-
-
-def _import_stream_get_state(key: str) -> str:
-    """Stub for WASM import ``(import "env" "cleat_stream_get_state")``."""
-    raise NotImplementedError(
-        "stream_get_state can only be called within a cleat WASM runtime."
-    )
 
 
 # -- durable-stream-state.delete-state -----------------------------------------
 
 
-def _import_stream_delete_state(key: str) -> int:
-    """Stub for WASM import ``(import "env" "cleat_stream_delete_state")``."""
-    raise NotImplementedError(
-        "stream_delete_state can only be called within a cleat WASM runtime."
-    )
-
-
 # -- durable-stream-state.incr-state -------------------------------------------
-
-
-def _import_stream_incr_state(key: str, delta: int) -> int:
-    """Stub for WASM import ``(import "env" "cleat_stream_incr_state")``."""
-    raise NotImplementedError(
-        "stream_incr_state can only be called within a cleat WASM runtime."
-    )
 
 
 # -- durable-stream-state.has-state --------------------------------------------
 
 
-def _import_stream_has_state(key: str) -> int:
-    """Stub for WASM import ``(import "env" "cleat_stream_has_state")``."""
-    raise NotImplementedError(
-        "stream_has_state can only be called within a cleat WASM runtime."
-    )
-
-
 # -- durable-stream-state.list-state -------------------------------------------
-
-
-def _import_stream_list_state(prefix: str) -> str:
-    """Stub for WASM import ``(import "env" "cleat_stream_list_state")``."""
-    raise NotImplementedError(
-        "stream_list_state can only be called within a cleat WASM runtime."
-    )
 
 
 # -- durable-extended-lifecycle.continue-as-new-versioned ----------------------
 
 
-def _import_continue_as_new_versioned(input: str, new_version: int) -> int:
-    """Stub for WASM import ``(import "env" "cleat_continue_as_new_versioned")``."""
-    raise NotImplementedError(
-        "continue_as_new_versioned can only be called within a cleat WASM runtime."
-    )
+if not _USING_WASM:
+
+    def _import_continue_as_new_versioned(input: str, new_version: int) -> int:
+        """Stub for WASM import ``(import "env" "cleat_continue_as_new_versioned")``."""
+        raise NotImplementedError(
+            "continue_as_new_versioned can only be called within a cleat WASM runtime."
+        )
 
 
 # -- durable-extended-lifecycle.side-effect ------------------------------------
 
 
-def _import_side_effect(result: str) -> str:
-    """Stub for WASM import ``(import "env" "cleat_side_effect")``."""
-    raise NotImplementedError(
-        "side_effect can only be called within a cleat WASM runtime."
-    )
+if not _USING_WASM:
 
-
-# -- durable-extended-children.child-workflow-in-schema ------------------------
-
-
-def _import_child_workflow_in_schema(schema: str, name: str, input: str, version: int, priority: int, policy: str) -> str:
-    """Stub for WASM import ``(import "env" "cleat_child_workflow_in_schema")``."""
-    raise NotImplementedError(
-        "child_workflow_in_schema can only be called within a cleat WASM runtime."
-    )
+    def _import_side_effect(result: str) -> str:
+        """Stub for WASM import ``(import "env" "cleat_side_effect")``."""
+        raise NotImplementedError(
+            "side_effect can only be called within a cleat WASM runtime."
+        )
 
 
 # -- durable-fetch.fetch -------------------------------------------------------
 
 
-def _import_fetch(method: str, url: str, headers: str, body: str) -> str:
-    """Stub for WASM import ``(import "env" "cleat_fetch")``."""
-    raise NotImplementedError("fetch can only be called within a cleat WASM runtime.")
+if not _USING_WASM:
+
+    def _import_fetch(method: str, url: str, headers: str, body: str) -> str:
+        """Stub for WASM import ``(import "env" "cleat_fetch")``."""
+        raise NotImplementedError("fetch can only be called within a cleat WASM runtime.")

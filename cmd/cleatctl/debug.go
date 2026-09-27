@@ -23,7 +23,7 @@ type debugFlags struct {
 }
 
 // runDebug is the entry point for the cleatctl debug command.
-func runDebug(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args []string) {
+func runDebug(ctx context.Context, store engine.WorkflowStore, db *sql.DB, d dialect, args []string) {
 	flags := parseDebugFlags(args)
 	if flags == nil {
 		return // usage already printed
@@ -37,7 +37,7 @@ func runDebug(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args 
 		return
 	}
 
-	runDebugStep(ctx, store, db, flags.workflowID, flags.entryPoint)
+	runDebugStep(ctx, store, db, d, flags.workflowID, flags.entryPoint)
 }
 
 // parseDebugFlags parses flags from the args slice. Returns nil if flag
@@ -130,8 +130,8 @@ type debugStepInfo struct {
 }
 
 // runDebugStep runs the interactive step-through debugger for a workflow.
-func runDebugStep(ctx context.Context, store engine.WorkflowStore, db *sql.DB, workflowID, entryPoint string) {
-	inst, err := loadWorkflowInstance(ctx, db, workflowID)
+func runDebugStep(ctx context.Context, store engine.WorkflowStore, db *sql.DB, d dialect, workflowID, entryPoint string) {
+	inst, err := loadWorkflowInstance(ctx, db, d, workflowID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error loading workflow instance %q: %v\n", workflowID, err)
 		osExit(1)

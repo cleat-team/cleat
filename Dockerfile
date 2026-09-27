@@ -15,7 +15,7 @@
 # calls into the host, so a workflow with a 2-second budget ran for 2m35s and
 # was reported as a success. See IMPROVEMENT-PLAN.md 2.28.
 #
-FROM golang:1.26-bookworm AS builder
+FROM golang:1.27.1-bookworm@sha256:69a7b9788769bec032d238959b61854e9ae87f57be9029ec04e9885fabf99195 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates gcc libc6-dev \

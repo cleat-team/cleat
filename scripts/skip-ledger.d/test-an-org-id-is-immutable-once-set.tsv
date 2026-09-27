@@ -1,0 +1,2 @@
+test-go/engine	2	^TestAnOrgIDIsImmutableOnceSet/(mysql|mssql)$	dialect-gated: cleat#1898's immutability trigger is asserted on all three dialects in one test; the mysql and mssql subtests skip in this PostgreSQL-only job and RUN in test-mysql and test-mssql.
+cluster	2	^TestAnOrgIDIsImmutableOnceSet/(mysql|mssql)$	dialect-gated: the same two subtests, and the cluster job sweeps ./engine/... too. See the test-go/engine line above.

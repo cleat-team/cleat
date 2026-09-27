@@ -10,6 +10,7 @@ import (
 
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
+	"github.com/cleat-team/cleat/engine/testutil"
 )
 
 // TestAuthMiddlewareRejectsInvalidKey verifies that when auth middleware is
@@ -47,8 +48,14 @@ func TestAuthMiddlewareRejectsInvalidKey(t *testing.T) {
 	if configured {
 		fatalf = t.Fatalf
 	}
+	var haveTable bool
 
-	db, err := sql.Open("postgres", dsn)
+	// Tagged so the cleat#982 gate does not read this connection as a stranger
+	// (cleat#1501). TagPostgresDSN rather than PostgresTestDSN, because the
+	// empty-check above is load-bearing here: this test distinguishes "no
+	// database configured" from "the configured database is broken", and a
+	// constructor with a localhost fallback makes the DSN never empty.
+	db, err := sql.Open("postgres", testutil.TagPostgresDSN(dsn))
 	if err != nil {
 		fatalf("cannot connect to database: %v", err)
 		return
@@ -60,24 +67,60 @@ func TestAuthMiddlewareRejectsInvalidKey(t *testing.T) {
 		return
 	}
 
-	// Ensure the tenant_api_keys table exists so that the query does not fail
-	// with a "relation does not exist" error before reaching the row check.
-	db.Exec(`CREATE TABLE IF NOT EXISTS tenant_api_keys (
-		key_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-		tenant_id UUID NOT NULL,
-		key_hash BYTEA NOT NULL UNIQUE,
-		description TEXT NOT NULL DEFAULT '',
-		revoked_at TIMESTAMPTZ,
-		created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-	)`)
+	// The table this test needs is admin.tenant_api_keys -- that is what
+	// PostgresStore.ResolveTenantFromAPIKey queries (engine/store_deployment.go).
+	// REQUIRE it rather than creating it, for two reasons.
+	//
+	// First, the 401 has to be attributable. If the relation is missing the
+	// query errors, the middleware refuses the request, and all three subtests
+	// pass against a database carrying none of the schema they claim to
+	// exercise. Measured 2026-09-04 against an empty database: three of three
+	// PASS. A test that cannot fail for its own reason is not a test.
+	//
+	// Second, this used to do `CREATE TABLE IF NOT EXISTS tenant_api_keys`,
+	// UNQUALIFIED -- so it never satisfied the query it was added for (wrong
+	// schema) and it manufactured a decoy. Unqualified names resolve through
+	// search_path ("$user", public), so the new table then shadowed
+	// admin.tenant_api_keys for every other unqualified reference in that
+	// database. engine/testutil's cleanup list carried one, and its DELETE hit
+	// this decoy instead of the real table for as long as both existed. Running
+	// this one test was enough to recreate the decoy minutes after it was
+	// dropped by hand.
+	// Build the schema the way every other database-backed test in this package
+	// does -- SetupFullSchema applies the real migrations, which is where
+	// admin.tenant_api_keys is defined. tenant_isolation_db_test.go in this same
+	// package already did this; this test hand-rolled a table instead and got
+	// the schema wrong.
+	testutil.SetupFullSchema(t, db, testutil.DialectPostgres)
 
-	// Build a minimal handler chain that mirrors what main() does when
-	// --require-auth=true: auth middleware wraps the route mux.
+	if err := db.QueryRow(
+		`SELECT to_regclass('admin.tenant_api_keys') IS NOT NULL`).Scan(&haveTable); err != nil {
+		fatalf("cannot check for admin.tenant_api_keys: %v", err)
+		return
+	}
+	if !haveTable {
+		fatalf("admin.tenant_api_keys does not exist in %s even after SetupFullSchema. "+
+			"Without it the middleware refuses every request because the lookup "+
+			"errors, and this test passes without exercising the key check at all.", dsn)
+		return
+	}
+
+	// requireAuth=FALSE, deliberately, and this comment used to say the opposite.
+	// It claimed to mirror "what main() does when --require-auth=true" while
+	// passing false -- so a reader checking whether the supported default is
+	// covered found a test that said yes and tested the other mode.
+	//
+	// What this file is actually for is the INVALID-key path, which behaves the
+	// same either way: a key that does not resolve is refused whether or not
+	// auth is required. The supported default's own property -- a request with
+	// NO key is refused rather than defaulted -- is covered by
+	// tenant_isolation_db_test.go's "unauthenticated request is refused, not
+	// defaulted", which builds the server with requireAuth: true.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/workflows/", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
-	handler := auth.Middleware(engine.NewPostgresStore(db), false)(mux)
+	handler := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux)(mux)
 
 	t.Run("invalid_api_key_returns_401", func(t *testing.T) {
 		req := httptest.NewRequest("POST", "/api/workflows/my-wf/start", nil)
@@ -98,8 +141,16 @@ func TestAuthMiddlewareRejectsInvalidKey(t *testing.T) {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, req)
 
-		// The middleware passes through requests without an API key so that
-		// unauthenticated endpoints (healthz, metrics) continue to work.
+		// This is the requireAuth=false behaviour, and the reason given here used
+		// to be wrong twice over: it said the pass-through exists "so that
+		// unauthenticated endpoints (healthz, metrics) continue to work", but
+		// those are exempted BY PATH at auth/middleware.go:66, before the
+		// requireAuth branch is reached -- and the path exercised below is
+		// /api/workflows/my-wf/start, which is not one of them.
+		//
+		// So what this pins is narrow and worth stating exactly: with auth NOT
+		// required, a missing key is not itself an error. Under the supported
+		// default it is a 401, asserted in tenant_isolation_db_test.go.
 		if w.Code != http.StatusOK {
 			t.Errorf("expected HTTP 200 when no auth header is present, got %d", w.Code)
 		}
@@ -110,7 +161,7 @@ func TestAuthMiddlewareRejectsInvalidKey(t *testing.T) {
 		mux2.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		})
-		handler2 := auth.Middleware(engine.NewPostgresStore(db), false)(mux2)
+		handler2 := auth.MiddlewareWithMux(engine.NewPostgresStore(db), false, mux2)(mux2)
 
 		req := httptest.NewRequest("GET", "/healthz", nil)
 		w := httptest.NewRecorder()

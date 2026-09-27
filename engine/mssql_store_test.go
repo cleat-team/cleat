@@ -188,7 +188,7 @@ func TestMSSQLStore_WithReadRedactionDisabled(t *testing.T) {
 func TestMSSQLStore_WithEncryption(t *testing.T) {
 	store := NewMSSQLStore(nil)
 
-	enc := &PayloadEncryption{key: make([]byte, 32)}
+	enc := &PayloadEncryption{}
 	encrypted := store.WithEncryption(enc, true)
 
 	if encrypted.encryption != enc {
@@ -245,25 +245,6 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 	testutil.SetupMSSQLFullSchema(t, db)
 	defer testutil.CleanupMSSQLTestData(t, db)
 
-	// Insert a workflow_defs row (required by FK constraint).
-	//
-	// tenant_id is the default tenant, not nil: migrations/mssql/001_schema.sql
-	// declares the column NOT NULL DEFAULT '000…' and always has. This passed
-	// nil only because engine/testutil's copy of the schema left the column
-	// nullable, which is the drift IMPROVEMENT-PLAN 3.12's ownership work
-	// corrected -- so the row this test used to insert could not exist in a
-	// real database.
-	_, err := db.Exec(`
-		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, task_queue, tenant_id)
-		VALUES (@p1, @p2, @p3, @p4, @p5, @p6)`,
-		"test-wf", 1, []byte("wasm"), "[]", "default", DefaultTenantUUID)
-	if err != nil {
-		t.Fatalf("insert workflow_def: %v", err)
-	}
-
-	nonDefaultTenant := "11111111-1111-1111-1111-111111111111"
-	store := NewMSSQLStore(db, "default")
-
 	// The assertions below read workflow_instances directly to check what
 	// StartNewRun stored. That read is subject to the shipped security
 	// policies, and the rows it is looking for belong to nonDefaultTenant --
@@ -275,6 +256,51 @@ func TestMSSQLStore_StartNewRun_TenantID(t *testing.T) {
 	// as an argument to check the argument is honoured, so verifying it is
 	// administrative work by definition and needs the admin connection.
 	adminDB := testutil.MSSQLAdminDB(t, db)
+
+	// Seeding and StartNewRun below both go through adminDB too, and for the
+	// same reason as the read: this test writes as TWO different tenants
+	// (DefaultTenantUUID and nonDefaultTenant) through one store, to check
+	// that StartNewRun's own tenantID argument -- not any session context --
+	// decides which tenant a row lands under. A single tenant-scoped
+	// connectored pool (openMSSQLTenantStore) bakes in ONE tenant's
+	// sp_set_session_context and cannot serve both. cleat#2205's migration
+	// 102 added block predicates that check SESSION_CONTEXT('tenant_id')
+	// regardless of the tenant_id value a statement names, and adminDB's
+	// login is a cleat_admin member -- which, once MSSQLAdminDB has applied
+	// the admin-bypass predicate (it always does when policies exist), is
+	// enough to satisfy the block predicate for ANY tenant_id, session
+	// context or not. See migrations/mssql/optional/cross_tenant_claim.sql.
+
+	// Insert a workflow_defs row (required by FK constraint).
+	//
+	// tenant_id is the default tenant, not nil: migrations/mssql/001_schema.sql
+	// declares the column NOT NULL DEFAULT '000…' and always has. This passed
+	// nil only because engine/testutil's copy of the schema left the column
+	// nullable, which is the drift IMPROVEMENT-PLAN 3.12's ownership work
+	// corrected -- so the row this test used to insert could not exist in a
+	// real database.
+	_, err := adminDB.Exec(`
+		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, task_queue, tenant_id)
+		VALUES (@p1, @p2, @p3, @p4, @p5, @p6)`,
+		"test-wf", 1, []byte("wasm"), "[]", "default", DefaultTenantUUID)
+	if err != nil {
+		t.Fatalf("insert workflow_def: %v", err)
+	}
+
+	nonDefaultTenant := "11111111-1111-1111-1111-111111111111"
+
+	// The runs below are deliberately started for a NON-default tenant, and
+	// since D7 the FK on workflow_instances carries tenant_id
+	// (IMPROVEMENT-PLAN 3.77), so that tenant needs its own definition row.
+	// Seeded here rather than by changing the runs to the default tenant,
+	// because the cross-tenant mismatch is what this test is about.
+	if _, err := adminDB.Exec(`
+		INSERT INTO workflow_defs (name, version, wasm_bytes, entry_points, task_queue, tenant_id)
+		VALUES (@p1, @p2, @p3, @p4, @p5, @p6)`,
+		"test-wf", 1, []byte("wasm"), "[]", "default", nonDefaultTenant); err != nil {
+		t.Fatalf("insert workflow_def (non-default tenant): %v", err)
+	}
+	store := NewMSSQLStore(adminDB, "default")
 
 	// --- Non-idempotent path ---
 	runID := uuid.New().String()
@@ -422,9 +448,9 @@ func TestNewMSSQLStoreFactory_EmptyConnStr(t *testing.T) {
 func TestGetOrCreateTenantPool_InvalidUUID(t *testing.T) {
 	f := &MSSQLStoreFactory{
 		connStr:   "sqlserver://localhost",
-		tenantDBs: make(map[string]*sql.DB),
+		tenantDBs: make(map[string]*leasedPool),
 	}
-	_, err := f.getOrCreateTenantPool(context.Background(), "not-a-valid-uuid")
+	_, err := tenantPoolDB(context.Background(), f, "not-a-valid-uuid")
 	if err == nil {
 		t.Fatal("expected error for invalid UUID, got nil")
 	}
@@ -436,7 +462,7 @@ func TestGetOrCreateTenantPool_InvalidUUID(t *testing.T) {
 func TestOpenStore_InvalidUUID(t *testing.T) {
 	f := &MSSQLStoreFactory{
 		connStr:   "sqlserver://localhost",
-		tenantDBs: make(map[string]*sql.DB),
+		tenantDBs: make(map[string]*leasedPool),
 	}
 	_, _, err := f.OpenStore(context.Background(), "not-a-valid-uuid")
 	if err == nil {
@@ -633,12 +659,6 @@ func TestTenantSessionConnector_SuccessWithPrepare(t *testing.T) {
 	}
 }
 
-func TestMSSQLNopCloser(t *testing.T) {
-	if err := (mssqlNopCloser{}).Close(); err != nil {
-		t.Errorf("mssqlNopCloser.Close() = %v, want nil", err)
-	}
-}
-
 func TestMSSQLFactoryNew_DefaultTTL(t *testing.T) {
 	f1 := NewMSSQLStoreFactory("sqlserver://localhost")
 	if f1.idempotencyKeyTTL != 720*time.Hour {
@@ -706,10 +726,16 @@ func TestMSSQLStore_BeginTxWithContext_Failure(t *testing.T) {
 
 func TestMSSQLStore_ListSchedules(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
+	// A DISTINCT instant for disabled_at, not `now`: the column sits next to
+	// next_run_at and last_run_at in the scan, so three equal timestamps would
+	// let a scan that read the wrong one still pass. Same reasoning as the
+	// per-row timezones below. nil is live -- the column replaced an `enabled`
+	// BOOLEAN in cleat#1702, and the polarity inverted with it.
+	disabledAt := now.Add(-72 * time.Hour)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM workflow_schedules", data: [][]driver.Value{
-			{"schedule-1", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now, "UTC", "00000000-0000-0000-0000-000000000000", "catch_up", 60, "allow", "run-1"},
-			{"schedule-2", "wf-b", "entry2", "0 * * * *", `[]`, false, now, nil, "America/New_York", "33333333-3333-3333-3333-333333333333", "skip", 7, "skip", ""},
+			{"schedule-1", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, nil, now, now, "UTC", "00000000-0000-0000-0000-000000000000", "catch_up", 60, "allow", "run-1"},
+			{"schedule-2", "wf-b", "entry2", "0 * * * *", `[]`, disabledAt, now, nil, "America/New_York", "33333333-3333-3333-3333-333333333333", "skip", 7, "skip", ""},
 		}},
 	}, nil)
 	defer db.Close()
@@ -733,7 +759,7 @@ func TestMSSQLStore_ListSchedules(t *testing.T) {
 	if string(s1.Input) != `{"k":"v"}` {
 		t.Errorf("schedule 1 input: %q", string(s1.Input))
 	}
-	if !s1.Enabled {
+	if s1.Disabled() {
 		t.Error("schedule 1 should be enabled")
 	}
 	if !s1.NextRunAt.Equal(now) {
@@ -752,8 +778,12 @@ func TestMSSQLStore_ListSchedules(t *testing.T) {
 	if s2.Name != "schedule-2" {
 		t.Errorf("schedule 2 name: %q", s2.Name)
 	}
-	if s2.Enabled {
+	if !s2.Disabled() {
 		t.Error("schedule 2 should be disabled")
+	} else if !s2.DisabledAt.Equal(disabledAt) {
+		// Disabled() only asks whether the pointer is non-nil, which a scan
+		// that landed next_run_at in this field would also satisfy.
+		t.Errorf("schedule 2 disabled_at = %v, want %v", s2.DisabledAt, disabledAt)
 	}
 	if s2.LastRunAt != nil {
 		t.Error("schedule 2 LastRunAt should be nil")
@@ -801,7 +831,7 @@ func TestMSSQLStore_GetWorkflowDef_Success(t *testing.T) {
 	pluginDepsJSON := []byte(`{"plugin1":"v1.0"}`)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM workflow_defs", data: [][]driver.Value{
-			{"test-wf", int64(3), wasmBytes, int64(2), int64(1), pluginDepsJSON, createdAt, false},
+			{"test-wf", int64(3), wasmBytes, int64(2), int64(1), pluginDepsJSON, createdAt, nil, false},
 		}},
 	}, nil)
 	defer db.Close()
@@ -829,7 +859,7 @@ func TestMSSQLStore_GetWorkflowDef_Success(t *testing.T) {
 	if !def.CreatedAt.Equal(createdAt) {
 		t.Errorf("created_at: %v, want %v", def.CreatedAt, createdAt)
 	}
-	if def.Deprecated {
+	if def.Disabled() {
 		t.Error("should not be deprecated")
 	}
 	if len(def.PluginDeps) != 1 || def.PluginDeps["plugin1"] != "v1.0" {
@@ -841,7 +871,7 @@ func TestMSSQLStore_GetWorkflowDef_NilPluginDeps(t *testing.T) {
 	createdAt := time.Now().UTC().Truncate(time.Microsecond)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM workflow_defs", data: [][]driver.Value{
-			{"test-wf", int64(1), []byte("wasm"), int64(1), int64(0), nil, createdAt, false},
+			{"test-wf", int64(1), []byte("wasm"), int64(1), int64(0), nil, createdAt, nil, false},
 		}},
 	}, nil)
 	defer db.Close()
@@ -1081,38 +1111,6 @@ func TestMSSQLStore_Heartbeat_BeginError(t *testing.T) {
 	}
 }
 
-func TestMSSQLStore_BatchHeartbeat_Success(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "status = 'running'", affected: 5},
-	})
-	defer db.Close()
-
-	store := NewMSSQLStore(db)
-	n, err := store.BatchHeartbeat(context.Background(), "worker-1")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat: %v", err)
-	}
-	if n != 5 {
-		t.Errorf("expected 5 rows, got %d", n)
-	}
-}
-
-func TestMSSQLStore_BatchHeartbeat_Zero(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "status = 'running'", affected: 0},
-	})
-	defer db.Close()
-
-	store := NewMSSQLStore(db)
-	n, err := store.BatchHeartbeat(context.Background(), "worker-1")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("expected 0 rows, got %d", n)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // Workflow lifecycle: CompleteWorkflow, FailWorkflow, ReleaseWorkflow
 // ---------------------------------------------------------------------------
@@ -1121,7 +1119,6 @@ func TestMSSQLStore_CompleteWorkflow_SuccessMock(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
 		{match: "SET status = 'done'", affected: 1},
-		{match: "idempotency_keys SET result"},
 	})
 	defer db.Close()
 
@@ -1162,7 +1159,10 @@ func TestMSSQLStore_FailWorkflow_Success(t *testing.T) {
 func TestMSSQLStore_ReleaseWorkflow_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "SET status = 'ready'", affected: 1},
+		// The release writes 'terminating' rather than 'ready' for a workflow
+		// whose defer phase is still owed (IMPROVEMENT-PLAN 3.112), so the
+		// match is the CASE's tail rather than a literal status.
+		{match: "ELSE 'ready' END", affected: 1},
 	})
 	defer db.Close()
 
@@ -1176,7 +1176,7 @@ func TestMSSQLStore_ReleaseWorkflow_Success(t *testing.T) {
 func TestMSSQLStore_ReleaseWorkflow_NoRows(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "SET status = 'ready'", affected: 0},
+		{match: "ELSE 'ready' END", affected: 0},
 	})
 	defer db.Close()
 
@@ -1194,8 +1194,29 @@ func TestMSSQLStore_ReleaseWorkflow_NoRows(t *testing.T) {
 func TestMSSQLStore_DeliverSignal_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
-		{match: "MERGE workflow_signals"},
-		{match: "SET next_wake_at"},
+		// INSERT INTO workflow_signals, not a MERGE -- see IMPROVEMENT-PLAN
+		// 3.215 and the doc comment on deliverSignalTx in
+		// mssql_signals_promises.go. This match string named the pre-3.215
+		// statement and, being a substring match, silently fell through to
+		// the mock's unmatched default instead of failing.
+		//
+		// affected: 1 is load-bearing now, not decoration -- cleat#2227
+		// checks this exec's own RowsAffected and returns ErrWorkflowNotFound
+		// on 0, which is mockExecResult's zero value. Before #2227 that zero
+		// was harmless because nothing read it; now an unset affected here
+		// makes this "success" test fail with ErrWorkflowNotFound instead of
+		// exercising the success path it is named for.
+		{match: "INSERT INTO workflow_signals", affected: 1},
+		// Matched on "UPDATE workflow_instances", not "SET next_wake_at" --
+		// the wake column is set inside a CASE expression following "SET
+		// signal_seq = signal_seq + 1,", so the latter is not actually a
+		// substring of the query text and never matched anything. Harmless
+		// while nothing checks this exec's RowsAffected either (cleat#2207
+		// tried that and reverted it -- see the doc comment on
+		// deliverSignalTx), but still worth matching correctly since a
+		// stale/wrong pattern here is a trap for the next person who adds a
+		// real assertion against this mock.
+		{match: "UPDATE workflow_instances"},
 	})
 	defer db.Close()
 
@@ -1219,20 +1240,21 @@ func TestMSSQLStore_DeliverSignal_BeginError(t *testing.T) {
 
 func TestMSSQLStore_PollSignal_Found(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "FROM workflow_signals", data: [][]driver.Value{{`{"approved":true}`}}},
+		{match: "FROM workflow_signals", data: [][]driver.Value{
+			{int64(1), `{"approved":true}`, time.UnixMilli(1_700_000_000_000)}}},
 	}, nil)
 	defer db.Close()
 
 	store := NewMSSQLStore(db)
-	payload, found, err := store.PollSignal(context.Background(), "wf-1", "order-approved")
+	d, found, err := store.PollSignal(context.Background(), "wf-1", "order-approved")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
 	if !found {
 		t.Error("expected found=true")
 	}
-	if payload != `{"approved":true}` {
-		t.Errorf("payload = %q, want %q", payload, `{"approved":true}`)
+	if d.Payload != `{"approved":true}` {
+		t.Errorf("payload = %q, want %q", d.Payload, `{"approved":true}`)
 	}
 }
 
@@ -1403,7 +1425,9 @@ func TestMSSQLStore_ListWorkflows_Simple(t *testing.T) {
 			{
 				"wf-1", "test-wf", int64(1), "running", `{"key":"val"}`,
 				"worker-1", now, nil, nil, nil, now,
-				int64(3), int64(0), "",
+				int64(3), int64(0), "", int64(4), // reclaim_count (cleat#1123)
+				false, // cancellation_requested (cleat#1351)
+				"",    // completed_by (cleat#1118: blank, this row is running)
 			},
 		}},
 	}, nil)
@@ -1419,6 +1443,14 @@ func TestMSSQLStore_ListWorkflows_Simple(t *testing.T) {
 	}
 	if wfs[0].ID != "wf-1" || wfs[0].DefName != "test-wf" || wfs[0].Status != "running" {
 		t.Errorf("unexpected workflow fields: %+v", wfs[0])
+	}
+	// reclaim_count is the field cleat#1123 was about: it is a plain int64 with
+	// no omitempty, so before the fix the list serialised a confident 0 for every
+	// run -- "never reclaimed" and "this path does not read the column" looked the
+	// same to a caller. This is the only place the SQL Server list scan is exercised
+	// without a live server.
+	if wfs[0].ReclaimCount != 4 {
+		t.Errorf("ReclaimCount = %d, want 4 (cleat#1123)", wfs[0].ReclaimCount)
 	}
 }
 
@@ -1456,8 +1488,21 @@ func TestMSSQLStore_GetWorkflowByID_Success(t *testing.T) {
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "FROM workflow_instances WHERE id", data: [][]driver.Value{{
 			"wf-1", "test-wf", int64(1), "running", `{"key":"val"}`,
-			"worker-1", now, now, nil, nil, nil, nil, nil,
-			int64(3), int64(0), "",
+			"worker-1", now, now, nil,
+			now, // started_at (cleat#1090)
+			nil, nil, nil, nil,
+			int64(3), int64(0), "", DefaultTenantUUID, // tenant_id (3.99)
+			"wf-0",                             // continued_from (cleat#887)
+			int64(5),                           // reclaim_count (cleat#1008)
+			"wf-parent",                        // parent_workflow_id (cleat#1103)
+			now,                                // created_at (cleat#1105)
+			"failed",                           // pending_terminal_status (cleat#1105)
+			true,                               // cancellation_requested (cleat#1351)
+			"INCIDENT-4242 operator cancelled", // cancellation_reason (cleat#1351)
+			// completed_by (cleat#1118). Deliberately NOT "worker-1", which
+			// this row already supplies for assigned_to: a scan that read the
+			// lease column twice would pass against a matching value.
+			"worker-7",
 		}}},
 	}, nil)
 	defer db.Close()
@@ -1475,6 +1520,31 @@ func TestMSSQLStore_GetWorkflowByID_Success(t *testing.T) {
 	}
 	if wf.Generation != 3 {
 		t.Errorf("generation = %d, want 3", wf.Generation)
+	}
+	// cleat#887, as in the PostgreSQL and MySQL tests: supplied by the fake
+	// row, so it must reach the struct rather than being scanned and dropped.
+	if wf.ContinuedFrom != "wf-0" {
+		t.Errorf("ContinuedFrom = %q, want %q", wf.ContinuedFrom, "wf-0")
+	}
+	// cleat#1090, same idiom as the line above: supplied by the fake row, so
+	// it must reach the struct. A nil here is the scan dropping it, which is
+	// exactly how completed_at went unnoticed (cleat#1091).
+	if wf.StartedAt == nil {
+		t.Errorf("StartedAt is nil, want %v -- the fake row supplies it", now)
+	} else if !wf.StartedAt.Equal(now) {
+		t.Errorf("StartedAt = %v, want %v", *wf.StartedAt, now)
+	}
+	// cleat#1103, same idiom as the two lines above: supplied by the fake row,
+	// so it must reach the struct. A nil here is the scan dropping it.
+	if wf.ParentWorkflowID == nil {
+		t.Errorf("ParentWorkflowID is nil, want %q -- the fake row supplies it", "wf-parent")
+	} else if *wf.ParentWorkflowID != "wf-parent" {
+		t.Errorf("ParentWorkflowID = %q, want %q", *wf.ParentWorkflowID, "wf-parent")
+	}
+	// cleat#1118, same idiom as the three lines above. The want differs from
+	// AssignedTo on purpose -- see the row comment.
+	if wf.CompletedBy != "worker-7" {
+		t.Errorf("CompletedBy = %q, want %q", wf.CompletedBy, "worker-7")
 	}
 }
 
@@ -1525,28 +1595,38 @@ func TestMSSQLStore_CreatePromise_Duplicate(t *testing.T) {
 }
 
 func TestMSSQLStore_ResolvePromise_Success(t *testing.T) {
+	// affected: 1 -- the settle must match a row. Settling a promise that does
+	// not exist now returns ErrPromiseNotFound rather than nil
+	// (IMPROVEMENT-PLAN 3.233), and the mock's default of zero rows is exactly
+	// the "settled nothing" case, so leaving it unset made this test assert the
+	// opposite of its own name.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "SET status = 'resolved'"},
-		{match: "SET next_wake_at"},
+		{match: "SET status = 'resolved'", affected: 1},
+		{match: "SET next_wake_at", affected: 1},
 	})
 	defer db.Close()
 
 	store := NewMSSQLStore(db)
-	err := store.ResolvePromise(context.Background(), "wf-1", "promise-uuid-1", `{"result":"ok"}`)
+	err := store.ResolvePromise(context.Background(), "promise-uuid-1", `{"result":"ok"}`)
 	if err != nil {
 		t.Fatalf("ResolvePromise: %v", err)
 	}
 }
 
 func TestMSSQLStore_RejectPromise_Success(t *testing.T) {
+	// affected: 1 -- the settle must match a row. Settling a promise that does
+	// not exist now returns ErrPromiseNotFound rather than nil
+	// (IMPROVEMENT-PLAN 3.233), and the mock's default of zero rows is exactly
+	// the "settled nothing" case, so leaving it unset made this test assert the
+	// opposite of its own name.
 	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "SET status = 'rejected'"},
-		{match: "SET next_wake_at"},
+		{match: "SET status = 'rejected'", affected: 1},
+		{match: "SET next_wake_at", affected: 1},
 	})
 	defer db.Close()
 
 	store := NewMSSQLStore(db)
-	err := store.RejectPromise(context.Background(), "wf-1", "promise-uuid-1", "something went wrong")
+	err := store.RejectPromise(context.Background(), "promise-uuid-1", "something went wrong")
 	if err != nil {
 		t.Fatalf("RejectPromise: %v", err)
 	}
@@ -1655,7 +1735,7 @@ func TestMSSQLStore_ReleaseConcurrencyKey_Success(t *testing.T) {
 	defer db.Close()
 
 	store := NewMSSQLStore(db)
-	err := store.ReleaseConcurrencyKey(context.Background(), "my-key")
+	_, err := store.ReleaseConcurrencyKey(context.Background(), "my-key", "wf-1")
 	if err != nil {
 		t.Fatalf("ReleaseConcurrencyKey: %v", err)
 	}
@@ -1683,10 +1763,17 @@ func TestMSSQLStore_FinalizeWorkflowSegment_Done(t *testing.T) {
 	}
 }
 
+// TestMSSQLStore_FinalizeWorkflowSegment_Failed used to assert that "failed"
+// succeeds here, mocking finalize_workflow_status's now-removed 'failed' arm.
+// cleat#1973 removed that arm -- nothing in production ever called it that
+// way, and a real failure goes through FailWorkflow instead -- so this must
+// now assert the opposite: "failed" is refused, in Go, before any query
+// reaches the mock. No mockRowsResult/mockExecResult beyond
+// sp_set_session_context is wired up, deliberately: a query the store issues
+// here is itself a failure, since validFinalStatus must reject "failed"
+// before finalizeWorkflowSegmentInner ever opens a transaction.
 func TestMSSQLStore_FinalizeWorkflowSegment_Failed(t *testing.T) {
-	db := newMockDBForPostgres(t, []mockRowsResult{
-		{match: "finalize_workflow_status", data: [][]driver.Value{{true}}},
-	}, []mockExecResult{
+	db := newMockDBForPostgres(t, nil, []mockExecResult{
 		{match: "sp_set_session_context"},
 	})
 	defer db.Close()
@@ -1694,8 +1781,9 @@ func TestMSSQLStore_FinalizeWorkflowSegment_Failed(t *testing.T) {
 	store := NewMSSQLStore(db)
 	err := store.FinalizeWorkflowSegment(context.Background(), "wf-1", "worker-1", 1,
 		[]EventRecord{}, "failed", "error occurred", "ERR_01", "my-op", nil, time.Time{})
-	if err != nil {
-		t.Fatalf("FinalizeWorkflowSegment(failed): %v", err)
+	if err == nil {
+		t.Fatal(`FinalizeWorkflowSegment(finalStatus="failed") returned nil -- cleat#1973 ` +
+			"removed the procedure's 'failed' arm; this must be refused")
 	}
 }
 
@@ -1747,7 +1835,6 @@ func TestMSSQLStore_CreateSchedule_Success(t *testing.T) {
 		EntryPoint:     "main",
 		CronExpression: "0 * * * *",
 		Input:          json.RawMessage(`{}`),
-		Enabled:        true,
 		NextRunAt:      now,
 	}
 	err := store.CreateSchedule(context.Background(), sch)
@@ -1757,9 +1844,14 @@ func TestMSSQLStore_CreateSchedule_Success(t *testing.T) {
 }
 
 func TestMSSQLStore_DeleteSchedule_Success(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "DELETE FROM workflow_schedules"},
-	})
+	// The count row is required since cleat#1297: DeleteSchedule checks the
+	// schedule exists first, so that an absent name is reported as not-found
+	// rather than answered 200 {"status":"deleted"}.
+	db := newMockDBForPostgres(t,
+		[]mockRowsResult{queryRowOk("SELECT count(*) FROM workflow_schedules", int64(1))},
+		[]mockExecResult{
+			{match: "DELETE FROM workflow_schedules"},
+		})
 	defer db.Close()
 
 	store := NewMSSQLStore(db)
@@ -1770,9 +1862,13 @@ func TestMSSQLStore_DeleteSchedule_Success(t *testing.T) {
 }
 
 func TestMSSQLStore_SetScheduleEnabled_Success(t *testing.T) {
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "UPDATE workflow_schedules SET enabled"},
-	})
+	// See TestMSSQLStore_DeleteSchedule_Success: the existence check is new
+	// in cleat#1297.
+	db := newMockDBForPostgres(t,
+		[]mockRowsResult{queryRowOk("SELECT count(*) FROM workflow_schedules", int64(1))},
+		[]mockExecResult{
+			{match: "UPDATE workflow_schedules"},
+		})
 	defer db.Close()
 
 	store := NewMSSQLStore(db)
@@ -1786,7 +1882,7 @@ func TestMSSQLStore_GetDueSchedules_Success(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	db := newMockDBForPostgres(t, []mockRowsResult{
 		{match: "READPAST", data: [][]driver.Value{
-			{"due-sch", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, true, now, now, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333", "skip", 11, "skip", "run-due"},
+			{"due-sch", "wf-a", "entry1", "*/5 * * * *", `{"k":"v"}`, nil, now, now, "Asia/Tokyo", "33333333-3333-3333-3333-333333333333", "skip", 11, "skip", "run-due"},
 		}},
 	}, nil)
 	defer db.Close()
@@ -1799,7 +1895,7 @@ func TestMSSQLStore_GetDueSchedules_Success(t *testing.T) {
 	if len(schedules) != 1 {
 		t.Fatalf("expected 1 schedule, got %d", len(schedules))
 	}
-	if schedules[0].Name != "due-sch" || !schedules[0].Enabled {
+	if schedules[0].Name != "due-sch" || schedules[0].Disabled() {
 		t.Errorf("unexpected schedule: %+v", schedules[0])
 	}
 	// The scheduler computes the next firing from this field; without it
@@ -1836,20 +1932,6 @@ func TestMSSQLStore_GetDueSchedules_Empty(t *testing.T) {
 	}
 	if len(schedules) != 0 {
 		t.Errorf("expected 0 schedules, got %d", len(schedules))
-	}
-}
-
-func TestMSSQLStore_UpdateScheduleNextRun_Success(t *testing.T) {
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	db := newMockDBForPostgres(t, nil, []mockExecResult{
-		{match: "next_run_at = @p2"},
-	})
-	defer db.Close()
-
-	store := NewMSSQLStore(db)
-	err := store.UpdateScheduleNextRun(context.Background(), "hourly-job", now.Add(1*time.Hour))
-	if err != nil {
-		t.Fatalf("UpdateScheduleNextRun: %v", err)
 	}
 }
 
@@ -2061,6 +2143,7 @@ func TestMSSQLStore_LoadEventHistory_Success(t *testing.T) {
 			"",                    // plugin_output
 			"",                    // plugin_error
 			"",                    // payload
+			nil,                   // payload_encoding (NULL = pre-cleat#1319 row)
 			"",                    // promise_name
 			"",                    // promise_id
 			"",                    // promise_result

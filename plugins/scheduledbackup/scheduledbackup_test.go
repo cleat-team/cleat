@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -146,46 +147,99 @@ func TestMigrations(t *testing.T) {
 	if migs[0].Up == "" {
 		t.Error("expected non-empty Up SQL")
 	}
+
+	// cleat#2247: v4 is the migration that stops backup tables being
+	// tenant-scoped -- see CLAUDE.md's "when a section names the files it
+	// will change" warning about trusting an EARLIER migration number for a
+	// table's current shape. Found by VERSION rather than by "the last
+	// element", because v5 (below) is not v4's successor in the sense of
+	// replacing it -- it patches a side effect of v4's own sibling, v3 --
+	// and a highest-migration check would silently start describing the
+	// wrong migration the next time one is appended.
+	var v4, v5 *plugin.Migration
+	for i := range migs {
+		switch migs[i].Version {
+		case 4:
+			v4 = &migs[i]
+		case 5:
+			v5 = &migs[i]
+		}
+	}
+	if v4 == nil {
+		t.Fatal("no migration declares Version: 4 (cleat#2247's operator-only migration)")
+	}
+	for name, sql := range map[string]string{"Up": v4.Up, "UpMySQL": v4.UpMySQL, "UpMSSQL": v4.UpMSSQL} {
+		if !strings.Contains(sql, "tenant_id") {
+			t.Errorf("v4 %s does not mention tenant_id at all -- expected it to DROP the column", name)
+		}
+	}
+	// Owner decision 1A, 2026-09-24: --uninstall-plugin scheduled-backup
+	// must keep working, so v4 carries a MINIMAL Down (drops the two
+	// indexes IT added) rather than Irreversible -- it does not restore
+	// tenant_id, RLS or the old indexes, see the migration's own comment.
+	if !strings.Contains(v4.Down, "idx_backup_config_enabled_next") || !strings.Contains(v4.Down, "idx_backup_history_config") {
+		t.Error("v4 Down does not drop both indexes v4's Up created")
+	}
+	if !strings.Contains(v4.DownMSSQL, "idx_backup_config_enabled_next") || !strings.Contains(v4.DownMSSQL, "idx_backup_history_config") {
+		t.Error("v4 DownMSSQL does not drop both indexes v4's Up created")
+	}
+	// DownMySQL drops only idx_backup_config_enabled_next: MySQL refuses to
+	// drop idx_backup_history_config while backup_history_config_id_fkey
+	// still needs it as its supporting index (Error 1553), measured by
+	// TestUninstallSchedulerBackupOnEveryDialect/mysql -- see the migration's
+	// own comment on DownMySQL.
+	if !strings.Contains(v4.DownMySQL, "idx_backup_config_enabled_next") {
+		t.Error("v4 DownMySQL does not drop idx_backup_config_enabled_next")
+	}
+	if strings.Contains(v4.DownMySQL, "idx_backup_history_config") {
+		t.Error("v4 DownMySQL mentions idx_backup_history_config -- MySQL cannot drop it while the FK needs it as a supporting index")
+	}
+	for name, sql := range map[string]string{"Down": v4.Down, "DownMySQL": v4.DownMySQL, "DownMSSQL": v4.DownMSSQL} {
+		if strings.Contains(sql, "tenant_id") {
+			t.Errorf("v4 %s mentions tenant_id -- this Down is deliberately minimal and must not attempt to restore it (no source of truth for a value)", name)
+		}
+	}
+	if v4.Irreversible != "" {
+		t.Error("v4 declares an Irreversible reason alongside a real Down -- the field is now stale and should be removed")
+	}
+
+	// cleat#2247: v5 removes the ON DELETE CASCADE v3 put on
+	// backup_history.config_id -- found by TestBackupCommandWorksOnEveryDialect
+	// (cmd/cleatctl), which showed `backup config-delete` silently erasing a
+	// config's entire backup_history despite printing that history rows are
+	// unaffected. Unlike v4, this one IS reversible (SET NULL back to
+	// CASCADE), so it carries a real Down on every dialect instead of
+	// Irreversible.
+	if v5 == nil {
+		t.Fatal("no migration declares Version: 5 (cleat#2247's backup_history.config_id ON DELETE fix)")
+	}
+	for name, sql := range map[string]string{"Up": v5.Up, "UpMySQL": v5.UpMySQL, "UpMSSQL": v5.UpMSSQL} {
+		if !strings.Contains(sql, "SET NULL") {
+			t.Errorf("v5 %s does not mention SET NULL -- expected it to replace CASCADE with SET NULL", name)
+		}
+	}
+	for name, sql := range map[string]string{"Down": v5.Down, "DownMySQL": v5.DownMySQL, "DownMSSQL": v5.DownMSSQL} {
+		if !strings.Contains(sql, "CASCADE") {
+			t.Errorf("v5 %s does not restore CASCADE -- expected it to reverse back to v3's shape", name)
+		}
+	}
+	if v5.Irreversible != "" {
+		t.Error("v5 declares Irreversible, but it has a real Down on every dialect -- restoring CASCADE is not a data-loss decision the way v4's tenant_id drop is")
+	}
 }
 
-func TestRegisterRoutes_NilMux(t *testing.T) {
-	p := &Plugin{}
-	err := p.RegisterRoutes(nil)
-	if err == nil {
-		t.Error("expected error for nil mux")
-	}
-}
-
-func TestRegisterCommands(t *testing.T) {
-	p := &Plugin{}
-	cmds := p.RegisterCommands()
-	found := map[string]bool{}
-	for _, c := range cmds {
-		found[c.Name] = true
-	}
-	if !found["backup-run"] {
-		t.Error("expected backup-run command")
-	}
-	if !found["backup-list"] {
-		t.Error("expected backup-list command")
-	}
-}
-
-func TestCLIBackupRun_NoFlags(t *testing.T) {
-	p := &Plugin{}
-	err := p.cliBackupRun([]string{})
-	if err == nil {
-		t.Error("expected error for missing flags")
-	}
-}
-
-func TestCLIBackupList_NoFlags(t *testing.T) {
-	p := &Plugin{}
-	err := p.cliBackupList([]string{})
-	if err == nil {
-		t.Error("expected error for missing flags")
-	}
-}
+// TestRegisterRoutes_NilMux, TestRegisterCommands, TestCLIBackupRun_NoFlags
+// and TestCLIBackupList_NoFlags were removed with routes.go and commands.go:
+// cleat#2247 made backup configuration operator-only, so there is no longer
+// a tenant-facing HTTP surface (RegisterRoutes) or a plugin.HasCommands
+// implementation (RegisterCommands, cliBackupRun, cliBackupList) --
+// operator access is now cmd/cleatctl/backup.go, which talks to
+// backup_config/backup_history directly the same way slackworkspace.go and
+// audit.go do for their own plugins, not through the Plugin interface.
+// Note RegisterCommands was never actually wired to anything: no caller
+// anywhere in this tree ever type-asserted a loaded plugin against
+// plugin.HasCommands, so its two CLI commands were unreachable dead code
+// even before this issue.
 
 func TestPluginRegistration(t *testing.T) {
 	plugins, err := plugin.Discover()

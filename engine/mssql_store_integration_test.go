@@ -17,6 +17,26 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 )
 
+// wakeRoundTripTolerance is how far a next_wake_at read back from the database
+// may differ from the instant the caller passed in.
+//
+// It is a PRECISION allowance, not a clock allowance, and that distinction is
+// the whole point of it existing (cleat#2427). The store writes the value it
+// was handed -- `next_wake_at = @p3` (mssql_lifecycle.go) and `$3`
+// (store_lifecycle.go) -- so a read-back is the same process-clock value after
+// a database round trip. No host<->container clock offset enters that
+// comparison, which is why a generous tolerance costs nothing: one second is
+// thousands of times any plausible driver truncation and still catches a store
+// that wrote a different instant.
+//
+// The assertion this replaced compared a DB-clock instant against
+// time.Now() with ZERO margin, so its verdict was decided by the SIGN of the
+// host<->container skew. It passes here because the container clock runs ahead
+// (measured 0.09-0.27s), and flips on a runner where it lags by a millisecond
+// -- reporting "next_wake_at is in the past", which reads as a store bug and is
+// a clock artifact.
+const wakeRoundTripTolerance = time.Second
+
 // ---------------------------------------------------------------------------
 // Test helper
 // ---------------------------------------------------------------------------
@@ -131,7 +151,7 @@ func TestMSSQLIntegration_DeployAndGetWorkflowDef(t *testing.T) {
 	if got.MinVersion != 1 {
 		t.Errorf("MinVersion = %d, want 1", got.MinVersion)
 	}
-	if got.Deprecated {
+	if got.Disabled() {
 		t.Error("Deprecated should be false")
 	}
 	if len(got.PluginDeps) != 0 {
@@ -307,128 +327,6 @@ func TestMSSQLIntegration_ClaimWorkflowsBatch(t *testing.T) {
 	}
 }
 
-func TestMSSQLIntegration_ClaimStickyWorkflows(t *testing.T) {
-	store, db := setupMSSQLIntegrationTest(t)
-	ctx := context.Background()
-	deployWorkflowDef(t, store, "sticky-wf", 1, []byte{0x00, 0x61, 0x73, 0x6d})
-
-	// Insert a workflow sticky to worker-A.
-	sfID := uuid.New().String()
-	_, err := db.ExecContext(ctx, `
-		INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, sticky_worker_id)
-		VALUES (@p1, 'sticky-wf', 1, 'ready', DATEADD(DAY, -1, SYSUTCDATETIME()), '{}', 'default', 'worker-A')
-	`, sfID)
-	if err != nil {
-		t.Fatalf("insert sticky workflow: %v", err)
-	}
-
-	// Claim sticky for worker-A.
-	claimed, err := store.ClaimStickyWorkflows(ctx, "worker-A", 10)
-	if err != nil {
-		t.Fatalf("ClaimStickyWorkflows: %v", err)
-	}
-	if len(claimed) != 1 {
-		t.Fatalf("expected 1 sticky workflow, got %d", len(claimed))
-	}
-	if claimed[0].ID != sfID {
-		t.Errorf("claimed id = %s, want %s", claimed[0].ID, sfID)
-	}
-
-	// No sticky workflows for worker-B.
-	claimedB, err := store.ClaimStickyWorkflows(ctx, "worker-B", 10)
-	if err != nil {
-		t.Fatalf("ClaimStickyWorkflows worker-B: %v", err)
-	}
-	if len(claimedB) != 0 {
-		t.Errorf("expected 0 for worker-B, got %d", len(claimedB))
-	}
-}
-
-// TestMSSQLIntegration_ClaimWorkflowsAcrossTenants proves the mechanism
-// described in ClaimWorkflowsAcrossTenants's doc comment (mssql_lifecycle.go)
-// against a real, RLS-enforced database: an ordinary tenant-scoped claim
-// cannot reach another tenant's ready work, and a claim run through a
-// dbo.cleat_admin member can -- via the identical SELECT/UPDATE, on a
-// connection dbo.fn_tenant_filter treats differently, not a different query.
-func TestMSSQLIntegration_ClaimWorkflowsAcrossTenants(t *testing.T) {
-	store, adminDB := setupMSSQLIntegrationTest(t)
-	ctx := context.Background()
-	deployWorkflowDef(t, store, "xtenant-wf", 1, []byte{0x00, 0x61, 0x73, 0x6d})
-
-	const otherTenant = "11111111-1111-1111-1111-111111111111"
-
-	ownID := uuid.New().String()
-	otherID := uuid.New().String()
-	for _, seed := range []struct{ id, tenant string }{
-		{ownID, DefaultTenantUUID},
-		{otherID, otherTenant},
-	} {
-		if _, err := adminDB.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue, tenant_id)
-			VALUES (@p1, 'xtenant-wf', 1, 'ready', DATEADD(DAY, -1, SYSUTCDATETIME()), '{}', 'default', @p2)
-		`, seed.id, seed.tenant); err != nil {
-			t.Fatalf("seed workflow %s (tenant %s): %v", seed.id, seed.tenant, err)
-		}
-	}
-
-	// store is scoped to DefaultTenantUUID through the same connection string
-	// CLEAT_TEST_MSSQL names -- setupMSSQLIntegrationTest builds it via
-	// NewMSSQLStoreFactory -- which is not a cleat_admin member (012_admin_role.sql:
-	// "sa reads IS_ROLEMEMBER('cleat_admin') = 0 and stays filtered"). So the
-	// ordinary claim must see only its own tenant's row.
-	scoped, err := store.ClaimWorkflows(ctx, "worker-scoped", 10)
-	if err != nil {
-		t.Fatalf("ClaimWorkflows: %v", err)
-	}
-	if len(scoped) != 1 || scoped[0].ID != ownID {
-		t.Fatalf("ClaimWorkflows claimed %v, want exactly [%s] -- it must not see tenant %s's row %s",
-			claimedIDs(scoped), ownID, otherTenant, otherID)
-	}
-
-	// adminDB (testutil.MSSQLAdminDB) is authenticated as a member of
-	// dbo.cleat_admin. A store built on it must reach the row the ordinary
-	// claim above could not.
-	adminStore := NewMSSQLStore(adminDB, "default")
-	across, err := adminStore.ClaimWorkflowsAcrossTenants(ctx, "worker-cross", 10)
-	if err != nil {
-		t.Fatalf("ClaimWorkflowsAcrossTenants: %v", err)
-	}
-	if len(across) != 1 || across[0].ID != otherID {
-		t.Fatalf("ClaimWorkflowsAcrossTenants claimed %v, want exactly [%s]", claimedIDs(across), otherID)
-	}
-	claimed := across[0]
-	if claimed.TenantID != otherTenant {
-		t.Errorf("claimed workflow TenantID = %q, want %q -- callers re-scope on this field, "+
-			"see CrossTenantClaimer's doc comment", claimed.TenantID, otherTenant)
-	}
-	if claimed.Status != "running" {
-		t.Errorf("claimed workflow status = %q, want %q", claimed.Status, "running")
-	}
-	if claimed.AssignedTo != "worker-cross" {
-		t.Errorf("claimed workflow AssignedTo = %q, want %q", claimed.AssignedTo, "worker-cross")
-	}
-}
-
-// TestMSSQLIntegration_ClaimWorkflowsAcrossTenants_RequiresCleatAdminMembership
-// proves the guard described in requireCleatAdminMembership's doc comment: a
-// claim attempted on a connection that is not a dbo.cleat_admin member must
-// fail loudly rather than silently return an empty (or worse, one-tenant)
-// result that reads exactly like an idle queue.
-func TestMSSQLIntegration_ClaimWorkflowsAcrossTenants_RequiresCleatAdminMembership(t *testing.T) {
-	store, _ := setupMSSQLIntegrationTest(t)
-	ctx := context.Background()
-
-	_, err := store.ClaimWorkflowsAcrossTenants(ctx, "worker-noadmin", 10)
-	if err == nil {
-		t.Fatal("ClaimWorkflowsAcrossTenants succeeded on a non-admin connection, " +
-			"want an error naming the missing cleat_admin grant")
-	}
-	if !strings.Contains(err.Error(), "cleat_admin") || !strings.Contains(err.Error(), "012_admin_role.sql") {
-		t.Errorf("error = %q, want it to name cleat_admin and migrations/mssql/012_admin_role.sql "+
-			"so an operator knows exactly what to grant and where it is documented", err.Error())
-	}
-}
-
 func TestMSSQLIntegration_FailWorkflow(t *testing.T) {
 	store, db := setupMSSQLIntegrationTest(t)
 	ctx := context.Background()
@@ -571,51 +469,6 @@ func TestMSSQLIntegration_Heartbeat(t *testing.T) {
 	}
 }
 
-func TestMSSQLIntegration_BatchHeartbeat(t *testing.T) {
-	store, db := setupMSSQLIntegrationTest(t)
-	ctx := context.Background()
-	deployWorkflowDef(t, store, "bhb-wf", 1, []byte{0x00, 0x61, 0x73, 0x6d})
-
-	// Insert two ready workflows and claim them.
-	ids := []string{uuid.New().String(), uuid.New().String()}
-	for _, id := range ids {
-		_, err := db.ExecContext(ctx, `
-			INSERT INTO workflow_instances (id, def_name, def_version, status, next_wake_at, input, task_queue)
-			VALUES (@p1, 'bhb-wf', 1, 'ready', DATEADD(DAY, -1, SYSUTCDATETIME()), '{}', 'default')
-		`, id)
-		if err != nil {
-			t.Fatalf("insert workflow_instance: %v", err)
-		}
-	}
-
-	// Claim them all.
-	claimed, err := store.ClaimWorkflows(ctx, "batch-hb-worker", 10)
-	if err != nil {
-		t.Fatalf("ClaimWorkflows: %v", err)
-	}
-	if len(claimed) != 2 {
-		t.Fatalf("expected 2 claimed, got %d", len(claimed))
-	}
-
-	// Batch heartbeat.
-	n, err := store.BatchHeartbeat(ctx, "batch-hb-worker")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat: %v", err)
-	}
-	if n != 2 {
-		t.Errorf("BatchHeartbeat affected %d rows, want 2", n)
-	}
-
-	// Unknown worker has no running workflows.
-	n, err = store.BatchHeartbeat(ctx, "unknown-worker")
-	if err != nil {
-		t.Fatalf("BatchHeartbeat unknown: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("BatchHeartbeat for unknown worker affected %d rows, want 0", n)
-	}
-}
-
 func TestMSSQLIntegration_ReleaseWorkflow(t *testing.T) {
 	store, db := setupMSSQLIntegrationTest(t)
 	ctx := context.Background()
@@ -651,8 +504,21 @@ func TestMSSQLIntegration_ReleaseWorkflow(t *testing.T) {
 	if status != "ready" {
 		t.Errorf("status = %s, want ready", status)
 	}
-	if nextWakeAt.Before(time.Now()) {
-		t.Error("next_wake_at should be in the future")
+	// cleat#2427: the value ROUND-TRIPS, rather than being merely "in the
+	// future". Both sides of this comparison are process-clock values -- one of
+	// them passed through the database -- so no host<->container skew can
+	// decide it, and it additionally catches a store that wrote some other
+	// future instant instead of the one it was given.
+	if d := nextWakeAt.Sub(futureWake); d < -wakeRoundTripTolerance || d > wakeRoundTripTolerance {
+		t.Errorf("next_wake_at = %v (%v from now), want the instant ReleaseWorkflow was given: %v "+
+			"(within %v).\n\nThe store writes its argument verbatim, so the read-back should be "+
+			"the same value after a round trip. A difference larger than a precision allowance "+
+			"means the release either ignored the instant it was handed or adjusted it.",
+			nextWakeAt, time.Until(nextWakeAt), futureWake, wakeRoundTripTolerance)
+	}
+	if !futureWake.After(time.Now()) {
+		t.Fatal("the fixture's futureWake is not in the future, so the assertion above would " +
+			"pass for a store that did nothing at all -- fix the fixture, not the assertion")
 	}
 }
 
@@ -905,30 +771,35 @@ func TestMSSQLIntegration_Signals(t *testing.T) {
 	}
 
 	// Poll the signal.
-	payload, found, err := store.PollSignal(ctx, wfID, "my-signal")
+	d, found, err := store.PollSignal(ctx, wfID, "my-signal")
 	if err != nil {
 		t.Fatalf("PollSignal: %v", err)
 	}
 	if !found {
 		t.Fatal("PollSignal: signal not found")
 	}
-	if payload != `{"hello":"world"}` {
-		t.Errorf("PollSignal payload = %s, want {\"hello\":\"world\"}", payload)
+	if d.Payload != `{"hello":"world"}` {
+		t.Errorf("PollSignal payload = %s, want {\"hello\":\"world\"}", d.Payload)
 	}
 
-	// PollAndClaim (atomically claims the signal).
-	payload2, found2, err := store.PollAndClaimSignal(ctx, wfID, "my-signal")
+	// Poll again: still there. PollSignal does not consume.
+	d2, found2, err := store.PollSignal(ctx, wfID, "my-signal")
 	if err != nil {
-		t.Fatalf("PollAndClaimSignal: %v", err)
+		t.Fatalf("second PollSignal: %v", err)
 	}
 	if !found2 {
-		t.Fatal("PollAndClaimSignal: signal not found")
+		t.Fatal("second PollSignal: signal not found -- PollSignal must not consume")
 	}
-	if payload2 != `{"hello":"world"}` {
-		t.Errorf("PollAndClaimSignal payload = %s", payload2)
+	if d2.ID != d.ID {
+		t.Errorf("second PollSignal returned a different delivery: %d then %d", d.ID, d2.ID)
 	}
 
-	// Second Poll should NOT find it (PollAndClaimSignal deletes the signal).
+	// Consume it by id.
+	if err := store.ConsumeSignal(ctx, wfID, d.ID); err != nil {
+		t.Fatalf("ConsumeSignal: %v", err)
+	}
+
+	// Second Poll should NOT find it (ConsumeSignal deleted the row).
 	_, found3, err := store.PollSignal(ctx, wfID, "my-signal")
 	if err != nil {
 		t.Fatalf("PollSignal 2nd: %v", err)
@@ -1023,7 +894,6 @@ func TestMSSQLIntegration_Schedules(t *testing.T) {
 		EntryPoint:     "main",
 		CronExpression: "*/5 * * * *",
 		Input:          json.RawMessage(`{"type":"test"}`),
-		Enabled:        true,
 		NextRunAt:      time.Now().Add(-1 * time.Hour),
 	}
 	if err := store.CreateSchedule(ctx, sch); err != nil {
@@ -1044,7 +914,7 @@ func TestMSSQLIntegration_Schedules(t *testing.T) {
 	if schedules[0].CronExpression != "*/5 * * * *" {
 		t.Errorf("cron = %s", schedules[0].CronExpression)
 	}
-	if !schedules[0].Enabled {
+	if schedules[0].Disabled() {
 		t.Error("schedule should be enabled")
 	}
 
@@ -1057,10 +927,27 @@ func TestMSSQLIntegration_Schedules(t *testing.T) {
 		t.Fatal("expected at least 1 due schedule")
 	}
 
-	// UpdateScheduleNextRun.
+	// Advance the schedule past now, so it stops being due.
+	//
+	// ClaimDueSchedule, not UpdateScheduleNextRun: the latter is gone. It was
+	// the unfenced sibling of this compare-and-swap, superseded and never
+	// called by anything that ships.
+	var current time.Time
+	for _, sch := range due {
+		if sch.Name == "test-schedule-1" {
+			current = sch.NextRunAt
+		}
+	}
+	if current.IsZero() {
+		t.Fatal("test-schedule-1 was not in the due list, so there is nothing to claim")
+	}
 	futureRun := time.Now().Add(1 * time.Hour)
-	if err := store.UpdateScheduleNextRun(ctx, "test-schedule-1", futureRun); err != nil {
-		t.Fatalf("UpdateScheduleNextRun: %v", err)
+	claimed, err := store.ClaimDueSchedule(ctx, "test-schedule-1", current, futureRun, "")
+	if err != nil {
+		t.Fatalf("ClaimDueSchedule: %v", err)
+	}
+	if !claimed {
+		t.Fatal("ClaimDueSchedule did not claim a schedule it had just read as due")
 	}
 
 	// Schedule should no longer be due.
@@ -1086,7 +973,7 @@ func TestMSSQLIntegration_Schedules(t *testing.T) {
 	if len(schedules2) != 1 {
 		t.Fatalf("expected 1 schedule, got %d", len(schedules2))
 	}
-	if schedules2[0].Enabled {
+	if !schedules2[0].Disabled() {
 		t.Error("schedule should be disabled")
 	}
 
@@ -1143,7 +1030,7 @@ func TestMSSQLIntegration_Promises(t *testing.T) {
 	}
 
 	// ResolvePromise.
-	if err := store.ResolvePromise(ctx, wfID, "promise-001", `{"resolved":true}`); err != nil {
+	if err := store.ResolvePromise(ctx, "promise-001", `{"resolved":true}`); err != nil {
 		t.Fatalf("ResolvePromise: %v", err)
 	}
 
@@ -1178,7 +1065,7 @@ func TestMSSQLIntegration_Promises(t *testing.T) {
 	if err := store.CreatePromise(ctx, wfID, "reject-promise", promiseID2); err != nil {
 		t.Fatalf("CreatePromise 2nd: %v", err)
 	}
-	if err := store.RejectPromise(ctx, wfID, promiseID2, "rejected because"); err != nil {
+	if err := store.RejectPromise(ctx, promiseID2, "rejected because"); err != nil {
 		t.Fatalf("RejectPromise: %v", err)
 	}
 
@@ -1257,7 +1144,7 @@ func TestMSSQLIntegration_ConcurrencyKeys(t *testing.T) {
 	}
 
 	// Release one key.
-	if err := store.ReleaseConcurrencyKey(ctx, "resource-a"); err != nil {
+	if _, err := store.ReleaseConcurrencyKey(ctx, "resource-a", wfID); err != nil {
 		t.Fatalf("ReleaseConcurrencyKey: %v", err)
 	}
 
@@ -1355,7 +1242,8 @@ func TestMSSQLIntegration_ChildWorkflows(t *testing.T) {
 	}
 
 	// GetChildResult should not be completed yet.
-	_, completed, err := store.GetChildResult(ctx, childID)
+	_outcome, err := store.GetChildResult(ctx, childID)
+	completed := _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult: %v", err)
 	}
@@ -1372,7 +1260,9 @@ func TestMSSQLIntegration_ChildWorkflows(t *testing.T) {
 		t.Fatalf("complete child via SQL: %v", err)
 	}
 
-	result, completed, err := store.GetChildResult(ctx, childID)
+	_outcome, err = store.GetChildResult(ctx, childID)
+	result := _outcome.Result
+	completed = _outcome.Completed
 	if err != nil {
 		t.Fatalf("GetChildResult after complete: %v", err)
 	}
@@ -1650,7 +1540,7 @@ func TestMSSQLIntegration_UpdateRequests(t *testing.T) {
 	}
 
 	// CompleteUpdateRequest with result.
-	if err := store.CompleteUpdateRequest(ctx, wfID, "update-name-1", `{"completed":true}`, ""); err != nil {
+	if err := store.CompleteUpdateRequest(ctx, wfID, pending[0].RequestID, `{"completed":true}`, ""); err != nil {
 		t.Fatalf("CompleteUpdateRequest: %v", err)
 	}
 
@@ -1969,7 +1859,7 @@ func TestMSSQLIntegration_ReapStaleInstances(t *testing.T) {
 	}
 
 	// Reap with 1-hour timeout should catch the stale one.
-	reaped, err := store.ReapStaleInstances(ctx, 1*time.Hour)
+	reaped, err := store.ReapStaleInstances(ctx, 1*time.Hour, 0)
 	if err != nil {
 		t.Fatalf("ReapStaleInstances: %v", err)
 	}
@@ -2480,8 +2370,18 @@ func TestMSSQLIntegration_FinalizeWorkflowSegment_Suspend(t *testing.T) {
 	if status != "ready" {
 		t.Errorf("status = %s, want ready", status)
 	}
-	if nextWakeAt.Before(time.Now()) {
-		t.Error("next_wake_at should be in the future after suspend")
+	// Same round-trip assertion as the release test above, and for the same
+	// reason: the caller supplies the instant, so comparing it against the
+	// process clock at assert time is a sign-of-skew test that the database
+	// round trip makes unnecessary. See wakeRoundTripTolerance.
+	if d := nextWakeAt.Sub(futureWake); d < -wakeRoundTripTolerance || d > wakeRoundTripTolerance {
+		t.Errorf("next_wake_at after suspend = %v (%v from now), want the instant "+
+			"FinalizeWorkflowSegment was given: %v (within %v)",
+			nextWakeAt, time.Until(nextWakeAt), futureWake, wakeRoundTripTolerance)
+	}
+	if !futureWake.After(time.Now()) {
+		t.Fatal("the fixture's futureWake is not in the future, so the assertion above would " +
+			"pass for a store that did nothing at all -- fix the fixture, not the assertion")
 	}
 }
 
@@ -2819,6 +2719,9 @@ func TestMSSQLIntegration_GetWorkflowByID_TenantScoped(t *testing.T) {
 
 	tenantA := "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 	tenantB := "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+	// One definition per tenant since D7 (IMPROVEMENT-PLAN 3.77).
+	deployWorkflowDef(t, store.WithTenant(tenantA), "ten-wf", 1, []byte{0x00, 0x61, 0x73, 0x6d})
+	deployWorkflowDef(t, store.WithTenant(tenantB), "ten-wf", 1, []byte{0x00, 0x61, 0x73, 0x6d})
 
 	// Insert workflows for tenant A and tenant B.
 	wfA := uuid.New().String()

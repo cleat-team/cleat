@@ -3,6 +3,20 @@
 This guide covers configuration, monitoring, backups, scaling, health checks,
 and graceful shutdown for running cleat in production.
 
+> **Before a tenant's workflows can fetch anything**, egress must be permitted
+> by both the operator and the tenant — see
+> [egress-policy.md](egress-policy.md). An unconfigured tenant reaches nothing,
+> which is deliberate.
+
+## Migrate the schema first
+
+A worker does not migrate the database when it starts: a normal start verifies the
+schema and refuses to start if it is behind. Run `cleat-worker --migrate-only --db
+"$CLEAT_DATABASE_URL" [--migrate-db ...]` once, as part of the deploy, before the
+workers start. It is idempotent and safe to run concurrently. See
+[Upgrading](upgrading.md#migration-is-a-deploy-step) for how each deployment shape
+does it; `--migrate-on-start` is the opt-in for a single node.
+
 ## Configuration
 
 ### Database URL
@@ -18,24 +32,29 @@ cleat-worker
 For production, always use `sslmode=require` (or `verify-full` with a CA
 certificate). Never disable SSL in production.
 
-### Namespaces
+### Tenant isolation
 
-Namespaces isolate workflow definitions and instances. Use them to separate
-environments, teams, or tenants:
+There is no `--namespace` flag on `cleat deploy` or `cleat-worker` — a prior
+version of this doc showed one, and it exits 2 with "flag provided but not
+defined" (cleat#1970). Environment and tenant separation is via `tenant_id`,
+not a namespace: `cleat deploy` takes the tenant from the global `--tenant`
+flag (must precede the subcommand) or `CLEAT_TENANT_ID`, and `cleat-worker`
+resolves the tenant per request via `--tenant-resolver`. See
+[multi-tenancy.md](../reference/multi-tenancy.md) for the resolution modes
+and what actually enforces the boundary (row-level security, not a separate
+table set).
 
 ```bash
-cleat deploy --db "$DATABASE_URL" --namespace staging --name place_order ./out/order.wasm
-cleat-worker --db "$DATABASE_URL" --namespace staging
+cleat --tenant "$STAGING_TENANT_ID" deploy --db "$CLEAT_DATABASE_URL" --name place_order ./out/order.wasm
+cleat-worker --db "$CLEAT_DATABASE_URL" --tenant-resolver=header:X-Tenant-ID
 ```
-
-Each namespace has its own set of `workflow_defs` and `workflow_instances`.
 
 ### Worker concurrency
 
 Control how many workflow instances a worker processes simultaneously:
 
 ```bash
-cleat-worker --db "$DATABASE_URL" --concurrency 20
+cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 20
 ```
 
 Set `--concurrency` based on available CPU and the workload's I/O profile. A
@@ -45,7 +64,7 @@ connection usage to tune this value.
 ### Heartbeat interval
 
 ```bash
-cleat-worker --db "$DATABASE_URL" --heartbeat 10s
+cleat-worker --db "$CLEAT_DATABASE_URL" --heartbeat 10s
 ```
 
 The heartbeat interval controls how often the worker updates `heartbeat_at` in
@@ -56,11 +75,70 @@ recovery but more database writes.
 ### Poll interval
 
 ```bash
-cleat-worker --db "$DATABASE_URL" --poll 250ms
+cleat-worker --db "$CLEAT_DATABASE_URL" --poll 250ms
 ```
 
 Controls how often the worker polls for new work when the queue is empty.
 Lower values reduce latency for new workflows but increase database load.
+
+## Managed PostgreSQL
+
+RDS, Aurora, Cloud SQL and Azure Database for PostgreSQL are supported, and the
+migration set applies on all of them as of this change. It did not before: 8 of
+72 migrations failed against a role with no superuser, and the first failure was
+`005_app_role.sql`, so cleat could not be **installed** on a managed instance at
+all.
+
+**What is different there, and it is not configuration.** None of these
+platforms gives you a PostgreSQL superuser. AWS documents the RDS master role as
+
+```sql
+CREATE ROLE postgres WITH LOGIN NOSUPERUSER INHERIT CREATEDB CREATEROLE
+  NOREPLICATION VALID UNTIL 'infinity'
+```
+
+and `rds_superuser`, `cloudsqlsuperuser` and `azure_pg_admin` are
+highest-privileged roles rather than superusers. `TestTheMigrationSetAppliesWithoutASuperuser` builds a role of exactly that shape and applies the whole set
+through it on every run.
+
+### One capability is genuinely unavailable
+
+`BYPASSRLS` can only be granted by a true superuser:
+
+```
+ERROR:  permission denied to create role
+DETAIL:  Only roles with the BYPASSRLS attribute may create roles with the
+         BYPASSRLS attribute.
+```
+
+So `023_cross_tenant_claim.sql` and `024_cross_tenant_schedules.sql` cannot
+create `cleat_dispatcher`. They now **say so and continue** rather than aborting
+the run: the functions are created owned by the migrating role, and the worker's
+startup check reports the claim as unavailable, naming the missing attribute
+rather than telling you to apply a file you cannot apply.
+
+| capability | on managed PostgreSQL |
+|---|---|
+| single-tenant dispatch | works, unchanged |
+| cross-tenant claim | **works** — each tenant's work is claimed under that tenant's own RLS context, and no exemption is involved |
+| a non-default tenant's cron | **works** the same way: due schedules are read per tenant, under that tenant's own RLS context |
+
+**Multi-tenancy on a managed instance is therefore complete**, and the default
+configuration is the one that works there. Until the due-schedule read gained a
+grant-free equivalent this table had a fourth row saying a non-default tenant's
+cron did not fire — a deployment could execute every tenant's workflows and fire
+only its own tenant's schedules. If you are reading an older copy of this page,
+that is the row that changed.
+
+### Row-level security is unaffected
+
+Three migrations backfill columns on RLS-forced tables and relied on the
+migrating connection being a superuser. They now drop `FORCE ROW LEVEL SECURITY`
+for the length of the backfill and restore it — which returns the **table
+owner's** exemption and nothing else, leaving every other role constrained
+throughout. Each migration runs in its own transaction, so a failure rolls the
+exemption back with everything else, and the test above asserts that no table is
+left with RLS enabled but not forced.
 
 ## Monitoring
 
@@ -69,7 +147,7 @@ Lower values reduce latency for new workflows but increase database load.
 Start the worker with `--api-addr` to expose a `/metrics` endpoint:
 
 ```bash
-cleat-worker --db "$DATABASE_URL" --api-addr :8080
+cleat-worker --db "$CLEAT_DATABASE_URL" --api-addr :8080
 ```
 
 Prometheus metrics are available at `http://localhost:8080/metrics`.
@@ -115,7 +193,7 @@ SELECT
     def_name,
     AVG(EXTRACT(EPOCH FROM (completed_at - created_at))) AS avg_duration_seconds
 FROM workflow_instances
-WHERE status = 'completed'
+WHERE status = 'done'
 GROUP BY def_name;
 ```
 
@@ -168,10 +246,10 @@ instances can run concurrently against the same database:
 
 ```bash
 # Worker 1
-cleat-worker --db "$DATABASE_URL" --concurrency 10
+cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 10
 
 # Worker 2 (different machine)
-cleat-worker --db "$DATABASE_URL" --concurrency 10
+cleat-worker --db "$CLEAT_DATABASE_URL" --concurrency 10
 ```
 
 `SELECT ... FOR UPDATE SKIP LOCKED` ensures each workflow instance is claimed by
@@ -249,7 +327,7 @@ query. If the database connection is lost, the worker will:
 The worker handles SIGINT and SIGTERM for graceful shutdown:
 
 ```bash
-cleat-worker --db "$DATABASE_URL"
+cleat-worker --db "$CLEAT_DATABASE_URL"
 
 # In another terminal:
 kill -TERM <worker_pid>

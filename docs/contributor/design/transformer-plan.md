@@ -1,5 +1,14 @@
 # Transformer Implementation Plan
 
+> **This is an original design document, not a description of the shipped system.**
+> Read it for intent; check `tiers.yaml` and the source for what is true now.
+> Marked 2026-09-06 while sweeping stale wazero references: every mention of
+> wazero as *the* runtime below dates from before #459 (2026-08-10) deleted the
+> wazero backend. wasmtime is the only WASM backend cleat has; the wazero
+> `engine.Runtime` survives for CLI and test tooling only. The body is left as
+> written, because rewriting a design document to match what was built destroys
+> the only record of what was intended.
+
 ## Goal
 
 Build a tool that reads a Go package containing workflow functions, analyzes the
@@ -491,7 +500,7 @@ experience — it's the difference between "write Go with restrictions" and
    - `E009`: Function value call (closures as values)
    - `E010`: `*HostCalls` not threaded to durable function
    - `E011`: Import of WASM-incompatible package
-   - `W001`: Map iteration with order-dependent control flow
+   - `E021`: Map iteration with order-dependent control flow (shipped as an ERROR, not the warning this plan proposed)
    - `W002`: Floating-point used in control flow condition
 
 9.2 **Each error includes:**

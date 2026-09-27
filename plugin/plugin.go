@@ -28,8 +28,81 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
+	"time"
+
+	"github.com/google/uuid"
 )
+
+// ErrNotConfigured is returned by Init when a plugin received no
+// configuration at all (env.Config is empty) and, absent one, cannot do
+// anything useful -- so it disables itself rather than running degraded.
+//
+// IT IS NOT THE SAME AS A CONFIGURATION ERROR. A plugin given a config
+// section that fails validation (bad JSON, a required field left blank
+// inside an otherwise-present section) must return a plain error instead,
+// so that mistake keeps failing loudly. Conflating the two turned "I forgot
+// to set the SendGrid API key" and "I never touched this plugin" into the
+// same ERROR-level log line on every stock worker start, cleat#2070.
+//
+// A caller distinguishes the two with errors.Is(err, ErrNotConfigured), not
+// by matching error text -- wrap it, don't replace it:
+//
+//	if len(env.Config) == 0 {
+//		return fmt.Errorf("myplugin: %w", plugin.ErrNotConfigured)
+//	}
+var ErrNotConfigured = errors.New("plugin not configured")
+
+// ErrFatalMisconfiguration is returned by Init when the config a plugin
+// received is not merely absent (see ErrNotConfigured) but actively
+// contradicts itself in a way that must stop the WHOLE WORKER, not just
+// disable the one plugin.
+//
+// The case that motivated it: cleat#1992 part 1 moved email-notify's
+// SendGrid key out of --plugin-config into a deployment secret, gated behind
+// a new "email_enabled" field. A pre-upgrade config still carrying
+// "sendgrid_api_key" but not yet "email_enabled" is a deployment that was
+// clearly sending email and, under the ordinary ErrNotConfigured path, would
+// silently stop -- disabled, ERROR-logged at most, worker still starts.
+// Found in cleat-review's #2202 re-check.
+//
+// A caller distinguishes this from every other Init error with
+// errors.Is(err, ErrFatalMisconfiguration): cmd/cleat-worker's Init loop
+// logs it and os.Exit(1)s immediately, the same severity as
+// checkRequiredDeploymentSecrets' fail-closed boot check, rather than
+// marking the plugin unhealthy and continuing.
+var ErrFatalMisconfiguration = errors.New("plugin: fatal misconfiguration")
+
+// ErrWorkflowNotFound is returned by Environment.SignalWorkflow when the
+// target workflowID is not visible under the caller's own tenant --
+// because it belongs to another tenant, or because no such workflow ever
+// existed, or because it existed and was purged. All three collapse to
+// this one error deliberately: telling them apart would reopen the
+// existence oracle that engine.DeliverSignal was changed specifically to
+// avoid re-creating (cleat#2218), by answering the same way regardless of
+// which of the three is true. See engine.ErrWorkflowNotFound
+// (engine/store_signals.go), which this stands in for at the plugin/engine
+// boundary -- cmd/cleat-worker/main.go's signalPluginWorkflow translates
+// one to the other, since plugins/* cannot import engine to compare
+// against its sentinel directly.
+//
+// Before cleat#2218, this case returned a plain, non-nil error (an FK
+// violation on the engine dialects that have one), and a signal to a
+// since-purged workflow -- routine, not a bug -- was indistinguishable from
+// a genuine delivery failure. eventtriggers treated every non-nil error the
+// same, as transient and worth retrying, so an awaiter for a permanently
+// gone workflow never unregistered and leaked forever (cleat#2213).
+// cleat#2218 changed this case to return nil instead -- fixing that leak as
+// a side effect, since eventtriggers unregisters on nil too, but leaving it
+// indistinguishable from a real delivery: a caller had no way to log or
+// react to "not found" specifically, only to treat it as success. This
+// error restores that distinction. A caller that wants to react
+// specifically to "not found" -- as plugins/eventtriggers now does, to log
+// and unregister the awaiter honestly rather than by accident -- uses
+// errors.Is(err, plugin.ErrWorkflowNotFound), not string matching.
+var ErrWorkflowNotFound = errors.New("plugin: workflow not found")
 
 // PluginInfo describes a plugin for discovery and documentation.
 type PluginInfo struct {
@@ -90,20 +163,286 @@ type Environment struct {
 	Done     <-chan struct{}
 	Dialect  Dialect
 
-	// StartWorkflow starts a new workflow instance using the latest deployed version.
-	// Plugins use this to trigger workflow executions (e.g., from cron schedules
-	// or job queues). Returns the run ID of the new workflow instance.
-	StartWorkflow func(ctx context.Context, defName string, input json.RawMessage) (runID string, err error)
+	// EventsLost is how a plugin that buffers events reports the ones it gave up on, so the
+	// host can count them where an operator looks (cleat#2168). pluginName is the plugin's own
+	// name, reason a short fixed word (audit-log uses buffer_full, insert_failed, shutdown, shutdown_inflight) and
+	// n how many. It is called once per loss and must not block.
+	//
+	// NIL MEANS "NOBODY IS COUNTING", and a plugin must still log every loss: the worker sets
+	// it, and cleattest, the embedded runner and a plugin's own unit tests do not.
+	EventsLost func(pluginName, reason string, n int64)
+
+	// HTTPTransport is the egress-guarded RoundTripper a plugin must use for
+	// every outbound HTTP request. cleat#1565.
+	//
+	// NIL MEANS UNGUARDED, and that is a deliberate hole with a fence around
+	// it rather than a default: cleattest, the embedded runner and a plugin's
+	// own unit tests construct an Environment directly and have no worker to
+	// build one. The worker always sets it, and
+	// TestEveryPluginRoutesItsEgressThroughTheGuard fails if a plugin reaches
+	// for http.DefaultTransport or builds a bare client instead of using this.
+	//
+	// What it enforces has two layers. The FLOOR -- loopback, link-local,
+	// RFC1918 -- always applies, so a misconfigured or attacker-supplied
+	// plugin endpoint cannot reach cloud instance metadata or the worker's own
+	// admin port. Above it, a tenant's allowlist applies when a tenant is in
+	// context (host-function calls), and the deployment-level
+	// --egress-allowlist applies when one is not (background loops,
+	// which are sweeps and have no tenant -- the same shape as cleat#1278).
+	HTTPTransport EgressTransport
+
+	// StartWorkflow starts a new workflow instance using the latest deployed
+	// version. Plugins use this to trigger workflow executions (e.g. from cron
+	// schedules or job queues). Returns the run ID of the new instance.
+	//
+	// TAKES A STRUCT, AND BOTH KEY AND TENANT ARE REQUIRED. It used to be
+	// (ctx, defName, input) and the implementation supplied `""` for the
+	// idempotency key and the all-zeros default for the tenant, so no plugin
+	// could start a workflow that was either retry-safe or correctly
+	// attributed. cleat#1555 and cleat#1580.
+	//
+	// A STRUCT RATHER THAN TWO MORE STRINGS, because the key and the tenant are
+	// both strings and adjacent. Passing them the wrong way round would compile,
+	// run, and produce a workflow owned by a tenant named after an idempotency
+	// key -- a failure with no symptom at the call site.
+	StartWorkflow func(ctx context.Context, req StartRequest) (runID string, err error)
 
 	// SignalWorkflow delivers a signal to a running workflow instance.
 	// The signal name and JSON payload are recorded deterministically
 	// in the workflow_signals table.
+	//
+	// Returns ErrWorkflowNotFound (cleat#2227) when workflowID is not
+	// visible under the caller's own tenant -- foreign, nonexistent, and
+	// purged are indistinguishable on purpose; see that error's doc
+	// comment. Any other non-nil error is a genuine delivery failure.
 	SignalWorkflow func(ctx context.Context, workflowID, signalName, payload string) error
 
 	// Audit provides access to the plugin audit log. Plugins can record
 	// deployment, deprecation, capability changes, and invocation events.
 	// May be nil if the audit log is not configured.
 	Audit *AuditLogger
+
+	// Secrets and Payloads give a plugin access to per-tenant encrypted
+	// storage (cleat#1992) -- see secrets.go for the design and why neither
+	// takes a tenantID parameter. May be nil where no master key is
+	// configured, the same convention DB/HTTPTransport already use: a plugin
+	// that dereferences a nil Environment field is a bug the type system
+	// cannot catch here, same as it cannot for those either.
+	Secrets  Secrets
+	Payloads Payloads
+
+	// DeploymentSecrets gives a plugin access to credentials that belong to
+	// the whole deployment rather than to a tenant (cleat#1992 part 1) -- see
+	// secrets.go's DeploymentSecrets doc comment for the fixed names and why
+	// a plugin must call Get per use rather than cache it from Config. Nil
+	// under the same convention as Secrets/Payloads.
+	DeploymentSecrets DeploymentSecrets
+
+	// HostResolver and RequireHostMatch exist for exactly one caller today --
+	// plugins/oauthprovider's /login, which is exempt from
+	// auth.HostBindingMiddlewareWithMux (cleat#2319) and so would otherwise
+	// have no way to enforce the same binding on the query-param tenant it
+	// resolves itself. cleat#2340.
+	//
+	// HostResolver answers the same question auth.HostBindingMiddlewareWithMux
+	// asks of every non-exempt route: does the request's Host belong to the
+	// tenant a caller is claiming? auth.DomainResolver.TenantForHost is a
+	// CONFIRM given a candidate tenant, not a reverse lookup -- there is no
+	// "which tenant owns this host" query anywhere in this codebase, on
+	// purpose (see auth/host_binding.go). May be nil, the same convention
+	// DB/HTTPTransport already use; RequireHostMatch tells a caller whether
+	// nil here means "host binding is off" or "this plugin has no host to
+	// check against" -- they are different states and only the flag
+	// distinguishes them.
+	//
+	// RequireHostMatch mirrors --require-host-match. It is not implied by
+	// HostResolver being non-nil: the resolver is built unconditionally
+	// (auth.NewTenantStoreForDialect has no failure mode tied to the flag),
+	// so a nil check alone cannot tell "not configured" from "configured but
+	// the operator didn't ask for enforcement."
+	HostResolver     DomainResolver
+	RequireHostMatch bool
+
+	// MintOAuthAPIKey records an API key that a plugin minted on an OAuth
+	// login, bound to the identity that logged in and to an expiry, and
+	// returns the plaintext for the plugin to hand back to the client.
+	// cleat#2340.
+	//
+	// THE HOST GENERATES AND STORES IT; THE PLUGIN NEVER SEES THE FORMAT. That
+	// is why this RETURNS the plaintext rather than taking one: the cleat_sk_
+	// shape, the hash, and the table it lands in are core auth's business, and
+	// a plugin that assembled them itself would be a second implementation of
+	// the credential format -- which is cleat#866's failure, where a key
+	// written by one path was looked up by another that disagreed about where
+	// it lived, and every request 401'd with the row sitting in the database.
+	//
+	// NIL MEANS "THIS HOST CANNOT MINT", and a plugin must REFUSE THE LOGIN
+	// rather than proceed without it. A login that returns a credential nothing
+	// recorded is not a degraded login: the token authenticates nothing, and it
+	// fails later and elsewhere, as a 401 from core auth on the first request
+	// that uses it. cleattest, the embedded runner and a plugin's own unit
+	// tests construct an Environment directly and have no host to build one;
+	// the worker always sets it.
+	//
+	// The error is the store's, unmodified. A plugin logs it and refuses; it
+	// must not fall back to minting something else.
+	MintOAuthAPIKey func(ctx context.Context, req MintOAuthAPIKeyRequest) (rawKey string, err error)
+
+	// RevokeExpiredOAuthAPIKeys soft-disables every OAuth-minted API key whose
+	// expiry has passed and returns how many it disabled. cleat#2340 design v2
+	// §(7), called from oauthprovider's background loop.
+	//
+	// THE HOST OWNS THIS TABLE, for the same reason and the same measured
+	// grant MintOAuthAPIKey above exists for: a plugin's cross-tenant
+	// statements run under `SET LOCAL ROLE cleat_sweep`, which holds no
+	// privilege whatever on admin.tenant_api_keys, so the design's statement
+	// written into the plugin fails with 42501 on every tick and disables
+	// nothing. See auth.TenantStore.RevokeExpiredOAuthAPIKeys for the command
+	// that measured it.
+	//
+	// IT TAKES NO TENANT. The table is read before a tenant is known (which is
+	// why migration 061 declined it an RLS policy), so there is no tenant to
+	// hand it -- unlike every other sweep-shaped call in this struct, whose
+	// subject is a tenant's own rows.
+	//
+	// NIL MEANS "THIS HOST CANNOT DO IT", and the same convention as the mint
+	// above applies in reverse: a background loop that finds this nil SKIPS the
+	// sweep and logs nothing, because an arm that cannot run is not a login that
+	// must be refused. cleattest and the embedded runner construct an
+	// Environment directly and have no key store; the worker always sets it.
+	//
+	// AN ERROR IS LOGGED AND RETRIED ON THE NEXT TICK rather than returned to
+	// any caller -- there is no caller. A persistent error here means expiry
+	// bookkeeping has stopped, which is worth a log line and is not worth
+	// stopping the loop over: the read path refuses expired keys regardless, so
+	// the failure degrades a number rather than an authentication.
+	RevokeExpiredOAuthAPIKeys func(ctx context.Context) (disabled int64, err error)
+}
+
+// MintOAuthAPIKeyRequest is what a plugin hands Environment.MintOAuthAPIKey.
+//
+// A STRUCT RATHER THAN A PARAMETER LIST, for the reason StartWorkflow's comment
+// gives: Description, OAuthIdentity and the returned key are all strings and
+// adjacent, so transposing two of them compiles, runs, and produces a key whose
+// description is its own identity tag -- a failure with no symptom at the call
+// site.
+//
+// TenantID is a uuid.UUID, not the text Environment.TenantID carries. This
+// package already imports uuid, and a caller here is not crossing the host-call
+// boundary: a string would add a parse that can fail on a value the caller
+// already held typed.
+//
+// ExpiresAt IS A TIME, NOT A *time.Time. An OAuth-minted key always expires --
+// an IdP that omits expires_in must not yield a permanent credential by
+// omission -- and the host's store refuses to write one without an expiry, so
+// there is deliberately no way to express "never" here.
+type MintOAuthAPIKeyRequest struct {
+	TenantID      uuid.UUID
+	Description   string
+	ExpiresAt     time.Time
+	OAuthIdentity string
+}
+
+// DomainResolver mirrors auth.DomainResolver's single method exactly.
+// Defined here, rather than imported, because plugin cannot import auth:
+// auth's own test files import engine, and engine imports plugin, so
+// plugin importing auth completes a cycle for auth's test build (auth_test
+// -> engine -> plugin -> auth). auth.TenantStore already satisfies this
+// structurally, with no adapter needed -- Go interface satisfaction is by
+// method set, not by declaring type.
+type DomainResolver interface {
+	// TenantForHost returns whether hostname belongs to want, the tenant a
+	// caller is claiming -- a CONFIRM, not a reverse lookup. See
+	// auth.DomainResolver's own doc comment (auth/host_binding.go) for why.
+	TenantForHost(ctx context.Context, hostname string, want uuid.UUID) (found bool, err error)
+}
+
+// StartRequest is everything a plugin must supply to start a workflow.
+//
+// EVERY FIELD IS REQUIRED and the implementation rejects an empty one rather
+// than defaulting it. Both of the added fields exist because the values were
+// previously hardcoded at the seam:
+//
+//   - IdempotencyKey was `""`, so a plugin that retried a start -- or crashed
+//     between starting and recording that it had -- created a second run. Each
+//     caller is a sweep over a durable table and already holds a natural key.
+//     cleat#1555.
+//   - TenantID was engine.DefaultTenantUUID, so a run triggered for tenant X
+//     was stored as the default tenant's. Every caller knows the real tenant;
+//     the seam discarded it. cleat#1580.
+//
+// Defaulting either would restore precisely the silent failure the requirement
+// exists to remove, so an empty value is an error rather than a fallback.
+type StartRequest struct {
+	// DefName is the workflow definition to start.
+	DefName string
+
+	// Input is the workflow's input payload.
+	Input json.RawMessage
+
+	// IdempotencyKey deduplicates retries of the same logical start.
+	//
+	// IT MUST BE STABLE ACROSS THOSE RETRIES: derive it from the durable row
+	// being acted on, never from the wall clock at dispatch. A key built from
+	// "now" differs on every attempt, so it deduplicates nothing -- and the
+	// failure has no symptom, because duplicate runs look exactly as they do
+	// without a key at all.
+	IdempotencyKey string
+
+	// TenantID is the tenant the started run belongs to, as a UUID string.
+	TenantID string
+
+	// EntryPoint names the workflow entry point to start, for a multi-entry
+	// workflow. Empty means implicit resolution -- today that is
+	// determineEntryPoint's single-entry-point shortcut or its
+	// firstHandleExport fallback; once a workflow declares more than one
+	// entry point, an empty EntryPoint here is exactly as ambiguous as an
+	// empty entry_point on the public start API, and is resolved (or
+	// refused) the same way. cleat#2114.
+	//
+	// Merge it into Input with MergeEntryPoint before calling StartWorkflow
+	// -- callers must not roll their own merge. See MergeEntryPoint's doc
+	// comment for why the shape (flat, not nested) matters.
+	EntryPoint string
+}
+
+// MergeEntryPoint flat-merges an entry point name into a JSON object input,
+// as a sibling field "__entry_point" -- the one shape determineEntryPoint
+// (cmd/cleat-worker/setup.go) actually reads: "an explicit __entry_point
+// field IN THE START INPUT". No guest -- Go's generated dispatcher included
+// -- unwraps a nested "input" key or strips __entry_point, so wf.Input must
+// reach the guest with __entry_point sitting flat alongside the entry's own
+// fields, not wrapping them.
+//
+// cleat#2108 found the REST start API doing this wrong -- wrapping instead
+// of merging, `{"input": originalInput, "__entry_point": ...}` -- which
+// determineEntryPoint still resolved (it only reads the top-level key) but
+// corrupted the entry's own input, so the guest failed to deserialize it.
+// cleat#2114 is the same shape one seam over: event-triggered starts built
+// plugin.StartRequest with no way to express an entry point at all. Both
+// paths call this one helper so there is exactly one place that shape is
+// implemented, instead of a second copy free to drift the way #2108's did.
+//
+// entryPoint == "" is a no-op: input is returned unchanged (todays implicit
+// resolution). A non-empty entryPoint against a non-object input is
+// refused -- there is no field to merge __entry_point into, and silently
+// discarding the caller's input (as the pre-#2108 code did, producing
+// {"input":null,"__entry_point":...}) is worse than an explicit error.
+func MergeEntryPoint(input json.RawMessage, entryPoint string) (json.RawMessage, error) {
+	if entryPoint == "" {
+		return input, nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(input, &obj); err != nil || obj == nil {
+		return nil, fmt.Errorf("entry_point requires the input to be a JSON object so __entry_point "+
+			"can be merged into it (got %s): %w", string(input), err)
+	}
+	obj["__entry_point"] = entryPoint
+	merged, err := json.Marshal(obj)
+	if err != nil {
+		return nil, fmt.Errorf("encoding input with entry_point: %w", err)
+	}
+	return merged, nil
 }
 
 // AuditLogger is the interface for recording plugin lifecycle events.
@@ -151,7 +490,136 @@ type Migration struct {
 	Up      string // required — SQL for PostgreSQL (the default)
 	UpMySQL string // optional — MySQL DDL. Empty means PG-only for this version.
 	UpMSSQL string // optional — MSSQL DDL. Empty means PG-only for this version.
-	Down    string // optional — SQL to roll back
+	Down    string // optional — SQL to roll back (PostgreSQL, and the default)
+
+	// DownMySQL and DownMSSQL are the dialect-specific reversals, symmetric
+	// with UpMySQL and UpMSSQL.
+	//
+	// They exist because a migration whose Up is dialect-specific could not be
+	// reversed before cleat#1622. Every migration in the tree until then had a
+	// non-empty Up as WELL as its dialect arms, so the asymmetry never
+	// surfaced: the first MySQL-only migration -- converting a plugin's JSON
+	// columns to LONGTEXT, which PostgreSQL and SQL Server do not need -- had
+	// nowhere to put a reversal that is also MySQL-only. A single Down would
+	// have been run verbatim against all three.
+	// DialectSpecific explains why this migration deliberately has no arm for
+	// one or more dialects, and must say which and why.
+	//
+	// It exists because "no arm for this dialect" has two causes that look
+	// identical: an author forgot, or the dialect genuinely needs nothing.
+	// cmd/cleat-worker's TestEveryLinkedPluginSupportsEveryDialectTheWorkerRuns
+	// On refuses the first, correctly -- a skipped migration has its version
+	// recorded as done, so a plugin can initialise against tables that were
+	// never created (cleat#1157). That guard's own comment already says a
+	// migration with no Up at all is "a different defect and not this test's
+	// subject"; this field is how an author says so, rather than the guard
+	// guessing.
+	//
+	// NARROW BY DESIGN, like TenantScoped and SweepTables: the exemption
+	// requires this to be NON-EMPTY, so a migration missing an arm by accident
+	// still trips the guard. A reason is required, not a boolean, because the
+	// next reader has to be able to check the claim.
+	//
+	// cleat#1622 is the first use: converting MySQL's JSON columns to LONGTEXT
+	// is work PostgreSQL's JSONB and SQL Server's NVARCHAR(MAX) do not need
+	// and must not have.
+	DialectSpecific string
+
+	DownMySQL string // optional — MySQL reversal. Falls back to Down when empty.
+	DownMSSQL string // optional — MSSQL reversal. Falls back to Down when empty.
+
+	// TenantScoped names tables this migration creates whose rows belong to
+	// one tenant, identified by a tenant_id column. The runtime enables
+	// row-level security on each and installs a policy filtering on the
+	// cleat.tenant_id set by SQLDBAdapter for the statement. cleat#1277.
+	//
+	// Declare it rather than writing the policy into Up, so that twenty-odd
+	// hand-written schemas do not each get it slightly wrong -- and so that
+	// the set of tenant-scoped plugin tables is a value the runtime can
+	// read rather than a pattern someone greps for.
+	//
+	// POSTGRESQL AND SQL SERVER install a policy from this field. MySQL has
+	// no row-level security, so a table named here is scoped by the plugin's
+	// own WHERE clause there and by nothing else; the field is accepted and
+	// does nothing. That is a real limit rather than a rounding error.
+	//
+	// THE TWO ARMS ARE NOT IDENTICAL, and the differences are measured rather
+	// than assumed (applyTenantScopingMSSQL has the tables):
+	//
+	//   - a read with NO tenant set raises on PostgreSQL and returns an EMPTY
+	//     RESULT on SQL Server, because a SQL Server filter predicate must be
+	//     an inline table-valued function and cannot raise;
+	//   - writes are refused on SQL Server by BLOCK predicates rather than by
+	//     the filter, which does not affect writes at all;
+	//   - dropping a tenant collects a table's rows on PostgreSQL only, via
+	//     admin.plugin_tables, which SQL Server does not have.
+	//
+	// THE REASON GIVEN HERE FOR SQL SERVER WAS WRONG until cleat#1552: "SQL
+	// Server binds a tenant to a whole connection pool
+	// (tenantSessionConnector), which a per-request tenant does not fit".
+	// Plugins never get that pool -- getPluginDB hands them the main or the
+	// plugin pool -- and a per-request tenant fits fine, via
+	// sp_set_session_context, which database/sql's connection recycle clears.
+	// engine/plugindb_tenant.go now sets it. What is still missing on SQL
+	// Server is the half this field controls: applyTenantScoping emits no
+	// CREATE SECURITY POLICY there.
+	//
+	// ONLY FOR TABLES WHOSE EVERY READER HAS A TENANT. A policy fails
+	// closed, so a plugin that also sweeps across tenants from a background
+	// loop -- where no tenant is in context -- will find those sweeps
+	// returning nothing. kvstore qualifies because all of its access is
+	// request-scoped; most plugins do not yet.
+	TenantScoped []string
+
+	// SweepTables names tables a cross-tenant sweep in this plugin READS OR
+	// WRITES but which carry no tenant column, so they get no policy and are
+	// not listed in TenantScoped.
+	//
+	// WHY THIS EXISTS AT ALL, because "grant the sweep everything" is the
+	// obvious alternative. A cross-tenant sweep runs under SET LOCAL ROLE
+	// cleat_sweep (engine/plugindb_tenant.go, cleat#1490), and switching role
+	// changes the privilege set for EVERY table the transaction touches, not
+	// only the ones carrying a policy. cleat_sweep therefore needs privileges
+	// on these by name. Granting it blanket privileges instead would hand any
+	// plugin that names itself cross-tenant the engine's own tables, which
+	// migrations 023, 024 and 073 each declined to do -- 073 in as many words:
+	// "it would let ANY plugin that names itself cross-tenant read the
+	// engine's own table. That trades a bounded question for an open
+	// capability, on behalf of two callers."
+	//
+	// A MISSING ENTRY FAILS LOUDLY, which is the point of naming them. The
+	// sweep gets `permission denied for table X (42501)` in the plugin's own
+	// tests. That is why this is a declaration and not a heuristic: the
+	// alternative shapes all fail by quietly widening what a sweep can reach.
+	//
+	// NOT A SUBSTITUTE FOR TenantScoped. A table listed here gets a GRANT and
+	// no policy -- it is asserted to have no tenant column. A table with a
+	// tenant column belongs in TenantScoped, which gives it both.
+	//
+	// PostgreSQL only, for the same reason TenantScoped is: the other two
+	// dialects install no policy and do not switch role.
+	SweepTables []string
+
+	// Irreversible states why this migration, though it writes SQL, has
+	// deliberately no Down (and none of DownMySQL/DownMSSQL): the runtime
+	// (migration_down.go) already refuses to reverse PAST an applied
+	// migration with no Down, for exactly this migration's shape, so nothing
+	// here needs to change at runtime -- this field exists only so
+	// plugintest.AssertMigrationsDoSomething can tell "an author forgot a
+	// Down" from "a Down cannot exist", the same distinction DialectSpecific
+	// draws for a missing Up arm. cleat#2247 needed it first: scheduledbackup's
+	// v4 migration drops backup_config.tenant_id and backup_history.tenant_id
+	// with no source of truth for what value a restored column should get
+	// (the whole point of the migration is that the column is gone), which is
+	// a data-recovery decision rather than a mechanical schema reversal.
+	//
+	// NARROW BY DESIGN, like TenantScoped, SweepTables and DialectSpecific:
+	// the exemption requires this to be NON-EMPTY, so a migration missing a
+	// Down by accident still trips the guard. It is NOT a substitute for
+	// TenantScoped/SweepTables -- those describe a migration with no SQL to
+	// undo in the first place; this describes one that DOES write SQL and
+	// still cannot be undone.
+	Irreversible string
 }
 
 // HasCommands: plugin adds CLI subcommands.
@@ -173,6 +641,44 @@ type HasBackground interface {
 	Run(ctx context.Context) error
 }
 
+// HasFinalizeObserver: plugin wants to know when a workflow run it may have
+// started (via Environment.StartWorkflow) reaches a terminal status.
+//
+// NOT transactional with the write that produces finalStatus. cleat#1715's
+// design asked for a hook placed inside FinalizeWorkflowSegment's own
+// transaction, so a write-back races nothing -- but FinalizeWorkflowSegment
+// is called directly on a WorkflowStore (cmd/cleat-worker/setup.go), not
+// through the Engine, and WorkflowStore has four implementations (Postgres,
+// MySQL, MSSQL, Sharded). Threading a hook field through all four for a
+// capability exactly one plugin uses is the twenty-edits shape this issue's
+// own design note argues against for CompleteWorkflow; the same argument
+// applies here to the store interface.
+//
+// The gap this leaves is a crash between FinalizeWorkflowSegment's commit and
+// ObserveFinalize's own write -- a small, same-process window, not a network
+// round trip. It is not silently accepted: cleat#1715 also asks for an
+// abandonment sweep (a job whose run is no longer in flight and never
+// received a terminal write-back), which is exactly the backstop this gap
+// needs and would need to exist regardless of whether the hook were
+// transactional -- a WORKER that dies between commit and write-back leaves
+// the same gap a transactional hook cannot close on its own, because nothing
+// guarantees the write-back's SIDE of a two-write transaction runs either
+// once the process is gone. The sweep is the actual safety net either way.
+type HasFinalizeObserver interface {
+	Plugin
+	// ObserveFinalize is called AFTER a workflow run reaches a terminal
+	// status: "done", "failed", "dead_lettered", "terminated" or
+	// "cancelled" -- never "ready", which is a suspend, not a terminal
+	// status. Before cleat#1976, only "done" and "failed" ever reached this
+	// call; the other three terminal outcomes reached it not at all, so an
+	// observer's own bookkeeping (jobqueue's task_queue row, for the
+	// currently-only implementer) could only be corrected later by an
+	// abandonment sweep inferring from absence rather than being told.
+	// Errors are logged and otherwise ignored: a plugin's own bookkeeping
+	// must never be able to fail a workflow's finalize.
+	ObserveFinalize(ctx context.Context, runID, finalStatus string) error
+}
+
 // HasHostFunctions: plugin adds functions callable from workflows.
 // These functions are automatically recorded in event history and
 // replayed deterministically -- plugin authors don't need to handle replay.
@@ -182,9 +688,63 @@ type HasHostFunctions interface {
 }
 
 // FuncOptions configures a registered host function.
+//
+// THE TWO REPLAY PROPERTIES ARE SEPARATE BECAUSE THEY ANSWER DIFFERENT
+// QUESTIONS. cleat#1318. Idempotent asks "is re-running this safe?"; replay
+// asks "should this run at all?". One boolean carried both until seven
+// functions were registered against the weaker reading, and they come apart
+// exactly where the wording is most inviting -- an idempotent WRITE reads as a
+// yes and is still a live write issued during a reconstruction of a past
+// execution.
+//
+// Replay re-invokes only when BOTH are true. Either alone is not enough:
+// re-invoking something unsafe repeats a side effect, and re-invoking something
+// safe-but-unstable hands the workflow a value it never branched on.
 type FuncOptions struct {
-	Name       string // function name (required)
-	Idempotent bool   // if true, safe to re-invoke during replay
+	Name string // function name (required)
+
+	// Idempotent reports that calling this function again has no additional
+	// effect -- no new side effects, nothing created twice. It says nothing
+	// about what the second call RETURNS.
+	//
+	// Nothing in the engine reads this for retry today; it is declarative.
+	Idempotent bool
+
+	// SameValueOnReplay reports that re-invoking during a replay yields what
+	// the original call yielded. This is the property that licenses discarding
+	// recorded output, and it is a statement about the WORLD, not about the
+	// function: a perfectly deterministic function fails it if its inputs can
+	// change between the original run and the replay. A feature flag an
+	// operator can toggle, a vector index anything can insert into, and a
+	// provider's model list all fail it.
+	//
+	// Note what it is not: not purity, and not determinism. The question is
+	// agreement with history.
+	SameValueOnReplay bool
+
+	// SecretOnlyFields names top-level JSON fields (matching the wire tag,
+	// e.g. "api_key") whose RAW, pre-resolution value -- what the workflow
+	// literally wrote, before ${secret:NAME} substitution -- must be exactly
+	// one secret reference when present. A call whose declared field holds
+	// anything else (a literal, two case-variant spellings of the same field,
+	// or malformed input entirely) is refused before the function is invoked
+	// and before anything resembling the field's value is recorded to
+	// event_history. cleat#2043.
+	//
+	// TOP-LEVEL ONLY. A field nested inside the JSON document is not checked;
+	// there is no dot-path support. Extend this if a plugin ever needs one --
+	// none has yet.
+	//
+	// A function declaring this must not also be registered with a policy
+	// where MayReInvokeOnReplay() is true: Register/RegisterStream refuse
+	// that combination. Without the exclusion, a call this check refused
+	// stays refused forever, including on replay of history recorded before
+	// this field existed, where the same call may have genuinely succeeded
+	// with a literal -- re-invoking it live during replay would flip a run
+	// that finished "done" into one that fails on replay, which is a
+	// determinism break in the opposite direction from the leak this field
+	// closes.
+	SecretOnlyFields []string
 }
 
 // FuncRegistry lets plugins register workflow-callable functions.
@@ -219,4 +779,64 @@ type StreamFuncRegistry interface {
 type HasHealth interface {
 	Plugin
 	Health() error // nil = healthy
+}
+
+// HasRequiredDeploymentSecrets: plugin names the deployment secrets it
+// cannot run without, given the same raw config bytes Init receives
+// (cleat#1992 part 1).
+//
+// Checked by the worker AFTER Init succeeds, not during it: Init's own
+// config-presence check is what decides whether the plugin is enabled at
+// all (see Environment.Config's doc comment, and ErrNotConfigured), and a
+// plugin with no config section is skipped before this is ever consulted.
+// This interface answers a narrower, later question -- for a plugin that IS
+// enabled, which of its deployment secrets must actually resolve before the
+// worker is allowed to serve traffic.
+//
+// RequiredDeploymentSecrets returns the deployment-secret NAMES this
+// instance needs (e.g. "email.sendgrid_api_key", or one
+// "llm.providers.<provider>.api_key" per enabled provider) -- not whether
+// they currently resolve. The worker checks that separately, against
+// Environment.DeploymentSecrets, and refuses to start if any is missing or
+// unopenable: a plugin enabled but unable to reach its own credential is
+// worse than one not enabled at all, because every call it serves fails
+// individually instead of the worker saying so once, at boot.
+type HasRequiredDeploymentSecrets interface {
+	Plugin
+	RequiredDeploymentSecrets(config []byte) ([]string, error)
+}
+
+// HasDeploymentSecretPrefix: plugin declares the name prefix its own
+// deployment secrets carry (e.g. "email.", "llm.providers."), so the worker
+// can hand it a DeploymentSecrets that refuses to Get anything outside that
+// prefix. Least privilege, cheap: every plugin currently shares ONE
+// DeploymentSecretStore connection wrapped in one adapter, so without this a
+// bug in any plugin using DeploymentSecrets (reachable through a workflow's
+// own HostCall arguments, not just plugin-author error) could read a
+// SIBLING plugin's credential -- llm reading email.sendgrid_api_key, say.
+// Optional, unlike HasRequiredDeploymentSecrets, but NOT permissive: a
+// plugin that does not implement this gets DeploymentSecrets == nil, not the
+// unscoped adapter every plugin used to share regardless of whether it read
+// deployment secrets at all. Default-deny, tightened in cleat-review's
+// #2202 re-check after the first version of this left every non-declaring
+// plugin able to read email's and llm's secrets through the one adapter
+// they all received. Only email and llm read deployment secrets today, so
+// this costs nothing; a plugin that starts needing one declares its prefix.
+// Found in cleat-review's #2202 pass.
+type HasDeploymentSecretPrefix interface {
+	Plugin
+	DeploymentSecretPrefix() string
+}
+
+// HasDeploymentSecretRemedyHint: plugin names an additional, non-secret way
+// an operator can satisfy HasRequiredDeploymentSecrets -- e.g. blobstore's
+// use_iam_credentials, a --plugin-config flag that opts out of the
+// deployment secrets this interface's sibling would otherwise require.
+// Optional: checkRequiredDeploymentSecrets (cmd/cleat-worker/setup.go)
+// appends the hint to its boot-refusal error when a plugin implements this,
+// so the operator sees every way to fix the refusal, not just the one
+// RequiredDeploymentSecrets is named after.
+type HasDeploymentSecretRemedyHint interface {
+	Plugin
+	DeploymentSecretRemedyHint() string
 }

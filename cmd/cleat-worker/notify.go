@@ -34,6 +34,9 @@ func startNotifyListener(dsn, channel string, notifyCh chan<- struct{}, logger *
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		// The NOTIFY listener loop. A panic here -- a malformed payload, a nil
+		// deref -- killed the worker process. cleat#1769.
+		defer recoverBackgroundGoroutine(logger, "", "pg-notify-listener")
 		for n := range listener.Notify {
 			if n == nil {
 				return

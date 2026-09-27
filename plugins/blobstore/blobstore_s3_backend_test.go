@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,15 +28,42 @@ import (
 type s3MockTransport struct {
 	mu   sync.Mutex
 	data map[string][]byte // object key -> raw bytes
+
+	// authErrorCode, when non-empty, makes every request -- regardless of
+	// method -- fail with a 403 carrying this S3 error code in the response
+	// body, instead of touching data. Used to drive a genuine
+	// minio.ErrorResponse (InvalidAccessKeyId/SignatureDoesNotMatch) through
+	// a real Put/Get/Delete, the way expireCredsOnAuthError's own callers
+	// see it -- TestS3BackendExpireCredsOnAuthError (blobstore_expire_creds_test.go)
+	// only exercises the helper directly, not this wiring.
+	authErrorCode string
 }
 
 func newS3MockTransport() *s3MockTransport {
 	return &s3MockTransport{data: make(map[string][]byte)}
 }
 
+// authErrorResponse returns S3's own error-response shape (the one
+// httpRespToErrorResponse in minio-go's api-error-response.go decodes) so
+// minio.ToErrorResponse(err).Code reports authErrorCode, exactly as it would
+// against a real S3-compatible server rejecting a stale credential.
+func authErrorResponse(code string) *http.Response {
+	body := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<Error><Code>%s</Code><Message>mock auth failure</Message></Error>`, code)
+	return &http.Response{
+		StatusCode: http.StatusForbidden,
+		Header:     http.Header{"Content-Type": {"application/xml"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
 func (t *s3MockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	if t.authErrorCode != "" {
+		return authErrorResponse(t.authErrorCode), nil
+	}
 
 	// Extract the object key from a path-style URL: /bucket/key
 	path := strings.TrimPrefix(req.URL.Path, "/")
@@ -96,8 +124,9 @@ func newS3BackendForTest(t *testing.T) (*s3Backend, *s3MockTransport) {
 	transport := newS3MockTransport()
 	// Use Secure: true so the client avoids chunked streaming signatures.
 	// The custom Transport bypasses TLS entirely, so no real TLS is needed.
+	creds := credentials.NewStaticV4("test-key", "test-secret", "")
 	client, err := minio.New("localhost:0", &minio.Options{
-		Creds:     credentials.NewStaticV4("test-key", "test-secret", ""),
+		Creds:     creds,
 		Region:    "us-east-1",
 		Secure:    true,
 		Transport: transport,
@@ -106,9 +135,15 @@ func newS3BackendForTest(t *testing.T) (*s3Backend, *s3MockTransport) {
 		t.Fatalf("minio.New: %v", err)
 	}
 
+	// creds populated the same way newS3Backend populates it in its non-IAM
+	// branch (backend.go), so Put/Get/Delete's expireCredsOnAuthError calls
+	// have something to act on -- a nil b.creds makes expireCredsOnAuthError
+	// a guaranteed no-op regardless of what the transport returns, which
+	// would make TestS3Backend*ExpiresCredsOnAuthError below pass vacuously.
 	return &s3Backend{
 		client: client,
 		bucket: "test-bucket",
+		creds:  creds,
 	}, transport
 }
 
@@ -226,6 +261,107 @@ func TestS3BackendPutAndGetLargeBlob(t *testing.T) {
 	}
 	if !bytes.Equal(got, data) {
 		t.Error("large blob data mismatch")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// expireCredsOnAuthError wiring: cleat-review's finding was that
+// TestS3BackendExpireCredsOnAuthError (blobstore_expire_creds_test.go) drives
+// the helper directly, so removing any one of the three call sites in
+// Put/Get/Delete (backend.go) leaves that test green. These three go through
+// the real minio.Client and a mock transport returning a genuine S3 auth
+// error, so each proves its own call site is load-bearing: falsify by
+// deleting one `b.expireCredsOnAuthError(err)` line at a time and confirm
+// only the matching test goes red.
+// ---------------------------------------------------------------------------
+
+func TestS3BackendPutExpiresCredsOnAuthError(t *testing.T) {
+	b, transport := newS3BackendForTest(t)
+	ctx := context.Background()
+
+	// A brand-new *credentials.Credentials reports IsExpired() == true until
+	// its first successful Get -- credentials.New sets forceRefresh: true
+	// (pkg/credentials/credentials.go). Prime it first so the baseline
+	// below is "not expired because nothing has failed yet", not "not
+	// expired because nothing has ever been resolved".
+	if _, err := b.creds.GetWithContext(nil); err != nil {
+		t.Fatalf("priming Get: %v", err)
+	}
+	if b.creds.IsExpired() {
+		t.Fatal("creds already expired right after a successful resolve -- test setup is broken")
+	}
+
+	transport.authErrorCode = "InvalidAccessKeyId"
+	err := b.Put(ctx, "deadbeef", []byte("data"), "")
+	if err == nil {
+		t.Fatal("expected an error from the mock auth failure")
+	}
+	if code := minio.ToErrorResponse(err).Code; code != "InvalidAccessKeyId" {
+		t.Fatalf("expected InvalidAccessKeyId from the mock, got %q (err=%v)", code, err)
+	}
+
+	if !b.creds.IsExpired() {
+		t.Error("Put's auth error did not expire b.creds -- the expireCredsOnAuthError wiring in Put is missing")
+	}
+}
+
+func TestS3BackendGetExpiresCredsOnAuthError(t *testing.T) {
+	b, transport := newS3BackendForTest(t)
+	ctx := context.Background()
+
+	// A brand-new *credentials.Credentials reports IsExpired() == true until
+	// its first successful Get -- credentials.New sets forceRefresh: true
+	// (pkg/credentials/credentials.go). Prime it first so the baseline
+	// below is "not expired because nothing has failed yet", not "not
+	// expired because nothing has ever been resolved".
+	if _, err := b.creds.GetWithContext(nil); err != nil {
+		t.Fatalf("priming Get: %v", err)
+	}
+	if b.creds.IsExpired() {
+		t.Fatal("creds already expired right after a successful resolve -- test setup is broken")
+	}
+
+	transport.authErrorCode = "SignatureDoesNotMatch"
+	_, err := b.Get(ctx, "deadbeef")
+	if err == nil {
+		t.Fatal("expected an error from the mock auth failure")
+	}
+	if code := minio.ToErrorResponse(errors.Unwrap(err)).Code; code != "SignatureDoesNotMatch" {
+		t.Fatalf("expected SignatureDoesNotMatch from the mock, got %q (err=%v)", code, err)
+	}
+
+	if !b.creds.IsExpired() {
+		t.Error("Get's auth error did not expire b.creds -- the expireCredsOnAuthError wiring in Get is missing")
+	}
+}
+
+func TestS3BackendDeleteExpiresCredsOnAuthError(t *testing.T) {
+	b, transport := newS3BackendForTest(t)
+	ctx := context.Background()
+
+	// A brand-new *credentials.Credentials reports IsExpired() == true until
+	// its first successful Get -- credentials.New sets forceRefresh: true
+	// (pkg/credentials/credentials.go). Prime it first so the baseline
+	// below is "not expired because nothing has failed yet", not "not
+	// expired because nothing has ever been resolved".
+	if _, err := b.creds.GetWithContext(nil); err != nil {
+		t.Fatalf("priming Get: %v", err)
+	}
+	if b.creds.IsExpired() {
+		t.Fatal("creds already expired right after a successful resolve -- test setup is broken")
+	}
+
+	transport.authErrorCode = "InvalidAccessKeyId"
+	err := b.Delete(ctx, "deadbeef")
+	if err == nil {
+		t.Fatal("expected an error from the mock auth failure")
+	}
+	if code := minio.ToErrorResponse(err).Code; code != "InvalidAccessKeyId" {
+		t.Fatalf("expected InvalidAccessKeyId from the mock, got %q (err=%v)", code, err)
+	}
+
+	if !b.creds.IsExpired() {
+		t.Error("Delete's auth error did not expire b.creds -- the expireCredsOnAuthError wiring in Delete is missing")
 	}
 }
 

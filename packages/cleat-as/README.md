@@ -10,23 +10,51 @@ workflows that compile to WebAssembly.  Re-exports from `assembly/index.ts`:
 
 ## Installation
 
+**Not published to npm** -- `@cleat/sdk` and `@cleat/transform` are not on the
+npm registry (`npm view @cleat/sdk` / `@cleat/transform` both 404). Install
+from git at a release tag instead. `@cleat/transform` is the transform plugin
+that generates ABI-compatible WASM export wrappers from
+`@cleatEntry`-decorated functions; it is needed alongside `@cleat/sdk` to
+compile a workflow.
+
+### pnpm (recommended -- handles the subdirectory)
+
+Both packages live in a subdirectory of the cleat repo (`packages/cleat-as`
+and `packages/cleat-as/transform`), not at its root, so plain `npm install
+github:...` cannot find a `package.json` there. pnpm's `#<ref>&path:<subdir>`
+git syntax names both the ref and the subdirectory in one dependency spec:
+
 ```bash
-npm install @cleat/sdk
+pnpm add "github:cleat-team/cleat#v0.3.0&path:packages/cleat-as"
+pnpm add -D "github:cleat-team/cleat#v0.3.0&path:packages/cleat-as/transform"
+pnpm add -D assemblyscript@^0.28.19
 ```
 
-Or from source:
+### npm (fallback -- clone, then install by local path)
+
+```bash
+git clone --branch v0.3.0 --depth 1 https://github.com/cleat-team/cleat cleat-src
+npm install "file:./cleat-src/packages/cleat-as" "file:./cleat-src/packages/cleat-as/transform" --save
+npm install assemblyscript@^0.28.19 --save-dev
+```
+
+Or from within a cleat checkout:
 
 ```bash
 cd packages/cleat-as/
 npm link
 ```
 
-The SDK also provides a transform plugin that generates ABI-compatible WASM
-export wrappers from `@cleatEntry`-decorated functions:
+Before `v0.3.0` is tagged, use `#develop&path:...` (pnpm) or `--branch
+develop` (npm clone) instead -- the dependency form does not change, only the
+ref.
 
-```bash
-npm install @cleat/transform
-```
+Verified 2026-09-24 outside a checkout, pinned to a `develop` commit, both
+paths: `pnpm add "github:cleat-team/cleat#<sha>&path:packages/cleat-as"` and
+the npm clone-then-`file:`-install fallback each resolved both packages, and
+`npx asc assembly/index.ts --target release --transform
+./node_modules/@cleat/transform/index.js -o dist/workflow.wasm` produced a
+real `dist/workflow.wasm` from each.
 
 See the [Import resolution](#scoped-package-import-resolution-in-as-02732) section for
 AssemblyScript compiler configuration.
@@ -42,13 +70,20 @@ import { HostCalls, cleatEntry } from "@cleat/sdk";
 
 @cleatEntry
 export function helloWorkflow(h: HostCalls, name: string): string {
-    h.cleatLog("Hello workflow started for " + name);
-    let resp = h.cleatCall("greeter", "Greet",
+    h.log("Hello workflow started for " + name);
+    let outcome = h.cleatCall("greeter", "Greet",
         '{"name": "' + name + '"}');
-    h.cleatLog("Got response: " + resp);
-    return resp;
+    if (outcome.isError) {
+        return '{"error": "' + outcome.error! + '"}';
+    }
+    h.log("Got response: " + outcome.response);
+    return outcome.response;
 }
 ```
+
+`HostCalls` has no `cleatLog` -- the method is `log`. `cleatCall` returns a
+`CleatCallOutcome` (`response: string`, `error: string | null`, `isError:
+bool`), not a bare `string`.
 
 The `@cleatEntry` decorator triggers the cleat transform plugin, which
 generates an ABI-compatible wrapper
@@ -83,6 +118,39 @@ The `HostCalls` class wraps all WASM host function imports, grouped by category:
 - `log(message: string): void` -- emit a log message
 - `cleatFetch(url: string, method: string, headers: string, body: string): string` -- durable HTTP fetch via host
 - `cleatSend(service: string, operation: string, request: string): void` -- fire-and-forget (no response)
+
+### Deferred cleanup
+
+- `deferFunc(h, description, fn, payload)` -- register cleanup **with a body**.
+  Runs in LIFO order when the entry point returns, and **not** when the
+  workflow suspends: a suspended workflow has not exited and its cleanup is
+  still pending.
+- `h.defer(description)` -- records the description with the host and nothing
+  else. Nothing runs it. Use `deferFunc` for cleanup that actually happens.
+
+Because this SDK has no closures (see below), a defer is a top-level function
+reference plus an explicit payload string. Everything the body needs travels
+in that string:
+
+```ts
+import { HostCalls, cleatEntry, deferFunc } from "@cleat/sdk";
+
+function releaseLock(h: HostCalls, payload: string): void {
+  h.cleatCall("locks", "Release", payload);
+}
+
+@cleatEntry()
+export function my_workflow(h: HostCalls, input: string): string {
+  deferFunc(h, "release order lock", releaseLock, '{"lock":"orders-42"}');
+  // ...
+  return '{"ok":true}';
+}
+```
+
+Import the SDK as `@cleat/sdk`, not by relative path. Both resolve to the same
+files, but `asc` treats them as two separate modules with two separate defer
+registries — a defer registered through one would be drained from the other and
+never run. The generated wrapper makes that a compile error.
 
 ### Signals & Events
 - `awaitSignals(signalNames: string[], timeoutMs: i64): SignalResult` -- wait for external signals
@@ -614,3 +682,48 @@ function callWithTimeout(
 ```
 
 Host-side timeout enforcement is on the roadmap.
+## Toolchain versions
+
+This package builds and tests on **AssemblyScript 0.28** with **as-pect 9**:
+
+    assemblyscript   ^0.28.19    (peer and dev)
+    @as-pect/cli     ^9.0.0
+    @as-pect/core    ^9.0.0
+
+`as-pect.asconfig.json` must set **`textFile`** as well as `outFile`. as-pect 9
+reads the compiler's `.wat` output (`extractCompilerOutput`), and without it the
+runner fails before a single test executes with:
+
+    AssemblyScript compiler did not emit output.wat.
+    Available outputs: .../output.wasm
+
+That is a config requirement, not a compiler bug -- `npm run build` succeeds
+whether or not it is set, so the SDK build passing says nothing about whether
+the tests can run.
+
+### Version pins live in five files
+
+Bumping AssemblyScript means bumping all of them together, because the SDK and
+the transform are consumed by `file:` dependencies rather than from a registry:
+
+    packages/cleat-as/package.json                       peer + dev
+    packages/cleat-as/transform/package.json             peer
+    tests/plugin-harness/testdata/asworkflow/package.json
+    examples/as-workflow/package.json
+    examples/widget-store-as/package.json
+
+### Historical note: the `glob-promise` override is gone
+
+Until as-pect 9, `@as-pect/cli@8` depended on `glob-promise@^5` ->
+`npm-install-peers` -> **the whole npm 6 CLI**, which put 457 packages and every
+`npm audit` finding into this lock file. #478 worked around it with an
+`overrides` entry pinning `glob-promise@^6`.
+
+`@as-pect/cli@9` depends on `glob@^13` directly and has no `glob-promise` edge
+at all, so the override was removed rather than carried forward. Re-derive:
+
+    cd packages/cleat-as && npm audit --package-lock-only
+
+    544 packages, 48 vulnerabilities   original
+     73 packages,  9 vulnerabilities   with the #478 override
+     54 packages,  0 vulnerabilities   as-pect 9  <- now

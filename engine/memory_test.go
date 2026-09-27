@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/tetratelabs/wazero"
@@ -183,10 +184,24 @@ func TestWriteWasmString(t *testing.T) {
 		t.Errorf("mem[10:15] = %q, want %q", string(got), "hello")
 	}
 
-	// Truncated to maxLen.
+	// Truncated to maxLen. The PREFIX is still written -- that part is
+	// unchanged, and deliberately: a caller that does not propagate the error
+	// behaves exactly as it did before.
+	//
+	// What changed in cleat#1312 is the second return value. This asserted
+	// `err == nil`, which is the defect written down as a contract: the value
+	// was cut and the writer said nothing, so a guest received a short value
+	// and a success code with nothing to compare against.
 	n, err = writeWasmString(mem, 20, "hello world", 5)
-	if n != 5 || err != nil {
-		t.Fatalf("writeWasmString truncated = %d, %v, want 5, nil", n, err)
+	if n != 5 {
+		t.Fatalf("writeWasmString truncated = %d, want 5", n)
+	}
+	var trunc *OutputTruncatedError
+	if !errors.As(err, &trunc) {
+		t.Fatalf("writeWasmString truncated returned err = %v, want an *OutputTruncatedError", err)
+	}
+	if trunc.Needed != 11 || trunc.Capacity != 5 {
+		t.Errorf("OutputTruncatedError{Needed:%d, Capacity:%d}, want {11, 5}", trunc.Needed, trunc.Capacity)
 	}
 	got, _ = mem.Read(20, 5)
 	if string(got) != "hello" {

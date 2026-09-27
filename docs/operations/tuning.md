@@ -33,28 +33,128 @@ concurrency = (target_throughput_rps × avg_workflow_duration_s)
 `--concurrency` interacts with `--memory-soft-limit`. When system memory exceeds the
 soft limit, the worker stops claiming new work even if concurrency slots are available.
 
-## Heartbeat (`--heartbeat`)
+## Heartbeat (`--heartbeat`) and reclaim (`--reclaim-timeout`)
 
-Controls how often the worker updates its liveness in the database. If a worker
-crashes, its claimed workflows are reclaimed after two missed heartbeats.
+`--heartbeat` controls how often a worker proves it is alive by updating its
+liveness row. `--reclaim-timeout` controls how long a run may go without one of
+those before another worker may claim it.
 
-### Tradeoff
+**They used to be one knob and are now two.** The reclaim window was derived as
+`max(2 x --heartbeat, 10s)`, so the only way to a longer window was a sparser
+heartbeat. `--reclaim-timeout` defaults to `0`, which keeps exactly that
+derivation — setting nothing changes nothing.
 
-| Heartbeat | Recovery time | DB write rate |
-|-----------|---------------|---------------|
-| 2 s | ~4 s | High |
-| 5 s (default) | ~10 s | Moderate |
-| 15 s | ~30 s | Low |
-| 30 s | ~60 s | Very low |
+### Why you might want them apart
+
+A database failover stops the heartbeat **without the worker being dead**. The
+heartbeat is written to the same database the workflow's events are, so an
+outage silences every worker at once, and at the default every run in the fleet
+is reclaimable ten seconds in. Buying tolerance for that by raising
+`--heartbeat` also makes heartbeats sparse, so a genuinely crashed worker's runs
+stay stranded just as long — paying for an occasional outage with every crash.
+
+```bash
+# a 5-minute reclaim window while still checking in every 5 seconds
+cleat-worker --heartbeat 5s --reclaim-timeout 5m
+```
+
+A value below `2 x --heartbeat` is **refused**, not clamped: it would reclaim
+runs from workers that are alive and checking in normally.
+
+### The derived window, if you leave `--reclaim-timeout` at 0
+
+| `--heartbeat` | Reclaim window | Reaper poll | DB write rate |
+|---|---|---|---|
+| 2 s | **10 s** | 10 s | High |
+| 5 s (default) | 10 s | 10 s | Moderate |
+| 15 s | 30 s | 15 s | Low |
+| 30 s | 60 s | 30 s | Very low |
+
+**The 10-second floor is why the first two rows are the same.** Every heartbeat
+of 5 s or below produces an identical 10 s reclaim window — `max(2 x hb, 10s)`.
+Going below 5 s buys no reclaim speed at all; it only adds write load. This
+table previously said a 2 s heartbeat gave ~4 s recovery, which the floor makes
+impossible.
+
+Re-derive rather than trusting the table:
+
+```
+max(2 x --heartbeat, 10s)     # cmd/cleat-worker/setup.go, Worker.reclaimAfter
+```
 
 ### Recommendations
 
-| Deployment | Heartbeat | Reason |
-|------------|-----------|--------|
-| Single worker | 15–30 s | No other workers to reclaim; fast recovery is irrelevant |
-| Multi-worker (stable) | 5–10 s | Balanced — fast enough for HA, low enough DB load |
-| Kubernetes (preemptible) | 2–5 s | Nodes can disappear suddenly; fast reclaim prevents long stalls |
-| Development | 30 s+ | Minimizes DB writes during debugging |
+| Deployment | Heartbeat | Reclaim | Reason |
+|---|---|---|---|
+| Single worker | 15–30 s | leave at 0 | No other worker can reclaim, so the window is irrelevant |
+| Multi-worker (stable) | 5–10 s | leave at 0 | Balanced |
+| Kubernetes (preemptible) | 5 s | leave at 0 | Nodes vanish suddenly; **do not go below 5 s** — the floor means it changes nothing |
+| Managed DB with failover | 5 s | `2–5 m` | Survive the failover without making crash recovery slower |
+| Development | 30 s+ | leave at 0 | Minimizes DB writes while debugging |
+
+## Event flush retry (`--flush-retry-window`)
+
+An event flush that fails does not give up immediately — it retries with
+exponential backoff until this window elapses, and only then is the step
+reported as unpersisted.
+
+`--flush-retry-window` defaults to `0`, meaning **750 ms**. That is not a new
+number: the batch flush path has always retried five times at 50 ms doubling,
+which is 50+100+200+400 = 750 ms of sleeping. Setting nothing leaves the batch
+path exactly as it was.
+
+### What changed at the default
+
+The **direct** flush path — the one every step of a low-rate workflow takes —
+made one attempt and no retry. The same event at a higher step rate went through
+the batch path and got five. That asymmetry was not a decision; it was where the
+retry happened to be written. Both paths now share the window.
+
+### Sizing it for a failover
+
+```bash
+# ride out a managed-database failover, and keep the runs while doing so
+cleat-worker --flush-retry-window 5m --reclaim-timeout 5m
+```
+
+**Raise `--reclaim-timeout` with it.** An outage long enough to need a long
+retry also stops this worker's heartbeat, which is written to the same database
+— so the moment the database returns, every run in the fleet is past its stale
+window, the reaper takes them, and the retry that finally succeeds loses its
+fence. A `--flush-retry-window` above the reclaim window buys nothing on its
+own, and the worker says so at startup:
+
+```
+WARN --flush-retry-window 5m0s outlasts the reclaim window (10s): ...
+```
+
+The exception is a deployment where nothing else reaps — a single worker — in
+which case the advice is safe to ignore. It is advice rather than a refusal for
+exactly that case.
+
+### What it costs
+
+| | |
+|---|---|
+| A step whose flush fails permanently | stalls for the whole window |
+| Errors the engine does not recognise | **are retried** — `errIsRetryable` defaults to true, so a permanent unknown error costs the full window |
+| Shutdown | an in-flight retry can delay it by up to the window |
+| A lost fence | **not** retried — it is another worker holding the claim, which no later attempt changes |
+| A cancelled context | not retried |
+
+Those exemptions are why the default is 750 ms rather than something failover-sized:
+the retry sits on the engine's hottest write path, and only an operator who knows
+their failover budget should be paying for one.
+
+### Recommendations
+
+| Deployment | `--flush-retry-window` | `--reclaim-timeout` |
+|---|---|---|
+| Local / development | leave at 0 | leave at 0 |
+| Multi-worker, self-managed DB | leave at 0 | leave at 0 |
+| Streaming replication failover | `30–60 s` | match it |
+| Managed DB with Multi-AZ failover | `2–5 m` | match it |
+| Single worker, long outages expected | `2–5 m` | leave at 0 (nothing else reaps) |
 
 ## Poll interval (`--poll`)
 
@@ -158,7 +258,7 @@ burst = rps × 2 (handle brief spikes)
 
 ```bash
 cleat-worker \
-  --db "$DATABASE_URL" \
+  --db "$CLEAT_DATABASE_URL" \
   --concurrency 2 \
   --heartbeat 30s \
   --poll 2s \
@@ -171,7 +271,7 @@ cleat-worker \
 
 ```bash
 cleat-worker \
-  --db "$DATABASE_URL" \
+  --db "$CLEAT_DATABASE_URL" \
   --concurrency 10 \
   --heartbeat 5s \
   --poll 500ms \
@@ -186,7 +286,7 @@ cleat-worker \
 
 ```bash
 cleat-worker \
-  --db "$DATABASE_URL" \
+  --db "$CLEAT_DATABASE_URL" \
   --concurrency 40 \
   --heartbeat 3s \
   --poll 100ms \
@@ -199,14 +299,106 @@ cleat-worker \
   --retention-days 7
 ```
 
+### Previewing a retention sweep
+
+Retention deletes event history and, when the opt-in arms are enabled, the
+workflow records themselves. Neither is recoverable. Before running a sweep —
+especially one with an `older_than` override, which can scope far wider than the
+configured window — ask what it would remove:
+
+```
+POST /api/admin/retention/sweep
+{"older_than": "720h", "dry_run": true}
+```
+
+The response has the same shape as a real sweep, with `"dry_run": true` added, so
+a preview and the sweep that follows it can be diffed directly. Disabled arms
+appear in `skipped` exactly as they do in a real sweep, so a zero is never
+ambiguous between "that arm is off" and "nothing matched".
+
+**The counts are best effort, not a guarantee.** They are read at one instant
+from a live database: by the time you run the sweep, workflows will have
+completed and rows will have aged past the cutoff. Treat the numbers as the right
+order of magnitude — enough to catch a mistyped window, which is what the preview
+is for — and not as a list of rows that will be deleted. Expect a preview and the
+sweep that follows it to differ by whatever the workload did in between.
+
+A preview takes no locks and writes nothing, so it is safe to run against a busy
+worker. It also does not advance the retention last-run metric, so checking a
+preview does not look like a retention pass to your dashboards.
+
 ## Database connection pool
 
-Each concurrent workflow holds one database connection. The worker also uses a
-few connections for housekeeping (reaper, compactor, health checks).
+**A worker opens several independent pools, not one.** `concurrency + 5` is the
+core pool alone, and sizing from it under-provisions a default worker by a
+factor of five.
+
+Per pool, with the gate each sits behind (cleat#1470):
+
+| pool | size | default | opened when |
+|---|---|---|---|
+| core | `--concurrency + 5` | **15** | always |
+| plugin | `--max-plugin-connections` | **10** | that flag `> 0` |
+| adaptive flusher | `--batch-flush-max-connections` | **50** | on PostgreSQL only, and unless `--batch-flush-disabled` *or* `--no-per-step-flush`. MySQL and SQL Server workers have no batch writer and open no such pool (cleat#2348) |
+| heartbeat | `--heartbeat-max-connections` | **3** | that flag `> 0`, and not on a sharded deployment |
+| shard | 15 **per shard** | — | only when sharding is configured |
+| migrate | 2 | — | only with `--migrate-db`, and only at boot |
+| tenant | `--tenant-pool-max-conns` **per tenant** | 25 × *T*<sub>active</sub> | **always** on SQL Server and MySQL; on PostgreSQL only with `--tenant-isolation=role` |
+
+*T*<sub>active</sub>, not *T*: every per-tenant pool is built with a five-minute
+`ConnMaxLifetime`, so a tenant that is not executing anything holds no
+connections. This term is a ceiling for tenants working at once, which
+`--concurrency` already bounds — not a cost per tenant the worker has ever seen.
+
+`only with --tenant-isolation=role` was wrong here for the same reason the
+worker's own connection census was: that mode is PostgreSQL-only, while
+`MSSQLStoreFactory` and `MySQLStoreFactory` pool per tenant by construction —
+SQL Server because its RLS reads a per-connection `SESSION_CONTEXT`, MySQL
+because each tenant has its own database.
 
 ```
-total_db_connections ≈ concurrency + 5 (housekeeping)
+default single-node worker, no sharding, no --migrate-db:
+    15 (core) + 10 (plugin) + 50 (flusher) + 3 (heartbeat) = 78
 ```
+
+**The adaptive flusher's 50 is default-on and is two thirds of that — on PostgreSQL.**
+Both of its gates — `--batch-flush-disabled` and `--no-per-step-flush` — default to
+`false`, so it reads like an opt-in feature and is not one. (A MySQL or SQL Server
+worker builds no flusher at all: its SQL is PostgreSQL's, cleat#2348.) If you size for
+`concurrency + 5` you will be short by 63 per worker, and the symptom is
+connection exhaustion under load.
+
+**The heartbeat pool is small on purpose.** cleat#2009: a saturated core pool
+(long-held connections claiming or deferring workflows) can starve a heartbeat
+write, and a missed heartbeat is what triggers reclaim -- so pool exhaustion
+under load looked like a dead worker. Three reserved connections cost little
+against PgBouncer's `default_pool_size` and remove that failure mode; set
+`--heartbeat-max-connections 0` to opt back out and share the core pool as
+before.
+
+**The tenant pool is unbounded in tenant count, and reaped.** A worker opens a
+pool per tenant it touches, from either of two sources — `--tenant-isolation=role`
+on PostgreSQL, and the store factory itself on MySQL and SQL Server — so there
+is no fixed total to quote. Budget for the tenants a worker will actually serve.
+
+A background loop (`tenant_pool_reaper`, every five minutes) closes pools
+nothing has used for fifteen minutes, so the count follows the tenants a worker
+is serving rather than the tenants it has ever seen. Fifteen minutes is three
+times the pools' own `ConnMaxLifetime`, so by the time one is closed its
+connections have already gone and what is reclaimed is the pool object and its
+goroutine.
+
+> The reaper is **housekeeping, not a budget**. A timer can only shrink an
+> overshoot after the fact; between two ticks the pool count is whatever demand
+> made it. The bound lives at admission — see cleat#1470.
+
+The store factory's pools are additionally **leased**: a pool a running
+workflow still holds is never closed, however idle the clock says it is
+(cleat#1928). A workflow can sit inside one activity for an hour without
+touching the database, so idleness alone does not mean "unused".
+
+The worker logs this whole budget at startup (`database connection budget`),
+and refuses to start when `--connection-budget` cannot cover the fixed pools.
 
 If you run multiple workers, multiply by the worker count. Use PgBouncer in
 transaction mode between workers and PostgreSQL to reduce the total connection
@@ -223,6 +415,39 @@ pool_mode = transaction
 max_client_conn = 200
 default_pool_size = 25
 ```
+
+> **Migrations must not go through a transaction-mode pooler.** `pool_mode =
+> transaction` hands each transaction whichever server backend is free, so
+> session state does not persist across statements — and the migration path
+> depends on exactly that:
+>
+> | session-scoped thing | where |
+> |---|---|
+> | `pg_advisory_lock`, serialising migrations across workers | `migration/runner.go:209`, `plugin/migration.go:177` |
+> | `SET search_path = <schema>, pg_temp`, held across the plugin run | `plugin/migration.go:202` |
+>
+> The lock is taken on one backend and the unlock may land on another, so the
+> serialisation is silently absent — at **every worker boot**, on the path that
+> applies schema changes, which is the one place two workers must not proceed
+> at once. Nothing errors; the lock simply does not lock.
+>
+> **Use `--migrate-db`, which already exists for this shape of problem.** Point
+> `--db` at PgBouncer and `--migrate-db` at a direct connection:
+>
+> ```bash
+> cleat-worker \
+>     --db "postgres://cleat@pgbouncer:6432/cleat" \
+>     --migrate-db "postgres://cleat@postgres:5432/cleat"
+> ```
+>
+> Steady-state traffic keeps its pooling; the migration connection gets the
+> session it requires. (`--migrate-db` was added for privilege separation — an
+> unprivileged `--db` role with a DDL-capable migration role — and serves both
+> purposes.)
+>
+> `session` pooling does not have this problem, and `statement` pooling is worse.
+> Verify with `git grep -n pg_advisory -- migration/ plugin/` before assuming
+> this note is still current; cleat#1310.
 
 Then connect workers to PgBouncer:
 

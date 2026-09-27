@@ -56,7 +56,7 @@ optional — the loader discovers capabilities via type assertion.
 7. Background start  HasBackground.Run(ctx) in goroutine
 8. Host funcs reg    HasHostFunctions.RegisterHostFunctions(scope)
 9. Worker starts     dispatch loop begins
-10. Shutdown         ctx cancelled → Stop() called if Stoppable
+10. Shutdown         drain ends → Stop() called if Stoppable, with a bounded context
 ```
 
 Key: migrations run BEFORE Init. Your `Init()` can query tables your
@@ -157,7 +157,11 @@ Rules:
 ```go
 func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
     scope.Register(plugin.FuncOptions{Name: "do_thing"}, p.doThing)
-    scope.Register(plugin.FuncOptions{Name: "read_thing", Idempotent: true}, p.readThing)
+    scope.Register(plugin.FuncOptions{
+        Name:              "read_thing",
+        Idempotent:        true, // calling again has no additional effect
+        SameValueOnReplay: true, // ...and returns what the first call returned
+    }, p.readThing)
     return nil
 }
 
@@ -185,13 +189,53 @@ func (p *Plugin) doThing(ctx context.Context, inputJSON string) (string, error) 
 
 Rules:
 - `CallContext` gives you `TenantID` and `WorkflowID` — the engine injects it
-- Use `Idempotent: true` for read-only functions (S3 reads, cache lookups).
-  The engine re-invokes these during replay instead of returning cached output.
-- Use `Idempotent: false` (default) for side-effecting functions. The engine
-  records input/output in event_history and returns cached output during replay.
+- **By default, replay returns the recorded output. Leave it that way unless you
+  can defend both properties** (cleat#1318):
+  - `Idempotent` — calling again has no additional effect.
+  - `SameValueOnReplay` — calling again returns what the first call returned.
+
+  The engine re-invokes during replay only when **both** are set. "Read-only" is
+  the answer to the first question and not the second: a read of anything
+  mutable — a feature flag, an index, a provider's catalogue — can hand the
+  workflow a value it never branched on. Being side-effect-free is not enough.
 - Output MUST be valid JSON — the WASM boundary expects it
 - Keep output small for non-idempotent functions (it's stored in event_history)
 - Return errors as `(string, error)` — the engine records the error in history
+- **If a field only makes sense as a credential, declare it with
+  `SecretOnlyFields`** (cleat#2043):
+
+  ```go
+  scope.Register(plugin.FuncOptions{
+      Name:             "chat",
+      SecretOnlyFields: []string{"api_key"},
+  }, p.chat)
+  ```
+
+  `${secret:NAME}` substitution only ever *resolves* a reference — nothing
+  stops a caller writing the literal credential directly, and without this a
+  literal reaches your function (and `event_history`) in plain text exactly
+  as typed. `SecretOnlyFields` names top-level JSON field names (the wire
+  tag, e.g. `"api_key"`, not the Go struct field `APIKey`) whose raw value
+  the engine requires to be **exactly** one `${secret:NAME}` reference before
+  your function is ever called. A literal, a duplicate of the field — exact
+  (`api_key` twice) or case-variant (`api_key` and `API_KEY` together) —
+  refused as an ambiguity rather than resolved one way or the other, or
+  input that isn't a JSON object at all (malformed JSON, or valid JSON that
+  is an array, a string, or a top-level `null`) is refused before dispatch,
+  and the recorded `event_history` row has the field redacted rather than
+  holding the offending value.
+
+  **Top-level fields only — there is no dot-path support**, so a credential
+  nested inside a sub-object is not covered; keep secret fields at the top
+  level of your input schema.
+
+  **Do not combine this with `Idempotent: true, SameValueOnReplay: true`
+  together** — registration refuses the combination outright. A call this
+  check refuses stays refused in history forever; re-invoking it live on
+  replay (which is what that policy pair licenses) would either repeat the
+  refusal for no reason or, for history recorded before your function
+  declared this field, risk sending a credential your workflow already
+  proved is a literal to a live call a second time.
 
 ### HasMiddleware — request wrapping
 
@@ -241,7 +285,7 @@ func (p *Plugin) Health() error {
 }
 ```
 
-Return nil if healthy, error if not. Reported on `/healthz` and `/api/plugins`.
+Return nil if healthy, error if not. The worker calls it every 10 seconds, off the request path, and never for a plugin whose `Init` failed, so it may run a query but must return within a few seconds (a call that does not answer in 5s keeps the last answer). An error shows as the reason code `plugin_unhealthy` (200, `degraded`) on `/livez`, `/readyz` and `/healthz`, and with its message on the authenticated `GET /api/admin/health`. It never makes the worker not ready: a degraded plugin is reported, not fatal.
 
 ### Stoppable — cleanup
 
@@ -251,7 +295,23 @@ func (p *Plugin) Stop(ctx context.Context) error {
 }
 ```
 
-Called during graceful shutdown. Not called if the process is killed.
+Called during graceful shutdown, **after** the worker has finished draining in-flight runs — so
+your `Stop` can assume nothing is still executing against your plugin.
+
+The `ctx` you receive is **not** the worker's cancelled shutdown context. It is a live context with
+a deadline: one budget is shared across every plugin being stopped (5 seconds as of cleat#2147,
+which wired this call up), and the first plugin to overrun it leaves the rest with an already-expired
+context. Do not treat a cancelled `ctx` as "the worker is gone and I should bail" — check it, do the
+cleanup you can within it, and return. A `Stop` that ignores `ctx` entirely cannot be bounded by the
+worker, and will be counted as failed with `deadline_exceeded=true` in the worker log.
+
+A panic or an error from `Stop` does not stop the other plugins from being stopped, and does not
+prevent the worker from exiting: this runs on a path that is already shutting down, and refusing to
+exit is worse than a failed cleanup.
+
+Not called if the process is killed (`SIGKILL`, OOM), and **not called for a plugin whose `Init`
+failed** — the same rule `HasHealth` follows. If your `Init` returns an error it owns the cleanup of
+whatever it opened, because the worker cannot see what state it left you in.
 
 ### HasCommands — CLI subcommands
 
@@ -361,9 +421,11 @@ func (p *Plugin) cleanupStaleRefs(ctx context.Context) error {
   `auth.TenantIDFromContext` (auth middleware sets a different context key).
 - **Don't allocate resources in the constructor** — the constructor is called
   during `Discover()` before `RunMigrations()`. Allocate in `Init()`.
-- **Don't store large outputs from non-idempotent host functions** — they're
-  stored in event_history. Use `Idempotent: true` for functions that return
-  large data.
+- **Don't store large outputs from host functions** — they're stored in
+  event_history. Note that the flags do **not** help here: every plugin call's
+  output is recorded on the original run whatever its replay policy, so setting
+  `Idempotent` / `SameValueOnReplay` to avoid storage does not work and trades a
+  correctness property for nothing. Return a reference and fetch the data.
 - **Don't return errors from background `Run()`** — the goroutine exits and
   your plugin is disabled. Log and continue.
 

@@ -63,7 +63,7 @@ func CollectVersionMetrics(ctx context.Context, store WorkflowStore) (*VersionMe
 		vm := VersionMetrics{
 			Name:            def.Name,
 			Version:         def.Version,
-			Deprecated:      def.Deprecated,
+			Deprecated:      def.Disabled(),
 			CreatedAt:       def.CreatedAt,
 			Age:             formatDuration(time.Since(def.CreatedAt)),
 			ActiveInstances: count,
@@ -74,7 +74,7 @@ func CollectVersionMetrics(ctx context.Context, store WorkflowStore) (*VersionMe
 		summary.Workflows = append(summary.Workflows, vm)
 		summary.TotalActiveInstances += count
 
-		if def.Deprecated {
+		if def.Disabled() {
 			summary.Deprecated++
 		} else {
 			summary.ActiveVersions++
@@ -116,7 +116,7 @@ func CheckStaleVersions(ctx context.Context, store WorkflowStore, staleThreshold
 		count := activeCounts[key]
 		daysSinceCreated := int(now.Sub(def.CreatedAt).Hours() / 24)
 
-		if def.Deprecated {
+		if def.Disabled() {
 			if count == 0 && now.Sub(def.CreatedAt) >= purgeThreshold {
 				alerts = append(alerts, StaleVersionAlert{
 					Name:             def.Name,

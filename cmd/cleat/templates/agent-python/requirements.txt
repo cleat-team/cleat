@@ -1,5 +1,10 @@
 # Cleat SDK
-cleat-sdk>=0.2.0
+#
+# Installed straight from this repo's python-sdk/ rather than PyPI: cleat-sdk
+# has not been published yet (cleat#1779, targeted for the 0.3.0 release).
+# Once it is, replace this with a version pin like the other dependencies
+# below.
+cleat-sdk @ git+https://github.com/cleat-team/cleat#subdirectory=python-sdk
 
 # LangChain integration
 langchain>=0.3.0

@@ -23,9 +23,13 @@ import {
   SCRATCH_BASE,
   OUTPUT_OFFSET,
   setWorkflowSuspended,
+  stopRequested,
+  isInDeferPhase,
 } from "./memory";
 
 import { jsonStrArray, jsonExtractString, jsonExtractNumber } from "./json";
+import { decodeSignalEnvelope, encodeSignalEnvelope, SignalEnvelope } from "./signal-envelope";
+import { decodeUpdateDelivery, UpdateDelivery, UpdateHandler, UpdateValidator } from "./updates";
 
 /**
  * Map an error code from the host runtime to a human-readable name.
@@ -38,6 +42,10 @@ function errorCodeName(code: u32): string {
     case 3: return "not_found";
     case 4: return "invalid_request";
     case 5: return "permission_denied";
+    // 6 and 7 were missing until cleat#1312, so a guest that hit either printed
+    // "unknown_code" and the operator had a number and nothing else.
+    case 6: return "retry_policy_too_long";
+    case 7: return "output_truncated";
     default: return "unknown_code";
   }
 }
@@ -92,6 +100,18 @@ export declare function import_cleat_min_version(): i64;
  * 7. cleat_defer: Register cleanup to run on workflow exit.
  * (import "env" "cleat_defer") (param i32 i32 i32 i32) (result i64)
  */
+/**
+ * 7a. cleat_defer_phase: report the start (1) and end (0) of the defer drain.
+ * (import "env" "cleat_defer_phase") (param i32) (result i64)
+ *
+ * Records no event. It marks the events the drain produces so the engine can
+ * tell a defer body's durable calls from the workflow body's -- without which a
+ * workflow that exhausted its retries and then cleaned up is classified failed
+ * rather than dead_lettered. cleat#1155.
+ */
+@external("env", "cleat_defer_phase")
+export declare function import_cleat_defer_phase(on: i32): i64;
+
 @external("env", "cleat_defer")
 export declare function import_cleat_defer(
   descPtr: i32,
@@ -255,6 +275,33 @@ export declare function import_cleat_register_update_handler(
 ): i64;
 
 /**
+ * 18a. cleat_poll_update: Deliver the next pending update request.
+ * (import "env" "cleat_poll_update") (param i32 i32) (result i64)
+ *
+ * Writes a JSON envelope {"name","payload","request_id"} and packs
+ * written<<32 | flags, with 0x0100 meaning an update was delivered.
+ */
+@external("env", "cleat_poll_update")
+export declare function import_cleat_poll_update(
+  envelopePtr: i32,
+  envelopeMaxLen: i32,
+): i64;
+
+/**
+ * 18b. cleat_complete_update: Record an outcome and settle the caller's promise.
+ * (import "env" "cleat_complete_update") (param i32 i32 i32 i32 i32 i32) (result i64)
+ */
+@external("env", "cleat_complete_update")
+export declare function import_cleat_complete_update(
+  requestIdPtr: i32,
+  requestIdLen: i32,
+  resultPtr: i32,
+  resultLen: i32,
+  errPtr: i32,
+  errLen: i32,
+): i64;
+
+/**
  * 19. plugin_call: Host-only extension for plugin function calls.
  * (import "env" "plugin_call") (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)
  */
@@ -290,34 +337,14 @@ export declare function import_cleat_run_id(
   idMaxLen: i32,
 ): i64;
 
-/**
- * 22. cleat_send_signal_and_wait: Send a signal and wait for a response.
- * (import "env" "cleat_send_signal_and_wait") (param i32 i32 i32 i32 i32 i32 i64 i32 i32) (result i64)
- */
-@external("env", "cleat_send_signal_and_wait")
-export declare function import_cleat_send_signal_and_wait(
-  targetRunIdPtr: i32,
-  targetRunIdLen: i32,
-  signalNamePtr: i32,
-  signalNameLen: i32,
-  payloadPtr: i32,
-  payloadLen: i32,
-  timeoutMs: i64,
-  responsePtr: i32,
-  responseMaxLen: i32,
-): i64;
-
-/**
- * 23. cleat_reply_to_signal: Respond to a signal from within a handler.
- * (import "env" "cleat_reply_to_signal") (param i32 i32 i32 i32) (result i64)
- */
-@external("env", "cleat_reply_to_signal")
-export declare function import_cleat_reply_to_signal(
-  correlationIdPtr: i32,
-  correlationIdLen: i32,
-  responsePtr: i32,
-  responseLen: i32,
-): i64;
+// 22/23. cleat_send_signal_and_wait (ABI 2.23) and cleat_reply_to_signal
+// (ABI 2.24) are deliberately NOT imported. Both were inert engine-side, and
+// request/reply is now composed from createPromise + signalWorkflow +
+// awaitPromise + resolvePromise (IMPROVEMENT-PLAN 3.220). Declaring an
+// @external this SDK never calls would make every AssemblyScript guest import
+// a host function it does not use. The engine still exports both; removing
+// the exports is a separate change that has to come after every SDK stops
+// importing them -- and with this SDK, every SDK has.
 
 /**
  * 24. cleat_signal_workflow: Send a signal to another workflow.
@@ -404,71 +431,28 @@ export declare function import_cleat_run_detached(
 ): i64;
 
 /**
- * 31. cleat_set_state: Set a key-value pair in workflow state.
- * (import "env" "cleat_set_state") (param i32 i32 i32 i32) (result i64)
+ * 30a. cleat_start_detached: cleat_run_detached, returning the run id.
+ * (import "env" "cleat_start_detached") (param i32 i32 i32 i32 i32 i32) (result i64)
+ *
+ * A separate import rather than two more parameters on the one above: arity is
+ * part of an import's type, so widening it stops every already-deployed binary
+ * instantiating, not just that one call. See ABI.md 2.24a.
  */
-@external("env", "cleat_set_state")
-export declare function import_cleat_set_state(
-  keyPtr: i32,
-  keyLen: i32,
-  valPtr: i32,
-  valLen: i32,
+@external("env", "cleat_start_detached")
+export declare function import_cleat_start_detached(
+  namePtr: i32,
+  nameLen: i32,
+  inputPtr: i32,
+  inputLen: i32,
+  runIdPtr: i32,
+  runIdMaxLen: i32,
 ): i64;
 
-/**
- * 32. cleat_get_state: Get a value from workflow state by key.
- * (import "env" "cleat_get_state") (param i32 i32 i32 i32) (result i64)
- */
-@external("env", "cleat_get_state")
-export declare function import_cleat_get_state(
-  keyPtr: i32,
-  keyLen: i32,
-  outPtr: i32,
-  maxLen: i32,
-): i64;
 
-/**
- * 33. cleat_delete_state: Delete a key from workflow state.
- * (import "env" "cleat_delete_state") (param i32 i32) (result i64)
- */
-@external("env", "cleat_delete_state")
-export declare function import_cleat_delete_state(
-  keyPtr: i32,
-  keyLen: i32,
-): i64;
 
-/**
- * 34. cleat_incr_state: Atomically increment a numeric state value.
- * (import "env" "cleat_incr_state") (param i32 i32 i64) (result i64)
- */
-@external("env", "cleat_incr_state")
-export declare function import_cleat_incr_state(
-  keyPtr: i32,
-  keyLen: i32,
-  delta: i64,
-): i64;
 
-/**
- * 35. cleat_has_state: Check if a key exists in workflow state.
- * (import "env" "cleat_has_state") (param i32 i32) (result i64)
- */
-@external("env", "cleat_has_state")
-export declare function import_cleat_has_state(
-  keyPtr: i32,
-  keyLen: i32,
-): i64;
 
-/**
- * 36. cleat_list_state: List state keys matching a prefix.
- * (import "env" "cleat_list_state") (param i32 i32 i32 i32) (result i64)
- */
-@external("env", "cleat_list_state")
-export declare function import_cleat_list_state(
-  prefixPtr: i32,
-  prefixLen: i32,
-  outPtr: i32,
-  maxLen: i32,
-): i64;
+
 
 /**
  * 37. cleat_await_all_children: Wait for multiple child workflows.
@@ -676,21 +660,6 @@ export declare function import_cleat_continue_as_new_versioned(
 ): i64;
 
 /**
- * cleat_child_workflow_in_schema: 11 params -> i64
- * (import "env" "cleat_child_workflow_in_schema")
- */
-@external("env", "cleat_child_workflow_in_schema")
-export declare function import_cleat_child_workflow_in_schema(
-  schemaPtr: i32, schemaLen: i32,
-  namePtr: i32, nameLen: i32,
-  inputPtr: i32, inputLen: i32,
-  version: i64,
-  priority: i64,
-  policyPtr: i32, policyLen: i32,
-  runIdPtr: i32, runIdMaxLen: i32,
-): i64;
-
-/**
  * cleat_side_effect: (ptr,len, ptr,maxLen) -> i64
  * (import "env" "cleat_side_effect")
  */
@@ -823,6 +792,16 @@ export class AwaitSignalsOutcome {
     public readonly timedOut: bool,
     /** Error message, or null on success. */
     public readonly error: string | null,
+    /**
+     * The address to answer this signal at, or "" for a one-way signal.
+     *
+     * Non-empty only when the sender used `sendSignalAndWait` and is
+     * suspended waiting for a reply; pass it to `replyToSignal`. A signal
+     * sent with `signalWorkflow` leaves it empty, which is how a receiver
+     * tells a request that wants an answer from a one-way notification.
+     * IMPROVEMENT-PLAN 3.220.
+     */
+    public readonly replyTo: string = "",
   ) {}
 
   /** Returns true when this outcome carries an error. */
@@ -933,12 +912,64 @@ export class ChildWorkflowOptions {
   }
 }
 
+/**
+ * Renders signal names as a JSON array.
+ *
+ * The names come from jsonStrArray, which delimits on escapes without decoding
+ * them -- so an element arrives still escaped and re-wrapping it in quotes
+ * reproduces the original JSON. Escaping again here would double it.
+ */
+function namesToJson(names: string[]): string {
+  let out: string = "[";
+  for (let i: i32 = 0; i < names.length; i++) {
+    if (i > 0) out += ",";
+    out += "\"" + names[i] + "\"";
+  }
+  return out + "]";
+}
+
+/** Index of `want` in `names`, or -1. */
+function indexOfName(names: string[], want: string): i32 {
+  for (let i: i32 = 0; i < names.length; i++) {
+    if (names[i] == want) return i;
+  }
+  return -1;
+}
+
+/** A copy of `names` with the first occurrence of `drop` removed. */
+function withoutName(names: string[], drop: string): string[] {
+  let out: string[] = [];
+  let dropped: bool = false;
+  for (let i: i32 = 0; i < names.length; i++) {
+    if (!dropped && names[i] == drop) {
+      dropped = true;
+      continue;
+    }
+    out.push(names[i]);
+  }
+  return out;
+}
+
 export class HostCalls {
   /** Memory helper for string I/O in linear memory. */
   protected memory: Memory;
 
   /** Current scope prefix for virtual object state operations. */
   private _scopePrefix: string = "";
+
+  /**
+   * Registered update handlers, in parallel arrays.
+   *
+   * Parallel arrays rather than a Map because AssemblyScript's Map requires a
+   * managed key type and this is hot on every suspension; indexOf over a
+   * handful of names is cheaper than the alternative and has no allocation.
+   */
+  private _updateNames: string[] = [];
+  private _updateHandlers: UpdateHandler[] = [];
+  private _updateValidators: (UpdateValidator | null)[] = [];
+
+  /** Reentrancy guard for dispatchUpdates(); see there. */
+  private _dispatchingUpdates: bool = false;
 
   /**
    * @param memory - Optional Memory instance. A default one is created if
@@ -1035,6 +1066,13 @@ export class HostCalls {
       OUT_BUF_SIZE,
     );
 
+    // The host refuses new work in a defer segment (IMPROVEMENT-PLAN 3.84);
+    // ask before decoding, because bit 31 overlaps a real field in one of
+    // these layouts. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new CleatCallOutcome("", "cleat: refused in a defer segment", 0);
+    }
+
     // Decode the packed result
     let decoded = decodeCallResult(result);
     let responseLen: i32 = decoded.responseLen as i32;
@@ -1113,6 +1151,14 @@ export class HostCalls {
     );
 
     // Decode the packed result (same bit layout as cleat_call)
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+    // await-signals layout that bit overlaps a real field, so decoding first
+    // would read a stop as an ordinary result. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new CleatCallOutcome("", "cleat: host refused this call -- the workflow is running its defer phase", 0);
+    }
+
     let decoded = decodeCallResult(result);
     let responseLen: i32 = decoded.responseLen as i32;
 
@@ -1177,6 +1223,14 @@ export class HostCalls {
     );
 
     // Decode the packed result (same bit layout as cleat_call)
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+    // await-signals layout that bit overlaps a real field, so decoding first
+    // would read a stop as an ordinary result. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new CleatCallOutcome("", "cleat: host refused this call -- the workflow is running its defer phase", 0);
+    }
+
     let decoded = decodeCallResult(result);
     let responseLen: i32 = decoded.responseLen as i32;
 
@@ -1222,6 +1276,7 @@ export class HostCalls {
    * @returns `true` if the workflow should suspend, `false` if completed.
    */
   cleatSleepMs(timeoutMs: i64): bool {
+    this.dispatchUpdates(); // dispatch point; see dispatchUpdates()
     let result: i64 = import_cleat_sleep(timeoutMs);
     let decoded = decodeSleepResult(result);
     let shouldSuspend: bool = decoded.status === 1;
@@ -1304,7 +1359,15 @@ export class HostCalls {
   // ────────────────────────────────────────────
 
   /**
-   * Register cleanup to run on workflow exit.
+   * Record with the host that a cleanup action exists.
+   *
+   * This registers a DESCRIPTION and nothing else. The host stores it in the
+   * workflow's deferrals map; **no code anywhere runs it**, because there is
+   * no body to run. This doc comment said "register cleanup to run on workflow
+   * exit" until IMPROVEMENT-PLAN §3.73, which was not true of any
+   * AssemblyScript workflow ever written.
+   *
+   * Use {@link deferFunc} for cleanup that actually runs.
    *
    * @param description - Human-readable description of the deferred action.
    * @returns A DurableResult containing the defer ID on success.
@@ -1405,6 +1468,18 @@ export class HostCalls {
    * @returns An error message on failure, or `null` on success.
    */
   continueAsNew(inputJson: string): string | null {
+    // Refused from inside a defer body -- IMPROVEMENT-PLAN 3.35 phase 4.
+    // Measured 2026-09-02 before this check: the host recorded a
+    // `continue_as_new` event AND the wrapper went on to report the workflow's
+    // already-decided result, so one history carried two contradictory
+    // terminal facts. The worker stores `done` and the continuation silently
+    // never happens.
+    if (isInDeferPhase()) {
+      return "continueAsNew() is not allowed from a defer body: the workflow's " +
+        "result is already decided by the time defers run, so the continuation " +
+        "would be recorded and never taken (IMPROVEMENT-PLAN 3.35 phase 4).";
+    }
+
     let inputLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, inputJson);
 
     let result: i64 = import_cleat_continue_as_new(SCRATCH_BASE as i32, inputLen);
@@ -1432,6 +1507,18 @@ export class HostCalls {
    * @returns An error message on failure, or `null` on success.
    */
   continueAsNewVersioned(inputJson: string, newVersion: i32): string | null {
+    // Refused from inside a defer body -- IMPROVEMENT-PLAN 3.35 phase 4.
+    // Measured 2026-09-02 before this check: the host recorded a
+    // `continue_as_new` event AND the wrapper went on to report the workflow's
+    // already-decided result, so one history carried two contradictory
+    // terminal facts. The worker stores `done` and the continuation silently
+    // never happens.
+    if (isInDeferPhase()) {
+      return "continueAsNewVersioned() is not allowed from a defer body: the workflow's " +
+        "result is already decided by the time defers run, so the continuation " +
+        "would be recorded and never taken (IMPROVEMENT-PLAN 3.35 phase 4).";
+    }
+
     let inputLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, inputJson);
 
     let result: i64 = import_cleat_continue_as_new_versioned(
@@ -1474,6 +1561,14 @@ export class HostCalls {
       OUT_BUF_SIZE,
     );
 
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+    // await-signals layout that bit overlaps a real field, so decoding first
+    // would read a stop as an ordinary result. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new DurableResult<string>("", "cleat: host refused this call -- the workflow is running its defer phase");
+    }
+
     let decoded = decodeSimpleResult(result);
 
     if (decoded.errCode !== 0) {
@@ -1514,74 +1609,20 @@ export class HostCalls {
       OUT_BUF_SIZE,
     );
 
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+    // await-signals layout that bit overlaps a real field, so decoding first
+    // would read a stop as an ordinary result. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new DurableResult<string>("", "cleat: host refused this call -- the workflow is running its defer phase");
+    }
+
     let decoded = decodeSimpleResult(result);
 
     if (decoded.errCode !== 0) {
       return new DurableResult<string>(
         "",
         "childWorkflowWithOptions(name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
-      );
-    }
-
-    let runId: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
-    return new DurableResult<string>(runId, null);
-  }
-
-  // ────────────────────────────────────────────
-  // 12b. childWorkflowInSchema
-  // ────────────────────────────────────────────
-
-  /**
-   * Start a child workflow instance within a named schema.
-   *
-   * @param schema     - Schema name for the child workflow.
-   * @param name       - Child workflow definition name.
-   * @param inputJson  - Input JSON for the child workflow.
-   * @param version    - Workflow definition version.
-   * @param priority   - Priority (0 = highest).
-   * @param policy     - Child workflow policy JSON.
-   * @returns A DurableResult containing the child run ID on success.
-   */
-  childWorkflowInSchema(
-    schema: string,
-    name: string,
-    inputJson: string,
-    version: i64,
-    priority: i64,
-    policy: string,
-  ): DurableResult<string> {
-    let schemaLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, schema);
-    let nameOffset: usize = SCRATCH_BASE + schemaLen;
-    let remaining: i32 = OUT_BUF_SIZE - schemaLen;
-    let nameLen: i32 = this.writeScratch(nameOffset, remaining, name, "name");
-    let inputOffset: usize = nameOffset + nameLen;
-    remaining -= nameLen;
-    let inputLen: i32 = this.writeScratch(inputOffset, remaining, inputJson, "inputJson");
-    let policyOffset: usize = inputOffset + inputLen;
-    remaining -= inputLen;
-    let policyLen: i32 = this.writeScratch(policyOffset, remaining, policy, "policy");
-
-    let result: i64 = import_cleat_child_workflow_in_schema(
-      SCRATCH_BASE as i32,
-      schemaLen,
-      nameOffset as i32,
-      nameLen,
-      inputOffset as i32,
-      inputLen,
-      version,
-      priority,
-      policyOffset as i32,
-      policyLen,
-      OUTPUT_OFFSET as i32,
-      OUT_BUF_SIZE,
-    );
-
-    let decoded = decodeSimpleResult(result);
-
-    if (decoded.errCode !== 0) {
-      return new DurableResult<string>(
-        "",
-        "childWorkflowInSchema(schema='" + schema + "', name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
       );
     }
 
@@ -1603,6 +1644,7 @@ export class HostCalls {
    * @returns A DurableResult containing the child's result JSON on success.
    */
   awaitChild(runId: string): DurableResult<string> {
+    this.dispatchUpdates(); // dispatch point; see dispatchUpdates()
     let runIdLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, runId);
 
     let result: i64 = import_cleat_await_child(
@@ -1746,6 +1788,7 @@ export class HostCalls {
    * @returns The outcome with signal name, payload, and timeout status.
    */
   awaitSignalsMs(namesJson: string, timeoutMs: i64): AwaitSignalsOutcome {
+    this.dispatchUpdates(); // dispatch point; see dispatchUpdates()
     // Write the signal names JSON into the lower portion of the scratch buffer
     let namesLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE / 2, namesJson);
 
@@ -1762,6 +1805,14 @@ export class HostCalls {
       payloadOffset as i32,
       payloadMaxLen,
     );
+
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+    // await-signals layout that bit overlaps a real field, so decoding first
+    // would read a stop as an ordinary result. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new AwaitSignalsOutcome("", "", false, "cleat: host refused this call -- the workflow is running its defer phase");
+    }
 
     let decoded = decodeAwaitSignalsResult(result);
 
@@ -1784,7 +1835,18 @@ export class HostCalls {
         ? this.memory.readString(payloadOffset, decoded.payloadLen as i32)
         : "";
 
-    return new AwaitSignalsOutcome(sigName, payload, decoded.timedOut, null);
+    // Strip the reply envelope, if this is a request/reply signal, so the
+    // receiver reads its payload exactly as the sender passed it and gets the
+    // address separately rather than parsing it out. IMPROVEMENT-PLAN 3.220.
+    let replyTo: string = "";
+    let unwrapped = decodeSignalEnvelope(payload);
+    if (unwrapped !== null) {
+      let env = <SignalEnvelope>unwrapped;
+      replyTo = env.replyTo;
+      payload = env.payload;
+    }
+
+    return new AwaitSignalsOutcome(sigName, payload, decoded.timedOut, null, replyTo);
   }
 
   // ────────────────────────────────────────────
@@ -1897,6 +1959,7 @@ export class HostCalls {
    * @returns The outcome with the resolved value and timeout status.
    */
   awaitPromiseMs(id: string, timeoutMs: i64): AwaitPromiseOutcome {
+    this.dispatchUpdates(); // dispatch point; see dispatchUpdates()
     let idLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, id);
 
     let result: i64 = import_cleat_await_promise(
@@ -1942,6 +2005,149 @@ export class HostCalls {
     import_cleat_register_update_handler(SCRATCH_BASE as i32, nameLen);
   }
 
+  /**
+   * Register an update handler with an optional validator.
+   *
+   * The validator returns "" to accept, or a message to refuse. It runs first
+   * and must be read-only: a refusal costs nothing beyond the completion.
+   *
+   * The name is registered with the host as well, which records it in the
+   * event history; the handler stays here, because only guest code can call it.
+   */
+  registerUpdateHandlerFn(
+    name: string,
+    handler: UpdateHandler,
+    validator: UpdateValidator | null = null,
+  ): void {
+    let idx: i32 = this._updateNames.indexOf(name);
+    if (idx >= 0) {
+      this._updateHandlers[idx] = handler;
+      this._updateValidators[idx] = validator;
+    } else {
+      this._updateNames.push(name);
+      this._updateHandlers.push(handler);
+      this._updateValidators.push(validator);
+    }
+    this.registerUpdateHandler(name);
+  }
+
+  /**
+   * Deliver and run every update currently pending for this workflow.
+   *
+   * The SDK already calls this before each suspension, so an ordinary workflow
+   * needs no update-specific code. It is exposed for workflows that want to
+   * service updates at additional points.
+   *
+   * Every path completes the request. An unregistered handler and a validator
+   * that refuses are both answers the caller is entitled to -- leaving either
+   * uncompleted would leave the caller holding a promise nothing settles.
+   */
+  dispatchUpdates(): void {
+    if (this._dispatchingUpdates) {
+      // Reentrancy guard. Every dispatch point is a suspension point, and a
+      // handler is ordinary workflow code that may sleep or await -- so without
+      // this a handler doing either would re-enter and recurse. Nesting would
+      // also be wrong if it terminated: the inner dispatch would interleave a
+      // second update's events inside the first one's.
+      return;
+    }
+    this._dispatchingUpdates = true;
+
+    while (true) {
+      let envelope: string = this.pollUpdate();
+      if (envelope.length === 0) break;
+
+      let d = decodeUpdateDelivery(envelope);
+      if (d === null) {
+        // The envelope is written by the host, so this is not a caller error.
+        // Stopping rather than continuing avoids spinning on a delivery that
+        // will decode the same way next time.
+        break;
+      }
+      let delivery = <UpdateDelivery>d;
+
+      let idx: i32 = this._updateNames.indexOf(delivery.name);
+      if (idx < 0) {
+        this.completeUpdate(delivery.requestId, "",
+          "cleat: no update handler registered for '" + delivery.name + "'");
+        continue;
+      }
+
+      let validator = this._updateValidators[idx];
+      if (validator !== null) {
+        let refusal: string = (<UpdateValidator>validator)(delivery.payload);
+        if (refusal.length > 0) {
+          this.completeUpdate(delivery.requestId, "", refusal);
+          continue;
+        }
+      }
+      let handler = this._updateHandlers[idx];
+      this.completeUpdate(delivery.requestId, handler(delivery.payload), "");
+    }
+
+    this._dispatchingUpdates = false;
+  }
+
+  /**
+   * Poll for the next pending update request.
+   *
+   * Low-level: prefer dispatchUpdates(), which pairs this with handler lookup,
+   * validation, and the guarantee that every delivered update is answered.
+   * Delivery is durable, so an update returned here is recorded as delivered
+   * whether or not you complete it.
+   *
+   * @returns The delivery envelope JSON, or "" when nothing is pending.
+   */
+  pollUpdate(): string {
+    let result: i64 = import_cleat_poll_update(OUTPUT_OFFSET as i32, OUT_BUF_SIZE);
+
+    // Ask before decoding: a stop is bit 31, which in this layout sits inside
+    // the flags word a decoder would read as an ordinary result.
+    if (stopRequested(result)) {
+      return "";
+    }
+
+    let decoded = decodePollSignalResult(result);
+    if (decoded.errCode !== 0 || !decoded.found || decoded.payloadLen === 0) {
+      return "";
+    }
+    return this.memory.readString(OUTPUT_OFFSET, decoded.payloadLen as i32);
+  }
+
+  /**
+   * Record an update handler's outcome and settle the caller's promise.
+   *
+   * A non-empty errMsg rejects; an empty one resolves. An empty result with an
+   * empty errMsg resolves -- an empty result is an outcome, not a missing one.
+   *
+   * Low-level: prefer dispatchUpdates(), which cannot forget to call this. An
+   * update delivered and never completed leaves its caller holding a promise
+   * nothing settles.
+   *
+   * @param requestId - The request id from pollUpdate(), unchanged.
+   * @param resultJson - The handler's result.
+   * @param errMsg - The failure message, or "" on success.
+   */
+  completeUpdate(requestId: string, resultJson: string, errMsg: string): void {
+    let idLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, requestId);
+    let resOffset: usize = SCRATCH_BASE + idLen;
+    let remaining: i32 = OUT_BUF_SIZE - idLen;
+    let resLen: i32 = this.writeScratch(resOffset, remaining, resultJson, "resultJson");
+    let errOffset: usize = resOffset + resLen;
+    remaining -= resLen;
+    let errLen: i32 = this.writeScratch(errOffset, remaining, errMsg, "errMsg");
+
+    let result: i64 = import_cleat_complete_update(
+      SCRATCH_BASE as i32,
+      idLen,
+      resOffset as i32,
+      resLen,
+      errOffset as i32,
+      errLen,
+    );
+    stopRequested(result);
+  }
+
   // ────────────────────────────────────────────
   // 19. pluginCall
   // ────────────────────────────────────────────
@@ -1981,6 +2187,14 @@ export class HostCalls {
     );
 
     // Decode the packed result (same bit layout as cleat_call)
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+    // await-signals layout that bit overlaps a real field, so decoding first
+    // would read a stop as an ordinary result. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new PluginCallOutcome("", "cleat: host refused this call -- the workflow is running its defer phase", 0);
+    }
+
     let decoded = decodeCallResult(result);
     let responseLen: i32 = decoded.responseLen as i32;
 
@@ -2036,6 +2250,14 @@ export class HostCalls {
     );
 
     // Decode the packed result (same bit layout as plugin_call)
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+    // await-signals layout that bit overlaps a real field, so decoding first
+    // would read a stop as an ordinary result. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new PluginCallOutcome("", "cleat: host refused this call -- the workflow is running its defer phase", 0);
+    }
+
     let decoded = decodeCallResult(result);
     let responseLen: i32 = decoded.responseLen as i32;
 
@@ -2246,35 +2468,55 @@ export class HostCalls {
     payload: string,
     timeoutMs: i64,
   ): DurableResult<string> {
-    let targetLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, targetRunId);
-    let sigOffset: usize = SCRATCH_BASE + targetLen;
-    let remaining: i32 = OUT_BUF_SIZE - targetLen;
-    let sigLen: i32 = this.writeScratch(sigOffset, remaining, signalName, "signalName");
-    let payloadOffset: usize = sigOffset + sigLen;
-    remaining -= sigLen;
-    let payloadLen: i32 = this.writeScratch(payloadOffset, remaining, payload, "payload");
-
-    let result: i64 = import_cleat_send_signal_and_wait(
-      SCRATCH_BASE as i32,
-      targetLen,
-      sigOffset as i32,
-      sigLen,
-      payloadOffset as i32,
-      payloadLen,
-      timeoutMs,
-      OUTPUT_OFFSET as i32,
-      OUT_BUF_SIZE,
-    );
-
-    let decoded = decodeSimpleResult(result);
-    if (decoded.errCode !== 0) {
+    // Composed from three durable primitives rather than being a host call of
+    // its own: a promise is the reply channel, its ID is the correlation ID,
+    // and answering is resolving it (IMPROVEMENT-PLAN 3.220).
+    // cleat_send_signal_and_wait was inert engine-side -- it never delivered
+    // the signal it then waited for -- so this is the first version that
+    // works at all.
+    let promise = this.createPromise("__reply:" + signalName);
+    if (promise.isError) {
       return new DurableResult<string>(
         "",
-        "sendSignalAndWaitMs(targetRunId='" + targetRunId + "', signalName='" + signalName + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
+        "sendSignalAndWait: create reply promise: " + (promise.error as string),
       );
     }
-    let response: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
-    return new DurableResult<string>(response, null);
+    let replyTo: string = promise.value;
+
+    let sendErr = this.signalWorkflow(
+      targetRunId,
+      signalName,
+      encodeSignalEnvelope(replyTo, payload),
+    );
+    if (sendErr !== null) {
+      return new DurableResult<string>(
+        "",
+        "sendSignalAndWait: send signal '" + signalName + "' to '" + targetRunId + "': " + (sendErr as string),
+      );
+    }
+
+    let awaited = this.awaitPromiseMs(replyTo, timeoutMs);
+    if (awaited.isError) {
+      return new DurableResult<string>(
+        "",
+        "sendSignalAndWait: await reply to signal '" + signalName + "': " + (awaited.error as string),
+      );
+    }
+    // Returning an error on timedOut is correct even though awaitPromise
+    // reports timedOut for a SUSPENSION as well as a real timeout. The host
+    // distinguishes them and this code does not have to: engine/promises.go
+    // sets session.suspendErr before returning, and engine/executor.go:264
+    // treats a workflow error as a failure only when suspendErr is nil --
+    // ":315 deliberately lets a suspension win over the error that
+    // accompanied it". There is nothing in the outcome to check: the engine
+    // signals suspension host-side, not through a sentinel.
+    if (awaited.timedOut) {
+      return new DurableResult<string>(
+        "",
+        "sendSignalAndWait: no reply to signal '" + signalName + "' from workflow '" + targetRunId + "' within " + timeoutMs.toString() + "ms",
+      );
+    }
+    return new DurableResult<string>(awaited.value, null);
   }
 
   // ────────────────────────────────────────────
@@ -2292,21 +2534,17 @@ export class HostCalls {
    * @returns An error message on failure, or null on success.
    */
   replyToSignal(correlationId: string, response: string): string | null {
-    let cidLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, correlationId);
-    let respOffset: usize = SCRATCH_BASE + cidLen;
-    let remaining: i32 = OUT_BUF_SIZE - cidLen;
-    let respLen: i32 = this.writeScratch(respOffset, remaining, response, "response");
-
-    let result: i64 = import_cleat_reply_to_signal(
-      SCRATCH_BASE as i32,
-      cidLen,
-      respOffset as i32,
-      respLen,
-    );
-
-    let decoded = decodeSimpleResult(result);
-    if (decoded.errCode !== 0) {
-      return "replyToSignal(correlationId='" + correlationId + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
+    // correlationId is AwaitSignalsOutcome.replyTo, which is the reply
+    // promise's ID, so replying is resolving that promise. An ID matching no
+    // promise is an error rather than a silent success, which is what makes a
+    // stale address visible instead of leaving the sender suspended until its
+    // timeout. IMPROVEMENT-PLAN 3.220.
+    if (correlationId.length === 0) {
+      return "replyToSignal: empty correlation ID. Pass AwaitSignalsOutcome.replyTo from the signal being answered; it is empty when the sender used signalWorkflow and is not waiting for a reply.";
+    }
+    let settled = this.resolvePromise(correlationId, response);
+    if (settled !== null) {
+      return "replyToSignal(correlationId='" + correlationId + "'): " + (settled as string);
     }
     return null;
   }
@@ -2354,10 +2592,41 @@ export class HostCalls {
     maxRejections: i32,
     timeoutMs: i64,
   ): AwaitSignalsOutcome[] {
-    // Simple implementation: call awaitSignalsMs in a loop.
+    // A quorum counts DISTINCT voters, so the set has to NARROW as they vote.
+    // Until cleat#1136 this passed `namesJson` -- the parameter -- to every
+    // awaitSignalsMs call, so three deliveries of one name satisfied a quorum
+    // of three while the other two were never sent (cleat#1132). Go was fixed
+    // in #1135, Rust and Python in #1158, Java in #1160; this is the last.
+    //
+    // Parsed once. AssemblyScript is the only SDK whose quorum API takes the
+    // set as JSON rather than a list, so this is the one place the fix is not
+    // a transliteration of #1135.
+    let names: string[] = jsonStrArray(namesJson);
+    if (names.length == 0) {
+      // Told apart from an unsatisfiable quorum below, because "quorum of 3
+      // over 0 names" would describe a caller error that did not happen.
+      throw new Error(
+        "quorum: could not read a signal-name array from " + namesJson,
+      );
+    }
+    // A quorum of N over M names is unsatisfiable when N > M. It used to spin
+    // to the deadline and report "got k/N signals" -- a message describing a
+    // slow sender rather than a caller asking for what arithmetic forbids.
+    if (minCount > names.length) {
+      throw new Error(
+        "quorum of " + minCount.toString() + " over " + names.length.toString() +
+          " name(s) is unsatisfiable; a quorum counts DISTINCT names, so it " +
+          "cannot exceed the size of the set",
+      );
+    }
+
     let results: AwaitSignalsOutcome[] = [];
     let deadline: i64 = this.now() + timeoutMs;
     let rejectionCount: i32 = 0;
+
+    // COPIED, so narrowing cannot disturb the caller's array.
+    let remaining: string[] = [];
+    for (let i: i32 = 0; i < names.length; i++) remaining.push(names[i]);
 
     while (results.length < minCount) {
       let remainingMs: i64 = deadline - this.now();
@@ -2367,7 +2636,7 @@ export class HostCalls {
         );
       }
 
-      let outcome: AwaitSignalsOutcome = this.awaitSignalsMs(namesJson, remainingMs);
+      let outcome: AwaitSignalsOutcome = this.awaitSignalsMs(namesToJson(remaining), remainingMs);
       if (outcome.timedOut) {
         throw new Error(
           "quorum timeout: got " + results.length.toString() + "/" + minCount.toString() + " signals",
@@ -2377,7 +2646,27 @@ export class HostCalls {
         throw new Error("quorum signal error: " + (outcome.error as string));
       }
 
+      // Narrowing what we ASK for is only half the fix if we accept whatever
+      // arrives. A well-behaved host returns one of the names it was given, so
+      // this is unreachable through the engine's own await -- it is here
+      // because the invariant the quorum rests on is "each result is a
+      // distinct member of the set", and this is the only place that can
+      // enforce it.
+      if (indexOfName(remaining, outcome.signalName) < 0) {
+        throw new Error(
+          "quorum: received signal \"" + outcome.signalName + "\", which is not " +
+            "among the names still awaited; a quorum counts distinct names and " +
+            "cannot count this one",
+        );
+      }
+
       results.push(outcome);
+
+      // This name has voted, and a quorum counts VOTERS. A rejection narrows
+      // too: a voter that votes no has voted, and leaving it in the set would
+      // let one rejector trip maxRejections alone -- the same defect wearing
+      // the other outcome.
+      remaining = withoutName(remaining, outcome.signalName);
 
       // Check for rejection if maxRejections >= 0.
       if (maxRejections >= 0 && outcome.payload.length > 0) {
@@ -2428,6 +2717,14 @@ export class HostCalls {
       payloadLen,
     );
 
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.302). Ask BEFORE decoding: decodeSimpleResult
+    // reads errCode from the low byte, where a stop is 0 -- an ordinary success
+    // for a fire-and-forget call, so the guest would report the send as done.
+    if (stopRequested(result)) {
+      return "cleat: host refused this call -- the workflow is running its defer phase";
+    }
+
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
       return "signalWorkflow(targetRunId='" + targetRunId + "', signalName='" + signalName + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
@@ -2459,6 +2756,15 @@ export class HostCalls {
       OUTPUT_OFFSET as i32,
       OUT_BUF_SIZE,
     );
+
+    // Bit 31 first. This method spells failure as `null`, and a stop decodes to
+    // errCode=0 with extra=0 -- which reaches the same `return null` and would
+    // be indistinguishable from an ordinary empty side effect. stopRequested
+    // also sets the suspend flag, which is what actually ends the segment here
+    // (AssemblyScript has no exceptions; see engine.go deferSegmentLanguages).
+    if (stopRequested(hostResult)) {
+      return null;
+    }
 
     let decoded = decodeSimpleResult(hostResult);
     if (decoded.errCode !== 0 || decoded.extra === 0) {
@@ -2565,6 +2871,14 @@ export class HostCalls {
       reqLen,
     );
 
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.302). Ask BEFORE decoding: decodeSimpleResult
+    // reads errCode from the low byte, where a stop is 0 -- an ordinary success
+    // for a fire-and-forget call, so the guest would report the send as done.
+    if (stopRequested(result)) {
+      return "cleat: host refused this call -- the workflow is running its defer phase";
+    }
+
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
       return "cleatSend(service='" + service + "', operation='" + operation + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
@@ -2623,6 +2937,14 @@ export class HostCalls {
       delayMs,
     );
 
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.302). Ask BEFORE decoding: decodeSimpleResult
+    // reads errCode from the low byte, where a stop is 0 -- an ordinary success
+    // for a fire-and-forget call, so the guest would report the send as done.
+    if (stopRequested(result)) {
+      return "cleat: host refused this call -- the workflow is running its defer phase";
+    }
+
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
       return "scheduleInvokeMs(service='" + service + "', operation='" + operation + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
@@ -2665,11 +2987,70 @@ export class HostCalls {
       inputLen,
     );
 
+    // The host refuses new work in a defer segment and marks it with bit 31
+    // (IMPROVEMENT-PLAN 3.111). Before decoding: this is a simple-result layout
+    // in which bit 31 is not a field, so a stop decoded field-first is errCode 0
+    // -- a SUCCESS, and the guest runs on.
+    if (stopRequested(result)) {
+      return "cleat: host refused this call -- the workflow is running its defer phase";
+    }
+
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {
       return "runDetached(name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
     }
     return null;
+  }
+
+  // ────────────────────────────────────────────
+  // 34a. startDetached — runDetached, returning the run id
+  // ────────────────────────────────────────────
+
+  /**
+   * Start a detached (fire-and-forget) workflow and return its run ID.
+   *
+   * Identical to runDetached except that the run ID the host already computes
+   * is handed back, so the caller has a handle to the run — to poll it, signal
+   * it, or record it somewhere durable. runDetached computes the same ID and
+   * discards it.
+   *
+   * The started workflow is NOT a child: this workflow does not await it, is
+   * not its parent, and completing or being cancelled does not affect it.
+   *
+   * @param name      - The workflow definition name to start.
+   * @param inputJson - Input JSON for the detached workflow.
+   * @returns The run ID on success, or an error message.
+   */
+  startDetached(name: string, inputJson: string): DurableResult<string> {
+    let nameLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, name);
+    let inputOffset: usize = SCRATCH_BASE + nameLen;
+    let remaining: i32 = OUT_BUF_SIZE - nameLen;
+    let inputLen: i32 = this.writeScratch(inputOffset, remaining, inputJson, "inputJson");
+
+    let result: i64 = import_cleat_start_detached(
+      SCRATCH_BASE as i32,
+      nameLen,
+      inputOffset as i32,
+      inputLen,
+      OUTPUT_OFFSET as i32,
+      OUT_BUF_SIZE,
+    );
+
+    // Before decoding, for the reason runDetached above gives.
+    if (stopRequested(result)) {
+      return new DurableResult<string>("", "cleat: host refused this call -- the workflow is running its defer phase");
+    }
+
+    let decoded = decodeSimpleResult(result);
+    if (decoded.errCode !== 0) {
+      return new DurableResult<string>(
+        "",
+        "startDetached(name='" + name + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")",
+      );
+    }
+
+    let runId: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
+    return new DurableResult<string>(runId, null);
   }
 
   // ────────────────────────────────────────────
@@ -2689,177 +3070,11 @@ export class HostCalls {
     return key;
   }
 
-  // ────────────────────────────────────────────
-  // 35. setState — set workflow state
-  // ────────────────────────────────────────────
 
-  /**
-   * Set a key-value pair in workflow state.
-   *
-   * State keys are automatically scoped if `setScope` was called
-   * (prefixed with "vo:<type>:<key>:").
-   *
-   * @param key   - State key.
-   * @param value - State value.
-   * @returns An error message on failure, or null on success.
-   */
-  setState(key: string, value: string): string | null {
-    let fullKey: string = this.scopedKey(key);
-    let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullKey);
-    let valOffset: usize = SCRATCH_BASE + keyLen;
-    let remaining: i32 = OUT_BUF_SIZE - keyLen;
-    let valLen: i32 = this.writeScratch(valOffset, remaining, value, "value");
 
-    let result: i64 = import_cleat_set_state(
-      SCRATCH_BASE as i32,
-      keyLen,
-      valOffset as i32,
-      valLen,
-    );
 
-    let decoded = decodeSimpleResult(result);
-    if (decoded.errCode !== 0) {
-      return "setState(key='" + key + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
-    }
-    return null;
-  }
 
-  // ────────────────────────────────────────────
-  // 36. getState — get workflow state
-  // ────────────────────────────────────────────
 
-  /**
-   * Get a value from workflow state by key.
-   *
-   * Returns the value string, or null if the key does not exist
-   * or an error occurred.
-   *
-   * @param key - State key to look up.
-   * @returns The value string, or null if not found or on error.
-   */
-  getState(key: string): string | null {
-    let fullKey: string = this.scopedKey(key);
-    let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullKey);
-
-    let result: i64 = import_cleat_get_state(
-      SCRATCH_BASE as i32,
-      keyLen,
-      OUTPUT_OFFSET as i32,
-      OUT_BUF_SIZE,
-    );
-
-    let decoded = decodeSimpleResult(result);
-    if (decoded.errCode !== 0 || decoded.extra === 0) {
-      return null;
-    }
-    return this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
-  }
-
-  // ────────────────────────────────────────────
-  // 37. deleteState — delete workflow state
-  // ────────────────────────────────────────────
-
-  /**
-   * Delete a key from workflow state.
-   *
-   * @param key - State key to delete.
-   * @returns An error message on failure, or null on success.
-   */
-  deleteState(key: string): string | null {
-    let fullKey: string = this.scopedKey(key);
-    let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullKey);
-
-    let result: i64 = import_cleat_delete_state(
-      SCRATCH_BASE as i32,
-      keyLen,
-    );
-
-    let decoded = decodeSimpleResult(result);
-    if (decoded.errCode !== 0) {
-      return "deleteState(key='" + key + "') failed: " + errorCodeName(decoded.errCode) + " (code " + decoded.errCode.toString() + ")";
-    }
-    return null;
-  }
-
-  // ────────────────────────────────────────────
-  // 38. incrState — atomically increment state value
-  // ────────────────────────────────────────────
-
-  /**
-   * Atomically increment a numeric state value by the given delta.
-   *
-   * If the key does not exist, it is initialized to the delta value.
-   *
-   * @param key   - State key to increment.
-   * @param delta - Amount to add (can be negative for decrement).
-   * @returns The new value after increment, or 0 on error.
-   */
-  incrState(key: string, delta: i64): i64 {
-    let fullKey: string = this.scopedKey(key);
-    let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullKey);
-
-    let result: i64 = import_cleat_incr_state(
-      SCRATCH_BASE as i32,
-      keyLen,
-      delta,
-    );
-
-    return result; // Host returns the new value directly
-  }
-
-  // ────────────────────────────────────────────
-  // 39. hasState — check if state key exists
-  // ────────────────────────────────────────────
-
-  /**
-   * Check if a key exists in workflow state.
-   *
-   * @param key - State key to check.
-   * @returns True if the key exists, false otherwise.
-   */
-  hasState(key: string): bool {
-    let fullKey: string = this.scopedKey(key);
-    let keyLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullKey);
-
-    let result: i64 = import_cleat_has_state(
-      SCRATCH_BASE as i32,
-      keyLen,
-    );
-
-    // Host returns non-zero for true, zero for false
-    return result !== 0;
-  }
-
-  // ────────────────────────────────────────────
-  // 40. listState — list state keys by prefix
-  // ────────────────────────────────────────────
-
-  /**
-   * List state keys matching a prefix.
-   *
-   * Returns an array of key names (not values) that match the prefix.
-   *
-   * @param prefix - Key prefix to match (empty string lists all keys).
-   * @returns Array of matching key names.
-   */
-  listState(prefix: string): string[] {
-    let fullPrefix: string = this.scopedKey(prefix);
-    let prefixLen: i32 = this.memory.writeString(SCRATCH_BASE, OUT_BUF_SIZE, fullPrefix);
-
-    let result: i64 = import_cleat_list_state(
-      SCRATCH_BASE as i32,
-      prefixLen,
-      OUTPUT_OFFSET as i32,
-      OUT_BUF_SIZE,
-    );
-
-    let decoded = decodeSimpleResult(result);
-    if (decoded.errCode !== 0 || decoded.extra === 0) {
-      return [];
-    }
-    let jsonStr: string = this.memory.readString(OUTPUT_OFFSET, decoded.extra as i32);
-    return jsonStrArray(jsonStr);
-  }
 
   // ────────────────────────────────────────────
   // 41. awaitAllChildren — wait for multiple child workflows
@@ -2978,6 +3193,14 @@ export class HostCalls {
       OUT_BUF_SIZE,
     );
 
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.84). Ask BEFORE decoding: in the
+    // await-signals layout that bit overlaps a real field, so decoding first
+    // would read a stop as an ordinary result. See memory.ts stopRequested.
+    if (stopRequested(result)) {
+      return new FetchResult(0, "", "", "cleat: host refused this call -- the workflow is running its defer phase");
+    }
+
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0 || decoded.extra === 0) {
       let errMsg: string =
@@ -3047,6 +3270,18 @@ export class HostCalls {
       keyLen,
       ttlMs,
     );
+
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.301). Ask BEFORE decoding: this layout puts
+    // `acquired` at bit 8 and errCode in the low byte, so a stop decodes as
+    // errCode=0, acquired=false -- an ordinary "someone else holds it", and the
+    // workflow takes its did-not-get-the-lock branch and runs on.
+    if (stopRequested(result)) {
+      return new DurableResult<bool>(
+        false,
+        "cleat: host refused this call -- the workflow is running its defer phase",
+      );
+    }
 
     let errCode: i64 = result & 0xFF;
     let acquired: bool = ((result >> 8) & 0x1) != 0;
@@ -3132,6 +3367,17 @@ export class HostCalls {
       OUTPUT_OFFSET as i32,
       OUT_BUF_SIZE,
     );
+
+    // The host refuses new work in a defer segment and marks the refusal with
+    // bit 31 (IMPROVEMENT-PLAN 3.300). Ask BEFORE decoding: decodeSimpleResult
+    // reads errCode from the low byte, where a stop is 0, and `extra` as a
+    // length, which for a stop is 0 -- an EMPTY SUCCESSFUL response.
+    if (stopRequested(result)) {
+      return new DurableResult<string>(
+        "",
+        "cleat: host refused this call -- the workflow is running its defer phase",
+      );
+    }
 
     let decoded = decodeSimpleResult(result);
     if (decoded.errCode !== 0) {

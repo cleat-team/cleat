@@ -22,8 +22,9 @@ cargo build --target wasm32-wasip1 --release
 ## Run
 
 ```bash
-cleat deploy rust-workflow target/wasm32-wasip1/release/rust_workflow.wasm
-cleat run place_order '{"user_id":"usr_001","cart":[{"sku":"SKU-1","quantity":2}]}'
+cleat deploy --name rust-workflow target/wasm32-wasip1/release/rust_workflow.wasm
+cleat run --wasm target/wasm32-wasip1/release/rust_workflow.wasm --entry-point place_order \
+  --input '{"user_id":"usr_001","cart":[{"sku":"SKU-1","quantity":2}]}'
 ```
 
 ## Key files
