@@ -43,12 +43,43 @@ those three files are *generated*:
   compacted files and are applied after them. `migrations/mssql/004_fix_finalize_workflow_status_fence.sql`
   was the example here until the SQL Server compaction folded its effect into `003_procedures.sql`
   — the compacted baseline is generated from a *fully-migrated* database, so a later file's content
-  lands in the baseline rather than beside it. **No dialect currently carries a numbered file above
-  `003`, and that is expected rather than a gap**: the baseline is cut at a release, so these only
-  start accumulating afterwards.
+  lands in the baseline rather than beside it. **The baseline is cut at a release, so a numbered file
+  above `003` is how a change lands from here on, and these files are expected to accumulate rather
+  than being a gap.** `migrations/postgres/004_scope_plugin_grants_to_the_install.sql` (cleat#2402)
+  is the first.
 
 Re-baselining is not something to do per change. It is a deliberate, once-per-era act with its own
 verification, and it is only possible because a release required a fresh database anyway.
+
+### A numbered migration that supersedes a baseline routine
+
+Following the rule above has a consequence that is easy to mistake for a defect, because it makes
+the same routine appear **twice** in `migrations/<dialect>/`: once in the frozen baseline, once in
+the migration that changes it. `migrations/postgres/004_scope_plugin_grants_to_the_install.sql`
+is that first case — it redefines `admin.grant_plugin_to_tenant` and
+`admin.revoke_plugin_from_tenant`, both of which `001_schema.sql` already defines.
+
+**That is the shape the rule asks for. Leave the baseline alone.** The two rules meet at
+`engine/routine_definition_drift_test.go`, and the owner ruled on 2026-09-27 on which one gives
+way — the guard, not the rule:
+
+- **A routine defined twice WITHIN the baseline is still a failure.** A generated baseline carries
+  each routine's last definition and nothing earlier, so a duplicate *there* means the generator
+  folded in a superseded definition, or the file was hand-edited. That is the baseline growing back
+  the very thing it was generated to remove — the guard still refuses it, and names the routine.
+- **A routine the baseline defines once and a later numbered migration redefines is expected.**
+  The guard excludes these from that count, and says so in its own failure text.
+
+The list of baseline files is `theBaseline` in that test. It is **shared by all three dialects**
+and keyed by filename, so a dialect that gains a fourth baseline file, or renames one, must move
+that list in the same change — otherwise the new file reads as post-baseline and duplicates inside
+it go uncounted. The test fails loudly if *no* definition comes from the listed files, so a
+wholesale rename cannot pass silently, but a rename of one file out of three can.
+
+**The superseding migration is not merely tolerated, it is still verified.** For a routine with
+two definitions the drift test compares the database's copy against the **latest** one, so
+`004`'s version is the one checked against what actually runs. A supersession that never applied,
+or that applied with the wrong body, fails there.
 
 ## Finding the current definition
 

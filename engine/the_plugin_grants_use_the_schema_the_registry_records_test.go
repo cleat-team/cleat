@@ -113,7 +113,14 @@ func TestThePluginGrantsUseTheSchemaTheRegistryRecords(t *testing.T) {
 
 	// THE CASE THAT USED TO RAISE. The registry records public; the function
 	// used to GRANT on tenant_<uuid> and fail with "relation does not exist".
-	if _, err := db.ExecContext(ctx, `SELECT admin.grant_plugin_to_tenant($1, $2::uuid)`, plugin, tenant); err != nil {
+	//
+	// The third argument is the schema whose registry rows this call is about
+	// (cleat#2402). It is NOT the same thing as the registry's schema_name,
+	// which is what the GRANT names; here they coincide because the plugin lives
+	// in the install's own schema. #2389's assertion survives the extra
+	// argument: the old code granted on tenant_<uuid>, and passing "public"
+	// cannot make that succeed.
+	if _, err := db.ExecContext(ctx, `SELECT admin.grant_plugin_to_tenant($1, $2::uuid, $3)`, plugin, tenant, "public"); err != nil {
 		t.Fatalf("admin.grant_plugin_to_tenant raised for a plugin whose registered schema is "+
 			"public: %v\n\nThis is cleat#2389. The function must act on "+
 			"admin.plugin_tables.schema_name, not on a schema derived from the tenant id -- "+
@@ -125,7 +132,7 @@ func TestThePluginGrantsUseTheSchemaTheRegistryRecords(t *testing.T) {
 			"so a silent no-op looks exactly like this.", role, qualified)
 	}
 
-	if _, err := db.ExecContext(ctx, `SELECT admin.revoke_plugin_from_tenant($1, $2::uuid)`, plugin, tenant); err != nil {
+	if _, err := db.ExecContext(ctx, `SELECT admin.revoke_plugin_from_tenant($1, $2::uuid, $3)`, plugin, tenant, "public"); err != nil {
 		t.Fatalf("admin.revoke_plugin_from_tenant raised, and it carries the identical bug: %v", err)
 	}
 	if can(t, "after revoke") {
@@ -139,8 +146,8 @@ func TestThePluginGrantsUseTheSchemaTheRegistryRecords(t *testing.T) {
 	// function raise for every plugin would pass everything above -- and the
 	// empty loop is the state these functions were in for their whole life
 	// before cleat#2343, so it is the one behaviour worth pinning.
-	if _, err := db.ExecContext(ctx, `SELECT admin.grant_plugin_to_tenant($1, $2::uuid)`,
-		"no-such-plugin-2389", tenant); err != nil {
+	if _, err := db.ExecContext(ctx, `SELECT admin.grant_plugin_to_tenant($1, $2::uuid, $3)`,
+		"no-such-plugin-2389", tenant, "public"); err != nil {
 		t.Errorf("admin.grant_plugin_to_tenant raised for a plugin with no registry rows: %v\n"+
 			"An empty loop must return cleanly. This failing means the change broke the "+
 			"zero-iteration path rather than the schema lookup.", err)
