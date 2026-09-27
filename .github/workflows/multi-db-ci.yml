@@ -71,7 +71,10 @@ on:
   push:
     branches: [main, develop]
   pull_request:
-    branches: [main, develop]
+    # cleat#2483: `branches` filters on the PR's BASE branch, and a
+    # release branch was absent -- so every PR targeting one ran none of
+    # this workflow, and the release PR into main was the only gate left.
+    branches: [main, develop, "release/**"]
     # `edited` is required, not decorative: it is the activity type a BASE
     # CHANGE fires. Without it a PR opened against a feature branch and later
     # retargeted here never triggers this workflow at all -- not at open (the

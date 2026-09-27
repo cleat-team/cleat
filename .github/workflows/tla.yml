@@ -1,7 +1,10 @@
 name: TLA+ Model Checking
 on:
   pull_request:
-    branches: [main, develop]
+    # cleat#2483: `branches` filters on the PR's BASE branch, and a
+    # release branch was absent -- so every PR targeting one ran none of
+    # this workflow, and the release PR into main was the only gate left.
+    branches: [main, develop, "release/**"]
     # cleat#1996: run on a PR that touches specs/ itself, OR any file named in
     # a checked spec's "Implemented by" header -- currently the union across
     # all four checked specs (cleat#2044). GitHub Actions requires this list
