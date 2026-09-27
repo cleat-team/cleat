@@ -588,24 +588,48 @@ Release candidates follow semver pre-release tags (e.g., `v0.5.0-rc.1`).
 
 ### SDK versions: which numbers are load-bearing
 
-The five SDKs do not share a version, and **should not be bumped to agree**.
-Only one of the five is versioned by the repo tag, and only one more has a
-publisher at all. Measured 2026-09-04:
+All five SDKs and the chart carry **one number, `0.3.0`** — the version the repo
+tag releases. That is owner decision 4 in cleat#2058, put on disk by cleat#2452,
+and `.github/workflows/publish-pypi.yml` is built around it: its own header says
+the whole repo is released under one tag, "All manifest versions become 0.3.0",
+not a per-SDK `python-sdk/vX.Y.Z` tag. Only one of the five is versioned by the
+repo tag, and only one more has a publisher at all:
 
 | SDK | version | set by | publisher |
 |---|---|---|---|
 | Go | repo tag | `git tag` (`v0.1.0`, `v0.2.0`) | the module path — Go's proxy serves the tag |
-| Python (`cleat-sdk`) | `0.2.0` | `python-sdk/pyproject.toml` | `.github/workflows/publish-pypi.yml` |
-| Rust (`cleat-sdk`, `cleat-macro`, `cleat-test`) | `0.1.0` | `crates/*/Cargo.toml` | **none** |
-| Java | `0.1.0` | `crates/cleat-java/build.gradle.kts` | **none** |
-| AssemblyScript | `0.1.0` | `packages/cleat-as/package.json` | **none** |
+| Python (`cleat-sdk`) | `0.3.0` | `python-sdk/pyproject.toml` | `.github/workflows/publish-pypi.yml` |
+| Rust (`cleat-sdk`, `cleat-macro`, `cleat-test`) | `0.3.0` | `crates/*/Cargo.toml` | **none** |
+| Java | `0.3.0` | `crates/cleat-java/build.gradle.kts` | **none** |
+| AssemblyScript | `0.3.0` | `packages/cleat-as/package.json` | **none** |
 
-A version in a manifest that no workflow publishes is inert: nothing reads it,
-and nothing would break if it changed. The three `0.1.0`s are therefore left
-alone deliberately. **Bumping them to 0.2.0 would be worse than leaving them**,
-because it would assert a 0.2.0 release of a package whose 0.1.0 never shipped
-either — so if crate or npm publishing is wired up later, the first real
-release would find its version already claimed.
+The chart takes the same number (`charts/cleat/Chart.yaml`), and the number lives
+in more places than the manifests. Each SDK stamps its own version into the
+metadata of every workflow it compiles, so a bump that stops at the manifest
+leaves the stamp behind — cleat#2452 moved
+`python-sdk/cleat_sdk/version.py`, `python-sdk/scripts/stamp_metadata.py`,
+`crates/cleat-sdk/src/bin/inject_metadata.rs`,
+`crates/cleat-java/scripts/inject-metadata.sh` and
+`packages/cleat-as/scripts/inject-metadata.js`. The Go module is the same story
+from the other side: five modules in this repo consume it, so each pins the
+version in its own `go.mod` — `cleat/`, `cleat/backendkit/`, `examples/`,
+`tests/cross-language/` and `tests/plugin-harness/` — and those move with the
+tag, in the same change.
+
+**Measured 2026-09-04, overridden 2026-09-23.** This section used to argue the
+opposite, and the argument it made is worth keeping, because it is sound as far as
+it goes: a version in a manifest that no workflow publishes is *inert* — nothing
+reads it, and nothing would break if it changed — so the three `0.1.0`s should be
+left alone, and bumping them to `0.2.0` would be *worse* than leaving them,
+because it would assert a release of a package whose `0.1.0` never shipped either,
+so a first crate or npm release would find its version already claimed. What
+overrides it is the publish path above: that workflow is designed around one
+number for the whole repo, so uniformity is worth more than an unclaimed first
+release. The cost is accepted rather than denied — **if crate or npm publishing is
+wired up later, its first release is numbered above `0.3.0`.**
+
+Until cleat#2452 the values on disk were Python `0.2.0`, and Rust, Java and
+AssemblyScript `0.1.0`.
 
 The Python number is different: it *is* load-bearing, because a publisher reads
 it. Historically it did not track the repo tag — `python-sdk` went `0.1.0` →
