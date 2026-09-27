@@ -975,6 +975,28 @@ All-`success` steps under a non-success job means the job was killed, not that i
 practical rule is cheaper than the diagnosis: **get the body right before pushing, and if you must
 edit it, do so before the checks start or after they settle.**
 
+**That rule is about not destroying a run you need, and it does not extend to a MERGED PR.**
+Measured 2026-09-27: two PRs merged at 15:05Z, bodies edited a minute later, and runs appeared at
+15:06:35Z and 15:06:38Z on both head branches. The attribution is established by the set rather
+than by the timing — every workflow that fired lists `edited` in its `types:` (`CI/CD Pipeline`,
+`Tier 1 Gate`, `Tier 2 Gate`, `Multi-DB CI`, `Cross-Language E2E`, `Plugin Harness Tests`,
+`TLA+`), and the three that did **not** fire (`Branch Naming Check`, `DCO Check`,
+`Stream Trailer Check`) are exactly the three without it. `closed` appears in **none** of them, so
+the trigger was the edit and not the merge.
+
+So the cost depends on the phase, and deferring does not dodge it:
+
+| the PR is | the edit costs | so |
+|---|---|---|
+| open, before the run registers | nothing | the only genuinely free window |
+| open, run in flight | a killed run — worse than waiting | wait, then edit |
+| merged | a full suite on code nobody can act on | decide on the merits; do not defer to dodge it |
+
+There is no ordering that avoids the run once checks have started; the choice is only whether it is
+useful. Do not "fix" this by removing `edited`: it is load-bearing, because a PR retargeted onto a
+filtered base branch would otherwise never trigger at all —
+`scripts/check-workflow-pr-triggers.sh` exists to enforce exactly that.
+
 **When a schema migration lands, recreate your test databases.** `CREATE TABLE IF NOT EXISTS`
 never adds a column, so a long-lived database keeps its old shape and dozens of tests fail on a
 missing column. Drop and recreate; do not debug the code.
