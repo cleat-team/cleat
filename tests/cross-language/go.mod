@@ -21,7 +21,7 @@ go 1.27.0
 toolchain go1.27.1
 
 require (
-	github.com/cleat-team/cleat v0.3.0
+	github.com/cleat-team/cleat v0.2.0
 	github.com/cleat-team/cleat/cleat v0.0.0
 )
 
