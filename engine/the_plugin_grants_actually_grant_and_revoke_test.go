@@ -110,7 +110,11 @@ func TestThePluginGrantsActuallyGrantAndRevoke(t *testing.T) {
 			"would pass without admin.grant_plugin_to_tenant doing anything", role, qualified)
 	}
 
-	if _, err := db.ExecContext(ctx, `SELECT admin.grant_plugin_to_tenant($1, $2::uuid)`, plugin, tenant); err != nil {
+	// The third argument is the INSTALL's schema (cleat#2402): the function
+	// cannot derive it, because the search_path pin below resolves
+	// current_schema() to pg_catalog inside the body. Here the plugin's table is
+	// registered under the tenant's own schema, so that is what is passed.
+	if _, err := db.ExecContext(ctx, `SELECT admin.grant_plugin_to_tenant($1, $2::uuid, $3)`, plugin, tenant, schema); err != nil {
 		t.Fatalf("grant_plugin_to_tenant: %v\n\nMigration 070 pins this function's "+
 			"search_path to pg_catalog. An error here means the pin removed a schema it "+
 			"needed -- which is the failure the pin could introduce and nothing else "+
@@ -122,7 +126,7 @@ func TestThePluginGrantsActuallyGrantAndRevoke(t *testing.T) {
 			"path succeeds -- so a silent no-op looks exactly like this.", role, qualified)
 	}
 
-	if _, err := db.ExecContext(ctx, `SELECT admin.revoke_plugin_from_tenant($1, $2::uuid)`, plugin, tenant); err != nil {
+	if _, err := db.ExecContext(ctx, `SELECT admin.revoke_plugin_from_tenant($1, $2::uuid, $3)`, plugin, tenant, schema); err != nil {
 		t.Fatalf("revoke_plugin_from_tenant: %v", err)
 	}
 	if can(t, "after revoke") {
