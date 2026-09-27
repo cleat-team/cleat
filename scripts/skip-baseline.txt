@@ -217,6 +217,7 @@ engine/testutil	SuiteTestDB	2
 engine/testutil	TestDB	4
 engine/testutil	TestMSSQLAdminDBRefcountsOverlappingCallers	1
 engine/testutil	TestMSSQLAdminDBRestoresThePlainPredicateAfterUse	1
+internal/pgclusterlock	requireDSN	1
 internal/transform	TestUpdateCallSitesSkipsWhenHAlreadyFirstArg	1
 migration	TestConcurrentMigratorsAreSerialisedOnMySQLAndSQLServer	1
 migration	mssqlCredentials	2
