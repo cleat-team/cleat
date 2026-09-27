@@ -129,9 +129,33 @@ test-plugin-harness-check:
 # ---- coverage -------------------------------------------------------------
 
 .PHONY: coverage-go
+# -timeout 40m, NOT the 10m default. With a database configured the engine
+# suite runs its Postgres-backed tests instead of skipping them, and it needs
+# well over ten minutes -- the 10m default cuts it partway through and reports
+# a package-level timeout, which carries no `"Test"` field and so is invisible
+# to a check that counts test failures (CLAUDE.md, "Is this result real?").
+#
+# It matters here specifically because the Coverage job now supplies a database
+# (see ci.yml): before that, this run skipped every DB-backed test and finished
+# in minutes, so the default was never exercised.
+#
+# -p 1, for the reason CLAUDE.md gives: engine/testutil's CleanupPostgresTestData
+# issues an UNQUALIFIED `DELETE FROM` over a list that includes
+# workflow_instances, so packages running concurrently against one database
+# delete each other's fixtures mid-test.
+#
+# And measured here rather than assumed -- it is also the difference between a
+# run that measures something and a run that reports 30 failures. Running the
+# seven package trees at the default parallelism against one Postgres exhausted
+# it:
+#
+#     pq: sorry, too many clients already (53300)
+#
+# 30 of 62 packages failed on that alone, every failure the same, none of them
+# about coverage. One package at a time is what keeps the pool bounded.
 coverage-go:
-	-go test -coverprofile=coverage.out -covermode=atomic ./internal/... ./plugins/... ./cmd/... ./engine/... ./plugin/... ./wasm/... ./auth/...
-	cd cleat && go test -coverprofile=../coverage_cleat.out -covermode=atomic ./...
+	-go test -p 1 -coverprofile=coverage.out -covermode=atomic -timeout 40m ./internal/... ./plugins/... ./cmd/... ./engine/... ./plugin/... ./wasm/... ./auth/...
+	cd cleat && go test -p 1 -coverprofile=../coverage_cleat.out -covermode=atomic -timeout 40m ./...
 
 .PHONY: coverage-python
 coverage-python:
