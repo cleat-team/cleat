@@ -21,29 +21,39 @@ plausible is not the invariant; asserting that no two disagree is. A version
 bumped in the manifest and missed in the stamper is exactly the defect, and it
 is invisible to any check that looks at one site at a time.
 
-MANIFESTS ARE PARSED, SOURCE IS MATCHED. TOML and JSON are read with `tomllib`
-and `json`, not with a pattern: a regex is a weak model of both, and the first
-draft of this script proved it by reading `"version": "0.1.0"` in package.json
-as ZERO matches (the key's closing quote sits between the name and the colon)
-and by matching a dependency constraint and a classifier as if they were
-versions. The stampers are SOURCE files, where there is nothing to parse, so
-they are matched on the field token -- `sdk_version` with an optional closing
-quote -- which does not care about nesting or surrounding structure. The same
-distinction bit the other way when reading a version back out of a compiled
-module: a pattern anchored on balanced braces found nothing, because
-`plugin_deps: {}` nests one, so the pattern could only see the shape it assumed.
+USE A PARSER WHERE THE SYNTAX IS PARSEABLE; fall back to a token match only
+where no parser exists. TOML and JSON are read with `tomllib` and `json`; the
+stampers are source files, where there is nothing to parse, so they get a
+pattern on the field token. This rule was learned by breaking it -- see
+"THE BUG THIS TOOL WAS BORN FROM" below.
 
-REQUIRES PYTHON 3.11+ for `tomllib` (stdlib from 3.11). That is the runner's
-3.12 and is NOT a claim about the SDK, whose floor is `requires-python =
-">=3.10"`. The Python stamper this checks does require 3.10+ itself -- its
-signatures use `bytes | None`, which is 3.10 syntax -- and that is consistent
-with the package it ships inside, so leave it alone rather than widening the
-signature to make it run on an older interpreter.
+THE BUG THIS TOOL WAS BORN FROM, kept because it is the failure mode the whole
+script exists to avoid, one level up. Its first version matched a regex rooted
+at `version` against every file. Against `package.json` that read
+`"version": "0.1.0"` as ZERO matches -- the key's closing quote sits between
+the name and the colon -- while SIMULTANEOUSLY matching a dependency constraint
+and a classifier as if they were versions. It did not merely fail to see its
+target; it invented three substitutes. So loudness was not available as a fix:
+the output was a confident, specific, wrong answer, and no amount of volume
+helps with a value that is present and incorrect. Use the parser.
+
+TWO FLOORS THAT LOOK LIKE ONE, distinguished because a reader will collapse
+them. This script needs Python 3.11+ for `tomllib`; that is the runner's 3.12
+and says nothing about the SDK. The SDK's own floor is `requires-python =
+">=3.10"`, and the Python stamper this checks needs 3.10+ as well -- its
+signatures use `bytes | None`, which is 3.10 syntax -- and that is CONSISTENT
+with the package it ships inside, so leave the signature alone rather than
+widening it to run on an older interpreter.
 
 The Go SDK is deliberately absent: `wasm/build.go` DERIVES its `sdkVersion`
 from `sdkRequiredVersion(cfg.ProjectRoot)` rather than hardcoding it, so it has
 no literal to keep in step. That is worth leaving a note about, per #2454, so
 the next reader does not "fix" it by adding one.
+
+Usage:
+    scripts/check-sdk-version-agreement.py                    # agreement only
+    scripts/check-sdk-version-agreement.py --expected 0.3.0   # ...and the version
+    scripts/check-sdk-version-agreement.py --self-test        # synthetic trees
 """
 
 from __future__ import annotations
@@ -52,38 +62,21 @@ import argparse
 import json
 import re
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
 # Source files only (the stampers): the field token, with an optional closing
 # quote so the same pattern reads `sdk_version = "x"`, `"sdk_version": "x"` and
 # the Python SDK's uppercase constant `SDK_VERSION = "x"`. Case-insensitive
-# because those three spellings are all in use, and a name-keyed pattern that is
-# case-sensitive silently reports the third as an absence -- which is how this
-# script's first run reported version.py as having no version at all.
+# because all three spellings are in use, and a case-sensitive name pattern
+# reports the third as an ABSENCE -- which is how this script's first run
+# reported version.py as carrying no version at all.
 SDK_VERSION_FIELD = re.compile(r'sdk_version"?\s*[:=]\s*"([^"]+)"', re.IGNORECASE)
 
 # Gradle is not a data format anything here can parse, so `.kts` is matched at
 # the line start -- precise enough that a dependency constraint cannot match.
 GRADLE_VERSION = re.compile(r'(?m)^\s*version\s*=\s*"([^"]+)"')
-
-
-def manifest_version(path: Path) -> list[str]:
-    """The version a manifest pins, read by a parser that knows its format."""
-    suffix = path.suffix
-    if suffix == ".json":
-        return [json.loads(path.read_text(encoding="utf-8")).get("version", "")]
-    if suffix == ".toml":
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-        # pyproject.toml pins it under [project]; Cargo.toml under [package].
-        for section in ("project", "package"):
-            block = data.get(section)
-            if isinstance(block, dict) and block.get("version"):
-                return [block["version"]]
-        return []
-    if suffix == ".kts":
-        return GRADLE_VERSION.findall(path.read_text(encoding="utf-8"))
-    raise ValueError(f"no reader for {path.suffix}: {path}")
 
 # SDK -> (manifest, [stampers]). The manifest is the authority for that SDK.
 SDKS: dict[str, tuple[str, list[str]]] = {
@@ -108,27 +101,43 @@ SDKS: dict[str, tuple[str, list[str]]] = {
     ),
 }
 
+# Synthetic files for --self-test, one per site above. The Java stamper
+# deliberately carries the version TWICE, matching the real one: a fixture with
+# one site could not express "one of the two went stale", which is a real shape.
+SITES: dict[str, str] = {
+    "python-sdk/pyproject.toml": '[project]\nname = "cleat-sdk"\nversion = "%s"\n',
+    "python-sdk/cleat_sdk/version.py": 'SDK_VERSION = "%s"\n',
+    "python-sdk/scripts/stamp_metadata.py": '    "sdk_version": "%s",\n',
+    "crates/cleat-sdk/Cargo.toml": '[package]\nname = "cleat-sdk"\nversion = "%s"\n',
+    "crates/cleat-sdk/src/bin/inject_metadata.rs": '        "sdk_version": "%s",\n',
+    "crates/cleat-java/build.gradle.kts": 'plugins { id("java") }\nversion = "%s"\n',
+    "crates/cleat-java/scripts/inject-metadata.sh": '  "sdk_version": "%s",\n  "sdk_version": "%s",\n',
+    "packages/cleat-as/package.json": '{\n  "name": "cleat-as",\n  "version": "%s"\n}\n',
+    "packages/cleat-as/scripts/inject-metadata.js": '    sdk_version: "%s",\n',
+}
 
-def read_version(path: Path, pattern: re.Pattern[str]) -> list[str]:
-    """Every match of `pattern` in the file, in order.
 
-    ALL of them, not the first: a stamper may carry the version more than once
-    (the Java stamper has two sites) and one of them going stale while the other
-    is bumped is the defect, not an edge case.
-    """
-    return pattern.findall(path.read_text(encoding="utf-8"))
+def manifest_version(path: Path) -> list[str]:
+    """The version a manifest pins, read by a parser that knows its format."""
+    suffix = path.suffix
+    if suffix == ".json":
+        value = json.loads(path.read_text(encoding="utf-8")).get("version")
+        return [value] if value else []
+    if suffix == ".toml":
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+        # pyproject.toml pins it under [project]; Cargo.toml under [package].
+        for section in ("project", "package"):
+            block = data.get(section)
+            if isinstance(block, dict) and block.get("version"):
+                return [block["version"]]
+        return []
+    if suffix == ".kts":
+        return GRADLE_VERSION.findall(path.read_text(encoding="utf-8"))
+    raise ValueError(f"no reader for {path.suffix}: {path}")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--expected",
-        help="the release version to require. Default: whatever each manifest says, "
-        "which checks AGREEMENT rather than a specific number.",
-    )
-    args = parser.parse_args()
-
-    root = Path(__file__).resolve().parent.parent
+def check(root: Path, expected: str) -> tuple[list[tuple], list[str]]:
+    """(rows, problems) for the tree at `root`."""
     problems: list[str] = []
     rows: list[tuple[str, str, str, str]] = []
 
@@ -138,16 +147,16 @@ def main() -> int:
             problems.append(f"{sdk}: manifest {manifest_rel} is missing")
             continue
         versions = manifest_version(manifest)
-        if len(versions) != 1 or not versions[0]:
+        if len(versions) != 1:
             problems.append(
                 f"{sdk}: {manifest_rel} yielded {versions!r}; the manifest must pin "
                 f"exactly one version"
             )
             continue
         pinned = versions[0]
-        if args.expected and pinned != args.expected:
+        if expected and pinned != expected:
             problems.append(
-                f"{sdk}: {manifest_rel} is {pinned}, expected {args.expected}"
+                f"{sdk}: {manifest_rel} is {pinned}, expected {expected}"
             )
 
         for stamper_rel in stamper_rels:
@@ -155,7 +164,7 @@ def main() -> int:
             if not stamper.is_file():
                 problems.append(f"{sdk}: stamper {stamper_rel} is missing")
                 continue
-            stamped = read_version(stamper, SDK_VERSION_FIELD)
+            stamped = SDK_VERSION_FIELD.findall(stamper.read_text(encoding="utf-8"))
             if not stamped:
                 problems.append(
                     f"{sdk}: nothing version-shaped matched in {stamper_rel} -- either "
@@ -171,6 +180,124 @@ def main() -> int:
                         f"{pinned} -- a workflow compiled from this SDK would report "
                         f"the wrong version to every consumer"
                     )
+    return rows, problems
+
+
+def write_tree(root: Path, overrides: dict[str, str] | None = None) -> None:
+    """A minimal tree with one file per site, all at 0.3.0 unless overridden."""
+    overrides = overrides or {}
+    for rel, template in SITES.items():
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # .replace rather than `%`: the templates carry one `%s` or two (the Java
+        # stamper has two sites), and `%` raises on the wrong arity.
+        path.write_text(overrides.get(rel, template.replace("%s", "0.3.0")))
+
+
+def self_test() -> int:
+    """Known-positive/negative trees, so the partial-bump control is a mechanism.
+
+    The hand-run that first proved this script works -- bump one manifest, watch
+    exactly one problem name the site, restore -- was correct at that moment and
+    proved nothing about the next edit. A control that runs once is a claim; one
+    that runs every time is a check. These cases are that check.
+    """
+    failures: list[str] = []
+    cases = 0
+
+    def run(label: str, overrides: dict[str, str], expected: str,
+            want_problems: int, want_substrings: list[str]):
+        nonlocal cases
+        cases += 1
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_tree(root, overrides)
+            _, problems = check(root, expected)
+        missing = [w for w in want_substrings if not any(w in p for p in problems)]
+        if missing or len(problems) != want_problems:
+            failures.append(
+                f"{label}: {len(problems)} problems, want {want_problems}; "
+                f"missing {missing}; got {problems}"
+            )
+
+    # KNOWN-NEGATIVE: a consistent tree. If this ever reports a problem the
+    # script is inventing defects, which is the failure mode it was born from.
+    run("consistent tree", {}, "", 0, [])
+
+    # KNOWN-POSITIVE, and this is the case the whole script exists for: ONE
+    # manifest bumped, its stamper left behind. Without this as a case, an edit
+    # that stops detecting it reports 0 problems -- exactly what a healthy run
+    # reports, so nothing would ever say so.
+    run(
+        "assemblyscript manifest bumped without its stamper",
+        {"packages/cleat-as/package.json":
+            SITES["packages/cleat-as/package.json"].replace("%s", "0.9.9")},
+        "",
+        1,
+        ["packages/cleat-as/scripts/inject-metadata.js stamps 0.3.0 but "
+         "packages/cleat-as/package.json is 0.9.9"],
+    )
+
+    # KNOWN-POSITIVE: the Java stamper carries the version TWICE, so only the
+    # second site going stale is a distinct shape -- and it is the one a
+    # hand-check of "the file mentions 0.3.0" would pass.
+    run(
+        "java stamper's SECOND site left behind",
+        {"crates/cleat-java/scripts/inject-metadata.sh":
+            '  "sdk_version": "0.3.0",\n  "sdk_version": "0.1.0",\n'},
+        "",
+        1,
+        ["inject-metadata.sh stamps 0.1.0"],
+    )
+
+    # KNOWN-POSITIVE: --expected is set and the tree is not at it. This is the
+    # release-branch invocation, where the branch name names the version.
+    run(
+        "release version expected, tree still on the old one",
+        {},
+        "0.4.0",
+        4,
+        ["is 0.3.0, expected 0.4.0"],
+    )
+
+    # KNOWN-POSITIVE: a site that cannot be read must be a problem, not silence.
+    run(
+        "python stamper deleted",
+        {"python-sdk/scripts/stamp_metadata.py": ""},
+        "",
+        1,
+        ["nothing version-shaped matched in python-sdk/scripts/stamp_metadata.py"],
+    )
+
+    if failures:
+        for f in failures:
+            print(f"SELF-TEST FAILED: {f}")
+        return 1
+    print(f"self-test passed: {cases} cases")
+    return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--expected",
+        help="the release version to require. Default: whatever each manifest says, "
+        "which checks AGREEMENT rather than a specific number. An empty string "
+        "means the same as omitting it.",
+    )
+    parser.add_argument("--root", help="tree to check (default: the repo root)")
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="run known-positive/known-negative cases against synthetic trees",
+    )
+    args = parser.parse_args()
+
+    if args.self_test:
+        return self_test()
+
+    root = Path(args.root).resolve() if args.root else Path(__file__).resolve().parent.parent
+    rows, problems = check(root, args.expected or "")
 
     for sdk, rel, value, status in rows:
         print(f"  {status:>9}  {sdk:<14} {value:<10} {rel}")
