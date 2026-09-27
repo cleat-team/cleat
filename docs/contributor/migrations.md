@@ -168,3 +168,47 @@ the places the emitter goes wrong:
 - **Security policies reference the predicate function, so the order is forced.** `DROP FUNCTION
   dbo.fn_tenant_filter` fails with error 3729 while any `TenantFilter_*` policy exists. Create
   function **before** policy; drop policy **before** function.
+
+## Reading the result: the conclusion and the duration are two readings
+
+**A step whose whole job is to verify something has silence as its failure mode.** `success` is
+what *"verified the baseline"* reports and also what *"returned early on a bad path"* reports, so
+the conclusion alone cannot separate them. Add the duration and it can.
+
+Measured on the first merge-group run carrying the PostgreSQL verify mode (cleat#2442):
+
+```
+step "Verify the committed PostgreSQL baseline is a fresh emit"    conclusion success
+elapsed 10.0s        (the mode measures ~6s end to end locally)
+```
+
+Ten seconds against six is what distinguishes building a database from the prior chain and
+comparing it, from exiting before doing the work. **Nothing else in that job's output can** — and
+note that "is it first among the test steps" does not either, because ordering is a property of
+the workflow file rather than of the run.
+
+This is the same shape as the empty catalog diff and as an absent `=== RUN`: **a check that fails
+by being silent reports identically whether it ran or not.** The remedy is always a reading that
+can fail *differently* — a positive marker, a floor, or a duration — never a narrower filter.
+
+It applies to verify modes specifically, and not to every step: a test step that skipped reports
+`skipped`. A verification step does not.
+
+### The other half: a verify mode can ground a decision that was already made
+
+A check is usually justified by *"this could go wrong later"*. **The stronger case is a present
+fact: something already rests on this and nothing has verified it.** The baseline is the clearest
+example here. cleat#2438 adjusted two `engine/` guards to suit a generated baseline — a floor that
+asserted *"there were 30+ `.sql` files on 2026-09-06"*, which a 3-file baseline fails while being
+exactly right, and a matcher written against the **source** spelling `ISJSON(dag_spec)` where the
+catalogue normalises the generated form to `isjson([dag_spec])`.
+
+**Both adjustments are sound only if the baseline is a faithful emit of the chain it replaces** —
+and that was true by construction and checked by nothing until the verify mode landed. So the
+verify step did not prevent a future mistake; it made an assumption that was *already load-bearing*
+into something the tree is held to, on every merge group. Note the shape: a guard relaxed to
+accommodate a change is the case where an unverified premise does the most damage, and it is the
+case least likely to be noticed, because the guard going green reads as the guard working.
+
+When you are weighing whether a check is worth building, that is the question to ask first:
+**not "what might break", but "what is already resting on this".**
