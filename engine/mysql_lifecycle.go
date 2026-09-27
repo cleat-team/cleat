@@ -30,10 +30,6 @@ func (s *MySQLStore) ClaimWorkflow(ctx context.Context, workerID string) (*Workf
 	return wfs[0], nil
 }
 
-// ClaimWorkflows atomically claims up to limit runnable workflow instances.
-// Uses SELECT ... FOR UPDATE SKIP LOCKED to avoid contention.
-// MySQL does not support UPDATE ... RETURNING, so we use a three-step
-// process inside a transaction: SELECT FOR UPDATE, UPDATE, SELECT.
 // CountRunnableWorkflows mirrors ClaimWorkflows' candidate predicate exactly,
 // minus the lock and the LIMIT.
 //
@@ -95,6 +91,10 @@ func (s *MySQLStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
 	return n, err
 }
 
+// ClaimWorkflows atomically claims up to limit runnable workflow instances.
+// Uses SELECT ... FOR UPDATE SKIP LOCKED to avoid contention.
+// MySQL does not support UPDATE ... RETURNING, so we use a three-step
+// process inside a transaction: SELECT FOR UPDATE, UPDATE, SELECT.
 func (s *MySQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTxReadCommitted(ctx)
 	if err != nil {

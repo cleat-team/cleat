@@ -61,13 +61,6 @@ func (s *MSSQLStore) ClaimWorkflow(ctx context.Context, workerID string) (*Workf
 	return wfs[0], nil
 }
 
-// ClaimWorkflows atomically claims up to limit runnable workflow instances.
-// Uses UPDATE...OUTPUT with READPAST/UPDLOCK hints (SQL Server's equivalent
-// of FOR UPDATE SKIP LOCKED) wrapped in a transaction with RLS context.
-// ClaimWorkflows retries on errors SQL Server guarantees it rolled back --
-// a deadlock victim claimed nothing, so replaying the claim is sound. Errors
-// that leave the outcome unknown are not retried; see
-// withRollbackGuaranteedRetry (IMPROVEMENT-PLAN.md 2.26).
 // CountRunnableWorkflows mirrors claimWorkflowsOnce' candidate predicate
 // exactly, minus the READPAST/UPDLOCK hints and the TOP.
 //
@@ -126,6 +119,13 @@ func (s *MSSQLStore) CountRunnableWorkflows(ctx context.Context) (int, error) {
 	return n, err
 }
 
+// ClaimWorkflows atomically claims up to limit runnable workflow instances.
+// Uses UPDATE...OUTPUT with READPAST/UPDLOCK hints (SQL Server's equivalent
+// of FOR UPDATE SKIP LOCKED) wrapped in a transaction with RLS context.
+// ClaimWorkflows retries on errors SQL Server guarantees it rolled back --
+// a deadlock victim claimed nothing, so replaying the claim is sound. Errors
+// that leave the outcome unknown are not retried; see
+// withRollbackGuaranteedRetry (IMPROVEMENT-PLAN.md 2.26).
 func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	var claimed []*WorkflowInstance
 	err := withRollbackGuaranteedRetry(ctx, "claim workflows", mssqlTxRetries, mssqlTxRetryDelay, func() error {

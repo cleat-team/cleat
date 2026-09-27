@@ -943,7 +943,6 @@ func WithReplayStepCallback(cb ReplayStepCallback) EngineOption {
 	return func(e *Engine) { e.stepCallback = cb }
 }
 
-// WithLogger sets the structured logger (default: slog.Default()).
 // realNowMs is the wall clock used to decide whether a sleep's deadline has
 // already passed.
 //
@@ -1019,6 +1018,7 @@ func (e *Engine) seedNowMs(replayHistory []EventRecord) int64 {
 // advances only by the durations the workflow asked for.
 func WithClock(fn func() int64) EngineOption { return func(e *Engine) { e.nowFn = fn } }
 
+// WithLogger sets the structured logger (default: slog.Default()).
 func WithLogger(l *slog.Logger) EngineOption { return func(e *Engine) { e.logger = l } }
 
 // WithChildBindingPolicy sets the child binding policy from WASM metadata.

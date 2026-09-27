@@ -1,6 +1,6 @@
 {
   "name": "@cleat/sdk",
-  "version": "0.3.0",
+  "version": "0.3.2",
   "description": "AssemblyScript SDK for the cleat durable execution framework",
   "main": "assembly/index.ts",
   "types": "assembly/index.ts",

@@ -323,8 +323,6 @@ func validateMenuItems(restaurantID string, items []OrderItem) ([]validatedItem,
 	return result, nil
 }
 
-// lookupMenuItem demonstrates DurableCallTyped — both request and response
-// are automatically marshaled/unmarshaled from typed structs.
 // toJSON marshals a value for an entry point's string result. Entry points
 // return strings because a WASM entry point hands back bytes and string is the
 // one shape every language SDK expresses identically (IMPROVEMENT-PLAN 3.228).
@@ -333,6 +331,8 @@ func toJSON(v interface{}) string {
 	return string(b)
 }
 
+// lookupMenuItem demonstrates DurableCallTyped — both request and response
+// are automatically marshaled/unmarshaled from typed structs.
 func lookupMenuItem(restaurantID, sku string) (menuItem, error) {
 	type lookupRequest struct {
 		RestaurantID string `json:"restaurant_id"`

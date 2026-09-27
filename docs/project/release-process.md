@@ -600,6 +600,103 @@ all — `go install pkg@version` refuses any module whose `go.mod` carries a
 helm pull oci://ghcr.io/cleat-team/charts/cleat --version X.Y.Z -d /tmp/chart-check
 ```
 
+### 9a. If the release run fails
+
+`release.yml` runs four jobs. Their `needs:` lines are the whole story of what a
+failure leaves behind:
+
+| job | needs | publishes |
+|---|---|---|
+| `goreleaser` | — | the GitHub Release and its binary/.deb assets |
+| `container-image` | `goreleaser` | `ghcr.io/cleat-team/cleat-worker` |
+| `homebrew-bump` | `goreleaser` | the formula in `cleat-team/homebrew-tap` |
+| `helm-chart-publish` | `goreleaser`, `container-image` | `oci://ghcr.io/cleat-team/charts/cleat` |
+
+Read the two dependents side by side, because the difference is deliberate.
+`homebrew-bump` needs nothing the image produces — it hashes GitHub's own
+auto-generated tag archive — so it does not wait on the image.
+`helm-chart-publish` pins the chart's `image.tag` to this release, so it does.
+
+Until cleat#2488 the image push was the last *step* of the `goreleaser` job, so
+a ghcr.io failure failed that job and skipped both dependents. Measured on
+v0.3.1 (run 36313519805): the tap still pinned `v0.2.0`, and both `Bump the
+Homebrew tap` and `Publish the Helm chart` were skipped, for a release whose
+nine binary assets were all present.
+
+**Re-run first.** "Re-run failed jobs" in the Actions UI is the recovery path
+that is always available, including on the release that has just failed:
+
+```bash
+gh run rerun <run-id> --failed
+```
+
+**The dispatch route, and its one delay.** `Release` also takes a
+`workflow_dispatch`, which covers what a re-run cannot — a run older than 30
+days or deleted, and a tag pushed with a token that does not trigger workflows,
+so that no run exists to re-run:
+
+```bash
+gh workflow run Release --ref vX.Y.Z
+```
+
+Dispatch **on the tag**, never on a branch. Every job takes the version from
+`GITHUB_REF_NAME`, and a dispatch sets that to the ref it was dispatched on — so
+a dispatch on `main` hands `main` to every tag check in the file. The
+`goreleaser` job's first step now refuses that by name; before cleat#2488 it
+validated the tag nowhere at all, because it relied entirely on the
+`push: tags:` trigger that a dispatch does not go through.
+
+**That command will 404 at first, and it is not a broken workflow.** GitHub
+serves a `workflow_dispatch` only once the workflow is registered with that
+trigger on the **default branch** — and this repository's default branch is
+`develop`, not `main`. The trigger is on `main` from cleat#2490, but it reaches
+`develop` only at the next back-merge. Until then the re-run above is the whole
+recovery path, and a 404 here means "not registered yet", not "not configured".
+
+Re-running is safe now where it was not before. A run that failed after the
+upload stage leaves the tag's assets already attached to the Release, and the
+retry used to die on the first one:
+
+```
+422 Validation Failed [{Resource:ReleaseAsset Field:name Code:already_exists}]
+```
+
+`release.replace_existing_artifacts: true` in `.goreleaser.yml` deletes the
+asset it collided with and retries the upload. It is not a wipe of the release:
+only the colliding asset goes, and only once an upload has already failed.
+Measured on v0.3.1's second attempt — all nine assets, then `release failed
+after 1m0s ... failed to publish artifacts`.
+
+**What this cannot do.** A fix reaches a tag only by being *in* the tag. A
+re-run and a dispatch both execute the workflow file, and read
+`.goreleaser.yml`, as they exist at the ref being run, so neither can retro-fit
+a tag cut before a fix landed. Checked 2026-09-27: neither `v0.3.0` nor
+`v0.3.1` carries `workflow_dispatch` or `replace_existing_artifacts`, so
+v0.3.1's own failure is not repairable by dispatching it. That case needs a new
+patch tag, or the missing steps run by hand.
+
+**Establish what a partial release actually left; do not assume.**
+
+```bash
+# The Release and its assets.
+gh release view vX.Y.Z --json assets --jq '.assets[].name'
+
+# The tap. No credentials needed; prints the version it is pinned to.
+gh api repos/cleat-team/homebrew-tap/contents/Formula/cleat.rb \
+  --jq '.content' | base64 -d | grep -E 'url|sha256'
+
+# The chart.
+helm pull oci://ghcr.io/cleat-team/charts/cleat --version X.Y.Z -d /tmp/chart-check
+```
+
+The **container image cannot be checked from a normal checkout**, and it fails
+quietly rather than loudly: an anonymous `docker manifest inspect
+ghcr.io/cleat-team/cleat-worker:vX.Y.Z` returns `denied` for a package that is
+private *and* for one that does not exist. Verified 2026-09-27 against a
+deliberately impossible package name, which returned the identical `denied` —
+so that output is not evidence either way. Check it with an authenticated
+`docker login ghcr.io`, or ask an owner.
+
 ### 10. Announce
 
 Post in Discord `#announcements`:

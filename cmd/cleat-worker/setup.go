@@ -5298,9 +5298,6 @@ func (w *Worker) runVersionGCSweep() {
 	)
 }
 
-// runRetentionSweep runs one iteration of both retention sweeps. Split out
-// of retentionLoop so it is callable directly from a test without waiting on
-// the loop's 24-hour ticker.
 // retentionSweepResult reports what one sweep did, per arm.
 //
 // Per arm and never summed. The four arms delete from different tables under
@@ -5467,6 +5464,9 @@ func (w *Worker) previewRetentionSweepWindow(retentionDays, completedWorkflowRet
 	return res
 }
 
+// runRetentionSweep runs one iteration of both retention sweeps. Split out
+// of retentionLoop so it is callable directly from a test without waiting on
+// the loop's 24-hour ticker.
 func (w *Worker) runRetentionSweep(retentionDays, completedWorkflowRetentionDays, deadLetterRetentionDays int) {
 	// ONE clock reading for the whole sweep. Each arm used to call time.Now()
 	// itself, so the three cutoffs differed by microseconds -- harmless in

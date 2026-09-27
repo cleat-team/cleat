@@ -202,7 +202,7 @@ def build_metadata(args: argparse.Namespace) -> dict:
         "plugin_deps": plugin_deps,
         "child_binding_policy": child_binding_policy,
         "sdk_language": "python",
-        "sdk_version": "0.3.0",
+        "sdk_version": "0.3.2",
         "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "language": language or "python",
     }

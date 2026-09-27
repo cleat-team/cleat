@@ -412,6 +412,8 @@ type GuestReturnedError struct {
 
 func (e *GuestReturnedError) Error() string { return e.Err.Error() }
 
+// Unwrap exposes the guest's own error, so errors.Is and errors.As reach
+// it through the GuestReturnedError wrapper.
 func (e *GuestReturnedError) Unwrap() error { return e.Err }
 
 // formatWasmCallError formats an error from a wazero function call into a
