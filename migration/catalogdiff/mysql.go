@@ -127,10 +127,14 @@ func snapshotMySQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 			// the class is live and the instrument could not see it either way.
 			//
 			// Folded into the column token rather than the definition string, so
-			// the diff line reads `[tenant_id d.recorded_at_d]` for a descending
-			// key rather than leaving the direction to a separate field nothing
-			// renders. NULL is a legitimate value here -- a functional index has
-			// no column -- so it is NOT treated as ascending by default.
+			// the direction reaches the line canonicalize already renders -- for
+			// a descending key, on a three-column index:
+			//
+			//     unique=false columns=[tenant_id,def_name,recorded_at DESC]
+			//
+			// -- rather than being left to a separate field nothing renders.
+			// NULL is a legitimate value here -- a functional index has no
+			// column -- so it is NOT treated as ascending by default.
 			if collation.Valid && collation.String == "D" {
 				col += " DESC"
 			}
@@ -148,9 +152,17 @@ func snapshotMySQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 		idxRows.Close()
 		for _, iname := range idxOrder {
 			acc := idxByName[iname]
+			// Comma-joined, matching how the MSSQL snapshot builds this same
+			// field -- STRING_AGG(c.name, ',') in that file's statistics query
+			// -- so the element boundaries are explicit. `%v` on a []string
+			// space-separates instead, which is ambiguous for exactly the token
+			// the fold above produces: `[a b recorded_at DESC]` does not say
+			// whether the third element is `recorded_at DESC` or `DESC` is a
+			// fourth. Two dialects disagreeing about the separator is a wart,
+			// not a hazard -- but the fold is what makes the space dangerous.
 			t.Indexes = append(t.Indexes, Index{
 				Name:       iname,
-				Definition: fmt.Sprintf("unique=%t columns=%v", acc.unique, acc.cols),
+				Definition: fmt.Sprintf("unique=%t columns=[%s]", acc.unique, strings.Join(acc.cols, ",")),
 			})
 		}
 

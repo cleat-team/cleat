@@ -139,7 +139,12 @@ func TestTheMySQLSnapshotSeesTheAttributesItSelects(t *testing.T) {
 	mysqlDiffCase(t, "descending-index",
 		`CREATE TABLE t (a INT NOT NULL, b DATETIME NOT NULL, KEY ix (a, b DESC))`,
 		`CREATE TABLE t (a INT NOT NULL, b DATETIME NOT NULL, KEY ix (a, b))`,
-		"DESC",
+		// The whole token, not just "DESC". A bare "DESC" is satisfied by any
+		// rendering that mentions the direction, including one that cannot be
+		// read back unambiguously -- which was the state before the separator
+		// changed. Pinning the exact form is what makes the join a decision
+		// rather than a detail nothing observes.
+		"columns=[a,b DESC]",
 		func(t *testing.T, a, b *sql.DB) string {
 			var n int
 			if err := a.QueryRow(`SELECT COUNT(*) FROM information_schema.statistics
