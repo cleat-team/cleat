@@ -11,6 +11,36 @@ on:
     tags:
       - "v*"
 
+  # cleat#2488: a second way in, for a tag whose release run failed.
+  #
+  # DISPATCH THIS ON THE TAG, not on a branch. Every job below reads the
+  # version from GITHUB_REF_NAME, and a dispatch sets that to the ref it was
+  # dispatched on -- so dispatching on `main` hands "main" to every tag check
+  # in this file. Three of the four jobs refused that loudly already; the
+  # `goreleaser` job validated the tag nowhere at all until this change, and
+  # would have tried to cut a release called `main`.
+  #
+  # It overlaps "Re-run failed jobs" for the ordinary case, and that overlap is
+  # not its purpose. It covers what a re-run cannot:
+  #   - the run is older than 30 days, or has been deleted;
+  #   - the tag was pushed with a token that does not trigger workflows, so
+  #     there is no run to re-run in the first place.
+  #
+  # Both mechanisms execute the workflow file, and read .goreleaser.yml, AS
+  # THEY EXIST AT THE REF -- so neither can retro-fit a tag cut BEFORE a fix
+  # landed. A fix reaches a tag only by being in the tag. Measured 2026-09-27:
+  # neither v0.3.0 nor v0.3.1 carries this trigger or
+  # `replace_existing_artifacts` (`.goreleaser.yml` at each tag: 0 hits), so
+  # v0.3.1's own `already_exists` failure is NOT repairable by dispatching it.
+  # That one needs a new tag. Everything cut from here on is repairable, which
+  # is the whole point of the commit this comment arrived in.
+  #
+  # GitHub requires the workflow to be registered with this trigger on the
+  # DEFAULT branch before the API or UI will dispatch it. Here that is
+  # `develop`, not `main`, so dispatching becomes available at the back-merge
+  # rather than at the merge to main.
+  workflow_dispatch:
+
 permissions:
   contents: write
   packages: write
@@ -23,6 +53,23 @@ jobs:
     # means that only moves when this line does.
     runs-on: ubuntu-26.04
     steps:
+      # First, before anything is checked out or built. Until this step existed
+      # the `goreleaser` job validated the tag NOWHERE -- it relied entirely on
+      # the `push: tags: v*` trigger, while both sibling jobs each had their own
+      # check. Adding `workflow_dispatch` above is what removes that guarantee:
+      # it is a second way in that the tag filter does not cover, and
+      # dispatching on a branch would otherwise cut a release named after that
+      # branch.
+      - name: Validate the release tag
+        run: |
+          set -euo pipefail
+          if ! [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag '${GITHUB_REF_NAME}' is not vX.Y.Z -- refusing to release from it."
+            echo "This workflow must be DISPATCHED ON THE TAG, not on a branch:"
+            echo "gh workflow run Release --ref <tag>"
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v7
         with:
@@ -117,14 +164,58 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No GORELEASER_CURRENT_TAG override is needed for the dispatch path:
+          # a dispatch ON THE TAG puts refs/tags/vX.Y.Z in GITHUB_REF and the
+          # tag's commit in HEAD, which is exactly what a tag push gives. It
+          # would be needed only to dispatch against a tag from a branch, and
+          # that is deliberately not supported -- see the trigger.
+          #
           # Where qemu-aarch64 looks for the guest's dynamic loader and libc.
           # Without it the arm64 post hook dies with "Could not open
           # '/lib/ld-linux-aarch64.so.1'" before cleat-worker's main runs, and
           # the release aborts. Found by the Release Dry Run job on its first run.
           QEMU_LD_PREFIX: /usr/aarch64-linux-gnu
 
+  # cleat#2488: the cleat-worker image push is its own job, not the last step
+  # of `goreleaser`.
+  #
+  # It used to be a step in `goreleaser`, and `homebrew-bump` declares
+  # `needs: goreleaser`. ghcr.io failing therefore took the Homebrew bump with
+  # it, though the bump depends on nothing this job produces -- it hashes
+  # GitHub's own auto-generated tag archive. Measured on v0.3.1 (run
+  # 36313519805 attempt 1): the image push failed, `Bump the Homebrew tap` and
+  # `Publish the Helm chart` were both skipped, and the tap still pinned
+  # v0.2.0 afterwards. The release and the image now fail independently.
+  #
+  # `needs: goreleaser` rather than nothing: the image should still only be
+  # published for a version whose GitHub Release exists. That is the ordering
+  # this had before -- the split changes which failures propagate, not when
+  # the image is built.
+  container-image:
+    name: Publish the cleat-worker image
+    needs: goreleaser
+    runs-on: ubuntu-26.04
+    steps:
+      # No tag check here, deliberately: `needs: goreleaser` has already run
+      # one, and "Compute cleat-worker image tags" below refuses a non-vX.Y.Z
+      # tag itself, before anything is pushed. A third copy would be a third
+      # thing to keep in step.
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Required, and NOT inherited: the arm64 leg below is emulated, and the
+      # `docker/setup-qemu-action` step that makes that possible runs in the
+      # `goreleaser` job, on a different runner. A job boundary is a fresh
+      # machine, so this has to be registered again here. Removing it does not
+      # degrade the image quietly -- buildx fails on the linux/arm64 platform.
+      - name: Set up QEMU for the arm64 image leg
+        uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+
       # .goreleaser.yml has no dockers:/docker_manifests: section -- GoReleaser
-      # above publishes binaries only. This publishes the cleat-worker image
+      # publishes binaries only. This publishes the cleat-worker image
       # cleat#2058 needs charts/cleat to be able to pull.
       #
       # No Dockerfile changes were needed for arm64: the build stage has no
@@ -139,10 +230,10 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      # Only reachable on a v* tag push (this whole workflow's trigger), so
-      # the actual push cannot fire from a PR. Kept as its own explicit
-      # condition anyway: a future trigger change should not silently start
-      # pushing from somewhere else.
+      # Reachable only from a v* tag push or a dispatch on a v* tag -- the
+      # whole workflow's trigger, either way, so this cannot fire from a PR.
+      # Kept as its own explicit condition anyway: a future trigger change
+      # should not silently start pushing from somewhere else.
       - name: Log in to ghcr.io
         if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/login-action@v4
@@ -168,8 +259,8 @@ jobs:
             echo "latest=$IMAGE:latest"
           } >> "$GITHUB_OUTPUT"
 
-      # push: true here is safe only because the whole workflow triggers
-      # solely on a v* tag push -- see the trigger at the top of this file.
+      # push: true is safe only because this job is reachable solely from a v*
+      # tag push or a workflow_dispatch whose tag passed the check above.
       # ghcr.io's package visibility (public/private) and this token's
       # packages: write permission are repository settings; until an owner
       # sets them, this step 401s/403s rather than publishing, and everything
@@ -257,16 +348,19 @@ jobs:
           git push origin main
 
   # cleat#2099: publish charts/cleat as an OCI artifact to ghcr.io, next to
-  # the cleat-worker image the goreleaser job above pushes, versioned with
-  # the release -- so a real tag always has a matching
+  # the cleat-worker image `container-image` pushes, versioned with the
+  # release -- so a real tag always has a matching
   # `helm install cleat oci://ghcr.io/cleat-team/charts/cleat --version X.Y.Z`.
   #
-  # needs: goreleaser for the same reason as homebrew-bump: this job wants
-  # the release tag's other artifacts (here, specifically the cleat-worker
-  # image the chart's default image.tag will point at) to already exist.
+  # needs: [goreleaser, container-image] -- cleat#2488. This is the one job
+  # that genuinely wants the image: it pins the chart's default image.tag to
+  # this release, so publishing a chart whose image was never pushed would
+  # ship a chart that cannot pull. `homebrew-bump` is the mirror image and
+  # deliberately does NOT list the image; read the two `needs:` lines
+  # together, because they are the whole of the split.
   helm-chart-publish:
     name: Publish the Helm chart
-    needs: goreleaser
+    needs: [goreleaser, container-image]
     runs-on: ubuntu-26.04
     steps:
       - name: Checkout
@@ -328,8 +422,8 @@ jobs:
             -d dist-chart
           ls -la dist-chart
 
-      # Only reachable on a v* tag push (this whole workflow's trigger), same
-      # guard as goreleaser's own "Log in to ghcr.io" step.
+      # Only reachable on a v* tag push or a dispatch on a v* tag, same guard
+      # as container-image's own "Log in to ghcr.io" step.
       - name: helm registry login ghcr.io
         if: startsWith(github.ref, 'refs/tags/v')
         env:

@@ -209,6 +209,27 @@ release:
     name: cleat
   prerelease: auto
   make_latest: true
+  # cleat#2488. A release that fails after the upload stage -- the container
+  # image push, or a network fault mid-job -- leaves the tag's assets already
+  # attached to the GitHub Release. Running goreleaser against that tag again
+  # then dies on its first upload with
+  #   422 Validation Failed [{Resource:ReleaseAsset Field:name
+  #                           Code:already_exists}]
+  # Measured on v0.3.1, run 36313519805 attempt 2: all nine assets, then
+  # "release failed after 1m0s ... failed to publish artifacts".
+  #
+  # GoReleaser only deletes the asset it actually collided with, and only
+  # after the upload fails -- it is not a wipe of the release -- so this makes
+  # a re-run converge instead of failing. Each colliding asset costs one extra
+  # API round trip, which is the "a bit expensive (rate-limiting speaking)"
+  # the docs warn about, paid only on the retry path.
+  #
+  # Verified against goreleaser 2.18.0 locally: `goreleaser check` accepts the
+  # key, and the same file with `replace_existing_artifacts_TYPO` in its place
+  # is rejected with "field ... not found in type config.Release" -- so the
+  # acceptance is the schema recognising the field, not the checker ignoring
+  # unknown keys. CI runs 2.18.2 (the version the failed v0.3.1 run reported).
+  replace_existing_artifacts: true
   header: |
     ## cleat {{ .Version }}
 
