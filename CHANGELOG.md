@@ -38,10 +38,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   **Consequences.**
   - **Anything that names a `migrations/<dialect>/NNN` file is now wrong, on all three
-    dialects.** That includes comments and docs across the repository — a tracked follow-up —
-    and older entries in this changelog (cleat#2424). A runbook or deployment script that
-    applied a numbered file, or pinned one by name, must apply the three in lexical order
-    instead.
+    dialects.** That includes comments and docs across the repository — a tracked follow-up,
+    and a larger one than this changelog: numbered citations across `docs/` resolve to files
+    this rebaseline deleted, and the count is not repeated here because it grows with each
+    compaction rather than shrinking. Older entries in *this* changelog are the same problem
+    (cleat#2424). A runbook or deployment script that applied a numbered file, or pinned one
+    by name, must apply the three in lexical order instead.
+  - **On SQL Server, "the three" is not the whole set for a `--claim-across-tenants`
+    deployment.** That one additionally applies
+    `migrations/mssql/optional/cross_tenant_claim.sql`, which the runner never picks up — the
+    mechanism is the directory rather than a flag, so it has no version number and is not in
+    `schema_migrations`, and this rebaseline does not touch it. Its own header names what is
+    lost without it: the worker stops seeing cross-tenant claims. PostgreSQL and MySQL have no
+    `optional/` directory, and on PostgreSQL the equivalent objects *were* numbered migrations
+    and are inside the baseline, so this asymmetry is SQL Server's alone.
   - **Cluster-level facts are absent from the baseline, and no per-database check could have
     seen them go.** A database dump carries no `CREATE ROLE` and no role *membership*, because
     `pg_auth_members` and `pg_shdescription` are cluster-wide — so the catalog diff that
