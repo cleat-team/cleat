@@ -2080,7 +2080,8 @@ jobs:
   # `goreleaser release`, without publishing anything, so this is the release
   # path minus the upload.
   #
-  # NOT a required check: .github/required-checks.txt mirrors branch protection,
+  # NOT A REQUIRED CHECK: Release Dry Run
+    # .github/required-checks.txt mirrors branch protection,
   # and adding a line there without changing the repository setting would be a
   # doc that lies. Making this blocking is a settings change for a maintainer.
   release-dryrun:

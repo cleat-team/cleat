@@ -432,7 +432,8 @@ jobs:
   # Unlike the per-backend jobs above (test-mysql, test-mssql), this job
   # does NOT run the full WorkflowStore suite — only plugin migration tests.
   #
-  # Not a required status check, and the two above are, as of 2026-08-07. The
+  # NOT A REQUIRED CHECK: Plugin Migrations
+# The two above are required, as of 2026-08-07. The
   # asymmetry is deliberate. Both of this job's steps are already gated
   # elsewhere on all three dialects: TestPluginMigrations lives in ./engine/,
   # a tier-1 package that the required `Tier 2 Gate`'s sibling `Tier 1 Gate`
@@ -610,7 +611,8 @@ jobs:
   # another worker. The suite's other scenarios stay PostgreSQL-only -- they are
   # not what cleat#2288 asked for, and each would be its own dialect port.
   #
-  # NOT A REQUIRED STATUS CHECK, by owner decision on 2026-09-25. It runs and it
+  # NOT A REQUIRED CHECK: Crash Shutdown Scenarios (MySQL, SQL Server)
+# By owner decision on 2026-09-25. It runs and it
   # reports; it does not gate a merge. Promoting it is three changes that have
   # to land together: this job's `name:` into .github/required-checks.txt,
   # tiers.yaml's required_contexts block, and branch protection.
