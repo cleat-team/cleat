@@ -240,8 +240,20 @@ func awaitInboundEvent(sourceID, eventType string) (inboundEvent, error) {
 			h.DurableSleepMs(waitMs)
 		}
 	}
-	return inboundEvent{}, fmt.Errorf("no %s event from source %s within %ds",
-		eventType, sourceID, attempts*waitMs/1000)
+	// The message names the likely cause and not only the symptom, because the
+	// symptom points at the wrong side of the system.
+	//
+	// Measured: an ingress POST carrying `{"event_type":"contact.updated"}` in
+	// its BODY and no header stores the event as `webhook` -- the type comes
+	// from `X-Github-Event` or `X-Event-Type`, falling back to that literal
+	// (plugins/webhookingest/routes.go). The event is in the table the whole
+	// time; `await_webhook` simply filters on a name nothing was stored under,
+	// and the run fails a full wait-window later saying no event arrived.
+	return inboundEvent{}, fmt.Errorf(
+		"no %q event from source %s within %ds (an event whose type was set only "+
+			"in the request body is stored as %q: the type comes from the "+
+			"X-Github-Event or X-Event-Type header)",
+		eventType, sourceID, attempts*waitMs/1000, "webhook")
 }
 
 type inboundEvent struct {

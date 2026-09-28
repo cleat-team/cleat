@@ -1,8 +1,14 @@
 # Postgres and a cleat worker -- the infrastructure this scenario runs on.
 #
-# The backend is deliberately NOT a service here. It is your application: this
-# file stands up what an application connects TO. Run it with `go run ./backend`
-# from the example directory; see the README.
+# The application backend is deliberately NOT a service here, exactly as in
+# examples/order-lifecycle: it is your application, this file stands up what an
+# application connects TO, and `go run ./backend` from the example directory
+# starts it on the host. scripts/run-integration-hub-scenario.sh drives the same
+# flow with `curl` instead, because the CI job's job is to run the README's
+# DOCUMENTED COMMANDS rather than a program of its own.
+#
+# What would sit outside this file in a deployment is the customer's CRM, and
+# that is the `sink` below.
 #
 # Mirrors examples/order-lifecycle/docker-compose.yml, and the parts that look
 # fussy are the parts measured there rather than reasoned about.
@@ -59,6 +65,43 @@ services:
         condition: service_completed_successfully
     restart: "no"
 
+  # THE ROPE END, STANDING IN FOR YOUR CUSTOMER'S SYSTEM.
+  #
+  # The connector dispatch is a real durable call to the notifications plugin;
+  # what is stubbed is only where it lands. In a deployment this service is the
+  # customer's CRM and does not exist in your compose file at all; here it
+  # exists so the whole thing runs, and it counts what it receives so the
+  # scenario can assert that a resumed run did not deliver twice.
+  #
+  # It is a compose service rather than a process on the host because the
+  # worker runs in a container: a host listener needs `host.docker.internal`,
+  # which is not resolvable on Linux without an extra --add-host flag. On the
+  # compose network the name `sink` just resolves, on every platform.
+  sink:
+    image: python:3-alpine
+    command:
+      - python3
+      - -c
+      - |
+        import http.server
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                n = int(self.headers.get('Content-Length', 0) or 0)
+                self.rfile.read(n)
+                with open('/tmp/hits', 'a') as f:
+                    f.write('hit\n')
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'ok')
+
+            def log_message(self, *a):
+                pass
+
+        http.server.HTTPServer(('0.0.0.0', 9099), Handler).serve_forever()
+    # Nothing depends on it; the worker delivers to it. Declared so a reader
+    # sees the two halves of the scenario side by side.
+
   cleat-worker:
     image: ${CLEAT_WORKER_IMAGE:-ghcr.io/cleat-team/cleat-worker:latest}
     # A worker drains for --shutdown-grace (default 20s) after SIGTERM before it
@@ -77,19 +120,40 @@ services:
       - "--migrate-db=postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable"
       - "--api-addr=:8080"
       - "--concurrency=4"
-      # THE EDGE MIDDLEWARE, CONFIGURED LOW ENOUGH TO OBSERVE.
+      # THE PERMISSION AN INTEGRATION HUB ACTUALLY NEEDS.
       #
-      # `ratelimiter` wraps every request -- core routes included, not only its
-      # own -- and this is the one number the scenario needs: without a rate
-      # set, per-tenant limiting is off and the hitch point is present but
-      # invisible. Set low so a burst from the scenario produces a real 429
-      # rather than being described.
+      # cleat's egress policy refuses loopback and RFC1918 addresses by default,
+      # which is the right floor and the wrong default for this scenario: an
+      # integration hub's whole job is reaching systems INSIDE the customer's
+      # network, so "use a public endpoint" is the opposite of the lesson.
       #
-      # DEFAULT MODE IS PER-WORKER (in-process token buckets), which is what an
-      # example should show. `mode: db` coordinates across workers through a
-      # shared table and needs the plugin-config flag; see the README.
-      - "--rate-limit-per-tenant=10"
-      - "--rate-limit-per-tenant-burst=10"
+      # The policy is a floor WITH AN EXEMPTION rather than an absolute --
+      # `engine/egress_policy.go` marks the RFC1918 prefixes `exemptible: true`
+      # and the help text at `cmd/cleat-worker/config.go:423` names a
+      # self-hosted model server as the motivating case. An operator permits a
+      # host by NAME, and the name is the host as it appears in the URL, so
+      # this is the compose service name.
+      #
+      # Measured: without this, the delivery is refused with
+      #   egress to sink (172.19.0.3) is refused by cleat's network policy: RFC1918 private
+      # which names a range and a reason and reads like a closed door. It is a
+      # door with a handle.
+      - "--plugin-egress-allow-private=sink"
+      # THE CORE'S PER-TENANT TIER -- NOT the plugin's edge middleware.
+      #
+      # There are two limiters and this flag is the wrong one for the
+      # `ratelimiter` hitch point, which is why it is commented rather than
+      # relied on. `--rate-limit-per-tenant` is read by the WORKER's own
+      # `rateLimitMiddleware` (cmd/cleat-worker/config.go), whose 429 carries no
+      # X-RateLimit-* headers. The PLUGIN's middleware builds its buckets from
+      # its own table, seeded through `PUT /rate-limits/{key}`, and its 429 does
+      # carry them -- that is the mechanism the scenario exercises and the
+      # header it asserts on.
+      #
+      # Set to 0 (the default, disabled) so the two cannot be confused: the
+      # core's per-IP tier is still active at its default of 100/s, which is
+      # well above the scenario's burst, so a 429 there can only be the plugin's.
+      - "--rate-limit-per-tenant=0"
     environment:
       # `webhook-ingest` seals each source's signing secret, and `notifications`
       # seals each webhook's -- so BOTH need a master key. Without one the

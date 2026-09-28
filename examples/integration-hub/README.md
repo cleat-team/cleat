@@ -38,13 +38,46 @@ not show that they compose:
 | **HTTP routes** | the ingest endpoint, `POST /ingest/{source_id}` — HMAC-verified and auth-exempt | `webhook-ingest` |
 | **Host functions** | the connector dispatch, `notifications.send_webhook` | `hub.go`, `dispatchToConnector` |
 | **Edge middleware** | the rate limit, wrapping **every** request including core routes | `ratelimiter` |
-| **Background loop** | the retry sweep over undelivered events, running `AcrossAllTenants` by name | `webhook-ingest` |
+| **Background loop** | the sweep over pending `webhook_delivery` rows, running `AcrossAllTenants` by name | `notifications` |
 
-The middleware row is the one people misread: `ratelimiter`'s middleware does
-not wrap only plugin routes. The plugin mux becomes the core mux, so a plugin
+The middleware row is the one people misread. `ratelimiter`'s middleware does
+not wrap only plugin routes: the plugin mux becomes the core mux, so a plugin
 implementing `HasMiddleware` sees `POST /api/workflows/:name/start` exactly as
 it sees its own routes (`cmd/cleat-worker/main.go`, the comment above the
 `RegisterRoutes` loop).
+
+**Two limiters run, they are different mechanisms, and one of them needs
+seeding before it does anything.**
+
+| | **core** | **plugin (`ratelimiter`)** |
+|---|---|---|
+| flags | `--rate-limit` (per IP, **100/s burst 200**), `--rate-limit-per-tenant` (**0 — off**) | none; limits live in the plugin's own table |
+| seeded by | those flags | `PUT /rate-limits/{key}` — **nothing fires until a limit exists** |
+| where | `rateLimitMiddleware`, wrapping the auth-wrapped handler | inside the plugin middleware chain, after auth resolves the tenant |
+| its 429 carries | no `X-RateLimit-*` headers | `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` |
+
+**Both answer 429 with the body `{"error":"rate limit exceeded"}`**, so the body
+cannot tell them apart. **The header is the discriminator**, and the scenario
+asserts on it: a 429 that carries `X-RateLimit-Limit` is the plugin's edge
+middleware, and one that does not is the core's.
+
+The plugin one is the hitch point in the assembly table, and the seeding is the
+part that catches people: `ratelimiter`'s middleware builds its token buckets
+from rows in its own table, refreshed by its background loop, so a deployment
+that never writes one has a registered middleware that **cannot fire**. Setting
+`--rate-limit-per-tenant` configures the *core's* tier instead — a different
+limiter with a different 429.
+
+**The core limiter is what reaches the auth-exempt ingest route.** It is applied
+outside auth, so it sees every request before anything decides who sent it, and
+`--rate-limit` (100/s per IP by default) bounds the ingest endpoint. The
+plugin's limiter cannot: it returns early when `auth.TenantIDFromContext` finds
+no tenant, which is exactly what an auth-exempt route has.
+
+**`--rate-limit 0` disables the IP limiter** — that is the condition under which
+the ingest endpoint is bounded only by its body limit (1 MiB) and its signature
+check. Stated as a condition rather than a default, because the default is
+bounded in both size and rate.
 
 ## What this exists to show: a host call is recorded, not repeated
 
@@ -92,17 +125,113 @@ cleat deploy --db "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable" 
   --name integration-hub /tmp/out/sync_customer.wasm
 ```
 
-Then stand up the rope end — a sink, standing in for the customer's system —
-and register it as the connector:
+The `sink` service came up with the stack: it is the rope end, standing in for
+your customer's system, and `docker compose up -d` already started it.
+
+## The app
+
+The commands above are the whole scenario, and they are what CI runs. There is
+also a small web app, which is what a reader wants when they would rather click
+than type:
 
 ```bash
-# The rope end. In a real deployment this URL is the customer's CRM.
-python3 -m http.server 9099 &
+cd examples/integration-hub
+CLEAT_URL=http://localhost:8080 \
+CLEAT_API_KEY="$CLEAT_API_KEY" \
+CLEAT_SOURCE_ID="$SOURCE_ID" \
+  go run ./backend
+# -> http://localhost:9090
+```
 
-# Register it. The secret is required: notifications signs every delivery.
+Run it from this directory: `-web` defaults to `web`, which is this example's
+own, and `go run ./backend` finds the `examples` module by walking up.
+
+`CLEAT_SOURCE_ID` is the ingest source registered below, and it is required
+rather than discoverable: the ingest route resolves the tenant from that row and
+not from the request, so this process may not invent one.
+
+It is a `backendkit` proxy and holds no business logic — the integration IS the
+workflow, and a backend that duplicated any of the dispatch would be
+demonstrating the thing cleat exists to remove. It offers three things the
+command line does not: a **delivery log** read from the connector's own record,
+a **one-click inbound event** (it signs server-side, because the secret is the
+source's and a browser must not hold it), and per-run **query state**, so you can
+watch a run move through `waiting_for_event` → `dispatching` → `dispatched` →
+`done` without reading event history.
+
+> **The delivery log is where the durability property becomes visible.** Start a
+> sync, deliver the inbound event, and watch one row appear. That row is the
+> connector's record of the dispatch; the crash-resume assertion in
+> `scripts/run-integration-hub-scenario.sh` is the same count, taken across a
+> real `SIGKILL`. A resumed run that re-executed the call would leave **two**.
+
+**A delivery's states are `pending`, `retrying`, `delivered`, `failed` and
+`cancelled` — there is no `dead_lettered`, and the page offers exactly those
+five.** `retrying` and `failed` are the same path with the ten-attempt ceiling
+either side of it (`retryOrFail`, `plugins/notifications/background.go`), and
+`cancelled` is a webhook deleted while its delivery was in flight.
+
+**There are three dead-letter-adjacent vocabularies in reach here and
+`webhook_delivery` is in none of them**, which is the conflation cleat#2050
+corrected in this scenario's playbook:
+
+| | the state | where |
+|---|---|---|
+| workflow **runs** | the dead-letter **queue**, `GET /api/dead-letters` | only runs whose last durable call exhausted its retry policy |
+| inbound **events** | `status = 'dead_letter'` | `webhook-ingest`'s sweep, after its own retries |
+| outbound **deliveries** | `failed` — there is no dead-letter state | ten attempts, then terminal |
+
+So a filter offering `dead_lettered` on this table would be a control that can
+never match, which is the same defect as one that filters nothing, wearing a
+friendlier face.
+
+**One read does not go through `backendkit`, and it is a gap rather than a
+choice.** The delivery log and the connector list are a plugin's own HTTP routes
+(`plugins/notifications/routes.go`), mounted on the worker's mux beside `/api/*`.
+`backendkit.Client` covers the `/api/*` resources and the plugin *host-function*
+path (`CallPlugin` → `/api/plugins/…`), and has no method for a route a plugin
+registers. The example spells those two paths in `pluginGET` and reuses the
+client `backendkit` was configured with, so the API key, the timeouts and the
+tenant are still its — but the URL is not. Filed as **cleat#2550**.
+
+> **A private rope end is refused by default, and permitting it is one flag.**
+>
+> cleat's egress policy refuses loopback and RFC1918 addresses, so without a
+> permission the delivery is refused:
+>
+> ```
+> notifications: delivery retrying attempt=1
+> reason="request failed: Post \"http://sink:9099/hook\": egress to sink
+> (172.19.0.3) is refused by cleat's network policy: RFC1918 private"
+> ```
+>
+> **That error names a range and a reason and reads like a closed door. It is a
+> door with a handle.** The policy is a floor *with an exemption*, not an
+> absolute — `engine/egress_policy.go` marks the RFC1918 prefixes
+> `exemptible: true`, and the compose sets:
+>
+> ```
+> --plugin-egress-allow-private=sink
+> ```
+>
+> The value is the host **as it appears in the endpoint URL**, matched as a
+> string — so `sink`, `localhost` and `127.0.0.1` are three different entries.
+> `cmd/cleat-worker/config.go` has the flag's own text, and its motivating case
+> is a self-hosted model server on `http://localhost:11434`.
+>
+> **This is the permission an integration hub exists to need.** An iPaaS reaches
+> systems *inside* the customer's network; telling yourself to use a publicly
+> reachable endpoint is the opposite of the architecture. The flag is how you
+> grant exactly one host, by name, rather than opening the range.
+
+Register it as the connector:
+
+```bash
+# The rope end. In a deployment this URL is your customer's CRM, and the sink
+# service does not exist -- it is here so the whole thing runs.
 curl -fsS -X POST http://localhost:8080/webhooks \
   -H "Authorization: Bearer $CLEAT_API_KEY" -H "Content-Type: application/json" \
-  -d '{"url":"http://host.docker.internal:9099/hook","secret":"whsec_local_dev","events":["contact.updated"]}'
+  -d '{"url":"http://sink:9099/hook","secret":"whsec_local_dev","events":["contact.updated"]}'
 # -> {"id":"<WEBHOOK_ID>", ...}
 ```
 
@@ -119,11 +248,24 @@ curl -fsS -X POST http://localhost:8080/ingest/sources \
 Start a sync with both ids, then deliver the inbound event:
 
 ```bash
-BODY='{"event_type":"contact.updated","payload":{"id":"c-1"}}'
+BODY='{"id":"c-1"}'
 SIG="sha256=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac 'whsec_local_dev' -r | cut -d' ' -f1)"
 curl -fsS -X POST "http://localhost:8080/ingest/$SOURCE_ID" \
-  -H "Content-Type: application/json" -H "X-Hub-Signature-256: $SIG" -d "$BODY"
+  -H "Content-Type: application/json" \
+  -H "X-Event-Type: contact.updated" \
+  -H "X-Hub-Signature-256: $SIG" -d "$BODY"
 ```
+
+**The event type is a HEADER, not a body field.** `webhook-ingest` reads
+`X-Github-Event`, then `X-Event-Type`, and falls back to the literal `"webhook"`
+if neither is present (`plugins/webhookingest/routes.go`). A body field named
+`event_type` is carried through as payload and does not affect routing.
+
+That is worth knowing because **the failure is on the other side of the
+system**: a mismatched type stores the event under `webhook`, `await_webhook`
+filters on the name it was given, finds nothing, and the run fails a wait-window
+later saying no event arrived — which points at the ingest rather than at the
+name. The event is in the table the whole time.
 
 The delivery the connector enqueues is visible without reading any event
 history:
@@ -143,6 +285,12 @@ cd examples && go test ./integration-hub/... -count=1
 
 - `hub.go` — the workflow: the inbound wait, the dispatch, and the settle step
 - `hub_test.go` — unit tests, driven through `cleattest`
-- `docker-compose.yml` — PostgreSQL and a worker, with a low per-tenant rate so
-  the middleware is observable rather than described
+- `backend/main.go` — the app: a `backendkit` proxy, and the delivery log
+- `web/` — the page `backend/` serves: syncs, their query state, and the
+  connector's deliveries
+- `docker-compose.yml` — PostgreSQL, a worker, and the `sink` standing in for the
+  customer's system. Two settings in it are the scenario's: the one private host
+  is permitted by name (`--plugin-egress-allow-private=sink`), and the core's
+  per-tenant limiter is left **off**, so a 429 observed here can only be the
+  plugin's — see the two-limiter table above
 - `cleat.yaml` — the workflow's name and entry points

@@ -393,6 +393,21 @@ linters:
         text: "G704"
         path: 'plugins/oauthprovider/oidc\.go$'
 
+      # G704 SSRF (taint), examples/integration-hub/backend/main.go, 2 sites. pluginGET fetches a route the
+      # WORKER serves -- the notifications plugin's own /webhooks and /webhooks/{id}/deliveries -- at
+      # s.client.BaseURL, which is the operator's CLEAT_URL and never request data. The one request-controlled
+      # segment is a webhook id, and it goes through url.PathEscape into a path segment of its own; the status
+      # filter goes through url.QueryEscape. MEASURED 2026-09-27 over "../../admin", "a/b", "x?y=1", "x#f",
+      # "http://evil.example/", "a\\b", "..%2f..%2fadmin", "\nHost: evil.example" and "a b": every one has
+      # `/`, `?`, `#` and `\` escaped, and the pre-encoded `%2f` becomes `%252f` rather than decoding to a
+      # separator. The pattern is anchored on the tail rather than the module root because golangci-lint run
+      # inside examples/ is one of the roots that reports a different prefix -- see the G70[23] entry above.
+      # THE COST: a path THIS FILE builds by concatenating a request value without escaping would not be
+      # flagged; the reviewer of a PR that adds one is the check.
+      - linters: [gosec]
+        text: "G704"
+        path: 'integration-hub/backend/main\.go$'
+
       # G101 hard-coded credentials, plugins/oauthprovider/routes.go, 3 sites: the provider endpoint table
       # (authorize, token and userinfo URLs). The file's own comment records that nothing in the map is read
       # as a credential; the trigger is the word `token` in a URL key.
