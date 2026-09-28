@@ -38,6 +38,7 @@
     "refused": "The start was refused before the workflow body ran.",
     "bound_absent_marker": "The parameter bound a value meaning 'the caller sent nothing' -- Go's nil for a *T -- and the workflow RAN, deciding its own fallback.",
     "bound_value": "The parameter bound the value the payload carried.",
+    "bound_wrong_value": "The key WAS present and the parameter bound something else, so it did not read the value the payload carried for its name. Distinct from bound_zero, which is about an ABSENT key: this one says the binder looked somewhere else. cleat#2542 -- the readers classified \"the key exists\" as bound_value until then, which is why nothing could tell the two apart.",
     "bound_whole_payload": "The parameter received the ENTIRE payload rather than a value extracted by name -- Go's and AssemblyScript's single-string fast path."
   },
   "no_per_parameter_binding": {
@@ -109,6 +110,27 @@
       "expect": {
         "go": "refused",
         "python": "refused",
+        "assemblyscript": "refused_at_compile_time"
+      }
+    },
+    {
+      "name": "present composite",
+      "why": "The control the absent row never had, and the row that makes the KEY the subject rather than mere success. A present composite binds from the parameter's OWN NAME -- the generator's JSONTag is p.Name() (wasm/exports.go:489, :749), used as the extraction key at :598 -- so `ref OrderRef` reads {\\\"ref\\\": ...} and not the struct's fields from the top level. That rule was stated backwards in docs/workflow-go-constraints.md for an unknown length of time (cleat#2541), and nothing in the test tree contradicted it: the absent row is equally satisfied by an SDK that refuses every composite, present or absent, so an SDK that never binds one at all passed it. The Go and Python fixtures echo the sku they bound, so binding from the wrong key yields the zero Item and reports bound_wrong_value rather than bound_value. AssemblyScript cannot express a present one either -- its transform rejects composite types at compile time -- which is measured asymmetry, not an untested row.",
+      "declared": [
+        {
+          "name": "item",
+          "kind": "composite"
+        }
+      ],
+      "payload": {
+        "item": {
+          "sku": "widget",
+          "qty": 2
+        }
+      },
+      "expect": {
+        "go": "bound_value",
+        "python": "bound_value",
         "assemblyscript": "refused_at_compile_time"
       }
     },
