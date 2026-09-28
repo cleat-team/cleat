@@ -8,7 +8,6 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 	"io"
 	"net/http"
-	"strings"
 )
 
 // ---------------------------------------------------------------------------
@@ -285,40 +284,23 @@ func GeminiChat(ctx context.Context, client *http.Client, apiKey, baseURL string
 		TotalTokens:      result.UsageMetadata.TotalTokenCount,
 	}
 
+	// Gemini's response carries no served-model field (the model is in the
+	// request URL, not the body), so there is no result.Model to key on the
+	// way openai.go/anthropic.go do -- input.Model is what was served here.
+	cost, known := CostFor("gemini", input.Model, usage)
+
 	return ChatOutput{
-		Choices: []Choice{choice},
-		Usage:   usage,
-		Cost:    geminiCost(input.Model, usage),
-		Model:   input.Model,
+		Choices:       []Choice{choice},
+		Usage:         usage,
+		Cost:          cost,
+		Model:         input.Model,
+		EstimatedCost: !known,
 	}, nil
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// geminiCost calculates an approximate cost for a Gemini model.
-func geminiCost(model string, usage Usage) float64 {
-	m := strings.ToLower(model)
-	switch {
-	case strings.Contains(m, "gemini-2.5-flash"):
-		// $0.15/1M input, $0.60/1M output (<=200K tokens range)
-		return float64(usage.PromptTokens)*0.15/1_000_000 +
-			float64(usage.CompletionTokens)*0.60/1_000_000
-	case strings.Contains(m, "gemini-2.5-pro"):
-		return float64(usage.PromptTokens)*1.25/1_000_000 +
-			float64(usage.CompletionTokens)*5.00/1_000_000
-	case strings.Contains(m, "gemini-2.0-flash-lite"):
-		return float64(usage.PromptTokens)*0.075/1_000_000 +
-			float64(usage.CompletionTokens)*0.30/1_000_000
-	case strings.Contains(m, "gemini-2.0-flash"):
-		return float64(usage.PromptTokens)*0.10/1_000_000 +
-			float64(usage.CompletionTokens)*0.40/1_000_000
-	default:
-		return float64(usage.PromptTokens)*0.15/1_000_000 +
-			float64(usage.CompletionTokens)*0.60/1_000_000
-	}
-}
 
 // wrapToolResult converts a tool result string into a JSON object suitable for
 // Gemini's functionResponse.response field.  If the content is already a JSON
