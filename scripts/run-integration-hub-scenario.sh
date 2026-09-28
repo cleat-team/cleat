@@ -146,8 +146,18 @@ cleanup() {
   local rc=$?
   if (( rc != 0 )); then
     echo >&2
-    echo "--- cleat-worker (tail) ---" >&2
-    "${COMPOSE[@]}" logs --tail=60 cleat-worker >&2 2>&1 || true
+    # SINCE THE RESTART WHEN THERE WAS ONE, and that is the difference between
+    # evidence and a red herring. This dumped `--tail=60` unconditionally until
+    # 2026-09-28, and after a restart those 60 lines are the pre-kill startup
+    # burst -- so the failure that mattered was reported with a perfectly
+    # healthy worker's log attached to it (cleat#2562's CI run).
+    if [[ -n "${RESTART_AT:-}" ]]; then
+      echo "--- cleat-worker (since the $RESTART_AT restart) ---" >&2
+      "${COMPOSE[@]}" logs --since "$RESTART_AT" cleat-worker >&2 2>&1 || true
+    else
+      echo "--- cleat-worker (tail) ---" >&2
+      "${COMPOSE[@]}" logs --tail=60 cleat-worker >&2 2>&1 || true
+    fi
     echo "--- sink (tail) ---" >&2
     "${COMPOSE[@]}" logs --tail=10 sink >&2 2>&1 || true
   fi
@@ -408,15 +418,53 @@ else
   echo "    killed; the run is now owned by a worker that does not exist"
 
   echo "==> restarting it"
+  # Stamp the moment, so every later log dump can ask for lines SINCE it. The
+  # old dump asked for the last 60 lines, which after a restart are the
+  # PRE-KILL startup burst -- a healthy worker -- so a failure to come back was
+  # reported with evidence of the worker that had just been killed.
+  RESTART_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   if ! "${COMPOSE[@]}" up -d cleat-worker >/tmp/ih-restart.log 2>&1; then
     echo "FAIL: could not restart the worker" >&2
     tail -20 /tmp/ih-restart.log >&2
     failures=$((failures + 1))
   fi
 
-  deadline=$((SECONDS + 60))
+  # THE WAIT IS GENEROUS AND THE FAILURE IS TERMINAL, and both halves are a fix
+  # rather than a preference. Measured on CI (cleat#2562's run): the restart
+  # exceeded a 60s budget, and because the script CONTINUED, eight later
+  # assertions fired against a dead worker and named eight wrong causes --
+  # `deliveries through the backend = '-1'`, `PUT /rate-limits/edge = 000` (a
+  # refused connection), `no request in a burst of 40 was rate limited`. A
+  # reader sees "9 assertion(s) failed" and has to deduce which one is the cause.
+  #
+  # So: wait long enough that a merely-slow runner is not a failure, and STOP
+  # when the worker is genuinely gone, because every assertion after this point
+  # is a measurement of the worker rather than of the scenario.
+  deadline=$((SECONDS + 180))
   until curl -fsS --max-time 5 "$API/healthz" >/dev/null 2>&1; do
-    (( SECONDS > deadline )) && { echo "FAIL: the worker did not come back within 60s" >&2; failures=$((failures + 1)); break; }
+    if (( SECONDS > deadline )); then
+      echo "FAIL: the worker did not come back within 180s." >&2
+      echo >&2
+      echo "THE CRASH-RESUME ASSERTION WAS NOT EVALUATED, and that is not the same" >&2
+      echo "as its having failed. It sits below this point, so this run says NOTHING" >&2
+      echo "about whether a resumed run dispatches twice -- and a reader told that" >&2
+      echo "the crash-resume check is red would go into the resume path, where" >&2
+      echo "nothing here has been measured." >&2
+      echo >&2
+      echo "STOPPING HERE rather than running the rest: every later assertion would" >&2
+      echo "run against a dead worker and name its own subject as the cause. That is" >&2
+      echo "what this script did on 2026-09-28, turning one unreturned container into" >&2
+      echo "nine failures across nine subjects." >&2
+      echo >&2
+      echo "--- what the container actually is ---" >&2
+      "${COMPOSE[@]}" ps -a >&2 2>&1 || true
+      echo "--- docker's own restart output ---" >&2
+      tail -20 /tmp/ih-restart.log >&2 2>&1 || true
+      echo "--- the worker's log SINCE THE RESTART (not --tail, which the" >&2
+      echo "    pre-kill startup burst fills: that is what the old dump showed)" >&2
+      "${COMPOSE[@]}" logs --since "${RESTART_AT:-5m}" cleat-worker >&2 2>&1 || true
+      exit 1
+    fi
     sleep 2
   done
 
