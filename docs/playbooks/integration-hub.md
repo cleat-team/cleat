@@ -148,6 +148,17 @@ workflow: no ambient filesystem, no network beyond the host functions you allow,
 calls go through the same recorder. You are not handing a tenant a scripting hook inside your own
 process; the isolation containing it is the one that already contains your own workflows.
 
+**Both halves of that are run, not merely described.** The `Integration hub scenario` CI job
+uploads `normalize-order` through `POST /api/definitions` and runs it as a child of the operator's
+workflow on a real deployed worker — the *mechanism* this section opens with. The
+`Integration hub tenant sandbox scenario` job is the *guarantee*: it uploads an adversarial step
+that tries to read the host filesystem and asserts cleat's WASI policy refuses it
+(`engine/wasi_policy.go`'s `path_open`), alongside the same `normalize-order` step as a positive
+control — a malicious-step FAIL is only meaningful next to a legitimate step that succeeds. It
+demonstrates the first of the three properties named above (no ambient filesystem); the other two
+are real properties of the same sandbox but are not what that job measures, which the job's own
+header comment says explicitly rather than leaving "the sandbox is tested" vague about which part.
+
 **Two things to get right before exposing it.**
 
 *Exposure is not free.* Serving a tenant's workflow on a **public** route needs the exposure-class

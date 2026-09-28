@@ -1,0 +1,11 @@
+# NOT a tenant's real workflow. This is the wedge scenario's own adversarial
+# probe: it plays the part of a malicious (or merely careless) tenant upload,
+# attempting the simplest thing a tenant step could do to escape its sandbox --
+# read a file from the HOST filesystem. See
+# docs/playbooks/integration-hub.md, "The wedge", and
+# scripts/run-integration-hub-tenant-sandbox-scenario.sh, which asserts this
+# workflow FAILS rather than succeeds.
+name: malicious-read-host-file
+language: go
+entry_points:
+  - read_host_file

@@ -81,6 +81,14 @@ type SyncInput struct {
 
 	// Payload is the event body, forwarded to the connector verbatim.
 	Payload json.RawMessage `json:"payload"`
+
+	// TenantStepName, when set, names a workflow definition the CALLING
+	// TENANT has uploaded through POST /api/definitions -- the wedge
+	// docs/playbooks/integration-hub.md describes ("The wedge: the tenant's
+	// own step, not yours"). Optional and empty by default, so every
+	// existing scenario that does not set it is unaffected: the dispatch
+	// still forwards the inbound payload verbatim, exactly as before.
+	TenantStepName string `json:"tenant_step_name"`
 }
 
 type SyncResult struct {
@@ -89,6 +97,11 @@ type SyncResult struct {
 	DeliveryID  string `json:"delivery_id"`
 	Status      string `json:"status"`
 	InboundSeen bool   `json:"inbound_seen"`
+	// TenantStepRan is true only when TenantStepName was set AND its child
+	// workflow completed successfully. Distinguishes "no tenant step was
+	// asked for" from "one was asked for and ran" for a caller inspecting
+	// the published result rather than the request it sent.
+	TenantStepRan bool `json:"tenant_step_ran,omitempty"`
 }
 
 // ---- Entry point ----
@@ -136,11 +149,49 @@ func SyncCustomer(h cleat.HostCalls, input string) (string, error) {
 		return "", fmt.Errorf("customer %s: waiting for %s: %w", in.CustomerID, in.EventType, err)
 	}
 
-	h.SetQueryState("status", "dispatching")
 	h.Log("inbound event received",
 		"customer_id", in.CustomerID,
 		"event_type", inbound.EventType,
 	)
+
+	// ---- 1.5. The tenant's own step, not yours ----
+	//
+	// docs/playbooks/integration-hub.md, "The wedge": a customer uploads its
+	// own transform through POST /api/definitions, and THIS workflow -- yours,
+	// not theirs -- invokes it as a child, handing it the raw inbound payload.
+	// Optional: every scenario that never sets TenantStepName dispatches the
+	// payload verbatim, exactly as before this existed.
+	tenantStepRan := false
+	payload := inbound.Payload
+	if in.TenantStepName != "" {
+		h.SetQueryState("status", "running_tenant_step")
+		runID, err := h.ChildWorkflow(in.TenantStepName, string(inbound.Payload))
+		if err != nil {
+			h.SetQueryState("status", "failed")
+			h.SetQueryState("failed_step", "tenant_step")
+			return "", fmt.Errorf("customer %s: starting tenant step %q: %w", in.CustomerID, in.TenantStepName, err)
+		}
+		transformed, err := h.AwaitChild(runID)
+		if err != nil {
+			// The tenant's own step failed or was refused -- including by the
+			// sandbox itself (engine/wasi_policy.go), if it attempted
+			// something a tenant-supplied step must not be able to do. Either
+			// way this is OUR workflow's failure to report, not a silent
+			// pass-through: a malicious or broken tenant step must not read
+			// as "delivered".
+			h.SetQueryState("status", "failed")
+			h.SetQueryState("failed_step", "tenant_step")
+			return "", fmt.Errorf("customer %s: tenant step %q: %w", in.CustomerID, in.TenantStepName, err)
+		}
+		payload = json.RawMessage(transformed)
+		tenantStepRan = true
+		h.Log("tenant step completed",
+			"customer_id", in.CustomerID,
+			"tenant_step_name", in.TenantStepName,
+		)
+	}
+
+	h.SetQueryState("status", "dispatching")
 
 	// ---- 2. The connector dispatch — THE RECORDED CALL ----
 	//
@@ -154,7 +205,7 @@ func SyncCustomer(h cleat.HostCalls, input string) (string, error) {
 	// 'pending' row and its own background loop performs the HTTP call. That is
 	// what makes the assertion countable — a re-executed call would be a second
 	// row, and the row is visible through GET /webhooks/{id}/deliveries.
-	deliveryID, err := dispatchToConnector(in.WebhookID, in.EventType, inbound.Payload)
+	deliveryID, err := dispatchToConnector(in.WebhookID, in.EventType, payload)
 	if err != nil {
 		h.SetQueryState("status", "failed")
 		h.SetQueryState("failed_step", "dispatch_to_connector")
@@ -178,11 +229,12 @@ func SyncCustomer(h cleat.HostCalls, input string) (string, error) {
 
 	h.SetQueryState("status", "done")
 	return mustJSON(SyncResult{
-		CustomerID:  in.CustomerID,
-		EventType:   in.EventType,
-		DeliveryID:  deliveryID,
-		Status:      "done",
-		InboundSeen: true,
+		CustomerID:    in.CustomerID,
+		EventType:     in.EventType,
+		DeliveryID:    deliveryID,
+		Status:        "done",
+		InboundSeen:   true,
+		TenantStepRan: tenantStepRan,
 	})
 }
 

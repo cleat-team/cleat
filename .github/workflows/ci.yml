@@ -1444,6 +1444,79 @@ jobs:
       - name: Run the scenario end to end
         run: scripts/run-integration-hub-scenario.sh ${{ matrix.dialect }}
 
+  integration-hub-tenant-sandbox-scenario:
+    name: Integration hub tenant sandbox scenario
+    runs-on: ubuntu-latest
+    # merge_group is excluded for the same reason as the sibling scenario jobs
+    # above -- read integration-hub-scenario's comment before removing this
+    # line. Not a required context (.github/required-checks.txt), so a
+    # merge_group run would add a build to the critical path of every queue
+    # entry while gating nothing.
+    if: github.event_name != 'merge_group'
+    # scripts/run-integration-hub-tenant-sandbox-scenario.sh, cleat#2597. The
+    # sibling job above (integration-hub-scenario) proves the tenant-uploaded-
+    # step MECHANISM works: a tenant's own WASM, uploaded through
+    # POST /api/definitions, runs as a child of the operator's workflow. That
+    # is a different claim from the one this job asserts -- working code is
+    # not yet a security guarantee. This job uploads an ADVERSARIAL step that
+    # tries to read the host filesystem and asserts cleat's WASI sandbox
+    # refuses it (engine/wasi_policy.go's path_open, wasiFatal), alongside a
+    # positive control (the same normalize-order step the sibling job uses)
+    # so a FAIL on the adversarial arm cannot be a worker that fails every
+    # workflow. See the script's own header comment for the full reasoning,
+    # including why this is a separate script/job rather than folded into the
+    # sibling scenario.
+    #
+    # ONE ARM, NOT A DIALECT MATRIX, for the same reason as the DBOS pair
+    # scenario below: the guarantee under test is a property of the WASM
+    # host, not of SQL, so there is no dialect axis to diverge on.
+    #
+    # A plain Postgres service, not docker-compose: this script runs the
+    # worker as a host process against the database directly (it provisions
+    # the cleat_app role itself with `ALTER ROLE`, the same non-superuser
+    # requirement CLAUDE.md's "Worker refuses on a superuser DSN" describes),
+    # so it needs no container image build.
+    services:
+      postgres:
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_PASSWORD: sandbox
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # 127.0.0.1, not localhost -- see test-go's identical comment on this
+      # exact ::1-vs-IPv4 hazard.
+      CLEAT_TENANT_SANDBOX_OWNER_DB: postgres://postgres:sandbox@127.0.0.1:5432/postgres?sslmode=disable
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build the cleat CLI and worker
+        run: |
+          go build -o .bin/cleat ./cmd/cleat
+          go build -o .bin/cleat-worker ./cmd/cleat-worker
+
+      # The script reports UNMEASURED (exit 2) rather than a false pass if
+      # psql is missing, but installed explicitly rather than relied on --
+      # see the DBOS pair scenario's identical reasoning for cloc.
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      # No "dump logs on failure" step after this one, for the same reason as
+      # the sibling scenario jobs: the script's own EXIT trap tails the
+      # worker's log on failure, before anything here could read it.
+      - name: Run the scenario end to end
+        run: scripts/run-integration-hub-tenant-sandbox-scenario.sh
+
   order-lifecycle-dbos-pair-scenario:
     name: Order lifecycle DBOS pair scenario
     runs-on: ubuntu-latest
