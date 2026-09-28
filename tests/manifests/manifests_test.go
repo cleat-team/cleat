@@ -213,6 +213,12 @@ func TestEveryWorkerLaunchSiteSaysHowItsSchemaGetsMigrated(t *testing.T) {
 		// RLS), so migration is a separate one-shot service running as the
 		// postgres superuser.
 		"examples/integration-hub/docker-compose.yml": "--migrate-only",
+		// cleat#2535. The third reference scenario, and the same shape for the
+		// third time: the serving worker connects as cleat_app because
+		// `--require-auth` refuses to start over a connection exempt from RLS,
+		// so DDL runs in a separate one-shot `--migrate-only` service as the
+		// postgres superuser.
+		"examples/ai-agent-platform/docker-compose.yml": "--migrate-only",
 		// Single-node development: the worker migrates itself.
 		"Makefile": "--migrate-on-start",
 	}

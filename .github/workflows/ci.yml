@@ -1411,6 +1411,69 @@ jobs:
       - name: Run the scenario end to end
         run: scripts/run-integration-hub-scenario.sh ${{ matrix.dialect }}
 
+  ai-agent-platform-scenario:
+    name: AI agent platform scenario
+    runs-on: ubuntu-latest
+    # merge_group is excluded for the same reason as the two jobs above -- read
+    # integration-hub-scenario's comment before removing this line. The short
+    # form: this is not a required context, so a merge_group run would add a
+    # docker build to the critical path of every queue entry while gating
+    # nothing.
+    if: github.event_name != 'merge_group'
+    # The example in examples/ai-agent-platform, RUN rather than only built.
+    # cleat#2535.
+    #
+    # This is the one scenario whose subject is the replay semantics themselves.
+    # It deploys an agent loop to a real worker, lets it call a model twice,
+    # SIGKILLs the worker mid-run, lets the run resume, and asserts the model was
+    # NOT asked again -- which is the playbook's central claim ("a replayed agent
+    # run does not re-ask the model") and the one a build check cannot see: a
+    # workflow that compiles, deploys, and then re-pays for its whole context on
+    # every resume.
+    #
+    # The counter that assertion reads lives on the model stub, and a KNOWN
+    # POSITIVE below moves it with a second run -- because "the count is
+    # unchanged across a crash" and "the count is always that number" are
+    # identical readings, and only the second run tells them apart.
+    #
+    # NOT a matrix entry under test-go, for the reason the sibling jobs give:
+    # examples/ is its own Go module, so a test beside the workflow would be
+    # selected by no matrix entry.
+    #
+    # TIME, so nobody is surprised: it builds the repository's Dockerfile and
+    # then runs compose, the same build cluster-tests does, and it also waits out
+    # a 30s durable settle window plus a worker restart. That is the price of
+    # measuring a crash-resume claim rather than asserting one.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Docker and compose are present on ubuntu-latest; the script refuses with
+      # UNMEASURED (exit 2) rather than reporting a clean run if either is not,
+      # so a runner image that stops shipping them fails here instead of going
+      # quietly green.
+      # BOTH binaries, and cleatctl is not optional here. This scenario grants a
+      # tenant egress to the model stub with `cleatctl egress-allow`, which is a
+      # cleatctl subcommand -- run against `cleat` it prints cleat's usage and
+      # exits non-zero, and the failure reads as a refused grant rather than as
+      # the wrong binary. The script refuses with UNMEASURED (exit 2) when either
+      # is missing, so this line and that check are a pair.
+      - name: Build the cleat CLI
+        run: |
+          go build -o .bin/cleat ./cmd/cleat
+          go build -o .bin/cleatctl ./cmd/cleatctl
+
+      # No "dump the container logs on failure" step after this one, for the
+      # same reason as the sibling jobs: the script removes the stack in its EXIT
+      # trap, so such a step would find nothing and print the same output whether
+      # the run passed or failed.
+      - name: Run the scenario end to end
+        run: scripts/run-ai-agent-platform-scenario.sh
+
   vulncheck:
     name: Vulnerability Check
     runs-on: ubuntu-latest

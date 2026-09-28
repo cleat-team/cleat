@@ -1,9 +1,12 @@
 # Playbook 1 — AI agent platform with per-tenant budgets
 
 **Status:** engineering reference. Drafted 2026-09-14 against `develop` at `654d6f84`; corrected
-2026-09-25 against `develop` at `656aced4` (cleat#2053) — see
-[What was verified](#what-was-verified) at the end for what changed. Nothing here has been built end
-to end.
+2026-09-25 against `develop` at `656aced4` (cleat#2053), and again 2026-09-28 (cleat#2535) — see
+[What was verified](#what-was-verified) at the end for what changed. **Built since drafting**:
+`examples/ai-agent-platform/` runs the cleat-side half end to end on every pull request, driven by
+`scripts/run-ai-agent-platform-scenario.sh`, which SIGKILLs a worker mid-loop and asserts the model
+was not asked again. Its own section under [The assembly](#the-assembly) says what is real and what
+is stubbed.
 
 **Who this is for:** you are building a product where a user's request kicks off an agent that
 thinks for anywhere from ten seconds to ten minutes, calls tools, retrieves documents, sometimes
@@ -65,7 +68,7 @@ model provider and your vector index to the cleat, and they come with the boat.
 | Concern | Component | Hitch point |
 |---|---|---|
 | Model calls | `llm`: `chat`, `chat_stream`, `embed`, `list_models` | host functions |
-| Retrieval | `pgvector`: `search`, `upsert`, `delete` | host functions |
+| Retrieval | **nothing shipped** — see below; `pgvector` has the functions but is not in the worker | host functions |
 | Documents and artifacts | `blobstore`: `get`, `put` (S3-backed) | host functions |
 | Model / prompt rollout | `featureflags`: `evaluate_flag` | host function |
 | Human approval | workflow signals, or `eventtriggers`: `await_event` | host function |
@@ -73,6 +76,19 @@ model provider and your vector index to the cleat, and they come with the boat.
 | User login | `oauthprovider` (OIDC; GitHub, Okta) | edge middleware |
 | Who-did-what | `auditlog` | edge middleware |
 | Long-run notification | `email`, `slacknotify`, `notifications` | host functions |
+
+**THE RETRIEVAL ROW IS THE ONE THAT DOES NOT RESOLVE.** This table listed `pgvector` as though it
+were a component you could reach, and it is not: **`plugins/pgvector` is deliberately absent from
+`cleat-worker`'s blank-import block** (`cmd/cleat-worker/main.go`). Its `Migrations()` creates an
+`embedding vector(1536)` column, and `plugin.RunMigrations` is **FATAL at boot** — so linking it
+would stop the worker starting on any PostgreSQL without the extension. The comment there is
+explicit that the repair is to make that migration degrade, and that it is a change to the plugin
+rather than to the import list.
+
+So if you are building this and reach the retrieval step, **there is no bundled store to call.** Your
+options are a plugin of your own (which the egress allowlist can reach a private host for, unlike a
+workflow's own fetch), a hosted vector database over `DurableFetch`, or retrieval in-process.
+`examples/ai-agent-platform/` takes the third and says why. (Found while building it, cleat#2535.)
 
 ---
 
@@ -86,6 +102,10 @@ other, and untested as loops. cleat#1983 replaces all three with one reusable ag
 starts as a child. **Until it lands: copy a template, and expect to delete it.** Do not build a
 product on a loop you are writing yourself — the loop is the part the engine is supposed to own, and
 it is the part that is not there yet.
+
+`examples/ai-agent-platform/` (2026-09-28, cleat#2535) is **the fourth copy**, written in the form
+#1983 will replace rather than as the permanent answer: it says so in its README, and a reader who
+finds it later should read it as a shape to copy and delete, not as the loop the engine owns.
 
 **Model keys are per-tenant now, which this page would have told you was impossible.** It listed
 per-tenant model keys under what you still have to build, because the `llm` request had no `api_key`
@@ -130,6 +150,12 @@ Look at how the shipped plugins actually declare themselves:
 | `llm.embed` | true | true | May be re-invoked — near-deterministic for a fixed model and input |
 | `pgvector.search` | true | false | Not re-invoked: the index is mutable, so a later insert would change the result set |
 | `pgvector.upsert` | false | false | Not re-invoked — it is a write |
+
+**The two `pgvector` rows describe a plugin that is not in the shipped worker** — see the note under
+[The assembly](#the-assembly). They are kept because the *declarations* are the lesson: those are
+the two properties a retrieval step must get right, and the argument below applies to whichever
+store you end up calling. Read them as a design question you will answer, not as a component you
+have.
 
 `llm.chat` is registered with neither property set (`plugins/llm/host_functions.go`), which means
 both are false — which is exactly right, and is the single most important line in this playbook. **A replayed agent run does not
@@ -383,3 +409,17 @@ load-bearing claims:
 
 Line citations were replaced with symbol names throughout — `FuncOptions` was cited at
 `plugin/plugin.go:208-243` and is at `:623`.
+
+**Corrected since drafting (2026-09-28, cleat#2535).** One thing, and it was the retrieval row of
+the assembly table:
+
+- **`plugins/pgvector` is not in the shipped worker**, so the table's retrieval row named a
+  component a reader could not reach, and the replay section discussed `pgvector.search`'s
+  declarations as though the plugin were callable. The reason is a FATAL migration, not an
+  oversight — see the note under [The assembly](#the-assembly). Found while building
+  `examples/ai-agent-platform/`, which is what a scenario is for.
+- **The set-level status claim is gone from the playbooks.** `docs/playbooks/README.md` listed
+  "None of these has been built end to end" for all four, which was false for three of them by the
+  time this landed; it is a per-playbook table now. `docs/playbooks/order-lifecycle.md` carried the
+  same sentence while its own body, eighty lines later, described `examples/order-lifecycle/`
+  running on every pull request.
