@@ -470,37 +470,21 @@ func (s *server) config(w http.ResponseWriter, r *http.Request) {
 
 // ---- helpers ----
 
-// pluginGET reads a worker route that is not part of backendkit's Client.
+// pluginGET reads a worker route that is not part of the workflow API -- a
+// plugin's own, registered in RegisterRoutes.
 //
-// THIS IS A GAP IN backendkit RATHER THAN A DESIGN OF THIS EXAMPLE'S. A plugin's
-// own HTTP routes are mounted on the worker's mux beside /api/*; Client covers
-// the /api/* resources and the plugin HOST-FUNCTION path (CallPlugin posts to
-// /api/plugins/{plugin}/{function}), and has no method for the routes a plugin
-// registers in RegisterRoutes. The delivery log and the connector list are
-// exactly those, and there is no host function that substitutes: notifications
-// registers send_webhook and nothing else.
+// IT USED TO SPELL THE REQUEST ITSELF, and the doc comment said so at length:
+// Client covered /api/* and the plugin HOST-FUNCTION path (CallPlugin posts to
+// /api/plugins/{plugin}/{function}) and had no method for the routes a plugin
+// mounts, so this example built the URL by hand and reached into
+// Client.HTTPClient to keep the auth transport. That was filed as cleat#2550,
+// and `Client.PluginRoute` is the method it asked for.
 //
-// Authentication is NOT re-implemented here. The request rides the *http.Client
-// backendkit was given, so the API key on the transport, the timeout and
-// therefore the tenant are backendkit's own — only the URL is spelled out.
+// Kept as a named helper rather than inlined at its two call sites, because a
+// reader of `deliveries` and `firstWebhookID` is better served by a name that
+// says what is being read than by a generic `PluginRoute` at each.
 func (s *server) pluginGET(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.client.BaseURL+path, nil)
-	if err != nil {
-		return fmt.Errorf("create request: %w", err)
-	}
-	resp, err := s.client.HTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("get %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		return fmt.Errorf("get %s: %s %s", path, resp.Status, strings.TrimSpace(string(body)))
-	}
-	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
-		return fmt.Errorf("decode %s: %w", path, err)
-	}
-	return nil
+	return s.client.PluginRoute(ctx, http.MethodGet, path, nil, out)
 }
 
 // sign is the ingest route's HMAC. It is sha256 over the RAW BODY, hex, in the
