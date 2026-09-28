@@ -549,6 +549,73 @@ func (c *Client) CallPlugin(ctx context.Context, pluginName, functionName, input
 	return string(body), nil
 }
 
+// PluginRoute performs an authenticated request against a route a PLUGIN
+// registered, rather than against the workflow API.
+//
+// WHY THIS EXISTS. Client's typed methods cover the /api/* resources, and
+// CallPlugin covers the plugin HOST-FUNCTION path (/api/plugins/{plugin}/{fn}).
+// Neither reaches the routes a plugin mounts itself in RegisterRoutes — which
+// are on the same mux and are part of the worker's public surface.
+// plugins/notifications alone registers six, and there is no host-function
+// substitute for the case that found this: it registers send_webhook and
+// nothing that lists deliveries, so a delivery log exists ONLY as an HTTP route
+// (cleat#2550).
+//
+// Without this an app that fronts a plugin spells the URL itself, which means
+// either hand-rolling the request — losing the API key, the timeout and the
+// error classification on the way — or reaching into Client.HTTPClient and
+// Client.BaseURL to rebuild what this method already does correctly.
+//
+// path must begin with "/". It is joined to the Client's BaseURL, and the HOST
+// therefore cannot be influenced by the caller: a path is appended to a URL
+// that already has an authority, so nothing a caller passes can redirect the
+// request — and the API key riding this client's transport — anywhere else.
+//
+// body is marshalled as JSON when non-nil; out is decoded from the response
+// when non-nil. A refusal is classified exactly as every other method's,
+// through doRequest, so a caller gets the same typed errors.
+func (c *Client) PluginRoute(ctx context.Context, method, path string, body, out any) error {
+	if !strings.HasPrefix(path, "/") {
+		return fmt.Errorf("plugin route %q must begin with %q: it is appended to the "+
+			"client's base URL, and a relative path would be resolved against the wrong "+
+			"base", path, "/")
+	}
+
+	var reqBody io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("marshal request body: %w", err)
+		}
+		reqBody = bytes.NewReader(b)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, reqBody)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := c.doRequest(req)
+	if err != nil {
+		return fmt.Errorf("plugin route %s %s: %w", method, path, err)
+	}
+	defer resp.Body.Close()
+
+	if out == nil {
+		// Drain, so the connection can be reused rather than torn down by the
+		// client on a body nobody read.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decode %s %s response: %w", method, path, err)
+	}
+	return nil
+}
+
 // Health reports whether the worker is ready to serve: GET /readyz answers 200 (its database answered
 // and it is not draining). A worker that is alive but not ready is reported false. It was /healthz, which
 // is now /livez under its old name and says nothing about the database. cleat#2007.
