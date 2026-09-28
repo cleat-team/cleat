@@ -87,12 +87,16 @@ func TestDocsDoNotTeachMethodsThatDoNotExist(t *testing.T) {
 	}
 
 	// The self-test runs the SAME helper the scan uses, so it proves the branch it
-	// exercises — a separate implementation would only prove itself. Both
-	// directions in one call: the real method must not be reported and the invented
-	// one must be.
-	selfTest := unknownHostCallMethods("h.DurableLog(\"x\")\nh.NotAMethod(1)\n", known)
-	if len(selfTest) != 1 || selfTest[0] != "NotAMethod" {
-		t.Fatalf("self-test failed: expected exactly [NotAMethod], got %v.\n\n"+
+	// exercises — a separate implementation would only prove itself. It covers BOTH
+	// shapes a host-call reference takes, and the second is the whole of the
+	// widening: a name in a parenthetical list has no paren, so a self-test that
+	// passed only a call would go green on a matcher that requires one.
+	selfTest := unknownHostCallMethods(
+		"h.DurableLog(\"x\")\nh.NotAMethod(1)\n(`h.AlsoNotAMethod`, `h.DurableCall`)\n", known)
+	if len(selfTest) != 2 || selfTest[0] != "NotAMethod" || selfTest[1] != "AlsoNotAMethod" {
+		t.Fatalf("self-test failed: expected exactly [NotAMethod AlsoNotAMethod], got %v.\n\n"+
+			"The first is a call and the second is a parenthetical name; a matcher requiring\n"+
+			"an open paren reports only the first, which is why both are asserted here.\n\n"+
 			"This is a failure of the CHECK, not a finding about the docs.", selfTest)
 	}
 
@@ -153,7 +157,7 @@ func TestDocsDoNotTeachMethodsThatDoNotExist(t *testing.T) {
 
 	var sb strings.Builder
 	for _, f := range findings {
-		fmt.Fprintf(&sb, "\n  %s:%d  calls h.%s(  which is not a method on cleat.HostCalls\n      %s",
+		fmt.Fprintf(&sb, "\n  %s:%d  names h.%s, which is not a method on cleat.HostCalls\n      %s",
 			f.file, f.line, f.name, f.text)
 	}
 	t.Errorf("%d documented call(s) name a method that does not exist,%s\n\n"+
@@ -201,10 +205,25 @@ func fencedGoBlocks(t *testing.T, root string) []goBlock {
 	return out
 }
 
-var hostCallRe = regexp.MustCompile(`\bh\.([A-Z][A-Za-z0-9_]*)\(`)
+// hostCallRe matches a host-call name on `h`. It does NOT require an open paren,
+// and that is deliberate: a name in a parenthetical list has none —
+//
+//	(`h.DurableCall`, `h.CleatSleep`, `h.CleatLog`, etc.)
+//
+// — and a pattern that can only return names of the shape it assumes cannot test
+// the assumption. Measured 2026-09-28: widening it changes NO finding on the tree
+// (nine before, nine after), so this is recall insurance rather than a fix for a
+// live instance.
+//
+// The two names that motivated it are in PROSE, outside this guard's fenced-block
+// scope — worth stating because the issue that asked for this widening described
+// them as being inside it. Reaching prose is a different change, and it inherits
+// the false-positive classes the test's header describes.
+var hostCallRe = regexp.MustCompile(`\bh\.([A-Z][A-Za-z0-9_]*)`)
 
-// unknownHostCallMethods returns the method names a block calls on `h` that are not
-// in `known`, in the order they appear and without duplicates.
+// unknownHostCallMethods returns the method names a block references on `h` that
+// are not in `known`, in the order they appear and without duplicates. Both shapes
+// count: a call, and a bare name in a parenthetical list.
 func unknownHostCallMethods(block string, known map[string]struct{}) []string {
 	var out []string
 	seen := map[string]struct{}{}
@@ -222,9 +241,13 @@ func unknownHostCallMethods(block string, known map[string]struct{}) []string {
 	return out
 }
 
+// firstLineOf finds the line a finding sits on, for the diagnostic. It matches the
+// name whether or not a paren follows: a helper requiring "(" would print an empty
+// line for exactly the findings the matcher above was widened to reach.
 func firstLineOf(block, name string) string {
+	re := regexp.MustCompile(`\bh\.` + regexp.QuoteMeta(name) + `\b`)
 	for _, l := range strings.Split(block, "\n") {
-		if strings.Contains(l, "h."+name+"(") {
+		if re.MatchString(l) {
 			return strings.TrimSpace(l)
 		}
 	}
