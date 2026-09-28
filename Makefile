@@ -514,9 +514,9 @@ setup:
 	@echo ""
 	@echo "Next steps:"
 	@echo "  1. Start PostgreSQL:  docker compose -f docker-compose.partner.yml up -d postgres"
-	@echo "  2. Build CLI:         go build -o cleat ./cmd/cleat && go build -o cleat-worker ./cmd/cleat-worker"
+	@echo "  2. Build CLI:         go build -o ./bin/cleat ./cmd/cleat && go build -o ./bin/cleat-worker ./cmd/cleat-worker"
 	@echo "  3. Verify:            make tools"
-	@echo "  4. Run dev mode:      ./cleat dev start"
+	@echo "  4. Run dev mode:      ./bin/cleat dev --entry-point Greet --input '{\"name\":\"Ada\"}' ./testdata/hello/"
 	@echo ""
 	@echo "See docs/tutorials/quick-start.md for a full walkthrough."
 
