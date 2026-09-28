@@ -11,8 +11,8 @@ import (
 	"github.com/cleat-team/cleat/engine/testutil"
 )
 
-// appRolePassword is granted to cleat_app by this test. 005_app_role.sql creates
-// the role NOLOGIN with no password deliberately -- a committed credential would
+// appRolePassword is granted to cleat_app by this test. The schema baseline
+// creates the role NOLOGIN with no password deliberately -- a committed credential would
 // be the defect that migration exists to prevent -- so the deployment supplies
 // one. Here the test is the deployment.
 //
@@ -39,7 +39,7 @@ func appRoleDB(t *testing.T, owner *sql.DB) *sql.DB {
 
 	if _, err := owner.Exec(fmt.Sprintf(
 		`ALTER ROLE cleat_app LOGIN PASSWORD '%s'`, appRolePassword)); err != nil {
-		t.Fatalf("granting cleat_app a login (is 005_app_role.sql applied?): %v", err)
+		t.Fatalf("granting cleat_app a login (is the schema baseline applied?): %v", err)
 	}
 
 	dsn := testutil.PostgresTestDSN()
@@ -69,7 +69,7 @@ func appRoleDB(t *testing.T, owner *sql.DB) *sql.DB {
 	}
 	if bypass {
 		t.Fatalf("cleat_app has BYPASSRLS, so this test cannot observe an RLS " +
-			"failure; 005_app_role.sql asserts NOBYPASSRLS on every run")
+			"failure; the schema baseline asserts NOBYPASSRLS every time it runs")
 	}
 	return db
 }
@@ -191,12 +191,15 @@ func TestEventFlushSucceedsAsOwner(t *testing.T) {
 	}
 }
 
-// applyAppRoleMigration applies 005_app_role.sql. SetupFullSchema builds the
-// tables but does not create the role, and this suite needs it.
+// applyAppRoleMigration CHECKS that the cleat_app role and its table grants
+// exist. It does not apply anything: it used to execute
+// migrations/postgres/005_app_role.sql, and since the cleat#2059 rebaseline the
+// role and its grants come from the schema baseline, so there is no file to run
+// -- SetupFullSchema builds the tables and the role together.
 //
 // # Why this takes a dedicated connection and resets it
 //
-// 005_app_role.sql line 52 is `SET search_path = public`, which is
+// The file this replaced ended with `SET search_path = public`, which is
 // SESSION-scoped, not statement-scoped. Handing the file to db.Exec runs it on
 // whichever pooled connection is free and leaves that setting on it, so every
 // later query on the same *sql.DB inherits a search_path the caller never asked
@@ -288,7 +291,8 @@ func TestApplyingTheAppRoleMigrationLeavesThePoolAlone(t *testing.T) {
 	}
 	if after != before {
 		t.Fatalf("applyAppRoleMigration changed the pool's search_path from %q to %q.\n\n"+
-			"005_app_role.sql ends with a session-scoped `SET search_path = public`. "+
+			"The migration this helper used to run ended with a session-scoped "+
+			"`SET search_path = public`. "+
 			"Leaking it means every later query on this *sql.DB runs with a path the "+
 			"caller never chose -- harmless where `\"$user\"` names no real schema, and "+
 			"fatal in CI, where the role is `cleat` and so is the schema holding the "+

@@ -28,8 +28,8 @@ services:
 
   # Schema migration as a one-shot step: a worker no longer migrates itself at
   # every start (cleat#2117). Runs as the postgres superuser, because DDL needs
-  # it and because migrations/postgres/005_app_role.sql -- the file that creates
-  # the lesser role below -- has to run first.
+  # it and because the schema baseline creates the lesser role below --
+  # cleat_app -- before anything connects as it.
   migrate:
     image: ${CLEAT_WORKER_IMAGE:-ghcr.io/cleat-team/cleat-worker:latest}
     command:
@@ -40,7 +40,7 @@ services:
         condition: service_healthy
     restart: "no"
 
-  # 005_app_role.sql creates cleat_app NOLOGIN and without a password, on
+  # The schema baseline creates cleat_app NOLOGIN and without a password, on
   # purpose: a credential does not belong in a file that migrations replay.
   # This one-shot step supplies one for local development, once the migration
   # above has created the role to receive it.
@@ -74,7 +74,7 @@ services:
     command:
       # NOT the postgres superuser above. Every tenant-scoped table has
       # row-level security FORCEd, and PostgreSQL never applies RLS to a
-      # superuser -- see migrations/postgres/005_app_role.sql. --require-auth
+      # superuser -- which is what cleat_app is for. --require-auth
       # (on by default) refuses to start over a connection that is exempt from
       # RLS, which is what catches this if it regresses.
       - "--db=postgres://cleat_app:${CLEAT_APP_PASSWORD:-cleat-app-local-dev}@postgres:5432/cleat?sslmode=disable"

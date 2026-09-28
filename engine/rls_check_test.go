@@ -33,9 +33,21 @@ func TestCheckRLSEnforced_DetectsSuperuserBypass(t *testing.T) {
 	}
 
 	// The message has to name the actual mechanism, or an operator cannot act
-	// on it.
+	// on it -- and what it must NOT do is name a migration FILE. This
+	// assertion used to require `005_app_role.sql`, which pinned the message to
+	// a path the 0.3.0 postgres compaction deleted, so the test and the message
+	// were wrong together and neither could catch the other (cleat#2553).
+	//
+	// So the assertion is on the role and the flag, which are the object and
+	// the action and neither of which moves at a compaction -- plus an inverted
+	// one, because the useful direction here is to go red when a filename comes
+	// BACK rather than to notice when one is missing.
 	msg := FormatRLSBypass(reasons)
-	for _, want := range []string{"row-level security", "005_app_role.sql", "--migrate-db"} {
+	if strings.Contains(msg, ".sql") {
+		t.Errorf("the bypass message names a migration file, which expires at the next "+
+			"compaction -- name the object and the state instead:\n%s", msg)
+	}
+	for _, want := range []string{"row-level security", "cleat_app", "--migrate-db"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("bypass message does not mention %q:\n%s", want, msg)
 		}
@@ -44,8 +56,8 @@ func TestCheckRLSEnforced_DetectsSuperuserBypass(t *testing.T) {
 }
 
 // TestCheckRLSEnforced_PassesForUnprivilegedRole runs against a role that is
-// neither superuser nor owner -- what a deployment is supposed to connect as
-// after 005_app_role.sql. The check must find nothing.
+// neither superuser nor owner -- cleat_app, which is what a deployment is
+// supposed to connect as. The check must find nothing.
 func TestCheckRLSEnforced_PassesForUnprivilegedRole(t *testing.T) {
 	adminDB := testutil.TestDB(t, testutil.DialectPostgres)
 	defer adminDB.Close()
@@ -104,5 +116,42 @@ func TestCheckRLSEnforced_ReportsMissingPolicies(t *testing.T) {
 func TestFormatRLSBypass_EmptyForNoReasons(t *testing.T) {
 	if got := FormatRLSBypass(nil); got != "" {
 		t.Errorf("FormatRLSBypass(nil) = %q, want empty", got)
+	}
+}
+
+// TestFormatRLSBypass_NamesTheObjectAndNotAFile is the message-shape guard, and
+// it is a PURE test on purpose.
+//
+// The same assertions used to sit inside the DB-backed
+// TestCheckRLSEnforced_ReportsSuperuserBypass, so on any machine without
+// CLEAT_TEST_DB they never ran -- a guard that is real in CI and absent for
+// whoever is editing the message. A string function's contract does not need a
+// database, and putting it behind one is how a message keeps a filename for a
+// year (cleat#2553).
+//
+// BOTH DIRECTIONS, because only one of them is the failure anyone notices:
+// a message with no actionable noun is what a reader catches, and a message
+// that names a migration file is what nothing catches -- it reads perfectly
+// until the file is deleted.
+func TestFormatRLSBypass_NamesTheObjectAndNotAFile(t *testing.T) {
+	msg := FormatRLSBypass([]RLSBypassReason{
+		{Kind: "superuser", Detail: "current_user is rls_check_test, which is a superuser"},
+	})
+
+	for _, want := range []string{"row-level security", "cleat_app", "--migrate-db"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the bypass message does not mention %q, so an operator cannot act "+
+				"on it:\n%s", want, msg)
+		}
+	}
+
+	// The inverted half. A path in this message is the defect: it is printed at
+	// an operator mid-incident, and it expires silently the moment the
+	// migrations are renumbered or compacted -- which is exactly what happened
+	// to `migrations/postgres/005_app_role.sql` in the 0.3.0 postgres
+	// compaction. Name the object and the state, never the file.
+	if strings.Contains(msg, ".sql") {
+		t.Errorf("the bypass message names a migration file, which expires the next time "+
+			"the migrations are compacted -- name the object and the state instead:\n%s", msg)
 	}
 }

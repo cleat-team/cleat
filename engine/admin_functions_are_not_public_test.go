@@ -97,7 +97,7 @@ func TestTheAppRoleKeepsExecuteOnTheAdminFunctions(t *testing.T) {
 		t.Fatalf("look up cleat_app: %v", err)
 	}
 	if !exists {
-		t.Fatal("cleat_app does not exist; 005_app_role.sql creates it and this " +
+		t.Fatal("cleat_app does not exist; the schema baseline creates it and this " +
 			"test is about what 065 does to its grants, so a missing role means " +
 			"the fixture is wrong rather than that there is nothing to check")
 	}
@@ -130,7 +130,7 @@ func TestTheAppRoleKeepsExecuteOnTheAdminFunctions(t *testing.T) {
 			t.Errorf("cleat_app has no EXECUTE on %s.\n\n"+
 				"065 revokes from PUBLIC and re-grants to cleat_app. "+
 				"REVOKE ... FROM PUBLIC does not touch a named grantee, so "+
-				"005_app_role.sql's explicit grant should survive either way. "+
+				"the schema baseline's explicit grant should survive either way. "+
 				"If this fails, something revoked from the role rather than "+
 				"from PUBLIC -- which is the failure mode a blanket REVOKE "+
 				"invites and the reason this test exists beside the other one.", sig)

@@ -245,8 +245,8 @@ This reports entry points, leaf functions, and any threading errors.
 cleat-worker --migrate-only --db "postgres://user:pass@localhost/cleat?sslmode=disable"
 ```
 
-This applies every migration (including `005_app_role.sql`, which creates
-the `cleat_app` role `NOLOGIN`) and exits `0`, without starting the worker.
+This applies the schema baseline, which creates the `cleat_app` role
+`NOLOGIN`, and exits `0`, without starting the worker.
 Run it again on the same database and it changes nothing -- it is safe to
 run from a script every deploy.
 
