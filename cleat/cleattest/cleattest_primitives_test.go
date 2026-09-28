@@ -785,6 +785,54 @@ func TestPluginCallWithoutStub(t *testing.T) {
 	}
 }
 
+// cleat#2522: before this, a second Return() for the same plugin+function
+// registered a stub pluginCallImpl's first-match scan could never reach --
+// silently unreachable, not sequenced. The first call below is the known
+// positive for the bug: without the fix it also returns "false", because
+// the second Return was dead.
+func TestOnPluginCallReturnSequencesAcrossCalls(t *testing.T) {
+	env := NewTestEnv()
+	env.OnPluginCall("event-triggers", "poll").Return(`{"found":false}`, nil)
+	env.OnPluginCall("event-triggers", "poll").Return(`{"found":true}`, nil)
+
+	first, err := env.H().PluginCall("event-triggers", "poll", "{}")
+	if err != nil {
+		t.Fatalf("first PluginCall: %v", err)
+	}
+	if first != `{"found":false}` {
+		t.Fatalf("first call = %q, want the first registered response", first)
+	}
+
+	second, err := env.H().PluginCall("event-triggers", "poll", "{}")
+	if err != nil {
+		t.Fatalf("second PluginCall: %v", err)
+	}
+	if second != `{"found":true}` {
+		t.Fatalf("second call = %q, want the second registered response -- "+
+			"a second Return() must sequence, not be unreachable", second)
+	}
+}
+
+// Once a sequence is exhausted, the LAST registered response repeats rather
+// than erroring -- which is also what makes a single Return() (nearly every
+// existing stub in this repo) answer every call identically, unchanged from
+// before cleat#2522.
+func TestOnPluginCallReturnRepeatsTheLastResponseOnceExhausted(t *testing.T) {
+	env := NewTestEnv()
+	env.OnPluginCall("event-triggers", "poll").Return(`{"found":false}`, nil)
+	env.OnPluginCall("event-triggers", "poll").Return(`{"found":true}`, nil)
+
+	for i, want := range []string{`{"found":false}`, `{"found":true}`, `{"found":true}`, `{"found":true}`} {
+		got, err := env.H().PluginCall("event-triggers", "poll", "{}")
+		if err != nil {
+			t.Fatalf("call %d: %v", i, err)
+		}
+		if got != want {
+			t.Fatalf("call %d = %q, want %q", i, got, want)
+		}
+	}
+}
+
 func TestDurableLog(t *testing.T) {
 	env := NewTestEnv()
 

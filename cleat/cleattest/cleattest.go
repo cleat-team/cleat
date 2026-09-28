@@ -197,11 +197,24 @@ type promiseState struct {
 	settled chan struct{}
 }
 
+// pluginCallResponse is one answer in a pluginCallStub's sequence.
+type pluginCallResponse struct {
+	result string
+	err    error
+}
+
+// pluginCallStub is every response registered for one plugin+function pair,
+// answered in registration order as pluginCallImpl consumes them. calls
+// counts how many real calls this pair has already answered; once it
+// reaches the end of responses, the LAST response repeats -- a single
+// Return() therefore still answers every call the same way (the case nearly
+// every existing test uses), and a second Return() sequences a second,
+// different answer instead of being silently unreachable. cleat#2522.
 type pluginCallStub struct {
 	pluginName   string
 	functionName string
-	result       string
-	err          error
+	responses    []pluginCallResponse
+	calls        int
 }
 
 type PluginCallStubBuilder struct {
@@ -210,13 +223,35 @@ type PluginCallStubBuilder struct {
 	functionName string
 }
 
-func (b *PluginCallStubBuilder) Return(result string, err error) {
+// Return appends one more answer for this plugin+function and returns the
+// builder, so
+//
+//	env.OnPluginCall("x", "poll").Return(`{"found":false}`, nil)
+//	env.OnPluginCall("x", "poll").Return(`{"found":true}`, nil)
+//
+// answers the first call to poll with "false" and every call after with
+// "true" -- the shape a polling workflow's wait loop needs (miss, then hit,
+// then steady state) and previously had no way to express: before
+// cleat#2522, a second Return() for the same plugin+function registered a
+// second stub that pluginCallImpl's first-match scan could never reach, so
+// it silently changed nothing and the test passed against only the first
+// call's path.
+func (b *PluginCallStubBuilder) Return(result string, err error) *PluginCallStubBuilder {
+	b.env.mu.Lock()
+	defer b.env.mu.Unlock()
+	resp := pluginCallResponse{result: result, err: err}
+	for _, stub := range b.env.pluginCallStubs {
+		if stub.pluginName == b.pluginName && stub.functionName == b.functionName {
+			stub.responses = append(stub.responses, resp)
+			return b
+		}
+	}
 	b.env.pluginCallStubs = append(b.env.pluginCallStubs, &pluginCallStub{
 		pluginName:   b.pluginName,
 		functionName: b.functionName,
-		result:       result,
-		err:          err,
+		responses:    []pluginCallResponse{resp},
 	})
+	return b
 }
 
 func (e *TestEnv) OnPluginCall(pluginName, functionName string) *PluginCallStubBuilder {
@@ -1708,12 +1743,24 @@ func (e *TestEnv) pluginCallImpl(pluginName, functionName, inputJSON string) (re
 		Request:   inputJSON,
 	}
 
+	// Find the matching stub and advance it. idx clamps to the last
+	// registered response, so a single Return() (nearly every existing
+	// stub) still answers every call the same way, and a sequence of
+	// Return()s is consumed in order with the last one repeating once
+	// exhausted -- see pluginCallStub's doc comment for why that shape
+	// rather than an error on the call past the end.
 	for _, stub := range e.pluginCallStubs {
 		if stub.pluginName == pluginName && stub.functionName == functionName {
-			rec.Response = stub.result
-			rec.Err = stub.err
+			idx := stub.calls
+			if idx >= len(stub.responses) {
+				idx = len(stub.responses) - 1
+			}
+			stub.calls++
+			resp := stub.responses[idx]
+			rec.Response = resp.result
+			rec.Err = resp.err
 			e.callHistory = append(e.callHistory, rec)
-			return stub.result, stub.err
+			return resp.result, resp.err
 		}
 	}
 	err := fmt.Errorf("cleattest: no stub registered for PluginCall(%q, %q)", pluginName, functionName)
