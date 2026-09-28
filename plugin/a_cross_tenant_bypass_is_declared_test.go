@@ -129,6 +129,14 @@ var crossTenantLedger = map[string]bypassKind{
 	// tenant dimension -- token_hash IS NULL is what scopes it to
 	// never-completed rows, not tenant_id. See background.go's doc comment.
 	"plugins/oauthprovider/background.go:(*Plugin).sweepExpiredSessions": kindGlobalSweep,
+	// cleat#2534: trial expiry, cut off by expires_at with no tenant
+	// dimension -- "which trials anywhere have expired" is the predicate.
+	// The bypass lives in sweep, not Run: Run only starts the ticker loop,
+	// and marking ctx there and relying on it to flow down through every
+	// p.sweep(ctx) call is what let TestSweep_MultiBackend/mssql call sweep
+	// directly with an unmarked ctx and get zero rows back with no error --
+	// see sweep's own doc comment.
+	"plugins/tenantlifecycle/background.go:(*Plugin).sweep": kindGlobalSweep,
 
 	// One transaction claims and advances every tenant's due rows.
 	"plugins/eventtriggers/background.go:(*Plugin).Run": kindClaimAcrossTenants,

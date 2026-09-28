@@ -76,6 +76,13 @@ var provenPluginDialects = map[string]map[Dialect]bool{
 	"rate-limiter":     {DialectMySQL: true, DialectMSSQL: true},
 	"slack-notify":     {DialectMySQL: true, DialectMSSQL: true},
 	"tenant-quota":     {DialectMySQL: true, DialectMSSQL: true},
+	// cleat#2534: tenant_trials is a single TenantScoped table with a plain
+	// `DROP TABLE IF EXISTS` Down and no DROP COLUMN/INDEX of the kind that
+	// broke other plugins on MySQL -- the same shape as tenant-quota above,
+	// which is already proven on both. Listed here in the same PR as
+	// TestUninstallDownChainIsClassifiedOnEveryDialect's own subtests proving
+	// it, per this file's own rule.
+	"tenant-lifecycle": {DialectMySQL: true, DialectMSSQL: true},
 }
 
 // UninstallProvenOnDialect reports whether pluginName's Down chain is

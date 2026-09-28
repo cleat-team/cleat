@@ -723,7 +723,7 @@ tier2:
            kill-path cleanup reaches AssemblyScript guests"
 
     - id: plugins
-      why: 21 built-in, all with unit tests; 10 covered by the integration harness.
+      why: 22 built-in, all with unit tests; 10 covered by the integration harness.
       open_items:
         - "RESOLVED 2026-08-09 for the read paths: webhookingest and notifications (HMAC keys),
            pagerdutyalert (routing key), slacknotify (webhook URL) and datadogexport (API key)
@@ -1427,7 +1427,7 @@ required_contexts:
       covers: tier2
       packages: ["./plugins/..."]
       why_required: |
-        The 21 built-in plugins are tier 2 as a support claim -- what is frontier about
+        The 22 built-in plugins are tier 2 as a support claim -- what is frontier about
         them is the breadth of the surface, not whether they run. They ship in the
         binary, so a plugin that stops building or stops passing is a defect in a
         shipped artifact, and holding them to must-pass costs nothing while the suite

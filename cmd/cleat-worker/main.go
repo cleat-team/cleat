@@ -95,6 +95,10 @@ import (
 	_ "github.com/cleat-team/cleat/plugins/scheduledbackup"
 	_ "github.com/cleat-team/cleat/plugins/scheduler"
 	_ "github.com/cleat-team/cleat/plugins/slacknotify"
+	// WS-1's addition, per WORKSTREAM.md: leaving this unwired is a plugin
+	// that exists but never runs, worse than the cross-stream edit.
+	// cleat#2534.
+	_ "github.com/cleat-team/cleat/plugins/tenantlifecycle"
 	_ "github.com/cleat-team/cleat/plugins/tenantquota"
 	_ "github.com/cleat-team/cleat/plugins/webhookingest"
 	//
@@ -1468,6 +1472,16 @@ func main() {
 		// loudly.
 		RevokeExpiredOAuthAPIKeys: func(ctx context.Context) (int64, error) {
 			return authResolver.RevokeExpiredOAuthAPIKeys(ctx)
+		},
+		// WS-1's addition to WS-3's file, same declaration WORKSTREAM.md asks
+		// for and the same reason as the two grants above: plugins/
+		// tenantlifecycle's trial-expiry sweep cannot reach admin.tenants
+		// itself (a plugin's cross-tenant statement runs as cleat_sweep,
+		// which holds no privilege on that table), so the write goes through
+		// the host's own connection, the same authResolver already built for
+		// HostResolver. cleat#2534.
+		SetTenantSuspended: func(ctx context.Context, tenantID uuid.UUID, suspended bool) error {
+			return authResolver.SetTenantSuspended(ctx, tenantID, suspended)
 		},
 		Done:       ctx.Done(),
 		Dialect:    plugin.Dialect(factory.Dialect()),

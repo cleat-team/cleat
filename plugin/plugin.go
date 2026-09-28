@@ -317,6 +317,36 @@ type Environment struct {
 	// stopping the loop over: the read path refuses expired keys regardless, so
 	// the failure degrades a number rather than an authentication.
 	RevokeExpiredOAuthAPIKeys func(ctx context.Context) (disabled int64, err error)
+
+	// SetTenantSuspended sets or clears a tenant's suspended flag.
+	// cleat#2534.
+	//
+	// THE HOST OWNS admin.tenants FOR THE SAME REASON IT OWNS
+	// admin.tenant_api_keys ABOVE: a plugin's cross-tenant statements run
+	// under SET LOCAL ROLE cleat_sweep, which holds no privilege on
+	// admin.tenants, so a sweep that wrote this table directly would fail
+	// with a permission error on every tick and suspend nothing. See
+	// auth.TenantStore.SetTenantSuspended, the implementation this closes
+	// over.
+	//
+	// TAKES A TENANT, unlike RevokeExpiredOAuthAPIKeys above: this acts on
+	// one specific tenant a caller names, not on every row past some cutoff.
+	//
+	// Returns auth.ErrTenantNotFound (via errors.Is) when tenantID matches no
+	// row, rather than succeeding silently -- a caller acting on a tenant id
+	// it did not just read from admin.tenants itself (a sweep reading a
+	// stale id from its own table) needs to be able to tell "suspended" from
+	// "no such tenant".
+	//
+	// NIL MEANS "THIS HOST CANNOT DO IT", the same convention as every other
+	// grant on this struct: the worker always sets it; cleattest, the
+	// embedded runner and a plugin's own unit tests construct an Environment
+	// directly and leave it nil. A caller finding it nil must fail loudly
+	// rather than silently skip the write -- unlike
+	// RevokeExpiredOAuthAPIKeys, this is not a best-effort bookkeeping sweep;
+	// a caller asked this tenant to be suspended and a silent no-op would
+	// report success for something that never happened.
+	SetTenantSuspended func(ctx context.Context, tenantID uuid.UUID, suspended bool) error
 }
 
 // MintOAuthAPIKeyRequest is what a plugin hands Environment.MintOAuthAPIKey.

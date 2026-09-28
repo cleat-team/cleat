@@ -1,0 +1,1 @@
+test-go/commands	1	^TestSetTenantTrialFailsClosedWithoutMSSQLSessionPinning$	MSSQL-only falsification of tenantTrialConnFor's session-pinning; skips whenever CLEAT_TEST_MSSQL is not set, which this PostgreSQL-only job never sets. cleat#2534.
