@@ -3,7 +3,9 @@
 **Status:** engineering reference. Drafted 2026-09-14 against `develop` at `654d6f84`; corrected
 2026-09-25 against `develop` at `656aced4` (cleat#2050) — see
 [What was verified](#what-was-verified) at the end for what changed and what is still unverified.
-Nothing here has been built end to end.
+
+**The cleat-side half has since been built and is run on every pull request** — see
+[The assembly](#the-assembly). The rope half is stubbed, named as such, and still yours to write.
 
 **Who this is for:** your product has to talk to your customers' other systems. Each customer wants
 their CRM, their warehouse, their ERP, their Slack — and each wants slightly different rules about
@@ -75,6 +77,27 @@ every one of those adjectives.
 `eventtriggers` is the keystone: it "lets workflows subscribe to domain events via HTTP API,
 evaluates filter expressions, and automatically starts workflow instances when matching events are
 published." That is the routing layer of an iPaaS, already built.
+
+**`examples/integration-hub/` is the runnable one.** It exercises **all four** hitch points in this
+table at once — the ingest route, the connector dispatch as a recorded host call, the rate limit as
+edge middleware, and `notifications`' delivery sweep as a background loop — and it is executed end to
+end on every pull request by `scripts/run-integration-hub-scenario.sh`: deployed to a real
+`cleat-worker` on a real PostgreSQL, with a real inbound event, a real crash, and its record
+asserted.
+
+**What it asserts is a property rather than a completion.** The worker is `SIGKILL`ed mid-run and
+the run is allowed to resume, and what is checked afterwards is the connector's own delivery log:
+**one row, not two**. `notifications.send_webhook` is registered `Idempotent: false`, so a resumed
+run that re-executed the call would deliver the customer's event a second time; one row is the
+evidence that the call was recorded and replayed instead. A green run that never crashes does not
+test that, which is why the crash is in the scenario rather than in its documentation.
+
+The rope half is the connector's far end. The scenario registers a local HTTP sink as the connector
+and points it there — a **private** address, which cleat's egress policy refuses by default and the
+compose permits for exactly one host by name (`--plugin-egress-allow-private=sink`). That is not a
+workaround for the example's convenience: an iPaaS reaches systems *inside* the customer's network,
+so "use a publicly reachable endpoint" is the opposite of the architecture. See the example's
+README for the flag and the refusal it lifts.
 
 ---
 

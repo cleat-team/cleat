@@ -1,0 +1,100 @@
+/* Served as its own file rather than an inline <style> block: the page runs
+   under style-src 'self', and an inline block would need 'unsafe-inline'. */
+
+:root {
+  --bg: #10141a;
+  --panel: #171d26;
+  --line: #29323f;
+  --text: #dde3ec;
+  --muted: #8b97a8;
+  --ok: #3fb950;
+  --wait: #d29922;
+  --bad: #f85149;
+  --accent: #58a6ff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0 0 4rem;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+header, main { max-width: 62rem; margin: 0 auto; padding: 0 1rem; }
+
+header { padding-top: 2rem; padding-bottom: 1rem; border-bottom: 1px solid var(--line); }
+h1 { margin: 0 0 .25rem; font-size: 1.5rem; }
+.sub { margin: 0; color: var(--muted); max-width: 48rem; }
+
+h2 { margin: 2rem 0 .75rem; font-size: 1.05rem; letter-spacing: .02em; text-transform: uppercase; color: var(--muted); }
+
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85em; }
+code { background: #0b0f14; padding: .1rem .3rem; border-radius: 3px; }
+
+/* ---- config ---- */
+
+/* dt/dd inline in a plain block, not flex items: a flex container blockifies
+   each child, so "tenant:" and its value would wrap apart from one another. */
+.config { margin: 1rem 0 0; font-size: .85rem; }
+.config dt { display: inline; color: var(--muted); }
+.config dd { display: inline; margin: 0 1.5rem 0 .4rem; }
+
+/* ---- forms ---- */
+
+form { display: flex; flex-wrap: wrap; gap: .75rem 1rem; align-items: flex-end; margin: 0 0 .75rem; }
+form.inline { margin-bottom: .5rem; }
+label { display: flex; flex-direction: column; gap: .25rem; font-size: .8rem; color: var(--muted); }
+
+input, select, button {
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: .4rem .55rem;
+}
+input { min-width: 11rem; }
+input[name="payload"] { min-width: 16rem; }
+
+button { cursor: pointer; border-color: var(--accent); color: var(--accent); background: transparent; }
+button:hover { background: #1c2634; }
+button.secondary { border-color: var(--line); color: var(--text); padding: .15rem .5rem; font-size: .8rem; }
+
+/* ---- tables ---- */
+
+table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+th { text-align: left; font-weight: 600; color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .03em; }
+th, td { padding: .45rem .5rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+tbody tr:last-child td { border-bottom: none; }
+
+.run-error { color: var(--bad); font-family: ui-monospace, monospace; font-size: .8rem; white-space: pre-wrap; }
+
+/* ---- status pills ---- */
+
+.pill { display: inline-block; padding: .1rem .45rem; border-radius: 999px; font-size: .78rem; border: 1px solid currentColor; }
+.pill.ok { color: var(--ok); }
+.pill.wait { color: var(--wait); }
+.pill.bad { color: var(--bad); }
+/* cancelled is muted rather than red: the webhook was deleted underneath the
+   delivery, which is not a failure of the delivery. */
+.pill.muted { color: var(--muted); }
+
+/* ---- messages ---- */
+
+.hint { color: var(--muted); font-size: .85rem; max-width: 48rem; }
+.status { min-height: 1.2rem; font-size: .85rem; }
+.status.ok { color: var(--ok); }
+.status.bad { color: var(--bad); }
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #ffffff; --panel: #f6f8fa; --line: #d0d7de; --text: #1f2328;
+    --muted: #59636e; --ok: #1a7f37; --wait: #9a6700; --bad: #cf222e;
+    --accent: #0969da;
+  }
+  code { background: #f6f8fa; }
+  button:hover { background: #eaeef2; }
+}

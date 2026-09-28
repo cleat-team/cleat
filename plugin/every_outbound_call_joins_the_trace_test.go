@@ -58,8 +58,16 @@ var notYetPropagating = map[string]string{
 	"cleat/backendkit/client.go:StartWorkflow":            "a CLIENT library for callers OF cleat, not cleat making an outbound call on a run's behalf. Any trace it carries belongs to its own caller's process; injecting cleat's here would attach a foreign trace to somebody else's request.",
 	"cleat/backendkit/client.go:StartWorkflowRaw":         "a CLIENT library for callers OF cleat, not cleat making an outbound call on a run's behalf. Any trace it carries belongs to its own caller's process; injecting cleat's here would attach a foreign trace to somebody else's request.",
 	"cleat/backendkit/client.go:StartWorkflowWithOptions": "a CLIENT library for callers OF cleat, not cleat making an outbound call on a run's behalf. Any trace it carries belongs to its own caller's process; injecting cleat's here would attach a foreign trace to somebody else's request.",
-	"plugin/index.go:DownloadWASM":                        "fetches from the plugin REGISTRY during resolution -- before and outside any run, so there is no caller trace to join. Would need a trace ORIGINATED rather than continued, which is the scheduled-run question in stage 3.",
-	"plugin/index.go:fetchURL":                            "fetches from the plugin REGISTRY during resolution -- before and outside any run, so there is no caller trace to join. Would need a trace ORIGINATED rather than continued, which is the scheduled-run question in stage 3.",
+	// The reference scenarios' APPLICATION backends: clients OF cleat, the same
+	// shape as cleat/backendkit above and for the same reason. They are also a
+	// useful record of why these two sites exist at all -- backendkit has no
+	// method for a plugin's own HTTP routes (cleat#2550), so the example spells
+	// them by hand. When backendkit gains one, the example uses it and these two
+	// entries go stale, which is the guard telling us the debt is paid.
+	"examples/integration-hub/backend/main.go:pluginGET":      "an APPLICATION backend reading a plugin's own HTTP route. It is a client OF cleat, not cleat making an outbound call on a run's behalf: the trace it would carry belongs to its own process, and injecting one here would attach a foreign trace to somebody else's request. Exists only because backendkit has no method for a plugin route (cleat#2550).",
+	"examples/integration-hub/backend/main.go:deliverInbound": "an APPLICATION backend standing in for the CUSTOMER'S SYSTEM, POSTing to the auth-exempt ingest route. Same reason as pluginGET -- a client of cleat, not a hop in a run's causal chain -- and note the route is HMAC-verified rather than authenticated, so a traceparent would be the one header on that request the sender did not sign.",
+	"plugin/index.go:DownloadWASM":                            "fetches from the plugin REGISTRY during resolution -- before and outside any run, so there is no caller trace to join. Would need a trace ORIGINATED rather than continued, which is the scheduled-run question in stage 3.",
+	"plugin/index.go:fetchURL":                                "fetches from the plugin REGISTRY during resolution -- before and outside any run, so there is no caller trace to join. Would need a trace ORIGINATED rather than continued, which is the scheduled-run question in stage 3.",
 
 	// --- stage 2: the plugin sweep. Each has a live caller trace to join. ---
 	"cleat/embedded/runner.go:handleHTTPFetch": "cleat#1596 stage 3, and it needs one " +

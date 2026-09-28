@@ -207,6 +207,12 @@ func TestEveryWorkerLaunchSiteSaysHowItsSchemaGetsMigrated(t *testing.T) {
 		// connects as cleat_app, and a separate one-shot `--migrate-only`
 		// service running as the superuser migrates first.
 		"examples/order-lifecycle/docker-compose.yml": "--migrate-only",
+		// cleat#2533. The second reference scenario, the same shape again.
+		// Its serving worker connects as cleat_app
+		// (`--require-auth` refuses to start over a connection exempt from
+		// RLS), so migration is a separate one-shot service running as the
+		// postgres superuser.
+		"examples/integration-hub/docker-compose.yml": "--migrate-only",
 		// Single-node development: the worker migrates itself.
 		"Makefile": "--migrate-on-start",
 	}

@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Integration hub</title>
+<!--
+  A separate stylesheet and a separate script, because this page is served under
+  `style-src 'self'` and `script-src 'self'`. An inline block would need
+  'unsafe-inline', and widening the policy for one page's convenience is the
+  thing the policy exists to prevent.
+
+  The page talks ONLY to its own origin. The worker's API key is held by the
+  backend and never sent here, so there is no fetch() to :8080 anywhere in
+  app.js -- a browser that held that key would be handing the tenant to anyone
+  who opened dev tools.
+-->
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<header>
+  <h1>Integration hub</h1>
+  <p class="sub">
+    An inbound event is dispatched to a per-tenant connector by a durable
+    workflow. The connector's far end is the <code>sink</code> service in this
+    example's compose file; in a deployment it is your customer's system.
+  </p>
+  <dl id="config" class="config"></dl>
+</header>
+
+<main>
+  <section>
+    <h2>Start a sync</h2>
+    <form id="start-form">
+      <label>Customer
+        <input name="customer_id" value="cus-1" required>
+      </label>
+      <label>Event type
+        <input name="event_type" id="event-type">
+      </label>
+      <label>Payload
+        <input name="payload" value='{"id":"c-1"}'>
+      </label>
+      <button type="submit">Start</button>
+    </form>
+    <p class="hint">
+      A run parks until an event arrives for its source. <strong>Deliver it</strong>
+      on the row below &mdash; that button is the customer's system, stood in for:
+      it signs the body with the source's secret, which is why it is not the
+      browser that computes it.
+    </p>
+    <p id="start-status" class="status"></p>
+  </section>
+
+  <section>
+    <h2>Syncs</h2>
+    <table id="runs">
+      <thead>
+        <tr><th>Run</th><th>Status</th><th>Stage</th><th>Customer</th><th>Delivery</th><th></th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="runs-empty" class="hint">No runs yet.</p>
+  </section>
+
+  <section>
+    <h2>Delivery log</h2>
+    <p class="hint">
+      The connector's own record &mdash; one row per dispatch. A resumed run that
+      re-executed the call would appear here as a <strong>second row</strong>,
+      which is what the crash-resume assertion in
+      <code>scripts/run-integration-hub-scenario.sh</code> counts.
+    </p>
+    <form id="delivery-filter" class="inline">
+      <label>Tenant
+        <input name="tenant" id="tenant-filter" placeholder="(this backend's tenant)">
+      </label>
+      <label>Status
+        <select name="status">
+          <option value="">any</option>
+          <!-- The five states webhook_delivery actually takes. `dead_lettered`
+               is deliberately NOT here: see the note below the table. -->
+          <option value="pending">pending</option>
+          <option value="retrying">retrying</option>
+          <option value="delivered">delivered</option>
+          <option value="failed">failed</option>
+          <option value="cancelled">cancelled</option>
+        </select>
+      </label>
+      <button type="submit">Filter</button>
+    </form>
+    <p id="delivery-status" class="status"></p>
+    <table id="deliveries">
+      <thead>
+        <tr><th>Created</th><th>Event</th><th>Status</th><th>Attempts</th><th>Response</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <p id="deliveries-empty" class="hint">No deliveries yet.</p>
+    <p class="hint">
+      <strong>There is no <code>dead_lettered</code> delivery state, and that is
+      not an omission.</strong> A delivery that exhausts its ten attempts is
+      <code>failed</code> &mdash; <em>retrying</em> and <em>failed</em> are the
+      same path with the attempt ceiling either side of it
+      (<code>plugins/notifications/background.go</code>, <code>retryOrFail</code>),
+      and <code>cancelled</code> is a webhook that was deleted while its
+      delivery was in flight.
+    </p>
+    <p class="hint">
+      Three vocabularies sit close together here and this table is in none of
+      them: the dead-letter <strong>queue</strong> holds workflow
+      <em>runs</em> whose last durable call exhausted its retry policy
+      (<code>GET /api/dead-letters</code>); <code>webhook-ingest</code> gives
+      unprocessed <em>events</em> a <code>dead_letter</code> status of their own;
+      and an outbound <em>delivery</em> simply ends at <code>failed</code>.
+      Keeping them apart is the distinction cleat#2050 corrected in this
+      scenario's playbook &mdash; only retry-exhausted runs reach the DLQ at all.
+    </p>
+  </section>
+
+  <section>
+    <h2>What to look for</h2>
+    <p class="hint">
+      Filtering by a tenant other than this backend's is <strong>refused</strong>:
+      the worker scopes the delivery log by the API key's tenant, so a second
+      tenant is a second key. Try it &mdash; the refusal names the reason.
+    </p>
+  </section>
+</main>
+
+<script src="/app.js"></script>
+</body>
+</html>
