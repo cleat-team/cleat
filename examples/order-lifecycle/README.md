@@ -26,10 +26,11 @@ running, query state that stops being published — is found by a person noticin
 or not at all.
 
 `scripts/run-order-lifecycle-scenario.sh` deploys this workflow to a real
-`cleat-worker` on a real PostgreSQL, starts runs, and asserts what each one
-published. It runs on every pull request. If you change the saga, the engine's
-`Saga`, the worker's routes or the query-state surface in a way that breaks this
-scenario, that job goes red.
+`cleat-worker` on a real database — **PostgreSQL, MySQL or SQL Server**, see
+[Which dialects this runs on](#which-dialects-this-runs-on) — starts runs, and
+asserts what each one published. It runs on every pull request, once per
+dialect. If you change the saga, the engine's `Saga`, the worker's routes or the
+query-state surface in a way that breaks this scenario, that job goes red.
 
 That is the whole reason this directory exists next to `fooddash`. If you are
 looking for the *clearest* reading of a saga, `fooddash` is probably it; this one
@@ -96,18 +97,120 @@ after the run id has been handed out.
 
 ## Run it against a real worker
 
-The compose file brings up PostgreSQL and a `cleat-worker`. The backend is not a
-service in it — that is your application, and you run it yourself.
+The compose file brings up a database and a `cleat-worker`, and **the profile
+picks which database**. PostgreSQL is the default and is what the rest of this
+README assumes; the other two are supported and covered — see below.
+
+The backend is not a service in the compose file — that is your application, and
+you run it yourself.
 
 ```bash
-# 1. Postgres and the worker. The worker prints an API key on first start.
-docker compose up -d
+# 1. The database and the worker. The worker prints an API key on first start.
+export CLEAT_DB_URL="postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable"
+docker compose --profile postgres up -d
 docker compose logs cleat-worker | grep -i 'Key:'
 
 # 2. Deploy the compiled workflow.
-cleat deploy --db "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable" \
-  --name order-lifecycle /tmp/out/place_order.wasm
+cleat deploy --db "$CLEAT_DB_URL" --name order-lifecycle /tmp/out/place_order.wasm
 ```
+
+### The deploy step is the one command that differs by dialect
+
+**The `cleat` CLI talks to PostgreSQL only.** That is a deliberate limit and not a
+gap in the engine: `cleat deploy` refuses a MySQL or SQL Server DSN with an error
+that says so, and names the alternative. The engine and the worker both support
+all three — it is the CLI that does not.
+
+So on MySQL and SQL Server the deploy is a **different command**, not the same
+command with a different DSN:
+
+```bash
+# MySQL or SQL Server: the CLI is PostgreSQL-only, so deploy with this instead.
+export CLEAT_DIALECT=mysql          # or: mssql
+go build -o /tmp/out/deploy-workflow ./cmd/deploy-workflow
+/tmp/out/deploy-workflow --driver "$CLEAT_DIALECT" --db "$CLEAT_DB_URL" \
+  order-lifecycle /tmp/out/place_order.wasm
+```
+
+`--driver` takes the dialect rather than a literal, so this one command covers
+both non-PostgreSQL dialects; `CLEAT_DIALECT` is the same variable the compose
+profile uses.
+
+`deploy-workflow` is the only multi-dialect deploy path cleat has. It deploys and
+nothing else — there is no multi-dialect `versions`, `rollback` or `plugin`
+equivalent. **Everything after the deploy is dialect-independent**: starting runs,
+the webhook wait, the published query state, the page. Only this one step knows
+which database it is talking to beyond the DSN.
+
+The scenario script asserts this both ways rather than routing around it: it runs
+`cleat deploy` on PostgreSQL and `deploy-workflow` on the other two, **and it
+asserts that `cleat deploy` is refused, with the dialect named, on the two where
+it does not work.** That refusal is the reason the commands differ, so it is
+checked rather than described.
+
+### Which dialects this runs on
+
+**All three: PostgreSQL, MySQL and SQL Server.** The scenario script takes the
+dialect as its first argument, and CI runs one arm per dialect, so the
+assertions below are asserted on each rather than only on the default:
+
+```bash
+scripts/run-order-lifecycle-scenario.sh postgres   # the default
+scripts/run-order-lifecycle-scenario.sh mysql
+scripts/run-order-lifecycle-scenario.sh mssql
+```
+
+The profile selects the database; the environment selects the DSN. These are the
+**in-network** hosts, because the worker reaches the database over the compose
+network — the `CLEAT_DB_URL` above is the same database seen from your host.
+
+```bash
+# MySQL
+export CLEAT_MIGRATE_DB_URL='root:cleat@tcp(mysql:3306)/cleat?tls=false&parseTime=true'
+export CLEAT_WORKER_DB_URL="$CLEAT_MIGRATE_DB_URL"
+docker compose --profile mysql up -d
+export CLEAT_DB_URL='root:cleat@tcp(localhost:3306)/cleat?tls=false&parseTime=true'
+
+# SQL Server (single-quoted: the password ends in `!`, which zsh expands)
+export CLEAT_MIGRATE_DB_URL='sqlserver://sa:CleatTest123!@mssql:1433?database=cleat'
+export CLEAT_WORKER_DB_URL="$CLEAT_MIGRATE_DB_URL"
+docker compose --profile mssql up -d
+export CLEAT_DB_URL='sqlserver://sa:CleatTest123!@localhost:1433?database=cleat'
+```
+
+#### What actually differs, and what does not
+
+Less than it looks, and the differences are the interesting part:
+
+| | PostgreSQL | MySQL | SQL Server |
+|---|---|---|---|
+| DSN shape | `postgres://user:pw@host:5432/db` | **no scheme**: `user:pw@tcp(host:3306)/db` | `sqlserver://user:pw@host:1433?database=db` |
+| worker `--driver` | `postgres` (the default) | `mysql` | `mssql` |
+| who connects at runtime | `cleat_app`, a lesser role | the same user as the migration | the same user as the migration |
+| the database itself is created by | `POSTGRES_DB` at first boot | the store factory, which issues `CREATE DATABASE IF NOT EXISTS` | a `mssql-db` step, because cleat does not create it |
+| row-level security on the runtime connection | enforced, and the worker **verifies** it | **none — MySQL is single-tenant by construction** | **none asserted; no check runs** |
+
+**The worker does not infer the dialect from the DSN.** `--driver` defaults to
+`postgres`, so a MySQL DSN handed to a worker without `--driver=mysql` is a
+connection error rather than a dialect switch. The compose file passes it for
+you; a hand-written `cleat-worker` invocation has to.
+
+**The saga assertions are identical on all three, and that is the claim.** Every
+check the scenario makes reads either a run's `error` or its published query
+state, and none of them is relaxed for a dialect. An arm that passed because it
+asserted less would be worse than no arm.
+
+**There is exactly one place the arms deliberately differ, and it is RLS.** On
+PostgreSQL the scenario asserts the worker reports that its runtime connection
+is subject to row-level security — a real guarantee, and the reason the
+`app-role` step exists. On MySQL and SQL Server there is no such guarantee to
+assert: `cmd/cleat-worker/main.go` gates the whole enforcement check on
+`--driver == "postgres"`, before calling `engine.CheckRLSEnforced`, which
+queries `pg_roles` and could not run elsewhere. So the arm **states the absence**
+rather than asserting the weaker thing and calling it the same check. On MySQL
+that absence is by design — cleat's MySQL is single-tenant by construction — and
+it is why `docker-compose.yml` puts the `app-role` step under the `postgres`
+profile instead of documenting it as not-for-MySQL.
 
 Then start a run. `simulate_payment_failure` is the interesting one: the charge
 is declined, and the reservation that already completed is released.

@@ -1246,8 +1246,24 @@ jobs:
         run: scripts/build-documented-examples.sh
 
   order-lifecycle-scenario:
-    name: Order lifecycle scenario
+    # One entry per dialect: the same scenario, the same assertions, three
+    # databases. cleat#2560.
+    name: Order lifecycle scenario (${{ matrix.dialect }})
     runs-on: ubuntu-latest
+    # `fail-fast: false` because the arms are independent, and a red PostgreSQL
+    # arm must not cancel the MySQL and SQL Server ones. The whole value of a
+    # dialect matrix is knowing WHICH dialect diverged, and a cancelled job
+    # reports neither.
+    #
+    # Confirmed NOT a required context before renaming this job -- see the
+    # warning on the `if:` below. `.github/required-checks.txt` matches on
+    # display names, so adding `(${{ matrix.dialect }})` to a REQUIRED context
+    # would have renamed it out of the list and wedged the queue with nothing
+    # red. It is not in that file, so this is safe.
+    strategy:
+      fail-fast: false
+      matrix:
+        dialect: [postgres, mysql, mssql]
     # merge_group is excluded, deliberately -- and this is the clause to re-read
     # before removing the line. The workflow triggers on merge_group, so without
     # this the job runs again against the projected tip of every queue entry,
@@ -1267,13 +1283,23 @@ jobs:
     # Nine workflow files here carry that warning; this is the tenth.
     if: github.event_name != 'merge_group'
     # The example in examples/order-lifecycle, RUN rather than only built.
-    # cleat#2512.
+    # cleat#2512, and on three dialects since cleat#2560.
     #
     # The job above builds ten examples and runs none of them. This one deploys
-    # a workflow to a real worker on a real PostgreSQL, starts three runs and
+    # a workflow to a real worker on a real database, starts three runs and
     # asserts what each PUBLISHED -- which is the only way to see the class of
     # failure that a build check cannot: a workflow that compiles, deploys, and
     # then cannot reach the plugin it calls.
+    #
+    # WHY THREE ARMS AND NOT ONE. This project's defect history is concentrated
+    # in dialect divergence -- a primary key that differs across dialects, a
+    # case-insensitive collation, RLS behaviour, `btrim` trimming only the space
+    # where Go's TrimSpace does not -- and none of it is reachable from a
+    # PostgreSQL-only example. The example is also the artefact most likely to
+    # be copied verbatim, so an unexercised dialect path here is a defect a
+    # READER inherits rather than one they might hit. What each arm asserts, and
+    # the single place the assertions differ, is stated in the example's README
+    # rather than averaged here.
     #
     # It is deliberately NOT a matrix entry under test-go. examples/ is its own
     # Go module and no matrix entry covers it, so a test living beside the
@@ -1281,10 +1307,13 @@ jobs:
     # shape this repo has been bitten by. A named job is also where a reader
     # looks for it.
     #
-    # TIME, so nobody is surprised: it builds the repository's Dockerfile and
-    # then runs compose. That build is the same one cluster-tests does, and it
-    # is the price of measuring the deployment the README documents rather than
-    # a parallel arrangement that merely resembles it.
+    # TIME, so nobody is surprised: each arm builds the repository's Dockerfile
+    # and then runs compose. That build is the same one cluster-tests does, and
+    # it is now paid three times over rather than once -- the arms run in
+    # parallel, so the wall clock is about what it was, but the runner-minutes
+    # are not. The SQL Server arm additionally pulls a ~1.5 GB image. That is
+    # the price of measuring the deployment the README documents on the dialects
+    # the README claims, rather than one arrangement that merely resembles it.
     steps:
       - uses: actions/checkout@v7
 
@@ -1307,7 +1336,7 @@ jobs:
       # or failed. The script captures the worker's log itself, on the failure
       # path, before tearing down. See its cleanup().
       - name: Run the scenario end to end
-        run: scripts/run-order-lifecycle-scenario.sh
+        run: scripts/run-order-lifecycle-scenario.sh ${{ matrix.dialect }}
 
   integration-hub-scenario:
     name: Integration hub scenario
