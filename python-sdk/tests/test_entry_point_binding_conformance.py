@@ -45,8 +45,15 @@ def test_the_table_is_readable_and_not_empty():
     is the exact failure this table exists to prevent.
     """
     assert TABLE.exists(), f"conformance table not found at {TABLE}"
+    total = len(json.loads(TABLE.read_text())["cases"])
     cases = _cases()
-    assert len(cases) >= 4, f"only {len(cases)} python cases; the table has lost rows"
+    # EQUALITY, not a floor -- cleat#2542. A floor catches a row being REMOVED.
+    # It cannot catch a row ADDED without a "python" key: _cases() filters that
+    # row out, pytest never parametrizes it, and it passes by not running.
+    assert len(cases) == total, (
+        f'{len(cases)} of {total} cases carry a "python" expectation. Every case in '
+        f'this table applies to Python, so a case without one is a case nothing checks.'
+    )
 
 
 def _build(declared):
@@ -84,6 +91,20 @@ def _build(declared):
     return getattr(wf, "export_wrapper", wf), spec
 
 
+def _fixture_echo(payload_value, kind):
+    """What this SDK's fixture reports for a parameter that bound this value.
+
+    Scalars are echoed as they are; the composite is echoed as its sku, which is
+    what the ``item`` entry point above returns. Comparing against it is what
+    makes the parameter's NAME the subject of the assertion -- a binder that read
+    the struct from the top level would bind the zero Item and echo "", which is
+    not the payload's sku.
+    """
+    if kind != "composite":
+        return payload_value
+    return payload_value.get("sku") if isinstance(payload_value, dict) else None
+
+
 def _classify(out, spec, payload):
     """Map the SDK's answer onto the table's semantic outcome tags.
 
@@ -96,7 +117,15 @@ def _classify(out, spec, payload):
     bound = json.loads(parsed)["bound"] if isinstance(parsed, str) else parsed["bound"]
     name = spec["name"]
     if name in payload:
-        return "bound_value"
+        # THE VALUE, NOT THE KEY'S PRESENCE. Until cleat#2542 this returned
+        # "bound_value" on presence alone, which left the "present scalar" row --
+        # the one whose `why` calls itself the control -- unable to fail: a
+        # fixture mutated to bind nothing still reported bound_value and the
+        # table stayed green. Measured 2026-09-28, on Go and here alike.
+        want = _fixture_echo(payload[name], spec["kind"])
+        if bound == want:
+            return "bound_value"
+        return f"bound_wrong_value(bound {bound!r}, want {want!r})"
     if "optional_default" in spec and bound == spec["optional_default"]:
         return "bound_default"
     if spec.get("kind") == "lone_string" and bound == json.dumps(payload):

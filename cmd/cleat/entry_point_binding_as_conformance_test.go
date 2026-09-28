@@ -55,16 +55,24 @@ func TestTheASRowsOfTheBindingTableAreAsserted(t *testing.T) {
 			asCases = append(asCases, c)
 		}
 	}
-	if len(asCases) < 4 {
-		t.Fatalf("only %d cases carry an \"assemblyscript\" expectation; the table has lost rows",
-			len(asCases))
+	// EQUALITY, not a floor -- cleat#2542. A floor catches a row being REMOVED.
+	// It cannot catch a row ADDED without an "assemblyscript" key: that row is
+	// filtered out here, never compiled, and passes by not running.
+	if len(asCases) != len(cases) {
+		t.Fatalf("%d of %d cases carry an \"assemblyscript\" expectation. Every case in "+
+			"this table applies to AssemblyScript, so a case without one is a case "+
+			"nothing checks.", len(asCases), len(cases))
 	}
 
 	ctx := context.Background()
 
-	// The composite row first, because it is a compile-time outcome and needs
-	// no engine at all.
-	t.Run("absent composite", func(t *testing.T) {
+	// The composite rows first, because they are compile-time outcomes needing
+	// no engine at all. EVERY composite case lands here, present or absent, and
+	// they are asserted by the one compile below -- which is the honest shape,
+	// because the transform's refusal does not depend on presence. Renamed from
+	// "absent composite" in cleat#2542, when the second composite row made that
+	// name describe only one of the cases it runs.
+	t.Run("composite parameters are refused at compile time", func(t *testing.T) {
 		want := ""
 		for _, c := range asCases {
 			if len(c.Declared) == 1 && c.Declared[0].Kind == "composite" {
