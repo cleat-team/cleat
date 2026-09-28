@@ -473,6 +473,22 @@ jobs:
       - name: Plan status-marker guard
         run: scripts/check-plan-markers.py --self-test
 
+      # A tracked package-lock.json's copy of a `file:`-linked local package
+      # (version, peerDependencies) drifting from that package's own
+      # package.json -- cleat#2455/#2506: examples/widget-store-as pinned
+      # @cleat/sdk@0.1.0 with peerDependencies.assemblyscript ^0.27.0 while
+      # packages/cleat-as had moved to 0.3.2 / ^0.28.19, npm ci refused, and
+      # nothing in CI ever ran npm ci there to notice. Needs no npm and no
+      # network -- pure JSON, so it belongs in Lint rather than an ecosystem
+      # job, and it reaches every consumer the same way regardless of which
+      # CI job (if any) actually builds that consumer's directory.
+      # --self-test first, same reason as every guard above it: on a clean
+      # tree "nothing drifted" and "the scan matched nothing" print the same
+      # kind of success.
+      - name: Local package lockfile mirror guard
+        run: |
+          scripts/check-local-package-mirrors.py --self-test
+          scripts/check-local-package-mirrors.py
 
       # Plan cross-references, after cleat#1727 split the open sections into
       # IMPROVEMENT-PLAN.d/. R3 exists because breaking a §N.M is the failure
