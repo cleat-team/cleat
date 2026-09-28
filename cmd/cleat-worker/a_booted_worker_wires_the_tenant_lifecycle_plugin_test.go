@@ -70,10 +70,14 @@ func TestABootedWorkerSuspendsAnExpiredTrial(t *testing.T) {
 			tenantID, expiresAt); err != nil {
 			t.Fatalf("seed tenant_trials for %s: %v", tenantID, err)
 		}
-		// expiredTenant is engine.DefaultTenantUUID, a well-known tenant every
-		// other test in this suite shares -- a leftover row here would outlive
-		// this test and contaminate the next one's fixture (this is exactly
-		// how this test caught itself doing that on its own first run).
+		// buildWorker -> deployScratch gives this test its own fresh, dropped-
+		// on-cleanup database, so this row cannot leak into another test's
+		// run the way it can in engine/testutil's shared-DB multidb tests --
+		// but it can still leak into a SECOND RUN of this test against the
+		// same scratch database if a prior run's own cleanup did not
+		// complete (a killed test process, a Ctrl-C). Cleaning up explicitly
+		// costs nothing and removes that one remaining way to contaminate a
+		// fixture.
 		t.Cleanup(func() {
 			_, _ = owner.ExecContext(context.Background(), `DELETE FROM tenant_trials WHERE tenant_id = $1`, tenantID)
 		})
@@ -112,7 +116,7 @@ func TestABootedWorkerSuspendsAnExpiredTrial(t *testing.T) {
 			}
 			if time.Now().After(deadline) {
 				return fmt.Errorf("the booted worker never suspended the tenant with an expired trial "+
-					"(%s, tenant_trials.expires_at in the past, handled=false) within 90s. Either "+
+					"(%s, tenant_trials.expires_at in the past, handled=false) within 30s. Either "+
 					"pluginEnv's SetTenantSuspended assignment is gone -- a nil grant is logged and "+
 					"the row is left for the next tick, which never arrives here as a suspension -- "+
 					"or the background loop that calls it never started. Both leave the suite green "+

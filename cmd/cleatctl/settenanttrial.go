@@ -104,66 +104,69 @@ func runSetTenantTrial(ctx context.Context, db *sql.DB, d dialect, args []string
 	}
 	defer closeExec()
 
-	// Read-then-write, exactly quota.go's writeQuota shape -- NOT a
-	// dialect-specific upsert (ON CONFLICT / ON DUPLICATE KEY / MERGE all
-	// spell "insert or update" differently, and TestEveryInlineStatementParses
-	// OnPostgres caught the first version of this function trying to parse
-	// MySQL's spelling against Postgres). A plain INSERT/UPDATE pair, bound
-	// through d.rebindArgs, is portable across all three -- `false` is a bound
-	// Go value here, not literal SQL text, so plugin.Rebind's own true/false
-	// -> 1/0 rewrite for MSSQL (plugin/query.go) applies to it exactly as it
-	// would to any other argument.
-	hasRow, err := tenantTrialExists(ctx, exec, d, tenantID)
-	if err != nil {
+	if err := writeTenantTrial(ctx, exec, d, tenantID, expiresAt); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		osExit(1)
 		return
+	}
+
+	fmt.Printf("tenant %s (%s) trial set to expire %s (in %d days). "+
+		"It will be suspended by the trial-expiry sweep after that, or immediately with suspend-tenant.\n",
+		tenantID, tenantName, expiresAt.Format(time.RFC3339), *days)
+}
+
+// writeTenantTrial does the actual read-then-write, split out from
+// runSetTenantTrial the way oauthAllowList is split from its own printing
+// loop (oauthallow.go): the part worth testing against a real database is
+// the one that returns an error, and a function that prints and calls
+// osExit cannot be called from a test at all.
+//
+// Read-then-write, exactly quota.go's writeQuota shape -- NOT a
+// dialect-specific upsert (ON CONFLICT / ON DUPLICATE KEY / MERGE all spell
+// "insert or update" differently, and TestEveryInlineStatementParsesOnPostgres
+// caught the first version of this function trying to parse MySQL's spelling
+// against Postgres). A plain INSERT/UPDATE pair, bound through d.rebindArgs,
+// is portable across all three -- `false` is a bound Go value here, not
+// literal SQL text, so plugin.Rebind's own true/false -> 1/0 rewrite for
+// MSSQL (plugin/query.go) applies to it exactly as it would to any other
+// argument.
+func writeTenantTrial(ctx context.Context, exec quotaExecer, d dialect, tenantID uuid.UUID, expiresAt time.Time) error {
+	hasRow, err := tenantTrialExists(ctx, exec, d, tenantID)
+	if err != nil {
+		return err
 	}
 	if hasRow {
 		stmt, stmtArgs, err := d.rebindArgs(
 			`UPDATE tenant_trials SET expires_at = $1, handled = $2 WHERE tenant_id = $3`,
 			expiresAt, false, tenantID)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			osExit(1)
-			return
+			return err
 		}
 		if _, err := exec.ExecContext(ctx, stmt, stmtArgs...); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			osExit(1)
-			return
+			return err
 		}
-	} else {
-		stmt, stmtArgs, err := d.rebindArgs(
-			`INSERT INTO tenant_trials (tenant_id, expires_at, handled) VALUES ($1, $2, $3)`,
-			tenantID, expiresAt, false)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			osExit(1)
-			return
-		}
-		if _, err := exec.ExecContext(ctx, stmt, stmtArgs...); err != nil {
-			// isQuotaDuplicateKey (quota.go): the same TOCTOU window
-			// writeQuota's INSERT branch has, between the existence check
-			// above and this INSERT -- a second `set-tenant-trial` for the
-			// same tenant racing this one. Rare for an operator command, but
-			// the friendly message is cheap and the raw constraint-violation
-			// text is not.
-			if isQuotaDuplicateKey(err) {
-				fmt.Fprintf(os.Stderr, "error: tenant %s's trial row was created by another command "+
-					"while this one was running; re-run set-tenant-trial to update it\n", tenantID)
-				osExit(1)
-				return
-			}
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			osExit(1)
-			return
-		}
+		return nil
 	}
 
-	fmt.Printf("tenant %s (%s) trial set to expire %s (in %d days). "+
-		"It will be suspended by the trial-expiry sweep after that, or immediately with suspend-tenant.\n",
-		tenantID, tenantName, expiresAt.Format(time.RFC3339), *days)
+	stmt, stmtArgs, err := d.rebindArgs(
+		`INSERT INTO tenant_trials (tenant_id, expires_at, handled) VALUES ($1, $2, $3)`,
+		tenantID, expiresAt, false)
+	if err != nil {
+		return err
+	}
+	if _, err := exec.ExecContext(ctx, stmt, stmtArgs...); err != nil {
+		// isQuotaDuplicateKey (quota.go): the same TOCTOU window writeQuota's
+		// INSERT branch has, between the existence check above and this
+		// INSERT -- a second `set-tenant-trial` for the same tenant racing
+		// this one. Rare for an operator command, but the friendly message
+		// is cheap and the raw constraint-violation text is not.
+		if isQuotaDuplicateKey(err) {
+			return fmt.Errorf("tenant %s's trial row was created by another command "+
+				"while this one was running; re-run set-tenant-trial to update it", tenantID)
+		}
+		return err
+	}
+	return nil
 }
 
 // lookupTenantName reads a tenant's display name, refusing with a clear
@@ -206,6 +209,34 @@ func tenantTrialConnFor(ctx context.Context, db *sql.DB, d dialect, tenantID str
 		return nil, nil, err
 	}
 	return conn, func() { conn.Close() }, nil
+}
+
+// tenantTrial mirrors one row of tenant_trials, for reading it back in tests
+// -- runSetTenantTrial itself never reads expires_at/handled back, it only
+// writes, so nothing in the CLI's own path needs this. Mirrors quotaRow.
+type tenantTrial struct {
+	expiresAt time.Time
+	handled   bool
+	existed   bool
+}
+
+// readTenantTrial reads one tenant's trial row, for tests -- see tenantTrial.
+func readTenantTrial(ctx context.Context, exec quotaExecer, d dialect, tenantID uuid.UUID) (tenantTrial, error) {
+	stmt, stmtArgs, err := d.rebindArgs(
+		`SELECT expires_at, handled FROM tenant_trials WHERE tenant_id = $1`, tenantID)
+	if err != nil {
+		return tenantTrial{}, err
+	}
+	var tt tenantTrial
+	err = exec.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&tt.expiresAt, &tt.handled)
+	if err == sql.ErrNoRows {
+		return tenantTrial{}, nil
+	}
+	if err != nil {
+		return tenantTrial{}, err
+	}
+	tt.existed = true
+	return tt, nil
 }
 
 // tenantTrialExists reports whether tenantID already has a tenant_trials

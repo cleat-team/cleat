@@ -28,10 +28,19 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					PRIMARY KEY (tenant_id)
 				);
 			`,
+			// DATETIME(6), not TIMESTAMP(6): TIMESTAMP overflows in 2038
+			// (plugins/auditlog/migrations.go:163-171 made the same fix, for
+			// the same reason, on an already-deployed column -- this one is
+			// new, so it starts right rather than needing a second
+			// migration). DATETIME also holds whatever wall-clock value it is
+			// given verbatim, with no session-timezone reinterpretation on
+			// read -- see background.go's comment on why the comparison binds
+			// a Go-computed `now` rather than using MySQL's own NOW(), which
+			// is session-timezone-dependent and would not agree with it.
 			UpMySQL: `
 				CREATE TABLE IF NOT EXISTS tenant_trials (
 					tenant_id  CHAR(36) NOT NULL,
-					expires_at TIMESTAMP(6) NOT NULL,
+					expires_at DATETIME(6) NOT NULL,
 					handled    BOOLEAN NOT NULL DEFAULT false,
 					PRIMARY KEY (tenant_id)
 				);
