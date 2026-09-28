@@ -114,9 +114,39 @@ docker compose logs cleat-worker | grep -i 'Key:'
 cleat deploy --db "$CLEAT_DB_URL" --name order-lifecycle /tmp/out/place_order.wasm
 ```
 
-**The deploy command is the same on every dialect** — that is the point of
-`CLEAT_DB_URL` rather than a literal. `cleat` infers the dialect from the DSN's
-shape, so only the variable changes; the command does not.
+### The deploy step is the one command that differs by dialect
+
+**The `cleat` CLI talks to PostgreSQL only.** That is a deliberate limit and not a
+gap in the engine: `cleat deploy` refuses a MySQL or SQL Server DSN with an error
+that says so, and names the alternative. The engine and the worker both support
+all three — it is the CLI that does not.
+
+So on MySQL and SQL Server the deploy is a **different command**, not the same
+command with a different DSN:
+
+```bash
+# MySQL or SQL Server: the CLI is PostgreSQL-only, so deploy with this instead.
+export CLEAT_DIALECT=mysql          # or: mssql
+go build -o /tmp/out/deploy-workflow ./cmd/deploy-workflow
+/tmp/out/deploy-workflow --driver "$CLEAT_DIALECT" --db "$CLEAT_DB_URL" \
+  order-lifecycle /tmp/out/place_order.wasm
+```
+
+`--driver` takes the dialect rather than a literal, so this one command covers
+both non-PostgreSQL dialects; `CLEAT_DIALECT` is the same variable the compose
+profile uses.
+
+`deploy-workflow` is the only multi-dialect deploy path cleat has. It deploys and
+nothing else — there is no multi-dialect `versions`, `rollback` or `plugin`
+equivalent. **Everything after the deploy is dialect-independent**: starting runs,
+the webhook wait, the published query state, the page. Only this one step knows
+which database it is talking to beyond the DSN.
+
+The scenario script asserts this both ways rather than routing around it: it runs
+`cleat deploy` on PostgreSQL and `deploy-workflow` on the other two, **and it
+asserts that `cleat deploy` is refused, with the dialect named, on the two where
+it does not work.** That refusal is the reason the commands differ, so it is
+checked rather than described.
 
 ### Which dialects this runs on
 

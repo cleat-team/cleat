@@ -198,16 +198,39 @@ extract_one() {
 
 BUILD_CMD="$(extract_one '(^| )cleat build ')"
 DEPLOY_CMD="$(extract_one '(^| )cleat deploy ')"
+DEPLOY_WF_CMD="$(extract_one 'deploy-workflow --driver')"
+
+# The deploy step is TWO documented commands, one per group of dialects, and an
+# arm needs the one for its own group. So the required set is dialect-dependent
+# and is stated as such, rather than loosened to "at least one of these" -- which
+# would pass an arm that had quietly stopped finding its own command.
+#
+# Why there are two at all: the `cleat` CLI talks to PostgreSQL only. It refuses
+# a MySQL or SQL Server DSN and names `deploy-workflow` as the alternative, and
+# this script asserts that refusal further down. See the README, "The deploy step
+# is the one command that differs by dialect".
+if [[ "$DIALECT" == "postgres" ]]; then
+  REQUIRED_CMDS=(build deploy)
+  DEPLOY_LABEL=deploy
+else
+  REQUIRED_CMDS=(build deploy-workflow)
+  DEPLOY_LABEL=deploy-workflow
+fi
 
 examined=0
-for pair in "build:$BUILD_CMD" "deploy:$DEPLOY_CMD"; do
-  [[ -z "${pair#*:}" ]] || examined=$((examined + 1))
+for want in "${REQUIRED_CMDS[@]}"; do
+  case "$want" in
+    build)           [[ -n "$BUILD_CMD" ]]     && examined=$((examined + 1)) ;;
+    deploy)          [[ -n "$DEPLOY_CMD" ]]    && examined=$((examined + 1)) ;;
+    deploy-workflow) [[ -n "$DEPLOY_WF_CMD" ]] && examined=$((examined + 1)) ;;
+  esac
 done
-if [[ $examined -lt 2 ]]; then
-  echo "UNMEASURED: found $examined of 2 documented cleat commands (build, deploy) in $README." >&2
+if (( examined < ${#REQUIRED_CMDS[@]} )); then
+  echo "UNMEASURED: found $examined of ${#REQUIRED_CMDS[@]} documented commands for the $DIALECT arm (${REQUIRED_CMDS[*]}) in $README." >&2
   echo "The extractor stopped seeing them, or the README stopped documenting them. Either" >&2
   echo "way a clean result below would mean nothing. Extracted:" >&2
-  printf '  build : %s\n  deploy: %s\n' "$BUILD_CMD" "$DEPLOY_CMD" >&2
+  printf '  build           : %s\n  deploy          : %s\n  deploy-workflow : %s\n' \
+    "$BUILD_CMD" "$DEPLOY_CMD" "$DEPLOY_WF_CMD" >&2
   exit 2
 fi
 
@@ -235,6 +258,23 @@ export CLEAT_DIALECT="$DIALECT"
 export CLEAT_DB_URL="$HOST_DB_URL"
 export CLEAT_MIGRATE_DB_URL="$NET_MIGRATE_DB_URL" CLEAT_WORKER_DB_URL="$NET_WORKER_DB_URL"
 export COMPOSE_PROJECT_NAME="cleat-order-lifecycle-$SUFFIX"
+
+# The failure counter, initialised ONCE, here, above every check that can
+# increment it.
+#
+# It used to be reset at the head of the assertions section. That was harmless
+# while nothing above it incremented the counter, and became a silent eraser the
+# moment a check was added above it: the RLS-posture failure was counted and then
+# zeroed, and the run reported clean. Moving it up rather than re-running the
+# ordering argument each time a check is added is the point -- from here no check
+# can precede the initialisation, whatever order the file is later edited into.
+failures=0
+
+# Where the non-PostgreSQL deploy binary is built. The README's second deploy
+# command names this exact path (`/tmp/out/deploy-workflow`), so building it here
+# is what lets the extracted command run verbatim rather than being rewritten.
+# Unused on the postgres arm, where the CLI does the deploying.
+DEPLOY_WF_BIN="$OUT_DIR/deploy-workflow"
 
 # On failure the worker's own log is the only artefact that explains what
 # happened, and the stack is about to be removed -- so it has to be captured
@@ -268,6 +308,18 @@ if [[ "$default_image_count" -ne 2 ]]; then
   exit 1
 fi
 export CLEAT_WORKER_IMAGE="$WORKER_IMAGE"
+
+# The non-PostgreSQL deploy tool, built the way the README tells a reader to
+# build it. A PRECONDITION rather than one of the counted commands, for the same
+# reason `.bin/cleat` is: it is tooling, not the scenario.
+if [[ "$DIALECT" != "postgres" ]]; then
+  echo "==> building deploy-workflow from this checkout"
+  if ! go build -o "$DEPLOY_WF_BIN" ./cmd/deploy-workflow >/tmp/ol-dw-build.log 2>&1; then
+    echo "FAIL: the README's documented build of deploy-workflow failed:" >&2
+    tail -20 /tmp/ol-dw-build.log >&2
+    exit 1
+  fi
+fi
 
 echo "==> building the worker image from this checkout"
 if ! docker build -t "$WORKER_IMAGE" . >/tmp/ol-docker-build.log 2>&1; then
@@ -321,7 +373,9 @@ echo "==> dialect: $DIALECT"
 # ---- the documented commands -------------------------------------------
 
 ran=0
-total=2
+# Derived from the dialect's own required set above, not hardcoded: the two arms
+# run two documented commands each, but they are not the same two.
+total=${#REQUIRED_CMDS[@]}
 
 run_documented() {
   local label="$1" cmd="$2"
@@ -331,8 +385,8 @@ run_documented() {
   # README is rewritten so this line is no longer a `cleat` invocation, running
   # it would measure something else -- say so rather than running it.
   case "$cmd" in
-    *"$CLEAT_BIN"*) ;;
-    *) echo "FAIL: the extracted $label command is not a cleat invocation: $cmd" >&2; exit 1 ;;
+    *"$CLEAT_BIN"*|*"$DEPLOY_WF_BIN"*) ;;
+    *) echo "FAIL: the extracted $label command runs neither $CLEAT_BIN nor $DEPLOY_WF_BIN: $cmd" >&2; exit 1 ;;
   esac
   if ! eval "$cmd" >/tmp/ol-cmd.log 2>&1; then
     echo "FAIL: the README's documented command failed:" >&2
@@ -357,16 +411,81 @@ if [[ ! -f "$WASM" ]]; then
   exit 1
 fi
 
-DEPLOY_RUN="${DEPLOY_CMD//cleat /$CLEAT_BIN }"
-DEPLOY_RUN="${DEPLOY_RUN//\/tmp\/out/$OUT_DIR}"
+# ---- the deploy step, which is the ONE command whose text differs ---------
+#
+# `cleat` is PostgreSQL-only: cmd/cleat/db.go refuses a MySQL or SQL Server DSN
+# and names `deploy-workflow` as the alternative, which is why the README
+# documents two deploy commands rather than one. The non-PostgreSQL arms take the
+# second.
+#
+# MEASURED, 2026-09-28, and it is the whole reason this branch exists: the first
+# version of this arm substituted only the DSN, on the reasoning that the engine
+# and the worker both speak three dialects. Both non-PostgreSQL arms failed here,
+# at this step, on the README's own command -- so what was wrong was the README's
+# claim, not the arm's machinery.
+if [[ "$DIALECT" == "postgres" ]]; then
+  DEPLOY_RUN="${DEPLOY_CMD//cleat /$CLEAT_BIN }"
+else
+  DEPLOY_RUN="$DEPLOY_WF_CMD"
+fi
+# `/tmp/out` is the convention every other example README uses; redirect it to a
+# directory this run owns. On the non-PostgreSQL arms this also rewrites
+# `/tmp/out/deploy-workflow` to the binary built above, which is why that binary
+# is built at exactly this path.
+#
 # There was a third substitution here until the dialect arm, rewriting
 # `localhost:5432` to the free port. It is gone because the README no longer
-# names a port: it reads `--db "$CLEAT_DB_URL"`, and CLEAT_DB_URL above is
-# already the right DSN for this dialect with the right port in it. That is a
-# better README and a stronger claim -- the deploy command's TEXT is now
-# identical on all three dialects, so "the documented command runs everywhere"
-# is a statement about one command rather than three near-copies.
-run_documented deploy "$DEPLOY_RUN"
+# names a port: both deploy forms read `--db "$CLEAT_DB_URL"`, and CLEAT_DB_URL
+# above is already the right DSN for this dialect with the right port in it.
+DEPLOY_RUN="${DEPLOY_RUN//\/tmp\/out/$OUT_DIR}"
+run_documented "$DEPLOY_LABEL" "$DEPLOY_RUN"
+
+# And the refusal itself, asserted rather than routed around.
+#
+# The CLI's PostgreSQL-only-ness is the fact that explains why there are two
+# deploy commands, so it is checked here rather than described in a comment. This
+# is also what makes the limitation VISIBLE if it is ever lifted: the day `cleat
+# deploy` accepts a MySQL DSN, this goes red and says the README is stale, rather
+# than the arm quietly continuing to route around a limit that no longer exists.
+if [[ "$DIALECT" != "postgres" ]]; then
+  refuse_log="/tmp/ol-cli-refuse-$DIALECT.log"
+  if "$CLEAT_BIN" deploy --db "$CLEAT_DB_URL" --name order-lifecycle "$WASM" \
+       >"$refuse_log" 2>&1; then
+    echo "    FAIL    cleat deploy ACCEPTED a $DIALECT DSN. This arm deploys with" >&2
+    echo "            deploy-workflow because the README says the CLI is PostgreSQL-only." >&2
+    echo "            One of the two is now wrong, and this arm's premise is the CLI one." >&2
+    failures=$((failures + 1))
+  elif grep -q 'only supports PostgreSQL' "$refuse_log"; then
+    echo "    ok      cleat deploy refuses a $DIALECT DSN, naming PostgreSQL as the reason"
+  else
+    # Non-zero for some OTHER reason is not the documented behaviour, and must
+    # not read as a pass. MEASURED 2026-09-28: `cleat deploy` exits 1 on a MySQL
+    # OR SQL Server DSN (the dialect refusal) AND exits 1 on a PostgreSQL DSN
+    # pointed at a closed port (a connection error). **Exit status cannot
+    # separate them**, so a check on the status alone would pass this arm while
+    # the README's stated reason went unverified.
+    #
+    # THE PHRASE IS CHOSEN CAREFULLY, AND NOT BECAUSE THE DIALECT NAME IS ABSENT
+    # -- it is present. Measured on the built binary, 2026-09-28: the SQL Server
+    # refusal contains `mssql` exactly once, in the REMEDY clause
+    # (`deploy-workflow --driver mssql`), while the DIAGNOSIS clause reads
+    # "looks like SQL Server".
+    #
+    # So `grep -q "$DIALECT"` WOULD match, and that is worse than a miss rather
+    # than better. This check exists to assert that the CLI named the right
+    # dialect as ITS REASON for refusing. The flag spelling in the remedy makes
+    # no claim about the diagnosis -- it would still be there if the leading
+    # clause named the wrong dialect, or named none at all. **A pass satisfied
+    # by the remedy is a green tick for the wrong reason**, which is the failure
+    # this arm exists to catch.
+    #
+    # `only supports PostgreSQL` sits in the diagnosis clause, which is the part
+    # that carries the claim.
+    echo "    FAIL    cleat deploy failed on $DIALECT, but not for the documented reason:" >&2
+    sed 's/^/            /' "$refuse_log" >&2
+    failures=$((failures + 1))
+  fi
+fi
 
 # ---- the webhook source the workflow waits on --------------------------
 #
@@ -474,12 +593,9 @@ contains() {
 # positive fact the worker prints. The other half has no fact to assert, and
 # saying so -- without counting it as a pass -- is the point.
 #
-# The counter starts here, beside the first check that can increment it. It used
-# to be reset at the head of this section, which was harmless while nothing
-# above incremented it and became a silent eraser the moment something did: the
-# RLS failure would have been counted and then zeroed, and the run would have
-# reported clean.
-failures=0
+# `failures` is initialised near the top of the file with the rest of the
+# script's state, not here. Read the note there before moving it down: a counter
+# reset below a check silently erases that check's failure.
 worker_log="$("${COMPOSE[@]}" logs cleat-worker 2>/dev/null || true)"
 if [[ "$DIALECT" == "postgres" ]]; then
   contains "the worker's RLS posture" "$worker_log" \
