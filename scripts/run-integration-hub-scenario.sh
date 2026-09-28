@@ -100,6 +100,56 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 2
 fi
 
+# ---- the dialect -------------------------------------------------------
+#
+# scripts/run-integration-hub-scenario.sh [postgres|mysql|mssql]
+#
+# cleat#2560. Same shape as scripts/run-order-lifecycle-scenario.sh -- read that
+# script's DIALECT ARMS note, which is the reference; this file states only what
+# differs.
+#
+# WHAT DIFFERS HERE: this scenario polls the notifications plugin's deliveries
+# route, and THAT route is dialect-parameterised where order-lifecycle's saga is
+# not. plugins/notifications/routes.go crosses four seams on the path this file
+# exercises:
+#
+#   webhookExistsSQL(d)  -- `SELECT EXISTS(...)` is invalid on SQL Server, so the
+#                           statement itself is different there (routes.go:69)
+#   plugin.LimitClause   -- SQL Server has no LIMIT              (routes.go:574)
+#   plugin.Rebind        -- $N vs ?, by appearance vs by number  (routes.go:540)
+#   plugin.ScanRow       -- column scanning                      (routes.go:596)
+#
+# That endpoint's own comment records what it cost the first time it met SQL
+# Server: "every call failed outright". So this half is the reason a dialect arm
+# is worth more here than on the saga -- the deliveries assertions below are what
+# would have caught it.
+DIALECT="${1:-postgres}"
+case "$DIALECT" in
+  postgres)
+    PORT_ENV=CLEAT_PG_PORT
+    HOST_DB_URL_TMPL='postgres://cleat:cleat@localhost:__PORT__/cleat?sslmode=disable'
+    NET_MIGRATE_DB_URL='postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable'
+    NET_WORKER_DB_URL='postgres://cleat_app:cleat-app-local-dev@postgres:5432/cleat?sslmode=disable'
+    ;;
+  mysql)
+    PORT_ENV=CLEAT_MYSQL_PORT
+    HOST_DB_URL_TMPL='root:cleat@tcp(localhost:__PORT__)/cleat?tls=false&parseTime=true'
+    NET_MIGRATE_DB_URL='root:cleat@tcp(mysql:3306)/cleat?tls=false&parseTime=true'
+    NET_WORKER_DB_URL="$NET_MIGRATE_DB_URL"
+    ;;
+  mssql)
+    PORT_ENV=CLEAT_MSSQL_PORT
+    HOST_DB_URL_TMPL='sqlserver://sa:CleatTest123!@localhost:__PORT__?database=cleat'
+    NET_MIGRATE_DB_URL='sqlserver://sa:CleatTest123!@mssql:1433?database=cleat'
+    NET_WORKER_DB_URL="$NET_MIGRATE_DB_URL"
+    ;;
+  *)
+    echo "UNMEASURED: unknown dialect '$DIALECT'." >&2
+    echo "Expected one of: postgres, mysql, mssql. Nothing was run." >&2
+    exit 2
+    ;;
+esac
+
 # ---- extract the documented commands ----------------------------------
 #
 # Join line-continuations BEFORE looking for anything: a command written across
@@ -112,14 +162,35 @@ extract_one() { printf '%s\n' "$DOC_COMMANDS" | grep -m1 -E "$1" || true; }
 
 BUILD_CMD="$(extract_one '(^| )cleat build ')"
 DEPLOY_CMD="$(extract_one '(^| )cleat deploy ')"
+DEPLOY_WF_CMD="$(extract_one 'deploy-workflow --driver')"
+
+# The deploy step is TWO documented commands, one per group of dialects -- the
+# `cleat` CLI is PostgreSQL-only and refuses a MySQL or SQL Server DSN, naming
+# `deploy-workflow` as the alternative. So the required set is dialect-dependent
+# rather than loosened to "at least one of these", which would pass an arm that
+# had quietly stopped finding its own command.
+if [[ "$DIALECT" == "postgres" ]]; then
+  REQUIRED_CMDS=(build deploy)
+  DEPLOY_LABEL=deploy
+else
+  REQUIRED_CMDS=(build deploy-workflow)
+  DEPLOY_LABEL=deploy-workflow
+fi
 
 examined=0
-for c in "$BUILD_CMD" "$DEPLOY_CMD"; do [[ -z "$c" ]] || examined=$((examined + 1)); done
-if [[ $examined -lt 2 ]]; then
-  echo "UNMEASURED: found $examined of 2 documented cleat commands (build, deploy) in $README." >&2
+for want in "${REQUIRED_CMDS[@]}"; do
+  case "$want" in
+    build)           [[ -n "$BUILD_CMD" ]]     && examined=$((examined + 1)) ;;
+    deploy)          [[ -n "$DEPLOY_CMD" ]]    && examined=$((examined + 1)) ;;
+    deploy-workflow) [[ -n "$DEPLOY_WF_CMD" ]] && examined=$((examined + 1)) ;;
+  esac
+done
+if (( examined < ${#REQUIRED_CMDS[@]} )); then
+  echo "UNMEASURED: found $examined of ${#REQUIRED_CMDS[@]} documented commands for the $DIALECT arm (${REQUIRED_CMDS[*]}) in $README." >&2
   echo "The extractor stopped seeing them, or the README stopped documenting them. Either" >&2
   echo "way a clean result below would mean nothing. Extracted:" >&2
-  printf '  build : %s\n  deploy: %s\n' "$BUILD_CMD" "$DEPLOY_CMD" >&2
+  printf '  build           : %s\n  deploy          : %s\n  deploy-workflow : %s\n' \
+    "$BUILD_CMD" "$DEPLOY_CMD" "$DEPLOY_WF_CMD" >&2
   exit 2
 fi
 
@@ -130,13 +201,31 @@ free_port() {
 }
 
 SUFFIX="$$-$(date +%s)"
-PG_PORT="$(free_port)"
+DB_PORT="$(free_port)"
 API_PORT="$(free_port)"
 WORKER_IMAGE="cleat-integration-hub-test:$SUFFIX"
-COMPOSE=(docker compose -f "$EXAMPLE_DIR/docker-compose.yml")
+COMPOSE=(docker compose --profile "$DIALECT" -f "$EXAMPLE_DIR/docker-compose.yml")
 OUT_DIR="$(mktemp -d)"
-export CLEAT_PG_PORT="$PG_PORT" CLEAT_API_PORT="$API_PORT"
+# The port is chosen at runtime, so the host DSN is templated rather than
+# literal. CLEAT_DB_URL is the variable the README's dialect table tells a reader
+# to set, so both documented deploy commands work unchanged on every dialect.
+HOST_DB_URL="${HOST_DB_URL_TMPL//__PORT__/$DB_PORT}"
+export "$PORT_ENV=$DB_PORT" CLEAT_API_PORT="$API_PORT"
+export CLEAT_DIALECT="$DIALECT"
+export CLEAT_DB_URL="$HOST_DB_URL"
+export CLEAT_MIGRATE_DB_URL="$NET_MIGRATE_DB_URL" CLEAT_WORKER_DB_URL="$NET_WORKER_DB_URL"
 export COMPOSE_PROJECT_NAME="cleat-integration-hub-$SUFFIX"
+
+# The failure counter, initialised ONCE, above every check that can increment it.
+# Moving it here rather than beside the first check is deliberate: a counter
+# placed relative to an editing history is a state that decays, and this one did
+# -- twice in the sibling script, by the same route, three edits apart.
+failures=0
+
+# Where the non-PostgreSQL deploy binary is built. The README's second deploy
+# command names this exact path, so building it here lets the extracted command
+# run verbatim rather than being rewritten.
+DEPLOY_WF_BIN="$OUT_DIR/deploy-workflow"
 
 # On failure the worker's own log is the only artefact that explains what
 # happened, and the stack is about to be removed -- so it is captured HERE. A
@@ -174,6 +263,18 @@ if [[ "$default_image_count" -ne 2 ]]; then
   exit 1
 fi
 export CLEAT_WORKER_IMAGE="$WORKER_IMAGE"
+
+# The non-PostgreSQL deploy tool, built the way the README tells a reader to
+# build it. A PRECONDITION rather than one of the counted commands, for the same
+# reason `.bin/cleat` is: it is tooling, not the scenario.
+if [[ "$DIALECT" != "postgres" ]]; then
+  echo "==> building deploy-workflow from this checkout"
+  if ! go build -o "$DEPLOY_WF_BIN" ./cmd/deploy-workflow >/tmp/ih-dw-build.log 2>&1; then
+    echo "FAIL: the README's documented build of deploy-workflow failed:" >&2
+    tail -20 /tmp/ih-dw-build.log >&2
+    exit 1
+  fi
+fi
 
 echo "==> building the worker image from this checkout"
 if ! docker build -t "$WORKER_IMAGE" . >/tmp/ih-docker-build.log 2>&1; then
@@ -214,18 +315,27 @@ if [[ -z "$API_KEY" ]]; then
 fi
 auth=(-H "Authorization: Bearer $API_KEY")
 
+# Announced here so the dialect is on screen before any output a reader might
+# mistake for the default arm's. The RLS check itself is in the assertions
+# section beside `contains`, because a bash function must be defined before it is
+# called and the helpers are all defined below this point.
+echo
+echo "==> dialect: $DIALECT"
+
 # ---- the documented commands -------------------------------------------
 
 ran=0
-total=2
+# Derived from the dialect's own required set, not hardcoded: the two arms run
+# two documented commands each, but they are not the same two.
+total=${#REQUIRED_CMDS[@]}
 
 run_documented() {
   local label="$1" cmd="$2"
   echo
   echo "==> ($label) \$ $cmd"
   case "$cmd" in
-    *"$CLEAT_BIN"*) ;;
-    *) echo "FAIL: the extracted $label command is not a cleat invocation: $cmd" >&2; exit 1 ;;
+    *"$CLEAT_BIN"*|*"$DEPLOY_WF_BIN"*) ;;
+    *) echo "FAIL: the extracted $label command runs neither $CLEAT_BIN nor $DEPLOY_WF_BIN: $cmd" >&2; exit 1 ;;
   esac
   if ! eval "$cmd" >/tmp/ih-cmd.log 2>&1; then
     echo "FAIL: the README's documented command failed:" >&2
@@ -248,10 +358,54 @@ if [[ ! -f "$WASM" ]]; then
   exit 1
 fi
 
-DEPLOY_RUN="${DEPLOY_CMD//cleat /$CLEAT_BIN }"
+# ---- the deploy step, which is the ONE command whose text differs ---------
+#
+# `cleat` is PostgreSQL-only: cmd/cleat/db.go refuses a MySQL or SQL Server DSN
+# and names `deploy-workflow` as the alternative, which is why the README
+# documents two deploy commands rather than one. The non-PostgreSQL arms take the
+# second. Measured on the sibling scenario, 2026-09-28: the arms failed HERE, on
+# the README's own command, before the compose was ever reached.
+if [[ "$DIALECT" == "postgres" ]]; then
+  DEPLOY_RUN="${DEPLOY_CMD//cleat /$CLEAT_BIN }"
+else
+  DEPLOY_RUN="$DEPLOY_WF_CMD"
+fi
+# `/tmp/out` is the convention every other example README uses; redirect it to a
+# directory this run owns. On the non-PostgreSQL arms this also rewrites
+# `/tmp/out/deploy-workflow` to the binary built above.
+#
+# There was a third substitution here until the dialect arm, rewriting
+# `localhost:5432` to the free port. It is gone because the README no longer
+# names a port: both deploy forms read `--db "$CLEAT_DB_URL"`.
 DEPLOY_RUN="${DEPLOY_RUN//\/tmp\/out/$OUT_DIR}"
-DEPLOY_RUN="${DEPLOY_RUN//localhost:5432/localhost:$PG_PORT}"
-run_documented deploy "$DEPLOY_RUN"
+run_documented "$DEPLOY_LABEL" "$DEPLOY_RUN"
+
+# And the refusal itself, asserted rather than routed around.
+#
+# The CLI's PostgreSQL-only-ness is the fact that explains why there are two
+# deploy commands, so it is checked here rather than described in a comment --
+# and it makes the limitation visible if it is ever lifted: the day `cleat deploy`
+# accepts a MySQL DSN, this goes red and says the README is stale.
+if [[ "$DIALECT" != "postgres" ]]; then
+  refuse_log="/tmp/ih-cli-refuse-$DIALECT.log"
+  if "$CLEAT_BIN" deploy --db "$CLEAT_DB_URL" --name integration-hub "$WASM" \
+       >"$refuse_log" 2>&1; then
+    echo "    FAIL    cleat deploy ACCEPTED a $DIALECT DSN. This arm deploys with" >&2
+    echo "            deploy-workflow because the README says the CLI is PostgreSQL-only." >&2
+    echo "            One of the two is now wrong, and this arm's premise is the CLI one." >&2
+    failures=$((failures + 1))
+  elif grep -q 'only supports PostgreSQL' "$refuse_log"; then
+    echo "    ok      cleat deploy refuses a $DIALECT DSN, naming PostgreSQL as the reason"
+  else
+    # A non-zero exit for some OTHER reason is not the documented behaviour and
+    # must not read as a pass: MEASURED on the sibling scenario, `cleat deploy`
+    # exits 1 for the dialect refusal AND exits 1 for a PostgreSQL DSN against a
+    # closed port, so the status cannot separate them.
+    echo "    FAIL    cleat deploy failed on $DIALECT, but not for the documented reason:" >&2
+    sed 's/^/            /' "$refuse_log" >&2
+    failures=$((failures + 1))
+  fi
+fi
 
 # ---- setup: the sink, and the two registrations -------------------------
 #
@@ -278,8 +432,12 @@ SOURCE_ID="$(printf '%s' "$SOURCE_JSON" | python3 -c 'import json,sys;print(json
 echo "    ingest source ${SOURCE_ID:0:8}…"
 
 # ---- helpers -----------------------------------------------------------
-
-failures=0
+#
+# `failures` is NOT reset here. It was, and it was harmless -- nothing above this
+# point incremented it -- which is exactly why it survived: the defect only
+# appears once a check is added above it, and then it is silent. It is now
+# initialised once near the top with the rest of the script's state, so no check
+# can precede the initialisation whatever order this file is edited into.
 
 run_status() {
   curl -fsS --max-time 10 "$API/api/workflows/$1" "${auth[@]}" 2>/dev/null |
@@ -350,6 +508,38 @@ contains() {
   if [[ "$hay" == *"$needle"* ]]; then echo "    ok      $what contains '$needle'"
   else echo "    FAIL    $what does not contain '$needle' (got: $hay)" >&2; failures=$((failures + 1)); fi
 }
+
+# ---- what THIS dialect does and does not guarantee ----------------------
+#
+# The one place the three arms are deliberately not the same assertion. Read the
+# DIALECT ARMS note in the header before changing it.
+#
+# `contains` is reused for the PostgreSQL half because the claim there is a
+# positive fact the worker prints. The other half has no fact to assert, and
+# saying so -- without counting it as a pass -- is the point.
+worker_log="$("${COMPOSE[@]}" logs cleat-worker 2>/dev/null || true)"
+if [[ "$DIALECT" == "postgres" ]]; then
+  contains "the worker's RLS posture" "$worker_log" \
+    "row-level security is enforced on this connection"
+else
+  if [[ "$worker_log" == *"row-level security is enforced on this connection"* ]]; then
+    # The gate in cmd/cleat-worker/main.go is `--driver == "postgres"`, and
+    # engine.CheckRLSEnforced queries pg_roles. If this ever prints on another
+    # dialect then the README's statement about that dialect -- that nothing
+    # there enforces RLS -- has become false, whatever else changed.
+    echo "    FAIL    the worker reports RLS enforced on $DIALECT, where the README" >&2
+    echo "            says nothing does. The README's dialect table is now wrong." >&2
+    failures=$((failures + 1))
+  else
+    echo "    --      no RLS assertion on $DIALECT, and none available to make."
+    echo "            cleat's MySQL is single-tenant by construction and SQL Server has"
+    echo "            no runtime enforcement check either: cmd/cleat-worker/main.go gates"
+    echo "            the whole check on --driver == \"postgres\", before calling"
+    echo "            engine.CheckRLSEnforced, which queries pg_roles and could not run"
+    echo "            here. The assertions below are NOT weaker for it -- they are the"
+    echo "            same assertions, and they are what this arm measures."
+  fi
+fi
 
 # ---- the crash-resume run ----------------------------------------------
 

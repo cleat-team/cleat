@@ -1339,8 +1339,21 @@ jobs:
         run: scripts/run-order-lifecycle-scenario.sh ${{ matrix.dialect }}
 
   integration-hub-scenario:
-    name: Integration hub scenario
+    # One entry per dialect: the same scenario, the same assertions, three
+    # databases. cleat#2560.
+    name: Integration hub scenario (${{ matrix.dialect }})
     runs-on: ubuntu-latest
+    # `fail-fast: false` so a red arm does not cancel the others -- the whole
+    # value of a dialect matrix is knowing WHICH dialect diverged.
+    #
+    # Confirmed NOT a required context before renaming, for the reason the
+    # sibling job states: `.github/required-checks.txt` matches on display names,
+    # so adding a matrix suffix to a REQUIRED context renames it out of the list
+    # and wedges the queue with nothing red. It is not in that file.
+    strategy:
+      fail-fast: false
+      matrix:
+        dialect: [postgres, mysql, mssql]
     # merge_group is excluded for the same reason as the job above -- read that
     # job's comment before removing this line. The short form: this is not a
     # required context, so a merge_group run would add a docker build to the
@@ -1351,19 +1364,31 @@ jobs:
     # cleat#2533.
     #
     # The job above (documented examples) builds ten and runs none. This one
-    # deploys a workflow to a real worker on a real PostgreSQL, delivers a signed
+    # deploys a workflow to a real worker on a real database, delivers a signed
     # inbound event, SIGKILLs the worker mid-run, lets the run resume, and
     # asserts the count -- which is the only way to see the class of failure a
     # build check cannot: a workflow that compiles, deploys, and then dispatches
     # to its connector twice.
     #
+    # THREE ARMS SINCE cleat#2560, and this example is where the dialect matrix
+    # earns its place more than its sibling does. The scenario polls the
+    # notifications plugin's deliveries route, and that handler crosses four
+    # seams where the STATEMENT differs rather than the data:
+    # `webhookExistsSQL` (SELECT EXISTS is invalid on SQL Server),
+    # `plugin.LimitClause` (no LIMIT there), `plugin.Rebind`, `plugin.ScanRow`.
+    # Its own source comment records what that cost the first time it met SQL
+    # Server -- "every call failed outright" -- so the deliveries assertions are
+    # what would catch a regression, and they are asserted on all three.
+    #
     # NOT a matrix entry under test-go, for the reason the sibling job gives:
     # examples/ is its own Go module, so a test beside the workflow would be
     # selected by no matrix entry.
     #
-    # TIME, so nobody is surprised: it builds the repository's Dockerfile and
-    # then runs compose, the same build cluster-tests does. That is the price of
-    # measuring the deployment the README documents.
+    # TIME, so nobody is surprised: each arm builds the repository's Dockerfile
+    # and then runs compose, the same build cluster-tests does. Parallel arms, so
+    # the wall clock is about what it was and the runner-minutes are not. That is
+    # the price of measuring the deployment the README documents on the dialects
+    # the README claims.
     steps:
       - uses: actions/checkout@v7
 
@@ -1384,7 +1409,7 @@ jobs:
       # trap, so such a step would find nothing and print the same output whether
       # the run passed or failed.
       - name: Run the scenario end to end
-        run: scripts/run-integration-hub-scenario.sh
+        run: scripts/run-integration-hub-scenario.sh ${{ matrix.dialect }}
 
   vulncheck:
     name: Vulnerability Check
