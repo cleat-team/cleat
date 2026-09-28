@@ -602,6 +602,23 @@ jobs:
           python3 scripts/check-readiness-doc.py --self-test
           python3 scripts/check-readiness-doc.py
 
+      # cleat#2513: the four-playbook correction pass (#2050-#2053) corrected
+      # each playbook's own body and never touched docs/playbooks/README.md,
+      # the shared table all four point back to -- so its routes row still
+      # said `RegisterRoutes(*http.ServeMux)` eleven days after cleat#2232
+      # changed the real interface to `plugin.Router` (cleat#2511). No network
+      # needed: both the documented interfaces and the Built? table's example
+      # dirs/CI job names are checked against this same tree.
+      #
+      # --self-test first, and its known-positive is the real cleat#2511 text
+      # (`RegisterRoutes(*http.ServeMux)`), not a synthetic mutation -- see the
+      # script's self_test() for the restore-and-diff falsification this was
+      # verified with before being wired in here.
+      - name: Playbook README interface and build claims
+        run: |
+          scripts/check-playbook-claims.py --self-test
+          scripts/check-playbook-claims.py
+
       # The guard above can only ever run against a pre-merge base, so the
       # post-merge run on develop is the only place a merge-created collision
       # is visible. This one keeps that run from being cancelled by the next
