@@ -1444,6 +1444,68 @@ jobs:
       - name: Run the scenario end to end
         run: scripts/run-integration-hub-scenario.sh ${{ matrix.dialect }}
 
+  order-lifecycle-dbos-pair-scenario:
+    name: Order lifecycle DBOS pair scenario
+    runs-on: ubuntu-latest
+    # merge_group is excluded for the same reason as the two jobs above --
+    # read integration-hub-scenario's comment before removing this line. Not
+    # a required context (.github/required-checks.txt), so a merge_group run
+    # would add an npm install/build to the critical path of every queue
+    # entry while gating nothing.
+    if: github.event_name != 'merge_group'
+    # examples/order-lifecycle-dbos-port, RUN rather than only built --
+    # cleat#2597. The pair's own README states the claim this job exists to
+    # back: a genuinely executed, equally-scoped DBOS counterpart of
+    # examples/order-lifecycle exists and is comparable to cleat's by the
+    # same line counter. An unexecuted port is not evidence for that, which
+    # is the exact gap the measurement doc that started this direction
+    # found -- see the README's "The claim this pair carries".
+    #
+    # ONE ARM, NOT A DIALECT MATRIX. cleat's own order-lifecycle-scenario runs
+    # three arms because this project's defect history is concentrated in SQL
+    # dialect divergence. The DBOS SDK's system database is Postgres-only --
+    # there is no second dialect on this side to diverge on.
+    services:
+      postgres:
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # 127.0.0.1, not localhost -- see test-go's identical comment on this
+      # exact ::1-vs-IPv4 hazard. DBOS creates its own system-database schema
+      # in the named database on launch, so no migration step is needed here.
+      DBOS_SYSTEM_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/order_lifecycle_dbos_ci
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "20"
+
+      # cloc is not part of the ubuntu-latest image; scripts/dbos-pair-loc.sh
+      # reports UNMEASURED rather than a false zero if it is missing, so an
+      # image that stops shipping something this step no longer installs
+      # fails loud here rather than reporting a clean run that counted
+      # nothing.
+      - name: Install cloc
+        run: sudo apt-get update && sudo apt-get install -y cloc
+
+      - name: Count lines for both sides of the pair
+        run: scripts/dbos-pair-loc.sh order-lifecycle
+
+      # No "dump logs on failure" step after this one, for the same reason as
+      # the sibling scenario jobs: the script's own EXIT trap tails the
+      # server's log on failure, before anything here could read it.
+      - name: Run the scenario end to end
+        run: scripts/run-order-lifecycle-dbos-scenario.sh
+
   ai-agent-platform-scenario:
     name: AI agent platform scenario
     runs-on: ubuntu-latest
