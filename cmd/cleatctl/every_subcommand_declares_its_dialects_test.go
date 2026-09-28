@@ -69,6 +69,14 @@ var unrestrictedSubcommands = map[string]string{
 	// through d.rebind, asserted directly by TestQuotaStatementsRebindPerDialect.
 	"quota": "ported to all three; tenant_quota is control-plane like tenant_settings (plugins read one shared env.DB, no per-tenant MySQL routing), and every statement goes through d.rebind (cleat#2046)",
 
+	// tenant_trials is tenantlifecycle's own table, same shape as tenant_quota
+	// above: one shared env.DB, no per-tenant MySQL routing, and
+	// runSetTenantTrial's read-then-write (settenanttrial.go) is plain
+	// portable SQL through d.rebindArgs -- no dialect-specific upsert syntax,
+	// which is exactly what tripped TestEveryInlineStatementParsesOnPostgres
+	// on the first version of this command. cleat#2534.
+	"set-tenant-trial": "ported to all three; tenant_trials is control-plane like tenant_quota, and every statement goes through d.rebindArgs",
+
 	// All three, and the SQL is not this package's: it calls auditlog.VerifyChain and
 	// auditlog.ChainedTenants, whose statements carry a per-dialect arm each and are
 	// exercised on PostgreSQL, MySQL and SQL Server by plugins/auditlog's

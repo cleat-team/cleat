@@ -129,6 +129,9 @@ var crossTenantLedger = map[string]bypassKind{
 	// tenant dimension -- token_hash IS NULL is what scopes it to
 	// never-completed rows, not tenant_id. See background.go's doc comment.
 	"plugins/oauthprovider/background.go:(*Plugin).sweepExpiredSessions": kindGlobalSweep,
+	// cleat#2534: trial expiry, cut off by expires_at with no tenant
+	// dimension -- "which trials anywhere have expired" is the predicate.
+	"plugins/tenantlifecycle/background.go:(*Plugin).Run": kindGlobalSweep,
 
 	// One transaction claims and advances every tenant's due rows.
 	"plugins/eventtriggers/background.go:(*Plugin).Run": kindClaimAcrossTenants,

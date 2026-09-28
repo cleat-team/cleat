@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -12,6 +13,13 @@ import (
 )
 
 var randRead = rand.Read
+
+// ErrTenantNotFound is returned by a write keyed on a tenant id that matched
+// no row, so a caller can tell "changed" from "there is no such tenant"
+// rather than getting the same nil error for both. A background sweep
+// reading a stale id (a tenant deleted between its read and its write) needs
+// this distinction as much as an HTTP caller eventually will.
+var ErrTenantNotFound = errors.New("auth: tenant not found")
 
 // TenantStore provides CRUD operations for tenants and their API keys.
 //
@@ -388,6 +396,54 @@ func (s *TenantStore) RevokeExpiredOAuthAPIKeys(ctx context.Context) (int64, err
 		return 0, err
 	}
 	return res.RowsAffected()
+}
+
+// SetTenantSuspended sets or clears a tenant's suspended flag.
+//
+// Extracted from cmd/cleatctl/suspendtenant.go, which used to inline this
+// UPDATE directly. cleatctl calls this now, and so does
+// plugins/tenantlifecycle's trial-expiry sweep, through
+// plugin.Environment.SetTenantSuspended -- one implementation instead of two.
+// cleat#866 is what two implementations of one write path disagreeing about
+// where a row lives looks like; this table has no reason to risk it a second
+// time.
+//
+// Works on every dialect. Unlike CreateTenant and the API-key writes above,
+// an UPDATE ... SET suspended = ? WHERE tenant_id = ? needs no
+// RETURNING-shaped workaround, so there is no dialect this refuses.
+//
+// Returns ErrTenantNotFound when the update affects zero rows, rather than
+// succeeding silently. A caller acting on a tenant id it did not just read
+// from this same table -- the sweep, eventually an admin route -- needs to
+// be able to tell "suspended" from "no such tenant" rather than getting the
+// same nil error for both.
+func (s *TenantStore) SetTenantSuspended(ctx context.Context, tenantID uuid.UUID, suspended bool) error {
+	res, err := s.db.ExecContext(ctx, setTenantSuspendedStmt(s.dialect), suspended, tenantID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("%w: %s", ErrTenantNotFound, tenantID)
+	}
+	return nil
+}
+
+// setTenantSuspendedStmt mirrors createAPIKeyStmt's per-dialect table naming:
+// admin.tenants on PostgreSQL and SQL Server, the unqualified tenants on
+// MySQL, which has no admin schema.
+func setTenantSuspendedStmt(dialect string) string {
+	switch dialect {
+	case DialectMySQL:
+		return `UPDATE tenants SET suspended = ? WHERE tenant_id = ?`
+	case DialectMSSQL:
+		return `UPDATE admin.tenants SET suspended = @p1 WHERE tenant_id = @p2`
+	default:
+		return `UPDATE admin.tenants SET suspended = $1 WHERE tenant_id = $2`
+	}
 }
 
 // GenerateAPIKey generates a random API key string.

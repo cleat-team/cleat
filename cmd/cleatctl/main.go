@@ -25,6 +25,7 @@
 //	drop-tenant <tenant-id>          — permanently delete a tenant and all its data
 //	suspend-tenant <tenant-id>       — stop new work for a tenant, reversibly
 //	resume-tenant <tenant-id>        — undo suspend-tenant
+//	set-tenant-trial <tenant-id> --days N — schedule a tenant for trial-expiry suspension
 //	revoke-api-key [flags]           — revoke a cleat API key (credential rotation)
 //	oauth-allow <list|add|remove>    — manage a tenant's OAuth identity allowlist
 package main
@@ -143,6 +144,8 @@ func main() {
 		runSuspendTenant(ctx, db, d, args[1:], true)
 	case "resume-tenant":
 		runSuspendTenant(ctx, db, d, args[1:], false)
+	case "set-tenant-trial":
+		runSetTenantTrial(ctx, db, d, args[1:])
 	case "revoke-api-key":
 		runRevokeAPIKey(ctx, db, args[1:])
 	case "set-tenant-setting":
@@ -202,6 +205,7 @@ Commands:
   drop-tenant <tenant-id> [--dry-run] [--yes]  permanently delete a tenant and all its data
   suspend-tenant <tenant-id> [--yes]           stop new work for a tenant, reversibly
   resume-tenant <tenant-id>                    undo suspend-tenant
+  set-tenant-trial <tenant-id> --days N        schedule a tenant for trial-expiry suspension
   revoke-api-key [--key-id|--key-hash|--key-stdin|--list]  revoke an API key
   quota get  --tenant <uuid> [--resource <name>]  show a tenant's quota
   quota set  --tenant <uuid> [--resource <name>] [--limit-count N]
