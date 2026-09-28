@@ -115,5 +115,14 @@ Web Dashboard
 #   260 and 7 -- were worked off. Both are zero and both linters are now steps
 #   in `Lint`, so the job was deleted rather than left as a permanent green.
 #   ci.yml keeps the full rationale where the job used to be.)
-#   Test Python 3.10/3.11/3.12
+#   Test Python 3.10/3.11/3.12/3.13
+#                                -- 3.13 joined this list with the check-run
+#                                itself (cleat#2462). The matrix stopped at 3.12
+#                                while `python-sdk/pyproject.toml` classified
+#                                3.13, so the newest version the package
+#                                advertised was exercised by nothing. It is NOT
+#                                required, matching its three siblings, and this
+#                                line is what makes that an absence-by-decision
+#                                rather than the oversight the block exists to
+#                                rule out.
 #   Benchmarks, Docs, Examples, and the release/soak/stale/ecosystem jobs.
