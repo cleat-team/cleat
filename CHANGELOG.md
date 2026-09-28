@@ -27,7 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   never matched a case in OpenAI's table, so **100% of Groq calls**, not just unrecognised ones,
   were priced at OpenAI's rate; and cost now keys on the model the provider actually served
   (`result.Model`) rather than the one requested (`input.Model`), so a provider that substitutes a
-  model bills at the substituted model's rate. (cleat#2572)
+  model bills at the substituted model's rate — **except Gemini, whose response carries no served-model
+  field at all** (the model only ever appears in the request URL), so `input.Model` is the only
+  candidate there; a limit of that API, not a gap in this fix. (cleat#2572)
 
 - **Every example app's live run-state panel rendered empty, because
   `backendkit.Client.GetWorkflowState` requested `/api/workflows/{id}/state` — a route that does not
