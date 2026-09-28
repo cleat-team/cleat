@@ -25,14 +25,16 @@ empty), `ip_address`, `user_agent`, `duration_ms` and `timestamp`, plus the chai
 A workflow can append to its own tenant's chain directly, with the `record_event` host
 function `plugins/auditlog/host_functions.go` registers:
 
-    { "event_type": "tenant.suspended", "details": {"reason": "trial_expired"} }
+    { "event_type": "tenant.suspended", "details": {"reason": "trial_expired"}, "event_id": "suspend-once" }
     -> { "recorded": true }
 
 `details` is optional and, when given, must be a JSON **object** (not a string, number, array
 or bare `true`/`false`) -- the same shape `metadata` has held since the chain existed, and a
 consumer reading the column back is entitled to keep assuming that. `null` is treated as
 omitted. `event_type` is required and has no fixed vocabulary; pick short, stable, dotted
-names (`tenant.suspended`, not a sentence) -- see *Field reuse* below for why.
+names (`tenant.suspended`, not a sentence) -- see *Field reuse* below for why. `event_id` is
+optional and is what closes *The residual* below for a caller that supplies it -- see that
+section.
 
 This call is **synchronous**, not queued: unlike an HTTP request's audit row (see *Delivery*
 below), it does not return until the row has committed. It uses the exact same transaction and
@@ -41,12 +43,21 @@ two interleave safely with no second append path.
 
 **Field reuse.** A workflow-sourced row has no HTTP request to describe, so it reuses the
 request-shaped columns rather than adding new ones: `method` is always the fixed string
-`PLUGIN_CALL` (never a real HTTP verb, so `method=` on `GET /audit/events` and in an export
-can select workflow-sourced rows apart from request ones), `path` holds `event_type`,
-`user_id` holds the calling workflow's id, and `status_code`, `duration_ms`, `ip_address` and
-`user_agent` are all present but empty/zero (`Valid: true` with no meaningful value, not
-`NULL`) -- the same shape they would have for any row, just uninformative here. `details`
-becomes `metadata`.
+`workflow:record_event`, `path` holds `event_type`, `user_id` holds the calling workflow's id,
+and `status_code`, `duration_ms`, `ip_address` and `user_agent` are all present but empty/zero
+(`Valid: true` with no meaningful value, not `NULL`) -- the same shape they would have for any
+row, just uninformative here. `details` becomes `metadata`.
+
+**The marker is not merely conventional -- it has to be syntactically impossible as an HTTP
+method.** This plugin's own middleware records every non-infrastructure request's `r.Method`
+verbatim, including a failed one, so an all-caps word like `PLUGIN_CALL` (the first version of
+this marker, before cleat-review's #2616 finding) IS a request a caller can send: RFC 9110's
+method grammar has no notion of "looks like a verb", and any caller whose request reaches this
+server could plant a row carrying it. `workflow:record_event` contains `:`, which is not a
+valid token character, so Go's HTTP server refuses the request line with `400` before any
+handler -- including this middleware -- ever runs. `method=` on `GET /audit/events` and in an
+export can therefore select workflow-sourced rows apart from request ones with the same
+confidence the chain gives everything else: nothing reachable over HTTP can forge one.
 
 **The residual: this is an ordinary AtLeastOnce host function, and a duplicate here is not
 quiet.** Every plugin host function in cleat (`send_message`, and now `record_event`) is
@@ -63,6 +74,17 @@ build that would let `appendOnce`'s existing `errAlreadyRecorded` path (used tod
 async queue's own retry) catch this case too -- `plugin.CallContext` carries no step number.
 Tracked as cleat#2614 (a `Step` field on `CallContext`, the same shape
 `DurableCallIdempotencyKey` already uses for `ServiceCaller`), not fixed here.
+
+**Closing it without waiting on cleat#2614: supply `event_id`.** A caller does not need the
+engine to give `record_event` a step number at all -- it already knows, better than any step
+counter could, which of its OWN calls are "the same event". `event_id`, scoped to the calling
+tenant and workflow, is turned into the row's deterministic id
+(`recordEventDeterministicID`); a repeat with the same `event_id` lands on `appendOnce`'s
+existing duplicate-id check and is reported as success without a second row. Two different
+workflow instances, or two different tenants, using the same `event_id` string produce
+different rows, never a collision -- and a workflow that reuses an `event_id` on purpose only
+suppresses its OWN later event, which it could already do by not calling `record_event` at
+all. Omitting `event_id` keeps the plain AtLeastOnce behaviour above unchanged.
 
 Text that cannot be stored or reproduced is replaced, not dropped: a `User-Agent` is bytes an
 attacker chooses, and PostgreSQL refuses invalid UTF-8 and NUL bytes. Both are replaced with

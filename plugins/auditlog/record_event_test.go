@@ -131,6 +131,87 @@ func TestRecordEventTwoCallsChainCorrectly(t *testing.T) {
 	})
 }
 
+// TestRecordEventWithAnEventIDIsIdempotent is the falsifiable regression test
+// for the closing-the-residual escape hatch cleat-review suggested on #2616:
+// two calls carrying the same event_id append exactly one row, and the
+// second call still reports success.
+func TestRecordEventWithAnEventIDIsIdempotent(t *testing.T) {
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		p := e.plugin()
+		tenant := uuid.New()
+		ctx := recordEventCallCtx(tenant, "wf-idempotent")
+
+		input, _ := json.Marshal(recordEventInput{
+			EventType: "tenant.provisioned",
+			EventID:   "provision-once",
+		})
+		for i := 0; i < 2; i++ {
+			outJSON, err := p.recordEvent(ctx, string(input))
+			if err != nil {
+				t.Fatalf("recordEvent call %d: %v", i+1, err)
+			}
+			var out recordEventOutput
+			if err := json.Unmarshal([]byte(outJSON), &out); err != nil {
+				t.Fatalf("unmarshal output %q: %v", outJSON, err)
+			}
+			if !out.Recorded {
+				t.Fatalf("recordEvent call %d output = %+v, want Recorded=true", i+1, out)
+			}
+		}
+
+		rep := e.verify(tenant)
+		if !rep.OK() {
+			t.Fatalf("verify reported a break: %+v", rep.Break)
+		}
+		if rep.Checked != 1 || rep.HeadSeq != 1 {
+			t.Fatalf("verify: %+v, want exactly ONE row despite two calls with the same event_id", rep)
+		}
+	})
+}
+
+// TestRecordEventDifferentEventIDsAppendSeparately proves the idempotency
+// test above isn't vacuous: two DIFFERENT event_ids for the same tenant and
+// workflow must both land.
+func TestRecordEventDifferentEventIDsAppendSeparately(t *testing.T) {
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		p := e.plugin()
+		tenant := uuid.New()
+		ctx := recordEventCallCtx(tenant, "wf-distinct-ids")
+
+		for _, id := range []string{"step-1", "step-2"} {
+			input, _ := json.Marshal(recordEventInput{EventType: "tenant.provisioned", EventID: id})
+			if _, err := p.recordEvent(ctx, string(input)); err != nil {
+				t.Fatalf("recordEvent(event_id=%q): %v", id, err)
+			}
+		}
+
+		rep := e.verify(tenant)
+		if !rep.OK() {
+			t.Fatalf("verify reported a break: %+v", rep.Break)
+		}
+		if rep.Checked != 2 || rep.HeadSeq != 2 {
+			t.Fatalf("verify: %+v, want 2 distinct rows for 2 distinct event_ids", rep)
+		}
+	})
+}
+
+// TestRecordEventDeterministicIDIsScopedToTenantAndWorkflow proves the same
+// event_id string, for a DIFFERENT tenant or a different workflow, is not
+// treated as the same event -- otherwise two unrelated callers reusing an
+// obvious id like "start" would silently suppress each other.
+func TestRecordEventDeterministicIDIsScopedToTenantAndWorkflow(t *testing.T) {
+	tenantA, tenantB := uuid.New(), uuid.New()
+	idA := recordEventDeterministicID(tenantA, "wf-1", "start")
+	idB := recordEventDeterministicID(tenantB, "wf-1", "start")
+	if idA == idB {
+		t.Fatalf("recordEventDeterministicID gave the same id for two different tenants: %s", idA)
+	}
+	idC := recordEventDeterministicID(tenantA, "wf-2", "start")
+	if idA == idC {
+		t.Fatalf("recordEventDeterministicID gave the same id for two different workflows: %s", idA)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Input validation -- no database reached, so no dialect matrix is needed: a
 // non-dialing *sql.DB is enough to prove appendChained is never called.

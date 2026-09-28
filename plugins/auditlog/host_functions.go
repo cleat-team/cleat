@@ -5,8 +5,10 @@ package auditlog
 // HTTP request does.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/cleat-team/cleat/plugin"
@@ -14,10 +16,27 @@ import (
 )
 
 // workflowEventMethod marks a row as workflow-sourced rather than an HTTP
-// request's. No HTTP method is ever this string, so `method=` on
-// GET /audit/events, and the same column in cleatctl's export, can select
-// workflow-sourced rows apart from request rows.
-const workflowEventMethod = "PLUGIN_CALL"
+// request's, so `method=` on GET /audit/events, and the same column in
+// cleatctl's export, can select workflow-sourced rows apart from request
+// rows.
+//
+// IT MUST NOT BE A VALID HTTP METHOD TOKEN, and that is not decoration: the
+// auditlog middleware records r.Method verbatim for every non-infrastructure
+// request, including a failed one, AFTER the handler runs (middleware.go).
+// An all-caps word like "PLUGIN_CALL" IS a valid token (RFC 9110's tchar
+// grammar has no notion of "looks like an HTTP verb"), so any caller whose
+// request reaches this server could plant a row carrying the exact marker
+// this file uses to claim "workflow-sourced" -- cleat-review found this on
+// #2616 by sending the raw request line "PLUGIN_CALL /tenant.suspended
+// HTTP/1.1" to a bare httptest server and getting a 204 with method ==
+// "PLUGIN_CALL".
+//
+// ':' is not a tchar, so "workflow:record_event" is not a syntactically
+// valid method token at all: Go's net/http server refuses the request line
+// with 400 before any handler, and before this middleware, ever sees it.
+// TestWorkflowEventMethodIsNotAValidHTTPMethodToken pins this against a raw
+// TCP connection, the same way it was found.
+const workflowEventMethod = "workflow:record_event"
 
 // RegisterHostFunctions registers workflow-callable functions on the scoped
 // function registry. The plugin name is implicit -- "audit-log" -- so
@@ -38,6 +57,12 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 type recordEventInput struct {
 	EventType string          `json:"event_type"`
 	Details   json.RawMessage `json:"details,omitempty"`
+
+	// EventID, when supplied, makes this call idempotent: see
+	// recordEventDeterministicID's doc comment for what it is derived from
+	// and why. Optional -- an empty value falls back to the ordinary
+	// AtLeastOnce behaviour documented above.
+	EventID string `json:"event_id,omitempty"`
 }
 
 type recordEventOutput struct {
@@ -78,6 +103,19 @@ type recordEventOutput struct {
 // function already has it), but it is sharper here than for e.g. a Slack
 // message, because the audit chain's whole job is to be the record of what
 // happened.
+//
+// # Closing it without waiting on cleat#2614
+//
+// A caller who supplies EventID does not need the engine to give this
+// function a step number at all -- it already knows, better than any step
+// counter could, which of ITS OWN calls are "the same event" (cleat-review's
+// finding on #2616). recordEventDeterministicID turns
+// (tenant, workflow, event_id) into the row's id and sets chainEvent.retry,
+// so a repeat lands on appendOnce's existing errAlreadyRecorded path -- the
+// same mechanism the async queue's own retry-after-timeout already relies on
+// (queue.go) -- and is reported as success without a second row. A caller
+// that omits EventID keeps the residual above exactly as described; this is
+// an escape hatch for the caller that wants it; the default is unchanged.
 func (p *Plugin) recordEvent(ctx context.Context, inputJSON string) (string, error) {
 	if p.db == nil {
 		return "", fmt.Errorf("audit-log: record_event: no database")
@@ -128,16 +166,64 @@ func (p *Plugin) recordEvent(ctx context.Context, inputJSON string) (string, err
 	// all -- but appendChained's own statements also take tenantID directly as
 	// a bound argument, the same way sendMessage's own tenantID does not rely
 	// on ctx scoping alone for its non-RLS lookups.
-	if err := p.appendChained(ctx, chainEvent{
+	ce := chainEvent{
 		tenantID: tenantID,
 		method:   workflowEventMethod,
 		path:     input.EventType,
 		userID:   cc.WorkflowID,
 		metadata: details,
-	}); err != nil {
+	}
+	if input.EventID != "" {
+		ce.id = recordEventDeterministicID(tenantID, cc.WorkflowID, input.EventID)
+		ce.retry = true
+	}
+	if err := p.appendChained(ctx, ce); err != nil {
+		// A caller that supplied EventID and is seeing its own earlier
+		// success again (a retried host call, a replay reaching this point
+		// a second time some other way) is not a failure -- see
+		// recordEventDeterministicID's doc comment.
+		if errors.Is(err, errAlreadyRecorded) {
+			out, _ := json.Marshal(recordEventOutput{Recorded: true})
+			return string(out), nil
+		}
 		return "", fmt.Errorf("audit-log: record_event: %w", err)
 	}
 
 	out, _ := json.Marshal(recordEventOutput{Recorded: true})
 	return string(out), nil
+}
+
+// recordEventDeterministicID turns one workflow-supplied EventID into the
+// row's id, so a repeat lands on appendOnce's own duplicate-id check
+// (chain_store.go's errAlreadyRecorded path) instead of appending twice.
+//
+// Domain-separated with NUL bytes, the same reasoning
+// DurableCallIdempotencyKey gives (engine/idempotency.go) and for the same
+// reason: without a separator, tenant "ab" + workflow "c" + event "x" and
+// tenant "a" + workflow "bc" + event "x" would hash identically, and two
+// unrelated calls could collide. recordEventIDNamespace is a fixed prefix
+// rather than a uuid.UUID passed as NewSHA1's "space" argument, because the
+// domain separation only has to be unique to THIS derivation, not a
+// registered RFC 4122 namespace -- uuid.Nil is passed as the space and the
+// prefix does the same job the codebase's other hash domains do (see
+// chain.go's chainDomain).
+//
+// EventID is the CALLER's identifier for its own event, scoped to
+// (tenant, workflow): two different workflow instances, or two different
+// tenants, using the same EventID string produce different rows, never a
+// collision. It is NOT scoped to guard against a hostile caller -- a guest
+// that reuses an id on purpose only suppresses ITS OWN later event, which it
+// could already do by choosing not to call this function at all
+// (cleat-review's non-blocking note on #2616).
+const recordEventIDNamespace = "cleat-audit-record-event-v1\x00"
+
+func recordEventDeterministicID(tenantID uuid.UUID, workflowID, eventID string) uuid.UUID {
+	var buf bytes.Buffer
+	buf.WriteString(recordEventIDNamespace)
+	buf.WriteString(tenantID.String())
+	buf.WriteByte(0)
+	buf.WriteString(workflowID)
+	buf.WriteByte(0)
+	buf.WriteString(eventID)
+	return uuid.NewSHA1(uuid.Nil, buf.Bytes())
 }
