@@ -745,18 +745,25 @@ fi
 # per-IP burst of 200, so a 429 here can only have come from the plugin.
 echo
 echo "==> bursting 40 authenticated requests"
-codes=""; with_header=0
+# codes is an ARRAY, and that is not a style preference. It was a
+# space-separated string whose ONE consumer relied on word splitting --
+# `printf '%s\n' $codes` -- to put each code on its own line, so the correct
+# repair is not to quote it (that prints one line and reports 0 of 40) but to
+# stop encoding a list as a string. ShellCheck flags the unquoted expansion as
+# SC2086 and shellcheck is right; the old form was load-bearing only because a
+# list was being spelled as text.
+codes=(); with_header=0
 for _ in $(seq 1 40); do
   out="$(curl -s -D - --max-time 5 "${auth[@]}" -o /dev/null "$API/api/workflows" 2>/dev/null)"
   code="$(printf '%s' "$out" | head -1 | awk '{print $2}')"
-  codes="$codes $code"
+  codes+=("$code")
   [[ "$code" == "429" ]] && printf '%s' "$out" | grep -qi '^X-RateLimit-Limit:' && with_header=$((with_header + 1))
 done
-over=$(printf '%s\n' $codes | grep -c '^429$')
+over=$(printf '%s\n' "${codes[@]}" | grep -c '^429$')
 
 if (( over == 0 )); then
   echo "    FAIL    no request in a burst of 40 was rate limited" >&2
-  echo "            (codes: $(printf '%s' "$codes" | tr ' ' '\n' | sort -u | tr '\n' ' '))" >&2
+  echo "            (codes seen: $(printf '%s\n' "${codes[@]}" | sort -u | tr '\n' ' '))" >&2
   failures=$((failures + 1))
 else
   echo "    ok      $over of 40 requests were rate limited (429)"
