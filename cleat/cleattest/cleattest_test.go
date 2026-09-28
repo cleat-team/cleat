@@ -217,6 +217,57 @@ func TestAssertNotCalledFails(t *testing.T) {
 	}
 }
 
+// The next three pin cleat#2539, where a plugin call never entered callHistory —
+// so over one call AssertCalled always failed and AssertNotCalled always passed,
+// whichever it had actually done. The first two are the two arms; the third is
+// the control, because a fix that made AssertNotCalled fail unconditionally would
+// satisfy the second on its own.
+
+func TestAssertCalledSeesAPluginCall(t *testing.T) {
+	env := NewTestEnv()
+	env.OnPluginCall("notifications", "send_webhook").Return(`{"ok":true}`, nil)
+
+	if _, err := env.H().PluginCall("notifications", "send_webhook", "{}"); err != nil {
+		t.Fatalf("plugin call failed: %v", err)
+	}
+
+	// Must not call Fatalf. Before cleat#2539 this always did.
+	env.AssertCalled(t, "notifications", "send_webhook")
+}
+
+func TestAssertNotCalledFailsOverAPluginCall(t *testing.T) {
+	env := NewTestEnv()
+	env.OnPluginCall("notifications", "send_webhook").Return(`{"ok":true}`, nil)
+
+	if _, err := env.H().PluginCall("notifications", "send_webhook", "{}"); err != nil {
+		t.Fatalf("plugin call failed: %v", err)
+	}
+
+	mt := &mockT{}
+	env.AssertNotCalled(mt, "notifications", "send_webhook")
+	if !mt.fatalfCalled {
+		t.Fatal("AssertNotCalled PASSED over a plugin call that demonstrably happened. " +
+			"(cleat#2539) An assertion that cannot fail certifies whatever it is pointed at, " +
+			"and this is the arm whose failure is discovered never rather than on first run.")
+	}
+}
+
+// The control. A plugin that is STUBBED but never CALLED must still satisfy
+// AssertNotCalled -- otherwise the fix above is satisfied by an assertion that
+// simply always fails, which is the same defect pointing the other way.
+func TestAssertNotCalledPassesWhenThePluginCallWasNotMade(t *testing.T) {
+	env := NewTestEnv()
+	env.OnPluginCall("notifications", "send_webhook").Return(`{"ok":true}`, nil)
+
+	_, err := env.H().PluginCall("notifications", "other_function", "{}")
+	if err == nil {
+		t.Fatal("expected the unstubbed function to error, so this test proves " +
+			"that SOMETHING was attempted and only the named call is absent")
+	}
+
+	env.AssertNotCalled(t, "notifications", "send_webhook")
+}
+
 // ---------------------------------------------------------------------------
 // 8. AfterSignal -> AwaitSignals receives it
 // ---------------------------------------------------------------------------

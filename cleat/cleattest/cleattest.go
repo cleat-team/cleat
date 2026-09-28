@@ -1675,6 +1675,20 @@ func settledErr(status, errorMsg string) error {
 	return nil
 }
 
+// pluginCallImpl records into the same history the call assertions read. It did
+// not, and that made AssertNotCalled unable to fail over a plugin call: both
+// assertions iterate callHistory, plugin calls were absent from it, so over one
+// call AssertCalled always failed and AssertNotCalled always passed -- whichever
+// the call actually did. AssertCalled's failure is discovered on first run;
+// AssertNotCalled's is discovered never, because it certifies whatever it is
+// pointed at. cleat#2539.
+//
+// The Service/Operation pair is the plugin and function name, the same shape a
+// durable call records, so a durable call and a plugin call that share both names
+// are indistinguishable to the assertions. That is deliberate rather than
+// overlooked -- it is what keeps AssertCalled(t, plugin, function) reading the way
+// OnPluginCall(plugin, function) is written -- and whether the record should also
+// name which kind it was is left open on cleat#2539 rather than decided here.
 func (e *TestEnv) pluginCallImpl(pluginName, functionName, inputJSON string) (resp string, retErr error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -1685,12 +1699,27 @@ func (e *TestEnv) pluginCallImpl(pluginName, functionName, inputJSON string) (re
 	}
 	defer func() { e.replayRecord("PluginCall", replayKey, resp, retErr) }()
 
+	// Recorded on the same paths durableCallImpl records on -- the stub match and
+	// the no-stub error -- and NOT on a replay-cache hit above, which replays a
+	// call already in the history rather than making a new one.
+	rec := CallRecord{
+		Service:   pluginName,
+		Operation: functionName,
+		Request:   inputJSON,
+	}
+
 	for _, stub := range e.pluginCallStubs {
 		if stub.pluginName == pluginName && stub.functionName == functionName {
+			rec.Response = stub.result
+			rec.Err = stub.err
+			e.callHistory = append(e.callHistory, rec)
 			return stub.result, stub.err
 		}
 	}
-	return "", fmt.Errorf("cleattest: no stub registered for PluginCall(%q, %q)", pluginName, functionName)
+	err := fmt.Errorf("cleattest: no stub registered for PluginCall(%q, %q)", pluginName, functionName)
+	rec.Err = err
+	e.callHistory = append(e.callHistory, rec)
+	return "", err
 }
 
 // signalWorkflowImpl delivers a signal to a target workflow.
