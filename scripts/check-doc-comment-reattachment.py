@@ -65,8 +65,9 @@ WHAT IT DOES NOT CATCH, stated so nobody reads a pass as more than it is:
 EXIT STATUS
     0  nothing lost a doc comment
     1  a finding: this tree has one
-    2  UNMEASURED -- a ref did not resolve, so nothing was compared. Separate
-       from 1 on purpose; see the comment at the check.
+    2  UNMEASURED -- a ref did not resolve, or the caller's arguments could not
+       be told apart from "run it locally with no arguments", so nothing was
+       compared. Separate from 1 on purpose; see the comment at the check.
 """
 import re
 import subprocess
@@ -261,6 +262,21 @@ def self_test():
         print('SELF-TEST FAILED: an indented/quoted func registered as a declaration')
         ok = False
 
+    # Known-positive for cleat#2479: a caller that supplied exactly one
+    # argument must be refused as UNMEASURED, not silently read as "use the
+    # defaults". This needs no git state at all -- the args check runs before
+    # any subprocess call -- so it belongs in the self-test rather than in a
+    # live-repo probe.
+    saved_argv = sys.argv
+    try:
+        sys.argv = ['check-doc-comment-reattachment.py', 'HEAD']
+        rc = main()
+        if rc != 2:
+            print(f'SELF-TEST FAILED: a lone positional argument returned {rc}, want 2 (UNMEASURED)')
+            ok = False
+    finally:
+        sys.argv = saved_argv
+
     print('self-test passed' if ok else 'self-test FAILED')
     return 0 if ok else 1
 
@@ -272,8 +288,31 @@ def main():
     args = [a for a in sys.argv[1:] if not a.startswith('-')]
     if len(args) == 2:
         base, head = args
-    else:
+    elif len(args) == 0:
         base, head = 'origin/develop', 'HEAD'
+    else:
+        # Exactly zero positional arguments is "run it by hand from a
+        # checkout" -- a real, legitimate caller. Anything else -- one
+        # argument, or three or more -- is not a caller who wants the
+        # defaults; it is a caller who tried to supply BASE and HEAD and
+        # failed. The one that bit CI (cleat#2479): a step invoked with
+        #     ${{ github.event.pull_request.base.sha }} HEAD
+        # on a push event, where there is no pull_request object, so the
+        # expression expands to the empty string and the shell drops it --
+        # leaving one argument, "HEAD". That used to fall into the same
+        # "anything but 2" branch as a genuine zero-argument call and
+        # silently compare origin/develop against HEAD, which are the same
+        # commit on a push, so it printed "ok" having compared nothing.
+        # Treating "not 0 and not 2" as its own UNMEASURED case closes that
+        # regardless of which caller mis-invokes it next.
+        print(f'UNMEASURED: expected 0 or 2 positional arguments (BASE HEAD), got '
+              f'{len(args)}: {args!r}.')
+        print('This is a failure of the check, not a finding about the tree.')
+        print('A lone argument usually means a CI expression expanded to the empty')
+        print('string (e.g. github.event.pull_request.base.sha on a non-pull_request')
+        print('event) and was silently read as "use the defaults" here. Pass BASE')
+        print('and HEAD explicitly, or nothing at all for the local default.')
+        return 2
 
     # UNMEASURED rather than a verdict. A base ref that does not resolve makes
     # every question below unanswerable, and a check that cannot establish its
