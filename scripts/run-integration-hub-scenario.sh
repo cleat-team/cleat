@@ -443,10 +443,18 @@ else
   deadline=$((SECONDS + 180))
   until curl -fsS --max-time 5 "$API/healthz" >/dev/null 2>&1; do
     if (( SECONDS > deadline )); then
-      echo "FAIL: the worker did not come back within 180s, so the resume cannot be" >&2
-      echo "      measured. STOPPING HERE rather than running the rest: every" >&2
-      echo "      assertion below this point would be about a dead worker, and" >&2
-      echo "      would name its own subject as the cause." >&2
+      echo "FAIL: the worker did not come back within 180s." >&2
+      echo >&2
+      echo "THE CRASH-RESUME ASSERTION WAS NOT EVALUATED, and that is not the same" >&2
+      echo "as its having failed. It sits below this point, so this run says NOTHING" >&2
+      echo "about whether a resumed run dispatches twice -- and a reader told that" >&2
+      echo "the crash-resume check is red would go into the resume path, where" >&2
+      echo "nothing here has been measured." >&2
+      echo >&2
+      echo "STOPPING HERE rather than running the rest: every later assertion would" >&2
+      echo "run against a dead worker and name its own subject as the cause. That is" >&2
+      echo "what this script did on 2026-09-28, turning one unreturned container into" >&2
+      echo "nine failures across nine subjects." >&2
       echo >&2
       echo "--- what the container actually is ---" >&2
       "${COMPOSE[@]}" ps -a >&2 2>&1 || true
