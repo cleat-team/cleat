@@ -851,32 +851,41 @@ OrbStack and containers are per-session). The same tree is reachable as `/locals
 — which is what `scripts/section-blocks.sh` does, and it is also how the `cleat-wt-*` worktrees
 resolve back to the stream that owns them.
 
-### The clone's git identity is a placeholder, and only one check notices
+### A bad git identity passes `DCO Check` and fails `CLA Assistant`
 
 Added 2026-09-27, after #2494 went red on `CLA Assistant` for a reason that had nothing to do
-with its contents.
-
-    $ git config --show-origin user.email
-    file:/Users/Shared/localssd/rcownie/cleat/.git/config	c@local
+with its contents. **Revised 2026-09-28**, when the placeholder this section described was
+removed — see "What is no longer true" below.
 
 The **mechanism** is configured and documented — `core.hooksPath` points at `.githooks`,
 `cleat.stream` is set, so `prepare-commit-msg` stamps both trailers (CONTRIBUTING.md §DCO).
-What is wrong is the identity it reads them *from*: a commit made here without an override is
-authored `c <c@local>`.
+What the checks read is the identity underneath them, and the two read it differently:
 
-The two checks read it differently, and only the second goes red:
-
-| check | what it matches | with `c <c@local>` |
+| check | what it matches | with an author email that maps to no account |
 |---|---|---|
 | `DCO Check` | that a `Signed-off-by` trailer **exists** | **passes** — it never reads the value |
 | `CLA Assistant` | the commit **author's email** against a signed CLA | **fails** |
 
-So a DCO-green PR can be un-mergeable, and the red check names the CLA rather than the identity.
-Every PR merged that day from this clone is authored `rcownie <rcownie@users.noreply.github.com>`:
-the per-commit override is the working practice, and nothing recorded it.
+So a DCO-green PR can be un-mergeable, and the red check names the CLA rather than the identity —
+the obvious reading of the failure ("sign the CLA") is not the problem and cannot fix it. **That
+asymmetry is this section's real content and nothing below changes it.**
 
-**Fix it per commit; do not change the shared config.** `.git/config` is read by every worktree,
-so editing it moves another stream's identity under it mid-task:
+**What is no longer true: this clone carried `c@local`, and it does not any more.** Resolved
+2026-09-28, owner-authorised:
+
+    $ git config --show-origin user.email
+    file:/Users/rcownie/.gitconfig	rcownie@users.noreply.github.com
+    $ git config --local --get-all user.email        # empty — no clone-local entry
+
+Anyone using the per-commit override is unaffected, because the override wins either way; anyone
+*not* overriding moved from an identity that **cannot** satisfy `CLA Assistant` to one that can.
+The instruction this section carried — *"fix it per commit; do not change the shared config"* —
+was the bounded alternative to editing a file every worktree reads, and its stated reason was that
+editing it moves another stream's identity under it mid-task. That protects against an
+**unannounced** change; this one was authorised and strictly widening, so the command below is now
+a general remedy rather than the rule for this clone.
+
+**Wherever a clone does carry a bad identity, the per-commit override is the tool:**
 
     git -c user.name=rcownie -c user.email=rcownie@users.noreply.github.com \
       commit --amend --no-edit --reset-author -s
@@ -884,9 +893,21 @@ so editing it moves another stream's identity under it mid-task:
 `-s` re-signs as the new identity, and the stale `Signed-off-by` from the old one has to be
 removed or the commit ends up carrying two.
 
-**Same trap one artefact over: annotated tags carry a tagger.** `v0.3.0` and `v0.3.1` are both
-`c <c@local>`. That is not CLA-relevant — a tag is not a commit in a PR — but for a public
-release the tagger is provenance a third party reads.
+**What makes an identity bad is that it maps to no account, not that it is clone-local.**
+`cleat-62e358cb` still carries a clone-local `richard.cownie@pobox.com` and was deliberately left
+alone: it maps to a real account and satisfies the CLA. `c@local` was broken because it maps to
+none.
+
+**Same trap one artefact over: annotated tags carry a tagger, and it is immutable.** `v0.3.0` and
+`v0.3.1` are `c <c@local>`; `v0.3.2` is `rcownie <rcownie@users.noreply.github.com>`. Re-derive:
+
+    for t in v0.3.0 v0.3.1 v0.3.2; do
+      git for-each-ref "refs/tags/$t" --format='%(refname:short) %(taggername) <%(taggeremail)>'
+    done
+
+That is not CLA-relevant — a tag is not a commit in a PR — but for a public release the tagger is
+provenance a third party reads, and **two published tags carry one that maps to no account** while
+the most recent does not.
 
 ### DSNs
 
