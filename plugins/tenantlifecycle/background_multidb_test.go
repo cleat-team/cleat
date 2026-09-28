@@ -6,12 +6,14 @@ package tenantlifecycle
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
@@ -131,6 +133,90 @@ func TestSweep_NilGrant_MultiBackend(t *testing.T) {
 						"next tick, not mark it handled -- otherwise a misconfigured worker " +
 						"silently never suspends anyone and never says so past one log line",
 				)
+			}
+		})
+	}
+}
+
+// TestSweep_ErrTenantNotFound_MultiBackend falsifies the starvation fix
+// cleat-review flagged on #2590: a tenant_trials row naming a tenant that no
+// longer exists must be marked handled, not left to retry forever. Reverting
+// suspendExpiredTenant's errors.Is(err, auth.ErrTenantNotFound) case back to
+// a plain `return` (the shape that starves the sweep, per its own doc
+// comment) turns this red -- the row stays handled=false and the second
+// sweep calls the grant again for the same tenant.
+func TestSweep_ErrTenantNotFound_MultiBackend(t *testing.T) {
+	backends := testutil.NewPluginTestBackends(t)
+	for _, be := range backends {
+		t.Run(be.Name, func(t *testing.T) {
+			defer be.Cleanup()
+
+			p := &Plugin{}
+			ctx := context.Background()
+			pluginDialect := plugin.Dialect(string(be.Dialect))
+
+			loaded := []*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}
+			if err := plugin.RunMigrations(ctx, be.DB, pluginDialect, nil, loaded); err != nil {
+				t.Fatalf("RunMigrations for backend %q: %v", be.Name, err)
+			}
+
+			p.dialect = pluginDialect
+			p.db = &engine.SQLDBAdapter{DB: be.DB, Dialect: pluginDialect}
+			p.logger = slog.Default()
+
+			// A trial for a tenant that was never created -- tenant_trials
+			// carries no FK to admin.tenants (migrations.go), so this row is
+			// exactly the dangling shape suspendExpiredTenant's doc comment
+			// describes: "the tenant was dropped after the trial was set."
+			danglingTenant := uuid.New()
+			insertTrial(t, p, danglingTenant, time.Now().Add(-time.Hour))
+
+			// Counted PER TENANT, not as a bare total: insertTrial's own
+			// t.Cleanup runs its DELETE after this subtest's `defer
+			// be.Cleanup()` has already closed the pool (the same ordering
+			// [[cleat-teardown-runs-before-t-cleanup]] records for engine's
+			// backend tests), so a sibling test's row can still be sitting
+			// in tenant_trials when this one runs against a shared
+			// Postgres/MySQL server. TestSweep_MultiBackend and
+			// TestSweep_NilGrant_MultiBackend never notice, because they
+			// only ever assert about their OWN tenant id; a bare call count
+			// here would be the first assertion in this file sensitive to
+			// the ambient population, and it does not need to be.
+			suspendCallsForDangling := 0
+			p.env = &plugin.Environment{
+				SetTenantSuspended: func(ctx context.Context, tenantID uuid.UUID, suspended bool) error {
+					if tenantID == danglingTenant {
+						suspendCallsForDangling++
+					}
+					return fmt.Errorf("suspend tenant: %w", auth.ErrTenantNotFound)
+				},
+			}
+
+			p.sweep(ctx)
+
+			if suspendCallsForDangling != 1 {
+				t.Fatalf("first sweep: SetTenantSuspended called %d times for the dangling tenant, want 1",
+					suspendCallsForDangling)
+			}
+			if !trialHandled(t, p, danglingTenant) {
+				t.Fatalf("WHAT: a trial for a nonexistent tenant was not marked handled after " +
+					"ErrTenantNotFound\n" +
+					"WHY:  tenant_trials has no FK to admin.tenants, so no tenant is EVER going to " +
+					"appear for this row -- leaving it unhandled means queryExpiredTrials' " +
+					"ORDER BY expires_at LIMIT 100 selects it again every tick, keeping its slot " +
+					"among the 100 and starving later trials out of the sweep entirely " +
+					"(cleat-review on #2590)")
+			}
+
+			// The second sweep is the falsification's whole point: if the
+			// row were left unhandled, this call would find it again (its
+			// expires_at has not changed) and call the grant a second time
+			// for the same tenant.
+			p.sweep(ctx)
+			if suspendCallsForDangling != 1 {
+				t.Fatalf("second sweep: SetTenantSuspended called again (total %d calls) for the "+
+					"dangling tenant, already marked handled after ErrTenantNotFound -- the row was "+
+					"not excluded from the next tick's scan", suspendCallsForDangling)
 			}
 		})
 	}

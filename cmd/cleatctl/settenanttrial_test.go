@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
+
+	mssqldriver "github.com/microsoft/go-mssqldb"
 
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
@@ -166,10 +169,28 @@ func TestSetTenantTrialFailsClosedWithoutMSSQLSessionPinning(t *testing.T) {
 	// cleat-review's suggested falsification names. tenant_trials'
 	// TenantScoped security policy has no bypass (migrations.go), so a
 	// write through the bare pool must be refused.
-	if err := writeTenantTrial(ctx, db, dialectMSSQL, tenant, expiresAt); err == nil {
+	err := writeTenantTrial(ctx, db, dialectMSSQL, tenant, expiresAt)
+	if err == nil {
 		t.Fatalf("writeTenantTrial through the bare pool (no SESSION_CONTEXT) succeeded on MSSQL; " +
 			"want the security policy to refuse it. Either tenant_trials' policy regressed, or " +
 			"tenantTrialConnFor's pinning is no longer the only thing making set-tenant-trial work " +
 			"on MSSQL -- re-run the falsification this test automates before trusting either")
+	}
+
+	// Not just ANY error -- cleat-review's finding: a missing table or a
+	// connection problem would also make err non-nil and pass a bare
+	// `err == nil` check without ever exercising the security policy at
+	// all. 33504 is SQL Server's specific "target object ... has a block
+	// predicate that conflicts with this operation" -- classified by
+	// NUMBER, not by matching the message text, for the same reason
+	// engine/mssql_errors.go's mssqlErrNumber gives: a substring match can
+	// hit digits the driver interpolates from unrelated data (a workflow
+	// id, a row count) rather than the error number itself.
+	var msErr mssqldriver.Error
+	if !errors.As(err, &msErr) || msErr.Number != 33504 {
+		t.Fatalf("writeTenantTrial through the bare pool failed, but not with the block-predicate "+
+			"refusal (33504) -- got %v. This test exists to prove the SECURITY POLICY is what "+
+			"refuses the write, not some other failure (a missing table, a connection error) that "+
+			"would pass a bare `err == nil` check without ever exercising it", err)
 	}
 }
