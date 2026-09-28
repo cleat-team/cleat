@@ -77,6 +77,33 @@ def wit_funcs(src: str) -> set[str]:
     return set(re.findall(r"^\s*([a-z0-9-]+)\s*:\s*func", clean, re.M))
 
 
+def wit_name(binding: str) -> str:
+    """The WIT function name a `_import_*` SDK binding corresponds to.
+
+    `sdk_bindings` and `wit_funcs` read ONE surface in TWO naming schemes, so a
+    set comparison between their raw output is a comparison of disjoint sets --
+    and two disjoint sets are consistent whatever the tree does. This is the
+    correspondence that makes them comparable at all (cleat#2569). Measured on
+    today's tree: all 48 SDK bindings normalise onto 48 of the 49 WIT functions.
+    """
+    n = binding[len("_import_"):]
+    if n.startswith("cleat_"):
+        n = "durable_" + n[len("cleat_"):]
+    return n.replace("_", "-")
+
+
+# WIT functions the Python SDK deliberately does not bind. Keyed on the NAME,
+# never on a count: `n_sdk == n_wit - 1` would re-encode 48 as a constant and rot
+# exactly the way a census does. Each entry is a decision, and a STALE one is a
+# defect (checked in main), so this list cannot become a rubber stamp that hides
+# the next removal.
+DELIBERATELY_UNBOUND = {
+    # Removed from every SDK on 2026-08-09; see the AssemblyScript twin recorded
+    # in CLAUDE.md. The WIT interface still declares it.
+    "durable-register-query-handler",
+}
+
+
 def shadowed_imports(src: str) -> list[str]:
     """Names bound from the WIT bindings and then re-bound at MODULE level.
 
@@ -187,11 +214,39 @@ def self_test() -> int:
     if wit_funcs("// nothing here\n"):
         failures.append("wit_funcs invented a declaration in a file with none")
 
+    # cleat#2569: the two extractors read one surface in two naming schemes, so
+    # comparing their raw output compares DISJOINT sets -- and disjoint sets agree
+    # with any tree, which is the defect this check exists to close.
+    for binding, want in (
+        ("_import_cleat_poll_work", "durable-poll-work"),
+        ("_import_plugin_call", "plugin-call"),
+        ("_import_set_query_state", "set-query-state"),
+    ):
+        if wit_name(binding) != want:
+            failures.append(f"wit_name({binding!r}) -> {wit_name(binding)!r}, want {want!r}")
+
+    # The control: if the raw names ever DID intersect, wit_name() would be
+    # unnecessary here and the self-test above would prove nothing.
+    pair_src = "from w import (\n    call as _import_cleat_call,\n)\n"
+    pair_wit = "interface x {\n  durable-call: func();\n}\n"
+    raw_sdk, raw_wit = sdk_bindings(pair_src), wit_funcs(pair_wit)
+    if raw_sdk & raw_wit:
+        failures.append(
+            "the raw SDK and WIT names intersect -- the schemes are not disjoint, so "
+            "this self-test no longer shows wit_name() is load-bearing"
+        )
+    if {wit_name(b) for b in raw_sdk} != raw_wit:
+        failures.append(
+            f"normalised SDK names {sorted({wit_name(b) for b in raw_sdk})} do not match "
+            f"the WIT declaration {sorted(raw_wit)}"
+        )
+
     if failures:
         for f in failures:
             print(f"SELF-TEST FAIL: {f}", file=sys.stderr)
         return 1
-    print("self-test passed: 8 cases (three known-positive, three known-negative, two vacuity)")
+    print("self-test passed: 13 cases (three known-positive, three known-negative, two "
+          "vacuity, five for the wit_name correspondence)")
     return 0
 
 
@@ -217,6 +272,41 @@ def main() -> int:
         return 2
 
     fail = 0
+
+    # cleat#2569: each number was checked against its OWN document and never
+    # against the other, so dropping a binding read as a pass once the document
+    # it is checked against was updated to match. Compare the SETS, in both
+    # directions -- a count cannot say which function went missing.
+    bound = {wit_name(b) for b in sdk_bindings(HOST_CALLS.read_text())}
+    declared = wit_funcs(WIT.read_text())
+
+    unbound = sorted(declared - bound - DELIBERATELY_UNBOUND)
+    if unbound:
+        print("ERROR: wit/cleat.wit declares these functions and the Python SDK does "
+              "not bind them:", file=sys.stderr)
+        for n in unbound:
+            print(f"    {n}", file=sys.stderr)
+        print("\nRestore the binding, or add the name to DELIBERATELY_UNBOUND in this "
+              "script if the removal is intended.", file=sys.stderr)
+        fail = 1
+
+    undeclared = sorted(bound - declared)
+    if undeclared:
+        print("ERROR: the Python SDK binds these and wit/cleat.wit declares no such "
+              "function:", file=sys.stderr)
+        for n in undeclared:
+            print(f"    {n}", file=sys.stderr)
+        fail = 1
+
+    # An exemption that no longer exempts anything is the mechanism by which an
+    # exemption list becomes a rubber stamp -- so a stale one is itself a failure.
+    stale = sorted(DELIBERATELY_UNBOUND & bound)
+    if stale:
+        print("ERROR: DELIBERATELY_UNBOUND lists functions the SDK does bind, so the "
+              "exemption is stale and would hide the next removal:", file=sys.stderr)
+        for n in stale:
+            print(f"    {n}", file=sys.stderr)
+        fail = 1
 
     # cleat#1432, checked before the documented numbers because a shadowed
     # import is a live defect while a stale number is a wrong sentence.
@@ -271,8 +361,10 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    print(f"OK: the Python SDK binds {n_sdk} host calls and wit/cleat.wit declares "
-          f"{n_wit}; every documented number agrees.")
+    exc = ", ".join(sorted(DELIBERATELY_UNBOUND)) or "none"
+    print(f"OK: the Python SDK binds {n_sdk} of the {n_wit} functions wit/cleat.wit "
+          f"declares, and every documented number agrees.")
+    print(f"    deliberate exceptions (declared, not bound): {exc}")
     return 0
 
 
