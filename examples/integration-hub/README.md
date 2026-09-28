@@ -118,15 +118,105 @@ entry point is part of the ABI.
 
 ## Run it
 
+The compose file brings up a database and a `cleat-worker`, and **the profile
+picks which database**. PostgreSQL is the default and is what the rest of this
+README assumes; the other two are supported and covered — see below.
+
 ```bash
-docker compose up -d
+# 1. The database and the worker. The worker prints an API key on first start.
+export CLEAT_DB_URL="postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable"
+docker compose --profile postgres up -d
 docker compose logs cleat-worker | grep -i 'Key:'
-cleat deploy --db "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable" \
-  --name integration-hub /tmp/out/sync_customer.wasm
+
+# 2. Deploy the compiled workflow.
+cleat deploy --db "$CLEAT_DB_URL" --name integration-hub /tmp/out/sync_customer.wasm
 ```
 
 The `sink` service came up with the stack: it is the rope end, standing in for
-your customer's system, and `docker compose up -d` already started it.
+your customer's system, and it carries **no profile** — it is not a database, so
+every dialect needs it.
+
+### Which dialects this runs on
+
+**All three: PostgreSQL, MySQL and SQL Server.** The scenario script takes the
+dialect as its first argument and CI runs one arm per dialect:
+
+```bash
+scripts/run-integration-hub-scenario.sh postgres   # the default
+scripts/run-integration-hub-scenario.sh mysql
+scripts/run-integration-hub-scenario.sh mssql
+```
+
+The profile selects the database; the environment selects the DSN. These are the
+**in-network** hosts, because the worker reaches the database over the compose
+network — the `CLEAT_DB_URL` above is the same database seen from your host.
+
+```bash
+# MySQL
+export CLEAT_MIGRATE_DB_URL='root:cleat@tcp(mysql:3306)/cleat?tls=false&parseTime=true'
+export CLEAT_WORKER_DB_URL="$CLEAT_MIGRATE_DB_URL"
+docker compose --profile mysql up -d
+export CLEAT_DB_URL='root:cleat@tcp(localhost:3306)/cleat?tls=false&parseTime=true'
+
+# SQL Server (single-quoted: the password ends in `!`, which zsh expands)
+export CLEAT_MIGRATE_DB_URL='sqlserver://sa:CleatTest123!@mssql:1433?database=cleat'
+export CLEAT_WORKER_DB_URL="$CLEAT_MIGRATE_DB_URL"
+docker compose --profile mssql up -d
+export CLEAT_DB_URL='sqlserver://sa:CleatTest123!@localhost:1433?database=cleat'
+```
+
+### The deploy step is the one command that differs by dialect
+
+**The `cleat` CLI talks to PostgreSQL only.** That is a deliberate limit and not
+a gap in the engine: `cleat deploy` refuses a MySQL or SQL Server DSN with an
+error that says so, and names the alternative.
+
+```bash
+# MySQL or SQL Server: the CLI is PostgreSQL-only, so deploy with this instead.
+export CLEAT_DIALECT=mysql          # or: mssql
+go build -o /tmp/out/deploy-workflow ./cmd/deploy-workflow
+/tmp/out/deploy-workflow --driver "$CLEAT_DIALECT" --db "$CLEAT_DB_URL" \
+  integration-hub /tmp/out/sync_customer.wasm
+```
+
+`deploy-workflow` is the only multi-dialect deploy path cleat has, and it deploys
+and nothing else. The scenario asserts this both ways: it runs the right command
+per arm **and asserts that `cleat deploy` is refused, with the dialect named, on
+the two where it does not work.**
+
+### This example is where the dialect difference actually bites
+
+Unlike its sibling, this scenario's assertions cross SQL that is written per
+dialect. `delivery_count()` polls the notifications plugin's deliveries route,
+and that handler alone crosses four seams — every one of them a place the
+statement differs rather than the data:
+
+| seam | why |
+|---|---|
+| `webhookExistsSQL` | `SELECT EXISTS(...)` **is not valid SQL Server syntax**; it is a `CASE WHEN EXISTS(...) THEN 1 ELSE 0 END` there |
+| `plugin.LimitClause` | SQL Server has no `LIMIT` |
+| `plugin.Rebind` | `$N` and `?` bind differently — by number vs by appearance |
+| `plugin.ScanRow` | column scanning |
+
+That endpoint's own source comment records what it cost the first time it met SQL
+Server: *"every call failed outright."* **So the deliveries assertions are the
+ones worth watching on this dialect arm** — they are what would have caught it,
+and they are the reason an arm here is worth more than an arm on the saga.
+
+**And one thing this arm does not prove on MySQL.** Every query on this path is
+tenant-scoped (`... AND tenant_id = $2`), but cleat's MySQL is single-tenant by
+construction, so there is exactly one possible value for that parameter and the
+predicate cannot discriminate between tenants. The assertion is the same on all
+three dialects; **what it proves is not** — on PostgreSQL that predicate sits
+under row-level security, and on MySQL it is the only thing there.
+
+The RLS difference is reported rather than averaged, exactly as in the sibling
+example: on PostgreSQL the arm asserts the worker reports
+`row-level security is enforced on this connection`; on MySQL and SQL Server it
+prints that no such guarantee exists and asserts nothing about it, counting as
+neither a pass nor a failure. `cmd/cleat-worker/main.go` gates that check on
+`--driver == "postgres"`, so `--require-auth` there is not a weaker guarantee —
+it is no check at all.
 
 ## The app
 
@@ -288,8 +378,11 @@ cd examples && go test ./integration-hub/... -count=1
 - `backend/main.go` — the app: a `backendkit` proxy, and the delivery log
 - `web/` — the page `backend/` serves: syncs, their query state, and the
   connector's deliveries
-- `docker-compose.yml` — PostgreSQL, a worker, and the `sink` standing in for the
-  customer's system. Two settings in it are the scenario's: the one private host
+- `docker-compose.yml` — a database, a worker, and the `sink` standing in for the
+  customer's system. **The database is chosen by profile** — PostgreSQL, MySQL or
+  SQL Server, see "Which dialects this runs on" — and the `sink` carries no
+  profile, because it is not a database and every dialect needs it. Two settings
+  in it are the scenario's: the one private host
   is permitted by name (`--plugin-egress-allow-private=sink`), and the core's
   per-tenant limiter is left **off**, so a 429 observed here can only be the
   plugin's — see the two-limiter table above
