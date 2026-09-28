@@ -38,7 +38,7 @@ func (s *PostgresStore) GetWASMLength(ctx context.Context, defName string, defVe
 	// connection.
 	//
 	// This ran on s.db with no cleat.tenant_id set, so on the role the engine
-	// is meant to run as (migrations/postgres/005_app_role.sql, 1.10) the
+	// is meant to run as (cleat_app, 1.10) the
 	// policy on workflow_defs could not be evaluated and the call failed with
 	//
 	//	pq: invalid input syntax for type uuid: "" (22P02)

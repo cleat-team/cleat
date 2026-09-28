@@ -173,7 +173,7 @@ func TestRequireHostMatchBootsAsTheAppRoleAndServesOnEveryDialect(t *testing.T) 
 func pgAppRoleDSN(t *testing.T, owner *sql.DB, ownerDSN string) string {
 	t.Helper()
 	if _, err := owner.Exec(`ALTER ROLE cleat_app LOGIN PASSWORD 'cleat-2258-pw'`); err != nil {
-		t.Fatalf("giving cleat_app a login (is 005_app_role.sql applied?): %v", err)
+		t.Fatalf("giving cleat_app a login (is the schema baseline applied?): %v", err)
 	}
 	u, err := url.Parse(ownerDSN)
 	if err != nil {

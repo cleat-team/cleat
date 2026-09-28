@@ -1502,7 +1502,7 @@ func main() {
 	// Run core schema migrations before plugin migrations.
 	//
 	// On a separate connection when --migrate-db is set: --db may be an
-	// unprivileged role (see migrations/postgres/005_app_role.sql), which is
+	// unprivileged role (cleat_app), which is
 	// what makes it subject to row-level security, and such a role cannot
 	// run DDL. Falls back to db so an unsplit deployment behaves as before.
 	migrateDB := db

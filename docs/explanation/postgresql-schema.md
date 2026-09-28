@@ -725,7 +725,7 @@ them.
 | Mechanism | `CREATE POLICY ... FOR ALL USING (tenant_id = current_setting('cleat.tenant_id')::uuid)` | Not available — application-layer `WHERE tenant_id = ?` on every query | `CREATE SECURITY POLICY ... ADD FILTER PREDICATE dbo.fn_tenant_filter() ON dbo.<table>` |
 | Session context | `current_setting('cleat.tenant_id', true)` | N/A | `SESSION_CONTEXT(N'tenant_id')` |
 | Predicate function | Inline policy expression | N/A | Inline TVF returning `1` when `SESSION_CONTEXT` matches |
-| Bypass | Superuser — unconditionally, and `FORCE ROW LEVEL SECURITY` does not close it (that closes the separate *table owner* exemption; see `migrations/postgres/005_app_role.sql`) | N/A | **None by default.** Since migration 075 the shipped `fn_tenant_filter` is `@tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER)` and names no role at all; sysadmin gets no exemption either. An `IS_ROLEMEMBER(N'cleat_admin')` form exists and must be opted into. |
+| Bypass | Superuser — unconditionally, and `FORCE ROW LEVEL SECURITY` does not close it (that closes the separate *table owner* exemption; see the `cleat_app` role) | N/A | **None by default.** Since migration 075 the shipped `fn_tenant_filter` is `@tenant_id = CAST(SESSION_CONTEXT(N'tenant_id') AS UNIQUEIDENTIFIER)` and names no role at all; sysadmin gets no exemption either. An `IS_ROLEMEMBER(N'cleat_admin')` form exists and must be opted into. |
 | Fail-closed | **On reads.** NULL context returns no rows | Yes (queries without tenant filter return no rows for other tenants) | **On reads.** Unset context returns no rows — and accepts a write, see below |
 | Block predicates | Not implemented (filter only) | N/A | **Not implemented (filter only).** `grep -c 'BLOCK PREDICATE' migrations/mssql/*.sql` → 0, against `ADD FILTER PREDICATE` in 8 files. |
 
@@ -796,7 +796,7 @@ are the *only* isolation there is — neither carries an application-level
 and there is no setting that changes that. A superuser connection therefore
 returns every tenant's data from those calls, however the policies are written.
 
-`005_app_role.sql` creates the role to use instead: `cleat_app`, which owns
+The schema baseline creates the role to use instead: `cleat_app`, which owns
 nothing, has no DDL rights, and is `NOSUPERUSER NOBYPASSRLS`. Ownership matters
 as much as superuser here — an owner is exempt from its own policies unless
 `FORCE` is set, so a role that owns nothing is subject to them unconditionally,

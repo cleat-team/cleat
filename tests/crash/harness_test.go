@@ -39,7 +39,7 @@ import (
 )
 
 const (
-	// appPassword is set on cleat_app by the harness. 005_app_role.sql creates
+	// appPassword is set on cleat_app by the harness. The schema baseline creates
 	// the role NOLOGIN with no password on purpose -- a committed credential
 	// would be a defect -- so the deployment supplies one. Here, the harness is
 	// the deployment.

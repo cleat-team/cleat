@@ -44,7 +44,7 @@ var (
 
 	// migrateDBURL exists so that --db can be an unprivileged role.
 	//
-	// The role cleat should run as (migrations/postgres/005_app_role.sql) owns
+	// The role cleat should run as (cleat_app) owns
 	// nothing and has no DDL rights -- that is what makes it subject to
 	// row-level security, and RLS is the only tenant isolation
 	// GetWorkflowByID and ListWorkflows have. But migrations obviously do need
