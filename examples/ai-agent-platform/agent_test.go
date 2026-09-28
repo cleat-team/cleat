@@ -262,10 +262,11 @@ func TestAgentProceedsWhenAHumanApproves(t *testing.T) {
 //
 // Measuring that needs a second turn: the denial is only proven to have been
 // fed back if a later request carries it. MaxSteps=2 gets one, at the cost of
-// the model asking for approval twice -- which is the shape cleat#2522 forces,
-// since the stub answers the same thing on every turn and cannot be made to
-// answer "approval first, then a summary". See
-// TestAgentApprovesOnTheFirstPoll for the long form.
+// the model asking for approval twice, rather than approving on turn one and
+// summarising on turn two -- this test predates cleat#2522's fix and was not
+// rewritten to use it (still a correct test either way; see
+// TestAgentApprovesOnTheFirstPoll for why sequencing the stub now can, but
+// this file does not yet, drive that turn-taking shape directly).
 func TestAgentReportsADenialRatherThanFailing(t *testing.T) {
 	env := setupEnv()
 	env.OnPluginCall("llm", "chat").Return(modelReply("", 0.003,
@@ -334,26 +335,26 @@ func TestAgentReportsADenialRatherThanFailing(t *testing.T) {
 	}
 }
 
-// TWO PATHS THIS FILE CANNOT REACH, and they are the same defect. cleat#2522.
+// ONE PATH THIS FILE STILL DOES NOT REACH, though the tool it needed now
+// exists. cleat#2522.
 //
 // **In `requestApproval`.** It polls: it asks for the event, and on
 // `found:false` it sleeps and asks again. The branch where the FIRST poll
 // misses and a LATER one hits is the branch a real deployment takes most often
 // -- a human takes minutes, not microseconds -- and nothing here reaches it.
 //
-// **In this test.** The natural way to write it is a model that asks for
-// approval on turn one and summarises on turn two. That needs the stub to
-// answer differently on the second call, and it cannot: `OnPluginCall(...)
-// .Return(...)` registers a single answer, `pluginCallImpl` scans
-// `pluginCallStubs` IN ORDER and the FIRST match wins, so registering a second
-// `.Return` for the same plugin+function is **unreachable, not sequenced** --
-// and it is not an error, so the test passes against the first-turn path while
-// reading as though it exercised the second.
-//
-// So both tests in this section bound the loop with `MaxSteps` instead and
-// assert on what `await_event` saw. That is the workaround, and it is filed
-// rather than hidden: the miss-then-hit branch of a polling loop has no unit
-// test in this repository, and an agent loop is a polling workflow.
+// **`OnPluginCall(...).Return(...)` can now express that miss-then-hit
+// sequence** -- a second `.Return` for the same plugin+function used to be
+// unreachable (`pluginCallImpl` matched only the first-registered stub,
+// forever) and now answers the second call, with the last registered
+// response repeating after that. What is below is still the two tests
+// written against the OLD limitation, bounding the loop with `MaxSteps`
+// instead of sequencing `event-triggers/await_event`'s answer -- they remain
+// correct tests of the turn-taking behaviour they assert on, so they were
+// left as they are rather than rewritten for its own sake. What they do NOT
+// do, and what a new test using the sequencing above could, is drive
+// `requestApproval`'s actual miss-then-hit branch end to end; that is
+// unclaimed follow-up work, not done here.
 func TestAgentApprovesOnTheFirstPoll(t *testing.T) {
 	env := setupEnv()
 	env.OnPluginCall("llm", "chat").Return(modelReply("", 0.001,
