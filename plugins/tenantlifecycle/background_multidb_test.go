@@ -26,7 +26,16 @@ func TestSweep_MultiBackend(t *testing.T) {
 	backends := testutil.NewPluginTestBackends(t)
 	for _, be := range backends {
 		t.Run(be.Name, func(t *testing.T) {
-			defer be.Cleanup()
+			// t.Cleanup, not defer: t.Cleanup runs LIFO, so registering
+			// be.Cleanup here (before any insertTrial call) makes it run
+			// LAST -- after every insertTrial fixture's own t.Cleanup
+			// DELETE. A plain `defer be.Cleanup()` closes the pool the
+			// moment this closure returns, which is BEFORE the testing
+			// package runs any t.Cleanup callback -- insertTrial's DELETE
+			// would then run against an already-closed pool and fail
+			// silently (cleat-review on #2590; NewPluginTestBackends'
+			// own doc says a double Cleanup call is safe).
+			t.Cleanup(be.Cleanup)
 
 			p := &Plugin{}
 			ctx := context.Background()
@@ -105,7 +114,16 @@ func TestSweep_NilGrant_MultiBackend(t *testing.T) {
 	backends := testutil.NewPluginTestBackends(t)
 	for _, be := range backends {
 		t.Run(be.Name, func(t *testing.T) {
-			defer be.Cleanup()
+			// t.Cleanup, not defer: t.Cleanup runs LIFO, so registering
+			// be.Cleanup here (before any insertTrial call) makes it run
+			// LAST -- after every insertTrial fixture's own t.Cleanup
+			// DELETE. A plain `defer be.Cleanup()` closes the pool the
+			// moment this closure returns, which is BEFORE the testing
+			// package runs any t.Cleanup callback -- insertTrial's DELETE
+			// would then run against an already-closed pool and fail
+			// silently (cleat-review on #2590; NewPluginTestBackends'
+			// own doc says a double Cleanup call is safe).
+			t.Cleanup(be.Cleanup)
 
 			p := &Plugin{}
 			ctx := context.Background()
@@ -149,7 +167,16 @@ func TestSweep_ErrTenantNotFound_MultiBackend(t *testing.T) {
 	backends := testutil.NewPluginTestBackends(t)
 	for _, be := range backends {
 		t.Run(be.Name, func(t *testing.T) {
-			defer be.Cleanup()
+			// t.Cleanup, not defer: t.Cleanup runs LIFO, so registering
+			// be.Cleanup here (before any insertTrial call) makes it run
+			// LAST -- after every insertTrial fixture's own t.Cleanup
+			// DELETE. A plain `defer be.Cleanup()` closes the pool the
+			// moment this closure returns, which is BEFORE the testing
+			// package runs any t.Cleanup callback -- insertTrial's DELETE
+			// would then run against an already-closed pool and fail
+			// silently (cleat-review on #2590; NewPluginTestBackends'
+			// own doc says a double Cleanup call is safe).
+			t.Cleanup(be.Cleanup)
 
 			p := &Plugin{}
 			ctx := context.Background()
@@ -171,17 +198,14 @@ func TestSweep_ErrTenantNotFound_MultiBackend(t *testing.T) {
 			danglingTenant := uuid.New()
 			insertTrial(t, p, danglingTenant, time.Now().Add(-time.Hour))
 
-			// Counted PER TENANT, not as a bare total: insertTrial's own
-			// t.Cleanup runs its DELETE after this subtest's `defer
-			// be.Cleanup()` has already closed the pool (the same ordering
-			// [[cleat-teardown-runs-before-t-cleanup]] records for engine's
-			// backend tests), so a sibling test's row can still be sitting
-			// in tenant_trials when this one runs against a shared
-			// Postgres/MySQL server. TestSweep_MultiBackend and
-			// TestSweep_NilGrant_MultiBackend never notice, because they
-			// only ever assert about their OWN tenant id; a bare call count
-			// here would be the first assertion in this file sensitive to
-			// the ambient population, and it does not need to be.
+			// Counted PER TENANT, not as a bare total. This was a workaround
+			// for a real leak (fixed above, t.Cleanup(be.Cleanup)) and is
+			// kept anyway as defense in depth: TestSweep_MultiBackend and
+			// TestSweep_NilGrant_MultiBackend both assert about their own
+			// tenant id rather than a raw count for the same reason -- this
+			// test's fixture is not the only thing that could ever leave a
+			// row in tenant_trials, and scoping the assertion to what this
+			// test itself created is cheap insurance against whatever does.
 			suspendCallsForDangling := 0
 			p.env = &plugin.Environment{
 				SetTenantSuspended: func(ctx context.Context, tenantID uuid.UUID, suspended bool) error {
