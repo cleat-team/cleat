@@ -10,7 +10,15 @@ validating cleat's architecture against real-world code.
 
 1. **Cleat's DX is cleaner than all three competitors for common patterns** —
    one-file workflows, no workflow/activity split, built-in Saga, and single-call
-   signal handling save ~28% lines of code vs equivalent Temporal/DBOS ports.
+   signal handling. This section previously quantified that as "~28% lines of
+   code vs equivalent Temporal/DBOS ports," cited to the widget-store AS port.
+   That port has since grown past what the workaround-free comparison assumed
+   (`examples/widget-store-as/ISSUES.md` — the AS 0.27.32 SDK did not compile
+   against it, `JSON.parse<T>` and `@json` were unavailable, the stub runtime
+   had no `try`/`catch`), and is now roughly 1,073 non-blank, non-comment lines
+   against the claimed 195 — see Part 1. No reproducible line-count comparison
+   currently backs a percentage, so none is quoted here; the structural claim
+   above does not depend on one.
 
 2. **WASM-based versioning is cleat's killer feature** — "deploy via INSERT,
    rollback via UPDATE" has no equivalent in any competitor. Multiple independent
@@ -49,18 +57,21 @@ validating cleat's architecture against real-world code.
 
 ## Part 1: Code Volume Comparison
 
-Concrete data from the DBOS widget-store port (TypeScript → AssemblyScript):
+**Retired.** This section quoted a DBOS-widget-store-port table claiming cleat's AS port
+totaled ~195 lines against DBOS's ~270 (~28% shorter), and the headline finding above
+repeated the percentage. Measured on `develop` (non-blank, non-comment lines):
+`examples/widget-store-as/assembly/workflows.ts` (157) + `host/main.go` (600) +
+`host/shop_test.go` (316) = **1,073** — roughly 5.5x the claimed total, not counting the
+267 more in a vendored, patched copy of the SDK. The port grew past the comparison after
+it was written: the AS 0.27.32 SDK did not compile against it, `JSON.parse<T>` and `@json`
+were unavailable, and the stub runtime had no `try`/`catch` — see
+`examples/widget-store-as/ISSUES.md`. No corrected replacement is quoted here rather than
+substituting a new unverified number; see cleat#2595. Cleat's real advantages in this area
+— database-enforced tenancy, build-time refusal of nondeterminism, simulated-clock tests
+with no database, deploy-as-INSERT — are ones a line count cannot see, which is itself an
+argument against leading with one.
 
-| Component | DBOS TS (original) | Cleat AS (ported) | Delta |
-|-----------|-------------------|-------------------|-------|
-| Workflow code | ~40 lines | ~40 lines | Same |
-| DB operations | ~80 lines (Knex) | ~20 lines (`durableCall` JSON) | **-75%** |
-| HTTP server | ~60 lines (Fastify) | ~50 lines (worker API) | -17% |
-| Configuration | ~10 lines (yaml) | ~5 lines (env vars) | -50% |
-| Tests | ~80 lines (Jest) | ~80 lines (TestEnv) | Same |
-| **Total** | **~270 lines** | **~195 lines** | **~28% shorter** |
-
-The reduction comes primarily from cleat's architecture:
+**What the mechanism claims still hold, independent of any line count:**
 - External service calls become `durableCall` invocations (no separate activity files)
 - DB operations move to the host side (workflow code doesn't talk to databases directly)
 - The HTTP server is handled by the worker's built-in REST API
