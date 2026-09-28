@@ -744,6 +744,31 @@ type FuncOptions struct {
 	// that finished "done" into one that fails on replay, which is a
 	// determinism break in the opposite direction from the leak this field
 	// closes.
+	//
+	// THIS COVERS THE INPUT SIDE ONLY. A host function's RETURN value has no
+	// equivalent per-function declaration, and that should not be read as
+	// nothing protects it -- three things are true at once, and a reader who
+	// stops after the first concludes the value is safer than it is:
+	//
+	//  1. engine.Redact runs on every read of PluginOutput (and PluginInput,
+	//     as a second line of defense), in all three dialects, on by default
+	//     -- nothing in production code turns it off. It masks a JSON field
+	//     whose NAME contains "token", "secret", "password", "credential",
+	//     "api_key" or "authorization" (case-insensitive, recursive into
+	//     nested objects), plus any bare value shaped like a JWT.
+	//  2. It is a FIXED NAME LIST, not a per-function declaration like this
+	//     field. A return value legitimately carrying a credential under a
+	//     name the list does not know -- "connection_string", "private_key"
+	//     -- passes through unredacted; "key" alone is not a matched
+	//     pattern, only "api_key" is.
+	//  3. It runs ON READ, not on write. The raw value is still what gets
+	//     inserted -- Redact never touches the row before it reaches the
+	//     database. A backup, a replica, or a plain SELECT against the table
+	//     sees it in the clear regardless of what an API caller is shown.
+	//
+	// So a host function whose result needs the guarantee this field gives
+	// the input -- refused before it is ever persisted -- has no mechanism
+	// today. cleat#2587.
 	SecretOnlyFields []string
 }
 
