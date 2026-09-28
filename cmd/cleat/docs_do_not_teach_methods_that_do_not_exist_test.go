@@ -39,7 +39,6 @@ var documentedCallsNotYetFixed = map[string]string{
 	"docs/migration/from-dbos.md|CallWithOptions": "h.DurableCallWithOptions",
 	"docs/migration/from-restate.md|CallTyped":    "h.DurableCallTyped",
 	"docs/migration/from-restate.md|SetState":     "no direct equivalent; the guide's state API needs a doc decision, not a rename",
-	"docs/reference/error-codes.md|SendSignal":    "h.SignalWorkflow is the nearest; this block is the 'after' half of a BAD/GOOD pair",
 	"examples/DX_COMPARISON.md|CallWithRetry":     "h.DurableCallWithRetry",
 }
 
@@ -62,22 +61,30 @@ var documentedCallsNotYetFixed = map[string]string{
 // only 28% of the population. This predicate examines all of it for one class of
 // error, cheaply, with no build.
 //
-// WHAT IT COVERS, STATED SO IT IS NOT MISTAKEN FOR MORE. Fenced `go` blocks only.
-// The same defect also appears in **inline code spans** — `In Go, use
-// \`h.Sleep(n * time.Second)\`.` — and those are deliberately NOT scanned, because
-// a code span is as often prose ABOUT a method as a call to one. Measured when this
-// was written: extending to spans added `h.X` and `h.Uppercase` from
-// IMPROVEMENT-PLAN.md, which are metavariables in illustrative text, not defects.
-// So this guard trades recall for a clean signal on purpose: of #2524's seven
-// sites it reached the three that are fenced blocks and missed the four that were
-// prose, which is why an issue and not this guard is what closed them. Do not widen
-// it without measuring the false-positive class it inherits. Measured over the whole
-// tree on 2026-09-27, that class has two members, and neither is a defect: `h.X` and
-// `h.Uppercase` are metavariables in IMPROVEMENT-PLAN prose, and `h.Secret` is an API
-// under a `### Planned` heading. Both are excludable — by path and by heading
-// respectively — rather than by name, so a widened guard is possible; it is a
-// separate change with its own false-positive budget, not a tweak to this one. (No
-// count is given here on purpose: this PR moved five of the references.)
+// WHAT IT COVERS — BOTH POPULATIONS, SINCE cleat#2549. Fenced `go` blocks AND the
+// inline code spans outside them. The span half was added because the defect does not
+// respect the line between a call and a mention: of cleat#2524's seven sites the fenced
+// scan reached three, and of cleat#2532's five it reached one. **Prose is where a reader
+// meets the name** — the closing summary line of each migration guide is a code span,
+// not a block, and that is the sentence a reader takes away.
+//
+// THE QUESTION THAT HELD IT BACK IS ANSWERED RATHER THAN ASSUMED AWAY. It was *"a code
+// span is as often prose ABOUT a method as a call to one"*, and the answer is that the
+// guard's subject is the **reference**, not the call: a backticked `h.Nonexistent` is a
+// defect whether it is presented as a call or as a mention, because the reader still
+// cannot use it and the page still names something that does not exist. The one class
+// of reference legitimately to a method that does not exist is a **planned** API — and
+// that is a place, not a name, which is why the heading exclusion below is a mechanism.
+//
+// TWO EXCLUSIONS, BOTH BY MECHANISM AND BOTH NAMED. Measured 2026-09-27, the
+// false-positive class has exactly two members and neither is a defect:
+//
+//	path `IMPROVEMENT-PLAN*`   `h.X`, `h.Uppercase` — metavariables in planning prose
+//	heading `### Planned`      `h.Secret` — an API that SHOULD not exist yet
+//
+// Excluding a name would be a standing exemption for a defect; excluding a *place* is a
+// statement about what those documents are for. No count is written here on purpose:
+// cleat#2532 moved several, and a number would have been wrong within the hour.
 //
 // AND THE COUNT IS NOT IN THIS FILE. #2526 says so explicitly: it is a census of a
 // growing population, and a number written into a document is the thing that
@@ -137,6 +144,31 @@ func TestDocsDoNotTeachMethodsThatDoNotExist(t *testing.T) {
 		}
 	}
 
+	// The prose half, cleat#2549. Same key space as the fenced scan — `file|method` — so
+	// a baseline entry keeps meaning what it always meant: this document names this
+	// method somewhere. The scan itself is the point; a baseline satisfied by a block and
+	// a block satisfied by a span are the same defect either way.
+	spans := proseCodeSpans(t, root)
+	// Anti-vacuity for the extracted population, for the same reason as the blocks above.
+	// The floor is loose on purpose — it catches a derivation that has stopped working,
+	// not a corpus that has shrunk — and it is two orders below the real population, so
+	// it cannot be mistaken for a claim about how many spans there are.
+	if len(spans) < 1000 {
+		t.Fatalf("extracted only %d inline code span(s) outside fenced blocks.\n\n"+
+			"This is a failure of the CHECK, not a finding about the docs: a span scan that\n"+
+			"extracts almost nothing reports no bad names in any document.", len(spans))
+	}
+	for _, s := range spans {
+		for _, name := range unknownHostCallMethods(s.text, known) {
+			key := s.file + "|" + name
+			live[key] = struct{}{}
+			if _, baselined := documentedCallsNotYetFixed[key]; baselined {
+				continue
+			}
+			findings = append(findings, finding{s.file, s.line, name, strings.TrimSpace(s.text)})
+		}
+	}
+
 	// A baseline entry that no longer matches is an error, not silence. Without
 	// this the list can only be added to, and a fixed document leaves a stale
 	// exemption behind that would hide the same defect if it returned. This is the
@@ -160,9 +192,9 @@ func TestDocsDoNotTeachMethodsThatDoNotExist(t *testing.T) {
 	}
 
 	if len(findings) == 0 {
-		t.Logf("examined %d fenced go block(s) against %d known host-call method(s); "+
-			"none calls a method that does not exist beyond the %d baselined",
-			len(blocks), len(known), len(documentedCallsNotYetFixed))
+		t.Logf("examined %d fenced go block(s) and %d inline code span(s) against %d known "+
+			"host-call method(s); none names a method that does not exist beyond the %d baselined",
+			len(blocks), len(spans), len(known), len(documentedCallsNotYetFixed))
 		return
 	}
 
@@ -184,6 +216,75 @@ type goBlock struct {
 	file string
 	line int
 	body string
+}
+
+// codeSpan is one inline code span outside every fenced block.
+type codeSpan struct {
+	file string
+	line int
+	text string
+}
+
+// proseCodeSpans returns the inline code spans that are NOT inside a fenced block, on
+// the paths this guard scans. The test's header says why prose is scanned at all and
+// names the two exclusions; what belongs here is how they are implemented.
+//
+// The fence is BLANKED rather than removed — replaced by the same number of newlines —
+// so a span's reported line number is its line in the file. Removing the fences would
+// make every finding below the first block point at the wrong line, which is the class
+// of error this whole file is about.
+func proseCodeSpans(t *testing.T, root string) []codeSpan {
+	t.Helper()
+	fence := regexp.MustCompile("(?ms)^```.*?^```")
+	span := regexp.MustCompile("`([^`]*)`")
+	var out []codeSpan
+	for _, rel := range trackedFiles(t, root, "*.md") {
+		// The path exclusion: planning prose uses `h.X` as a metavariable, so a name
+		// there is illustrative text rather than a reference to a method.
+		if strings.HasPrefix(rel, "IMPROVEMENT-PLAN") {
+			continue
+		}
+		if strings.Contains(rel, "/design/") || strings.HasSuffix(rel, "-CLOSED.md") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			continue
+		}
+		src := string(data)
+		prose := fence.ReplaceAllStringFunc(src, func(m string) string {
+			return strings.Repeat("\n", strings.Count(m, "\n"))
+		})
+		planned := plannedSectionLines(prose)
+		for _, m := range span.FindAllStringSubmatchIndex(prose, -1) {
+			line := strings.Count(prose[:m[0]], "\n") + 1
+			if planned[line] {
+				continue
+			}
+			out = append(out, codeSpan{file: rel, line: line, text: prose[m[2]:m[3]]})
+		}
+	}
+	return out
+}
+
+var plannedHeading = regexp.MustCompile(`^#{2,4}\s+Planned\b`)
+
+// plannedSectionLines marks the lines under a heading naming a planned API, where a
+// reference to a method that does not exist yet is correct rather than a defect. The
+// section ends at the next heading of any level, so the exclusion cannot leak past it.
+func plannedSectionLines(src string) map[int]bool {
+	out := map[int]bool{}
+	in := false
+	for i, l := range strings.Split(src, "\n") {
+		if strings.HasPrefix(l, "#") {
+			in = plannedHeading.MatchString(l)
+			continue
+		}
+		if in {
+			out[i+1] = true
+		}
+	}
+	return out
 }
 
 // fencedGoBlocks returns the fenced ```go blocks of the tracked markdown a reader is
