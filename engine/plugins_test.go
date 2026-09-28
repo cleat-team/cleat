@@ -326,6 +326,8 @@ func TestPluginCall_FreshWithTenantAndWorkflowID(t *testing.T) {
 	s.engine.pluginRegistry = pr
 	s.tenantID = "tenant-abc"
 	s.workflowID = "wf-123"
+	s.execRunID = "wf-123"
+	s.stepCount = 3
 
 	buf := make([]byte, 256)
 	ctx := contextWithRawMemBuf(context.Background(), buf)
@@ -344,6 +346,15 @@ func TestPluginCall_FreshWithTenantAndWorkflowID(t *testing.T) {
 	}
 	if cc.WorkflowID != "wf-123" {
 		t.Errorf("expected WorkflowID %q, got %q", "wf-123", cc.WorkflowID)
+	}
+	// cleat#2614: Step and RunID must reach the plugin so it can derive a
+	// replay-safe idempotency key, the same shape DurableCallIdempotencyKey
+	// already uses for the ServiceCaller path.
+	if cc.RunID != "wf-123" {
+		t.Errorf("expected RunID %q, got %q", "wf-123", cc.RunID)
+	}
+	if cc.Step != 3 {
+		t.Errorf("expected Step %d, got %d", 3, cc.Step)
 	}
 }
 
