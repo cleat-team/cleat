@@ -192,6 +192,77 @@ func TestSyncCustomer_NoConnectorIsRefusedBeforeWaiting(t *testing.T) {
 	}
 }
 
+// A tenant-uploaded step, invoked as a child, transforms the payload before
+// dispatch. docs/playbooks/integration-hub.md, "The wedge: the tenant's own
+// step, not yours".
+func TestSyncCustomer_RunsTheTenantsOwnStep(t *testing.T) {
+	env := setupEnv()
+	env.OnPluginCall("webhook-ingest", "await_webhook").
+		Return(`{"found":true,"event_type":"contact.updated","payload":{"id":"c-1"}}`, nil)
+	env.OnChildWorkflow("normalize-order").
+		Return(`{"id":"c-1","normalized":true}`, nil)
+	env.OnPluginCall("notifications", "send_webhook").
+		Return(`{"delivery_id":"11111111-1111-1111-1111-111111111111"}`, nil)
+
+	in := syncInput()
+	in.TenantStepName = "normalize-order"
+
+	resultJSON, err := run(t, env, in)
+	if err != nil {
+		t.Fatalf("SyncCustomer failed: %v", err)
+	}
+
+	var result SyncResult
+	if err := json.Unmarshal([]byte(resultJSON), &result); err != nil {
+		t.Fatalf("SyncCustomer returned unparseable JSON %q: %v", resultJSON, err)
+	}
+	if result.Status != "done" {
+		t.Errorf("status = %q, want done", result.Status)
+	}
+	if !result.TenantStepRan {
+		t.Error("TenantStepRan = false: the tenant step was asked for and stubbed to succeed")
+	}
+
+	calls := env.ChildWorkflowCallHistory()
+	if len(calls) != 1 || calls[0].Name != "normalize-order" {
+		t.Errorf("child workflow calls = %+v, want exactly one call to normalize-order", calls)
+	}
+}
+
+// A tenant step that fails -- including one the SANDBOX refuses -- must fail
+// THIS workflow, distinctly, rather than reading as a successful dispatch.
+// The failing tenant step is exactly what a malicious or broken upload looks
+// like from the caller's side of ChildWorkflow/AwaitChild; see
+// examples/integration-hub/tenant-steps/malicious-read-host-file for what a
+// real WASI-policy refusal looks like end to end.
+func TestSyncCustomer_ATenantStepThatFailsNamesItsStep(t *testing.T) {
+	env := setupEnv()
+	env.OnPluginCall("webhook-ingest", "await_webhook").
+		Return(`{"found":true,"event_type":"contact.updated","payload":{"id":"c-1"}}`, nil)
+	env.OnChildWorkflow("malicious-read-host-file").
+		Return("", errTest(`cleat refuses the WASI call "path_open"`))
+
+	in := syncInput()
+	in.TenantStepName = "malicious-read-host-file"
+
+	if _, err := run(t, env, in); err == nil {
+		t.Fatal("expected the run to fail when the tenant step fails")
+	}
+
+	if got, _ := env.QueryState("failed_step"); got != "tenant_step" {
+		t.Errorf("failed_step = %q, want tenant_step", got)
+	}
+	if got, _ := env.QueryState("status"); got != "failed" {
+		t.Errorf("status = %q, want failed", got)
+	}
+
+	// The connector must never see a payload from a step that never
+	// completed -- a malicious step failing must not read as "delivered".
+	if got, ok := env.QueryState("delivery_id"); ok {
+		t.Errorf("delivery_id = %q: dispatch ran despite the tenant step failing", got)
+	}
+}
+
 type errTest string
 
 func (e errTest) Error() string { return string(e) }

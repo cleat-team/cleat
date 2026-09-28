@@ -1,0 +1,9 @@
+# A stand-in for a TENANT's own uploaded workflow -- see
+# docs/playbooks/integration-hub.md, "The wedge: the tenant's own step, not
+# yours". Deployed through POST /api/definitions rather than `cleat deploy`,
+# because that is how a tenant's own upload reaches the worker; this cleat.yaml
+# exists only so `cleat build` can produce the WASM bytes to upload.
+name: normalize-order
+language: go
+entry_points:
+  - normalize_order

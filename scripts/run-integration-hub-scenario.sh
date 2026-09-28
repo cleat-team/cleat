@@ -924,6 +924,102 @@ fi
 disown "$BACKEND_PID" 2>/dev/null || true
 kill "$BACKEND_PID" 2>/dev/null || true
 
+# ---- the wedge: the tenant's own step, not yours -----------------------
+#
+# docs/playbooks/integration-hub.md, "The wedge": a customer uploads its own
+# transform through POST /api/definitions, and SyncCustomer (hub.go) invokes
+# it as a child workflow. Everything above this point deploys and runs the
+# OPERATOR's own workflow; nothing above ever calls POST /api/definitions at
+# all, so the tenant-uploaded-step claim was undemonstrated. This is that
+# claim, executed against the same real deployed worker.
+#
+# RUNS HERE, before the rate-limit burst spends the bucket below and after
+# the backend section's own counted delivery, so this section's own dispatch
+# does not disturb an absolute delivery count any earlier assertion checks.
+echo
+echo "==> the wedge: uploading and running the tenant's own step"
+
+TENANT_WASM_DIR="$(mktemp -d)"
+if ! "$CLEAT_BIN" build --target go -o "$TENANT_WASM_DIR" \
+    ./examples/integration-hub/tenant-steps/normalize-order/ >/tmp/ih-tenant-build.log 2>&1; then
+  echo "FAIL: building the tenant's own step (normalize-order) failed" >&2
+  tail -25 /tmp/ih-tenant-build.log >&2
+  failures=$((failures + 1))
+else
+  TENANT_WASM="$TENANT_WASM_DIR/normalize_order.wasm"
+  if [[ ! -f "$TENANT_WASM" ]]; then
+    echo "FAIL: the tenant step build did not produce $TENANT_WASM" >&2
+    ls -la "$TENANT_WASM_DIR" >&2
+    failures=$((failures + 1))
+  else
+    # The base64 payload goes over STDIN, not argv: a multi-megabyte string
+    # as a single shell/exec argument risks E2BIG ("Argument list too
+    # long") on some systems -- measured hitting it here with a ~5 MB wasm.
+    DEF_JSON_FILE="$OUT_DIR/normalize-order-def.json"
+    base64 < "$TENANT_WASM" | tr -d '\n' | python3 -c '
+import json, sys
+print(json.dumps({"name": "normalize-order", "wasm_bytes_base64": sys.stdin.read()}))
+' >"$DEF_JSON_FILE"
+    # --data @file, NOT -d "$(cat file)": the JSON body is several MB once the
+    # wasm is base64-encoded, and passing it as a single shell/exec argument
+    # risks E2BIG ("Argument list too long") -- measured hitting it here.
+    if ! curl -fsS --max-time 30 -X POST "$API/api/definitions" "${auth[@]}" \
+        -H "Content-Type: application/json" --data @"$DEF_JSON_FILE" >/tmp/ih-tenant-upload.log 2>&1; then
+      echo "FAIL: POST /api/definitions (the tenant's own upload) was refused" >&2
+      cat /tmp/ih-tenant-upload.log >&2
+      failures=$((failures + 1))
+    else
+      echo "    ok      the tenant's own step was uploaded through POST /api/definitions"
+
+      TENANT_RUN="$(curl -fsS --max-time 15 -X POST "$API/api/workflows/integration-hub/start" "${auth[@]}" \
+        -H "Content-Type: application/json" -H "Idempotency-Key: ih-$SUFFIX-wedge" \
+        -d "{\"input\":{\"source_id\":\"$SOURCE_ID\",\"webhook_id\":\"$WEBHOOK_ID\",\"customer_id\":\"cus-wedge\",\"event_type\":\"contact.updated\",\"payload\":{\"id\":\"c-wedge\"},\"tenant_step_name\":\"normalize-order\"}}" |
+        python3 -c 'import json,sys;print(json.load(sys.stdin).get("id",""))')"
+      if [[ -z "$TENANT_RUN" ]]; then
+        echo "FAIL: the wedge sync returned no run id" >&2
+        failures=$((failures + 1))
+      else
+        # normalize-order requires order_id (examples/integration-hub/tenant-steps/normalize-order/main.go)
+        # -- $BODY above has no such field, so the wedge needs its own inbound
+        # payload rather than reusing the backend section's.
+        #
+        # NO {"event_type":...,"payload":{...}} WRAPPER, unlike $BODY above:
+        # plugins/webhookingest/routes.go's webhookPayload(body) forwards the
+        # RAW POST BODY verbatim as inbound.Payload -- it does not unwrap a
+        # nested "payload" key -- and eventType is read from the X-Event-Type
+        # header below, not from the body. A wrapped body here would make
+        # order_id live at .payload.order_id instead of the top level
+        # normalize-order's json.Unmarshal expects (measured: "order_id is
+        # required" with the wrapper in place).
+        WEDGE_BODY='{"order_id":"ord-wedge-1","vendor_name":"acme"}'
+        SIGW="sha256=$(printf '%s' "$WEDGE_BODY" | openssl dgst -sha256 -hmac 'whsec_local_dev' -r | cut -d' ' -f1)"
+        if ! curl -fsS --max-time 15 -X POST "$API/ingest/$SOURCE_ID" \
+            -H "Content-Type: application/json" \
+            -H "X-Event-Type: contact.updated" \
+            -H "X-Hub-Signature-256: $SIGW" -d "$WEDGE_BODY" >/dev/null 2>&1; then
+          echo "FAIL: the wedge's signed inbound event was refused" >&2
+          failures=$((failures + 1))
+        fi
+
+        if wait_for_status "$TENANT_RUN" "done" 60; then
+          RESULT_JSON="$(curl -fsS --max-time 10 "$API/api/workflows/$TENANT_RUN" "${auth[@]}" 2>/dev/null |
+            python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("result",""))
+except Exception: print("")')"
+          TENANT_STEP_RAN="$(printf '%s' "$RESULT_JSON" | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("tenant_step_ran", False))
+except Exception: print(False)')"
+          check "tenant_step_ran" "$TENANT_STEP_RAN" "True"
+        else
+          echo "FAIL: the wedge run did not complete; it reads '$(run_status "$TENANT_RUN")'" >&2
+          failures=$((failures + 1))
+        fi
+      fi
+    fi
+  fi
+  rm -rf "$TENANT_WASM_DIR"
+fi
+
 # ---- the edge middleware -----------------------------------------------
 #
 # THIS SECTION RUNS LAST, AND THE ORDER IS LOAD-BEARING. The burst below spends
