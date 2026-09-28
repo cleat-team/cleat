@@ -46,6 +46,35 @@
 #
 # Every substitution is a variable the example already documents. The commands'
 # own text -- the flags, the workflow name, the artifact path -- is the README's.
+#
+# DIALECT ARMS -- cleat#2560
+#
+#   scripts/run-order-lifecycle-scenario.sh [postgres|mysql|mssql]
+#
+# The compose file carries three databases and a profile per dialect, so this
+# takes one and drives that arm end to end. Default postgres.
+#
+# WHAT THE ARM DOES AND DOES NOT CLAIM, because the whole value of a dialect
+# matrix is that the per-dialect differences are stated rather than averaged:
+#
+#   - **The saga assertions are dialect-independent and are asserted
+#     IDENTICALLY on all three.** Every check below reads either the run's
+#     `error` field or its published query state. None of them is relaxed for a
+#     dialect, and none may be: an arm that passes because it asserts less is
+#     the failure this exists to avoid. If one of these turns out not to hold on
+#     MySQL, that is a finding about MySQL and not a reason to drop the check.
+#   - **There is exactly one place the dialects genuinely differ, and it is
+#     asserted differently on purpose.** PostgreSQL enforces row-level security
+#     and the worker verifies its runtime connection is subject to it; MySQL and
+#     SQL Server have no such check at all, because
+#     `cmd/cleat-worker/main.go` gates the whole thing on `--driver ==
+#     "postgres"` before calling `engine.CheckRLSEnforced` -- a function that
+#     queries `pg_roles` and could not run elsewhere. So this script asserts the
+#     guarantee where it exists and STATES ITS ABSENCE where it does not, rather
+#     than asserting the weaker thing and calling it the same assertion. See
+#     assert_rls_posture below.
+#
+# The README's dialect table is the reader-facing half of the same statement.
 set -uo pipefail
 
 # ERREXIT OFF, EXPLICITLY -- as a DECLARATION, not as a fix for anything.
@@ -78,6 +107,56 @@ set -uo pipefail
 set +e
 
 cd "$(git rev-parse --show-toplevel)" || exit 2
+
+# ---- the dialect -------------------------------------------------------
+
+DIALECT="${1:-postgres}"
+# Every per-dialect fact this script needs, in one place, so that adding a
+# fourth dialect is a column rather than a search.
+#
+# The DSNs are the column worth reading. PostgreSQL and SQL Server carry a
+# scheme and MySQL does not -- `user:pw@tcp(host:port)/db` -- so there is no one
+# template with the host swapped out: the SHAPE differs, not just the host. That
+# is also why the compose file states the defaults rather than deriving them.
+#
+# Two views of each database are needed and neither is derivable from the other:
+# HOST_* is what the reader's `cleat deploy` reaches, and NET_* is what the
+# worker reaches over the compose network. A host runs on `localhost`, the
+# worker runs beside the service.
+case "$DIALECT" in
+  postgres)
+    PORT_ENV=CLEAT_PG_PORT
+    # The superuser, because deploy writes a workflow definition and the tables
+    # holding it have row-level security FORCEd.
+    HOST_DB_URL_TMPL='postgres://cleat:cleat@localhost:__PORT__/cleat?sslmode=disable'
+    # The worker is the non-superuser the app-role step exists to provision.
+    NET_MIGRATE_DB_URL='postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable'
+    NET_WORKER_DB_URL='postgres://cleat_app:cleat-app-local-dev@postgres:5432/cleat?sslmode=disable'
+    ;;
+  mysql)
+    PORT_ENV=CLEAT_MYSQL_PORT
+    HOST_DB_URL_TMPL='root:cleat@tcp(localhost:__PORT__)/cleat?tls=false&parseTime=true'
+    # No app-role step and no lesser identity: cleat's MySQL is single-tenant by
+    # construction (cleat#2534, D1), so there is no second role to connect as
+    # and the migration and the runtime use the same credentials.
+    NET_MIGRATE_DB_URL='root:cleat@tcp(mysql:3306)/cleat?tls=false&parseTime=true'
+    NET_WORKER_DB_URL="$NET_MIGRATE_DB_URL"
+    ;;
+  mssql)
+    PORT_ENV=CLEAT_MSSQL_PORT
+    HOST_DB_URL_TMPL='sqlserver://sa:CleatTest123!@localhost:__PORT__?database=cleat'
+    NET_MIGRATE_DB_URL='sqlserver://sa:CleatTest123!@mssql:1433?database=cleat'
+    NET_WORKER_DB_URL="$NET_MIGRATE_DB_URL"
+    ;;
+  *)
+    # An unrecognised argument is a broken check, not a finding about the
+    # example, and it must not fall through to the postgres arm -- which would
+    # report a clean PostgreSQL run under the name of a dialect nobody ran.
+    echo "UNMEASURED: unknown dialect '$DIALECT'." >&2
+    echo "Expected one of: postgres, mysql, mssql. Nothing was run." >&2
+    exit 2
+    ;;
+esac
 
 EXAMPLE_DIR="examples/order-lifecycle"
 README="$EXAMPLE_DIR/README.md"
@@ -138,14 +217,23 @@ free_port() {
   python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'
 }
 
+
 SUFFIX="$$-$(date +%s)"
-PG_PORT="$(free_port)"
+DB_PORT="$(free_port)"
 API_PORT="$(free_port)"
 WEB_PORT="$(free_port)"
 WORKER_IMAGE="cleat-order-lifecycle-test:$SUFFIX"
-COMPOSE=(docker compose -f "$EXAMPLE_DIR/docker-compose.yml")
+COMPOSE=(docker compose --profile "$DIALECT" -f "$EXAMPLE_DIR/docker-compose.yml")
 OUT_DIR="$(mktemp -d)"
-export CLEAT_PG_PORT="$PG_PORT" CLEAT_API_PORT="$API_PORT"
+# The port is chosen at runtime, so the host DSN is templated rather than
+# literal. CLEAT_DB_URL is the variable the README's dialect table tells a
+# reader to set, so the documented command works unchanged on every dialect --
+# which is the claim this arm makes about it.
+HOST_DB_URL="${HOST_DB_URL_TMPL//__PORT__/$DB_PORT}"
+export "$PORT_ENV=$DB_PORT" CLEAT_API_PORT="$API_PORT"
+export CLEAT_DIALECT="$DIALECT"
+export CLEAT_DB_URL="$HOST_DB_URL"
+export CLEAT_MIGRATE_DB_URL="$NET_MIGRATE_DB_URL" CLEAT_WORKER_DB_URL="$NET_WORKER_DB_URL"
 export COMPOSE_PROJECT_NAME="cleat-order-lifecycle-$SUFFIX"
 
 # On failure the worker's own log is the only artefact that explains what
@@ -221,6 +309,15 @@ if [[ -z "$API_KEY" ]]; then
 fi
 auth=(-H "Authorization: Bearer $API_KEY")
 
+# ---- what THIS dialect does and does not guarantee ----------------------
+#
+# Announced here so the dialect is on screen before any output a reader might
+# mistake for the default arm's. The CHECK itself is in the assertions section
+# beside `contains`, because a bash function must be defined before it is called
+# and every helper in this file is defined below this point.
+echo
+echo "==> dialect: $DIALECT"
+
 # ---- the documented commands -------------------------------------------
 
 ran=0
@@ -262,7 +359,13 @@ fi
 
 DEPLOY_RUN="${DEPLOY_CMD//cleat /$CLEAT_BIN }"
 DEPLOY_RUN="${DEPLOY_RUN//\/tmp\/out/$OUT_DIR}"
-DEPLOY_RUN="${DEPLOY_RUN//localhost:5432/localhost:$PG_PORT}"
+# There was a third substitution here until the dialect arm, rewriting
+# `localhost:5432` to the free port. It is gone because the README no longer
+# names a port: it reads `--db "$CLEAT_DB_URL"`, and CLEAT_DB_URL above is
+# already the right DSN for this dialect with the right port in it. That is a
+# better README and a stronger claim -- the deploy command's TEXT is now
+# identical on all three dialects, so "the documented command runs everywhere"
+# is a statement about one command rather than three near-copies.
 run_documented deploy "$DEPLOY_RUN"
 
 # ---- the webhook source the workflow waits on --------------------------
@@ -287,8 +390,12 @@ fi
 echo "    source ${SOURCE_ID:0:8}…"
 
 # ---- assertions --------------------------------------------------------
-
-failures=0
+#
+# The counter is initialised further up, beside the first thing that can
+# increment it -- the dialect's RLS posture below. It used to be reset here,
+# which was harmless while this was the first check in the file and became a
+# silent eraser the moment a check was added above it: the RLS failure would
+# have been counted and then zeroed, and the run would have reported clean.
 
 # state_of <run-id> <key> -> the published query value, or empty.
 state_of() {
@@ -357,6 +464,45 @@ contains() {
     failures=$((failures + 1))
   fi
 }
+
+# ---- what THIS dialect does and does not guarantee ----------------------
+#
+# The one place the three arms are deliberately not the same assertion. Read the
+# DIALECT ARMS note in the header before changing it.
+#
+# `contains` is reused for the PostgreSQL half because the claim there is a
+# positive fact the worker prints. The other half has no fact to assert, and
+# saying so -- without counting it as a pass -- is the point.
+#
+# The counter starts here, beside the first check that can increment it. It used
+# to be reset at the head of this section, which was harmless while nothing
+# above incremented it and became a silent eraser the moment something did: the
+# RLS failure would have been counted and then zeroed, and the run would have
+# reported clean.
+failures=0
+worker_log="$("${COMPOSE[@]}" logs cleat-worker 2>/dev/null || true)"
+if [[ "$DIALECT" == "postgres" ]]; then
+  contains "the worker's RLS posture" "$worker_log" \
+    "row-level security is enforced on this connection"
+else
+  if [[ "$worker_log" == *"row-level security is enforced on this connection"* ]]; then
+    # The gate in cmd/cleat-worker/main.go is `--driver == "postgres"`, and
+    # engine.CheckRLSEnforced queries pg_roles. If this ever prints on another
+    # dialect then the README's statement about that dialect -- that nothing
+    # there enforces RLS -- has become false, whatever else changed.
+    echo "    FAIL    the worker reports RLS enforced on $DIALECT, where the README" >&2
+    echo "            says nothing does. The README's dialect table is now wrong." >&2
+    failures=$((failures + 1))
+  else
+    echo "    --      no RLS assertion on $DIALECT, and none available to make."
+    echo "            cleat's MySQL is single-tenant by construction and SQL Server has"
+    echo "            no runtime enforcement check either: cmd/cleat-worker/main.go gates"
+    echo "            the whole check on --driver == \"postgres\", before calling"
+    echo "            engine.CheckRLSEnforced, which queries pg_roles and could not run"
+    echo "            here. The saga assertions below are NOT weaker for it -- they are"
+    echo "            the same assertions, and they are what this arm measures."
+  fi
+fi
 
 # WHY THE FAILED RUNS ARE ASSERTED ON THE ERROR AND NOT ON QUERY STATE.
 #
@@ -552,6 +698,7 @@ kill "$BACKEND_PID" 2>/dev/null || true
 # ---- report ------------------------------------------------------------
 
 echo
+echo "dialect: $DIALECT"
 echo "documented commands run: $ran of $total"
 
 # A run that executed nothing is a broken check, not a clean tree -- the same
@@ -568,4 +715,4 @@ if (( failures > 0 )); then
   exit 1
 fi
 
-echo "all assertions passed"
+echo "all assertions passed on $DIALECT"
