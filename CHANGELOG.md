@@ -12,6 +12,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`llm.chat` priced a model it did not recognise as one of the provider's mid-range models,
+  silently, in both directions at once** — a spend ceiling (`Cost` is what it enforces against)
+  permitted 5x the intended spend on an under-priced model and tripped ~16x early on an
+  over-priced one. Closed by collapsing every provider's own price table (each carrying an
+  identical `default:` guess — `openai.go`, `anthropic.go`, and two more the issue had not found,
+  `gemini.go` and `mistral.go`) into one (`providers/pricing.go`), used by every provider's cost
+  computation and by `list_models`, which previously carried a second, differently-shaped table
+  (one blended $/1k figure that only agreed with the split prompt/completion rate at a 1:1 ratio,
+  which a real call never has). A model absent from the table is now priced at the provider's
+  highest known rate — conservative, the safe direction for a ceiling — and flagged via a new
+  `ChatOutput.estimated_cost` field plus a log line, rather than returned as an indistinguishable
+  mid-range number. Also fixed: Groq delegates to `OpenAIChat` for parsing, and Groq's model names
+  never matched a case in OpenAI's table, so **100% of Groq calls**, not just unrecognised ones,
+  were priced at OpenAI's rate; and cost now keys on the model the provider actually served
+  (`result.Model`) rather than the one requested (`input.Model`), so a provider that substitutes a
+  model bills at the substituted model's rate — **except Gemini, whose response carries no served-model
+  field at all** (the model only ever appears in the request URL), so `input.Model` is the only
+  candidate there; a limit of that API, not a gap in this fix. (cleat#2572)
+
 - **Every example app's live run-state panel rendered empty, because
   `backendkit.Client.GetWorkflowState` requested `/api/workflows/{id}/state` — a route that does not
   exist.** Every call answered 404, and every caller read that as "no state", so `order-lifecycle`,

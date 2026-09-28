@@ -54,6 +54,14 @@ type ChatOutput struct {
 	Cost    float64  `json:"cost"`
 	Model   string   `json:"model"`
 	Error   string   `json:"error,omitempty"`
+
+	// EstimatedCost is true when Model was not in cleat's price table, so
+	// Cost was computed at the provider's highest known rate rather than an
+	// exact one -- see CostFor. It is not an error (Error carries those);
+	// the call succeeded, its price just is not exact. cleat#2572: this
+	// field exists so an unpriced model is a visible fact rather than a
+	// mid-range number indistinguishable from a real one.
+	EstimatedCost bool `json:"estimated_cost,omitempty"`
 }
 
 // Choice represents a single completion choice.
