@@ -66,7 +66,67 @@ services:
     ports:
       - "${CLEAT_MYSQL_PORT:-3306}:3306"
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-pcleat"]
+      # `-h 127.0.0.1`, NOT `-h localhost`.
+      #
+      # THE DISCRIMINATOR IS THE CLIENT, NOT THE VALUE -- do not "fix" the MSSQL
+      # healthcheck below on the strength of this line. In the MYSQL client
+      # `localhost` is a magic string meaning "use the unix socket";
+      # `127.0.0.1` forces TCP. `sqlcmd` has no such special case, so that
+      # service's `-S localhost` is a hostname resolved to loopback -- and the
+      # MSSQL arm PASSES with it, in the same matrix run whose MySQL arm failed.
+      # That arm is the control for this paragraph: the rule is about the MySQL
+      # client, not about the string.
+      #
+      # WHY IT MATTERS HERE: every consumer of this database connects over TCP
+      # (`tcp(mysql:3306)`), so a healthcheck that answers on the socket is
+      # reporting on an interface nothing uses.
+      #
+      # AND THE WINDOW BITES ON A SINGLE SAMPLE rather than needing to persist:
+      # `service_healthy` releases on the FIRST healthy reading rather than
+      # requiring sustained health, so one early socket answer is enough to
+      # start everything downstream. (That is a fact about Compose. That it is
+      # what happened HERE is the experiment below, not this sentence.)
+      #
+      # This is also what cleat's own multi-db CI uses
+      # (`.github/workflows/multi-db-ci.yml`, `--health-cmd "mysqladmin ping -h
+      # 127.0.0.1 -u root -pcleat"`); this file diverged from it by copying
+      # docker-compose.dev.yml, which says `localhost`.
+      #
+      # THE LINE IS CAUSAL, measured by reverting ONLY it and re-running the
+      # MySQL arm -- same commit, same everything else:
+      #
+      #     -h 127.0.0.1   ->  Order lifecycle scenario (mysql) PASSES
+      #     -h localhost   ->  Order lifecycle scenario (mysql) FAILS, with the
+      #                        same `dial tcp 172.18.0.2:3306: connect:
+      #                        connection refused` at worker startup
+      #
+      # Two runs, one variable. So this is a FIX and not a hardening.
+      #
+      # THE WINDOW ITSELF IS INFERRED, NOT MEASURED, and the difference is worth
+      # keeping. What is measured is that this line decides the outcome. That the
+      # reason is a socket answer during the entrypoint's `--skip-networking`
+      # init is the explanation that fits both observations, and it has not been
+      # observed directly. The command that would settle it -- on a FAILING run,
+      # `docker inspect --format '{{json .State.Health}}' <container>`, whose
+      # probe log carries every exit code and `mysqladmin`'s own output naming
+      # the socket it used -- was not run, because it needs another failing
+      # configuration and the effect is already established. Say "the line is
+      # causal, and here is the mechanism that explains it" rather than "the
+      # mechanism is demonstrated".
+      #
+      # WHAT THE WINDOW IS NOT OBSERVABLE FROM, which a reader needs BEFORE
+      # trying to reproduce it: a cold-start poll INSIDE the container, both
+      # forms checked each iteration, had them answer at the SAME instant on an
+      # idle machine (+5.0s each, delta 0). It does not reproduce without load
+      # -- which is why three earlier local probes were all negative, and why the
+      # causal evidence had to come from CI. A reader who runs that probe and
+      # sees delta 0 has not falsified this; they have reproduced the reason it
+      # could not be measured locally.
+      #
+      # The change stands on its own merits regardless: a healthcheck must assert
+      # the interface its consumers use, and this one was asserting a socket that
+      # only the healthcheck itself was using.
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-pcleat"]
       interval: 3s
       timeout: 5s
       retries: 20
