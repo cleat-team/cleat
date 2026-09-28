@@ -121,6 +121,61 @@ class TestStubCall:
 
 
 # ======================================================================
+# Plugin call recording (cleat#2547)
+# ======================================================================
+
+
+class TestPluginCallRecording:
+    """A plugin call must enter the history the call assertions read.
+
+    ``CleatTestHarness`` subclasses ``HostCalls`` and overrides both
+    ``call`` and ``plugin_call``.  The ``call`` override records into
+    ``call_history``; the ``plugin_call`` override did not, so
+    ``assert_not_called`` over a plugin call was satisfied by absence
+    whether or not the call happened — a check that reads cleanest
+    exactly where it measured least (cleat#2539, cleat#2547).
+
+    The service name is ``plugin:<name>``, not the bare plugin name: the
+    base class dispatches on that spelling
+    (``host_calls.py``, ``_call_or_raise(f"plugin:{plugin_name}", …)``)
+    and ``stub_call`` already requires it to register a plugin stub.
+    """
+
+    def test_plugin_call_enters_the_history(self):
+        """Known positive: the call demonstrably happened, so absence must not hold.
+
+        The stub is consumed and its response returned — obtainable no
+        other way, which is what makes the call demonstrable.  The
+        assertion that matters is the absence one: ``assert_not_called``
+        was satisfied by an empty history whether or not the call was
+        made, which is the direction that certifies what it cannot see.
+        """
+        h = CleatTestHarness()
+        h.stub_call("plugin:notifications", "send_webhook", '{"delivery_id": "d1"}')
+        response = h.plugin_call(
+            "notifications", "send_webhook", {"url": "https://example.com"}
+        )
+
+        # The call happened: only a matching plugin_call pops this stub.
+        assert json.loads(response)["delivery_id"] == "d1"
+
+        assert h.call_count("plugin:notifications", "send_webhook") == 1
+        assert not h.assert_not_called("plugin:notifications", "send_webhook")
+
+    def test_stubbed_but_uncalled_plugin_satisfies_absence(self):
+        """Control: the fix must not make the absence assertion unsatisfiable.
+
+        Without this, a fix that made ``assert_not_called`` fail
+        unconditionally would pass the acceptance test on its own.
+        """
+        h = CleatTestHarness()
+        h.stub_call("plugin:notifications", "send_webhook", '{"delivery_id": "d1"}')
+
+        assert h.assert_not_called("plugin:notifications", "send_webhook")
+        assert not h.assert_called("plugin:notifications", "send_webhook")
+
+
+# ======================================================================
 # Clock control
 # ======================================================================
 

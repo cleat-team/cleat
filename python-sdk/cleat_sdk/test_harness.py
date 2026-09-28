@@ -699,13 +699,41 @@ class CleatTestHarness(HostCalls):
         )
 
     def plugin_call(self, plugin_name: str, function_name: str, input: Any) -> str:
+        # Plugin calls are recorded under the namespaced service name the
+        # base class dispatches on -- `host_calls.py` calls
+        # `_call_or_raise(f"plugin:{plugin_name}", ...)` -- which is also
+        # the name a stub is registered under via `stub_call`.  Recording
+        # the bare plugin name here would make `call_history` disagree
+        # with both.  See cleat#2547.
+        service = f"plugin:{plugin_name}"
+        req_str = self._marshal(input)
+
         # Check for stubs — try matching registered stubs
         for i, stub in enumerate(self._call_stubs):
-            if stub.service == f"plugin:{plugin_name}" and stub.operation == function_name:
+            if stub.service == service and stub.operation == function_name:
                 self._call_stubs.pop(i)
+                self.call_history.append(
+                    CallRecord(
+                        service=service,
+                        operation=function_name,
+                        request=req_str,
+                        response=stub.response,
+                        error=stub.error,
+                    )
+                )
                 if stub.error:
                     raise RuntimeError(stub.error)
                 return stub.response
+
+        self.call_history.append(
+            CallRecord(
+                service=service,
+                operation=function_name,
+                request=req_str,
+                response="",
+                error="no stub registered",
+            )
+        )
         raise RuntimeError(
             f"CleatTestHarness: no stub registered for plugin {plugin_name}.{function_name}"
         )
