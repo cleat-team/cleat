@@ -773,7 +773,7 @@ Mitigation options, from simplest to most impactful:
 - **Increase the heartbeat interval:** Raising the interval from 5 seconds to 30 seconds reduces throughput by 6x. The tradeoff is slower dead-worker detection: up to 60 seconds (two missed intervals at 30s) versus 10 seconds (two missed at 5s) — acceptable for many workloads.
 - **Skip the heartbeat_at index:** If stale-worker detection uses an out-of-band mechanism (Patroni session health checks or a worker-side lease), the UPDATE can be a HOT (Heap-Only Tuple) update that avoids index maintenance.
 
-Without batching, heartbeat UPDATE throughput saturates PostgreSQL at roughly the same concurrent-workflow scale as INSERT throughput. With batching, the heartbeat load is negligible: a handful of UPDATEs per second regardless of workflow count.
+Without batching, heartbeat UPDATE throughput saturates PostgreSQL at roughly the same concurrent-workflow scale as INSERT throughput. **With batching, the STATEMENT count is negligible -- a handful of UPDATEs per second regardless of workflow count -- but that is not the same as negligible cost.** Batching cuts statements, not row versions: a thousand running workflows still produce a thousand new tuples per interval, each with its own WAL record and vacuum work. And `heartbeat_at` is a column in two indexes (`idx_instances_heartbeat`, `idx_instances_stale`; `migrations/postgres/001_schema.sql`), so unless the third mitigation above is taken, every heartbeat also writes two B-tree index entries and cannot use PostgreSQL's heap-only-tuple (HOT) update path. cleat#2608.
 
 **Bottleneck 3 — Worker memory:**
 
