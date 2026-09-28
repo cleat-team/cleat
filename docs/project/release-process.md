@@ -653,6 +653,98 @@ position 3 because it collides with the one in front of it. An entry evicted for
 reason still reads `OPEN`, so "still queued" and "silently kicked out" are the same
 reading if you poll only the PR state.
 
+**And when you want the whole queue rather than one PR's entry, ask for the queue.**
+`mergeQueueEntry` answers a question about a single PR and cannot show you what else is
+waiting, so assembling the picture from it takes one call per PR — each answering a
+smaller question than you asked. `mergeQueue` returns every entry with its position and
+state together:
+
+```bash
+gh api graphql -f query='{repository(owner:"cleat-team",name:"cleat"){
+  mergeQueue(branch:"develop"){entries(first:10){nodes{
+    position state pullRequest{number}}}}}}' \
+  --jq '.data.repository.mergeQueue.entries.nodes[]
+        | "pos=\(.position) \(.state) #\(.pullRequest.number)"'
+```
+
+    pos=1 AWAITING_CHECKS #2536
+    pos=2 AWAITING_CHECKS #2546
+    pos=3 AWAITING_CHECKS #2543
+
+The two are companions rather than alternatives: this is the only view that shows the
+queue **as a queue**, which is what makes an entry's position readable in context.
+**`branch` is an ARGUMENT here, not a field** — `mergeQueue.branch` errors, and it is
+the shape a reader will try first.
+
+**A long wait at position 1 is a CI pass, not a stall — and the queue's own runs are
+where you see it.** The queue does not check your branch tip; it builds the merge commit
+it *would* create and runs the checks against **that**, which is how it can tell whether
+your PR survives the entries ahead of it — and, as below, that commit is the one that
+lands:
+
+```bash
+gh run list --event merge_group --limit 20 \
+  --json headBranch,status,name --jq '.[] | "\(.status)  \(.name)\n    \(.headBranch)"'
+```
+
+    queued  CI/CD Pipeline
+        gh-readonly-queue/develop/pr-2543-340a862612222a9682c9a29c92cf616fb57ad76a
+    completed  DCO Check
+        gh-readonly-queue/develop/pr-2543-340a862612222a9682c9a29c92cf616fb57ad76a
+
+Read that ref before drawing anything from it. It sits under `refs/heads/`, so **a
+workflow gated on `refs/heads/main` will not match it** and will not run for a queued
+PR — which is the point of the name.
+
+**The `<sha>` in it is not the PR's head; it names the parent that this PR's merge
+commit will have.** It is the commit the trial was merged *onto* — the head of the queue
+at that moment, which for an entry behind another is the **pre-computed** merge of the
+entry ahead of it, before that entry has landed.
+
+That is checkable from the graph rather than only observable, which is what makes it a
+mechanism: `pr-2536-8395ac2d…` corresponds to a merge commit whose parent is `8395ac2d`,
+and `pr-2543-340a8626…` to one whose parent is `340a8626`. Compare it against the PR's
+head and it will not match — `#2543`'s head was `0c8aeca1`, which its ref never named.
+
+**And the trial merge is the commit that lands.** The queue raises the ref, runs the
+checks against it, and that same commit reaches `develop` — measured on `#2536`, whose
+queue ref pointed at `f01820b0` before merging and whose merge commit is `f01820b0`.
+
+So the wait is a real CI pass rather than a formality, and the precise reason is worth
+stating because the loose version is falsifiable: **the checks that GATE the merge are
+the checks that apply to what ships.** Develop's ordinary push CI does run on the landed
+commit too — measured on `f01820b0`, `gh run list` shows eight `push` runs against the
+same SHA — but by then the merge has happened, so those gate nothing. It is the
+`merge_group` runs that decided, and they decided against the commit that shipped.
+
+**And an entry behind another is queued, not stalled.** Two PRs sitting at positions 2
+and 3 while a third holds position 1 is the queue working — it evaluates one entry at a
+time, against the entries ahead. **Position is the only field that says so:** `state`
+reads `AWAITING_CHECKS` for every entry in the queue, including the one that is running,
+so it cannot distinguish the head from the two waiting behind it.
+
+**The `state` field has five values, and one of them reads like another.** Enumerate them
+from the schema rather than by watching traffic — the type is the authority and it is one
+call:
+
+```bash
+gh api graphql -f query='{__type(name:"MergeQueueEntryState"){enumValues{name description}}}'
+```
+
+| state | means |
+|---|---|
+| `QUEUED` | the entry has entered the queue |
+| `AWAITING_CHECKS` | the queue is checking the trial merge |
+| `MERGEABLE` | checks passed, the merge is imminent |
+| `UNMERGEABLE` | **it will not merge as it stands** |
+| `LOCKED` | the schema says only "currently locked" |
+
+**`UNMERGEABLE` is the one worth knowing, because a reader would misread it as
+`AWAITING_CHECKS`.** Both say "not merged yet"; only one of them is going to merge. That
+is the same distinction `position` draws for a different pair, and it is the state
+someone polling their own PR most needs to recognise — an entry that cannot merge looks
+exactly like one that is still waiting unless you read this field.
+
 **And a null is ambiguous, so read the PR state beside it.** A PR that has merged and
 a PR that was never enqueued both return `null` for `mergeQueueEntry`:
 
