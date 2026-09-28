@@ -114,10 +114,26 @@ func (s *TenantStore) CreateTenant(ctx context.Context, name, displayName string
 // low-entropy user-chosen password. The hash exists so the plaintext key
 // is never persisted and so lookups can use a DB equality index
 // (ResolveTenantFromAPIKey does `WHERE key_hash = $1`); it is not a
-// password-verification barrier. CodeQL go/weak-sensitive-data-hashing
-// alert #12 flags this call; dismissed with that reasoning. If a caller
-// is ever added that lets a tenant supply their own key text, that
-// precondition breaks and this needs to move to bcrypt/scrypt/argon2
+// password-verification barrier. CodeQL's go/weak-sensitive-data-hashing
+// rule flags this call; dismissed with that reasoning, and the RULE ID is
+// the anchor here deliberately rather than an alert number.
+//
+// A dismissal is keyed to a fingerprint that includes the location, so a
+// refactor that moves this call re-raises it as a NEW alert carrying no
+// memory of the decision. That has already happened once: alert #12 was
+// dismissed against line 53, the hash moved here when it was factored into
+// the shared createAPIKey below, and the same finding returned as alert #16.
+// An earlier version of this comment named #12, which was closed -- so a
+// reader who followed it found a dismissed alert and concluded nothing was
+// outstanding, while #16 sat open for three weeks.
+//
+// Go has no inline CodeQL suppression (the // codeql[...] form covers C/C++,
+// C#, Java, JS/TS, Python, Ruby, Swift and Kotlin, not Go), so a future
+// refactor can re-raise this again. CHECK FOR AN OPEN ALERT rather than
+// trusting a number recorded in this comment.
+//
+// If a caller is ever added that lets a tenant supply their own key text,
+// that precondition breaks and this needs to move to bcrypt/scrypt/argon2
 // (golang.org/x/crypto is already a dependency) with a versioned-hash
 // migration path for existing rows.
 func (s *TenantStore) CreateAPIKey(ctx context.Context, tenantID uuid.UUID, description, rawKey string) error {
