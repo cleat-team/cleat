@@ -621,6 +621,45 @@ is the one that gets skipped, and skipping it — by omission or by squash — i
 `main` and `develop` diverge; the two `git` commands in that section are how you
 tell, and they are worth running before the next release rather than after.
 
+**Check what the enqueue did, not what it said.** `gh pr merge` is the one command
+here whose message and exit status are both uninformative, and **both directions are
+measured** — this applies to every enqueue, not only this step:
+
+- **The message is evidence in neither direction.** A *successful* enqueue prints
+  `! The merge strategy for develop is set by the merge queue`. That is a
+  refusal-shaped line, and it is what success looks like.
+- **The exit status is evidence in neither direction either.** `gh pr merge` exits
+  `0` on a refusal as well. The sharpest instance, from WS-1 (2026-09-27):
+  enqueueing a **draft** PR printed `Pull request is a draft` and **exited 0**. A
+  zero status on a refusal is the shape `gofmt -l && echo clean` has — the command
+  reporting success about a thing it did not do.
+
+So read the queue, which is the only view showing both the outcome and the
+**position**:
+
+```bash
+gh api graphql -f query="{repository(owner:\"cleat-team\",name:\"cleat\"){
+  pullRequest(number:<PR>){mergeQueueEntry{state position}}}}" \
+  --jq '.data.repository.pullRequest.mergeQueueEntry
+        | if . == null then "NOT IN QUEUE" else "\(.state) pos \(.position)" end'
+```
+
+An empty queue reads `NOT IN QUEUE` — which is also what a merged PR reads, hence the
+next paragraph.
+
+Position is not decoration: the queue evaluates your PR against **the entries ahead
+of it**, not against `develop`, so a `CLEAN`/`MERGEABLE` PR can sit `UNMERGEABLE` at
+position 3 because it collides with the one in front of it. An entry evicted for that
+reason still reads `OPEN`, so "still queued" and "silently kicked out" are the same
+reading if you poll only the PR state.
+
+**And a null is ambiguous, so read the PR state beside it.** A PR that has merged and
+a PR that was never enqueued both return `null` for `mergeQueueEntry`:
+
+```bash
+gh pr view <PR> --json state,mergedAt     # OPEN + mergedAt=null + no entry == nothing happened
+```
+
 ### 8. Verify CI
 
 Pushing the tag triggers `.github/workflows/release.yml` (GoReleaser), which:
