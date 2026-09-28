@@ -350,6 +350,36 @@ payloads; see `CHANGELOG.md`'s breaking-changes entry for the migration note. `n
 outbound `send_webhook` delivery got the same requirement the same PR: `POST /webhooks` also
 rejects a missing secret, and `PUT /webhooks/{id}` can rotate one but can no longer clear it.
 
+**The event type is a second header, and the body's `event_type` is ignored for routing.** `POST
+/ingest/{source_id}` takes the event's name from `X-Github-Event`, then `X-Event-Type`, and falls
+back to the literal `"webhook"` when neither is present (`plugins/webhookingest/routes.go`). A JSON
+field called `event_type` is carried through as payload and changes nothing about how the event is
+stored or matched.
+
+**It is the second header on a route whose other header this page documents, and the mistake is
+silent where it is made.** A body-only event type is *accepted* — 201, stored,
+`status = completed` — under the default name, so the ingress reports success and the event is in
+the table. It surfaces later and somewhere else: a workflow's `await_webhook` filters on the name it
+was given, matches nothing, and the run fails a full wait-window later with
+
+    no contact.updated event from source 6f6036cb-… within 30s
+
+**That message points at the ingress, which is working.** "No event arrived" is what a webhook that
+was never delivered says, so the natural next step is to check the delivery — which is fine, and the
+event has `completed` beside it the whole time:
+
+    SELECT event_type, status FROM webhook_events;
+     webhook | completed
+
+Measured while building [`examples/integration-hub/`](../../examples/integration-hub/README.md),
+whose README states the header beside its `curl`. A pointer here rather than only there, because
+this is the page that lists what the route requires and a reader is entitled to assume the list is
+the list.
+
+**Not a body fallback.** Header-first with `X-Github-Event` is deliberate — GitHub sends it — and
+reading the body's field as a fallback would be a behaviour change rather than a correction for
+this.
+
 **Schema drift in a customer's system.** Nothing detects it. Your integration fails, and *where it
 lands depends on how it failed*: a call that exhausted its retry policy is dead-lettered, while a
 parse error or an error returned by the workflow is a plain `failed` run that never reaches the DLQ.
@@ -386,3 +416,10 @@ redrive verbs); the claim that `ratelimiter` falls back to memory when no databa
 refuses to start, cleat#1581); the claim that `--dead-letter-retention-days` alone bounds a poison
 event (a plainly-failed one is bounded by `--retention-days`); and the tenant-supplied-logic gap,
 which was shipped and unnarrated.
+
+**Added since drafting (2026-09-28, cleat#2544):** the ingest route's **event-type header**, in
+"Failure modes to design against". This page documented the route's *other* header — the signature —
+and 400/401/503 carefully, and said nothing about how the event is *named*, so a reader could
+reasonably conclude the list was the list. There was no markdown anywhere in the repository
+mentioning `X-Event-Type` or `X-Github-Event` when this was filed; `examples/integration-hub/README.md`
+now states it beside its `curl`, and this page points at that rather than duplicating it.
