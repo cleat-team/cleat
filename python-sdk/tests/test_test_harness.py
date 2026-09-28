@@ -175,6 +175,77 @@ class TestPluginCallRecording:
         assert not h.assert_called("plugin:notifications", "send_webhook")
 
 
+class TestUnmatchableServiceRefusal:
+    """A bare plugin name can never match, so an assertion over it must refuse.
+
+    ``TestPluginCallRecording`` closed one vacuous pass: a plugin call now
+    enters ``call_history``, so the namespaced assertion means something. It
+    did not close the next one, which is the same defect one spelling to the
+    left -- the assertion could still be written with the BARE name, which
+    matches nothing, so ``assert_not_called("notifications", ...)`` returned
+    True over a call that demonstrably happened. cleat#2567.
+
+    **Why the guard is narrow rather than "refuse anything unregistered."**
+    For ``call``, ``send`` and ``schedule_invoke`` the service is
+    caller-supplied, so any string can match, and asserting absence over a
+    service you deliberately left unstubbed is a meaningful statement about
+    which path the workflow took. Requiring a stub for the thing you assert
+    was never called is backwards -- and it would break the contract pinned by
+    ``test_assert_not_called``. The name is decidable exactly where the
+    harness derives it, which is ``plugin_call``.
+    """
+
+    def test_bare_name_after_the_call_is_refused(self):
+        """The case that was vacuous: the call happened, the name cannot match."""
+        h = CleatTestHarness()
+        h.stub_call("plugin:notifications", "send_webhook", '{"delivery_id": "d1"}')
+        h.plugin_call("notifications", "send_webhook", {"url": "https://example.com"})
+
+        with pytest.raises(AssertionError) as excinfo:
+            h.assert_not_called("notifications", "send_webhook")
+        assert "plugin:notifications" in str(excinfo.value)
+
+    def test_bare_name_before_any_call_is_refused(self):
+        """The other half of the union: the registered stub is the only evidence.
+
+        Nothing has been called, so a consumed-stub lookup finds nothing and
+        this name is findable only in ``_call_stubs``. That is the case an
+        absence assertion is usually written for, so a guard that covered only
+        ``call_history`` would be silent exactly where it is most needed.
+        """
+        h = CleatTestHarness()
+        h.stub_call("plugin:notifications", "send_webhook", '{"delivery_id": "d1"}')
+
+        with pytest.raises(AssertionError) as excinfo:
+            h.assert_not_called("notifications", "send_webhook")
+        assert "plugin:notifications" in str(excinfo.value)
+
+    def test_assert_called_refuses_too(self):
+        """Not a correctness gap -- it fails loudly either way -- but the message is the point.
+
+        "expected call not found" teaches less than "did you mean
+        plugin:notifications?". Both assertions read the same history and
+        differ only in direction, so both get the same refusal.
+        """
+        h = CleatTestHarness()
+        h.stub_call("plugin:notifications", "send_webhook", '{"delivery_id": "d1"}')
+
+        with pytest.raises(AssertionError) as excinfo:
+            h.assert_called("notifications", "send_webhook")
+        assert "plugin:notifications" in str(excinfo.value)
+
+    def test_unstubbed_non_plugin_service_is_still_allowed(self):
+        """The control: the refusal must not swallow the legitimate pattern.
+
+        Nothing is registered for ``svc`` or ``email``, and neither is a bare
+        plugin name -- so the documented contract holds. If this test starts
+        failing, the guard has overreached into "refuse anything unregistered".
+        """
+        h = CleatTestHarness()
+        assert h.assert_not_called("svc", "op")
+        assert h.assert_not_called("email", "send")
+
+
 # ======================================================================
 # Clock control
 # ======================================================================
