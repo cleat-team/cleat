@@ -212,8 +212,13 @@ func fencedGoBlocks(t *testing.T, root string) []goBlock {
 //
 // — and a pattern that can only return names of the shape it assumes cannot test
 // the assumption. Measured 2026-09-28: widening it changes NO finding on the tree
-// (nine before, nine after), so this is recall insurance rather than a fix for a
-// live instance.
+// — the finding SET is identical before and after — so this is recall insurance
+// rather than a fix for a live instance.
+//
+// The count is deliberately not written here. cleat#2536 removes three baseline
+// entries from this same file, so a number would be wrong whichever of the two
+// landed first, and "nine before, nine after" was already wrong for it when
+// written. The property — an identical finding set — is what the change is.
 //
 // The two names that motivated it are in PROSE, outside this guard's fenced-block
 // scope — worth stating because the issue that asked for this widening described
