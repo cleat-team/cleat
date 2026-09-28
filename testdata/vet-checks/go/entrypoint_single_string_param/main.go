@@ -36,8 +36,8 @@ func HandleTwoStrings(h cleat.HostCalls, key string, tag string) (string, error)
 	return `{"acquired":true}`, nil
 }
 
-// HandleOneStruct takes a struct, which is unmarshalled from the input JSON
-// and binds by field. Also must not warn.
+// HandleOneStruct takes a struct, which is unmarshalled from the input JSON and
+// binds by its PARAMETER name ("in"), not by the struct's fields. Also must not warn.
 type Input struct {
 	Key string `json:"key"`
 }

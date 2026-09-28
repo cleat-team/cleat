@@ -287,7 +287,8 @@ func warnEntryPointTakesRawInput(result *analyzer.AnalysisResult, cr *Result) {
 			Suggestion: "If that is what you want -- an opaque payload the workflow parses " +
 				"itself -- nothing needs to change. If you meant to bind one field by name, " +
 				fmt.Sprintf("add a second parameter or take a struct: func(h cleat.HostCalls, %s string, tag string). ", p.Name()) +
-				"Struct parameters are unmarshalled from the input JSON and bind by field.",
+				"Struct parameters bind by exact Go parameter name too, not by the struct's " +
+				"fields -- a parameter named ref is filled from the input's \"ref\" key.",
 			Line: line,
 		})
 	}
