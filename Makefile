@@ -421,7 +421,7 @@ tools: tools-go tools-rust tools-python tools-java tools-as
 .PHONY: tools-go
 tools-go:
 	@if command -v go >/dev/null 2>&1; then \
-		VER=$$(go version | grep -oP 'go\K[0-9]+\.[0-9]+'); \
+		VER=$$(go version | sed -E 's/^go version go([0-9]+\.[0-9]+).*/\1/'); \
 		MAJOR=$$(echo $$VER | cut -d. -f1); \
 		MINOR=$$(echo $$VER | cut -d. -f2); \
 		MIN_MAJOR=$$(echo $(GO_MIN_VERSION) | cut -d. -f1); \
