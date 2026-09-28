@@ -219,7 +219,7 @@ max_parallel_workers = '16'
 
 ### Required indexes (created by default migrations)
 
-**The claim-index block below was corrected against `migrations/postgres/001_schema.sql` (cleat#2608); the sticky, tenant-filter, expired-cleanup and heartbeat-lookup blocks after it were not re-verified in that pass and may be equally stale -- see cleat#2609 before relying on them.**
+**The whole block below is now corrected against `migrations/postgres/001_schema.sql`** (cleat#2608, cleat#2609); the expired-cleanup entry was additionally confirmed live with `EXPLAIN (ANALYZE, BUFFERS)` against a seeded database, not just a column-name comparison -- see the note under that entry.
 
 ```sql
 -- Primary key: workflow_id + step for event_history
@@ -235,30 +235,43 @@ CREATE INDEX CONCURRENTLY idx_instances_claim_order
     ON workflow_instances (tenant_id, task_queue, priority, created_at)
     WHERE status IN ('ready', 'terminating');
 
--- Sticky claim index (workflow_instances)
+-- Sticky claim index (workflow_instances). Not "idx_instances_sticky (assigned_to,
+-- status, next_wake_at) WHERE assigned_to != ''" -- that shape does not exist. The
+-- real index is on the column that actually marks stickiness:
 CREATE INDEX CONCURRENTLY idx_instances_sticky
-    ON workflow_instances (assigned_to, status, next_wake_at)
-    WHERE assigned_to != '' AND status = 'running';
+    ON workflow_instances (sticky_worker_id)
+    WHERE sticky_worker_id IS NOT NULL;
 
--- Tenant filter index (workflow_instances)
-CREATE INDEX CONCURRENTLY idx_instances_tenant
-    ON workflow_instances (tenant_id, status, created_at);
+-- Tenant filter index (workflow_instances). No index is named
+-- "idx_instances_tenant"; the real one with this shape is:
+CREATE INDEX CONCURRENTLY idx_instances_tenant_status_created
+    ON workflow_instances (tenant_id, status, created_at DESC);
 
--- Expired events cleanup (event_history)
-CREATE INDEX CONCURRENTLY idx_event_history_cleanup
-    ON workflow_instances (status, completed_at)
-    WHERE status IN ('done', 'failed') AND completed_at IS NOT NULL;
+-- Expired events cleanup (workflow_instances, not event_history -- the
+-- predicate DeleteExpiredEvents runs filters workflow_instances to find
+-- which workflows' event_history rows to delete). No index is named
+-- "idx_event_history_cleanup". Confirmed with EXPLAIN against the real
+-- predicate (engine/retention_predicates.go's pgExpiredEventsWorkflows) on a
+-- seeded 50k-row table: this index is what the planner actually picks
+-- (Index Scan, not Seq Scan), and dropping it flips the same query to a
+-- Seq Scan removing 43,784 of 50,000 rows by filter -- cleat#2609.
+CREATE INDEX CONCURRENTLY idx_instances_terminal_completed
+    ON workflow_instances (tenant_id, status, completed_at)
+    WHERE status IN ('done', 'failed', 'terminated');
 
--- Heartbeat lookup (workflow_instances)
+-- Heartbeat lookup (workflow_instances). Name matches; the column list did
+-- not -- heartbeat_at (the column that makes this the heartbeat index) was
+-- missing and "status" was listed as an indexed column when it is only the
+-- predicate:
 CREATE INDEX CONCURRENTLY idx_instances_heartbeat
-    ON workflow_instances (assigned_to, status)
+    ON workflow_instances (assigned_to, heartbeat_at)
     WHERE status = 'running';
 ```
 
 ### Performance considerations
 
-- **Two** indexes are critical for claim throughput, not one: `idx_instances_claimable` (`status, next_wake_at`) is what a claim scans to find a claimable row at all; `idx_instances_claim_order` (`tenant_id, task_queue, priority, created_at`) is what orders candidates within a tenant's queue by priority. Without both, claim queries either sequential-scan or fall back to sorting in memory. cleat#2608.
-- The `idx_event_history_cleanup` index significantly speeds up the 24-hour retention cleanup cycle. Without it, the subquery in `DeleteExpiredEvents` scans the full `workflow_instances` table. **This entry has not been re-verified against the tree -- see cleat#2609.**
+- **Two** indexes are critical for claim throughput, not one: `idx_instances_claimable` (`status, next_wake_at`) is what a claim scans to find a claimable row at all; `idx_instances_claim_order` (`tenant_id, task_queue, priority, created_at`) is what orders candidates within a tenant's queue by priority. Without both, claim queries either sequential-scan or fall back to sorting in memory. cleat#2608. (Two further indexes, `idx_instances_tenant_claimable` and `idx_instances_tenant_queue_claimable`, add `tenant_id` to the same shapes; which of the four a given claim query actually uses was not re-verified here -- cleat#2609 only checked the expired-cleanup index live.)
+- The `idx_instances_terminal_completed` index is what makes the 24-hour retention cleanup cycle an index scan rather than a full-table scan. Confirmed live: dropping it on a seeded database turns `DeleteExpiredEvents`'s query from an `Index Scan` (2.9ms) into a `Seq Scan` discarding 43,784 of 50,000 rows by filter (6.2ms at this scale, and it only gets worse as the table grows). cleat#2609.
 - Monitor index bloat with `pgstattuple` extension. Event history is write-only (no UPDATEs), so it should not bloat. **The most frequent `UPDATE` on `workflow_instances` is the worker heartbeat** (`--heartbeat`, 5s by default -- `cmd/cleat-worker/config.go`), scaling with the number of *running* workflows rather than with status transitions; a long-running workflow typically changes status only a handful of times in its life. Size for bloat from the heartbeat, not from status changes. cleat#2608.
 
 ---
