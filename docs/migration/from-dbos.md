@@ -157,7 +157,7 @@ h.sleep(5000)  # 5 seconds
 
 **Cleat (Go):**
 ```go
-h.Sleep(5 * time.Second)
+h.DurableSleep(5 * time.Second)
 ```
 
 ### Signal Communication
@@ -398,7 +398,7 @@ run in WASM and cannot access databases directly.
 - **Gap**: `DBOS.sleepSeconds(n)` takes seconds; Cleat `sleep(ms)` takes
   milliseconds.
 - **Workaround**: Multiply by 1000: `h.sleep(dbos_seconds * 1000)`.
-  In Go, use `h.Sleep(n * time.Second)`.
+  In Go, use `h.DurableSleep(n * time.Second)`.
 
 ### 4. No `DBOS.getWorkflowInput` Equivalent
 

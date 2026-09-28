@@ -49,8 +49,8 @@ wazero under CLI and test tooling — implement strict IEEE 754 semantics withou
 | `h.Now()` | Yes | Virtual time from event history |
 | `h.Random()` | Yes | Seeded replay-safe PRNG |
 | `h.DurableCall()` | Yes | Recorded in event history |
-| `h.Sleep()` | Yes | Virtual time |
-| `h.AwaitSignal()` | Yes | Recorded signal replay |
+| `h.DurableSleep()` | Yes | Virtual time |
+| `h.AwaitSignals()` | Yes | Recorded signal replay |
 | `time.Now()` | No | **Blocked** at vet/build time |
 | `crypto/rand` | No | **Blocked** at vet/build time |
 

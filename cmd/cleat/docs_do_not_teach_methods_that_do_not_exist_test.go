@@ -19,23 +19,26 @@ import (
 // fixed document must drop its line in the same change.
 //
 // WHY A BASELINE AND NOT A FIX IN THE SAME PR. Shipping this guard red would block
-// every pull request until nine separate documents were corrected, which is how a
+// every pull request until every document it flags was corrected, which is how a
 // guard gets muted. Shipping it green with the findings named is the shape
-// `scripts/check-dead-exports.sh` uses for its 13 dead exports and
-// `engine_option_reachability_test.go` uses for its 10 unwired options — the
+// `scripts/check-dead-exports.sh` uses for its dead exports and
+// `engine_option_reachability_test.go` uses for its unwired options — the
 // difference between a listed defect and an accepted one is that a list can shrink.
 //
-// WHERE EACH FIX BELONGS. The three `h.Sleep` sites are cleat#2524. The rest are
-// renames to a method that already exists, except `SetState`, which has no direct
-// equivalent and is a documentation decision rather than a substitution.
+// WHERE EACH FIX BELONGS. The rest are renames to a method that already exists,
+// except `SetState`, which has no direct equivalent and is a documentation decision
+// rather than a substitution.
+//
+// THE THREE `h.Sleep` ENTRIES WERE REMOVED BY cleat#2524, which fixed all seven
+// sites across the three migration guides and `docs/determinism.md`. They are gone
+// from this map because they are gone from the documents — and deleting the entry
+// IS the check that they are: a stale entry fails this test, so a document quietly
+// reverted to `h.Sleep` would have to re-add its line here to build.
 var documentedCallsNotYetFixed = map[string]string{
 	"ABI.md|DurableRandom":                        "h.Random is the method; the example calls a name that was never one",
-	"docs/migration/from-dbos.md|Sleep":           "h.DurableSleep -- cleat#2524",
 	"docs/migration/from-dbos.md|CallWithOptions": "h.DurableCallWithOptions",
-	"docs/migration/from-restate.md|Sleep":        "h.DurableSleep -- cleat#2524",
 	"docs/migration/from-restate.md|CallTyped":    "h.DurableCallTyped",
 	"docs/migration/from-restate.md|SetState":     "no direct equivalent; the guide's state API needs a doc decision, not a rename",
-	"docs/migration/from-temporal.md|Sleep":       "h.DurableSleep -- cleat#2524",
 	"docs/reference/error-codes.md|SendSignal":    "h.SignalWorkflow is the nearest; this block is the 'after' half of a BAD/GOOD pair",
 	"examples/DX_COMPARISON.md|CallWithRetry":     "h.DurableCallWithRetry",
 }
@@ -45,11 +48,12 @@ var documentedCallsNotYetFixed = map[string]string{
 // THE DEFECT. `h.Sleep(...)` does not exist. It is not a method on `cleat.HostCalls`,
 // and there is no alias — the `Timer` interface (cleat/runtime.go) has
 // `DurableSleep` and `DurableSleepMs`, and its own doc comment says *"Never call
-// time.Now() or time.Sleep() in workflow code"*. Four documents teach `h.Sleep`,
+// time.Now() or time.Sleep() in workflow code"*. Four documents taught `h.Sleep`,
 // including all three migration guides, once in an example and once in a summary
-// line each. The correct call appears ZERO times in those same documents. A reader
-// who writes what the page tells them to write gets a compile error naming a method
-// the page recommended.
+// line each, and the correct call appeared ZERO times in those same documents — so a
+// reader who wrote what the page told them to write got a compile error naming a
+// method the page recommended. cleat#2524 fixed all seven sites; this guard exists
+// so the next one of these is caught by CI rather than by a reader.
 //
 // WHY A PREDICATE AND NOT A COMPILE HARNESS. The census on cleat#2521 measured
 // 418 fenced `go` blocks across 201 files, of which **300 (72%) cannot be
@@ -65,8 +69,15 @@ var documentedCallsNotYetFixed = map[string]string{
 // was written: extending to spans added `h.X` and `h.Uppercase` from
 // IMPROVEMENT-PLAN.md, which are metavariables in illustrative text, not defects.
 // So this guard trades recall for a clean signal on purpose: of #2524's seven
-// sites it reaches the three that are fenced blocks and misses the four that are
-// prose. Do not widen it without measuring the false-positive class it inherits.
+// sites it reached the three that are fenced blocks and missed the four that were
+// prose, which is why an issue and not this guard is what closed them. Do not widen
+// it without measuring the false-positive class it inherits. Measured over the whole
+// tree on 2026-09-27, that class has two members, and neither is a defect: `h.X` and
+// `h.Uppercase` are metavariables in IMPROVEMENT-PLAN prose, and `h.Secret` is an API
+// under a `### Planned` heading. Both are excludable — by path and by heading
+// respectively — rather than by name, so a widened guard is possible; it is a
+// separate change with its own false-positive budget, not a tweak to this one. (No
+// count is given here on purpose: this PR moved five of the references.)
 //
 // AND THE COUNT IS NOT IN THIS FILE. #2526 says so explicitly: it is a census of a
 // growing population, and a number written into a document is the thing that

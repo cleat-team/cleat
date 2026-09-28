@@ -109,7 +109,7 @@ h.sleep(5000)  # 5 seconds
 
 **Cleat (Go):**
 ```go
-h.Sleep(5 * time.Second)
+h.DurableSleep(5 * time.Second)
 ```
 
 ### Side Effect
@@ -405,7 +405,7 @@ without virtual-object *state*.
 - **Gap**: Restate uses `Duration` objects (Java) or `ctx.sleep(Duration.ofSeconds(n))`;
   Cleat uses milliseconds (`sleep(ms)`).
 - **Workaround**: Multiply by 1000: `h.sleep(restate_seconds * 1000)`.
-  In Go, use `h.Sleep(n * time.Second)`.
+  In Go, use `h.DurableSleep(n * time.Second)`.
 
 ### 4. No Direct `ctx.sideEffect()` Equivalent
 
