@@ -17,8 +17,52 @@ same list that is exempt from authentication. `GET /api/admin/health` needs a cr
 
 `method`, `path`, `status_code`, `user_id` (the OAuth subject when the request carried one, else
 empty), `ip_address`, `user_agent`, `duration_ms` and `timestamp`, plus the chain columns
-`seq`, `prev_hash` and `row_hash`. `metadata` is always `{}` today; it is part of the hash so a
-later use of the column is already covered.
+`seq`, `prev_hash` and `row_hash`. `metadata` was always `{}` before cleat#2534; see
+*Recording from a workflow* below for the first thing that writes anything else there.
+
+## Recording from a workflow
+
+A workflow can append to its own tenant's chain directly, with the `record_event` host
+function `plugins/auditlog/host_functions.go` registers:
+
+    { "event_type": "tenant.suspended", "details": {"reason": "trial_expired"} }
+    -> { "recorded": true }
+
+`details` is optional and, when given, must be a JSON **object** (not a string, number, array
+or bare `true`/`false`) -- the same shape `metadata` has held since the chain existed, and a
+consumer reading the column back is entitled to keep assuming that. `null` is treated as
+omitted. `event_type` is required and has no fixed vocabulary; pick short, stable, dotted
+names (`tenant.suspended`, not a sentence) -- see *Field reuse* below for why.
+
+This call is **synchronous**, not queued: unlike an HTTP request's audit row (see *Delivery*
+below), it does not return until the row has committed. It uses the exact same transaction and
+per-tenant head lock a queued HTTP append would (`chain_store.go`'s `appendChained`), so the
+two interleave safely with no second append path.
+
+**Field reuse.** A workflow-sourced row has no HTTP request to describe, so it reuses the
+request-shaped columns rather than adding new ones: `method` is always the fixed string
+`PLUGIN_CALL` (never a real HTTP verb, so `method=` on `GET /audit/events` and in an export
+can select workflow-sourced rows apart from request ones), `path` holds `event_type`,
+`user_id` holds the calling workflow's id, and `status_code`, `duration_ms`, `ip_address` and
+`user_agent` are all present but empty/zero (`Valid: true` with no meaningful value, not
+`NULL`) -- the same shape they would have for any row, just uninformative here. `details`
+becomes `metadata`.
+
+**The residual: this is an ordinary AtLeastOnce host function, and a duplicate here is not
+quiet.** Every plugin host function in cleat (`send_message`, and now `record_event`) is
+called, and only THEN recorded to the workflow's own durable event history
+(`engine/plugins.go`'s `freshPluginCallInternal`) -- there is no write-ahead-intent path for
+this call shape, only for the separate `ServiceCaller` route
+(`engine.DurableCallIdempotencyKey`, `engine/idempotency.go`). So a worker killed after
+`record_event`'s transaction commits but before the engine's own history record for that call
+lands will, on resume, call it again with the same input. For most host functions that is a
+quiet, rare, accepted gap. For a hash-chained audit log it is not quiet: the chain faithfully
+records **two** correctly-linked rows for one event, which is the opposite of the failure mode
+this whole page is about detecting. There is currently no per-call id a plugin function can
+build that would let `appendOnce`'s existing `errAlreadyRecorded` path (used today by the
+async queue's own retry) catch this case too -- `plugin.CallContext` carries no step number.
+Tracked as cleat#2614 (a `Step` field on `CallContext`, the same shape
+`DurableCallIdempotencyKey` already uses for `ServiceCaller`), not fixed here.
 
 Text that cannot be stored or reproduced is replaced, not dropped: a `User-Agent` is bytes an
 attacker chooses, and PostgreSQL refuses invalid UTF-8 and NUL bytes. Both are replaced with
