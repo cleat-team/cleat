@@ -1372,8 +1372,8 @@ required_contexts:
   # `measured` is the date the declared list below was last compared against branch
   # protection itself, not the date this file was last edited. Only --check-live and the
   # default run's live attempt can move it; an entry added from a PR description cannot.
-  measured: 2026-09-23
-  total: 33
+  measured: 2026-09-29
+  total: 35
 
   # `covers` is one of:
   #   tier1        the context runs only tier-1 packages/modules
@@ -1554,6 +1554,20 @@ required_contexts:
       workflow: ci.yml
       job: lint-go
       covers: infra          # no `name:` on the job, so the context IS the job id
+
+    # The Python suite became gate-worthy on 2026-09-29, once cleat#2547, #2567 and
+    # #2569 had closed the ways it could pass while asserting nothing. 3.12 and 3.13
+    # are required; 3.10 and 3.11 stay non-required and are declared in
+    # .github/required-checks.txt's "NOT required" block. The matrix runs all four
+    # either way -- this block is about which of them gate.
+    - context: Test Python 3.12
+      workflow: ci.yml
+      job: test-python
+      covers: infra
+    - context: Test Python 3.13
+      workflow: ci.yml
+      job: test-python
+      covers: infra
 
     # --- tier2.gated_by suites, which have their own stricter jobs -------------------
     - context: Cross-Language WASM E2E
