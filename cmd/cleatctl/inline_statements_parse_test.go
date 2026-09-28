@@ -183,16 +183,24 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 		// cleat#2534. tenant_trials is plugins/tenantlifecycle's own plugin
 		// table (migrations.go), the same shape as tenant_quota above and
 		// pinned for the identical reason: it isn't in this test's core
-		// schema, so PREPAREing any of the four below fails with "relation
+		// schema, so PREPAREing any of the three below fails with "relation
 		// tenant_trials does not exist", a property of this test's fixture
 		// rather than of the SQL. TestSetTenantTrialWorksOnEveryDialect
-		// (settenanttrial_test.go) runs every one of these four, unmodified,
-		// through plugin.RunMigrations against real Postgres, MySQL and SQL
-		// Server -- the live check tenant_quota's own comment describes.
-		"UPDATE tenant_trials SET expires_at = $1, handled = $2 WHERE tenant_id = $3":       "tenant_trials is a plugin table, not in this test's core schema; checked live by TestSetTenantTrialWorksOnEveryDialect (cleat#2534)",
-		"INSERT INTO tenant_trials (tenant_id, expires_at, handled) VALUES ($1, $2, $3)":     "tenant_trials is a plugin table, not in this test's core schema; checked live by TestSetTenantTrialWorksOnEveryDialect (cleat#2534)",
-		"SELECT expires_at, handled FROM tenant_trials WHERE tenant_id = $1":                 "tenant_trials is a plugin table, not in this test's core schema; checked live by TestSetTenantTrialWorksOnEveryDialect (cleat#2534)",
-		"SELECT 1 FROM tenant_trials WHERE tenant_id = $1":                                   "tenant_trials is a plugin table, not in this test's core schema; checked live by TestSetTenantTrialWorksOnEveryDialect (cleat#2534)",
+		// (settenanttrial_test.go) runs all three, unmodified, through
+		// plugin.RunMigrations against real Postgres, MySQL and SQL Server --
+		// the live check tenant_quota's own comment describes.
+		//
+		// Only three, not four: readTenantTrial's SELECT (cleat-review on
+		// #2590) moved into settenanttrial_test.go along with the tenantTrial
+		// type, since nothing in cleatctl's own CLI path reads a trial back.
+		// tenantTrialExists' own "SELECT 1 ..." below is unrelated and stays
+		// in settenanttrial.go -- this test's own scan (below) skips
+		// _test.go files, so readTenantTrial's statement is no longer in its
+		// input at all, and a pin for it would itself go stale (line ~370,
+		// the "_test.go" suffix check).
+		"UPDATE tenant_trials SET expires_at = $1, handled = $2 WHERE tenant_id = $3":    "tenant_trials is a plugin table, not in this test's core schema; checked live by TestSetTenantTrialWorksOnEveryDialect (cleat#2534)",
+		"INSERT INTO tenant_trials (tenant_id, expires_at, handled) VALUES ($1, $2, $3)": "tenant_trials is a plugin table, not in this test's core schema; checked live by TestSetTenantTrialWorksOnEveryDialect (cleat#2534)",
+		"SELECT 1 FROM tenant_trials WHERE tenant_id = $1":                               "tenant_trials is a plugin table, not in this test's core schema; checked live by TestSetTenantTrialWorksOnEveryDialect (cleat#2534)",
 
 		// cleat#2247. backup.go's runBackupConfigUpdate builds its SET list
 		// from whichever flags were given (--cron, --retention-days,

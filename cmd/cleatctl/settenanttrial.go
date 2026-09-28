@@ -211,34 +211,6 @@ func tenantTrialConnFor(ctx context.Context, db *sql.DB, d dialect, tenantID str
 	return conn, func() { conn.Close() }, nil
 }
 
-// tenantTrial mirrors one row of tenant_trials, for reading it back in tests
-// -- runSetTenantTrial itself never reads expires_at/handled back, it only
-// writes, so nothing in the CLI's own path needs this. Mirrors quotaRow.
-type tenantTrial struct {
-	expiresAt time.Time
-	handled   bool
-	existed   bool
-}
-
-// readTenantTrial reads one tenant's trial row, for tests -- see tenantTrial.
-func readTenantTrial(ctx context.Context, exec quotaExecer, d dialect, tenantID uuid.UUID) (tenantTrial, error) {
-	stmt, stmtArgs, err := d.rebindArgs(
-		`SELECT expires_at, handled FROM tenant_trials WHERE tenant_id = $1`, tenantID)
-	if err != nil {
-		return tenantTrial{}, err
-	}
-	var tt tenantTrial
-	err = exec.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&tt.expiresAt, &tt.handled)
-	if err == sql.ErrNoRows {
-		return tenantTrial{}, nil
-	}
-	if err != nil {
-		return tenantTrial{}, err
-	}
-	tt.existed = true
-	return tt, nil
-}
-
 // tenantTrialExists reports whether tenantID already has a tenant_trials
 // row, so runSetTenantTrial can choose INSERT or UPDATE the way
 // quota.go's writeQuota does -- read-modify-write rather than a

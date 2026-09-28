@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -193,4 +194,34 @@ func TestSetTenantTrialFailsClosedWithoutMSSQLSessionPinning(t *testing.T) {
 			"refuses the write, not some other failure (a missing table, a connection error) that "+
 			"would pass a bare `err == nil` check without ever exercising it", err)
 	}
+}
+
+// tenantTrial mirrors one row of tenant_trials, for reading it back here --
+// runSetTenantTrial itself never reads expires_at/handled back, it only
+// writes, so nothing in the CLI's own path needs this (cleat-review on
+// #2590: moved out of settenanttrial.go, since only tests reference it).
+// Mirrors quotaRow.
+type tenantTrial struct {
+	expiresAt time.Time
+	handled   bool
+	existed   bool
+}
+
+// readTenantTrial reads one tenant's trial row -- see tenantTrial.
+func readTenantTrial(ctx context.Context, exec quotaExecer, d dialect, tenantID uuid.UUID) (tenantTrial, error) {
+	stmt, stmtArgs, err := d.rebindArgs(
+		`SELECT expires_at, handled FROM tenant_trials WHERE tenant_id = $1`, tenantID)
+	if err != nil {
+		return tenantTrial{}, err
+	}
+	var tt tenantTrial
+	err = exec.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&tt.expiresAt, &tt.handled)
+	if err == sql.ErrNoRows {
+		return tenantTrial{}, nil
+	}
+	if err != nil {
+		return tenantTrial{}, err
+	}
+	tt.existed = true
+	return tt, nil
 }
