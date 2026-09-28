@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-27
+
+**This release requires a fresh database.** There is no upgrade path from
+v0.2.0 — read the upgrade notes below before installing. **v0.3.1 and v0.3.2
+were patch releases within this series**: they have no sections of their own,
+and everything that changed in them is recorded here.
+
 ### UPGRADE NOTES — breaking
 
 - **Every dialect's schema now ships as a compacted baseline, not a numbered migration chain.**
@@ -771,8 +778,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `plugin.provenPluginDialects` (cleat#2306's phase 2 tracks doing this for every plugin).
 
 - **Terminating a workflow that has registered `defer` bodies is now asynchronous,
-  and runs those bodies before the workflow becomes terminal.** Migrations
-  `postgres/040`, `mssql/043` (MySQL needs none).
+  and runs those bodies before the workflow becomes terminal.**
 
   Previously `TerminateWorkflow` wrote `status = 'terminated'` and then released
   the workflow's sticky assignment and concurrency keys. The registered defers
@@ -796,12 +802,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A defer phase never changes the outcome: if it traps, times out, or cannot
     start, the recorded outcome is applied anyway and the lost cleanup is logged.
     `defer_phase_deadline` (5 minutes) bounds it.
-  - **Apply the migrations.** `postgres/040` widens `admin.claim_workflows` and
-    the claim's partial indexes; `mssql/043` widens the filtered ones. A
-    deployment running this code against the older schema keeps working — the
-    cross-tenant claim falls back with a warning naming the migration — but its
-    defer phases are never claimed, so every terminate waits out its deadline and
-    skips the cleanup.
+  - **What changed in the schema:** `admin.claim_workflows` and the partial
+    indexes its claim uses are widened; MySQL needed no change. All of it is in
+    the baseline, so there is nothing to apply.
 
   **A closing parent's `TERMINATE` children work the same way**, and the change
   matters more there because it is a bulk operation: one closing parent used to
@@ -820,7 +823,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Workflow definition names are now per-tenant.** `workflow_defs`' primary key
   becomes `(tenant_id, name, version)`, and the three foreign keys that reference
   it — from `workflow_instances`, `workflow_tags` and `workflow_routing` — carry
-  `tenant_id` too. Migrations `postgres/035`, `mysql/034`, `mssql/038`.
+  `tenant_id` too.
 
   Two tenants can now each hold their own `order-processor`. Previously the name
   was a shared namespace: the second tenant to deploy one was refused, and before
@@ -836,8 +839,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   names is refused by the foreign key.
 
   **MySQL only:** `workflow_defs.tenant_id` was nullable with no default, unlike
-  the other two dialects. `mysql/034` backfills `NULL`s to the default tenant and
-  makes the column `NOT NULL DEFAULT`, as a primary-key column must be.
+  the other two dialects — which a primary-key column cannot be. It is now
+  `NOT NULL DEFAULT`, matching the other two.
 
   See IMPROVEMENT-PLAN §3.77 and D7 in `tiers.yaml`.
 
@@ -1121,8 +1124,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the only remaining 409 on this endpoint, and it clears when the in-flight request is answered.
   A client that branches on `detail` keeps working. (cleat#1416)
 
-  **Schema change**, applied by `postgres/068`, `mysql/062` and `mssql/066`:
-  `workflow_update_requests` gains a `request_id` column and is keyed
+  **Schema change:** `workflow_update_requests` gains a `request_id` column and is keyed
   `(workflow_id, request_id)` instead of `(workflow_id, update_name)`. Existing rows are backfilled
   from `update_name`, which is unique per workflow under the old key, so a workflow suspended
   mid-update across the upgrade completes against the correct row.
@@ -1508,10 +1510,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fact. Measured on a live database, `assigned_to` was blank on 185 of 185 terminal runs.
   (cleat#1118)
 
-  **Schema change**, applied by `postgres/074`, `mysql/064` and `mssql/068`: `workflow_instances`
-  gains a nullable `completed_by`. `postgres/075` additionally re-emits `finalize_workflow_status`,
-  whose `done` and `failed` branches record it; the `ready` branch deliberately does not, because
-  that run goes back on the queue and recording there would name whoever yielded.
+  **Schema change:** `workflow_instances` gains a nullable `completed_by`. `finalize_workflow_status`
+  is re-emitted to record it, in its `done` and `failed` branches; the `ready` branch deliberately
+  does not, because that run goes back on the queue and recording there would name whoever yielded.
 
   Returned by both read paths — `GET /api/workflows/:id` and the workflow listing.
 
@@ -1970,8 +1971,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### UPGRADE NOTES — breaking
 
-- **SQL Server 2022 is now the minimum.** `migrations/mssql/011` uses
-  `ISJSON(payload, VALUE)`, whose second argument requires 2022, so that the
+- **SQL Server 2022 is now the minimum.** The `payload` columns use
+  `ISJSON(payload, VALUE)`, whose second argument requires 2022, so that they
   payload columns accept the JSON scalars PostgreSQL and MySQL have always
   accepted — without it, `DeliverSignal` and `CreateUpdateRequest` failed on
   any SQL Server built from the shipped schema. `README.md` and
@@ -2031,11 +2032,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   To upgrade:
 
-  1. Apply `migrations/postgres/005_app_role.sql`, which creates the
-     `cleat_app` role and grants it what the engine needs — no ownership, no
-     DDL.
-  2. Give it a password: `ALTER ROLE cleat_app LOGIN PASSWORD '...';` The
-     migration deliberately does not, so no credential lives in the
+  1. Give the engine a `cleat_app` role with what it needs — no ownership, no
+     DDL. 0.2.0 applied this as a numbered migration, which the 0.3.0 rebaseline
+     absorbed into the schema baseline (cleat#2416).
+  2. Give it a password: `ALTER ROLE cleat_app LOGIN PASSWORD '...';` That
+     migration deliberately did not, so no credential ever lived in the
      repository. (`docker-compose.cluster.yml` does this from
      `CLEAT_APP_PASSWORD` via `deploy/postgres/900-app-role.sh`, but
      `docker-entrypoint-initdb.d` only runs on a *first* initialisation, so an
