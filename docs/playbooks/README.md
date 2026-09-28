@@ -126,5 +126,24 @@ playbook names the measurement to take instead of inventing one.
 section. A playbook with an empty one is wrong.
 
 **Claims are separated from checks.** Each ends with what was read from the tree and what was
-merely reasoned about. None of these has been built end to end; they are designs grounded in code
-that exists, not reports of systems that run.
+merely reasoned about. Where a design has since been built, the build is named below — a sentence
+about what has run, not a report of a system that does.
+
+**Whether a playbook has been built is a per-playbook fact, so it is recorded per playbook and
+not as a sentence about the set.** The sentence this replaces read *"None of these has been built
+end to end"* — true when written, and false for three of the four within a fortnight, which is why
+it is a table now. A blanket claim about a set rots as soon as one member changes, and the reader
+who arrives between the change and the correction believes it.
+
+| Playbook | Built? | Where |
+|---|---|---|
+| 1 — AI agent platform | **yes** | [`examples/ai-agent-platform/`](../../examples/ai-agent-platform/), with the `AI agent platform scenario` CI job running its documented commands |
+| 2 — B2B SaaS control plane | **no** | a design grounded in code that exists |
+| 3 — Order and subscription lifecycle | **yes** | [`examples/order-lifecycle/`](../../examples/order-lifecycle/), with the `Order lifecycle scenario` CI job |
+| 4 — Event-driven integration hub | **yes** | [`examples/integration-hub/`](../../examples/integration-hub/), with the `Integration hub scenario` CI job |
+
+**"Built" means the cleat-side half runs end to end and its documented commands run in CI.** It does
+not mean the reader's half exists: each example stubs the rope side deliberately and says which
+parts are stubbed, which is the split the playbooks themselves describe under *what ties to the
+cleat* and *what stays rope*. A playbook marked "no" is not a lesser document — it is one whose
+claims have not been executed, and its own *"What was verified"* section is where that is scoped.

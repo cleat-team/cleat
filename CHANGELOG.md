@@ -10,6 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Every example app's live run-state panel rendered empty, because
+  `backendkit.Client.GetWorkflowState` requested `/api/workflows/{id}/state` — a route that does not
+  exist.** Every call answered 404, and every caller read that as "no state", so `order-lifecycle`,
+  `integration-hub` and `ai-agent-platform` each showed a running workflow with nothing published
+  against it. The listing is `/query` with **no** `key`; `?key=` reads a single key instead. Five
+  call sites. It survived because the method's unit test pinned the dead path and served a body the
+  worker never sends — the test and the method agreed with each other, and neither asked the route.
+  (cleat#2573)
+
 ## [0.3.0] - 2026-09-27
 
 **This release requires a fresh database.** There is no upgrade path from

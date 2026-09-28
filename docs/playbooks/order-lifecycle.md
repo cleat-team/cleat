@@ -2,8 +2,10 @@
 
 **Status:** engineering reference. Drafted 2026-09-14 against `develop` at `654d6f84`; corrected
 2026-09-25 against `develop` at `656aced4` (cleat#2051) — see
-[What was verified](#what-was-verified) at the end for what changed. Nothing here has been built end
-to end.
+[What was verified](#what-was-verified) at the end for what changed. **Built since drafting**:
+`examples/order-lifecycle/` runs the cleat-side half end to end on every pull request, driven by
+`scripts/run-order-lifecycle-scenario.sh`; its own section under
+[The assembly](#the-assembly) says what is real and what is stubbed.
 
 **Who this is for:** you take money and ship something. An order touches inventory, payment,
 fulfilment and notification; a subscription renews, dunns, upgrades and cancels. Each of those is a

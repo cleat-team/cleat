@@ -464,7 +464,23 @@ func (c *Client) QueryState(ctx context.Context, id, key string) (string, error)
 
 // GetWorkflowState retrieves the full state (query state) of a workflow.
 func (c *Client) GetWorkflowState(ctx context.Context, id string) (map[string]string, error) {
-	u := c.BaseURL + "/api/workflows/" + url.PathEscape(id) + "/state"
+	// THE ROUTE IS /query WITH NO key, NOT /state, and this method called the
+	// latter until 2026-09-28 -- a route that does not exist. Every call
+	// answered 404, every caller treated that as "no state", and three shipped
+	// example backends rendered a run's state panel as empty.
+	//
+	// The worker's dispatch is `cmd/cleat-worker/server.go` `handleWorkflows`:
+	// the :id/:verb pairs it accepts are start, signal, cancel, retry, terminal,
+	// history, stream, query, dag, promises, routing and tags. There is no
+	// `state` among them -- `/api/instances/{id}/state` exists, on a DIFFERENT
+	// prefix, which is what made the name look right.
+	//
+	// `?key=` is OPTIONAL and its ABSENCE is the list: with no key,
+	// `handleGetQueryState` calls `ListQueryState` and answers
+	// `{"state": {...every key the run published...}}`. With a key it answers
+	// `{"key":k,"value":v}` -- which is what `QueryState` below uses. So the two
+	// methods differ by the parameter's presence, not by a different verb.
+	u := c.BaseURL + "/api/workflows/" + url.PathEscape(id) + "/query"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -477,11 +493,18 @@ func (c *Client) GetWorkflowState(ctx context.Context, id string) (map[string]st
 	}
 	defer resp.Body.Close()
 
-	var state map[string]string
-	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
+	// The envelope is decoded, not the bare map: the route wraps the state in
+	// `{"state": ...}` so that a listing and a keyed read are distinguishable at
+	// the top level. Decoding straight into a map[string]string against this
+	// route would fail; against the OLD route it succeeded, because the test
+	// that covered it served a bare map the worker never sends.
+	var out struct {
+		State map[string]string `json:"state"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
-	return state, nil
+	return out.State, nil
 }
 
 // GetHistory retrieves the event history of a workflow with pagination.
