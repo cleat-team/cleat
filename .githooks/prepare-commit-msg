@@ -66,9 +66,51 @@ git interpret-trailers \
 # Already present -- an explicit --trailer, or an amend of a stamped commit --
 # is left exactly as written. The config is a default for commits that do not
 # say, not an override of ones that do.
+#
+# ASK GIT'S OWN TRAILER PARSER WHETHER IT IS ALREADY THERE, NOT A GREP OVER
+# THE RAW FILE. cleat#2588, found on #2621's first review round:
+# stream-trailer-check.yml reads `%(trailers:key=Claude-Stream,valueonly)`,
+# which is git's parser applied to the FINAL PARAGRAPH only -- a line that
+# matches "Claude-Stream: ..." anywhere else in the message (the common case
+# is a blank line between it and the trailer block at the end) is invisible
+# to that reader. A raw grep over the whole file cannot tell the two apart,
+# so it was satisfied by exactly that shape, exited early thinking the
+# trailer was already there, and the check downstream found nothing --
+# stream-trailer-check.yml's own header names the identical failure it sees
+# on OTHER commits' messages ("TWO CAUSES, ONE SYMPTOM, DIFFERENT REPAIRS").
+#
+# `git interpret-trailers --parse` is the same parser: it prints only what
+# the final paragraph actually contains as trailers, which is what
+# `%(trailers:...)` also reads. Trust that, not a text match.
 # ---------------------------------------------------------------------------
-if grep -qiE '^Claude-Stream:[[:space:]]*[^[:space:]]' "$MSG_FILE"; then
+if git interpret-trailers --parse "$MSG_FILE" | grep -qiE '^Claude-Stream:[[:space:]]*[^[:space:]]'; then
 	exit 0
+fi
+
+# The parser does not see one. If a line that LOOKS like one exists anywhere
+# in the raw message, this is a MALFORMED message, not an absent trailer --
+# fail loudly rather than silently doing nothing (today's bug, before this
+# fix) or silently stamping a second, correctly-placed trailer next to a
+# broken one that stream-trailer-check.yml will never read.
+if grep -qiE '^Claude-Stream:[[:space:]]*[^[:space:]]' "$MSG_FILE"; then
+	echo "prepare-commit-msg: this message has a line matching" >&2
+	echo "'Claude-Stream: ...', but git's own trailer parser does not read" >&2
+	echo "it as a trailer -- it is not in the message's FINAL paragraph." >&2
+	echo "stream-trailer-check.yml's %(trailers:key=Claude-Stream,valueonly)" >&2
+	echo "would see nothing here, exactly as it does on this repo's own" >&2
+	echo "history for the identical shape (see that workflow's header)." >&2
+	echo "" >&2
+	echo "Usually caused by a blank line between the Claude-Stream line and" >&2
+	echo "the rest of the trailer block:" >&2
+	echo "" >&2
+	echo "    Claude-Stream: WS-2" >&2
+	echo "                          <- this blank line is the defect" >&2
+	echo "    Signed-off-by: ..." >&2
+	echo "" >&2
+	echo "Fix the message by hand: remove the blank line so the trailer" >&2
+	echo "block is one contiguous, final paragraph -- or delete the stray" >&2
+	echo "line entirely and let this hook stamp a correctly-placed one." >&2
+	exit 1
 fi
 
 STREAM=$(git config cleat.stream || true)

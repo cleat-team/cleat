@@ -192,6 +192,62 @@ func TestAStreamTheCheckWouldRejectIsRefusedLocally(t *testing.T) {
 	}
 }
 
+// TestABlankLineSplittingTheTrailerBlockIsRefused is the regression test for
+// cleat#2588, found on #2621's first review round: a message whose
+// Claude-Stream line sits in an earlier paragraph, separated from the actual
+// trailer block by a blank line, is invisible to
+// stream-trailer-check.yml's %(trailers:key=Claude-Stream,valueonly) --
+// git's parser reads only the message's FINAL paragraph. The hook must not
+// read this as "already present" (a raw grep over the whole file is
+// satisfied by it) and exit having stamped nothing; it must refuse loudly.
+func TestABlankLineSplittingTheTrailerBlockIsRefused(t *testing.T) {
+	// Reproduces the exact shape measured against real `git interpret-trailers
+	// --parse`: the trailer block git actually recognises is `Signed-off-by`
+	// alone, because the blank line after Claude-Stream starts a new paragraph.
+	message := "fix: something\n\nClaude-Stream: WS-2\n\nSigned-off-by: Someone <someone@example.com>\n"
+	got, err := runHook(t, "cleat-review", message)
+	if err == nil {
+		t.Fatalf("the hook accepted a message where Claude-Stream is split from "+
+			"the trailer block by a blank line:\n%s", got)
+	}
+	he, ok := err.(*hookError)
+	if !ok {
+		t.Fatalf("unexpected error type: %v", err)
+	}
+	// The refusal has to name what it found and point at the fix, the same
+	// discipline TestAnUnsetStreamIsRefusedRatherThanGuessed already asserts
+	// for the other refusal path.
+	for _, want := range []string{"final paragraph", "blank line"} {
+		if !strings.Contains(he.stderr, want) {
+			t.Errorf("the refusal does not mention %q:\n%s", want, he.stderr)
+		}
+	}
+	// And it must not have silently stamped a SECOND, correct trailer next to
+	// the broken one -- that would leave the message with two Claude-Stream
+	// lines, one of which git still cannot read, which is a more confusing
+	// state than either alternative failure mode.
+	if strings.Contains(got, "cleat-review") {
+		t.Errorf("the hook stamped a trailer despite refusing:\n%s", got)
+	}
+}
+
+// TestAGenuinelyMissingTrailerIsStillStamped is the negative control for the
+// test above: proves the new git-parser-based check does not become MORE
+// restrictive than the raw grep it replaced. A message with no Claude-Stream
+// line anywhere must still be stamped normally, exactly as
+// TestTheHookStampsTheStreamAndTheSignoff already covers for the simplest
+// case -- this one adds an unrelated trailer-shaped final paragraph, so the
+// parser has something to parse before Claude-Stream is added to it.
+func TestAGenuinelyMissingTrailerIsStillStamped(t *testing.T) {
+	got, err := runHook(t, "WS-3", "fix: something\n\nCo-Authored-By: Someone <someone@example.com>\n")
+	if err != nil {
+		t.Fatalf("hook failed: %v", err)
+	}
+	if !strings.Contains(got, "Claude-Stream: WS-3") {
+		t.Errorf("a genuinely missing trailer was not stamped:\n%s", got)
+	}
+}
+
 // The hook and the check agree about the valid set, because the hook reads it
 // from the check.
 //
