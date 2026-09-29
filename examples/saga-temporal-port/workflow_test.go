@@ -116,9 +116,12 @@ func TestTransferMoney_StepWithErrorFiresCompensations(t *testing.T) {
 }
 
 // TestTransferMoney_CompensationErrorsContinue tests that compensation
-// continues even if one compensation step fails. Note: the current Saga
-// implementation ignores compensation errors (Compensate returns void),
-// so this test verifies the existing behavior.
+// continues even if one compensation step fails. Compensate returns error,
+// and Saga.Run joins every compensation error into the one it returns
+// (errors.Join(err, compErr), cleat/runtime_workflow.go) -- errors are not
+// ignored. What this test verifies is that a failing compensation step does
+// not stop LIFO compensation of the steps still owed one: the remaining
+// steps still run, and only then does the joined error surface.
 func TestTransferMoney_CompensationErrorsContinue(t *testing.T) {
 	env := cleattest.NewTestEnv()
 
