@@ -230,6 +230,10 @@ func runPluginInstall(args []string) {
 	}
 
 	fmt.Printf("Successfully installed %s v%s\n", name, version.Version)
+	fmt.Println()
+	fmt.Println("NOTE: this stores the plugin; it does not run it. No cleat-worker today")
+	fmt.Println("loads an installed WASM plugin (IMPROVEMENT-PLAN 3.315), so a workflow")
+	fmt.Println("calling one of its host functions will not reach it.")
 }
 
 // parsePluginSpec splits a "name@constraint" string into name and constraint.
@@ -333,7 +337,11 @@ func listInstalledPlugins() {
 	}
 	if !found {
 		fmt.Println("No plugins installed.")
+		return
 	}
+	fmt.Println()
+	fmt.Println("NOTE: STATUS above reflects plugin_defs only. No cleat-worker today loads an")
+	fmt.Println("installed WASM plugin (IMPROVEMENT-PLAN 3.315); none of the rows above run.")
 }
 
 // ---------------------------------------------------------------------------
