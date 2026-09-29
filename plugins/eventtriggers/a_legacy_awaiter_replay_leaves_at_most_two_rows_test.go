@@ -1,18 +1,17 @@
-package main
+package eventtriggers
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
+	"io"
+	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 
+	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
-	"github.com/cleat-team/cleat/plugins/eventtriggers"
 	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
@@ -45,6 +44,14 @@ import (
 // every row, on a REALISTIC id length (255 characters each for
 // workflow_id and event_type -- a short-id test would pass against the
 // overflow bug too, which is how it got through the first review).
+//
+// cleat#2664: this test used to live in cmd/cleat-worker and hand-copy
+// registrationKey (as replayRegistrationKey) and hand-write the unregister
+// DELETE, because registerAwaiter, unregisterAwaiter and registrationKey
+// are all unexported and that package could not reach them. It moved here
+// -- an internal test in the plugin's own package -- to call the real
+// functions instead: a hand-copy that drifts from the code it is supposed
+// to be testing proves nothing about that code, only about the copy.
 func TestALegacyAwaiterReplayLeavesAtMostTwoRowsAndUnregisterRemovesBoth(t *testing.T) {
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		be := be
@@ -71,14 +78,16 @@ func TestALegacyAwaiterReplayLeavesAtMostTwoRowsAndUnregisterRemovesBoth(t *test
 			// Clean up BEFORE running anything, not only after, so this
 			// test does not depend on what ran before it in the same
 			// binary.
-			cleanupEventTriggersSchema(t, be.DB, be.Dialect)
-			defer cleanupEventTriggersSchema(t, be.DB, be.Dialect)
+			plugintest.CleanupPluginSchema(t, be.DB, be.Dialect, "event-triggers",
+				[]string{"event_awaiters", "event_subscriptions", "ingested_events"})
+			defer plugintest.CleanupPluginSchema(t, be.DB, be.Dialect, "event-triggers",
+				[]string{"event_awaiters", "event_subscriptions", "ingested_events"})
 
 			// Apply only Versions 1-5, simulating a database that predates
 			// the correlation-key migration -- exactly the shape a
 			// pre-cleat#2625 deployment has today.
 			legacy := &truncatedEventTriggersMigrations{
-				Plugin: eventtriggers.New().(*eventtriggers.Plugin),
+				Plugin: New().(*Plugin),
 				n:      5,
 			}
 			if err := plugin.RunMigrations(ctx, be.DB, dialect, nil,
@@ -103,7 +112,8 @@ func TestALegacyAwaiterReplayLeavesAtMostTwoRowsAndUnregisterRemovesBoth(t *test
 			// MSSQL under Version 3-5 in the first place. 240 characters
 			// combined is still 3.75x the CHAR(64) overflow point this
 			// test exists to catch, with comfortable margin either way.
-			tenantID := uuid.New().String()
+			tenantUUID := uuid.New()
+			tenantID := tenantUUID.String()
 			workflowID := strings.Repeat("w", 200)
 			eventType := strings.Repeat("e", 40)
 
@@ -116,7 +126,7 @@ func TestALegacyAwaiterReplayLeavesAtMostTwoRowsAndUnregisterRemovesBoth(t *test
 			// this failed outright on every dialect: "value too long for
 			// type character(64)" (Postgres), a strict-mode truncation
 			// error (MySQL), string-or-binary-data truncation (MSSQL).
-			full := eventtriggers.New()
+			full := New()
 			if err := plugin.RunMigrations(ctx, be.DB, dialect, nil,
 				[]*plugin.LoadedPlugin{{Plugin: full, Healthy: true}}); err != nil {
 				t.Fatalf("event-triggers v6 migration on %s (this is the backfill-overflow "+
@@ -134,27 +144,59 @@ func TestALegacyAwaiterReplayLeavesAtMostTwoRowsAndUnregisterRemovesBoth(t *test
 					be.Name, len(backfilledKey), backfilledKey)
 			}
 
-			// The replay: a fresh registration for the SAME (workflow_id,
-			// event_type), empty keys -- what a real post-migration
-			// registerAwaiter call computes. Inserted directly against the
-			// schema (not through registerAwaiter, which is unexported and
-			// out of this package's reach) to test the property at the
-			// level cleat-review's finding is about: does the SCHEMA admit
-			// a second row when registration_key differs, and does cleanup
-			// still reach both. replayRegistrationKey below is
-			// keys.go's registrationKey, copied rather than called across
-			// the package boundary -- see its own comment.
-			replayKey := replayRegistrationKey(workflowID, eventType, "", "", "")
+			// The premise check: registrationKey (the real function, not a
+			// copy) must disagree with the backfilled digest for the same
+			// (workflow_id, event_type) -- that disagreement is the entire
+			// reason a replay produces a second row rather than updating
+			// the first, and it is what the rest of this test exercises.
+			replayKey := registrationKey(workflowID, eventType, "", "", "")
 			if replayKey == backfilledKey {
 				t.Fatalf("on %s, the replay key collided with the backfilled key (%q) -- "+
 					"the two are supposed to differ by construction; this test's own "+
 					"premise is broken, not the migration", be.Name, backfilledKey)
 			}
-			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
-				`INSERT INTO event_awaiters (id, workflow_id, tenant_id, event_type, key1, key2, key3, registration_key, created_at) `+
-					`VALUES ($1, $2, $3, $4, $5, $6, $7, $8, `+nowExprFor(dialect)+`)`,
-				uuid.New().String(), workflowID, tenantID, eventType, "", "", "", replayKey); err != nil {
-				t.Fatalf("insert replay event_awaiters row on %s: %v", be.Name, err)
+
+			// The replay: a fresh registration for the SAME (workflow_id,
+			// event_type), empty keys -- through the real registerAwaiter,
+			// the exact call a post-migration awaitEvent makes after a
+			// crash. Not a hand-copy: this is the production upsert,
+			// exercised against a real database of every dialect.
+			//
+			// Fields set directly, NOT p.Init: Init assigns the PACKAGE-LEVEL
+			// currentDialect (plugin.go), which unregisterAwaiter's Rebind
+			// call reads because that function takes no dialect parameter of
+			// its own. Calling Init here leaks across this loop's dialects and
+			// out of this test entirely -- caught by TestAnEventBodyIsStoredAsPublished
+			// going red in the SAME BINARY, on a stub DB that never touches a
+			// real database: Init left currentDialect on the last dialect this
+			// loop ran, and every query after that -- in any other test -- was
+			// rewritten for a dialect it was never meant to run against. See
+			// the currentDialect save/restore a few lines down, which is the
+			// same containment a_await_event_correlates_by_key_test.go's own
+			// tests get for free by never calling Init at all.
+			p := &Plugin{
+				db:      &engine.SQLDBAdapter{DB: be.DB, Dialect: dialect},
+				dialect: dialect,
+				logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+			}
+			// unregisterAwaiter (below) has no dialect parameter and reads
+			// the package-level currentDialect instead -- restore it when this
+			// subtest ends, so a later test in this binary is never run
+			// against a dialect this one happened to finish on.
+			prevDialect := currentDialect
+			currentDialect = dialect
+			defer func() { currentDialect = prevDialect }()
+			// plugin.ForTenant, not a bare context: p.db (engine.SQLDBAdapter)
+			// reads it to set the real MSSQL session context a FORCE RLS
+			// table requires -- without it, registerAwaiter's INSERT runs
+			// with no tenant context and MSSQL's block predicate refuses it
+			// outright ("target object ... has a block predicate that
+			// conflicts with this operation", 33504), a hazard
+			// eventtriggers_dialect_arms_multidb_test.go's own comment on
+			// upsertAwaiter documents for exactly this reason.
+			tenantCtx := plugin.ForTenant(ctx, tenantUUID)
+			if err := p.registerAwaiter(tenantCtx, tenantID, workflowID, eventType, "", "", ""); err != nil {
+				t.Fatalf("replay registerAwaiter on %s: %v", be.Name, err)
 			}
 
 			var rowCount int
@@ -179,12 +221,9 @@ func TestALegacyAwaiterReplayLeavesAtMostTwoRowsAndUnregisterRemovesBoth(t *test
 			// unregisterAwaiter's DELETE matches on (workflow_id,
 			// event_type, key1, key2, key3), not registration_key -- so one
 			// call removes every row for this awaiter regardless of which
-			// registration_key each one carries.
-			if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
-				`DELETE FROM event_awaiters WHERE workflow_id = $1 AND event_type = $2 AND key1 = $3 AND key2 = $4 AND key3 = $5`,
-				workflowID, eventType, "", "", ""); err != nil {
-				t.Fatalf("unregister on %s: %v", be.Name, err)
-			}
+			// registration_key each one carries. The real function, not a
+			// hand-written DELETE.
+			unregisterAwaiter(tenantCtx, p.db, p.logger, workflowID, eventType, "", "", "")
 			if err := plugintest.QueryRowRebound(t, ctx, fixtureDB, dialect,
 				`SELECT COUNT(*) FROM event_awaiters WHERE workflow_id = $1 AND event_type = $2`,
 				workflowID, eventType).Scan(&rowCount); err != nil {
@@ -205,46 +244,11 @@ func TestALegacyAwaiterReplayLeavesAtMostTwoRowsAndUnregisterRemovesBoth(t *test
 // database to exactly the Version-5 shape without a second, drifting copy
 // of Versions 1-5's SQL in this test.
 type truncatedEventTriggersMigrations struct {
-	*eventtriggers.Plugin
+	*Plugin
 	n int
 }
 
 func (p *truncatedEventTriggersMigrations) Migrations() []plugin.Migration {
 	all := p.Plugin.Migrations()
 	return append([]plugin.Migration(nil), all[:p.n]...)
-}
-
-// replayRegistrationKey is plugins/eventtriggers/keys.go's registrationKey,
-// copied rather than called: that function is unexported, and this test
-// lives in a different package (cmd/cleat-worker, for
-// cleanupEventTriggersSchema and the real-database dialect harness this
-// file already has). If keys.go's algorithm changes, this copy has to
-// change with it -- there is no compiler check tying them together, only
-// this comment and the two file paths.
-func replayRegistrationKey(workflowID, eventType, key1, key2, key3 string) string {
-	h := sha256.New()
-	var lenBuf [8]byte
-	for _, s := range [5]string{workflowID, eventType, key1, key2, key3} {
-		binary.BigEndian.PutUint64(lenBuf[:], uint64(len(s)))
-		h.Write(lenBuf[:])
-		h.Write([]byte(s))
-	}
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-// nowExprFor returns each dialect's current-timestamp expression.
-// event_awaiters.created_at has a server-side DEFAULT on all three
-// dialects (migrations.go Version 3), so this INSERT could omit the
-// column entirely -- it is supplied explicitly here only so the row's
-// shape is visibly complete at the call site, matching upsertAwaiter's
-// own VALUES list.
-func nowExprFor(dialect plugin.Dialect) string {
-	switch dialect {
-	case plugin.DialectMySQL:
-		return "NOW()"
-	case plugin.DialectMSSQL:
-		return "SYSUTCDATETIME()"
-	default:
-		return "NOW()"
-	}
 }
