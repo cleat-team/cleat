@@ -647,10 +647,9 @@ func (s *execSession) freshPluginCallInternal(ctx context.Context, m api.Module,
 			}
 		}
 		if fnErr == nil {
-			callCtx := s.pluginCallContext(ctx)
-
 			// Actually call the plugin.
 			step := s.stepCount
+			callCtx := s.pluginCallContext(ctx, step)
 			callCtx, eventSpan := telemetry.EventSpan(callCtx, step, "plugin_call", pluginName, functionName)
 			t0 := time.Now()
 			outputJSON, fnErr = fn(callCtx, inputJSON)
@@ -836,7 +835,7 @@ func (s *execSession) freshPluginCallStreaming(ctx context.Context, m api.Module
 			callFailureCode, responsePtr, responseMaxLen)
 	}
 
-	callCtx := s.pluginCallContext(ctx)
+	callCtx := s.pluginCallContext(ctx, s.stepCount)
 
 	// Call the streaming plugin function and collect chunks.
 	chunkCh, err := fn(callCtx, inputJSON)

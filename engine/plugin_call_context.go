@@ -53,7 +53,14 @@ import (
 // into an outage, and dropping it silently reintroduces exactly the gap this
 // function closes, invisibly. Warn and continue unscoped, which is what the
 // call did before this existed.
-func (s *execSession) pluginCallContext(ctx context.Context) context.Context {
+//
+// step IS THE CALLER'S s.stepCount, NOT DERIVED HERE. Both call sites already
+// read it to build the recorded EventRecord's own Step field a few lines
+// later; passing the same value in is what keeps CallContext.Step and the
+// event actually recorded for this call from being able to drift, the same
+// reason callService takes step as a parameter rather than reading
+// s.stepCount itself. cleat#2614.
+func (s *execSession) pluginCallContext(ctx context.Context, step int) context.Context {
 	cc := &plugin.CallContext{}
 	if s.tenantID != "" {
 		cc.TenantID = s.tenantID
@@ -61,6 +68,8 @@ func (s *execSession) pluginCallContext(ctx context.Context) context.Context {
 	if s.workflowID != "" {
 		cc.WorkflowID = s.workflowID
 	}
+	cc.RunID = s.execRunID
+	cc.Step = step
 	if s.engine.db != nil {
 		cc.DB = s.engine.db
 	}
