@@ -70,9 +70,9 @@ everything hung off that model inherits tenancy for free.
 | Business processes | your workflows — or your **tenants' own**, via `POST /api/definitions`. See *Tenant-supplied steps* below | — |
 | Schedules | `scheduler` | routes + background loop |
 | Settings and metadata | `kvstore` (versioned JSONB, optimistic concurrency) | routes |
-| Per-tenant secrets | the tenant secret store (migration 081) — read by the host and **never handed to the guest**; `cleatctl set-secret`, rotation via `reseal-secrets` | host + admin |
+| Per-tenant secrets | the tenant secret store (`tenant_secrets`, `migrations/postgres/001_schema.sql`) — read by the host and **never handed to the guest**; `cleatctl set-secret`, rotation via `reseal-secrets` | host + admin |
 | Hostname to tenant | `auth/host_binding.go` (cleat#1568) | edge middleware |
-| Grouping a customer's tenants | orgs (cleat#1898, `091_an_org_groups_a_customers_tenants.sql`) | schema |
+| Grouping a customer's tenants | orgs (cleat#1898, `admin.orgs`, `migrations/postgres/001_schema.sql`) | schema |
 | Files and attachments | `blobstore` (S3-backed) | host functions |
 | Notifications | `email`, `slacknotify`, `notifications` | host functions |
 
@@ -167,7 +167,7 @@ due-schedule read go through — so a single line stops work and cron together. 
 side effect of the per-tenant claim: before it, the claim was one widened query inside a
 `SECURITY DEFINER` function and there was nowhere central to put this.
 
-`admin.tenants.suspended` had been in the schema since migration 001 with **no Go code reading it**.
+`admin.tenants.suspended` is in the schema (`migrations/postgres/001_schema.sql`) with **no Go code reading it**.
 A column named `suspended` that does nothing is worse than an absent one — the first operator to
 reach for it in an incident sets it, sees nothing happen, and has spent the minutes that mattered
 finding that out.

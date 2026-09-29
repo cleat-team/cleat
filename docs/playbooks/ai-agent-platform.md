@@ -184,8 +184,9 @@ Two honest caveats, both already written down in the tree rather than by me:
 
 Three execution ceilings are settable per tenant, with a clamp rule that is the right way round:
 the operator's flag is the maximum, and **a tenant may lower it and can never raise it**. A larger
-value is clamped at execution time rather than rejected (`settenantsetting.go`,
-schema from `migrations/postgres/039_tenant_settings.sql`):
+value is clamped at execution time rather than rejected (`settenantsetting.go`; schema is the
+`tenant_settings` table, generated into `migrations/postgres/001_schema.sql` by the 2026-09
+baseline compaction, cleat#2416):
 
     cleatctl --db <dsn> set-tenant-setting <tenant-uuid> \
       --wasm-instance-timeout-ms N \     # guest EXECUTION time ceiling
