@@ -2,7 +2,9 @@ package webhookingest
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -139,13 +141,81 @@ func (p *Plugin) awaitWebhook(ctx context.Context, input AwaitWebhookInput) (Awa
 		eventType = defaultWebhookEventType
 	}
 
+	// GUARD: input.Keys and the source's own correlation_key_field must AGREE
+	// on whether key2 exists at all -- cleat-review's finding on #2697. Key
+	// slots are strict equality and "" is a sentinel, not a wildcard
+	// (keys.go), so a mismatch is silent in BOTH directions:
+	//
+	//  1. Keys is non-empty but the source has no correlation_key_field:
+	//     handleIngestWebhook never extracts a key2 (routes.go, gated on
+	//     CorrelationKeyField != ""), so every published event's key2 is ""
+	//     while every awaiter registers key2 = input.Keys[0]. They can never
+	//     match -- this is exactly the bug cleat#2697's own scenario script
+	//     hit (scripts/run-order-lifecycle-scenario.sh, fixed alongside
+	//     this), and it is not specific to that script: any tenant that
+	//     passes Keys against a source with no correlation_key_field hits it.
+	//  2. Keys is empty but the source HAS a correlation_key_field: published
+	//     events carry the extracted key2, but this await registers "" --
+	//     so setting correlation_key_field on an existing source silently
+	//     breaks every key-less await_webhook call already using it.
+	//
+	// Both directions produce {"found": false} forever, indistinguishable
+	// from "no webhook has arrived yet" -- the same "never-matching awaiter
+	// is a silent failure" reasoning the owner used for requiring source_id
+	// in the first place (see this function's own doc comment). A tenant-
+	// scoped read here, rather than trusting AwaitWebhookInput alone, is the
+	// only way to catch a mismatch that Go's type system cannot: the source
+	// row is the one place both sides of the comparison actually live.
+	// Same query shape as handleGetSource (routes.go) -- deliberately, not
+	// a narrower "just the one column" query: the fake DB test harness
+	// (webhookingest_behavioral_test.go) recognises queries by matching
+	// their exact text, and this shape is already a recognised case there,
+	// so this reuses it rather than adding a second one for a single
+	// column.
+	var src webhookSourceJSON
+	err = plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(`
+		SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, correlation_key_field, created_at, updated_at
+		FROM webhook_sources
+		WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+	`, p.dialect), sourceID, cc.TenantID), &src.ID, &src.TenantID, &src.Name, &src.SourceType,
+		&src.SecretConfigured, &src.Enabled, &src.SignalWorkflowID, &src.SignalName,
+		&src.CorrelationKeyField, &src.CreatedAt, &src.UpdatedAt)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		// NOT an error -- a gone-or-never-existed source is the documented
+		// {"found": false} case (this function's own doc comment, owner
+		// decision on cleat#2199: "an awaiting workflow simply keeps getting
+		// {'found': false}... There is no signal here that the source was
+		// deleted rather than merely idle"). TestADeletedSourcesPendingEventIsCancelledNotDelivered
+		// pins exactly this: a deleted source's already-cancelled events
+		// must read as not-found, not as an error. There is nothing to
+		// validate Keys against, so the mismatch guard below is skipped;
+		// ClaimOrRegisterAwaiter will not find anything for a source with
+		// no live rows either way.
+	case err != nil:
+		return AwaitWebhookOutput{}, fmt.Errorf("webhook-ingest: look up source: %w", err)
+	case len(input.Keys) > 0 && src.CorrelationKeyField == "":
+		return AwaitWebhookOutput{}, fmt.Errorf(
+			"webhook-ingest: Keys were passed but source %s has no correlation_key_field configured -- "+
+				"they would never match a delivered event; set correlation_key_field on the source or omit Keys",
+			sourceID)
+	case len(input.Keys) == 0 && src.CorrelationKeyField != "":
+		return AwaitWebhookOutput{}, fmt.Errorf(
+			"webhook-ingest: source %s has correlation_key_field %q configured, but no Keys were passed -- "+
+				"this await would never match a delivered event; pass Keys or use a source with no correlation_key_field",
+			sourceID, src.CorrelationKeyField)
+	}
+
 	// key1 = this source's id, ALWAYS first -- matching exactly what
 	// handleIngestWebhook publishes (routes.go). input.Keys, if the caller
 	// passes any, becomes key2 (and key3): a caller correlating on an order
 	// id passes Keys: []string{orderID}, which must be the SAME value
 	// handleIngestWebhook's CorrelationKeyField extraction produced for the
 	// matching webhook, or the two never meet -- same as any correlation
-	// mismatch, {"found": false} rather than an error.
+	// mismatch, {"found": false} rather than an error. The guard above rules
+	// out the one case that mismatch is never intentional; a genuine key2
+	// VALUE mismatch (right shape, wrong value) still reads as "not found",
+	// which is correct -- that is an ordinary miss, not a configuration bug.
 	keys := append([]string{sourceID.String()}, input.Keys...)
 
 	var out AwaitWebhookOutput

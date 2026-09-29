@@ -57,6 +57,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   static-binding feature is kept at all, and what `webhook_events.processed` should mean now that
   `await_webhook` no longer reads it, is tracked separately in cleat#2689.
 
+- **`await_webhook`'s `Keys` and a source's own `correlation_key_field` must now agree on whether
+  a second correlation key exists at all, or the call errors instead of hanging forever.**
+  cleat-review's finding on cleat#2697: `Keys` (cleat#2649) and `correlation_key_field` are strict
+  equality on both sides (`""` is a sentinel, not a wildcard), so a mismatch between them was
+  silent in *both* directions before this — `{"found": false}` forever, indistinguishable from "no
+  webhook has arrived yet". Two ways to hit it: (1) calling `await_webhook` with `Keys` set against
+  a source that has no `correlation_key_field` configured — every published event's key2 is `""`
+  while the await's is the passed key, and they never meet; (2) setting `correlation_key_field` on
+  an **existing** source that already has callers doing key-less `await_webhook` calls — those
+  calls now register key2 `""` against events whose key2 is the extracted value, and silently stop
+  matching. `await_webhook` now reads the source row and errors immediately
+  (`webhook-ingest: Keys were passed but source ... has no correlation_key_field configured ...` /
+  `webhook-ingest: source ... has correlation_key_field ... configured, but no Keys were passed
+  ...`) instead of registering an awaiter that can never match. **Consequence:** adding
+  `correlation_key_field` to a source that already has key-less `await_webhook` callers is now a
+  breaking change for those callers, surfaced immediately rather than as a silent hang — update
+  every caller of that source to pass `Keys` in the same change that adds the field.
+
 ### Added
 
 - **`cleat/pluginclients` is new public SDK surface**: generated, typed callers for the bundled

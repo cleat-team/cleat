@@ -501,7 +501,10 @@ echo "==> creating a webhook source (setup, not a counted step)"
 # extracts no key2 from the delivered webhook's body, so every published
 # event's key2 is "" while every awaiter's key2 is the order id -- they can
 # never match, on any dialect, and run 2 below times out at its 30s budget
-# every time. Found via cleat#2697's mssql arm failing this exact way.
+# every time -- on all three dialects, not just one. Found via cleat#2697's
+# mssql arm failing first (it happened to be the arm that completed rather
+# than being cancelled by a double-trigger race); cleat-review confirmed the
+# same failure on postgres and mysql too.
 SOURCE_JSON="$(curl -fsS --max-time 15 -X POST "$API/ingest/sources" "${auth[@]}" \
   -H "Content-Type: application/json" \
   -d '{"name":"psp","source_type":"payment","secret":"whsec_local_dev","correlation_key_field":"order_id"}' 2>&1)" || {

@@ -3390,20 +3390,31 @@ func TestWH_AwaitWebhook_QueryError(t *testing.T) {
 	keyHash := sha256.Sum256([]byte("test-api-key"))
 	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
 
+	// awaitWebhook's FIRST query is now the correlation_key_field guard's
+	// own source lookup (cleat-review on #2697) -- a real row must exist
+	// for it to reach ClaimOrRegisterAwaiter's claim SELECT at all, which is
+	// what this test actually wants to exercise a failure in.
+	sourceID := uuid.New()
+	store.sources = append(store.sources, webhookSourceRow{
+		id:       sourceID.String(),
+		tenantID: testTenantStr,
+		name:     "query-error-source",
+	})
+
 	db := sql.OpenDB(&fakeConnector{store: store})
 	defer db.Close()
 
-	// Set fail flag for the next query -- awaitWebhook's first query is now
+	// Set fail flag for the SECOND query, skipping the guard's own lookup
+	// (querySkip=1) -- awaitWebhook's second query is
 	// ClaimOrRegisterAwaiter's claim SELECT against ingested_events
 	// (cleat#2649), reached through db.Begin()+tx.QueryRow(), not a direct
 	// query on this Plugin's own db. This still exercises the same
 	// property (a query failure propagates as an error mentioning
 	// "query events"): ClaimOrRegisterAwaiter wraps it as
-	// "event-triggers: query events: %w", and failNextQuery fires on
-	// whatever query runs first regardless of its text, so no seeded event
-	// is needed to reach it.
+	// "event-triggers: query events: %w".
 	store.mu.Lock()
 	store.failNextQuery = true
+	store.querySkip = 1
 	store.mu.Unlock()
 
 	p := &Plugin{
@@ -3415,7 +3426,7 @@ func TestWH_AwaitWebhook_QueryError(t *testing.T) {
 	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	_, err := p.awaitWebhook(ctx, AwaitWebhookInput{SourceID: uuid.New().String()})
+	_, err := p.awaitWebhook(ctx, AwaitWebhookInput{SourceID: sourceID.String()})
 	if err == nil {
 		t.Fatal("expected error from query failure, got nil")
 	}
