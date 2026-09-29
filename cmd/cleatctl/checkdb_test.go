@@ -239,9 +239,9 @@ func TestRunCheckDB_PingSuccess(t *testing.T) {
 		makePingResult(nil), // ping ok
 		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}), // schema
 	}, tablesAllPresent()...),
-		makeMultiRowResult([]string{"status", "cnt"}, nil),           // instances (none)
-		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),  // event history
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}), // dead letters
+		makeMultiRowResult([]string{"status", "cnt"}, nil),          // instances (none)
+		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}), // event history
+		makeMultiRowResult([]string{"proname", "count"}, nil),       // function overloads (none)
 	)
 	stdout, _ := runCheckDBTest(t, script, nil)
 	if !strings.Contains(stdout, "connected") {
@@ -264,7 +264,7 @@ func TestRunCheckDB_SchemaVersion_NoRows(t *testing.T) {
 	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil), // function overloads (none)
 	)
 	stdout, _ := runCheckDBTest(t, script, nil)
 	if !strings.Contains(stdout, "no migrations applied yet") {
@@ -280,7 +280,7 @@ func TestRunCheckDB_SchemaVersion_ReadError(t *testing.T) {
 	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil), // function overloads (none)
 	)
 	_, stderr := runCheckDBTest(t, script, nil)
 	if !strings.Contains(stderr, "WARNING") || !strings.Contains(stderr, "schema version") {
@@ -299,7 +299,7 @@ func TestRunCheckDB_SchemaVersion_Valid(t *testing.T) {
 	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(1024 * 1024)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil), // function overloads (none)
 	)
 	stdout, _ := runCheckDBTest(t, script, nil)
 	if !strings.Contains(stdout, "005_migration") {
@@ -317,7 +317,7 @@ func TestRunCheckDB_SchemaVersion_VerboseNoRows(t *testing.T) {
 	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil), // function overloads (none)
 	)
 	stdout, _ := runCheckDBTest(t, script, []string{"--verbose"})
 	if !strings.Contains(stdout, "(none)") {
@@ -336,7 +336,7 @@ func TestRunCheckDB_Tables_AllAccessible(t *testing.T) {
 	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil), // function overloads (none)
 	)
 	stdout, _ := runCheckDBTest(t, script, nil)
 	want := fmt.Sprintf("all %d accessible", len(coreTables))
@@ -369,7 +369,7 @@ func TestRunCheckDB_Tables_FallbackPath(t *testing.T) {
 		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil), // function overloads (none)
 	}
 	stdout, _ := runCheckDBTest(t, script, nil)
 	if !strings.Contains(stdout, "accessible") {
@@ -389,7 +389,7 @@ func TestRunCheckDB_Tables_AllMissing(t *testing.T) {
 	}, tablesAllAbsent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil), // function overloads (none)
 	)
 	stdout, stderr := runCheckDBTest(t, script, nil)
 	wantMissing := fmt.Sprintf("0 accessible, %d missing", len(coreTables))
@@ -422,7 +422,7 @@ func TestRunCheckDB_Tables_VerboseMissing(t *testing.T) {
 		makeQueryResult([]string{"count"}, []driver.Value{int64(1)}), // table 13
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil), // function overloads (none)
 	}
 	stdout, stderr := runCheckDBTest(t, script, []string{"--verbose"})
 	_ = stderr
@@ -446,7 +446,7 @@ func TestRunCheckDB_Instances_WithStatuses(t *testing.T) {
 			{"failed", int64(3)},
 		}),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil), // function overloads (none)
 	)
 	stdout, _ := runCheckDBTest(t, script, nil)
 	if !strings.Contains(stdout, "INSTANCES: 18 total") {
@@ -463,7 +463,7 @@ func TestRunCheckDB_Instances_VerboseStatuses(t *testing.T) {
 			{"running", int64(2)},
 		}),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil), // function overloads (none)
 	)
 	stdout, _ := runCheckDBTest(t, script, []string{"--verbose"})
 	if !strings.Contains(stdout, "by status:") {
@@ -481,7 +481,7 @@ func TestRunCheckDB_Instances_QueryError(t *testing.T) {
 	}, tablesAllPresent()...),
 		makeQueryError(fmt.Errorf("instance query error")), // instance query fails
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil), // function overloads (none)
 	)
 	stdout, stderr := runCheckDBTest(t, script, nil)
 
@@ -511,7 +511,7 @@ func TestRunCheckDB_Instances_QueryErrorVerbose(t *testing.T) {
 	}, tablesAllPresent()...),
 		makeQueryError(fmt.Errorf("instance query error")),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil), // function overloads (none)
 	)
 	_, stderr := runCheckDBTest(t, script, []string{"--verbose"})
 	if !strings.Contains(stderr, "UNREADABLE") || !strings.Contains(stderr, "workflow_instances") {
@@ -530,7 +530,7 @@ func TestRunCheckDB_EventHistory_Size(t *testing.T) {
 	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(5 * 1024 * 1024)}), // 5MB
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil),                     // function overloads (none)
 	)
 	stdout, _ := runCheckDBTest(t, script, nil)
 	if !strings.Contains(stdout, "EVENT HISTORY: 5.0 MB") {
@@ -546,7 +546,7 @@ func TestRunCheckDB_EventHistory_FallbackCount(t *testing.T) {
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryError(fmt.Errorf("pg_column_size not available")),    // size query fails
 		makeQueryResult([]string{"count"}, []driver.Value{int64(42)}), // fallback count
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil),         // function overloads (none)
 	)
 	stdout, _ := runCheckDBTest(t, script, []string{"--verbose"})
 	if !strings.Contains(stdout, "42 rows") {
@@ -581,6 +581,88 @@ func TestRunCheckDB_EventHistory_FallbackCount(t *testing.T) {
 // line already reports dead_lettered under the same --verbose gate. cleat#1216.
 
 // =========================================================================
+// Function Overload Tests
+// =========================================================================
+
+// TestRunCheckDB_FunctionOverloads_None is the mirror of the "detected" test
+// below, in the SAME run rather than a separate one: a query returning zero
+// rows must not be read as a stale overload, and STATUS must stay healthy.
+// Without this, a version of the check that flagged every function (or every
+// admin-schema function) would still pass the "detected" test below.
+func TestRunCheckDB_FunctionOverloads_None(t *testing.T) {
+	script := append(append([]checkDBResult{
+		makePingResult(nil), // ping ok
+		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
+	}, tablesAllPresent()...),
+		makeMultiRowResult([]string{"status", "cnt"}, nil),
+		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil), // function overloads (none)
+	)
+	stdout, stderr := runCheckDBTest(t, script, []string{"--verbose"})
+	if !strings.Contains(stdout, "STATUS: healthy") {
+		t.Errorf("expected STATUS: healthy, got stdout: %s stderr: %s", stdout, stderr)
+	}
+	if !strings.Contains(stdout, "FUNCTION OVERLOADS: none") {
+		t.Errorf("expected 'FUNCTION OVERLOADS: none' in verbose output, got: %s", stdout)
+	}
+}
+
+// TestRunCheckDB_FunctionOverloads_Detected constructs the stale state
+// itself, per cleat#2449: a fresh database can never have a superseded
+// overload (migrations/postgres/ ships only the last signature of each
+// routine, since #2416's rebaseline), so this cannot be reproduced by
+// pointing the check at a real, freshly-built database. Scripting the query's
+// RESULT is the only way to exercise the "found one" path at all, and it is
+// exactly the shape a real admin.drop_tenant(uuid) coexisting with
+// admin.drop_tenant(uuid, text) would produce.
+func TestRunCheckDB_FunctionOverloads_Detected(t *testing.T) {
+	script := append(append([]checkDBResult{
+		makePingResult(nil), // ping ok
+		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
+	}, tablesAllPresent()...),
+		makeMultiRowResult([]string{"status", "cnt"}, nil),
+		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, [][]driver.Value{
+			{"drop_tenant", int64(2)},
+		}),
+	)
+	stdout, stderr := runCheckDBTest(t, script, nil)
+	if !strings.Contains(stderr, "FUNCTION OVERLOADS") || !strings.Contains(stderr, "drop_tenant") {
+		t.Errorf("expected drop_tenant named in the FUNCTION OVERLOADS warning, got stderr: %s", stderr)
+	}
+	if !strings.Contains(stderr, "DEGRADED") {
+		t.Errorf("a superseded, unpinned SECURITY DEFINER overload is not a healthy database, "+
+			"got stderr: %s", stderr)
+	}
+	if strings.Contains(stdout, "STATUS: healthy") {
+		t.Errorf("must not report healthy with a stale overload present, got stdout: %s", stdout)
+	}
+}
+
+// TestRunCheckDB_FunctionOverloads_QueryError is the same non-fatal-vs-fatal
+// distinction TestRunCheckDB_SchemaVersion_ReadError makes for the schema
+// query: a check that cannot run is reported as a WARNING and a DEGRADED
+// issue, not silently skipped -- see this file's own comment on `issues`
+// being the single source of truth for exactly this reason.
+func TestRunCheckDB_FunctionOverloads_QueryError(t *testing.T) {
+	script := append(append([]checkDBResult{
+		makePingResult(nil), // ping ok
+		makeQueryResult([]string{"version", "applied_at"}, []driver.Value{"001", nil}),
+	}, tablesAllPresent()...),
+		makeMultiRowResult([]string{"status", "cnt"}, nil),
+		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
+		makeQueryError(fmt.Errorf("pg_proc unreadable")),
+	)
+	_, stderr := runCheckDBTest(t, script, nil)
+	if !strings.Contains(stderr, "FUNCTION OVERLOADS") || !strings.Contains(stderr, "WARNING") {
+		t.Errorf("expected a FUNCTION OVERLOADS WARNING, got: %s", stderr)
+	}
+	if !strings.Contains(stderr, "DEGRADED") {
+		t.Errorf("a check that could not run must still mark the database DEGRADED, got: %s", stderr)
+	}
+}
+
+// =========================================================================
 // Verbose / Summary Tests
 // =========================================================================
 
@@ -591,7 +673,7 @@ func TestRunCheckDB_Verbose_JSONSummary(t *testing.T) {
 	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil), // function overloads (none)
 	)
 	_, stderr := runCheckDBTest(t, script, []string{"--verbose"})
 	if !strings.Contains(stderr, "JSON summary") {
@@ -609,7 +691,7 @@ func TestRunCheckDB_ShortVerboseFlag(t *testing.T) {
 	}, tablesAllPresent()...),
 		makeMultiRowResult([]string{"status", "cnt"}, nil),
 		makeQueryResult([]string{"size"}, []driver.Value{int64(0)}),
-		makeQueryResult([]string{"count"}, []driver.Value{int64(0)}),
+		makeMultiRowResult([]string{"proname", "count"}, nil), // function overloads (none)
 	)
 	_, stderr := runCheckDBTest(t, script, []string{"-v"})
 	if !strings.Contains(stderr, "JSON summary") {
