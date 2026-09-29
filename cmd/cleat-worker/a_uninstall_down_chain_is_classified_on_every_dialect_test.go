@@ -66,11 +66,16 @@ const (
 	// either the follow-up Up fails outright, or it returns no error while
 	// the recovered schema is missing an object the failed Down destroyed
 	// (plugin_migrations still records that migration as applied, so the
-	// recovery Up skips re-creating it). Measured 2026-09-25, all three
-	// remaining instances are the second shape: blobstore/mysql,
-	// oauth-provider/mssql, webhook-ingest/mssql. notifications/MSSQL --
-	// cleat#2342's one pair whose follow-up Up failed outright -- is now
-	// proven and gone from the map.
+	// recovery Up skips re-creating it). Measured 2026-09-25, three
+	// instances were the second shape: blobstore/mysql, oauth-provider/mssql,
+	// webhook-ingest/mssql. notifications/MSSQL -- cleat#2342's one pair
+	// whose follow-up Up failed outright -- is now proven and gone from the
+	// map. webhook-ingest/mssql was re-measured 2026-09-29 (cleat#2649,
+	// which adds webhook_sources.correlation_key_field as this plugin's
+	// Version 9): this test's own run now reports the follow-up Up
+	// succeeding with a schema IDENTICAL to a clean install, where it used
+	// to differ by the missing webhook_events.error_msg column. The two
+	// remaining are blobstore/mysql and oauth-provider/mssql.
 	outcomeUnrecoverable
 )
 
@@ -105,12 +110,16 @@ var knownBrokenPluginDown = map[string]map[plugin.Dialect]downOutcome{
 	"jobqueue":       {plugin.DialectMySQL: outcomeRecoverable},
 	"scheduler":      {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeRecoverable},
 	"kafka-connect":  {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeRecoverable},
-	// blobstore/mysql, oauth-provider/mssql and webhook-ingest/mssql are split
-	// below: each is recoverable on one dialect and unrecoverable on the
-	// other, so they cannot share one line with the pairs above.
+	// webhook-ingest/mssql moved here from the split group below on
+	// 2026-09-29 (cleat#2649): re-measured as outcomeRecoverable, not
+	// outcomeUnrecoverable -- see the outcomeUnrecoverable const doc comment
+	// above for what changed.
+	"webhook-ingest": {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeRecoverable},
+	// blobstore/mysql and oauth-provider/mssql are split below: each is
+	// recoverable on one dialect and unrecoverable on the other, so they
+	// cannot share one line with the pairs above.
 	"blobstore":      {plugin.DialectMySQL: outcomeUnrecoverable, plugin.DialectMSSQL: outcomeRecoverable},
 	"oauth-provider": {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeUnrecoverable},
-	"webhook-ingest": {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeUnrecoverable},
 	// Unrecoverable: the follow-up Up returns no error, but cleat#2306 phase
 	// 2's schema-equality check (migration/catalogdiff, added after
 	// cleat-review's GAP verdict on #2346) proves the recovered database is
@@ -119,7 +128,6 @@ var knownBrokenPluginDown = map[string]map[plugin.Dialect]downOutcome{
 	// re-creating it. Measured 2026-09-25:
 	//   blobstore/mysql:      the entire workflow_blob_refs TABLE is gone
 	//   oauth-provider/mssql: oauth_sessions.nonce COLUMN is gone
-	//   webhook-ingest/mssql: webhook_events.error_msg COLUMN is gone
 }
 
 func TestUninstallDownChainIsClassifiedOnEveryDialect(t *testing.T) {
@@ -204,9 +212,9 @@ func TestUninstallDownChainIsClassifiedOnEveryDialect(t *testing.T) {
 					// migration as applied, so the recovery Up sees nothing pending, skips
 					// re-creating the object, and returns cleanly anyway -- which is exactly the
 					// shape an outcomeUnrecoverable pair can now also take (blobstore/mysql,
-					// oauth-provider/mssql, webhook-ingest/mssql: recoverErr is nil for all
-					// three). This snapshot, taken while the schema is known-good, is what the
-					// recovered schema is compared against below, whichever outcome is expected.
+					// oauth-provider/mssql: recoverErr is nil for both). This snapshot, taken
+					// while the schema is known-good, is what the recovered schema is compared
+					// against below, whichever outcome is expected.
 					var cleanSchema *catalogdiff.Catalog
 					if want == outcomeRecoverable || want == outcomeUnrecoverable {
 						var err error
@@ -308,9 +316,9 @@ func TestUninstallDownChainIsClassifiedOnEveryDialect(t *testing.T) {
 							// RunMigrations sees nothing pending and returns cleanly over a
 							// silently incomplete schema -- true for EITHER expected outcome, since
 							// an outcomeUnrecoverable pair can take this path too (blobstore/mysql,
-							// oauth-provider/mssql, webhook-ingest/mssql all do). Compare against
-							// the clean snapshot taken right after the initial Up, before
-							// RunDownMigrations touched anything.
+							// oauth-provider/mssql both do). Compare against the clean snapshot
+							// taken right after the initial Up, before RunDownMigrations touched
+							// anything.
 							recoveredSchema, err := catalogdiff.Snapshot(ctx, db, catalogDialect(dialect))
 							if err != nil {
 								t.Fatalf("%s/%s: snapshotting the schema after the recovery Up: %v",
