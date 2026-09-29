@@ -3435,6 +3435,44 @@ func TestWH_AwaitWebhook_QueryError(t *testing.T) {
 	}
 }
 
+// TestWH_AwaitWebhook_SourceLookupQueryError is cleat-review's minor note on
+// #2697: the correlation_key_field guard's OWN lookup query error path
+// (distinct from sql.ErrNoRows, which is deliberately not an error -- see
+// awaitWebhook's guard comment and TestADeletedSourcesPendingEventIsCancelledNotDelivered)
+// had no test. This is the FIRST query awaitWebhook runs, so no querySkip is
+// needed and no source needs seeding -- failNextQuery fires before the fake
+// even looks at what query it is.
+func TestWH_AwaitWebhook_SourceLookupQueryError(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	store.mu.Lock()
+	store.failNextQuery = true
+	store.mu.Unlock()
+
+	p := &Plugin{
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
+	}
+
+	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
+	ctx := plugin.WithCallContext(context.Background(), callCtx)
+
+	_, err := p.awaitWebhook(ctx, AwaitWebhookInput{SourceID: uuid.New().String()})
+	if err == nil {
+		t.Fatal("expected error from source lookup query failure, got nil")
+	}
+	const want = "webhook-ingest: look up source:"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error: got %q, want it to contain %q", err.Error(), want)
+	}
+}
+
 // ===========================================================================
 // AwaitWebhook exec error (mark processed)
 // ===========================================================================
