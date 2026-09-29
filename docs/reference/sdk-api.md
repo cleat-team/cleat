@@ -878,9 +878,16 @@ to do to an already-published `Req`/`Resp` struct, because unlike an ordinary
 internal edit, a rename here breaks a type a customer's code already imports.
 
 1. **Adding a field to a `Req` or `Resp` struct is additive-safe, subject to
-   rollout order — owner decision, 2026-09-29, resolving the conflict this
-   section otherwise has with point 3.** It is the conventional additive
-   direction every consumer of a JSON-shaped API already has to tolerate,
+   rollout order.** The owner chose this over two other options for
+   resolving the conflict this section otherwise has with point 3 --
+   [cleat#2597, 2026-09-29](https://github.com/cleat-team/cleat/issues/2597#issuecomment-5894188198)
+   records the choice. **The choice is the owner's; the two constraints
+   below are the coordinator's formulation of what that choice entails, not
+   a verbatim statement from the owner** -- stated this way because the
+   distinction matters more than usual on a page whose whole job is telling
+   a reader which rule governs which case. It is also the conventional
+   additive direction every consumer of a JSON-shaped API already has to
+   tolerate,
    with a new input field marked `omitempty` so an older caller who never
    sets it still round-trips, and its Go zero value treated as "not sent" in
    the plugin. **Two constraints, both load-bearing once point 3's fix
