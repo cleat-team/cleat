@@ -335,6 +335,32 @@ func TestRecordEventRejectsMalformedInput(t *testing.T) {
 	}
 }
 
+// TestRecordEventRejectsAnUnknownField is the case
+// TestRecordEventRejectsMalformedInput's `{not json` cannot show: that input
+// is not even syntactically valid JSON, and the OLD raw json.Unmarshal this
+// plugin used before cleat#2626/#2681 rejected it too -- so it exercises no
+// behaviour this conversion changed. What decodeStrict (plugin/typed.go)
+// actually buys, per RegisterTyped's own doc comment, is
+// DisallowUnknownFields: syntactically valid JSON carrying a field
+// RecordEventInput does not declare -- here "detial", a typo of "details" --
+// used to decode silently, dropping the unrecognized field, and now fails
+// the call instead. That silent-to-loud flip is the change; this test is the
+// one that would fail if RegisterTyped's decode ever regressed to plain
+// json.Unmarshal.
+func TestRecordEventRejectsAnUnknownField(t *testing.T) {
+	p := unreachableDBPlugin(t)
+	reg := newFakeFuncRegistry()
+	if err := p.RegisterHostFunctions(reg); err != nil {
+		t.Fatalf("RegisterHostFunctions: %v", err)
+	}
+	ctx := recordEventCallCtx(uuid.New(), "wf-1", 0)
+	if _, err := reg.Get("record_event")(ctx, `{"event_type":"x","detial":{}}`); err == nil ||
+		!strings.Contains(err.Error(), "invalid input") ||
+		!strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("recordEvent with an unrecognized field: err = %v, want an \"invalid input\" ... \"unknown field\" error", err)
+	}
+}
+
 // TestRecordEventRejectsNonObjectDetails covers the branch
 // TestRecordEventRejectsMalformedInput cannot reach: RegisterTyped's decode
 // already refuses input that is not syntactically valid JSON, so "details is
