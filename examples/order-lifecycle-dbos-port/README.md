@@ -109,13 +109,19 @@ at all, which is the gap the comparison is naming, not a feature.
 | role | file | code lines |
 |---|---|---|
 | workflow and compensation | `src/workflow.ts` | 114 |
-| HTTP backend | `src/server.ts` | 57 |
+| HTTP backend | `src/server.ts` | 70 |
 | tests | `src/order.test.ts` | 90 |
-| **total** | | **261** |
+| **total** | | **274** |
 
 Against cleat's side, `cloc examples/order-lifecycle/{order.go,backend/main.go,order_test.go}`
 on the same date: **729**. Re-derive both with `scripts/dbos-pair-loc.sh`, not
 by re-quoting these numbers — they are a census of a file that will change.
+
+**Corrected 2026-09-28 (cleat#2622): `server.ts` grew from 57 to 70 lines after this table was
+first written, and the table was not re-derived when it did — the total quoted here was 261 for
+however long that drift went unnoticed.** `scripts/check-dbos-pair-loc.py` now runs the counter
+and fails CI if this table and the script disagree again, so the next drift is a red build rather
+than a quiet one.
 
 ## The counter
 
