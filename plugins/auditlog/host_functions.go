@@ -258,6 +258,16 @@ func recordEventDeterministicID(tenantID uuid.UUID, workflowID, eventID string) 
 // own separators exist to prevent, one level up. A wholly separate namespace
 // prefix removes the question rather than trusting no caller ever picks a
 // colliding EventID.
+//
+// The failure that collision would cause has no trace: two calls that
+// collide are not recorded as a conflict or an error, they are recorded as
+// "already recorded" -- so a colliding EventID would make one of the two
+// events silently never appear in the chain at all, discovered (if ever)
+// only by noticing an audit trail is missing an event nobody can point to.
+// Namespacing costs nothing and removes the possibility outright rather than
+// relying on no caller ever choosing a colliding EventID. The NEXT person
+// adding a third key source to this function should give it its own
+// namespace too, for the same reason.
 const recordEventStepIDNamespace = "cleat-audit-record-event-step-v1\x00"
 
 func recordEventStepID(tenantID uuid.UUID, workflowID, runID string, step int) uuid.UUID {
