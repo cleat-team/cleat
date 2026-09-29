@@ -31,6 +31,12 @@
 # refused, and a plain, non-interactive `git commit -F <malformed file>` is
 # refused immediately, with HEAD never created.
 #
+# This hook does not run at all for a plain rebase pick or cherry-pick of an
+# already-malformed commit -- no conflict, no `reword`, no editor, and git
+# does not invoke commit-msg for that case (measured: git 2.50.1). That
+# commit passes through unchanged, exactly as it did before this hook
+# existed; CI's Stream Trailer Check is the backstop there, same as always.
+#
 # Deliberately narrower than prepare-commit-msg's job: this hook does not
 # enforce that a Claude-Stream trailer is PRESENT. prepare-commit-msg
 # already refuses to proceed -- before the editor opens -- when

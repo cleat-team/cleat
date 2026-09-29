@@ -109,15 +109,20 @@ fi
 # the broken one -- that would leave two Claude-Stream lines, one of which
 # the check still can't read) and let the message through as-is, warning
 # rather than failing. `.githooks/commit-msg` runs on the FINAL message,
-# after any editor has had its chance, and is where this actually gets
-# refused if it is still broken. See that hook for the refusal and its
-# regression tests.
+# after any editor has had its chance, and refuses it there if it is still
+# broken -- but only when an editor (or `reword`) actually ran. A plain
+# rebase pick or cherry-pick of an already-malformed commit invokes neither
+# hook (measured: git 2.50.1, no conflict, no reword), so it passes through
+# unchanged and CI's Stream Trailer Check is the backstop, same as before
+# this fix existed. See commit-msg for the refusal and its regression tests.
 if grep -qiE '^Claude-Stream:[[:space:]]*[^[:space:]]' "$MSG_FILE"; then
 	echo "prepare-commit-msg: warning: this message has a line matching" >&2
 	echo "'Claude-Stream: ...' that git's trailer parser does not read as a" >&2
 	echo "trailer (it is not in the message's final paragraph). Not stamping" >&2
-	echo "over it -- edit the message to fix this, or commit-msg will refuse" >&2
-	echo "it once you're done editing. See .githooks/commit-msg." >&2
+	echo "over it -- edit the message to fix this. commit-msg refuses it once" >&2
+	echo "you're done editing; a plain rebase pick or cherry-pick runs no" >&2
+	echo "editor and no commit-msg either, so it goes through unchanged and" >&2
+	echo "CI's Stream Trailer Check reports it. See .githooks/commit-msg." >&2
 	exit 0
 fi
 
