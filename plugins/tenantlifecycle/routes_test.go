@@ -138,17 +138,29 @@ func TestGetLifecycleStatus_NoTenant(t *testing.T) {
 // read only tenant A's row, never tenant B's, regardless of which one
 // expires first or which was inserted first.
 //
-// FALSIFIED by widening queryOwnTrial's WHERE to `tenant_id = $1 OR 1=1`:
-// PostgreSQL and MySQL both failed for the right reason ("tenant B got
-// tenant A's trial"). MSSQL's own arm stayed green even under that
-// mutation -- not a blind spot in this test, but a second, independent
-// backstop: background.go documents that SQL Server's security policy has
-// no owner-bypass (unlike PostgreSQL's, which does not constrain the table
-// owner by default -- NewPluginTestBackends' connections are the owner on
-// every dialect, so this test's PostgreSQL/MySQL arms exercise this
-// handler's own WHERE clause, not RLS). Recorded here so a future reader
-// re-falsifying this test does not mistake the MSSQL pass for the test
-// failing to falsify.
+// FALSIFIED by widening queryOwnTrial's WHERE to `tenant_id = $1 OR 1=1`
+// (one shared string -- see queryOwnTrial's own comment on why there is only
+// one to mutate): PostgreSQL and MySQL both failed for the right reason
+// ("tenant B got tenant A's trial"). MSSQL's own arm stayed green even under
+// that SAME mutation -- not an untested copy, but its own security policy
+// acting as a second, independent backstop.
+//
+// WHY POSTGRESQL FAILED HERE RATHER THAN BEING BACKSTOPPED LIKE MSSQL:
+// tenant_trials carries ENABLE + FORCE ROW LEVEL SECURITY (plugin/migration.go),
+// which DOES constrain the table owner -- cleat-review's correction on #2683
+// to an earlier, wrong version of this comment, which blamed "PostgreSQL does
+// not constrain the owner by default". The real mechanism is narrower and
+// worth naming exactly: NewPluginTestBackends (like CI's own multi-db-ci.yml)
+// connects as the `postgres` role, which is a SUPERUSER, and a superuser
+// bypasses row-level security unconditionally, FORCE included
+// (plugin/migration.go's own comment on the shipped role documents this same
+// trap for the fixture that measures the policy directly). So this test's
+// PostgreSQL arm exercises this handler's own WHERE clause, same as MySQL
+// (which has no RLS at all) -- not the policy. Against a NOSUPERUSER
+// connection, PostgreSQL's arm would be policy-backstopped exactly like
+// MSSQL's. Recorded here so a future reader re-falsifying this test does not
+// mistake the MSSQL pass for the test failing to falsify, or repeat the
+// owner-vs-superuser mixup this comment used to make.
 func TestGetLifecycleStatus_NeverSeesAnotherTenantsTrial(t *testing.T) {
 	backends := testutil.NewPluginTestBackends(t)
 	for _, be := range backends {
