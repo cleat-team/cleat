@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -121,8 +122,17 @@ func TestAwaitEventMarshalFailureLeavesEventUnconsumed(t *testing.T) {
 		TenantID:   tenantID.String(),
 		WorkflowID: "wf-marshal-failure-mssql",
 	})
-	if _, err := p.awaitEvent(ctx, `{"event_type":"order.corrupt","timeout_ms":1000}`); err == nil {
-		t.Fatal("awaitEvent: expected an error from the unmarshalable event_data, got nil")
+	// Asserted against the specific marshal error, not just "some error" --
+	// cleat-review and the coordinator both flagged this independently: the
+	// property under test is ORDERING (a marshal failure leaves the row
+	// unconsumed), and a bare err != nil passes just as well if awaitEvent
+	// failed for an unrelated reason before ever reaching the claim -- e.g.
+	// a broken claim query or a bad input -- where processed is ALSO false
+	// for a reason that has nothing to do with this fix. That version of
+	// the test cannot tell "the fix works" from "it fell over earlier".
+	if _, err := p.awaitEvent(ctx, `{"event_type":"order.corrupt","timeout_ms":1000}`); err == nil ||
+		!strings.Contains(err.Error(), "marshal await_event output") {
+		t.Fatalf("awaitEvent: expected the marshal error, got: %v", err)
 	}
 
 	// The property under test: NOT consumed, so a later claim can still
