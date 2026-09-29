@@ -130,8 +130,8 @@ func TestAwaitEventMarshalFailureLeavesEventUnconsumed(t *testing.T) {
 	// awaitEvent again, since a second call would hit the same marshal
 	// failure and prove nothing beyond the first call.
 	var processed bool
-	row := p.db.QueryRow(seedCtx, plugin.Rebind(
-		`SELECT processed FROM ingested_events WHERE id = $1`, dialect), eventID)
+	row := p.db.QueryRow(seedCtx,
+		`SELECT processed FROM ingested_events WHERE id = $1`, eventID)
 	if err := plugin.ScanRow(row, &processed); err != nil {
 		t.Fatalf("query processed flag: %v", err)
 	}
