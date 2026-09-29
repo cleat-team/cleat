@@ -264,7 +264,7 @@ func TestAwaitEventConcurrentClaimsSkipTheLockedRow(t *testing.T) {
 				)
 				err = plugin.ScanRow(tx.QueryRow(seedCtx,
 					queryOldestUnprocessedEventForClaim.For(dialect),
-					tenantID, "order.created"), &eventID, &eventType, &eventData, &receivedAt)
+					tenantID, "order.created", "", "", ""), &eventID, &eventType, &eventData, &receivedAt)
 				if err != nil {
 					_ = tx.Rollback()
 					t.Fatalf("claim query: %v", err)
@@ -352,7 +352,7 @@ func TestAwaitEventConcurrentClaimsOfDifferentEventTypesDoNotInterfereOnMySQL(t 
 		)
 		err = plugin.ScanRow(tx.QueryRow(seedCtx,
 			queryOldestUnprocessedEventForClaim.For(dialect),
-			tenantID, eventType), &eventID, &gotType, &eventData, &receivedAt)
+			tenantID, eventType, "", "", ""), &eventID, &gotType, &eventData, &receivedAt)
 		return tx, eventID, err
 	}
 
