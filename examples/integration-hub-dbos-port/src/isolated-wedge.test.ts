@@ -43,23 +43,31 @@
 //      runaway loop was INTERRUPTED by the isolate's timeout -- all exactly
 //      as documented.
 //   1  A FINDING: the adversarial read SUCCEEDED despite running inside the
-//      isolate, OR the runaway loop completed with a result instead of being
-//      interrupted -- meaning isolated-vm's isolation boundary did not hold.
-//      A serious result (a sandbox library not sandboxing) and needs
-//      investigating immediately, not waving through.
+//      isolate, OR the runaway loop was not interrupted -- either it
+//      completed with a result, or it hung past this file's own
+//      SAFETY_MARGIN_MS with no result and no error at all. Either way,
+//      isolated-vm's isolation boundary did not hold. A serious result (a
+//      sandbox library not sandboxing) and needs investigating immediately,
+//      not waving through.
 //
-//      NOTE ONE EXCEPTION: if the runaway loop instead hangs PAST this
-//      file's own SAFETY_MARGIN_MS with no result and no error at all, the
-//      process reports 2, not 1 -- see SAFETY_MARGIN_MS's comment for why:
-//      a process with a genuinely wedged native isolate thread cannot be
-//      made to exit(1) cleanly (measured), only SIGKILLed, and a process
-//      killed by signal has no exit code for its parent to read. Read a 2
-//      from this file as possibly this case, not only as "nothing was
-//      checked" -- the stderr line printed immediately before the kill says
-//      which one it was.
-//   2  UNMEASURED: the positive control itself did not hold, or the harness
-//      crashed before reaching a verdict.
+//      THE SECOND CASE IS REPORTED VIA run-tests.js, NOT DIRECTLY: a
+//      process with a genuinely wedged native isolate thread cannot be made
+//      to exit(1) cleanly (measured -- see SAFETY_MARGIN_MS's comment), only
+//      SIGKILLed, and a process killed by signal has no exit code of its
+//      own. This file writes a sentinel FILE naming the finding before it
+//      kills itself; run-tests.js (the only thing that runs this file
+//      directly) reads that file and reports 1, not 2, when it is present.
+//      Running this file some OTHER way -- directly, bypassing run-tests.js
+//      -- loses that translation and a stuck loop will report as if killed
+//      for an unrelated reason. See run-tests.js's own comment for why the
+//      sentinel is a file and not just the signal.
+//   2  UNMEASURED: the positive control itself did not hold, the harness
+//      crashed before reaching a verdict, or (via run-tests.js) this
+//      process was killed by a signal it did not send itself -- an OOM
+//      kill, a CI cancellation -- which says nothing about the boundary
+//      this file measures.
 import { DBOS } from '@dbos-inc/dbos-sdk';
+import * as fs from 'node:fs';
 import { RunTenantStepIsolated } from './isolated-workflow';
 
 const CLAIM =
@@ -135,6 +143,17 @@ async function testReadHostFileIsRefusedByTheIsolate() {
 // than isolated-vm's own bound (whatever that is currently configured to),
 // so a regression here is reported as the FINDING it is -- "the loop was
 // not interrupted" -- rather than a stalled CI job with no message at all.
+//
+// GETTING TO "reported as 1" TOOK A SECOND FIX, caught in review rather
+// than by running it: the margin firing still has to SIGKILL this process
+// (see the stuckLoopStillRunning branch in main(), below), and a
+// signal-killed process has no exit code of its own for run-tests.js's
+// spawnSync to read -- it mapped to 2 (UNMEASURED) unconditionally, which
+// reported the exact regression this margin exists to catch as "nothing was
+// checked", the opposite of this paragraph's claim. The sentinel file
+// run-tests.js passes via CLEAT_STUCK_LOOP_SENTINEL, written just before the
+// kill, is what actually closes the gap between this comment and what
+// happened.
 const SAFETY_MARGIN_MS = 15_000;
 
 function delay(ms: number): Promise<{ safetyMarginFired: true }> {
@@ -215,6 +234,21 @@ async function main() {
       'a workflow is still genuinely running; DBOS.shutdown() and process.exit() do not ' +
         'terminate a process with a wedged native isolate thread -- sending SIGKILL to self',
     );
+    // A SIGKILL alone reports as UNMEASURED to run-tests.js -- cleat-review's
+    // GAP on the first version of this fix: `status === null` (killed by
+    // signal) mapped unconditionally to 2, which reports the EXACT
+    // regression this test exists to catch as "could not measure", the
+    // opposite of what SAFETY_MARGIN_MS's own comment says happens. Write
+    // the sentinel file run-tests.js gave this process, BEFORE the kill --
+    // there is no after. See run-tests.js's own comment for the other half.
+    const sentinelPath = process.env.CLEAT_STUCK_LOOP_SENTINEL;
+    if (sentinelPath) {
+      try {
+        fs.writeFileSync(sentinelPath, '1');
+      } catch (e) {
+        console.error(`could not write the stuck-loop sentinel to ${sentinelPath}: ${e}`);
+      }
+    }
     process.kill(process.pid, 'SIGKILL');
     return; // unreachable; SIGKILL does not return control to this process
   }

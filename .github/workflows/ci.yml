@@ -1500,10 +1500,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build the cleat CLI and worker
+      # cleatctl since cleat#2628: the third arm tightens the tenant's own
+      # wasm_instance_timeout with `cleatctl set-tenant-setting` before
+      # uploading the runaway fixture. Without this, the script's own
+      # UNMEASURED-on-missing-binary check (added the same PR that
+      # introduced the arm) caught its own gap -- confirmed live, cleat-review's
+      # review of #2638: this job exited 2 with "no binary at .../.bin/cleatctl"
+      # before running ANY arm, old or new.
+      - name: Build the cleat CLI, worker and cleatctl
         run: |
           go build -o .bin/cleat ./cmd/cleat
           go build -o .bin/cleat-worker ./cmd/cleat-worker
+          go build -o .bin/cleatctl ./cmd/cleatctl
 
       # The script reports UNMEASURED (exit 2) rather than a false pass if
       # psql is missing, but installed explicitly rather than relied on --

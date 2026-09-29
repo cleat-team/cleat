@@ -30,6 +30,8 @@ package infiniteloop
 import "github.com/cleat-team/cleat/cleat"
 
 func InfiniteLoop(h cleat.HostCalls, input string) (string, error) {
+	//nolint:staticcheck // SA5002: the spin IS the fixture -- this function
+	// exists to be a busy loop the epoch fence must interrupt (cleat#2628).
 	for {
 	}
 }
