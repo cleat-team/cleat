@@ -377,9 +377,15 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// nil keys: webhook-ingest has no correlation-key concept of its own yet
+	// (a source is not per-order). cleat#2625, P1 -- adopting keys here, so a
+	// shared source can correlate to whichever run is waiting for THIS
+	// order's webhook, is the follow-up this design exists for; nil is the
+	// "no keys" case every existing awaiter matches, so this is unchanged
+	// behaviour.
 	matched, pubErr := eventtriggers.PublishEvent(
 		tenantCtx, p.db, p.logger, p.env,
-		eventID, source.TenantID, eventType, eventDataJSON,
+		eventID, source.TenantID, eventType, eventDataJSON, nil,
 	)
 	if pubErr != nil {
 		p.logger.Error("webhook-ingest: publish event failed", "error", pubErr)

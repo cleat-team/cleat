@@ -261,7 +261,7 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 					t.Helper()
 					eventID := uuid.New()
 					if _, err := eventtriggers.PublishEvent(ctx, pdb, logger, env,
-						eventID, tenant, eventType, json.RawMessage(`{}`)); err != nil {
+						eventID, tenant, eventType, json.RawMessage(`{}`), nil); err != nil {
 						t.Fatalf("PublishEvent (%s) on %s: %v", label, be.Name, err)
 					}
 				}

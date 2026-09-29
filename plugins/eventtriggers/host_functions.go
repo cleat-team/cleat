@@ -94,9 +94,22 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 		// No matching event found -- register as an awaiter so the publish
 		// handler can signal this workflow when a matching event arrives.
 		if cc.WorkflowID != "" {
+			// "","","" for now, NOT input.Keys -- awaitEventInput carries no
+			// Keys field yet. queryLatestUnprocessedEvent above is mid
+			// rewrite for cleat#2641 (the double-consume / newest-first
+			// fixes), and adding the key predicate to its WHERE clause in
+			// the same breath as that rewrite is exactly the collision this
+			// file's callers agreed to avoid. Once #2641 lands, this call
+			// (and the query above it) both gain real keys in the same
+			// follow-up PR -- see cleat#2625. Passing empty slots now is
+			// not a partial version of correlation: an awaiter with no keys
+			// only ever matched an event with no keys before this existed
+			// (§4.4's sentinel), so behaviour is unchanged until both halves
+			// land together.
+			//
 			// Not `Found: false` on failure: that is a success report, and it
 			// is exactly the lie cleat#1473 is about.
-			if err := p.registerAwaiter(ctx, cc.TenantID, cc.WorkflowID, input.EventType); err != nil {
+			if err := p.registerAwaiter(ctx, cc.TenantID, cc.WorkflowID, input.EventType, "", "", ""); err != nil {
 				return "", err
 			}
 		}
@@ -127,8 +140,11 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 		"workflow_id", cc.WorkflowID,
 	)
 
-	// Clean up any pending awaiter registration for this workflow + event type.
-	unregisterAwaiter(ctx, p.db, p.logger, cc.WorkflowID, input.EventType)
+	// Clean up any pending awaiter registration for this workflow + event
+	// type. "","","" for the same reason as the registerAwaiter call above:
+	// no caller can pass real keys yet, so this is the no-keys case, which
+	// is what every existing awaiter row already is.
+	unregisterAwaiter(ctx, p.db, p.logger, cc.WorkflowID, input.EventType, "", "", "")
 
 	output := awaitEventOutput{
 		Found:      true,
@@ -158,9 +174,9 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 // returns its error -- so registration was the one write whose failure was
 // swallowed, and propagating makes the function uniform. A visible error beats
 // an invisible wait.
-func (p *Plugin) registerAwaiter(ctx context.Context, tenantID, workflowID, eventType string) error {
+func (p *Plugin) registerAwaiter(ctx context.Context, tenantID, workflowID, eventType, key1, key2, key3 string) error {
 	_, err := p.db.Exec(ctx, plugin.Rebind(upsertAwaiter.For(p.dialect), p.dialect),
-		workflowID, tenantID, eventType)
+		workflowID, tenantID, eventType, key1, key2, key3)
 	if err != nil {
 		p.logger.Warn("event-triggers: register awaiter", "error", err, "workflow_id", workflowID)
 		return fmt.Errorf("event-triggers: register awaiter: %w", err)

@@ -36,5 +36,35 @@ func TestEveryQueryArmRunsOnItsOwnDialect(t *testing.T) {
 			Args:     []any{"00000000-0000-0000-0000-000000000001", "some.event"},
 			WantCols: 4,
 		},
+		// The two Version 6 (cleat#2625, P1) queries: key1/key2/key3 on both
+		// sides of correlation. Exec, not Query -- these are the INSERT/MERGE
+		// statements that write the columns migrations.go's Version 6 adds,
+		// and only running them for real, on the schema that migration
+		// actually builds, proves the column list and the placeholder count
+		// agree on all three dialects. A parse-only check cannot: MSSQL's
+		// MERGE ... WHEN NOT MATCHED THEN INSERT binds its column list and
+		// its VALUES list independently, so a mismatched count there is a
+		// binding error of exactly the "reads cleanest where it measured
+		// least" kind this file's own header describes for NOT processed.
+		{
+			Name: "insertEventIdempotent",
+			Q:    insertEventIdempotent,
+			Args: []any{
+				"00000000-0000-0000-0000-0000000000f1",
+				"00000000-0000-0000-0000-000000000001",
+				"order.created", `{}`, "A-991", "", "",
+			},
+			Exec: true,
+		},
+		{
+			Name: "upsertAwaiter",
+			Q:    upsertAwaiter,
+			Args: []any{
+				"wf-dialect-arm-test",
+				"00000000-0000-0000-0000-000000000001",
+				"order.created", "A-991", "", "",
+			},
+			Exec: true,
+		},
 	})
 }

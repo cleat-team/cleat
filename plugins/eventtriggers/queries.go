@@ -4,34 +4,43 @@ import "github.com/cleat-team/cleat/plugin"
 
 // Dialect-specific query variants for structurally different SQL.
 
+// upsertAwaiter registers or refreshes an awaiter's registration. The
+// conflict target is the five-column tuple that migrations.go's Version 6
+// makes unique (uq_event_awaiters_registration), not the surrogate id --
+// this is what makes a REPLAYED registerAwaiter call (awaitEvent is
+// Idempotent: false, SameValueOnReplay: false, so a replay re-executes for
+// real) refresh the same row rather than accumulate a duplicate, while still
+// letting two awaits for the same (workflow, type) coexist when their key
+// slots differ. cleat#2625.
 var upsertAwaiter = plugin.Query{
-	Default: `INSERT INTO event_awaiters (workflow_id, tenant_id, event_type, created_at)
-VALUES ($1, $2, $3, NOW())
-ON CONFLICT (workflow_id, event_type) DO UPDATE
+	Default: `INSERT INTO event_awaiters (id, workflow_id, tenant_id, event_type, key1, key2, key3, created_at)
+VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW())
+ON CONFLICT (workflow_id, event_type, key1, key2, key3) DO UPDATE
 	SET created_at = NOW()`,
-	MySQL: `INSERT INTO event_awaiters (workflow_id, tenant_id, event_type, created_at)
-VALUES ($1, $2, $3, NOW())
+	MySQL: `INSERT INTO event_awaiters (id, workflow_id, tenant_id, event_type, key1, key2, key3, created_at)
+VALUES (UUID(), $1, $2, $3, $4, $5, $6, NOW())
 ON DUPLICATE KEY UPDATE
 	created_at = NOW()`,
 	MSSQL: `MERGE event_awaiters AS target
-USING (VALUES ($1, $2, $3, SYSUTCDATETIME())) AS source (workflow_id, tenant_id, event_type, created_at)
+USING (VALUES ($1, $2, $3, $4, $5, $6, SYSUTCDATETIME())) AS source (workflow_id, tenant_id, event_type, key1, key2, key3, created_at)
 ON target.workflow_id = source.workflow_id AND target.event_type = source.event_type
+	AND target.key1 = source.key1 AND target.key2 = source.key2 AND target.key3 = source.key3
 WHEN MATCHED THEN UPDATE SET created_at = SYSUTCDATETIME()
-WHEN NOT MATCHED THEN INSERT (workflow_id, tenant_id, event_type, created_at)
-VALUES (source.workflow_id, source.tenant_id, source.event_type, source.created_at);`,
+WHEN NOT MATCHED THEN INSERT (id, workflow_id, tenant_id, event_type, key1, key2, key3, created_at)
+VALUES (NEWID(), source.workflow_id, source.tenant_id, source.event_type, source.key1, source.key2, source.key3, source.created_at);`,
 }
 
 var insertEventIdempotent = plugin.Query{
-	Default: `INSERT INTO ingested_events (id, tenant_id, event_type, event_data, received_at, processed)
-VALUES ($1, $2, $3, $4, NOW(), false)
+	Default: `INSERT INTO ingested_events (id, tenant_id, event_type, event_data, key1, key2, key3, received_at, processed)
+VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), false)
 ON CONFLICT (id) DO NOTHING`,
-	MySQL: `INSERT IGNORE INTO ingested_events (id, tenant_id, event_type, event_data, received_at, processed)
-VALUES ($1, $2, $3, $4, NOW(), false)`,
+	MySQL: `INSERT IGNORE INTO ingested_events (id, tenant_id, event_type, event_data, key1, key2, key3, received_at, processed)
+VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), false)`,
 	MSSQL: `MERGE ingested_events AS target
-USING (VALUES ($1, $2, $3, $4, SYSUTCDATETIME(), 0)) AS source (id, tenant_id, event_type, event_data, received_at, processed)
+USING (VALUES ($1, $2, $3, $4, $5, $6, $7, SYSUTCDATETIME(), 0)) AS source (id, tenant_id, event_type, event_data, key1, key2, key3, received_at, processed)
 ON target.id = source.id
-WHEN NOT MATCHED THEN INSERT (id, tenant_id, event_type, event_data, received_at, processed)
-VALUES (source.id, source.tenant_id, source.event_type, source.event_data, source.received_at, source.processed);`,
+WHEN NOT MATCHED THEN INSERT (id, tenant_id, event_type, event_data, key1, key2, key3, received_at, processed)
+VALUES (source.id, source.tenant_id, source.event_type, source.event_data, source.key1, source.key2, source.key3, source.received_at, source.processed);`,
 }
 
 var insertSubscriptionReturning = plugin.Query{

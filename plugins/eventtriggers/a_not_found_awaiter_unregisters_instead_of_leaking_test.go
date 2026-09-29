@@ -48,7 +48,7 @@ func TestANotFoundAwaiterUnregistersInsteadOfLeaking(t *testing.T) {
 		}
 
 		signalAwaiters(context.Background(), db, quietLogger(), env,
-			uuid.New(), "order.created", `{}`)
+			uuid.New(), "order.created", `{}`, "", "", "")
 
 		if !execedDelete(db, "wf-purged", "order.created") {
 			t.Errorf("no DELETE FROM event_awaiters for wf-purged was issued; the awaiter leaks "+
@@ -73,7 +73,7 @@ func TestANotFoundAwaiterUnregistersInsteadOfLeaking(t *testing.T) {
 		}
 
 		signalAwaiters(context.Background(), db, quietLogger(), env,
-			uuid.New(), "order.created", `{}`)
+			uuid.New(), "order.created", `{}`, "", "", "")
 
 		if execedDelete(db, "wf-flaky", "order.created") {
 			t.Errorf("a DELETE FROM event_awaiters was issued for wf-flaky after an ordinary "+

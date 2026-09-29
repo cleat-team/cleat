@@ -234,5 +234,201 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					MODIFY input_template JSON NULL DEFAULT ('{}');
 			`,
 		},
+		{
+			// Key slots and correlation -- P1 of
+			// docs/contributor/design/event-routing-design.md. cleat#2625.
+			//
+			// Three string slots, added to both sides of a match: the event
+			// that arrived and the run that is waiting. `await_event` gains a
+			// Keys parameter (host_functions.go) that populates these on the
+			// awaiter row, and PublishEvent populates them on the event row
+			// from the publisher's envelope. Equality on all three is what
+			// correlation IS -- see the design doc's §2 for why this has to
+			// be an indexed equality rather than anything more expressive.
+			//
+			// NOT NULL DEFAULT '', never NULL: NULL = NULL is unknown in SQL,
+			// and the portable fix (IS NOT DISTINCT FROM) is not portable
+			// across all three dialects. A sentinel empty string is what
+			// makes three-way equality behave identically everywhere, and it
+			// is also what makes this backward compatible with every
+			// existing row and every existing call: an event or an awaiter
+			// that never mentions keys gets '' in all three slots on both
+			// sides, so old-shape publishes and old-shape awaits still match
+			// each other exactly as before.
+			//
+			// Binary collation, explicit rather than inherited: this repo's
+			// migrations never specify one anywhere else
+			// (`grep -rhno 'COLLATE [A-Za-z0-9_]*' migrations/` finds
+			// nothing), so every string column takes its server's default --
+			// and MySQL 8's default, utf8mb4_0900_ai_ci, is
+			// accent-and-case-insensitive. Under that collation "ORDER-1"
+			// and "order-1" correlate as the same key on one dialect only,
+			// silently. An opaque correlation key wants byte-exact equality,
+			// which a binary collation gives on all three.
+			//
+			// 128 bytes, not more: three VARCHAR(128) slots under
+			// utf8mb4_bin cost up to 1536 bytes of InnoDB's 3072-byte index
+			// key limit once tenant_id and event_type are added ahead of
+			// them -- comfortable, but a fourth slot or a wider one would
+			// not fit. See the design doc's §4.3 for the full budget.
+			//
+			// event_awaiters' primary key moves from (workflow_id,
+			// event_type) to a surrogate id. The composite key meant a
+			// second `await_event` call for the same type -- in a loop, or
+			// awaiting a second order while the first is still pending --
+			// upserted over the FIRST registration rather than adding a
+			// second one, so only the most recent await could ever be woken.
+			// A surrogate key lets two awaits for the same (workflow, type)
+			// coexist as long as their key slots differ, which is the whole
+			// point of adding key slots in the first place. The unique index
+			// below on the five-column tuple keeps the one property the
+			// composite PK was actually enforcing -- a REPLAYED await_event
+			// call (this host function is Idempotent: false,
+			// SameValueOnReplay: false, so a replay re-executes for real)
+			// re-registers the same row rather than accumulating a duplicate
+			// -- without collapsing two awaits that differ only in their
+			// keys.
+			//
+			// `seq`/`event_subscriptions.source`/`def_version` from the
+			// design doc's §8 are NOT part of this migration. Both belong to
+			// later phases -- seq is a P2 concern (the suspend/resume
+			// watermark, §6.5), source/def_version is P3's (triggers
+			// declared in source, §7) -- and P1 is scoped to correlation
+			// alone, per IMPROVEMENT-PLAN's phasing.
+			Version: 6,
+			Up: `
+				ALTER TABLE ingested_events ADD COLUMN IF NOT EXISTS key1 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
+				ALTER TABLE ingested_events ADD COLUMN IF NOT EXISTS key2 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
+				ALTER TABLE ingested_events ADD COLUMN IF NOT EXISTS key3 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
+				CREATE INDEX IF NOT EXISTS idx_ingested_events_correlate ON ingested_events(tenant_id, event_type, key1, key2, key3, received_at);
+
+				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS key1 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
+				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS key2 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
+				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS key3 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
+
+				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS id UUID DEFAULT gen_random_uuid();
+				UPDATE event_awaiters SET id = gen_random_uuid() WHERE id IS NULL;
+				ALTER TABLE event_awaiters ALTER COLUMN id SET NOT NULL;
+				ALTER TABLE event_awaiters DROP CONSTRAINT IF EXISTS event_awaiters_pkey;
+				ALTER TABLE event_awaiters ADD CONSTRAINT event_awaiters_pkey PRIMARY KEY (id);
+
+				CREATE UNIQUE INDEX IF NOT EXISTS uq_event_awaiters_registration ON event_awaiters(workflow_id, event_type, key1, key2, key3);
+				CREATE INDEX IF NOT EXISTS idx_event_awaiters_correlate ON event_awaiters(tenant_id, event_type, key1, key2, key3);
+			`,
+			UpMySQL: `
+				ALTER TABLE ingested_events ADD COLUMN key1 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT '';
+				ALTER TABLE ingested_events ADD COLUMN key2 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT '';
+				ALTER TABLE ingested_events ADD COLUMN key3 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT '';
+				CREATE INDEX idx_ingested_events_correlate ON ingested_events(tenant_id, event_type, key1, key2, key3, received_at);
+
+				ALTER TABLE event_awaiters ADD COLUMN key1 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT '';
+				ALTER TABLE event_awaiters ADD COLUMN key2 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT '';
+				ALTER TABLE event_awaiters ADD COLUMN key3 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT '';
+
+				ALTER TABLE event_awaiters ADD COLUMN id CHAR(36) NULL;
+				UPDATE event_awaiters SET id = UUID() WHERE id IS NULL;
+				ALTER TABLE event_awaiters MODIFY id CHAR(36) NOT NULL;
+				ALTER TABLE event_awaiters DROP PRIMARY KEY, ADD PRIMARY KEY (id);
+
+				CREATE UNIQUE INDEX uq_event_awaiters_registration ON event_awaiters(workflow_id, event_type, key1, key2, key3);
+				CREATE INDEX idx_event_awaiters_correlate ON event_awaiters(tenant_id, event_type, key1, key2, key3);
+			`,
+			// The PK swap looks up the existing auto-named constraint rather
+			// than assuming a name, the same shape as
+			// plugins/scheduledbackup/migrations.go's foreign-key
+			// replacement: find whatever is there under a DIFFERENT name
+			// than the one this migration is about to install, drop it if
+			// found, then add the new one guarded by existence. That makes
+			// this idempotent by construction rather than by an outer
+			// "has this version already run" check.
+			UpMSSQL: `
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('ingested_events') AND name = 'key1')
+				ALTER TABLE ingested_events ADD key1 NVARCHAR(128) COLLATE Latin1_General_BIN2 NOT NULL DEFAULT '';
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('ingested_events') AND name = 'key2')
+				ALTER TABLE ingested_events ADD key2 NVARCHAR(128) COLLATE Latin1_General_BIN2 NOT NULL DEFAULT '';
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('ingested_events') AND name = 'key3')
+				ALTER TABLE ingested_events ADD key3 NVARCHAR(128) COLLATE Latin1_General_BIN2 NOT NULL DEFAULT '';
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_correlate' AND object_id = OBJECT_ID('ingested_events'))
+				CREATE INDEX idx_ingested_events_correlate ON ingested_events(tenant_id, event_type, key1, key2, key3, received_at);
+
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('event_awaiters') AND name = 'key1')
+				ALTER TABLE event_awaiters ADD key1 NVARCHAR(128) COLLATE Latin1_General_BIN2 NOT NULL DEFAULT '';
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('event_awaiters') AND name = 'key2')
+				ALTER TABLE event_awaiters ADD key2 NVARCHAR(128) COLLATE Latin1_General_BIN2 NOT NULL DEFAULT '';
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('event_awaiters') AND name = 'key3')
+				ALTER TABLE event_awaiters ADD key3 NVARCHAR(128) COLLATE Latin1_General_BIN2 NOT NULL DEFAULT '';
+
+				DECLARE @pkname sysname
+				SELECT @pkname = kc.name
+					FROM sys.key_constraints kc
+					WHERE kc.parent_object_id = OBJECT_ID('event_awaiters')
+					  AND kc.type = 'PK'
+					  AND kc.name <> 'pk_event_awaiters'
+				IF @pkname IS NOT NULL EXEC('ALTER TABLE event_awaiters DROP CONSTRAINT [' + @pkname + ']');
+
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('event_awaiters') AND name = 'id')
+				ALTER TABLE event_awaiters ADD id UNIQUEIDENTIFIER DEFAULT NEWID();
+				UPDATE event_awaiters SET id = NEWID() WHERE id IS NULL;
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('event_awaiters') AND name = 'id' AND is_nullable = 1)
+				ALTER TABLE event_awaiters ALTER COLUMN id UNIQUEIDENTIFIER NOT NULL;
+
+				IF NOT EXISTS (SELECT 1 FROM sys.key_constraints WHERE name = 'pk_event_awaiters')
+				ALTER TABLE event_awaiters ADD CONSTRAINT pk_event_awaiters PRIMARY KEY (id);
+
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'uq_event_awaiters_registration' AND object_id = OBJECT_ID('event_awaiters'))
+				CREATE UNIQUE INDEX uq_event_awaiters_registration ON event_awaiters(workflow_id, event_type, key1, key2, key3);
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_event_awaiters_correlate' AND object_id = OBJECT_ID('event_awaiters'))
+				CREATE INDEX idx_event_awaiters_correlate ON event_awaiters(tenant_id, event_type, key1, key2, key3);
+			`,
+			// Lossy on purpose, like Version 5's MySQL reversal: a row
+			// inserted post-Up with a key1/2/3 combination that duplicates
+			// another awaiter's (workflow_id, event_type) pair -- legitimate
+			// now, was impossible under the old composite PK -- makes the
+			// composite PRIMARY KEY this restores fail to re-add. Down is
+			// for a migration applied and immediately rolled back in
+			// development, not for undoing a deployment that has taken
+			// traffic under the new shape.
+			Down: `
+				DROP INDEX IF EXISTS idx_event_awaiters_correlate;
+				DROP INDEX IF EXISTS uq_event_awaiters_registration;
+				ALTER TABLE event_awaiters DROP CONSTRAINT IF EXISTS event_awaiters_pkey;
+				ALTER TABLE event_awaiters ADD CONSTRAINT event_awaiters_pkey PRIMARY KEY (workflow_id, event_type);
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS id;
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key3;
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key2;
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key1;
+				DROP INDEX IF EXISTS idx_ingested_events_correlate;
+				ALTER TABLE ingested_events DROP COLUMN IF EXISTS key3;
+				ALTER TABLE ingested_events DROP COLUMN IF EXISTS key2;
+				ALTER TABLE ingested_events DROP COLUMN IF EXISTS key1;
+			`,
+			DownMySQL: `
+				DROP INDEX idx_event_awaiters_correlate ON event_awaiters;
+				DROP INDEX uq_event_awaiters_registration ON event_awaiters;
+				ALTER TABLE event_awaiters DROP PRIMARY KEY, ADD PRIMARY KEY (workflow_id, event_type);
+				ALTER TABLE event_awaiters DROP COLUMN id;
+				ALTER TABLE event_awaiters DROP COLUMN key3;
+				ALTER TABLE event_awaiters DROP COLUMN key2;
+				ALTER TABLE event_awaiters DROP COLUMN key1;
+				DROP INDEX idx_ingested_events_correlate ON ingested_events;
+				ALTER TABLE ingested_events DROP COLUMN key3;
+				ALTER TABLE ingested_events DROP COLUMN key2;
+				ALTER TABLE ingested_events DROP COLUMN key1;
+			`,
+			DownMSSQL: `
+				DROP INDEX IF EXISTS idx_event_awaiters_correlate ON event_awaiters;
+				DROP INDEX IF EXISTS uq_event_awaiters_registration ON event_awaiters;
+				ALTER TABLE event_awaiters DROP CONSTRAINT IF EXISTS pk_event_awaiters;
+				ALTER TABLE event_awaiters ADD CONSTRAINT pk_event_awaiters_restored PRIMARY KEY (workflow_id, event_type);
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS id;
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key3;
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key2;
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key1;
+				DROP INDEX IF EXISTS idx_ingested_events_correlate ON ingested_events;
+				ALTER TABLE ingested_events DROP COLUMN IF EXISTS key3;
+				ALTER TABLE ingested_events DROP COLUMN IF EXISTS key2;
+				ALTER TABLE ingested_events DROP COLUMN IF EXISTS key1;
+			`,
+		},
 	}
 }
