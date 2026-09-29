@@ -95,7 +95,8 @@ func TestAKeyedPublishSignalsOnlyTheMatchingAwaiter(t *testing.T) {
 // webhookingest's current nil-keys callers) must keep working exactly as
 // before. Regression coverage for the sentinel-empty-string rule in
 // migrations.go's Version 6: an unkeyed event and an unkeyed awaiter both
-// carry '' in all three slots, so three-way equality still matches them.
+// carry the empty-string sentinel in all three slots, so three-way equality
+// still matches them.
 func TestAnUnkeyedPublishStillReachesAnUnkeyedAwaiter(t *testing.T) {
 	store := newETDBStore()
 	db := sql.OpenDB(&etConnector{store: store})

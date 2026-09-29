@@ -175,8 +175,9 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 // swallowed, and propagating makes the function uniform. A visible error beats
 // an invisible wait.
 func (p *Plugin) registerAwaiter(ctx context.Context, tenantID, workflowID, eventType, key1, key2, key3 string) error {
+	regKey := registrationKey(workflowID, eventType, key1, key2, key3)
 	_, err := p.db.Exec(ctx, plugin.Rebind(upsertAwaiter.For(p.dialect), p.dialect),
-		workflowID, tenantID, eventType, key1, key2, key3)
+		workflowID, tenantID, eventType, key1, key2, key3, regKey)
 	if err != nil {
 		p.logger.Warn("event-triggers: register awaiter", "error", err, "workflow_id", workflowID)
 		return fmt.Errorf("event-triggers: register awaiter: %w", err)

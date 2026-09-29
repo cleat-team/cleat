@@ -266,11 +266,10 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// silently. An opaque correlation key wants byte-exact equality,
 			// which a binary collation gives on all three.
 			//
-			// 128 bytes, not more: three VARCHAR(128) slots under
-			// utf8mb4_bin cost up to 1536 bytes of InnoDB's 3072-byte index
-			// key limit once tenant_id and event_type are added ahead of
-			// them -- comfortable, but a fourth slot or a wider one would
-			// not fit. See the design doc's §4.3 for the full budget.
+			// 128 bytes, not more: see the design doc's §4.3 for the budget
+			// this was chosen against. That budget undercounted the tables
+			// this repo actually has -- see the registration_key note below,
+			// found the hard way in cleat-review on this PR.
 			//
 			// event_awaiters' primary key moves from (workflow_id,
 			// event_type) to a surrogate id. The composite key meant a
@@ -280,14 +279,49 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// second one, so only the most recent await could ever be woken.
 			// A surrogate key lets two awaits for the same (workflow, type)
 			// coexist as long as their key slots differ, which is the whole
-			// point of adding key slots in the first place. The unique index
-			// below on the five-column tuple keeps the one property the
-			// composite PK was actually enforcing -- a REPLAYED await_event
-			// call (this host function is Idempotent: false,
-			// SameValueOnReplay: false, so a replay re-executes for real)
-			// re-registers the same row rather than accumulating a duplicate
-			// -- without collapsing two awaits that differ only in their
-			// keys.
+			// point of adding key slots in the first place.
+			//
+			// REGISTRATION_KEY, NOT A FIVE-COLUMN UNIQUE INDEX. The first
+			// version of this migration made
+			// (workflow_id, event_type, key1, key2, key3) the unique
+			// constraint that replaces what the composite PK was enforcing,
+			// and it does not fit on two of three dialects: MySQL's
+			// utf8mb4 VARCHAR(255) columns cost 1020 bytes each, so
+			// workflow_id + event_type + three 128-byte keys is
+			// 1020+1020+1536 = 3576 bytes against InnoDB's 3072-byte index
+			// key limit. Narrowing workflow_id to VARCHAR(128) gets MySQL to
+			// 3068/3072 -- four bytes of margin on a limit that has already
+			// bitten this migration once, and SQL Server is worse: even
+			// after narrowing event_type below, NVARCHAR is 2 bytes/char, so
+			// 255+255+3*128 = 766 characters is 1532 bytes... plus
+			// workflow_id's own 255 chars at full width was 510+510+768 =
+			// 1788 bytes against SQL Server's 1700-byte NONCLUSTERED index
+			// limit -- and SQL Server does not refuse that CREATE INDEX. It
+			// warns and lets a later INSERT whose values are wide enough
+			// fail instead, which is invisible to any migration test and
+			// exactly the "reads cleanest where it measured least" trap
+			// CLAUDE.md's whole "Is this result real?" section exists for.
+			//
+			// registration_key is a CHAR(64) SHA-256 hex digest of the five
+			// fields, computed in Go (keys.go's registrationKey) with each
+			// field length-prefixed before hashing -- concatenation with a
+			// separator would let ("ab","c") and ("a","bc") collide onto the
+			// same key, which length-prefixing removes by construction
+			// rather than by hoping the separator never appears in a value.
+			// 64 ASCII bytes fits every dialect's limit with room to spare,
+			// and sidesteps the ceiling permanently instead of buying
+			// headroom the next column change would spend.
+			//
+			// Pre-existing rows (there should be none -- see the "greenfield
+			// window" note in an earlier draft of this file, and cleat#986's
+			// point that a census of a growing population is the wrong thing
+			// to assert anyway) get 'workflow_id:event_type' as a backfilled
+			// placeholder rather than the real hash: the old PK already
+			// guaranteed that pair is unique per pre-existing row, key1/2/3
+			// are freshly '' for all of them, so the placeholder cannot
+			// collide across two old rows even though it is not the format
+			// any new row will use. Format does not need to be uniform
+			// across rows -- only per-row uniqueness does.
 			//
 			// `seq`/`event_subscriptions.source`/`def_version` from the
 			// design doc's §8 are NOT part of this migration. Both belong to
@@ -305,6 +339,8 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS key1 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
 				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS key2 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
 				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS key3 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
+				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS registration_key CHAR(64) NOT NULL DEFAULT '';
+				UPDATE event_awaiters SET registration_key = workflow_id || ':' || event_type WHERE registration_key = '';
 
 				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS id UUID DEFAULT gen_random_uuid();
 				UPDATE event_awaiters SET id = gen_random_uuid() WHERE id IS NULL;
@@ -312,26 +348,68 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE event_awaiters DROP CONSTRAINT IF EXISTS event_awaiters_pkey;
 				ALTER TABLE event_awaiters ADD CONSTRAINT event_awaiters_pkey PRIMARY KEY (id);
 
-				CREATE UNIQUE INDEX IF NOT EXISTS uq_event_awaiters_registration ON event_awaiters(workflow_id, event_type, key1, key2, key3);
+				CREATE UNIQUE INDEX IF NOT EXISTS uq_event_awaiters_registration ON event_awaiters(registration_key);
 				CREATE INDEX IF NOT EXISTS idx_event_awaiters_correlate ON event_awaiters(tenant_id, event_type, key1, key2, key3);
 			`,
+			// Every statement guarded through information_schema, matching
+			// plugins/notifications/migrations.go's v6 and
+			// plugins/scheduledbackup/migrations.go: MySQL DDL is not
+			// transactional and has no IF NOT EXISTS for ADD COLUMN or
+			// CREATE INDEX, so a v6 that fails partway (as this one did, the
+			// first time) leaves a database that cannot re-run it -- the
+			// surviving statements report "Duplicate column"/"Duplicate key
+			// name" on retry. Guarding each one is what makes retry possible
+			// rather than merely making a fresh database work.
 			UpMySQL: `
-				ALTER TABLE ingested_events ADD COLUMN key1 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT '';
-				ALTER TABLE ingested_events ADD COLUMN key2 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT '';
-				ALTER TABLE ingested_events ADD COLUMN key3 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT '';
-				CREATE INDEX idx_ingested_events_correlate ON ingested_events(tenant_id, event_type, key1, key2, key3, received_at);
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND column_name = 'key1');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE ingested_events ADD COLUMN key1 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT \'\'', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
-				ALTER TABLE event_awaiters ADD COLUMN key1 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT '';
-				ALTER TABLE event_awaiters ADD COLUMN key2 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT '';
-				ALTER TABLE event_awaiters ADD COLUMN key3 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT '';
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND column_name = 'key2');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE ingested_events ADD COLUMN key2 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT \'\'', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
-				ALTER TABLE event_awaiters ADD COLUMN id CHAR(36) NULL;
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND column_name = 'key3');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE ingested_events ADD COLUMN key3 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT \'\'', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_correlate');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_ingested_events_correlate ON ingested_events(tenant_id, event_type, key1, key2, key3, received_at)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'event_awaiters' AND column_name = 'key1');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE event_awaiters ADD COLUMN key1 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT \'\'', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'event_awaiters' AND column_name = 'key2');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE event_awaiters ADD COLUMN key2 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT \'\'', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'event_awaiters' AND column_name = 'key3');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE event_awaiters ADD COLUMN key3 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT \'\'', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'event_awaiters' AND column_name = 'registration_key');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE event_awaiters ADD COLUMN registration_key CHAR(64) NOT NULL DEFAULT \'\'', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				UPDATE event_awaiters SET registration_key = CONCAT(workflow_id, ':', event_type) WHERE registration_key = '';
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'event_awaiters' AND column_name = 'id');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE event_awaiters ADD COLUMN id CHAR(36) NULL', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
 				UPDATE event_awaiters SET id = UUID() WHERE id IS NULL;
 				ALTER TABLE event_awaiters MODIFY id CHAR(36) NOT NULL;
 				ALTER TABLE event_awaiters DROP PRIMARY KEY, ADD PRIMARY KEY (id);
 
-				CREATE UNIQUE INDEX uq_event_awaiters_registration ON event_awaiters(workflow_id, event_type, key1, key2, key3);
-				CREATE INDEX idx_event_awaiters_correlate ON event_awaiters(tenant_id, event_type, key1, key2, key3);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'event_awaiters' AND index_name = 'uq_event_awaiters_registration');
+				SET @ddl := IF(@idx = 0, 'CREATE UNIQUE INDEX uq_event_awaiters_registration ON event_awaiters(registration_key)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'event_awaiters' AND index_name = 'idx_event_awaiters_correlate');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_event_awaiters_correlate ON event_awaiters(tenant_id, event_type, key1, key2, key3)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			// The PK swap looks up the existing auto-named constraint rather
 			// than assuming a name, the same shape as
@@ -341,7 +419,46 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// found, then add the new one guarded by existence. That makes
 			// this idempotent by construction rather than by an outer
 			// "has this version already run" check.
+			//
+			// ingested_events.event_type is narrowed from NVARCHAR(MAX) to
+			// NVARCHAR(255) FIRST, before anything tries to index it: SQL
+			// Server refuses a MAX-length column as an index key column
+			// outright (error 1919), not merely warns. The narrowing is
+			// itself guarded by a data check that THROWs rather than
+			// truncating -- a silently truncated event_type would break
+			// every future correlation lookup against that row in a way
+			// that surfaces much later than the migration that caused it.
+			// 255 matches event_subscriptions.event_type's existing bound
+			// (v1, NVARCHAR(255)), which every event_type value in this
+			// plugin already respects there.
+			//
+			// TWO INDEPENDENT single-statement IFs below, not one BEGIN/END
+			// block -- plugin/migration.go's splitStatements divides UpMSSQL
+			// on every semicolon with no awareness of BEGIN/END, quotes, or
+			// anything else, and executes each fragment as its own
+			// ExecContext call. A THROW followed by an ALTER inside one
+			// BEGIN/END puts two statements and the block's own closing
+			// syntax across one semicolon boundary, so the naive split cuts
+			// it into a dangling BEGIN with no END -- reproduced directly
+			// against a live SQL Server: "Incorrect syntax near '1'", where
+			// '1' is THROW's own state argument, because the fragment ends
+			// at THROW's semicolon with the enclosing IF/BEGIN never closed.
+			// Every existing UpMSSQL block in this file already follows the
+			// fragment rule (guard, then exactly one statement, repeated)
+			// for the same reason; this was the first violation of it, and
+			// the first time it was checked against a real server rather
+			// than assumed correct because it parses as valid T-SQL in
+			// isolation. If execution reaches the second IF, the THROW in
+			// the first one did not fire (a fired THROW aborts the whole
+			// migration via execSQLStatements' immediate return on error),
+			// so the second IF does not need to re-check the row length.
 			UpMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id = OBJECT_ID('ingested_events') AND c.name = 'event_type' AND c.max_length = -1)
+					AND EXISTS (SELECT 1 FROM ingested_events WHERE LEN(event_type) > 255)
+				THROW 50001, 'event-triggers migration 6: ingested_events.event_type has a value over 255 characters. Refusing to narrow it to NVARCHAR(255) rather than truncate it. See cleat#2625.', 1;
+				IF EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id = OBJECT_ID('ingested_events') AND c.name = 'event_type' AND c.max_length = -1)
+				ALTER TABLE ingested_events ALTER COLUMN event_type NVARCHAR(255) NOT NULL;
+
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('ingested_events') AND name = 'key1')
 				ALTER TABLE ingested_events ADD key1 NVARCHAR(128) COLLATE Latin1_General_BIN2 NOT NULL DEFAULT '';
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('ingested_events') AND name = 'key2')
@@ -357,6 +474,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE event_awaiters ADD key2 NVARCHAR(128) COLLATE Latin1_General_BIN2 NOT NULL DEFAULT '';
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('event_awaiters') AND name = 'key3')
 				ALTER TABLE event_awaiters ADD key3 NVARCHAR(128) COLLATE Latin1_General_BIN2 NOT NULL DEFAULT '';
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('event_awaiters') AND name = 'registration_key')
+				ALTER TABLE event_awaiters ADD registration_key CHAR(64) NOT NULL DEFAULT '';
+				UPDATE event_awaiters SET registration_key = workflow_id + ':' + event_type WHERE registration_key = '';
 
 				DECLARE @pkname sysname
 				SELECT @pkname = kc.name
@@ -376,7 +496,7 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE event_awaiters ADD CONSTRAINT pk_event_awaiters PRIMARY KEY (id);
 
 				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'uq_event_awaiters_registration' AND object_id = OBJECT_ID('event_awaiters'))
-				CREATE UNIQUE INDEX uq_event_awaiters_registration ON event_awaiters(workflow_id, event_type, key1, key2, key3);
+				CREATE UNIQUE INDEX uq_event_awaiters_registration ON event_awaiters(registration_key);
 				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_event_awaiters_correlate' AND object_id = OBJECT_ID('event_awaiters'))
 				CREATE INDEX idx_event_awaiters_correlate ON event_awaiters(tenant_id, event_type, key1, key2, key3);
 			`,
@@ -387,13 +507,18 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// composite PRIMARY KEY this restores fail to re-add. Down is
 			// for a migration applied and immediately rolled back in
 			// development, not for undoing a deployment that has taken
-			// traffic under the new shape.
+			// traffic under the new shape. ingested_events.event_type is
+			// left at NVARCHAR(255) on the way down (not widened back to
+			// MAX) for the same reason -- reversing a narrowing that has
+			// taken writes under the new bound is a separate decision from
+			// reversing this migration.
 			Down: `
 				DROP INDEX IF EXISTS idx_event_awaiters_correlate;
 				DROP INDEX IF EXISTS uq_event_awaiters_registration;
 				ALTER TABLE event_awaiters DROP CONSTRAINT IF EXISTS event_awaiters_pkey;
 				ALTER TABLE event_awaiters ADD CONSTRAINT event_awaiters_pkey PRIMARY KEY (workflow_id, event_type);
 				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS id;
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS registration_key;
 				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key3;
 				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key2;
 				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key1;
@@ -407,6 +532,7 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				DROP INDEX uq_event_awaiters_registration ON event_awaiters;
 				ALTER TABLE event_awaiters DROP PRIMARY KEY, ADD PRIMARY KEY (workflow_id, event_type);
 				ALTER TABLE event_awaiters DROP COLUMN id;
+				ALTER TABLE event_awaiters DROP COLUMN registration_key;
 				ALTER TABLE event_awaiters DROP COLUMN key3;
 				ALTER TABLE event_awaiters DROP COLUMN key2;
 				ALTER TABLE event_awaiters DROP COLUMN key1;
@@ -415,16 +541,65 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE ingested_events DROP COLUMN key2;
 				ALTER TABLE ingested_events DROP COLUMN key1;
 			`,
+			// SQL Server gives every inline "DEFAULT ..." its own auto-named
+			// constraint object (DF__event_awa__id__<hex>), and ALTER TABLE
+			// ... DROP COLUMN refuses while one is attached: "The object
+			// 'DF__...' is dependent on column 'id'." (Msg 5074/4922,
+			// reproduced directly against a live SQL Server). id
+			// (DEFAULT NEWID()), registration_key, key1, key2 and key3
+			// (DEFAULT '') on event_awaiters, and key1/key2/key3 on
+			// ingested_events, all carry one. The name is generated, not
+			// something this migration chose, so it has to be looked up
+			// per table -- one dynamic block per table, run before any
+			// DROP COLUMN on that table, rather than one per column: it
+			// finds every default constraint on the columns this Down
+			// removes and drops them all in one EXEC, using the same
+			// DECLARE/SELECT/IF-EXEC shape (no semicolon until the closing
+			// one) UpMSSQL already relies on above to keep the naive
+			// splitter in plugin/migration.go from treating DECLARE,
+			// SELECT and IF as separate statements and losing the
+			// variable between them.
+			//
+			// The concatenated string is built with CHAR(59), not a literal
+			// ';', for the same reason -- plugin/migration.go's
+			// splitStatements has zero quote-awareness (this repo's own
+			// documented hazard: THROW's embedded semicolon hit the same
+			// wall above). A literal ';' inside this string literal would
+			// be cut by the OUTER splitter before the statement ever
+			// reaches SQL Server, same as the BEGIN/END fragmentation this
+			// migration already had to route around once. CHAR(59) puts a
+			// real semicolon in the dynamic SQL EXEC() runs without one
+			// ever appearing in the migration's raw text.
 			DownMSSQL: `
 				DROP INDEX IF EXISTS idx_event_awaiters_correlate ON event_awaiters;
 				DROP INDEX IF EXISTS uq_event_awaiters_registration ON event_awaiters;
 				ALTER TABLE event_awaiters DROP CONSTRAINT IF EXISTS pk_event_awaiters;
 				ALTER TABLE event_awaiters ADD CONSTRAINT pk_event_awaiters_restored PRIMARY KEY (workflow_id, event_type);
+
+				DECLARE @eaDefaults NVARCHAR(MAX) = ''
+				SELECT @eaDefaults = @eaDefaults + 'ALTER TABLE event_awaiters DROP CONSTRAINT [' + dc.name + ']' + CHAR(59) + ' '
+					FROM sys.default_constraints dc
+					JOIN sys.columns c ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
+					WHERE dc.parent_object_id = OBJECT_ID('event_awaiters')
+					  AND c.name IN ('id', 'registration_key', 'key1', 'key2', 'key3')
+				IF @eaDefaults <> '' EXEC(@eaDefaults);
+
 				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS id;
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS registration_key;
 				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key3;
 				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key2;
 				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key1;
+
 				DROP INDEX IF EXISTS idx_ingested_events_correlate ON ingested_events;
+
+				DECLARE @ieDefaults NVARCHAR(MAX) = ''
+				SELECT @ieDefaults = @ieDefaults + 'ALTER TABLE ingested_events DROP CONSTRAINT [' + dc.name + ']' + CHAR(59) + ' '
+					FROM sys.default_constraints dc
+					JOIN sys.columns c ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
+					WHERE dc.parent_object_id = OBJECT_ID('ingested_events')
+					  AND c.name IN ('key1', 'key2', 'key3')
+				IF @ieDefaults <> '' EXEC(@ieDefaults);
+
 				ALTER TABLE ingested_events DROP COLUMN IF EXISTS key3;
 				ALTER TABLE ingested_events DROP COLUMN IF EXISTS key2;
 				ALTER TABLE ingested_events DROP COLUMN IF EXISTS key1;

@@ -220,9 +220,19 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 					t.Fatalf("insert workflow_instances on %s: %v", be.Name, err)
 				}
 
+				// id is supplied explicitly rather than left to a column
+				// default: Postgres and SQL Server's event_awaiters.id have
+				// one (gen_random_uuid()/NEWID()), but MySQL's does not --
+				// migrations.go's Version 6 comment explains why an
+				// expression default was deliberately not given to it there
+				// -- so an insert omitting id fails on MySQL only
+				// ("Field 'id' doesn't have a default value") while passing
+				// on the other two. Every production writer (registerAwaiter
+				// / upsertAwaiter) already supplies id explicitly on all
+				// three dialects; this fixture now matches that.
 				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
-					`INSERT INTO event_awaiters (workflow_id, tenant_id, event_type) VALUES ($1, $2, $3)`,
-					runID, tenant.String(), eventType); err != nil {
+					`INSERT INTO event_awaiters (id, workflow_id, tenant_id, event_type) VALUES ($1, $2, $3, $4)`,
+					uuid.New().String(), runID, tenant.String(), eventType); err != nil {
 					t.Fatalf("insert event_awaiters on %s: %v", be.Name, err)
 				}
 

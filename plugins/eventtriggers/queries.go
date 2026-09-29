@@ -5,29 +5,34 @@ import "github.com/cleat-team/cleat/plugin"
 // Dialect-specific query variants for structurally different SQL.
 
 // upsertAwaiter registers or refreshes an awaiter's registration. The
-// conflict target is the five-column tuple that migrations.go's Version 6
-// makes unique (uq_event_awaiters_registration), not the surrogate id --
-// this is what makes a REPLAYED registerAwaiter call (awaitEvent is
-// Idempotent: false, SameValueOnReplay: false, so a replay re-executes for
-// real) refresh the same row rather than accumulate a duplicate, while still
-// letting two awaits for the same (workflow, type) coexist when their key
-// slots differ. cleat#2625.
+// conflict target is registration_key -- a 64-character SHA-256 hex digest
+// of (workflow_id, event_type, key1, key2, key3), computed in Go by
+// keys.go's registrationKey and passed as the final argument -- not the
+// surrogate id and not the five raw columns. A five-column unique index
+// does not fit MySQL's or SQL Server's index-key byte limits once
+// workflow_id and event_type are both present at full width; see
+// registrationKey's own doc comment and migrations.go's Version 6 comment
+// for the byte accounting. Matching on the hash is what makes a REPLAYED
+// registerAwaiter call (awaitEvent is Idempotent: false,
+// SameValueOnReplay: false, so a replay re-executes for real) refresh the
+// same row rather than accumulate a duplicate, while still letting two
+// awaits for the same (workflow, type) coexist when their key slots differ.
+// cleat#2625.
 var upsertAwaiter = plugin.Query{
-	Default: `INSERT INTO event_awaiters (id, workflow_id, tenant_id, event_type, key1, key2, key3, created_at)
-VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW())
-ON CONFLICT (workflow_id, event_type, key1, key2, key3) DO UPDATE
+	Default: `INSERT INTO event_awaiters (id, workflow_id, tenant_id, event_type, key1, key2, key3, registration_key, created_at)
+VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, NOW())
+ON CONFLICT (registration_key) DO UPDATE
 	SET created_at = NOW()`,
-	MySQL: `INSERT INTO event_awaiters (id, workflow_id, tenant_id, event_type, key1, key2, key3, created_at)
-VALUES (UUID(), $1, $2, $3, $4, $5, $6, NOW())
+	MySQL: `INSERT INTO event_awaiters (id, workflow_id, tenant_id, event_type, key1, key2, key3, registration_key, created_at)
+VALUES (UUID(), $1, $2, $3, $4, $5, $6, $7, NOW())
 ON DUPLICATE KEY UPDATE
 	created_at = NOW()`,
 	MSSQL: `MERGE event_awaiters AS target
-USING (VALUES ($1, $2, $3, $4, $5, $6, SYSUTCDATETIME())) AS source (workflow_id, tenant_id, event_type, key1, key2, key3, created_at)
-ON target.workflow_id = source.workflow_id AND target.event_type = source.event_type
-	AND target.key1 = source.key1 AND target.key2 = source.key2 AND target.key3 = source.key3
+USING (VALUES ($1, $2, $3, $4, $5, $6, $7, SYSUTCDATETIME())) AS source (workflow_id, tenant_id, event_type, key1, key2, key3, registration_key, created_at)
+ON target.registration_key = source.registration_key
 WHEN MATCHED THEN UPDATE SET created_at = SYSUTCDATETIME()
-WHEN NOT MATCHED THEN INSERT (id, workflow_id, tenant_id, event_type, key1, key2, key3, created_at)
-VALUES (NEWID(), source.workflow_id, source.tenant_id, source.event_type, source.key1, source.key2, source.key3, source.created_at);`,
+WHEN NOT MATCHED THEN INSERT (id, workflow_id, tenant_id, event_type, key1, key2, key3, registration_key, created_at)
+VALUES (NEWID(), source.workflow_id, source.tenant_id, source.event_type, source.key1, source.key2, source.key3, source.registration_key, source.created_at);`,
 }
 
 var insertEventIdempotent = plugin.Query{

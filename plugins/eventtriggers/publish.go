@@ -307,9 +307,9 @@ func triggerMatchingWorkflows(
 //
 // key1/key2/key3 are the just-published event's own slots (from
 // PublishEvent's keySlots call), and the WHERE clause below requires all
-// three to match the awaiter's. An awaiter that asked for no keys has ''
-// in all three (§4.4's sentinel, never NULL), which is exactly what an
-// unkeyed event also carries -- so an unkeyed publish still reaches only
+// three to match the awaiter's. An awaiter that asked for no keys has the
+// empty-string sentinel in all three (§4.4, never NULL), which is exactly
+// what an unkeyed event also carries -- so an unkeyed publish still reaches only
 // unkeyed awaiters of that type, precisely today's behaviour, and a keyed
 // publish no longer wakes every awaiter of the type regardless of which
 // value they are holding for. cleat#2625.

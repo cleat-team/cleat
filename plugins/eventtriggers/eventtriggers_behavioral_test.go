@@ -2434,13 +2434,14 @@ type etIngestedEventRow struct {
 }
 
 type etAwaiterRow struct {
-	workflowID string
-	tenantID   string
-	eventType  string
-	key1       string
-	key2       string
-	key3       string
-	createdAt  time.Time
+	workflowID      string
+	tenantID        string
+	eventType       string
+	key1            string
+	key2            string
+	key3            string
+	registrationKey string
+	createdAt       time.Time
 }
 
 type etDBStore struct {
@@ -2614,15 +2615,16 @@ func (c *etConn) execInsertAwaiter(args []driver.NamedValue) (driver.Result, err
 	key1, _ := etArgString(args, 4)
 	key2, _ := etArgString(args, 5)
 	key3, _ := etArgString(args, 6)
+	regKey, _ := etArgString(args, 7)
 
-	// Upsert: if exists (same workflow, type AND keys -- migrations.go's
-	// Version 6 conflict target), update created_at. A different key
-	// combination is a DIFFERENT awaiter now, not an upsert target, which is
-	// the whole reason the conflict target grew from two columns to five.
+	// Upsert: if exists (same registration_key -- migrations.go's Version 6
+	// conflict target, a hash of workflow+type+keys), update created_at. A
+	// different key combination hashes to a different registration_key, so
+	// it is a DIFFERENT awaiter, not an upsert target -- the whole reason
+	// the conflict target grew from two columns to a hash of five.
 	found := false
 	for i, a := range c.store.awaiters {
-		if a.workflowID == workflowID && a.eventType == eventType &&
-			a.key1 == key1 && a.key2 == key2 && a.key3 == key3 {
+		if a.registrationKey == regKey {
 			c.store.awaiters[i].createdAt = time.Now()
 			found = true
 			break
@@ -2630,13 +2632,14 @@ func (c *etConn) execInsertAwaiter(args []driver.NamedValue) (driver.Result, err
 	}
 	if !found {
 		c.store.awaiters = append(c.store.awaiters, etAwaiterRow{
-			workflowID: workflowID,
-			tenantID:   tenantID,
-			eventType:  eventType,
-			key1:       key1,
-			key2:       key2,
-			key3:       key3,
-			createdAt:  time.Now(),
+			workflowID:      workflowID,
+			tenantID:        tenantID,
+			eventType:       eventType,
+			key1:            key1,
+			key2:            key2,
+			key3:            key3,
+			registrationKey: regKey,
+			createdAt:       time.Now(),
 		})
 	}
 	return &etResult{rowsAffected: 1}, nil
