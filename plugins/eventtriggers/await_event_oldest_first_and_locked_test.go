@@ -61,6 +61,86 @@ func mustInsertIngestedEventAt(t *testing.T, ctx context.Context, p *Plugin, id,
 	}
 }
 
+// mustInsertIngestedEventWithData is mustInsertIngestedEventAt with an
+// explicit event_data, for tests that need to seed a row that cannot
+// round-trip through json.Marshal -- see
+// TestAwaitEventMarshalFailureLeavesEventUnconsumed.
+func mustInsertIngestedEventWithData(t *testing.T, ctx context.Context, p *Plugin, id, tenantID uuid.UUID, eventType, eventData string, receivedAt time.Time) {
+	t.Helper()
+	if _, err := p.db.Exec(ctx, `
+		INSERT INTO ingested_events (id, tenant_id, event_type, event_data, received_at, processed, status)
+		VALUES ($1, $2, $3, $4, $5, false, 'pending')
+	`, id, tenantID, eventType, eventData, receivedAt); err != nil {
+		t.Fatalf("insert ingested_events %s: %v", id, err)
+	}
+}
+
+// TestAwaitEventMarshalFailureLeavesEventUnconsumed is cleat#2654: a row
+// whose event_data cannot round-trip through json.Marshal (corrupted, e.g.
+// by the VARBINARY->NVARCHAR conversion cleat#2645's own CI run hit) used to
+// be marshaled AFTER the claim transaction committed, so the failure was
+// reported as an error while the event was already durably consumed and
+// gone forever. This crosses the commit boundary deliberately: a test that
+// only checks the returned error cannot see that difference, because both
+// the fixed and unfixed code return an error here -- what distinguishes
+// them is whether the row is still there to claim afterward.
+//
+// MSSQL-ONLY, not table-driven, and not an oversight: event_data is JSONB on
+// Postgres and JSON on MySQL, and both dialects validate JSON syntax at
+// INSERT and refuse this test's malformed literal before awaitEvent ever
+// sees it (measured: Postgres returns "pq: invalid input syntax for type
+// json (22P02)" on the seeding insert itself). MSSQL's event_data is
+// NVARCHAR(MAX), a plain text column with no such check, which is exactly
+// why the ORIGINAL corruption this issue cites (cleat#2645's CI failure) was
+// only ever observed on that dialect -- this test reproduces the same
+// precondition, not a weaker stand-in for it.
+func TestAwaitEventMarshalFailureLeavesEventUnconsumed(t *testing.T) {
+	db := testutil.TestDB(t, testutil.DialectMSSQL)
+	dialect := plugin.DialectMSSQL
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	p := &Plugin{dialect: dialect, logger: quiet}
+	if err := plugin.RunMigrations(context.Background(), db, dialect, nil,
+		[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	p.db = &engine.SQLDBAdapter{DB: db, Dialect: dialect}
+
+	tenantID := uuid.New()
+	eventID := uuid.New()
+	seedCtx := plugin.ForTenant(context.Background(), tenantID)
+
+	// Not valid JSON, so the struct embedding it as json.RawMessage fails to
+	// marshal -- verified directly: json.Marshal on
+	// awaitEventOutput{EventData: json.RawMessage("not valid json{")} returns
+	// a non-nil error and empty bytes.
+	mustInsertIngestedEventWithData(t, seedCtx, p, eventID, tenantID,
+		"order.corrupt", "not valid json{", time.Now().Add(-time.Hour))
+
+	ctx := plugin.WithCallContext(seedCtx, &plugin.CallContext{
+		TenantID:   tenantID.String(),
+		WorkflowID: "wf-marshal-failure-mssql",
+	})
+	if _, err := p.awaitEvent(ctx, `{"event_type":"order.corrupt","timeout_ms":1000}`); err == nil {
+		t.Fatal("awaitEvent: expected an error from the unmarshalable event_data, got nil")
+	}
+
+	// The property under test: NOT consumed, so a later claim can still
+	// retry it. Asserted directly against the row rather than by calling
+	// awaitEvent again, since a second call would hit the same marshal
+	// failure and prove nothing beyond the first call.
+	var processed bool
+	row := p.db.QueryRow(seedCtx, plugin.Rebind(
+		`SELECT processed FROM ingested_events WHERE id = $1`, dialect), eventID)
+	if err := plugin.ScanRow(row, &processed); err != nil {
+		t.Fatalf("query processed flag: %v", err)
+	}
+	if processed {
+		t.Fatal("event was marked processed despite the output failing to marshal -- " +
+			"it is now durably consumed and unrecoverable, the exact failure cleat#2654 describes")
+	}
+}
+
 // TestAwaitEventClaimsOldestAcrossDialects is cleat-review's GAP 1, fix half
 // one: it seeds the NEWER event first (so a pick-by-insertion-order
 // implementation would also get it wrong) and asserts the OLDER one is
