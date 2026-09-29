@@ -1060,25 +1060,27 @@ func (s *MSSQLStore) failWorkflowOnce(ctx context.Context, workflowID, workerID 
 // back, so a deadlock no longer loses the terminal write. ErrFenceLost is
 // returned before the commit and is not an mssql.Error, so the fence
 // semantics are untouched by the retry. See withRollbackGuaranteedRetry.
-func (s *MSSQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (s *MSSQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return withRollbackGuaranteedRetry(ctx, "move to dead letter queue", mssqlTxRetries, mssqlTxRetryDelay, func() error {
-		return s.moveToDeadLetterQueueOnce(ctx, workflowID, workerID, generation, errMsg, errorCode, errorOp)
+		return s.moveToDeadLetterQueueOnce(ctx, workflowID, workerID, generation, errMsg, errorCode, errorOp, queryState)
 	})
 }
 
-func (s *MSSQLStore) moveToDeadLetterQueueOnce(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (s *MSSQLStore) moveToDeadLetterQueueOnce(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("move to dead letter queue: begin: %w", err)
 	}
 	defer tx.Rollback()
 
+	qsParam := queryStateUpdateParam(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = @p3, error_code = @p4, error_op = @p5,
-		    completed_at = SYSUTCDATETIME(), completed_by = assigned_to, assigned_to = NULL
-		WHERE id = @p1 AND assigned_to = @p2 AND generation = @p6
-	`, workflowID, workerID, errMsg, errorCode, errorOp, generation)
+		    completed_at = SYSUTCDATETIME(), completed_by = assigned_to, assigned_to = NULL,
+		    query_state = COALESCE(@p6, query_state)
+		WHERE id = @p1 AND assigned_to = @p2 AND generation = @p7
+	`, workflowID, workerID, errMsg, errorCode, errorOp, qsParam, generation)
 	if err != nil {
 		return err
 	}

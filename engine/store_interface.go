@@ -160,8 +160,10 @@ type WorkflowStore interface {
 
 	// MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 	// after exhausting all retry attempts. This is a terminal status similar to
-	// 'failed' but indicates the workflow was retried without success.
-	MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error
+	// 'failed' but indicates the workflow was retried without success. queryState
+	// is FailWorkflow's parameter of the same name -- see its comment and
+	// cmd/cleat-worker/setup.go's writeTerminalFailure. cleat#2650.
+	MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error
 
 	// RetryWorkflow moves a dead_lettered workflow back to a runnable state.
 	// Resets status to 'ready', clears the assigned worker and all error fields,

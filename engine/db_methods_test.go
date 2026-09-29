@@ -3626,7 +3626,7 @@ func TestPostgresStore_MoveToDeadLetterQueue_BeginError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.MoveToDeadLetterQueue(testCtx, "wf-1", "worker-1", 1, "err", "ERR", "op")
+	err := store.MoveToDeadLetterQueue(testCtx, "wf-1", "worker-1", 1, "err", "ERR", "op", nil)
 	if err == nil {
 		t.Fatal("expected error from begin failure")
 	}

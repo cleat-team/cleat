@@ -1185,19 +1185,21 @@ func (s *PostgresStore) runParentClosePolicyStep(ctx context.Context, query stri
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 // after exhausting all retry attempts.
 
-func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (s *PostgresStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	tx, err := s.beginTxWithRLS(ctx)
 	if err != nil {
 		return fmt.Errorf("move to dead letter queue: begin: %w", err)
 	}
 	defer tx.Rollback()
 
+	qsParam := queryStateUpdateParam(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = $3, error_code = $4, error_op = $5,
-		    completed_at = now(), completed_by = assigned_to, assigned_to = NULL
-		WHERE id = $1 AND assigned_to = $2 AND generation = $6
-	`, workflowID, workerID, errMsg, errorCode, errorOp, generation)
+		    completed_at = now(), completed_by = assigned_to, assigned_to = NULL,
+		    query_state = COALESCE($6::jsonb, query_state)
+		WHERE id = $1 AND assigned_to = $2 AND generation = $7
+	`, workflowID, workerID, errMsg, errorCode, errorOp, qsParam, generation)
 	if err != nil {
 		return err
 	}

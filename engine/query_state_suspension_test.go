@@ -214,3 +214,85 @@ func TestFailWorkflowNilQueryStatePreservesThePriorSegment(t *testing.T) {
 		})
 	}
 }
+
+// TestMoveToDeadLetterQueueNilQueryStatePreservesThePriorSegment is
+// TestFailWorkflowNilQueryStatePreservesThePriorSegment's DLQ twin -- cleat#2650.
+// A dead-lettered run with nothing new to report must not erase what an
+// earlier successful segment finalized, and one that publishes fresh state on
+// the very segment that exhausts its retries must have that state written,
+// since no earlier segment will ever get another chance to persist it.
+func TestMoveToDeadLetterQueueNilQueryStatePreservesThePriorSegment(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			setupTestData(t, store)
+			truncateAll(t, store)
+			ctx := context.Background()
+
+			id, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "qs-dlq-nil", DefaultTenantUUID, 0)
+			if err != nil {
+				t.Fatalf("StartNewRun: %v", err)
+			}
+			wf, err := store.ClaimWorkflow(ctx, "worker-1")
+			if err != nil || wf == nil {
+				t.Fatalf("ClaimWorkflow: %v (wf=%v)", err, wf)
+			}
+
+			published := map[string]string{"phase": "charging"}
+			if err := store.FinalizeWorkflowSegment(ctx, id, "worker-1", wf.Generation, nil, "ready",
+				"", "", "", published, time.Now().Add(-time.Minute)); err != nil {
+				t.Fatalf("FinalizeWorkflowSegment(ready): %v", err)
+			}
+
+			wf2, err := store.ClaimWorkflow(ctx, "worker-2")
+			if err != nil || wf2 == nil {
+				t.Fatalf("ClaimWorkflow (segment 2): %v (wf=%v)", err, wf2)
+			}
+			// nil is the panic/pre-flight shape: no replay ran on this
+			// segment, so there is nothing new to report.
+			if err := store.MoveToDeadLetterQueue(ctx, id, "worker-2", wf2.Generation, "retries exhausted", "retries_exhausted", "op", nil); err != nil {
+				t.Fatalf("MoveToDeadLetterQueue(nil): %v", err)
+			}
+
+			got, err := store.GetQueryState(ctx, id, "phase")
+			if err != nil {
+				t.Fatalf("GetQueryState after MoveToDeadLetterQueue(nil): %v", err)
+			}
+			if got != "charging" {
+				t.Errorf("GetQueryState(phase) = %q after MoveToDeadLetterQueue(nil), want %q preserved "+
+					"from the prior segment -- a caller with nothing new to say must not erase what was there",
+					got, "charging")
+			}
+
+			// Companion: a run dead-lettered on the SAME segment that
+			// published new state -- no earlier segment finalized, so this is
+			// the only write that will ever persist it. This is cleat#2650's
+			// actual defect: before the fix, MoveToDeadLetterQueue's UPDATE
+			// had no query_state clause at all, so this value never reached
+			// the database no matter what the caller passed.
+			id2, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "qs-dlq-real", DefaultTenantUUID, 0)
+			if err != nil {
+				t.Fatalf("StartNewRun (companion): %v", err)
+			}
+			wf3, err := store.ClaimWorkflow(ctx, "worker-3")
+			if err != nil || wf3 == nil {
+				t.Fatalf("ClaimWorkflow (companion): %v (wf=%v)", err, wf3)
+			}
+			if err := store.MoveToDeadLetterQueue(ctx, id2, "worker-3", wf3.Generation, "retries exhausted", "retries_exhausted", "op",
+				map[string]string{"phase": "dead-lettered-with-state"}); err != nil {
+				t.Fatalf("MoveToDeadLetterQueue(real map): %v", err)
+			}
+			got2, err := store.GetQueryState(ctx, id2, "phase")
+			if err != nil {
+				t.Fatalf("GetQueryState after MoveToDeadLetterQueue(real map): %v", err)
+			}
+			if got2 != "dead-lettered-with-state" {
+				t.Errorf("GetQueryState(phase) = %q after MoveToDeadLetterQueue with a real map, want %q "+
+					"written -- the final failing replay's own published state was dropped on the way to the store",
+					got2, "dead-lettered-with-state")
+			}
+		})
+	}
+}

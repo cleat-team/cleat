@@ -5859,10 +5859,15 @@ func classifyTerminalErrorCode(errorCode string, deadLettered bool) string {
 //
 // queryState is what the failing replay itself published via SetQueryState,
 // if any -- nil for the paths that never ran a replay (a panic recovery, or a
-// failure before the segment started). It is passed to FailWorkflow only:
-// MoveToDeadLetterQueue's own UPDATE never touches query_state, so it already
-// preserves whatever the last successfully-finalized segment persisted, and a
-// parameter here would have nothing to do. See cleat#2520.
+// failure before the segment started). It is passed to both FailWorkflow and
+// MoveToDeadLetterQueue, the same way and for the same reason: each store's
+// UPDATE writes query_state = COALESCE(<param>, query_state), so a nil here
+// leaves the column exactly as the last successfully-finalized segment left
+// it, and a non-nil map is what THIS segment published before it failed.
+// Before cleat#2650, MoveToDeadLetterQueue's UPDATE never touched query_state
+// at all, so the final failing replay's own publishes -- the ones no earlier
+// successful segment had a chance to persist -- were silently discarded on
+// the dead-letter path. See cleat#2520.
 func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, errorCode, errorOp string, eligibleForDLQ bool, history []engine.EventRecord, queryState map[string]string) (applied, deadLettered bool) {
 	st, release := w.storeFor(wf)
 	defer release()
@@ -5955,7 +5960,7 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 
 	var err error
 	if deadLettered {
-		err = st.MoveToDeadLetterQueue(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
+		err = st.MoveToDeadLetterQueue(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, queryState)
 	} else {
 		err = st.FailWorkflow(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, queryState)
 	}
@@ -6188,7 +6193,8 @@ func (w *Worker) recordTerminalFailure(wf *engine.WorkflowInstance, startedAt ti
 // the workflow.
 //
 // queryState is that same segment's replay result -- see writeTerminalFailure's
-// doc comment for why it goes to FailWorkflow and not MoveToDeadLetterQueue.
+// doc comment for how it reaches whichever of FailWorkflow or
+// MoveToDeadLetterQueue actually applies.
 func (w *Worker) recordTerminalFailureWithHistory(wf *engine.WorkflowInstance, startedAt time.Time, errMsg, errorCode, errorOp string, history []engine.EventRecord, queryState map[string]string) {
 	applied, deadLettered := w.writeTerminalFailure(wf, errMsg, errorCode, errorOp, true, history, queryState)
 	if !applied {

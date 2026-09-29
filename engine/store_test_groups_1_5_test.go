@@ -905,7 +905,7 @@ func TestMoveToDeadLetterQueue(t *testing.T) {
 				t.Fatal("ClaimWorkflow returned nil")
 			}
 
-			if err := store.MoveToDeadLetterQueue(ctx, wf.ID, "worker-1", wf.Generation, "exhausted retries", "retries_exhausted", "DurableCall"); err != nil {
+			if err := store.MoveToDeadLetterQueue(ctx, wf.ID, "worker-1", wf.Generation, "exhausted retries", "retries_exhausted", "DurableCall", nil); err != nil {
 				t.Fatalf("MoveToDeadLetterQueue: %v", err)
 			}
 
