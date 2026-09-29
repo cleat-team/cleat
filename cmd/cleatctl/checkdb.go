@@ -372,6 +372,88 @@ func runCheckDB(ctx context.Context, db *sql.DB, d dialect, dsn string, args []s
 		_ = histSize
 	}
 
+	// 5b. Superseded function overloads with an unpinned search_path.
+	//
+	// cleat#2449. CREATE OR REPLACE FUNCTION keys on the SIGNATURE, so a
+	// migration that widens a function's parameter list without first
+	// dropping the old signature creates a second overload instead of
+	// replacing the first -- admin.drop_tenant(uuid) survived this way
+	// alongside admin.drop_tenant(uuid, text) on at least one long-lived
+	// database. migrations/postgres/ ships only the LAST signature of each
+	// routine (it is a pg_dump baseline of a database's current state, not a
+	// replay of every transition -- #2416), so nothing in a FRESH build can
+	// ever have a superseded overload.
+	//
+	// THE ORIGIN IS IN-REPO, NOT A MANUAL STEP, AND STILL LIVE ON develop
+	// (cleat-review, cleat#2449): engine/drop_tenant_test.go's
+	// resetToOriginal001DropTenant reinstalls this exact pre-032 signature to
+	// pin a data-loss regression, on a database SetupFullSchema has already
+	// migrated to the current two-argument form -- so it ADDS the overload
+	// rather than reverting to it, and nothing dropped it afterward. Every
+	// run of the three tests that call it against a persistent local
+	// Postgres reproduces this deterministically. Fixed alongside this
+	// check by having that helper return a cleanup closure its three call
+	// sites defer -- NOT t.Cleanup, which cannot run before the plain
+	// `defer adminDB.Close()` each call site already has (see
+	// resetToOriginal001DropTenant's own doc comment for why). This
+	// session's first guess here (a manual statement run outside the
+	// migration runner) was wrong.
+	//
+	// A superseded overload matters specifically when it is SECURITY
+	// DEFINER with no pinned search_path (proconfig IS NULL): that is the
+	// cleat#1363/#1480 class of hazard, where a caller-controlled
+	// search_path can redirect an unqualified reference inside the
+	// function body. A superseded overload was never pinned because
+	// nothing written after it was ever there to look for one -- pinning
+	// lands on the CURRENT signature, not on whatever came before it.
+	if d.name == "postgres" {
+		rows, ferr := db.QueryContext(ctx, `
+			SELECT p.proname, COUNT(*)
+			FROM pg_proc p
+			JOIN pg_namespace n ON n.oid = p.pronamespace
+			WHERE n.nspname = 'admin'
+			GROUP BY p.proname
+			HAVING COUNT(*) > 1
+			   AND COUNT(*) FILTER (WHERE p.proconfig IS NULL AND p.prosecdef) > 0
+		`)
+		if ferr != nil {
+			fmt.Fprintf(os.Stderr, "FUNCTION OVERLOADS: WARNING: cannot check: %v\n", ferr)
+			issues = append(issues, fmt.Sprintf("function overload check failed: %v", ferr))
+		} else {
+			var stale []string
+			for rows.Next() {
+				var name string
+				var n int
+				if scanErr := rows.Scan(&name, &n); scanErr != nil {
+					// A dropped row reads as "one fewer overload found" --
+					// silent for a check whose whole job is naming a
+					// security-relevant gap. Report it as its own issue
+					// rather than let the row disappear.
+					fmt.Fprintf(os.Stderr, "FUNCTION OVERLOADS: WARNING: cannot read a row: %v\n", scanErr)
+					issues = append(issues, fmt.Sprintf("function overload check: cannot read a row: %v", scanErr))
+					continue
+				}
+				stale = append(stale, fmt.Sprintf("%s (%d overloads)", name, n))
+			}
+			if rowsErr := rows.Err(); rowsErr != nil {
+				fmt.Fprintf(os.Stderr, "FUNCTION OVERLOADS: WARNING: iteration failed: %v\n", rowsErr)
+				issues = append(issues, fmt.Sprintf("function overload check: iteration failed: %v", rowsErr))
+			}
+			rows.Close()
+			if len(stale) > 0 {
+				fmt.Fprintf(os.Stderr, "FUNCTION OVERLOADS: superseded, unpinned SECURITY DEFINER overload(s): %s\n",
+					strings.Join(stale, ", "))
+				issues = append(issues, fmt.Sprintf(
+					"superseded, unpinned SECURITY DEFINER function overload(s): %s -- "+
+						"CREATE OR REPLACE never removes an old signature; find it with "+
+						"pg_get_function_identity_arguments and DROP FUNCTION it by that exact "+
+						"old signature (cleat#2449)", strings.Join(stale, ", ")))
+			} else if verbose {
+				fmt.Println("FUNCTION OVERLOADS: none")
+			}
+		}
+	}
+
 	// 6. Dead letters are reported by section 4 above, and were never reported
 	// here.
 	//
