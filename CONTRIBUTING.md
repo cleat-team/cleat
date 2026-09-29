@@ -110,13 +110,14 @@ opens, so refusing there would block the only ways to fix it (`commit
 first). It lets the message through unstamped and warns instead.
 `.githooks/commit-msg` — installed by the same `core.hooksPath` setting —
 runs on the *final* message, after any editor, and refuses it there if it
-is still broken. An already-malformed commit can still slip through
-unrefused two ways: an unchanged `rebase -i` pick (no conflict, no
-`reword`) invokes neither hook at all, and a plain `cherry-pick` invokes
-`prepare-commit-msg` (which only warns) but not `commit-msg`. Either way
-`Stream Trailer Check` is the backstop, same as before this split existed.
-See `commit-msg`'s own doc comment for the measured repair paths this is
-built around (cleat#2588).
+is still broken. `commit-msg` never runs for a pick that opens no editor.
+`prepare-commit-msg` runs whenever git actually creates the commit (a
+`cherry-pick`, or a rebase onto a base that moved) and only warns; a pick
+git fast-forwards, because the parent is unchanged, reuses the existing
+commit object and runs neither hook. In every case an already-malformed
+commit passes through unrefused, and `Stream Trailer Check` is the
+backstop, same as before this split existed. See `commit-msg`'s own doc
+comment for the measured repair paths this is built around (cleat#2588).
 
 **On `develop`, read it with an anchored grep — not the trailer parser.** Every
 commit merged there is a squash, and `squash_merge_commit_message=COMMIT_MESSAGES`

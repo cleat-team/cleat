@@ -31,13 +31,14 @@
 # refused, and a plain, non-interactive `git commit -F <malformed file>` is
 # refused immediately, with HEAD never created.
 #
-# This hook does not run at all for an unchanged rebase pick (no conflict,
-# no `reword`) or for a plain `cherry-pick` of an already-malformed commit
-# -- measured, git 2.50.1. (prepare-commit-msg is not the same story: a
-# `cherry-pick` DOES invoke it, and it warns; only commit-msg is silent on
-# that path. A rebase pick invokes neither hook at all.) Either way, that
-# commit passes through unrefused, exactly as it did before this hook
-# existed; CI's Stream Trailer Check is the backstop there, same as always.
+# commit-msg never runs for a pick that opens no editor. prepare-commit-msg
+# runs whenever git actually CREATES the commit -- a cherry-pick, or a
+# rebase onto a base that moved -- and only warns; measured, git 2.50.1. A
+# pick git fast-forwards, because the parent is unchanged, reuses the
+# existing commit object and runs neither hook. In every case an
+# already-malformed commit passes through unrefused, exactly as it did
+# before this hook existed; CI's Stream Trailer Check is the backstop
+# there, same as always.
 #
 # Deliberately narrower than prepare-commit-msg's job: this hook does not
 # enforce that a Claude-Stream trailer is PRESENT. prepare-commit-msg

@@ -110,13 +110,14 @@ fi
 # the check still can't read) and let the message through as-is, warning
 # rather than failing. `.githooks/commit-msg` runs on the FINAL message,
 # after any editor has had its chance, and refuses it there if it is still
-# broken -- but only when an editor (or `reword`) actually ran. Measured,
-# git 2.50.1, on an already-malformed commit: an UNCHANGED `rebase -i` pick
-# (no conflict, no reword) invokes NEITHER hook, so it passes through
-# silently. `cherry-pick` is different -- it DOES run this hook (this
-# warning prints), but not commit-msg, so it also passes through, just with
-# a warning rather than silence. Either way, CI's Stream Trailer Check is
-# the backstop, same as before this fix existed. See commit-msg for the
+# broken -- but only when an editor (or `reword`) actually ran. commit-msg
+# never runs for a pick that opens no editor. THIS hook runs whenever git
+# actually CREATES the commit -- a cherry-pick, or a rebase onto a base
+# that moved -- and only warns, as below; measured, git 2.50.1. A pick git
+# fast-forwards, because the parent is unchanged, reuses the existing
+# commit object and runs neither hook. In every case an already-malformed
+# commit passes through unrefused; CI's Stream Trailer Check is the
+# backstop, same as before this fix existed. See commit-msg for the
 # refusal and its regression tests.
 if grep -qiE '^Claude-Stream:[[:space:]]*[^[:space:]]' "$MSG_FILE"; then
 	echo "prepare-commit-msg: warning: this message has a line matching" >&2
