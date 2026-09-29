@@ -259,3 +259,97 @@ func TestBackupCommandWorksOnEveryDialect(t *testing.T) {
 		})
 	}
 }
+
+// TestBackupHistoryDisplaysADeletedConfigsNullIDAsADashNotAZeroUUID is
+// cleat#2292 item 6, driven through the real path rather than a seeded row:
+// v5 (cleat#2247) makes `backup config-delete` set backup_history.config_id
+// to NULL on every history row for the config being deleted (ON DELETE SET
+// NULL, replacing v3's short-lived ON DELETE CASCADE) precisely so the
+// history survives -- so this is the routine outcome of deleting a config
+// with any history, not a contrived edge case.
+func TestBackupHistoryDisplaysADeletedConfigsNullIDAsADashNotAZeroUUID(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		td   testutil.Dialect
+		d    dialect
+	}{
+		{"postgres", testutil.DialectPostgres, dialectPostgres},
+		{"mysql", testutil.DialectMySQL, dialectMySQL},
+		{"mssql", testutil.DialectMSSQL, dialectMSSQL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testutil.TestDB(t, tc.td)
+			ctx := context.Background()
+
+			loaded := []*plugin.LoadedPlugin{{Plugin: scheduledbackup.New(), Healthy: true}}
+			if err := plugin.RunMigrations(ctx, db, tc.d.query, nil, loaded); err != nil {
+				t.Fatalf("apply scheduledbackup migrations on %s: %v", tc.name, err)
+			}
+
+			name := "wsdt-" + strings.ReplaceAll(uuid.New().String(), "-", "")[:12]
+			runBackupConfigCreate(ctx, db, tc.d, []string{
+				"--name", name, "--cron", "0 0 * * *", "--retention-days", "7",
+			})
+			id, err := resolveConfigID(ctx, db, tc.d, "", name)
+			if err != nil {
+				t.Fatalf("resolveConfigID after create: %v", err)
+			}
+
+			historyID := uuid.New()
+			stmt, stmtArgs := mustRebindArgs(t, tc.d, `
+				INSERT INTO backup_history (id, config_id, filename, status, started_at)
+				VALUES ($1, $2, $3, $4, $5)
+			`, historyID, id, "backup-"+name+".sql.gz", "completed", time.Now().UTC().Add(-time.Hour))
+			if _, err := db.ExecContext(ctx, stmt, stmtArgs...); err != nil {
+				t.Fatalf("seeding backup_history: %v", err)
+			}
+
+			// Before deleting anything: config_id is NOT NULL here, and
+			// must still show the config's REAL id -- not the zero UUID a
+			// broken NullGUID could produce, and on SQL Server specifically
+			// not a byte-order-scrambled-but-nonzero one either. Without
+			// this, a NullGUID whose Scan silently mis-swapped bytes would
+			// still pass the "not the zero UUID" check below, because
+			// mis-swapped is not the same failure as zeroed. This is the
+			// known-positive for that failure mode.
+			preDelete, _ := withExitPanicOutput(t, func() {
+				runBackupHistory(ctx, db, tc.d, nil)
+			})
+			if !strings.Contains(preDelete, id.String()) {
+				t.Fatalf("with config_id NOT NULL, history did not display the config's real id %s:\n%s", id, preDelete)
+			}
+
+			// The real path: deleting the config through the CLI, not a raw
+			// UPDATE, so this proves what an operator actually gets.
+			runBackupConfigDelete(ctx, db, tc.d, []string{"--id", id.String()})
+
+			// Confirm the mechanism fired before trusting the display: a
+			// premise check, not the thing under test. If this ever reads
+			// non-NULL, the test below would pass for the wrong reason (no
+			// NULL to mis-display).
+			// CASE, not a bare `config_id IS NULL` in the select list: that
+			// is a valid boolean expression on PostgreSQL/MySQL but not
+			// T-SQL, which has no boolean type a SELECT list can return.
+			var nullFlag int
+			stmt, stmtArgs = mustRebindArgs(t, tc.d,
+				`SELECT CASE WHEN config_id IS NULL THEN 1 ELSE 0 END FROM backup_history WHERE id = $1`, historyID)
+			if err := db.QueryRowContext(ctx, stmt, stmtArgs...).Scan(&nullFlag); err != nil {
+				t.Fatalf("checking config_id nulled: %v", err)
+			}
+			if nullFlag == 0 {
+				t.Fatal("premise failed: backup config-delete did not null the seeded row's config_id -- " +
+					"the display fix below cannot be exercised without this")
+			}
+
+			stdout, stderr := withExitPanicOutput(t, func() {
+				runBackupHistory(ctx, db, tc.d, nil)
+			})
+			if !strings.Contains(stdout, historyID.String()) {
+				t.Fatalf("backup history did not list the row at all:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+			}
+			if strings.Contains(stdout, "00000000-0000-0000-0000-000000000000") {
+				t.Errorf("a NULL config_id printed as the zero UUID instead of '-':\n%s", stdout)
+			}
+		})
+	}
+}

@@ -28,7 +28,15 @@ func (f *fakeRow) Scan(dest ...any) error {
 			if err := t.Scan(f.vals[i]); err != nil {
 				return err
 			}
+		case *NullGUID:
+			if err := t.Scan(f.vals[i]); err != nil {
+				return err
+			}
 		case *uuid.UUID:
+			if err := t.Scan(f.vals[i]); err != nil {
+				return err
+			}
+		case *uuid.NullUUID:
 			if err := t.Scan(f.vals[i]); err != nil {
 				return err
 			}
@@ -129,5 +137,77 @@ func TestScanRowDoesNotWriteBackOnError(t *testing.T) {
 	}
 	if got != before {
 		t.Errorf("destination was modified on a failed Scan: %s -> %s", before, got)
+	}
+}
+
+// cleat#2292 item 6's mechanism: a *uuid.NullUUID destination must get the
+// same SQL Server byte-order correction as *uuid.UUID, or a nullable id
+// column is correct on PostgreSQL/MySQL and silently wrong on SQL Server --
+// exactly cleat#1137, one type over. Without NullGUID, ScanRow's original
+// type switch (only *uuid.UUID) passes a *uuid.NullUUID straight through
+// unswapped.
+func TestScanRowCorrectsMixedEndianBytesForNullUUID(t *testing.T) {
+	want := uuid.MustParse("11223344-5566-7788-99aa-bbccddeeff00")
+	row := &fakeRow{vals: []any{mixedEndian(want)}}
+
+	var got uuid.NullUUID
+	if err := ScanRow(row, &got); err != nil {
+		t.Fatalf("ScanRow: %v", err)
+	}
+	if !got.Valid || got.UUID != want {
+		t.Errorf("ScanRow gave (valid=%v, %s), want (valid=true, %s)", got.Valid, got.UUID, want)
+	}
+}
+
+// The control for the test above, mirroring TestScanRowIsTheThingThatCorrects:
+// without it, a NullGUID that just aliased uuid.NullUUID.Scan would pass a
+// mixed-endian test whose "want" happened to already look right, or a broken
+// swap that always zeroed would pass if "want" were the zero uuid.
+func TestScanRowNullUUIDIsTheThingThatCorrects(t *testing.T) {
+	want := uuid.MustParse("11223344-5566-7788-99aa-bbccddeeff00")
+	row := &fakeRow{vals: []any{mixedEndian(want)}}
+
+	var direct uuid.NullUUID
+	if err := row.Scan(&direct); err != nil {
+		t.Fatalf("direct Scan: %v", err)
+	}
+	if direct.Valid && direct.UUID == want {
+		t.Fatal("a direct uuid.NullUUID Scan already produced the right id, so this " +
+			"fixture does not reproduce cleat#1137 and the test above proves nothing")
+	}
+}
+
+// A SQL NULL must scan as Valid=false, not as the zero UUID or an error --
+// this is the actual cleat#2292 item 6 symptom: a NULL config_id displayed as
+// 00000000-0000-0000-0000-000000000000 rather than reported as absent.
+func TestScanRowNullUUIDHandlesSQLNull(t *testing.T) {
+	row := &fakeRow{vals: []any{nil}}
+
+	var got uuid.NullUUID
+	got.Valid = true // start non-zero-value so a no-op Scan would be caught
+	if err := ScanRow(row, &got); err != nil {
+		t.Fatalf("ScanRow: %v", err)
+	}
+	if got.Valid {
+		t.Errorf("ScanRow reported Valid=true for a SQL NULL; got.UUID=%s", got.UUID)
+	}
+}
+
+// Same as TestScanRowLeavesOtherDestinationsAlone, for the NullUUID branch:
+// a *uuid.NullUUID destination is substituted with *NullGUID, nothing else.
+func TestScanRowNullUUIDLeavesOtherDestinationsAlone(t *testing.T) {
+	want := uuid.MustParse("11223344-5566-7788-99aa-bbccddeeff00")
+	row := &fakeRow{vals: []any{mixedEndian(want), "hello"}}
+
+	var id uuid.NullUUID
+	var s string
+	if err := ScanRow(row, &id, &s); err != nil {
+		t.Fatalf("ScanRow: %v", err)
+	}
+	if !id.Valid || id.UUID != want || s != "hello" {
+		t.Errorf("got (valid=%v, %s, %q), want (valid=true, %s, %q)", id.Valid, id.UUID, s, want, "hello")
+	}
+	if _, isNullGUID := row.got[1].(*NullGUID); isNullGUID {
+		t.Error("a *string destination was substituted; only *uuid.UUID/*uuid.NullUUID may be")
 	}
 }
