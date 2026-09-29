@@ -1711,7 +1711,7 @@ tier3:
         per-spec status files -- but reclassifying a component is a product-status
         decision, not a wording fix, and it belongs to whoever owns this file's
         tier assignments rather than to the session that noticed the comment was
-        wrong. Filed as cleat#2420's follow-up rather than decided here.
+        wrong. Filed as cleat#2708 rather than decided here.
 
         The two remaining specs, `CleatSignals.tla` and `CleatStateMachine.tla`,
         have no `.cfg` and are explicitly documented as unmaintained/superseded in
