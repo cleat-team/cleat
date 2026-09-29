@@ -607,8 +607,19 @@ jobs:
       # pattern, so it re-runs in seconds and cannot hide a badly-named test
       # the way the removed job-wide filter did -- it adds visibility for
       # these specific tests, it does not stand in for the step above.
+      #
+      # cleat#2669 (cleat-review, reviewing #2675): the pattern was
+      # '^TestAwaitEvent', which does not match TestVersion7ReplacesThe...,
+      # TestClaimQueryPlanExcludesProcessedRowsOnPostgres or
+      # TestClaimQueryIsSargableOnProcessedOnMySQL -- three tests added to
+      # prove the same "ran vs skipped, both print ok" gap this step exists
+      # to close, invisible to the one step that exists to close it. Widened
+      # rather than renamed, because a second badly-matched pattern is the
+      # same failure mode this step's own history already has one instance
+      # of. Re-derive what a pattern selects before trusting it:
+      #   go test ./plugins/eventtriggers/... -list '^Test(AwaitEvent|ClaimQuery|Version7)'
       - name: Verify the oldest-first and lock claim tests ran (not skipped) per dialect
-        run: go test -count=1 -v -run '^TestAwaitEvent' ./plugins/eventtriggers/...
+        run: go test -count=1 -v -run '^Test(AwaitEvent|ClaimQuery|Version7)' ./plugins/eventtriggers/...
 
   # -------------------------------------------------------------------------
   # Crash shutdown scenarios on MySQL and SQL Server (cleat#2288)

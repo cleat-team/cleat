@@ -205,14 +205,42 @@ FOR UPDATE SKIP LOCKED`,
 	// (#2645's own coverage) both stay green -- neither of those two ever
 	// needed the unprocessed index for correctness; they simply never
 	// exercised a case where the two indexes' locking shapes diverged.
+	//
+	// cleat#2669: idx_ingested_events_correlate itself is gone as of
+	// Version 7, replaced by idx_ingested_events_claim -- same leading
+	// columns, but with `processed` added so the index can exclude a
+	// processed row rather than merely filter it out after finding it.
+	// idx_ingested_events_correlate had no processed column, so the claim
+	// walked -- and under REPEATABLE READ, locked -- every PROCESSED row
+	// for its key tuple before reaching the first unprocessed one; nothing
+	// deletes from ingested_events, so that walk was the tenant's entire
+	// history of the event type for an unkeyed claim (today's only usage).
+	// See migrations.go's Version 7 comment for the measurement (Postgres
+	// 2.5ms to 0.46ms, SQL Server 193ms to 5.5ms, MySQL 28.4ms to 0.33ms
+	// (85x), all at 20,000 rows of history) and for why this was a real,
+	// and equally unbounded, cost on Postgres and SQL Server too, not a
+	// MySQL-only concern -- MySQL is only the dialect where the old shape
+	// was a correctness bug on top of the performance one.
+	//
+	// "processed = FALSE", not "NOT processed": measured with EXPLAIN
+	// ANALYZE at n=2000 that MySQL's optimizer already produces the exact
+	// same plan for both -- "Index lookup ... (..., processed=0)",
+	// actual rows=1 -- because `processed` is a two-valued (0/1) column
+	// and MySQL's range optimizer folds a NOT of one into an equality
+	// against the other. So this is not a correctness fix; it is the
+	// explicit form, matching MSSQL's `processed = 0` arm below, so a
+	// future reader does not have to re-derive the same EXPLAIN to be
+	// sure the predicate is sargable -- raised in cleat-review's #2675
+	// round 1 as a question ("is this sargable on MySQL?"), settled by
+	// measurement rather than by inspection.
 	MySQL: `SELECT id, event_type, event_data, received_at
-FROM ingested_events FORCE INDEX (idx_ingested_events_correlate)
+FROM ingested_events FORCE INDEX (idx_ingested_events_claim)
 WHERE tenant_id = $1
   AND event_type = $2
   AND key1 = $3
   AND key2 = $4
   AND key3 = $5
-  AND NOT processed
+  AND processed = FALSE
 ORDER BY received_at
 LIMIT 1
 FOR UPDATE SKIP LOCKED`,
