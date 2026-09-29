@@ -63,10 +63,12 @@ ways depending on how the run would have started**. A direct start surfaces it
 immediately but unhelpfully: creating the tenant succeeds, and nothing about
 it fails, so the gap is invisible until that tenant's first run 404s with
 "workflow definition not found" — by which point it is easy to mistake for an
-unrelated problem. A *scheduled* run is quieter still: the scheduler only logs
-a WARN, `"Scheduler: definition not found"`, naming the schedule and the
-missing definition, and the schedule simply never fires — nothing surfaces to
-an operator not reading worker logs at that level.
+unrelated problem. A *scheduled* run is noisier in the log but no more visible
+in practice: the scheduler logs a WARN, `"Scheduler: definition not found"`,
+naming the schedule and the missing definition, and does not advance the
+schedule's due time — so it does not fire until the definition is deployed,
+and logs that same WARN on every scheduler tick until then. Nothing surfaces
+to an operator not reading worker logs at that level.
 
 An application that creates tenants at runtime (a signup flow, for example)
 needs to run the same `cleat deploy` its operator ran once, again, for each
