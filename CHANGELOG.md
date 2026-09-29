@@ -2036,6 +2036,15 @@ and everything that changed in them is recorded here.
   stays readable by every tenant, which is what this table's PostgreSQL RLS
   policy has always allowed.
 
+  **This advice was true when written and stopped being true.** See "Workflow
+  definition names are now per-tenant" under [0.3.0] above (§3.77, D7): that
+  change made definition names per-tenant and removed the default-tenant
+  exemption (`OR tenant_id = '00000000-...'`) from `tenant_isolation_defs`
+  entirely. A definition owned by the default tenant is no longer readable
+  by any other tenant, on any dialect — deploying a "shared" definition this
+  way now just makes it a definition only the default tenant can use.
+  cleat#2620.
+
   What upgrades cleanly: every definition in an existing database is owned by
   the default tenant, because `PostgresStore` hardcoded that value and
   `MSSQLStore`'s `MERGE` omitted the column. Such a definition is *adopted* by

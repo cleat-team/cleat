@@ -215,10 +215,19 @@ func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef)
 	// This line used to be a literal `tenantID :=
 	// "00000000-0000-0000-0000-000000000000"`, ignoring s.tenantID, so every
 	// definition every tenant deployed was written as the default tenant's --
-	// and this table's RLS policy admits the default tenant by design
+	// and this table's RLS policy USED TO admit the default tenant by design
 	// (`tenant_id = cleat.assert_tenant_set() OR tenant_id = '000…'`, for
 	// shared definitions), so every definition was a shared definition.
 	// IMPROVEMENT-PLAN 3.12.
+	//
+	// THAT OR CLAUSE IS GONE. #594 (§3.77, D7, 2026-09-02) made definition
+	// names per-tenant and removed it from `tenant_isolation_defs` along
+	// with `ErrWorkflowDefOwnedByAnotherTenant` -- the policy today is
+	// exactly `tenant_id = cleat.assert_tenant_set()`, with no default-tenant
+	// exemption on any dialect. A definition owned by the default tenant is
+	// readable ONLY when the session's tenant is also the default tenant.
+	// cleat#2620: a CHANGELOG entry from before #594 still describes the old
+	// behaviour as current.
 	tenantID := s.tenantID
 
 	// No ownership check: under (tenant_id, name, version) another tenant's
