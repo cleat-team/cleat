@@ -350,10 +350,14 @@ version is the CONTROL, reported separately and excluded from the totals):
 | platform | **124** | **0** |
 | **total** | **442** | **136** |
 
+*Bare `DBOS.runStep` (no sandbox) is deliberately not a row or a column in
+this table — it is the CONTROL, reported separately below, and adding its
+104 lines to either side here would be a mistake, not an omission to fix.*
+
 CONTROL, excluded from the totals above: bare `DBOS.runStep`, no sandbox
 (`src/workflow.ts` + `src/wedge.test.ts`) — **104** lines. It is not what an
 idiomatic team ships, which is the entire reason the isolated counterpart
-exists; folding it into the isolated row's total would count DBOS's own
+exists; folding it into the isolated column's total would count DBOS's own
 control as part of its treatment.
 
 **What each row actually contains, since two of the four are extracted
