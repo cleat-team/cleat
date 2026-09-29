@@ -115,6 +115,30 @@ func (p *Plugin) blobPut(ctx context.Context, inputJSON string) (string, error) 
 	if len(input.Data) == 0 {
 		return "", fmt.Errorf("blobstore: data is required")
 	}
+	// The SAME ceiling PUT /blobs/{key...} enforces (routes.go's
+	// MaxBodyFromConfig(p.config.MaxBlobSize, ...)), not a separate one --
+	// cleat#2275. That ceiling is the operator's own configured limit on
+	// what this system will call a blob, independent of transport; a guest
+	// workflow calling this host function reaches the identical storage
+	// backend and blob_content bookkeeping PUT does; there is no reason a
+	// caller that skips the HTTP route should see no bound at all. Checked
+	// here, before p.backend.Put and the metadata upsert, so an oversized
+	// blob is refused before anything is written rather than stored and
+	// then reported as too large.
+	//
+	// `> 0`, matching Init's own "unset" convention (plugin.go: `if
+	// p.config.MaxBlobSize <= 0 { ... default 10 MiB }`) -- every production
+	// Plugin has gone through Init before a host function can be called, so
+	// MaxBlobSize is always positive there. A test that builds &Plugin{}
+	// directly, bypassing Init (as most of this package's host-function
+	// tests do), leaves it at Go's zero value; treating that as "no
+	// configured bound" rather than "reject everything" is what makes this
+	// check apply to a real deployment without rewriting every such test to
+	// set one it does not care about.
+	if p.config.MaxBlobSize > 0 && int64(len(input.Data)) > p.config.MaxBlobSize {
+		return "", fmt.Errorf("blobstore: data is %d bytes, exceeding max_blob_size (%d bytes)",
+			len(input.Data), p.config.MaxBlobSize)
+	}
 	if input.ContentType == "" {
 		input.ContentType = "application/octet-stream"
 	}
