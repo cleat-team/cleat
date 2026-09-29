@@ -645,6 +645,22 @@ jobs:
       - name: Cross-module go.mod tidiness guard
         run: scripts/check-go-mod-tidy.sh
 
+      # cleat#2626: examples/order-lifecycle/{webhookingestclient,emailclient}
+      # are `cleat-gen plugin-client` output, committed rather than built at
+      # compile time -- and a copy drifts from its producer exactly the way
+      # a hand-maintained plugin.json manifest already has (cleat#2656).
+      # PluginCall stays string-and-JSON-keyed underneath a generated client,
+      # so a stale one compiles fine and sends the wrong field names at
+      # runtime; #2626's own PR found that exact failure shape from a
+      # hand-written payload. --self-test first: it mutates a committed
+      # client, requires this script to report it stale, then restores it --
+      # the known-positive that separates "no drift" from "this check
+      # compares nothing".
+      - name: Generated plugin-client freshness guard
+        run: |
+          scripts/check-generated-plugin-clients.sh --self-test
+          scripts/check-generated-plugin-clients.sh
+
       # One contract for the non-workflow entities (cleat#1702): created_at,
       # updated_at, disabled_at, and none of the four older spellings of
       # "retired". Members convert one at a time, so most clauses are still
