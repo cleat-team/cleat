@@ -299,8 +299,20 @@ jobs:
       # fails if a second package starts wiping these databases, which is the
       # condition that would make -p 1 load-bearing. Change this comment when
       # it does.
+      # -json, tee'd to a report rather than piped through -v: cleat#2444. This
+      # is the only job that runs with exactly one non-PostgreSQL DSN set, so a
+      # dialect-gated test that starts SKIPPING here (rather than running)
+      # previously had nothing to notice -- `ok …/engine` prints identically
+      # either way. set -o pipefail is required: without it, tee supplies the
+      # exit status and a failing go test is reported as a green step.
       - name: Run tests
-        run: go test -count=1 -p 1 -timeout=900s ./engine/... ./migration/...
+        run: |
+          set -o pipefail
+          go test -count=1 -p 1 -timeout=900s -json ./engine/... ./migration/... 2>&1 | tee test-report.json
+
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh multi-db/mysql test-report.json
 
   # -------------------------------------------------------------------------
   # Test SQL Server backend
@@ -417,8 +429,17 @@ jobs:
       # space"), and azure-sql-edge, which does, cannot apply the shipped
       # migrations (011_json_scalar_payloads.sql needs isjson). The claim here
       # rests on the call sites plus this job, not on a local measurement.
+      # Same treatment as test-mysql above, cleat#2444: this job runs with
+      # exactly one non-PostgreSQL DSN set, so a dialect-gated test flipping
+      # from running to skipping here was invisible until this budget step.
       - name: Run tests
-        run: go test -count=1 -p 1 -timeout=900s ./engine/... ./migration/...
+        run: |
+          set -o pipefail
+          go test -count=1 -p 1 -timeout=900s -json ./engine/... ./migration/... 2>&1 | tee test-report.json
+
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh multi-db/mssql test-report.json
 
   # -------------------------------------------------------------------------
   # Plugin migration smoke test (all three backends)
@@ -570,7 +591,16 @@ jobs:
           docker exec $(docker ps --filter "ancestor=mcr.microsoft.com/mssql/server@sha256:ba4c8329f48fb8f02e1416be6a930ebfd71268caee78aa985f3af4315e457c89" -q) /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'CleatTest123!' -C -Q "CREATE DATABASE cleat"
 
       - name: Run plugin migration tests
-        run: go test -count=1 -p 1 -timeout=600s -run TestPluginMigrations ./engine/...
+        run: |
+          set -o pipefail
+          go test -count=1 -p 1 -timeout=600s -json -run TestPluginMigrations ./engine/... 2>&1 | tee migration-test-report.json
+
+      # cleat#2444: this job sets all three DSNs, so a passing budget here
+      # means the filtered step above genuinely exercised every dialect
+      # rather than a dialect's arm quietly skipping under an unfiltered "ok".
+      - name: Skip budget (plugin migration tests)
+        if: always()
+        run: scripts/check-skip-budget.sh multi-db/plugin-migrations migration-test-report.json
 
       # Unfiltered, and -p 1. cleat#1203.
       #
@@ -593,7 +623,20 @@ jobs:
       # concurrently against one server delete each other's fixtures mid-test.
       # That serialisation is part of the 31s above, not an addition to it.
       - name: Run plugin behavioral tests (all backends)
-        run: go test -count=1 -p 1 -timeout=900s ./plugins/...
+        run: |
+          set -o pipefail
+          go test -count=1 -p 1 -timeout=900s -json ./plugins/... 2>&1 | tee plugins-test-report.json
+
+      # cleat#2444: this is the step the issue is about -- "ok …/plugins/
+      # eventtriggers" prints identically whether a dialect-gated test ran or
+      # skipped, and this unfiltered sweep is the ONLY place any plugin
+      # package's MySQL and SQL Server arms execute at all (ci.yml's
+      # test-go/plugins job sets CLEAT_TEST_DB for PostgreSQL only, no MySQL
+      # or SQL Server DSN). The per-package -v step below is a convenience
+      # once this exists, not the only evidence.
+      - name: Skip budget (plugin behavioral tests)
+        if: always()
+        run: scripts/check-skip-budget.sh multi-db/plugins plugins-test-report.json
 
       # A NARROW, ADDITIONAL step -- not a replacement for the unfiltered run
       # above, which stays unfiltered for exactly the reason cleat#1203 gives
@@ -703,4 +746,15 @@ jobs:
       # CLEAT_CRASH_DB and Fatals without it, deliberately. It selects the
       # parent and its four dialect subtests; re-derive with -list.
       - name: Run the shutdown scenarios on MySQL and SQL Server
-        run: go test -count=1 -timeout=900s ./tests/crash/ -run TestShutdownScenariosOnMySQLAndMSSQL
+        run: |
+          set -o pipefail
+          go test -count=1 -timeout=900s -json ./tests/crash/ -run TestShutdownScenariosOnMySQLAndMSSQL 2>&1 | tee test-report.json
+
+      # cleat#2444: both dialect DSNs are set here (CLEAT_CRASH_MYSQL,
+      # CLEAT_CRASH_MSSQL), so the four selected subtests should never skip in
+      # this job -- unlike test-go/crash's ledger entry for the SAME test
+      # names in ci.yml's PostgreSQL-only crash matrix, where all four skip by
+      # design. Budgeted at 0 here for exactly that reason.
+      - name: Skip budget
+        if: always()
+        run: scripts/check-skip-budget.sh multi-db/crash-shutdown test-report.json
