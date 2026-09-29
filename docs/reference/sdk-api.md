@@ -877,23 +877,30 @@ That promise needs a rule for what a plugin's own contract change is allowed
 to do to an already-published `Req`/`Resp` struct, because unlike an ordinary
 internal edit, a rename here breaks a type a customer's code already imports.
 
-1. **Adding a field to a `Req` or `Resp` struct is safe today** -- the
-   conventional additive direction every consumer of a JSON-shaped API
-   already has to tolerate, with a new input field marked `omitempty` so an
-   older caller who never sets it still round-trips, and its Go zero value
-   treated as "not sent" in the plugin. **This is qualified, not
-   unconditional, and the qualification matters once point 3's fix ships:**
-   under plain `json.Unmarshal` (today), an unrecognised field is silently
-   dropped either direction, which is what makes an addition safe in
-   whichever order client and plugin update. If a plugin adopts
-   `DisallowUnknownFields` on its `Req` (point 3), a newer client's new
-   field sent to a not-yet-upgraded plugin now fails the call outright
-   instead of being dropped -- so a `Req` addition needs **plugin-first
-   rollout** wherever that fix is live. `Resp` additions stay safe
-   independently of that fix, and only for as long as client-side decoding
-   (`PluginCallTyped`, `cleat/plugin.go`) stays a plain, lenient
-   `json.Unmarshal` -- which is the current shape, and is request-side-only
-   by design in point 3's proposal.
+1. **Adding a field to a `Req` or `Resp` struct is additive-safe, subject to
+   rollout order — owner decision, 2026-09-29, resolving the conflict this
+   section otherwise has with point 3.** It is the conventional additive
+   direction every consumer of a JSON-shaped API already has to tolerate,
+   with a new input field marked `omitempty` so an older caller who never
+   sets it still round-trips, and its Go zero value treated as "not sent" in
+   the plugin. **Two constraints, both load-bearing once point 3's fix
+   exists, and both belong on this page rather than left implicit:**
+   - **A `Req` addition needs plugin-first rollout.** Under plain
+     `json.Unmarshal` (today), an unrecognised field is silently dropped
+     either direction, which is what makes an addition safe regardless of
+     which side updates first. If a plugin adopts `DisallowUnknownFields`
+     on its `Req` (point 3), a newer client's new field sent to a
+     not-yet-upgraded plugin now fails the call outright instead of being
+     dropped — so the plugin must be upgraded before clients start setting
+     the new field.
+   - **`Resp` additions stay safe only if client-side decoding stays
+     lenient, and the fix in point 3 must never be applied there.** Client
+     decoding (`PluginCallTyped`, `cleat/plugin.go`) is a plain
+     `json.Unmarshal` today; that leniency is what makes a `Resp` addition
+     safe in either rollout order. Point 3's rejection is request-side only
+     **by design, not by omission** — applying it to the client's own
+     decode would turn every `Resp` addition into the same rollout hazard
+     as a `Req` addition, for no compatibility benefit.
 
 2. **Renaming or removing a field is a breaking change to published SDK
    surface, and needs an explicit version boundary -- this is the part of
@@ -934,8 +941,14 @@ internal edit, a rename here breaks a type a customer's code already imports.
      request-side only, by design** (see point 1's qualification).
 
    **This is not yet enforced anywhere for case (a); it is a known,
-   documented hazard, and (b) and (c) are not "enforced" so much as
-   inherently tolerated by the zero-value convention.** The concrete fix
+   documented hazard.** The other two are not both benign: **(b) is
+   genuinely tolerated**, by point 1's own additive convention — a missing
+   optional field is the normal, intended shape of the contract. **(c) is
+   not tolerated, it is undetected**: a renamed or removed `Resp` field is
+   silent data loss the client cannot distinguish from a field that was
+   always empty, and it is governed by point 2's breaking-change rule, not
+   by point 1's zero-value convention — point 2 is what has to gate that
+   change, precisely because nothing else will catch it. The concrete fix
    for (a), recommended but not adopted here because adopting it is itself
    a compatibility decision: have `RegisterTyped` decode with
    `json.NewDecoder(...).DisallowUnknownFields()` instead, so a version
