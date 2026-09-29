@@ -48,6 +48,11 @@ var mysqlCleanupTables = []string{
 	"workflow_instances",
 	"workflow_defs",
 	"plugin_defs",
+	// See postgresCleanupTables' comments on these four entries -- cleat#2228.
+	"tenant_secrets",
+	"queues",
+	"tenant_domains",
+	"tenant_settings",
 }
 
 // CleanupMySQLTestData removes all test data from MySQL tables.

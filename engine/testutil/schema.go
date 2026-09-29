@@ -110,6 +110,30 @@ var postgresCleanupTables = []string{
 	"workflow_instances",
 	"workflow_defs",
 	"plugin_defs",
+	// None of the four below has an FK to any table above -- each is keyed on
+	// tenant_id alone, FK'd only to admin.tenants, which this list never
+	// touches. Position doesn't matter for correctness; appended rather than
+	// inserted to keep the diff small.
+	//
+	// tenant_secrets -- cleat#2228: notifications and webhookingest seed rows
+	// here (notifications.webhook_secret.*, webhook-ingest.source_secret.*)
+	// under the default tenant, and nothing cleared them -- a later `go test`
+	// process derives its own random master key ring, so it inherits an
+	// earlier process's key_version=1 row whose actual key material differs,
+	// and TestResealSecretsCommandConvergesAndIsIdempotent fails on
+	// "secret could not be decrypted" against a database no run in that
+	// process ever wrote to.
+	"tenant_secrets",
+	// queues, tenant_domains, tenant_settings -- the same gap cleat#2228
+	// asked to be checked for: all three carry FORCE ROW LEVEL SECURITY
+	// (`grep -oE 'ALTER TABLE (ONLY )?[a-zA-Z_.]+ FORCE ROW LEVEL SECURITY'
+	// migrations/postgres/*.sql`) and were simply never added here. queues is
+	// distinct from queue_holders, already in this list -- confirmed by
+	// their separate CREATE TABLE statements and FK targets
+	// (queue_holders -> workflow_instances, queues -> admin.tenants only).
+	"queues",
+	"tenant_domains",
+	"tenant_settings",
 }
 
 // CleanupPostgresTestData deletes all rows from the cleat test tables.
