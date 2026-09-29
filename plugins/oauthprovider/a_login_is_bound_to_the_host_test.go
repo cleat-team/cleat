@@ -168,6 +168,32 @@ func TestLoginIsBoundToTheHost(t *testing.T) {
 		}
 	})
 
+	t.Run("host binding on with a typed-nil resolver refuses rather than panicking", func(t *testing.T) {
+		// cleat#2375: hostResolver is an interface, and a typed nil -- a nil
+		// *recordingHostResolver assigned through it, the same shape a hand-built
+		// plugin.Environment{HostResolver: (*auth.TenantStore)(nil)} produces --
+		// is a NON-nil interface value. `p.hostResolver == nil` reads that as
+		// "a resolver is present" and calls TenantForHost on it, which panics
+		// dereferencing the nil receiver instead of answering the intended 500.
+		p, handler, _ := newFixture(t)
+		p.requireHostMatch = true
+		var nilResolver *recordingHostResolver
+		p.hostResolver = nilResolver // typed nil, not the untyped nil the case above covers
+
+		rec := doLogin(handler)
+
+		if rec.Code != http.StatusInternalServerError {
+			t.Fatalf("want 500 for a typed-nil resolver (the same refusal as no resolver at all), "+
+				"got %d: %s", rec.Code, rec.Body.String())
+		}
+		if body := rec.Body.String(); !strings.Contains(body, "misconfigured") {
+			t.Errorf("500 body %q does not name the misconfiguration", body)
+		}
+		if loc := rec.Header().Get("Location"); loc != "" {
+			t.Errorf("unresolvable host binding still set Location: %q", loc)
+		}
+	})
+
 	t.Run("a resolver error refuses rather than reading as bound", func(t *testing.T) {
 		p, handler, _ := newFixture(t)
 		p.requireHostMatch = true

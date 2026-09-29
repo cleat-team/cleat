@@ -117,7 +117,19 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.mux = env.Mux
 	p.dialect = env.Dialect
 	p.secrets = env.Secrets
-	p.hostResolver = env.HostResolver
+	// hostResolverIsNil, not a plain assignment: env.HostResolver is a
+	// plugin.DomainResolver, and a caller building an Environment by hand can
+	// assign a typed-nil concrete value through it (cleat#2375). Normalising
+	// here means every later read of p.hostResolver, present or future, sees
+	// a real nil in that case rather than each caller having to know to call
+	// hostResolverIsNil for itself -- routes.go's own guard still does too,
+	// as defence in depth against a test or future code path that sets the
+	// field directly rather than through Init.
+	if hostResolverIsNil(env.HostResolver) {
+		p.hostResolver = nil
+	} else {
+		p.hostResolver = env.HostResolver
+	}
 	p.requireHostMatch = env.RequireHostMatch
 	p.mintOAuthAPIKey = env.MintOAuthAPIKey
 	p.revokeExpiredOAuthAPIKeys = env.RevokeExpiredOAuthAPIKeys

@@ -13,6 +13,7 @@ import (
 	"html/template"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -349,8 +350,16 @@ func (p *Plugin) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// happens in a test building an Environment by hand -- treated as "can't
 	// check" rather than "check passed", refusing rather than silently
 	// skipping the binding --require-host-match promised.
+	//
+	// hostResolverIsNil, NOT `p.hostResolver == nil` (cleat#2375): hostResolver
+	// is an interface, and a test building an Environment by hand with a
+	// typed-nil concrete value -- Environment{HostResolver: (*auth.TenantStore)(nil)}
+	// -- produces a non-nil interface wrapping a nil pointer. `== nil` is false
+	// for that value, so the plain comparison let it straight through to
+	// TenantForHost, which panics dereferencing the nil receiver instead of
+	// answering the intended 500.
 	if p.requireHostMatch {
-		if p.hostResolver == nil {
+		if hostResolverIsNil(p.hostResolver) {
 			p.logger.Error("oauth: --require-host-match is set but no host resolver was provided")
 			p.writeError(w, http.StatusInternalServerError, "host binding is misconfigured")
 			return
@@ -1166,4 +1175,28 @@ func (p *Plugin) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p.writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
+}
+
+// hostResolverIsNil reports whether resolver is unusable -- either a plain
+// nil interface, or a non-nil interface wrapping a nil pointer (the shape
+// Environment{HostResolver: (*auth.TenantStore)(nil)} produces, which
+// `resolver == nil` cannot see: cleat#2375).
+//
+// Guards its own reflection: a caller could in principle satisfy
+// plugin.DomainResolver with a non-pointer, non-nillable concrete type (a
+// plain struct value, for instance), and reflect.Value.IsNil panics on a
+// Kind it does not apply to. Restricting to the five nillable kinds keeps
+// this a "can this value even be nil" check rather than a demand that every
+// implementation be pointer-shaped.
+func hostResolverIsNil(resolver plugin.DomainResolver) bool {
+	if resolver == nil {
+		return true
+	}
+	v := reflect.ValueOf(resolver)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
