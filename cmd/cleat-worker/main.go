@@ -2365,11 +2365,6 @@ func main() {
 			// writer put the key in the base database, and the API
 			// answered 401 to every request with no key that could work.
 			// cleat#866.
-			authResolver, arErr := auth.NewTenantStoreForDialect(db, *driver)
-			if arErr != nil {
-				logger.ErrorContext(context.Background(), "cannot build the API key resolver, so no request could be authenticated", "worker_id", workerID, "error", arErr)
-				os.Exit(1)
-			}
 			//
 			// HOST BINDING GOES ON FIRST, so that after auth.MiddlewareWithMux wraps
 			// it below the order is auth OUTSIDE, host binding INSIDE.
