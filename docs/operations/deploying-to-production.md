@@ -58,15 +58,19 @@ useful."* (cleat#2717). So **onboarding a new tenant includes a deploy step**
 for every workflow it needs to run — running `cleat deploy` once, for one
 tenant, does not make that workflow available to a tenant created afterward.
 
-The failure this produces if you forget is **late and quiet**: creating the
-tenant succeeds, and nothing about it fails. The gap only surfaces when that
-tenant starts a run, as "workflow definition not found" — by which point the
-missing deploy is easy to mistake for an unrelated problem. An application
-that creates tenants at runtime (a signup flow, for example) needs to run the
-same `cleat deploy` its operator ran once, again, for each new tenant's id,
-before that tenant's first run — see `examples/b2b-saas-control-plane/`'s
-`tenantAdmin.deployWorkflowDef` for a worked example of exactly this, done
-right after tenant creation.
+The failure this produces if you forget is **late and quiet, in two different
+ways depending on how the run would have started**. A direct start surfaces it
+immediately but unhelpfully: creating the tenant succeeds, and nothing about
+it fails, so the gap is invisible until that tenant's first run 404s with
+"workflow definition not found" — by which point it is easy to mistake for an
+unrelated problem. A *scheduled* run is quieter still: the scheduler only logs
+a WARN, `"Scheduler: definition not found"`, naming the schedule and the
+missing definition, and the schedule simply never fires — nothing surfaces to
+an operator not reading worker logs at that level.
+
+An application that creates tenants at runtime (a signup flow, for example)
+needs to run the same `cleat deploy` its operator ran once, again, for each
+new tenant's id, before that tenant's first run.
 
 ### Worker concurrency
 
