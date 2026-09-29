@@ -165,33 +165,47 @@ question both counterparts measure: what happens to a tenant step's host
 access, not the full upload/storage lifecycle.
 
 **The result: the isolate refuses the read, empirically.**
-`src/isolated-wedge.test.ts` runs the same two tenant behaviours
-(`normalize-order`, `read-host-file`) through `DBOS.runStep` wrapping
-`isolated-vm` execution instead of a plain function call, with the same
-mandatory positive control this pair's bare version requires. Verified
-2026-09-28, against a real DBOS runtime and Postgres:
+`src/isolated-wedge.test.ts` runs three tenant behaviours
+(`normalize-order`, `read-host-file`, and — cleat#2628 — `infinite-loop`)
+through `DBOS.runStep` wrapping `isolated-vm` execution instead of a plain
+function call, with the same mandatory positive control this pair's bare
+version requires. Verified 2026-09-29, against a real DBOS runtime and
+Postgres:
 
     ok: the legitimate tenant step completed through the isolate
     require is not defined
     ok: readHostFile was refused by the isolate (ReferenceError: require is not defined)
+    Script execution timed out.
+    ok: the runaway loop was interrupted by the isolate's timeout (Error: Script execution timed out.)
     all assertions passed -- the isolate boundary holds
 
 The refusal is `isolated-vm`'s doing, not DBOS's: the isolate simply has no
-`require` in its global scope. **Falsified by mutation, both directions**,
-same discipline as the bare counterpart:
+`require` in its global scope. The interruption is a second, independent
+mechanism of the same library — a per-call `timeout`, not the missing
+`require` — bounding a tenant script that never tries to escape at all, only
+never returns; see `src/isolated-workflow.ts`'s `INFINITE_LOOP_SOURCE` for
+why that is a different adversarial shape from `read-host-file` and needs
+its own test. **Falsified by mutation, in all the directions this file's
+three assertions admit**, same discipline as the bare counterpart:
 
 | mutation | result |
 |---|---|
-| (none) | exit 0 — positive control holds, isolation holds |
-| break the positive control (force `normalize-order` to throw) | exit 2 — UNMEASURED, isolation test correctly skipped |
+| (none) | exit 0 — positive control holds, both isolation checks hold |
+| break the positive control (force `normalize-order` to throw) | exit 2 — UNMEASURED, both isolation tests correctly skipped |
 | leak `require` into `readHostFileIsolated` (simulate a misconfigured sandbox) | exit 1 — FINDING, correctly reports the isolation did NOT hold |
+| remove `timeout` from the `fn.apply` call that runs the loop (cleat#2628) | exit 2 — the isolate genuinely never returns; `DBOS.shutdown()` and even `process.exit()` cannot terminate a process with a wedged native isolate thread (both measured), so the harness self-SIGKILLs rather than hang the CI job forever. See `isolated-wedge.test.ts`'s `SAFETY_MARGIN_MS` comment. |
 
-That third row is the one worth dwelling on: it is not a hypothetical.
-Simulating a team that wires its sandbox up incorrectly (or a future
-`isolated-vm` release that changes its default global scope) produces
-exactly the same exit code as a real regression, which is the entire point
-of the 3-way contract — a broken sandbox is a **finding**, not a silent
-green.
+The third row is the one worth dwelling on from the earlier revision of this
+pair: it is not a hypothetical. Simulating a team that wires its sandbox up
+incorrectly (or a future `isolated-vm` release that changes its default
+global scope) produces exactly the same exit code as a real regression,
+which is the entire point of the 3-way contract — a broken sandbox is a
+**finding**, not a silent green. **The fourth row is a different shape of
+the same lesson, found by running it rather than reading it**: the obvious
+fix for "this might hang" — call `process.exit()` — does not actually work
+once a native thread is truly wedged, and the only way that was discovered
+was letting the falsification run to completion under an external hard
+bound instead of trusting that `process.exit()` does what its name implies.
 
 ## What this counterpart costs, and where the DBOS side's number understates it
 
@@ -331,7 +345,7 @@ the same discipline as the cost this pair cannot measure directly.
 ## Counting this pair, role-symmetric
 
 **Re-derive with `scripts/dbos-pair-loc.sh integration-hub`** (`cloc` 2.10).
-Snapshot dated **2026-09-28** — re-run the command rather than re-quoting
+Snapshot dated **2026-09-29** — re-run the command rather than re-quoting
 these rows, per CLAUDE.md's rule on numbers in prose.
 
 **This is the fourth shape this table has taken, and each move fixed a
@@ -359,14 +373,31 @@ of them load-bearing. Adding them moved cleat's host-runner row from 21 to
 time a real asymmetry surfaced: **against** cleat's total, from 120 to
 124.
 
+**This is the fifth shape, and it moves the same direction again.**
+cleat#2628 added a THIRD tenant behaviour to both sides — an infinite loop,
+bounding a runaway tenant step rather than one that tries to escape through
+a host call — after cleat-review noted the original two behaviours tested
+only the CPU-unbounded counterpart's `require` refusal, never the `timeout`
+it also carries. Adding the third behaviour, and the assertions and
+falsification comments that go with it, moved every row it touches: cleat's
+tenant code (a third `main.go`) and e2e harness (a third scenario arm);
+DBOS-isolated's tenant code (a third template literal), host runner (new
+comments explaining why this row is extracted the way it is), and unit
+tests (two new assertions, their falsification comments, and the
+self-SIGKILL fallback's own comment describing why it exists). The
+DBOS-isolated side grew considerably more than cleat's, because this pair's
+own convention is to document a falsification's mechanism in the file next
+to the code it falsifies, and this behaviour's falsification needed more of
+that than the other two combined (see "Falsified by mutation" below).
+
 | role | cleat | DBOS-isolated |
 |---|---:|---:|
-| tenant code | **49** | **19** |
-| host runner | **25** | **49** |
-| unit tests | **50** | **72** |
-| **app total** (tenant + host + unit tests) | **124** | **140** |
+| tenant code | **55** | **24** |
+| host runner | **25** | **54** |
+| unit tests | **50** | **113** |
+| **app total** (tenant + host + unit tests) | **130** | **191** |
 | platform (own line — not summed above) | **124** | **0** |
-| e2e harness (own line — not summed above, see below) | **198** | **42** |
+| e2e harness (own line — not summed above, see below) | **239** | **42** |
 
 *Bare `DBOS.runStep` (no sandbox) is deliberately not a row or a column
 here either — it is the CONTROL, reported separately below, at **104**
@@ -378,12 +409,12 @@ the source's own structure — a brace block, a named function, a template
 literal's closing backtick — not a frozen line range, so the extraction
 tracks edits rather than silently drifting):
 
-- **tenant code**: cleat's two tenant-steps `main.go` files, whole (a cleat
-  tenant author writes nothing else). DBOS-isolated's two source **string
-  literals** (`NORMALIZE_ORDER_SOURCE`, `READ_HOST_FILE_SOURCE`) — the
-  closest analogue to tenant-authored code on that side, since DBOS has no
-  upload mechanism and this port stands the string in for what a tenant
-  would upload.
+- **tenant code**: cleat's three tenant-steps `main.go` files, whole (a
+  cleat tenant author writes nothing else). DBOS-isolated's three source
+  **string literals** (`NORMALIZE_ORDER_SOURCE`, `READ_HOST_FILE_SOURCE`,
+  `INFINITE_LOOP_SOURCE`) — the closest analogue to tenant-authored code on
+  that side, since DBOS has no upload mechanism and this port stands the
+  string in for what a tenant would upload.
 - **host runner**: the `if in.TenantStepName != ""` dispatch block
   extracted from `hub.go`, **plus every other line the dispatch depends
   on** — the `TenantStepName`/`TenantStepRan` struct field declarations,
@@ -392,9 +423,9 @@ tracks edits rather than silently drifting):
   block itself. The rest of `hub.go` is far larger and out of this pair's
   scope (see "Not a full SyncCustomer port"); `scripts/dbos-pair-loc.sh`'s
   comment shows the `grep -ni tenant` sweep that this row's five fragments
-  come from. DBOS-isolated's is `isolated-workflow.ts` **minus** the two
+  come from. DBOS-isolated's is `isolated-workflow.ts` **minus** the three
   tenant-code string literals — `runInIsolate` (isolate setup, the CPU
-  timeout, teardown), the two async wrapper functions, and the workflow
+  timeout, teardown), the three async wrapper functions, and the workflow
   registration.
 - **unit tests**: cleat's two `hub_test.go` functions that exercise
   `TenantStepName` (`TestSyncCustomer_RunsTheTenantsOwnStep`,
@@ -437,13 +468,18 @@ rather than receive it from DBOS.
 **So the honest reading of this table is not a single number — it is
 several separate claims, each real:**
 
-1. **The like-for-like application code is roughly equal**: 124 vs. 140,
-   tenant code + host runner + unit tests on both sides. Read this as
-   "the pair's case for cleat does not rest on line-count arithmetic" —
-   it rests on the three capability claims this README states with their
-   mechanisms: platform-enforced isolation (this section), durable
-   tenant code ("The tenant step's own durability"), and runtime code
-   intake (the e2e-harness note above).
+1. **The like-for-like application code is no longer roughly equal, and
+   that gap is worth naming rather than smoothing over**: 130 vs. 191,
+   tenant code + host runner + unit tests on both sides -- up from 124 vs.
+   140 before cleat#2628's third tenant behaviour. Nearly all of the new
+   61-line gap is in DBOS-isolated's unit-tests row (50 vs. 113, see point
+   3), not in the tenant code or host runner rows, which moved by roughly
+   the same small amount each side did before. Read this as "the pair's
+   case for cleat does not rest on line-count arithmetic" — it rests on
+   the three capability claims this README states with their mechanisms:
+   platform-enforced isolation (this section), durable tenant code ("The
+   tenant step's own durability"), and runtime code intake (the
+   e2e-harness note above).
 2. **cleat ships an isolation boundary as a platform capability** (124
    lines, on its own line, written once, in `engine/`) that every tenant
    step gets automatically. Those 124 lines are not free — someone at
@@ -451,15 +487,28 @@ several separate claims, each real:**
    tenant-step's own author, which is the comparison the app total is
    about. An idiomatic DBOS deployment has no equivalent platform line to
    count, because the capability does not exist there.
-3. **cleat's tenant-code row is smaller than DBOS-isolated's, and its
-   host-runner row is close** (49 vs. 19 is reversed because DBOS's
-   tenant code is a minimal source-string stand-in, not a real upload
-   payload; 25 vs. 49 reflects `isolated-vm`'s setup/teardown/timeout
-   plumbing against cleat's `ChildWorkflow`/`AwaitChild` call plus the
-   struct-field wiring around it). Largely Go-program-vs-JS-string and
-   library-plumbing differences, not a cleat-vs-DBOS platform difference
-   — read them as noisy at this size,
-   not as a trend.
+3. **cleat's tenant-code row is bigger than DBOS-isolated's, and its
+   host-runner row is close** (55 vs. 24 is reversed from DBOS's favour
+   because DBOS's tenant code is a minimal source-string stand-in, not a
+   real upload payload; 25 vs. 54 reflects `isolated-vm`'s
+   setup/teardown/timeout plumbing against cleat's
+   `ChildWorkflow`/`AwaitChild` call plus the struct-field wiring around
+   it). Largely Go-program-vs-JS-string and library-plumbing differences,
+   not a cleat-vs-DBOS platform difference — read them as noisy at this
+   size, not as a trend. **The unit-tests row (50 vs. 113) is the one
+   exception, and it is not noise**: DBOS-isolated's grew by 41 lines
+   documenting one falsification (removing `isolated-vm`'s `timeout`
+   genuinely hangs the process, and neither `DBOS.shutdown()` nor
+   `process.exit()` can terminate it — both measured, not assumed), where
+   cleat's grew by 0, because the equivalent cleat-side falsification (the
+   epoch fence actually interrupting a `for {}` guest) was already proven
+   at the engine layer before this pair existed
+   (`engine/tenant_instance_timeout_test.go`) and this pair's own
+   falsification lives in `scripts/run-integration-hub-tenant-sandbox-scenario.sh`'s
+   comment instead of in a Go test file. Read this as a real cost of
+   `isolated-vm` being a library an application author bolted on rather
+   than a platform guarantee: proving its edge cases is the author's job,
+   documented in the author's code, not the platform's.
 4. **Neither counterpart's line count captures the durability-boundary
    cost** ("What this counterpart costs") or the tenant-step-as-workflow
    difference ("The tenant step's own durability"), because both are

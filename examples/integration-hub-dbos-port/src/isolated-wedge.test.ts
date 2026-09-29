@@ -20,17 +20,43 @@
 // empirically below, the same way wedge.test.ts verifies its own opposite
 // finding: neither file asks the reader to take its claim on faith.
 //
+// A THIRD ASSERTION -- cleat#2628, the bilateral half of a suggestion
+// cleat-review made reviewing #2621: this file's `timeout` option (added
+// after that review caught it was missing) had only ever been verified by a
+// scratch script, not a shipped test, and only on this one side of the
+// cleat-vs-DBOS pair -- cleat's own equivalent bound
+// (tenant_settings.wasm_instance_timeout_ms) is exercised through
+// scripts/run-integration-hub-tenant-sandbox-scenario.sh's real deployed
+// path, so "bounded execution" was a tested claim on one side and an
+// assertion-by-hand on the other. testRunawayLoopIsInterruptedByTheTimeout
+// below closes that gap on this side: it asserts the isolate's `timeout`
+// actually throws for a script that never returns, through the same
+// DBOS.startWorkflow entry point the other two assertions use, not by
+// calling runInIsolate directly.
+//
 // READING THIS FILE'S EXIT CODES -- SAME CONTRACT AS wedge.test.ts, restated
 // because the polarity is opposite and a reader skimming only exit codes
 // could otherwise misread which file is which:
 //
-//   0  both assertions held: the positive control ran through the isolate,
-//      and the adversarial read was REFUSED by the isolate exactly as
-//      documented.
+//   0  all three assertions held: the positive control ran through the
+//      isolate, the adversarial read was REFUSED by the isolate, and a
+//      runaway loop was INTERRUPTED by the isolate's timeout -- all exactly
+//      as documented.
 //   1  A FINDING: the adversarial read SUCCEEDED despite running inside the
-//      isolate -- meaning isolated-vm's isolation boundary did not hold.
-//      That is a serious result (a sandbox library not sandboxing) and
-//      needs investigating immediately, not waving through.
+//      isolate, OR the runaway loop completed with a result instead of being
+//      interrupted -- meaning isolated-vm's isolation boundary did not hold.
+//      A serious result (a sandbox library not sandboxing) and needs
+//      investigating immediately, not waving through.
+//
+//      NOTE ONE EXCEPTION: if the runaway loop instead hangs PAST this
+//      file's own SAFETY_MARGIN_MS with no result and no error at all, the
+//      process reports 2, not 1 -- see SAFETY_MARGIN_MS's comment for why:
+//      a process with a genuinely wedged native isolate thread cannot be
+//      made to exit(1) cleanly (measured), only SIGKILLed, and a process
+//      killed by signal has no exit code for its parent to read. Read a 2
+//      from this file as possibly this case, not only as "nothing was
+//      checked" -- the stderr line printed immediately before the kill says
+//      which one it was.
 //   2  UNMEASURED: the positive control itself did not hold, or the harness
 //      crashed before reaching a verdict.
 import { DBOS } from '@dbos-inc/dbos-sdk';
@@ -44,6 +70,8 @@ const CLAIM =
 
 let positiveControlHeld = false;
 let isolationHeld = false;
+let timeoutHeld = false;
+let stuckLoopStillRunning = false;
 
 function log(ok: boolean, why: string) {
   console.log(`${ok ? 'ok' : 'FAIL'}: ${why}`);
@@ -86,6 +114,66 @@ async function testReadHostFileIsRefusedByTheIsolate() {
   }
 }
 
+// THE SECOND FINDING FOR THIS COUNTERPART: the isolate interrupts a runaway
+// loop rather than hanging the DBOS step (and, through it, the workflow)
+// forever. DBOS.startWorkflow / getResult have no timeout of their own on
+// this call, so a test that got this wrong would hang rather than fail --
+// worth naming, because it means this test's own correctness depends on the
+// isolate's timeout actually firing, the same property it exists to check.
+//
+// THAT HANG IS NOT HYPOTHETICAL, AND THIS FILE DOES NOT LEAVE IT UNBOUNDED.
+// Falsified by removing isolated-workflow.ts's `timeout` from the fn.apply
+// call that actually runs the loop (context.eval's own timeout only bounds
+// PARSING the source, so it returns immediately regardless): the process
+// hung past 15s with no error and no result. `npm test` here feeds
+// scripts/run-integration-hub-dbos-scenario.sh, whose CI job
+// (integration-hub-dbos-pair-scenario in .github/workflows/ci.yml) sets no
+// `timeout-minutes` -- like every job in that file -- so an unbounded wait
+// here would not fail the job, it would occupy a GitHub Actions runner for
+// up to the platform's own 360-minute default. SAFETY_MARGIN_MS races
+// getResult() against a plain setTimeout, independent of and far larger
+// than isolated-vm's own bound (whatever that is currently configured to),
+// so a regression here is reported as the FINDING it is -- "the loop was
+// not interrupted" -- rather than a stalled CI job with no message at all.
+const SAFETY_MARGIN_MS = 15_000;
+
+function delay(ms: number): Promise<{ safetyMarginFired: true }> {
+  return new Promise((resolve) => setTimeout(() => resolve({ safetyMarginFired: true }), ms));
+}
+
+async function testRunawayLoopIsInterruptedByTheTimeout() {
+  const handle = await DBOS.startWorkflow(RunTenantStepIsolated)('infinite-loop', { orderId: 'unused' });
+  try {
+    const outcome = await Promise.race([handle.getResult(), delay(SAFETY_MARGIN_MS)]);
+    timeoutHeld = false;
+    if (outcome && (outcome as { safetyMarginFired?: true }).safetyMarginFired) {
+      // The isolate's OWN timeout never fired, so the underlying step is still
+      // genuinely stuck in a native busy loop -- observed directly, once,
+      // falsifying this test: DBOS.shutdown() below printed one log line
+      // ("Shutting down while N workflows are still running") and then hung
+      // itself, indefinitely, rather than returning. Recorded here rather than
+      // fixed in DBOS.shutdown(), which this file does not own; main() below
+      // skips the graceful shutdown entirely when this flag is set, for
+      // exactly that reason.
+      stuckLoopStillRunning = true;
+      console.error(
+        `FINDING: a runaway loop was still running after this test's own ${SAFETY_MARGIN_MS}ms safety ` +
+          "margin, well past isolated-vm's own configured timeout -- the isolate's timeout did not fire " +
+          'at all; investigate immediately. (This margin exists so a regression here fails this ' +
+          'assertion instead of hanging the CI job -- see the comment above.)',
+      );
+    } else {
+      console.error(
+        `FINDING: a runaway loop completed with a result (${JSON.stringify(outcome)}) instead of being ` +
+          "interrupted -- isolated-vm's timeout did not hold; investigate immediately.",
+      );
+    }
+  } catch (e) {
+    timeoutHeld = true;
+    log(true, `the runaway loop was interrupted by the isolate's timeout (${e}) -- exactly as documented`);
+  }
+}
+
 async function main() {
   console.log(`CLAIM: ${CLAIM}`);
   DBOS.setConfig({
@@ -97,21 +185,49 @@ async function main() {
   await testPositiveControlNormalizeOrderSucceedsThroughIsolate();
   if (positiveControlHeld) {
     await testReadHostFileIsRefusedByTheIsolate();
+    await testRunawayLoopIsInterruptedByTheTimeout();
   } else {
     console.error(
-      'UNMEASURED: the positive control failed, so the isolation test was not evaluated -- ' +
+      'UNMEASURED: the positive control failed, so the isolation tests were not evaluated -- ' +
         'this run says nothing about the boundary this counterpart measures',
     );
   }
 
+  if (stuckLoopStillRunning) {
+    // Do NOT await DBOS.shutdown() here, and do NOT use process.exit() either
+    // -- both were tried and both failed, in that order, each only found by
+    // actually running this branch to completion under an external hard
+    // bound (`timeout 40 npm test`), not by reading the code:
+    //
+    //  1. await DBOS.shutdown() printed one log line ("Shutting down while N
+    //     workflows are still running") and then hung indefinitely.
+    //  2. Skipping it and calling process.exit(1) directly did NOT terminate
+    //     the process either -- confirmed by measurement, `timeout 40` had
+    //     to SIGKILL it from outside. isolated-vm's native busy-loop thread
+    //     has nothing checking for Node's normal exit signal, so the process
+    //     keeps running with the event loop otherwise empty.
+    //
+    // SIGKILL to itself is what actually works, because the OS terminates
+    // the whole process unconditionally -- no JS-level or native-level code
+    // gets a chance to keep a thread alive against it, which is exactly the
+    // property everything above lacked.
+    console.error(
+      'a workflow is still genuinely running; DBOS.shutdown() and process.exit() do not ' +
+        'terminate a process with a wedged native isolate thread -- sending SIGKILL to self',
+    );
+    process.kill(process.pid, 'SIGKILL');
+    return; // unreachable; SIGKILL does not return control to this process
+  }
   await DBOS.shutdown();
 
   if (!positiveControlHeld) {
     console.error('UNMEASURED: harness precondition (positive control) not met');
     process.exit(2);
   }
-  if (!isolationHeld) {
-    console.error('FINDING: the isolate failed to refuse the adversarial read -- see this file\'s header comment');
+  if (!isolationHeld || !timeoutHeld) {
+    console.error(
+      'FINDING: the isolate failed to hold one of its boundaries -- see this file\'s header comment',
+    );
     process.exit(1);
   }
   console.log('all assertions passed -- the isolate boundary holds');

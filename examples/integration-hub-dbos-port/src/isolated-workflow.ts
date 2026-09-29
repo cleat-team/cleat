@@ -79,6 +79,24 @@ const READ_HOST_FILE_SOURCE = `
   })
 `;
 
+// A THIRD tenant behaviour -- cleat#2628, the bilateral half of the timeout
+// this file already carries. Adding the `timeout` above (this file's own
+// prior review round) fixed the omission by hand-verifying it against a
+// scratch script; this source string is what makes that verification a
+// SHIPPED test instead, run through isolated-wedge.test.ts the same way the
+// other two behaviours are. Deliberately a different SHAPE of adversarial
+// input from READ_HOST_FILE_SOURCE: that one tries to escape the isolate
+// through a host API (`require`), which is refused before it ever runs,
+// because a fresh isolate has no such binding. This one never tries to
+// escape at all -- it is a tenant script that simply never returns, and the
+// isolate's own `require`-less sandboxing does nothing to stop it. Only the
+// timeout can.
+const INFINITE_LOOP_SOURCE = `
+  (function () {
+    while (true) {}
+  })
+`;
+
 // A competent team sandboxing untrusted code bounds its CPU time, not only
 // its memory -- cleat-review's review of the first version of this file
 // caught the omission: without a `timeout`, a tenant step containing
@@ -136,6 +154,10 @@ async function readHostFileIsolated(): Promise<string> {
   return runInIsolate(READ_HOST_FILE_SOURCE);
 }
 
+async function infiniteLoopIsolated(): Promise<string> {
+  return runInIsolate(INFINITE_LOOP_SOURCE);
+}
+
 // runTenantStepIsolated -- same shape as workflow.ts's runTenantStep, same
 // DBOS.runStep composition. THE DURABILITY BOUNDARY THIS INTRODUCES IS
 // DOCUMENTED IN README.md ("The durability cost this counterpart does not
@@ -149,7 +171,7 @@ async function readHostFileIsolated(): Promise<string> {
 // idempotent on the TENANT's side, and DBOS has no mechanism -- here or in
 // the bare version -- to enforce or verify that for code it does not
 // control.
-export type TenantStepName = 'normalize-order' | 'read-host-file';
+export type TenantStepName = 'normalize-order' | 'read-host-file' | 'infinite-loop';
 
 async function runTenantStepIsolated(stepName: TenantStepName, input: NormalizeOrderInput): Promise<unknown> {
   switch (stepName) {
@@ -157,6 +179,8 @@ async function runTenantStepIsolated(stepName: TenantStepName, input: NormalizeO
       return DBOS.runStep(() => normalizeOrderIsolated(input), { name: 'normalizeOrderIsolated' });
     case 'read-host-file':
       return DBOS.runStep(() => readHostFileIsolated(), { name: 'readHostFileIsolated' });
+    case 'infinite-loop':
+      return DBOS.runStep(() => infiniteLoopIsolated(), { name: 'infiniteLoopIsolated' });
   }
 }
 
