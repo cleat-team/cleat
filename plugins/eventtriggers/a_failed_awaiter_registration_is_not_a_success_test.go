@@ -39,6 +39,7 @@ func (d *awaiterStubDB) QueryRow(_ context.Context, _ string, _ ...any) plugin.R
 func (d *awaiterStubDB) Query(_ context.Context, _ string, _ ...any) (plugin.Rows, error) {
 	return nil, sql.ErrNoRows
 }
+
 // Begin succeeds and hands back a transaction that forwards straight to the
 // same stub, so the no-rows claim query (and this test's assertions about
 // what happens after it) behave exactly as they did before await_event
