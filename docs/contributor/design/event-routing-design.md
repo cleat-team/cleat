@@ -709,7 +709,9 @@ arrival that the lock this PR adds exists to handle, so "oldest-first" is only
 approximate until `ingested_events` gains a column that orders ties the way concurrent
 inserts actually happened (a sequence, not a wall-clock column). P1's surrogate key
 (cleat#2646) is on `event_awaiters`, a registration table looked up by equality with no
-ordering role, and is not a candidate for this.
+ordering role, and is not a candidate for this. Tracked as cleat#2652, which also
+records cleat-review's nuance: a sequence gives insert order, not commit order, so even
+that is an approximation under concurrency rather than a strict guarantee.
 
 **What this does not cover, filed separately as cleat#2644:** the lock excludes a second
 concurrent `await_event` call, which is what P0b's bug was about. It does not exclude
