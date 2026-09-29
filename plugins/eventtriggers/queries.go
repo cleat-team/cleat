@@ -216,11 +216,23 @@ FOR UPDATE SKIP LOCKED`,
 	// deletes from ingested_events, so that walk was the tenant's entire
 	// history of the event type for an unkeyed claim (today's only usage).
 	// See migrations.go's Version 7 comment for the measurement (Postgres
-	// 2.5ms to 0.46ms, SQL Server 193ms to 5.5ms, at 20,000 rows of
-	// history) and for why this was a real, and equally unbounded, cost on
-	// Postgres and SQL Server too, not a MySQL-only concern -- MySQL is
-	// only the dialect where the old shape was a correctness bug on top of
-	// the performance one.
+	// 2.5ms to 0.46ms, SQL Server 193ms to 5.5ms, MySQL 28.4ms to 0.33ms
+	// (85x), all at 20,000 rows of history) and for why this was a real,
+	// and equally unbounded, cost on Postgres and SQL Server too, not a
+	// MySQL-only concern -- MySQL is only the dialect where the old shape
+	// was a correctness bug on top of the performance one.
+	//
+	// "processed = FALSE", not "NOT processed": measured with EXPLAIN
+	// ANALYZE at n=2000 that MySQL's optimizer already produces the exact
+	// same plan for both -- "Index lookup ... (..., processed=0)",
+	// actual rows=1 -- because `processed` is a two-valued (0/1) column
+	// and MySQL's range optimizer folds a NOT of one into an equality
+	// against the other. So this is not a correctness fix; it is the
+	// explicit form, matching MSSQL's `processed = 0` arm below, so a
+	// future reader does not have to re-derive the same EXPLAIN to be
+	// sure the predicate is sargable -- raised in cleat-review's #2675
+	// round 1 as a question ("is this sargable on MySQL?"), settled by
+	// measurement rather than by inspection.
 	MySQL: `SELECT id, event_type, event_data, received_at
 FROM ingested_events FORCE INDEX (idx_ingested_events_claim)
 WHERE tenant_id = $1
@@ -228,7 +240,7 @@ WHERE tenant_id = $1
   AND key1 = $3
   AND key2 = $4
   AND key3 = $5
-  AND NOT processed
+  AND processed = FALSE
 ORDER BY received_at
 LIMIT 1
 FOR UPDATE SKIP LOCKED`,

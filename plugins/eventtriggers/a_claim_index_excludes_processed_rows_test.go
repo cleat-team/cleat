@@ -2,6 +2,8 @@ package eventtriggers
 
 import (
 	"context"
+	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
@@ -187,6 +189,108 @@ func TestClaimQueryPlanExcludesProcessedRowsOnPostgres(t *testing.T) {
 		t.Errorf("EXPLAIN shows rows removed by the NOT processed filter -- idx_ingested_events_claim is "+
 			"not excluding processed rows structurally, which defeats the point of Version 7. Full plan:\n%s",
 			joinLines(plan))
+	}
+}
+
+// TestClaimQueryIsSargableOnProcessedOnMySQL is cleat-review's round-1 GAP on
+// #2675: idx_ingested_events_claim puts `processed` between key3 and
+// received_at (MySQL has no partial-index support, so `processed` has to be
+// a real column in the key -- see migrations.go's Version 7 comment). The
+// query's WHERE clause binds it with "processed = FALSE". A reasonable
+// worry, raised without a MySQL environment to check it in: if MySQL's
+// optimizer treated that as a post-scan FILTER rather than an equality KEY
+// PART, the claim would seek to (tenant_id, event_type, key1, key2, key3)
+// and then walk every row of that key's history -- read AND, under
+// REPEATABLE READ, locked -- to find the first with processed = FALSE,
+// which is exactly the bug this migration exists to remove, on the one
+// dialect the issue was filed about.
+//
+// It does not: EXPLAIN's own "ref" column names SIX const-bound parts --
+// tenant_id, event_type, key1, key2, key3, AND processed -- proving
+// `processed` is consumed as part of the index SEEK, not a filter applied
+// after it. "Extra" carries no "Using filesort": the received_at ordering
+// this migration relies on (idx_ingested_events_claim: ..., key3, received_at)
+// falls out of the index for free once processed is bound by equality,
+// exactly as it did for the key columns alone before this migration existed.
+func TestClaimQueryIsSargableOnProcessedOnMySQL(t *testing.T) {
+	db := testutil.TestDB(t, testutil.DialectMySQL)
+	dialect := plugin.DialectMySQL
+
+	p := &Plugin{dialect: dialect}
+	if err := plugin.RunMigrations(context.Background(), db, dialect, nil,
+		[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	p.db = &engine.SQLDBAdapter{DB: db, Dialect: dialect}
+
+	tenantID := uuid.New()
+	now := time.Now()
+	seedCtx := plugin.ForTenant(context.Background(), tenantID)
+
+	// Same modest, fast history as the Postgres EXPLAIN test above.
+	const n = 200
+	for i := 0; i < n; i++ {
+		if _, err := p.db.Exec(seedCtx, `INSERT INTO ingested_events (id, tenant_id, event_type, event_data, key1, received_at, processed, status) VALUES ($1,$2,$3,$4,$5,$6,true,'consumed')`,
+			uuid.New(), tenantID, "order.paid", "{}", "K-1", now.Add(-time.Duration(n-i)*time.Second)); err != nil {
+			t.Fatalf("seed processed row %d: %v", i, err)
+		}
+	}
+	if _, err := p.db.Exec(seedCtx, `INSERT INTO ingested_events (id, tenant_id, event_type, event_data, key1, received_at, processed, status) VALUES ($1,$2,$3,$4,$5,$6,false,'pending')`,
+		uuid.New(), tenantID, "order.paid", "{}", "K-1", now); err != nil {
+		t.Fatalf("seed unprocessed row: %v", err)
+	}
+
+	// p.db.Query, not a bare db.QueryContext: p.db (engine.SQLDBAdapter) is
+	// what rebinds queryOldestUnprocessedEventForClaim's "$1".."$5"
+	// placeholders to MySQL's "?" -- the same reason every other query in
+	// this file goes through p.db rather than the raw *sql.DB.
+	//
+	// Scanned POSITIONALLY, not by column name: plugin.Rows (p.db.Query's
+	// return type) has no Columns() method -- it is a scoped interface for
+	// plugins, not a mirror of *sql.Rows. MySQL 8's classic (non-ANALYZE)
+	// EXPLAIN has a fixed 12-column shape: id, select_type, table,
+	// partitions, type, possible_keys, key, key_len, ref, rows, filtered,
+	// Extra. Several are nullable (partitions, possible_keys, key, key_len,
+	// ref, filtered), hence sql.NullString rather than string.
+	explainSQL := "EXPLAIN " + queryOldestUnprocessedEventForClaim.For(dialect)
+	rows, err := p.db.Query(seedCtx, explainSQL, tenantID, "order.paid", "K-1", "", "")
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		t.Fatalf("UNMEASURED: EXPLAIN returned no rows")
+	}
+	var id, selType, table, partitions, typ, possibleKeys, key, keyLen, ref, rowsEst, filtered, extra sql.NullString
+	if err := rows.Scan(&id, &selType, &table, &partitions, &typ, &possibleKeys, &key, &keyLen, &ref, &rowsEst, &filtered, &extra); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	row := map[string]string{
+		"key": key.String, "ref": ref.String, "Extra": extra.String,
+	}
+
+	if row["key"] != "idx_ingested_events_claim" {
+		t.Fatalf("UNMEASURED: EXPLAIN used key %q, not idx_ingested_events_claim -- this run says nothing "+
+			"about that index's sargability. Full row: %+v", row["key"], row)
+	}
+	// FLOOR: six comma-separated "const" entries in `ref` means all six
+	// leading columns -- tenant_id, event_type, key1, key2, key3, processed
+	// -- are bound by equality as part of the index SEEK. Fewer than six
+	// means processed (or an earlier column) is NOT part of the seek, and
+	// whatever it filters on afterwards is exactly the walk this migration
+	// removes.
+	refParts := strings.Split(row["ref"], ",")
+	if len(refParts) != 6 {
+		t.Errorf("on mysql, EXPLAIN's ref column has %d const-bound part(s) (%q), want 6 (tenant_id, "+
+			"event_type, key1, key2, key3, processed) -- processed is not being consumed as part of the "+
+			"index seek, which reopens the walk-and-lock-the-history bug this migration exists to fix. "+
+			"Full row: %+v", len(refParts), row["ref"], row)
+	}
+	if strings.Contains(row["Extra"], "Using filesort") {
+		t.Errorf("on mysql, EXPLAIN's Extra contains %q -- the received_at ordering is not falling out of "+
+			"the index for free, which means MySQL is materialising and sorting a candidate set rather than "+
+			"seeking directly to the row wanted. Full row: %+v", row["Extra"], row)
 	}
 }
 

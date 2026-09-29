@@ -750,22 +750,38 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// an unkeyed await (today's only caller): three tier-1 slots
 			// have a use once queries beyond await_event start filling them.
 			//
-			// MEASURED, not assumed, on both a real Postgres 16 and a real
-			// SQL Server 2022: seeded 20,000 processed rows for one
-			// (tenant, type, key) ahead of one unprocessed target row, then
-			// timed the claim query exactly as written before this
+			// MEASURED, not assumed, on real Postgres 16, SQL Server 2022,
+			// and MySQL 8.4 containers: seeded 20,000 processed rows for
+			// one (tenant, type, key) ahead of one unprocessed target row,
+			// then timed the claim query exactly as written before this
 			// migration. Postgres's own EXPLAIN (ANALYZE, BUFFERS) named
 			// the cost directly -- "Rows Removed by Filter: 20000" -- at
-			// 2.5ms; SQL Server took 193ms for the identical shape, with no
-			// EXPLAIN needed to show why. Adding a CANDIDATE index of this
-			// migration's exact shape, with no query change at all, cut
-			// Postgres to 0.46ms (5.5x) and SQL Server to 5.5ms (35x) --
-			// BOTH optimizers picked it up on their own, no FORCE/hint
-			// needed on either. So this is not a MySQL-only cost: MySQL is
-			// the dialect where the old shape was a CORRECTNESS bug
-			// (over-locking under REPEATABLE READ); Postgres and SQL Server
-			// were paying the same walk as a pure, and real, performance
-			// cost, growing exactly as unboundedly as MySQL's did.
+			// 2.5ms; SQL Server took 193ms for the identical shape, with
+			// no EXPLAIN needed to show why; MySQL, FORCE INDEXed onto the
+			// old idx_ingested_events_correlate exactly as queries.go had
+			// it, took 28.4ms. Adding a CANDIDATE index of this
+			// migration's exact shape, with no other query change, cut
+			// Postgres to 0.46ms (5.5x), SQL Server to 5.5ms (35x), and
+			// MySQL to 0.33ms (85x) -- Postgres and SQL Server's
+			// optimizers picked the new index on their own, no
+			// FORCE/hint needed on either.
+			//
+			// So this is not a MySQL-only cost, and MySQL's old shape was
+			// not only a performance cost either -- it was ALSO a
+			// correctness bug, but a narrower one than #2668's, and the
+			// two do not overlap. #2668 fixed CROSS-key locking: a claim
+			// for key A no longer takes a next-key lock on an older row of
+			// a DIFFERENT key B that the scan passes on its way to A.
+			// idx_ingested_events_correlate has no processed column, so
+			// even with #2668's fix a claim for key A still walked, and
+			// under MySQL's default REPEATABLE READ locked, every
+			// PROCESSED row of key A's own history before reaching the
+			// first unprocessed one -- SAME-key locking, over a claim's
+			// own history rather than a different awaiter's key. That is
+			// this migration's MySQL half, confirmed by EXPLAIN ANALYZE
+			// against the new index: "Index lookup ... processed=0 ...
+			// actual rows=1" -- a real index seek on the exact row wanted,
+			// not a scan that locks its way past the rest.
 			//
 			// idx_ingested_events_correlate is DROPPED, not kept alongside
 			// the replacement: grepping every query in this package that
