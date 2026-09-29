@@ -1603,7 +1603,14 @@ jobs:
       # above it: on a tree where the numbers already agree, "nothing
       # drifted" and "the check matched nothing" print the same kind of
       # success.
+      # ADVISORY until late in 0.4.0 (owner decision, cleat#2699) --
+      # continue-on-error means this step reports without failing the job.
+      # Tracked for reversal as cleat#2700, not just this comment: an
+      # advisory check nobody revisits is indistinguishable from a deleted
+      # one, and a stale "not required" comment alone has already talked a
+      # stream out of a real red once (cleat#2510, closing-reference-check.yml).
       - name: README line counts agree with the pair's own counter
+        continue-on-error: true
         run: |
           python3 scripts/check-dbos-pair-loc.py --self-test
           python3 scripts/check-dbos-pair-loc.py
