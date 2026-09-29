@@ -211,12 +211,36 @@ func snapshotMSSQL(ctx context.Context, db *sql.DB) (*Catalog, error) {
 			WHERE kc.parent_object_id = @p1 AND kc.type = 'UQ'
 			GROUP BY kc.name
 			UNION ALL
+			-- cleat#2447. sys.foreign_keys carries the delete/update actions
+			-- and its own is_not_trusted, none of which were compared -- the
+			-- same shape as the CHECK constraint's is_not_trusted above, and
+			-- for the same reason: two definitions that render identically
+			-- here (ON DELETE CASCADE vs no action) are NOT the same
+			-- constraint, and the emitter (scripts/gen-mssql-baseline/emit.go,
+			-- refAction) already reads both actions -- only the comparator
+			-- was missing them. The CASE mapping matches refAction exactly
+			-- (CASCADE/SET_NULL/SET_DEFAULT, NO_ACTION omitted) so the same
+			-- FK renders identically on both sides of -mode=verify.
 			SELECT fk.name, 'FOREIGN KEY (' + STRING_AGG(pc.name, ',') WITHIN GROUP (ORDER BY fkc.constraint_column_id) + ') REFERENCES ' + OBJECT_NAME(fk.referenced_object_id)
+				+ CASE fk.delete_referential_action_desc
+					WHEN 'CASCADE' THEN ' ON DELETE CASCADE'
+					WHEN 'SET_NULL' THEN ' ON DELETE SET NULL'
+					WHEN 'SET_DEFAULT' THEN ' ON DELETE SET DEFAULT'
+					ELSE ''
+				  END
+				+ CASE fk.update_referential_action_desc
+					WHEN 'CASCADE' THEN ' ON UPDATE CASCADE'
+					WHEN 'SET_NULL' THEN ' ON UPDATE SET NULL'
+					WHEN 'SET_DEFAULT' THEN ' ON UPDATE SET DEFAULT'
+					ELSE ''
+				  END
+				+ CASE WHEN fk.is_not_trusted = 1 THEN ' WITH NOCHECK' ELSE '' END
 			FROM sys.foreign_keys fk
 			JOIN sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
 			JOIN sys.columns pc ON pc.object_id = fkc.parent_object_id AND pc.column_id = fkc.parent_column_id
 			WHERE fk.parent_object_id = @p1
-			GROUP BY fk.name, fk.referenced_object_id
+			GROUP BY fk.name, fk.referenced_object_id, fk.delete_referential_action_desc,
+				fk.update_referential_action_desc, fk.is_not_trusted
 			ORDER BY 1
 		`, tr.objectID)
 		if err != nil {
