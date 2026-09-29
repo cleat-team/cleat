@@ -623,8 +623,15 @@ jobs:
       # post-merge run on develop is the only place a merge-created collision
       # is visible. This one keeps that run from being cancelled by the next
       # merge -- see scripts/check-workflow-concurrency.sh for the measurement.
+      #
+      # --self-test first (cleat#2079's known-positive/negative-control pair,
+      # checked against this repo's own committed workflows), so a future
+      # change to the push-trigger detection is caught here rather than by a
+      # workflow silently losing its concurrency coverage.
       - name: Workflow concurrency guard
-        run: scripts/check-workflow-concurrency.sh
+        run: |
+          scripts/check-workflow-concurrency.sh --self-test
+          scripts/check-workflow-concurrency.sh
 
       # The concurrency guard above keeps a run from being DISCARDED. This one
       # keeps a run from never being CREATED: a workflow that filters

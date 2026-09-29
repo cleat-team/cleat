@@ -59,11 +59,123 @@
 # other.
 #
 # Re-derive what this reads:
-#   grep -l 'push:' .github/workflows/*.yml
+#   python3 -c "import yaml,glob; [print(p) for p in sorted(glob.glob('.github/workflows/*.yml')) if 'push' in (yaml.safe_load(open(p)).get('on', yaml.safe_load(open(p)).get(True)) or {})]"
 #   grep -l 'merge_group:' .github/workflows/*.yml
+#
+# NOT `grep -l 'push:' .github/workflows/*.yml` -- that is the cleat#2079
+# defect this script used to have, re-derived here as a demonstration rather
+# than a recommendation: it overcounts by one, `release-image-dryrun-arm64.yml`,
+# which has `push: false` on a docker/build-push-action step and no `on: push`
+# at all.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+
+# cleat#2079. `grep -qE '^\s*push:'` allows any indentation, so it also
+# matches docker/build-push-action's `push: false` step INPUT, deeply nested
+# under `with:` -- a build option, not an `on: push:` trigger.
+# release-image-dryrun-arm64.yml (schedule + workflow_dispatch only) has
+# exactly that input and was counted as push-triggered by the line-oriented
+# read. Two of the three files with this input (ci.yml, release.yml) are
+# genuinely push-triggered anyway, which is how it went unnoticed: the false
+# positive only shows up on a workflow that ISN'T.
+#
+# Read the trigger from the parsed `on:` mapping instead, the same move
+# check-workflow-pr-triggers.sh already made for the same reason (CLAUDE.md's
+# recurring defect: a tool applied to a format it does not model). `on` is
+# YAML's bare boolean True under YAML 1.1, and can be a bare string
+# (`on: push`), a list (`on: [push, ...]`), or a mapping -- this repo's own
+# workflows are all the mapping form today (`git grep -c '^on: push$'
+# .github/workflows/` and `'^on: \[' .github/workflows/` -> 0, 0), but all
+# three are handled rather than assuming the one shape observed.
+PUSH_FILES_OUT="$(python3 - "$(pwd)" <<'PY'
+import sys, os, glob
+
+try:
+    import yaml
+except ImportError:
+    print("ERROR: PyYAML is not installed, so this guard cannot parse any "
+          "workflow. Install it (pip install pyyaml) rather than skipping: a "
+          "check that cannot run must not report success.", file=sys.stderr)
+    sys.exit(2)
+
+root = sys.argv[1]
+paths = sorted(glob.glob(os.path.join(root, ".github", "workflows", "*.yml")) +
+               glob.glob(os.path.join(root, ".github", "workflows", "*.yaml")))
+if not paths:
+    print("ERROR: no workflow files found -- this guard would pass no matter "
+          "what the workflows said.", file=sys.stderr)
+    sys.exit(2)
+
+for p in paths:
+    with open(p) as fh:
+        doc = yaml.safe_load(fh) or {}
+    # `on` is parsed by YAML 1.1 as the boolean True. Accept both spellings
+    # rather than assuming which one this parser produced.
+    on = doc.get("on", doc.get(True))
+    if isinstance(on, dict):
+        triggers = on
+    elif isinstance(on, list):
+        triggers = {str(t): None for t in on}
+    elif on is not None:
+        triggers = {str(on): None}
+    else:
+        triggers = {}
+    if "push" in triggers:
+        print(p)
+PY
+)"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    exit "$rc"
+fi
+push_files=()
+while IFS= read -r line; do
+    [ -n "$line" ] && push_files+=("$line")
+done <<< "$PUSH_FILES_OUT"
+
+# --self-test: the known-positive/negative-control pair from cleat#2079,
+# checked against the real committed workflows rather than a synthetic
+# fixture -- both files are part of this repo's own tree, not test data that
+# could drift from what the guard actually reads.
+if [ "${1:-}" = "--self-test" ]; then
+    self_test_fail=0
+    is_push_triggered() {
+        local want="$1" f
+        for f in "${push_files[@]}"; do
+            [ "$(basename "$f")" = "$want" ] && return 0
+        done
+        return 1
+    }
+    # Known-positive: has `push: false` on a docker/build-push-action step
+    # and no `on: push` at all. The pre-cleat#2079 grep counted this file as
+    # push-triggered; this must not.
+    if is_push_triggered "release-image-dryrun-arm64.yml"; then
+        echo "FAIL: release-image-dryrun-arm64.yml is reported push-triggered." >&2
+        echo "      It has 'push: false' on a build step and no 'on: push' -- the" >&2
+        echo "      cleat#2079 defect this self-test exists to catch." >&2
+        self_test_fail=1
+    else
+        echo "ok  release-image-dryrun-arm64.yml is correctly NOT push-triggered"
+    fi
+    # Negative control: genuinely push-triggered, and also has a `push:`
+    # build-step input elsewhere in the file. A fix that stopped detecting
+    # push triggers entirely -- not just the false positive -- would pass
+    # the check above vacuously and only this catches it.
+    if is_push_triggered "ci.yml"; then
+        echo "ok  ci.yml is correctly push-triggered"
+    else
+        echo "FAIL: ci.yml is not reported push-triggered, but it is (on: push)." >&2
+        echo "      A check that cannot see a real positive is not a check." >&2
+        self_test_fail=1
+    fi
+    if [ "$self_test_fail" -ne 0 ]; then
+        echo "self-test: FAILED" >&2
+        exit 1
+    fi
+    echo "self-test: known-positive and negative control both correct"
+    exit 0
+fi
 
 # Extract THE group expression, or say we cannot. cleat#1426 review (WS-3):
 # `grep '^\s*group:' | head -1` silently assumes one top-level concurrency
@@ -88,10 +200,7 @@ bad_group=()
 scanned=0
 with_concurrency=0
 
-for f in .github/workflows/*.yml; do
-    # Only workflows that run on push are affected; a pull_request-only
-    # workflow sharing and cancelling its own group is correct.
-    grep -qE '^\s*push:' "$f" || continue
+for f in "${push_files[@]}"; do
     scanned=$((scanned + 1))
 
     if grep -qE '^\s*cancel-in-progress:\s*true\s*$' "$f"; then
