@@ -132,7 +132,7 @@ func TestV5PayloadNotNullMigrationBackfillsExistingNulls(t *testing.T) {
 				t.Errorf("payload IS_NULLABLE after v5: got %q, want %q", isNullable.String, "NO")
 			}
 			if !columnDefault.Valid {
-				t.Errorf("payload COLUMN_DEFAULT after v5: got SQL NULL, want a default -- "+
+				t.Errorf("payload COLUMN_DEFAULT after v5: got SQL NULL, want a default -- " +
 					"v4's MODIFY dropped it and v5 is supposed to restore it")
 			}
 		})
