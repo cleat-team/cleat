@@ -2048,20 +2048,21 @@ and everything that changed in them is recorded here.
   name remains a global namespace; squatting one is now loud instead of
   silent. IMPROVEMENT-PLAN §3.12.
 
-  **Everything above was superseded by "Workflow definition names are now
-  per-tenant" under [0.3.0] above (§3.77, D7), not just the shared-definition
-  advice.** Definition names are per-tenant now, so: a deploy no longer
-  refuses a name another tenant holds (`engine.ErrWorkflowDefOwnedByAnotherTenant`
-  is removed, and a deploy returns no `409` for this at all -- there is no
-  conflict to report, per the [0.3.0] entry); the adoption window is gone
-  (`canAdoptDef` was deleted in the same change, so a tenant other than a
-  definition's creator can no longer take it over, adopted or not); the
-  default-tenant RLS exemption is gone (`tenant_id = cleat.assert_tenant_set()
-  OR tenant_id = '00000000-...'` lost its `OR` clause, so the shared-definition
-  advice two paragraphs up no longer works on any dialect); and the primary
-  key already carries `tenant_id` -- `workflow_defs`' PK is `(tenant_id, name,
-  version)` on both PostgreSQL (`migrations/postgres/001_schema.sql:975`) and
-  SQL Server (`migrations/mssql/001_schema.sql:512`), so "the name remains a
+  **Everything above in this entry was superseded by "Workflow definition
+  names are now per-tenant" under [0.3.0] above (§3.77, D7), not just the
+  shared-definition advice.** Definition names are per-tenant now, so: a
+  deploy no longer refuses a name another tenant holds
+  (`engine.ErrWorkflowDefOwnedByAnotherTenant` is removed, and a deploy
+  returns no `409` for this at all -- there is no conflict to report, per the
+  [0.3.0] entry); the adoption window is gone (`canAdoptDef` was deleted in
+  the same change, so a tenant other than a definition's creator can no
+  longer take it over, adopted or not); the default-tenant RLS exemption is
+  gone (`tenant_id = cleat.assert_tenant_set() OR tenant_id = '00000000-...'`
+  lost its `OR` clause, so the shared-definition advice under "Who this
+  breaks" above no longer works on any dialect); and the primary key already
+  carries `tenant_id` -- `workflow_defs`' PK is `(tenant_id, name, version)`
+  on both PostgreSQL (`migrations/postgres/001_schema.sql:975`) and SQL
+  Server (`migrations/mssql/001_schema.sql:512`), so "the name remains a
   global namespace" above is also no longer true: two tenants can hold the
   same name today. cleat#2620.
 
