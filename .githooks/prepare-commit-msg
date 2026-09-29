@@ -89,28 +89,36 @@ fi
 
 # The parser does not see one. If a line that LOOKS like one exists anywhere
 # in the raw message, this is a MALFORMED message, not an absent trailer --
-# fail loudly rather than silently doing nothing (today's bug, before this
-# fix) or silently stamping a second, correctly-placed trailer next to a
-# broken one that stream-trailer-check.yml will never read.
+# but DO NOT REFUSE HERE. cleat#2588's second review round (cleat-review,
+# confirmed independently by the coordinator and by this hook's own author
+# in a scratch repo): prepare-commit-msg runs BEFORE the commit-message
+# editor opens, for every path that could actually repair this --
+# `commit --amend` and `rebase -i`'s `reword` both hand the ALREADY-malformed
+# message to this hook first, and a hook that exits non-zero here aborts
+# before the editor is ever invoked. Refusing at this point does not give
+# the author a chance to fix it; it blocks the only paths that could.
+# Measured with git 2.50.1: `commit --amend --no-edit` on such a commit was
+# refused with HEAD unchanged; a `reword` was refused with the rebase left
+# stuck, rescheduled. `--no-verify` skips this hook's sibling commit-msg but
+# not this hook, so it does not help either. The only escape from a refusal
+# placed here was `--amend -F <already-fixed-file>` -- not "fix the message
+# by hand", which is what this warning used to say while refusing to let
+# anyone reach the editor to do it.
+#
+# So: skip stamping (do not add a second, correctly-placed trailer next to
+# the broken one -- that would leave two Claude-Stream lines, one of which
+# the check still can't read) and let the message through as-is, warning
+# rather than failing. `.githooks/commit-msg` runs on the FINAL message,
+# after any editor has had its chance, and is where this actually gets
+# refused if it is still broken. See that hook for the refusal and its
+# regression tests.
 if grep -qiE '^Claude-Stream:[[:space:]]*[^[:space:]]' "$MSG_FILE"; then
-	echo "prepare-commit-msg: this message has a line matching" >&2
-	echo "'Claude-Stream: ...', but git's own trailer parser does not read" >&2
-	echo "it as a trailer -- it is not in the message's FINAL paragraph." >&2
-	echo "stream-trailer-check.yml's %(trailers:key=Claude-Stream,valueonly)" >&2
-	echo "would see nothing here, exactly as it does on this repo's own" >&2
-	echo "history for the identical shape (see that workflow's header)." >&2
-	echo "" >&2
-	echo "Usually caused by a blank line between the Claude-Stream line and" >&2
-	echo "the rest of the trailer block:" >&2
-	echo "" >&2
-	echo "    Claude-Stream: WS-2" >&2
-	echo "                          <- this blank line is the defect" >&2
-	echo "    Signed-off-by: ..." >&2
-	echo "" >&2
-	echo "Fix the message by hand: remove the blank line so the trailer" >&2
-	echo "block is one contiguous, final paragraph -- or delete the stray" >&2
-	echo "line entirely and let this hook stamp a correctly-placed one." >&2
-	exit 1
+	echo "prepare-commit-msg: warning: this message has a line matching" >&2
+	echo "'Claude-Stream: ...' that git's trailer parser does not read as a" >&2
+	echo "trailer (it is not in the message's final paragraph). Not stamping" >&2
+	echo "over it -- edit the message to fix this, or commit-msg will refuse" >&2
+	echo "it once you're done editing. See .githooks/commit-msg." >&2
+	exit 0
 fi
 
 STREAM=$(git config cleat.stream || true)

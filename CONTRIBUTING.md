@@ -100,6 +100,19 @@ its own name that it had not opened.
 A message that already names a stream is left alone, so `git commit --trailer`
 and a rebase onto a checkout that never set the config both work.
 
+**A `Claude-Stream:` line separated from the rest of the trailer block by a
+blank line is invisible to git's own trailer parser**, which is what
+`Stream Trailer Check` reads — so it is a malformed message, not an absent
+trailer, and the two get different treatment. `prepare-commit-msg` notices
+but does not refuse it: that hook runs *before* the commit-message editor
+opens, so refusing there would block the only ways to fix it (`commit
+--amend`, `rebase -i`'s `reword` both hand it the already-malformed message
+first). It lets the message through unstamped and warns instead.
+`.githooks/commit-msg` — installed by the same `core.hooksPath` setting —
+runs on the *final* message, after any editor, and is what actually refuses
+it if it is still broken. See that hook's own doc comment for the measured
+repair paths this split is built around (cleat#2588).
+
 **On `develop`, read it with an anchored grep — not the trailer parser.** Every
 commit merged there is a squash, and `squash_merge_commit_message=COMMIT_MESSAGES`
 concatenates the constituent messages, so each one's trailer block lands
