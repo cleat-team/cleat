@@ -1652,6 +1652,17 @@ jobs:
       - name: Install cloc
         run: sudo apt-get update && sudo apt-get install -y cloc
 
+      # scripts/dbos-pair-loc-extract.py's structural extraction is what
+      # makes the role-symmetric table above possible at all -- coordinator's
+      # review of #2621 asked directly whether its correctness was checked
+      # anywhere other than by hand (four markers were broken and confirmed
+      # to fail loud during that PR's review, which is not a check that
+      # survives the next person to touch this file). --self-test verifies
+      # every extraction mode against a known-positive and a known-negative,
+      # the same discipline as the sibling job's check-dbos-pair-loc.py step.
+      - name: LOC extractor's own correctness
+        run: python3 scripts/dbos-pair-loc-extract.py --self-test
+
       - name: Count lines for both sides of the pair
         run: scripts/dbos-pair-loc.sh integration-hub
 

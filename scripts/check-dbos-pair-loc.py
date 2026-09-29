@@ -20,6 +20,18 @@ Both numbers, not just one -- the README asserts a parity claim between two
 sides, and a check that only re-derives one of them could pass while the
 OTHER side silently drifted.
 
+cleat#2597 (the integration-hub pair, in the same PR that split
+dbos-pair-loc.sh's output into "app" and "platform" groups): the section
+markers this file's SELF-TEST FIXTURE reproduced by hand ("== cleat side
+==") drifted from what the script actually prints ("== cleat: app ==")
+the moment that PR renamed them, and the self-test still passed --
+because it is a fixture, not the real script's output, so it can drift
+independently and never notice. Only running the REAL check against the
+tree (this file's own `main()`, not `--self-test`) caught it, reporting
+UNMEASURED rather than a false pass. Extending PAIRS to a pair whose
+output shape differs further is tracked separately (cleat#2632) rather
+than attempted here.
+
 WHAT THIS DOES NOT DO: recompute cloc itself. scripts/dbos-pair-loc.sh is the
 one pinned invocation (CLAUDE.md's own rule -- two counters "the same way,
 slightly differently" produce numbers that look like a finding rather than a
@@ -57,9 +69,9 @@ def parse_script_output(text):
     mismatch, because a parse failure says nothing about whether the numbers
     agree.
     """
-    if "== cleat side ==" not in text or "== DBOS side ==" not in text:
-        return None, None, "script output has neither '== cleat side ==' nor '== DBOS side ==' markers"
-    cleat_part, _, dbos_part = text.partition("== DBOS side ==")
+    if "== cleat: app ==" not in text or "== DBOS: app ==" not in text:
+        return None, None, "script output has neither '== cleat: app ==' nor '== DBOS: app ==' markers"
+    cleat_part, _, dbos_part = text.partition("== DBOS: app ==")
     cleat_m = SUM_RE.search(cleat_part)
     dbos_m = SUM_RE.search(dbos_part)
     if not cleat_m:
@@ -125,12 +137,12 @@ def real_script_runner(pair):
 # --------------------------------------------------------------------------
 
 
-SELF_TEST_SCRIPT_OUT_MATCHED = """== cleat side ==
+SELF_TEST_SCRIPT_OUT_MATCHED = """== cleat: app ==
 Language                     files          blank        comment           code
 Go                               3            125            403            729
 SUM:                             3            125            403            729
 
-== DBOS side ==
+== DBOS: app ==
 Language                     files          blank        comment           code
 TypeScript                       3             43            109            274
 SUM:                             3             43            109            274

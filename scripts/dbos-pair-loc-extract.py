@@ -198,7 +198,126 @@ def go_line(path, regex):
     return '\n'.join(lines[start:match_line + 1]) + '\n'
 
 
+def _write(path, text):
+    with open(path, 'w') as fh:
+        fh.write(text)
+
+
+def self_test():
+    """Verify every extraction mode against a KNOWN-POSITIVE (the marker is
+    there, and the right text comes back) and a KNOWN-NEGATIVE (the marker
+    is gone, and extraction fails loud rather than returning nothing or the
+    wrong span) -- the same discipline check-dbos-pair-loc.py's own
+    --self-test uses, applied here because coordinator's review of #2621
+    asked directly whether this extractor's correctness was checked anywhere
+    other than by hand: four markers were broken and confirmed to fail
+    loud during that PR, but a hand-run falsification decays the moment
+    nobody remembers to re-run it. This makes it part of the script instead.
+
+    Only checks THIS FILE's own extraction logic -- not dbos-pair-loc.sh's
+    use of it, and not whether the pair's README agrees with either (that
+    is check-dbos-pair-loc.py's job, tracked for this pair as cleat#2632).
+    """
+    import tempfile
+
+    failures = []
+    tmpdir = tempfile.mkdtemp(prefix='dbos-pair-loc-extract-selftest-')
+
+    def check(label, fn, expect_substring):
+        try:
+            result = fn()
+        except SystemExit as e:
+            failures.append(f"{label}: known-positive case exited ({e.code}) instead of returning text")
+            return
+        if expect_substring not in result:
+            failures.append(f"{label}: known-positive case did not contain {expect_substring!r}: got {result!r}")
+
+    def check_fails(label, fn):
+        try:
+            fn()
+        except SystemExit as e:
+            if e.code != 2:
+                failures.append(f"{label}: known-negative case exited {e.code}, want 2")
+            return
+        failures.append(f"{label}: known-negative case returned normally instead of exiting 2")
+
+    # go-brace-block
+    p = f"{tmpdir}/brace.go"
+    _write(p, "func f() {\n\tif x.Y {\n\t\tdoThing()\n\t}\n}\n")
+    check("go-brace-block", lambda: go_brace_block(p, r'if x\.Y'), "doThing()")
+    check_fails("go-brace-block (marker missing)", lambda: go_brace_block(p, r'if x\.NOPE'))
+    unclosed = f"{tmpdir}/brace_unclosed.go"
+    _write(unclosed, "func f() {\n\tif x.Y {\n\t\tdoThing()\n")
+    check_fails("go-brace-block (never closes)", lambda: go_brace_block(unclosed, r'if x\.Y'))
+
+    # go-func
+    p = f"{tmpdir}/func.go"
+    _write(p, "func TestThing(t *testing.T) {\n\tassertSomething()\n}\n")
+    check("go-func", lambda: go_func(p, "TestThing"), "assertSomething()")
+    check_fails("go-func (marker missing)", lambda: go_func(p, "TestNope"))
+
+    # ts-const-template
+    p = f"{tmpdir}/tmpl.ts"
+    _write(p, "const SOURCE = `\n  the payload\n`;\n")
+    check("ts-const-template", lambda: ts_const_template(p, "SOURCE"), "the payload")
+    check_fails("ts-const-template (marker missing)", lambda: ts_const_template(p, "NOPE"))
+
+    # go-struct-field
+    p = f"{tmpdir}/field.go"
+    _write(p, "type S struct {\n\t// a comment\n\tFieldName string `json:\"field_name\"`\n}\n")
+    check("go-struct-field", lambda: go_struct_field(p, "FieldName"), "a comment")
+    check_fails("go-struct-field (marker missing)", lambda: go_struct_field(p, "NopeField"))
+
+    # go-line
+    p = f"{tmpdir}/line.go"
+    _write(p, "func f() {\n\t// why this line exists\n\tResultField: someVar,\n}\n")
+    check("go-line", lambda: go_line(p, r'^\s*ResultField:'), "why this line exists")
+    check_fails("go-line (marker missing)", lambda: go_line(p, r'^\s*NopeField:'))
+
+    # FileNotFoundError -> UNMEASURED (2), for every mode, not a traceback
+    for mode, arg in [
+        ('go-brace-block', 'x'), ('go-func', 'x'),
+        ('ts-const-template', 'x'), ('go-struct-field', 'x'), ('go-line', 'x'),
+    ]:
+        try:
+            run_mode(mode, f"{tmpdir}/does-not-exist.go", arg)
+            failures.append(f"{mode} (missing file): returned normally instead of exiting 2")
+        except SystemExit as e:
+            if e.code != 2:
+                failures.append(f"{mode} (missing file): exited {e.code}, want 2")
+
+    if failures:
+        print("self-test FAILED:\n" + "\n".join(f"  {f}" for f in failures), file=sys.stderr)
+        return 1
+    print("self-test passed")
+    return 0
+
+
+def run_mode(mode, path, arg):
+    """The one dispatch table both main() and self_test() use -- a second,
+    independently-maintained copy of this if/elif chain is exactly the kind
+    of drift this file's own extraction logic exists to avoid in the README
+    tables it feeds."""
+    try:
+        if mode == 'go-brace-block':
+            return go_brace_block(path, arg)
+        elif mode == 'go-func':
+            return go_func(path, arg)
+        elif mode == 'ts-const-template':
+            return ts_const_template(path, arg)
+        elif mode == 'go-struct-field':
+            return go_struct_field(path, arg)
+        elif mode == 'go-line':
+            return go_line(path, arg)
+        print(f"unknown mode {mode!r}", file=sys.stderr)
+        sys.exit(2)
+    except FileNotFoundError:
+        fail(f"{path} does not exist")
+
+
 def main():
+    if len(sys.argv) == 2 and sys.argv[1] == '--self-test':
+        sys.exit(self_test())
     if len(sys.argv) != 4:
         print(
             f"usage: {sys.argv[0]} go-brace-block|go-func|ts-const-template|go-struct-field|go-line <file> <name-or-regex>",
@@ -206,22 +325,7 @@ def main():
         )
         sys.exit(2)
     mode, path, arg = sys.argv[1], sys.argv[2], sys.argv[3]
-    try:
-        if mode == 'go-brace-block':
-            sys.stdout.write(go_brace_block(path, arg))
-        elif mode == 'go-func':
-            sys.stdout.write(go_func(path, arg))
-        elif mode == 'ts-const-template':
-            sys.stdout.write(ts_const_template(path, arg))
-        elif mode == 'go-struct-field':
-            sys.stdout.write(go_struct_field(path, arg))
-        elif mode == 'go-line':
-            sys.stdout.write(go_line(path, arg))
-        else:
-            print(f"unknown mode {mode!r}", file=sys.stderr)
-            sys.exit(2)
-    except FileNotFoundError:
-        fail(f"{path} does not exist")
+    sys.stdout.write(run_mode(mode, path, arg))
 
 
 if __name__ == '__main__':
