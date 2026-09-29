@@ -145,8 +145,31 @@ WHERE tenant_id = $1
 ORDER BY received_at
 LIMIT 1
 FOR UPDATE SKIP LOCKED`,
+	// FORCE INDEX pins this to the index TestAwaitEventConcurrentClaimsSkipTheLockedRow
+	// (added by cleat#2641/#2645) and TestAwaitEventConcurrentClaimsOfDifferentEventTypesDoNotInterfereOnMySQL
+	// already characterise: idx_ingested_events_unprocessed's leading column is
+	// (processed, received_at), narrow enough that InnoDB's next-key locking
+	// under REPEATABLE READ has a known, tested shape (documented on the
+	// latter test above). cleat#2625's Version 6 migration added a SECOND
+	// index, idx_ingested_events_correlate (tenant_id, event_type, key1, key2,
+	// key3, received_at), for signalAwaiters'/unregisterAwaiter's key-scoped
+	// lookups -- and its leading columns happen to match this query's WHERE
+	// clause too. Left to the optimizer, MySQL sometimes prefers it here
+	// instead, and its locking shape has NOT been characterised the way the
+	// other index's has: measured directly (10 iterations of
+	// TestAwaitEventConcurrentClaimsSkipTheLockedRow against a real MySQL
+	// 8.4, tenant_id fresh per iteration so cross-iteration data was the only
+	// variable), the unforced query failed 9 of 10 with "claim query: sql: no
+	// rows in result set" -- txB's SKIP LOCKED claim found nothing where
+	// exactly one unprocessed row of its own tenant existed, unlocked and
+	// waiting. Dropping idx_ingested_events_correlate made the same 10
+	// iterations pass 10 of 10, isolating the index choice as the cause
+	// rather than the query text. FORCE INDEX (not USE INDEX -- this must
+	// exclude the correlate index, not merely admit the other one as an
+	// option) restores the characterised locking shape; the correlate index
+	// remains exactly as useful to the key-scoped queries it was built for.
 	MySQL: `SELECT id, event_type, event_data, received_at
-FROM ingested_events
+FROM ingested_events FORCE INDEX (idx_ingested_events_unprocessed)
 WHERE tenant_id = $1
   AND event_type = $2
   AND NOT processed
