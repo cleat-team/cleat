@@ -473,6 +473,21 @@ jobs:
         if: always()
         run: scripts/check-skip-budget.sh plugin-harness/multi-db test-report.json
 
+      # cleat#2661: the -json output above was produced and then discarded --
+      # redirected straight into a file with no `tee`, so a red run's failure
+      # text never reached the job's own log, and nothing carried the file
+      # past the runner once the job ended. This is the same shape as
+      # engine-race.yml's "Upload report" step; `if: always()` matters here
+      # more than there, since the whole point is recovering a FAILING run's
+      # detail without a local reproduction.
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: plugin-harness-multi-db-report-${{ github.run_id }}
+          path: test-report.json
+          retention-days: 30
+
   # --------------------------------------------------------------------------
   # Blobstore S3 round-trip (MinIO)
   # --------------------------------------------------------------------------
