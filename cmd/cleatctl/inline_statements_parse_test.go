@@ -19,6 +19,8 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/plugins/oauthprovider"
 	"github.com/cleat-team/cleat/plugins/scheduledbackup"
+	"github.com/cleat-team/cleat/plugins/tenantlifecycle"
+	"github.com/cleat-team/cleat/plugins/tenantquota"
 )
 
 // Every SQL statement written inline in this package must PARSE against a real
@@ -69,9 +71,27 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 	// with 42P01, and the guard's own fallback, a pin, is worse than the
 	// migration because a pin is permanent. Running the migration is what
 	// makes these four statements genuinely prepare rather than be waived.
+	//
+	// tenantquota and tenantlifecycle joined the same way, cleat#2413/#2178:
+	// both were previously PINNED (eight statements against tenant_quota and
+	// tenant_trials) rather than migrated, and a pin is exactly the wrong
+	// tool here -- PREPARE against a database that HAS EVER run
+	// TestQuotaCommandWorksOnEveryDialect or TestSetTenantTrialWorksOnEveryDialect
+	// in this same package succeeds (those tests create the tables and never
+	// roll back), so the guard's own stale-pin detector then reports eight
+	// correct statements as "no longer describing the tree" and tells the
+	// reader to delete them -- green or red by TEST ORDERING within one run
+	// of `go test ./cmd/cleatctl/`, on a database this package's own tests
+	// share, not by a property of the SQL. Migrating both here, like
+	// scheduledbackup and oauthprovider, makes all eight genuinely PREPARE
+	// against tables this test created itself, so the verdict no longer
+	// depends on what ran before it.
 	lp := &plugin.LoadedPlugin{Plugin: scheduledbackup.New(), Healthy: true}
 	oauth := &plugin.LoadedPlugin{Plugin: oauthprovider.New(), Healthy: true}
-	if err := plugin.RunMigrations(ctx, db, plugin.DialectPostgres, nil, []*plugin.LoadedPlugin{lp, oauth}); err != nil {
+	quota := &plugin.LoadedPlugin{Plugin: tenantquota.New(), Healthy: true}
+	trials := &plugin.LoadedPlugin{Plugin: tenantlifecycle.New(), Healthy: true}
+	if err := plugin.RunMigrations(ctx, db, plugin.DialectPostgres, nil,
+		[]*plugin.LoadedPlugin{lp, oauth, quota, trials}); err != nil {
 		t.Fatalf("applying plugin migrations: %v", err)
 	}
 
@@ -159,49 +179,6 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 		// five-letter subcommand name that collides with the UPDATE keyword.
 		"update": "cmd/cleatctl/queue.go's `case \"update\":` switch label for the `queue update` subcommand; matches the verb regex by coincidence of spelling, not because it is SQL",
 
-		// cleat#2046. tenant_quota is a PLUGIN table (plugins/tenantquota/
-		// migrations.go), not part of the core schema testutil.TestDB applies
-		// here -- unlike tenant_settings, tenant_egress_allow and
-		// tenant_secrets, which this package also writes inline SQL against
-		// and which ARE core tables, so their statements are checked by this
-		// test as written. PREPAREing any of the five below against this
-		// test's db fails with "relation tenant_quota does not exist", which
-		// is a property of this test's fixture, not of the SQL.
-		//
-		// The coverage is not lost: TestQuotaCommandWorksOnEveryDialect runs
-		// every one of these five, unmodified, through plugin.RunMigrations
-		// (the same call cmd/cleat-worker uses at boot) against real
-		// Postgres, MySQL and SQL Server databases -- a stronger check than
-		// this test's PREPARE-only one, and the only one of the three
-		// dialects this test could have run against anyway.
-		"SELECT limit_count, window_seconds, enforce, updated_at FROM tenant_quota WHERE tenant_id = $1 AND resource = $2":                                        "tenant_quota is a plugin table, not in this test's core schema; checked live by TestQuotaCommandWorksOnEveryDialect (cleat#2046)",
-		"INSERT INTO tenant_quota (tenant_id, resource, limit_count, window_seconds, enforce, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7)":        "tenant_quota is a plugin table, not in this test's core schema; checked live by TestQuotaCommandWorksOnEveryDialect (cleat#2046)",
-		"UPDATE tenant_quota SET limit_count = $1, window_seconds = $2, enforce = $3, updated_at = $4 WHERE tenant_id = $5 AND resource = $6 AND updated_at = $7": "tenant_quota is a plugin table, not in this test's core schema; checked live by TestQuotaCommandWorksOnEveryDialect (cleat#2046)",
-		"SELECT tenant_id, resource, limit_count, window_seconds, enforce, updated_at FROM tenant_quota WHERE tenant_id = $1 ORDER BY resource":                   "tenant_quota is a plugin table, not in this test's core schema; checked live by TestQuotaCommandWorksOnEveryDialect (cleat#2046)",
-		"SELECT tenant_id, resource, limit_count, window_seconds, enforce, updated_at FROM tenant_quota ORDER BY tenant_id, resource":                             "tenant_quota is a plugin table, not in this test's core schema; checked live by TestQuotaCommandWorksOnEveryDialect (cleat#2046)",
-
-		// cleat#2534. tenant_trials is plugins/tenantlifecycle's own plugin
-		// table (migrations.go), the same shape as tenant_quota above and
-		// pinned for the identical reason: it isn't in this test's core
-		// schema, so PREPAREing any of the three below fails with "relation
-		// tenant_trials does not exist", a property of this test's fixture
-		// rather than of the SQL. TestSetTenantTrialWorksOnEveryDialect
-		// (settenanttrial_test.go) runs all three, unmodified, through
-		// plugin.RunMigrations against real Postgres, MySQL and SQL Server --
-		// the live check tenant_quota's own comment describes.
-		//
-		// Only three, not four: readTenantTrial's SELECT (cleat-review on
-		// #2590) moved into settenanttrial_test.go along with the tenantTrial
-		// type, since nothing in cleatctl's own CLI path reads a trial back.
-		// tenantTrialExists' own "SELECT 1 ..." below is unrelated and stays
-		// in settenanttrial.go -- this test's own scan (below) skips
-		// _test.go files, so readTenantTrial's statement is no longer in its
-		// input at all, and a pin for it would itself go stale (line ~370,
-		// the "_test.go" suffix check).
-		"UPDATE tenant_trials SET expires_at = $1, handled = $2 WHERE tenant_id = $3":    "tenant_trials is a plugin table, not in this test's core schema; checked live by TestSetTenantTrialWorksOnEveryDialect (cleat#2534)",
-		"INSERT INTO tenant_trials (tenant_id, expires_at, handled) VALUES ($1, $2, $3)": "tenant_trials is a plugin table, not in this test's core schema; checked live by TestSetTenantTrialWorksOnEveryDialect (cleat#2534)",
-		"SELECT 1 FROM tenant_trials WHERE tenant_id = $1":                               "tenant_trials is a plugin table, not in this test's core schema; checked live by TestSetTenantTrialWorksOnEveryDialect (cleat#2534)",
-
 		// cleat#2247. backup.go's runBackupConfigUpdate builds its SET list
 		// from whichever flags were given (--cron, --retention-days,
 		// --enabled/--disabled), the same shape quota.go and queue.go use
@@ -227,9 +204,10 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 		// passing `-run TestEveryInlineStatementParsesOnPostgres` alone (a
 		// normal dev and bisect workflow) depend on an unstated file-name
 		// ordering that breaks on a rename or a `-shuffle` run. Migrating
-		// the plugin's own tables here is what tenant_quota's five pins
-		// above are the fallback for when this is too heavy to do; here it
-		// is not.
+		// the plugin's own tables here is the same fix applied above to
+		// tenant_quota and tenant_trials (cleat#2413/#2178), which used to
+		// be the fallback for when this was too heavy to do; it no longer
+		// is, for either.
 	}
 
 	// A template is not checkable as written, and saying so out loud is the
