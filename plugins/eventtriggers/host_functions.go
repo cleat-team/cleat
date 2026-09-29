@@ -135,7 +135,16 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 		}
 
 		output := awaitEventOutput{Found: false}
-		outJSON, _ := json.Marshal(output)
+		outJSON, err := json.Marshal(output)
+		if err != nil {
+			// Nothing was consumed on this path, so there is no durability
+			// concern here -- but a discarded error here used to return ""
+			// on failure, indistinguishable from Found:false's own JSON. A
+			// caller could not tell "no event yet" from "marshalling broke",
+			// which is the same lie cleat#1473 is about, from the other
+			// side (cleat#2654).
+			return "", fmt.Errorf("event-triggers: marshal await_event output: %w", err)
+		}
 		return string(outJSON), nil
 	}
 	if err != nil {
@@ -152,6 +161,25 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 		WHERE id = $1
 	`, eventID); err != nil {
 		return "", fmt.Errorf("event-triggers: mark event consumed: %w", err)
+	}
+
+	// Built and marshaled BEFORE Commit, deliberately. Marshaling after commit
+	// would mean a marshal failure -- e.g. corrupted event_data, as happened
+	// on cleat#2645's own CI run -- reports an error while the event stays
+	// durably consumed with no way to ever report it again: a lost event
+	// dressed up as a failure. Built here, a marshal failure instead falls
+	// through to the deferred Rollback, so the row stays unprocessed and the
+	// next claim can retry it (cleat#2654).
+	output := awaitEventOutput{
+		Found:      true,
+		EventID:    eventID.String(),
+		EventType:  eventType,
+		EventData:  json.RawMessage(eventData),
+		ReceivedAt: receivedAt.Format(time.RFC3339),
+	}
+	outJSON, err := json.Marshal(output)
+	if err != nil {
+		return "", fmt.Errorf("event-triggers: marshal await_event output: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -171,14 +199,6 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 	// is what every existing awaiter row already is.
 	unregisterAwaiter(ctx, p.db, p.logger, cc.WorkflowID, input.EventType, "", "", "")
 
-	output := awaitEventOutput{
-		Found:      true,
-		EventID:    eventID.String(),
-		EventType:  eventType,
-		EventData:  json.RawMessage(eventData),
-		ReceivedAt: receivedAt.Format(time.RFC3339),
-	}
-	outJSON, _ := json.Marshal(output)
 	return string(outJSON), nil
 }
 
