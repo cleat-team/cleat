@@ -1590,6 +1590,87 @@ jobs:
       - name: Run the scenario end to end
         run: scripts/run-order-lifecycle-dbos-scenario.sh
 
+  integration-hub-dbos-pair-scenario:
+    name: Integration hub DBOS pair scenario
+    runs-on: ubuntu-latest
+    # merge_group is excluded for the same reason as the sibling scenario
+    # jobs -- read integration-hub-scenario's comment before removing this
+    # line. Not a required context (.github/required-checks.txt), so a
+    # merge_group run would add an npm install/build to the critical path of
+    # every queue entry while gating nothing.
+    if: github.event_name != 'merge_group'
+    # examples/integration-hub-dbos-port, cleat#2597's SECOND cleat-vs-DBOS
+    # pair -- unlike its sibling above (the CONTROL, an honest equally-scoped
+    # comparison), this pair exists to locate a specific structural boundary:
+    # DBOS has no primitive for accepting a tenant's own code at runtime and
+    # executing it, sandboxed or not (checked against current docs.dbos.dev;
+    # see the port's own README). A GREEN run here means the documented gap
+    # is CONFIRMED -- the adversarial step's host-filesystem read succeeds,
+    # because nothing in DBOS's execution path is positioned to refuse it,
+    # exactly as this pair's README says it should. A RED run is a real
+    # finding (today's DBOS no longer behaves as documented) and needs
+    # investigating, not waving through with a re-run -- see the port's
+    # README, "Reading this pair's exit codes", before assuming a red run
+    # here is an ordinary broken test.
+    #
+    # ONE ARM, NOT A DIALECT MATRIX, same reasoning as the sibling job: the
+    # property under test belongs to the language runtime, not to SQL.
+    services:
+      postgres:
+        image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
+        env:
+          POSTGRES_PASSWORD: sandbox
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # 127.0.0.1, not localhost -- see test-go's identical comment on this
+      # exact ::1-vs-IPv4 hazard.
+      DBOS_SYSTEM_DATABASE_URL: postgres://postgres:sandbox@127.0.0.1:5432/integration_hub_dbos_ci
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          # 24 ("Krypton"), not 20 or 26 -- the isolated-vm counterpart
+          # (src/isolated-workflow.ts) pins isolated-vm@6.1.2, which needs
+          # Node >=22 and ships no prebuilt binary for Node 26; 24 is also
+          # the current LTS line as of 2026-09-28, the more defensible pin
+          # for a job demonstrating what an idiomatic team would ship. See
+          # isolated-workflow.ts's header for the full version rationale.
+          node-version: "24"
+
+      # cloc is not part of the ubuntu-latest image; scripts/dbos-pair-loc.sh
+      # reports UNMEASURED rather than a false zero if it is missing, so an
+      # image that stops shipping something this step no longer installs
+      # fails loud here rather than reporting a clean run that counted
+      # nothing.
+      - name: Install cloc
+        run: sudo apt-get update && sudo apt-get install -y cloc
+
+      # scripts/dbos-pair-loc-extract.py's structural extraction is what
+      # makes the role-symmetric table above possible at all -- coordinator's
+      # review of #2621 asked directly whether its correctness was checked
+      # anywhere other than by hand (four markers were broken and confirmed
+      # to fail loud during that PR's review, which is not a check that
+      # survives the next person to touch this file). --self-test verifies
+      # every extraction mode against a known-positive and a known-negative,
+      # the same discipline as the sibling job's check-dbos-pair-loc.py step.
+      - name: LOC extractor's own correctness
+        run: python3 scripts/dbos-pair-loc-extract.py --self-test
+
+      - name: Count lines for both sides of the pair
+        run: scripts/dbos-pair-loc.sh integration-hub
+
+      # No "dump logs on failure" step after this one, for the same reason
+      # as the sibling scenario jobs.
+      - name: Run the scenario end to end
+        run: scripts/run-integration-hub-dbos-scenario.sh
+
   ai-agent-platform-scenario:
     name: AI agent platform scenario
     runs-on: ubuntu-latest
