@@ -132,15 +132,25 @@ self_test() {
   # Known-positive: delete a field from the committed struct, which is
   # exactly what a plugin author forgetting to regenerate would leave
   # behind.
+  #
+  # MATCHED BY REGEX, NOT A FIXED-WHITESPACE STRING -- found on cleat#2649,
+  # which added a Keys field to this same struct. gofmt re-aligns every
+  # field's column to the widest type in the struct (`[]string` is wider
+  # than `string`), so EventType's own line gained padding spaces the
+  # instant a sibling field's type got longer -- through no fault of the
+  # generator, which check_one's own non-self-test run confirmed was still
+  # producing byte-identical output. A byte-exact marker string breaks on
+  # the next legitimate field addition exactly the way this one did; a
+  # regex tolerant of the whitespace gofmt owns does not.
   if ! python3 - "$target" <<'EOF'
-import sys
+import re, sys
 path = sys.argv[1]
 src = open(path).read()
-marker = '\tEventType string `json:"event_type,omitempty"`\n'
-if marker not in src:
+pattern = re.compile(r'\tEventType +string +`json:"event_type,omitempty"`\n')
+if not pattern.search(src):
     print("SELF-TEST SETUP FAILED: expected field line not found", file=sys.stderr)
     sys.exit(2)
-open(path, "w").write(src.replace(marker, "", 1))
+open(path, "w").write(pattern.sub("", src, count=1))
 EOF
   then
     exit 2
