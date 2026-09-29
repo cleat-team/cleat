@@ -1333,7 +1333,7 @@ func TestRetryEventResponseRoundtrip(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestUnregisterAwaiterEmptyWorkflowID(t *testing.T) {
-	unregisterAwaiter(context.Background(), nil, nil, "", "event_type")
+	unregisterAwaiter(context.Background(), nil, nil, "", "event_type", "", "", "")
 }
 
 // ---------------------------------------------------------------------------
@@ -2422,6 +2422,9 @@ type etIngestedEventRow struct {
 	tenantID    string
 	eventType   string
 	eventData   string
+	key1        string
+	key2        string
+	key3        string
 	receivedAt  time.Time
 	processed   bool
 	retryCount  int
@@ -2431,10 +2434,14 @@ type etIngestedEventRow struct {
 }
 
 type etAwaiterRow struct {
-	workflowID string
-	tenantID   string
-	eventType  string
-	createdAt  time.Time
+	workflowID      string
+	tenantID        string
+	eventType       string
+	key1            string
+	key2            string
+	key3            string
+	registrationKey string
+	createdAt       time.Time
 }
 
 type etDBStore struct {
@@ -2569,6 +2576,13 @@ func (c *etConn) execInsertEvent(args []driver.NamedValue) (driver.Result, error
 	if err != nil {
 		return nil, err
 	}
+	// key1/key2/key3, cleat#2625 -- absent when the caller passed fewer than
+	// 7 args (an older test double calling this fake directly), in which
+	// case they default to "", the same sentinel a real database column's
+	// NOT NULL DEFAULT '' gives.
+	key1, _ := etArgString(args, 5)
+	key2, _ := etArgString(args, 6)
+	key3, _ := etArgString(args, 7)
 
 	// Check if event already exists (idempotent insert).
 	for _, evt := range c.store.events {
@@ -2582,6 +2596,9 @@ func (c *etConn) execInsertEvent(args []driver.NamedValue) (driver.Result, error
 		tenantID:   tenantID,
 		eventType:  eventType,
 		eventData:  eventData,
+		key1:       key1,
+		key2:       key2,
+		key3:       key3,
 		receivedAt: time.Now(),
 		processed:  false,
 		status:     "pending",
@@ -2602,11 +2619,19 @@ func (c *etConn) execInsertAwaiter(args []driver.NamedValue) (driver.Result, err
 	if err != nil {
 		return nil, err
 	}
+	key1, _ := etArgString(args, 4)
+	key2, _ := etArgString(args, 5)
+	key3, _ := etArgString(args, 6)
+	regKey, _ := etArgString(args, 7)
 
-	// Upsert: if exists, update created_at
+	// Upsert: if exists (same registration_key -- migrations.go's Version 6
+	// conflict target, a hash of workflow+type+keys), update created_at. A
+	// different key combination hashes to a different registration_key, so
+	// it is a DIFFERENT awaiter, not an upsert target -- the whole reason
+	// the conflict target grew from two columns to a hash of five.
 	found := false
 	for i, a := range c.store.awaiters {
-		if a.workflowID == workflowID && a.eventType == eventType {
+		if a.registrationKey == regKey {
 			c.store.awaiters[i].createdAt = time.Now()
 			found = true
 			break
@@ -2614,10 +2639,14 @@ func (c *etConn) execInsertAwaiter(args []driver.NamedValue) (driver.Result, err
 	}
 	if !found {
 		c.store.awaiters = append(c.store.awaiters, etAwaiterRow{
-			workflowID: workflowID,
-			tenantID:   tenantID,
-			eventType:  eventType,
-			createdAt:  time.Now(),
+			workflowID:      workflowID,
+			tenantID:        tenantID,
+			eventType:       eventType,
+			key1:            key1,
+			key2:            key2,
+			key3:            key3,
+			registrationKey: regKey,
+			createdAt:       time.Now(),
 		})
 	}
 	return &etResult{rowsAffected: 1}, nil
@@ -2632,9 +2661,16 @@ func (c *etConn) execDeleteAwaiter(args []driver.NamedValue) (driver.Result, err
 	if err != nil {
 		return nil, err
 	}
+	// key1/key2/key3, cleat#2625: deleting by workflow+type ALONE would
+	// remove whichever awaiter matched first, including a sibling still
+	// legitimately waiting on a different key combination.
+	key1, _ := etArgString(args, 3)
+	key2, _ := etArgString(args, 4)
+	key3, _ := etArgString(args, 5)
 
 	for i, a := range c.store.awaiters {
-		if a.workflowID == workflowID && a.eventType == eventType {
+		if a.workflowID == workflowID && a.eventType == eventType &&
+			a.key1 == key1 && a.key2 == key2 && a.key3 == key3 {
 			c.store.awaiters = append(c.store.awaiters[:i], c.store.awaiters[i+1:]...)
 			return &etResult{rowsAffected: 1}, nil
 		}
@@ -2773,12 +2809,12 @@ func (c *etConn) QueryContext(_ context.Context, query string, args []driver.Nam
 		return c.querySubCount(args)
 	case strings.Contains(q, "SELECT COALESCE(MAX(max_retries), 3) FROM event_subscriptions"):
 		return c.queryMaxRetries(args)
-	case strings.Contains(q, "SELECT COALESCE(status, 'pending'), event_type, event_data FROM ingested_events"):
+	case strings.Contains(q, "SELECT COALESCE(status, 'pending'), event_type, event_data, key1, key2, key3"):
 		return c.queryEventForRetry(args)
 	case strings.Contains(q, "SELECT id, event_type, event_data, received_at") && strings.Contains(q, "FROM ingested_events"):
 		return c.queryEventForAwait(args)
 	case strings.Contains(q, "SELECT workflow_id FROM event_awaiters"):
-		return c.queryAwaiters(args)
+		return c.queryAwaiters(q, args)
 	case strings.Contains(q, "FROM event_subscriptions") && strings.Contains(q, "ORDER BY"):
 		return c.queryListSubscriptions(args)
 	case strings.Contains(q, "FROM event_subscriptions") && strings.Contains(q, "event_type ="):
@@ -2934,12 +2970,12 @@ func (c *etConn) queryEventForRetry(args []driver.NamedValue) (driver.Rows, erro
 				status = "pending"
 			}
 			return &etRows{
-				columns: []string{"status", "event_type", "event_data"},
-				data:    [][]driver.Value{{status, evt.eventType, []byte(evt.eventData)}},
+				columns: []string{"status", "event_type", "event_data", "key1", "key2", "key3"},
+				data:    [][]driver.Value{{status, evt.eventType, []byte(evt.eventData), evt.key1, evt.key2, evt.key3}},
 			}, nil
 		}
 	}
-	return &etRows{columns: []string{"status", "event_type", "event_data"}}, nil
+	return &etRows{columns: []string{"status", "event_type", "event_data", "key1", "key2", "key3"}}, nil
 }
 
 func (c *etConn) queryEventForAwait(args []driver.NamedValue) (driver.Rows, error) {
@@ -2974,7 +3010,19 @@ func (c *etConn) queryEventForAwait(args []driver.NamedValue) (driver.Rows, erro
 	}, nil
 }
 
-func (c *etConn) queryAwaiters(args []driver.NamedValue) (driver.Rows, error) {
+// queryAwaiters filters on the SQL TEXT, not just on whether key args happen
+// to be present, deliberately. This fake is a stand-in for a real database:
+// a real WHERE clause with no "key1 = " predicate returns every row matching
+// what it DOES ask for, regardless of what a caller separately knows about
+// keys -- it does not infer a filter nobody wrote. Filtering unconditionally
+// here would make a falsification of the production predicate (removing
+// "AND key1 = $3 ..." from signalAwaiters' query, cleat#2625) fail for the
+// WRONG reason: this fake would still narrow correctly on the caller's own
+// keys, hiding exactly the over-notification bug the predicate exists to
+// prevent. Checked by removing the predicate from publish.go's literal and
+// confirming this test then reports every awaiter of the type as signalled,
+// not "signalled 0".
+func (c *etConn) queryAwaiters(query string, args []driver.NamedValue) (driver.Rows, error) {
 	tid, err := etArgString(args, 1)
 	if err != nil {
 		return nil, err
@@ -2983,12 +3031,23 @@ func (c *etConn) queryAwaiters(args []driver.NamedValue) (driver.Rows, error) {
 	if err != nil {
 		return nil, err
 	}
+	filterByKey := strings.Contains(query, "key1")
+	var key1, key2, key3 string
+	if filterByKey {
+		key1, _ = etArgString(args, 3)
+		key2, _ = etArgString(args, 4)
+		key3, _ = etArgString(args, 5)
+	}
 
 	var data [][]driver.Value
 	for _, a := range c.store.awaiters {
-		if a.tenantID == tid && a.eventType == eventType {
-			data = append(data, []driver.Value{a.workflowID})
+		if a.tenantID != tid || a.eventType != eventType {
+			continue
 		}
+		if filterByKey && (a.key1 != key1 || a.key2 != key2 || a.key3 != key3) {
+			continue
+		}
+		data = append(data, []driver.Value{a.workflowID})
 	}
 	return &etRows{
 		columns: []string{"workflow_id"},
@@ -3464,7 +3523,7 @@ func TestRegisterAndUnregisterAwaiter(t *testing.T) {
 	}
 
 	// Register.
-	p.registerAwaiter(context.Background(), etTestTenantID.String(), "wf-123", "order.created")
+	p.registerAwaiter(context.Background(), etTestTenantID.String(), "wf-123", "order.created", "", "", "")
 
 	store.mu.RLock()
 	n := len(store.awaiters)
@@ -3477,7 +3536,7 @@ func TestRegisterAndUnregisterAwaiter(t *testing.T) {
 	}
 
 	// Unregister.
-	unregisterAwaiter(context.Background(), &engine.SQLDBAdapter{DB: db}, slog.New(slog.NewTextHandler(io.Discard, nil)), "wf-123", "order.created")
+	unregisterAwaiter(context.Background(), &engine.SQLDBAdapter{DB: db}, slog.New(slog.NewTextHandler(io.Discard, nil)), "wf-123", "order.created", "", "", "")
 
 	store.mu.RLock()
 	n = len(store.awaiters)

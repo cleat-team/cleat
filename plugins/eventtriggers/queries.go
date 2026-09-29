@@ -4,34 +4,48 @@ import "github.com/cleat-team/cleat/plugin"
 
 // Dialect-specific query variants for structurally different SQL.
 
+// upsertAwaiter registers or refreshes an awaiter's registration. The
+// conflict target is registration_key -- a 64-character SHA-256 hex digest
+// of (workflow_id, event_type, key1, key2, key3), computed in Go by
+// keys.go's registrationKey and passed as the final argument -- not the
+// surrogate id and not the five raw columns. A five-column unique index
+// does not fit MySQL's or SQL Server's index-key byte limits once
+// workflow_id and event_type are both present at full width; see
+// registrationKey's own doc comment and migrations.go's Version 6 comment
+// for the byte accounting. Matching on the hash is what makes a REPLAYED
+// registerAwaiter call (awaitEvent is Idempotent: false,
+// SameValueOnReplay: false, so a replay re-executes for real) refresh the
+// same row rather than accumulate a duplicate, while still letting two
+// awaits for the same (workflow, type) coexist when their key slots differ.
+// cleat#2625.
 var upsertAwaiter = plugin.Query{
-	Default: `INSERT INTO event_awaiters (workflow_id, tenant_id, event_type, created_at)
-VALUES ($1, $2, $3, NOW())
-ON CONFLICT (workflow_id, event_type) DO UPDATE
+	Default: `INSERT INTO event_awaiters (id, workflow_id, tenant_id, event_type, key1, key2, key3, registration_key, created_at)
+VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, NOW())
+ON CONFLICT (registration_key) DO UPDATE
 	SET created_at = NOW()`,
-	MySQL: `INSERT INTO event_awaiters (workflow_id, tenant_id, event_type, created_at)
-VALUES ($1, $2, $3, NOW())
+	MySQL: `INSERT INTO event_awaiters (id, workflow_id, tenant_id, event_type, key1, key2, key3, registration_key, created_at)
+VALUES (UUID(), $1, $2, $3, $4, $5, $6, $7, NOW())
 ON DUPLICATE KEY UPDATE
 	created_at = NOW()`,
 	MSSQL: `MERGE event_awaiters AS target
-USING (VALUES ($1, $2, $3, SYSUTCDATETIME())) AS source (workflow_id, tenant_id, event_type, created_at)
-ON target.workflow_id = source.workflow_id AND target.event_type = source.event_type
+USING (VALUES ($1, $2, $3, $4, $5, $6, $7, SYSUTCDATETIME())) AS source (workflow_id, tenant_id, event_type, key1, key2, key3, registration_key, created_at)
+ON target.registration_key = source.registration_key
 WHEN MATCHED THEN UPDATE SET created_at = SYSUTCDATETIME()
-WHEN NOT MATCHED THEN INSERT (workflow_id, tenant_id, event_type, created_at)
-VALUES (source.workflow_id, source.tenant_id, source.event_type, source.created_at);`,
+WHEN NOT MATCHED THEN INSERT (id, workflow_id, tenant_id, event_type, key1, key2, key3, registration_key, created_at)
+VALUES (NEWID(), source.workflow_id, source.tenant_id, source.event_type, source.key1, source.key2, source.key3, source.registration_key, source.created_at);`,
 }
 
 var insertEventIdempotent = plugin.Query{
-	Default: `INSERT INTO ingested_events (id, tenant_id, event_type, event_data, received_at, processed)
-VALUES ($1, $2, $3, $4, NOW(), false)
+	Default: `INSERT INTO ingested_events (id, tenant_id, event_type, event_data, key1, key2, key3, received_at, processed)
+VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), false)
 ON CONFLICT (id) DO NOTHING`,
-	MySQL: `INSERT IGNORE INTO ingested_events (id, tenant_id, event_type, event_data, received_at, processed)
-VALUES ($1, $2, $3, $4, NOW(), false)`,
+	MySQL: `INSERT IGNORE INTO ingested_events (id, tenant_id, event_type, event_data, key1, key2, key3, received_at, processed)
+VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), false)`,
 	MSSQL: `MERGE ingested_events AS target
-USING (VALUES ($1, $2, $3, $4, SYSUTCDATETIME(), 0)) AS source (id, tenant_id, event_type, event_data, received_at, processed)
+USING (VALUES ($1, $2, $3, $4, $5, $6, $7, SYSUTCDATETIME(), 0)) AS source (id, tenant_id, event_type, event_data, key1, key2, key3, received_at, processed)
 ON target.id = source.id
-WHEN NOT MATCHED THEN INSERT (id, tenant_id, event_type, event_data, received_at, processed)
-VALUES (source.id, source.tenant_id, source.event_type, source.event_data, source.received_at, source.processed);`,
+WHEN NOT MATCHED THEN INSERT (id, tenant_id, event_type, event_data, key1, key2, key3, received_at, processed)
+VALUES (source.id, source.tenant_id, source.event_type, source.event_data, source.key1, source.key2, source.key3, source.received_at, source.processed);`,
 }
 
 var insertSubscriptionReturning = plugin.Query{
@@ -131,8 +145,31 @@ WHERE tenant_id = $1
 ORDER BY received_at
 LIMIT 1
 FOR UPDATE SKIP LOCKED`,
+	// FORCE INDEX pins this to the index TestAwaitEventConcurrentClaimsSkipTheLockedRow
+	// (added by cleat#2641/#2645) and TestAwaitEventConcurrentClaimsOfDifferentEventTypesDoNotInterfereOnMySQL
+	// already characterise: idx_ingested_events_unprocessed's leading column is
+	// (processed, received_at), narrow enough that InnoDB's next-key locking
+	// under REPEATABLE READ has a known, tested shape (documented on the
+	// latter test above). cleat#2625's Version 6 migration added a SECOND
+	// index, idx_ingested_events_correlate (tenant_id, event_type, key1, key2,
+	// key3, received_at), for signalAwaiters'/unregisterAwaiter's key-scoped
+	// lookups -- and its leading columns happen to match this query's WHERE
+	// clause too. Left to the optimizer, MySQL sometimes prefers it here
+	// instead, and its locking shape has NOT been characterised the way the
+	// other index's has: measured directly (10 iterations of
+	// TestAwaitEventConcurrentClaimsSkipTheLockedRow against a real MySQL
+	// 8.4, tenant_id fresh per iteration so cross-iteration data was the only
+	// variable), the unforced query failed 9 of 10 with "claim query: sql: no
+	// rows in result set" -- txB's SKIP LOCKED claim found nothing where
+	// exactly one unprocessed row of its own tenant existed, unlocked and
+	// waiting. Dropping idx_ingested_events_correlate made the same 10
+	// iterations pass 10 of 10, isolating the index choice as the cause
+	// rather than the query text. FORCE INDEX (not USE INDEX -- this must
+	// exclude the correlate index, not merely admit the other one as an
+	// option) restores the characterised locking shape; the correlate index
+	// remains exactly as useful to the key-scoped queries it was built for.
 	MySQL: `SELECT id, event_type, event_data, received_at
-FROM ingested_events
+FROM ingested_events FORCE INDEX (idx_ingested_events_unprocessed)
 WHERE tenant_id = $1
   AND event_type = $2
   AND NOT processed

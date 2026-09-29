@@ -234,5 +234,507 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					MODIFY input_template JSON NULL DEFAULT ('{}');
 			`,
 		},
+		{
+			// Key slots and correlation -- P1 of
+			// docs/contributor/design/event-routing-design.md. cleat#2625.
+			//
+			// Three string slots, added to both sides of a match: the event
+			// that arrived and the run that is waiting. `await_event` gains a
+			// Keys parameter (host_functions.go) that populates these on the
+			// awaiter row, and PublishEvent populates them on the event row
+			// from the publisher's envelope. Equality on all three is what
+			// correlation IS -- see the design doc's §2 for why this has to
+			// be an indexed equality rather than anything more expressive.
+			//
+			// NOT NULL DEFAULT '', never NULL: NULL = NULL is unknown in SQL,
+			// and the portable fix (IS NOT DISTINCT FROM) is not portable
+			// across all three dialects. A sentinel empty string is what
+			// makes three-way equality behave identically everywhere, and it
+			// is also what makes this backward compatible with every
+			// existing row and every existing call: an event or an awaiter
+			// that never mentions keys gets '' in all three slots on both
+			// sides, so old-shape publishes and old-shape awaits still match
+			// each other exactly as before.
+			//
+			// Binary collation, explicit rather than inherited: this repo's
+			// migrations never specify one anywhere else
+			// (`grep -rhno 'COLLATE [A-Za-z0-9_]*' migrations/` finds
+			// nothing), so every string column takes its server's default --
+			// and MySQL 8's default, utf8mb4_0900_ai_ci, is
+			// accent-and-case-insensitive. Under that collation "ORDER-1"
+			// and "order-1" correlate as the same key on one dialect only,
+			// silently. An opaque correlation key wants byte-exact equality,
+			// which a binary collation gives on all three.
+			//
+			// 128 bytes, not more: see the design doc's §4.3 for the budget
+			// this was chosen against. That budget undercounted the tables
+			// this repo actually has -- see the registration_key note below,
+			// found the hard way in cleat-review on this PR.
+			//
+			// event_awaiters' primary key moves from (workflow_id,
+			// event_type) to a surrogate id. The composite key meant a
+			// second `await_event` call for the same type -- in a loop, or
+			// awaiting a second order while the first is still pending --
+			// upserted over the FIRST registration rather than adding a
+			// second one, so only the most recent await could ever be woken.
+			// A surrogate key lets two awaits for the same (workflow, type)
+			// coexist as long as their key slots differ, which is the whole
+			// point of adding key slots in the first place.
+			//
+			// REGISTRATION_KEY, NOT A FIVE-COLUMN UNIQUE INDEX. The first
+			// version of this migration made
+			// (workflow_id, event_type, key1, key2, key3) the unique
+			// constraint that replaces what the composite PK was enforcing,
+			// and it does not fit on two of three dialects: MySQL's
+			// utf8mb4 VARCHAR(255) columns cost 1020 bytes each, so
+			// workflow_id + event_type + three 128-byte keys is
+			// 1020+1020+1536 = 3576 bytes against InnoDB's 3072-byte index
+			// key limit. Narrowing workflow_id to VARCHAR(128) gets MySQL to
+			// 3068/3072 -- four bytes of margin on a limit that has already
+			// bitten this migration once, and SQL Server is worse: even
+			// after narrowing event_type below, NVARCHAR is 2 bytes/char, so
+			// 255+255+3*128 = 766 characters is 1532 bytes... plus
+			// workflow_id's own 255 chars at full width was 510+510+768 =
+			// 1788 bytes against SQL Server's 1700-byte NONCLUSTERED index
+			// limit -- and SQL Server does not refuse that CREATE INDEX. It
+			// warns and lets a later INSERT whose values are wide enough
+			// fail instead, which is invisible to any migration test and
+			// exactly the "reads cleanest where it measured least" trap
+			// CLAUDE.md's whole "Is this result real?" section exists for.
+			//
+			// registration_key is a CHAR(64) SHA-256 hex digest of the five
+			// fields, computed in Go (keys.go's registrationKey) with each
+			// field length-prefixed before hashing -- concatenation with a
+			// separator would let ("ab","c") and ("a","bc") collide onto the
+			// same key, which length-prefixing removes by construction
+			// rather than by hoping the separator never appears in a value.
+			// 64 ASCII bytes fits every dialect's limit with room to spare,
+			// and sidesteps the ceiling permanently instead of buying
+			// headroom the next column change would spend.
+			//
+			// Pre-existing rows get a DB-side SHA-256 hex digest of
+			// 'workflow_id:event_type' as their backfilled registration_key,
+			// not the raw concatenation this migration originally used.
+			// cleat-review caught that version on cleat#2646's first review:
+			// workflow_id and event_type are each up to 255 characters, so
+			// the raw concatenation is up to 511 bytes against a CHAR(64)
+			// column -- "value too long for type character(64)" on Postgres,
+			// a strict-mode truncation error on MySQL, string-or-binary-data
+			// truncation on MSSQL. A pre-existing awaiter with a realistic
+			// workflow_id (a UUID is already 36 characters) and an event
+			// type of any length fails the migration outright; only a
+			// short-ids test tree hid it. sha256/SHA2/HASHBYTES('SHA2_256',
+			// ...) each produce a 64-character lowercase hex digest here,
+			// but NOT the same one across dialects for the same logical
+			// input, and that is a fact worth stating rather than a gap in
+			// this comment: HASHBYTES hashes the bytes of its argument
+			// exactly as stored, and workflow_id/event_type are NVARCHAR on
+			// MSSQL -- UTF-16LE -- while Postgres and MySQL hash the UTF-8
+			// bytes of the equivalent VARCHAR/TEXT value. Measured directly:
+			// HASHBYTES('SHA2_256', 'wf-1:order.paid') (a VARCHAR literal)
+			// gives bedeb380..., matching Python's
+			// hashlib.sha256(b'wf-1:order.paid') exactly, but
+			// HASHBYTES('SHA2_256', N'wf-1:order.paid') (NVARCHAR, what the
+			// real column concatenation actually produces) gives
+			// e7a2b910... -- a different digest, cleat-review caught this
+			// on round 3 after an earlier version of this comment claimed
+			// the three were byte-identical, confirmed against a VARCHAR
+			// literal rather than the NVARCHAR column type this migration
+			// actually hashes. It does not matter functionally: nothing
+			// compares a backfilled registration_key across dialects, and
+			// within one dialect the digest only has to be distinct per
+			// input and fit CHAR(64), both of which every dialect's digest
+			// does independently.
+			//
+			// This is still not the SAME digest registrationKey (Go,
+			// keys.go) computes for an equivalent fresh row: Go hashes five
+			// LENGTH-PREFIXED fields (workflow_id, event_type, key1, key2,
+			// key3), not a colon-joined pair. Reproducing that exact framing
+			// in SQL -- an 8-byte big-endian length prefix per field, ahead
+			// of the field's own bytes, fed into one hash -- is not
+			// impossible but is impractical on MSSQL in particular, where
+			// NVARCHAR's DATALENGTH is UTF-16 code units, not the UTF-8
+			// byte count Go's binary.BigEndian.PutUint64(len(s)) measures.
+			// Given P0's read side (queryLatestUnprocessedEvent/awaitEvent)
+			// does not yet consult keys at all -- nothing running today can
+			// even observe registration_key -- an exact match is not worth
+			// that complexity.
+			//
+			// The gap this leaves: a workflow that registered as an awaiter
+			// BEFORE this migration and is later replayed (re-registers via
+			// the real Go registerAwaiter path, e.g. after a crash) computes
+			// a DIFFERENT registration_key than its own backfilled row, so
+			// upsertAwaiter's ON CONFLICT never fires against it -- it
+			// INSERTs a second row for the same (workflow_id, event_type)
+			// instead of updating the first. This is bounded, not a leak:
+			// at most one extra row per legacy awaiter, ever (the second
+			// row's key is the real Go hash, so every SUBSEQUENT replay of
+			// that same workflow does match it and upserts cleanly), and
+			// unregisterAwaiter's DELETE matches on (workflow_id,
+			// event_type, key1, key2, key3) -- not registration_key -- so it
+			// removes both rows for that awaiter when the workflow completes
+			// or is purged. Exercised by
+			// TestALegacyAwaiterReplayLeavesAtMostTwoRowsAndUnregisterRemovesBoth,
+			// all three dialects.
+			//
+			// `seq`/`event_subscriptions.source`/`def_version` from the
+			// design doc's §8 are NOT part of this migration. Both belong to
+			// later phases -- seq is a P2 concern (the suspend/resume
+			// watermark, §6.5), source/def_version is P3's (triggers
+			// declared in source, §7) -- and P1 is scoped to correlation
+			// alone, per IMPROVEMENT-PLAN's phasing.
+			Version: 6,
+			Up: `
+				ALTER TABLE ingested_events ADD COLUMN IF NOT EXISTS key1 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
+				ALTER TABLE ingested_events ADD COLUMN IF NOT EXISTS key2 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
+				ALTER TABLE ingested_events ADD COLUMN IF NOT EXISTS key3 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
+				CREATE INDEX IF NOT EXISTS idx_ingested_events_correlate ON ingested_events(tenant_id, event_type, key1, key2, key3, received_at);
+
+				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS key1 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
+				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS key2 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
+				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS key3 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
+				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS registration_key CHAR(64) NOT NULL DEFAULT '';
+				UPDATE event_awaiters SET registration_key = encode(sha256(convert_to(workflow_id || ':' || event_type, 'UTF8')), 'hex') WHERE registration_key = '';
+
+				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS id UUID DEFAULT gen_random_uuid();
+				UPDATE event_awaiters SET id = gen_random_uuid() WHERE id IS NULL;
+				ALTER TABLE event_awaiters ALTER COLUMN id SET NOT NULL;
+				ALTER TABLE event_awaiters DROP CONSTRAINT IF EXISTS event_awaiters_pkey;
+				ALTER TABLE event_awaiters ADD CONSTRAINT event_awaiters_pkey PRIMARY KEY (id);
+
+				CREATE UNIQUE INDEX IF NOT EXISTS uq_event_awaiters_registration ON event_awaiters(registration_key);
+				CREATE INDEX IF NOT EXISTS idx_event_awaiters_correlate ON event_awaiters(tenant_id, event_type, key1, key2, key3);
+			`,
+			// Every statement guarded through information_schema, matching
+			// plugins/notifications/migrations.go's v6 and
+			// plugins/scheduledbackup/migrations.go: MySQL DDL is not
+			// transactional and has no IF NOT EXISTS for ADD COLUMN or
+			// CREATE INDEX, so a v6 that fails partway (as this one did, the
+			// first time) leaves a database that cannot re-run it -- the
+			// surviving statements report "Duplicate column"/"Duplicate key
+			// name" on retry. Guarding each one is what makes retry possible
+			// rather than merely making a fresh database work.
+			UpMySQL: `
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND column_name = 'key1');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE ingested_events ADD COLUMN key1 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT \'\'', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND column_name = 'key2');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE ingested_events ADD COLUMN key2 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT \'\'', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND column_name = 'key3');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE ingested_events ADD COLUMN key3 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT \'\'', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_correlate');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_ingested_events_correlate ON ingested_events(tenant_id, event_type, key1, key2, key3, received_at)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'event_awaiters' AND column_name = 'key1');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE event_awaiters ADD COLUMN key1 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT \'\'', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'event_awaiters' AND column_name = 'key2');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE event_awaiters ADD COLUMN key2 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT \'\'', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'event_awaiters' AND column_name = 'key3');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE event_awaiters ADD COLUMN key3 VARCHAR(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL DEFAULT \'\'', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'event_awaiters' AND column_name = 'registration_key');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE event_awaiters ADD COLUMN registration_key CHAR(64) NOT NULL DEFAULT \'\'', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				UPDATE event_awaiters SET registration_key = SHA2(CONCAT(workflow_id, ':', event_type), 256) WHERE registration_key = '';
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'event_awaiters' AND column_name = 'id');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE event_awaiters ADD COLUMN id CHAR(36) NULL', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				UPDATE event_awaiters SET id = UUID() WHERE id IS NULL;
+				ALTER TABLE event_awaiters MODIFY id CHAR(36) NOT NULL;
+				ALTER TABLE event_awaiters DROP PRIMARY KEY, ADD PRIMARY KEY (id);
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'event_awaiters' AND index_name = 'uq_event_awaiters_registration');
+				SET @ddl := IF(@idx = 0, 'CREATE UNIQUE INDEX uq_event_awaiters_registration ON event_awaiters(registration_key)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'event_awaiters' AND index_name = 'idx_event_awaiters_correlate');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_event_awaiters_correlate ON event_awaiters(tenant_id, event_type, key1, key2, key3)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+			// The PK swap looks up the existing auto-named constraint rather
+			// than assuming a name, the same shape as
+			// plugins/scheduledbackup/migrations.go's foreign-key
+			// replacement: find whatever is there under a DIFFERENT name
+			// than the one this migration is about to install, drop it if
+			// found, then add the new one guarded by existence. That makes
+			// this idempotent by construction rather than by an outer
+			// "has this version already run" check.
+			//
+			// ingested_events.event_type is narrowed from NVARCHAR(MAX) to
+			// NVARCHAR(255) FIRST, before anything tries to index it: SQL
+			// Server refuses a MAX-length column as an index key column
+			// outright (error 1919), not merely warns. The narrowing is
+			// itself guarded by a data check that THROWs rather than
+			// truncating -- a silently truncated event_type would break
+			// every future correlation lookup against that row in a way
+			// that surfaces much later than the migration that caused it.
+			// 255 matches event_subscriptions.event_type's existing bound
+			// (v1, NVARCHAR(255)), which every event_type value in this
+			// plugin already respects there.
+			//
+			// TWO INDEPENDENT single-statement IFs below, not one BEGIN/END
+			// block -- plugin/migration.go's splitStatements divides UpMSSQL
+			// on every semicolon with no awareness of BEGIN/END, quotes, or
+			// anything else, and executes each fragment as its own
+			// ExecContext call. A THROW followed by an ALTER inside one
+			// BEGIN/END puts two statements and the block's own closing
+			// syntax across one semicolon boundary, so the naive split cuts
+			// it into a dangling BEGIN with no END -- reproduced directly
+			// against a live SQL Server: "Incorrect syntax near '1'", where
+			// '1' is THROW's own state argument, because the fragment ends
+			// at THROW's semicolon with the enclosing IF/BEGIN never closed.
+			// Every existing UpMSSQL block in this file already follows the
+			// fragment rule (guard, then exactly one statement, repeated)
+			// for the same reason; this was the first violation of it, and
+			// the first time it was checked against a real server rather
+			// than assumed correct because it parses as valid T-SQL in
+			// isolation. If execution reaches the second IF, the THROW in
+			// the first one did not fire (a fired THROW aborts the whole
+			// migration via execSQLStatements' immediate return on error),
+			// so the second IF does not need to re-check the row length.
+			UpMSSQL: `
+				-- Both ingested_events and event_awaiters are TenantScoped
+				-- (Version 4), and SQL Server's FORCE security policy
+				-- applies to every principal INCLUDING the login running
+				-- this migration -- plugin.pluginLockedSession sets no
+				-- tenant context for it, so a plain UPDATE against either
+				-- table's pre-existing rows silently matches NOTHING: the
+				-- filter predicate hides every row from a session with no
+				-- 'tenant_id' and no 'cross_tenant' key set. Reproduced
+				-- directly: this migration's own id backfill below
+				-- (UPDATE event_awaiters SET id = NEWID() WHERE id IS NULL)
+				-- left a real pre-existing row's id NULL, which the very
+				-- next statement's NOT NULL validation then rejected --
+				-- "Cannot insert the value NULL into column 'id' ...
+				-- UPDATE fails" (515) -- for ANY pre-existing awaiter, not
+				-- only a wide one. The registration_key backfill a few
+				-- lines below has the identical exposure and fails
+				-- silently rather than loudly: a row RLS hides from that
+				-- UPDATE keeps the '' the ADD COLUMN ... DEFAULT '' already
+				-- gave it (that part is DDL and touches every row
+				-- regardless of RLS), which is wrong but raises nothing.
+				--
+				-- sp_set_session_context's 'cross_tenant' key is the same
+				-- bypass engine/plugindb_tenant.go's markCrossTenantOnTx
+				-- uses for the sweep path (plugin/migration.go's
+				-- mssqlPluginTenantFilter reads it) -- SESSION-scoped, so
+				-- setting it once here covers every statement below. That
+				-- session is NOT scoped to this migration, or even to this
+				-- plugin: pluginMigrationSession (plugin/migration.go:511-515)
+				-- pins ONE connection for the entire RunMigrations call, and
+				-- the loop at :531 runs every LATER plugin's migrations on
+				-- that same connection before releasing it. Left set, this
+				-- bypass would silently carry into every plugin migrated
+				-- after event-triggers on whichever boot happens to apply
+				-- v6 -- present on that boot, absent on every other one that
+				-- finds v6 already applied. Cleared at the end of this arm
+				-- (below the SET statement's twin, after the correlate
+				-- index) rather than left to rely on go-mssqldb's
+				-- ResetSession clearing it on reuse, which only fires
+				-- between separate RunMigrations calls, not between
+				-- plugins within one.
+				EXEC sp_set_session_context @key = N'cross_tenant', @value = N'event-triggers migration 6 backfill, cleat#2625';
+
+				-- Every statement below that REFERENCES key1/key2/key3/
+				-- registration_key/id -- as opposed to the IF-guarded
+				-- ALTER TABLE ... ADD that creates each one -- is wrapped
+				-- in EXEC('...'), and that wrapping is load-bearing, not
+				-- decorative. plugin.RunMigrations ("production") sends
+				-- this file one statement at a time, so by the time any
+				-- later statement runs, the earlier ADD COLUMN has already
+				-- committed and the column exists. tests/plugin-harness's
+				-- RunPluginMigrations (a SEPARATE, independent runner --
+				-- see its own comment on migration.SplitMSSQL) does not:
+				-- it splits only on GO, and this migration has none, so
+				-- the ENTIRE block above is sent to SQL Server as ONE
+				-- batch. Reproduced directly: SQL Server compiles a plain
+				-- ad-hoc batch's column references against the catalog as
+				-- it stood BEFORE the batch started, and a column added by
+				-- a CONDITIONAL ALTER (inside an IF) earlier in that same
+				-- batch does not count as existing yet for that pass --
+				-- "Msg 207: Invalid column name 'registration_key'" on the
+				-- very first plain reference to it, four lines below
+				-- where cleat-review's Layer 3 finding pointed. Dynamic
+				-- SQL is not compiled until EXEC actually runs it, which
+				-- is after every earlier statement in the batch has
+				-- already executed and the column genuinely exists --
+				-- the same technique the DECLARE @pkname block below
+				-- already used for the old PK constraint, applied here to
+				-- every other conditionally-created column this migration
+				-- touches again.
+				IF EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id = OBJECT_ID('ingested_events') AND c.name = 'event_type' AND c.max_length = -1)
+					AND EXISTS (SELECT 1 FROM ingested_events WHERE LEN(event_type) > 255)
+				THROW 50001, 'event-triggers migration 6: ingested_events.event_type has a value over 255 characters. Refusing to narrow it to NVARCHAR(255) rather than truncate it. See cleat#2625.', 1;
+				IF EXISTS (SELECT 1 FROM sys.columns c WHERE c.object_id = OBJECT_ID('ingested_events') AND c.name = 'event_type' AND c.max_length = -1)
+				ALTER TABLE ingested_events ALTER COLUMN event_type NVARCHAR(255) NOT NULL;
+
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('ingested_events') AND name = 'key1')
+				ALTER TABLE ingested_events ADD key1 NVARCHAR(128) COLLATE Latin1_General_BIN2 NOT NULL DEFAULT '';
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('ingested_events') AND name = 'key2')
+				ALTER TABLE ingested_events ADD key2 NVARCHAR(128) COLLATE Latin1_General_BIN2 NOT NULL DEFAULT '';
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('ingested_events') AND name = 'key3')
+				ALTER TABLE ingested_events ADD key3 NVARCHAR(128) COLLATE Latin1_General_BIN2 NOT NULL DEFAULT '';
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_correlate' AND object_id = OBJECT_ID('ingested_events'))
+				EXEC('CREATE INDEX idx_ingested_events_correlate ON ingested_events(tenant_id, event_type, key1, key2, key3, received_at)');
+
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('event_awaiters') AND name = 'key1')
+				ALTER TABLE event_awaiters ADD key1 NVARCHAR(128) COLLATE Latin1_General_BIN2 NOT NULL DEFAULT '';
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('event_awaiters') AND name = 'key2')
+				ALTER TABLE event_awaiters ADD key2 NVARCHAR(128) COLLATE Latin1_General_BIN2 NOT NULL DEFAULT '';
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('event_awaiters') AND name = 'key3')
+				ALTER TABLE event_awaiters ADD key3 NVARCHAR(128) COLLATE Latin1_General_BIN2 NOT NULL DEFAULT '';
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('event_awaiters') AND name = 'registration_key')
+				ALTER TABLE event_awaiters ADD registration_key CHAR(64) NOT NULL DEFAULT '';
+				EXEC('UPDATE event_awaiters SET registration_key = LOWER(CONVERT(CHAR(64), HASHBYTES(''SHA2_256'', workflow_id + '':'' + event_type), 2)) WHERE registration_key = ''''');
+
+				DECLARE @pkname sysname
+				SELECT @pkname = kc.name
+					FROM sys.key_constraints kc
+					WHERE kc.parent_object_id = OBJECT_ID('event_awaiters')
+					  AND kc.type = 'PK'
+					  AND kc.name <> 'pk_event_awaiters'
+				IF @pkname IS NOT NULL EXEC('ALTER TABLE event_awaiters DROP CONSTRAINT [' + @pkname + ']');
+
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('event_awaiters') AND name = 'id')
+				ALTER TABLE event_awaiters ADD id UNIQUEIDENTIFIER DEFAULT NEWID();
+				EXEC('UPDATE event_awaiters SET id = NEWID() WHERE id IS NULL');
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('event_awaiters') AND name = 'id' AND is_nullable = 1)
+				EXEC('ALTER TABLE event_awaiters ALTER COLUMN id UNIQUEIDENTIFIER NOT NULL');
+
+				IF NOT EXISTS (SELECT 1 FROM sys.key_constraints WHERE name = 'pk_event_awaiters')
+				EXEC('ALTER TABLE event_awaiters ADD CONSTRAINT pk_event_awaiters PRIMARY KEY (id)');
+
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'uq_event_awaiters_registration' AND object_id = OBJECT_ID('event_awaiters'))
+				EXEC('CREATE UNIQUE INDEX uq_event_awaiters_registration ON event_awaiters(registration_key)');
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_event_awaiters_correlate' AND object_id = OBJECT_ID('event_awaiters'))
+				EXEC('CREATE INDEX idx_event_awaiters_correlate ON event_awaiters(tenant_id, event_type, key1, key2, key3)');
+
+				-- Twin of the SET above: this session outlives this
+				-- migration (see that comment), so the bypass must not.
+				-- Cleared unconditionally, not inside an IF -- cheap, and it
+				-- means this line does not depend on remembering to update
+				-- it if anything above it changes from unconditional to
+				-- guarded.
+				EXEC sp_set_session_context @key = N'cross_tenant', @value = NULL;
+			`,
+			// Lossy on purpose, like Version 5's MySQL reversal: a row
+			// inserted post-Up with a key1/2/3 combination that duplicates
+			// another awaiter's (workflow_id, event_type) pair -- legitimate
+			// now, was impossible under the old composite PK -- makes the
+			// composite PRIMARY KEY this restores fail to re-add. Down is
+			// for a migration applied and immediately rolled back in
+			// development, not for undoing a deployment that has taken
+			// traffic under the new shape. ingested_events.event_type is
+			// left at NVARCHAR(255) on the way down (not widened back to
+			// MAX) for the same reason -- reversing a narrowing that has
+			// taken writes under the new bound is a separate decision from
+			// reversing this migration.
+			Down: `
+				DROP INDEX IF EXISTS idx_event_awaiters_correlate;
+				DROP INDEX IF EXISTS uq_event_awaiters_registration;
+				ALTER TABLE event_awaiters DROP CONSTRAINT IF EXISTS event_awaiters_pkey;
+				ALTER TABLE event_awaiters ADD CONSTRAINT event_awaiters_pkey PRIMARY KEY (workflow_id, event_type);
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS id;
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS registration_key;
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key3;
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key2;
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key1;
+				DROP INDEX IF EXISTS idx_ingested_events_correlate;
+				ALTER TABLE ingested_events DROP COLUMN IF EXISTS key3;
+				ALTER TABLE ingested_events DROP COLUMN IF EXISTS key2;
+				ALTER TABLE ingested_events DROP COLUMN IF EXISTS key1;
+			`,
+			DownMySQL: `
+				DROP INDEX idx_event_awaiters_correlate ON event_awaiters;
+				DROP INDEX uq_event_awaiters_registration ON event_awaiters;
+				ALTER TABLE event_awaiters DROP PRIMARY KEY, ADD PRIMARY KEY (workflow_id, event_type);
+				ALTER TABLE event_awaiters DROP COLUMN id;
+				ALTER TABLE event_awaiters DROP COLUMN registration_key;
+				ALTER TABLE event_awaiters DROP COLUMN key3;
+				ALTER TABLE event_awaiters DROP COLUMN key2;
+				ALTER TABLE event_awaiters DROP COLUMN key1;
+				DROP INDEX idx_ingested_events_correlate ON ingested_events;
+				ALTER TABLE ingested_events DROP COLUMN key3;
+				ALTER TABLE ingested_events DROP COLUMN key2;
+				ALTER TABLE ingested_events DROP COLUMN key1;
+			`,
+			// SQL Server gives every inline "DEFAULT ..." its own auto-named
+			// constraint object (DF__event_awa__id__<hex>), and ALTER TABLE
+			// ... DROP COLUMN refuses while one is attached: "The object
+			// 'DF__...' is dependent on column 'id'." (Msg 5074/4922,
+			// reproduced directly against a live SQL Server). id
+			// (DEFAULT NEWID()), registration_key, key1, key2 and key3
+			// (DEFAULT '') on event_awaiters, and key1/key2/key3 on
+			// ingested_events, all carry one. The name is generated, not
+			// something this migration chose, so it has to be looked up
+			// per table -- one dynamic block per table, run before any
+			// DROP COLUMN on that table, rather than one per column: it
+			// finds every default constraint on the columns this Down
+			// removes and drops them all in one EXEC, using the same
+			// DECLARE/SELECT/IF-EXEC shape (no semicolon until the closing
+			// one) UpMSSQL already relies on above to keep the naive
+			// splitter in plugin/migration.go from treating DECLARE,
+			// SELECT and IF as separate statements and losing the
+			// variable between them.
+			//
+			// The concatenated string is built with CHAR(59), not a literal
+			// ';', for the same reason -- plugin/migration.go's
+			// splitStatements has zero quote-awareness (this repo's own
+			// documented hazard: THROW's embedded semicolon hit the same
+			// wall above). A literal ';' inside this string literal would
+			// be cut by the OUTER splitter before the statement ever
+			// reaches SQL Server, same as the BEGIN/END fragmentation this
+			// migration already had to route around once. CHAR(59) puts a
+			// real semicolon in the dynamic SQL EXEC() runs without one
+			// ever appearing in the migration's raw text.
+			DownMSSQL: `
+				DROP INDEX IF EXISTS idx_event_awaiters_correlate ON event_awaiters;
+				DROP INDEX IF EXISTS uq_event_awaiters_registration ON event_awaiters;
+				ALTER TABLE event_awaiters DROP CONSTRAINT IF EXISTS pk_event_awaiters;
+				ALTER TABLE event_awaiters ADD CONSTRAINT pk_event_awaiters_restored PRIMARY KEY (workflow_id, event_type);
+
+				DECLARE @eaDefaults NVARCHAR(MAX) = ''
+				SELECT @eaDefaults = @eaDefaults + 'ALTER TABLE event_awaiters DROP CONSTRAINT [' + dc.name + ']' + CHAR(59) + ' '
+					FROM sys.default_constraints dc
+					JOIN sys.columns c ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
+					WHERE dc.parent_object_id = OBJECT_ID('event_awaiters')
+					  AND c.name IN ('id', 'registration_key', 'key1', 'key2', 'key3')
+				IF @eaDefaults <> '' EXEC(@eaDefaults);
+
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS id;
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS registration_key;
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key3;
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key2;
+				ALTER TABLE event_awaiters DROP COLUMN IF EXISTS key1;
+
+				DROP INDEX IF EXISTS idx_ingested_events_correlate ON ingested_events;
+
+				DECLARE @ieDefaults NVARCHAR(MAX) = ''
+				SELECT @ieDefaults = @ieDefaults + 'ALTER TABLE ingested_events DROP CONSTRAINT [' + dc.name + ']' + CHAR(59) + ' '
+					FROM sys.default_constraints dc
+					JOIN sys.columns c ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
+					WHERE dc.parent_object_id = OBJECT_ID('ingested_events')
+					  AND c.name IN ('key1', 'key2', 'key3')
+				IF @ieDefaults <> '' EXEC(@ieDefaults);
+
+				ALTER TABLE ingested_events DROP COLUMN IF EXISTS key3;
+				ALTER TABLE ingested_events DROP COLUMN IF EXISTS key2;
+				ALTER TABLE ingested_events DROP COLUMN IF EXISTS key1;
+			`,
+		},
 	}
 }

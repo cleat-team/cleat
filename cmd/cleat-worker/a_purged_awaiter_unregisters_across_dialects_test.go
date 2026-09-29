@@ -220,9 +220,19 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 					t.Fatalf("insert workflow_instances on %s: %v", be.Name, err)
 				}
 
+				// id is supplied explicitly rather than left to a column
+				// default: Postgres and SQL Server's event_awaiters.id have
+				// one (gen_random_uuid()/NEWID()), but MySQL's does not --
+				// migrations.go's Version 6 comment explains why an
+				// expression default was deliberately not given to it there
+				// -- so an insert omitting id fails on MySQL only
+				// ("Field 'id' doesn't have a default value") while passing
+				// on the other two. Every production writer (registerAwaiter
+				// / upsertAwaiter) already supplies id explicitly on all
+				// three dialects; this fixture now matches that.
 				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect,
-					`INSERT INTO event_awaiters (workflow_id, tenant_id, event_type) VALUES ($1, $2, $3)`,
-					runID, tenant.String(), eventType); err != nil {
+					`INSERT INTO event_awaiters (id, workflow_id, tenant_id, event_type) VALUES ($1, $2, $3, $4)`,
+					uuid.New().String(), runID, tenant.String(), eventType); err != nil {
 					t.Fatalf("insert event_awaiters on %s: %v", be.Name, err)
 				}
 
@@ -261,7 +271,7 @@ func TestPurgedAwaiterUnregistersAcrossDialects(t *testing.T) {
 					t.Helper()
 					eventID := uuid.New()
 					if _, err := eventtriggers.PublishEvent(ctx, pdb, logger, env,
-						eventID, tenant, eventType, json.RawMessage(`{}`)); err != nil {
+						eventID, tenant, eventType, json.RawMessage(`{}`), nil); err != nil {
 						t.Fatalf("PublishEvent (%s) on %s: %v", label, be.Name, err)
 					}
 				}
@@ -367,15 +377,58 @@ func cleanupEventTriggersSchema(t *testing.T, conn *sql.DB, dialect testutil.Dia
 				exec(`DROP TABLE ` + tbl)
 			}
 		}
-		exec(`DELETE FROM plugin_migrations WHERE plugin_name = '` + pluginName + `'`)
+		// Same lazy-creation hazard as the Postgres/MySQL branch below --
+		// plugin.RunMigrations creates plugin_migrations on first use, not
+		// SetupMinimalSchema -- and unlike DROP TABLE above, DELETE has no
+		// "IF EXISTS" form to fall back on: "Invalid object name
+		// 'plugin_migrations'. (208)" on a database no plugin has ever
+		// migrated.
+		if exists(`SELECT COUNT(*) FROM sys.tables WHERE name = 'plugin_migrations'`) {
+			exec(`DELETE FROM plugin_migrations WHERE plugin_name = '` + pluginName + `'`)
+		}
 		return
 	}
 
 	for _, tbl := range tables {
 		exec(`DROP TABLE IF EXISTS ` + tbl)
 	}
-	exec(`DELETE FROM plugin_migrations WHERE plugin_name = '` + pluginName + `'`)
-	if dialect == testutil.DialectPostgres {
+	// Unlike DROP TABLE, Postgres and MySQL have no "DELETE ... IF EXISTS":
+	// plugin_migrations itself is created lazily, by plugin.RunMigrations'
+	// own CREATE TABLE IF NOT EXISTS, not by testutil.SetupMinimalSchema. So
+	// on a database no plugin has ever migrated -- cleat#2646's
+	// TestALegacyAwaiterReplayLeavesAtMostTwoRowsAndUnregisterRemovesBoth
+	// calls this BEFORE running any migration, to guarantee a clean slate
+	// regardless of what an earlier test in this binary left behind -- a
+	// blind DELETE fails outright: "relation plugin_migrations does not
+	// exist" (42P01 on Postgres, 1146 on MySQL). Guard it the same way the
+	// MSSQL branch above already guards its DROPs.
+	if migrationsTableExists(t, conn, dialect) {
+		exec(`DELETE FROM plugin_migrations WHERE plugin_name = '` + pluginName + `'`)
+	}
+	if dialect == testutil.DialectPostgres && exists(`SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'admin' AND table_name = 'plugin_tables'`) {
 		exec(`DELETE FROM admin.plugin_tables WHERE plugin_name = '` + pluginName + `'`)
 	}
+}
+
+// migrationsTableExists reports whether plugin_migrations has been created
+// yet on conn. It exists lazily -- plugin.RunMigrations creates it with
+// CREATE TABLE IF NOT EXISTS on first use -- so a cleanup that runs before
+// any migration has ever executed against this database must not assume it
+// is there.
+func migrationsTableExists(t *testing.T, conn *sql.DB, dialect testutil.Dialect) bool {
+	t.Helper()
+	ctx := context.Background()
+	var query string
+	switch dialect {
+	case testutil.DialectMySQL:
+		query = `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'plugin_migrations'`
+	default:
+		query = `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'plugin_migrations'`
+	}
+	var n int
+	if err := conn.QueryRowContext(ctx, query).Scan(&n); err != nil {
+		t.Errorf("cleanupEventTriggersSchema: check plugin_migrations exists: %v", err)
+		return false
+	}
+	return n > 0
 }

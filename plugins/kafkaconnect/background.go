@@ -342,7 +342,10 @@ func (p *Plugin) publishRecord(ctx context.Context, c configRow, record kafkaRec
 		return fmt.Errorf("marshal event data: %w", err)
 	}
 
-	matched, err := eventtriggers.PublishEvent(ctx, p.db, p.logger, p.env, eventID, c.TenantID, c.EventType, eventDataJSON)
+	// nil keys: kafka-connect has no correlation-key concept of its own yet.
+	// cleat#2625, P1 -- adopting keys here is a follow-up, not part of this
+	// change, and nil is the "no keys" case every existing awaiter matches.
+	matched, err := eventtriggers.PublishEvent(ctx, p.db, p.logger, p.env, eventID, c.TenantID, c.EventType, eventDataJSON, nil)
 	if err != nil {
 		return fmt.Errorf("publish event: %w", err)
 	}

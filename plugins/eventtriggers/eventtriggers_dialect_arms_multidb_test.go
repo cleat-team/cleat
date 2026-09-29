@@ -38,3 +38,24 @@ func TestEveryQueryArmRunsOnItsOwnDialect(t *testing.T) {
 		},
 	})
 }
+
+// insertEventIdempotent and upsertAwaiter (Version 6, cleat#2625) are NOT
+// arms here, on purpose. Both write ingested_events/event_awaiters, and both
+// are TenantScoped (migrations.go v4) -- RunEveryArm executes straight
+// against be.DB with no tenant session context, which SQL Server's RLS block
+// predicate refuses outright ("target object ... has a block predicate that
+// conflicts with this operation", error 33504), unlike Postgres and MySQL on
+// this test harness's connections. Reproducing correct tenant-context setup
+// per dialect inside this shared helper -- Postgres's set_config on the
+// write transaction, SQL Server's sp_set_session_context, and its own
+// fragility under connection-pool reuse (plugin/plugin.go's comment on
+// exactly that) -- is a bigger change than this migration's own SQL
+// correctness needs.
+//
+// Both statements ARE exercised for real, under correct tenant scoping, by
+// TestPluginMigrations_AllDialects (the schema they write into, on all three
+// dialects) and TestPublishEventCarriesItsOwnTenant (PublishEvent, which
+// calls insertEventIdempotent, under real RLS enforcement) -- and by the
+// worker's own Multi-DB/Layer-3 CI jobs once this lands, which run
+// PublishEvent/registerAwaiter through the real tenant-scoped connection
+// path End to end.
