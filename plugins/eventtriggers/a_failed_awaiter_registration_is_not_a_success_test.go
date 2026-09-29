@@ -50,20 +50,35 @@ func (d *awaiterStubDB) Begin(context.Context) (plugin.PluginTx, error) {
 }
 func (d *awaiterStubDB) Ping(context.Context) error { return nil }
 
+// awaiterStubTx is the plugin.PluginTx Begin hands back. Every method just
+// forwards to the awaiterStubDB it was opened from, so awaitEvent's claim
+// transaction behaves exactly like the untransacted stub calls below it did
+// before cleat#2641.
 type awaiterStubTx struct {
 	db *awaiterStubDB
 }
 
+// Exec forwards to the stub, recording the query the same way an untransacted
+// Exec would.
 func (tx *awaiterStubTx) Exec(ctx context.Context, q string, args ...any) (int64, error) {
 	return tx.db.Exec(ctx, q, args...)
 }
+
+// Query forwards to the stub, which always returns sql.ErrNoRows.
 func (tx *awaiterStubTx) Query(ctx context.Context, q string, args ...any) (plugin.Rows, error) {
 	return tx.db.Query(ctx, q, args...)
 }
+
+// QueryRow forwards to the stub's noRowsScanner, so the claim's no-rows
+// branch fires exactly as it did before the transaction wrapping.
 func (tx *awaiterStubTx) QueryRow(ctx context.Context, q string, args ...any) plugin.RowScanner {
 	return tx.db.QueryRow(ctx, q, args...)
 }
-func (tx *awaiterStubTx) Commit() error   { return nil }
+
+// Commit is a no-op: the stub has no real transaction to commit.
+func (tx *awaiterStubTx) Commit() error { return nil }
+
+// Rollback is a no-op: the stub has no real transaction to roll back.
 func (tx *awaiterStubTx) Rollback() error { return nil }
 
 type noRowsScanner struct{}
