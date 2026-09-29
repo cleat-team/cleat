@@ -195,7 +195,7 @@ func TestALegacyAwaiterReplayLeavesAtMostTwoRowsAndUnregisterRemovesBoth(t *test
 			// eventtriggers_dialect_arms_multidb_test.go's own comment on
 			// upsertAwaiter documents for exactly this reason.
 			tenantCtx := plugin.ForTenant(ctx, tenantUUID)
-			if err := p.registerAwaiter(tenantCtx, tenantID, workflowID, eventType, "", "", ""); err != nil {
+			if err := registerAwaiterCore(tenantCtx, p.db, p.dialect, p.logger, tenantID, workflowID, eventType, "", "", ""); err != nil {
 				t.Fatalf("replay registerAwaiter on %s: %v", be.Name, err)
 			}
 
