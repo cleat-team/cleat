@@ -854,7 +854,7 @@ replay.
 ```go
 import "github.com/cleat-team/cleat/cleat/pluginclients/email"
 
-out, err := email.Send.Call(ctx, h, email.SendInput{
+out, err := email.Send.Call(h, email.SendInput{
     To:       "customer@example.com",
     Subject:  "Your order shipped",
     BodyHTML: "<p>...</p>",
@@ -877,12 +877,23 @@ That promise needs a rule for what a plugin's own contract change is allowed
 to do to an already-published `Req`/`Resp` struct, because unlike an ordinary
 internal edit, a rename here breaks a type a customer's code already imports.
 
-1. **Adding a field to a `Req` or `Resp` struct is always safe** and needs no
-   version-boundary decision -- it is the conventional additive direction
-   every consumer of a JSON-shaped API already has to tolerate. Give a new
-   input field `omitempty` so an older caller who never sets it still
-   round-trips as before, and treat its Go zero value as "not sent" in the
-   plugin.
+1. **Adding a field to a `Req` or `Resp` struct is safe today** -- the
+   conventional additive direction every consumer of a JSON-shaped API
+   already has to tolerate, with a new input field marked `omitempty` so an
+   older caller who never sets it still round-trips, and its Go zero value
+   treated as "not sent" in the plugin. **This is qualified, not
+   unconditional, and the qualification matters once point 3's fix ships:**
+   under plain `json.Unmarshal` (today), an unrecognised field is silently
+   dropped either direction, which is what makes an addition safe in
+   whichever order client and plugin update. If a plugin adopts
+   `DisallowUnknownFields` on its `Req` (point 3), a newer client's new
+   field sent to a not-yet-upgraded plugin now fails the call outright
+   instead of being dropped -- so a `Req` addition needs **plugin-first
+   rollout** wherever that fix is live. `Resp` additions stay safe
+   independently of that fix, and only for as long as client-side decoding
+   (`PluginCallTyped`, `cleat/plugin.go`) stays a plain, lenient
+   `json.Unmarshal` -- which is the current shape, and is request-side-only
+   by design in point 3's proposal.
 
 2. **Renaming or removing a field is a breaking change to published SDK
    surface, and needs an explicit version boundary -- this is the part of
@@ -890,32 +901,51 @@ internal edit, a rename here breaks a type a customer's code already imports.
    confirmed with the owner.** The proposed default, stated so it can be
    confirmed or overridden rather than left implicit: while the SDK is
    pre-1.0, a rename/removal lands in the next MINOR release (0.x), called
-   out under `UPGRADE NOTES -- breaking` in `CHANGELOG.md`, consistent with
+   out under `UPGRADE NOTES — breaking` in `CHANGELOG.md`, consistent with
    how this project has already treated other 0.4.0 interface changes
    (cleat#2597, "breaking changes are acceptable here"); once the SDK reaches
    1.0, the same change would require a MAJOR release under ordinary semver.
    **Treat this paragraph as a proposal awaiting owner confirmation, not a
    settled rule**, until cleat#2597 (or its successor) records a decision.
 
-3. **A client and the plugin it calls can be pinned to different releases,
-   and today that disagreement is silent in both directions** (cleat#2660,
-   found reviewing cleat#2657): a customer's workflow is compiled against
-   whatever SDK version they pinned, but runs against whichever plugin
-   version the operator's worker deployed. Concretely, a client built
-   against a newer `Req` struct can send a field the deployed plugin's older
-   struct does not declare -- `plugin.RegisterTyped` decodes the payload with
-   a plain `json.Unmarshal` (`plugin/typed.go`), which silently drops any
-   field the target struct does not have, and the call still returns success.
-   **This is not yet enforced anywhere; it is a known, documented hazard.**
-   The concrete fix, recommended but not adopted here because adopting it is
-   itself a compatibility decision (see below): have `RegisterTyped` decode
-   with `json.NewDecoder(...).DisallowUnknownFields()` instead, so a version
+3. **A client and the plugin it calls can be pinned to different releases**
+   (cleat#2660, found reviewing cleat#2657): a customer's workflow is
+   compiled against whatever SDK version they pinned, but runs against
+   whichever plugin version the operator's worker deployed. That skew has
+   **three distinct cases, not one**, and they are not symmetric:
+
+   - **(a) newer client, older plugin, an extra `Req` field.** The client
+     sends a field the deployed plugin's `Req` struct does not declare.
+     `plugin.RegisterTyped` decodes with a plain `json.Unmarshal`
+     (`plugin/typed.go`), which silently drops any field the target struct
+     does not have, and the call still returns success. **This is the one
+     case the fix below closes.**
+   - **(b) older client, newer plugin, a missing `Req` field.** The plugin's
+     `Req` struct has a field the older client never sends. The plugin sees
+     Go's zero value for it -- the same as any other JSON message omitting
+     an optional field. Already covered by point 1's zero-value convention;
+     not a new hazard and not something the fix below changes.
+   - **(c) newer plugin, older client, a renamed or removed `Resp` field.**
+     The plugin's response shape changed, but the client's copy of `Resp`
+     still declares the old field. The client's decode
+     (`PluginCallTyped`, `cleat/plugin.go`) is *also* a plain, lenient
+     `json.Unmarshal`, so the client silently gets the zero value for that
+     field. **The fix below does not touch this at all — it is
+     request-side only, by design** (see point 1's qualification).
+
+   **This is not yet enforced anywhere for case (a); it is a known,
+   documented hazard, and (b) and (c) are not "enforced" so much as
+   inherently tolerated by the zero-value convention.** The concrete fix
+   for (a), recommended but not adopted here because adopting it is itself
+   a compatibility decision: have `RegisterTyped` decode with
+   `json.NewDecoder(...).DisallowUnknownFields()` instead, so a version
    mismatch fails the call loudly at the boundary instead of silently
    dropping data. That change is a single choke point -- every typed plugin
    registration routes through `RegisterTyped` -- but it is also a breaking
-   change for any caller currently sending a field a plugin does not declare,
-   which is exactly the kind of thing point 2 above says needs a stated
-   version boundary before it ships.
+   change for any caller currently sending a field a plugin does not
+   declare, which is exactly the kind of thing point 2 above says needs a
+   stated version boundary before it ships, and it is what makes point 1's
+   "plugin-first rollout" qualification necessary once it's live.
 
 **What enforces this today, stated precisely rather than implied:**
 `scripts/check-generated-plugin-clients.sh` keeps a committed client in
@@ -926,7 +956,7 @@ the *same* tree. **It cannot see, and is not designed to see, the cross-release
 case this section is about**: a customer's already-published, pinned SDK
 version against an operator's independently-deployed worker version never
 meet in this repository's CI, so no automated check here can observe that
-pairing at all. Point 3's `DisallowUnknownFields` change, if adopted, would be
+pairing at all. Point 3(a)'s `DisallowUnknownFields` change, if adopted, would be
 directly unit-testable at the plugin boundary (encode a payload carrying an
 extra field, assert the call now errors instead of silently succeeding) --
 but until it lands, points 2 and 3 above are documentation of a rule and a
