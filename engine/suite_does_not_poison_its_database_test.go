@@ -114,8 +114,13 @@ func TestTheSuiteLeavesTheMigratedSchemaIntact(t *testing.T) {
 		t.Fatalf("admin schema has superseded function overload(s) that a test fixture "+
 			"installed and never dropped: %s -- a database in this state is exactly "+
 			"cleat#2449 (a stale, unpinned SECURITY DEFINER overload cleatctl check-db "+
-			"would flag on a real deployment). Add a t.Cleanup that drops the old "+
-			"signature by its exact arguments wherever this fixture creates one.",
+			"would flag on a real deployment). Return a cleanup closure that drops the "+
+			"old signature by its exact arguments, and defer it AFTER this fixture's "+
+			"own defer that closes the database connection (LIFO order then runs the "+
+			"drop first) -- NOT t.Cleanup, which runs after every plain defer in the "+
+			"test has already fired, so it would try to drop the function on an "+
+			"already-closed connection. See resetToOriginal001DropTenant's own doc "+
+			"comment (drop_tenant_test.go) for the same fix applied once already.",
 			strings.Join(overloaded, ", "))
 	}
 }

@@ -392,8 +392,12 @@ func runCheckDB(ctx context.Context, db *sql.DB, d dialect, dsn string, args []s
 	// rather than reverting to it, and nothing dropped it afterward. Every
 	// run of the three tests that call it against a persistent local
 	// Postgres reproduces this deterministically. Fixed alongside this
-	// check by giving that helper a t.Cleanup; this session's first guess
-	// here (a manual statement run outside the migration runner) was wrong.
+	// check by having that helper return a cleanup closure its three call
+	// sites defer -- NOT t.Cleanup, which cannot run before the plain
+	// `defer adminDB.Close()` each call site already has (see
+	// resetToOriginal001DropTenant's own doc comment for why). This
+	// session's first guess here (a manual statement run outside the
+	// migration runner) was wrong.
 	//
 	// A superseded overload matters specifically when it is SECURITY
 	// DEFINER with no pinned search_path (proconfig IS NULL): that is the
