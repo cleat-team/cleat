@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -498,8 +499,19 @@ func TestAwaitEventRejectsATrailingSpaceKeyAcrossDialects(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal input: %v", err)
 			}
-			if _, err := p.awaitEvent(ctx, string(inputJSON)); err == nil {
+			// Asserting err != nil alone is the same vacuity #2665's first
+			// test had: awaitEvent fails loudly for plenty of unrelated
+			// reasons (no tenant context, bad JSON, a DB error), and any of
+			// those would also make this pass without keySlots' trailing-
+			// space check ever running. Assert the error is THIS error.
+			_, err = p.awaitEvent(ctx, string(inputJSON))
+			if err == nil {
 				t.Fatalf("on %s, awaitEvent with a trailing-space key succeeded, want an error from keySlots", tc.name)
+			}
+			if !strings.Contains(err.Error(), "ends with a space") {
+				t.Fatalf("on %s, awaitEvent failed with %q, want an error naming the trailing space -- "+
+					"this may be failing for an unrelated reason, which would make this test pass "+
+					"whether or not keySlots' trailing-space check exists at all", tc.name, err)
 			}
 
 			// Not just "it errored" -- confirm registerAwaiter's write never
