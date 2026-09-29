@@ -167,7 +167,8 @@ due-schedule read go through — so a single line stops work and cron together. 
 side effect of the per-tenant claim: before it, the claim was one widened query inside a
 `SECURITY DEFINER` function and there was nowhere central to put this.
 
-`admin.tenants.suspended` is in the schema (`migrations/postgres/001_schema.sql`) with **no Go code reading it**.
+`admin.tenants.suspended` had been in the schema since the earliest migration (now generated into
+`migrations/postgres/001_schema.sql`) with **no Go code reading it**.
 A column named `suspended` that does nothing is worse than an absent one — the first operator to
 reach for it in an incident sets it, sees nothing happen, and has spent the minutes that mattered
 finding that out.
