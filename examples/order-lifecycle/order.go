@@ -496,8 +496,11 @@ const webhookEventType = "webhook"
 // workflow as an awaiter for (sourceID, orderID), and the publish handler
 // signals it directly the moment a matching webhook arrives
 // (plugins/eventtriggers/publish.go's signalAwaiters, "__evt:"+event_type) --
-// so the second call below is a genuine suspend, no worker held, woken by
-// the one event that matches rather than by the next tick of a timer.
+// so the loop below is a genuine suspend, no worker held, woken by the one
+// event that matches rather than by the next tick of a timer -- it is a
+// bounded loop of suspends, not a poll, because a wake is not proof of a
+// claimable event (see the loop's own comment) and the ordinary case exits
+// on the first iteration.
 func awaitPaymentConfirmation(sourceID, orderID string) error {
 	if sourceID == "" {
 		return fmt.Errorf("no webhook source configured; see the README's setup step")
@@ -525,28 +528,43 @@ func awaitPaymentConfirmation(sourceID, orderID string) error {
 	// Not found: the call above already registered this workflow as an
 	// awaiter for exactly (sourceID, orderID). Suspend on the signal that
 	// registration wakes, rather than polling.
-	const waitFor = 30 * time.Second
-	sr := h.AwaitSignals([]string{"__evt:" + webhookEventType}, waitFor)
-	if sr.TimedOut {
-		return fmt.Errorf("no payment confirmation from source %s within %s", sourceID, waitFor)
-	}
+	//
+	// A WAKE IS NOT PROOF OF A CLAIMABLE EVENT -- cleat-review's finding on
+	// this PR. A publish's INSERT and its signalAwaiters call are two
+	// separate steps (plugins/eventtriggers/publish.go), so a signal can
+	// arrive for an event a DIFFERENT, earlier wake of this same awaiter (or
+	// eventtriggers.ClaimOrRegisterAwaiter's own internal re-check, which
+	// closes the race this signal exists to cover -- see claim.go) already
+	// claimed. Treating one wake as authoritative and erroring when the
+	// re-check finds nothing turns an ordinary spurious wakeup -- the same
+	// hazard any condition variable has -- into a false failure. So this
+	// loops on the CONDITION (found a claimable event) rather than the
+	// EVENT (a signal arrived), across a fixed number of attempts rather
+	// than tracking wall-clock time: plain Go code between host calls is
+	// replayed, so a real time.Now() read here would not be.
+	const attempts = 5
+	const perAttemptWait = 6 * time.Second // attempts * perAttemptWait = 30s total, same budget as before this PR.
 
-	// The signal only wakes the workflow; it is not the claim. Re-call so
-	// the atomic claim/mark-consumed still happens exactly once, through
-	// the same mechanism, regardless of how many awaiters a given publish
-	// woke (there is exactly one here, but the call does not assume that).
-	got, err = webhookingest.AwaitWebhook.Call(h, webhookingest.AwaitWebhookInput{
-		SourceID: sourceID,
-		Keys:     []string{orderID},
-	})
-	if err != nil {
-		return err
+	for i := 0; i < attempts; i++ {
+		h.AwaitSignals([]string{"__evt:" + webhookEventType}, perAttemptWait)
+
+		// The signal only wakes the workflow; it is not the claim. Re-call
+		// so the atomic claim/mark-consumed still happens exactly once,
+		// through the same mechanism, regardless of how many awaiters a
+		// given publish woke, or whether this particular wake was spurious.
+		got, err = webhookingest.AwaitWebhook.Call(h, webhookingest.AwaitWebhookInput{
+			SourceID: sourceID,
+			Keys:     []string{orderID},
+		})
+		if err != nil {
+			return err
+		}
+		if got.Found {
+			return nil
+		}
 	}
-	if !got.Found {
-		return fmt.Errorf("signalled for payment confirmation from source %s but found nothing to claim -- "+
-			"another awaiter may have already consumed it", sourceID)
-	}
-	return nil
+	return fmt.Errorf("no payment confirmation from source %s within %s",
+		sourceID, attempts*perAttemptWait)
 }
 
 func dispatchFulfilment(input OrderInput) error {

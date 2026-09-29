@@ -912,6 +912,16 @@ func extractCorrelationKeyValue(body []byte, field string) (string, bool) {
 	// Not a JSON string -- accept a number or bool by its literal text
 	// (e.g. an integer order id sent unquoted), reject an object/array/null,
 	// which have no single scalar to correlate on.
+	//
+	// MATCHED BY RAW JSON TEXT, NOT NUMERIC VALUE -- cleat-review's finding
+	// on this PR. "order_id":1000 and "order_id":1e3 are the same number
+	// and different correlation keys, because correlation matching is
+	// always string equality (keys.go), never JSON-aware comparison -- a
+	// PSP that serialises the same value two different ways across
+	// requests (unlikely for an id, but not impossible for one computed
+	// rather than stored verbatim) correlates as if they were different
+	// orders. Use a string field for a correlation key where the sender's
+	// serialisation is not otherwise pinned.
 	var scalar any
 	if err := json.Unmarshal(raw, &scalar); err != nil {
 		return "", false
