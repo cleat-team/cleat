@@ -146,9 +146,9 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 	return string(outJSON), nil
 }
 
-// registerAwaiter records that the given workflow is waiting for an event of
-// the specified type.  This allows the publish handler to deliver a signal
-// when a matching event arrives.
+// registerAwaiterCore records that the given workflow is waiting for an
+// event of the specified type. This allows the publish handler to deliver a
+// signal when a matching event arrives.
 // RETURNS ITS ERROR, and that is the whole of cleat#1473.
 //
 // It used to log and return nothing, so awaitEvent's caller could not tell a
@@ -163,14 +163,15 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 // returns its error -- so registration was the one write whose failure was
 // swallowed, and propagating makes the function uniform. A visible error beats
 // an invisible wait.
-func (p *Plugin) registerAwaiter(ctx context.Context, tenantID, workflowID, eventType, key1, key2, key3 string) error {
-	return registerAwaiterCore(ctx, p.db, p.dialect, p.logger, tenantID, workflowID, eventType, key1, key2, key3)
-}
-
-// registerAwaiterCore is registerAwaiter's actual body, as a free function
-// so ClaimOrRegisterAwaiter (claim.go) can call the SAME write rather than
-// keeping a second copy -- the same reason ClaimOrRegisterAwaiter itself
-// exists (see its doc comment).
+//
+// A free function, not a (*Plugin) method: both awaitEvent (via
+// ClaimOrRegisterAwaiter, claim.go) and webhookingest's awaitWebhook (same
+// path) need the SAME write, and neither is a Plugin method on
+// event-triggers. The method wrapper this replaced (cleat#2697,
+// scripts/check-test-only-code.sh) had lost its last production caller the
+// moment awaitEvent was rewritten to call ClaimOrRegisterAwaiter directly --
+// every remaining caller was a test, which is exactly the shape that check
+// exists to catch.
 func registerAwaiterCore(ctx context.Context, db plugin.PluginDB, dialect plugin.Dialect, logger *slog.Logger, tenantID, workflowID, eventType, key1, key2, key3 string) error {
 	regKey := registrationKey(workflowID, eventType, key1, key2, key3)
 	_, err := db.Exec(ctx, plugin.Rebind(upsertAwaiter.For(dialect), dialect),

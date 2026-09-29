@@ -495,9 +495,16 @@ fi
 
 echo
 echo "==> creating a webhook source (setup, not a counted step)"
+# correlation_key_field: "order_id" -- matching the README's documented setup
+# step and order.go's awaitPaymentConfirmation, which ALWAYS passes
+# Keys: []string{orderID} (cleat#2649). Without this, handleIngestWebhook
+# extracts no key2 from the delivered webhook's body, so every published
+# event's key2 is "" while every awaiter's key2 is the order id -- they can
+# never match, on any dialect, and run 2 below times out at its 30s budget
+# every time. Found via cleat#2697's mssql arm failing this exact way.
 SOURCE_JSON="$(curl -fsS --max-time 15 -X POST "$API/ingest/sources" "${auth[@]}" \
   -H "Content-Type: application/json" \
-  -d '{"name":"psp","source_type":"payment","secret":"whsec_local_dev"}' 2>&1)" || {
+  -d '{"name":"psp","source_type":"payment","secret":"whsec_local_dev","correlation_key_field":"order_id"}' 2>&1)" || {
     echo "FAIL: POST /ingest/sources: $SOURCE_JSON" >&2
     exit 1
   }
