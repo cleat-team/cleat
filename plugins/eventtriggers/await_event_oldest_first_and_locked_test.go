@@ -122,9 +122,8 @@ func TestAwaitEventMarshalFailureLeavesEventUnconsumed(t *testing.T) {
 		TenantID:   tenantID.String(),
 		WorkflowID: "wf-marshal-failure-mssql",
 	})
-	// Asserted against the specific marshal error, not just "some error" --
-	// cleat-review and the coordinator both flagged this independently: the
-	// property under test is ORDERING (a marshal failure leaves the row
+	// Asserted against the specific marshal error, not just "some error":
+	// the property under test is ORDERING (a marshal failure leaves the row
 	// unconsumed), and a bare err != nil passes just as well if awaitEvent
 	// failed for an unrelated reason before ever reaching the claim -- e.g.
 	// a broken claim query or a bad input -- where processed is ALSO false
