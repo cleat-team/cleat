@@ -65,10 +65,15 @@ func TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds(t *testing.T) {
 		template string
 		artifact string
 	}{
-		{"basic", "hello.wasm"},
-		{"agent", "agent_loop.wasm"},
-		{"workflow", "process.wasm"},
-		{"fullstack", "submit_order.wasm"},
+		// cleat#2407: the artifact is named after the SOURCE FILE, not the
+		// entry point. basic, workflow and fullstack all scaffold their
+		// entry point into main.go, so all three now build main.wasm; agent
+		// scaffolds it into workflow.go (tools.go, its other file, declares
+		// none), so it builds workflow.wasm.
+		{"basic", "main.wasm"},
+		{"agent", "workflow.wasm"},
+		{"workflow", "main.wasm"},
+		{"fullstack", "main.wasm"},
 	} {
 		t.Run(tc.template, func(t *testing.T) {
 			root := t.TempDir()

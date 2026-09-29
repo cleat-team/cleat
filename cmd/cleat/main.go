@@ -1439,10 +1439,36 @@ func exportedEntryPointNames(result *analyzer.AnalysisResult) []string {
 	return names
 }
 
+// wasmOutputName names the artifact after the SOURCE FILE the workflow is
+// defined in, not the entry point (owner decision, 2026-09-26, cleat#2407).
+//
+// A snake_case entry-point name is correct for the export inside the module
+// -- wasm.ToSnakeCase(analyzer.ShortName(...)) still produces that, unchanged,
+// wherever an export name is needed -- but naming the FILE after it broke the
+// "deploy cancel_order.wasm to run PlaceOrder" case: fooddash's alphabetically
+// -first entry point (sort.Strings orders result.EntryPoints in loader.go) is
+// CancelOrder, so the artifact was cancel_order.wasm even though the workflow
+// a reader actually wants to run, and the file that defines it, is order.go.
+//
+// Still keyed on EntryPoints[0] -- same selection, so a package with entry
+// points across several files stays deterministic the same way it already
+// was -- but resolved to THAT entry point's file via lookupFile rather than
+// its own name.
 func wasmOutputName(result *analyzer.AnalysisResult) string {
 	if len(result.EntryPoints) == 0 {
 		return "output.wasm"
 	}
+	if file := lookupFile(result, result.EntryPoints[0]); file != "" {
+		stem := strings.TrimSuffix(file, filepath.Ext(file))
+		return wasm.ToSnakeCase(stem) + ".wasm"
+	}
+	// lookupFile returns "" only when the entry point's position information
+	// is unavailable (fd.Pkg, fd.Pkg.Fset, or the AST node's file are nil) --
+	// not reachable through the loader's normal path, which always resolves
+	// real source files, but a caller could in principle hand this a
+	// synthesized AnalysisResult with EntryPoints set and Funcs not. Falling
+	// back to the entry-point name rather than "output.wasm" keeps that case
+	// at the OLD behaviour instead of a name carrying no information at all.
 	return wasm.ToSnakeCase(analyzer.ShortName(result.EntryPoints[0])) + ".wasm"
 }
 

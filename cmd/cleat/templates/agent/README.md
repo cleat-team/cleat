@@ -41,7 +41,7 @@ cleat build -o ./out .
 
 # Deploy to PostgreSQL
 cleat --db "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable" \
-  deploy --name agent ./out/agent_loop.wasm
+  deploy --name agent ./out/workflow.wasm
 
 # Start the worker
 docker-compose up -d worker

@@ -71,6 +71,14 @@ var goFixtureExpectations = map[string]string{
 	"signalworkflow": "",
 	"spin":           "",
 	"updatedispatch": "",
+	// cleat#2407: two entry points split across two files, used by
+	// TestWasmOutputName_CrossFileEntryPointsNameTheRightFile to prove
+	// wasmOutputName resolves the SELECTED entry point's own file rather
+	// than some other rule (alphabetically-first filename, package name).
+	// Nothing unusual about the shape otherwise -- two single-string-param
+	// entry points -- so it must verify cleanly like every other fixture
+	// here.
+	"wasmnamecrossfile": "",
 
 	// cleat#1614's floor assertion. The same Retrier.Wait as methodglobalh
 	// below, reaching the host through a cleat.HostCalls field on the

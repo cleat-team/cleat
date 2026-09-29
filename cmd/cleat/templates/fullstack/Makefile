@@ -32,7 +32,7 @@ logs:
 # no-op'ing.
 deploy: build
 	cleat deploy --db "postgres://cleat:cleat@localhost:$(CLEAT_PG_PORT)/cleat?sslmode=disable" \
-	  --name my-fullstack-app ./out/submit_order.wasm
+	  --name my-fullstack-app ./out/main.wasm
 
 # Start one run. Idempotency-Key makes a retry of THIS request return the
 # original run instead of creating a second one.

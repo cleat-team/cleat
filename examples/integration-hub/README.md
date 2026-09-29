@@ -106,9 +106,9 @@ the crash-resume count, not the completion.
 cleat build -o /tmp/out ./examples/integration-hub/
 ```
 
-The artifact is named for the entry point: `sync_customer.wasm`. `cleat.yaml`
-lists entry points in snake_case while the Go function is `SyncCustomer` — the
-entry point is part of the ABI.
+The artifact is named for the source file: `hub.wasm` (`hub.go`). `cleat.yaml`
+lists entry points in snake_case while the Go function is `SyncCustomer` — that
+pairing, not the filename, is part of the ABI.
 
 > `cleat build` emits **W003** here, warning that a single `string` parameter
 > receives the whole input JSON rather than the field of that name. That is
@@ -129,7 +129,7 @@ docker compose --profile postgres up -d
 docker compose logs cleat-worker | grep -i 'Key:'
 
 # 2. Deploy the compiled workflow.
-cleat deploy --db "$CLEAT_DB_URL" --name integration-hub /tmp/out/sync_customer.wasm
+cleat deploy --db "$CLEAT_DB_URL" --name integration-hub /tmp/out/hub.wasm
 ```
 
 The `sink` service came up with the stack: it is the rope end, standing in for
@@ -176,7 +176,7 @@ error that says so, and names the alternative.
 export CLEAT_DIALECT=mysql          # or: mssql
 go build -o /tmp/out/deploy-workflow ./cmd/deploy-workflow
 /tmp/out/deploy-workflow --driver "$CLEAT_DIALECT" --db "$CLEAT_DB_URL" \
-  integration-hub /tmp/out/sync_customer.wasm
+  integration-hub /tmp/out/hub.wasm
 ```
 
 `deploy-workflow` is the only multi-dialect deploy path cleat has, and it deploys

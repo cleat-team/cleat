@@ -782,9 +782,50 @@ func TestWasmOutputName_FromRealAnalysis(t *testing.T) {
 	if !strings.HasSuffix(name, ".wasm") {
 		t.Errorf("expected .wasm suffix, got %q", name)
 	}
-	// The first registered entry point is PlaceOrder -> place_order
-	if !strings.Contains(name, "place_order") && !strings.Contains(name, "cancel_order") {
-		t.Errorf("expected name containing one of the entry points, got %q", name)
+	// cleat#2407: named after the SOURCE FILE, not the entry point. All three
+	// of testdata/basic's entry points (PlaceOrder, CancelOrder, LongRunning)
+	// are declared in order.go, so the artifact is order.wasm regardless of
+	// which one sorts first in result.EntryPoints -- this fixture no longer
+	// exercises that ordering at all, which is exactly the point: a reader
+	// who deploys order.wasm gets the file that actually defines whichever
+	// entry point they meant to run.
+	if want := "order.wasm"; name != want {
+		t.Errorf("wasmOutputName() = %q, want %q (order.go, where every entry point in this fixture is declared)",
+			name, want)
+	}
+}
+
+// TestWasmOutputName_CrossFileEntryPointsNameTheRightFile is the adversarial
+// case testdata/basic cannot exercise, because all of ITS entry points share
+// one file: two entry points in DIFFERENT files, where the alphabetically
+// -first one (Aardvark, sorted before Zookeeper -- sort.Strings in
+// internal/analyzer/loader.go) lives in the file that also sorts LAST by
+// filename (zebra.go, after mango.go).
+//
+// That second inversion is deliberate and is what the test is actually
+// about: without it, "resolves to the entry point's own file" and "resolves
+// to the alphabetically-first filename in the package" would agree, and a
+// wasmOutputName that quietly did the latter (e.g. by taking the first
+// result of a sorted filepath.Glob rather than the selected entry point's
+// own position) would pass this test for the wrong reason.
+func TestWasmOutputName_CrossFileEntryPointsNameTheRightFile(t *testing.T) {
+	pattern := filepath.Join(testdataDir(t), "wasmnamecrossfile")
+	result, _, _, _, _, _ := analyze(pattern)
+
+	if len(result.EntryPoints) != 2 {
+		t.Fatalf("fixture needs exactly 2 entry points, got %d: %v",
+			len(result.EntryPoints), result.EntryPoints)
+	}
+	if got := analyzer.ShortName(result.EntryPoints[0]); got != "Aardvark" {
+		t.Fatalf("UNMEASURED: EntryPoints[0] = %q, want %q -- the fixture or the sort "+
+			"changed, so this test is not exercising the case it claims to", got, "Aardvark")
+	}
+
+	if want := "zebra.wasm"; wasmOutputName(result) != want {
+		t.Errorf("wasmOutputName() = %q, want %q -- the selected entry point (Aardvark) "+
+			"is declared in zebra.go, not mango.go, so the artifact must be named for "+
+			"zebra.go regardless of which filename sorts first",
+			wasmOutputName(result), want)
 	}
 }
 
