@@ -5,13 +5,17 @@
   "description": "DBOS counterpart to examples/integration-hub's wedge, for cleat#2597's cleat-vs-DBOS pair harness. See README.md for the finding this pair measures before reading any code here.",
   "scripts": {
     "build": "tsc",
-    "test": "node dist/wedge.test.js"
+    "test": "node run-tests.js"
   },
   "dependencies": {
-    "@dbos-inc/dbos-sdk": "5.1.10"
+    "@dbos-inc/dbos-sdk": "5.1.10",
+    "isolated-vm": "6.1.2"
   },
   "devDependencies": {
     "typescript": "5.5.4",
-    "@types/node": "20.14.10"
+    "@types/node": "24.0.0"
+  },
+  "allowScripts": {
+    "isolated-vm@6.1.2": true
   }
 }

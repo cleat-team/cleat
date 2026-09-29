@@ -122,12 +122,349 @@ than a possible change in DBOS's own behaviour worth re-checking against
 current docs, has drawn exactly the wrong conclusion from this pair's own
 design.
 
+## The second counterpart: DBOS plus a real sandbox (`src/isolated-workflow.ts`)
+
+**Added after cleat-review's review of the bare-step counterpart above,
+because the comparison it makes on its own is one-sided.** Bare
+`DBOS.runStep` with no sandboxing shows what happens if a team does
+*nothing* special — and no real team ships tenant-supplied code that way.
+The owner's feedback, relayed by the coordinator: *"bare DBOS is not the
+competitor... The honest counterpart is 'DBOS plus a sandbox service', and
+the pair should measure that."* This section is that counterpart, and it is
+**complementary to the one above, not a replacement for it** — the bare
+version's finding (DBOS's platform surface supplies zero isolation) is still
+true and is the entire reason this section's extra machinery exists at all.
+
+**Why `isolated-vm`, specifically.** It is the lowest-friction idiomatic
+choice for a Node/TypeScript team that wants to run untrusted JavaScript
+without standing up a container fleet or a separate sandboxing service: no
+extra infrastructure, no network hop, just a library dependency. A V8
+isolate has its own heap and starts with **no** access to Node's built-in
+modules (`require`, `fs`, `process`, network sockets) unless the host code
+explicitly injects a reference into the isolate's global object — a real
+boundary, verified empirically below rather than merely asserted. A
+container-per-tenant or a separate sandbox microservice were the other two
+options the owner's framing named; `isolated-vm` was chosen because it needs
+no additional infrastructure to demonstrate in a CI job, which keeps this
+pair reproducible the same way the bare version is. The cost/durability
+analysis below would look qualitatively the same for either alternative —
+an out-of-process boundary makes the durability question *sharper*, not
+weaker, since more state then crosses the boundary between the step and its
+checkpoint.
+
+**The tenant's code is a string here, not a function reference** — a
+deliberate difference from `src/workflow.ts`'s `runTenantStep`. A function
+already compiled into `workflow.ts` at build time is not what a tenant
+uploads; a string evaluated at runtime inside an isolate
+(`src/isolated-workflow.ts`'s `NORMALIZE_ORDER_SOURCE` /
+`READ_HOST_FILE_SOURCE`) is the closest idiomatic DBOS analogue to cleat's
+`POST /api/definitions` payload. It is still not a full analogue — nothing
+here *persists* an uploaded string across a process restart, the way
+cleat's WASM module storage does — so this remains scoped to the one
+question both counterparts measure: what happens to a tenant step's host
+access, not the full upload/storage lifecycle.
+
+**The result: the isolate refuses the read, empirically.**
+`src/isolated-wedge.test.ts` runs the same two tenant behaviours
+(`normalize-order`, `read-host-file`) through `DBOS.runStep` wrapping
+`isolated-vm` execution instead of a plain function call, with the same
+mandatory positive control this pair's bare version requires. Verified
+2026-09-28, against a real DBOS runtime and Postgres:
+
+    ok: the legitimate tenant step completed through the isolate
+    require is not defined
+    ok: readHostFile was refused by the isolate (ReferenceError: require is not defined)
+    all assertions passed -- the isolate boundary holds
+
+The refusal is `isolated-vm`'s doing, not DBOS's: the isolate simply has no
+`require` in its global scope. **Falsified by mutation, both directions**,
+same discipline as the bare counterpart:
+
+| mutation | result |
+|---|---|
+| (none) | exit 0 — positive control holds, isolation holds |
+| break the positive control (force `normalize-order` to throw) | exit 2 — UNMEASURED, isolation test correctly skipped |
+| leak `require` into `readHostFileIsolated` (simulate a misconfigured sandbox) | exit 1 — FINDING, correctly reports the isolation did NOT hold |
+
+That third row is the one worth dwelling on: it is not a hypothetical.
+Simulating a team that wires its sandbox up incorrectly (or a future
+`isolated-vm` release that changes its default global scope) produces
+exactly the same exit code as a real regression, which is the entire point
+of the 3-way contract — a broken sandbox is a **finding**, not a silent
+green.
+
+## What this counterpart costs, and where the DBOS side's number understates it
+
+**An idiomatic team does not get this boundary for the cost of `npm install
+isolated-vm`.** The line count below (see "Counting this pair,
+role-symmetric") is real, but it undercounts the actual burden in one
+specific way that is worth stating rather than leaving for a reader to
+discover: `src/isolated-workflow.ts`'s two tenant behaviours are **pure
+functions** with no side effects, chosen to mirror `workflow.ts`'s
+`normalizeOrder`/`readHostFile` exactly. That choice is what makes the LOC
+comparison fair — but it is also why this counterpart cannot demonstrate the
+single most important cost of the isolate boundary: **what it takes to keep
+durability across it.**
+
+**The mechanism, cited from DBOS's own documentation
+(`docs.dbos.dev/architecture`, checked 2026-09-28):** DBOS steps are
+**at-least-once**, not exactly-once. *"Eventually, the recovered workflow
+reaches a step with no checkpoint... The recovered workflow executes that
+step normally... resuming from the last completed step."* And from
+`/typescript/tutorials/step-tutorial`: *"Steps should be idempotent... If a
+workflow fails while executing a step, it retries the step during recovery.
+However, once a step completes and is checkpointed, it is never
+re-executed."*
+
+**Composing `DBOS.runStep` with an isolate execution does not change that
+contract — it just moves the boundary a crash can land inside.**
+`runTenantStepIsolated` treats the whole isolate run (spin up, eval, invoke,
+marshal the result, dispose) as one opaque unit from DBOS's point of view.
+If the process crashes *after* the isolate has finished — a tenant's code
+has already run, its side effect (a charge, a webhook, a write to another
+system) has already happened — but *before* DBOS checkpoints the step, the
+recovered workflow re-executes `runTenantStepIsolated` from the start, and
+the isolate runs the tenant's code again. DBOS's idempotency requirement is
+stated for *the step function*, and here the step function is "run whatever
+the tenant uploaded" — DBOS has no way to inspect or enforce idempotency on
+code it does not control, and neither does `isolated-vm`: the isolate
+enforces what the tenant's code can *reach*, not how many times it *runs*.
+
+**Why this pair's own two test functions cannot exercise that risk, and why
+that is not a gap in the test — it is a fact about what pure functions
+are.** `normalizeOrder`/`normalizeOrderIsolated` and
+`readHostFile`/`readHostFileIsolated` are pure: re-running either one
+twice, from scratch, produces the same observable result and no double
+effect. That is exactly why they are safe choices for a line-count
+comparison (their DBOS-side and cleat-side versions do the same work, so
+the LOC delta isolates the execution-boundary cost rather than smuggling in
+different business logic) — and exactly why re-execution risk is invisible
+to them. Demonstrating the risk for real would need a tenant step with an
+external side effect (a charge, an outbound webhook) and a way to crash the
+process between the isolate finishing and DBOS's checkpoint write — a
+fault-injection harness, not a difference in tenant logic. Building that
+was judged out of scope for what this pair measures (an execution-boundary
+comparison, not a fault-injection study of either platform), so the risk is
+**documented here, with its exact mechanism and citation, rather than
+fabricated as a passing test that doesn't actually exercise it.**
+
+**Cleat does not have this problem, and the reason is worth stating
+precisely rather than as a slogan.** cleat's engine records every host call
+a WASM guest makes (including sandbox-boundary-crossing ones) as part of
+the workflow's durable event log, and replay re-delivers recorded results
+rather than re-executing the call — so a crash between a guest's host call
+and the engine's checkpoint does not re-run the guest's side effect on
+recovery. That mechanism is `engine/` infrastructure (part of the 124
+platform lines counted below), not something either DBOS counterpart's
+application code reproduces. **This is the cost this pair's numbers most
+understate**: it does not show up as a line count difference at all,
+because nothing on the DBOS side has a comparable mechanism to count lines
+*of* — the gap is a missing capability, not a smaller implementation of the
+same one.
+
+## The timeout that makes this counterpart competent, not just present
+
+**A sandbox with no CPU bound is not a sandbox a real team would ship.**
+The first version of `src/isolated-workflow.ts` called `fn.apply` with no
+`timeout` option — cleat-review's review caught it: without one, a tenant
+step containing `while(true){}` hangs the isolate, the DBOS step, and the
+workflow forever. That is not a finding about DBOS or about `isolated-vm`;
+it is a finding about this counterpart being unfinished, and an unfinished
+sandboxed counterpart makes the gap it measures look larger than it really
+is — the same "flattering error" direction this README's other sections
+have been careful to check for elsewhere.
+
+**Fixed by adding `timeout: 5000` to both `context.eval` and `fn.apply`**
+(`runInIsolate`, `src/isolated-workflow.ts`) — the eval call needs one too,
+not only the invocation, because a tenant could hang the isolate with a
+top-level infinite loop in the source string itself, before any function is
+ever called. **Verified empirically, not just cited from `isolated-vm`'s
+docs**: a scratch isolate running `(function(){ while(true){} })()` with
+`timeout: 2000` threw `Script execution timed out.` after 2008ms. cleat
+bounds guest execution the same way, at the engine level
+(`tenant_settings.wasm_wall_clock_ceiling_ms`, plus further engine limits);
+this is that same defence, added on the DBOS-isolated side rather than
+omitted. The 5000ms figure is counted in the "host runner" row below, since
+it is part of the plumbing that invokes the tenant's code, not the tenant's
+own logic.
+
+**Not shipped in this PR: a third tenant behaviour (an infinite loop) run
+on both sides, asserting each platform actually bounds it.** cleat-review
+suggested this as a strong-but-optional addition — it would turn "bounded
+execution" into a tested claim on both sides rather than one verified only
+by a scratch script here. Filed as a follow-up rather than silently
+dropped: cleat#2628. cleat's own side would need its own
+`tenant_settings.wasm_wall_clock_ceiling_ms` case added to
+`scripts/run-integration-hub-tenant-sandbox-scenario.sh`, which is outside
+this PR's scope (fixing the isolated-vm counterpart's missing timeout, not
+extending cleat's own sandbox scenario).
+
+## The tenant step's own durability: a workflow vs. one atomic step
+
+**On cleat, a tenant step is not merely sandboxed code — it is a full child
+workflow**, per `hub.go`'s `h.ChildWorkflow(in.TenantStepName, ...)` /
+`h.AwaitChild(runID)`. That means a tenant's own step can itself make
+durable host calls, sleep, wait on an event, and be replayed independently
+of the parent workflow — the same durability guarantees any cleat workflow
+gets, because a tenant step IS a cleat workflow, running under the same
+engine.
+
+**On the DBOS-isolated counterpart, a tenant step is one opaque,
+atomic, at-least-once `DBOS.runStep` call** wrapping the isolate's entire
+execution. There is no durable operation available *inside* the isolate:
+`isolated-vm`'s isolate has no access to `@dbos-inc/dbos-sdk` (nor should
+it — handing a sandboxed isolate a reference to the host's DBOS client
+would defeat the sandbox), so a tenant step that needed to sleep, wait for
+an event, or call another durable operation from *within* its own logic
+has no path to do so without the host bridging specific DBOS APIs into the
+isolate's global scope — which is more plumbing, and another boundary to
+secure (each bridged function is a new surface the isolate could call in a
+way its author did not intend).
+
+**This pair's two tenant behaviours don't exercise this difference
+either**, for the same reason they cannot exercise the durability-boundary
+risk two sections up: both are synchronous, single-call pure functions with
+no need for a nested durable operation. The claim is structural rather than
+something a passing test demonstrates here — stated with its mechanism,
+the same discipline as the cost this pair cannot measure directly.
+
+## Counting this pair, role-symmetric
+
+**Re-derive with `scripts/dbos-pair-loc.sh integration-hub`** (`cloc` 2.10).
+Snapshot dated **2026-09-28** — re-run the command rather than re-quoting
+these rows, per CLAUDE.md's rule on numbers in prose. This table replaced
+an earlier "app lines vs. platform lines" split that cleat-review's review
+of this PR's first version found was still not like-for-like: it compared
+cleat's two tenant-step files against **all four** DBOS files (both the
+bare AND isolated variants, plus both their test files) — a treatment
+against a treatment-plus-its-own-control, in cleat's favour. The comparison
+below is **role-symmetric**: the same four roles, counted the same way, on
+cleat and on the DBOS-**isolated** counterpart specifically (the bare
+version is the CONTROL, reported separately and excluded from the totals):
+
+| role | cleat | DBOS-isolated |
+|---|---:|---:|
+| tenant code | **49** | **19** |
+| host runner | **21** | **45** |
+| tests | **248** | **72** |
+| platform | **124** | **0** |
+| **total** | **442** | **136** |
+
+CONTROL, excluded from the totals above: bare `DBOS.runStep`, no sandbox
+(`src/workflow.ts` + `src/wedge.test.ts`) — **104** lines. It is not what an
+idiomatic team ships, which is the entire reason the isolated counterpart
+exists; folding it into the isolated row's total would count DBOS's own
+control as part of its treatment.
+
+**What each row actually contains, since two of the four are extracted
+fragments rather than whole files** (`scripts/dbos-pair-loc-extract.py`,
+bounded by the source's own structure — a brace block, a named function, a
+template literal's closing backtick — not a frozen line range, so the
+extraction tracks edits rather than silently drifting):
+
+- **tenant code**: cleat's two tenant-steps `main.go` files, whole (a
+  cleat tenant author writes nothing else). DBOS-isolated's two source
+  **string literals** (`NORMALIZE_ORDER_SOURCE`, `READ_HOST_FILE_SOURCE`)
+  — the closest analogue to tenant-authored code on that side, since DBOS
+  has no upload mechanism (see "No primitive for tenant-supplied code" in
+  `ISSUES.md`) and this port stands the string in for what a tenant would
+  upload.
+- **host runner**: the `if in.TenantStepName != ""` dispatch block
+  extracted from `hub.go` — the *entire* file is far larger, because
+  `SyncCustomer` also does webhook ingestion and connector dispatch, out of
+  this pair's scope (see "Not a full SyncCustomer port"). DBOS-isolated's
+  is `isolated-workflow.ts` **minus** the two tenant-code string literals
+  — `runInIsolate` (isolate setup, the CPU timeout, teardown), the two
+  async wrapper functions, and the workflow registration.
+- **tests**: cleat's two `hub_test.go` functions that exercise
+  `TenantStepName` (`TestSyncCustomer_RunsTheTenantsOwnStep`,
+  `TestSyncCustomer_ATenantStepThatFailsNamesItsStep`), **plus**
+  `scripts/run-integration-hub-tenant-sandbox-scenario.sh` in full — the
+  end-to-end proof against a real deployed worker. DBOS-isolated's is
+  `isolated-wedge.test.ts` in full.
+- **platform**: unchanged from the earlier table — `engine/wasi_policy.go`
+  + `engine/wasi_policy_wasmtime.go` for cleat, nothing for DBOS (see
+  below).
+
+**The 442-vs-136 gap is dominated by the "tests" row, and that is a real
+structural difference, not padding.** cleat's tenant-step boundary can only
+be proven by driving a real HTTP API against a real deployed
+`cleat-worker` process — uploading a WASM module through
+`POST /api/definitions`, starting it, and polling for a terminal status —
+because that is how a tenant's uploaded code actually reaches the engine.
+`isolated-wedge.test.ts` proves the DBOS-isolated equivalent **in-process**,
+by calling `DBOS.startWorkflow` directly in the same Node process, because
+"tenant code" here is a string evaluated inside that process, not a module
+deployed to a separate service. Neither harness is doing unnecessary work;
+they are proving the same property at two different deployment topologies,
+and the topology cleat proves against is the one a real multi-tenant
+deployment actually has.
+
+**Why DBOS's platform row is 0, and why that is not a rounding artefact.**
+`@dbos-inc/dbos-sdk` contributes no isolation code of its own.
+`isolated-vm` *does* supply the actual boundary, but it is a third-party
+library the application author chose, installed, and wired up — counted in
+the **host runner** row above, not platform, the same way a team choosing
+a container-per-tenant would write and maintain their own orchestration
+rather than receive it from DBOS. Contrast cleat's platform row:
+`engine/wasi_policy.go` and `engine/wasi_policy_wasmtime.go` are written
+**once**, by the platform, and every tenant step this engine ever runs
+gets the boundary for free.
+
+**So the honest reading of this table is not a single "442 vs. 136"
+verdict — it is several separate claims, each real:**
+
+1. **cleat ships an isolation boundary as a platform capability** (124
+   lines, written once, in `engine/`) that every tenant step gets
+   automatically. Those 124 lines are not free — someone at cleat wrote
+   and maintains them — but they are not paid by the tenant-step's own
+   author, which is the comparison this pair is about. An idiomatic DBOS
+   deployment has no equivalent platform line to count, because the
+   capability does not exist there.
+2. **An idiomatic team CAN build a comparable boundary on DBOS**, using a
+   third-party library, at a real and measurable cost split across tenant
+   code, host runner, and tests — 136 lines total, all counted as
+   application cost because nothing about it is DBOS's contribution.
+3. **cleat's own tenant-code and host-runner rows are each smaller than
+   DBOS-isolated's** (49 vs. 19 is reversed because DBOS's tenant code is a
+   minimal source-string stand-in, not a real upload payload; 21 vs. 45
+   reflects `isolated-vm`'s setup/teardown/timeout plumbing against
+   cleat's two-line `ChildWorkflow`/`AwaitChild` call). Read these as
+   noisy at this size — a 24-26 line difference either way — not as a
+   trend either side should lean on.
+4. **The "tests" row is where the real gap lives, and it is about
+   deployment topology, not code quality** — see above.
+5. **Neither counterpart's line count captures the durability-boundary
+   cost** described above ("What this counterpart costs") or the
+   tenant-step-as-workflow difference ("The tenant step's own
+   durability"), because both are missing capabilities rather than a
+   smaller implementation of an existing one.
+
+A smaller total on either side is not, by itself, a win for that side — the
+order-lifecycle pair's own rule (*"Tenancy: 0 lines, and it is not a
+compliment"*) applies here too: a 0 in DBOS's platform row is a capability
+gap, and DBOS-isolated's non-zero host-runner and tenant-code rows are the
+honest price of an application author closing part of that gap themselves.
+
 ## Version and date
 
-`package.json` pins `@dbos-inc/dbos-sdk` to `5.1.10` — the latest stable
-release as of **2026-09-28**, confirmed with `npm view @dbos-inc/dbos-sdk
-version` on the same day this port was written, and the same version the
-order-lifecycle pair already pins. No drift between the two pairs to record.
+`package.json` pins:
+
+- `@dbos-inc/dbos-sdk` to `5.1.10` — the latest stable release as of
+  **2026-09-28**, confirmed with `npm view @dbos-inc/dbos-sdk version` on
+  the same day this port was written, and the same version the
+  order-lifecycle pair already pins. No drift between the two pairs to
+  record.
+- `isolated-vm` to `6.1.2`, paired with **Node 24** ("Krypton", the current
+  LTS line as of 2026-09-28) in both CI (`.github/workflows/ci.yml`) and
+  `@types/node`. Both were verified empirically in this PR, not chosen from
+  a changelog: `isolated-vm@7.x` requires Node ≥26, which as of this date is
+  still the bleeding-edge "Current" release rather than LTS — the less
+  defensible pin for a job meant to demonstrate what an idiomatic team would
+  actually ship. `6.1.2` ships a prebuilt native binary for `darwin-arm64`
+  and Linux (`node_modules/isolated-vm/prebuilds/`), so CI needs no C++
+  toolchain to install it. See `src/isolated-workflow.ts`'s header comment
+  for the full version rationale.
 
 ## Build and run
 
@@ -144,45 +481,13 @@ DBOS_SYSTEM_DATABASE_URL=postgres://postgres:PASSWORD@127.0.0.1:5432/integration
   npm test
 ```
 
-`scripts/run-integration-hub-dbos-scenario.sh`, at the repo root, is what CI
-runs — it installs, builds, and runs `npm test`, translating its exit code
-into the three-way status documented above.
-
-## Why the totals below are not the whole comparison
-
-**These file lists are not role-symmetric, and that asymmetry IS the
-finding — not a flaw in the count.** Re-derive with
-`scripts/dbos-pair-loc.sh integration-hub`, `cloc.py` 2.10:
-
-| role | file | code lines |
-|---|---|---|
-| cleat: tenant step (positive) | `tenant-steps/normalize-order/main.go` | 31 |
-| cleat: tenant step (adversarial) | `tenant-steps/malicious-read-host-file/main.go` | 18 |
-| cleat: sandbox policy | `engine/wasi_policy.go` | 92 |
-| cleat: sandbox enforcement | `engine/wasi_policy_wasmtime.go` | 32 |
-| **cleat total** | | **173** |
-| DBOS: workflow + steps | `src/workflow.ts` | 31 |
-| DBOS: test | `src/wedge.test.ts` | 73 |
-| **DBOS total** | | **104** |
-
-This is a snapshot dated 2026-09-28; re-derive with the command above rather
-than re-quoting these rows — CLAUDE.md's own rule about numbers in prose
-applies to this table as much as to anything else in the repo.
-
-**A smaller DBOS total here is not an efficiency win, and reading it as one
-is the mistake this section exists to head off.** It is the same shape as
-the order-lifecycle pair's *"Tenancy: 0 lines, and it is not a compliment"*:
-124 of cleat's 173 lines are the enforcement code that makes a refusal real
-— `engine/wasi_policy.go` declaring `path_open` as `wasiFatal`,
-`engine/wasi_policy_wasmtime.go` turning that into a trap. Written once,
-applied to every tenant step this engine will ever run. **The DBOS side has
-no equivalent line to count, because nothing on that side enforces
-anything.** A smaller total is what "zero isolation code" looks like in a
-line counter, not what "better isolation" looks like.
-
-## The counter
-
-`scripts/dbos-pair-loc.sh` runs `cloc` identically on this directory's
-`src/` and on the cleat-side files above, so both pairs' counts come from
-one pinned invocation rather than two people using `cloc` slightly
-differently.
+`npm test` runs **both** counterparts (`dist/wedge.test.js`, the bare
+version, then `dist/isolated-wedge.test.js`, the sandboxed one) via
+`run-tests.js`, which combines their exit codes by taking the more severe
+one (2 beats 1 beats 0) — a 2 from either run means at least one of this
+pair's two claims was never actually checked, which is worse than a 1 (a
+claim that was checked and came back false), so it must win regardless of
+which run produced it. `scripts/run-integration-hub-dbos-scenario.sh`, at
+the repo root, is what CI runs — it installs, builds, and runs `npm test`,
+translating the combined exit code into the three-way status documented
+above.

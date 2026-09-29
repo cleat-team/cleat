@@ -51,3 +51,36 @@ comparison needs.
   this pair; see above.
 - Any upload endpoint -- see "No primitive for tenant-supplied code" above.
   Its absence is the finding, not an omission to fix.
+
+## Second counterpart added: DBOS + isolated-vm (2026-09-28)
+
+Added after cleat-review's review of the first counterpart identified the
+bare-`DBOS.runStep` comparison as one-sided -- no real team ships
+tenant-supplied code with zero sandboxing, so the honest counterpart is
+"DBOS plus a sandbox library", not bare DBOS. See README.md, "The second
+counterpart: DBOS plus a real sandbox", for the full writeup. Notes that
+belong here rather than there:
+
+- **`isolated-vm@6.1.2` was chosen over the current `7.x` line specifically
+  because of Node version pinning, not because it is newer or more capable.**
+  `7.x` requires Node >=26, which is Node's bleeding-edge "Current" release
+  as of 2026-09-28, not the LTS line -- pinning CI to a non-LTS Node to make
+  a newer library version installable would be a worse-idiomatic choice than
+  the whole point of this counterpart is meant to demonstrate. `6.1.2` needs
+  only Node >=22 and ships prebuilt binaries for both `darwin-arm64` and
+  Linux, verified empirically (installed and run against real DBOS +
+  Postgres) before being pinned, not read off `npm view`.
+- **`isolated-vm@6.1.2` failed to build from source against Node 26** during
+  version selection (`gyp ERR! build error`, `serializer_nortti.o Error 1`)
+  -- its native addon's prebuilt binaries are ABI-locked to specific Node
+  majors, and no prebuild existed for 26 at the time. This is *why* Node 24
+  is pinned in `.github/workflows/ci.yml` for this job specifically, rather
+  than whatever Node version other jobs in this CI happen to use.
+- **The durability-boundary cost DBOS's own docs describe (at-least-once
+  step execution, requiring tenant-side idempotency DBOS cannot enforce) is
+  real but not exercised by this pair's tests**, because both tenant
+  behaviours ported here are pure functions with no side effects -- the
+  same property that makes them a fair LOC comparison makes re-execution
+  risk invisible to them. See README.md, "What this counterpart costs", for
+  why building a fault-injection harness to exercise this was judged out of
+  scope rather than silently ignored.

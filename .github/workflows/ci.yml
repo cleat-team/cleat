@@ -1636,7 +1636,13 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: "20"
+          # 24 ("Krypton"), not 20 or 26 -- the isolated-vm counterpart
+          # (src/isolated-workflow.ts) pins isolated-vm@6.1.2, which needs
+          # Node >=22 and ships no prebuilt binary for Node 26; 24 is also
+          # the current LTS line as of 2026-09-28, the more defensible pin
+          # for a job demonstrating what an idiomatic team would ship. See
+          # isolated-workflow.ts's header for the full version rationale.
+          node-version: "24"
 
       # cloc is not part of the ubuntu-latest image; scripts/dbos-pair-loc.sh
       # reports UNMEASURED rather than a false zero if it is missing, so an
