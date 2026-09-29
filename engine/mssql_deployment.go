@@ -516,8 +516,8 @@ func (s *MSSQLStore) getActiveInstanceCountsByVersionOnce(ctx context.Context) (
 	// `NOT NULL` on this dialect (migrations/mssql/001_schema.sql), same as
 	// PostgreSQL's. Not the same clause cleat#2620 is about (that one was a
 	// real, since-removed exemption on workflow_defs) -- this is dead code on
-	// a column that was never nullable, left as a comment rather than
-	// removed here since this PR is doc/comment-only.
+	// a column that was never nullable. Tracked as cleat#2635 rather than
+	// removed here.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT def_name, def_version, COUNT(*) as cnt
 		FROM workflow_instances
