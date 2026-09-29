@@ -33,7 +33,7 @@ func TestEveryQueryArmRunsOnItsOwnDialect(t *testing.T) {
 		{
 			Name:     "queryOldestUnprocessedEventForClaim",
 			Q:        queryOldestUnprocessedEventForClaim,
-			Args:     []any{"00000000-0000-0000-0000-000000000001", "some.event"},
+			Args:     []any{"00000000-0000-0000-0000-000000000001", "some.event", "", "", ""},
 			WantCols: 4,
 		},
 	})

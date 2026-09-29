@@ -42,8 +42,9 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 // ---- Input/output types ----
 
 type awaitEventInput struct {
-	EventType string `json:"event_type"`
-	TimeoutMs int64  `json:"timeout_ms"`
+	EventType string   `json:"event_type"`
+	TimeoutMs int64    `json:"timeout_ms"`
+	Keys      []string `json:"keys,omitempty"`
 }
 
 type awaitEventOutput struct {
@@ -79,6 +80,10 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 	if input.EventType == "" {
 		return "", fmt.Errorf("event-triggers: event_type is required")
 	}
+	key1, key2, key3, err := keySlots(input.Keys)
+	if err != nil {
+		return "", err
+	}
 
 	// Find and claim the oldest matching unprocessed event for this tenant +
 	// type in one transaction, so a failure to mark it consumed cannot be
@@ -103,7 +108,7 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 
 	err = plugin.ScanRow(tx.QueryRow(ctx,
 		queryOldestUnprocessedEventForClaim.For(p.dialect),
-		cc.TenantID, input.EventType), &eventID, &eventType, &eventData, &receivedAt)
+		cc.TenantID, input.EventType, key1, key2, key3), &eventID, &eventType, &eventData, &receivedAt)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		// Nothing was locked, so there is nothing to release beyond the
@@ -114,22 +119,15 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 		// No matching event found -- register as an awaiter so the publish
 		// handler can signal this workflow when a matching event arrives.
 		if cc.WorkflowID != "" {
-			// "","","" for now, NOT input.Keys -- awaitEventInput carries no
-			// Keys field yet. queryLatestUnprocessedEvent above is mid
-			// rewrite for cleat#2641 (the double-consume / newest-first
-			// fixes), and adding the key predicate to its WHERE clause in
-			// the same breath as that rewrite is exactly the collision this
-			// file's callers agreed to avoid. Once #2641 lands, this call
-			// (and the query above it) both gain real keys in the same
-			// follow-up PR -- see cleat#2625. Passing empty slots now is
-			// not a partial version of correlation: an awaiter with no keys
-			// only ever matched an event with no keys before this existed
-			// (§4.4's sentinel), so behaviour is unchanged until both halves
-			// land together.
+			// input.Keys, via the same keySlots() validation the claim query
+			// above was matched against -- key1/key2/key3 are already
+			// computed and validated once, up front, so the awaiter this
+			// registers and the event this call just failed to find agree on
+			// what "matching" means. cleat#2625, P1's read side (cleat#2647).
 			//
 			// Not `Found: false` on failure: that is a success report, and it
 			// is exactly the lie cleat#1473 is about.
-			if err := p.registerAwaiter(ctx, cc.TenantID, cc.WorkflowID, input.EventType, "", "", ""); err != nil {
+			if err := p.registerAwaiter(ctx, cc.TenantID, cc.WorkflowID, input.EventType, key1, key2, key3); err != nil {
 				return "", err
 			}
 		}
@@ -166,10 +164,11 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 	)
 
 	// Clean up any pending awaiter registration for this workflow + event
-	// type. "","","" for the same reason as the registerAwaiter call above:
-	// no caller can pass real keys yet, so this is the no-keys case, which
-	// is what every existing awaiter row already is.
-	unregisterAwaiter(ctx, p.db, p.logger, cc.WorkflowID, input.EventType, "", "", "")
+	// type + keys -- the same key1/key2/key3 computed above, so this only
+	// ever removes the awaiter row this exact call would itself have
+	// registered on a "not found" path, never a differently-keyed one still
+	// legitimately waiting (unregisterAwaiter's own doc comment).
+	unregisterAwaiter(ctx, p.db, p.logger, cc.WorkflowID, input.EventType, key1, key2, key3)
 
 	output := awaitEventOutput{
 		Found:      true,

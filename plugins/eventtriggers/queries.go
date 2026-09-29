@@ -136,11 +136,23 @@ OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY`,
 // moving LIMIT to TOP relocates a token to a different clause, and FOR UPDATE
 // SKIP LOCKED relocates to a different clause entirely. All three belong in an
 // explicit arm.
+// key1/key2/key3 are equality predicates, not a filter (§2 of the event
+// routing design: "correlation is equality and filtering is not" -- only an
+// indexed equality is affordable per (event x awaiter) pair). An uncorrelated
+// caller passes keySlots(nil)'s "","","" -- §4.4's sentinel -- which matches
+// only an event published with no keys either, exactly as it did before this
+// predicate existed: an empty-keyed ingested_events row's key1/key2/key3
+// columns are ” by the same DEFAULT ” every pre-existing row already
+// carries, so this is additive to the WHERE clause, not a behaviour change
+// for a caller that passes no keys.
 var queryOldestUnprocessedEventForClaim = plugin.Query{
 	Default: `SELECT id, event_type, event_data, received_at
 FROM ingested_events
 WHERE tenant_id = $1
   AND event_type = $2
+  AND key1 = $3
+  AND key2 = $4
+  AND key3 = $5
   AND NOT processed
 ORDER BY received_at
 LIMIT 1
@@ -172,6 +184,9 @@ FOR UPDATE SKIP LOCKED`,
 FROM ingested_events FORCE INDEX (idx_ingested_events_unprocessed)
 WHERE tenant_id = $1
   AND event_type = $2
+  AND key1 = $3
+  AND key2 = $4
+  AND key3 = $5
   AND NOT processed
 ORDER BY received_at
 LIMIT 1
@@ -180,6 +195,9 @@ FOR UPDATE SKIP LOCKED`,
 FROM ingested_events WITH (UPDLOCK, READPAST, ROWLOCK)
 WHERE tenant_id = $1
   AND event_type = $2
+  AND key1 = $3
+  AND key2 = $4
+  AND key3 = $5
   AND processed = 0
 ORDER BY received_at`,
 }
