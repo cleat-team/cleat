@@ -170,6 +170,88 @@ func TestPrepareBuildDirAllowsTheSDKImportWhenTheWorkflowIsTheRootModule(t *test
 	}
 }
 
+// TestPrepareBuildDirAllowsANonSDKRootPackageWhenTheWorkflowIsTheRootModule is
+// cleat#2672: the test above exercises the root-module-workflow case only
+// through an SDK import, and SDKModulePath is a strictly longer prefix match
+// than RootModulePath -- so owningModule always resolves it to the SDK
+// candidate, and isReplaced(RootModulePath) is never the deciding clause.
+// That leaves it possible to mutate away "RootModulePath counts as replaced
+// when rootReplaced" without any test noticing, because nothing exercises a
+// workflow in the root module importing a genuine ROOT package that is NOT
+// the SDK (e.g. something like this repo's own engine/). Measured by
+// cleat-review's mutation pass on cleat#2667's rewrite: removing that clause
+// from isReplaced left every existing test green.
+//
+// This pins the missing case directly: a root-module workflow importing a
+// non-SDK root package, which can only be satisfied by the SAME unconditional
+// `replace RootModulePath => filepath.Dir(sdkDir)` the SDK test's scenario
+// also emits -- so this is fail-closed if it regresses (a loud refusal), not
+// a live defect, exactly as cleat-review characterized it.
+func TestPrepareBuildDirAllowsANonSDKRootPackageWhenTheWorkflowIsTheRootModule(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Same shape as TestPrepareBuildDirAllowsTheSDKImportWhenTheWorkflowIsThe
+	// RootModule: the workflow lives directly at its module's root, and that
+	// module IS RootModulePath.
+	projRoot := filepath.Join(tmpDir, "project")
+	if err := os.MkdirAll(projRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projRoot, "go.mod"),
+		[]byte("module "+RootModulePath+"\n\ngo 1.26\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A local SDK checkout at <projRoot>/cleat, which is what makes sdkDir
+	// non-empty and rootReplaced true -- required for RootModulePath's own
+	// replace to be emitted at all, independent of what is imported.
+	cleatDir := filepath.Join(projRoot, "cleat")
+	if err := os.MkdirAll(cleatDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cleatDir, "go.mod"),
+		[]byte("module "+SDKModulePath+"\n\ngo 1.26\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A genuine ROOT-module package that is NOT the SDK -- a stand-in for
+	// something like this repo's own engine/. It is a real subdirectory of
+	// projRoot, the root module's own tree, and unstaged (staging is a flat
+	// glob of SrcDir's own *.go files) -- reachable only via the root
+	// module's own replace, never by staging.
+	engineDir := filepath.Join(projRoot, "engine")
+	if err := os.MkdirAll(engineDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(engineDir, "engine.go"),
+		[]byte("package engine\n\nfunc Something() {}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rootPkgImport := RootModulePath + "/engine"
+	if err := os.WriteFile(filepath.Join(projRoot, "workflow.go"),
+		[]byte("package mypkg\n\nimport \""+rootPkgImport+"\"\n\nfunc Run() { engine.Something() }\n"),
+		0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &BuildConfig{
+		SrcDir:      projRoot,
+		OutDir:      filepath.Join(tmpDir, "out"),
+		PkgName:     "main",
+		ModulePath:  RootModulePath,
+		ProjectRoot: projRoot,
+		GoVersion:   "1.26",
+		Outputs:     &OutputFiles{},
+		WASMOutput:  "out.wasm",
+	}
+
+	if err := PrepareBuildDir(cfg); err != nil {
+		t.Fatalf("PrepareBuildDir refused a root-module workflow's own non-SDK root package "+
+			"import (%q): %v", rootPkgImport, err)
+	}
+}
+
 // TestPrepareBuildDirRefusesTheInRepoNestedModuleIncident reproduces
 // cleat#2657/#2658 at the shape it actually occurs in: a workflow inside a
 // NESTED module (its own go.mod, like examples/) importing a subpackage of
