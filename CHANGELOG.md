@@ -10,6 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### UPGRADE NOTES — breaking
+
+- **A typed plugin registration (`plugin.RegisterTyped`) now rejects a request carrying a field
+  its `Req` struct does not declare, instead of silently dropping it.** Closes cleat#2660: a
+  `cleat/pluginclients` caller compiled against a newer SDK can send a `Req` field the deployed
+  plugin's older version does not have. Before this, `RegisterTyped` decoded with plain
+  `json.Unmarshal`, which silently drops an unrecognised field — the call still returned success,
+  and the caller had no way to tell their extra field was ignored. It now decodes with
+  `json.NewDecoder(...).DisallowUnknownFields()`, so the call fails loudly at the boundary
+  instead. **Plugin-side only** — the typed *client*'s own decode (`PluginCallTyped`,
+  `cleat/plugin.go`) is deliberately left lenient, per the owner's decision on cleat#2597 (see
+  "Plugin Clients" in [`docs/reference/sdk-api.md`](docs/reference/sdk-api.md)), because applying
+  this same strictness there would turn every additive `Resp` field into a rollout hazard for no
+  compatibility benefit. **Consequence for rollout order:** a `Req` field addition is no longer
+  unconditionally safe regardless of deploy order — the plugin must be upgraded to declare a new
+  field before any client starts sending it, or that client's calls now fail instead of the field
+  being silently dropped. Only `plugins/email` and `plugins/webhookingest` use `RegisterTyped`
+  today.
+
 ### Added
 
 - **`cleat/pluginclients` is new public SDK surface**: generated, typed callers for the bundled
