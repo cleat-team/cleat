@@ -323,11 +323,28 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// truncation on MSSQL. A pre-existing awaiter with a realistic
 			// workflow_id (a UUID is already 36 characters) and an event
 			// type of any length fails the migration outright; only a
-			// short-ids test tree hid it. Confirmed 2026-09-29 against real
-			// Postgres 16 / MySQL 8.4 / SQL Server 2022 containers that
-			// sha256/SHA2/HASHBYTES('SHA2_256', ...) all produce the same
-			// 64-character lowercase hex digest for the same input across
-			// all three dialects.
+			// short-ids test tree hid it. sha256/SHA2/HASHBYTES('SHA2_256',
+			// ...) each produce a 64-character lowercase hex digest here,
+			// but NOT the same one across dialects for the same logical
+			// input, and that is a fact worth stating rather than a gap in
+			// this comment: HASHBYTES hashes the bytes of its argument
+			// exactly as stored, and workflow_id/event_type are NVARCHAR on
+			// MSSQL -- UTF-16LE -- while Postgres and MySQL hash the UTF-8
+			// bytes of the equivalent VARCHAR/TEXT value. Measured directly:
+			// HASHBYTES('SHA2_256', 'wf-1:order.paid') (a VARCHAR literal)
+			// gives bedeb380..., matching Python's
+			// hashlib.sha256(b'wf-1:order.paid') exactly, but
+			// HASHBYTES('SHA2_256', N'wf-1:order.paid') (NVARCHAR, what the
+			// real column concatenation actually produces) gives
+			// e7a2b910... -- a different digest, cleat-review caught this
+			// on round 3 after an earlier version of this comment claimed
+			// the three were byte-identical, confirmed against a VARCHAR
+			// literal rather than the NVARCHAR column type this migration
+			// actually hashes. It does not matter functionally: nothing
+			// compares a backfilled registration_key across dialects, and
+			// within one dialect the digest only has to be distinct per
+			// input and fit CHAR(64), both of which every dialect's digest
+			// does independently.
 			//
 			// This is still not the SAME digest registrationKey (Go,
 			// keys.go) computes for an equivalent fresh row: Go hashes five
@@ -515,8 +532,21 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				-- bypass engine/plugindb_tenant.go's markCrossTenantOnTx
 				-- uses for the sweep path (plugin/migration.go's
 				-- mssqlPluginTenantFilter reads it) -- SESSION-scoped, so
-				-- setting it once here covers every statement below for the
-				-- rest of this migration's pinned connection.
+				-- setting it once here covers every statement below. That
+				-- session is NOT scoped to this migration, or even to this
+				-- plugin: pluginMigrationSession (plugin/migration.go:511-515)
+				-- pins ONE connection for the entire RunMigrations call, and
+				-- the loop at :531 runs every LATER plugin's migrations on
+				-- that same connection before releasing it. Left set, this
+				-- bypass would silently carry into every plugin migrated
+				-- after event-triggers on whichever boot happens to apply
+				-- v6 -- present on that boot, absent on every other one that
+				-- finds v6 already applied. Cleared at the end of this arm
+				-- (below the SET statement's twin, after the correlate
+				-- index) rather than left to rely on go-mssqldb's
+				-- ResetSession clearing it on reuse, which only fires
+				-- between separate RunMigrations calls, not between
+				-- plugins within one.
 				EXEC sp_set_session_context @key = N'cross_tenant', @value = N'event-triggers migration 6 backfill, cleat#2625';
 
 				-- Every statement below that REFERENCES key1/key2/key3/
@@ -592,6 +622,14 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				EXEC('CREATE UNIQUE INDEX uq_event_awaiters_registration ON event_awaiters(registration_key)');
 				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_event_awaiters_correlate' AND object_id = OBJECT_ID('event_awaiters'))
 				EXEC('CREATE INDEX idx_event_awaiters_correlate ON event_awaiters(tenant_id, event_type, key1, key2, key3)');
+
+				-- Twin of the SET above: this session outlives this
+				-- migration (see that comment), so the bypass must not.
+				-- Cleared unconditionally, not inside an IF -- cheap, and it
+				-- means this line does not depend on remembering to update
+				-- it if anything above it changes from unconditional to
+				-- guarded.
+				EXEC sp_set_session_context @key = N'cross_tenant', @value = NULL;
 			`,
 			// Lossy on purpose, like Version 5's MySQL reversal: a row
 			// inserted post-Up with a key1/2/3 combination that duplicates
