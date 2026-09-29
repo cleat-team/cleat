@@ -736,5 +736,121 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE ingested_events DROP COLUMN IF EXISTS key1;
 			`,
 		},
+		{
+			// cleat#2669, found by cleat-review reviewing cleat#2668's
+			// MySQL lock-order fix. That fix forced the claim query onto
+			// idx_ingested_events_correlate (tenant_id, event_type, key1,
+			// key2, key3, received_at) -- correct for the locking defect it
+			// fixed, but that index has NO processed column, so it cannot
+			// exclude rows the claim's "AND NOT processed" predicate will
+			// reject. The claim walks every PROCESSED row for its key tuple,
+			// in received_at order, before reaching the first unprocessed
+			// one -- and since nothing deletes from ingested_events, that
+			// walk is the tenant's entire history of that event type, for
+			// an unkeyed await (today's only caller): three tier-1 slots
+			// have a use once queries beyond await_event start filling them.
+			//
+			// MEASURED, not assumed, on both a real Postgres 16 and a real
+			// SQL Server 2022: seeded 20,000 processed rows for one
+			// (tenant, type, key) ahead of one unprocessed target row, then
+			// timed the claim query exactly as written before this
+			// migration. Postgres's own EXPLAIN (ANALYZE, BUFFERS) named
+			// the cost directly -- "Rows Removed by Filter: 20000" -- at
+			// 2.5ms; SQL Server took 193ms for the identical shape, with no
+			// EXPLAIN needed to show why. Adding a CANDIDATE index of this
+			// migration's exact shape, with no query change at all, cut
+			// Postgres to 0.46ms (5.5x) and SQL Server to 5.5ms (35x) --
+			// BOTH optimizers picked it up on their own, no FORCE/hint
+			// needed on either. So this is not a MySQL-only cost: MySQL is
+			// the dialect where the old shape was a CORRECTNESS bug
+			// (over-locking under REPEATABLE READ); Postgres and SQL Server
+			// were paying the same walk as a pure, and real, performance
+			// cost, growing exactly as unboundedly as MySQL's did.
+			//
+			// idx_ingested_events_correlate is DROPPED, not kept alongside
+			// the replacement: grepping every query in this package that
+			// touches ingested_events, the claim query
+			// (queryOldestUnprocessedEventForClaim) is the ONLY one that
+			// ever referenced it, by name, via FORCE INDEX on MySQL --
+			// queryUnprocessedEvents (the background dispatcher) has no
+			// tenant/type/key predicate at all and needs
+			// idx_ingested_events_unprocessed instead, which this migration
+			// does not touch. A v7 index carrying every column the old one
+			// had, in the same order, plus `processed` ahead of
+			// `received_at`, strictly dominates it for that one consumer --
+			// keeping both would be a second index nothing reads, paying
+			// write cost for no query.
+			//
+			// PARTIAL ON POSTGRES, FILTERED ON MSSQL, FULL ON MYSQL --
+			// three different shapes because the dialects differ in what
+			// they can express, not because the query differs. Postgres
+			// and SQL Server both support an index that excludes processed
+			// rows BY CONSTRUCTION (`WHERE NOT processed` / `WHERE
+			// processed = 0`), which is what the measurement above credits
+			// for the 5.5x/35x gains -- a processed row is never IN the
+			// index at all, not merely filtered out of it after a match.
+			// MySQL has no partial or filtered index support of any kind,
+			// so `processed` has to be a real column in the key, placed
+			// BEFORE received_at so an exact-equality claim (tenant_id,
+			// event_type, key1, key2, key3, processed) still gets
+			// received_at as pure index order within that match, the same
+			// property the old correlate index had for the key columns
+			// alone. FORCE INDEX stays on the MySQL arm only, retargeted to
+			// this index's name -- Postgres and SQL Server are left
+			// unforced, because the measurement above already showed both
+			// optimizers choose the new index on their own.
+			Version: 7,
+			Up: `
+				DROP INDEX IF EXISTS idx_ingested_events_correlate;
+				CREATE INDEX IF NOT EXISTS idx_ingested_events_claim ON ingested_events(tenant_id, event_type, key1, key2, key3, received_at) WHERE NOT processed;
+			`,
+			// Guarded through information_schema, the same idempotency
+			// discipline Version 6's MySQL arm established for this table:
+			// MySQL DDL is not transactional, so a migration that failed
+			// partway must be safe to re-run rather than answering
+			// "Duplicate key name" on retry.
+			UpMySQL: `
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_correlate');
+				SET @ddl := IF(@idx > 0, 'DROP INDEX idx_ingested_events_correlate ON ingested_events', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_claim');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_ingested_events_claim ON ingested_events(tenant_id, event_type, key1, key2, key3, processed, received_at)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+			UpMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_correlate' AND object_id = OBJECT_ID('ingested_events'))
+				DROP INDEX idx_ingested_events_correlate ON ingested_events;
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_claim' AND object_id = OBJECT_ID('ingested_events'))
+				CREATE INDEX idx_ingested_events_claim ON ingested_events(tenant_id, event_type, key1, key2, key3, received_at) WHERE processed = 0;
+			`,
+			// Reverses to the Version 6 shape, not to "no index at all" --
+			// dropping idx_ingested_events_claim and leaving nothing would
+			// reopen cleat#2668's lock-order defect on a database that
+			// still runs code expecting the claim query's FORCE INDEX
+			// target to exist. As with every other Down in this file, this
+			// is for a migration applied and immediately rolled back in
+			// development, not for undoing a deployment that has taken
+			// claim traffic under the new index.
+			Down: `
+				DROP INDEX IF EXISTS idx_ingested_events_claim;
+				CREATE INDEX IF NOT EXISTS idx_ingested_events_correlate ON ingested_events(tenant_id, event_type, key1, key2, key3, received_at);
+			`,
+			DownMySQL: `
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_claim');
+				SET @ddl := IF(@idx > 0, 'DROP INDEX idx_ingested_events_claim ON ingested_events', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_correlate');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_ingested_events_correlate ON ingested_events(tenant_id, event_type, key1, key2, key3, received_at)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+			DownMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_claim' AND object_id = OBJECT_ID('ingested_events'))
+				DROP INDEX idx_ingested_events_claim ON ingested_events;
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_correlate' AND object_id = OBJECT_ID('ingested_events'))
+				CREATE INDEX idx_ingested_events_correlate ON ingested_events(tenant_id, event_type, key1, key2, key3, received_at);
+			`,
+		},
 	}
 }
