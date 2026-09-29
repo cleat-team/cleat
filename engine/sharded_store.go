@@ -43,6 +43,16 @@ type Shard struct {
 // across the fleet).  Most other operations use a consistent hash of the
 // workflow ID to route to the owning shard.  Global operations (schedules,
 // reaping, listing) fan out to every shard and merge results.
+//
+// batchFlushSupported (engine.go) passes *ShardedStore today, correctly: it
+// does not implement perStepEventFlusher, and every shard is opened via
+// PostgresStoreFactory / sql.Open("postgres", ...), so the batch writer's
+// PostgreSQL-dialect SQL is safe against any of them. That is an accident of
+// what sharding currently supports, not something this type declares -- if
+// sharding ever admits a non-PostgreSQL shard dialect, ShardedStore is the
+// one production type batchFlushSupported would then classify wrongly, and
+// it would need to implement perStepEventFlusher itself (or route per-shard)
+// to stay correct. cleat#2358.
 type ShardedStore struct {
 	shards []*Shard
 	mu     sync.RWMutex
