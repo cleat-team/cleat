@@ -64,6 +64,7 @@ cd "$REPO_ROOT" || exit 2
 CLIENTS=(
   "webhook-ingest|./plugins/webhookingest|webhookingest|cleat/pluginclients/webhookingest/client.go"
   "email-notify|./plugins/email|email|cleat/pluginclients/email/client.go"
+  "audit-log|./plugins/auditlog|auditlog|cleat/pluginclients/auditlog/client.go"
 )
 
 check_one() {
