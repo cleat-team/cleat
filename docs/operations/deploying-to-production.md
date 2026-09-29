@@ -49,6 +49,25 @@ cleat --tenant "$STAGING_TENANT_ID" deploy --db "$CLEAT_DATABASE_URL" --name pla
 cleat-worker --db "$CLEAT_DATABASE_URL" --tenant-resolver=header:X-Tenant-ID
 ```
 
+**A deploy registers a definition for exactly the one tenant named above, not
+for every tenant.** `workflow_defs` is keyed `(tenant_id, name, version)` — there
+is no way to register a definition visible to every tenant, and that is not a
+limitation to work around: *"workflow defs are scoped to a tenant. there isn't
+a way to have a workflow accessible to all tenants. i don't think that's
+useful."* (cleat#2717). So **onboarding a new tenant includes a deploy step**
+for every workflow it needs to run — running `cleat deploy` once, for one
+tenant, does not make that workflow available to a tenant created afterward.
+
+The failure this produces if you forget is **late and quiet**: creating the
+tenant succeeds, and nothing about it fails. The gap only surfaces when that
+tenant starts a run, as "workflow definition not found" — by which point the
+missing deploy is easy to mistake for an unrelated problem. An application
+that creates tenants at runtime (a signup flow, for example) needs to run the
+same `cleat deploy` its operator ran once, again, for each new tenant's id,
+before that tenant's first run — see `examples/b2b-saas-control-plane/`'s
+`tenantAdmin.deployWorkflowDef` for a worked example of exactly this, done
+right after tenant creation.
+
 ### Worker concurrency
 
 Control how many workflow instances a worker processes simultaneously:
