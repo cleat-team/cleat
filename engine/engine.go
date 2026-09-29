@@ -1118,7 +1118,17 @@ func (e *Engine) getAdaptiveFlusher() *AdaptiveFlusher {
 // in this package can build fake stores that stand in for PostgreSQL on the
 // batch path. No non-test type may implement it:
 // TestNoProductionStoreOptsBackIntoBatchMode reads the sources to keep it so.
+//
+// NIL IS REFUSED, NOT WAVED THROUGH. A nil WorkflowStore implements no
+// concrete type, so the interface check below would otherwise read it the
+// same as "definitely not PostgreSQL" and answer true -- the unsafe direction
+// for a fail-safe gate. getAdaptiveFlusher never calls this with a nil store
+// in production, so this is defence in depth rather than a reachable path;
+// it costs one comparison to make the gate's failure mode match its name.
 func batchFlushSupported(store WorkflowStore) bool {
+	if store == nil {
+		return false
+	}
 	if _, notPostgres := store.(perStepEventFlusher); !notPostgres {
 		return true
 	}
