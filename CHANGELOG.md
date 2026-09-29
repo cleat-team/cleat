@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`cleat/pluginclients` is new public SDK surface**: generated, typed callers for the bundled
+  `webhookingest` and `email` plugins (`cleat/pluginclients/webhookingest`, `cleat/pluginclients/email`),
+  replacing hand-written JSON built against `h.PluginCall`. These types ship inside the `cleat` SDK
+  module and are covered by the SDK's compatibility promise like any other exported type — see
+  "Plugin Clients" in [`docs/reference/sdk-api.md`](docs/reference/sdk-api.md) for what that promise
+  currently commits to, and what is still an open policy question (cleat#2597, cleat#2660).
+
 ### Fixed
 
 - **`llm.chat` priced a model it did not recognise as one of the provider's mid-range models,
