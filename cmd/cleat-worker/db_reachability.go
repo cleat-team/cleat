@@ -124,15 +124,22 @@ func (r *dbReachability) observe(started, now time.Time, elapsed time.Duration, 
 		r.reachable = true
 		r.failures = 0
 		r.lastSuccess = now
+		if wasKnown && !wasReachable {
+			// r.lastSuccessStart, read before this call's own success updates it below, is the
+			// last known-good instant BEFORE the outage -- the earliest the outage could actually
+			// have begun. r.failingSince is when the first failed call RETURNED, which already
+			// lags the real onset by up to a heartbeat interval plus that call's deadline
+			// (cleat#2284): a call in flight when the database died does not report failure until
+			// its deadline expires, and the failing call that set failingSince might not have
+			// started until a heartbeat interval after the database was already down.
+			t, outage = dbBecameReachable, now.Sub(r.failingSince)
+			r.recoveredAt = now
+			r.outageStart = r.lastSuccessStart
+		}
 		if started.After(r.lastSuccessStart) {
 			r.lastSuccessStart = started
 		}
 		r.lastErr = ""
-		if wasKnown && !wasReachable {
-			t, outage = dbBecameReachable, now.Sub(r.failingSince)
-			r.recoveredAt = now
-			r.outageStart = r.failingSince
-		}
 		r.failingSince = time.Time{}
 	} else {
 		r.reachable = false

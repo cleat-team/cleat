@@ -537,7 +537,16 @@ func TestTheRecoveryGraceExcusesOnlyLoopsThatWentQuietDuringTheOutage(t *testing
 	w.healthTracker.recordRun("held")
 	w.healthTracker.recordRun("wedged")
 	probeOK(w)
-	clk.advance(time.Minute)
+	// The database keeps answering right up until the outage -- a realistic heartbeat cadence, not a
+	// minute of silence. cleat#2284 anchors the outage boundary on the last known-good call
+	// (lastSuccessStart), so a minute of no probing at all would put that boundary a minute before the
+	// failure and wrongly excuse "wedged" too; a database that is actually being watched the whole time
+	// keeps the boundary close to the real failure, which is what lets this test still tell the two
+	// loops apart.
+	for i := 0; i < 12; i++ {
+		clk.advance(5 * time.Second)
+		probeOK(w)
+	}
 	// "held" keeps ticking until the outage begins (the database then holds its call).
 	w.healthTracker.recordRun("held")
 	clk.advance(200 * time.Millisecond)
@@ -561,5 +570,38 @@ func TestTheRecoveryGraceExcusesOnlyLoopsThatWentQuietDuringTheOutage(t *testing
 	probeOK(w)
 	if c, b := livez(); c != 503 {
 		t.Fatalf("[grace over, the loop never resumed] /livez = %d %v, want 503", c, b)
+	}
+}
+
+// TestTheOutageBoundaryReachesBackToTheLastKnownGoodCallNotTheFirstFailedOne is a falsification for
+// cleat#2284: the failing call that sets failingSince does not FAIL at the instant the outage began, it
+// FAILS when its own deadline expires -- which can be up to a heartbeat interval plus that deadline
+// after the database actually went down. A loop that went quiet during that lag, before failingSince but
+// after the real onset, is explained by the outage and the old code (outageStart = failingSince) wrongly
+// called it wedged.
+func TestTheOutageBoundaryReachesBackToTheLastKnownGoodCallNotTheFirstFailedOne(t *testing.T) {
+	api := newTestAPIServer(&mockStore{})
+	w := api.worker
+	clk := sharedClock(w)
+	w.healthTracker.setInterval("held", time.Second)
+	probeOK(w) // t=0: last known-good instant
+
+	// The database dies at t=5s, but the call watching it does not report failure until its 8s deadline
+	// expires at t=13s: observeDBProbe's "started" and the clock's "now" diverge on purpose, the same way
+	// a real bounded call's start and its eventual deadline-expiry do.
+	started := clk.now()
+	clk.advance(5 * time.Second)
+	w.healthTracker.registerLoop("held")
+	w.healthTracker.recordRun("held") // "held" ticks at t=5s, DURING the real outage, before it is detected
+	clk.advance(8 * time.Second)      // t=13s: the watching call's deadline finally expires
+	w.observeDBProbe(started, 13*time.Second, context.DeadlineExceeded)
+
+	clk.advance(2 * time.Second) // t=15s
+	probeOK(w)                   // recovery, well inside dbRecoveryGrace of the t=13s failure
+
+	if c, b, _ := healthGet(t, api.handleLivez, "/livez"); c != 200 {
+		t.Fatalf("[loop quiet at t=5s, DURING the outage that started at t=5s but was not observed as "+
+			"failed until t=13s] /livez = %d %v, want 200: the outage boundary must reach back to the "+
+			"last known-good call (t=0), not stop at the first failed observation (t=13s)", c, b)
 	}
 }
