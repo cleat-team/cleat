@@ -22,7 +22,27 @@ import (
 // reads by an explicit tenant_id = $2 argument, audit_events and audit_chain_heads are
 // row-level-secured, so a ctx with no tenant scoping fails closed inside appendChained
 // rather than inside this function.
-func recordEventCallCtx(tenant uuid.UUID, workflowID string) context.Context {
+//
+// RunID is set to workflowID, matching what the real engine does today
+// (plugin.CallContext's own doc comment: "always set to the workflow id" --
+// engine/plugin_call_context.go). step is the caller's own position in a
+// sequence of calls sharing one workflow/tenant, and matters as of cleat#2618:
+// two recordEvent calls through the SAME step now dedup by default (see
+// recordEventCallCtxNoRunID below for the pre-#2618 shape, still exercised
+// deliberately by TestRecordEventWithoutRunIDIsNotDeduped).
+func recordEventCallCtx(tenant uuid.UUID, workflowID string, step int) context.Context {
+	ctx := plugin.WithCallContext(context.Background(),
+		&plugin.CallContext{TenantID: tenant.String(), WorkflowID: workflowID, RunID: workflowID, Step: step})
+	return plugin.ForTenant(ctx, tenant)
+}
+
+// recordEventCallCtxNoRunID builds a CallContext the way one would have
+// looked before cleat#2618 -- no RunID, no Step -- which is still a real
+// shape: a plugin's own unit test, or an embedder that predates #2618,
+// builds CallContext directly rather than through the engine's PluginCall
+// dispatch. recordEvent must not default-dedup in this case (see its own
+// doc comment); TestRecordEventWithoutRunIDIsNotDeduped pins that.
+func recordEventCallCtxNoRunID(tenant uuid.UUID, workflowID string) context.Context {
 	ctx := plugin.WithCallContext(context.Background(),
 		&plugin.CallContext{TenantID: tenant.String(), WorkflowID: workflowID})
 	return plugin.ForTenant(ctx, tenant)
@@ -45,7 +65,7 @@ func TestRecordEventAppendsToTheCallersTenantChain(t *testing.T) {
 			t.Fatalf("marshal input: %v", err)
 		}
 
-		outJSON, err := p.recordEvent(recordEventCallCtx(tenant, "wf-123"), string(input))
+		outJSON, err := p.recordEvent(recordEventCallCtx(tenant, "wf-123", 0), string(input))
 		if err != nil {
 			t.Fatalf("recordEvent: %v", err)
 		}
@@ -90,7 +110,7 @@ func TestRecordEventDefaultsDetailsToAnEmptyObject(t *testing.T) {
 		tenant := uuid.New()
 
 		input, _ := json.Marshal(recordEventInput{EventType: "tenant.provisioned"})
-		if _, err := p.recordEvent(recordEventCallCtx(tenant, "wf-no-details"), string(input)); err != nil {
+		if _, err := p.recordEvent(recordEventCallCtx(tenant, "wf-no-details", 0), string(input)); err != nil {
 			t.Fatalf("recordEvent: %v", err)
 		}
 
@@ -108,16 +128,19 @@ func TestRecordEventDefaultsDetailsToAnEmptyObject(t *testing.T) {
 	})
 }
 
+// TestRecordEventTwoCallsChainCorrectly also proves the default step-based
+// dedup (cleat#2618) does not collide two DIFFERENT real calls: each
+// iteration is step i, matching how the engine would actually advance
+// s.stepCount between two distinct record_event calls in one workflow.
 func TestRecordEventTwoCallsChainCorrectly(t *testing.T) {
 	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
 		p := e.plugin()
 		tenant := uuid.New()
-		ctx := recordEventCallCtx(tenant, "wf-two-calls")
 
-		for _, et := range []string{"tenant.provisioned", "tenant.plan_changed"} {
+		for i, et := range []string{"tenant.provisioned", "tenant.plan_changed"} {
 			input, _ := json.Marshal(recordEventInput{EventType: et})
-			if _, err := p.recordEvent(ctx, string(input)); err != nil {
-				t.Fatalf("recordEvent(%q): %v", et, err)
+			if _, err := p.recordEvent(recordEventCallCtx(tenant, "wf-two-calls", i), string(input)); err != nil {
+				t.Fatalf("recordEvent(%q, step=%d): %v", et, i, err)
 			}
 		}
 
@@ -131,6 +154,69 @@ func TestRecordEventTwoCallsChainCorrectly(t *testing.T) {
 	})
 }
 
+// TestRecordEventWithoutAnEventIDIsIdempotentByStep is the default-path
+// counterpart to TestRecordEventWithAnEventIDIsIdempotent: two calls at the
+// SAME step, no event_id supplied, append exactly one row -- simulating a
+// worker crash-and-retry replaying the same PluginCall dispatch (same
+// RunID, same Step) rather than a caller-chosen key.
+func TestRecordEventWithoutAnEventIDIsIdempotentByStep(t *testing.T) {
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		p := e.plugin()
+		tenant := uuid.New()
+		ctx := recordEventCallCtx(tenant, "wf-retry-same-step", 3)
+
+		input, _ := json.Marshal(recordEventInput{EventType: "tenant.provisioned"})
+		for i := 0; i < 2; i++ {
+			outJSON, err := p.recordEvent(ctx, string(input))
+			if err != nil {
+				t.Fatalf("recordEvent call %d: %v", i+1, err)
+			}
+			var out recordEventOutput
+			if err := json.Unmarshal([]byte(outJSON), &out); err != nil {
+				t.Fatalf("unmarshal output %q: %v", outJSON, err)
+			}
+			if !out.Recorded {
+				t.Fatalf("recordEvent call %d output = %+v, want Recorded=true", i+1, out)
+			}
+		}
+
+		rep := e.verify(tenant)
+		if !rep.OK() {
+			t.Fatalf("verify reported a break: %+v", rep.Break)
+		}
+		if rep.Checked != 1 || rep.HeadSeq != 1 {
+			t.Fatalf("verify: %+v, want exactly ONE row despite two calls at the same (RunID, Step)", rep)
+		}
+	})
+}
+
+// TestRecordEventWithoutRunIDIsNotDeduped proves the fallback: a CallContext
+// with no RunID (built directly, not through the engine's PluginCall
+// dispatch) gets the plain AtLeastOnce behaviour -- no default dedup, two
+// calls with identical input append two rows, matching the pre-#2618 shape.
+func TestRecordEventWithoutRunIDIsNotDeduped(t *testing.T) {
+	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
+		p := e.plugin()
+		tenant := uuid.New()
+		ctx := recordEventCallCtxNoRunID(tenant, "wf-no-run-id")
+
+		input, _ := json.Marshal(recordEventInput{EventType: "tenant.provisioned"})
+		for i := 0; i < 2; i++ {
+			if _, err := p.recordEvent(ctx, string(input)); err != nil {
+				t.Fatalf("recordEvent call %d: %v", i+1, err)
+			}
+		}
+
+		rep := e.verify(tenant)
+		if !rep.OK() {
+			t.Fatalf("verify reported a break: %+v", rep.Break)
+		}
+		if rep.Checked != 2 || rep.HeadSeq != 2 {
+			t.Fatalf("verify: %+v, want 2 rows: no RunID means no default dedup", rep)
+		}
+	})
+}
+
 // TestRecordEventWithAnEventIDIsIdempotent is the falsifiable regression test
 // for the closing-the-residual escape hatch cleat-review suggested on #2616:
 // two calls carrying the same event_id append exactly one row, and the
@@ -139,7 +225,7 @@ func TestRecordEventWithAnEventIDIsIdempotent(t *testing.T) {
 	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
 		p := e.plugin()
 		tenant := uuid.New()
-		ctx := recordEventCallCtx(tenant, "wf-idempotent")
+		ctx := recordEventCallCtx(tenant, "wf-idempotent", 0)
 
 		input, _ := json.Marshal(recordEventInput{
 			EventType: "tenant.provisioned",
@@ -176,7 +262,7 @@ func TestRecordEventDifferentEventIDsAppendSeparately(t *testing.T) {
 	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
 		p := e.plugin()
 		tenant := uuid.New()
-		ctx := recordEventCallCtx(tenant, "wf-distinct-ids")
+		ctx := recordEventCallCtx(tenant, "wf-distinct-ids", 0)
 
 		for _, id := range []string{"step-1", "step-2"} {
 			input, _ := json.Marshal(recordEventInput{EventType: "tenant.provisioned", EventID: id})
@@ -244,7 +330,7 @@ func TestRecordEventRequiresATenantContext(t *testing.T) {
 
 func TestRecordEventRequiresEventType(t *testing.T) {
 	p := unreachableDBPlugin(t)
-	ctx := recordEventCallCtx(uuid.New(), "wf-1")
+	ctx := recordEventCallCtx(uuid.New(), "wf-1", 0)
 	input, _ := json.Marshal(recordEventInput{})
 	if _, err := p.recordEvent(ctx, string(input)); err == nil ||
 		!strings.Contains(err.Error(), "event_type is required") {
@@ -254,7 +340,7 @@ func TestRecordEventRequiresEventType(t *testing.T) {
 
 func TestRecordEventRejectsMalformedInput(t *testing.T) {
 	p := unreachableDBPlugin(t)
-	ctx := recordEventCallCtx(uuid.New(), "wf-1")
+	ctx := recordEventCallCtx(uuid.New(), "wf-1", 0)
 	if _, err := p.recordEvent(ctx, `{not json`); err == nil ||
 		!strings.Contains(err.Error(), "invalid input") {
 		t.Fatalf("recordEvent with malformed JSON: err = %v, want an \"invalid input\" error", err)
@@ -269,7 +355,7 @@ func TestRecordEventRejectsMalformedInput(t *testing.T) {
 // details value that parses but is not a JSON OBJECT.
 func TestRecordEventRejectsNonObjectDetails(t *testing.T) {
 	p := unreachableDBPlugin(t)
-	ctx := recordEventCallCtx(uuid.New(), "wf-1")
+	ctx := recordEventCallCtx(uuid.New(), "wf-1", 0)
 	for _, details := range []string{`"a string"`, `42`, `[1,2,3]`, `true`} {
 		input := `{"event_type":"x","details":` + details + `}`
 		if _, err := p.recordEvent(ctx, input); err == nil || !strings.Contains(err.Error(), "must be a JSON object") {
@@ -285,7 +371,7 @@ func TestRecordEventAcceptsNullDetails(t *testing.T) {
 	forEachChainDialect(t, func(t *testing.T, e *chainEnv) {
 		p := e.plugin()
 		tenant := uuid.New()
-		ctx := recordEventCallCtx(tenant, "wf-null-details")
+		ctx := recordEventCallCtx(tenant, "wf-null-details", 0)
 		if _, err := p.recordEvent(ctx, `{"event_type":"x","details":null}`); err != nil {
 			t.Fatalf("recordEvent with details=null: %v", err)
 		}
@@ -300,7 +386,7 @@ func TestRecordEventAcceptsNullDetails(t *testing.T) {
 
 func TestRecordEventRequiresADatabase(t *testing.T) {
 	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	ctx := recordEventCallCtx(uuid.New(), "wf-1")
+	ctx := recordEventCallCtx(uuid.New(), "wf-1", 0)
 	input, _ := json.Marshal(recordEventInput{EventType: "tenant.suspended"})
 	if _, err := p.recordEvent(ctx, string(input)); err == nil ||
 		!strings.Contains(err.Error(), "no database") {
