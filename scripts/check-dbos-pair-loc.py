@@ -134,6 +134,40 @@ def real_script_runner(pair):
     return p.returncode, p.stdout, p.stderr
 
 
+def interface_failures(pair, runner):
+    """Run `runner(pair)` (same signature as a script_runner) and check
+    whether parse_script_output can find its markers in the result --
+    the INTERFACE question, never the numbers.
+
+    Returns (failures, unmeasured): `failures` is non-empty only when the
+    runner produced output but this file's parser could not read it (a
+    real interface break); `unmeasured` is non-empty only when the runner
+    itself could not produce output at all (cloc missing, or an
+    unexpected non-zero exit). The two are never mixed in one list, so a
+    caller can tell "the interface changed" from "this check could not
+    run" without inspecting message text.
+
+    Used by self_test() for BOTH the real check (against real_script_runner)
+    and its known-negatives (against a runner that simulates a broken
+    producer) -- the same function on both sides is what stops a negative
+    from silently exercising a different code path than the real check, the
+    exact way cleat#2633 itself first slipped past.
+    """
+    rc, out, err = runner(pair)
+    if rc == 2:
+        return [], [f"UNMEASURED calling scripts/dbos-pair-loc.sh {pair}: {err.strip()}"]
+    if rc != 0:
+        return [], [f"scripts/dbos-pair-loc.sh {pair} exited {rc} unexpectedly: {err.strip()}"]
+    _, _, reason = parse_script_output(out)
+    if reason:
+        return [
+            f"INTERFACE BROKEN: scripts/dbos-pair-loc.sh {pair}'s real output no longer has "
+            f"the markers this parser needs ({reason}). dbos-pair-loc.sh's output labels are "
+            f"an interface this script parses -- renaming one is a breaking edit to it."
+        ], []
+    return [], []
+
+
 # --------------------------------------------------------------------------
 
 
@@ -210,9 +244,96 @@ def self_test():
         failures.append(f"  MISSED: unparseable script output was not reported as unmeasured "
                         f"(got status={status!r}): {problems}")
 
+    # cleat#2633 -- everything above tests the PARSER against fixtures this
+    # file writes and controls, which is exactly how cleat#2621 went
+    # undetected: SELF_TEST_SCRIPT_OUT_MATCHED is a hand-written COPY of
+    # dbos-pair-loc.sh's markers, and when the producer renamed them
+    # ("== cleat side ==" -> "== cleat: app =="), the copy did not follow,
+    # so this self-test kept passing while the real check against the tree
+    # returned UNMEASURED. A hand-written fixture can confirm the parser
+    # handles a shape; it cannot notice that the shape stopped being
+    # produced.
+    #
+    # So this checks the INTERFACE rather than the fixture: run the REAL
+    # dbos-pair-loc.sh for every registered pair and confirm this file's
+    # parser can still find the markers it needs in what that script
+    # ACTUALLY prints today -- never comparing against a copy of it.
+    #
+    # DELIBERATELY DOES NOT CHECK WHETHER THE NUMBERS AGREE. That is
+    # main()'s job, and it is allowed to fail on a genuinely stale README
+    # without that reading as a broken self-test -- conflating "the
+    # interface still parses" with "the README is still accurate" would
+    # make an ordinary drift look like this script itself being broken.
+    #
+    # A first version of this self-test ran the loop over `real_script_runner`
+    # inline, then separately fed a renamed-producer string straight into
+    # parse_script_output for its negative -- which meant the negative
+    # re-tested the parser (already covered by known negative #5) and never
+    # went through the loop's own call site at all. Factoring the shared
+    # "call runner, check markers" logic into `interface_failures` and
+    # calling it from both the real loop and the negatives below means A
+    # VACUOUS `interface_failures` TRIPS THE NEGATIVES -- verified by making
+    # its body return `[], []` unconditionally and watching both negatives
+    # report MISSED.
+    #
+    # THAT DOES NOT COVER EVERY WAY THE LOOP ITSELF COULD GO VACUOUS --
+    # cleat-review's re-review measured two mutations the function-level fix
+    # does not reach: `for pair in PAIRS` narrowed to iterate nothing, and
+    # this call site's `real_script_runner` argument swapped for a fixture
+    # runner. Both leave `interface_failures` itself correct and untested by
+    # the negatives below, which call it directly with their own runners.
+    # The count check just below closes the first (a loop that checks zero
+    # pairs is itself a finding); the second is a one-line call-site swap in
+    # plain sight, left as a residual rather than guarded, the same
+    # trade this file's own header makes for scripts/dbos-pair-loc.sh's
+    # numbers ("recompute cloc" is out of scope; so is guarding the
+    # `interface_failures(pair, real_script_runner)` call below).
+    all_unmeasured = []
+    pairs_checked = 0
+    for pair in PAIRS:
+        f, u = interface_failures(pair, real_script_runner)
+        failures.extend(f)
+        all_unmeasured.extend(u)
+        pairs_checked += 1
+    if not PAIRS:
+        failures.append("  PAIRS is empty -- the interface check has nothing to run against")
+    elif pairs_checked != len(PAIRS):
+        failures.append(f"  the interface check loop ran for {pairs_checked} of {len(PAIRS)} "
+                        f"registered pairs -- something short-circuited it")
+
+    # Known negative -- simulates exactly the cleat#2621 regression: a
+    # producer that renamed its own markers. Goes through interface_failures
+    # like the real check above, not a separate hand-rolled call.
+    def renamed_producer(pair):
+        return 0, SELF_TEST_SCRIPT_OUT_MATCHED.replace("cleat: app", "cleat side")\
+            .replace("DBOS: app", "DBOS side"), ""
+    f, u = interface_failures("order-lifecycle", renamed_producer)
+    if not f:
+        failures.append("  MISSED: a producer that renamed its section markers "
+                        "(simulating cleat#2621) was not detected as an interface break")
+
+    # Known negative -- the interface check's OWN precondition can fail
+    # (cloc missing when scripts/dbos-pair-loc.sh runs for real), and that
+    # must come back UNMEASURED, never as a failure and never silently
+    # ignored. Before this, an UNMEASURED here was appended to `failures`
+    # and returned exit 1 -- indistinguishable from a real interface break,
+    # which is the same status-conflation this file's own header warns
+    # against for scripts/dbos-pair-loc.sh's exit codes.
+    def cloc_missing_runner(pair):
+        return 2, "", "UNMEASURED: cloc is not installed\n"
+    f, u = interface_failures("order-lifecycle", cloc_missing_runner)
+    if f or not u:
+        failures.append("  MISSED: an UNMEASURED interface-check runner was not propagated "
+                        "as unmeasured (got failures=%r unmeasured=%r)" % (f, u))
+
     if failures:
         print("self-test FAILED:\n" + "\n".join(failures), file=sys.stderr)
         return 1
+    if all_unmeasured:
+        print("self-test UNMEASURED: " + "; ".join(all_unmeasured), file=sys.stderr)
+        print("UNMEASURED: this is a failure of the self-test's own environment "
+              "(e.g. cloc missing), not a finding about the checker", file=sys.stderr)
+        return 2
     print("self-test passed")
     return 0
 
