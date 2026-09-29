@@ -27,34 +27,57 @@
 # platform-enforcement asymmetry, and no ROLE asymmetry either -- both sides
 # are one workflow file, one server/backend file, one test file.
 #
-# integration-hub is NOT role-symmetric by file count, and this is the
-# second correction cleat-review's review of #2621 made to this script (the
-# first added the app/platform split; see git blame). Four roles, on both
-# cleat and the DBOS-ISOLATED counterpart specifically:
+# integration-hub is NOT role-symmetric by file count, and this script has
+# been corrected twice by cleat-review's review of #2621 (see git blame):
+# once to add the app/platform split, once to make the four roles
+# role-symmetric with the bare variant as a CONTROL row. Five groups now, on
+# both cleat and the DBOS-ISOLATED counterpart specifically:
 #
 #   tenant code   what a tenant AUTHORS -- the transform/read itself
 #   host runner   the plumbing that INVOKES tenant code (dispatch, isolate
 #                 setup/teardown) -- not written by the tenant, but written
 #                 once per application, not once per platform
-#   tests         everything that asserts the boundary holds
+#   unit tests    like-for-like test code, counted in the APP TOTAL
+#   e2e harness   shown for BOTH sides but EXCLUDED from any total -- see
+#                 below for why this is its own group rather than folded
+#                 into "unit tests" or dropped
 #   platform      what the PLATFORM contributes once, for every tenant step
-#                 it will ever run -- see below for why DBOS's is 0
+#                 it will ever run -- reported on ITS OWN LINE, never summed
+#                 into the app total, because doing so is exactly the
+#                 category-mixing the app/platform split exists to prevent
+#
+# WHY "unit tests" AND "e2e harness" ARE SEPARATE, not one "tests" group as
+# an earlier version of this script had it. cleat's proof of the sandbox
+# boundary needs `scripts/run-integration-hub-tenant-sandbox-scenario.sh`
+# (~198 lines) -- a real HTTP-deployed worker, receiving a WASM upload
+# through the SAME runtime-code-intake path a tenant actually uses. DBOS's
+# analogous end-to-end proof lives ENTIRELY inside `isolated-wedge.test.ts`
+# (calling `DBOS.startWorkflow` in-process); `run-integration-hub-dbos-
+# scenario.sh` (~42 lines) is just an npm install/build/test wrapper with no
+# assertions of its own. Counting cleat's harness inside "tests" while DBOS
+# has no comparable line to count previously double-counted cleat's cost
+# without a DBOS-side counterpart to compare it against. Both harness
+# scripts are shown, neither is summed into the app total, and the prose
+# says what the size difference is actually about (runtime code intake,
+# which only cleat's side exercises) rather than letting a bare number
+# imply "DBOS's tests are 3x smaller."
 #
 # The bare-DBOS.runStep counterpart (src/workflow.ts, src/wedge.test.ts) is
 # reported as a separate CONTROL row, excluded from the role-symmetric
 # comparison total: it is not what an idiomatic team ships (that is the
 # whole reason the isolated-vm counterpart exists), so folding it into the
 # "treatment" total would compare a treatment against a treatment-plus-its-
-# own-control, which is the error being corrected here.
+# own-control.
 #
 # cleat's "tenant code" is two whole files (the tenant-steps mains) because
 # that is genuinely all a cleat tenant author writes. Its "host runner" and
-# "tests" are NOT whole files -- hub.go and hub_test.go do far more than
-# this pair's scope (webhook ingestion, connector dispatch; see the port's
-# ISSUES.md, "Not a full SyncCustomer port") -- so they are STRUCTURALLY
-# EXTRACTED fragments via scripts/dbos-pair-loc-extract.py, bounded by the
-# source's own shape (a brace block, a named function) rather than a frozen
-# line range that would drift the moment either file is edited.
+# "unit tests" are NOT whole files -- hub.go and hub_test.go do far more
+# than this pair's scope (webhook ingestion, connector dispatch; see the
+# port's ISSUES.md, "Not a full SyncCustomer port") -- so they are
+# STRUCTURALLY EXTRACTED fragments via scripts/dbos-pair-loc-extract.py,
+# bounded by the source's own shape (a brace block, a named function) rather
+# than a frozen line range that would drift the moment either file is
+# edited.
 #
 # EXIT STATUS
 #
@@ -142,6 +165,7 @@ case "$pair" in
              "$repo_root/engine/wasi_policy.go" \
              "$repo_root/engine/wasi_policy_wasmtime.go" \
              "$repo_root/scripts/run-integration-hub-tenant-sandbox-scenario.sh" \
+             "$repo_root/scripts/run-integration-hub-dbos-scenario.sh" \
              "$repo_root/examples/integration-hub-dbos-port/src/workflow.ts" \
              "$repo_root/examples/integration-hub-dbos-port/src/wedge.test.ts" \
              "$repo_root/examples/integration-hub-dbos-port/src/isolated-wedge.test.ts"; do
@@ -185,18 +209,22 @@ EOF
       "$repo_root/examples/integration-hub/tenant-steps/normalize-order/main.go" \
       "$repo_root/examples/integration-hub/tenant-steps/malicious-read-host-file/main.go"
     print_group "cleat: host runner (extracted from hub.go)" "$cleat_host_runner"
-    print_group "cleat: tests (extracted from hub_test.go, plus the e2e sandbox scenario script)" \
-      "$cleat_test1" "$cleat_test2" \
-      "$repo_root/scripts/run-integration-hub-tenant-sandbox-scenario.sh"
-    print_group "cleat: platform" \
-      "$repo_root/engine/wasi_policy.go" \
-      "$repo_root/engine/wasi_policy_wasmtime.go"
-
+    print_group "cleat: unit tests (extracted from hub_test.go)" "$cleat_test1" "$cleat_test2"
     print_group "DBOS-isolated: tenant code (extracted template literals)" "$dbos_tenant1" "$dbos_tenant2"
     print_group "DBOS-isolated: host runner (isolated-workflow.ts minus tenant code)" "$scratch/dbos-host-runner.ts"
-    print_group "DBOS-isolated: tests" \
+    print_group "DBOS-isolated: unit tests" \
       "$repo_root/examples/integration-hub-dbos-port/src/isolated-wedge.test.ts"
-    print_group "DBOS-isolated: platform" # empty -- see header comment
+
+    echo "== E2E HARNESS, both sides -- shown, NOT summed into either app total (see header comment) =="
+    print_group "cleat: e2e harness (drives a real deployed worker over HTTP -- exercises runtime code intake)" \
+      "$repo_root/scripts/run-integration-hub-tenant-sandbox-scenario.sh"
+    print_group "DBOS-isolated: e2e harness (npm install/build/test wrapper -- the assertions live in the unit test above; no runtime code intake to exercise)" \
+      "$repo_root/scripts/run-integration-hub-dbos-scenario.sh"
+
+    print_group "cleat: platform (own line -- never summed into the app total)" \
+      "$repo_root/engine/wasi_policy.go" \
+      "$repo_root/engine/wasi_policy_wasmtime.go"
+    print_group "DBOS-isolated: platform (own line -- never summed into the app total)" # empty -- see header comment
     ;;
 
   *)

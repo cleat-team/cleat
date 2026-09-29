@@ -332,123 +332,130 @@ the same discipline as the cost this pair cannot measure directly.
 
 **Re-derive with `scripts/dbos-pair-loc.sh integration-hub`** (`cloc` 2.10).
 Snapshot dated **2026-09-28** — re-run the command rather than re-quoting
-these rows, per CLAUDE.md's rule on numbers in prose. This table replaced
-an earlier "app lines vs. platform lines" split that cleat-review's review
-of this PR's first version found was still not like-for-like: it compared
-cleat's two tenant-step files against **all four** DBOS files (both the
-bare AND isolated variants, plus both their test files) — a treatment
-against a treatment-plus-its-own-control, in cleat's favour. The comparison
-below is **role-symmetric**: the same four roles, counted the same way, on
-cleat and on the DBOS-**isolated** counterpart specifically (the bare
-version is the CONTROL, reported separately and excluded from the totals):
+these rows, per CLAUDE.md's rule on numbers in prose.
+
+**This is the third shape this table has taken, and each move fixed a real
+asymmetry cleat-review found, not a preference:** an initial "app lines vs.
+platform lines" split compared cleat's two tenant-step files against **all
+four** DBOS files (both variants, both test files) — 49 vs. 240. Making it
+role-symmetric (tenant code / host runner / tests / platform, bare DBOS as
+an excluded CONTROL) gave 442 vs. 136 — but that total **summed cleat's 124
+platform lines into an app comparison**, and its "tests" row counted
+cleat's ~198-line HTTP-deployed-worker harness while giving DBOS's
+analogous ~42-line harness no line at all. Both were caught on the same
+re-review. The table below is the fix: **platform is its own line, never
+summed**, and **both end-to-end harnesses are shown, neither summed into
+either app total** — rather than picking one of the two equally-defensible
+ways to resolve that asymmetry (drop cleat's harness, or add DBOS's), this
+shows both real numbers and lets the prose carry what they mean, per the
+same instinct that put the bare-DBOS control in its own excluded row.
 
 | role | cleat | DBOS-isolated |
 |---|---:|---:|
 | tenant code | **49** | **19** |
-| host runner | **21** | **45** |
-| tests | **248** | **72** |
-| platform | **124** | **0** |
-| **total** | **442** | **136** |
+| host runner | **21** | **49** |
+| unit tests | **50** | **72** |
+| **app total** (tenant + host + unit tests) | **120** | **140** |
+| platform (own line — not summed above) | **124** | **0** |
+| e2e harness (own line — not summed above, see below) | **198** | **42** |
 
-*Bare `DBOS.runStep` (no sandbox) is deliberately not a row or a column in
-this table — it is the CONTROL, reported separately below, and adding its
-104 lines to either side here would be a mistake, not an omission to fix.*
+*Bare `DBOS.runStep` (no sandbox) is deliberately not a row or a column
+here either — it is the CONTROL, reported separately below, at **104**
+lines.*
 
-CONTROL, excluded from the totals above: bare `DBOS.runStep`, no sandbox
-(`src/workflow.ts` + `src/wedge.test.ts`) — **104** lines. It is not what an
-idiomatic team ships, which is the entire reason the isolated counterpart
-exists; folding it into the isolated column's total would count DBOS's own
-control as part of its treatment.
+**What each row actually contains, since several are extracted fragments
+rather than whole files** (`scripts/dbos-pair-loc-extract.py`, bounded by
+the source's own structure — a brace block, a named function, a template
+literal's closing backtick — not a frozen line range, so the extraction
+tracks edits rather than silently drifting):
 
-**What each row actually contains, since two of the four are extracted
-fragments rather than whole files** (`scripts/dbos-pair-loc-extract.py`,
-bounded by the source's own structure — a brace block, a named function, a
-template literal's closing backtick — not a frozen line range, so the
-extraction tracks edits rather than silently drifting):
-
-- **tenant code**: cleat's two tenant-steps `main.go` files, whole (a
-  cleat tenant author writes nothing else). DBOS-isolated's two source
-  **string literals** (`NORMALIZE_ORDER_SOURCE`, `READ_HOST_FILE_SOURCE`)
-  — the closest analogue to tenant-authored code on that side, since DBOS
-  has no upload mechanism (see "No primitive for tenant-supplied code" in
-  `ISSUES.md`) and this port stands the string in for what a tenant would
-  upload.
+- **tenant code**: cleat's two tenant-steps `main.go` files, whole (a cleat
+  tenant author writes nothing else). DBOS-isolated's two source **string
+  literals** (`NORMALIZE_ORDER_SOURCE`, `READ_HOST_FILE_SOURCE`) — the
+  closest analogue to tenant-authored code on that side, since DBOS has no
+  upload mechanism and this port stands the string in for what a tenant
+  would upload.
 - **host runner**: the `if in.TenantStepName != ""` dispatch block
-  extracted from `hub.go` — the *entire* file is far larger, because
-  `SyncCustomer` also does webhook ingestion and connector dispatch, out of
-  this pair's scope (see "Not a full SyncCustomer port"). DBOS-isolated's
-  is `isolated-workflow.ts` **minus** the two tenant-code string literals
-  — `runInIsolate` (isolate setup, the CPU timeout, teardown), the two
-  async wrapper functions, and the workflow registration.
-- **tests**: cleat's two `hub_test.go` functions that exercise
+  extracted from `hub.go` — the entire file is far larger, out of this
+  pair's scope (see "Not a full SyncCustomer port"). DBOS-isolated's is
+  `isolated-workflow.ts` **minus** the two tenant-code string literals —
+  `runInIsolate` (isolate setup, the CPU timeout, teardown), the two async
+  wrapper functions, and the workflow registration.
+- **unit tests**: cleat's two `hub_test.go` functions that exercise
   `TenantStepName` (`TestSyncCustomer_RunsTheTenantsOwnStep`,
-  `TestSyncCustomer_ATenantStepThatFailsNamesItsStep`), **plus**
-  `scripts/run-integration-hub-tenant-sandbox-scenario.sh` in full — the
-  end-to-end proof against a real deployed worker. DBOS-isolated's is
-  `isolated-wedge.test.ts` in full.
-- **platform**: unchanged from the earlier table — `engine/wasi_policy.go`
-  + `engine/wasi_policy_wasmtime.go` for cleat, nothing for DBOS (see
-  below).
+  `TestSyncCustomer_ATenantStepThatFailsNamesItsStep`). DBOS-isolated's is
+  `isolated-wedge.test.ts` in full — this row is genuinely like-for-like,
+  which is why it is the one counted in the app total.
+- **platform**: `engine/wasi_policy.go` + `engine/wasi_policy_wasmtime.go`
+  for cleat, nothing for DBOS-isolated (see below).
+- **e2e harness**: `scripts/run-integration-hub-tenant-sandbox-scenario.sh`
+  for cleat, `scripts/run-integration-hub-dbos-scenario.sh` for
+  DBOS-isolated — see immediately below for why these are shown but not
+  summed.
 
-**The 442-vs-136 gap is dominated by the "tests" row, and that is a real
-structural difference, not padding.** cleat's tenant-step boundary can only
-be proven by driving a real HTTP API against a real deployed
-`cleat-worker` process — uploading a WASM module through
-`POST /api/definitions`, starting it, and polling for a terminal status —
-because that is how a tenant's uploaded code actually reaches the engine.
-`isolated-wedge.test.ts` proves the DBOS-isolated equivalent **in-process**,
-by calling `DBOS.startWorkflow` directly in the same Node process, because
-"tenant code" here is a string evaluated inside that process, not a module
-deployed to a separate service. Neither harness is doing unnecessary work;
-they are proving the same property at two different deployment topologies,
-and the topology cleat proves against is the one a real multi-tenant
-deployment actually has.
+**Why the two harness scripts get their own excluded row instead of being
+folded into "unit tests" or dropped.** cleat's harness (~198 lines) starts
+a real `cleat-worker`, provisions a tenant, and uploads a WASM module
+through `POST /api/definitions` over HTTP — it is the only place this pair
+exercises **runtime code intake**, because that is how a tenant's code
+actually reaches a cleat deployment. DBOS's harness (~42 lines) is an npm
+install/build/test wrapper with no assertions of its own; the equivalent
+end-to-end proof on that side lives entirely inside `isolated-wedge.test.ts`
+(already counted, in full, under "unit tests"), calling
+`DBOS.startWorkflow` **in-process** — there is nothing analogous to upload
+over HTTP, because "tenant code" here is a string evaluated inside the same
+process. Neither harness is doing unnecessary work; they reflect two
+different deployment topologies, and the topology cleat proves against is
+the one a real multi-tenant deployment actually has. Showing both numbers,
+rather than dropping cleat's or inventing a DBOS-side equivalent that
+doesn't exist, is the version of this table that survives a skeptical
+re-read.
 
 **Why DBOS's platform row is 0, and why that is not a rounding artefact.**
 `@dbos-inc/dbos-sdk` contributes no isolation code of its own.
 `isolated-vm` *does* supply the actual boundary, but it is a third-party
 library the application author chose, installed, and wired up — counted in
-the **host runner** row above, not platform, the same way a team choosing
-a container-per-tenant would write and maintain their own orchestration
-rather than receive it from DBOS. Contrast cleat's platform row:
-`engine/wasi_policy.go` and `engine/wasi_policy_wasmtime.go` are written
-**once**, by the platform, and every tenant step this engine ever runs
-gets the boundary for free.
+the **host runner** row, not platform, the same way a team choosing a
+container-per-tenant would write and maintain their own orchestration
+rather than receive it from DBOS.
 
-**So the honest reading of this table is not a single "442 vs. 136"
-verdict — it is several separate claims, each real:**
+**So the honest reading of this table is not a single number — it is
+several separate claims, each real:**
 
-1. **cleat ships an isolation boundary as a platform capability** (124
-   lines, written once, in `engine/`) that every tenant step gets
-   automatically. Those 124 lines are not free — someone at cleat wrote
-   and maintains them — but they are not paid by the tenant-step's own
-   author, which is the comparison this pair is about. An idiomatic DBOS
-   deployment has no equivalent platform line to count, because the
-   capability does not exist there.
-2. **An idiomatic team CAN build a comparable boundary on DBOS**, using a
-   third-party library, at a real and measurable cost split across tenant
-   code, host runner, and tests — 136 lines total, all counted as
-   application cost because nothing about it is DBOS's contribution.
-3. **cleat's own tenant-code and host-runner rows are each smaller than
-   DBOS-isolated's** (49 vs. 19 is reversed because DBOS's tenant code is a
-   minimal source-string stand-in, not a real upload payload; 21 vs. 45
-   reflects `isolated-vm`'s setup/teardown/timeout plumbing against
-   cleat's two-line `ChildWorkflow`/`AwaitChild` call). Read these as
-   noisy at this size — a 24-26 line difference either way — not as a
-   trend either side should lean on.
-4. **The "tests" row is where the real gap lives, and it is about
-   deployment topology, not code quality** — see above.
-5. **Neither counterpart's line count captures the durability-boundary
-   cost** described above ("What this counterpart costs") or the
-   tenant-step-as-workflow difference ("The tenant step's own
-   durability"), because both are missing capabilities rather than a
-   smaller implementation of an existing one.
+1. **The like-for-like application code is roughly equal**: 120 vs. 140,
+   tenant code + host runner + unit tests on both sides. Read this as
+   "the pair's case for cleat does not rest on line-count arithmetic" —
+   it rests on the three capability claims this README states with their
+   mechanisms: platform-enforced isolation (this section), durable
+   tenant code ("The tenant step's own durability"), and runtime code
+   intake (the e2e-harness note above).
+2. **cleat ships an isolation boundary as a platform capability** (124
+   lines, on its own line, written once, in `engine/`) that every tenant
+   step gets automatically. Those 124 lines are not free — someone at
+   cleat wrote and maintains them — but they are not paid by the
+   tenant-step's own author, which is the comparison the app total is
+   about. An idiomatic DBOS deployment has no equivalent platform line to
+   count, because the capability does not exist there.
+3. **cleat's tenant-code and host-runner rows are individually smaller
+   than DBOS-isolated's** (49 vs. 19 is reversed because DBOS's tenant
+   code is a minimal source-string stand-in, not a real upload payload;
+   21 vs. 49 reflects `isolated-vm`'s setup/teardown/timeout plumbing
+   against cleat's two-line `ChildWorkflow`/`AwaitChild` call). Largely
+   Go-program-vs-JS-string and library-plumbing differences, not a
+   cleat-vs-DBOS platform difference — read them as noisy at this size,
+   not as a trend.
+4. **Neither counterpart's line count captures the durability-boundary
+   cost** ("What this counterpart costs") or the tenant-step-as-workflow
+   difference ("The tenant step's own durability"), because both are
+   missing capabilities rather than a smaller implementation of an
+   existing one.
 
-A smaller total on either side is not, by itself, a win for that side — the
-order-lifecycle pair's own rule (*"Tenancy: 0 lines, and it is not a
+A smaller number on either side is not, by itself, a win for that side —
+the order-lifecycle pair's own rule (*"Tenancy: 0 lines, and it is not a
 compliment"*) applies here too: a 0 in DBOS's platform row is a capability
-gap, and DBOS-isolated's non-zero host-runner and tenant-code rows are the
-honest price of an application author closing part of that gap themselves.
+gap, not an efficiency, and DBOS-isolated's non-zero host-runner and
+tenant-code rows are the honest price of an application author closing
+part of that gap themselves.
 
 ## Version and date
 
