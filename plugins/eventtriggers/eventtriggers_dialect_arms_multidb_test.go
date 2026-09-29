@@ -31,8 +31,8 @@ func TestEveryQueryArmRunsOnItsOwnDialect(t *testing.T) {
 	plugintest.RunEveryArm(t, &Plugin{}, []plugintest.Arm{
 		{Name: "queryUnprocessedEvents", Q: queryUnprocessedEvents, WantCols: 5},
 		{
-			Name:     "queryLatestUnprocessedEvent",
-			Q:        queryLatestUnprocessedEvent,
+			Name:     "queryOldestUnprocessedEventForClaim",
+			Q:        queryOldestUnprocessedEventForClaim,
 			Args:     []any{"00000000-0000-0000-0000-000000000001", "some.event"},
 			WantCols: 4,
 		},

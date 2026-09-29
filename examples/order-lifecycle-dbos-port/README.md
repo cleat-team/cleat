@@ -114,7 +114,7 @@ at all, which is the gap the comparison is naming, not a feature.
 | **total** | | **274** |
 
 Against cleat's side, `cloc examples/order-lifecycle/{order.go,backend/main.go,order_test.go}`
-on the same date: **729**. Re-derive both with `scripts/dbos-pair-loc.sh`, not
+on the same date: **749**. Re-derive both with `scripts/dbos-pair-loc.sh`, not
 by re-quoting these numbers — they are a census of a file that will change.
 
 **Corrected 2026-09-28 (cleat#2622): `server.ts` grew from 57 to 70 lines after this table was
@@ -122,6 +122,30 @@ first written, and the table was not re-derived when it did — the total quoted
 however long that drift went unnoticed.** `scripts/check-dbos-pair-loc.py` now runs the counter
 and fails CI if this table and the script disagree again, so the next drift is a red build rather
 than a quiet one.
+
+**Corrected 2026-09-29 (cleat#2626): 729 → 749**, net of two changes that pull in opposite
+directions: converting `order.go`'s two hand-rolled `h.PluginCall` JSON call sites
+(`webhook-ingest.await_webhook`, `email-notify.send`) to generated typed clients
+(`webhookingest.AwaitWebhook.Call`, `email.Send.Call`) removes 12 lines of call-site ceremony
+from `order.go` itself; adding `order_test.go`'s
+`TestPlaceOrder_NotifyCustomerSendsARealBody` (a regression test for a real bug this conversion
+found -- see below) adds more than that back. **749 is the honest APP figure**, not a partial
+one: the generated clients
+(`cleat/pluginclients/{webhookingest,email}/client.go`, 60 code lines combined) live in the
+`cleat` SDK module, not in this example -- they are shared platform code every workflow calling
+these two plugins reuses, the same way every workflow already reuses the rest of the `cleat`
+package, not a cost this example's own line count should carry. (An earlier version of this note,
+briefly, put the generated clients inside `examples/order-lifecycle/` itself and counted them as
+this example's own cost, 775 against the 729 baseline. That placement turned out to be
+mechanically wrong on top of being the wrong accounting: `examples/` is cleat's own separate Go
+module, unpublished and untagged for local changes, and `cleat build`'s workflow staging only
+ever copies files from the workflow's own source directory -- so a sibling subpackage under
+`examples/order-lifecycle/` could not be resolved at all, and `cleat build` failed outright.
+`cleat/`, by contrast, is the one module every `cleat build` already locally replaces for every
+workflow, which is what makes SDK placement both the honest accounting and the working one. See
+cleat#2626 and cleat#2658 for the full story.) See cleat#2626 for why the lever is still worth it
+independent of any of this: converting `notifyCustomer` turned a real, previously silent bug (a
+hand-written payload's `"body"` field, which `SendInput` never had) into a compile error.
 
 ## The counter
 

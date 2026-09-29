@@ -205,14 +205,9 @@ func TestADeletedSourcesPendingEventIsCancelledNotDelivered(t *testing.T) {
 			// decision on cleat#2199.
 			cc := &plugin.CallContext{TenantID: tenantID.String(), WorkflowID: "wf-review-2221", DB: be.DB}
 			awaitCtx := plugin.WithCallContext(auth.WithTenantID(context.Background(), tenantID), cc)
-			awaitInput := `{"source_id":"` + sourceID + `"}`
-			outJSON, err := p.awaitWebhook(awaitCtx, awaitInput)
+			out, err := p.awaitWebhook(awaitCtx, AwaitWebhookInput{SourceID: sourceID})
 			if err != nil {
 				t.Fatalf("await_webhook: %v", err)
-			}
-			var out awaitWebhookOutput
-			if err := json.Unmarshal([]byte(outJSON), &out); err != nil {
-				t.Fatalf("decode await_webhook output: %v (%q)", err, outJSON)
 			}
 			if out.Found {
 				t.Errorf("await_webhook returned a deleted source's cancelled event (id=%s), want found=false", out.ID)

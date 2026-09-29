@@ -162,6 +162,7 @@ case "$pair" in
     for f in "$hub_go" "$hub_test_go" "$isolated_workflow_ts" \
              "$repo_root/examples/integration-hub/tenant-steps/normalize-order/main.go" \
              "$repo_root/examples/integration-hub/tenant-steps/malicious-read-host-file/main.go" \
+             "$repo_root/examples/integration-hub/tenant-steps/infinite-loop/main.go" \
              "$repo_root/engine/wasi_policy.go" \
              "$repo_root/engine/wasi_policy_wasmtime.go" \
              "$repo_root/scripts/run-integration-hub-tenant-sandbox-scenario.sh" \
@@ -202,12 +203,19 @@ case "$pair" in
     dbos_tenant1="$scratch/dbos-tenant1.ts"
     extract ts-const-template "$isolated_workflow_ts" READ_HOST_FILE_SOURCE dbos-tenant2.ts
     dbos_tenant2="$scratch/dbos-tenant2.ts"
+    # cleat#2628: a THIRD tenant behaviour, added after the other two. Its
+    # own template literal, extracted the same way -- if this were left in
+    # the "host runner" remainder below instead, tenant code would be
+    # miscounted as infrastructure, which is exactly the asymmetry this
+    # script exists to catch in the OTHER direction.
+    extract ts-const-template "$isolated_workflow_ts" INFINITE_LOOP_SOURCE dbos-tenant3.ts
+    dbos_tenant3="$scratch/dbos-tenant3.ts"
 
     # isolated-workflow.ts's "host runner" is everything in the file EXCEPT
-    # the two tenant-code template literals just extracted above -- computed
-    # by removing those two blocks' TEXT from a copy of the file, rather
+    # the three tenant-code template literals just extracted above -- computed
+    # by removing those blocks' TEXT from a copy of the file, rather
     # than by a second, independently-drifting line range.
-    python3 - "$isolated_workflow_ts" "$dbos_tenant1" "$dbos_tenant2" > "$scratch/dbos-host-runner.ts" <<'EOF'
+    python3 - "$isolated_workflow_ts" "$dbos_tenant1" "$dbos_tenant2" "$dbos_tenant3" > "$scratch/dbos-host-runner.ts" <<'EOF'
 import sys
 whole = open(sys.argv[1]).read()
 for extracted_path in sys.argv[2:]:
@@ -227,12 +235,13 @@ EOF
 
     print_group "cleat: tenant code" \
       "$repo_root/examples/integration-hub/tenant-steps/normalize-order/main.go" \
-      "$repo_root/examples/integration-hub/tenant-steps/malicious-read-host-file/main.go"
+      "$repo_root/examples/integration-hub/tenant-steps/malicious-read-host-file/main.go" \
+      "$repo_root/examples/integration-hub/tenant-steps/infinite-loop/main.go"
     print_group "cleat: host runner (extracted from hub.go -- dispatch block + every other TenantStepName-related line)" \
       "$cleat_host_runner" "$cleat_host_runner_field_in" "$cleat_host_runner_field_out" \
       "$cleat_host_runner_field_out_set" "$cleat_host_runner_flag_init"
     print_group "cleat: unit tests (extracted from hub_test.go)" "$cleat_test1" "$cleat_test2"
-    print_group "DBOS-isolated: tenant code (extracted template literals)" "$dbos_tenant1" "$dbos_tenant2"
+    print_group "DBOS-isolated: tenant code (extracted template literals)" "$dbos_tenant1" "$dbos_tenant2" "$dbos_tenant3"
     print_group "DBOS-isolated: host runner (isolated-workflow.ts minus tenant code)" "$scratch/dbos-host-runner.ts"
     print_group "DBOS-isolated: unit tests" \
       "$repo_root/examples/integration-hub-dbos-port/src/isolated-wedge.test.ts"

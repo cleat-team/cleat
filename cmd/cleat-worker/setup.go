@@ -3363,7 +3363,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		// was recorded by the segment that just ran, so it is only in the
 		// post-execution history. Passing the pre-execution `history` here
 		// would look correct and dead-letter nothing on a first failure.
-		w.recordTerminalFailureWithHistory(wf, workflowStartTime, errMsg, errorCode, errorOp, resultHistory)
+		w.recordTerminalFailureWithHistory(wf, workflowStartTime, errMsg, errorCode, errorOp, resultHistory, queryState)
 		return
 	}
 
@@ -5856,7 +5856,14 @@ func classifyTerminalErrorCode(errorCode string, deadLettered bool) string {
 // because the two callers differ on it absolutely rather than by degree. The
 // panic path cannot be one: a recovered panic is a crash, not a call that ran
 // out of attempts.
-func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, errorCode, errorOp string, eligibleForDLQ bool, history []engine.EventRecord) (applied, deadLettered bool) {
+//
+// queryState is what the failing replay itself published via SetQueryState,
+// if any -- nil for the paths that never ran a replay (a panic recovery, or a
+// failure before the segment started). It is passed to FailWorkflow only:
+// MoveToDeadLetterQueue's own UPDATE never touches query_state, so it already
+// preserves whatever the last successfully-finalized segment persisted, and a
+// parameter here would have nothing to do. See cleat#2520.
+func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, errorCode, errorOp string, eligibleForDLQ bool, history []engine.EventRecord, queryState map[string]string) (applied, deadLettered bool) {
 	st, release := w.storeFor(wf)
 	defer release()
 	ctx := context.Background()
@@ -5950,7 +5957,7 @@ func (w *Worker) writeTerminalFailure(wf *engine.WorkflowInstance, errMsg, error
 	if deadLettered {
 		err = st.MoveToDeadLetterQueue(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp)
 	} else {
-		err = st.FailWorkflow(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, nil)
+		err = st.FailWorkflow(ctx, wf.ID, w.id, wf.Generation, errMsg, errorCode, errorOp, queryState)
 	}
 
 	if errors.Is(err, engine.ErrFenceLost) {
@@ -6173,14 +6180,17 @@ func (w *Worker) shouldWarnUnservable(workflowID, check string, now time.Time) b
 // serve it rather than destroying it. See releaseForAnotherWorker above for
 // which side of that line a new pre-flight check belongs on.
 func (w *Worker) recordTerminalFailure(wf *engine.WorkflowInstance, startedAt time.Time, errMsg, errorCode, errorOp string) {
-	w.recordTerminalFailureWithHistory(wf, startedAt, errMsg, errorCode, errorOp, nil)
+	w.recordTerminalFailureWithHistory(wf, startedAt, errMsg, errorCode, errorOp, nil, nil)
 }
 
 // recordTerminalFailureWithHistory is the form used where a segment actually
 // executed, so its history can answer whether a retry exhaustion is what ended
 // the workflow.
-func (w *Worker) recordTerminalFailureWithHistory(wf *engine.WorkflowInstance, startedAt time.Time, errMsg, errorCode, errorOp string, history []engine.EventRecord) {
-	applied, deadLettered := w.writeTerminalFailure(wf, errMsg, errorCode, errorOp, true, history)
+//
+// queryState is that same segment's replay result -- see writeTerminalFailure's
+// doc comment for why it goes to FailWorkflow and not MoveToDeadLetterQueue.
+func (w *Worker) recordTerminalFailureWithHistory(wf *engine.WorkflowInstance, startedAt time.Time, errMsg, errorCode, errorOp string, history []engine.EventRecord, queryState map[string]string) {
+	applied, deadLettered := w.writeTerminalFailure(wf, errMsg, errorCode, errorOp, true, history, queryState)
 	if !applied {
 		return
 	}
@@ -6318,7 +6328,7 @@ func (w *Worker) releaseOrFail(wf *engine.WorkflowInstance, errMsg string) {
 	// panicked left its parent waiting out its full timer, and its job (if
 	// jobqueue-dispatched) recoverable only by the abandonment sweep, marked
 	// 'abandoned' rather than 'failed'.
-	applied, _ := w.writeTerminalFailure(wf, errMsg, engine.ErrUnknown.String(), "panic", false, nil)
+	applied, _ := w.writeTerminalFailure(wf, errMsg, engine.ErrUnknown.String(), "panic", false, nil, nil)
 	if !applied {
 		return
 	}

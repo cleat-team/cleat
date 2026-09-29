@@ -33,3 +33,27 @@ func marshalQueryState(queryState map[string]string) []byte {
 	}
 	return b
 }
+
+// queryStateUpdateParam is marshalQueryState's counterpart for a terminal
+// write that may have NOTHING new to say, as opposed to a write with nothing
+// to preserve.
+//
+// A nil queryState means the caller never ran a replay that could have
+// published anything -- a panic recovery, or a failure before the segment
+// started (see writeTerminalFailure's doc comment, cmd/cleat-worker/setup.go).
+// Passing that through marshalQueryState writes the literal string "{}",
+// which the UPDATE below (query_state = $N) applies unconditionally --
+// wiping whatever the last successfully-finalized segment had persisted.
+// cleat#2520.
+//
+// Returning a real, untyped Go nil here -- not the string "{}" -- makes the
+// database driver bind an actual SQL NULL, so `query_state = COALESCE($N,
+// query_state)` at the call site leaves the column exactly as it was. A
+// non-nil queryState, even an empty map, IS something to say (this replay
+// ran and published nothing) and is marshalled and written as usual.
+func queryStateUpdateParam(queryState map[string]string) any {
+	if queryState == nil {
+		return nil
+	}
+	return string(marshalQueryState(queryState))
+}

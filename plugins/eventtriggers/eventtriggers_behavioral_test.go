@@ -2450,6 +2450,13 @@ type etDBStore struct {
 	events        []etIngestedEventRow
 	awaiters      []etAwaiterRow
 	apiKeys       map[string]string
+
+	// failUpdateProcessedOnce makes the next "SET processed" UPDATE return an
+	// error instead of mutating, then clears itself. Used to prove
+	// awaitEvent's claim+consume transaction surfaces a failed consuming
+	// UPDATE as an error rather than reporting a false Found:true
+	// (cleat#2641).
+	failUpdateProcessedOnce bool
 }
 
 func newETDBStore() *etDBStore {
@@ -2691,6 +2698,11 @@ func (c *etConn) execDeleteSubscription(args []driver.NamedValue) (driver.Result
 }
 
 func (c *etConn) execUpdateEventProcessed(query string, args []driver.NamedValue) (driver.Result, error) {
+	if c.store.failUpdateProcessedOnce {
+		c.store.failUpdateProcessedOnce = false
+		return nil, fmt.Errorf("etConn: injected failure marking event processed")
+	}
+
 	id, err := etArgString(args, 1)
 	if err != nil {
 		return nil, err
@@ -2976,11 +2988,14 @@ func (c *etConn) queryEventForAwait(args []driver.NamedValue) (driver.Rows, erro
 		return nil, err
 	}
 
-	// Find the latest unprocessed event matching tenant + type.
+	// Find the OLDEST unprocessed event matching tenant + type -- cleat#2641:
+	// this used to pick the newest, which starves any older unconsumed event
+	// of the same type. Mirrors queryOldestUnprocessedEventForClaim's real
+	// ORDER BY received_at (ascending) LIMIT 1.
 	var best *etIngestedEventRow
 	for _, evt := range c.store.events {
 		if evt.tenantID == tid && evt.eventType == eventType && !evt.processed {
-			if best == nil || evt.receivedAt.After(best.receivedAt) {
+			if best == nil || evt.receivedAt.Before(best.receivedAt) {
 				best = &evt
 			}
 		}
@@ -3586,6 +3601,146 @@ func TestAwaitEventFindsAndConsumesEvent(t *testing.T) {
 	}
 	if evt.status != "consumed" {
 		t.Errorf("expected status 'consumed', got %s", evt.status)
+	}
+}
+
+// cleat#2641: await_event used to select the NEWEST unprocessed event
+// (ORDER BY received_at DESC), which starves any older unconsumed event of
+// the same type for as long as newer ones keep arriving. This registers the
+// newer event first (so an implementation keying off insertion order would
+// also get this wrong) and asserts the older one is claimed.
+func TestAwaitEventPicksOldestUnprocessedEvent(t *testing.T) {
+	store := newETDBStore()
+
+	db := sql.OpenDB(&etConnector{store: store})
+	defer db.Close()
+
+	now := time.Now()
+	newerID := uuid.New().String()
+	olderID := uuid.New().String()
+
+	store.events = append(store.events,
+		etIngestedEventRow{
+			id:         newerID,
+			tenantID:   etTestTenantStr,
+			eventType:  "order.created",
+			eventData:  `{"order_id":2}`,
+			receivedAt: now,
+			processed:  false,
+			status:     "pending",
+		},
+		etIngestedEventRow{
+			id:         olderID,
+			tenantID:   etTestTenantStr,
+			eventType:  "order.created",
+			eventData:  `{"order_id":1}`,
+			receivedAt: now.Add(-time.Hour),
+			processed:  false,
+			status:     "pending",
+		},
+	)
+
+	p := &Plugin{
+		db:     &engine.SQLDBAdapter{DB: db},
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	cc := &plugin.CallContext{TenantID: etTestTenantID.String(), WorkflowID: "wf-consumer"}
+	ctx := plugin.WithCallContext(context.Background(), cc)
+
+	input, _ := json.Marshal(map[string]any{
+		"event_type": "order.created",
+		"timeout_ms": 1000,
+	})
+	output, err := p.awaitEvent(ctx, string(input))
+	if err != nil {
+		t.Fatalf("awaitEvent: %v", err)
+	}
+
+	var result awaitEventOutput
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if !result.Found {
+		t.Fatal("expected Found=true")
+	}
+	if result.EventID != olderID {
+		t.Errorf("expected the OLDER event %s to be claimed, got %s (the newer one)", olderID, result.EventID)
+	}
+
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	for _, evt := range store.events {
+		switch evt.id {
+		case olderID:
+			if !evt.processed {
+				t.Error("older event should have been marked processed")
+			}
+		case newerID:
+			if evt.processed {
+				t.Error("newer event should not have been touched while an older one was available")
+			}
+		}
+	}
+}
+
+// cleat#2641: the claiming SELECT and the consuming UPDATE used to be two
+// separate statements, with the UPDATE's error logged and swallowed. A
+// caller was told {"found": true} for an event that had never actually been
+// marked consumed. This proves the fix: a failed consuming UPDATE now
+// surfaces as an error, the event is left unprocessed rather than lost, and
+// a subsequent call can still claim and consume it.
+func TestAwaitEventConsumeFailureSurfacesAsError(t *testing.T) {
+	store := newETDBStore()
+
+	db := sql.OpenDB(&etConnector{store: store})
+	defer db.Close()
+
+	eventID := uuid.New().String()
+	store.events = append(store.events, etIngestedEventRow{
+		id:        eventID,
+		tenantID:  etTestTenantStr,
+		eventType: "order.created",
+		eventData: `{"order_id":1}`,
+		processed: false,
+		status:    "pending",
+	})
+	store.failUpdateProcessedOnce = true
+
+	p := &Plugin{
+		db:     &engine.SQLDBAdapter{DB: db},
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	cc := &plugin.CallContext{TenantID: etTestTenantID.String(), WorkflowID: "wf-consumer"}
+	ctx := plugin.WithCallContext(context.Background(), cc)
+
+	input, _ := json.Marshal(map[string]any{
+		"event_type": "order.created",
+		"timeout_ms": 1000,
+	})
+
+	if _, err := p.awaitEvent(ctx, string(input)); err == nil {
+		t.Fatal("expected awaitEvent to return an error when the consuming UPDATE fails")
+	}
+
+	store.mu.RLock()
+	evt := store.events[0]
+	store.mu.RUnlock()
+	if evt.processed {
+		t.Error("event must not be left marked processed when the consuming UPDATE failed")
+	}
+
+	// The event must still be claimable -- a failed claim leaves it
+	// available rather than lost.
+	output, err := p.awaitEvent(ctx, string(input))
+	if err != nil {
+		t.Fatalf("awaitEvent (retry after injected failure): %v", err)
+	}
+	var result awaitEventOutput
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if !result.Found || result.EventID != eventID {
+		t.Errorf("expected retry to find and consume event %s, got found=%v id=%s", eventID, result.Found, result.EventID)
 	}
 }
 

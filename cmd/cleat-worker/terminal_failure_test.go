@@ -227,7 +227,7 @@ func TestDeadLetteringDoesNotDependOnTheGuestsWording(t *testing.T) {
 			}
 			w := newTestWorker(ms)
 
-			w.recordTerminalFailureWithHistory(testInstance("dlq-routing-wf"), time.Now(), tc.errMsg, "", "", tc.history)
+			w.recordTerminalFailureWithHistory(testInstance("dlq-routing-wf"), time.Now(), tc.errMsg, "", "", tc.history, nil)
 
 			if sawDLQ != tc.wantDLQ || sawFail == tc.wantDLQ {
 				t.Errorf("routing for %q: dead-letter=%v fail=%v, want dead-letter=%v fail=%v\n  %s",
@@ -267,7 +267,7 @@ func TestTheSameHistoryRoutesTheSameWayWhateverTheGuestSaid(t *testing.T) {
 			return nil
 		}
 		w := newTestWorker(ms)
-		w.recordTerminalFailureWithHistory(testInstance("wording-wf"), time.Now(), msg, "", "", history)
+		w.recordTerminalFailureWithHistory(testInstance("wording-wf"), time.Now(), msg, "", "", history, nil)
 
 		if i == 0 {
 			first = sawDLQ
@@ -316,7 +316,7 @@ func TestTheLimitOfWhatPositionCanTell(t *testing.T) {
 
 	// The guest caught the exhaustion and failed on its own logic instead.
 	w.recordTerminalFailureWithHistory(testInstance("caught-then-failed"), time.Now(),
-		"validation failed: customer id must be numeric", "", "", history)
+		"validation failed: customer id must be numeric", "", "", history, nil)
 
 	if !sawDLQ {
 		t.Error("this case is dead-lettered ON PURPOSE. It is indistinguishable from a run " +
@@ -418,7 +418,7 @@ func TestRecordTerminalFailureWithHistory_NotifiesTerminal(t *testing.T) {
 	w.finalizeObservers = []plugin.HasFinalizeObserver{obs}
 
 	wf := testInstance("notify-on-fail-wf")
-	w.recordTerminalFailureWithHistory(wf, time.Now(), "boom", engine.ErrUnknown.String(), "", nil)
+	w.recordTerminalFailureWithHistory(wf, time.Now(), "boom", engine.ErrUnknown.String(), "", nil, nil)
 
 	select {
 	case <-w.parentWakeCh:
@@ -455,7 +455,7 @@ func TestRecordTerminalFailureWithHistory_DeadLetteredNotifiesDistinctly(t *test
 		Err: "retries exhausted", RetriesExhausted: true,
 	}}
 	wf := testInstance("notify-dlq-wf")
-	w.recordTerminalFailureWithHistory(wf, time.Now(), "retries exhausted", "", "", history)
+	w.recordTerminalFailureWithHistory(wf, time.Now(), "retries exhausted", "", "", history, nil)
 
 	if len(obs.calls) != 1 {
 		t.Fatalf("finalize observer called %d times, want 1", len(obs.calls))
@@ -500,6 +500,33 @@ func TestReleaseOrFail_NotifiesTerminal(t *testing.T) {
 	}
 	if samples := failedTotalFor(t, w, defName); len(samples) == 0 {
 		t.Error("a panic-terminated workflow was not counted in cleat_workflows_failed_total")
+	}
+}
+
+// TestRecordTerminalFailureWithHistory_PublishesQueryStateToFailWorkflow is
+// cleat#2520's FailWorkflow half: the failing replay's own queryState (what
+// eng.Replay returned before the caller decided this run had failed) must
+// reach the store, not the nil this call site used to pass while the value
+// sat in scope three frames up. See writeTerminalFailure's doc comment for
+// why MoveToDeadLetterQueue needs no equivalent test -- its UPDATE never
+// touches query_state at all, so there is nothing for a queryState argument
+// to do there.
+func TestRecordTerminalFailureWithHistory_PublishesQueryStateToFailWorkflow(t *testing.T) {
+	var gotQueryState map[string]string
+	ms := &mockStore{}
+	ms.failWorkflowFn = func(ctx context.Context, workflowID, workerID string, generation int64, errorMsg, errorCode, errorOp string, queryState map[string]string) error {
+		gotQueryState = queryState
+		return nil
+	}
+	w := newTestWorker(ms)
+
+	wantQueryState := map[string]string{"phase": "charging"}
+	w.recordTerminalFailureWithHistory(testInstance("publishes-query-state-wf"), time.Now(),
+		"boom", engine.ErrUnknown.String(), "", nil, wantQueryState)
+
+	if len(gotQueryState) != len(wantQueryState) || gotQueryState["phase"] != "charging" {
+		t.Errorf("FailWorkflow received queryState=%v, want %v -- a failed run's published "+
+			"state was dropped on the way to the store", gotQueryState, wantQueryState)
 	}
 }
 

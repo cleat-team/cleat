@@ -39,8 +39,47 @@ func (d *awaiterStubDB) QueryRow(_ context.Context, _ string, _ ...any) plugin.R
 func (d *awaiterStubDB) Query(_ context.Context, _ string, _ ...any) (plugin.Rows, error) {
 	return nil, sql.ErrNoRows
 }
-func (d *awaiterStubDB) Begin(context.Context) (plugin.PluginTx, error) { return nil, sql.ErrConnDone }
-func (d *awaiterStubDB) Ping(context.Context) error                     { return nil }
+
+// Begin succeeds and hands back a transaction that forwards straight to the
+// same stub, so the no-rows claim query (and this test's assertions about
+// what happens after it) behave exactly as they did before await_event
+// wrapped its claim in a transaction (cleat#2641). This stub is about
+// registerAwaiter's error propagation, not transaction semantics.
+func (d *awaiterStubDB) Begin(context.Context) (plugin.PluginTx, error) {
+	return &awaiterStubTx{db: d}, nil
+}
+func (d *awaiterStubDB) Ping(context.Context) error { return nil }
+
+// awaiterStubTx is the plugin.PluginTx Begin hands back. Every method just
+// forwards to the awaiterStubDB it was opened from, so awaitEvent's claim
+// transaction behaves exactly like the untransacted stub calls below it did
+// before cleat#2641.
+type awaiterStubTx struct {
+	db *awaiterStubDB
+}
+
+// Exec forwards to the stub, recording the query the same way an untransacted
+// Exec would.
+func (tx *awaiterStubTx) Exec(ctx context.Context, q string, args ...any) (int64, error) {
+	return tx.db.Exec(ctx, q, args...)
+}
+
+// Query forwards to the stub, which always returns sql.ErrNoRows.
+func (tx *awaiterStubTx) Query(ctx context.Context, q string, args ...any) (plugin.Rows, error) {
+	return tx.db.Query(ctx, q, args...)
+}
+
+// QueryRow forwards to the stub's noRowsScanner, so the claim's no-rows
+// branch fires exactly as it did before the transaction wrapping.
+func (tx *awaiterStubTx) QueryRow(ctx context.Context, q string, args ...any) plugin.RowScanner {
+	return tx.db.QueryRow(ctx, q, args...)
+}
+
+// Commit is a no-op: the stub has no real transaction to commit.
+func (tx *awaiterStubTx) Commit() error { return nil }
+
+// Rollback is a no-op: the stub has no real transaction to roll back.
+func (tx *awaiterStubTx) Rollback() error { return nil }
 
 type noRowsScanner struct{}
 

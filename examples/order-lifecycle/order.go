@@ -43,6 +43,8 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/cleat"
+	"github.com/cleat-team/cleat/cleat/pluginclients/email"
+	"github.com/cleat-team/cleat/cleat/pluginclients/webhookingest"
 )
 
 // h is the package-level context object. The transformer auto-threads it into
@@ -475,10 +477,6 @@ func awaitPaymentConfirmation(sourceID string) error {
 	if sourceID == "" {
 		return fmt.Errorf("no webhook source configured; see the README's setup step")
 	}
-	payload, err := json.Marshal(map[string]string{"source_id": sourceID})
-	if err != nil {
-		return err
-	}
 
 	// THE WAIT IS A LOOP, AND THAT IS NOT OBVIOUS.
 	//
@@ -498,18 +496,11 @@ func awaitPaymentConfirmation(sourceID string) error {
 	const waitMs = 1000
 
 	for i := 0; i < attempts; i++ {
-		raw, err := h.PluginCall("webhook-ingest", "await_webhook", string(payload))
+		got, err := webhookingest.AwaitWebhook.Call(h, webhookingest.AwaitWebhookInput{
+			SourceID: sourceID,
+		})
 		if err != nil {
 			return err
-		}
-
-		var got struct {
-			Found     bool            `json:"found"`
-			EventType string          `json:"event_type"`
-			Payload   json.RawMessage `json:"payload"`
-		}
-		if err := json.Unmarshal([]byte(raw), &got); err != nil {
-			return fmt.Errorf("decode await_webhook response: %w", err)
 		}
 		if got.Found {
 			return nil
@@ -542,17 +533,20 @@ func notifyCustomer(input OrderInput, totalCents int) error {
 	if input.Email == "" {
 		return nil
 	}
-	payload, err := json.Marshal(map[string]string{
-		"to":      input.Email,
-		"subject": fmt.Sprintf("Order %s confirmed", input.OrderID),
-		"body": fmt.Sprintf(
+	// The generated SendInput has no "body" field -- only
+	// BodyHTML and BodyText -- which is what surfaced this: the hand-rolled
+	// JSON this replaced sent "body", a key plugins/email's SendInput
+	// (host_functions.go) has never had. json.Unmarshal silently drops an
+	// unknown field, so BodyHTML stayed empty and every real send failed
+	// with "email: body_html is required" -- the exact kind of manifest/
+	// reality drift cleat#2626 exists to make a compile error instead.
+	_, err := email.Send.Call(h, email.SendInput{
+		To:      input.Email,
+		Subject: fmt.Sprintf("Order %s confirmed", input.OrderID),
+		BodyHTML: fmt.Sprintf(
 			"Your order %s has been confirmed. Total: %s.\n",
 			input.OrderID, formatCents(totalCents)),
 	})
-	if err != nil {
-		return err
-	}
-	_, err = h.PluginCall("email-notify", "send", string(payload))
 	return err
 }
 

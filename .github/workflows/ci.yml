@@ -645,6 +645,22 @@ jobs:
       - name: Cross-module go.mod tidiness guard
         run: scripts/check-go-mod-tidy.sh
 
+      # cleat#2626: examples/order-lifecycle/{webhookingestclient,emailclient}
+      # are `cleat-gen plugin-client` output, committed rather than built at
+      # compile time -- and a copy drifts from its producer exactly the way
+      # a hand-maintained plugin.json manifest already has (cleat#2656).
+      # PluginCall stays string-and-JSON-keyed underneath a generated client,
+      # so a stale one compiles fine and sends the wrong field names at
+      # runtime; #2626's own PR found that exact failure shape from a
+      # hand-written payload. --self-test first: it mutates a committed
+      # client, requires this script to report it stale, then restores it --
+      # the known-positive that separates "no drift" from "this check
+      # compares nothing".
+      - name: Generated plugin-client freshness guard
+        run: |
+          scripts/check-generated-plugin-clients.sh --self-test
+          scripts/check-generated-plugin-clients.sh
+
       # One contract for the non-workflow entities (cleat#1702): created_at,
       # updated_at, disabled_at, and none of the four older spellings of
       # "retired". Members convert one at a time, so most clauses are still
@@ -1500,10 +1516,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build the cleat CLI and worker
+      # cleatctl since cleat#2628: the third arm tightens the tenant's own
+      # wasm_instance_timeout with `cleatctl set-tenant-setting` before
+      # uploading the runaway fixture. Without this, the script's own
+      # UNMEASURED-on-missing-binary check (added the same PR that
+      # introduced the arm) caught its own gap -- confirmed live, cleat-review's
+      # review of #2638: this job exited 2 with "no binary at .../.bin/cleatctl"
+      # before running ANY arm, old or new.
+      - name: Build the cleat CLI, worker and cleatctl
         run: |
           go build -o .bin/cleat ./cmd/cleat
           go build -o .bin/cleat-worker ./cmd/cleat-worker
+          go build -o .bin/cleatctl ./cmd/cleatctl
 
       # The script reports UNMEASURED (exit 2) rather than a false pass if
       # psql is missing, but installed explicitly rather than relied on --

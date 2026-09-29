@@ -20,7 +20,7 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	}
 	if err := scope.Register(plugin.FuncOptions{
 		Name: "await_event",
-		// NEITHER. It selects the latest UNPROCESSED event, so a replay can
+		// NEITHER. It selects the oldest UNPROCESSED event, so a replay can
 		// match a different one -- and on the not-found path it WRITES, calling
 		// registerAwaiter before returning a successful "no event" output.
 		// That output is recorded, so under cleat#1318 a replay returns it and
@@ -56,8 +56,10 @@ type awaitEventOutput struct {
 
 // ---- Host functions ----
 
-// awaitEvent queries for the latest matching unprocessed event for the
-// workflow's tenant.  If a matching event is found, it is returned and the
+// awaitEvent queries for the oldest matching unprocessed event for the
+// workflow's tenant -- oldest, not newest, so a backlog of the same event
+// type drains in order rather than starving whichever event arrived first
+// (cleat#2641). If a matching event is found, it is returned and the
 // workflow proceeds.  If none is found, the output {"found": false} is
 // returned and the workflow engine will retry according to its retry policy.
 //
@@ -78,7 +80,14 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 		return "", fmt.Errorf("event-triggers: event_type is required")
 	}
 
-	// Query for the latest matching unprocessed event for this tenant + type.
+	// Find and claim the oldest matching unprocessed event for this tenant +
+	// type in one transaction, so a failure to mark it consumed cannot be
+	// logged-and-continued into a double consume (cleat#2641). The claiming
+	// query locks the row (FOR UPDATE SKIP LOCKED / WITH (UPDLOCK, READPAST,
+	// ROWLOCK)) for exactly the lifetime of this transaction -- see
+	// queryOldestUnprocessedEventForClaim's doc comment for why that is what
+	// makes two concurrent await_event calls safe rather than merely usually
+	// fine.
 	var (
 		eventID    uuid.UUID
 		eventType  string
@@ -86,11 +95,22 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 		receivedAt time.Time
 	)
 
-	err := plugin.ScanRow(p.db.QueryRow(ctx,
-		queryLatestUnprocessedEvent.For(p.dialect),
+	tx, err := p.db.Begin(ctx)
+	if err != nil {
+		return "", fmt.Errorf("event-triggers: begin claim transaction: %w", err)
+	}
+	defer tx.Rollback() // no-op once Commit has succeeded
+
+	err = plugin.ScanRow(tx.QueryRow(ctx,
+		queryOldestUnprocessedEventForClaim.For(p.dialect),
 		cc.TenantID, input.EventType), &eventID, &eventType, &eventData, &receivedAt)
 
 	if errors.Is(err, sql.ErrNoRows) {
+		// Nothing was locked, so there is nothing to release beyond the
+		// deferred Rollback -- but do it now rather than holding the
+		// transaction open across registerAwaiter's separate write.
+		_ = tx.Rollback()
+
 		// No matching event found -- register as an awaiter so the publish
 		// handler can signal this workflow when a matching event arrives.
 		if cc.WorkflowID != "" {
@@ -122,15 +142,20 @@ func (p *Plugin) awaitEvent(ctx context.Context, inputJSON string) (string, erro
 		return "", fmt.Errorf("event-triggers: query events: %w", err)
 	}
 
-	// Mark the event as consumed.
-	_, err = p.db.Exec(ctx, `
+	// Mark the event as consumed, in the same transaction that locked it.
+	// A failure here now surfaces as an error instead of being logged and
+	// continued past -- the row stays locked-then-rolled-back rather than
+	// being reported to the caller as consumed while still unprocessed.
+	if _, err := tx.Exec(ctx, `
 		UPDATE ingested_events
 		SET processed = true, status = 'consumed'
 		WHERE id = $1
-	`, eventID)
-	if err != nil {
-		p.logger.Error("event-triggers: mark event consumed", "event_id", eventID, "error", err)
-		// Continue even if marking fails.
+	`, eventID); err != nil {
+		return "", fmt.Errorf("event-triggers: mark event consumed: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("event-triggers: commit claim: %w", err)
 	}
 
 	p.logger.Info("event-triggers: event consumed via await_event",

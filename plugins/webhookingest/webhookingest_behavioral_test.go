@@ -1020,6 +1020,10 @@ func (r *fakeFuncRegistry) Has(name string) bool {
 	return ok
 }
 
+func (r *fakeFuncRegistry) Get(name string) plugin.PluginFunc {
+	return r.funcs[name]
+}
+
 // errReadCloser simulates an io.ReadCloser that fails on Read.
 type errReadCloser struct{}
 
@@ -1656,14 +1660,9 @@ func TestDeletingASourceCancelsItsPendingEventsForBothDeliveryPaths(t *testing.T
 	// PULL path.
 	callCtx := &plugin.CallContext{TenantID: testTenantStr, WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
-	input, _ := json.Marshal(map[string]any{"source_id": sourceID.String()})
-	outJSON, err := p.awaitWebhook(ctx, string(input))
+	out, err := p.awaitWebhook(ctx, AwaitWebhookInput{SourceID: sourceID.String()})
 	if err != nil {
 		t.Fatalf("awaitWebhook: %v", err)
-	}
-	var out awaitWebhookOutput
-	if err := json.Unmarshal([]byte(outJSON), &out); err != nil {
-		t.Fatalf("unmarshal awaitWebhook output: %v", err)
 	}
 	if out.Found {
 		t.Errorf("awaitWebhook returned a deleted source's cancelled event (id=%s), want found=false", out.ID)
@@ -1710,24 +1709,19 @@ func TestAwaitWebhookHostFunction(t *testing.T) {
 	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	input, _ := json.Marshal(map[string]any{
-		"source_id":  sourceID.String(),
-		"event_type": "push",
+	output, err := p.awaitWebhook(ctx, AwaitWebhookInput{
+		SourceID:  sourceID.String(),
+		EventType: "push",
 	})
-	output, err := p.awaitWebhook(ctx, string(input))
 	if err != nil {
 		t.Fatalf("awaitWebhook: %v", err)
 	}
 
-	var result map[string]any
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to decode output: %v", err)
+	if !output.Found {
+		t.Errorf("expected found=true, got %v", output.Found)
 	}
-	if result["found"] != true {
-		t.Errorf("expected found=true, got %v", result["found"])
-	}
-	if result["event_type"] != "push" {
-		t.Errorf("expected event_type 'push', got %s", result["event_type"])
+	if output.EventType != "push" {
+		t.Errorf("expected event_type 'push', got %s", output.EventType)
 	}
 
 	// Verify event was marked processed.
@@ -1759,18 +1753,13 @@ func TestAwaitWebhookNoEvents(t *testing.T) {
 	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	input, _ := json.Marshal(map[string]any{
-		"source_id": uuid.New().String(),
-	})
-	output, err := p.awaitWebhook(ctx, string(input))
+	output, err := p.awaitWebhook(ctx, AwaitWebhookInput{SourceID: uuid.New().String()})
 	if err != nil {
 		t.Fatalf("awaitWebhook: %v", err)
 	}
 
-	var result map[string]any
-	json.Unmarshal([]byte(output), &result)
-	if result["found"] != false {
-		t.Errorf("expected found=false, got %v", result["found"])
+	if output.Found {
+		t.Errorf("expected found=false, got %v", output.Found)
 	}
 }
 
@@ -2979,7 +2968,7 @@ func TestWH_AwaitWebhook_NoTenant(t *testing.T) {
 	}
 
 	// Call awaitWebhook with a context that has no CallContext.
-	_, err := p.awaitWebhook(context.Background(), `{"source_id":"`+uuid.New().String()+`"}`)
+	_, err := p.awaitWebhook(context.Background(), AwaitWebhookInput{SourceID: uuid.New().String()})
 	if err == nil {
 		t.Fatal("expected error for missing tenant context, got nil")
 	}
@@ -3010,7 +2999,7 @@ func TestWH_AwaitWebhook_InvalidSourceID(t *testing.T) {
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
 	// Call with invalid source_id.
-	_, err := p.awaitWebhook(ctx, `{"source_id":"not-a-uuid"}`)
+	_, err := p.awaitWebhook(ctx, AwaitWebhookInput{SourceID: "not-a-uuid"})
 	if err == nil {
 		t.Fatal("expected error for invalid source_id, got nil")
 	}
@@ -3023,6 +3012,14 @@ func TestWH_AwaitWebhook_InvalidSourceID(t *testing.T) {
 // AwaitWebhook invalid input JSON
 // ===========================================================================
 
+// TestWH_AwaitWebhook_InvalidJSON exercises the real call site a workflow
+// reaches -- the registered PluginFunc, which does its own JSON
+// unmarshaling via plugin.RegisterTyped -- rather than p.awaitWebhook
+// directly. awaitWebhook itself (cleat#2626) no longer parses JSON; that
+// moved into RegisterTyped's wrapper, which is tested on its own merits in
+// plugin/typed_test.go. This test is what's left to prove: that
+// webhookingest's own registration still rejects malformed input
+// end-to-end.
 func TestWH_AwaitWebhook_InvalidJSON(t *testing.T) {
 	store := newFakeDBStore()
 	keyHash := sha256.Sum256([]byte("test-api-key"))
@@ -3037,11 +3034,16 @@ func TestWH_AwaitWebhook_InvalidJSON(t *testing.T) {
 		secrets: plugintest.NewFakeSecrets(),
 	}
 
+	reg := newFakeFuncRegistry()
+	if err := p.RegisterHostFunctions(reg); err != nil {
+		t.Fatalf("RegisterHostFunctions: %v", err)
+	}
+
 	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
 	// Call with invalid JSON input.
-	_, err := p.awaitWebhook(ctx, `not valid json`)
+	_, err := reg.Get("await_webhook")(ctx, `not valid json`)
 	if err == nil {
 		t.Fatal("expected error for invalid JSON, got nil")
 	}
@@ -3383,10 +3385,7 @@ func TestWH_AwaitWebhook_QueryError(t *testing.T) {
 	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	input, _ := json.Marshal(map[string]any{
-		"source_id": uuid.New().String(),
-	})
-	_, err := p.awaitWebhook(ctx, string(input))
+	_, err := p.awaitWebhook(ctx, AwaitWebhookInput{SourceID: uuid.New().String()})
 	if err == nil {
 		t.Fatal("expected error from query failure, got nil")
 	}
@@ -3431,20 +3430,13 @@ func TestWH_AwaitWebhook_ExecError(t *testing.T) {
 	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	input, _ := json.Marshal(map[string]any{
-		"event_type": "push",
-	})
-	output, err := p.awaitWebhook(ctx, string(input))
+	output, err := p.awaitWebhook(ctx, AwaitWebhookInput{EventType: "push"})
 	if err != nil {
 		t.Fatalf("expected no error even when exec fails, got: %v", err)
 	}
 	// The event should still be returned even if marking as processed fails.
-	var result map[string]any
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to decode output: %v", err)
-	}
-	if result["found"] != true {
-		t.Errorf("expected found=true, got %v", result["found"])
+	if !output.Found {
+		t.Errorf("expected found=true, got %v", output.Found)
 	}
 }
 
