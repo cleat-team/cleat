@@ -689,15 +689,27 @@ the tables exist from the first boot of a worker built after that change, and a
 deployment that has booted one has them. P1 should re-check that before assuming it can
 reshape `event_awaiters` freely.
 
-**P0b — fix today's semantics. DONE 2026-09-29 (cleat#2641).** `ORDER BY received_at
-DESC` → ordered ascending by `received_at`, with the claiming SELECT and the consuming
-UPDATE folded into one transaction, holding `FOR UPDATE SKIP LOCKED` /
-`WITH (UPDLOCK, READPAST, ROWLOCK)` on the claimed row for that transaction's lifetime
-(`queryOldestUnprocessedEventForClaim` in `plugins/eventtriggers/queries.go`, mirroring
-the idiom `plugins/scheduler/background.go` already uses for the same problem). The old
-"continue even if marking fails" branch is gone — a failed consuming UPDATE now returns
-an error rather than reporting `{"found": true}` for a row that was never actually
-marked consumed.
+**P0b — fix today's semantics. DONE except the monotonic column (2026-09-29,
+cleat#2641).** `ORDER BY received_at DESC` → ordered ascending by `received_at`, with
+the claiming SELECT and the consuming UPDATE folded into one transaction, holding
+`FOR UPDATE SKIP LOCKED` / `WITH (UPDLOCK, READPAST, ROWLOCK)` on the claimed row for
+that transaction's lifetime (`queryOldestUnprocessedEventForClaim` in
+`plugins/eventtriggers/queries.go`, mirroring the idiom
+`plugins/scheduler/background.go` already uses for the same problem). The old "continue
+even if marking fails" branch is gone — a failed consuming UPDATE now returns an error
+rather than reporting `{"found": true}` for a row that was never actually marked
+consumed.
+
+**The "except" is real, and it attaches to `ingested_events` — the queue `await_event`
+claims from — not to `event_awaiters`.** `received_at` is not monotonic: on PostgreSQL
+`NOW()` is transaction-start time, and two events committed by concurrent transactions
+can carry the same value or an out-of-arrival-order one, with ties unordered by `ORDER
+BY received_at` alone. That is not a corner case here — it is exactly the concurrent
+arrival that the lock this PR adds exists to handle, so "oldest-first" is only
+approximate until `ingested_events` gains a column that orders ties the way concurrent
+inserts actually happened (a sequence, not a wall-clock column). P1's surrogate key
+(cleat#2646) is on `event_awaiters`, a registration table looked up by equality with no
+ordering role, and is not a candidate for this.
 
 **What this does not cover, filed separately as cleat#2644:** the lock excludes a second
 concurrent `await_event` call, which is what P0b's bug was about. It does not exclude
