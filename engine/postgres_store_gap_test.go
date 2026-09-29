@@ -377,7 +377,7 @@ func TestGap_MoveToDeadLetterQueue(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.MoveToDeadLetterQueue(testCtx, "wf-1", "worker-1", 0, "err msg", "ERR_CODE", "op")
+	err := store.MoveToDeadLetterQueue(testCtx, "wf-1", "worker-1", 0, "err msg", "ERR_CODE", "op", nil)
 	if err != nil {
 		t.Fatalf("MoveToDeadLetterQueue: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestGap_MoveToDeadLetterQueue_BeginError(t *testing.T) {
 	defer db.Close()
 
 	store := NewPostgresStore(db)
-	err := store.MoveToDeadLetterQueue(testCtx, "wf-1", "worker-1", 0, "err", "code", "op")
+	err := store.MoveToDeadLetterQueue(testCtx, "wf-1", "worker-1", 0, "err", "code", "op", nil)
 	if err == nil {
 		t.Fatal("expected error from MoveToDeadLetterQueue when BeginTx fails")
 	}

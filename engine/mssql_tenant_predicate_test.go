@@ -240,8 +240,12 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		// assigned_to, generation) is unchanged, so the reason is unchanged too.
 		Reason: scopedByCaller,
 	},
-	"mssql_lifecycle.go:moveToDeadLetterQueueOnce#6e62fa0d74d4": {
-		SQL:    "update workflow_instances set status = 'dead_lettered', error_msg = @p3, error",
+	"mssql_lifecycle.go:moveToDeadLetterQueueOnce#c618d5298130": {
+		SQL: "update workflow_instances set status = 'dead_lettered', error_msg = @p3, error",
+		// Digest moved from #6e62fa0d74d4 when cleat#2650 changed this UPDATE
+		// to also write query_state = COALESCE(@p6, query_state) -- the WHERE
+		// clause (id, assigned_to, generation) is unchanged, so the reason is
+		// unchanged too. Same shape as failWorkflowOnce's re-key in cleat#2520.
 		Reason: scopedByCaller,
 	},
 	"mssql_lifecycle.go:releaseWorkflowOnce#2128999583d9": {

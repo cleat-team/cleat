@@ -31,7 +31,7 @@ type deadLetterStore interface {
 	StartNewRun(ctx context.Context, runID, defName string, version int, input json.RawMessage,
 		idempotencyKey, tenantID string, priority int) (string, bool, error)
 	MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64,
-		errMsg, errorCode, errorOp string) error
+		errMsg, errorCode, errorOp string, queryState map[string]string) error
 }
 
 func TestDeadLetterRetentionFreesTheIdempotencyKey(t *testing.T) {
@@ -98,7 +98,7 @@ func TestDeadLetterRetentionFreesTheIdempotencyKey(t *testing.T) {
 				t.Fatalf("read generation: %v", err)
 			}
 			if err := store.MoveToDeadLetterQueue(ctx, id, workerID, generation,
-				"retries exhausted", "E_EXHAUSTED", "call"); err != nil {
+				"retries exhausted", "E_EXHAUSTED", "call", nil); err != nil {
 				t.Fatalf("move to dead letter queue: %v", err)
 			}
 

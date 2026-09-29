@@ -256,7 +256,7 @@ func (m *mockShardStore) FailWorkflow(ctx context.Context, workflowID, workerID 
 	return m.err
 }
 
-func (m *mockShardStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (m *mockShardStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	m.recordCall("MoveToDeadLetterQueue")
 	return m.err
 }
@@ -1665,7 +1665,7 @@ func TestVerifyWorkflowEvents_Success(t *testing.T) {
 
 func TestMoveToDeadLetterQueue_Success(t *testing.T) {
 	ss, _ := makeShardedStore(t, 2)
-	err := ss.MoveToDeadLetterQueue(context.Background(), "wf-1", "worker-1", 1, "err", "CODE", "op")
+	err := ss.MoveToDeadLetterQueue(context.Background(), "wf-1", "worker-1", 1, "err", "CODE", "op", nil)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -3186,7 +3186,7 @@ func TestVerifyWorkflowEvents_NilShard(t *testing.T) {
 
 func TestMoveToDeadLetterQueue_NilShard(t *testing.T) {
 	ss := makeShardedStoreManual(nil)
-	err := ss.MoveToDeadLetterQueue(context.Background(), "wf-1", "worker-1", 1, "err", "CODE", "op")
+	err := ss.MoveToDeadLetterQueue(context.Background(), "wf-1", "worker-1", 1, "err", "CODE", "op", nil)
 	if err == nil {
 		t.Fatal("expected error for nil shard")
 	}

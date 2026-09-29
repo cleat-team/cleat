@@ -89,7 +89,7 @@ func deadLetter(t *testing.T, ctx context.Context, store WorkflowStore, wfID str
 		t.Fatalf("workflow %s was not claimed; got %d", wfID, len(claimed))
 	}
 	if err := store.MoveToDeadLetterQueue(ctx, wfID, "worker-retry", gen,
-		"retries exhausted", "E_RETRY", "call"); err != nil {
+		"retries exhausted", "E_RETRY", "call", nil); err != nil {
 		t.Fatalf("MoveToDeadLetterQueue: %v", err)
 	}
 }

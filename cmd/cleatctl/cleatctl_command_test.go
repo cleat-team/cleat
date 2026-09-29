@@ -1852,7 +1852,7 @@ func (m *mockStore) LoadEventHistoryPaginated(ctx context.Context, workflowID st
 	return nil, nil
 }
 func (m *mockStore) VerifyWorkflowEvents(ctx context.Context, workflowID string) error { return nil }
-func (m *mockStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (m *mockStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	return nil
 }
 func (m *mockStore) RetryWorkflow(ctx context.Context, workflowID string) error { return nil }

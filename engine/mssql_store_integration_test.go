@@ -392,7 +392,7 @@ func TestMSSQLIntegration_DeadLetterAndRetry(t *testing.T) {
 	}
 
 	// Move to dead letter queue.
-	err = store.MoveToDeadLetterQueue(ctx, wfID, "worker-dlq", wf.Generation, "DLQ reason", "DLQ_CODE", "op_dlq")
+	err = store.MoveToDeadLetterQueue(ctx, wfID, "worker-dlq", wf.Generation, "DLQ reason", "DLQ_CODE", "op_dlq", nil)
 	if err != nil {
 		t.Fatalf("MoveToDeadLetterQueue: %v", err)
 	}

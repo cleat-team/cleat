@@ -65,7 +65,7 @@ func TestATerminalChildDoesNotHoldItsParentsQuota(t *testing.T) {
 				}},
 				{"dead_lettered", func(t *testing.T, id string) {
 					wf := claimChildOrFail(t, ctx, store, id, "w-dlq")
-					if err := store.MoveToDeadLetterQueue(ctx, id, "w-dlq", wf.Generation, "retries exhausted", "E_RETRY", "op"); err != nil {
+					if err := store.MoveToDeadLetterQueue(ctx, id, "w-dlq", wf.Generation, "retries exhausted", "E_RETRY", "op", nil); err != nil {
 						t.Fatalf("MoveToDeadLetterQueue: %v", err)
 					}
 				}},

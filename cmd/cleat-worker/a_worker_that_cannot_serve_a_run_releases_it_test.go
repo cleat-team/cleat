@@ -59,7 +59,7 @@ func unservableFixture(t *testing.T, releaseErr error) (*Worker, *[]releaseRecor
 				"not destroy work a sibling could have done.", id, errorCode, errorOp, errMsg)
 			return nil
 		},
-		moveToDeadLetterQueueFn: func(_ context.Context, id, _ string, _ int64, _, _, _ string) error {
+		moveToDeadLetterQueueFn: func(_ context.Context, id, _ string, _ int64, _, _, _ string, _ map[string]string) error {
 			t.Errorf("MoveToDeadLetterQueue was called for %s -- see cleat#1710", id)
 			return nil
 		},

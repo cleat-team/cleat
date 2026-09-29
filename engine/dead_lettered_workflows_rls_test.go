@@ -70,7 +70,7 @@ func TestDeleteDeadLetteredWorkflows_RLSEnforcedAndEventHistoryNotOrphaned(t *te
 		if err != nil || wf == nil {
 			t.Fatalf("ClaimWorkflow(%s): wf=%v err=%v", tenant, wf, err)
 		}
-		if err := tenantStore.MoveToDeadLetterQueue(ctx, wf.ID, "worker-"+tag, wf.Generation, "boom", "E_BOOM", "run"); err != nil {
+		if err := tenantStore.MoveToDeadLetterQueue(ctx, wf.ID, "worker-"+tag, wf.Generation, "boom", "E_BOOM", "run", nil); err != nil {
 			t.Fatalf("MoveToDeadLetterQueue(%s): %v", tenant, err)
 		}
 		// completed_at is set to now() by MoveToDeadLetterQueue; a future

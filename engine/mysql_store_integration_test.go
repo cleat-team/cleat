@@ -398,7 +398,7 @@ func TestMySQLIntegration_DeadLetterAndRetry(t *testing.T) {
 
 	// Move to dead letter queue.
 	if err := s.MoveToDeadLetterQueue(ctx, wf.ID, "worker-1", wf.Generation,
-		"exhausted retries", "max_retries", "DurableCall"); err != nil {
+		"exhausted retries", "max_retries", "DurableCall", nil); err != nil {
 		t.Fatalf("MoveToDeadLetterQueue: %v", err)
 	}
 
@@ -2413,7 +2413,7 @@ func TestMySQLIntegration_DeleteDeadLetteredWorkflows(t *testing.T) {
 
 	// Dead-letter it.
 	if err := s.MoveToDeadLetterQueue(ctx, wf.ID, "worker-1", wf.Generation,
-		"gone", "gone", "op"); err != nil {
+		"gone", "gone", "op", nil); err != nil {
 		t.Fatalf("MoveToDeadLetterQueue: %v", err)
 	}
 

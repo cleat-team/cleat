@@ -75,7 +75,7 @@ func TestADeadLetteredChildSurvivesItsParentsTerminateClosePolicy(t *testing.T) 
 
 			const reason = "retries exhausted"
 			const code = "E_RETRY"
-			if err := store.MoveToDeadLetterQueue(ctx, childID, "w-dlq-close", gen, reason, code, "run"); err != nil {
+			if err := store.MoveToDeadLetterQueue(ctx, childID, "w-dlq-close", gen, reason, code, "run", nil); err != nil {
 				t.Fatalf("MoveToDeadLetterQueue: %v", err)
 			}
 

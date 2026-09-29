@@ -540,12 +540,12 @@ func (s *ShardedStore) VerifyWorkflowEvents(ctx context.Context, workflowID stri
 }
 
 // MoveToDeadLetterQueue routes by workflow ID.
-func (s *ShardedStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (s *ShardedStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	shard := s.getShard(workflowID)
 	if shard == nil {
 		return fmt.Errorf("no shard available for workflow %s", workflowID)
 	}
-	return shard.Store.MoveToDeadLetterQueue(ctx, workflowID, workerID, generation, errMsg, errorCode, errorOp)
+	return shard.Store.MoveToDeadLetterQueue(ctx, workflowID, workerID, generation, errMsg, errorCode, errorOp, queryState)
 }
 
 // RetryWorkflow routes by workflow ID.

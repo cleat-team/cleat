@@ -1118,19 +1118,21 @@ func (s *MySQLStore) HeartbeatBatchFenced(ctx context.Context, workerID string, 
 // MoveToDeadLetterQueue marks a workflow as dead_lettered because it failed
 // after exhausting all retry attempts. This is a terminal status similar to
 // 'failed' but indicates the workflow was retried without success.
-func (s *MySQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string) error {
+func (s *MySQLStore) MoveToDeadLetterQueue(ctx context.Context, workflowID, workerID string, generation int64, errMsg, errorCode, errorOp string, queryState map[string]string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("move to dead letter queue: begin: %w", err)
 	}
 	defer tx.Rollback()
 
+	qsParam := queryStateUpdateParam(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'dead_lettered', error_msg = ?, error_code = ?, error_op = ?,
-		    completed_at = NOW(6), completed_by = assigned_to, assigned_to = NULL
+		    completed_at = NOW(6), completed_by = assigned_to, assigned_to = NULL,
+		    query_state = COALESCE(?, query_state)
 		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
-	`, errMsg, errorCode, errorOp, workflowID, workerID, s.tenantID, generation)
+	`, errMsg, errorCode, errorOp, qsParam, workflowID, workerID, s.tenantID, generation)
 	if err != nil {
 		return err
 	}
