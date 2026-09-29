@@ -55,6 +55,36 @@
 # this script IS how that was found; #2613 is a prerequisite for this
 # script's FAIL branch ever being reachable, not merely a nice-to-have.
 #
+# THE THIRD ARM -- A RUNAWAY STEP, NOT AN ESCAPING ONE. cleat#2628, the
+# bilateral half of a suggestion cleat-review made reviewing #2621
+# (cleat#2597's DBOS pair): the DBOS-isolated counterpart
+# (examples/integration-hub-dbos-port/src/isolated-workflow.ts) verifies its
+# sandbox bounds a tenant step that loops forever (isolated-vm's own
+# `timeout`, measured there at 2008ms against a 2000ms limit); until this
+# arm existed, cleat's own equivalent bound
+# (--wasm-instance-timeout / tenant_settings.wasm_instance_timeout_ms) had
+# only ever been verified at the engine layer
+# (engine/tenant_instance_timeout_test.go), never through this script's real
+# entry point -- an uploaded WASM module, a running worker, an HTTP status
+# poll. "Bounded execution" was a tested claim on one side of the pair and an
+# assertion-by-hand on the other, which is the shape that reads as covered
+# while only being half-covered.
+#
+# examples/integration-hub/tenant-steps/infinite-loop is a DIFFERENT
+# adversarial shape from malicious-read-host-file, deliberately: the
+# read-host-file probe is stopped by a per-call WASI policy
+# (engine/wasi_policy.go traps path_open), which says nothing about a guest
+# that never calls into the host at all. A tight loop with no syscalls is
+# stopped only by the wasmtime epoch fence
+# (engine.WithWASMInstanceTimeout), which is a different mechanism and needs
+# its own test.
+#
+# This tenant's own wasm_instance_timeout is tightened to 2s first
+# (cleatctl set-tenant-setting), rather than waiting out the operator's
+# default (30s, cmd/cleat-worker/config.go) -- both to keep this script fast
+# and because it exercises the per-tenant override path, not just the
+# operator's flag.
+#
 # EXIT STATUS
 #
 #   0  the sandbox held (malicious step failed) and the positive control
@@ -69,11 +99,13 @@ cd "$(git rev-parse --show-toplevel)" || exit 2
 
 CLEAT_BIN="${CLEAT_BIN:-$(pwd)/.bin/cleat}"
 WORKER_BIN="${WORKER_BIN:-$(pwd)/.bin/cleat-worker}"
-for bin in "$CLEAT_BIN" "$WORKER_BIN"; do
+CLEATCTL_BIN="${CLEATCTL_BIN:-$(pwd)/.bin/cleatctl}"
+for bin in "$CLEAT_BIN" "$WORKER_BIN" "$CLEATCTL_BIN"; do
   if [[ ! -x "$bin" ]]; then
     echo "UNMEASURED: no binary at $bin. Build it first:" >&2
     echo "  go build -o .bin/cleat ./cmd/cleat" >&2
     echo "  go build -o .bin/cleat-worker ./cmd/cleat-worker" >&2
+    echo "  go build -o .bin/cleatctl ./cmd/cleatctl" >&2
     exit 2
   fi
 done
@@ -280,6 +312,52 @@ except Exception: print("")')"
       echo "      a different error means this is no longer exercising the" >&2
       echo "      filesystem-refusal guarantee." >&2
       failures=$((failures + 1))
+    fi
+  fi
+fi
+
+# ---- the bilateral bound: a runaway tenant step must be bounded, not left
+# running forever (cleat#2628) ----
+echo
+echo "==> the bound holds: a runaway tenant step (infinite-loop)"
+echo "    tightening this tenant's wasm_instance_timeout to 2s"
+if ! "$CLEATCTL_BIN" -db "$OWNER_DB" set-tenant-setting "$TENANT_ID" --wasm-instance-timeout-ms=2000 \
+    >/tmp/ih-ts-set-tenant-setting.log 2>&1; then
+  echo "FAIL: set-tenant-setting could not tighten this tenant's instance timeout" >&2
+  tail -25 /tmp/ih-ts-set-tenant-setting.log >&2
+  failures=$((failures + 1))
+else
+  LOOP_RUN="$(upload_and_start "infinite-loop" "infinite-loop" "infinite_loop")"
+  if [[ -z "$LOOP_RUN" ]]; then
+    echo "FAIL: the runaway tenant step never started" >&2
+    failures=$((failures + 1))
+  else
+    # 20s, not the other arms' 30: the tenant's own bound is 2s, so 20 is
+    # already generous headroom rather than a tight race -- if this ever
+    # needs the full 20, something upstream of the epoch fence is slow, and
+    # that is itself worth knowing rather than papering over with a longer wait.
+    status="$(wait_for_terminal "$LOOP_RUN" 20)"
+    if [[ "$status" != "failed" ]]; then
+      echo "FAIL: the runaway tenant step reports status=$status, want failed" >&2
+      echo "      a tenant step in an infinite loop must be interrupted by the" >&2
+      echo "      epoch fence (--wasm-instance-timeout), not left running or" >&2
+      echo "      reported as though it completed." >&2
+      failures=$((failures + 1))
+    else
+      err="$(curl -fsS --max-time 10 "$API/api/workflows/$LOOP_RUN" "${auth[@]}" 2>/dev/null |
+        python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("error",""))
+except Exception: print("")')"
+      if [[ "$err" == *'execution time limit exceeded'* ]]; then
+        echo "    ok      status=failed, interrupted by the epoch fence (execution time limit exceeded)"
+      else
+        echo "FAIL: status=failed, but not for the documented reason" >&2
+        echo "      error: $err" >&2
+        echo "      a different error means this is no longer exercising the" >&2
+        echo "      runaway-execution bound -- it may be failing for some other" >&2
+        echo "      reason before ever reaching the epoch fence." >&2
+        failures=$((failures + 1))
+      fi
     fi
   fi
 fi
