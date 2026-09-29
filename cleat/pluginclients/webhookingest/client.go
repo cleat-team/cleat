@@ -8,8 +8,9 @@ import (
 )
 
 type AwaitWebhookInput struct {
-	SourceID  string `json:"source_id"`
-	EventType string `json:"event_type,omitempty"`
+	SourceID  string   `json:"source_id"`
+	EventType string   `json:"event_type,omitempty"`
+	Keys      []string `json:"keys,omitempty"`
 }
 
 type AwaitWebhookOutput struct {

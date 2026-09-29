@@ -32,17 +32,18 @@ import (
 // ---------------------------------------------------------------------------
 
 type webhookSourceRow struct {
-	id               string
-	tenantID         string
-	name             string
-	sourceType       string
-	secretConfigured bool
-	enabled          bool
-	signalWorkflowID string
-	signalName       string
-	createdAt        time.Time
-	updatedAt        time.Time
-	deleted          bool
+	id                  string
+	tenantID            string
+	name                string
+	sourceType          string
+	secretConfigured    bool
+	enabled             bool
+	signalWorkflowID    string
+	signalName          string
+	correlationKeyField string
+	createdAt           time.Time
+	updatedAt           time.Time
+	deleted             bool
 }
 
 type webhookEventRow struct {
@@ -152,6 +153,21 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, args []driver.Na
 		return c.execCancelPendingEventsForSource(args)
 	case strings.Contains(query, "UPDATE webhook_events"):
 		return c.execUpdateEvent(args)
+	// cleat#2649: handleDeleteSource's THIRD statement, same transaction,
+	// cancelling any still-unclaimed correlated event (key1 = the deleted
+	// source's id) in eventtriggers' own table -- see routes.go's comment on
+	// why cleat#2199's guarantee has to reach this table too now that
+	// awaitWebhook claims from it instead of webhook_events. This fake never
+	// populates ingested_events (awaitWebhook's real dialect-specific claim
+	// query is tested against real databases instead -- see
+	// a_deleted_sources_pending_event_is_cancelled_not_delivered_multidb_test.go,
+	// which pairs eventtriggers.Plugin{} into its migration setup and asserts
+	// awaitWebhook returns found=false after a delete; a hand-rolled fake
+	// cannot faithfully represent FOR UPDATE SKIP LOCKED), so this is a no-op
+	// success: nothing here asserts on ingested_events state, only that the
+	// statement does not abort the DELETE's transaction.
+	case strings.Contains(query, "UPDATE ingested_events"):
+		return &fakeResult{rowsAffected: 0}, nil
 	// cleat#2199: soft delete (UPDATE ... SET enabled = false, deleted_at =
 	// ...), not a real DELETE -- the production query's literal SET clause
 	// distinguishes it from every other webhook_sources UPDATE this fake
@@ -205,7 +221,7 @@ func (c *fakeConn) QueryContext(_ context.Context, query string, args []driver.N
 		c.store.mu.RLock()
 		defer c.store.mu.RUnlock()
 		return c.queryTenantLookup(args)
-	case strings.Contains(query, "SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, created_at, updated_at"):
+	case strings.Contains(query, "SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, correlation_key_field, created_at, updated_at"):
 		// "WHERE id = $1 AND" used to be specific to handleGetSource's
 		// two-argument query (id, tenant_id). cleat#2199 added
 		// "AND deleted_at IS NULL" to handleIngestWebhook's one-argument
@@ -300,17 +316,25 @@ func (c *fakeConn) execInsertSource(args []driver.NamedValue) (driver.Result, er
 		}
 	}
 
+	var correlationKeyField string
+	if len(args) >= 10 {
+		if v, err := argString(args, 10); err == nil {
+			correlationKeyField = v
+		}
+	}
+
 	c.store.sources = append(c.store.sources, webhookSourceRow{
-		id:               id,
-		tenantID:         tenantID,
-		name:             name,
-		sourceType:       sourceType,
-		secretConfigured: secretConfigured,
-		enabled:          true,
-		signalWorkflowID: signalWorkflowID,
-		signalName:       signalName,
-		createdAt:        nowVal,
-		updatedAt:        nowVal,
+		id:                  id,
+		tenantID:            tenantID,
+		name:                name,
+		sourceType:          sourceType,
+		secretConfigured:    secretConfigured,
+		enabled:             true,
+		signalWorkflowID:    signalWorkflowID,
+		signalName:          signalName,
+		correlationKeyField: correlationKeyField,
+		createdAt:           nowVal,
+		updatedAt:           nowVal,
 	})
 	return &fakeResult{rowsAffected: 1}, nil
 }
@@ -511,7 +535,7 @@ func (c *fakeConn) queryListSources(args []driver.NamedValue, corrupt bool) (dri
 		}
 	}
 
-	columns := []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"}
+	columns := []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "correlation_key_field", "created_at", "updated_at"}
 	var data [][]driver.Value
 	for i, s := range results {
 		enabled := driver.Value(s.enabled)
@@ -520,7 +544,7 @@ func (c *fakeConn) queryListSources(args []driver.NamedValue, corrupt bool) (dri
 		}
 		data = append(data, []driver.Value{
 			s.id, s.tenantID, s.name, s.sourceType, s.secretConfigured,
-			enabled, s.signalWorkflowID, s.signalName,
+			enabled, s.signalWorkflowID, s.signalName, s.correlationKeyField,
 			s.createdAt, s.updatedAt,
 		})
 	}
@@ -536,16 +560,16 @@ func (c *fakeConn) querySourceByID(args []driver.NamedValue) (driver.Rows, error
 	for _, s := range c.store.sources {
 		if s.id == id && !s.deleted {
 			return &fakeRows{
-				columns: []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"},
+				columns: []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "correlation_key_field", "created_at", "updated_at"},
 				data: [][]driver.Value{{
 					s.id, s.tenantID, s.name, s.sourceType, s.secretConfigured,
-					s.enabled, s.signalWorkflowID, s.signalName,
+					s.enabled, s.signalWorkflowID, s.signalName, s.correlationKeyField,
 					s.createdAt, s.updatedAt,
 				}},
 			}, nil
 		}
 	}
-	return &fakeRows{columns: []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"}}, nil
+	return &fakeRows{columns: []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "correlation_key_field", "created_at", "updated_at"}}, nil
 }
 
 func (c *fakeConn) queryGetSource(args []driver.NamedValue) (driver.Rows, error) {
@@ -561,16 +585,16 @@ func (c *fakeConn) queryGetSource(args []driver.NamedValue) (driver.Rows, error)
 	for _, s := range c.store.sources {
 		if s.id == id && s.tenantID == tid && !s.deleted {
 			return &fakeRows{
-				columns: []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"},
+				columns: []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "correlation_key_field", "created_at", "updated_at"},
 				data: [][]driver.Value{{
 					s.id, s.tenantID, s.name, s.sourceType, s.secretConfigured,
-					s.enabled, s.signalWorkflowID, s.signalName,
+					s.enabled, s.signalWorkflowID, s.signalName, s.correlationKeyField,
 					s.createdAt, s.updatedAt,
 				}},
 			}, nil
 		}
 	}
-	return &fakeRows{columns: []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "created_at", "updated_at"}}, nil
+	return &fakeRows{columns: []string{"id", "tenant_id", "name", "source_type", "secret_configured", "enabled", "signal_workflow_id", "signal_name", "correlation_key_field", "created_at", "updated_at"}}, nil
 }
 
 func (c *fakeConn) queryListEvents(query string, args []driver.NamedValue, corrupt bool) (driver.Rows, error) {
@@ -1580,12 +1604,24 @@ func TestBackgroundRetryWorker(t *testing.T) {
 // cleat-review's finding on #2221: an event ingested before a source is
 // deleted, still pending because its inline signal delivery
 // (handleIngestWebhook's SignalWorkflow call) failed, must never reach a
-// workflow afterward -- neither through the background retry sweep
-// (processBatch, the PUSH path) nor through a later await_webhook call (the
-// PULL path, host_functions.go; owner decision on cleat#2199). Falsified by
-// reverting handleDeleteSource's second UPDATE (the one that cancels the
-// source's own pending events) back to a no-op: both assertions below then
-// fail -- the signal fires, and await_webhook hands the event out.
+// workflow afterward through the background retry sweep (processBatch, the
+// PUSH path; owner decision on cleat#2199). Falsified by reverting
+// handleDeleteSource's webhook_events UPDATE (the one that cancels the
+// source's own pending events) back to a no-op: the assertion below then
+// fails -- the signal fires.
+//
+// The PULL path (awaitWebhook) used to be asserted here too, against this
+// file's fake webhook_events-backed driver. cleat#2649 moved awaitWebhook
+// onto eventtriggers.ClaimOrRegisterAwaiter, which claims from
+// ingested_events with a real, dialect-specific locking query (FOR UPDATE
+// SKIP LOCKED and friends) this hand-rolled fake cannot faithfully
+// represent -- see
+// a_deleted_sources_pending_event_is_cancelled_not_delivered_multidb_test.go's
+// TestADeletedSourcesPendingEventIsCancelledNotDelivered, which pins the same
+// property against real databases instead (and now pairs
+// eventtriggers.Plugin{} into its migration setup, since handleDeleteSource's
+// ingested_events cancellation and awaitWebhook's claim both require that
+// schema to exist).
 func TestDeletingASourceCancelsItsPendingEventsForBothDeliveryPaths(t *testing.T) {
 	store := newFakeDBStore()
 	keyHash := sha256.Sum256([]byte("test-api-key"))
@@ -1656,112 +1692,30 @@ func TestDeletingASourceCancelsItsPendingEventsForBothDeliveryPaths(t *testing.T
 	if signalled != 0 {
 		t.Errorf("processBatch signalled a deleted source's cancelled event %d time(s), want 0", signalled)
 	}
-
-	// PULL path.
-	callCtx := &plugin.CallContext{TenantID: testTenantStr, WorkflowID: "test-wf"}
-	ctx := plugin.WithCallContext(context.Background(), callCtx)
-	out, err := p.awaitWebhook(ctx, AwaitWebhookInput{SourceID: sourceID.String()})
-	if err != nil {
-		t.Fatalf("awaitWebhook: %v", err)
-	}
-	if out.Found {
-		t.Errorf("awaitWebhook returned a deleted source's cancelled event (id=%s), want found=false", out.ID)
-	}
 }
 
-// TestAwaitWebhookHostFunction verifies the await_webhook host function
-// finds and claims unprocessed events.
-func TestAwaitWebhookHostFunction(t *testing.T) {
-	store := newFakeDBStore()
-
-	sourceID := uuid.New()
-	store.sources = append(store.sources, webhookSourceRow{
-		id:         sourceID.String(),
-		tenantID:   testTenantStr,
-		name:       "test",
-		sourceType: "generic",
-		enabled:    true,
-	})
-
-	// Add an unprocessed event.
-	eventID := uuid.New()
-	store.events = append(store.events, webhookEventRow{
-		id:         eventID.String(),
-		sourceID:   sourceID.String(),
-		tenantID:   testTenantStr,
-		eventType:  "push",
-		payload:    `{"ref":"main"}`,
-		receivedAt: time.Now(),
-		processed:  false,
-		status:     "pending",
-	})
-
-	db := sql.OpenDB(&fakeConnector{store: store})
-	defer db.Close()
-
-	p := &Plugin{
-		db:      &engine.SQLDBAdapter{DB: db},
-		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-		secrets: plugintest.NewFakeSecrets(),
-	}
-
-	// Call awaitWebhook with context containing tenant info.
-	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
-	ctx := plugin.WithCallContext(context.Background(), callCtx)
-
-	output, err := p.awaitWebhook(ctx, AwaitWebhookInput{
-		SourceID:  sourceID.String(),
-		EventType: "push",
-	})
-	if err != nil {
-		t.Fatalf("awaitWebhook: %v", err)
-	}
-
-	if !output.Found {
-		t.Errorf("expected found=true, got %v", output.Found)
-	}
-	if output.EventType != "push" {
-		t.Errorf("expected event_type 'push', got %s", output.EventType)
-	}
-
-	// Verify event was marked processed.
-	store.mu.RLock()
-	evt := store.events[0]
-	store.mu.RUnlock()
-	if !evt.processed {
-		t.Errorf("expected event to be marked processed after consumption")
-	}
-}
-
-// TestAwaitWebhookNoEvents verifies that awaitWebhook returns found=false
-// when no matching events exist.
-func TestAwaitWebhookNoEvents(t *testing.T) {
-	store := newFakeDBStore()
-
-	keyHash := sha256.Sum256([]byte("test-api-key"))
-	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
-
-	db := sql.OpenDB(&fakeConnector{store: store})
-	defer db.Close()
-
-	p := &Plugin{
-		db:      &engine.SQLDBAdapter{DB: db},
-		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-		secrets: plugintest.NewFakeSecrets(),
-	}
-
-	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
-	ctx := plugin.WithCallContext(context.Background(), callCtx)
-
-	output, err := p.awaitWebhook(ctx, AwaitWebhookInput{SourceID: uuid.New().String()})
-	if err != nil {
-		t.Fatalf("awaitWebhook: %v", err)
-	}
-
-	if output.Found {
-		t.Errorf("expected found=false, got %v", output.Found)
-	}
-}
+// TestAwaitWebhookHostFunction and TestAwaitWebhookNoEvents used to live
+// here, seeding this file's fake webhook_events-backed driver and asserting
+// the found/not-found shape of awaitWebhook. cleat#2649 moved awaitWebhook
+// onto eventtriggers.ClaimOrRegisterAwaiter, which claims from
+// ingested_events through a real, dialect-specific locking query (FOR
+// UPDATE SKIP LOCKED and friends) and, on no match, upserts an
+// event_awaiters row -- two query shapes this hand-rolled fake has no
+// concept of and cannot faithfully represent (see the comment on
+// TestDeletingASourceCancelsItsPendingEventsForBothDeliveryPaths, above,
+// for the same reasoning applied to that test's PULL-path assertion).
+//
+// Their coverage now lives in
+// an_ingested_event_is_listed_and_awaited_multidb_test.go, against real
+// databases -- TestAnIngestedEventIsListedAndAwaited claims a matching event
+// and asserts a second call finds nothing (already consumed), and
+// a_deleted_sources_pending_event_is_cancelled_not_delivered_multidb_test.go's
+// TestADeletedSourcesPendingEventIsCancelledNotDelivered exercises the
+// not-found/register-an-awaiter path. Both now pair eventtriggers.Plugin{}
+// into their migration setup, which is also where eventtriggers' own
+// equivalent claim/register tests (a_await_event_correlates_by_key_test.go)
+// already live, so both sides of the shared mechanism are tested the same
+// way.
 
 // TestSourceDelete verifies deleting a webhook source.
 //
@@ -2153,14 +2107,33 @@ func TestIngestWithSignalDelivery(t *testing.T) {
 		t.Fatalf("ingest: expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
-	// Verify signal was delivered.
+	// No signal fires at ingest any more -- cleat#2649 removed the inline
+	// push (handleIngestWebhook's legacy path), leaving background.go's
+	// retry sweep (processBatch) as signal_workflow_id's only remaining
+	// delivery mechanism, async-only from here on (see UPGRADE_NOTES.md and
+	// cleat#2689, which tracks whether this static-binding feature is kept
+	// at all). Backdating received_at past processBatch's 10s cutoff and
+	// calling it directly is what used to happen ~30s later on its own
+	// ticker; nothing here is a race, since a synchronous ingest handler
+	// return has already committed the row this reaches into.
+	select {
+	case <-signalChan:
+		t.Fatal("signal fired inline at ingest -- the legacy push was supposed to be removed")
+	default:
+	}
+
+	store.mu.Lock()
+	store.events[0].receivedAt = time.Now().Add(-30 * time.Second)
+	store.mu.Unlock()
+	p.processBatch(context.Background())
+
 	select {
 	case signalName := <-signalChan:
 		if signalName != "my_signal" {
 			t.Errorf("expected signal name 'my_signal', got %s", signalName)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for signal delivery")
+		t.Fatal("timed out waiting for signal delivery via the background retry sweep")
 	}
 
 	// Verify event was marked processed.
@@ -2978,6 +2951,49 @@ func TestWH_AwaitWebhook_NoTenant(t *testing.T) {
 }
 
 // ===========================================================================
+// AwaitWebhook empty source ID -- cleat#2649, BREAKING (see CHANGELOG.md)
+// ===========================================================================
+
+// TestWH_AwaitWebhook_EmptySourceIDIsRequired asserts the exact message a
+// caller relying on the pre-cleat#2649 "empty source_id means any source"
+// behaviour now gets, per cleat-review's ask on that PR: state the message,
+// not just that an error occurs -- the #2665/#2668 vacuity lesson (a
+// `-run` pattern or an error check that matches everything proves nothing
+// about which case fired). A caller upgrading a long-running workflow needs
+// this exact string to recognise the failure as this breaking change rather
+// than a generic bug.
+func TestWH_AwaitWebhook_EmptySourceIDIsRequired(t *testing.T) {
+	store := newFakeDBStore()
+	keyHash := sha256.Sum256([]byte("test-api-key"))
+	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
+
+	db := sql.OpenDB(&fakeConnector{store: store})
+	defer db.Close()
+
+	p := &Plugin{
+		db:      &engine.SQLDBAdapter{DB: db},
+		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
+		secrets: plugintest.NewFakeSecrets(),
+	}
+
+	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
+	ctx := plugin.WithCallContext(context.Background(), callCtx)
+
+	// No EventType or Keys either -- SourceID alone is what must trigger
+	// this, before the call reaches any query (this fake's QueryContext has
+	// no case for ingested_events, so a query would fail loudly with
+	// "unexpected Query" if this check did not short-circuit first).
+	_, err := p.awaitWebhook(ctx, AwaitWebhookInput{})
+	if err == nil {
+		t.Fatal("expected error for empty source_id, got nil")
+	}
+	const want = "webhook-ingest: source_id is required for correlated await"
+	if err.Error() != want {
+		t.Errorf("error message: got %q, want %q", err.Error(), want)
+	}
+}
+
+// ===========================================================================
 // AwaitWebhook invalid source ID
 // ===========================================================================
 
@@ -3263,6 +3279,14 @@ func TestWH_Ingest_EmptySignalName(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
+	// No signal fires at ingest any more -- cleat#2649 removed the inline
+	// push; background.go's retry sweep is the only delivery left for
+	// signal_workflow_id sources (see TestIngestWithSignalDelivery, above).
+	store.mu.Lock()
+	store.events[0].receivedAt = time.Now().Add(-30 * time.Second)
+	store.mu.Unlock()
+	p.processBatch(context.Background())
+
 	// Verify signal name defaulted to "webhook_received".
 	select {
 	case signalName := <-signalNameCh:
@@ -3270,7 +3294,7 @@ func TestWH_Ingest_EmptySignalName(t *testing.T) {
 			t.Errorf("expected signal name 'webhook_received', got %s", signalName)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for signal delivery")
+		t.Fatal("timed out waiting for signal delivery via the background retry sweep")
 	}
 }
 
@@ -3334,6 +3358,14 @@ func TestWH_Ingest_NonJSONBodyWithSignal(t *testing.T) {
 		t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
 	}
 
+	// No signal fires at ingest any more -- cleat#2649 removed the inline
+	// push; background.go's retry sweep is the only delivery left for
+	// signal_workflow_id sources (see TestIngestWithSignalDelivery, above).
+	store.mu.Lock()
+	store.events[0].receivedAt = time.Now().Add(-30 * time.Second)
+	store.mu.Unlock()
+	p.processBatch(context.Background())
+
 	// Verify signal was delivered.
 	select {
 	case payload := <-signalPayloadCh:
@@ -3358,20 +3390,18 @@ func TestWH_AwaitWebhook_QueryError(t *testing.T) {
 	keyHash := sha256.Sum256([]byte("test-api-key"))
 	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
 
-	// Add an event so the query doesn't return ErrNoRows.
-	eventID := uuid.New()
-	store.events = append(store.events, webhookEventRow{
-		id:        eventID.String(),
-		tenantID:  testTenantStr,
-		eventType: "push",
-		payload:   `{"ref":"main"}`,
-		processed: false,
-	})
-
 	db := sql.OpenDB(&fakeConnector{store: store})
 	defer db.Close()
 
-	// Set fail flag for the next query (the events query in awaitWebhook).
+	// Set fail flag for the next query -- awaitWebhook's first query is now
+	// ClaimOrRegisterAwaiter's claim SELECT against ingested_events
+	// (cleat#2649), reached through db.Begin()+tx.QueryRow(), not a direct
+	// query on this Plugin's own db. This still exercises the same
+	// property (a query failure propagates as an error mentioning
+	// "query events"): ClaimOrRegisterAwaiter wraps it as
+	// "event-triggers: query events: %w", and failNextQuery fires on
+	// whatever query runs first regardless of its text, so no seeded event
+	// is needed to reach it.
 	store.mu.Lock()
 	store.failNextQuery = true
 	store.mu.Unlock()
@@ -3398,47 +3428,18 @@ func TestWH_AwaitWebhook_QueryError(t *testing.T) {
 // AwaitWebhook exec error (mark processed)
 // ===========================================================================
 
-func TestWH_AwaitWebhook_ExecError(t *testing.T) {
-	store := newFakeDBStore()
-	keyHash := sha256.Sum256([]byte("test-api-key"))
-	store.apiKeys[fmt.Sprintf("%x", keyHash)] = testTenantStr
-
-	// Add an event that awaitWebhook will find.
-	eventID := uuid.New()
-	store.events = append(store.events, webhookEventRow{
-		id:        eventID.String(),
-		tenantID:  testTenantStr,
-		eventType: "push",
-		payload:   `{"ref":"main"}`,
-		processed: false,
-	})
-
-	db := sql.OpenDB(&fakeConnector{store: store})
-	defer db.Close()
-
-	// Set fail flag for the exec (mark processed) after the query succeeds.
-	store.mu.Lock()
-	store.failNextExec = true
-	store.mu.Unlock()
-
-	p := &Plugin{
-		db:      &engine.SQLDBAdapter{DB: db},
-		logger:  slog.New(slog.NewTextHandler(io.Discard, nil)),
-		secrets: plugintest.NewFakeSecrets(),
-	}
-
-	callCtx := &plugin.CallContext{TenantID: testTenantID.String(), WorkflowID: "test-wf"}
-	ctx := plugin.WithCallContext(context.Background(), callCtx)
-
-	output, err := p.awaitWebhook(ctx, AwaitWebhookInput{EventType: "push"})
-	if err != nil {
-		t.Fatalf("expected no error even when exec fails, got: %v", err)
-	}
-	// The event should still be returned even if marking as processed fails.
-	if !output.Found {
-		t.Errorf("expected found=true, got %v", output.Found)
-	}
-}
+// TestWH_AwaitWebhook_ExecError used to pin that a failed "mark processed"
+// UPDATE was tolerated -- awaitWebhook still returned the found event. That
+// was never a deliberately reviewed property, just the old poll's
+// best-effort default (a logged warning, nothing more). cleat#2649 moved
+// awaitWebhook onto eventtriggers.ClaimOrRegisterAwaiter, which claims and
+// marks an event consumed in ONE transaction and fails loudly if any part
+// of it errors (cleat#2654's own reasoning: a claim that cannot be reported
+// back must roll back rather than report success over a write that may not
+// have landed). Also, this test's call had no SourceID, which now errors
+// before reaching any query at all. Superseded, not replaced --
+// ClaimOrRegisterAwaiter's transactional failure handling is exercised by
+// eventtriggers' own tests (e.g. TestClaimOrRegisterAwaiterSkippingBeforeCommitLosesCleat2654IsRealFinding).
 
 // ===========================================================================
 // ListEvents empty list (nil to empty slice)

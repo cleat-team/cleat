@@ -378,5 +378,55 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					ALTER TABLE webhook_sources DROP COLUMN deleted_at;
 				`,
 		},
+		{
+			// correlation_key_field: a tenant-declared, optional top-level
+			// JSON field name, extracted from an inbound payload at ingest
+			// time and carried as the P1 correlation key's second slot.
+			// cleat#2649, owner decision (relayed by coordinator): key1 is
+			// ALWAYS this source's own id (added automatically at ingest,
+			// no schema needed for it -- see handleIngestWebhook), so two
+			// sources declaring the same field name can never wake each
+			// other's awaiters; key2 is this field's extracted value; key3
+			// stays free. Empty string means "no extraction configured",
+			// the same empty-string-sentinel convention keySlots already
+			// uses for an unused slot -- never NULL.
+			//
+			// DEFAULT '' on every dialect, matching secret_configured's v7
+			// shape: a source created before this migration reads as
+			// "not configured" the instant the column exists, with no
+			// backfill needed -- there is no value to infer it from.
+			Version: 9,
+			Up:      `ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS correlation_key_field TEXT NOT NULL DEFAULT '';`,
+			// MySQL DDL is not transactional (see v8's UpMySQL comment for
+			// the identical crash-and-reboot hazard on a bare ADD COLUMN),
+			// so this is guarded through information_schema.columns and
+			// executed via PREPARE/EXECUTE the same way.
+			UpMySQL: `
+					SET @col := (
+						SELECT COUNT(*) FROM information_schema.columns
+						WHERE table_schema = DATABASE()
+						  AND table_name = 'webhook_sources'
+						  AND column_name = 'correlation_key_field'
+					);
+					SET @ddl := IF(@col = 0,
+						CONCAT('ALTER TABLE webhook_sources ADD COLUMN correlation_key_field VARCHAR(255) NOT NULL DEFAULT ', CHAR(39), CHAR(39)),
+						'DO 0');
+					PREPARE stmt FROM @ddl;
+					EXECUTE stmt;
+					DEALLOCATE PREPARE stmt;
+				`,
+			UpMSSQL: `
+					IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'correlation_key_field')
+					ALTER TABLE webhook_sources ADD correlation_key_field NVARCHAR(MAX) NOT NULL DEFAULT '';
+				`,
+			Down: `ALTER TABLE webhook_sources DROP COLUMN IF EXISTS correlation_key_field;`,
+			DownMySQL: `
+					ALTER TABLE webhook_sources DROP COLUMN correlation_key_field;
+				`,
+			DownMSSQL: `
+					IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'correlation_key_field')
+					ALTER TABLE webhook_sources DROP COLUMN correlation_key_field;
+				`,
+		},
 	}
 }

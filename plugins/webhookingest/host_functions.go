@@ -2,13 +2,12 @@ package webhookingest
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"time"
 
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/eventtriggers"
 	"github.com/google/uuid"
 )
 
@@ -44,6 +43,14 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 type AwaitWebhookInput struct {
 	SourceID  string `json:"source_id"`
 	EventType string `json:"event_type,omitempty"`
+	// Keys correlates this await to one specific event among the many a
+	// shared source can publish -- e.g. an order id -- mirroring
+	// eventtriggers.awaitEventInput's Keys field exactly (same validation,
+	// same 3-slot/128-byte shape, same claim/register mechanism
+	// underneath). cleat#2649. Additive: a caller upgrading from before
+	// this field existed omits it and gets the empty slice, matching
+	// today's behaviour of correlating on SourceID alone.
+	Keys []string `json:"keys,omitempty"`
 }
 
 type AwaitWebhookOutput struct {
@@ -56,118 +63,123 @@ type AwaitWebhookOutput struct {
 
 // ---- Host functions ----
 
-// awaitWebhook queries for the latest matching webhook event for the workflow's
-// tenant. If a matching event is found, it is marked as processed and returned.
-// If none is found, the output {"found": false} is returned and the workflow
-// engine will retry according to its retry policy.
+// awaitWebhook claims the oldest matching unclaimed webhook for the
+// workflow's tenant, correlated by source and (optionally) by Keys --
+// cleat#2649, built on the exact same mechanism event-triggers.awaitEvent
+// uses (eventtriggers.ClaimOrRegisterAwaiter), so a shared source can
+// correlate to whichever run is actually waiting for THIS delivery rather
+// than handing every awaiter the same oldest-unprocessed row. If a matching
+// event is found, it is claimed and returned. If none is found, the output
+// {"found": false} is returned and cc.WorkflowID (if set) is registered as
+// an awaiter, so eventtriggers' publish handler can signal it directly
+// instead of this call being the only way to notice a match.
+//
+// This replaced a two-step, non-transactional poll (a SELECT, then a
+// separate UPDATE with no row lock and no WHERE processed = false guard) --
+// a genuine, previously untested TOCTOU race between two concurrent
+// awaiters for the same event. ClaimOrRegisterAwaiter's claim and its
+// processed/status update run in one transaction with a locking read
+// (queryOldestUnprocessedEventForClaim), which closes it as a side effect
+// of adopting the shared mechanism, not as a separate fix.
+//
+// source_id is now REQUIRED. BREAKING CHANGE, cleat#2649: before this, an
+// empty source_id meant "any source for this tenant" -- a real, working
+// poll filter. The correlated claim has no way to express that: key1 is
+// always the publishing source's own id (routes.go's handleIngestWebhook),
+// an EQUALITY match, not a wildcard, and there is no dialect-portable way to
+// ask "key1 is anything" without ALSO matching every other tenant source's
+// events, which would reopen the exact cross-source collision key1 exists to
+// prevent. cleat-review checked every tracked caller (SDK examples, plugin
+// harness in all five guest languages, docs) on 2026-09-29 and found none
+// that relies on the any-source form. See UPGRADE_NOTES.md.
 //
 // A deleted source's events are cancelled, not delivered here -- owner
-// decision on cleat#2199, applied in cleat-review on #2221. An event ingested
-// BEFORE its source was deleted but not yet consumed by this call is marked
-// status='cancelled' in the same transaction as the delete
-// (handleDeleteSource, routes.go), and the WHERE clause below excludes any
-// row in that state on top of that -- the same belt-and-suspenders shape
-// processBatch's queryUnprocessedWebhookEvents already uses for the
-// background retry path (background.go), so a future write path that forgets
-// the delete-time cancellation still cannot hand a deleted source's event to
-// a caller. Practically: once a source is deleted, no event of its ever
-// reaches this function again, delivered or not, past or future -- an
-// awaiting workflow simply keeps getting {"found": false} and is woken only
-// by its own retry policy's eventual timeout, the same as if the source had
-// gone quiet rather than been deleted. There is no signal here that the
-// source was deleted rather than merely idle; a caller that needs to
-// distinguish the two has to check GET /ingest/sources/{id} itself.
+// decision on cleat#2199, applied in cleat-review on #2221, extended in
+// cleat#2649: handleDeleteSource (routes.go) now cancels a source's pending
+// rows in BOTH webhook_events (the original fix) AND ingested_events (keyed
+// by key1 = the source's id), in the same transaction as the soft-delete,
+// so this claim can never observe one either way. Practically: once a
+// source is deleted, no event of its ever reaches this function again,
+// delivered or not, past or future -- an awaiting workflow simply keeps
+// getting {"found": false} and is woken only by its own retry policy's
+// eventual timeout, the same as if the source had gone quiet rather than
+// been deleted. There is no signal here that the source was deleted rather
+// than merely idle; a caller that needs to distinguish the two has to check
+// GET /ingest/sources/{id} itself.
 func (p *Plugin) awaitWebhook(ctx context.Context, input AwaitWebhookInput) (AwaitWebhookOutput, error) {
 	cc := plugin.CallContextFromContext(ctx)
 	if cc == nil || cc.TenantID == "" {
 		return AwaitWebhookOutput{}, fmt.Errorf("webhook-ingest: no tenant context")
 	}
 
-	// Parse source_id if provided.
-	var sourceID uuid.UUID
-	if input.SourceID != "" {
-		var err error
-		sourceID, err = uuid.Parse(input.SourceID)
-		if err != nil {
-			return AwaitWebhookOutput{}, fmt.Errorf("webhook-ingest: invalid source_id: %w", err)
-		}
+	if input.SourceID == "" {
+		return AwaitWebhookOutput{}, fmt.Errorf("webhook-ingest: source_id is required for correlated await")
+	}
+	sourceID, err := uuid.Parse(input.SourceID)
+	if err != nil {
+		return AwaitWebhookOutput{}, fmt.Errorf("webhook-ingest: invalid source_id: %w", err)
 	}
 
-	// Build query for the latest matching unprocessed event.
-	//
-	// LEFT JOIN webhook_sources s, not a bare FROM webhook_events: the
-	// `s.deleted_at IS NULL` guard below needs it, and every selected and
-	// filtered column is qualified with `e.` because joining introduces a
-	// second `id` column (webhook_sources has one too) -- an unqualified
-	// `id` in the SELECT list or WHERE clause would be ambiguous the moment
-	// this join exists, not merely stylistically inconsistent.
-	query := `
-		SELECT e.id, e.event_type, e.payload, e.received_at
-		FROM webhook_events e
-		LEFT JOIN webhook_sources s ON e.source_id = s.id
-		WHERE e.tenant_id = $1 AND e.processed = false
-		  AND (e.status IS NULL OR e.status != 'cancelled')
-		  AND s.deleted_at IS NULL
-	`
-	args := []any{cc.TenantID}
-	argIdx := 2
-
-	if sourceID != uuid.Nil {
-		query += fmt.Sprintf(" AND e.source_id = $%d", argIdx)
-		args = append(args, sourceID)
-		argIdx++
-	}
-	if input.EventType != "" {
-		query += fmt.Sprintf(" AND e.event_type = $%d", argIdx)
-		args = append(args, input.EventType)
-		argIdx++ //nolint:ineffassign,staticcheck // Deliberate: keeps the placeholder counter correct so the next clause added below cannot silently reuse this one's $N. Deleting it is a latent SQL bug, not a cleanup.
+	// defaultWebhookEventType, not "": the claim is keyed on an EXACT
+	// event_type (eventtriggers.queryOldestUnprocessedEventForClaim), unlike
+	// the old poll where an unset EventType meant "no filter". Matches
+	// handleIngestWebhook's own default (routes.go) -- see
+	// defaultWebhookEventType's doc comment for why the two sides have to
+	// agree rather than each treating "unset" independently.
+	eventType := input.EventType
+	if eventType == "" {
+		eventType = defaultWebhookEventType
 	}
 
-	// plugin.LimitClause, not a literal "LIMIT 1": SQL Server has no LIMIT,
-	// only OFFSET/FETCH after an ORDER BY (which this query already has).
-	// cleat-review's re-check on #2198 found await_webhook erroring outright
-	// on MSSQL -- a workflow could never see an ingested event there. Same
-	// bug, same fix, as the two list-endpoint LIMITs in this PR.
-	query += " ORDER BY e.received_at DESC " + plugin.LimitClause("1", p.dialect)
+	// key1 = this source's id, ALWAYS first -- matching exactly what
+	// handleIngestWebhook publishes (routes.go). input.Keys, if the caller
+	// passes any, becomes key2 (and key3): a caller correlating on an order
+	// id passes Keys: []string{orderID}, which must be the SAME value
+	// handleIngestWebhook's CorrelationKeyField extraction produced for the
+	// matching webhook, or the two never meet -- same as any correlation
+	// mismatch, {"found": false} rather than an error.
+	keys := append([]string{sourceID.String()}, input.Keys...)
 
-	var (
-		eventID    uuid.UUID
-		eventType  string
-		payloadRaw []byte
-		receivedAt time.Time
-	)
-
-	err := plugin.ScanRow(p.db.QueryRow(ctx, plugin.Rebind(query, p.dialect), args...),
-		&eventID, &eventType, &payloadRaw, &receivedAt,
-	)
-	if errors.Is(err, sql.ErrNoRows) {
+	var out AwaitWebhookOutput
+	claimed, err := eventtriggers.ClaimOrRegisterAwaiter(ctx, p.db, p.dialect, p.logger,
+		cc.TenantID, cc.WorkflowID, eventType, keys,
+		func(c *eventtriggers.ClaimedEvent) error {
+			// c.EventData is the WRAPPER envelope handleIngestWebhook
+			// publishes ({"source_id":...,"headers":...,"payload":...}), not
+			// the bare webhook body -- eventtriggers' own subscription/
+			// auto-start consumers want the envelope, so publishing is left
+			// unchanged. AwaitWebhookOutput.Payload's contract predates that
+			// envelope (it was webhook_events.payload, the bare body), so
+			// this unwraps back to it rather than changing the field's
+			// shape as a side effect of the storage move.
+			var envelope struct {
+				Payload json.RawMessage `json:"payload"`
+			}
+			if err := json.Unmarshal(c.EventData, &envelope); err != nil {
+				return fmt.Errorf("webhook-ingest: unwrap event payload: %w", err)
+			}
+			out = AwaitWebhookOutput{
+				Found:      true,
+				ID:         c.EventID.String(),
+				EventType:  c.EventType,
+				Payload:    envelope.Payload,
+				ReceivedAt: c.ReceivedAt.Format(time.RFC3339),
+			}
+			return nil
+		})
+	if err != nil {
+		return AwaitWebhookOutput{}, err
+	}
+	if claimed == nil {
 		return AwaitWebhookOutput{Found: false}, nil
 	}
-	if err != nil {
-		return AwaitWebhookOutput{}, fmt.Errorf("webhook-ingest: query events: %w", err)
-	}
 
-	// Mark the event as processed.
-	_, err = p.db.Exec(ctx, plugin.Rebind(`
-		UPDATE webhook_events SET processed = true WHERE id = $1
-	`, p.dialect), eventID)
-	if err != nil {
-		p.logger.Error("webhook-ingest: mark processed", "event_id", eventID, "error", err)
-		// Continue even if marking fails -- the event will be returned and
-		// the workflow will make progress.
-	}
-
-	p.logger.Info("webhook-ingest: event consumed",
-		"event_id", eventID,
-		"event_type", eventType,
+	p.logger.Info("webhook-ingest: event consumed via await_webhook",
+		"event_id", claimed.EventID,
+		"event_type", claimed.EventType,
 		"tenant", cc.TenantID,
+		"workflow_id", cc.WorkflowID,
 	)
 
-	return AwaitWebhookOutput{
-		Found:      true,
-		ID:         eventID.String(),
-		EventType:  eventType,
-		Payload:    json.RawMessage(payloadRaw),
-		ReceivedAt: receivedAt.Format(time.RFC3339),
-	}, nil
+	return out, nil
 }
