@@ -15,16 +15,19 @@
 // This test builds a real v1-v4 database from the plugin's own truncated
 // Migrations() (not a hand-copied schema), seeds a row that omits payload --
 // the one shape that reads NULL under v4, since no tracked production INSERT
-// does this but nothing stops a future one from starting to -- runs v5's
-// real UpMySQL text, and asserts both that it succeeds and that the
-// previously-NULL row now reads '{}', not that a NOT NULL column merely
-// exists.
+// does this but nothing stops a future one from starting to -- then applies
+// v5 through plugin.RunMigrations with the FULL, untruncated plugin, the
+// same call a real worker's migration step makes. Reading v5's UpMySQL text
+// and executing it directly (this test's first version) could not catch the
+// runner failing to select v5's MySQL arm at all -- exactly what a real
+// deploy depends on, and cleat-review's finding on this PR. Asserts both
+// that the migration succeeds and that the previously-NULL row now reads
+// '{}', not that a NOT NULL column merely exists afterward.
 package jobqueue
 
 import (
 	"context"
 	"database/sql"
-	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -90,37 +93,20 @@ func TestV5PayloadNotNullMigrationBackfillsExistingNulls(t *testing.T) {
 					"the fixture is supposed to reproduce v4's shape, and this means it did not", seededPayload.String)
 			}
 
-			var v5SQL string
-			for _, m := range legacy.Plugin.Migrations() {
-				if m.Version == 5 {
-					v5SQL = m.UpMySQL
-				}
-			}
-			if v5SQL == "" {
-				t.Fatal("migration v5's UpMySQL is empty -- nothing to run")
-			}
-
-			// The real migration text, run directly against the fixture
-			// connection -- not through plugin.RunMigrations, which would
-			// need the version-tracking row v1-v4 already wrote and is not
-			// what this test is about; this is testing the SQL itself
-			// against a database that already has the NULL row the bug
-			// describes.
-			//
-			// Split on ";" and exec each statement separately, mirroring
-			// plugin.RunMigrations' own execSQLStatements -- a plain
-			// database/sql connection (no multiStatements DSN flag, which
-			// nothing in this repo sets) cannot run two statements in one
-			// Exec call, and v5's Up is UPDATE-then-ALTER, exactly two.
-			for _, stmt := range strings.Split(v5SQL, ";") {
-				stmt = strings.TrimSpace(stmt)
-				if stmt == "" {
-					continue
-				}
-				if _, err := plugintest.ExecRebound(t, ctx, fixtureDB, dialect, stmt); err != nil {
-					t.Fatalf("v5 UpMySQL statement %q failed on %s, with a pre-existing NULL payload row present: %v",
-						stmt, be.Name, err)
-				}
+			// Drive v5 through the REAL production path -- cleat-review's
+			// finding on this PR's first version, which read m.UpMySQL and
+			// executed it directly, bypassing plugin.RunMigrations
+			// entirely. That could not catch the runner failing to select
+			// v5's MySQL arm at all (Up: "" + UpMySQL, the same shape v4
+			// uses) -- exactly the thing a real deploy depends on. v1-v4
+			// above already ran through RunMigrations, which recorded them
+			// in plugin_migrations, so a second RunMigrations call with the
+			// FULL (untruncated) plugin applies only what is still
+			// pending -- v5 -- through the identical dispatch a real
+			// worker's migration step uses.
+			if err := plugin.RunMigrations(ctx, be.DB, dialect, nil,
+				[]*plugin.LoadedPlugin{{Plugin: New().(*Plugin), Healthy: true}}); err != nil {
+				t.Fatalf("jobqueue v5 migration on %s, with a pre-existing NULL payload row present: %v", be.Name, err)
 			}
 
 			var gotPayload sql.NullString
