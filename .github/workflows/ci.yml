@@ -1793,6 +1793,48 @@ jobs:
       - name: Run the scenario end to end
         run: scripts/run-ai-agent-platform-scenario.sh
 
+  b2b-saas-control-plane-scenario:
+    name: B2B SaaS control plane scenario
+    runs-on: ubuntu-latest
+    # merge_group is excluded for the same reason as the sibling scenario jobs
+    # above -- read integration-hub-scenario's comment before removing this
+    # line.
+    if: github.event_name != 'merge_group'
+    # The example in examples/b2b-saas-control-plane, RUN rather than only
+    # built. cleat#2534/#2681.
+    #
+    # PostgreSQL only, and not by omission -- see the script's own header
+    # comment and the README's "Which dialects this runs on" section. This
+    # scenario creates tenants via `cleat-worker --create-tenant`, which
+    # refuses outright on MySQL and SQL Server, so there is no dialect matrix
+    # to run here the way order-lifecycle-scenario and integration-hub-scenario
+    # have one.
+    #
+    # Self-contained, unlike the sibling jobs above: the script builds cleat,
+    # cleat-worker AND the example's own backend itself, into a scratch
+    # directory, so there is no separate "Build the cleat CLI" step here --
+    # one was tried and was dead weight, since the script never reads a
+    # pre-built binary from anywhere this job could place one.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Docker and compose are present on ubuntu-latest; the script's own
+      # failure on either is a `docker build`/`docker compose up` step failing
+      # loudly, the same as every sibling scenario job.
+      #
+      # No "dump the container logs on failure" step after this one, for the
+      # same reason as the sibling jobs: the script removes the stack in its
+      # EXIT trap, so such a step would find nothing and print the same output
+      # whether the run passed or failed. The script captures the worker's and
+      # the backend's logs itself, on the failure path, before tearing down.
+      - name: Run the scenario end to end
+        run: scripts/run-b2b-saas-control-plane-scenario.sh
+
   vulncheck:
     name: Vulnerability Check
     runs-on: ubuntu-latest

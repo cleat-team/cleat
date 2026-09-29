@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>B2B SaaS control plane — tenant provisioning</title>
+<!--
+  Served under `default-src 'none'` with `script-src 'self'` and
+  `style-src 'self'` (backend/main.go, serveFile) -- same policy
+  examples/order-lifecycle/web/index.html documents, and the same reason:
+  no inline <style> or onclick= anywhere on this page.
+
+  UNLIKE order-lifecycle, THE API KEY DOES LIVE HERE, IN MEMORY, AFTER
+  SIGNUP. Every tenant gets its OWN key -- there is no single fixed
+  credential a backend process could hold server-side the way
+  order-lifecycle's single-tenant demo does. It is held in a page-local JS
+  variable (never localStorage, so it does not outlive a reload) and shown
+  to you exactly once, the same way a real signup flow would show it once
+  and then never again -- see the README's "Which tenant does this run as"
+  section.
+-->
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<header class="page-head">
+  <h1>B2B SaaS control plane</h1>
+  <p class="lede">
+    A durable tenant-provisioning workflow, running <strong>as the tenant it
+    provisions</strong>. Sign up a business and watch its own audit trail
+    fill in, one host-function call at a time.
+  </p>
+  <p class="lede note">
+    <strong>Tenant creation is the one thing a workflow cannot do for
+    itself.</strong> This page's signup call reaches the backend, which
+    shells out to <code>cleat-worker --create-tenant</code> -- see the
+    README for why that boundary is load-bearing rather than incidental.
+  </p>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Sign up a business</h2>
+
+    <form id="signup-form" autocomplete="off">
+      <div class="field-row">
+        <label for="business-name">Business name</label>
+        <input id="business-name" name="business_name" type="text" required>
+      </div>
+
+      <div class="field-row">
+        <label for="admin-email">Admin email</label>
+        <input id="admin-email" name="admin_email" type="email" value="admin@example.com">
+        <span class="sub">Receives the welcome email -- a real call to the
+          bundled <code>email-notify</code> plugin, best-effort.</span>
+      </div>
+
+      <div class="field-row">
+        <label for="plan">Plan</label>
+        <select id="plan" name="plan">
+          <option value="starter" selected>Starter</option>
+          <option value="growth">Growth</option>
+          <option value="enterprise">Enterprise</option>
+        </select>
+      </div>
+
+      <fieldset class="failures">
+        <legend>Make a step fail</legend>
+        <label class="check">
+          <input type="checkbox" id="sim-workspace">
+          <span>
+            <strong>Fail workspace provisioning</strong>
+            <span class="sub">The rope-side seam fails. A
+              <code>tenant.provisioning_failed</code> audit event is
+              recorded and the run reports failed.</span>
+          </span>
+        </label>
+      </fieldset>
+
+      <button type="submit" id="submit">Sign up</button>
+      <p class="form-error" id="form-error" hidden></p>
+    </form>
+  </section>
+
+  <section class="card" id="credential" hidden>
+    <h2>Your credential</h2>
+    <p class="sub">
+      Shown <strong>exactly once</strong>. cleat stores only a hash of your
+      API key -- there is no "show me my key again" surface, here or in
+      cleat itself. Copy it now.
+    </p>
+    <dl class="kv">
+      <dt>Tenant ID</dt><dd id="cred-tenant" class="mono"></dd>
+      <dt>API key</dt><dd id="cred-key" class="mono"></dd>
+    </dl>
+  </section>
+
+  <section class="card" id="detail" hidden>
+    <h2>Provisioning run <span id="detail-id" class="mono"></span></h2>
+
+    <div class="status-line">
+      <span id="detail-status" class="pill">…</span>
+      <span id="detail-run-status" class="sub"></span>
+    </div>
+
+    <div id="outcome"></div>
+
+    <details class="raw">
+      <summary>Published query state</summary>
+      <dl id="state-list"></dl>
+    </details>
+  </section>
+
+  <section class="card" id="lifecycle" hidden>
+    <h2>Tenant lifecycle</h2>
+    <p class="sub">
+      Proxied from <code>plugins/tenantlifecycle</code>'s own tenant-scoped
+      route (cleat#2683) -- your own key, never substituted.
+    </p>
+    <dl class="kv" id="lifecycle-list"></dl>
+    <button type="button" id="refresh-lifecycle" class="ghost">Refresh</button>
+  </section>
+</main>
+
+<footer class="page-foot">
+  <p class="sub">
+    Workflow-only: workspace provisioning is a placeholder. See
+    <code>provision.go</code> for why, and the README for the background
+    sweep and audit-trail hitch points this page does not show directly.
+  </p>
+</footer>
+
+<script src="/app.js"></script>
+</body>
+</html>
