@@ -334,28 +334,37 @@ the same discipline as the cost this pair cannot measure directly.
 Snapshot dated **2026-09-28** — re-run the command rather than re-quoting
 these rows, per CLAUDE.md's rule on numbers in prose.
 
-**This is the third shape this table has taken, and each move fixed a real
-asymmetry cleat-review found, not a preference:** an initial "app lines vs.
-platform lines" split compared cleat's two tenant-step files against **all
-four** DBOS files (both variants, both test files) — 49 vs. 240. Making it
-role-symmetric (tenant code / host runner / tests / platform, bare DBOS as
-an excluded CONTROL) gave 442 vs. 136 — but that total **summed cleat's 124
-platform lines into an app comparison**, and its "tests" row counted
-cleat's ~198-line HTTP-deployed-worker harness while giving DBOS's
-analogous ~42-line harness no line at all. Both were caught on the same
-re-review. The table below is the fix: **platform is its own line, never
-summed**, and **both end-to-end harnesses are shown, neither summed into
-either app total** — rather than picking one of the two equally-defensible
-ways to resolve that asymmetry (drop cleat's harness, or add DBOS's), this
-shows both real numbers and lets the prose carry what they mean, per the
-same instinct that put the bare-DBOS control in its own excluded row.
+**This is the fourth shape this table has taken, and each move fixed a
+real asymmetry someone found, not a preference:** an initial "app lines
+vs. platform lines" split compared cleat's two tenant-step files against
+**all four** DBOS files (both variants, both test files) — 49 vs. 240.
+Making it role-symmetric (tenant code / host runner / tests / platform,
+bare DBOS as an excluded CONTROL) gave 442 vs. 136 — but that total
+**summed cleat's 124 platform lines into an app comparison**, and its
+"tests" row counted cleat's ~198-line HTTP-deployed-worker harness while
+giving DBOS's analogous ~42-line harness no line at all; the fix was
+**platform on its own line, never summed**, and **both end-to-end
+harnesses shown, neither summed into either app total**, giving 120 vs.
+140. The coordinator then asked a fair question about that table: cleat's
+"host runner" row was a *fragment* of `hub.go` (21 of 176 lines) while
+DBOS-isolated's was nearly the *whole* of `isolated-workflow.ts`, so the
+two extractions were not obviously asking the same question — and a
+sweep of every `tenant`-related line in `hub.go`
+(`grep -ni tenant examples/integration-hub/hub.go`) turned up real wedge
+wiring the first dispatch-block-only extraction had missed: the
+`TenantStepName`/`TenantStepRan` struct fields, the result assignment, and
+the flag's initialisation — none of them inside the `if` block itself, all
+of them load-bearing. Adding them moved cleat's host-runner row from 21 to
+**25**, which moves the direction this whole exercise has moved every
+time a real asymmetry surfaced: **against** cleat's total, from 120 to
+124.
 
 | role | cleat | DBOS-isolated |
 |---|---:|---:|
 | tenant code | **49** | **19** |
-| host runner | **21** | **49** |
+| host runner | **25** | **49** |
 | unit tests | **50** | **72** |
-| **app total** (tenant + host + unit tests) | **120** | **140** |
+| **app total** (tenant + host + unit tests) | **124** | **140** |
 | platform (own line — not summed above) | **124** | **0** |
 | e2e harness (own line — not summed above, see below) | **198** | **42** |
 
@@ -376,11 +385,17 @@ tracks edits rather than silently drifting):
   upload mechanism and this port stands the string in for what a tenant
   would upload.
 - **host runner**: the `if in.TenantStepName != ""` dispatch block
-  extracted from `hub.go` — the entire file is far larger, out of this
-  pair's scope (see "Not a full SyncCustomer port"). DBOS-isolated's is
-  `isolated-workflow.ts` **minus** the two tenant-code string literals —
-  `runInIsolate` (isolate setup, the CPU timeout, teardown), the two async
-  wrapper functions, and the workflow registration.
+  extracted from `hub.go`, **plus every other line the dispatch depends
+  on** — the `TenantStepName`/`TenantStepRan` struct field declarations,
+  the `TenantStepRan: tenantStepRan` result assignment, and the
+  `tenantStepRan := false` initialisation, none of which live inside the
+  block itself. The rest of `hub.go` is far larger and out of this pair's
+  scope (see "Not a full SyncCustomer port"); `scripts/dbos-pair-loc.sh`'s
+  comment shows the `grep -ni tenant` sweep that this row's five fragments
+  come from. DBOS-isolated's is `isolated-workflow.ts` **minus** the two
+  tenant-code string literals — `runInIsolate` (isolate setup, the CPU
+  timeout, teardown), the two async wrapper functions, and the workflow
+  registration.
 - **unit tests**: cleat's two `hub_test.go` functions that exercise
   `TenantStepName` (`TestSyncCustomer_RunsTheTenantsOwnStep`,
   `TestSyncCustomer_ATenantStepThatFailsNamesItsStep`). DBOS-isolated's is
@@ -422,7 +437,7 @@ rather than receive it from DBOS.
 **So the honest reading of this table is not a single number — it is
 several separate claims, each real:**
 
-1. **The like-for-like application code is roughly equal**: 120 vs. 140,
+1. **The like-for-like application code is roughly equal**: 124 vs. 140,
    tenant code + host runner + unit tests on both sides. Read this as
    "the pair's case for cleat does not rest on line-count arithmetic" —
    it rests on the three capability claims this README states with their
@@ -436,13 +451,14 @@ several separate claims, each real:**
    tenant-step's own author, which is the comparison the app total is
    about. An idiomatic DBOS deployment has no equivalent platform line to
    count, because the capability does not exist there.
-3. **cleat's tenant-code and host-runner rows are individually smaller
-   than DBOS-isolated's** (49 vs. 19 is reversed because DBOS's tenant
-   code is a minimal source-string stand-in, not a real upload payload;
-   21 vs. 49 reflects `isolated-vm`'s setup/teardown/timeout plumbing
-   against cleat's two-line `ChildWorkflow`/`AwaitChild` call). Largely
-   Go-program-vs-JS-string and library-plumbing differences, not a
-   cleat-vs-DBOS platform difference — read them as noisy at this size,
+3. **cleat's tenant-code row is smaller than DBOS-isolated's, and its
+   host-runner row is close** (49 vs. 19 is reversed because DBOS's
+   tenant code is a minimal source-string stand-in, not a real upload
+   payload; 25 vs. 49 reflects `isolated-vm`'s setup/teardown/timeout
+   plumbing against cleat's `ChildWorkflow`/`AwaitChild` call plus the
+   struct-field wiring around it). Largely Go-program-vs-JS-string and
+   library-plumbing differences, not a cleat-vs-DBOS platform difference
+   — read them as noisy at this size,
    not as a trend.
 4. **Neither counterpart's line count captures the durability-boundary
    cost** ("What this counterpart costs") or the tenant-step-as-workflow

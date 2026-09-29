@@ -172,8 +172,28 @@ case "$pair" in
       [ -f "$f" ] || { echo "UNMEASURED: expected file is missing: $f" >&2; exit 2; }
     done
 
-    extract go-brace-block "$hub_go" 'if in\.TenantStepName' cleat-host-runner.go
-    cleat_host_runner="$scratch/cleat-host-runner.go"
+    # Five fragments make up cleat's "host runner", not one: the dispatch
+    # block plus the wiring outside it that a search for every "tenant"
+    # mention in hub.go turns up (`grep -ni tenant`, minus the file's
+    # unrelated per-customer-tenancy header comment and the pre-existing
+    # baseline payload line the wedge's own comment says predates it). A
+    # brace-block extraction of the dispatch site alone does not see any
+    # of these -- coordinator's review of #2621 caught the two struct
+    # fields as a real undercount, not a false alarm: TenantStepName,
+    # TenantStepRan, its assignment, and the flag's initialisation are all
+    # load-bearing (a caller cannot ask for a tenant step, or learn
+    # whether one ran, without every one of them) and happened to live
+    # outside the block the first extraction looked at.
+    extract go-brace-block "$hub_go" 'if in\.TenantStepName' cleat-host-runner-dispatch.go
+    extract go-struct-field "$hub_go" TenantStepName cleat-host-runner-field-in.go
+    extract go-struct-field "$hub_go" TenantStepRan cleat-host-runner-field-out.go
+    extract go-line "$hub_go" '^\s*TenantStepRan:' cleat-host-runner-field-out-set.go
+    extract go-line "$hub_go" '^\s*tenantStepRan := false' cleat-host-runner-flag-init.go
+    cleat_host_runner="$scratch/cleat-host-runner-dispatch.go"
+    cleat_host_runner_field_in="$scratch/cleat-host-runner-field-in.go"
+    cleat_host_runner_field_out="$scratch/cleat-host-runner-field-out.go"
+    cleat_host_runner_field_out_set="$scratch/cleat-host-runner-field-out-set.go"
+    cleat_host_runner_flag_init="$scratch/cleat-host-runner-flag-init.go"
     extract go-func "$hub_test_go" TestSyncCustomer_RunsTheTenantsOwnStep cleat-test1.go
     cleat_test1="$scratch/cleat-test1.go"
     extract go-func "$hub_test_go" TestSyncCustomer_ATenantStepThatFailsNamesItsStep cleat-test2.go
@@ -208,7 +228,9 @@ EOF
     print_group "cleat: tenant code" \
       "$repo_root/examples/integration-hub/tenant-steps/normalize-order/main.go" \
       "$repo_root/examples/integration-hub/tenant-steps/malicious-read-host-file/main.go"
-    print_group "cleat: host runner (extracted from hub.go)" "$cleat_host_runner"
+    print_group "cleat: host runner (extracted from hub.go -- dispatch block + every other TenantStepName-related line)" \
+      "$cleat_host_runner" "$cleat_host_runner_field_in" "$cleat_host_runner_field_out" \
+      "$cleat_host_runner_field_out_set" "$cleat_host_runner_flag_init"
     print_group "cleat: unit tests (extracted from hub_test.go)" "$cleat_test1" "$cleat_test2"
     print_group "DBOS-isolated: tenant code (extracted template literals)" "$dbos_tenant1" "$dbos_tenant2"
     print_group "DBOS-isolated: host runner (isolated-workflow.ts minus tenant code)" "$scratch/dbos-host-runner.ts"

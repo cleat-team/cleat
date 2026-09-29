@@ -29,6 +29,23 @@ Modes:
       that is exactly a closing backtick, optionally followed by ';'
       (inclusive).
 
+  go-struct-field <file> <field-name>
+      The line whose trimmed text starts with "<field-name> " or
+      "<field-name>\t" (a Go struct field declaration), plus any
+      unbroken run of full-line "//" comments immediately above it.
+      Exists because a brace-block extraction of a dispatch site does not
+      see the struct fields that carry its input/output across a
+      caller/response boundary -- coordinator's review of #2621 caught
+      that hub.go's TenantStepName/TenantStepRan fields were real wedge
+      wiring the go-brace-block extraction of the dispatch block alone
+      did not count.
+
+  go-line <file> <regex>
+      The first line matching regex, plus any unbroken run of full-line
+      "//" comments immediately above it. For a single reference site --
+      e.g. a composite-literal field assignment -- that go-struct-field's
+      declaration-only pattern does not match.
+
 Prints the extracted text to stdout. Exits 2 (UNMEASURED) if the start
 marker or the closing boundary is not found -- never prints a partial or
 empty extraction as if it were the real thing.
@@ -149,9 +166,44 @@ def ts_const_template(path, const_name):
     return '\n'.join(lines[start:end + 1]) + '\n'
 
 
+def go_struct_field(path, field_name):
+    lines = open(path).read().split('\n')
+    pat = re.compile(r'^\s*' + re.escape(field_name) + r'[ \t]')
+    field_line = None
+    for i, l in enumerate(lines):
+        if pat.match(l):
+            field_line = i
+            break
+    if field_line is None:
+        fail(f"no struct field {field_name!r} found in {path}")
+    start = field_line
+    while start > 0 and lines[start - 1].lstrip().startswith('//'):
+        start -= 1
+    return '\n'.join(lines[start:field_line + 1]) + '\n'
+
+
+def go_line(path, regex):
+    lines = open(path).read().split('\n')
+    pat = re.compile(regex)
+    match_line = None
+    for i, l in enumerate(lines):
+        if pat.search(l):
+            match_line = i
+            break
+    if match_line is None:
+        fail(f"no line in {path} matches {regex!r}")
+    start = match_line
+    while start > 0 and lines[start - 1].lstrip().startswith('//'):
+        start -= 1
+    return '\n'.join(lines[start:match_line + 1]) + '\n'
+
+
 def main():
     if len(sys.argv) != 4:
-        print(f"usage: {sys.argv[0]} go-brace-block|go-func|ts-const-template <file> <name-or-regex>", file=sys.stderr)
+        print(
+            f"usage: {sys.argv[0]} go-brace-block|go-func|ts-const-template|go-struct-field|go-line <file> <name-or-regex>",
+            file=sys.stderr,
+        )
         sys.exit(2)
     mode, path, arg = sys.argv[1], sys.argv[2], sys.argv[3]
     try:
@@ -161,6 +213,10 @@ def main():
             sys.stdout.write(go_func(path, arg))
         elif mode == 'ts-const-template':
             sys.stdout.write(ts_const_template(path, arg))
+        elif mode == 'go-struct-field':
+            sys.stdout.write(go_struct_field(path, arg))
+        elif mode == 'go-line':
+            sys.stdout.write(go_line(path, arg))
         else:
             print(f"unknown mode {mode!r}", file=sys.stderr)
             sys.exit(2)
