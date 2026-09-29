@@ -43,8 +43,8 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/cleat"
-	"github.com/cleat-team/cleat/examples/order-lifecycle/emailclient"
-	"github.com/cleat-team/cleat/examples/order-lifecycle/webhookingestclient"
+	"github.com/cleat-team/cleat/cleat/pluginclients/email"
+	"github.com/cleat-team/cleat/cleat/pluginclients/webhookingest"
 )
 
 // h is the package-level context object. The transformer auto-threads it into
@@ -496,7 +496,7 @@ func awaitPaymentConfirmation(sourceID string) error {
 	const waitMs = 1000
 
 	for i := 0; i < attempts; i++ {
-		got, err := webhookingestclient.AwaitWebhook.Call(h, webhookingestclient.AwaitWebhookInput{
+		got, err := webhookingest.AwaitWebhook.Call(h, webhookingest.AwaitWebhookInput{
 			SourceID: sourceID,
 		})
 		if err != nil {
@@ -533,14 +533,14 @@ func notifyCustomer(input OrderInput, totalCents int) error {
 	if input.Email == "" {
 		return nil
 	}
-	// The generated emailclient.SendInput has no "body" field -- only
+	// The generated SendInput has no "body" field -- only
 	// BodyHTML and BodyText -- which is what surfaced this: the hand-rolled
 	// JSON this replaced sent "body", a key plugins/email's SendInput
 	// (host_functions.go) has never had. json.Unmarshal silently drops an
 	// unknown field, so BodyHTML stayed empty and every real send failed
 	// with "email: body_html is required" -- the exact kind of manifest/
 	// reality drift cleat#2626 exists to make a compile error instead.
-	_, err := emailclient.Send.Call(h, emailclient.SendInput{
+	_, err := email.Send.Call(h, email.SendInput{
 		To:      input.Email,
 		Subject: fmt.Sprintf("Order %s confirmed", input.OrderID),
 		BodyHTML: fmt.Sprintf(

@@ -2,7 +2,7 @@
 # A generated plugin client is a COPY of what cmd/cleat-gen plugin-client
 # would produce from its plugin's current RegisterTyped call sites, not a
 # live view of them. Nothing regenerated
-# examples/order-lifecycle/{webhookingestclient,emailclient}/client.go
+# cleat/pluginclients/{webhookingest,email}/client.go
 # and diffed them against their source in CI, so a plugin's registration
 # could change -- a renamed field, a new operation, a widened Req struct --
 # and the committed client would keep compiling against the OLD shape.
@@ -43,9 +43,27 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT" || exit 2
 
 # plugin-name | source package | output package name | committed file
+#
+# Both live under cleat/pluginclients/ -- inside the `cleat` SDK module,
+# not inside examples/ -- and that placement is load-bearing, not
+# cosmetic. `cleat build` stages a WASM workflow by globbing *.go
+# non-recursively in the workflow's own source directory (wasm/build.go,
+# PrepareBuildDir) and does not pull in sibling packages at all; a client
+# generated into its own subpackage of examples/order-lifecycle/ could
+# never be staged, and cleat#2626's own PR proved it live in CI -- `cleat
+# build` failed with "module ... found, but does not contain package
+# .../webhookingestclient", because examples/ is cleat's own separate,
+# unpublished Go module and nothing local replaces it. cleat/, by
+# contrast, is the one module every `cleat build` ALREADY locally
+# replaces for every workflow (wasm/build.go's generated go.mod), so a
+# client placed anywhere under cleat/ resolves the same way the `cleat`
+# package itself already does -- no staging involved, so cleat#2658 (the
+# staging gap itself) doesn't need to be fixed for this case to work. See
+# cleat#2658 for the staging gap as a general problem, which a future
+# out-of-tree or multi-file client would still hit.
 CLIENTS=(
-  "webhook-ingest|./plugins/webhookingest|webhookingestclient|examples/order-lifecycle/webhookingestclient/client.go"
-  "email-notify|./plugins/email|emailclient|examples/order-lifecycle/emailclient/client.go"
+  "webhook-ingest|./plugins/webhookingest|webhookingest|cleat/pluginclients/webhookingest/client.go"
+  "email-notify|./plugins/email|email|cleat/pluginclients/email/client.go"
 )
 
 check_one() {
@@ -100,7 +118,7 @@ run_all() {
 }
 
 self_test() {
-  local target="examples/order-lifecycle/webhookingestclient/client.go"
+  local target="cleat/pluginclients/webhookingest/client.go"
   local backup
   backup="$(mktemp)"
   cp "$target" "$backup"

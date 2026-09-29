@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/cleat-team/cleat/cleat/cleattest"
+	"github.com/cleat-team/cleat/cleat/pluginclients/email"
 )
 
 // setupEnv creates a test environment and wires it into the package-level h so
@@ -116,6 +117,54 @@ func TestPlaceOrder_Completes(t *testing.T) {
 	}
 	if got, _ := env.QueryState("compensated"); got != "" {
 		t.Errorf("compensated = %q, want empty on a completed order", got)
+	}
+}
+
+// TestPlaceOrder_NotifyCustomerSendsARealBody is the regression cleat-review
+// asked for on cleat#2626. notifyCustomer used to build its email-notify.send
+// payload as a hand-written map[string]string{"body": ...} -- a key
+// plugins/email's SendInput (host_functions.go) has never had. json.Unmarshal
+// silently drops an unknown field, so BodyHTML stayed "" and every real send
+// failed with "email: body_html is required" -- with nothing here catching it,
+// because stubPlugins answers "email-notify"/"send" unconditionally and no
+// earlier test inspected what notifyCustomer actually sent, only that the call
+// did not return an error.
+//
+// This asserts on the wire request cleattest recorded, not on PlaceOrder's own
+// result, which is the only way to see the bug: PlaceOrder succeeds either way,
+// because the stub answers before anything checks BodyHTML.
+func TestPlaceOrder_NotifyCustomerSendsARealBody(t *testing.T) {
+	env := setupEnv()
+	stubPlugins(env)
+
+	order := smallOrder()
+	if _, err := run(t, env, order); err != nil {
+		t.Fatalf("PlaceOrder failed: %v", err)
+	}
+
+	var sendReq *email.SendInput
+	for _, rec := range env.CallHistory() {
+		if rec.Service != "email-notify" || rec.Operation != "send" {
+			continue
+		}
+		var req email.SendInput
+		if err := json.Unmarshal([]byte(rec.Request), &req); err != nil {
+			t.Fatalf("email-notify.send request is not valid JSON: %v (%q)", err, rec.Request)
+		}
+		sendReq = &req
+	}
+	if sendReq == nil {
+		t.Fatal("notifyCustomer never called email-notify.send")
+	}
+
+	if sendReq.To != order.Email {
+		t.Errorf("SendInput.To = %q, want %q", sendReq.To, order.Email)
+	}
+	if sendReq.BodyHTML == "" {
+		t.Fatal("SendInput.BodyHTML is empty -- the confirmation text is not reaching the field plugins/email actually reads")
+	}
+	if !strings.Contains(sendReq.BodyHTML, order.OrderID) {
+		t.Errorf("SendInput.BodyHTML = %q, want it to mention the order id %q", sendReq.BodyHTML, order.OrderID)
 	}
 }
 

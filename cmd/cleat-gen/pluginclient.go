@@ -31,6 +31,56 @@
 // keeps the generated client's only cleat-side dependency on
 // "github.com/cleat-team/cleat/cleat", exactly like cleat-gen's existing
 // "client" command.
+//
+// WHERE THE OUTPUT FILE HAS TO LIVE, IF A WORKFLOW `cleat build` COMPILES
+// WILL CALL IT. `cleat build` stages a workflow by globbing *.go
+// NON-RECURSIVELY in the workflow's own source directory (wasm/build.go,
+// PrepareBuildDir) and does not pull in ANY sibling package by copying it in
+// -- so an arbitrary subpackage sitting next to the workflow's own source
+// cannot be imported by such a workflow at all; `go mod tidy` in the
+// isolated build directory falls through to the module proxy and fails with
+// "module ... found, but does not contain package .../yourclient" (measured
+// live in cleat#2626's own PR, the first time this was tried, against
+// examples/, which is cleat's own separate and unpublished Go module).
+//
+// Two placements avoid that, for different reasons, and the choice affects
+// what the client's line count actually represents:
+//
+//   - SAME PACKAGE AS THE WORKFLOW: generate with `-p <the workflow's
+//     package name>` and `-o <workflow dir>/<plugin>_client_gen.go`, call
+//     its vars unqualified. No cross-package import exists at all, so
+//     staging is never in question. This makes the client that workflow's
+//     OWN code -- its line count is a real, non-amortised cost of that one
+//     workflow, and a second workflow calling the same plugin generates and
+//     pays for its own separate copy.
+//   - A PACKAGE cleat build ALREADY LOCALLY REPLACES FOR EVERY WORKFLOW:
+//     wasm/build.go's generated go.mod carries a `replace
+//     github.com/cleat-team/cleat/cleat => <local checkout>/cleat`
+//     unconditionally, for every workflow build in this repository -- so
+//     any package under cleat/ (e.g. cleat/pluginclients/<plugin>/) resolves
+//     the same way the cleat package itself already does, with no staging
+//     involved and no proxy fallback possible. For a BUNDLED plugin (one
+//     shipped in this repository), this is the right default: the client is
+//     genuinely shared, platform-provided code, reused by every workflow
+//     that calls that plugin rather than paid for again per caller, and its
+//     line count should be accounted for that way rather than folded into
+//     any one workflow's total. For a THIRD-PARTY, out-of-tree plugin,
+//     there is no cleat/ to place it under -- the analogous move is
+//     generating into the PLUGIN AUTHOR'S OWN published module, which an
+//     importing workflow then depends on as an ordinary external module
+//     (resolved via go.sum/the proxy normally, since it is properly
+//     published and versioned there -- the failure mode above is specific
+//     to an UNPUBLISHED same-repo sibling module, not to external
+//     dependencies as such).
+//
+// This repository's own bundled-plugin clients live under
+// cleat/pluginclients/ for exactly this reason: see
+// examples/order-lifecycle, and cleat#2626/cleat#2658 for the fuller
+// accounting of why the two placements are not cosmetic alternatives.
+//
+// Neither constraint touches a native Go caller (cleat/embedded, cleatctl,
+// a plugin's own tests): `cleat build`'s staging model is specific to a
+// WASM-compiled workflow, and a native caller can use any package normally.
 package main
 
 import (
