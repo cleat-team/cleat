@@ -40,7 +40,16 @@ func TestCheckDBDetectsASupersededUnpinnedFunctionOverload(t *testing.T) {
 	// Baseline: the shared test database, on the current schema, must not
 	// already read as having a stale overload -- otherwise the "flagged"
 	// assertion below would prove nothing about THIS function creating it.
-	baseline, _ := withExitPanicOutput(t, func() {
+	//
+	// _, baseline, NOT baseline, _: the FUNCTION OVERLOADS line goes to
+	// STDERR (checkdb.go's fmt.Fprintf), and withExitPanicOutput returns
+	// (stdout, stderr) in that order. Checking stdout here made this premise
+	// guard dead code -- found by cleat-review, and confirmed real: a
+	// database polluted by engine/drop_tenant_test.go's
+	// resetToOriginal001DropTenant (fixed in the same PR, cleat#2449) made
+	// the CREATE FUNCTION below fail on "already exists" instead of this
+	// guard ever firing.
+	_, baseline := withExitPanicOutput(t, func() {
 		runCheckDB(ctx, db, dialectPostgres, "", nil)
 	})
 	if strings.Contains(baseline, "FUNCTION OVERLOADS") {

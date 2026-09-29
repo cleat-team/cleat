@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -73,5 +74,48 @@ func TestTheSuiteLeavesTheMigratedSchemaIntact(t *testing.T) {
 			"and the failure surfaces in an unrelated tenant/RLS test.\n\n"+
 			"To recover this database: DELETE FROM schema_migrations WHERE version='34' "+
 			"and re-run any test that calls SetupFullSchema.", body)
+	}
+
+	// cleat#2449, the sibling defect to the one this file is named for: a
+	// fixture that INSTALLS a superseded function signature and never drops
+	// it, rather than one that reverts a current one. drop_tenant_test.go's
+	// resetToOriginal001DropTenant does exactly this on purpose (three tests
+	// need the pre-032, one-argument admin.drop_tenant to pin a data-loss
+	// bug) -- the defect was never calling it, it was never cleaning up
+	// after. Checked here, at the granularity the property actually has
+	// (no admin function keeps more than one signature), rather than by
+	// naming drop_tenant specifically: that also catches the next helper
+	// that does the same thing to a different function.
+	rows, err := db.QueryContext(ctx, `
+		SELECT p.proname, COUNT(*)
+		FROM pg_proc p
+		JOIN pg_namespace n ON n.oid = p.pronamespace
+		WHERE n.nspname = 'admin'
+		GROUP BY p.proname
+		HAVING COUNT(*) > 1
+	`)
+	if err != nil {
+		t.Fatalf("checking for superseded admin function overloads: %v", err)
+	}
+	defer rows.Close()
+	var overloaded []string
+	for rows.Next() {
+		var name string
+		var n int
+		if scanErr := rows.Scan(&name, &n); scanErr != nil {
+			t.Fatalf("scanning admin function overload row: %v", scanErr)
+		}
+		overloaded = append(overloaded, fmt.Sprintf("%s (%d overloads)", name, n))
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterating admin function overload rows: %v", err)
+	}
+	if len(overloaded) > 0 {
+		t.Fatalf("admin schema has superseded function overload(s) that a test fixture "+
+			"installed and never dropped: %s -- a database in this state is exactly "+
+			"cleat#2449 (a stale, unpinned SECURITY DEFINER overload cleatctl check-db "+
+			"would flag on a real deployment). Add a t.Cleanup that drops the old "+
+			"signature by its exact arguments wherever this fixture creates one.",
+			strings.Join(overloaded, ", "))
 	}
 }

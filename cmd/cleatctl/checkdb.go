@@ -382,11 +382,18 @@ func runCheckDB(ctx context.Context, db *sql.DB, d dialect, dsn string, args []s
 	// database. migrations/postgres/ ships only the LAST signature of each
 	// routine (it is a pg_dump baseline of a database's current state, not a
 	// replay of every transition -- #2416), so nothing in a FRESH build can
-	// ever have a superseded overload; the only database that can is one
-	// whose migration history diverged from the shipped chain -- an
-	// in-place upgrade attempted across a rebaseline (unsupported: 0.3.0
-	// has no upgrade path from 0.2, #2058 decision 3), or a manual
-	// statement run outside the migration runner.
+	// ever have a superseded overload.
+	//
+	// THE ORIGIN IS IN-REPO, NOT A MANUAL STEP, AND STILL LIVE ON develop
+	// (cleat-review, cleat#2449): engine/drop_tenant_test.go's
+	// resetToOriginal001DropTenant reinstalls this exact pre-032 signature to
+	// pin a data-loss regression, on a database SetupFullSchema has already
+	// migrated to the current two-argument form -- so it ADDS the overload
+	// rather than reverting to it, and nothing dropped it afterward. Every
+	// run of the three tests that call it against a persistent local
+	// Postgres reproduces this deterministically. Fixed alongside this
+	// check by giving that helper a t.Cleanup; this session's first guess
+	// here (a manual statement run outside the migration runner) was wrong.
 	//
 	// A superseded overload matters specifically when it is SECURITY
 	// DEFINER with no pinned search_path (proconfig IS NULL): that is the
@@ -413,9 +420,20 @@ func runCheckDB(ctx context.Context, db *sql.DB, d dialect, dsn string, args []s
 			for rows.Next() {
 				var name string
 				var n int
-				if scanErr := rows.Scan(&name, &n); scanErr == nil {
-					stale = append(stale, fmt.Sprintf("%s (%d overloads)", name, n))
+				if scanErr := rows.Scan(&name, &n); scanErr != nil {
+					// A dropped row reads as "one fewer overload found" --
+					// silent for a check whose whole job is naming a
+					// security-relevant gap. Report it as its own issue
+					// rather than let the row disappear.
+					fmt.Fprintf(os.Stderr, "FUNCTION OVERLOADS: WARNING: cannot read a row: %v\n", scanErr)
+					issues = append(issues, fmt.Sprintf("function overload check: cannot read a row: %v", scanErr))
+					continue
 				}
+				stale = append(stale, fmt.Sprintf("%s (%d overloads)", name, n))
+			}
+			if rowsErr := rows.Err(); rowsErr != nil {
+				fmt.Fprintf(os.Stderr, "FUNCTION OVERLOADS: WARNING: iteration failed: %v\n", rowsErr)
+				issues = append(issues, fmt.Sprintf("function overload check: iteration failed: %v", rowsErr))
 			}
 			rows.Close()
 			if len(stale) > 0 {
