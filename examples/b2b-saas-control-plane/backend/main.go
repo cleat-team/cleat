@@ -463,9 +463,31 @@ func (a *tenantAdmin) runBin(ctx context.Context, bin string, args ...string) (s
 	cmd := exec.CommandContext(ctx, bin, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("%s %s: %w: %s", bin, strings.Join(args, " "), err, out)
+		return "", fmt.Errorf("%s %s: %w: %s", bin, strings.Join(redactDBFlag(args), " "), err, out)
 	}
 	return string(out), nil
+}
+
+// redactDBFlag replaces the value following a "--db" argument with a
+// placeholder before an argument list is ever formatted into an error --
+// every caller's args include "--db", a.dbURL, and a.dbURL is a full
+// PostgreSQL DSN carrying a password (CLEAT_ADMIN_DB_URL). Without this,
+// createTenant/generateAPIKey/deployWorkflowDef's callers all s.log.Error
+// this err, so a single failed signup would have put the ADMIN connection
+// string, password included, into this process's logs -- the HTTP response
+// stays generic (backendkit.WriteInternalError never sees err.Error()), but
+// the log line does not, and examples are what readers copy (same class as
+// cleat#2247). cmd's own output ("out") is left alone: it can contain a
+// legitimate error from the invoked binary, not a copy of its own argv.
+func redactDBFlag(args []string) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i, a := range out {
+		if a == "--db" && i+1 < len(out) {
+			out[i+1] = "REDACTED"
+		}
+	}
+	return out
 }
 
 // serveFile mirrors examples/order-lifecycle/backend/main.go's helper
