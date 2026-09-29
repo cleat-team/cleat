@@ -17,18 +17,26 @@
 # USAGE
 #
 #   scripts/dbos-pair-loc.sh order-lifecycle
+#   scripts/dbos-pair-loc.sh integration-hub
 #
-# Only "order-lifecycle" is wired up today -- it is the one pair that has
-# both sides built and executed (examples/order-lifecycle,
-# examples/order-lifecycle-dbos-port). Adding a pair means adding one case
-# below, not a new script: the whole point is one counting rule for every
-# pair this harness ever grows.
+# Adding a pair means adding one case below, not a new script: the whole
+# point is one counting rule for every pair this harness ever grows.
+#
+# integration-hub's file lists are NOT role-symmetric, and that asymmetry is
+# itself part of the finding -- see the pair's own README
+# (examples/integration-hub-dbos-port/README.md, "Why the totals below are
+# not the whole comparison") before reading a smaller DBOS total as an
+# efficiency win. Its cleat side includes engine/wasi_policy.go and
+# engine/wasi_policy_wasmtime.go -- the enforcement code that makes the
+# sandbox refusal real -- because that enforcement exists; the DBOS side has
+# no equivalent to include, because nothing enforces anything there.
 #
 # EXIT STATUS
 #
 #   0  counted; both totals printed
-#   2  UNMEASURED -- cloc is not installed, or the named pair's files are
-#      missing. Never printed as if it were a count of zero.
+#   2  UNMEASURED -- cloc is not installed, the named pair is unknown, or
+#      the pair's files are missing. Never printed as if it were a count of
+#      zero.
 set -euo pipefail
 
 if ! command -v cloc >/dev/null 2>&1; then
@@ -38,23 +46,38 @@ if ! command -v cloc >/dev/null 2>&1; then
 fi
 
 pair="${1:-}"
-if [ "$pair" != "order-lifecycle" ]; then
-  echo "usage: $0 order-lifecycle" >&2
-  exit 2
-fi
-
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-cleat_files=(
-  "$repo_root/examples/order-lifecycle/order.go"
-  "$repo_root/examples/order-lifecycle/backend/main.go"
-  "$repo_root/examples/order-lifecycle/order_test.go"
-)
-dbos_files=(
-  "$repo_root/examples/order-lifecycle-dbos-port/src/workflow.ts"
-  "$repo_root/examples/order-lifecycle-dbos-port/src/server.ts"
-  "$repo_root/examples/order-lifecycle-dbos-port/src/order.test.ts"
-)
+case "$pair" in
+  order-lifecycle)
+    cleat_files=(
+      "$repo_root/examples/order-lifecycle/order.go"
+      "$repo_root/examples/order-lifecycle/backend/main.go"
+      "$repo_root/examples/order-lifecycle/order_test.go"
+    )
+    dbos_files=(
+      "$repo_root/examples/order-lifecycle-dbos-port/src/workflow.ts"
+      "$repo_root/examples/order-lifecycle-dbos-port/src/server.ts"
+      "$repo_root/examples/order-lifecycle-dbos-port/src/order.test.ts"
+    )
+    ;;
+  integration-hub)
+    cleat_files=(
+      "$repo_root/examples/integration-hub/tenant-steps/normalize-order/main.go"
+      "$repo_root/examples/integration-hub/tenant-steps/malicious-read-host-file/main.go"
+      "$repo_root/engine/wasi_policy.go"
+      "$repo_root/engine/wasi_policy_wasmtime.go"
+    )
+    dbos_files=(
+      "$repo_root/examples/integration-hub-dbos-port/src/workflow.ts"
+      "$repo_root/examples/integration-hub-dbos-port/src/wedge.test.ts"
+    )
+    ;;
+  *)
+    echo "usage: $0 order-lifecycle|integration-hub" >&2
+    exit 2
+    ;;
+esac
 
 for f in "${cleat_files[@]}" "${dbos_files[@]}"; do
   if [ ! -f "$f" ]; then
