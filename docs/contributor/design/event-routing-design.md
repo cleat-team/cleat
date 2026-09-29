@@ -689,12 +689,22 @@ the tables exist from the first boot of a worker built after that change, and a
 deployment that has booted one has them. P1 should re-check that before assuming it can
 reshape `event_awaiters` freely.
 
-**P0b — fix today's semantics.** `ORDER BY received_at DESC` → ordered ascending by a
-monotonic column; consume-and-record in one transaction (today's code marks consumed
-and logs on failure with "Continue even if marking fails", admitting a double-consume).
-Cheap *now*, and cheaper than it looks: `plugins` is a **tier 2** component, nothing may
-describe it as production-ready, and — per P0 — nothing is running it, so there are no
-existing semantics for anyone to depend on.
+**P0b — fix today's semantics. DONE 2026-09-29 (cleat#2641).** `ORDER BY received_at
+DESC` → ordered ascending by `received_at`, with the claiming SELECT and the consuming
+UPDATE folded into one transaction, holding `FOR UPDATE SKIP LOCKED` /
+`WITH (UPDLOCK, READPAST, ROWLOCK)` on the claimed row for that transaction's lifetime
+(`queryOldestUnprocessedEventForClaim` in `plugins/eventtriggers/queries.go`, mirroring
+the idiom `plugins/scheduler/background.go` already uses for the same problem). The old
+"continue even if marking fails" branch is gone — a failed consuming UPDATE now returns
+an error rather than reporting `{"found": true}` for a row that was never actually
+marked consumed.
+
+**What this does not cover, filed separately as cleat#2644:** the lock excludes a second
+concurrent `await_event` call, which is what P0b's bug was about. It does not exclude
+`processBatch`'s background scan (`background.go`), which reads the same table with a
+plain, unlocked SELECT — so the two mechanisms can still race each other under READ
+COMMITTED. That is a design decision about the background dispatcher's own query, not an
+extension of this fix, so P1 should not assume it is closed.
 
 **P1 — key slots and correlation, inside the plugin.** The §8 schema, the surrogate
 primary key, three slots on both tables, the composite indexes, and the `Keys`

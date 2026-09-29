@@ -80,9 +80,28 @@ ORDER BY received_at
 OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY`,
 }
 
-// The newest unprocessed event of a type for a tenant.
+// The oldest unprocessed event of a type for a tenant, locked for exclusive
+// claim by the caller's transaction.
 //
-// Two constructs here have no portable spelling, which is why this is a
+// OLDEST, NOT LATEST -- cleat#2641. This used to be queryLatestUnprocessedEvent,
+// ORDER BY received_at DESC: a newest-first read that starves any older
+// unconsumed event of the same type, the same property queryUnprocessedEvents
+// (the plural one, below) already avoids for the background dispatcher. The
+// two names differing by one word is what let the bug hide -- a grep for
+// "ORDER BY received_at" finds the plural query's ascending order and reads as
+// "the fix landed" without checking which query, or which caller.
+//
+// FOR UPDATE SKIP LOCKED / WITH (UPDLOCK, READPAST, ROWLOCK) -- the same
+// per-dialect claim idiom plugins/scheduler/background.go already uses for
+// exactly this problem (see dueSchedulesQuery there). The lock is what makes
+// folding the SELECT and the consuming UPDATE into one transaction actually
+// atomic: two concurrent await_event calls for the same tenant+type must not
+// both select the same row, and SKIP LOCKED means the second one finds the
+// next-oldest row instead of blocking or double-claiming. The caller commits
+// (or rolls back) the transaction this query runs in; the lock is held no
+// longer than that.
+//
+// Three constructs here have no portable spelling, which is why this is a
 // plugin.Query rather than one literal (cleat#1133):
 //
 //   - `NOT processed`. T-SQL has no boolean type, so a BIT column is a value
@@ -91,30 +110,39 @@ OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY`,
 //     That is a BINDING error rather than a syntax error, so SET PARSEONLY ON
 //     accepts it and only SET NOEXEC ON rejects it.
 //   - `LIMIT 1`. T-SQL spells row limits as TOP or OFFSET/FETCH.
+//   - `FOR UPDATE SKIP LOCKED`. T-SQL spells the same intent as a table hint
+//     on the FROM clause, not a trailing clause -- WITH (UPDLOCK, READPAST,
+//     ROWLOCK). UPDLOCK takes the lock this statement needs to hold; READPAST
+//     is SQL Server's SKIP LOCKED; ROWLOCK asks for row- rather than
+//     page-granularity so an unrelated row in the same page is not blocked.
 //
-// Neither is something the adapter's Rebind should attempt. A boolean COLUMN
-// is not a boolean LITERAL -- rewriting `NOT x` would have to leave NOT EXISTS,
-// NOT IN, NOT LIKE, NOT NULL and NOT (a AND b) alone -- and moving LIMIT to TOP
-// relocates a token to a different clause. Both belong in an explicit arm.
-var queryLatestUnprocessedEvent = plugin.Query{
+// None of the three is something the adapter's Rebind should attempt. A
+// boolean COLUMN is not a boolean LITERAL -- rewriting `NOT x` would have to
+// leave NOT EXISTS, NOT IN, NOT LIKE, NOT NULL and NOT (a AND b) alone --
+// moving LIMIT to TOP relocates a token to a different clause, and FOR UPDATE
+// SKIP LOCKED relocates to a different clause entirely. All three belong in an
+// explicit arm.
+var queryOldestUnprocessedEventForClaim = plugin.Query{
 	Default: `SELECT id, event_type, event_data, received_at
 FROM ingested_events
 WHERE tenant_id = $1
   AND event_type = $2
   AND NOT processed
-ORDER BY received_at DESC
-LIMIT 1`,
+ORDER BY received_at
+LIMIT 1
+FOR UPDATE SKIP LOCKED`,
 	MySQL: `SELECT id, event_type, event_data, received_at
 FROM ingested_events
 WHERE tenant_id = $1
   AND event_type = $2
   AND NOT processed
-ORDER BY received_at DESC
-LIMIT 1`,
+ORDER BY received_at
+LIMIT 1
+FOR UPDATE SKIP LOCKED`,
 	MSSQL: `SELECT TOP 1 id, event_type, event_data, received_at
-FROM ingested_events
+FROM ingested_events WITH (UPDLOCK, READPAST, ROWLOCK)
 WHERE tenant_id = $1
   AND event_type = $2
   AND processed = 0
-ORDER BY received_at DESC`,
+ORDER BY received_at`,
 }
