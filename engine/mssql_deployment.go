@@ -512,17 +512,11 @@ func (s *MSSQLStore) getActiveInstanceCountsByVersionOnce(ctx context.Context) (
 	}
 	defer tx.Rollback()
 
-	// `OR tenant_id IS NULL` cannot match: workflow_instances.tenant_id is
-	// `NOT NULL` on this dialect (migrations/mssql/001_schema.sql), same as
-	// PostgreSQL's. Not the same clause cleat#2620 is about (that one was a
-	// real, since-removed exemption on workflow_defs) -- this is dead code on
-	// a column that was never nullable. Tracked as cleat#2635 rather than
-	// removed here.
 	rows, err := tx.QueryContext(ctx, `
 		SELECT def_name, def_version, COUNT(*) as cnt
 		FROM workflow_instances
 		WHERE status IN ('ready', 'running')
-		  AND (tenant_id = @p1 OR tenant_id IS NULL)
+		  AND tenant_id = @p1
 		GROUP BY def_name, def_version
 	`, s.tenantID)
 	if err != nil {
