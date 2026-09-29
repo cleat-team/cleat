@@ -7,6 +7,7 @@ toolchain go1.27.1
 require (
 	github.com/cleat-team/cleat/cleat v0.0.0
 	github.com/cleat-team/cleat/cleat/backendkit v0.0.0-20260914142453-535d1c610746
+	github.com/cleat-team/cleat/examples/fooddash/clients v0.0.0
 )
 
 require (
@@ -64,3 +65,5 @@ replace (
 	// and is what catches it.
 	github.com/cleat-team/cleat/cleat/backendkit => ../cleat/backendkit
 )
+
+replace github.com/cleat-team/cleat/examples/fooddash/clients => ./fooddash/clients

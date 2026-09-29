@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/cleat-team/cleat/internal/analyzer"
@@ -158,6 +159,13 @@ func writeStagedManifest(outDir string, names []string) error {
 	return nil
 }
 
+// staged is one user source file PrepareBuildDir will copy into the build
+// directory, keyed by the flat base name it is staged under.
+type staged struct {
+	base    string
+	content []byte
+}
+
 // PrepareBuildDir assembles the build directory: copies user source files,
 // writes generated files, and creates a go.mod for wasip1 compilation.
 func PrepareBuildDir(cfg *BuildConfig) error {
@@ -169,10 +177,6 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 	// Collect the user sources this build will stage, BEFORE writing any of
 	// them, so the stale ones from a previous build into the same directory
 	// can be removed first. cleat#1823.
-	type staged struct {
-		base    string
-		content []byte
-	}
 	var toStage []staged
 
 	if len(cfg.XfrmSource) > 0 {
@@ -320,6 +324,10 @@ func PrepareBuildDir(cfg *BuildConfig) error {
 		}
 	}
 
+	if err := checkStagedImportsSatisfiable(cfg, toStage, sdkDir != ""); err != nil {
+		return err
+	}
+
 	modContent := fmt.Sprintf(`module cleat-build
 
 go %s
@@ -364,6 +372,144 @@ require %s %s
 		fmt.Fprintf(os.Stderr, "warning: propagating replace directives: %v\n", err)
 	}
 
+	return nil
+}
+
+// sourceModuleDirectoryReplaces returns the Old.Path of every directory-path
+// replace declared in projectRoot's own go.mod -- the same set
+// propagateReplaces forwards into the generated build go.mod (see its
+// identical modfile.IsDirectoryPath filter). Returns nil if the file is
+// missing or does not parse; a check with nothing to compare against should
+// not invent a new failure mode out of that.
+func sourceModuleDirectoryReplaces(projectRoot string) []string {
+	modPath := filepath.Join(projectRoot, "go.mod")
+	data, err := os.ReadFile(modPath)
+	if err != nil {
+		return nil
+	}
+	modFile, err := modfile.Parse(modPath, data, nil)
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, r := range modFile.Replace {
+		if modfile.IsDirectoryPath(r.New.Path) {
+			paths = append(paths, r.Old.Path)
+		}
+	}
+	return paths
+}
+
+// checkStagedImportsSatisfiable refuses a build whose staged sources import a
+// package this build cannot resolve locally: one that belongs to the
+// workflow's own source module (cfg.ModulePath) but is not the workflow's own
+// directory.
+//
+// PrepareBuildDir stages a workflow's source with a flat, non-recursive copy
+// (filepath.Glob(cfg.SrcDir+"/*.go"), or XfrmSource keyed and copied by
+// filepath.Base) -- either way, the ONLY package of cfg.ModulePath's tree this
+// build ever has locally is the one being compiled. A subpackage of SrcDir --
+//
+//	order-lifecycle/
+//	  order.go              <- staged
+//	  emailclient/          <- never staged, and staging cannot notice
+//	    client.go
+//
+// -- and a SIBLING package elsewhere in the same module are equally absent:
+// staging never copies anything outside SrcDir, so neither shape is a special
+// case of the other. `go mod tidy` in the build directory then falls through
+// to the module proxy for such an import: if cfg.ModulePath has never been
+// published there, resolution fails loudly (the incident this guards,
+// cleat#2658 / cleat#2657); if it has, and a published version happens to
+// contain a package at that import path, the build can succeed SILENTLY
+// against that stale published copy instead of the local one sitting unbuilt
+// in the tree.
+//
+// The question this asks is "which module owns this import", not "is it
+// nested under SrcDir" -- and it is answered by the LONGEST matching prefix
+// among every module path this build actually knows how to resolve locally:
+// cfg.ModulePath itself, SDKModulePath (always an explicit require),
+// RootModulePath (replaced locally whenever rootReplaced, i.e. a local SDK
+// checkout was found), and whatever directory-path replaces the workflow's
+// own go.mod declares (sourceModuleDirectoryReplaces -- the identical set
+// propagateReplaces forwards). Refusing only when the LONGEST match is
+// cfg.ModulePath itself, and cfg.ModulePath is not among the paths already
+// covered by one of those replaces, is what tells a nested module apart from
+// a module whose path it merely shares a string prefix with:
+// "github.com/cleat-team/cleat/examples/order-lifecycle/emailclient" starts
+// with RootModulePath, but examples/ is its own go.mod, so that subtree is
+// NOT part of the root module and RootModulePath's replace does not reach it
+// -- cfg.ModulePath ("github.com/cleat-team/cleat/examples") is the longer,
+// and correct, match. The same rule also covers the root-module-workflow
+// edge case this file's history got wrong the first time: there,
+// cfg.ModulePath IS RootModulePath, so the "already covered by a replace"
+// check is what excuses it, not a name comparison against RootModulePath or
+// SDKModulePath bolted on beside the main rule.
+func checkStagedImportsSatisfiable(cfg *BuildConfig, toStage []staged, rootReplaced bool) error {
+	if cfg.ModulePath == "" {
+		return nil
+	}
+
+	replacedElsewhere := sourceModuleDirectoryReplaces(cfg.ProjectRoot)
+
+	knownModules := make([]string, 0, len(replacedElsewhere)+3)
+	knownModules = append(knownModules, cfg.ModulePath, SDKModulePath)
+	if rootReplaced {
+		knownModules = append(knownModules, RootModulePath)
+	}
+	knownModules = append(knownModules, replacedElsewhere...)
+
+	isReplaced := func(mod string) bool {
+		if mod == SDKModulePath || (rootReplaced && mod == RootModulePath) {
+			return true
+		}
+		for _, r := range replacedElsewhere {
+			if mod == r {
+				return true
+			}
+		}
+		return false
+	}
+
+	owningModule := func(path string) string {
+		best := ""
+		for _, m := range knownModules {
+			if path != m && !strings.HasPrefix(path, m+"/") {
+				continue
+			}
+			if len(m) > len(best) {
+				best = m
+			}
+		}
+		return best
+	}
+
+	fset := token.NewFileSet()
+	for _, f := range toStage {
+		af, err := parser.ParseFile(fset, f.base, f.content, parser.ImportsOnly)
+		if err != nil {
+			// A file that fails to parse fails later, at compile time, with a
+			// clearer message than this check could give; do not shadow it.
+			continue
+		}
+		for _, imp := range af.Imports {
+			path, err := strconv.Unquote(imp.Path.Value)
+			if err != nil {
+				continue
+			}
+			if owningModule(path) != cfg.ModulePath || isReplaced(cfg.ModulePath) {
+				continue
+			}
+			return fmt.Errorf(
+				"%s imports %q, a package in this workflow's own module (%s) that is neither "+
+					"its own directory nor covered by a replace -- cleat build stages only this "+
+					"workflow's own source files, with a flat copy, so a sibling or subpackage "+
+					"import can never be satisfied from the local build and would otherwise be "+
+					"resolved from the module proxy, possibly against a stale published copy "+
+					"instead of the code sitting in this tree",
+				f.base, path, cfg.ModulePath)
+		}
+	}
 	return nil
 }
 
