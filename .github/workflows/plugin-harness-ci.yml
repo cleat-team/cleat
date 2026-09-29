@@ -114,6 +114,7 @@ jobs:
   # --------------------------------------------------------------------------
   test-layer1:
     name: Layer 1 — SDK (cleattest)
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -165,6 +166,7 @@ jobs:
   # --------------------------------------------------------------------------
   test-layer2:
     name: Layer 2 — WASM Integration
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -365,6 +367,7 @@ jobs:
   # --------------------------------------------------------------------------
   test-multi-db:
     name: Layer 3 — Multi-DB
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -493,6 +496,7 @@ jobs:
   # --------------------------------------------------------------------------
   test-blobstore-s3:
     name: Blobstore S3 Round-Trip
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     services:
       postgres:

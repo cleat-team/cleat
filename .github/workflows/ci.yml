@@ -143,6 +143,7 @@ jobs:
   # -------------------------------------------------------------------------
   lint:
     name: Lint
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -1083,6 +1084,7 @@ jobs:
   # Lint Go (golangci-lint)
   # -------------------------------------------------------------------------
   lint-go:
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     env:
       # CGO on, for the reason given on the Go vet step above: at 0, the eight
@@ -1251,6 +1253,7 @@ jobs:
   # -------------------------------------------------------------------------
   build-documented-examples:
     name: Documented example builds
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     # Every `cleat build` an example README documents is run, and must succeed.
     # cleat#1814.
@@ -1330,7 +1333,7 @@ jobs:
     # never reports in merge_group wedges the queue with nothing red on it: the
     # queue waits for a status that cannot arrive, and no check fails to say so.
     # Nine workflow files here carry that warning; this is the tenth.
-    if: github.event_name != 'merge_group'
+    if: (github.event_name != 'merge_group') && (github.event.action != 'edited' || github.event.changes.base)
     # The example in examples/order-lifecycle, RUN rather than only built.
     # cleat#2512, and on three dialects since cleat#2560.
     #
@@ -1408,7 +1411,7 @@ jobs:
     # required context, so a merge_group run would add a docker build to the
     # critical path of every queue entry while gating nothing. The `if:` and any
     # future promotion to a required context go together, never one alone.
-    if: github.event_name != 'merge_group'
+    if: (github.event_name != 'merge_group') && (github.event.action != 'edited' || github.event.changes.base)
     # The example in examples/integration-hub, RUN rather than only built.
     # cleat#2533.
     #
@@ -1468,7 +1471,7 @@ jobs:
     # line. Not a required context (.github/required-checks.txt), so a
     # merge_group run would add a build to the critical path of every queue
     # entry while gating nothing.
-    if: github.event_name != 'merge_group'
+    if: (github.event_name != 'merge_group') && (github.event.action != 'edited' || github.event.changes.base)
     # scripts/run-integration-hub-tenant-sandbox-scenario.sh, cleat#2597. The
     # sibling job above (integration-hub-scenario) proves the tenant-uploaded-
     # step MECHANISM works: a tenant's own WASM, uploaded through
@@ -1549,7 +1552,7 @@ jobs:
     # a required context (.github/required-checks.txt), so a merge_group run
     # would add an npm install/build to the critical path of every queue
     # entry while gating nothing.
-    if: github.event_name != 'merge_group'
+    if: (github.event_name != 'merge_group') && (github.event.action != 'edited' || github.event.changes.base)
     # examples/order-lifecycle-dbos-port, RUN rather than only built --
     # cleat#2597. The pair's own README states the claim this job exists to
     # back: a genuinely executed, equally-scoped DBOS counterpart of
@@ -1622,7 +1625,7 @@ jobs:
     # line. Not a required context (.github/required-checks.txt), so a
     # merge_group run would add an npm install/build to the critical path of
     # every queue entry while gating nothing.
-    if: github.event_name != 'merge_group'
+    if: (github.event_name != 'merge_group') && (github.event.action != 'edited' || github.event.changes.base)
     # examples/integration-hub-dbos-port, cleat#2597's SECOND cleat-vs-DBOS
     # pair -- unlike its sibling above (the CONTROL, an honest equally-scoped
     # comparison), this pair exists to locate a specific structural boundary:
@@ -1703,7 +1706,7 @@ jobs:
     # form: this is not a required context, so a merge_group run would add a
     # docker build to the critical path of every queue entry while gating
     # nothing.
-    if: github.event_name != 'merge_group'
+    if: (github.event_name != 'merge_group') && (github.event.action != 'edited' || github.event.changes.base)
     # The example in examples/ai-agent-platform, RUN rather than only built.
     # cleat#2535.
     #
@@ -1760,6 +1763,7 @@ jobs:
 
   vulncheck:
     name: Vulnerability Check
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -1826,6 +1830,7 @@ jobs:
   # -------------------------------------------------------------------------
   test-go:
     name: Test Go (${{ matrix.package.name }}) on ${{ matrix.go-version }}
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -2163,6 +2168,7 @@ jobs:
   # -------------------------------------------------------------------------
   test-python:
     name: Test Python ${{ matrix.python-version }}
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     # No continue-on-error. With it, this job could not fail the build, so the
     # Python SDK's own unit tests were advisory across all three versions -- and
@@ -2226,6 +2232,7 @@ jobs:
   # -------------------------------------------------------------------------
   test-java:
     name: Java Tests
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     # No continue-on-error. It was here, so this job could not fail the build,
     # and nobody had reason to look at it: measured 2026-08-06 on a clean
@@ -2255,6 +2262,7 @@ jobs:
   # -------------------------------------------------------------------------
   test-assemblyscript:
     name: AssemblyScript Tests
+    if: (github.event.action != 'edited' || github.event.changes.base)
     # No continue-on-error. Measured 2026-08-06 on a clean checkout, `npm test`
     # in packages/cleat-as runs 106 assertions across three spec files, 106
     # passing -- so the exemption was protecting nothing, and meanwhile the one
@@ -2321,6 +2329,7 @@ jobs:
   # -------------------------------------------------------------------------
   test-web:
     name: Web Dashboard
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -2378,6 +2387,7 @@ jobs:
   # -------------------------------------------------------------------------
   test-rust:
     name: Test Rust
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -2414,6 +2424,7 @@ jobs:
   # -------------------------------------------------------------------------
   test-assemblyscript-wasm:
     name: AssemblyScript WASM Build
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     # continue-on-error removed 2026-08-07. It was protecting nothing: measured on
     # develop run 31193028xxx, every one of this job's steps -- Install SDK
@@ -2477,6 +2488,7 @@ jobs:
   # -------------------------------------------------------------------------
   fuzz:
     name: Fuzz Tests
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -2522,7 +2534,7 @@ jobs:
   # -------------------------------------------------------------------------
   benchmarks:
     name: Benchmarks
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: (github.ref == 'refs/heads/main' && github.event_name == 'push') && (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -2620,6 +2632,7 @@ jobs:
   # doc that lies. Making this blocking is a settings change for a maintainer.
   release-dryrun:
     name: Release Dry Run
+    if: (github.event.action != 'edited' || github.event.changes.base)
     # ubuntu-26.04, matching release.yml (cleat#2069) -- the .deb-install
     # step below needs to run on the same base the real release job pins to,
     # not whatever ubuntu-latest happens to mean this week.
@@ -2861,6 +2874,7 @@ jobs:
 
   build:
     name: Build
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -2964,7 +2978,7 @@ jobs:
     # pay for it and gain nothing. `refs/heads/main` is false for a merge-group
     # ref (`refs/heads/gh-readonly-queue/...`), so the second clause excludes it
     # rather than needing a third.
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    if: (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') && (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     # WHY THIS JOB HAS A DATABASE.
     #
@@ -3070,6 +3084,7 @@ jobs:
   # -------------------------------------------------------------------------
   cluster-tests:
     name: Cluster Integration Tests
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     env:
       # A database of the tests' own -- and, as of cleat#2012, a SERVER of its

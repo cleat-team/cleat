@@ -130,6 +130,7 @@ permissions:
 jobs:
   tier2:
     name: Tier 2 Gate
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     # The gate ran 1567 tests in six patterns plus one module when this was written,
     # with -p 1, in well under two minutes of test time locally. 30 is generous; a gate

@@ -134,6 +134,7 @@ permissions:
 jobs:
   e2e-cross-language:
     name: Cross-Language WASM E2E
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     timeout-minutes: 20
 

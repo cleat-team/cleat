@@ -190,6 +190,7 @@ jobs:
   # -------------------------------------------------------------------------
   test-mysql:
     name: Test MySQL
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     services:
       mysql:
@@ -319,6 +320,7 @@ jobs:
   # -------------------------------------------------------------------------
   test-mssql:
     name: Test SQL Server
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     services:
       mssql:
@@ -468,6 +470,7 @@ jobs:
   # -------------------------------------------------------------------------
   test-plugin-migrations:
     name: Plugin Migrations
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -696,6 +699,7 @@ jobs:
   # included. Bump them together with the other sites or `Lint` fails the PR.
   crash-shutdown-dialects:
     name: Crash Shutdown Scenarios (MySQL, SQL Server)
+    if: (github.event.action != 'edited' || github.event.changes.base)
     runs-on: ubuntu-latest
     services:
       mysql:
