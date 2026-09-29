@@ -107,6 +107,22 @@ func PublishEvent(
 		eventData = json.RawMessage("{}")
 	}
 
+	// Reject invalid JSON HERE, uniformly, rather than leaving it to the
+	// column type. PostgreSQL's JSONB and MySQL's JSON both refuse an invalid
+	// value at INSERT; SQL Server's event_data is plain NVARCHAR(MAX) with no
+	// equivalent (migrations.go has never added an ISJSON check there,
+	// unlike event_subscriptions.input_template's JSON_VALID CHECK). Without
+	// this, a row that reaches storage on SQL Server only is unmarshalable by
+	// every reader downstream -- and because the claim query orders by
+	// received_at with no way to skip a row it cannot process, that row
+	// becomes the permanent head of its (tenant, event_type), and no later
+	// event of that type is ever delivered (cleat#2666). Checking in Go once,
+	// before the dialect-specific INSERT, makes the guarantee the same on all
+	// three dialects instead of resting on a per-column accident.
+	if !json.Valid(eventData) {
+		return 0, fmt.Errorf("event-triggers: publish: event data is not valid JSON")
+	}
+
 	key1, key2, key3, err := keySlots(keys)
 	if err != nil {
 		return 0, fmt.Errorf("event-triggers: publish: %w", err)
