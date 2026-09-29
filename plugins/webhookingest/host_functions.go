@@ -45,11 +45,19 @@ type AwaitWebhookInput struct {
 	EventType string `json:"event_type,omitempty"`
 	// Keys correlates this await to one specific event among the many a
 	// shared source can publish -- e.g. an order id -- mirroring
-	// eventtriggers.awaitEventInput's Keys field exactly (same validation,
-	// same 3-slot/128-byte shape, same claim/register mechanism
-	// underneath). cleat#2649. Additive: a caller upgrading from before
-	// this field existed omits it and gets the empty slice, matching
-	// today's behaviour of correlating on SourceID alone.
+	// eventtriggers.awaitEventInput's Keys field (same validation, same
+	// claim/register mechanism underneath). cleat#2649. Additive: a caller
+	// upgrading from before this field existed omits it and gets the empty
+	// slice, matching today's behaviour of correlating on SourceID alone.
+	//
+	// THE EFFECTIVE BUDGET IS 2, NOT 3 -- cleat-review's finding on this
+	// PR. eventtriggers has three correlation-key slots, but awaitWebhook
+	// always prepends SourceID as key1 (host_functions.go's awaitWebhook),
+	// so Keys here only ever fills key2 and key3. A caller passing 3
+	// entries hits eventtriggers' own "at most 3 correlation keys ... got
+	// 4" error, which names the wrong number for this call site -- it is
+	// correct about eventtriggers.ClaimOrRegisterAwaiter's budget, not
+	// about what a caller of THIS field may pass. Pass at most 2.
 	Keys []string `json:"keys,omitempty"`
 }
 
