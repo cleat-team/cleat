@@ -37,12 +37,26 @@ import (
 // received_at, bypassing the plugin's own NOW()-based insert path so the two
 // rows in a test can be placed in a known order regardless of wall-clock
 // timing or database round-trip order.
+//
+// event_data is bound as a STRING, not []byte, matching publish.go's own
+// `db.Exec(ctx, ..., string(eventData))` -- measured the hard way on CI's
+// real MSSQL, not assumed. A []byte argument here bound as VARBINARY, and
+// SQL Server's implicit VARBINARY->NVARCHAR conversion for the NVARCHAR(MAX)
+// column re-interprets the bytes rather than decoding them as text, so the
+// row that came back read as corrupt JSON: awaitEvent's
+// `outJSON, _ := json.Marshal(output)` discarded json.Marshal's error on
+// the resulting invalid json.RawMessage and returned "" with a nil error,
+// which TestAwaitEventClaimsOldestAcrossDialects/mssql then failed on with
+// "unmarshal output: unexpected end of JSON input" -- a failure with no
+// error message from awaitEvent itself, because the error was the one this
+// helper's own bad argument discarded two layers up. PostgreSQL and MySQL
+// tolerated the []byte fine, which is why this was invisible locally.
 func mustInsertIngestedEventAt(t *testing.T, ctx context.Context, p *Plugin, id, tenantID uuid.UUID, eventType string, receivedAt time.Time) {
 	t.Helper()
 	if _, err := p.db.Exec(ctx, `
 		INSERT INTO ingested_events (id, tenant_id, event_type, event_data, received_at, processed, status)
 		VALUES ($1, $2, $3, $4, $5, false, 'pending')
-	`, id, tenantID, eventType, []byte("{}"), receivedAt); err != nil {
+	`, id, tenantID, eventType, "{}", receivedAt); err != nil {
 		t.Fatalf("insert ingested_events %s: %v", id, err)
 	}
 }
