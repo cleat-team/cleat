@@ -1573,6 +1573,17 @@ jobs:
       - name: Count lines for both sides of the pair
         run: scripts/dbos-pair-loc.sh order-lifecycle
 
+      # cleat#2622: the README's quoted DBOS-side total (261) drifted from
+      # what the step above actually counts (274) after src/server.ts grew,
+      # and nothing noticed. --self-test first, same reason as every guard
+      # above it: on a tree where the numbers already agree, "nothing
+      # drifted" and "the check matched nothing" print the same kind of
+      # success.
+      - name: README line counts agree with the pair's own counter
+        run: |
+          python3 scripts/check-dbos-pair-loc.py --self-test
+          python3 scripts/check-dbos-pair-loc.py
+
       # No "dump logs on failure" step after this one, for the same reason as
       # the sibling scenario jobs: the script's own EXIT trap tails the
       # server's log on failure, before anything here could read it.
