@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 
 	"github.com/cleat-team/cleat/plugin"
 	"github.com/google/uuid"
@@ -58,10 +59,10 @@ type recordEventInput struct {
 	EventType string          `json:"event_type"`
 	Details   json.RawMessage `json:"details,omitempty"`
 
-	// EventID, when supplied, makes this call idempotent: see
-	// recordEventDeterministicID's doc comment for what it is derived from
-	// and why. Optional -- an empty value falls back to the ordinary
-	// AtLeastOnce behaviour documented above.
+	// EventID, when supplied, OVERRIDES the default step-based dedup key --
+	// see recordEvent's own doc comment ("EventID: an explicit override") for
+	// when a caller would want that. Optional: recordEvent is deduplicated by
+	// default (cleat#2618) whether or not this is set.
 	EventID string `json:"event_id,omitempty"`
 }
 
@@ -81,41 +82,46 @@ type recordEventOutput struct {
 // queued rather than written, the history would assert something that might
 // still be false when the process is killed.
 //
-// # The residual after this returns successfully
+// # The AtLeastOnce residual, and why it is closed by default now
 //
 // This IS an ordinary AtLeastOnce host function -- the same guarantee every
 // other plugin host function has (engine/plugins.go's freshPluginCallInternal
 // calls fn, THEN records the event to history; a crash between the two is not
-// specially guarded here or anywhere else a plugin registers a function).
-// engine.DurableCallIdempotencyKey (engine/idempotency.go) exists for the
-// separate ServiceCaller path and gives a call a key stable across replay --
-// PluginCall has no equivalent, because plugin.CallContext carries no step
-// number a plugin function could build one from. Investigated and not fixed
-// here: extending CallContext is shared engine infrastructure, out of scope
-// for this plugin. Filed as cleat#2614.
-//
-// So: a worker killed after this function's transaction commits but before
-// the engine's own event_history record for this call lands will, on resume,
+// specially guarded here or anywhere else a plugin registers a function). A
+// worker killed after this function's transaction commits but before the
+// engine's own event_history record for that call lands will, on resume,
 // call this function again with the same input. For a hash-chained log that
-// is not a quiet gap -- it is TWO rows, correctly linked into the chain, both
-// asserting an event that happened once. That is the residual this host
-// function ships with; it is not a regression (every existing plugin host
-// function already has it), but it is sharper here than for e.g. a Slack
-// message, because the audit chain's whole job is to be the record of what
-// happened.
+// is not a quiet gap -- it would be TWO rows, correctly linked into the
+// chain, both asserting an event that happened once.
 //
-// # Closing it without waiting on cleat#2614
+// Originally (cleat#2616) there was no per-call id a plugin function could
+// build to catch this with appendOnce's existing errAlreadyRecorded path
+// (chain_store.go) -- plugin.CallContext carried no step number. cleat#2618
+// closed that: CallContext.RunID and CallContext.Step are now populated at
+// every PluginCall dispatch from the SAME s.execRunID/s.stepCount the
+// recorded event itself uses (engine/plugin_call_context.go), stable across
+// exactly the crash-and-retry this residual describes. So by DEFAULT -- no
+// input required -- recordEventStepID derives the row's id from
+// (tenant, workflow, RunID, Step), the same shape
+// engine.DurableCallIdempotencyKey uses for the separate ServiceCaller path,
+// and a retry lands on errAlreadyRecorded instead of a second row.
 //
-// A caller who supplies EventID does not need the engine to give this
-// function a step number at all -- it already knows, better than any step
-// counter could, which of ITS OWN calls are "the same event" (cleat-review's
-// finding on #2616). recordEventDeterministicID turns
-// (tenant, workflow, event_id) into the row's id and sets chainEvent.retry,
-// so a repeat lands on appendOnce's existing errAlreadyRecorded path -- the
-// same mechanism the async queue's own retry-after-timeout already relies on
-// (queue.go) -- and is reported as success without a second row. A caller
-// that omits EventID keeps the residual above exactly as described; this is
-// an escape hatch for the caller that wants it; the default is unchanged.
+// The one case this does NOT cover: CallContext built directly rather than
+// by the engine's PluginCall dispatch (cleattest, a plugin's own unit test,
+// an embedder that predates #2618) leaves RunID empty, and this function
+// falls back to no dedup at all -- the plain AtLeastOnce behaviour, matching
+// what every OTHER plugin host function still has today.
+//
+// # EventID: an explicit override, for a caller that wants its own key
+//
+// A caller who supplies EventID does not need the engine's step number at
+// all -- it already knows, from its own logic, which of ITS OWN calls are
+// "the same event" (cleat-review's finding on #2616). This is useful when
+// the same logical event could be triggered from different steps (a retry
+// loop inside the workflow itself, not a crash) or when a key stable across
+// a workflow definition's own step renumbering is wanted. recordEventDeterministicID
+// turns (tenant, workflow, event_id) into the row's id the same way; EventID
+// takes priority over the default step-based key when both are available.
 func (p *Plugin) recordEvent(ctx context.Context, inputJSON string) (string, error) {
 	if p.db == nil {
 		return "", fmt.Errorf("audit-log: record_event: no database")
@@ -173,15 +179,22 @@ func (p *Plugin) recordEvent(ctx context.Context, inputJSON string) (string, err
 		userID:   cc.WorkflowID,
 		metadata: details,
 	}
-	if input.EventID != "" {
+	switch {
+	case input.EventID != "":
 		ce.id = recordEventDeterministicID(tenantID, cc.WorkflowID, input.EventID)
+		ce.retry = true
+	case cc.RunID != "":
+		// The default path (cleat#2618): cc.RunID is empty only when
+		// CallContext was built directly rather than by the engine's
+		// PluginCall dispatch (see recordEvent's own doc comment).
+		ce.id = recordEventStepID(tenantID, cc.WorkflowID, cc.RunID, cc.Step)
 		ce.retry = true
 	}
 	if err := p.appendChained(ctx, ce); err != nil {
-		// A caller that supplied EventID and is seeing its own earlier
-		// success again (a retried host call, a replay reaching this point
-		// a second time some other way) is not a failure -- see
-		// recordEventDeterministicID's doc comment.
+		// Seeing a call's own earlier success again -- a crash-and-retry
+		// under the default step-based key, or a caller-supplied EventID
+		// repeated on purpose -- is not a failure. See recordEvent's own
+		// doc comment.
 		if errors.Is(err, errAlreadyRecorded) {
 			out, _ := json.Marshal(recordEventOutput{Recorded: true})
 			return string(out), nil
@@ -225,5 +238,37 @@ func recordEventDeterministicID(tenantID uuid.UUID, workflowID, eventID string) 
 	buf.WriteString(workflowID)
 	buf.WriteByte(0)
 	buf.WriteString(eventID)
+	return uuid.NewSHA1(uuid.Nil, buf.Bytes())
+}
+
+// recordEventStepID is the DEFAULT dedup key (cleat#2618), derived from the
+// engine's own (RunID, Step) rather than anything the caller supplies -- the
+// same shape engine.DurableCallIdempotencyKey uses for the ServiceCaller
+// path (workflowID, runID, step, NUL-separated), plus tenantID since this
+// produces a database row id rather than an opaque header value.
+//
+// recordEventStepIDNamespace is DELIBERATELY A DIFFERENT fixed prefix from
+// recordEventIDNamespace above, not a shared prefix with a "mode" tag glued
+// into the middle of the hashed material. Two derivations sharing one prefix
+// and differing only in how many NUL-separated parts follow it can collide
+// across modes: a crafted EventID equal to "<runID>\x00<step>" would hash
+// identically to the step-derived key for that exact (runID, step), because
+// NUL-separated concatenation cannot tell "one field containing a NUL" from
+// "two fields" apart -- the same ambiguity class DurableCallIdempotencyKey's
+// own separators exist to prevent, one level up. A wholly separate namespace
+// prefix removes the question rather than trusting no caller ever picks a
+// colliding EventID.
+const recordEventStepIDNamespace = "cleat-audit-record-event-step-v1\x00"
+
+func recordEventStepID(tenantID uuid.UUID, workflowID, runID string, step int) uuid.UUID {
+	var buf bytes.Buffer
+	buf.WriteString(recordEventStepIDNamespace)
+	buf.WriteString(tenantID.String())
+	buf.WriteByte(0)
+	buf.WriteString(workflowID)
+	buf.WriteByte(0)
+	buf.WriteString(runID)
+	buf.WriteByte(0)
+	buf.WriteString(strconv.Itoa(step))
 	return uuid.NewSHA1(uuid.Nil, buf.Bytes())
 }
