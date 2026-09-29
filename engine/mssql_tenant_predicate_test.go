@@ -233,8 +233,11 @@ var tenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "update workflow_instances set status = 'done', result = @p3, completed_at = sy",
 		Reason: scopedByCaller,
 	},
-	"mssql_lifecycle.go:failWorkflowOnce#9f6051527077": {
-		SQL:    "update workflow_instances set status = 'failed', error_msg = @p3, error_code =",
+	"mssql_lifecycle.go:failWorkflowOnce#adc152244274": {
+		SQL: "update workflow_instances set status = 'failed', error_msg = @p3, error_code =",
+		// Digest moved from #9f6051527077 when cleat#2520 changed query_state = @p6
+		// to query_state = COALESCE(@p6, query_state) -- the WHERE clause (id,
+		// assigned_to, generation) is unchanged, so the reason is unchanged too.
 		Reason: scopedByCaller,
 	},
 	"mssql_lifecycle.go:moveToDeadLetterQueueOnce#6e62fa0d74d4": {

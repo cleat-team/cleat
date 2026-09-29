@@ -323,7 +323,7 @@ func (e *Engine) executeWithBackend(
 			e.runDefers(context.Background(), wasmBytes, session.deferrals)
 		}
 		session.releaseHeldScopes(context.Background())
-		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution timed out", e.workflowID)
+		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, fmt.Errorf("host: workflow %s: execution timed out", e.workflowID)
 	}
 	if callErr != nil && session.suspendErr == nil {
 		// Non-suspend error (trap, panic, timeout, or cancellation).
@@ -356,7 +356,7 @@ func (e *Engine) executeWithBackend(
 		}
 		session.releaseHeldScopes(context.Background())
 		if guestCompleted {
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, session.classifyFailure(fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr))
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, session.classifyFailure(fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr))
 		}
 		if enriched := resolveWasmTrap(wasmBytes, callErr.Error()); enriched != "" {
 			// wasmTrapError, not fmt.Errorf("%s"): resolveWasmTrap returns an
@@ -366,12 +366,12 @@ func (e *Engine) executeWithBackend(
 			// opposite of what wasmTrapError.Unwrap was written for. Keeping
 			// the enriched text as the message and callErr as the cause gives
 			// both.
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, session.classifyFailure(&wasmTrapError{
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, session.classifyFailure(&wasmTrapError{
 				cause: callErr,
 				msg:   fmt.Sprintf("host: workflow %s: execution failed: %s", e.workflowID, enriched),
 			})
 		}
-		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, session.classifyFailure(fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr))
+		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, session.classifyFailure(fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, callErr))
 	}
 
 	// res may be nil here. Every error return in the wasmtime backend is
@@ -415,7 +415,7 @@ func (e *Engine) executeWithBackend(
 			}
 			newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState, priority)
 			if cnErr != nil {
-				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: continue_as_new handler failed: %w", e.workflowID, cnErr)
+				return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, fmt.Errorf("host: workflow %s: continue_as_new handler failed: %w", e.workflowID, cnErr)
 			}
 			susResult.ContinueAsNewHandled = true
 			susResult.NewRunID = newRunID
@@ -601,7 +601,7 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 				}
 				newRunID, cnErr := e.continueAsNewHandler(ctx, e.workflowID, e.workerID, int64(0), e.defName, e.defVersion, se.NewInput, newEvents, result, session.queryState, priority)
 				if cnErr != nil {
-					return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: continue_as_new handler failed: %w", e.workflowID, cnErr)
+					return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, fmt.Errorf("host: workflow %s: continue_as_new handler failed: %w", e.workflowID, cnErr)
 				}
 				susResult.ContinueAsNewHandled = true
 				susResult.NewRunID = newRunID
@@ -673,12 +673,12 @@ func (e *Engine) executeCompiled(ctx context.Context, compiled wazero.CompiledMo
 		if enriched := resolveWasmTrap(wasmBytes, err.Error()); enriched != "" {
 			// See the note at the other resolveWasmTrap site: %s dropped the
 			// cause and broke errors.Is/errors.As for every trap.
-			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, &wasmTrapError{
+			return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, &wasmTrapError{
 				cause: err,
 				msg:   fmt.Sprintf("host: workflow %s: execution failed: %s", e.workflowID, enriched),
 			}
 		}
-		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, nil, fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, err)
+		return "", stripCompactedEvents(session.history, compactedStep), nil, nil, session.queryState, fmt.Errorf("host: workflow %s: execution failed: %w", e.workflowID, err)
 	}
 
 	// Workflow completed successfully. Release any held scopes.
