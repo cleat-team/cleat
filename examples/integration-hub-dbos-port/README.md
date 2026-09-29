@@ -371,7 +371,7 @@ the flag's initialisation — none of them inside the `if` block itself, all
 of them load-bearing. Adding them moved cleat's host-runner row from 21 to
 **25**, from 120 to 124 against cleat's total. **That is not a trend, and
 this table does not claim one**: the correction two sentences earlier —
-442 vs. 136 collapsing to 120 vs. 140 — moved forty times as far in
+442 vs. 136 collapsing to 120 vs. 140 — moved far further in
 cleat's favour. The corrections found here have run in both directions;
 the result should not depend on which one a given round happens to be
 (cleat-review caught an earlier draft of this section implying otherwise,
@@ -392,8 +392,10 @@ of this paragraph attributed DBOS-isolated's larger jump to "comments" —
 `cloc`'s **code** column, which every number below is, does not count
 comments at all, so that reasoning could not have been right regardless of
 whether the comments existed (cleat-review caught this, and noted the same
-misattribution had already slipped through un-caught for `read-host-file`
-in #2621's own review of this table). The real, code-level comparison,
+*placement* asymmetry -- a real behaviour-test cost landing unevenly
+across this table's rows -- had already slipped through un-caught for
+`read-host-file` in #2621's own review of this table; the comments
+misattribution itself is new here). The real, code-level comparison,
 each side's dedicated test file against its base-commit self:
 `isolated-wedge.test.ts` **+50** code lines (72 → 122);
 `run-integration-hub-tenant-sandbox-scenario.sh` **+41** (198 → 239). Close
@@ -500,7 +502,7 @@ several separate claims, each real:**
    difference** — see the "fifth shape" paragraph above for the full
    correction. 130 vs. 200, tenant code + host runner + unit tests on both
    sides, up from 124 vs. 140 before cleat#2628's third tenant behaviour.
-   Almost all of that growth is DBOS-isolated's unit-tests row (50 → 122),
+   Almost all of that growth is DBOS-isolated's unit-tests row (72 → 122),
    and the like-for-like comparison is against cleat's e2e-harness row (198
    → 239, not summed into this total at all) — both are the SAME new
    behaviour's test code, at nearly the same code-line cost (+50 vs. +41),
@@ -533,8 +535,10 @@ several separate claims, each real:**
    `run-integration-hub-tenant-sandbox-scenario.sh` +41. The residual
    9-line difference is `isolated-wedge.test.ts` alone needing a
    result-sentinel mechanism (see "the fifth shape" above) that cleat's
-   HTTP-polling harness has no equivalent problem to solve. What actually
-   produced the 72-line jump in this row is that DBOS's cost landed in
+   HTTP-polling harness has no equivalent problem to solve. The row's full
+   72-line gap (122 − 50) is not this PR's doing on its own — 22 of it
+   predates cleat#2628, and only +50 is new. What turned that +50 into a
+   72-line gap in this ONE row is that DBOS's cost landed in
    **unit tests**, which this app total sums, while cleat's landed in
    **e2e harness**, which it does not — a placement difference, not a
    difference in how much each side had to write.
