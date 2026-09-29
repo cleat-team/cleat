@@ -73,11 +73,14 @@ cleat build --size-report ./my-workflow/
 ```
 
 This reads the compiled WASM binary and attributes its code section to packages.
-Real output, from `./testdata/basic/` on 2026-09-12:
+Real output, from `./testdata/basic/` on 2026-09-29. (The binary name changed from
+`cancel_order.wasm` to `order.wasm` -- cleat#2407 named it for the entry points'
+own source file rather than picking one entry point among the three this
+package declares.)
 
 ```
   ===== WASM Size Report =====
-  Binary: cancel_order.wasm (4.7 MB)
+  Binary: order.wasm (4.7 MB)
   Target: go
   Code section: 3.0 MB of 4.7 MB (64.5%)
 

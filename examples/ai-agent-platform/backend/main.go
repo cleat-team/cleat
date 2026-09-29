@@ -101,7 +101,7 @@ const approvalEventType = "agent.approval"
 // that posts 0 or posts 8 gets the same run.
 //
 // Duplicated rather than imported: the guest package is a WASM module
-// (run_agent.wasm) and this process only proxies for it, so linking
+// (agent.wasm) and this process only proxies for it, so linking
 // `aiagentplatform` into the server would put the workflow in the wrong binary.
 const (
 	defaultMaxSteps  = 8

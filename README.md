@@ -98,14 +98,15 @@ docker compose -f docker-compose.partner.yml up -d postgres
 #    (github.com/cleat-team/cleat) does not contain package
 #    github.com/cleat-team/cleat/out" (cleat#2473).
 ./bin/cleat build -o /tmp/cleat-build ./testdata/basic/
-# Wrote /tmp/cleat-build/cancel_order.wasm -- cleat build bundles every entry
-# point in the package (PlaceOrder, CancelOrder, LongRunning) into one module,
-# named after the first entry point it found. All three are still callable
-# from that one file; --entry-point at trigger time (step 7) picks one.
+# Wrote /tmp/cleat-build/order.wasm -- cleat build bundles every entry point
+# in the package (PlaceOrder, CancelOrder, LongRunning) into one module,
+# named after the SOURCE FILE they share (order.go), not any one entry point
+# (cleat#2407). All three are still callable from that one file;
+# --entry-point at trigger time (step 7) picks one.
 
 # 4. Deploy to your database. The owner DSN is correct here.
 ./bin/cleat deploy --db "$CLEAT_OWNER_DSN" \
-    --name place_order /tmp/cleat-build/cancel_order.wasm
+    --name place_order /tmp/cleat-build/order.wasm
 
 # 5. Give the worker a connection it will accept. It REFUSES a superuser DSN,
 #    because PostgreSQL never applies row-level security to a superuser. The

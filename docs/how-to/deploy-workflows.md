@@ -43,6 +43,12 @@ $ cleat build -o ./out ./examples/order/
   Embedded metadata: place_order v1 (ABI v1)
 ```
 
+The output filename is derived from the entry point's own SOURCE FILE, not
+the entry point function's name -- `place_order.wasm` here assumes the
+`PlaceOrder` entry point lives in a file called `place_order.go`. A function
+named `PlaceOrder` living in, say, `order.go` produces `order.wasm` instead
+(cleat#2407). `--name` on `deploy` is independent of either.
+
 ## Step 2: Deploy the WASM binary
 
 Use `cleat deploy` to insert the built WASM binary into the `workflow_defs` database table:

@@ -84,6 +84,10 @@ Example:
 
     cleat deploy --db "postgres://..." --name place_order ./out/place_order.wasm
 
+`./out/place_order.wasm` here assumes the entry point's own source file is
+`place_order.go` -- the build names the artifact for that file, not for the
+entry point function (docs/how-to/deploy-workflows.md, and cleat#2407).
+
 ---
 
 ## dev
