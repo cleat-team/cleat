@@ -130,3 +130,87 @@ func TestQueryStateAdvancesAcrossSegments(t *testing.T) {
 		})
 	}
 }
+
+// TestFailWorkflowNilQueryStatePreservesThePriorSegment is cleat#2520's
+// FailWorkflow half: a caller with nothing new to say (queryState == nil,
+// which is what a panic recovery or a pre-flight failure -- one that never
+// ran a replay -- legitimately has) must not erase what an earlier suspending
+// segment published. Before this, FailWorkflow's UPDATE set
+// query_state = marshalQueryState(nil), which is the literal string "{}", so
+// every failed run's published state was wiped regardless of why it failed.
+//
+// The companion case -- FailWorkflow given an ACTUAL map -- is asserted in
+// the same test so a fix that stops writing anything at all (rather than
+// distinguishing nil from "nothing new") cannot pass silently.
+func TestFailWorkflowNilQueryStatePreservesThePriorSegment(t *testing.T) {
+	for _, backend := range registeredBackends {
+		backend := backend
+		t.Run(backend.Name(), func(t *testing.T) {
+			store, teardown := backend.Setup(t)
+			defer teardown()
+			setupTestData(t, store)
+			truncateAll(t, store)
+			ctx := context.Background()
+
+			id, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "qs-fail-nil", DefaultTenantUUID, 0)
+			if err != nil {
+				t.Fatalf("StartNewRun: %v", err)
+			}
+			wf, err := store.ClaimWorkflow(ctx, "worker-1")
+			if err != nil || wf == nil {
+				t.Fatalf("ClaimWorkflow: %v (wf=%v)", err, wf)
+			}
+
+			published := map[string]string{"phase": "charging"}
+			if err := store.FinalizeWorkflowSegment(ctx, id, "worker-1", wf.Generation, nil, "ready",
+				"", "", "", published, time.Now().Add(-time.Minute)); err != nil {
+				t.Fatalf("FinalizeWorkflowSegment(ready): %v", err)
+			}
+
+			wf2, err := store.ClaimWorkflow(ctx, "worker-2")
+			if err != nil || wf2 == nil {
+				t.Fatalf("ClaimWorkflow (segment 2): %v (wf=%v)", err, wf2)
+			}
+			// The nil here is the exact shape of the panic and pre-flight
+			// callers in cmd/cleat-worker/setup.go -- no replay ran, so there
+			// is nothing new to report.
+			if err := store.FailWorkflow(ctx, id, "worker-2", wf2.Generation, "boom", "unknown", "op", nil); err != nil {
+				t.Fatalf("FailWorkflow(nil): %v", err)
+			}
+
+			got, err := store.GetQueryState(ctx, id, "phase")
+			if err != nil {
+				t.Fatalf("GetQueryState after FailWorkflow(nil): %v", err)
+			}
+			if got != "charging" {
+				t.Errorf("GetQueryState(phase) = %q after FailWorkflow(nil), want %q preserved from "+
+					"the prior segment -- a caller with nothing new to say must not erase what was there",
+					got, "charging")
+			}
+
+			// Companion: a SECOND run, failed with a real map, must still be
+			// written -- nil is the only value that means "leave it alone".
+			id2, _, err := store.StartNewRun(ctx, "", "test-workflow", 1, json.RawMessage(`{}`), "qs-fail-real", DefaultTenantUUID, 0)
+			if err != nil {
+				t.Fatalf("StartNewRun (companion): %v", err)
+			}
+			wf3, err := store.ClaimWorkflow(ctx, "worker-3")
+			if err != nil || wf3 == nil {
+				t.Fatalf("ClaimWorkflow (companion): %v (wf=%v)", err, wf3)
+			}
+			if err := store.FailWorkflow(ctx, id2, "worker-3", wf3.Generation, "boom", "unknown", "op",
+				map[string]string{"phase": "failed-with-state"}); err != nil {
+				t.Fatalf("FailWorkflow(real map): %v", err)
+			}
+			got2, err := store.GetQueryState(ctx, id2, "phase")
+			if err != nil {
+				t.Fatalf("GetQueryState after FailWorkflow(real map): %v", err)
+			}
+			if got2 != "failed-with-state" {
+				t.Errorf("GetQueryState(phase) = %q after FailWorkflow with a real map, want %q written -- "+
+					"a fix that stops writing anything on failure would pass the nil case above too",
+					got2, "failed-with-state")
+			}
+		})
+	}
+}

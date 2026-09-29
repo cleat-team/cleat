@@ -890,7 +890,7 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 	}
 	defer tx.Rollback()
 
-	qsJSON := marshalQueryState(queryState)
+	qsParam := queryStateUpdateParam(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed',
@@ -899,9 +899,9 @@ func (s *PostgresStore) FailWorkflow(ctx context.Context, workflowID, workerID s
 		    error_op = $5,
 		    completed_at = now(),
 		    completed_by = assigned_to, assigned_to = NULL,
-		    query_state = $6
+		    query_state = COALESCE($6::jsonb, query_state)
 		WHERE id = $1 AND assigned_to = $2 AND generation = $7
-	`, workflowID, workerID, errorMsg, errorCode, errorOp, string(qsJSON), generation)
+	`, workflowID, workerID, errorMsg, errorCode, errorOp, qsParam, generation)
 	if err != nil {
 		return err
 	}

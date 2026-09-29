@@ -656,7 +656,7 @@ func (s *MySQLStore) FailWorkflow(ctx context.Context, workflowID, workerID stri
 	}
 	defer tx.Rollback()
 
-	qsJSON := marshalQueryState(queryState)
+	qsParam := queryStateUpdateParam(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed',
@@ -665,9 +665,9 @@ func (s *MySQLStore) FailWorkflow(ctx context.Context, workflowID, workerID stri
 		    error_op = ?,
 		    completed_at = NOW(6),
 		    completed_by = assigned_to, assigned_to = NULL,
-		    query_state = ?
+		    query_state = COALESCE(?, query_state)
 		WHERE id = ? AND assigned_to = ? AND tenant_id = ? AND generation = ?
-	`, errorMsg, errorCode, errorOp, qsJSON, workflowID, workerID, s.tenantID, generation)
+	`, errorMsg, errorCode, errorOp, qsParam, workflowID, workerID, s.tenantID, generation)
 	if err != nil {
 		return err
 	}

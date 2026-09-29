@@ -1011,7 +1011,7 @@ func (s *MSSQLStore) failWorkflowOnce(ctx context.Context, workflowID, workerID 
 	}
 	defer tx.Rollback()
 
-	qsJSON := marshalQueryState(queryState)
+	qsParam := queryStateUpdateParam(queryState)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = 'failed',
@@ -1020,9 +1020,9 @@ func (s *MSSQLStore) failWorkflowOnce(ctx context.Context, workflowID, workerID 
 		    error_op = @p5,
 		    completed_at = SYSUTCDATETIME(),
 		    completed_by = assigned_to, assigned_to = NULL,
-		    query_state = @p6
+		    query_state = COALESCE(@p6, query_state)
 		WHERE id = @p1 AND assigned_to = @p2 AND generation = @p7
-	`, workflowID, workerID, errorMsg, errorCode, errorOp, string(qsJSON), generation)
+	`, workflowID, workerID, errorMsg, errorCode, errorOp, qsParam, generation)
 	if err != nil {
 		return err
 	}
