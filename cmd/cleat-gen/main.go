@@ -89,9 +89,12 @@ func main() {
 	switch command {
 	case "client":
 		runClient(os.Args[2:])
+	case "plugin-client":
+		runPluginClient(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
 		fmt.Fprintf(os.Stderr, "Usage: cleat-gen client [-o <file>] [-service <name>] [-p <package>] <spec-dir>\n")
+		fmt.Fprintf(os.Stderr, "       cleat-gen plugin-client -plugin <name> [-o <file>] [-p <package>] <plugin-package>\n")
 		os.Exit(1)
 	}
 }

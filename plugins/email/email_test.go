@@ -398,6 +398,10 @@ func (r *fakeFuncRegistry) Has(name string) bool {
 	return ok
 }
 
+func (r *fakeFuncRegistry) Get(name string) plugin.PluginFunc {
+	return r.funcs[name]
+}
+
 func TestRegisterHostFunctions(t *testing.T) {
 	p := &Plugin{}
 	reg := newFakeFuncRegistry()
@@ -450,31 +454,26 @@ func TestSend(t *testing.T) {
 
 	p := newTestPlugin(t)
 
-	input := map[string]any{
-		"to":        "recipient@example.com",
-		"subject":   "Hello from cleat",
-		"body_html": "<h1>Hello</h1>",
-		"from":      "sender@example.com",
+	input := SendInput{
+		To:       "recipient@example.com",
+		Subject:  "Hello from cleat",
+		BodyHTML: "<h1>Hello</h1>",
+		From:     "sender@example.com",
 	}
-	inputJSON, _ := json.Marshal(input)
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	output, err := p.send(ctx, string(inputJSON))
+	output, err := p.send(ctx, input)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
-	var result map[string]any
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to decode output: %v", err)
+	if output.MessageID != "test-msg-123" {
+		t.Errorf("expected message_id 'test-msg-123', got %v", output.MessageID)
 	}
-	if result["message_id"] != "test-msg-123" {
-		t.Errorf("expected message_id 'test-msg-123', got %v", result["message_id"])
-	}
-	if result["status"] != "sent" {
-		t.Errorf("expected status 'sent', got %v", result["status"])
+	if output.Status != "sent" {
+		t.Errorf("expected status 'sent', got %v", output.Status)
 	}
 }
 
@@ -489,27 +488,24 @@ func TestSendWithBodyText(t *testing.T) {
 
 	p := newTestPlugin(t)
 
-	input := map[string]any{
-		"to":        "user@example.com",
-		"subject":   "Test with text",
-		"body_html": "<p>HTML content</p>",
-		"body_text": "Plain text content",
-		"from":      "sender@example.com",
+	input := SendInput{
+		To:       "user@example.com",
+		Subject:  "Test with text",
+		BodyHTML: "<p>HTML content</p>",
+		BodyText: "Plain text content",
+		From:     "sender@example.com",
 	}
-	inputJSON, _ := json.Marshal(input)
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	output, err := p.send(ctx, string(inputJSON))
+	output, err := p.send(ctx, input)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
-	var result map[string]any
-	json.Unmarshal([]byte(output), &result)
-	if result["message_id"] != "msg-with-text" {
-		t.Errorf("expected message_id 'msg-with-text', got %v", result["message_id"])
+	if output.MessageID != "msg-with-text" {
+		t.Errorf("expected message_id 'msg-with-text', got %v", output.MessageID)
 	}
 }
 
@@ -523,28 +519,25 @@ func TestSendWithCCBCC(t *testing.T) {
 
 	p := newTestPlugin(t)
 
-	input := map[string]any{
-		"to":        "primary@example.com",
-		"subject":   "CC/BCC test",
-		"body_html": "<p>Hello</p>",
-		"from":      "sender@example.com",
-		"cc":        []string{"cc@example.com"},
-		"bcc":       []string{"bcc@example.com"},
+	input := SendInput{
+		To:       "primary@example.com",
+		Subject:  "CC/BCC test",
+		BodyHTML: "<p>Hello</p>",
+		From:     "sender@example.com",
+		CC:       []string{"cc@example.com"},
+		BCC:      []string{"bcc@example.com"},
 	}
-	inputJSON, _ := json.Marshal(input)
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	output, err := p.send(ctx, string(inputJSON))
+	output, err := p.send(ctx, input)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
-	var result map[string]any
-	json.Unmarshal([]byte(output), &result)
-	if result["message_id"] != "msg-cc-bcc" {
-		t.Errorf("expected message_id 'msg-cc-bcc', got %v", result["message_id"])
+	if output.MessageID != "msg-cc-bcc" {
+		t.Errorf("expected message_id 'msg-cc-bcc', got %v", output.MessageID)
 	}
 }
 
@@ -558,19 +551,18 @@ func TestSendWithReplyTo(t *testing.T) {
 
 	p := newTestPlugin(t)
 
-	input := map[string]any{
-		"to":        "user@example.com",
-		"subject":   "Reply test",
-		"body_html": "<p>Reply to me</p>",
-		"from":      "sender@example.com",
-		"reply_to":  "support@example.com",
+	input := SendInput{
+		To:       "user@example.com",
+		Subject:  "Reply test",
+		BodyHTML: "<p>Reply to me</p>",
+		From:     "sender@example.com",
+		ReplyTo:  "support@example.com",
 	}
-	inputJSON, _ := json.Marshal(input)
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	_, err := p.send(ctx, string(inputJSON))
+	_, err := p.send(ctx, input)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
@@ -588,25 +580,22 @@ func TestSendWithDefaultFrom(t *testing.T) {
 	p := newTestPlugin(t)
 	p.defaultFrom = "default@example.com"
 
-	input := map[string]any{
-		"to":        "user@example.com",
-		"subject":   "Default from test",
-		"body_html": "<p>Hello</p>",
+	input := SendInput{
+		To:       "user@example.com",
+		Subject:  "Default from test",
+		BodyHTML: "<p>Hello</p>",
 	}
-	inputJSON, _ := json.Marshal(input)
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	output, err := p.send(ctx, string(inputJSON))
+	output, err := p.send(ctx, input)
 	if err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
-	var result map[string]any
-	json.Unmarshal([]byte(output), &result)
-	if result["message_id"] != "default-from-msg" {
-		t.Errorf("expected message_id 'default-from-msg', got %v", result["message_id"])
+	if output.MessageID != "default-from-msg" {
+		t.Errorf("expected message_id 'default-from-msg', got %v", output.MessageID)
 	}
 }
 
@@ -614,17 +603,29 @@ func TestSendWithDefaultFrom(t *testing.T) {
 
 func TestSendErrorPaths_MissingTenant(t *testing.T) {
 	p := newTestPlugin(t)
-	_, err := p.send(context.Background(),
-		`{"to":"user@example.com","subject":"test","body_html":"<p>test</p>","from":"from@example.com"}`)
+	_, err := p.send(context.Background(), SendInput{
+		To: "user@example.com", Subject: "test", BodyHTML: "<p>test</p>", From: "from@example.com",
+	})
 	if err == nil || !strings.Contains(err.Error(), "no tenant context") {
 		t.Fatalf("expected no tenant context error, got: %v", err)
 	}
 }
 
+// TestSendErrorPaths_InvalidJSON exercises the real call site a workflow
+// reaches -- the registered PluginFunc, which does its own JSON
+// unmarshaling via plugin.RegisterTyped -- rather than p.send directly.
+// send itself (cleat#2626) no longer parses JSON; that moved into
+// RegisterTyped's wrapper, tested on its own merits in
+// plugin/typed_test.go. This proves email's own registration still rejects
+// malformed input end-to-end.
 func TestSendErrorPaths_InvalidJSON(t *testing.T) {
 	p := newTestPlugin(t)
+	reg := newFakeFuncRegistry()
+	if err := p.RegisterHostFunctions(reg); err != nil {
+		t.Fatalf("RegisterHostFunctions: %v", err)
+	}
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
-	_, err := p.send(ctx, `not json`)
+	_, err := reg.Get("send")(ctx, `not json`)
 	if err == nil || !strings.Contains(err.Error(), "invalid input") {
 		t.Fatalf("expected invalid input error, got: %v", err)
 	}
@@ -633,7 +634,7 @@ func TestSendErrorPaths_InvalidJSON(t *testing.T) {
 func TestSendErrorPaths_MissingTo(t *testing.T) {
 	p := newTestPlugin(t)
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
-	_, err := p.send(ctx, `{"subject":"test","body_html":"<p>test</p>","from":"from@example.com"}`)
+	_, err := p.send(ctx, SendInput{Subject: "test", BodyHTML: "<p>test</p>", From: "from@example.com"})
 	if err == nil || !strings.Contains(err.Error(), "to is required") {
 		t.Fatalf("expected to required error, got: %v", err)
 	}
@@ -642,7 +643,7 @@ func TestSendErrorPaths_MissingTo(t *testing.T) {
 func TestSendErrorPaths_MissingSubject(t *testing.T) {
 	p := newTestPlugin(t)
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
-	_, err := p.send(ctx, `{"to":"user@example.com","body_html":"<p>test</p>","from":"from@example.com"}`)
+	_, err := p.send(ctx, SendInput{To: "user@example.com", BodyHTML: "<p>test</p>", From: "from@example.com"})
 	if err == nil || !strings.Contains(err.Error(), "subject is required") {
 		t.Fatalf("expected subject required error, got: %v", err)
 	}
@@ -651,7 +652,7 @@ func TestSendErrorPaths_MissingSubject(t *testing.T) {
 func TestSendErrorPaths_MissingBodyHTML(t *testing.T) {
 	p := newTestPlugin(t)
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
-	_, err := p.send(ctx, `{"to":"user@example.com","subject":"test","from":"from@example.com"}`)
+	_, err := p.send(ctx, SendInput{To: "user@example.com", Subject: "test", From: "from@example.com"})
 	if err == nil || !strings.Contains(err.Error(), "body_html is required") {
 		t.Fatalf("expected body_html required error, got: %v", err)
 	}
@@ -660,7 +661,7 @@ func TestSendErrorPaths_MissingBodyHTML(t *testing.T) {
 func TestSendErrorPaths_MissingFrom(t *testing.T) {
 	p := newTestPlugin(t)
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
-	_, err := p.send(ctx, `{"to":"user@example.com","subject":"test","body_html":"<p>test</p>"}`)
+	_, err := p.send(ctx, SendInput{To: "user@example.com", Subject: "test", BodyHTML: "<p>test</p>"})
 	if err == nil || !strings.Contains(err.Error(), "from is required") {
 		t.Fatalf("expected from required error, got: %v", err)
 	}
@@ -674,18 +675,17 @@ func TestSendErrorPaths_APIError(t *testing.T) {
 
 	p := newTestPlugin(t)
 
-	input := map[string]any{
-		"to":        "user@example.com",
-		"subject":   "test",
-		"body_html": "<p>test</p>",
-		"from":      "from@example.com",
+	input := SendInput{
+		To:       "user@example.com",
+		Subject:  "test",
+		BodyHTML: "<p>test</p>",
+		From:     "from@example.com",
 	}
-	inputJSON, _ := json.Marshal(input)
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	_, err := p.send(ctx, string(inputJSON))
+	_, err := p.send(ctx, input)
 	if err == nil || !strings.Contains(err.Error(), "SendGrid returned") {
 		t.Fatalf("expected SendGrid error, got: %v", err)
 	}
@@ -704,34 +704,29 @@ func TestSendTemplate(t *testing.T) {
 
 	p := newTestPlugin(t)
 
-	input := map[string]any{
-		"to":          "user@example.com",
-		"template_id": "d-abc123def456",
-		"template_data": map[string]any{
+	input := SendTemplateInput{
+		To:         "user@example.com",
+		TemplateID: "d-abc123def456",
+		TemplateData: map[string]any{
 			"name": "Alice",
 			"link": "https://example.com",
 		},
-		"from": "sender@example.com",
+		From: "sender@example.com",
 	}
-	inputJSON, _ := json.Marshal(input)
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	output, err := p.sendTemplate(ctx, string(inputJSON))
+	output, err := p.sendTemplate(ctx, input)
 	if err != nil {
 		t.Fatalf("sendTemplate: %v", err)
 	}
 
-	var result map[string]any
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to decode output: %v", err)
+	if output.MessageID != "template-msg-456" {
+		t.Errorf("expected message_id 'template-msg-456', got %v", output.MessageID)
 	}
-	if result["message_id"] != "template-msg-456" {
-		t.Errorf("expected message_id 'template-msg-456', got %v", result["message_id"])
-	}
-	if result["status"] != "sent" {
-		t.Errorf("expected status 'sent', got %v", result["status"])
+	if output.Status != "sent" {
+		t.Errorf("expected status 'sent', got %v", output.Status)
 	}
 }
 
@@ -744,21 +739,20 @@ func TestSendTemplateWithReplyTo(t *testing.T) {
 
 	p := newTestPlugin(t)
 
-	input := map[string]any{
-		"to":          "user@example.com",
-		"template_id": "d-abc123def456",
-		"template_data": map[string]any{
+	input := SendTemplateInput{
+		To:         "user@example.com",
+		TemplateID: "d-abc123def456",
+		TemplateData: map[string]any{
 			"name": "Bob",
 		},
-		"from":     "sender@example.com",
-		"reply_to": "support@example.com",
+		From:    "sender@example.com",
+		ReplyTo: "support@example.com",
 	}
-	inputJSON, _ := json.Marshal(input)
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	_, err := p.sendTemplate(ctx, string(inputJSON))
+	_, err := p.sendTemplate(ctx, input)
 	if err != nil {
 		t.Fatalf("sendTemplate: %v", err)
 	}
@@ -774,19 +768,18 @@ func TestSendTemplateWithDefaultFrom(t *testing.T) {
 	p := newTestPlugin(t)
 	p.defaultFrom = "default@example.com"
 
-	input := map[string]any{
-		"to":          "user@example.com",
-		"template_id": "d-xyz789",
-		"template_data": map[string]any{
+	input := SendTemplateInput{
+		To:         "user@example.com",
+		TemplateID: "d-xyz789",
+		TemplateData: map[string]any{
 			"name": "Carol",
 		},
 	}
-	inputJSON, _ := json.Marshal(input)
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	_, err := p.sendTemplate(ctx, string(inputJSON))
+	_, err := p.sendTemplate(ctx, input)
 	if err != nil {
 		t.Fatalf("sendTemplate: %v", err)
 	}
@@ -796,17 +789,25 @@ func TestSendTemplateWithDefaultFrom(t *testing.T) {
 
 func TestSendTemplateErrorPaths_MissingTenant(t *testing.T) {
 	p := newTestPlugin(t)
-	_, err := p.sendTemplate(context.Background(),
-		`{"to":"user@example.com","template_id":"d-abc","from":"from@example.com"}`)
+	_, err := p.sendTemplate(context.Background(), SendTemplateInput{
+		To: "user@example.com", TemplateID: "d-abc", From: "from@example.com",
+	})
 	if err == nil || !strings.Contains(err.Error(), "no tenant context") {
 		t.Fatalf("expected no tenant context error, got: %v", err)
 	}
 }
 
+// TestSendTemplateErrorPaths_InvalidJSON: see TestSendErrorPaths_InvalidJSON
+// -- JSON validation now happens in RegisterTyped's wrapper, so this must
+// go through the registered PluginFunc rather than p.sendTemplate directly.
 func TestSendTemplateErrorPaths_InvalidJSON(t *testing.T) {
 	p := newTestPlugin(t)
+	reg := newFakeFuncRegistry()
+	if err := p.RegisterHostFunctions(reg); err != nil {
+		t.Fatalf("RegisterHostFunctions: %v", err)
+	}
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
-	_, err := p.sendTemplate(ctx, `not json`)
+	_, err := reg.Get("send_template")(ctx, `not json`)
 	if err == nil || !strings.Contains(err.Error(), "invalid input") {
 		t.Fatalf("expected invalid input error, got: %v", err)
 	}
@@ -815,7 +816,7 @@ func TestSendTemplateErrorPaths_InvalidJSON(t *testing.T) {
 func TestSendTemplateErrorPaths_MissingTo(t *testing.T) {
 	p := newTestPlugin(t)
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
-	_, err := p.sendTemplate(ctx, `{"template_id":"d-abc","from":"from@example.com"}`)
+	_, err := p.sendTemplate(ctx, SendTemplateInput{TemplateID: "d-abc", From: "from@example.com"})
 	if err == nil || !strings.Contains(err.Error(), "to is required") {
 		t.Fatalf("expected to required error, got: %v", err)
 	}
@@ -824,7 +825,7 @@ func TestSendTemplateErrorPaths_MissingTo(t *testing.T) {
 func TestSendTemplateErrorPaths_MissingTemplateID(t *testing.T) {
 	p := newTestPlugin(t)
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
-	_, err := p.sendTemplate(ctx, `{"to":"user@example.com","from":"from@example.com"}`)
+	_, err := p.sendTemplate(ctx, SendTemplateInput{To: "user@example.com", From: "from@example.com"})
 	if err == nil || !strings.Contains(err.Error(), "template_id is required") {
 		t.Fatalf("expected template_id required error, got: %v", err)
 	}
@@ -833,7 +834,7 @@ func TestSendTemplateErrorPaths_MissingTemplateID(t *testing.T) {
 func TestSendTemplateErrorPaths_MissingFrom(t *testing.T) {
 	p := newTestPlugin(t)
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
-	_, err := p.sendTemplate(ctx, `{"to":"user@example.com","template_id":"d-abc"}`)
+	_, err := p.sendTemplate(ctx, SendTemplateInput{To: "user@example.com", TemplateID: "d-abc"})
 	if err == nil || !strings.Contains(err.Error(), "from is required") {
 		t.Fatalf("expected from required error, got: %v", err)
 	}
@@ -847,18 +848,17 @@ func TestSendTemplateErrorPaths_APIError(t *testing.T) {
 
 	p := newTestPlugin(t)
 
-	input := map[string]any{
-		"to":            "user@example.com",
-		"template_id":   "d-invalid",
-		"template_data": map[string]any{},
-		"from":          "from@example.com",
+	input := SendTemplateInput{
+		To:           "user@example.com",
+		TemplateID:   "d-invalid",
+		TemplateData: map[string]any{},
+		From:         "from@example.com",
 	}
-	inputJSON, _ := json.Marshal(input)
 
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	_, err := p.sendTemplate(ctx, string(inputJSON))
+	_, err := p.sendTemplate(ctx, input)
 	if err == nil || !strings.Contains(err.Error(), "SendGrid returned") {
 		t.Fatalf("expected SendGrid error, got: %v", err)
 	}
@@ -885,26 +885,18 @@ func TestCheckStatus(t *testing.T) {
 		Transport: &testTransport{baseURL: ts.URL, next: http.DefaultTransport},
 	}
 
-	input := map[string]any{"message_id": "test-msg-123"}
-	inputJSON, _ := json.Marshal(input)
-
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	output, err := p.checkStatus(ctx, string(inputJSON))
+	output, err := p.checkStatus(ctx, CheckStatusInput{MessageID: "test-msg-123"})
 	if err != nil {
 		t.Fatalf("checkStatus: %v", err)
 	}
 
-	var result map[string]any
-	if err := json.Unmarshal([]byte(output), &result); err != nil {
-		t.Fatalf("failed to decode output: %v", err)
+	if output.Status != "delivered" {
+		t.Errorf("expected status 'delivered', got %v", output.Status)
 	}
-	if result["status"] != "delivered" {
-		t.Errorf("expected status 'delivered', got %v", result["status"])
-	}
-	events, ok := result["events"].([]any)
-	if !ok || len(events) == 0 {
+	if len(output.Events) == 0 {
 		t.Error("expected at least one event")
 	}
 }
@@ -926,20 +918,15 @@ func TestCheckStatusMessageFoundWithOpens(t *testing.T) {
 		Transport: &testTransport{baseURL: ts.URL, next: http.DefaultTransport},
 	}
 
-	input := map[string]any{"message_id": "msg-opened"}
-	inputJSON, _ := json.Marshal(input)
-
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	output, err := p.checkStatus(ctx, string(inputJSON))
+	output, err := p.checkStatus(ctx, CheckStatusInput{MessageID: "msg-opened"})
 	if err != nil {
 		t.Fatalf("checkStatus: %v", err)
 	}
-	var result map[string]any
-	json.Unmarshal([]byte(output), &result)
-	if result["status"] != "opened" {
-		t.Errorf("expected status 'opened', got %v", result["status"])
+	if output.Status != "opened" {
+		t.Errorf("expected status 'opened', got %v", output.Status)
 	}
 }
 
@@ -952,20 +939,15 @@ func TestCheckStatusMessageNotFound(t *testing.T) {
 		Transport: &testTransport{baseURL: ts.URL, next: http.DefaultTransport},
 	}
 
-	input := map[string]any{"message_id": "nonexistent"}
-	inputJSON, _ := json.Marshal(input)
-
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	output, err := p.checkStatus(ctx, string(inputJSON))
+	output, err := p.checkStatus(ctx, CheckStatusInput{MessageID: "nonexistent"})
 	if err != nil {
 		t.Fatalf("checkStatus: %v", err)
 	}
-	var result map[string]any
-	json.Unmarshal([]byte(output), &result)
-	if result["status"] != "unknown" {
-		t.Errorf("expected status 'unknown', got %v", result["status"])
+	if output.Status != "unknown" {
+		t.Errorf("expected status 'unknown', got %v", output.Status)
 	}
 }
 
@@ -979,20 +961,15 @@ func TestCheckStatusAPINotAvailable(t *testing.T) {
 		Transport: &testTransport{baseURL: ts.URL, next: http.DefaultTransport},
 	}
 
-	input := map[string]any{"message_id": "test-msg"}
-	inputJSON, _ := json.Marshal(input)
-
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	output, err := p.checkStatus(ctx, string(inputJSON))
+	output, err := p.checkStatus(ctx, CheckStatusInput{MessageID: "test-msg"})
 	if err != nil {
 		t.Fatalf("checkStatus: %v", err)
 	}
-	var result map[string]any
-	json.Unmarshal([]byte(output), &result)
-	if result["status"] != "sent" {
-		t.Errorf("expected best-effort status 'sent', got %v", result["status"])
+	if output.Status != "sent" {
+		t.Errorf("expected best-effort status 'sent', got %v", output.Status)
 	}
 }
 
@@ -1006,20 +983,15 @@ func TestCheckStatusAPINotFound(t *testing.T) {
 		Transport: &testTransport{baseURL: ts.URL, next: http.DefaultTransport},
 	}
 
-	input := map[string]any{"message_id": "test-msg"}
-	inputJSON, _ := json.Marshal(input)
-
 	callCtx := &plugin.CallContext{TenantID: testTenantID, WorkflowID: "test-workflow"}
 	ctx := plugin.WithCallContext(context.Background(), callCtx)
 
-	output, err := p.checkStatus(ctx, string(inputJSON))
+	output, err := p.checkStatus(ctx, CheckStatusInput{MessageID: "test-msg"})
 	if err != nil {
 		t.Fatalf("checkStatus: %v", err)
 	}
-	var result map[string]any
-	json.Unmarshal([]byte(output), &result)
-	if result["status"] != "sent" {
-		t.Errorf("expected best-effort status 'sent', got %v", result["status"])
+	if output.Status != "sent" {
+		t.Errorf("expected best-effort status 'sent', got %v", output.Status)
 	}
 }
 
@@ -1027,16 +999,23 @@ func TestCheckStatusAPINotFound(t *testing.T) {
 
 func TestCheckStatusErrorPaths_MissingTenant(t *testing.T) {
 	p := newTestPlugin(t)
-	_, err := p.checkStatus(context.Background(), `{"message_id":"test-msg"}`)
+	_, err := p.checkStatus(context.Background(), CheckStatusInput{MessageID: "test-msg"})
 	if err == nil || !strings.Contains(err.Error(), "no tenant context") {
 		t.Fatalf("expected no tenant context error, got: %v", err)
 	}
 }
 
+// TestCheckStatusErrorPaths_InvalidJSON: see TestSendErrorPaths_InvalidJSON
+// -- JSON validation now happens in RegisterTyped's wrapper, so this must
+// go through the registered PluginFunc rather than p.checkStatus directly.
 func TestCheckStatusErrorPaths_InvalidJSON(t *testing.T) {
 	p := newTestPlugin(t)
+	reg := newFakeFuncRegistry()
+	if err := p.RegisterHostFunctions(reg); err != nil {
+		t.Fatalf("RegisterHostFunctions: %v", err)
+	}
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
-	_, err := p.checkStatus(ctx, `not json`)
+	_, err := reg.Get("check_status")(ctx, `not json`)
 	if err == nil || !strings.Contains(err.Error(), "invalid input") {
 		t.Fatalf("expected invalid input error, got: %v", err)
 	}
@@ -1045,7 +1024,7 @@ func TestCheckStatusErrorPaths_InvalidJSON(t *testing.T) {
 func TestCheckStatusErrorPaths_MissingMessageID(t *testing.T) {
 	p := newTestPlugin(t)
 	ctx := plugin.WithCallContext(context.Background(), &plugin.CallContext{TenantID: testTenantID})
-	_, err := p.checkStatus(ctx, `{}`)
+	_, err := p.checkStatus(ctx, CheckStatusInput{})
 	if err == nil || !strings.Contains(err.Error(), "message_id is required") {
 		t.Fatalf("expected message_id required error, got: %v", err)
 	}

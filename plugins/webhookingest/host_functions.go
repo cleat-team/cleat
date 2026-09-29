@@ -19,7 +19,7 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	if scope == nil {
 		return fmt.Errorf("webhook-ingest: nil function registry")
 	}
-	if err := scope.Register(plugin.FuncOptions{
+	if err := plugin.RegisterTyped(scope, plugin.FuncOptions{
 		Name: "await_webhook",
 		// NEITHER, same shape as eventtriggers.await_event: an await over
 		// mutable state, consuming from a queue of deliveries. cleat#1318.
@@ -32,13 +32,21 @@ func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 }
 
 // ---- Input/output types ----
+//
+// Exported (cleat#2626): these are the Req/Resp types a
+// plugin.RegisterTyped call site publishes, and cmd/cleat-gen plugin-client
+// reads them off this real registration -- never a hand-maintained
+// manifest -- to generate a typed caller-side client. An unexported type
+// here would type-check fine but be unusable from the generated client's
+// own callers, so the generator refuses one rather than emitting a client
+// nobody outside this package can call.
 
-type awaitWebhookInput struct {
+type AwaitWebhookInput struct {
 	SourceID  string `json:"source_id"`
 	EventType string `json:"event_type,omitempty"`
 }
 
-type awaitWebhookOutput struct {
+type AwaitWebhookOutput struct {
 	Found      bool            `json:"found"`
 	ID         string          `json:"id,omitempty"`
 	EventType  string          `json:"event_type,omitempty"`
@@ -69,15 +77,10 @@ type awaitWebhookOutput struct {
 // gone quiet rather than been deleted. There is no signal here that the
 // source was deleted rather than merely idle; a caller that needs to
 // distinguish the two has to check GET /ingest/sources/{id} itself.
-func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, error) {
+func (p *Plugin) awaitWebhook(ctx context.Context, input AwaitWebhookInput) (AwaitWebhookOutput, error) {
 	cc := plugin.CallContextFromContext(ctx)
 	if cc == nil || cc.TenantID == "" {
-		return "", fmt.Errorf("webhook-ingest: no tenant context")
-	}
-
-	var input awaitWebhookInput
-	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
-		return "", fmt.Errorf("webhook-ingest: invalid input: %w", err)
+		return AwaitWebhookOutput{}, fmt.Errorf("webhook-ingest: no tenant context")
 	}
 
 	// Parse source_id if provided.
@@ -86,7 +89,7 @@ func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, er
 		var err error
 		sourceID, err = uuid.Parse(input.SourceID)
 		if err != nil {
-			return "", fmt.Errorf("webhook-ingest: invalid source_id: %w", err)
+			return AwaitWebhookOutput{}, fmt.Errorf("webhook-ingest: invalid source_id: %w", err)
 		}
 	}
 
@@ -138,12 +141,10 @@ func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, er
 		&eventID, &eventType, &payloadRaw, &receivedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		output := awaitWebhookOutput{Found: false}
-		outJSON, _ := json.Marshal(output)
-		return string(outJSON), nil
+		return AwaitWebhookOutput{Found: false}, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("webhook-ingest: query events: %w", err)
+		return AwaitWebhookOutput{}, fmt.Errorf("webhook-ingest: query events: %w", err)
 	}
 
 	// Mark the event as processed.
@@ -162,13 +163,11 @@ func (p *Plugin) awaitWebhook(ctx context.Context, inputJSON string) (string, er
 		"tenant", cc.TenantID,
 	)
 
-	output := awaitWebhookOutput{
+	return AwaitWebhookOutput{
 		Found:      true,
 		ID:         eventID.String(),
 		EventType:  eventType,
 		Payload:    json.RawMessage(payloadRaw),
 		ReceivedAt: receivedAt.Format(time.RFC3339),
-	}
-	outJSON, _ := json.Marshal(output)
-	return string(outJSON), nil
+	}, nil
 }
