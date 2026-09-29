@@ -344,6 +344,24 @@ pattern above missed it entirely without that flag.
 That grep will not find the Homebrew formula, which is Ruby — but as of
 cleat#2068 nothing here needs to bump it by hand.
 
+**That grep is not the SDK version check, and does not stand in for one
+(cleat#2454).** It reaches one of the six places an SDK version lives — the
+Rust metadata stamper, via `--include="*.rs"` — and is structurally blind to
+the Python, Java and AssemblyScript ones, and to `pyproject.toml`, because
+none of those carry a bare `vX.Y.Z` in a `.go`/`.rs`/`.mod` file. Verify SDK
+version agreement with the script written for exactly this:
+
+```bash
+scripts/check-sdk-version-agreement.py --expected <version>
+```
+
+For each SDK it compares the manifest against every stamper that embeds the
+same version (see its docstring for the full list — e.g. python:
+`python-sdk/pyproject.toml` against `python-sdk/cleat_sdk/version.py` and
+`python-sdk/scripts/stamp_metadata.py`) and fails on any mismatch. The Go SDK
+is deliberately excluded: `wasm/build.go` derives `sdkVersion` rather than
+hardcoding it, so there is nothing for the script to compare.
+
 It also will not find `python-sdk/pyproject.toml`, which is TOML
 (`version = "0.2.0"`, no `v` prefix, so the pattern's own anchor can't see
 it). Bump it by hand on the release branch before tagging. This one is not
