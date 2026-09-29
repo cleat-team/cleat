@@ -24,6 +24,16 @@
 # it is visible on the PR and to scripts/pr-watch.py. Making it required is a
 # ruleset change plus a line in .github/required-checks.txt, and the
 # merge_group arm below already exists so that change needs nothing else.
+# cleat#2436, a SECOND, separate defect this same check now also covers: a
+# closing keyword can be correctly formed (`#N`, not `cleat#N`) and still be
+# NEGATED in the surrounding text -- "Deliberately does not close #2402."
+# registers as closing #2402 regardless of the "not". #2072's script above
+# catches the FORM only; scripts/check-negated-closing-references.py is the
+# SEMANTICS half, added as a second step in the SAME job rather than a new
+# required check, since adding a required check is a ruleset change this
+# workflow file cannot make on its own. See that script's own docstring for
+# the full design and why closingIssuesReferences, not a text scan, is the
+# authority it reads first.
 # ---------------------------------------------------------------------------
 name: Closing Reference Check
 
@@ -38,6 +48,10 @@ on:
 
 permissions:
   contents: read
+  # Read-only, for `gh pr view --json closingIssuesReferences,commits` in the
+  # negated-reference step below. contents:read alone does not reach the
+  # Pulls API.
+  pull-requests: read
 
 jobs:
   closing-references:
@@ -58,3 +72,11 @@ jobs:
           # Through env, never ${{ }} inside run: -- the body is untrusted text.
           PR_BODY: ${{ github.event.pull_request.body }}
         run: scripts/check-closing-references.sh
+
+      - name: Check for a negated closing reference
+        if: github.event_name != 'merge_group'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: scripts/check-negated-closing-references.sh
