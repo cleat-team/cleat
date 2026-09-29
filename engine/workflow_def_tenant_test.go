@@ -167,9 +167,14 @@ func TestTwoTenantsEachHoldTheirOwnDefinitionOfOneName(t *testing.T) {
 // s.tenantID, and MSSQLStore's MERGE did not name tenant_id in its INSERT
 // column list, so it took the column default -- the same value. Only
 // MySQLStore passed s.tenantID. With every definition owned by the default
-// tenant, and PostgreSQL's policy on this table admitting the default tenant
-// by design (`tenant_id = cleat.assert_tenant_set() OR tenant_id = '000…'`),
-// every definition was a shared definition.
+// tenant, and PostgreSQL's policy on this table USED TO admit the default
+// tenant by design (`tenant_id = cleat.assert_tenant_set() OR tenant_id =
+// '000…'`), every definition was a shared definition.
+//
+// THAT CLAUSE IS GONE, dropped by migration 035 when D7 landed (#594,
+// 2026-09-02) -- see engine/def_lookup_tenant_property_test.go's fuller
+// note on the same removal, and cleat#2620, which found a CHANGELOG entry
+// still advising the now-nonexistent behaviour.
 func TestDeployRecordsTheDeployingTenant(t *testing.T) {
 	for _, backend := range registeredBackends {
 		backend := backend
