@@ -157,31 +157,56 @@ WHERE tenant_id = $1
 ORDER BY received_at
 LIMIT 1
 FOR UPDATE SKIP LOCKED`,
-	// FORCE INDEX pins this to the index TestAwaitEventConcurrentClaimsSkipTheLockedRow
-	// (added by cleat#2641/#2645) and TestAwaitEventConcurrentClaimsOfDifferentEventTypesDoNotInterfereOnMySQL
-	// already characterise: idx_ingested_events_unprocessed's leading column is
-	// (processed, received_at), narrow enough that InnoDB's next-key locking
-	// under REPEATABLE READ has a known, tested shape (documented on the
-	// latter test above). cleat#2625's Version 6 migration added a SECOND
-	// index, idx_ingested_events_correlate (tenant_id, event_type, key1, key2,
-	// key3, received_at), for signalAwaiters'/unregisterAwaiter's key-scoped
-	// lookups -- and its leading columns happen to match this query's WHERE
-	// clause too. Left to the optimizer, MySQL sometimes prefers it here
-	// instead, and its locking shape has NOT been characterised the way the
-	// other index's has: measured directly (10 iterations of
-	// TestAwaitEventConcurrentClaimsSkipTheLockedRow against a real MySQL
-	// 8.4, tenant_id fresh per iteration so cross-iteration data was the only
-	// variable), the unforced query failed 9 of 10 with "claim query: sql: no
-	// rows in result set" -- txB's SKIP LOCKED claim found nothing where
-	// exactly one unprocessed row of its own tenant existed, unlocked and
-	// waiting. Dropping idx_ingested_events_correlate made the same 10
-	// iterations pass 10 of 10, isolating the index choice as the cause
-	// rather than the query text. FORCE INDEX (not USE INDEX -- this must
-	// exclude the correlate index, not merely admit the other one as an
-	// option) restores the characterised locking shape; the correlate index
-	// remains exactly as useful to the key-scoped queries it was built for.
+	// FORCE INDEX (idx_ingested_events_correlate), NOT idx_ingested_events_unprocessed
+	// -- this changed once, and changed BACK, and both changes have a
+	// measured reason rather than a guess.
+	//
+	// cleat#2646 round 4 forced idx_ingested_events_unprocessed
+	// (processed, received_at), because at that time the WHERE clause had
+	// no key1/key2/key3 predicate at all -- every awaiter used the "","",""
+	// sentinel -- and MySQL's optimizer sometimes preferred
+	// idx_ingested_events_correlate anyway, purely on its (tenant_id,
+	// event_type) prefix. Under THAT shape, the correlate index's remaining
+	// columns (key1, key2, key3, received_at) supplied no useful ordering
+	// or narrowing -- every candidate row shared the same empty keys -- so
+	// InnoDB's next-key locking over an effectively unconstrained scan
+	// left the wrong rows locked: measured 9 of 10 failures on
+	// TestAwaitEventConcurrentClaimsSkipTheLockedRow, 10 of 10 clean with
+	// the correlate index dropped entirely.
+	//
+	// cleat#2647 gave every claim a REAL key1/key2/key3 equality predicate.
+	// That changes which index is actually cheap: idx_ingested_events_unprocessed
+	// (processed, received_at) has no key columns at all, so a claim
+	// correlated on one key must SCAN PAST every other key's rows of the
+	// same type to reach the one it wants, evaluating key1/key2/key3 as a
+	// post-scan filter -- and under MySQL's default REPEATABLE READ,
+	// InnoDB's locking read takes next-key locks on every index record it
+	// examines during that scan, not only the one row the filter keeps.
+	// cleat-review predicted the consequence by reasoning alone (#2668
+	// round 1) and it reproduced exactly as stated:
+	// TestAwaitEventConcurrentClaimsOfDifferentKeysDoNotBlockOnMySQL claims
+	// a NEWER key while an OLDER, differently-keyed row of the same type
+	// sits in front of it in (processed, received_at) order -- the scan
+	// locks the older row on its way past, and a concurrent claim for that
+	// older key hits "sql: no rows in result set" against its own,
+	// unrelated, unlocked-in-principle event.
+	//
+	// idx_ingested_events_correlate (tenant_id, event_type, key1, key2,
+	// key3, received_at) does not have this problem ONCE every column
+	// ahead of received_at is bound by equality, which #2647 made
+	// permanent: MySQL can seek directly to the exact (tenant_id,
+	// event_type, key1, key2, key3) range and never touch a row of a
+	// different key at all, let alone lock one. Measured: switching this
+	// FORCE INDEX target makes
+	// TestAwaitEventConcurrentClaimsOfDifferentKeysDoNotBlockOnMySQL pass,
+	// while TestAwaitEventConcurrentClaimsSkipTheLockedRow (same key,
+	// round 4's original scenario) and
+	// TestAwaitEventConcurrentClaimsOfDifferentEventTypesDoNotInterfereOnMySQL
+	// (#2645's own coverage) both stay green -- neither of those two ever
+	// needed the unprocessed index for correctness; they simply never
+	// exercised a case where the two indexes' locking shapes diverged.
 	MySQL: `SELECT id, event_type, event_data, received_at
-FROM ingested_events FORCE INDEX (idx_ingested_events_unprocessed)
+FROM ingested_events FORCE INDEX (idx_ingested_events_correlate)
 WHERE tenant_id = $1
   AND event_type = $2
   AND key1 = $3

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"strings"
 )
 
 // maxCorrelationKeys and maxCorrelationKeyBytes are the shape §4 of
@@ -49,6 +50,27 @@ func keySlots(keys []string) (key1, key2, key3 string, err error) {
 					"cap -- hash it in the guest rather than have it silently truncated "+
 					"and never match again",
 				i+1, len(k), maxCorrelationKeyBytes)
+		}
+		// A trailing space makes two DIFFERENT keys compare equal on two of
+		// the three tier-1 dialects, which is worse than the truncation
+		// hazard above: it is a silent CROSS-match, not a silent
+		// never-match. Postgres's COLLATE "C" compares byte-exact ("B-2" !=
+		// "B-2 "), but MySQL's utf8mb4_bin is PAD SPACE (the SQL standard's
+		// CHAR/VARCHAR comparison rule: the shorter operand is padded with
+		// spaces before comparing), and SQL Server's `=` ignores trailing
+		// spaces under ANY collation, binary ones included -- neither is a
+		// property of the collation this migration chose, both are
+		// dialect-level comparison semantics no COLLATE clause overrides.
+		// Measured directly: "B-2" = "B-2 " is false on Postgres, true on
+		// MySQL, true on SQL Server. cleat-review, #2668 round 1.
+		if strings.HasSuffix(k, " ") {
+			return "", "", "", fmt.Errorf(
+				"event-triggers: correlation key %d ends with a space, which "+
+					"MySQL's PAD SPACE comparison and SQL Server's trailing-space-"+
+					"insensitive equality both treat as equal to the same key "+
+					"without it -- a different correlation key would silently "+
+					"match this one's awaiters on two of three dialects",
+				i+1)
 		}
 		slots[i] = k
 	}

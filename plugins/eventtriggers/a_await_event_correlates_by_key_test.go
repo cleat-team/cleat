@@ -341,6 +341,36 @@ func TestAwaitEventKeyComparisonIsCaseSensitiveAcrossDialects(t *testing.T) {
 				t.Errorf("on %s, a claim correlated on \"order-1\" matched an event keyed "+
 					"\"Order-1\" -- key1's collation is not case-sensitive here", tc.name)
 			}
+
+			// THE POSITIVE, IN THE SAME SUBTEST: !Found alone is consistent
+			// with a broken predicate that matches NOTHING, or with a seed
+			// that silently failed -- neither of which this negative
+			// assertion could tell apart from genuine case-sensitivity.
+			// Claiming the EXACT case must still succeed, against the same
+			// seeded row, proving the predicate works at all before trusting
+			// that it also excludes the wrong case.
+			inputJSON, err = json.Marshal(awaitEventInput{
+				EventType: "case.test",
+				Keys:      []string{"Order-1"},
+			})
+			if err != nil {
+				t.Fatalf("marshal exact-case input: %v", err)
+			}
+			out, err = p.awaitEvent(ctx, string(inputJSON))
+			if err != nil {
+				t.Fatalf("awaitEvent (exact case): %v", err)
+			}
+			if err := json.Unmarshal([]byte(out), &result); err != nil {
+				t.Fatalf("unmarshal exact-case output: %v", err)
+			}
+			if !result.Found {
+				t.Fatalf("UNMEASURED: on %s, a claim correlated on the SEEDED case \"Order-1\" found "+
+					"nothing -- either the seed did not take or the predicate matches nothing at all, "+
+					"which would make the negative assertion above pass vacuously", tc.name)
+			}
+			if result.EventID != eventID.String() {
+				t.Errorf("on %s, claimed event %s, want the seeded event %s", tc.name, result.EventID, eventID)
+			}
 		})
 	}
 }
@@ -412,5 +442,170 @@ func TestAwaitEventCorrelatesOnTwoKeysAcrossDialects(t *testing.T) {
 					eventWest, eventEast)
 			}
 		})
+	}
+}
+
+// TestAwaitEventRejectsATrailingSpaceKeyAcrossDialects is cleat-review's
+// round-1 GAP 1 on #2668. A trailing space makes two DIFFERENT correlation
+// keys compare EQUAL on two of the three tier-1 dialects -- the opposite
+// direction from §4.3's truncation hazard (a silent never-match): this is a
+// silent CROSS-match, where the wrong workflow can claim another run's
+// event. Measured directly against real servers, not assumed from the SQL
+// standard alone:
+//
+//	Postgres, COLLATE "C":            'B-2' = 'B-2 '  -> false
+//	MySQL,    utf8mb4_bin (PAD SPACE): 'B-2' = 'B-2 '  -> true
+//	SQL Server, Latin1_General_BIN2:   'B-2' = 'B-2 '  -> true (ANSI padding
+//	    ignores trailing spaces in comparison, regardless of collation)
+//
+// keys.go's keySlots now rejects a trailing space outright, so the fix is a
+// single Go-level check reachable from every dialect's code path -- what
+// this test proves is that the guard is actually WIRED into awaitEvent (and
+// therefore into registerAwaiter, which awaitEvent's not-found path calls)
+// on all three dialects, not merely present in keys.go and untested from the
+// caller side. keys_test.go covers keySlots in isolation; this is the
+// integration point cleat-review asked to see settled against real servers.
+func TestAwaitEventRejectsATrailingSpaceKeyAcrossDialects(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		td   testutil.Dialect
+	}{
+		{"postgres", testutil.DialectPostgres},
+		{"mysql", testutil.DialectMySQL},
+		{"mssql", testutil.DialectMSSQL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testutil.TestDB(t, tc.td)
+			dialect := plugin.Dialect(string(tc.td))
+			quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+			p := &Plugin{dialect: dialect, logger: quiet}
+			if err := plugin.RunMigrations(context.Background(), db, dialect, nil,
+				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
+				t.Fatalf("apply migrations: %v", err)
+			}
+			p.db = &engine.SQLDBAdapter{DB: db, Dialect: dialect}
+
+			tenantID := uuid.New()
+			workflowID := "wf-trailing-space-" + tc.name + "-" + tenantID.String()
+			ctx := plugin.WithCallContext(plugin.ForTenant(context.Background(), tenantID),
+				&plugin.CallContext{TenantID: tenantID.String(), WorkflowID: workflowID})
+
+			inputJSON, err := json.Marshal(awaitEventInput{
+				EventType: "trailing.space.test",
+				Keys:      []string{"B-2 "},
+			})
+			if err != nil {
+				t.Fatalf("marshal input: %v", err)
+			}
+			if _, err := p.awaitEvent(ctx, string(inputJSON)); err == nil {
+				t.Fatalf("on %s, awaitEvent with a trailing-space key succeeded, want an error from keySlots", tc.name)
+			}
+
+			// Not just "it errored" -- confirm registerAwaiter's write never
+			// happened either, since a partially-applied guard (error
+			// returned, row written anyway on some code path) would still
+			// leave the cross-match reachable.
+			var remaining int
+			if err := p.db.QueryRow(ctx,
+				`SELECT COUNT(*) FROM event_awaiters WHERE workflow_id = $1`, workflowID).
+				Scan(&remaining); err != nil {
+				t.Fatalf("count awaiters on %s: %v", tc.name, err)
+			}
+			if remaining != 0 {
+				t.Errorf("on %s, %d awaiter row(s) were written despite the trailing-space key being rejected",
+					tc.name, remaining)
+			}
+		})
+	}
+}
+
+// TestAwaitEventConcurrentClaimsOfDifferentKeysDoNotBlockOnMySQL is
+// cleat-review's round-1 GAP 3 on #2668, predicted by reasoning before it was
+// run: FORCE INDEX (idx_ingested_events_unprocessed) orders the scan by
+// (processed, received_at) alone -- key1/key2/key3 are evaluated as a
+// post-scan filter, not part of the index range. A claim correlated on the
+// NEWER of two same-type events must scan PAST the older one to reach it.
+// Under REPEATABLE READ (MySQL's default, unlike Postgres/MSSQL's READ
+// COMMITTED), InnoDB's locking read takes next-key locks on every INDEX
+// RECORD it examines during that scan, not only the one row the WHERE
+// clause keeps -- so the older, non-matching row it scanned past stays
+// locked for the rest of the holding transaction. A concurrent claim
+// correlated on THAT older key then hits its own event under SKIP LOCKED,
+// reports not-found, and registers an awaiter whose matching event has
+// already been published -- it waits until timeout for something that
+// already happened.
+//
+// This is the SAME mechanism TestAwaitEventConcurrentClaimsOfDifferentEventTypesDoNotInterfereOnMySQL
+// (await_event_oldest_first_and_locked_test.go) already characterises for
+// event TYPES, and that test's own doc comment explains why: InnoDB's
+// next-key locking scans and locks records the WHERE clause later discards.
+// That test cannot catch THIS shape because it claims the OLDER row first
+// (type.x, inserted earliest), which requires no scan past anything --
+// there is nothing older in front of it to lock. This test claims the
+// NEWER key first, which is the ordering that forces the scan through the
+// older, differently-keyed row.
+func TestAwaitEventConcurrentClaimsOfDifferentKeysDoNotBlockOnMySQL(t *testing.T) {
+	db := testutil.TestDB(t, testutil.DialectMySQL)
+	dialect := plugin.DialectMySQL
+	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	p := &Plugin{dialect: dialect, logger: quiet}
+	if err := plugin.RunMigrations(context.Background(), db, dialect, nil,
+		[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+	p.db = &engine.SQLDBAdapter{DB: db, Dialect: dialect}
+
+	tenantID := uuid.New()
+	olderA := uuid.New()
+	newerB := uuid.New()
+	now := time.Now()
+
+	seedCtx := plugin.ForTenant(context.Background(), tenantID)
+	mustInsertIngestedEventAtWithKey(t, seedCtx, p, olderA, tenantID, "order.paid", "A", now.Add(-time.Hour))
+	mustInsertIngestedEventAtWithKey(t, seedCtx, p, newerB, tenantID, "order.paid", "B", now)
+
+	claim := func(key string) (plugin.PluginTx, uuid.UUID, error) {
+		t.Helper()
+		tx, err := p.db.Begin(seedCtx)
+		if err != nil {
+			t.Fatalf("begin claim tx: %v", err)
+		}
+		var (
+			eventID    uuid.UUID
+			eventType  string
+			eventData  []byte
+			receivedAt time.Time
+		)
+		err = plugin.ScanRow(tx.QueryRow(seedCtx,
+			queryOldestUnprocessedEventForClaim.For(dialect),
+			tenantID, "order.paid", key, "", ""), &eventID, &eventType, &eventData, &receivedAt)
+		return tx, eventID, err
+	}
+
+	// Claim the NEWER key (B) first, and HOLD it -- this is the transaction
+	// whose scan must pass over A's older row to reach B's.
+	txB, gotB, err := claim("B")
+	if err != nil {
+		t.Fatalf("claim B: %v", err)
+	}
+	defer txB.Rollback()
+	if gotB != newerB {
+		t.Fatalf("claimed %s for key B, want %s", gotB, newerB)
+	}
+
+	// While txB is still open, claim the OLDER key (A) concurrently. On a
+	// correct implementation this succeeds immediately -- A's row was never
+	// locked by txB, because txB's WHERE clause never matched it.
+	txA, gotA, err := claim("A")
+	if err != nil {
+		t.Fatalf("claim A while B is held: %v -- on MySQL, this is the scan-past-and-lock "+
+			"defect this test exists to catch: A's row was never a candidate for txB's claim "+
+			"(different key), so it must not be locked by it", err)
+	}
+	defer txA.Rollback()
+	if gotA != olderA {
+		t.Fatalf("claimed %s for key A, want %s", gotA, olderA)
 	}
 }
