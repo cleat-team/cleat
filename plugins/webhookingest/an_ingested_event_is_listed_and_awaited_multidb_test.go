@@ -20,6 +20,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/eventtriggers"
 )
 
 // TestAnIngestedEventIsListedAndAwaited is cleat#1992/#2172's end-to-end pin,
@@ -50,8 +51,21 @@ func TestAnIngestedEventIsListedAndAwaited(t *testing.T) {
 			testutil.SetupFullSchema(t, be.DB, be.Dialect)
 
 			p := &Plugin{dialect: dialect, logger: quiet}
+
+			// eventtriggers is migrated and initialised too, cleat#2649:
+			// handleIngestWebhook publishes through it and awaitWebhook now
+			// claims from its ingested_events table directly, not just
+			// webhook_events -- see
+			// an_auth_exempt_route_cannot_assume_a_tenant_test.go's identical
+			// pairing and its comment on why Init (not just Migrations) is
+			// required: it sets eventtriggers' package-level dialect, and
+			// without it Rebind produces the wrong placeholders.
+			et := &eventtriggers.Plugin{}
+			if err := et.Init(ctx, &plugin.Environment{Dialect: dialect, Logger: quiet}); err != nil {
+				t.Fatalf("eventtriggers Init: %v", err)
+			}
 			if err := plugin.RunMigrations(ctx, be.DB, dialect, nil,
-				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
+				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}, {Plugin: et, Healthy: true}}); err != nil {
 				t.Fatalf("migrations: %v", err)
 			}
 

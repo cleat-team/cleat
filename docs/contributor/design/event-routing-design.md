@@ -726,6 +726,20 @@ parameter on `await_event`. **No ABI change** — it goes through `plugin_call` 
 since §8 is greenfield, no data migration either. Proves the model before spending a
 host call.
 
+**P1 landed for `event-triggers` itself (cleat#2641/#2645/#2646/#2647/#2668), and
+extended to a second plugin, cleat#2649.** The claim/register mechanism
+(`ClaimOrRegisterAwaiter`) is now exported from `plugins/eventtriggers/claim.go` rather
+than living only inside `awaitEvent`, and `webhookingest.await_webhook` calls it
+directly — the mechanism this design settles on is shared across plugins, not
+reimplemented per caller, which is what §13's own phasing exists to avoid (a second,
+divergent correlation mechanism was exactly the failure this cleat#2649 was scoped
+not to become). `webhookingest`'s own key1 is always its publishing source's id
+(`plugins/webhookingest/routes.go`), automatic and not part of the key budget a caller
+declares — key2 (and key3) are free for a tenant-declared correlation field
+(`correlation_key_field` on `webhook_sources`). A plugin adopting this mechanism after
+`webhookingest` should read `plugins/eventtriggers/claim.go`'s doc comment before
+building a second copy.
+
 **P2 — promote to an engine suspend.** The §12 checklist, plus §6's write-then-read
 ordering and the sweeper. **This carries the risk**, and the earlier draft's claim that
 P1 "proves the whole model" was false: P1 proves correlation, which was never the

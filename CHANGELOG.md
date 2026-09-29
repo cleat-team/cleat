@@ -29,6 +29,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   being silently dropped. Only `plugins/email` and `plugins/webhookingest` use `RegisterTyped`
   today.
 
+- **`webhookingest.await_webhook` now requires `source_id`; an empty one errors instead of
+  matching any source.** Before this, an empty `source_id` polled across every source for the
+  tenant — a real, working filter. cleat#2649 moved `await_webhook` onto the same correlated
+  claim/register mechanism `event-triggers.await_event` uses (`eventtriggers.ClaimOrRegisterAwaiter`),
+  where every source's events are keyed by `key1 = <that source's own id>` so that two sources
+  can never wake each other's awaiters (`key1` is an equality match, not a wildcard — there is no
+  dialect-portable way to express "any source" against it without reopening the exact
+  cross-source collision the key exists to prevent). An empty `source_id` now returns
+  `webhook-ingest: source_id is required for correlated await` immediately, rather than silently
+  registering an awaiter that can never match (a permanent hang) or matching every tenant source
+  indiscriminately. cleat-review checked every tracked caller (the SDK plugin-harness workflows in
+  all five guest languages, `examples/order-lifecycle`, every webhookingest test and doc) on
+  2026-09-29 and found none relies on the any-source form. **Replay note:** a workflow already
+  mid-`await_webhook` with an empty `source_id` under the old code replays into this new error
+  once the worker upgrades — acceptable, since the feature is unreleased at production scale, but
+  worth knowing if you have a long-running workflow using it today.
+
+- **A `webhook_sources` row with `signal_workflow_id` configured no longer signals inline at
+  ingest.** cleat#2649 removed `handleIngestWebhook`'s legacy push (the same PR that adds
+  `await_webhook`'s correlated claim, to avoid leaving two delivery mechanisms for the same event
+  coexisting at ingest time — see the design doc's §13 phasing). `background.go`'s existing retry
+  sweep (`processBatch`, a ~30s tick) is the only delivery left for this static, non-correlated
+  binding, so a bound workflow now hears about a webhook on that cadence instead of immediately,
+  and the payload shape it receives from the retry path is the raw `webhook_events.payload` column
+  rather than the inline push's wrapped `{"source_id":...,"payload":...}` envelope. Whether this
+  static-binding feature is kept at all, and what `webhook_events.processed` should mean now that
+  `await_webhook` no longer reads it, is tracked separately in cleat#2689.
+
 ### Added
 
 - **`cleat/pluginclients` is new public SDK surface**: generated, typed callers for the bundled

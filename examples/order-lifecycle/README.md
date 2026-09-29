@@ -246,13 +246,22 @@ order, and it is the least polished path in this example:
 ```bash
 # 2a. Create the source. A signing secret is required -- an unsigned source
 #     cannot be created at all (cleat#1992/#2172, owner decision).
+#
+#     correlation_key_field names the top-level JSON field this PSP's webhook
+#     body carries the order id in -- "order_id" below, matching 2b's BODY.
+#     One source is shared by every order; this is what lets the workflow
+#     wait for THIS order's confirmation specifically rather than whichever
+#     one arrives next (cleat#2649). Omit it and await_payment_confirmation
+#     can still be told to wait on this source alone, but two orders in
+#     flight at once could not be told apart.
 curl -fsS -X POST http://localhost:8080/ingest/sources \
   -H "Authorization: Bearer $CLEAT_API_KEY" -H "Content-Type: application/json" \
-  -d '{"name":"psp","source_type":"payment","secret":"whsec_local_dev"}'
+  -d '{"name":"psp","source_type":"payment","secret":"whsec_local_dev","correlation_key_field":"order_id"}'
 # -> {"id":"<SOURCE_ID>", ...}
 
 # 2b. Deliver the PSP's confirmation. The signature is GitHub-style: HMAC-SHA256
-#     of the raw body, hex, in X-Hub-Signature-256.
+#     of the raw body, hex, in X-Hub-Signature-256. order_id must match the
+#     order_id this run was started with (1a) -- that is the correlation.
 BODY='{"event_type":"payment.succeeded","order_id":"ord-1"}'
 SIG="sha256=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac 'whsec_local_dev' -r | cut -d' ' -f1)"
 curl -fsS -X POST "http://localhost:8080/ingest/$SOURCE_ID" \
@@ -264,7 +273,10 @@ payment provider and holds no cleat credential. The signature is what replaces
 the key, so the secret is the security boundary.
 
 Pass the id as `source_id` on the run's input and the workflow parks on the
-webhook instead of failing.
+webhook instead of failing -- a real suspend now, not a poll: `source_id` is
+now **required** (cleat#2649, a breaking change from earlier versions of this
+example -- see CHANGELOG.md), and the wait is woken directly by 2b's POST
+rather than checking back on a timer.
 
 ## The web page
 
