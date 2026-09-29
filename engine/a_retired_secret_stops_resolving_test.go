@@ -37,7 +37,8 @@ func TestARetiredSecretStopsResolvingAndSetSecretRevivesIt(t *testing.T) {
 			testutil.SetupFullSchema(t, db, dialect)
 
 			const name = "cleat-1989-retirement-check"
-			ctx := tenantctx.With(context.Background(), uuid.MustParse(DefaultTenantUUID))
+			tenant := uuid.MustParse(DefaultTenantUUID)
+			ctx := tenantctx.With(context.Background(), tenant)
 			master := testMaster(t)
 
 			store, err := NewSecretStore(db, string(dialect), master)
@@ -49,22 +50,35 @@ func TestARetiredSecretStopsResolvingAndSetSecretRevivesIt(t *testing.T) {
 			// test fails: a leftover row from a failed prior run must not
 			// make PutSecret's insert-vs-update branch below run the wrong
 			// arm for a reason unrelated to this test.
+			//
+			// deleteSecretRowForTestChecked, not a bare db.ExecContext(ctx, ...):
+			// ctx's tenant is never seen by the connection a bare ExecContext
+			// uses (tenantctx is read only by beginTenantTx), so on SQL Server
+			// the security policy hides the row, the DELETE affects zero rows,
+			// and it reports success -- cleat#2126, this file's own second RLS
+			// gap after the one the comment above this test describes.
+			//
+			// rowCreated guards the RowsAffected assertion: it is only known
+			// safe to require a deleted row once PutSecret below has actually
+			// written one. Before that (this cleanup also runs if an earlier
+			// step never gets there), there is nothing to delete and asserting
+			// otherwise would compound an unrelated failure with a confusing one.
+			rowCreated := false
 			t.Cleanup(func() {
-				// ctx, not context.Background(): on SQL Server an unscoped
-				// connection sees no rows to delete, so this would silently
-				// leave the row behind for the RLS reason this whole file is
-				// about, and the leftover would only surface as an unrelated
-				// PRIMARY KEY violation the next time this test runs.
-				db.ExecContext(ctx, //nolint:errcheck // best-effort cleanup
-					deleteSecretStmtForTest(dialect), DefaultTenantUUID, name)
+				if !rowCreated {
+					return
+				}
+				if n := deleteSecretRowForTestChecked(t, db, dialect, tenant, name); n == 0 {
+					t.Errorf("cleanup: expected to delete the row this test created, deleted 0 -- "+
+						"see deleteSecretRowForTestChecked's doc comment for the SQL Server RLS gap this guards")
+				}
 			})
-			if _, err := db.ExecContext(ctx, deleteSecretStmtForTest(dialect), DefaultTenantUUID, name); err != nil {
-				t.Fatalf("pre-test cleanup of a leftover row: %v", err)
-			}
+			deleteSecretRowForTest(t, db, dialect, tenant, name) // clear any leftover from a failed prior run
 
 			if err := store.PutSecret(ctx, DefaultTenantUUID, name, "sk-live-original"); err != nil {
 				t.Fatalf("PutSecret: %v", err)
 			}
+			rowCreated = true
 			got, err := store.GetSecret(ctx, DefaultTenantUUID, name)
 			if err != nil {
 				t.Fatalf("GetSecret before retiring: %v", err)
