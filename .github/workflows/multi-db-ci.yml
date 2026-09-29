@@ -595,6 +595,21 @@ jobs:
       - name: Run plugin behavioral tests (all backends)
         run: go test -count=1 -p 1 -timeout=900s ./plugins/...
 
+      # A NARROW, ADDITIONAL step -- not a replacement for the unfiltered run
+      # above, which stays unfiltered for exactly the reason cleat#1203 gives
+      # it. This one exists only so the log can show what the step above
+      # cannot: "ok …/plugins/eventtriggers" prints identically whether a
+      # test RAN or SKIPPED, so a green step there is not evidence the
+      # dialect-gated tests cleat#2645 added actually exercised MySQL and SQL
+      # Server rather than testutil.TestDB skipping them cleanly
+      # (cleat-review's finding on that PR). -v makes each subtest's
+      # RUN/PASS/SKIP its own line. Scoped to one package and one -run
+      # pattern, so it re-runs in seconds and cannot hide a badly-named test
+      # the way the removed job-wide filter did -- it adds visibility for
+      # these specific tests, it does not stand in for the step above.
+      - name: Verify the oldest-first and lock claim tests ran (not skipped) per dialect
+        run: go test -count=1 -v -run '^TestAwaitEvent' ./plugins/eventtriggers/...
+
   # -------------------------------------------------------------------------
   # Crash shutdown scenarios on MySQL and SQL Server (cleat#2288)
   #
