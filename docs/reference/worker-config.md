@@ -1271,23 +1271,29 @@ and restores both the plain predicate and the marker the worker reads.
 you do not have to infer it from silence:
 
 ```
-INFO  cross-tenant workflow claim is available
-INFO  cross-tenant due-schedule read is available
+INFO  cross-tenant workflow claim is available by tenant rotation; no database grant is required
+INFO  cross-tenant due-schedule read is available by tenant rotation; no database grant is required
 ```
 
-or, on a deployment that applied 023 but not 024:
+or, if this worker cannot rotate at all (no per-tenant store factory, or a
+store that cannot enumerate tenants):
 
 ```
-INFO  cross-tenant workflow claim is available
-WARN  cross-tenant due-schedule read is NOT available; only this worker's own
-      tenant's cron will fire
-      reason=admin.get_due_schedules does not exist; apply
-             migrations/postgres/024_cross_tenant_schedules.sql
+WARN  claim-across-tenants is set but this worker cannot serve other tenants;
+      it will claim and fire cron for its own tenant only
+      reason=<why the store can't rotate>
 ```
+
+**There is no longer a state where one loop is available and the other is
+not.** #1926 replaced the two migration-gated widened queries (023's claim,
+024's schedule read) with one rotation mechanism that both loops share, so one
+`rotatingClaimAvailability` check now answers for both -- which is why the WARN
+names neither 023 nor 024 and points at nothing to apply. A deployment that
+never ran either migration is unaffected either way.
 
 It is a report, not a gate -- refusing to start would contradict the degradation
-above, and would turn a revoked `GRANT` into an outage for the worker's own
-tenant, which was never affected.
+above, and would turn a store that cannot rotate into an outage for the
+worker's own tenant, which was never affected.
 
 On PostgreSQL it also checks something no runtime error explains: whether the
 function's **owner still has `BYPASSRLS`**. Losing that attribute does fail --
