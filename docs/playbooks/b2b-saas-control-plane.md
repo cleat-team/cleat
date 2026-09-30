@@ -2,8 +2,12 @@
 
 **Status:** engineering reference. Drafted 2026-09-14 against `develop` at `654d6f84`; corrected
 2026-09-25 against `develop` at `656aced4` (cleat#2052) — see
-[What was verified](#what-was-verified) at the end for what changed. Nothing here has been built end
-to end.
+[What was verified](#what-was-verified) at the end for what changed. **As of cleat#2716
+(2026-09-30), this scenario has been built end to end**, at `examples/b2b-saas-control-plane/` —
+signup, provisioning workflow, audit trail and trial-expiry sweep, run for real against a live
+worker by `scripts/run-b2b-saas-control-plane-scenario.sh` and CI's "B2B SaaS control plane
+scenario" job. See that directory's README for what it covers and what it still asserts rather
+than measures.
 
 **Who this is for:** you sell software to businesses. Each customer gets their own login, their own
 data, their own settings, often their own branded URL, and an auditor will eventually ask you to
@@ -393,3 +397,12 @@ tree rather than taken from the issue:
 
 Line citations were replaced with symbol names throughout, per the precedent
 `docs/reference/workflow-lifecycle.md` set — several had drifted.
+
+**Built end to end, 2026-09-30 (cleat#2534/#2681/#2716).** The top-of-page status line said
+"nothing here has been built end to end" from this page's first draft through cleat#2716's own
+review; it landed the scenario the line was denying. `examples/b2b-saas-control-plane/` runs
+signup through a real HTTP backend, a durable provisioning workflow started **as the tenant it
+provisions** (not the operator — see that directory's `provision.go` for why that distinction
+matters for the audit trail the workflow writes), and the background trial-expiry sweep, all
+against a live worker; `scripts/run-b2b-saas-control-plane-scenario.sh` and the "B2B SaaS control
+plane scenario" CI job are the falsifiable version of that claim, not this sentence.

@@ -165,6 +165,55 @@ func slugify(businessName string) string {
 	return slug + "-" + uuid.NewString()[:8]
 }
 
+// displayNameControlChars matches anything sanitizeDisplayName strips: ASCII
+// control characters (including newline/tab, which would otherwise let one
+// signup's --tenant-display-name value span the runBin call's redacted log
+// line, or a later `sqlcmd`/log viewer's output, across multiple lines) and
+// nothing else -- ordinary punctuation in a business name is fine.
+var displayNameControlChars = regexp.MustCompile(`[\x00-\x1f\x7f]+`)
+
+// maxDisplayNameLen bounds what an unauthenticated signup can make this
+// process pass as a single argv element to cleat --create-tenant. Not a
+// UX limit (no real business name is this long); a guard against an
+// unbounded request body turning into an unbounded argv entry.
+const maxDisplayNameLen = 200
+
+// sanitizeDisplayName makes req.BusinessName safe to pass as
+// --tenant-display-name's VALUE to createTenant's runBin call, which execs
+// cleat directly -- no shell, so classic shell metacharacter injection
+// (";", "|", "$(...)") is not the risk. The risk this closes is argument
+// reinterpretation: Go's flag package consumes a flag's value from the next
+// argv token unconditionally, even one starting with "-", so cleat's own
+// parsing is not fooled by it -- but gosec's G702 taint check has no way to
+// know that about a binary it does not analyze, and a defense that holds
+// regardless of the receiving program's flag-parsing semantics is worth
+// having anyway (a future cleat CLI change, or a different consumer of this
+// sanitizer, should not have to re-derive this reasoning). Producing a NEW
+// string here, rather than validating and passing the original through, is
+// what makes it a sanitizer rather than a guard: gosec's taint tracker does
+// not treat an early-return check on the original value as clearing taint
+// on that same value, but a transform that returns different bytes does.
+func sanitizeDisplayName(businessName string) string {
+	name := displayNameControlChars.ReplaceAllString(businessName, " ")
+	name = strings.TrimSpace(name)
+	// A leading "-" is the one shape that could ever be mistaken for a
+	// flag by ANY argv-consuming parser, this repo's own included -- strip
+	// every leading one rather than just the first, since "--foo" is as
+	// much a flag shape as "-foo".
+	name = strings.TrimLeft(name, "-")
+	name = strings.TrimSpace(name)
+	// By RUNE, not byte: a byte-index slice on a business name outside
+	// ASCII (most of them, this being a signup form) can split a multi-byte
+	// rune and hand createTenant invalid UTF-8.
+	if runes := []rune(name); len(runes) > maxDisplayNameLen {
+		name = strings.TrimSpace(string(runes[:maxDisplayNameLen]))
+	}
+	if name == "" {
+		name = "tenant"
+	}
+	return name
+}
+
 // signup is the one thing a tenant-scoped worker API cannot do for itself:
 // create the tenant. Everything after this call runs AS the tenant it just
 // created, through the ordinary worker API -- see provision.go's "Which
@@ -189,7 +238,11 @@ func (s *server) signup(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 	tenantName := slugify(req.BusinessName)
-	tenantID, err := s.admin.createTenant(ctx, tenantName, req.BusinessName)
+	// createTenant passes this to runBin as --tenant-display-name's value --
+	// see sanitizeDisplayName's doc comment for why the raw request field
+	// never reaches that call directly.
+	displayName := sanitizeDisplayName(req.BusinessName)
+	tenantID, err := s.admin.createTenant(ctx, tenantName, displayName)
 	if err != nil {
 		s.log.Error("create tenant", "business_name", req.BusinessName, "err", err)
 		backendkit.WriteInternalError(w)
@@ -460,6 +513,18 @@ func (a *tenantAdmin) run(ctx context.Context, args ...string) (string, error) {
 }
 
 func (a *tenantAdmin) runBin(ctx context.Context, bin string, args ...string) (string, error) {
+	// #nosec G702 -- bin is always a.cleatBin/a.workerBin (flags parsed
+	// once at startup, in newTenantAdmin), never request-derived; no shell
+	// is involved (exec.CommandContext, not sh -c), so shell metacharacter
+	// injection is not the shape of risk here. The one argv element that
+	// does trace back to an HTTP request field is createTenant's
+	// displayName, and it reaches this call already passed through
+	// sanitizeDisplayName -- see that function's doc comment for why a
+	// leading "-" is the only shape worth stripping and why gosec's
+	// per-function taint check still flags this shared sink regardless
+	// (every runBin caller's args are folded into one warning here, so a
+	// caller passing only program-controlled args, like deployWorkflowDef,
+	// cannot make it go away either).
 	cmd := exec.CommandContext(ctx, bin, args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {

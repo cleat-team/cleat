@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // TestRedactDBFlagHidesTheDSN pins redactDBFlag's one job: the value
@@ -58,5 +59,58 @@ func TestRunBinRedactsTheDSNOnFailure(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "super-secret-password") {
 		t.Fatalf("runBin's error leaks the DSN password: %v", err)
+	}
+}
+
+// TestSanitizeDisplayNameStripsALeadingDash pins the one property that
+// matters: whatever a signup's business_name looks like, the value handed
+// to createTenant's --tenant-display-name flag can never itself be
+// mistaken for a flag by an argv-consuming parser. gosec's G702 flagged
+// runBin's exec.CommandContext call for exactly this shape of taint (a
+// request field reaching argv) on #2716; this is the falsification for the
+// #nosec justification at that call site, not a general string-cleaning
+// test.
+func TestSanitizeDisplayNameStripsALeadingDash(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain name unchanged", "Acme Corp", "Acme Corp"},
+		{"single leading dash stripped", "-rf", "rf"},
+		{"flag-shaped input stripped to its body", "--tenant-display-name=x", "tenant-display-name=x"},
+		{"interior dash kept", "Acme-Corp", "Acme-Corp"},
+		{"control characters become a space", "Acme\tCorp\n", "Acme Corp"},
+		{"empty after stripping falls back", "---", "tenant"},
+		{"pure whitespace falls back", "   ", "tenant"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeDisplayName(tc.in)
+			if got != tc.want {
+				t.Errorf("sanitizeDisplayName(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if strings.HasPrefix(got, "-") {
+				t.Errorf("sanitizeDisplayName(%q) = %q, still starts with '-'", tc.in, got)
+			}
+		})
+	}
+}
+
+// TestSanitizeDisplayNameBoundsLength confirms the length guard actually
+// bounds the result, and does so on a rune boundary rather than a byte one
+// -- a byte-index slice on a non-ASCII business name (an ordinary case for
+// a signup form) can otherwise split a multi-byte rune and hand
+// createTenant invalid UTF-8 as an argv element.
+func TestSanitizeDisplayNameBoundsLength(t *testing.T) {
+	// "café" repeated past maxDisplayNameLen runes; "é" is multi-byte, so a
+	// byte-index truncation at exactly the rune budget would corrupt it.
+	long := strings.Repeat("café ", maxDisplayNameLen)
+	got := sanitizeDisplayName(long)
+	if n := len([]rune(got)); n > maxDisplayNameLen {
+		t.Errorf("sanitizeDisplayName returned %d runes, want <= %d", n, maxDisplayNameLen)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("sanitizeDisplayName(%.20q...) = %.20q..., not valid UTF-8", long, got)
 	}
 }
