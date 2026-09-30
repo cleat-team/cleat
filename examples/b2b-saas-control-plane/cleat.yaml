@@ -3,11 +3,12 @@
 #
 # entry_points is snake_case while the Go function is ProvisionTenant, because
 # the entry point is part of the ABI and C/WASM callers do not have Go's
-# naming. The built artifact is named for the entry point today
-# (provision_tenant.wasm), not this name: field -- confirmed by running
-# `cleat build`, not assumed; see examples/order-lifecycle/cleat.yaml, which
-# documents the same rule for place_order.wasm. cleat#2692 changes the rule
-# to prefer this field once it merges.
+# naming. The built artifact is named for THIS FIELD, `name:` below --
+# b2b-saas-control-plane.wasm (cleat#2692) -- not the entry point and not its
+# source file either. Getting entry_points out of step with the Go function
+# is silent at deploy time and 404-shaped at start time -- a run for a
+# workflow whose entry point does not exist fails after the run id has been
+# handed out.
 name: b2b-saas-control-plane
 language: go
 entry_points:

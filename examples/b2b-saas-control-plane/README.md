@@ -80,10 +80,10 @@ and there is no other one to call instead.
 cleat build -o /tmp/out ./examples/b2b-saas-control-plane/
 ```
 
-The artifact is named for the entry point, not the directory:
-`provision_tenant.wasm` — confirmed by running `cleat build`, not assumed;
-see `cleat.yaml`'s own comment, and `examples/order-lifecycle/README.md` for
-the same rule stated against `place_order.wasm`.
+The artifact is named for `cleat.yaml`'s own `name:` field, not the directory
+or the entry point: `b2b-saas-control-plane.wasm` (cleat#2692) — confirmed by
+running `cleat build`, not assumed; see `examples/order-lifecycle/README.md`
+for the same rule stated against `order-lifecycle.wasm`.
 
 ## Run it against a real worker
 
@@ -94,7 +94,7 @@ docker compose logs cleat-worker | grep -i 'Key:'   # informational; this scenar
 
 # 2. Deploy the compiled workflow.
 cleat deploy --db "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable" \
-  --name b2b-saas-control-plane /tmp/out/provision_tenant.wasm
+  --name b2b-saas-control-plane /tmp/out/b2b-saas-control-plane.wasm
 
 # 3. One org, once per deployment -- cleat-worker --create-tenant requires one.
 go build -o .bin/cleat-worker ./cmd/cleat-worker
@@ -111,7 +111,7 @@ CLEAT_URL=http://localhost:8080 \
 CLEAT_ADMIN_DB_URL="postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable" \
 CLEAT_ORG_ID=<ORG_ID> \
 CLEAT_WORKER_BIN=.bin/cleat-worker \
-CLEAT_WASM_PATH=/tmp/out/provision_tenant.wasm \
+CLEAT_WASM_PATH=/tmp/out/b2b-saas-control-plane.wasm \
   go run ./backend
 ```
 

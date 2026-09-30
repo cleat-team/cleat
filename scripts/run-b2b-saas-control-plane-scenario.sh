@@ -134,7 +134,8 @@ if ! "$OUT_DIR/cleat" build -o "$OUT_DIR/wasm" "$EXAMPLE_DIR" >"$OUT_DIR/cleat-b
   cat "$OUT_DIR/cleat-build.log" >&2
   exit 1
 fi
-WASM="$OUT_DIR/wasm/provision_tenant.wasm"
+# Named for cleat.yaml's `name:` field, not the entry point -- cleat#2692.
+WASM="$OUT_DIR/wasm/b2b-saas-control-plane.wasm"
 if [[ ! -f "$WASM" ]]; then
   echo "FAIL: expected $WASM; cleat build's actual output was:" >&2
   ls -la "$OUT_DIR/wasm" >&2
