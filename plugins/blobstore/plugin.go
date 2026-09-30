@@ -127,7 +127,9 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 		// via plugin.MaxBody, so a zero value here would mean "no limit at
 		// all" rather than "use the default" once that wiring lands.
 		// Host-function enforcement (a WASM guest calling the blob-write host
-		// call directly, bypassing HTTP) is a separate follow-up.
+		// call directly, bypassing HTTP) was a separate follow-up -- cleat#2275
+		// closed it: blobPut (host_functions.go) now enforces this same
+		// MaxBlobSize too, not just RegisterRoutes' HTTP ceiling.
 		p.config.MaxBlobSize = 10 * 1024 * 1024 // default 10 MiB, per the struct's own doc comment
 	}
 

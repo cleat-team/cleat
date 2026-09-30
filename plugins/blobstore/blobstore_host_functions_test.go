@@ -336,6 +336,53 @@ func TestBlobPutRequiresData(t *testing.T) {
 	}
 }
 
+// TestBlobPutRejectsOversizedData is cleat#2275: blobPut (this host
+// function, callable directly by a guest workflow) validated only that
+// Data was non-empty, with no upper bound at all -- while PUT /blobs/{key...}
+// (routes.go) bounds its request body at p.config.MaxBlobSize. A workflow
+// calling this host function bypassed that ceiling entirely and could store
+// a blob of any size the storage backend would accept, unbounded, through
+// the exact same backend and blob_content bookkeeping the HTTP route uses.
+func TestBlobPutRejectsOversizedData(t *testing.T) {
+	p, _, _ := setupHostFuncTest(t)
+	p.config.MaxBlobSize = 10
+	ctx := hostFuncContext(context.Background(), testTenantID, "")
+
+	input := blobPutInput{
+		Key:  "too-big",
+		Data: []byte("this is more than ten bytes"),
+	}
+	inputJSON, _ := json.Marshal(input)
+
+	_, err := p.blobPut(ctx, string(inputJSON))
+	if err == nil {
+		t.Fatal("expected error for data exceeding max_blob_size, got nil")
+	}
+	const want = "exceeding max_blob_size"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error: got %q, want it to contain %q", err.Error(), want)
+	}
+}
+
+// TestBlobPutAtLimitSucceeds is the control for the test above: data exactly
+// at max_blob_size must still be accepted -- the check is an upper bound,
+// not an off-by-one that refuses the boundary itself.
+func TestBlobPutAtLimitSucceeds(t *testing.T) {
+	p, _, _ := setupHostFuncTest(t)
+	p.config.MaxBlobSize = 10
+	ctx := hostFuncContext(context.Background(), testTenantID, "")
+
+	input := blobPutInput{
+		Key:  "exactly-at-limit",
+		Data: []byte("0123456789"), // exactly 10 bytes
+	}
+	inputJSON, _ := json.Marshal(input)
+
+	if _, err := p.blobPut(ctx, string(inputJSON)); err != nil {
+		t.Fatalf("blobPut at exactly max_blob_size: %v", err)
+	}
+}
+
 func TestBlobPutDefaultsContentType(t *testing.T) {
 	p, _, _ := setupHostFuncTest(t)
 	ctx := hostFuncContext(context.Background(), testTenantID, "")
