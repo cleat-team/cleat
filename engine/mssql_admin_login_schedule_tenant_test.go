@@ -63,10 +63,10 @@ import (
 // Note what this does NOT do. It does not grant anything, weaken a policy or
 // reach past the store API. The connection is one that genuinely exists in a
 // deployment today (cleatctl, cross-tenant test teardown), and its callers
-// (this file, mssql_admin_login_tags_tenant_test.go, and the def/claim
-// variants -- grep -n "adminLoginStores(t)" engine/*_test.go for the current
-// list) exercise ordinary store methods through the public API, not
-// anything privileged.
+// (this file, mssql_admin_login_tags_tenant_test.go, and the cascade,
+// control_plane and defs variants -- grep -n "adminLoginStores(t)"
+// engine/*_test.go for the current list) exercise ordinary store methods
+// through the public API, not anything privileged.
 func adminLoginStores(t *testing.T) (a, b *MSSQLStore) {
 	t.Helper()
 	backend := &MSSQLBackend{}

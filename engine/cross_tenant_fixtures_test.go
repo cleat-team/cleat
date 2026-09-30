@@ -11,10 +11,13 @@ import (
 	"github.com/cleat-team/cleat/engine/testutil"
 )
 
-// PostgreSQL-only: admin.claim_workflows (migrations/postgres/023_cross_tenant_claim.sql)
-// does not exist on MySQL or SQL Server. #1926 retired the CrossTenantClaimer
-// interface that once made this dialect-specific -- unconditional per-tenant
-// rotation needs no such interface at all -- but the function these fixtures
+// PostgreSQL-only: admin.claim_workflows (defined in migrations/postgres/001_schema.sql;
+// find the current definition with
+// `grep -rn "CREATE.*FUNCTION admin.claim_workflows" migrations/postgres/*.sql`
+// rather than trusting a migration number here) does not exist on MySQL or
+// SQL Server. #1926 retired the CrossTenantClaimer interface that once made
+// this dialect-specific -- unconditional per-tenant rotation needs no such
+// interface at all -- but the function this file's fixtures were built to
 // exercise is still Postgres-only, because the schema it reads is. These
 // tests are written directly against *PostgresStore rather than looped over
 // registeredBackends, so a run without CLEAT_TEST_MYSQL/CLEAT_TEST_MSSQL set
