@@ -114,11 +114,12 @@ type MySQLStore struct {
 
 	// perTenantDatabase records that this store was built by
 	// MySQLStoreFactory, whose topology gives each tenant its own physical
-	// database (cleat_<tenant_id>). Only ClaimWorkflowsAcrossTenants reads it,
-	// and only to refuse: dropping a tenant_id predicate cannot widen a
-	// connection that is pointed at a single tenant's database, so the claim
-	// would return one tenant's work and report success. See the doc comment
-	// on ClaimWorkflowsAcrossTenants.
+	// database (cleat_<tenant_id>). It existed for ClaimWorkflowsAcrossTenants
+	// to refuse on: dropping a tenant_id predicate could not widen a
+	// connection already pointed at a single tenant's database, so that claim
+	// would have returned one tenant's work and reported success. #1926
+	// retired ClaimWorkflowsAcrossTenants; this field is set below but has no
+	// remaining reader.
 	perTenantDatabase bool
 
 	logger *slog.Logger
@@ -1114,7 +1115,7 @@ func (f *MySQLStoreFactory) OpenStore(ctx context.Context, tenantID string, task
 	store.tenantID = tenantID
 	store = store.WithLogger(f.logger)
 	// Set last: WithLogger returns a copy, so anything set before it survives
-	// only by accident of struct copying. See ClaimWorkflowsAcrossTenants.
+	// only by accident of struct copying.
 	store.perTenantDatabase = true
 	return store, lease, nil
 }

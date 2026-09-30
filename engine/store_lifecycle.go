@@ -1745,12 +1745,9 @@ func truncateForLog(s string) string {
 
 // scanClaimedWorkflows reads the rows a claim returns.
 //
-// Shared by ClaimWorkflows and ClaimWorkflowsAcrossTenants deliberately: the
-// second reads its columns from admin.claim_workflows, a function defined in a
-// migration, and the only thing keeping that definition in step with this scan
-// is that there is exactly one scan. Two copies would drift, and the symptom
-// would be a scan error at claim time on whichever deployment ran the newer
-// migration.
+// ClaimWorkflowsAcrossTenants was retired in #1926 (the widened
+// admin.claim_workflows path replaced by unconditional per-tenant rotation);
+// this scan now has ClaimWorkflows as its only caller.
 func scanClaimedWorkflows(rows *sql.Rows) ([]*WorkflowInstance, error) {
 	var wfs []*WorkflowInstance
 	for rows.Next() {
