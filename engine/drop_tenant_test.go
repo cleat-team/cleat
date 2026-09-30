@@ -1,17 +1,15 @@
 package engine
 
 // Regression coverage for Finding S3: admin.drop_tenant
-// (migrations/postgres/001_schema.sql, fixed by
-// migrations/postgres/032_drop_tenant_deletes_tenant_data.sql) dropped a
-// tenant's plugin schema and role and two admin.* bookkeeping rows, but
-// never deleted a single row of the tenant's actual workflow data.
+// (migrations/postgres/001_schema.sql, originally fixed by
+// migrations/postgres/032_drop_tenant_deletes_tenant_data.sql, now folded
+// into the cleat#2059 baseline) dropped a tenant's plugin schema and role
+// and two admin.* bookkeeping rows, but never deleted a single row of the
+// tenant's actual workflow data.
 //
-// This file applies 032 directly via os.ReadFile + Exec, the same approach
-// engine/rls_gap_concurrency_and_update_requests_test.go uses for 031:
-// engine/testutil's postgresSchemaFiles() is an explicit list (not a
-// directory glob) owned by another stream this round per
-// WORKSTREAM.md's shared-files table, so a migration added here is applied locally
-// rather than by editing that list.
+// apply032DropTenantMigration below no longer reads any file: it asserts the
+// current admin.drop_tenant is installed, which is what the call sites
+// actually need. See its own comment for why it is still called that.
 //
 // CLAUDE.md's standing requirement: prove the regression test can fail, and
 // read why. TestDropTenant_OldVersionLeavesDataBehind below calls the

@@ -25,9 +25,8 @@ var ErrQueueAlreadyExists = errors.New("queue already exists")
 
 // Queue is a declared concurrency limit and, optionally, a declared rate
 // limit. cleat#1116: explicit registration rather than implicit-on-first-use,
-// so a name exists before anything starts against it. See
-// migrations/postgres/093_a_queue_declares_its_own_concurrency_limit.sql for
-// the full design reasoning.
+// so a name exists before anything starts against it. See the queues table,
+// migrations/postgres/001_schema.sql, for the full design reasoning.
 //
 // THE CLAIM READS ConcurrencyLimit. A workflow whose concurrency_key equals a
 // live queue's name is admitted only while that queue holds fewer than
@@ -44,8 +43,8 @@ var ErrQueueAlreadyExists = errors.New("queue already exists")
 // window, independent of ConcurrencyLimit -- a run can be rate-limited with a
 // free concurrency slot, and vice versa. Both nil means unlimited, the same
 // convention ConcurrencyLimit's own absence (no queues row at all) already
-// uses one level up. See
-// migrations/postgres/096_a_queue_declares_its_own_rate_limit.sql.
+// uses one level up. See the queues.rate_limit column,
+// migrations/postgres/001_schema.sql.
 //
 // WorkerConcurrency is cleat#1917: DBOS parity for a PER-WORKER cap -- how
 // many of this queue's holders one worker process may own at once, nil
@@ -53,8 +52,8 @@ var ErrQueueAlreadyExists = errors.New("queue already exists")
 // total, across every worker) and of RateLimit (an admission rate, not a
 // point-in-time count). A worker serving two tenants, each capped at 1 on a
 // `gpu` queue, may run one of each at the same time -- that is the intended
-// behaviour, not a gap in enforcement. See
-// migrations/postgres/098_a_queue_declares_its_own_worker_concurrency.sql.
+// behaviour, not a gap in enforcement. See the queues.worker_concurrency
+// column, migrations/postgres/001_schema.sql.
 type Queue struct {
 	Name              string
 	ConcurrencyLimit  int

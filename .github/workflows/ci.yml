@@ -391,6 +391,16 @@ jobs:
       - name: ABI doc/code consistency guard
         run: scripts/check-doc-consistency.sh
 
+      # cleat#2725: the postgres schema rebaseline (cleat#2059, cleat#2416)
+      # collapsed every numbered migration into four generated files. A
+      # citation of any other numbered filename is dangling by construction;
+      # this catches the next one, not just the 43 fixed in the PR that
+      # added it.
+      - name: Postgres migration citation guard
+        run: |
+          scripts/check-postgres-migration-citations.py --self-test
+          scripts/check-postgres-migration-citations.py
+
       # The Python SDK's own surface, which the guard above deliberately
       # excludes: an SDK states a different denominator from the engine's and
       # is allowed to differ from it. Five sites stated a number for it and

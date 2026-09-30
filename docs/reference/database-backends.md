@@ -460,7 +460,7 @@ table-valued function (TVF) that checks `SESSION_CONTEXT()`.
    ```
 
 4. **Security policy binding**: Each tenant-scoped table gets filter and block
-   predicates via `CREATE SECURITY POLICY` (migration `002_tenant_foundation.sql`).
+   predicates via `CREATE SECURITY POLICY` (`migrations/mssql/003_procedures.sql`).
 
 5. **db_owner bypass**: Members of `db_owner` role bypass the filter, which
    is standard SQL Server RLS behavior.

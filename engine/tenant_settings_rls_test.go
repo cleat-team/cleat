@@ -188,8 +188,8 @@ func TestATenantCannotSeeAnotherTenantsSettingsRow(t *testing.T) {
 		if err := tx.QueryRow(`SELECT count(*) FROM tenant_settings`).Scan(&n); err != nil {
 			t.Fatalf("counting settings rows as cleat_app: %v\n\n"+
 				"If this is a permission error, the schema baseline's ALTER DEFAULT "+
-				"PRIVILEGES did not reach migrations/postgres/039_tenant_settings.sql "+
-				"and that migration needs an explicit GRANT.", err)
+				"PRIVILEGES did not reach the tenant_settings table "+
+				"(migrations/postgres/001_schema.sql) and that table needs an explicit GRANT.", err)
 		}
 		return n
 	}

@@ -233,8 +233,8 @@ func TestFinalizeWorkflowSegment_ZombieWriterFence(t *testing.T) {
 // including its unconditional DELETE FROM event_history -- regardless of
 // whether the SQL-level guard
 // (`IF v_rows_updated > 0 AND (p_final_status = 'done' OR ...)` in
-// migrations/postgres/004_fix_finalize_workflow_status_fence.sql) is present
-// or not. That's good defence in depth in production, but it means the
+// finalize_workflow_status, migrations/postgres/003_procedures.sql) is
+// present or not. That's good defence in depth in production, but it means the
 // existing zombie-writer test above cannot actually tell whether the SQL
 // guard is doing anything: delete the `v_rows_updated > 0` condition from
 // all three migrations and that test still passes, because the Go-level

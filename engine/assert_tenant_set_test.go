@@ -9,7 +9,7 @@ import (
 )
 
 // TestAssertTenantSetRejectsEmptyStringLikeNull pins the fix in
-// migrations/postgres/034_assert_tenant_set_empty_string.sql.
+// cleat.assert_tenant_set() (migrations/postgres/001_schema.sql).
 //
 // cleat.assert_tenant_set() raises when cleat.tenant_id is missing, so a query
 // reaching an RLS-forced table without a tenant context fails loudly. It tested
@@ -122,7 +122,7 @@ func TestAssertTenantSetRejectsEmptyStringLikeNull(t *testing.T) {
 			"transaction-local, so a connection that has served an RLS transaction "+
 			"reports the GUC as \"\" rather than NULL. The guard misses and "+
 			"`RETURN tid::uuid` fails with a uuid syntax error that never mentions "+
-			"tenants. See migrations/postgres/034_assert_tenant_set_empty_string.sql.",
+			"tenants. See cleat.assert_tenant_set(), migrations/postgres/001_schema.sql.",
 			err, wantMsg)
 	}
 }

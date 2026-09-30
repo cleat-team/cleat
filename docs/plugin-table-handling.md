@@ -304,8 +304,8 @@ done
 grep -rn "TenantScoped:" plugins/*/migrations.go
 
 # does drop_tenant touch any plugin table?
-sed -n '/FUNCTION admin.drop_tenant/,/\$\$ LANGUAGE/p' \
-  migrations/postgres/059_a_dropped_tenants_definitions_go_with_it.sql | grep "DELETE FROM"
+sed -n '/^CREATE OR REPLACE FUNCTION admin.drop_tenant/,/^\$_\$;/p' \
+  migrations/postgres/001_schema.sql | grep "DELETE FROM"
 ```
 
 The dialect-arm comparison needs Go's parser rather than a regex; see §2.2 for why, and §3.3 for

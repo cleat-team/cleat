@@ -169,8 +169,10 @@ Two differences from the PostgreSQL arm are worth knowing, both measured:
 
 ### The same BLOCK predicates now cover the core tables too
 
-Until cleat#2205 (migration `103_a_filtered_write_is_a_blocked_write.sql`,
-2026-09-24) the asymmetry above was worse on the **core** `dbo.*` tables than on
+Until cleat#2205 (the `ADD BLOCK PREDICATE` clauses on the core tables'
+`CREATE SECURITY POLICY` statements, `migrations/mssql/003_procedures.sql`
+since cleat#2438's compaction, 2026-09-24) the asymmetry above was worse on
+the **core** `dbo.*` tables than on
 plugin ones: `dbo.fn_tenant_filter` carried a `FILTER PREDICATE` only, so an
 `INSERT` or `UPDATE` on `workflow_instances`, `workflow_defs`, and the other
 core tenant-scoped tables could stamp or move a row into the *wrong* tenant

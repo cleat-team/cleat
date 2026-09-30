@@ -1,8 +1,9 @@
 package engine
 
-// Layer-separation proof for cleat#1098:
-// migrations/postgres/061_the_memory_profile_has_a_policy_behind_its_predicate.sql
-// adds Row-Level Security to workflow_memory_stats and workflow_memory_samples.
+// Layer-separation proof for cleat#1098: Row-Level Security on
+// workflow_memory_stats and workflow_memory_samples (migrations/postgres/001_schema.sql
+// since the cleat#2059 rebaseline; originally added by
+// migrations/postgres/061_the_memory_profile_has_a_policy_behind_its_predicate.sql).
 //
 // CLAUDE.md's standing requirement for this class: prove the DB policy blocks
 // cross-tenant access ON ITS OWN (Go filter removed), and prove the Go filter
