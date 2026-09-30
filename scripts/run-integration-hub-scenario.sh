@@ -704,27 +704,41 @@ else
   if ! wait_for_worker_state running 15; then
     # A final determination, not a re-use of whatever wait_for_worker_state
     # last saw: it can return 1 having only ever seen "unknown" (cleat#2803
-    # review), and that is a materially different report from "confirmed
+    # review, R1), and that is a materially different report from "confirmed
     # not running" -- the fix must not turn an undetermined read into a
     # confident negative, which is the exact defect this fix exists for.
+    #
+    # It can also return 1 having genuinely reached "running" a moment after
+    # the 15s budget closed -- wait_for_worker_state polls once a second, so
+    # that window is real (cleat-review's #2803 N1). Reporting "NOT RUNNING"
+    # against a fresh read of "running" would contradict itself in the same
+    # message, so a late-but-genuine "running" here is treated as having
+    # come up, not as a failure: what this check exists to catch is never
+    # coming back, not being a couple of seconds later than the budget.
     if final_state="$(worker_container_state 2>/tmp/ih-worker-state-diag.err)"; then
-      echo "FAIL: cleat-worker is NOT RUNNING after the restart." >&2
-      echo "This is not a slow start -- the container never came up. Current" >&2
-      echo "state: '$final_state'." >&2
+      if [[ "$final_state" == "running" ]]; then
+        echo "    cleat-worker reached running just after the 15s budget -- continuing" >&2
+      else
+        echo "FAIL: cleat-worker is NOT RUNNING after the restart." >&2
+        echo "This is not a slow start -- the container never came up. Current" >&2
+        echo "state: '$final_state'." >&2
+      fi
     else
       echo "FAIL: could not determine cleat-worker's state after the restart:" >&2
       echo "  $(cat /tmp/ih-worker-state-diag.err 2>/dev/null)" >&2
       echo "This is NOT a confirmed 'not running' -- docker itself would not say." >&2
     fi
-    echo >&2
-    echo "--- what the container actually is ---" >&2
-    "${COMPOSE[@]}" ps -a >&2 2>&1 || true
-    echo "--- docker compose up's own output (full, not a tail) ---" >&2
-    cat /tmp/ih-restart.log >&2 2>&1 || true
-    echo "--- the worker's log SINCE THE RESTART (not --tail, which the" >&2
-    echo "    pre-kill startup burst fills: that is what the old dump showed)" >&2
-    "${COMPOSE[@]}" logs --since "${RESTART_AT:-5m}" cleat-worker >&2 2>&1 || true
-    exit 1
+    if [[ "${final_state:-}" != "running" ]]; then
+      echo >&2
+      echo "--- what the container actually is ---" >&2
+      "${COMPOSE[@]}" ps -a >&2 2>&1 || true
+      echo "--- docker compose up's own output (full, not a tail) ---" >&2
+      cat /tmp/ih-restart.log >&2 2>&1 || true
+      echo "--- the worker's log SINCE THE RESTART (not --tail, which the" >&2
+      echo "    pre-kill startup burst fills: that is what the old dump showed)" >&2
+      "${COMPOSE[@]}" logs --since "${RESTART_AT:-5m}" cleat-worker >&2 2>&1 || true
+      exit 1
+    fi
   fi
 
   # THE WAIT IS GENEROUS AND THE FAILURE IS TERMINAL, and both halves are a fix
