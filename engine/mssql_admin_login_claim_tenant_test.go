@@ -29,7 +29,7 @@ package engine
 //
 // WHY THE GRANT WAS ALWAYS PRESENT WHERE IT MATTERED, AT THE TIME. This
 // paragraph describes 3.91-era code: requireCleatAdminMembership,
-// ClaimWorkflowsAcrossTenants and the -claim-across-tenants=global mechanism
+// ClaimWorkflowsAcrossTenants and the --claim-strategy=global mechanism
 // it names were all removed in #1926, which replaced the widened claim with
 // unconditional per-tenant rotation. What the removal did not change is that
 // any pool holding dbo.cleat_admin membership -- granted today for cleatctl

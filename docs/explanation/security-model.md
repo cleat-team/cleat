@@ -135,7 +135,8 @@ and syscall boundary but not the CPU/wall-clock one.
 > (8 tables: `workflow_defs`, `workflow_instances`, `event_history`,
 > `workflow_signals`, `workflow_schedules`, `workflow_tags`,
 > `workflow_routing`, `workflow_promises`) and
-> `migrations/mssql/003_procedures.sql:356-364`, which binds
+> `migrations/mssql/003_procedures.sql:356-361` (the function) and `:364-473`
+> (the policies), which binds
 > `dbo.fn_tenant_filter` as a `FILTER PREDICATE` security policy on the same
 > seven multi-tenant tables (this was `012_admin_role.sql` until the SQL
 > Server migration compaction folded it into the baseline; that filename no

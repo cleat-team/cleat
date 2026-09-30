@@ -10,10 +10,11 @@ package engine
 // was written (IMPROVEMENT-PLAN 3.86-era). A non-default tenant's workflows
 // only ran if the dispatch loop could see across tenants: on PostgreSQL that
 // was migrations 023 and 024, and on SQL Server the exemption was
-// IS_ROLEMEMBER(N'cleat_admin') = 1 inside dbo.fn_tenant_filter itself, once
-// migrations/mssql/optional/cross_tenant_claim.sql had switched the predicate
-// to that form (the shipped predicate, migrations/mssql/003_procedures.sql,
-// has never admitted cleat_admin members -- that split is cleat#1541).
+// IS_ROLEMEMBER(N'cleat_admin') = 1 inside the shipped fn_tenant_filter itself
+// (migrations/mssql/012_admin_role.sql, now folded into the baseline); cleat#1541
+// (migration 075, also folded) made that admission opt-in via
+// migrations/mssql/optional/cross_tenant_claim.sql, and the shipped predicate
+// has not carried it since.
 // GetDueSchedulesAcrossTenants, ClaimReadyAcrossTenants and
 // requireCleatAdminMembership were all removed in #1926, which replaced that
 // widened claim with unconditional per-tenant rotation needing no grant at
