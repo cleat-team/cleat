@@ -37,6 +37,24 @@ import (
 // test as the refusal, not split out: a bare "not admitted" proves nothing
 // if the table is simply broken for everyone (CLAUDE.md's empty-table trap,
 // #1285/#1286).
+//
+// THE TWO DIALECT ARMS ARE NOT REDUNDANT, AND THE ASYMMETRY IS NOT
+// COSMETIC -- do not trim the MSSQL arm as duplicate coverage of the
+// Postgres one. testutil.NewPluginTestBackends' Postgres connection is the
+// superuser role (bypassrls), so the Postgres subtest can only ever catch a
+// dropped `WHERE tenant_id = $1` predicate -- it cannot see a dropped
+// plugin.ForTenant(ctx, tid) call at all, since RLS is exactly what that
+// call arms and a superuser bypasses RLS regardless. Measured directly
+// (cleat-review, 2026-09-30, confirmed independently here): with ForTenant
+// removed and the WHERE clause left intact, the Postgres subtest PASSES.
+// The MSSQL subtest is the ONLY thing in this file that exercises the
+// ForTenant/RLS layer, because SQL Server's SECURITY POLICY applies to
+// every principal, not just non-superusers -- it is what fails (closed,
+// denying tenant A's own row too) in exactly that scenario. In production,
+// on the RLS-subject `cleat_app` role, a dropped ForTenant would instead
+// raise via assert_tenant_set() on Postgres rather than pass silently; this
+// test's Postgres arm still would not see that either way, because it
+// never runs as that role.
 func TestAllowlistRowAdmitsOnlyItsOwnTenant(t *testing.T) {
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		if be.Dialect == testutil.DialectMySQL {
