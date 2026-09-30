@@ -322,18 +322,51 @@ go test -count=1 -v ./internal/transform/...
 
 # Cluster integration tests (requires Docker)
 # Starts a PostgreSQL cluster via docker-compose, then runs tests
+#
+# -timeout=1200s, not 120s (cleat#2252). ./engine/... runs every
+# dialect-independent test regardless of which DSNs are set, so "one dialect
+# configured" is not "one dialect's worth of work" -- measured 2026-09-30,
+# fresh single-purpose Docker containers, no other load, `time go test
+# -count=1 -p 1 -timeout=<generous> ./engine/...` with only the named DSN
+# set:
+#
+#   postgres only:  452s (engine) +   4s (engine/testutil)
+#   mysql only:     378s (engine) +   3s (engine/testutil)
+#   mssql only:     574s (engine) +   3s (engine/testutil)
+#   all three:      640s (engine) +   2s (engine/testutil)
+#
+# All four already exceed the old 120s by 3-5x on a dedicated, unloaded
+# machine; CI and a shared dev box run slower still. 1200s is roughly 2x the
+# worst measured figure (mssql), not the figure itself -- see "Any number you
+# write down carries a date and the command that re-derives it" in this
+# project's CLAUDE.md: re-run the command above before trusting these numbers
+# again, don't just trust this comment.
+#
+# A TIMEOUT HERE LEAVES SHARED TEST-DATABASE STATE DIRTY, not just a slow
+# result. `go test`'s own timeout panic skips every test's t.Cleanup, so a
+# helper that flips session-level state for its duration and restores it in
+# Cleanup (e.g. engine/testutil's MSSQLAdminDB, which flips
+# admin.rls_predicate_form to 'admin' for the duration of a call) never gets
+# to restore it. The next run then fails somewhere else entirely --
+# TestMSSQLAdminDBRestoresThePlainPredicateAfterUse reading 'admin' where it
+# expects 'plain' is the exact, reproduced symptom (cleat#2252): it looks like
+# an unrelated new failure, and it is old, dirty state from a timeout in a
+# PREVIOUS run. If ./engine/... has ever hit its timeout on your test
+# databases, drop and recreate them before trusting the next run's failures --
+# do not debug what a stale predicate or partially-applied fixture leaves
+# behind.
 CLEAT_TEST_DB=postgres://cleat:cleat@127.0.0.1:5432/cleat?sslmode=disable \
-  go test -count=1 -p 1 -timeout=120s ./engine/...
+  go test -count=1 -p 1 -timeout=1200s ./engine/...
 
 # MySQL backend tests (requires MySQL 8.0+ at localhost:3306)
 # Skipped if CLEAT_TEST_MYSQL is not set
 CLEAT_TEST_MYSQL=root:cleat@tcp(localhost:3306)/cleat \
-  go test -count=1 -p 1 -timeout=120s ./engine/...
+  go test -count=1 -p 1 -timeout=1200s ./engine/...
 
 # SQL Server backend tests (requires SQL Server 2017+ at localhost:1433)
 # Skipped if CLEAT_TEST_MSSQL is not set
 CLEAT_TEST_MSSQL=sqlserver://sa:CleatTest123!@localhost:1433?database=master \
-  go test -count=1 -p 1 -timeout=120s ./engine/...
+  go test -count=1 -p 1 -timeout=1200s ./engine/...
 
 # Rust crates
 cd crates/cleat-macro && cargo test
