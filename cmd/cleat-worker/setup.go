@@ -3570,9 +3570,11 @@ func (w *Worker) heartbeatBatchStore() engine.WorkflowStore {
 
 // heartbeatAndFenceInFlight heartbeats every run this worker's OWN goroutines
 // are currently executing, fenced individually per (run, generation) rather
-// than in the single unfenced statement BatchHeartbeat issues. cleat#2008:
-// this replaces that call at this one site (BatchHeartbeat itself is
-// unchanged and still correct for whatever else may call it) because it does
+// than in the single unfenced statement BatchHeartbeat used to issue.
+// cleat#2008 replaced BatchHeartbeat with this at the worker's one
+// heartbeat-loop call site -- BatchHeartbeat itself is gone, not left
+// standing for other callers, because it had none (see
+// engine/store_interface.go's HeartbeatBatchFenced doc) -- because this does
 // everything BatchHeartbeat did here PLUS the fence check, in the same
 // number of round trips.
 //
