@@ -192,12 +192,14 @@ func scanPluginForTenantSites(t *testing.T, root string, files []string) []plugi
 		if err != nil {
 			t.Fatalf("parse %s: %v", rel, err)
 		}
+		assertDefaultPluginImportName(t, f, rel)
 		for _, decl := range f.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok {
 				continue
 			}
 			name := funcName(fn)
+			assertNoTrackedReferenceEscapes(t, fn, fset, rel, name, isPluginForTenantCall)
 			ast.Inspect(fn, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok || !isPluginForTenantCall(call.Fun) {
