@@ -19,6 +19,7 @@ engine/engine.go	func WithDeferPassBudget
 engine/engine.go	func WithFetcher
 engine/engine.go	func WithPluginCallGuard
 engine/engine.go	func WithPluginCallObserver
+engine/errors.go	func NewCancelledError
 engine/errors.go	func NewRetriesExhaustedError
 engine/errors.go	func NewTimeoutError
 engine/events.go	func EventsFromRecords
