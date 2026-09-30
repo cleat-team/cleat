@@ -120,16 +120,41 @@ DECL = re.compile(
 )
 
 
+# `_` and `init` are the two identifiers Go explicitly exempts from the
+# one-per-file rule: a blank-identifier `var _ = ...` is the standard
+# compile-time interface assertion and a file routinely carries several, and
+# a package may declare `func init()` any number of times, in any file. A
+# bare-name key collides on both -- the identical defect this guard exists to
+# fix, one identifier over. Verified rather than assumed: nine files in this
+# repo already declare `var _` more than once
+# (`grep -rn '^var _ ' --include="*.go" . | awk -F: '{print $1}' | sort | uniq -c
+#   | sort -rn | awk '$1>1' | wc -l`), and the tree is still accumulating them.
+REPEATABLE_BY_CONTENT = {'_'}   # disambiguated by the rest of the declaration line
+REPEATABLE_BY_ORDINAL = {'init'}  # `func init() {` carries no distinguishing text
+
+
 def documented(src):
     """Map each top-level declaration to whether a // block sits directly above it.
 
-    THE MAP KEY is the bare name for a function, type, var or const -- those
-    occupy one flat namespace in Go, so the compiler already refuses two of
+    THE MAP KEY is the bare name for a function, type, var or const, WITH TWO
+    EXCEPTIONS (`_` and `init`, see REPEATABLE_BY_* above). Every other name
+    occupies one flat namespace in Go, so the compiler already refuses two of
     them sharing a name and a bare-name key cannot collide by construction.
     A METHOD's key is `(receiver_type, name)` instead, because a method's
     namespace is scoped to its receiver and two methods sharing a name on
     different receivers are not just legal, they are the normal way to
     implement an interface method per type (cleat#2480).
+
+    `_` is keyed on `('_', rest-of-line)` rather than by occurrence order,
+    because a `var _` declaration's whole point is to name the type it
+    asserts against, so the rest of the line is almost always a natural,
+    stable, content-based key -- and ordinal position is NOT stable across a
+    reorder, which is exactly the kind of edit that would otherwise produce a
+    spurious finding on an untouched assertion (cleat-review, cleat#2774 R1).
+    `init` has no such content to key on, so it falls back to occurrence
+    order; reordering two adjacent `init` functions can still fool it, which
+    is a narrower and much rarer edit and is recorded as a known limitation
+    rather than solved here.
 
     RAW STRING LITERALS ARE SKIPPED, because Go embeds SQL and generated Go in
     backticks and a `func ...` at column 0 inside one is not a declaration. The
@@ -145,6 +170,7 @@ def documented(src):
     lines = src.split('\n')
     out = {}
     in_raw = False
+    seen = {}  # occurrence counts, for REPEATABLE_BY_ORDINAL names only
     for i, line in enumerate(lines):
         stripped = line.lstrip()
         is_comment = stripped.startswith('//')
@@ -153,9 +179,16 @@ def documented(src):
             if m:
                 recv, fname, other = m.groups()
                 if fname is not None:
-                    key = (recv, fname) if recv is not None else fname
+                    name = fname
+                    key = (recv, name) if recv is not None else name
                 else:
-                    key = other
+                    name = other
+                    key = name
+                if name in REPEATABLE_BY_CONTENT:
+                    key = (name, line[m.end():].strip())
+                elif name in REPEATABLE_BY_ORDINAL:
+                    seen[name] = seen.get(name, 0) + 1
+                    key = (name, seen[name])
                 out[key] = i > 0 and lines[i - 1].startswith('//')
         if not is_comment and line.count('`') % 2 == 1:
             in_raw = not in_raw
@@ -165,8 +198,12 @@ def documented(src):
 def display_name(key):
     """Render a documented() key back into something a reader recognises."""
     if isinstance(key, tuple):
-        recv, name = key
-        return f'({recv}).{name}' if recv else name
+        a, b = key
+        if a in REPEATABLE_BY_CONTENT:
+            return f'var _ {b}' if b else '_'
+        if a in REPEATABLE_BY_ORDINAL:
+            return f'{a} (occurrence #{b})'
+        return f'({a}).{b}' if a else b
     return key
 
 
@@ -371,6 +408,47 @@ func (e *GuestReturnedError) Unwrap() error { return e.cause }
         print(f'SELF-TEST FAILED: a genuine loss on one receiver, beside an untouched '
               f'same-named method on another receiver, was not reported correctly: '
               f'{[display_name(k) for k in real_loss]!r}')
+        ok = False
+
+    # cleat#2774 R1 (cleat-review): a SECOND `var _` must not read as the
+    # FIRST one losing its doc comment. Nine files in this repo already
+    # declare `var _` more than once, so this is not a hypothetical.
+    blank_var_base = '''package p
+
+// _ asserts Plugin implements HasHealth at compile time.
+var _ plugin.HasHealth = (*Plugin)(nil)
+'''
+    blank_var_head = '''package p
+
+// _ asserts Plugin implements HasHealth at compile time.
+var _ plugin.HasHealth = (*Plugin)(nil)
+
+var _ plugin.OtherIface = (*Plugin)(nil)
+'''
+    blank_collided = lost_docs(blank_var_base, blank_var_head)
+    if blank_collided:
+        print(f'SELF-TEST FAILED: a second, unrelated `var _` was read as the first one '
+              f'losing its doc comment: {[display_name(k) for k in blank_collided]!r}')
+        ok = False
+
+    # And the same shape for `init`, which Go also allows any number of per
+    # file -- no content to key on, so this exercises the ordinal fallback.
+    init_base = '''package p
+
+// init seeds the default registry.
+func init() { register(defaultThing) }
+'''
+    init_head = '''package p
+
+// init seeds the default registry.
+func init() { register(defaultThing) }
+
+func init() { register(anotherThing) }
+'''
+    init_collided = lost_docs(init_base, init_head)
+    if init_collided:
+        print(f'SELF-TEST FAILED: a second init() was read as the first one losing its '
+              f'doc comment: {[display_name(k) for k in init_collided]!r}')
         ok = False
 
     # A `func` inside a string or indented must not register as a declaration.
