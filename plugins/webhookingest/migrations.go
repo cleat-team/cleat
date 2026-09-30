@@ -423,7 +423,34 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			DownMySQL: `
 					ALTER TABLE webhook_sources DROP COLUMN correlation_key_field;
 				`,
+			// NOT NULL DEFAULT '' above backs the column with a
+			// system-named default constraint, and a bare DROP COLUMN
+			// refuses while it exists (Msg 5074 / 4922) -- the same
+			// obstacle v7's UpMSSQL hits dropping the old `secret` column,
+			// and the same fix: look the constraint up by (table, column)
+			// in sys.default_constraints and drop it by name first. cleat
+			// review found this the hard way (cleat#2649 GAP): the broken
+			// Down doesn't merely fail to drop the column, it fails at the
+			// FIRST step of the whole Down chain (migrations run in
+			// descending order), so RunDownMigrations never even reaches
+			// v4's Down -- which is what actually drops
+			// webhook_events.error_msg. Nothing gets reversed, and the
+			// recovery Up trivially matches a clean install, which reads as
+			// "recovered" when it is really "never touched." A missing
+			// column makes the DECLARE/SELECT below set @dfname to NULL
+			// rather than error, so the constraint-drop step needs no
+			// existence guard of its own; only the column DROP does -- see
+			// v7's identical comment for why NO BEGIN/END: plugin.splitStatements
+			// shreds this on every literal ';', so each statement has to be
+			// independently complete.
 			DownMSSQL: `
+					DECLARE @dfname sysname
+					SELECT @dfname = dc.name
+						FROM sys.default_constraints dc
+						JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+						WHERE dc.parent_object_id = OBJECT_ID('webhook_sources') AND c.name = 'correlation_key_field'
+					IF @dfname IS NOT NULL EXEC('ALTER TABLE webhook_sources DROP CONSTRAINT [' + @dfname + ']');
+
 					IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'correlation_key_field')
 					ALTER TABLE webhook_sources DROP COLUMN correlation_key_field;
 				`,
