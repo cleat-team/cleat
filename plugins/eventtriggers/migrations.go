@@ -997,8 +997,18 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				-- the batch started and fails with "Invalid column name".
 				EXEC('UPDATE ingested_events SET dispatch_processed = 1 WHERE processed = 1 OR (status IS NOT NULL AND status <> ''pending'')');
 
+				-- EXEC(...) for the same reason as the UPDATE above: this
+				-- CREATE INDEX references dispatch_processed too, in the same
+				-- batch as the conditional ALTER -- a plain statement here
+				-- compiles against the pre-batch catalog on a runner that
+				-- does not split statements and fails "Invalid column name
+				-- 'dispatch_processed'". Caught by tests/plugin-harness'
+				-- Multi-DB CI job, not by this package's own test suite,
+				-- which runs each statement separately through
+				-- plugin.RunMigrations -- exactly the gap the UPDATE's own
+				-- comment above already named and this statement missed.
 				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_dispatch' AND object_id = OBJECT_ID('ingested_events'))
-				CREATE INDEX idx_ingested_events_dispatch ON ingested_events(dispatch_processed, received_at) WHERE dispatch_processed = 0;
+				EXEC('CREATE INDEX idx_ingested_events_dispatch ON ingested_events(dispatch_processed, received_at) WHERE dispatch_processed = 0');
 
 				-- Twin of the SET above: cleared unconditionally, matching
 				-- Version 6's own reasoning -- this session outlives this
