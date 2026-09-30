@@ -116,15 +116,19 @@ Plugins can fail for many reasons: the downstream API is down, rate limits are e
 func NotifyOnSlack(h cleat.HostCalls, input string) error {
     resp, err := h.PluginCall("slack-notify", "send_message", input)
     if err != nil {
-        // Log the failure, but don't fail the workflow.
-        h.DurableLog("slack notification failed: " + err.Error())
+        // No err.Error(): a call through an interface is unresolvable
+        // dispatch to the analyzer (E008), and error is an interface.
+        h.DurableLog("slack notification failed")
 
         // Optionally fall back to a different channel or method.
         fallbackInput := strings.Replace(input, "#workflow-alerts", "#ops-logs", 1)
         resp, err = h.PluginCall("slack-notify", "send_message", fallbackInput)
         if err != nil {
-            // Last resort: log and continue.
-            h.DurableLog("fallback slack notification also failed: " + err.Error())
+            // Last resort: log and continue. The error's text isn't lost by
+            // dropping err.Error() here -- it would still be in the error if
+            // this returned it instead of nil; it's discarded deliberately
+            // below because a failed Slack notification is non-critical.
+            h.DurableLog("fallback slack notification also failed")
             return nil // non-critical failure
         }
     }

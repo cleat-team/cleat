@@ -257,6 +257,28 @@ called through an interface, so it cannot verify the call chain.
 
 **Alternative**: Use concrete types or make the function a cleat entry point.
 
+**The case you are more likely to hit**: `error` is an interface, so calling
+`err.Error()` anywhere in a cleat function triggers the same E008 — not just
+an explicitly declared interface variable.
+
+```go
+if err != nil {
+    h.DurableLog("operation failed: " + err.Error()) // ERROR: E008
+}
+```
+
+This looks like ordinary error handling, not interface dispatch, which is why
+it is easy to hit without recognizing the cause. Log a static message and
+return the error instead of formatting it into the log line — the engine
+records the returned error's text against the run:
+
+```go
+if err != nil {
+    h.DurableLog("operation failed")
+    return err
+}
+```
+
 ### Function Value Calls (E009)
 
 ```go
