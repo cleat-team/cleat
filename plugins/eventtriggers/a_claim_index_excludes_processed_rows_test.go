@@ -143,13 +143,18 @@ func TestClaimQueryPlanExcludesProcessedRowsOnPostgres(t *testing.T) {
 	// This replaces a fixed count of 200, which cleat#2822 exposed as
 	// fragile rather than wrong: at ~200 rows this table is small enough
 	// that whether the planner prefers the index depends on whether
-	// ingested_events has ever been ANALYZEd in this run, and that is an
-	// accident of what else has run in the shared database beforehand, not
-	// a property of the index. develop passes today only because nothing
-	// upstream of this test analyzes the table; cleat#2822's v8 adds a
-	// backfill UPDATE that (plausibly, per CI's own numbers) does. 20,000
-	// rows removes the dependency in both directions: the index is
-	// genuinely cheaper at this size whether or not stats are fresh.
+	// pg_class.reltuples for ingested_events has been set in this run (by
+	// ANALYZE, VACUUM or an index build), and that is an accident of what
+	// else has run in the shared database beforehand, not a property of
+	// the index. In CI at cleat#2822 it was (reltuples=4, relpages=1) with
+	// no ANALYZE/autoanalyze ever run (both NULL, job 110053370908),
+	// consistent with v8's CREATE INDEX idx_ingested_events_dispatch
+	// setting it as a side effect of building on a near-empty table --
+	// the log shows stats set with no analyze, not which operation set
+	// them. develop leaves it at -1, which happens to still favor the
+	// index. 20,000 rows removes the dependency in both directions: the
+	// index is genuinely cheaper at this size whether or not stats are
+	// fresh.
 	//
 	// One batched INSERT ... SELECT rather than 20,000 round trips, which
 	// at one row per exec would make this test slow enough that nobody
