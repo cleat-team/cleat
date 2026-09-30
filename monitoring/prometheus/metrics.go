@@ -1730,16 +1730,6 @@ func (m *Metrics) mergeAttrs(attrs ...attribute.KeyValue) []attribute.KeyValue {
 
 // --- Prometheus text format writer ---
 
-// stripTotalSuffix removes the _total suffix from a metric name if present.
-// This is used for # HELP and # TYPE lines where Prometheus convention omits
-// the suffix for counter metrics.
-func stripTotalSuffix(name string) string {
-	if strings.HasSuffix(name, "_total") {
-		return name[:len(name)-6]
-	}
-	return name
-}
-
 // writePrometheusText formats a ResourceMetrics tree into Prometheus
 // exposition format and writes it to w.
 func writePrometheusText(w io.Writer, rm *metricdata.ResourceMetrics) error {
@@ -1761,15 +1751,11 @@ func writeMetric(w io.Writer, m metricdata.Metrics) error {
 		if len(data.DataPoints) == 0 {
 			return nil
 		}
-		helpName := m.Name
 		typ := "counter"
 		if !data.IsMonotonic {
 			typ = "gauge"
-		} else {
-			// Strip _total suffix only for counter metrics in HELP/TYPE lines.
-			helpName = stripTotalSuffix(helpName)
 		}
-		if _, err := fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n", helpName, m.Description, helpName, typ); err != nil {
+		if _, err := fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n", m.Name, m.Description, m.Name, typ); err != nil {
 			return err
 		}
 		for _, dp := range data.DataPoints {
@@ -1783,14 +1769,11 @@ func writeMetric(w io.Writer, m metricdata.Metrics) error {
 		if len(data.DataPoints) == 0 {
 			return nil
 		}
-		helpName := m.Name
 		typ := "counter"
 		if !data.IsMonotonic {
 			typ = "gauge"
-		} else {
-			helpName = stripTotalSuffix(helpName)
 		}
-		if _, err := fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n", helpName, m.Description, helpName, typ); err != nil {
+		if _, err := fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n", m.Name, m.Description, m.Name, typ); err != nil {
 			return err
 		}
 		for _, dp := range data.DataPoints {
