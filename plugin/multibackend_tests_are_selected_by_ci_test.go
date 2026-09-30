@@ -317,6 +317,35 @@ func (f goFile) references(body *ast.BlockStmt) []funcKey {
 // file into plugins/ to make the cross-check fire did nothing at all, because
 // the file was untracked. The flags keep the worktree exclusion, since
 // .gitignore carries .claude/worktrees/ and --exclude-standard honours it.
+//
+// isGoToolIgnored drops a second class --others makes visible that
+// .gitignore was never meant to cover: a package's OWN throwaway scratch
+// directory, dot- or underscore-prefixed by the same convention `go build
+// ./...` and `go test ./...` already use to ignore it (`go help packages`).
+// internal/plugingen's assertGoCompiles writes real, untracked .go files to
+// exactly such a directory (.compiletest-NNN/, deliberately in-module --
+// see that function's own doc) and deletes it when its test ends.
+// --exclude-standard has nothing to say about it, since nothing in
+// .gitignore names it, so this guard's *.go glob matched it, sorted it in
+// among real source, and then tried to parse it -- successfully whenever
+// this guard ran alone, and racing assertGoCompiles' own create/delete
+// whenever `go test` ran both packages in one invocation (cleat#2811):
+//
+//	parse internal/plugingen/.compiletest-NNN/generated.go: ... no such file or directory
+//
+// This filter makes this guard agree with the go tool about what counts as
+// source, the same way `go build ./...` already does -- not a new exclusion
+// list, since nothing here is named, only the shape every dot/underscore
+// scratch directory already shares.
+func isGoToolIgnored(rel string) bool {
+	for _, seg := range strings.Split(rel, "/") {
+		if strings.HasPrefix(seg, ".") || strings.HasPrefix(seg, "_") {
+			return true
+		}
+	}
+	return false
+}
+
 func parseTrackedGoFiles(t *testing.T, root string) []goFile {
 	t.Helper()
 
@@ -329,6 +358,13 @@ func parseTrackedGoFiles(t *testing.T, root string) []goFile {
 	if len(rels) == 0 {
 		t.Fatal("git ls-files matched no .go files")
 	}
+	filtered := rels[:0]
+	for _, rel := range rels {
+		if !isGoToolIgnored(rel) {
+			filtered = append(filtered, rel)
+		}
+	}
+	rels = filtered
 	sort.Strings(rels)
 
 	mod := modulePath(t, root)

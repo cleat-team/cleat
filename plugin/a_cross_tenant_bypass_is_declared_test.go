@@ -201,6 +201,15 @@ func (s crossTenantSite) key() string { return s.File + ":" + s.Func }
 // --others --exclude-standard so that a call site added in an untracked file is
 // still seen. A guard that only reads committed files is blind to exactly the
 // change being reviewed.
+//
+// --others ALSO surfaces a package's own throwaway scratch directory, which
+// --exclude-standard does not catch because nothing in .gitignore names it:
+// internal/plugingen's assertGoCompiles writes real, untracked .go files
+// under a dot-prefixed .compiletest-NNN/ (deliberately in-module) and
+// deletes them when its test ends, so this glob can match a file mid-create
+// or mid-delete when both packages run in one `go test` invocation
+// (cleat#2811). Skipping any dot/underscore-prefixed path segment matches
+// the same convention `go build ./...` already uses to ignore it.
 func trackedGoFiles(t *testing.T, root string) []string {
 	t.Helper()
 	out, err := exec.Command("git", "-C", root, "ls-files",
@@ -210,6 +219,9 @@ func trackedGoFiles(t *testing.T, root string) []string {
 	}
 	var files []string
 	for _, rel := range strings.Fields(string(out)) {
+		if isGoToolIgnored(rel) {
+			continue
+		}
 		if strings.HasSuffix(rel, "_test.go") {
 			continue
 		}
