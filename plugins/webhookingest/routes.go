@@ -738,11 +738,9 @@ func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 	// sweep (queryUnprocessedEvents) too, as a side effect rather than by
 	// design. After the split, `processed` alone stops delivery to an
 	// AWAITER but no longer stops a matching event_subscriptions row from
-	// being dispatched for a deleted source's event. Setting both here
-	// preserves today's actual behaviour (a deleted source's events are
-	// fully inert) rather than silently answering cleat#2820's open product
-	// question -- "should a deleted source's events ever be dispatchable" --
-	// by default, as a refactor's side effect.
+	// being dispatched for a deleted source's event. Decided in #2822
+	// (closing #2820, which asked the question): a deleted source's events
+	// are inert on both paths, matching webhook_events' own cancellation.
 	if _, err := tx.Exec(r.Context(), plugin.Rebind(`
 		UPDATE ingested_events
 		SET status = 'cancelled', processed = true, dispatch_processed = true, error_msg = 'source deleted'
