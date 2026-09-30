@@ -16,16 +16,17 @@ import (
 )
 
 // TestHealthDegradesWhenAScheduledBackupCannotResolveItsDSN is cleat#2246
-// item 2: Health is driven by the attempt path (runDueBackups actually
-// failing to resolve scheduledbackup.dsn), not by a query run for its own
-// sake, mirroring auditlog's lost-event health signal
+// item 2: Health is driven by the attempt path (executeScheduledBackup
+// actually failing to resolve scheduledbackup.dsn, background.go), not by a
+// query run for its own sake, mirroring auditlog's lost-event health signal
 // (plugins/auditlog/queue.go).
 //
-// Drives the real runDueBackups dispatch path against real PostgreSQL,
-// rather than calling Health after hand-setting the field directly, so this
+// Drives the real runDueBackups dispatch path (which dispatches
+// executeScheduledBackup on its own goroutine) against real PostgreSQL,
+// rather than calling Health after hand-setting the fields directly, so this
 // proves the wiring in background.go actually calls Health's own
 // bookkeeping -- a test that only exercised Health() in isolation could not
-// catch background.go forgetting to record the failure at all.
+// catch background.go forgetting to record anything at all.
 func TestHealthDegradesWhenAScheduledBackupCannotResolveItsDSN(t *testing.T) {
 	db := testutil.TestDB(t, testutil.DialectPostgres)
 	ctx := context.Background()
@@ -66,35 +67,60 @@ func TestHealthDegradesWhenAScheduledBackupCannotResolveItsDSN(t *testing.T) {
 		t.Fatalf("Health error does not mention scheduledbackup.dsn: %v", err)
 	}
 
-	// Negative control: the window has not elapsed, and a healthy dispatch
-	// (secret now resolves) does not itself clear the signal -- an operator
-	// needs to see that SOMETHING failed recently even if the next attempt
-	// succeeds, since the failed attempt's backup was never taken.
+	// Negative control: a later successful attempt does not INSTANTLY clear
+	// the signal -- it starts the decay window (see Health's doc comment for
+	// why a fixed decay from the ORIGINAL failure is wrong for something
+	// that recurs once per cron period). Immediately after the success, the
+	// window has not elapsed, so Health must still report an error.
 	p.deploymentSecrets = &fakeBackupDeploymentSecrets{dsn: testBackupDSN}
 	configID2 := uuid.New()
 	mustInsertDueConfig(t, db, dialect, configID2, "cleat-2246-health-2", past)
 	p.runDueBackups(ctx)
 	waitForBgBackups(t, p)
 	if err := p.Health(); err == nil {
-		t.Fatalf("Health after a later successful attempt: nil, want the earlier failure to still be reported (window has not elapsed)")
+		t.Fatalf("Health immediately after a later successful attempt: nil, want the decay window to not have elapsed yet")
 	}
 }
 
-// TestHealthRecoversAfterTheWindowElapses confirms the signal decays rather
-// than latching, the same shape as auditlog's: an operator should not see a
-// permanently-red worker over one transient DSN outage. Manipulates the
-// recorded time directly rather than sleeping healthWindow (5 minutes) in a
-// test -- Health's own arithmetic is what is under test, not the clock.
-func TestHealthRecoversAfterTheWindowElapses(t *testing.T) {
+// TestHealthStaysDegradedWithNoSuccessSinceTheFailure is cleat-review's R1 on
+// #2764: a fixed decay window borrowed from auditlog is wrong here.
+// auditlog's losses recur on every request, so "5 minutes since the last
+// one" is a reasonable proxy for "still happening". A scheduled backup
+// recurs once per cron period -- a daily schedule with no DSN set would be
+// degraded for 5 of every 1,440 minutes under a naive decay, well under any
+// `for:` duration an alert would use, so the signal would never fire in
+// practice. Health must instead stay degraded indefinitely as long as the
+// latest attempt is the failure itself, with no decay purely from elapsed
+// time.
+func TestHealthStaysDegradedWithNoSuccessSinceTheFailure(t *testing.T) {
 	p := &Plugin{}
 
-	p.lastDSNUnavailable.Store(time.Now().Add(-healthWindow + time.Minute).UnixNano())
+	// A failure far older than healthWindow, and nothing has ever resolved
+	// it (lastDSNResolved is still the zero value) -- this is the daily-cron
+	// case cleat-review named: elapsed time alone must not heal it.
+	p.lastDSNUnavailable.Store(time.Now().Add(-24 * time.Hour).UnixNano())
 	if err := p.Health(); err == nil {
-		t.Fatalf("Health with a failure inside the window: nil, want an error")
+		t.Fatalf("Health with a day-old failure and no success since: nil, want an error -- time alone must not decay this")
+	}
+}
+
+// TestHealthDecaysForTheWindowAfterARecoveringAttempt covers the other half
+// of the same fix: once a LATER attempt actually resolves the secret, the
+// signal decays for healthWindow measured from that success, not from the
+// original failure -- covering both sides of that window without sleeping 5
+// minutes in a test.
+func TestHealthDecaysForTheWindowAfterARecoveringAttempt(t *testing.T) {
+	failedAt := time.Now().Add(-24 * time.Hour)
+
+	p := &Plugin{}
+	p.lastDSNUnavailable.Store(failedAt.UnixNano())
+	p.lastDSNResolved.Store(time.Now().Add(-healthWindow + time.Minute).UnixNano())
+	if err := p.Health(); err == nil {
+		t.Fatalf("Health with a recovery inside the window: nil, want an error")
 	}
 
-	p.lastDSNUnavailable.Store(time.Now().Add(-healthWindow - time.Second).UnixNano())
+	p.lastDSNResolved.Store(time.Now().Add(-healthWindow - time.Second).UnixNano())
 	if err := p.Health(); err != nil {
-		t.Fatalf("Health with a failure past the window: %v, want nil", err)
+		t.Fatalf("Health with a recovery past the window: %v, want nil", err)
 	}
 }

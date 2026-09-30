@@ -303,6 +303,10 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID uuid.UUID,
 		p.lastDSNUnavailable.Store(time.Now().UnixNano())
 		return
 	}
+	// Also drives Health: a later successful resolution is what starts the
+	// signal decaying, rather than the fixed window running from the
+	// original failure (see Health's doc comment for why).
+	p.lastDSNResolved.Store(time.Now().UnixNano())
 
 	// Execute pg_dump.
 	//
