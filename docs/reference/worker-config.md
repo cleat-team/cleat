@@ -1300,9 +1300,9 @@ check for a lost `BYPASSRLS` grant on `cleat_dispatcher` -- that check belonged
 to the widened `admin.claim_workflows` query #1926 retired, and went with it:
 `reportCrossTenantCapability` (`cmd/cleat-worker/setup.go`) calls only
 `rotatingClaimAvailability`, which asks nothing about role attributes. Confirm
-with `grep -rn CheckCrossTenantCapability --include='*.go' .` -- every
-non-test hit is a stale comment naming a function that is not defined in
-`engine/`.
+with `grep -rn CheckCrossTenantCapability --include='*.go' .` -- the only
+non-test hit is `setup.go`'s own comment recording that the function was
+retired with #1926; it is not defined anywhere in `engine/`.
 
 ---
 
