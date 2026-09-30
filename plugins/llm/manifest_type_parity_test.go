@@ -16,13 +16,15 @@ import (
 // should be declared as, and the real Go type whose JSON shape that name
 // should structurally match. cleat#2656.
 //
-// inputGoType/outputGoType are nil for a function whose request or response
-// has no fixed, named, package-level Go type to reflect on -- list_models's
-// response is assembled from map[string]any and a function-local anonymous
-// struct (see listModels). That is recorded here, not left as an absence:
-// a nil entry still asserts the manifest type NAME is correct and still
-// requires the function to be present in this table at all, it just skips
-// the structural field-by-field comparison for that one side.
+// inputGoType/outputGoType are nil for a request or response with no fixed,
+// named, package-level Go type to reflect on -- list_models's OUTPUT is
+// assembled from map[string]any in two different shapes depending on
+// whether a provider filter is given (see listModels), so there is nothing
+// stable to compare its declared fields against. That is recorded here, not
+// left as an absence: a nil entry still asserts the manifest type NAME is
+// correct and still requires the function to be present in this table at
+// all, it just skips the structural field-by-field comparison for that one
+// side.
 type expectedHostFunctionType struct {
 	inputManifestType  string
 	inputGoType        reflect.Type
@@ -44,7 +46,7 @@ var expectedHostFunctions = map[string]expectedHostFunctionType{
 		"embed_output", reflect.TypeOf(providers.EmbedOutput{}),
 	},
 	"list_models": {
-		"list_models_input", nil,
+		"list_models_input", reflect.TypeOf(listModelsRequest{}),
 		"list_models_output", nil,
 	},
 }
