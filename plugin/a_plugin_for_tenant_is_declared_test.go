@@ -49,13 +49,6 @@ var pluginForTenantLedger = map[string]bool{
 	// credential at all, so r.Context() carries no tenant to inherit.
 	"plugins/webhookingest/routes.go:(*Plugin).handleIngestWebhook": true,
 
-	// Background retry loop, built from context.Background() rather than the
-	// sweep's own ctx for two reasons: to detach from the tick's cancellation,
-	// and because the sweep's ctx carries an AcrossAllTenants bypass that would
-	// silently absorb a ForTenant applied on top of it (cleat#1515) and leave
-	// the write unscoped while looking correct at the call site.
-	"plugins/webhookingest/background.go:(*Plugin).processBatch": true,
-
 	// Background export loop (a plugin_lease-elected leader sweeping every
 	// tenant's configs), no request in scope. cfg.TenantID comes off the
 	// config row being exported. Same function as secretsForTenantLedger's
