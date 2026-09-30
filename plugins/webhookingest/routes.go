@@ -487,8 +487,34 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	body, ok := plugin.ReadBody(w, r)
+	if !ok {
+		return
+	}
+
+	// signal_workflow_id/signal_name were retired in cleat#2689 along with
+	// the static push-to-signal mechanism they configured
+	// (background.go, deleted entirely). createSourceRequest no longer
+	// declares them, so a plain json.Unmarshal into it silently drops an
+	// unknown field -- a caller migrating an old integration would get a
+	// 201 and a source that quietly never signals, with nothing telling
+	// it why. Reject instead. Ignore a decode error here: a genuinely
+	// malformed body is reported once, below, by the real decode.
+	var retired struct {
+		SignalWorkflowID string `json:"signal_workflow_id"`
+		SignalName       string `json:"signal_name"`
+	}
+	if err := json.Unmarshal(body, &retired); err == nil {
+		if retired.SignalWorkflowID != "" || retired.SignalName != "" {
+			p.writeError(w, 400, "signal_workflow_id/signal_name were retired in cleat#2689 and no "+
+				"longer do anything; use a correlated await_webhook call instead (cleat#2625/#2649)")
+			return
+		}
+	}
+
 	var req createSourceRequest
-	if !plugin.ReadJSONBody(w, r, &req) {
+	if err := json.Unmarshal(body, &req); err != nil {
+		p.writeError(w, 400, fmt.Sprintf("invalid JSON: %v", err))
 		return
 	}
 	if req.Name == "" {

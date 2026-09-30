@@ -486,10 +486,32 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// one thing: "cancelled by a source deletion" (or its DEFAULT
 			// false otherwise) -- narrower, but no longer false.
 			//
-			// NO BACKFILL, matching v7's precedent: 0.3.0 requires a fresh
-			// database (cleat#2058, owner decision 3), so no deployment has
-			// existing rows whose signal_workflow_id ever fired through a
-			// path this migration needs to preserve.
+			// NO BACKFILL, and UNLIKE v7's precedent this is not because
+			// there is nothing to preserve. v7's "0.3.0 requires a fresh
+			// database" (cleat#2058, owner decision 3) is true of the
+			// v0.2.0->v0.3.0 transition specifically: no v0.2.0 deployment
+			// had a plaintext secret to move, because the secret column
+			// didn't exist yet. It does NOT generalise to this migration --
+			// v0.3.0, v0.3.1 and v0.3.2 all shipped signal_workflow_id and a
+			// working push-to-signal path (confirmed via `git show
+			// v0.3.0:plugins/webhookingest/routes.go` and `background.go`),
+			// so a real v0.3.x deployment can have rows actively relying on
+			// it. There is no automatic backfill for "convert a static
+			// signal_workflow_id binding into a correlated await_webhook
+			// wait" -- that is a per-integration config decision only the
+			// operator can make. Owner ruling on cleat#2689/cleat#2833:
+			// RETIRE, with a mandatory pre-upgrade operator step rather than
+			// a silent drop. Before upgrading past this migration, run
+			//   SELECT id, tenant_id, signal_workflow_id, signal_name
+			//   FROM webhook_sources
+			//   WHERE signal_workflow_id IS NOT NULL AND deleted_at IS NULL
+			// on every v0.3.x deployment, and for each row, migrate that
+			// workflow onto correlated `await_webhook` (cleat#2625/#2649)
+			// before upgrading -- see CHANGELOG.md's entry for this version.
+			// A deployment that skips this step keeps working after
+			// upgrade; it just stops receiving pushed signals for any
+			// source that still had one bound, with no error and no
+			// warning, because the column carrying that binding is gone.
 			Version: 10,
 			Up: `
 				ALTER TABLE webhook_sources DROP COLUMN IF EXISTS signal_workflow_id;

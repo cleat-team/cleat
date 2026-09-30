@@ -1589,6 +1589,53 @@ func TestCreateSourceInvalidBody(t *testing.T) {
 	}
 }
 
+// TestCreateSourceRejectsRetiredSignalFields is cleat#2689's R1: before this
+// fix, createSourceRequest simply had no field for signal_workflow_id or
+// signal_name, so a plain json.Unmarshal silently dropped either one -- a
+// caller migrating an old integration got a 201 and a source that quietly
+// never signals, with nothing telling it why. Both fields, and both
+// non-empty and present-with-other-fields, must be rejected; an absent or
+// empty field must not be.
+func TestCreateSourceRejectsRetiredSignalFields(t *testing.T) {
+	for _, body := range []string{
+		`{"name":"s","secret":"x","signal_workflow_id":"wf-123"}`,
+		`{"name":"s","secret":"x","signal_name":"webhook_received"}`,
+		`{"name":"s","secret":"x","signal_workflow_id":"wf-123","signal_name":"webhook_received"}`,
+	} {
+		_, handler, _ := setupTestPlugin(t)
+		req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(body)))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %s: expected 400, got %d: %s", body, rec.Code, rec.Body.String())
+		}
+		var resp map[string]any
+		json.Unmarshal(rec.Body.Bytes(), &resp)
+		errMsg, _ := resp["error"].(string)
+		if !strings.Contains(errMsg, "2689") {
+			t.Errorf("body %s: expected the error to name cleat#2689, got %q", body, errMsg)
+		}
+	}
+}
+
+// TestCreateSourceAllowsAbsentOrEmptyRetiredSignalFields is the sibling
+// negative case: nothing about the new check should reject a request that
+// never mentions the retired fields, or sets them to their zero value.
+func TestCreateSourceAllowsAbsentOrEmptyRetiredSignalFields(t *testing.T) {
+	for _, body := range []string{
+		`{"name":"s","secret":"x"}`,
+		`{"name":"s","secret":"x","signal_workflow_id":"","signal_name":""}`,
+	} {
+		_, handler, _ := setupTestPlugin(t)
+		req := authedRequest("POST", "/ingest/sources", bytes.NewReader([]byte(body)))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("body %s: expected 201, got %d: %s", body, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 // ===========================================================================
 // List events with and without filters
 // ===========================================================================
