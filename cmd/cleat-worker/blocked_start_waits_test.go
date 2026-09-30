@@ -103,18 +103,36 @@ func TestABlockedStartIsAcceptedAndWaits(t *testing.T) {
 	// never both. This is the assertion that stops "accepted" from silently
 	// meaning "accepted and run concurrently", which would be worse than the
 	// 409 it replaced.
-	claimed, err := store.ClaimWorkflows(ctx, "worker-blocked-start", 10)
-	if err != nil {
-		t.Fatalf("ClaimWorkflows: %v", err)
-	}
-	got := 0
-	for _, wf := range claimed {
-		if wf.ID == body1["id"] || wf.ID == body2["id"] {
-			got++
+	//
+	// ClaimWorkflows(ctx, workerID, limit) claims across the WHOLE shared
+	// database -- there is no per-test scoping parameter -- and this suite's
+	// database is SuiteTestDB's, which persists across every local run with
+	// nothing resetting it (cleat#2214). So a single fixed-size claim can
+	// exhaust its limit on runnable rows OTHER local runs left behind and see
+	// neither of this test's own two: that reads as "0 claimed" and looks
+	// exactly like the concurrency-key fix being broken, when nothing is
+	// wrong. Drain in batches until both IDs are accounted for or the queue
+	// itself is empty, rather than trusting one call's limit to be enough. In
+	// CI, which always starts from a fresh database, this drains in one pass.
+	seen := map[string]bool{}
+	const batch = 50
+	for i := 0; i < 200; i++ { // generous: observed local leftover volume is in the tens, not thousands
+		claimed, err := store.ClaimWorkflows(ctx, "worker-blocked-start", batch)
+		if err != nil {
+			t.Fatalf("ClaimWorkflows: %v", err)
+		}
+		for _, wf := range claimed {
+			if wf.ID == body1["id"] || wf.ID == body2["id"] {
+				seen[wf.ID] = true
+			}
+		}
+		if len(claimed) < batch {
+			break // the queue is drained: nothing more to find
 		}
 	}
-	if got != 1 {
-		t.Errorf("%d of the two runs sharing key %q were claimed, want exactly 1.\n\n"+
+	if got := len(seen); got != 1 {
+		t.Errorf("%d of the two runs sharing key %q were claimed (draining the local queue to find "+
+			"them), want exactly 1.\n\n"+
 			"2 means the key is not excluding anything and accepting the second start made "+
 			"things worse than refusing it. 0 means neither can run at all.", got, key)
 	}
