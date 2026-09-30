@@ -80,9 +80,11 @@ describing the discovery of), and cleat#1973 has since gone one step further: th
 paragraph's finding, since nothing ever called the procedure that way — was removed outright
 in `migrations/postgres/101_the_finalize_procedure_stops_deleting_failed_history.sql` and its
 MySQL/SQL Server equivalents. It is no longer merely unreachable in practice; the procedure
-now raises "unknown final status" if a future caller tries. This paragraph is left as-is
-otherwise because it documents how the model's premise was found, not the current state of
-either comment — re-read the comments themselves for that.
+now raises "unknown final status" if a future caller tries. That removal is reflected in the
+procedure's current body, `migrations/postgres/003_procedures.sql` since the cleat#2059
+rebaseline. This paragraph is left as-is otherwise because it documents how the model's
+premise was found, not the current state of either comment — re-read the comments themselves
+for that.
 
 **Not modeled, and worse than what is: `RetryWorkflow`** (`cmd/cleat-worker/app.go`'s
 `st.RetryWorkflow` call, `dead_lettered` → `ready`) **has no equivalent guard at all** —

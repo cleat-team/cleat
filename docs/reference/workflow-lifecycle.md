@@ -121,7 +121,7 @@ The name survives in three places, and none of them make it a status:
 
 - `validFinalStatus` (`validFinalStatus`, `engine/store_lifecycle.go`) accepts `"suspended"` — but the Postgres
   `finalize_workflow_status` function has `WHEN 'done' / 'ready'` and `RAISE
-  EXCEPTION` on anything else (`migrations/postgres/101_the_finalize_procedure_stops_deleting_failed_history.sql`).
+  EXCEPTION` on anything else (`migrations/postgres/003_procedures.sql`).
   Passing `"suspended"` would pass the Go check and raise in the database. No caller does: the
   worker passes only `"done"` or `"ready"`.
 - Read predicates of the form `WHERE id = $1 AND status IN ('ready', 'suspended')`
@@ -130,14 +130,18 @@ The name survives in three places, and none of them make it a status:
 - Suspension *is* a real concept — it is what the guest does, and the host reports it through
   `SuspendResult`. It is simply not represented in this column.
 
-> Note for migration 101: it is the highest-numbered migration that **defines**
-> `finalize_workflow_status`, superseding 004. Later migrations reference it. For anything created
-> with `CREATE OR REPLACE`, find the highest-numbered definition before concluding what the
-> procedure does — 004 and 003 both still contain earlier bodies, and 004's had a `WHEN 'failed'`
-> arm that 101 removed (cleat#1973: nothing ever called the procedure with `finalStatus = "failed"`
-> — a real failure goes through `FailWorkflow`, a plain Go `UPDATE`, not this procedure — so as of
-> 101 `validFinalStatus` no longer accepts `"failed"` either; it now raises in Go before reaching
-> the database, the same way `"suspended"` already did).
+> Note for the current definition: since the cleat#2059 rebaseline,
+> `migrations/postgres/003_procedures.sql` carries `finalize_workflow_status`'s
+> only body -- `CREATE OR REPLACE` means there is one live definition, not a
+> sequence to walk. For a routine still on the pre-rebaseline numbered chain,
+> the rule stands as written: find the highest-numbered migration that
+> **defines** it before concluding what it does. Here that used to matter --
+> migration 101 removed a `WHEN 'failed'` arm that 004 had added (cleat#1973:
+> nothing ever called the procedure with `finalStatus = "failed"` — a real
+> failure goes through `FailWorkflow`, a plain Go `UPDATE`, not this procedure
+> — so as of 101 `validFinalStatus` no longer accepts `"failed"` either; it now
+> raises in Go before reaching the database, the same way `"suspended"`
+> already did) — and the current baseline already reflects that removal.
 
 ### There are no EXPORTED status constants, and the unexported ones do not cover everything
 
@@ -631,9 +635,11 @@ The durable record:
 | `workflow_instances.defer_phase_deadline` | when the phase gives up. Separate from heartbeat staleness on purpose, and it is a different sweep: a phase whose worker *vanished* is caught by the heartbeat sweep and gets another attempt, so this one bounds the number of ATTEMPTS — a workflow cannot sit in `terminating` forever because its defers trap on every replay. Past it, `ExpireDeferPhases` applies the recorded outcome without the cleanup. |
 | `terminating` | the status for the window, per the visibility condition below. |
 
-`migrations/postgres/038_defer_phase_marker.sql`, `mysql/037`, `mssql/041`. Note the numbers do
-not align across dialects and are not meant to; take the next free number above each dialect's
-own high-water mark. `migrations/postgres/040` widened the cross-tenant claim function to match
+`idx_workflow_instances_defer_phase_deadline` (`migrations/postgres/001_schema.sql` since the
+cleat#2059 rebaseline; originally `migrations/postgres/038_defer_phase_marker.sql`, `mysql/037`,
+`mssql/041`). Note the numbers did not align across dialects and were not meant to; on the
+pre-rebaseline chain, a new column or index took the next free number above each dialect's own
+high-water mark. `migrations/postgres/040` widened the cross-tenant claim function to match
 the inline claims — a deployment on `--claim-across-tenants` that applied 038 without 040 would
 never dispatch a defer phase at all.
 

@@ -668,9 +668,13 @@ As of this release, queries without tenant context **fail with an error**:
 
 ### Migration
 
-Run migration `008_rls_fail_closed.sql`. The migration is idempotent:
-- Creates or replaces the `cleat.assert_tenant_set()` function.
-- Recreates RLS policies to use the new assert function (Postgres).
+Run the standard migration command (`cleat-worker --migrate-db` or
+`cleatctl migrate`) against the current migration tree. The fail-closed
+`cleat.assert_tenant_set()` function and the RLS policies that call it have
+been part of the baseline schema (`migrations/postgres/001_schema.sql`) since
+the cleat#2059 rebaseline, so on a deployment already on that baseline this
+step is a no-op; it only does work on a deployment still on the pre-rebaseline
+numbered chain, where it originally shipped as migration `008_rls_fail_closed.sql`.
 
 No application code changes are required for normal operation. The existing
 `WithTenant()` pattern in the dispatch loop already sets tenant context before
@@ -688,10 +692,13 @@ SELECT set_config('cleat.tenant_id', '<tenant-uuid>', false);
 
 ### Migration ordering
 
-Migrations must be applied in order. Do not re-run migration `002_constraints.sql`
-after migration `008_rls_fail_closed.sql` without first manually dropping the RLS
-policies, because `002_constraints.sql` uses bare `CREATE POLICY` without
-`DROP POLICY IF EXISTS` guards.
+Migrations must be applied in order; the migration runner enforces this. On
+the pre-rebaseline numbered chain, this ordering hazard was real: replaying
+migration `002_constraints.sql` (bare `CREATE POLICY`, no
+`DROP POLICY IF EXISTS` guard) after `008_rls_fail_closed.sql` without first
+manually dropping the RLS policies would fail. `migrations/postgres/001_schema.sql`,
+the current baseline, carries the RLS policies' LAST definition directly and
+is applied once, so there is no such sequence to replay.
 
 ### MSSQL limitation
 

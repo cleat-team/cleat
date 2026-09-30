@@ -14,7 +14,8 @@ for f in migrations/postgres/*.sql; do psql -U postgres -d cleat -f "$f"; done
 
 ### PostgreSQL 16 is required, not merely recommended
 
-From migration `077_a_plugin_policy_can_use_its_index.sql` onward the schema uses
+The schema's `GRANT cleat_sweep ... WITH INHERIT FALSE` (`migrations/postgres/001_schema.sql`,
+originally added by migration `077_a_plugin_policy_can_use_its_index.sql`) uses
 syntax that does not exist before PostgreSQL 16:
 
 ```sql
@@ -306,9 +307,9 @@ CREATE INDEX idx_workflow_signals_queue
 whole of the table's semantics.** A signal is a *delivery*, and a name is not an
 identity: sending `approve` twice before the workflow consumes it produces two
 rows, and a workflow that accumulates — a counter, one approval per reviewer, a
-batch of items — receives both. The table was keyed on the name until 2026-09-05
-(`migrations/postgres/041_signal_queue.sql`), which made the second delivery
-overwrite the first with no error.
+batch of items — receives both. The table was keyed on the name until 2026-09-05,
+when the surrogate key above (now `migrations/postgres/001_schema.sql`) replaced
+it, which made the second delivery overwrite the first with no error.
 
 So the table is a FIFO queue per `(workflow_id, signal_name)`, ordered by `id`.
 `delivered_at` cannot serve as the order: two deliveries in the same microsecond

@@ -213,8 +213,8 @@ type WorkflowStore interface {
 
 	// PollSignal returns the OLDEST unconsumed delivery with this name,
 	// without consuming it. Ordering is by SignalDelivery.ID, which is the
-	// table's surrogate key -- see migrations/postgres/041_signal_queue.sql
-	// for why delivered_at cannot serve.
+	// table's surrogate key -- see the idx_workflow_signals_queue index,
+	// migrations/postgres/001_schema.sql, for why delivered_at cannot serve.
 	//
 	// It does not consume, and that is deliberate rather than an oversight:
 	// consuming here would make delivery at-most-once, because the caller

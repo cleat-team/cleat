@@ -2,9 +2,9 @@ package main
 
 // Integration coverage for the `cleatctl drop-tenant` command
 // (droptenant.go), the caller Finding S3 asks for: admin.drop_tenant
-// (migrations/postgres/032_drop_tenant_deletes_tenant_data.sql, proven
-// against the real deletion logic in engine/drop_tenant_test.go) had no Go
-// caller anywhere in the tree before this. These tests exercise the CLI
+// (migrations/postgres/001_schema.sql, proven against the real deletion
+// logic in engine/drop_tenant_test.go) had no Go caller anywhere in the
+// tree before this. These tests exercise the CLI
 // layer specifically -- argument parsing, the default-tenant refusal, the
 // dry-run/confirmation/audit-output guard rails -- against a real
 // PostgreSQL connection, the same CLEAT_TEST_POSTGRES database
@@ -34,9 +34,9 @@ import (
 // current one -- the exact hazard the list existed to prevent (CREATE OR
 // REPLACE keeps whichever ran last, and cleat#1201's fix lives in 059).
 //
-// What the call sites need is that the CURRENT routine is installed. This
-// asserts that instead: the two-argument form, which 069 gave it the schema
-// parameter for.
+// What the call sites need is that the CURRENT routine is installed
+// (migrations/postgres/001_schema.sql). This asserts that instead: the
+// two-argument form, which 069 gave it the schema parameter for.
 func apply032ForDropTenantTest(t *testing.T, db *sql.DB) {
 	t.Helper()
 	var n int

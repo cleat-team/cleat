@@ -42,7 +42,8 @@ claimed workflow through `store.FailWorkflow` and asserts a preserved call
 event survives.
 
 **cleat#1973: the procedure no longer has a `finalStatus = 'failed'` branch
-at all, as of `migrations/postgres/101_the_finalize_procedure_stops_deleting_failed_history.sql`
+at all, in `finalize_workflow_status` (`migrations/postgres/003_procedures.sql`,
+originally removed by `migrations/postgres/101_the_finalize_procedure_stops_deleting_failed_history.sql`)
 and its MySQL/SQL Server equivalents.** It was dead code -- the paragraph
 above already establishes nothing ever called it that way -- and was removed
 rather than left as a landmine one call-site change could silently
@@ -306,10 +307,12 @@ itself having stopped running (e.g. `time() - cleat_retention_last_run_timestamp
 
 ## Indexes
 
-See `migrations/postgres/033_completed_workflow_retention_indexes.sql` (and
-the MySQL/SQL Server equivalents) for the indexes that support both the
+See `idx_instances_terminal_completed`, `idx_instances_tenant_status_created`
+and `idx_instances_error_msg_trgm` (`migrations/postgres/001_schema.sql`,
+originally added by `migrations/postgres/033_completed_workflow_retention_indexes.sql`)
+and the MySQL/SQL Server equivalents for the indexes that support both the
 retention queries above and the admin dashboard's `ListWorkflows` filters.
-That migration's own comments explain which `ListWorkflows` query shapes are
+033's own (now-folded-in) comments explain which `ListWorkflows` query shapes are
 indexed, which are deliberately left unindexed, and why -- in short: the
 `status` filter and the dedicated `ErrorContains` filter are indexed;
 free-text substring search across JSONB `input`/`result` columns (the

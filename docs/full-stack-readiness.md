@@ -229,7 +229,7 @@ absence is why the serving design doc could not make the vhost story concrete.
 
 `tenant_settings` has exactly three knobs, all durations: `wasm_instance_timeout_ms`,
 `wasm_wall_clock_ceiling_ms`, `host_retry_budget_ms`
-(`migrations/postgres/039_tenant_settings.sql`), clamped by `ClampToCeiling(tenant, ceiling
+(`migrations/postgres/001_schema.sql`), clamped by `ClampToCeiling(tenant, ceiling
 time.Duration)` (`engine/tenant_settings.go:97`).
 
 The clamp semantics are right — a tenant may lower and can never raise — but the dimension is
