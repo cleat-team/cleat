@@ -868,5 +868,199 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				CREATE INDEX idx_ingested_events_correlate ON ingested_events(tenant_id, event_type, key1, key2, key3, received_at);
 			`,
 		},
+		{
+			// cleat#2663: `processed` was shared by two writers with no model
+			// of each other. tryClaim (claim.go) sets it when an awaiter's
+			// backstop scan (queryOldestUnprocessedEventForClaim) consumes a
+			// row; retryEvent/markRetryFailed (background.go) set it on every
+			// terminal subscription-dispatch outcome, for reasons that have
+			// nothing to do with whether an awaiter still wants that row.
+			// Whichever writer got there first retired the other's interest:
+			// a dispatched-and-completed event became permanently invisible
+			// to the awaiter backstop scan (a lost wakeup, since PublishEvent
+			// itself sets `processed` on NEITHER path -- every event sits at
+			// `processed = false` until processBatch's 30s sweep reaches it,
+			// so this did not need the T1/T2 registration race to trigger,
+			// only an event type with no subscriptions or a >10s-old event),
+			// and the mirror direction: an awaiter's claim permanently
+			// starved a failed dispatch of its retry.
+			//
+			// The fix is two independent columns for two independent
+			// questions, not a merge of the two writers' rules. `processed`
+			// stays exclusively the awaiter-claim path's (claim.go,
+			// queryOldestUnprocessedEventForClaim, idx_ingested_events_claim
+			// -- NONE of which change in this migration). This adds
+			// `dispatch_processed`, which becomes the subscription-dispatch
+			// path's own flag: background.go's writers and
+			// queryUnprocessedEvents's read move onto it in the same PR that
+			// adds this migration.
+			//
+			// idx_ingested_events_unprocessed (Version 1, `(processed,
+			// received_at)`) is KEPT, not dropped, though nothing names it by
+			// hint or FORCE INDEX any more since Version 7 moved the claim
+			// query onto idx_ingested_events_claim. Measured directly rather
+			// than assumed: dropping it reintroduces a real bug in
+			// queryOldestUnprocessedEventForClaim (claim.go) on SQL Server --
+			// TestAwaitEventConcurrentClaimsSkipTheLockedRow/mssql fails
+			// deterministically (10/10) with it dropped and passes
+			// deterministically (10/10) with it present, both on a genuinely
+			// fresh database each run, everything else held constant. The
+			// claim query's own plan is a Clustered Index Scan either way
+			// (confirmed via SHOWPLAN_TEXT, identical operator on both), so
+			// this is not the seek-vs-scan mechanism it would be tempting to
+			// assume -- the index's mere PRESENCE changes the query
+			// optimizer's behaviour for a statement that does not use it by
+			// name, and removing it lets a concurrent claim (UPDLOCK, READPAST,
+			// ROWLOCK) return zero rows while an unlocked, matching row still
+			// exists -- a claim-starvation bug, not merely a missed
+			// optimization. Isolated by adding ONLY this column to a clean
+			// develop checkout (harmless) and then ONLY dropping this index on
+			// that same checkout (reproduces the failure) -- see cleat#2821,
+			// filed rather than chased further here because the mechanism
+			// inside SQL Server's optimizer is not this issue's question.
+			// dispatch_processed gets its OWN new index,
+			// idx_ingested_events_dispatch, same per-dialect partial/plain
+			// shape Version 1 established for the one this keeps.
+			//
+			// THE BACKFILL BELOW IS NOT OPTIONAL, and its absence was a real
+			// defect caught by cleat-review before this shipped (#2822 round
+			// 1), measured on PG16 with the real v1-v7 Postgres migrations
+			// applied to four seeded aged rows (completed, dead_letter,
+			// consumed, pending): develop's predicate selects 1 (pending);
+			// this migration's Up, run with no backfill, selected 4 --
+			// dispatch_processed defaults to false for every row that
+			// existed before the upgrade, and the dropped `status` predicate
+			// (see queryUnprocessedEvents's own comment on why it is
+			// redundant GOING FORWARD) was the only thing that had ever
+			// excluded them. Nothing deletes from ingested_events, so an
+			// upgrade with no backfill would re-dispatch a deployment's
+			// entire event history, restarting every workflow it ever
+			// triggered. Fresh-database tests cannot see this: every row in
+			// a fresh database gets dispatch_processed correctly from birth.
+			// The backfill preserves exactly what develop's own sweep would
+			// have selected -- a row is already dispatch-settled if the
+			// awaiter-claim path already consumed it (processed) or the
+			// dispatch path already reached a terminal, non-pending status.
+			// Rescuing rows the OLD flag starved (this issue's whole point,
+			// going forward) is deliberately not backdated here -- that is a
+			// data-migration decision for whoever wants historical recovery,
+			// not a side effect of adding the column.
+			Version: 8,
+			Up: `
+				ALTER TABLE ingested_events ADD COLUMN IF NOT EXISTS dispatch_processed BOOLEAN NOT NULL DEFAULT false;
+				UPDATE ingested_events SET dispatch_processed = true
+					WHERE processed OR (status IS NOT NULL AND status <> 'pending');
+				CREATE INDEX IF NOT EXISTS idx_ingested_events_dispatch ON ingested_events(dispatch_processed, received_at) WHERE NOT dispatch_processed;
+			`,
+			// Idempotency via information_schema, matching Version 6/7's own
+			// discipline: MySQL DDL is not transactional, so a migration that
+			// failed partway must be safe to re-run. The backfill UPDATE
+			// needs no such guard -- it is naturally idempotent, re-setting
+			// an already-true row to true.
+			UpMySQL: `
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND column_name = 'dispatch_processed');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE ingested_events ADD COLUMN dispatch_processed TINYINT(1) NOT NULL DEFAULT 0', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				UPDATE ingested_events SET dispatch_processed = 1
+					WHERE processed = 1 OR (status IS NOT NULL AND status <> 'pending');
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_dispatch');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_ingested_events_dispatch ON ingested_events(dispatch_processed, received_at)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+			UpMSSQL: `
+				-- ingested_events is TenantScoped (Version 4), and SQL
+				-- Server's security policy applies to every principal
+				-- INCLUDING the login running this migration -- the same
+				-- exposure Version 6's own backfill documents at length
+				-- above. A plain UPDATE with no tenant_id predicate matches
+				-- NOTHING under a session with no 'tenant_id' and no
+				-- 'cross_tenant' key set: the filter predicate hides every
+				-- row first. Reproduced directly while fixing cleat-review's
+				-- round-1 GAP on cleat#2822 -- the backfill below silently
+				-- affected 0 rows without this bypass, which is worse than
+				-- an error: the migration reports success and the re-dispatch
+				-- hazard R1 exists to prevent survives on this dialect alone.
+				-- Same session-scoped key Version 6 uses, cleared the same way.
+				EXEC sp_set_session_context @key = N'cross_tenant', @value = N'event-triggers migration 8 backfill, cleat#2822';
+
+				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('ingested_events') AND name = 'dispatch_processed')
+				ALTER TABLE ingested_events ADD dispatch_processed BIT NOT NULL DEFAULT 0;
+
+				-- EXEC(...), not a plain statement: dispatch_processed may
+				-- have just been added by the conditional ALTER above, in
+				-- the SAME batch, on the runner (tests/plugin-harness) that
+				-- does not split on statement boundaries -- Version 6's own
+				-- comment on this exact hazard explains why a plain
+				-- reference compiles against the catalog as it stood before
+				-- the batch started and fails with "Invalid column name".
+				EXEC('UPDATE ingested_events SET dispatch_processed = 1 WHERE processed = 1 OR (status IS NOT NULL AND status <> ''pending'')');
+
+				-- EXEC(...) for the same reason as the UPDATE above: this
+				-- CREATE INDEX references dispatch_processed too, in the same
+				-- batch as the conditional ALTER -- a plain statement here
+				-- compiles against the pre-batch catalog on a runner that
+				-- does not split statements and fails "Invalid column name
+				-- 'dispatch_processed'". Caught by tests/plugin-harness'
+				-- Multi-DB CI job, not by this package's own test suite,
+				-- which runs each statement separately through
+				-- plugin.RunMigrations -- exactly the gap the UPDATE's own
+				-- comment above already named and this statement missed.
+				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_dispatch' AND object_id = OBJECT_ID('ingested_events'))
+				EXEC('CREATE INDEX idx_ingested_events_dispatch ON ingested_events(dispatch_processed, received_at) WHERE dispatch_processed = 0');
+
+				-- Twin of the SET above: cleared unconditionally, matching
+				-- Version 6's own reasoning -- this session outlives this
+				-- migration and the bypass must not.
+				EXEC sp_set_session_context @key = N'cross_tenant', @value = NULL;
+			`,
+			// Reverses to the Version 7 shape -- idx_ingested_events_unprocessed
+			// was never touched by Up, so Down does not recreate it. This is for
+			// a migration applied and immediately rolled back in development,
+			// matching every other Down in this file -- not for undoing a
+			// deployment that has taken dispatch-sweep traffic under the new
+			// column.
+			Down: `
+				DROP INDEX IF EXISTS idx_ingested_events_dispatch;
+				ALTER TABLE ingested_events DROP COLUMN IF EXISTS dispatch_processed;
+			`,
+			DownMySQL: `
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_dispatch');
+				SET @ddl := IF(@idx > 0, 'DROP INDEX idx_ingested_events_dispatch ON ingested_events', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND column_name = 'dispatch_processed');
+				SET @ddl := IF(@col > 0, 'ALTER TABLE ingested_events DROP COLUMN dispatch_processed', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
+			DownMSSQL: `
+				IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_dispatch' AND object_id = OBJECT_ID('ingested_events'))
+				DROP INDEX idx_ingested_events_dispatch ON ingested_events;
+
+				-- dispatch_processed carries a DEFAULT on this dialect (Up's
+				-- "BIT NOT NULL DEFAULT 0"), backed by an unnamed default
+				-- constraint -- the same obstacle every other MSSQL column
+				-- drop in this file hits, and the same fix: find it by
+				-- (table, column) in sys.default_constraints and drop it by
+				-- name first. Tier 1 Gate caught this uncaught: DROP COLUMN
+				-- failed with "The object 'DF__ingested___dispa__...' is
+				-- dependent on column 'dispatch_processed' (5074)", and
+				-- because RunDownMigrations had already dropped the index
+				-- and recorded nothing rolled back, the subsequent recovery
+				-- Up left the schema short one index versus a clean install
+				-- -- this pair was never actually safely recoverable.
+				DECLARE @ieDefaults NVARCHAR(MAX) = ''
+				SELECT @ieDefaults = @ieDefaults + 'ALTER TABLE ingested_events DROP CONSTRAINT [' + dc.name + ']' + CHAR(59) + ' '
+					FROM sys.default_constraints dc
+					JOIN sys.columns c ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
+					WHERE dc.parent_object_id = OBJECT_ID('ingested_events')
+					  AND c.name = 'dispatch_processed'
+				IF @ieDefaults <> '' EXEC(@ieDefaults);
+
+				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('ingested_events') AND name = 'dispatch_processed')
+				ALTER TABLE ingested_events DROP COLUMN dispatch_processed;
+			`,
+		},
 	}
 }

@@ -3,6 +3,7 @@ package eventtriggers
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -132,14 +133,44 @@ func TestClaimQueryPlanExcludesProcessedRowsOnPostgres(t *testing.T) {
 	now := time.Now()
 	seedCtx := plugin.ForTenant(context.Background(), tenantID)
 
-	// A modest, fast history: 200 processed rows for the target key, older
-	// than the one unprocessed row a claim should find.
-	const n = 200
-	for i := 0; i < n; i++ {
-		if _, err := p.db.Exec(seedCtx, `INSERT INTO ingested_events (id, tenant_id, event_type, event_data, key1, received_at, processed, status) VALUES ($1,$2,$3,$4,$5,$6,true,'consumed')`,
-			uuid.New(), tenantID, "order.paid", "{}", "K-1", now.Add(-time.Duration(n-i)*time.Second)); err != nil {
-			t.Fatalf("seed processed row %d: %v", i, err)
-		}
+	// 20,000 processed rows for the target key, older than the one
+	// unprocessed row a claim should find -- the same order of magnitude
+	// this file's own Version-7 comment measured (20,000 rows, 2.5ms/193ms
+	// seq-scanned vs 0.46ms/5.5ms indexed) as the point at which the index
+	// is cheaper for a REAL reason, not merely because default,
+	// never-analyzed page-count estimates happen to favor it.
+	//
+	// This replaces a fixed count of 200, which cleat#2822 exposed as
+	// fragile rather than wrong: at ~200 rows this table is small enough
+	// that whether the planner prefers the index depends on whether
+	// pg_class.reltuples for ingested_events has been set in this run (by
+	// ANALYZE, VACUUM or an index build), and that is an accident of what
+	// else has run in the shared database beforehand, not a property of
+	// the index. In CI at cleat#2822 it was (reltuples=4, relpages=1) with
+	// no ANALYZE/autoanalyze ever run (both NULL, job 110053370908),
+	// consistent with v8's CREATE INDEX idx_ingested_events_dispatch
+	// setting it as a side effect of building on a near-empty table --
+	// the log shows stats set with no analyze, not which operation set
+	// them. develop leaves it at -1, which happens to still favor the
+	// index. 20,000 rows removes the dependency in both directions: the
+	// index is genuinely cheaper at this size whether or not stats are
+	// fresh.
+	//
+	// One batched INSERT ... SELECT rather than 20,000 round trips, which
+	// at one row per exec would make this test slow enough that nobody
+	// would want it at this size. tenant_id, event_type and key1 are
+	// inlined as literals (test-generated values, not user input) so the
+	// statement needs one bound parameter (a row count) rather than
+	// 20,000 x N; id and received_at are computed per generated row.
+	const n = 20000
+	seedSQL := fmt.Sprintf(`
+		INSERT INTO ingested_events (id, tenant_id, event_type, event_data, key1, received_at, processed, status)
+		SELECT gen_random_uuid(), %s, 'order.paid', '{}', 'K-1',
+		       $1::timestamptz - ((%d - g) * interval '1 second'), true, 'consumed'
+		FROM generate_series(0, %d) AS g
+	`, "'"+tenantID.String()+"'::uuid", n, n-1)
+	if _, err := p.db.Exec(seedCtx, seedSQL, now); err != nil {
+		t.Fatalf("seed %d processed rows: %v", n, err)
 	}
 	if _, err := p.db.Exec(seedCtx, `INSERT INTO ingested_events (id, tenant_id, event_type, event_data, key1, received_at, processed, status) VALUES ($1,$2,$3,$4,$5,$6,false,'pending')`,
 		uuid.New(), tenantID, "order.paid", "{}", "K-1", now); err != nil {

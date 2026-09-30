@@ -369,7 +369,7 @@ func (p *Plugin) handleRetryEvent(w http.ResponseWriter, r *http.Request) {
 	// Reset processing state.
 	_, err = p.db.Exec(r.Context(), `
 		UPDATE ingested_events
-		SET processed = false, status = 'pending', retry_count = 0, error_msg = NULL, last_retry_at = NULL
+		SET dispatch_processed = false, status = 'pending', retry_count = 0, error_msg = NULL, last_retry_at = NULL
 		WHERE id = $1 AND tenant_id = $2
 	`, eventID, tid)
 	if err != nil {
@@ -407,7 +407,7 @@ func (p *Plugin) handleRetryEvent(w http.ResponseWriter, r *http.Request) {
 		// Mark as completed since at least one workflow was started.
 		p.db.Exec(r.Context(), `
 			UPDATE ingested_events
-			SET processed = true, status = 'completed', error_msg = NULL
+			SET dispatch_processed = true, status = 'completed', error_msg = NULL
 			WHERE id = $1
 		`, eventID)
 	}

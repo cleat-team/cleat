@@ -59,26 +59,58 @@ OUTPUT INSERTED.id
 VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 3), 1, $8)`,
 }
 
+// queryUnprocessedEvents feeds processBatch's subscription-dispatch sweep.
+// It filters on dispatch_processed, NOT processed -- cleat#2663. `processed`
+// is the awaiter-claim path's own flag (queryOldestUnprocessedEventForClaim,
+// tryClaim in claim.go); this query used to share it, which meant an
+// awaiter's claim could permanently starve a failed dispatch of its retry,
+// the mirror image of that issue's main hazard. dispatch_processed
+// (migrations.go Version 8) is this query's own column, written only by
+// retryEvent/markRetryFailed in background.go.
+//
+// NO `status` PREDICATE ANY MORE, and that is deliberate, not an oversight --
+// `status = 'pending' OR status IS NULL` used to do the SAME job
+// `dispatch_processed` now does more precisely, plus one thing it should
+// NOT have been doing: tryClaim (claim.go) sets status = 'consumed' on an
+// awaiter's claim, which is a THIRD value this predicate excluded, so an
+// awaiter's claim alone was enough to starve a dispatch retry even before
+// `processed` entered into it. Every dispatch-domain terminal state
+// (`completed`, `dead_letter`) is now set in the SAME statement as
+// `dispatch_processed = true` (background.go), so `NOT dispatch_processed`
+// alone already excludes them -- the status check was redundant for those
+// two values and actively wrong for the third (`consumed`, a value this
+// query's writer, retryEvent/markRetryFailed, never sets and has no reason
+// to filter on).
+//
+// A THIRD writer of `processed` exists outside this package --
+// webhookingest's handleDeleteSource cancels a deleted source's pending
+// ingested_events rows, to stop await_webhook/awaitEvent's backstop scan
+// from ever delivering one. Per cleat-review round 2 on cleat#2822, it also
+// sets dispatch_processed = true in the same statement, so a cancelled
+// event stays fully inert on both paths -- preserving what the shared
+// column did as a side effect before this split. Decided in #2822 (closing
+// #2820, which asked the question): a deleted source's events are inert on
+// both the awaiter and dispatch paths, matching what webhook_events already
+// does for its own cancellation.
 var queryUnprocessedEvents = plugin.Query{
 	Default: `SELECT id, tenant_id, event_type, event_data, retry_count
 FROM ingested_events
-WHERE NOT processed
-  AND (status = 'pending' OR status IS NULL)
+WHERE NOT dispatch_processed
   AND received_at < NOW() - INTERVAL '10 seconds'
 ORDER BY received_at
 LIMIT 100`,
 	MySQL: `SELECT id, tenant_id, event_type, event_data, retry_count
 FROM ingested_events
-WHERE NOT processed
-  AND (status = 'pending' OR status IS NULL)
+WHERE NOT dispatch_processed
   AND received_at < DATE_SUB(NOW(), INTERVAL 10 SECOND)
 ORDER BY received_at
 LIMIT 100`,
-	// `processed = 0`, not `NOT processed`: T-SQL has no boolean type, so a BIT
-	// column is a value and not a condition. `WHERE NOT processed` is rejected
-	// with "An expression of non-boolean type specified in a context where a
-	// condition is expected" (Msg 4145) -- a BINDING error, which is why
-	// SET PARSEONLY ON accepts the statement and only SET NOEXEC ON rejects it.
+	// `dispatch_processed = 0`, not `NOT dispatch_processed`: T-SQL has no
+	// boolean type, so a BIT column is a value and not a condition.
+	// `WHERE NOT dispatch_processed` is rejected with "An expression of
+	// non-boolean type specified in a context where a condition is expected"
+	// (Msg 4145) -- a BINDING error, which is why SET PARSEONLY ON accepts
+	// the statement and only SET NOEXEC ON rejects it.
 	//
 	// This arm had LIMIT 100 translated to OFFSET/FETCH and NOW() - INTERVAL
 	// translated to DATEADD, and kept the primary dialect's boolean test. That
@@ -87,8 +119,7 @@ LIMIT 100`,
 	// of the literal inherits the primary dialect unexamined.
 	MSSQL: `SELECT id, tenant_id, event_type, event_data, retry_count
 FROM ingested_events
-WHERE processed = 0
-  AND (status = 'pending' OR status IS NULL)
+WHERE dispatch_processed = 0
   AND received_at < DATEADD(second, -10, SYSUTCDATETIME())
 ORDER BY received_at
 OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY`,

@@ -2418,19 +2418,23 @@ type etSubscriptionRow struct {
 }
 
 type etIngestedEventRow struct {
-	id          string
-	tenantID    string
-	eventType   string
-	eventData   string
-	key1        string
-	key2        string
-	key3        string
-	receivedAt  time.Time
-	processed   bool
-	retryCount  int
-	lastRetryAt *time.Time
-	status      string
-	errorMsg    *string
+	id         string
+	tenantID   string
+	eventType  string
+	eventData  string
+	key1       string
+	key2       string
+	key3       string
+	receivedAt time.Time
+	processed  bool
+	// dispatchProcessed mirrors dispatch_processed (migrations.go Version 8,
+	// cleat#2663): the subscription-dispatch domain's own flag, independent
+	// of `processed`, which stays the awaiter-claim path's (claim.go).
+	dispatchProcessed bool
+	retryCount        int
+	lastRetryAt       *time.Time
+	status            string
+	errorMsg          *string
 }
 
 type etAwaiterRow struct {
@@ -2548,6 +2552,8 @@ func (c *etConn) ExecContext(_ context.Context, query string, args []driver.Name
 		return c.execUpdateEventRetry(q, args)
 	case strings.Contains(q, "SET processed"):
 		return c.execUpdateEventProcessed(q, args)
+	case strings.Contains(q, "SET dispatch_processed"):
+		return c.execUpdateEventDispatchProcessed(q, args)
 	case strings.Contains(q, "UPDATE ingested_events"):
 		return c.execUpdateEvent(args)
 	default:
@@ -2724,6 +2730,56 @@ func (c *etConn) execUpdateEventProcessed(query string, args []driver.NamedValue
 	return &etResult{rowsAffected: 0}, nil
 }
 
+// execUpdateEventDispatchProcessed handles every real UPDATE that writes
+// dispatch_processed -- background.go's retryEvent/markRetryFailed terminal
+// paths and routes.go's handleRetryEvent (reset, then re-mark on success).
+// Branches on the query TEXT because the four real shapes differ in which
+// columns they touch, not just in the values -- the same discipline
+// queryAwaiters' own comment explains for filterByKey.
+func (c *etConn) execUpdateEventDispatchProcessed(query string, args []driver.NamedValue) (driver.Result, error) {
+	id, err := etArgString(args, 1)
+	if err != nil {
+		return nil, err
+	}
+
+	for i, evt := range c.store.events {
+		if evt.id == id {
+			switch {
+			case strings.Contains(query, "dispatch_processed = false"):
+				// handleRetryEvent's reset, before re-dispatching.
+				evt.dispatchProcessed = false
+				evt.status = "pending"
+				evt.retryCount = 0
+				evt.errorMsg = nil
+				evt.lastRetryAt = nil
+			case strings.Contains(query, "dead_letter"):
+				evt.dispatchProcessed = true
+				evt.status = "dead_letter"
+				if len(args) >= 2 {
+					if v, err := etArgAny(args, 2); err == nil {
+						if s, ok := v.(string); ok {
+							evt.errorMsg = &s
+						}
+					}
+				}
+			case strings.Contains(query, "no matching subscriptions"):
+				evt.dispatchProcessed = true
+				evt.status = "completed"
+				msg := "no matching subscriptions"
+				evt.errorMsg = &msg
+			default:
+				// matched > 0, from either retryEvent or handleRetryEvent.
+				evt.dispatchProcessed = true
+				evt.status = "completed"
+				evt.errorMsg = nil
+			}
+			c.store.events[i] = evt
+			return &etResult{rowsAffected: 1}, nil
+		}
+	}
+	return &etResult{rowsAffected: 0}, nil
+}
+
 func (c *etConn) execUpdateEventRetry(query string, args []driver.NamedValue) (driver.Result, error) {
 	id, err := etArgString(args, 1)
 	if err != nil {
@@ -2749,7 +2805,7 @@ func (c *etConn) execUpdateEventRetry(query string, args []driver.NamedValue) (d
 
 			if strings.Contains(query, "dead_letter") {
 				evt.status = "dead_letter"
-				evt.processed = true
+				evt.dispatchProcessed = true
 			} else if strings.Contains(query, "consumed") {
 				evt.status = "consumed"
 				evt.processed = true
@@ -3109,7 +3165,7 @@ func (c *etConn) queryProcessBatch(args []driver.NamedValue) (driver.Rows, error
 	cutoff := time.Now().Add(-10 * time.Second)
 	var data [][]driver.Value
 	for _, evt := range c.store.events {
-		if !evt.processed && (evt.status == "pending" || evt.status == "") && evt.receivedAt.Before(cutoff) {
+		if !evt.dispatchProcessed && evt.receivedAt.Before(cutoff) {
 			data = append(data, []driver.Value{
 				evt.id, evt.tenantID, evt.eventType, []byte(evt.eventData), int64(evt.retryCount),
 			})
@@ -4075,6 +4131,133 @@ func TestRetryEventBackground(t *testing.T) {
 
 		p.retryEvent(context.Background(), eventID, etTestTenantID, "test.event", []byte(`{"key":"value"}`), 0)
 	})
+}
+
+// TestRetryEventDoesNotStarveTheAwaiterBackstopScan is the regression test
+// for cleat#2663's main hazard: retryEvent used to set the SAME `processed`
+// flag the awaiter backstop scan (queryOldestUnprocessedEventForClaim,
+// claim.go) depends on, so a dispatch-completed event became permanently
+// invisible to a workflow's own later await_event call -- a lost wakeup.
+// This needed no T1/T2 registration race to trigger: PublishEvent never
+// sets `processed` itself, so ANY event with no matching subscriptions
+// reaches this state as soon as processBatch's sweep runs, race or not.
+func TestRetryEventDoesNotStarveTheAwaiterBackstopScan(t *testing.T) {
+	p, _, store := setupETPlugin(t)
+	eventID := uuid.MustParse("dddddddd-dddd-dddd-dddd-dddddddddddd")
+	store.mu.Lock()
+	store.events = append(store.events, etIngestedEventRow{
+		id:         eventID.String(),
+		tenantID:   etTestTenantStr,
+		eventType:  "order.created",
+		eventData:  `{"order_id":42}`,
+		processed:  false,
+		status:     "pending",
+		receivedAt: time.Now().Add(-time.Minute),
+	})
+	store.mu.Unlock()
+
+	// processBatch's sweep reaches this event: no subscriptions exist for
+	// "order.created", so retryEvent marks it dispatch-complete.
+	p.retryEvent(context.Background(), eventID, etTestTenantID, "order.created", []byte(`{"order_id":42}`), 0)
+
+	store.mu.RLock()
+	var evt etIngestedEventRow
+	for _, e := range store.events {
+		if e.id == eventID.String() {
+			evt = e
+		}
+	}
+	store.mu.RUnlock()
+	if !evt.dispatchProcessed {
+		t.Fatalf("retryEvent did not set dispatch_processed -- test setup is wrong, not exercising the fix")
+	}
+	if evt.processed {
+		t.Fatalf("retryEvent set `processed` -- that is cleat#2663's bug reintroduced")
+	}
+
+	// A workflow now calls await_event as its own backstop scan. The outcome
+	// must not depend on whether it lost the T1/T2 registration race: any
+	// event this old and unclaimed by an awaiter should still be findable.
+	cc := &plugin.CallContext{TenantID: etTestTenantID.String(), WorkflowID: "wf-consumer"}
+	ctx := plugin.WithCallContext(context.Background(), cc)
+	input, _ := json.Marshal(map[string]any{"event_type": "order.created", "timeout_ms": 5000})
+	output, err := p.awaitEvent(ctx, string(input))
+	if err != nil {
+		t.Fatalf("awaitEvent: %v", err)
+	}
+	var result awaitEventOutput
+	if err := json.Unmarshal([]byte(output), &result); err != nil {
+		t.Fatalf("unmarshal output: %v", err)
+	}
+	if !result.Found {
+		t.Fatal("awaitEvent did not find an event whose dispatch had already completed -- cleat#2663")
+	}
+	if result.EventID != eventID.String() {
+		t.Errorf("found event %s, want %s", result.EventID, eventID)
+	}
+}
+
+// TestAnAwaiterClaimDoesNotStarveADispatchRetry is the regression test for
+// cleat#2663's mirror-image hazard: tryClaim (claim.go) sets status =
+// 'consumed' on an awaiter's claim, and queryUnprocessedEvents used to
+// filter on that same status column (`status = 'pending' OR status IS
+// NULL`), so an awaiter claiming an event could permanently stop a failed
+// synchronous dispatch attempt from ever being retried by processBatch.
+func TestAnAwaiterClaimDoesNotStarveADispatchRetry(t *testing.T) {
+	p, _, store := setupETPlugin(t)
+	eventID := uuid.MustParse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
+	store.mu.Lock()
+	store.events = append(store.events, etIngestedEventRow{
+		id:         eventID.String(),
+		tenantID:   etTestTenantStr,
+		eventType:  "order.created",
+		eventData:  `{"order_id":42}`,
+		processed:  false,
+		status:     "pending",
+		receivedAt: time.Now().Add(-time.Minute),
+	})
+	store.mu.Unlock()
+
+	// An awaiter claims the event via the backstop scan -- reaching the
+	// state a dispatch retry must still work through.
+	cc := &plugin.CallContext{TenantID: etTestTenantID.String(), WorkflowID: "wf-consumer"}
+	ctx := plugin.WithCallContext(context.Background(), cc)
+	input, _ := json.Marshal(map[string]any{"event_type": "order.created", "timeout_ms": 5000})
+	if _, err := p.awaitEvent(ctx, string(input)); err != nil {
+		t.Fatalf("awaitEvent: %v", err)
+	}
+
+	store.mu.RLock()
+	var evt etIngestedEventRow
+	for _, e := range store.events {
+		if e.id == eventID.String() {
+			evt = e
+		}
+	}
+	store.mu.RUnlock()
+	if !evt.processed || evt.status != "consumed" {
+		t.Fatalf("awaitEvent did not claim the event as expected -- test setup is wrong: processed=%v status=%q",
+			evt.processed, evt.status)
+	}
+	if evt.dispatchProcessed {
+		t.Fatalf("claiming the event should not touch dispatch_processed")
+	}
+
+	// processBatch's sweep must still be free to retry dispatch for this
+	// event -- the claim answered "does an awaiter still want this", not
+	// "did subscription dispatch succeed".
+	p.processBatch(context.Background())
+
+	store.mu.RLock()
+	for _, e := range store.events {
+		if e.id == eventID.String() {
+			evt = e
+		}
+	}
+	store.mu.RUnlock()
+	if !evt.dispatchProcessed {
+		t.Error("processBatch skipped an awaiter-claimed event -- cleat#2663's mirror-image hazard")
+	}
 }
 
 func TestMarkRetryFailed(t *testing.T) {

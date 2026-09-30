@@ -731,9 +731,19 @@ func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 	// this source's own id (routes.go's handleIngestWebhook), and no other
 	// plugin or source ever writes that value into ingested_events.key1, so
 	// this can only ever match rows this source itself published.
+	//
+	// dispatch_processed = true is ALSO set here, and it did not need to be
+	// before cleat#2663/#2822 split it from `processed`: this UPDATE relied
+	// on the shared column to block eventtriggers' subscription-dispatch
+	// sweep (queryUnprocessedEvents) too, as a side effect rather than by
+	// design. After the split, `processed` alone stops delivery to an
+	// AWAITER but no longer stops a matching event_subscriptions row from
+	// being dispatched for a deleted source's event. Decided in #2822
+	// (closing #2820, which asked the question): a deleted source's events
+	// are inert on both paths, matching webhook_events' own cancellation.
 	if _, err := tx.Exec(r.Context(), plugin.Rebind(`
 		UPDATE ingested_events
-		SET status = 'cancelled', processed = true, error_msg = 'source deleted'
+		SET status = 'cancelled', processed = true, dispatch_processed = true, error_msg = 'source deleted'
 		WHERE tenant_id = $1 AND key1 = $2 AND processed = false
 	`, p.dialect), tid, id.String()); err != nil {
 		tx.Rollback()
