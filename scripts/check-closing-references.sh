@@ -34,14 +34,34 @@
 # space, slash and `#`, so it matched ANY single non-space/slash/hash
 # character immediately before `#N`, including `(`. "Fix (#2003)" -- a
 # CORRECT reference, deliberately parenthesized -- parsed the `(` as a
-# malformed repo name and flagged it. Measured against the fixed class:
+# malformed repo name and flagged it.
 #
-#   echo 'Fix (#2003) later'    | grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+[A-Za-z0-9_.-]+#[0-9]+'
-#   # (no output, correctly)    vs the old [^[:space:]/#]+ class: "Fix (#2003"
+# A repo-name charset can't produce THAT false positive: GitHub repo and
+# owner names are letters, digits, `_`, `.` and `-`. But cleat#2800's first
+# fix used exactly that charset alone -- `[A-Za-z0-9_.-]+` -- with no leading
+# punctuation allowed, and that swung the other way: cleat-review found it
+# turned `Fixes **cleat#12**.` and `Fixes [cleat#12](url).` from correctly
+# FLAGGED (the old class matched "**cleat" / "[cleat" as its one-char-plus
+# "name", by accident) into a false NEGATIVE, because a name class that
+# cannot START with `*` or `[` fails to match at all right after the
+# required whitespace, and there is no second starting position to retry
+# from. `cleat#12` wrapped in Markdown emphasis or a link still links
+# nothing on GitHub; the wrapping is not a repo name and must not make the
+# reference pass.
 #
-# A repo-name charset can't produce this false positive: GitHub repo and owner
-# names are letters, digits, `_`, `.` and `-` (see --self-test below for the
-# fixture that pins this and the cases that must still be caught).
+# The fix: allow, but don't require, a run of Markdown emphasis/link-opening
+# punctuation (`*_[(`) before the repo-name charset -- it is discarded by
+# the class itself, never treated as part of the name:
+#
+#   [[:space:]]+[*_[(]*[A-Za-z0-9_.-]+#[0-9]+
+#
+# `(#2003)` still passes: `[*_[(]*` can consume the `(`, but the following
+# `[A-Za-z0-9_.-]+` then has nothing to match (next char is `#`) and needs
+# at least one, so the whole alternative fails at that position -- same
+# reasoning as `owner/repo#N` passing, one paragraph up. `**cleat#12**` and
+# `[cleat#12](url)` both match: the punctuation class absorbs the leading
+# `**`/`[`, then `cleat` satisfies the name class, then `#12` closes it.
+# See --self-test below for the fixture pinning both directions.
 #
 # The body arrives in PR_BODY, set by the workflow from the event payload
 # through `env:` rather than interpolated into the script: a PR body is
@@ -76,7 +96,7 @@ check_body() {
   # the whole pipeline (which would also hide a grep that failed to run).
   local bad
   if ! bad=$(printf '%s\n' "$prose" |
-    grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+[A-Za-z0-9_.-]+#[0-9]+'); then
+    grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+[*_[(]*[A-Za-z0-9_.-]+#[0-9]+'); then
     echo "No closing keyword names an issue as <repo>#N."
     return 0
   fi
@@ -110,6 +130,9 @@ self_test() {
     "owner/repo#N has a slash and links|Closes cleat-team/cleat#123.|0|No closing keyword"
     "a bare mention with no keyword passes|See cleat#2003 for context.|0|No closing keyword"
     "code-quoted bad form is inert|Explains \`Closes cleat#N\` as an example.|0|No closing keyword"
+    "bold cleat#N must still be caught (cleat#2807)|Fixes **cleat#12**.|1|cleat#12"
+    "linked cleat#N must still be caught (cleat#2807)|Fixes [cleat#12](https://x).|1|cleat#12"
+    "bold correct reference still passes (cleat#2807)|Fixes **#12**.|0|No closing keyword"
   )
 
   local case name body want_exit want_substr got_out got_exit
