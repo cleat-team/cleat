@@ -109,15 +109,34 @@ func TestEveryDialectSensitiveAdapterCarriesItsDialect(t *testing.T) {
 }
 
 // isDialectSensitiveTestFile reports whether path's source is one of the
-// three places TestEveryDialectSensitiveAdapterCarriesItsDialect's doc
-// comment above describes -- a multi-backend loop (NewPluginTestBackends),
-// or a file that opens a MySQL or SQL Server *sql.DB directly.
+// places TestEveryDialectSensitiveAdapterCarriesItsDialect's doc comment
+// above describes -- a multi-backend loop (NewPluginTestBackends), a file
+// that opens a MySQL or SQL Server *sql.DB directly, or a file that gets one
+// via testutil.TestDB(t, testutil.DialectMySQL) (or DialectMSSQL) without
+// ever containing a literal sql.Open("mysql"/... call of its own (cleat#2286).
+//
+// Matched as testutil.DialectMySQL/testutil.DialectMSSQL specifically, not
+// the bare constant name: plugin.DialectMySQL/plugin.DialectMSSQL are the
+// same strings (TestDialectConstantsAgree) but are also how a plugin names
+// the dialect it is testing against an in-memory fake connector, with no
+// real MySQL/MSSQL server anywhere in reach -- plugins/kvstore/kvstore_new_test.go
+// and plugins/ratelimiter/ratelimiter_test.go do exactly this, and a bare
+// match on the constant name flags both as false positives (checked by
+// running the widened guard against the tree before qualifying it: it found
+// those two and only those two). testutil.Dialect exists for one purpose --
+// naming the backend a real *sql.DB in this package talks to -- so the
+// qualified form carries none of that ambiguity.
 func isDialectSensitiveTestFile(src string) bool {
 	if strings.Contains(src, "NewPluginTestBackends") {
 		return true
 	}
 	for _, driver := range []string{`sql.Open("mysql"`, `sql.Open("sqlserver"`, `sql.Open("mssql"`} {
 		if strings.Contains(src, driver) {
+			return true
+		}
+	}
+	for _, ref := range []string{"testutil.DialectMySQL", "testutil.DialectMSSQL"} {
+		if strings.Contains(src, ref) {
 			return true
 		}
 	}
@@ -197,6 +216,38 @@ func f() { db, _ := sql.Open("postgres", "dsn") }
 	}
 	if isDialectSensitiveTestFile(postgresOnly) {
 		t.Error("a postgres-only fixture, with no NewPluginTestBackends and no MySQL/MSSQL open, was flagged as dialect-sensitive")
+	}
+}
+
+// TestDialectSensitiveTestFileDetectsHelperDialectReference is the
+// known-positive for cleat#2286: a _test.go file that gets its MySQL or SQL
+// Server *sql.DB through testutil.TestDB(t, testutil.DialectMySQL) names the
+// dialect constant without ever containing a literal sql.Open("mysql"/...
+// call, and the pre-#2286 guard did not flag it even though it goes on to
+// build an SQLDBAdapter/ReadOnlyDB with no Dialect.
+//
+// The negative case is the reason the match is qualified rather than bare:
+// plugin.DialectMSSQL is the same string but names the dialect a plugin is
+// testing against a fake, in-process connector -- kvstore_new_test.go and
+// ratelimiter_test.go both do this, own no Dialect on their SQLDBAdapter,
+// and reach no real MySQL/MSSQL server for it to matter. A bare match on the
+// constant name flagged both as offenders when this was checked against the
+// tree; the qualified match does not.
+func TestDialectSensitiveTestFileDetectsHelperDialectReference(t *testing.T) {
+	viaTestutilHelper := `package x
+import "github.com/cleat-team/cleat/engine/testutil"
+func f(t *testing.T) { db := testutil.TestDB(t, testutil.DialectMySQL) }
+`
+	viaPluginConstantOnFakeConnector := `package x
+import "github.com/cleat-team/cleat/plugin"
+func f(dialect plugin.Dialect) { _ = dialect == plugin.DialectMSSQL }
+`
+	if !isDialectSensitiveTestFile(viaTestutilHelper) {
+		t.Error("a file referencing testutil.DialectMySQL through TestDB was not flagged as dialect-sensitive")
+	}
+	if isDialectSensitiveTestFile(viaPluginConstantOnFakeConnector) {
+		t.Error("a file referencing plugin.DialectMSSQL alone (no testutil helper, no sql.Open) " +
+			"was flagged as dialect-sensitive -- this is the kvstore/ratelimiter false-positive shape")
 	}
 }
 
