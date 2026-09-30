@@ -341,6 +341,26 @@ func TestGenerateGo_HyphenatedPluginName(t *testing.T) {
 	}
 }
 
+// TestGenerateGo_NamespacedThirdPartyPluginName is the regression case for
+// what TestManifestRoundTrip_HelloWorld (plugin/integration_test.go) caught
+// against the real examples/third-party-plugin/plugin.json manifest: a
+// third-party plugin name is namespaced, "org/name", and the unstripped
+// slash produced an unparseable "package example/helloworld".
+func TestGenerateGo_NamespacedThirdPartyPluginName(t *testing.T) {
+	ir := &IR{
+		PluginName:    "example/hello-world",
+		PluginVersion: "0.1.0",
+		HostFunctions: []HostFuncIR{{Name: "greet"}},
+	}
+	code, err := GenerateGo(ir)
+	if err != nil {
+		t.Fatalf("GenerateGo: %v", err)
+	}
+	if !strings.Contains(code, "package helloworld") {
+		t.Errorf("expected package helloworld (namespace and hyphen stripped), got:\n%s", code)
+	}
+}
+
 func TestGenerateGo_UnreferencedType(t *testing.T) {
 	// A type that is not referenced by any host function should still be emitted.
 	ir := &IR{

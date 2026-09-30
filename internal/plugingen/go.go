@@ -126,11 +126,21 @@ func GenerateGo(ir *IR) (string, error) {
 }
 
 // goPackageName derives the plugin's own Go package name from its manifest
-// name, the same way every first-party plugin directory already does it --
+// name. First-party plugins are hyphenated with no namespace --
 // plugins/slacknotify/ for "slack-notify", plugins/scheduledbackup/ for
 // "scheduled-backup" (CLAUDE.md's "Plugin development" section: plugin
-// names are hyphenated, and the package name is not).
+// names are hyphenated, and the package name is not). Third-party plugins
+// are namespaced, "org/name" (examples/third-party-plugin/plugin.json:
+// "example/hello-world", and every plugin index entry in
+// docs/contributor/plugins/third-party-plugin-guide.md) -- the slash is
+// invalid inside a Go package clause and produced an unparseable
+// "package example/helloworld" before this took only the final segment.
+// Caught by TestManifestRoundTrip_HelloWorld (plugin/integration_test.go),
+// which is a real manifest and not one of this package's own fixtures.
 func goPackageName(pluginName string) string {
+	if i := strings.LastIndexByte(pluginName, '/'); i >= 0 {
+		pluginName = pluginName[i+1:]
+	}
 	return strings.ToLower(strings.ReplaceAll(pluginName, "-", ""))
 }
 
