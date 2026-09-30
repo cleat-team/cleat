@@ -203,7 +203,7 @@ func (s *server) startSync(w http.ResponseWriter, r *http.Request) {
 		var err error
 		webhookID, err = s.firstWebhookID(r.Context())
 		if err != nil {
-			backendkit.WriteError(w, http.StatusBadGateway, err.Error())
+			backendkit.WriteUpstreamError(w, err)
 			return
 		}
 		if webhookID == "" {
@@ -245,7 +245,7 @@ func (s *server) startSync(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		s.log.Error("start failed", "customer", req.CustomerID, "err", err)
-		backendkit.WriteError(w, http.StatusBadGateway, err.Error())
+		backendkit.WriteUpstreamError(w, err)
 		return
 	}
 
@@ -347,7 +347,7 @@ func (s *server) getSync(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	detail, err := s.client.GetWorkflow(r.Context(), id)
 	if err != nil {
-		backendkit.WriteError(w, http.StatusBadGateway, err.Error())
+		backendkit.WriteUpstreamError(w, err)
 		return
 	}
 	state, err := s.client.GetWorkflowState(r.Context(), id)
@@ -371,7 +371,7 @@ func (s *server) listSyncs(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	runs, err := s.client.ListWorkflows(r.Context(), status, 50)
 	if err != nil {
-		backendkit.WriteError(w, http.StatusBadGateway, err.Error())
+		backendkit.WriteUpstreamError(w, err)
 		return
 	}
 	backendkit.WriteJSON(w, http.StatusOK, map[string]any{"runs": runs})
@@ -406,7 +406,7 @@ func (s *server) deliveries(w http.ResponseWriter, r *http.Request) {
 		var err error
 		webhookID, err = s.firstWebhookID(r.Context())
 		if err != nil {
-			backendkit.WriteError(w, http.StatusBadGateway, err.Error())
+			backendkit.WriteUpstreamError(w, err)
 			return
 		}
 	}
@@ -425,7 +425,7 @@ func (s *server) deliveries(w http.ResponseWriter, r *http.Request) {
 	}
 	var raw []json.RawMessage
 	if err := s.pluginGET(r.Context(), path, &raw); err != nil {
-		backendkit.WriteError(w, http.StatusBadGateway, err.Error())
+		backendkit.WriteUpstreamError(w, err)
 		return
 	}
 	if raw == nil {

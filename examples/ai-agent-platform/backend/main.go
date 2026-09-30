@@ -324,7 +324,7 @@ func (s *server) startAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		s.log.Error("start failed", "task", req.Task, "err", err)
-		backendkit.WriteError(w, http.StatusBadGateway, err.Error())
+		backendkit.WriteUpstreamError(w, err)
 		return
 	}
 
@@ -372,7 +372,7 @@ type agentRun struct {
 func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 	runs, err := s.client.ListWorkflows(r.Context(), r.URL.Query().Get("status"), listLimit)
 	if err != nil {
-		backendkit.WriteError(w, http.StatusBadGateway, err.Error())
+		backendkit.WriteUpstreamError(w, err)
 		return
 	}
 
@@ -418,7 +418,7 @@ func (s *server) getAgent(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	detail, err := s.client.GetWorkflow(r.Context(), id)
 	if err != nil {
-		backendkit.WriteError(w, http.StatusBadGateway, err.Error())
+		backendkit.WriteUpstreamError(w, err)
 		return
 	}
 	if detail.DefName != workflowName {
@@ -487,7 +487,7 @@ func (s *server) approveAgent(w http.ResponseWriter, r *http.Request) {
 
 	detail, err := s.client.GetWorkflow(r.Context(), id)
 	if err != nil {
-		backendkit.WriteError(w, http.StatusBadGateway, err.Error())
+		backendkit.WriteUpstreamError(w, err)
 		return
 	}
 	if detail.DefName != workflowName {
@@ -500,7 +500,7 @@ func (s *server) approveAgent(w http.ResponseWriter, r *http.Request) {
 		// Fatal HERE, unlike in the two read handlers: the guard is the point,
 		// and a run whose state will not read cannot be confirmed to be waiting.
 		s.log.Error("no query state for an approval", "id", id, "err", err)
-		backendkit.WriteError(w, http.StatusBadGateway, err.Error())
+		backendkit.WriteUpstreamError(w, err)
 		return
 	}
 	submitted := req.Approved
@@ -541,7 +541,7 @@ func (s *server) approveAgent(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	if err := s.client.PluginRoute(r.Context(), http.MethodPost, "/api/events/publish", body, nil); err != nil {
-		backendkit.WriteError(w, http.StatusBadGateway, err.Error())
+		backendkit.WriteUpstreamError(w, err)
 		return
 	}
 
