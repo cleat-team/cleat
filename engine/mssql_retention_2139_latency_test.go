@@ -68,16 +68,17 @@ const (
 // completed_at) workflow_instances row under writerDef and appending one
 // event_history row to it -- never a row any of the three retention
 // sweeps' predicates can match, since none of them touch a row with no
-// completed_at and a non-terminal status. Returns one latency per sample
-// (mssql2139WriterSamples total) alongside the wall-clock window the
-// samples were taken in, which the caller uses to prove overlap with a
-// concurrently-running sweep.
-func mssql2139WriterLatencies(t *testing.T, ctx context.Context, admin *sql.DB, store *MSSQLStore, writerDef, tenantID string) (latencies []time.Duration, windowStart, windowEnd time.Time) {
+// completed_at and a non-terminal status. Returns one latency and one
+// start time per sample (mssql2139WriterSamples total each), which the
+// caller uses to prove -- per SAMPLE, not just as an aggregate window --
+// how much of this writer's run genuinely raced a concurrently-running
+// sweep.
+func mssql2139WriterLatencies(t *testing.T, ctx context.Context, admin *sql.DB, store *MSSQLStore, writerDef, tenantID string) (latencies []time.Duration, starts []time.Time) {
 	t.Helper()
 	latencies = make([]time.Duration, mssql2139WriterSamples)
+	starts = make([]time.Time, mssql2139WriterSamples)
 	var wg sync.WaitGroup
 	var idx atomic.Int64
-	var firstNano, lastNano atomic.Int64
 
 	sem := make(chan struct{}, mssql2139WriterConcurrency)
 	for i := 0; i < mssql2139WriterSamples; i++ {
@@ -113,33 +114,34 @@ func mssql2139WriterLatencies(t *testing.T, ctx context.Context, admin *sql.DB, 
 				return
 			}
 
-			startNano := start.UnixNano()
-			for {
-				cur := firstNano.Load()
-				if cur != 0 && cur <= startNano {
-					break
-				}
-				if firstNano.CompareAndSwap(cur, startNano) {
-					break
-				}
-			}
-			endNano := time.Now().UnixNano()
-			for {
-				cur := lastNano.Load()
-				if cur >= endNano {
-					break
-				}
-				if lastNano.CompareAndSwap(cur, endNano) {
-					break
-				}
-			}
-
+			starts[n-1] = start
 			latencies[n-1] = d
 		}()
 	}
 	wg.Wait()
 
-	return latencies, time.Unix(0, firstNano.Load()), time.Unix(0, lastNano.Load())
+	return latencies, starts
+}
+
+// mssql2139OverlapFraction returns the fraction of starts that fall within
+// [sweepStart, sweepEnd]. A whole-window check (does [writerStart,
+// writerEnd] intersect [sweepStart, sweepEnd] at all) can be satisfied by
+// a single straggling sample while the other 199 ran entirely before or
+// after the sweep -- which is exactly what a fast sweep against a slower
+// writer produces, and it is not a corner case: measured 2026-09-29, a
+// sweep mutated to run in one unchunked pass over the whole batch (see
+// the falsification below) finished in under half a second against a
+// multi-second writer run, so the old any-overlap check passed while
+// fewer than 5% of samples actually raced it -- diluting a genuine 26x
+// per-sample spike down to noise in the aggregate P99.
+func mssql2139OverlapFraction(starts []time.Time, sweepStart, sweepEnd time.Time) float64 {
+	var inWindow int
+	for _, s := range starts {
+		if !s.Before(sweepStart) && !s.After(sweepEnd) {
+			inWindow++
+		}
+	}
+	return float64(inWindow) / float64(len(starts))
 }
 
 // mssql2139Percentiles sorts latencies (a copy, so the caller's slice keeps
@@ -210,17 +212,24 @@ func TestMSSQLRetentionSweepConcurrentWriterLatencyStaysBounded(t *testing.T) {
 				t.Fatalf("deploy %s: %v", writerDef, err)
 			}
 
-			// BASELINE: writer alone, nothing else running against this
-			// database.
-			baseline, _, _ := mssql2139WriterLatencies(t, ctx, admin, store, writerDef, tid)
-			basP50, basP99 := mssql2139Percentiles(baseline)
-
 			// Seed the sweep's own target data -- same size and shape as
 			// the #2060 escalation test (mssql2060WorkflowCount workflows
 			// at mssql2060EventsPerWorkflow events each), comfortably past
 			// SQL Server's lock-escalation threshold, so the sweep this
 			// runs against is a REALISTIC one, not a token amount that
 			// would finish before the writer notices it.
+			//
+			// Seeded BEFORE the baseline is measured, not after: a cold
+			// baseline (measured on an empty database, before this seed)
+			// differs from treatment in DATA VOLUME as well as in whether
+			// a sweep is running, and that confound is not hypothetical --
+			// cleat-review measured this test's own five baseline trials
+			// at 32ms-264ms P99, and detecting the #2138 regression this
+			// test falsifies against needs a baseline under roughly 214ms
+			// ((958-100)/4, from the boundFactor/boundFloor below). A warm
+			// baseline, taken on the SAME already-seeded database the
+			// treatment runs against, removes data volume as a variable
+			// between the two arms entirely.
 			ids := make([]string, mssql2060WorkflowCount)
 			for i := range ids {
 				ids[i] = fmt.Sprintf("mssql-2139-%s-%05d", arm.name, i)
@@ -237,6 +246,11 @@ func TestMSSQLRetentionSweepConcurrentWriterLatencyStaysBounded(t *testing.T) {
 				t.Fatalf("precondition: seeded %d event_history rows, want %d -- the sweep below "+
 					"would run against less data than intended", seededEvents, want)
 			}
+
+			// BASELINE: writer alone against the already-seeded database,
+			// nothing else running yet. Warm, not cold -- see above.
+			baseline, _ := mssql2139WriterLatencies(t, ctx, admin, store, writerDef, tid)
+			basP50, basP99 := mssql2139Percentiles(baseline)
 
 			// TREATMENT: the writer runs on this goroutine while the sweep
 			// runs concurrently on another. sweepDone/sweepErr/sweepStart/
@@ -256,7 +270,7 @@ func TestMSSQLRetentionSweepConcurrentWriterLatencyStaysBounded(t *testing.T) {
 				sweepEnd = time.Now()
 			}()
 
-			treatment, writerStart, writerEnd := mssql2139WriterLatencies(t, ctx, admin, store, writerDef, tid)
+			treatment, writerStarts := mssql2139WriterLatencies(t, ctx, admin, store, writerDef, tid)
 			<-sweepDone
 
 			if sweepErr != nil {
@@ -267,30 +281,46 @@ func TestMSSQLRetentionSweepConcurrentWriterLatencyStaysBounded(t *testing.T) {
 					"against a sweep that touched nothing", arm.name)
 			}
 
-			// PROVE OVERLAP, do not assume it. The writer's sampling
-			// window [writerStart, writerEnd] must intersect the sweep's
-			// own [sweepStart, sweepEnd]; if it does not, every number
-			// below is the "clean but meaningless" case cleat#2139 warns
-			// against, and this test says so rather than reporting a
-			// bound as met.
-			overlapStart := writerStart
-			if sweepStart.After(overlapStart) {
-				overlapStart = sweepStart
+			// PROVE OVERLAP AS A FRACTION, not merely that it is nonzero.
+			// A single straggling sample satisfies "the windows
+			// intersect" while the other 199 ran entirely before or
+			// after the sweep, and a fast sweep against a slower writer
+			// produces exactly that: measured 2026-09-29, mutating
+			// mssqlInterleaveChunk from 20 to 6000 (one unchunked pass
+			// over the whole batch, collapsing the interleaving cleat#2060
+			// depends on) made the sweep finish in well under a second
+			// against a multi-second writer run, so a whole-window
+			// overlap check passed while under 5% of samples actually
+			// raced it -- diluting a confirmed lock escalation (caught
+			// independently by TestMSSQLRetentionSweepsCauseNoLockEscalation
+			// against the same mutation) down to noise in the aggregate
+			// P99. See the falsification below for that measurement in
+			// full.
+			var inWindow []time.Duration
+			for i, s := range writerStarts {
+				if !s.Before(sweepStart) && !s.After(sweepEnd) {
+					inWindow = append(inWindow, treatment[i])
+				}
 			}
-			overlapEnd := writerEnd
-			if sweepEnd.Before(overlapEnd) {
-				overlapEnd = sweepEnd
-			}
-			if !overlapEnd.After(overlapStart) {
-				t.Fatalf("%s: no measured overlap between the writer's sampling window "+
-					"(%s .. %s) and the sweep's own (%s .. %s) -- this run does not exercise "+
-					"the scenario cleat#2139 asks about, and the latency numbers below are "+
-					"not evidence of anything",
-					arm.name, writerStart.Format(time.RFC3339Nano), writerEnd.Format(time.RFC3339Nano),
+			overlapFraction := float64(len(inWindow)) / float64(len(treatment))
+			const minOverlapFraction = 0.5
+			if overlapFraction < minOverlapFraction {
+				t.Fatalf("%s: only %.1f%% of the writer's %d samples fell inside the sweep's own "+
+					"window (sweep %s .. %s) -- this run does not exercise the scenario cleat#2139 "+
+					"asks about, and the latency numbers below are not evidence of anything",
+					arm.name, overlapFraction*100, len(treatment),
 					sweepStart.Format(time.RFC3339Nano), sweepEnd.Format(time.RFC3339Nano))
 			}
 
-			treP50, treP99 := mssql2139Percentiles(treatment)
+			// The bound below is asserted over the IN-WINDOW samples
+			// only, not the whole treatment run: a writer sample taken
+			// after the sweep has already finished says nothing about
+			// contention, and averaging it in with the samples that did
+			// race the sweep is the same dilution the fraction check
+			// above exists to catch, just moved from "did we overlap at
+			// all" to "how good is our per-sample signal".
+			treP50, treP99 := mssql2139Percentiles(inWindow)
+			allP50, allP99 := mssql2139Percentiles(treatment)
 
 			// The writer's own rows must survive: none of the three
 			// sweeps' predicates should ever match a 'running',
@@ -311,9 +341,9 @@ func TestMSSQLRetentionSweepConcurrentWriterLatencyStaysBounded(t *testing.T) {
 					"it should never have matched", arm.name, writerRowsRemaining, wantWriterRows)
 			}
 
-			t.Logf("%s: baseline P50=%v P99=%v (n=%d) | treatment P50=%v P99=%v (n=%d, %d rows swept) | overlap=%v",
-				arm.name, basP50, basP99, len(baseline), treP50, treP99, len(treatment), sweepDeleted,
-				overlapEnd.Sub(overlapStart))
+			t.Logf("%s: baseline P50=%v P99=%v (n=%d) | treatment(in-window) P50=%v P99=%v (n=%d of %d, %.0f%% overlap) | treatment(whole run) P50=%v P99=%v | %d rows swept",
+				arm.name, basP50, basP99, len(baseline), treP50, treP99, len(inWindow), len(treatment),
+				overlapFraction*100, allP50, allP99, sweepDeleted)
 
 			assertAllMSSQL2139Sampled(t, arm.name, "baseline", baseline)
 			assertAllMSSQL2139Sampled(t, arm.name, "treatment", treatment)
@@ -369,17 +399,74 @@ func assertAllMSSQL2139Sampled(t *testing.T, arm, phase string, latencies []time
 	}
 }
 
-// Falsification (applied by hand, verified, and reverted -- never
-// committed): with mssqlEventRowChunk changed from 2000 to 1000000 in
-// mssql_schedules.go (#2138's row-bounded DELETE effectively unbounded
-// again, for a sweep sized well under that), the DeleteExpiredEvents arm's
-// treatment P99 jumped from 37ms to 958ms -- a 26x spike against its own
-// unmutated baseline of the same run, comfortably over the stated bound.
-// DeleteCompletedWorkflows and DeleteDeadLetteredWorkflows did not
-// regress under this specific mutation: their event_history removal goes
-// through the cascade-delete path (mssqlIDChunk-bounded workflow batches),
-// not the explicit mssqlEventRowChunk-bounded DELETE TOP this mutation
-// targets, so they are not expected to react to it -- DeleteExpiredEvents
-// alone going red is the known-positive cleat#2139 asks for, not a partial
-// failure. Restored via content diff against a pre-mutation backup,
-// re-verified green (all three arms). Confirmed 2026-09-29.
+// FALSIFICATION 1 -- DeleteExpiredEvents, mssqlEventRowChunk (applied by
+// hand, verified, and reverted -- never committed). With mssqlEventRowChunk
+// changed from 2000 to 10000 in mssql_schedules.go (#2138's per-statement
+// row bound loosened enough to matter for a 30000-row sweep, but not so
+// large that the whole sweep collapses into one near-instant statement --
+// see the note on overlap below for why that distinction matters), the
+// DeleteExpiredEvents arm's in-window treatment P99 jumped from ~13ms to
+// 900ms at 90% overlap -- comfortably over the stated bound. Restored via
+// content diff against a pre-mutation backup, re-verified green (all three
+// arms). Confirmed 2026-09-29.
+//
+// An earlier attempt at this same falsification used 1000000 (this test's
+// prior, pre-review version reported "958ms P99, a 26x spike" for exactly
+// that value). That value no longer demonstrates the regression under THIS
+// version of the test: a single DELETE TOP(1000000) clears all 30000 rows
+// in one near-instant statement, so the sweep finishes before most of the
+// writer's samples are even taken, and the test correctly refuses to
+// certify a result over that thin an overlap (measured: 40% of samples
+// in-window, below minOverlapFraction) rather than reporting a P99 number
+// that would not mean what it looked like it meant. 10000 keeps the sweep
+// slow enough to race the writer properly while still exceeding the bound.
+//
+// FALSIFICATION 2 -- DeleteCompletedWorkflows / DeleteDeadLetteredWorkflows,
+// mssqlInterleaveChunk. The reasoning this comment carried until
+// cleat-review's review of PR #2743 -- that these two arms' event_history
+// removal "goes through the cascade-delete path... not the explicit
+// mssqlEventRowChunk-bounded DELETE TOP" -- was wrong about the mechanism,
+// though right that mssqlEventRowChunk does not move them: both call
+// deleteWorkflowsBatchOnce, which interleaves deleteEventHistoryRowBoundedCommitting
+// (the SAME function DeleteExpiredEvents uses) over mssqlInterleaveChunk-sized
+// (20-workflow) id chunks (mssql_schedules.go:904-910) -- so each call's own
+// event_history delete never approaches mssqlEventRowChunk rows regardless of
+// its value, which is why raising it does nothing for these two arms.
+//
+// The correct known-positive is mssqlInterleaveChunk, not mssqlEventRowChunk,
+// and it DOES cause a real regression -- but not one this latency harness can
+// see, which is itself worth recording rather than papering over. Changed
+// from 20 to 6000 (the whole batch in one interleave step, reproducing the
+// first, rejected design deleteWorkflowsBatchOnce's own comment describes:
+// "delete ALL of event_history for the whole batch first... THEN delete
+// workflow_instances... in one shared transaction... +1 escalation"):
+//
+//   - TestMSSQLRetentionSweepsCauseNoLockEscalation (this package's sibling
+//     regression test for cleat#2060, which reads sys.dm_db_index_operational_stats
+//     directly rather than inferring contention from writer latency) FAILS
+//     under this exact mutation, on DeleteCompletedWorkflows and
+//     DeleteDeadLetteredWorkflows specifically -- "event_history lock
+//     promotions rose by 1 sweeping 6000 workflows' events (6000 rows) in
+//     one call". Confirmed 2026-09-29. This is the real, mechanism-accurate
+//     known-positive cleat-review asked for, and it exists and passes.
+//   - THIS test does not react to the same mutation: with the overlap
+//     fraction fixed to 100% (a giant single-chunk sweep still finishes fast
+//     enough that all 200 writer samples fall inside its window here), both
+//     arms' in-window treatment P99 came in LOWER than baseline (e.g.
+//     DeleteCompletedWorkflows: baseline P99 34-47ms, treatment P99
+//     10-15ms), not higher. Measured directly, not inferred: the mutation
+//     was applied, TestMSSQLRetentionSweepConcurrentWriterLatencyStaysBounded
+//     was run against it, and it passed.
+//
+// So this harness has a confirmed blind spot for the mssqlInterleaveChunk
+// regression on these two arms. The escalated lock is real (per the DMV
+// counter) but does not manifest as materially higher writer latency in
+// this measurement -- plausibly because SQL Server's escalation fires very
+// late in an already-short transaction, leaving too narrow a blocking
+// window for a 200-sample writer to reliably catch relative to its own
+// per-sample noise floor; that is a hypothesis, not a second measurement,
+// and is recorded as one. TestMSSQLRetentionSweepsCauseNoLockEscalation
+// remains the authoritative regression guard for cleat#2060/mssqlInterleaveChunk;
+// this test's bound should be read as covering cleat#2138/mssqlEventRowChunk
+// only, confirmed for DeleteExpiredEvents, and not as a general contention
+// detector for all three arms.
