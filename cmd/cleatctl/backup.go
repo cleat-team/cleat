@@ -189,18 +189,6 @@ func parseBackupFlags(args []string) (backupFlags, error) {
 	return f, nil
 }
 
-// resolveConfigID turns --id or --name into the config's id. Exactly one of
-// idFlag/nameFlag must be non-empty -- checked by the caller, since the
-// error message differs by subcommand (config-create has neither because it
-// is the one command that MAKES an id).
-//
-// plugin.ScanRow, not a bare .Scan(&found): SQL Server returns
-// UNIQUEIDENTIFIER in mixed-endian byte order, which uuid.UUID's own Scan
-// accepts without error and turns into a DIFFERENT uuid (cleat#1137).
-// Confirmed directly by TestBackupCommandWorksOnEveryDialect/mssql, before
-// this fix: config-create reported the correct id, but immediately looking
-// it back up by --name (which round-trips it through exactly this Scan)
-// returned an id that then matched no row at all.
 // backupDSNSecretName is scheduledbackup's own deployment secret name --
 // duplicated here rather than imported because the plugin does not export
 // it, and re-deriving a package-private literal is worse than one comment
@@ -254,6 +242,18 @@ func warnIfBackupDSNUnresolvable(ctx context.Context, db *sql.DB, d dialect) {
 	}
 }
 
+// resolveConfigID turns --id or --name into the config's id. Exactly one of
+// idFlag/nameFlag must be non-empty -- checked by the caller, since the
+// error message differs by subcommand (config-create has neither because it
+// is the one command that MAKES an id).
+//
+// plugin.ScanRow, not a bare .Scan(&found): SQL Server returns
+// UNIQUEIDENTIFIER in mixed-endian byte order, which uuid.UUID's own Scan
+// accepts without error and turns into a DIFFERENT uuid (cleat#1137).
+// Confirmed directly by TestBackupCommandWorksOnEveryDialect/mssql, before
+// this fix: config-create reported the correct id, but immediately looking
+// it back up by --name (which round-trips it through exactly this Scan)
+// returned an id that then matched no row at all.
 func resolveConfigID(ctx context.Context, db *sql.DB, d dialect, idFlag, nameFlag string) (uuid.UUID, error) {
 	if idFlag != "" {
 		id, err := uuid.Parse(idFlag)
