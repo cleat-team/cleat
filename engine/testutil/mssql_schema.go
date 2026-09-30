@@ -91,6 +91,18 @@ func applyMSSQLSchemaFile(t *testing.T, db *sql.DB) {
 // check-then-restore, the same discipline MSSQLAdminDB itself uses, so a
 // concurrent MSSQLAdminDB call can't slip in between the refcount read and
 // the restore.
+//
+// mssqlAdminRefs is PER-PROCESS, not per-database, so this guard cannot
+// distinguish "no process anywhere still needs 'admin'" from "no process
+// *in this one* does" -- a second `go test` process against the same server
+// (no -p 1 locally, or two sessions pointed at one instance) holds the
+// predicate exactly as a genuinely-interrupted one left it, and this
+// function cannot tell which. Measured (cleat-review, cleat#2831 review):
+// process A holds MSSQLAdminDB for 25s; process B's schema setup 8s later
+// heals the predicate out from under A, which is still live. CI cannot
+// reach this -- every MSSQL job runs `go test -p 1` against its own
+// server -- but a local run with two processes on one instance can, and the
+// log below says so rather than naming only the timeout cause.
 func selfHealMSSQLAdminPredicate(t *testing.T, db *sql.DB) {
 	t.Helper()
 	if !mssqlHasCoreSecurityPolicies(t, db) {
@@ -110,17 +122,21 @@ func selfHealMSSQLAdminPredicate(t *testing.T, db *sql.DB) {
 
 	var form string
 	if err := db.QueryRow(`SELECT form FROM admin.rls_predicate_form`).Scan(&form); err != nil {
-		// Migration 075 may not have run against this schema variant; nothing
-		// to heal if the table itself doesn't exist.
-		return
+		// migrations/mssql/001_schema.sql creates this table unconditionally,
+		// and applyMigrations (in applyMSSQLSchemaFile, immediately before
+		// this call) has already run -- so a query error here is a real
+		// failure, not an environmental precondition to tolerate.
+		t.Fatalf("read admin.rls_predicate_form: %v", err)
 	}
 	if form != "admin" {
 		return
 	}
 
-	t.Logf("admin.rls_predicate_form was 'admin' with no live MSSQLAdminDB caller in this "+
-		"process -- an earlier run likely hit a timeout mid-use and skipped its Cleanup "+
-		"(cleat#2831); restoring 'plain' before this test continues")
+	t.Logf("admin.rls_predicate_form was 'admin' with no MSSQLAdminDB caller live in this " +
+		"process -- either an earlier run in this process hit a timeout mid-use and " +
+		"skipped its Cleanup (cleat#2831), or another process sharing this database " +
+		"server currently holds it live (this guard is per-process, not per-database); " +
+		"restoring 'plain' before this test continues")
 	restoreMSSQLPlainPredicate(t, baseDSN)
 }
 

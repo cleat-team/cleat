@@ -109,9 +109,12 @@ func TestSetupMSSQLFullSchemaSelfHealsAnAdminPredicateLeftDirtyByAnInterruptedRu
 	db := MSSQLTestDB(t)
 	SetupMSSQLFullSchema(t, db)
 
-	if _, err := db.Exec(`UPDATE admin.rls_predicate_form SET form = N'admin'`); err != nil {
-		t.Fatalf("dirty the predicate to simulate an interrupted prior run: %v", err)
-	}
+	// The real dirtying mechanism, not just the row: applyMSSQLCrossTenantOptIn
+	// also flips fn_tenant_filter's policy definition, so this leaves the
+	// database in the actual 'admin' state an interrupted MSSQLAdminDB call
+	// would -- consistent even if the self-heal under test regresses, rather
+	// than a row that merely lies (cleat-review's N3 on cleat#2831's review).
+	applyMSSQLCrossTenantOptIn(t, db)
 
 	// The self-heal under test: the next schema setup -- what every MSSQL
 	// test calls before doing anything else -- must notice the dirty
