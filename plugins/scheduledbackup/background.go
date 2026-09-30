@@ -297,8 +297,16 @@ func (p *Plugin) executeScheduledBackup(ctx context.Context, configID uuid.UUID,
 		p.logger.Error("scheduledbackup: refusing scheduled backup",
 			"config_id", configID, "history_id", historyID, "error", err)
 		p.markBackupFailed(bookkeepCtx, historyID, backupErrDSNUnavailable)
+		// Drives Health (plugin.go, cleat#2246 item 2): an operator watching
+		// worker health should see this even if nobody is watching
+		// backup_history.
+		p.lastDSNUnavailable.Store(time.Now().UnixNano())
 		return
 	}
+	// Also drives Health: a later successful resolution is what starts the
+	// signal decaying, rather than the fixed window running from the
+	// original failure (see Health's doc comment for why).
+	p.lastDSNResolved.Store(time.Now().UnixNano())
 
 	// Execute pg_dump.
 	//
