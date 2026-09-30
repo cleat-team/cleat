@@ -227,7 +227,6 @@ plugin/crosstenant.go	migrations/postgres/063
 plugin/every_plugin_tenant_table_is_declared_tenant_scoped_test.go	migration 056
 plugin/migration.go	migration 012
 plugin/migration.go	migration 063
-plugin/migration.go	migrations/mssql/074
 plugin/no_plugin_write_casts_a_value_to_json_test.go	migrations/mysql/071
 plugin/plugin.go	migration 061
 plugin/tenant_role_password.go	migrations/postgres/064

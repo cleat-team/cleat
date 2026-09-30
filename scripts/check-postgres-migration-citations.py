@@ -63,17 +63,23 @@ pair must not excuse a *different* file citing the same number.
 
 Cited-review review also proposed leaving `plugin/migration.go`'s own two
 `migrations/mssql/074` citations OUT of the generated baseline entirely, so
-the guard's main-mode check visibly refuses them until cleat#2816 (open,
-unmerged as of this writing) fixes the citations themselves. That is not
-what this PR does: `--update`'s output is written verbatim, including that
-pair, because withholding it by hand would couple this PR's mergeability to
-cleat#2816's merge order and land this guard with CI red over a citation
-this PR did not introduce and is not scoped to fix (CLAUDE.md: "never merge
-on red", "one PR, one thing"). Assertions 15-17 exercise the exact
-regression using that pair synthetically instead -- they do not depend on
-`plugin/migration.go`'s current content, so they hold before AND after
-cleat#2816 lands. Once it does, the next `--update` will simply stop
-regenerating that entry; nothing here needs a hand edit either way.
+the guard's main-mode check would visibly refuse them until cleat#2816 fixed
+the citations themselves. That is not what this PR did: `--update`'s output
+was written verbatim, including that pair, because withholding it by hand
+would have coupled this PR's mergeability to cleat#2816's merge order and
+landed this guard with CI red over a citation this PR did not introduce and
+was not scoped to fix (CLAUDE.md: "never merge on red", "one PR, one
+thing"). Assertions 15-17 exercise the exact regression using that pair
+synthetically instead -- they do not depend on `plugin/migration.go`'s
+current content, so they held before AND after cleat#2816 landed.
+
+**cleat#2816 merged 2026-09-30 (0ba61d98), and the prediction above was
+confirmed rather than assumed: the very next `--update`, run as part of this
+PR's own rebase onto that commit, stopped regenerating the entry** --
+291 -> 290 baseline entries, the single line removed being exactly
+`plugin/migration.go	migrations/mssql/074`. Nothing here needed a hand edit
+either way, which was the point of not hand-stripping it in the first
+place.
 
 Generating the baseline by hand for the ~289 legitimate historical citations
 this widening surfaced (checked individually against each dialect's own git
@@ -194,16 +200,19 @@ EXEMPT_FILE_PREFIXES = (
     BASELINE_PATH,
 )
 
-# NOTE on scripts/migration-citation-baseline.txt's `plugin/migration.go`
-# entry: it cites `migrations/mssql/074` twice (as of this writing) and 074
-# does not exist in mssql's current tree -- cleat#2816 (open, unmerged) fixes
-# the citations. It IS in the generated baseline, written there verbatim by
-# --update like every other entry; see the module docstring's "VALIDATION
-# SIDE -- REVISED" section for why this PR does not hand-strip it, and
-# --self-test's assertions 15-17 for how the regression it stands in for
-# (a once-real number silently excusing ANY citation of it) is tested
-# instead, synthetically, so the test does not depend on this entry's
-# presence or on cleat#2816's merge order.
+# NOTE, historical: scripts/migration-citation-baseline.txt used to carry a
+# `plugin/migration.go` entry citing `migrations/mssql/074` twice, because
+# 074 did not exist in mssql's current tree at the time this guard was
+# written. cleat#2816 (merged 2026-09-30, 0ba61d98) fixed those citations in
+# plugin/migration.go itself, and the very next `--update` after that merge
+# stopped regenerating the entry -- confirmed, not assumed: 291 -> 290
+# baseline entries, this exact pair the one line removed. See the module
+# docstring's "VALIDATION SIDE -- REVISED" section for why this guard never
+# hand-stripped it while it was still live, and --self-test's assertions
+# 15-17 for how the regression it stood in for (a once-real number silently
+# excusing ANY citation of it) is tested instead, synthetically -- those
+# assertions do not depend on this entry's presence and still pass now that
+# it is gone.
 #
 # ALLOWLIST itself is gone as of this PR, replaced by the generated baseline
 # above -- the 22-entry hand-maintained dict that used to live here (and the
