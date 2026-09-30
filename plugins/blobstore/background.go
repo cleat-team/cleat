@@ -3,6 +3,7 @@ package blobstore
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -292,23 +293,51 @@ func (p *Plugin) sweepStaleWorkflowRefs(ctx, baseCtx context.Context) (int64, er
 // TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave sets it.
 var sweepStaleWorkflowRefsMSSQLTestHook func()
 
+// sqlErrorNumberer is go-mssqldb's mssql.Error, named structurally rather
+// than imported -- its own doc comment invites exactly this: "methods for
+// reading the contents of the struct, which allows calling programs to
+// check for specific error conditions without having to import this
+// package directly." errors.As matches on method set, not on the concrete
+// type, so this works against the real driver error without adding
+// go-mssqldb as an explicit dependency of this file.
+type sqlErrorNumberer interface {
+	SQLErrorNumber() int32
+}
+
+// mssqlErrDeadlockVictim is SQL Server's 1205, the deadlock-victim code --
+// restated from engine/mssql_errors.go's mssqlErrDeadlockVictim, which is
+// unexported and package-private to engine.
+const mssqlErrDeadlockVictim = 1205
+
 // isMSSQLDeadlock reports whether err is a SQL Server deadlock victim (1205,
-// "Rerun the transaction"). Matched on the message, the same way
-// plugins/auditlog/verify.go's isTransientDBError is and for the same
-// reason stated there: no plugin here type-asserts against the driver's
-// mssql.Error, even though engine/mssql_errors.go's own isMSSQLDeadlock
-// does and could be imported (go-mssqldb is a root go.mod dependency, not
-// an engine-only one). The phrases are copied from that function's proven
-// set rather than re-derived, so this one recognizes exactly what it does.
+// "Rerun the transaction").
 //
-// Narrower than auditlog's isTransientDBError on purpose: that one also
-// matches 1213 (MySQL) and PostgreSQL's 40001/40P01, because VerifyChain
-// runs on every dialect. Every caller of this one is MSSQL-only by name
-// (sweepStaleWorkflowRefsMSSQL, allInFlightWorkflowIDsMSSQL), so there is no
-// other dialect's error text to avoid colliding with.
+// THE NUMBER FIRST, cleat-review's finding on this function's first version
+// here: a message-only check is locale-dependent, and go-mssqldb surfaces
+// the server's error text as reported, which is not guaranteed to be
+// English -- a non-English login language would make every phrase below
+// miss, and this function would simply never retry a deadlock it cannot
+// read. That failure is SAFE (the caller gets a hard error instead of a
+// silent wrong answer) but it defeats this function's whole purpose
+// wherever it fires, so the number is checked first and the phrases are a
+// fallback for whatever a `sqlErrorNumberer` check cannot reach -- a
+// wrapped error the concrete type does not survive being As'd through, or
+// (fixture/test paths only) an error constructed as a plain string.
+//
+// The phrases are copied from engine/mssql_errors.go's own isMSSQLDeadlock
+// rather than re-derived, so this one recognizes exactly what it does.
+// Narrower than plugins/auditlog/verify.go's isTransientDBError on purpose:
+// that one also matches 1213 (MySQL) and PostgreSQL's 40001/40P01, because
+// VerifyChain runs on every dialect. Every caller of this one is MSSQL-only
+// by name (sweepStaleWorkflowRefsMSSQL, allInFlightWorkflowIDsMSSQL), so
+// there is no other dialect's error text to avoid colliding with.
 func isMSSQLDeadlock(err error) bool {
 	if err == nil {
 		return false
+	}
+	var n sqlErrorNumberer
+	if errors.As(err, &n) {
+		return n.SQLErrorNumber() == mssqlErrDeadlockVictim
 	}
 	m := strings.ToLower(err.Error())
 	for _, phrase := range []string{"deadlock victim", "was deadlocked", "deadlocked on lock"} {

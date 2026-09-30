@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	mssql "github.com/microsoft/go-mssqldb"
 )
 
 // These pin isMSSQLDeadlock and withMSSQLDeadlockRetry, added for cleat#2303:
@@ -55,6 +57,32 @@ func TestIsMSSQLDeadlock_NotAPermanentError(t *testing.T) {
 func TestIsMSSQLDeadlock_Nil(t *testing.T) {
 	if isMSSQLDeadlock(nil) {
 		t.Error("isMSSQLDeadlock(nil) = true, want false")
+	}
+}
+
+// TestIsMSSQLDeadlock_TypedErrorNumber is cleat-review's N1 on this PR: a
+// message-only check is locale-dependent, since go-mssqldb surfaces the
+// server's own error text verbatim. The real mssql.Error carries the
+// number regardless of language, and errors.As should reach it through the
+// sqlErrorNumberer interface without this file importing go-mssqldb's
+// concrete type in its own (non-test) source.
+func TestIsMSSQLDeadlock_TypedErrorNumber(t *testing.T) {
+	// A message a phrase-only check would miss entirely (no English
+	// "deadlock"/"victim" wording at all), paired with the real number --
+	// the case the number-first check exists for.
+	err := mssql.Error{Number: 1205, Message: "Transaction wurde von einer anderen Anweisung blockiert."}
+	if !isMSSQLDeadlock(err) {
+		t.Errorf("isMSSQLDeadlock(mssql.Error{Number: 1205, non-English message}) = false, want true")
+	}
+}
+
+// TestIsMSSQLDeadlock_TypedErrorWrongNumber is the negative control for the
+// above: the typed path must discriminate on the NUMBER, not merely on
+// "was this an mssql.Error at all".
+func TestIsMSSQLDeadlock_TypedErrorWrongNumber(t *testing.T) {
+	err := mssql.Error{Number: 2627, Message: "Violation of PRIMARY KEY constraint"} // duplicate key, not a deadlock
+	if isMSSQLDeadlock(err) {
+		t.Errorf("isMSSQLDeadlock(mssql.Error{Number: 2627}) = true, want false")
 	}
 }
 
