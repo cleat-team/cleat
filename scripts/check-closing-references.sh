@@ -49,19 +49,39 @@
 # nothing on GitHub; the wrapping is not a repo name and must not make the
 # reference pass.
 #
-# The fix: allow, but don't require, a run of Markdown emphasis/link-opening
-# punctuation (`*_[(`) before the repo-name charset -- it is discarded by
-# the class itself, never treated as part of the name:
+# The first fix (above) allowed, but did not require, a run of Markdown
+# emphasis/link-opening punctuation (`*_[(`) before the repo-name charset.
+# That was an ENUMERATED list, and cleat-review found the next miss within
+# the hour: `Fixes "cleat#12".` and `Fixes 'cleat#12'.` -- quoted rather than
+# emphasized -- both flag on develop and both PASSED under the `*_[(`
+# version, because `"` and `'` are not in that list. Every fix so far had
+# moved the miss to the next wrapper character rather than closing the
+# class, which is the tell that the class needs a different SHAPE, not one
+# more character added to it.
 #
-#   [[:space:]]+[*_[(]*[A-Za-z0-9_.-]+#[0-9]+
+# The actual rule is not "which punctuation is allowed before the name" --
+# it's what GitHub itself does: `#N` links only when nothing but whitespace
+# precedes it, or when a slash-bearing `owner/repo` does. ANY other run of
+# non-whitespace, non-`/` characters between the keyword and the name --
+# whatever it is made of -- already breaks the link, so the class should
+# accept ANY such run rather than enumerate the ones seen so far:
 #
-# `(#2003)` still passes: `[*_[(]*` can consume the `(`, but the following
-# `[A-Za-z0-9_.-]+` then has nothing to match (next char is `#`) and needs
-# at least one, so the whole alternative fails at that position -- same
-# reasoning as `owner/repo#N` passing, one paragraph up. `**cleat#12**` and
-# `[cleat#12](url)` both match: the punctuation class absorbs the leading
-# `**`/`[`, then `cleat` satisfies the name class, then `#12` closes it.
-# See --self-test below for the fixture pinning both directions.
+#   [[:space:]]+[^[:space:]#/]*[A-Za-z0-9_.-]#[0-9]+
+#
+# A prefix class, not a wrapper list: any number of non-space/non-hash/
+# non-slash characters, followed by exactly one repo-name character
+# immediately before `#N` (so there is always a "name" for the message to
+# quote). `(#2003)` and `**#12**` still pass: every character between the
+# keyword and `#` is punctuation, so there is no repo-name character to sit
+# immediately before `#`, and the alternative fails at every backtrack --
+# same reasoning as `owner/repo#N` passing (the `/` is excluded from the
+# prefix class, so a namechar can never be adjacent to `#` across it).
+# `**cleat#12**`, `[cleat#12](url)`, `"cleat#12"` and `'cleat#12'` all
+# match: whatever wraps `cleat` is absorbed by the open prefix class, `t`
+# (the last letter of `cleat`) sits immediately before `#12`, and the
+# alternative succeeds. See --self-test below for the fixture pinning all
+# of it, including the case that discriminates a prefix class from a
+# wrapper list -- a form no prior version of this comment anticipated.
 #
 # The body arrives in PR_BODY, set by the workflow from the event payload
 # through `env:` rather than interpolated into the script: a PR body is
@@ -96,7 +116,7 @@ check_body() {
   # the whole pipeline (which would also hide a grep that failed to run).
   local bad
   if ! bad=$(printf '%s\n' "$prose" |
-    grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+[*_[(]*[A-Za-z0-9_.-]+#[0-9]+'); then
+    grep -oiE '\b(close[sd]?|fix(e[sd])?|resolve[sd]?):?[[:space:]]+[^[:space:]#/]*[A-Za-z0-9_.-]#[0-9]+'); then
     echo "No closing keyword names an issue as <repo>#N."
     return 0
   fi
@@ -133,6 +153,10 @@ self_test() {
     "bold cleat#N must still be caught (cleat#2807)|Fixes **cleat#12**.|1|cleat#12"
     "linked cleat#N must still be caught (cleat#2807)|Fixes [cleat#12](https://x).|1|cleat#12"
     "bold correct reference still passes (cleat#2807)|Fixes **#12**.|0|No closing keyword"
+    "linked correct reference still passes (cleat#2807)|Fixes [#12](https://x).|0|No closing keyword"
+    "double-quoted cleat#N must still be caught (cleat#2807 R2)|Fixes \"cleat#12\".|1|cleat#12"
+    "single-quoted cleat#N must still be caught (cleat#2807 R2)|Fixes 'cleat#12'.|1|cleat#12"
+    "a valid ref alongside a bad one, one keyword each|Resolves: cleat#7 and fixes #8|1|cleat#7"
   )
 
   local case name body want_exit want_substr got_out got_exit
