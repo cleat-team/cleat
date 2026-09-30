@@ -48,6 +48,20 @@ import (
 // nobody has reviewed) or produce false failures against a formula that
 // was never meant to cover that range -- both worse than saying so.
 //
+// AND STATED PLAINLY, NOT LEFT IMPLICIT: this test covers the SAFETY
+// direction only ("no live run is reclaimed too early"), not the LIVENESS
+// direction cleat#2175 also asks for ("a dead worker's run is reclaimed
+// within the documented bound"). An earlier version carried a liveness
+// assertion; cleat-review found it could never fail for any positive
+// heartbeat (it was deleted rather than repaired -- see the note where it
+// used to be). This test also has no OBSERVER: cleat-review's own history
+// records at least two of the four historical edges in this invariant as
+// observer-side (an idle worker's own probe, the reaper-tick phase), and
+// nothing here models either -- the grid varies the HOLDER's stall
+// exposure only. Neither of those gaps is silently absorbed by "exhaustive
+// sweep" in this file's own title; see the PR this test shipped in for
+// how they are tracked.
+//
 // THE THREE DRIVER FAILURE SHAPES, cited from minimumReclaimAfter's own doc
 // and cleat#2005's issue body:
 //   - mysql:    the driver respects ctx cancellation, so a call caught by
@@ -173,14 +187,6 @@ func TestReaperRecoveryGateHoldsAcrossTheParameterSpace(t *testing.T) {
 			deadline := dbCallDeadlineFor(hs.hb)
 			retryInterval := heartbeatRetryIntervalFor(hs.hb)
 			reclaimTimeout := minimumReclaimAfter(hs.hb)
-			// The liveness side: once eligible, a real reaper needs up to
-			// one more tick to actually notice and act -- reaperLoop's own
-			// interval is max(heartbeatInterval, 10s) in production; this
-			// test uses the heartbeat-scaled form of that same slack
-			// rather than the hardcoded 10s floor, since hb here spans a
-			// much wider range than any real deployment would use as
-			// --heartbeat.
-			tickSlack := hs.hb
 
 			for _, reconnect := range reconnectLatencies {
 				if !m.retryPaysReconnect && reconnect > 0 {
@@ -210,24 +216,24 @@ func TestReaperRecoveryGateHoldsAcrossTheParameterSpace(t *testing.T) {
 									name, recovery, hs.hb, reclaimTimeout)
 							}
 
-							// Liveness: a run that is GENUINELY dead (no
-							// further attempts ever land) must become
-							// reclaimable within reclaimTimeout, and a real
-							// reaper must notice within one more tick.
-							// reclaimTimeout itself is the liveness bound
-							// ReapStaleInstances applies to the row; this
-							// only checks the bound is finite and sane
-							// (positive, and reachable within a bounded
-							// number of ticks) rather than re-deriving
-							// ReapStaleInstances' own staleness predicate,
-							// which the existing
+							// LIVENESS IS NOT COVERED BY THIS TEST. An earlier
+							// version asserted `reclaimTimeout+tickSlack <= 0`
+							// as a liveness check -- cleat-review found that
+							// condition can never be false for any positive
+							// heartbeat (both terms are durations derived from
+							// a positive hb), so it passed even with
+							// minimumReclaimAfter scaled 1000x, an ~4-hour
+							// dead-run window at the default heartbeat. That
+							// was a dead assertion, not a weak one, and it is
+							// deleted rather than repaired: a real liveness
+							// bound needs to reason about
+							// ReapStaleInstances' own staleness predicate and
+							// reaperLoop's own tick cadence together, which
 							// TestReapOnceReclaimsOnceTheGracePeriodHasCleared
-							// and friends already cover directly.
-							if reclaimTimeout+tickSlack <= 0 {
-								t.Fatalf("%s: reclaimTimeout+tickSlack is not positive (%v) -- "+
-									"a dead worker's run would never become reclaimable",
-									name, reclaimTimeout+tickSlack)
-							}
+							// and friends already do directly, at the
+							// hand-picked points they cover. This test's own
+							// scope is the safety half only -- see the file
+							// doc comment.
 						})
 					}
 				}
@@ -241,31 +247,44 @@ func TestReaperRecoveryGateHoldsAcrossTheParameterSpace(t *testing.T) {
 // Falsification (applied by hand, verified, and reverted -- never
 // committed, same discipline as this file's sibling falsification notes):
 // with reclaimSlack changed from `1 * time.Second` to `0` in setup.go,
-// exactly 31 of the 1890 grid points go red -- all mssql mode, hb=default,
-// D within 750ms of hb (4.25s-5s, its uppermost steps), and every non-zero
-// reconnect value (250ms and 900ms). This is exactly minimumReclaimAfter's
-// own round-5 zero-slack defect (see its doc comment): with no slack term,
-// a reconnect of any size breaks the invariant precisely where the stall
-// has consumed nearly all of T2's own budget, leaving nothing spare for
-// T4's reconnect addition. Caught here at 31 grid points rather than the
-// one hand-picked case
+// exactly 30 of the 1890 grid points go red (cleat-review's own count,
+// verified here rather than trusted -- an earlier version of this comment
+// said 31, from a `grep -c` that also matched the run's own top-level
+// "--- FAIL: TestReaperRecoveryGateHoldsAcrossTheParameterSpace" summary
+// line as if it were a 31st grid point). The exact 30: mssql mode,
+// hb=default only, reconnect=900ms at stall steps 17-20 (4.25s-5s, 4 values
+// x 6 round-trip values = 24), plus reconnect=250ms at step 20 alone
+// (4.999999999s x 6 round-trip values = 6). hb=low never fails because its
+// deadline floors at 2s, leaving ample margin; hb=large never fails
+// because deadline+mssqlDrainSlack (15s+5s=20s) is wide enough that the
+// ceiling, not the stall, always binds T2 well below what a 30s heartbeat
+// and reclaimTimeout can absorb. This is exactly minimumReclaimAfter's own
+// round-5 zero-slack defect (see its doc comment): with no slack term, a
+// reconnect of any size breaks the invariant precisely where the stall has
+// consumed nearly all of T2's own budget, leaving nothing spare for T4's
+// reconnect addition. Caught here at 30 grid points rather than the one
+// hand-picked case
 // TestAReconnectBeforeTheRetryBreaksTheZeroSlackInvariantButNotWithReclaimSlack
 // checks. Restored via content diff against a pre-mutation backup,
 // re-verified green. Confirmed 2026-09-29.
 //
-// A NOTE ON THE RECONNECT DIMENSION'S OWN UPPER BOUND, since finding this
-// took two iterations to get right: an earlier version of this sweep used
-// an unbounded-feeling 2-second reconnect value, which failed at 24 grid
-// points even with reclaimSlack intact (unmutated). That was not a second,
-// independent finding -- reclaimSlack's own doc comment names its fixed
-// 1-second budget as covering a reconnect TOGETHER WITH the retry's own
-// initial round trip and ordinary scheduler lateness, not an unbounded
+// THE RECONNECT DIMENSION IS A PIN INSIDE THE SLACK BUDGET, NOT EVIDENCE
+// ABOUT REAL RECONNECT LATENCY -- state this plainly rather than let a
+// green result imply more than it does. An earlier version of this sweep
+// used an unbounded-feeling 2-second reconnect value, which failed at 24
+// grid points even with reclaimSlack intact (unmutated). That was not a
+// second, independent finding: reclaimSlack's own doc comment names its
+// fixed 1-second budget as covering a reconnect TOGETHER WITH the retry's
+// own initial round trip and ordinary scheduler lateness, not an unbounded
 // reconnect alone, and this model already charges the retry's own
-// worst-case latency separately (T4). A reconnect value larger than the
-// documented slack budget is guaranteed to fail by construction -- that is
-// a fact about picking an ungrounded parameter, not a fact about the
-// invariant. reconnectLatencies below stays within reclaimSlack's own
-// stated value for exactly this reason.
+// worst-case latency separately (T4). So reconnectLatencies below was
+// capped at reclaimSlack's own value -- which means, for the mssql arm,
+// this sweep passing is exactly the statement "reconnect < reclaimSlack",
+// true by construction of the grid, not a measurement that real
+// go-mssqldb reconnects stay under that budget. Nothing in this repository
+// measures a real reconnect's cost (dial + TLS handshake + login); that
+// number is the one figure here that would correspond to production, and
+// it remains unmeasured.
 //
 // FOLLOW-UP NOTED, NOT BUILT HERE: extending D past one heartbeat interval
 // needs a multi-attempt simulation (each retry's start time depends on when
