@@ -133,7 +133,7 @@ func selfHealMSSQLAdminPredicate(t *testing.T, db *sql.DB) {
 	}
 
 	t.Logf("admin.rls_predicate_form was 'admin' with no MSSQLAdminDB caller live in this " +
-		"process -- either an earlier run in this process hit a timeout mid-use and " +
+		"process -- either an earlier `go test` process hit a timeout mid-use and " +
 		"skipped its Cleanup (cleat#2831), or another process sharing this database " +
 		"server currently holds it live (this guard is per-process, not per-database); " +
 		"restoring 'plain' before this test continues")
