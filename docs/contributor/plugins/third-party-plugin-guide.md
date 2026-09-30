@@ -905,14 +905,20 @@ func cleat_abi_version() int32 {
 }
 ```
 
-The intended check before loading was:
-
 | ABI version | Minimum cleat version | Notes |
 |-------------|----------------------|-------|
 | 1 | 1.0.0 | Initial stable ABI. All imports listed above are available. |
 
-If a plugin requires a newer ABI than the worker supports, the worker refuses
-to load it with a clear error message.
+**The real check does not refuse, and cannot yet -- it WARNS.**
+`warnIfModuleWantsANewerABI` (`engine/executor.go`) reads `abi_version` from the
+module's `cleat.metadata` (the same field the status note above describes, not
+the guest export) and logs a warning if it exceeds this worker's
+`wasm.CurrentABIVersion`; it runs the module anyway. cleat#1054 proposed a
+refusal and rejected it: `CurrentABIVersion` is still 1, so no module can
+currently declare a version this check would refuse, and a rejection path that
+has never executed is not one to ship. A guest can misreport its own
+`abi_version` (it is the module's own claim, not verified), which is why this
+stays a warning rather than becoming the gate a future ABI bump might need.
 
 ---
 
