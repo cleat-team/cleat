@@ -15,9 +15,13 @@
 // Input and output are JSON strings passed through memory buffers.
 //
 // The ABI export/import layer (//go:wasmimport, //export) is not provided
-// by any "cleat WASM SDK" -- no such package exists. It is hand-written,
-// illustrated only as a comment near the bottom of this file, because WASM
-// plugin execution is unwired end to end (IMPROVEMENT-PLAN 3.315):
+// by any cleat package. No cleat package provides the PLUGIN ABI layer --
+// the workflow SDK under cleat/ ("the durable SDK") exists, but it is for
+// workflows, not plugins, and its own ABI stubs come from the code
+// transformer rather than being hand-written or library-provided either.
+// This file's ABI layer is hand-written, illustrated only as a comment
+// near the bottom of this file, because WASM plugin execution is unwired
+// end to end (IMPROVEMENT-PLAN 3.315):
 // engine.PluginLoader.LoadPlugin has no non-test caller, and cmd/cleat-worker
 // constructs no loader. This file contains the pure business logic a real
 // ABI layer would dispatch to. See
