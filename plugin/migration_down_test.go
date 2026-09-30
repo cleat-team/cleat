@@ -309,3 +309,68 @@ func TestRunDownMigrationsOnAnUnappliedPluginIsANoop(t *testing.T) {
 		t.Errorf("reported %v reversed for a plugin that was never applied", res.Reversed)
 	}
 }
+
+// TestRunDownMigrationsRollsBackAPartiallyFailedMultiStatementDown is
+// cleat#2850's regression test: the FIRST statement of a two-statement Down
+// succeeds, the second fails outright, and on a dialect that supports
+// transactional DDL (PostgreSQL, tested here) the first statement's effect
+// must not survive either. Before this fix, Phase 2 ran each statement via
+// execSQLStatements(ctx, session.ExecContext, ...) with no transaction at
+// all, so the first DROP committed immediately and stood on its own --
+// cleat#2822's Version 8 hit exactly this shape on MSSQL (an index dropped, a
+// column not).
+func TestRunDownMigrationsRollsBackAPartiallyFailedMultiStatementDown(t *testing.T) {
+	db := downTestDB(t, "cleat_down_"+t.Name()[len("TestRunDownMigrations"):])
+	defer db.Close()
+	ctx := context.Background()
+
+	p := loaded("down-atomic",
+		Migration{
+			Version: 1,
+			Up: `CREATE TABLE down_atomic_one (id INT, tenant_id UUID); ` +
+				`CREATE TABLE down_atomic_two (id INT, tenant_id UUID)`,
+			// The second statement fails outright (no such table), so a
+			// non-transactional Down leaves the first DROP committed and
+			// down_atomic_two standing -- this is cleat#2822's shape, minus
+			// the SQL Server default-constraint specifics.
+			Down: `DROP TABLE down_atomic_one; ` +
+				`DROP TABLE down_atomic_table_that_does_not_exist`,
+			TenantScoped: []string{"down_atomic_one", "down_atomic_two"},
+		},
+	)
+
+	if err := RunMigrations(ctx, db, DialectPostgres, nil, []*LoadedPlugin{p}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if !tableExists(t, db, "down_atomic_one") {
+		t.Fatal("PRECONDITION FAILED: down_atomic_one was not created, so the reversal " +
+			"below would report success against nothing")
+	}
+
+	if _, err := RunDownMigrations(ctx, db, DialectPostgres, p, []*LoadedPlugin{p}); err == nil {
+		t.Fatal("reversing a Down whose second statement fails must return an error")
+	}
+
+	// THE ATOMICITY PROPERTY. PostgreSQL supports transactional DDL, so
+	// wrapping the whole version's Down in one transaction means the first
+	// DROP must roll back with the second statement's failure -- an
+	// all-or-nothing reversal, not a partial teardown.
+	if !tableExists(t, db, "down_atomic_one") {
+		t.Error("down_atomic_one was dropped even though this version's Down failed overall -- " +
+			"a partial teardown, not the atomic reversal this function's doc comment promises " +
+			"on PostgreSQL (cleat#2850)")
+	}
+
+	// And the tracking row must still say "applied": untracking only happens
+	// after the whole transaction, including the Down SQL, commits. A Down
+	// that fails partway and gets untracked anyway could never be retried.
+	var tracked int
+	if err := db.QueryRow(`SELECT count(*) FROM plugin_migrations WHERE plugin_name = $1 AND version = 1`,
+		"down-atomic").Scan(&tracked); err != nil {
+		t.Fatalf("count tracking rows: %v", err)
+	}
+	if tracked != 1 {
+		t.Errorf("tracking row count for the failed version = %d, want 1 -- a failed Down "+
+			"must stay tracked as applied so it can be retried", tracked)
+	}
+}
