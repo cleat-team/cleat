@@ -50,6 +50,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT" || exit 1
 
 BASELINE="scripts/skip-baseline.txt"
+LEDGER="scripts/skip-ledger.tsv"
+LEDGER_D="scripts/skip-ledger.d"
+CROSSCHECK_EXEMPT="scripts/skip-crosscheck-exempt.txt"
 
 # Emitted by scan() when it produced nothing, so callers can tell a failed scan
 # from a clean tree across the command-substitution boundary. Same guard, and
@@ -199,6 +202,25 @@ total_skips() {
   awk -F'\t' '{ n += $3 } END { print n + 0 }' <<<"$1"
 }
 
+# ledger_lines prints every runtime skip-ledger declaration -- the single
+# file plus every fragment in skip-ledger.d/ -- as one stream.
+#
+# DUPLICATED from scripts/check-skip-budget.sh rather than shared, on
+# purpose: that script is under active edit elsewhere (cleat#2753) as this is
+# written, and factoring both into one sourced file would make an edit to
+# either collide with the other over a file neither owns alone. See that
+# script's own comment on this same function for the full reasoning on why
+# the fragment directory exists (cleat#1333, cleat#1395) and why `awk 1`,
+# not `cat` (a fragment missing its trailing newline must not swallow the
+# next file's declaration).
+ledger_lines() {
+  awk 1 "$LEDGER" 2>/dev/null
+  if [ -d "$LEDGER_D" ]; then
+    find "$LEDGER_D" -maxdepth 1 -name '*.tsv' -type f -print0 |
+      sort -z | xargs -0 -r awk 1
+  fi
+}
+
 # stale_entries prints the baseline lines whose (dir, function) key the current
 # scan does not produce at all. cleat#1746.
 #
@@ -237,6 +259,239 @@ stale_entries() {
   printf '%s' "$out"
 }
 
+# crosscheck_baseline_vs_ledger: cleat#2759.
+#
+# A new dialect-gated test has to be registered in TWO places -- this
+# script's own static baseline (checked above, and it fails loudly if this
+# one is missed) and the runtime skip-ledger scripts/check-skip-budget.sh
+# reads. Registering only the first produces a green Lint run and a red CI
+# job hours later, in whichever job runs ./engine/... without the DSN the
+# test needs. That is not a hypothetical: cleat#2741, cleat#2746 and
+# cleat#2756 all hit it in one night, each after the author believed the
+# static registration alone was complete.
+#
+# This runs here, in Lint, with no database, so it can fail AT THE POINT THE
+# SKIP IS INTRODUCED. check-skip-budget.sh cannot: it only sees the gap once
+# a real per-job `go test -json` report exists, which is after the fact by
+# construction -- the same discipline cleat#2158 asks for from the ledger's
+# other direction (a cluster line implying a test-go/engine line).
+#
+# SCOPE IS DELIBERATELY NARROW, in two ways, and each is a false negative
+# rather than a false positive when it declines:
+#
+#   1. Only dir=="engine". All three known-positives are there, and this
+#      guard has no job table for any other package.
+#   2. Only a function whose body names EXACTLY ONE of the four dialect
+#      discriminators below. Zero or more than one is left unclassified.
+#
+# THIS USED TO ALSO EXCLUDE ANY FUNCTION CONTAINING t.Run/b.Run, meant to
+# skip registeredBackends-style dialect dispatch -- and it was both
+# unnecessary and wrong. Unnecessary: a registeredBackends test dispatches
+# through backend.Setup(t), a SEPARATE function, so the dispatching test
+# itself names zero dialects and rule 2 above already excludes it. Wrong:
+# cleat#2746's own known-positive, TestMSSQLRetentionSweepConcurrentWriter
+# LatencyStaysBounded, is gated on exactly one dialect at its top and then
+# runs three UNRELATED t.Run arms under that one gate -- the excluded shape
+# was one of the three cases this guard exists to catch. Caught by running
+# this guard against that test's own pre-baseline commit (c56a89c1) as the
+# known-positive control below: the first version reported no violation.
+#
+# THIS ALSO USED TO RUN AGAINST $added ($current minus the COMMITTED
+# skip-baseline.txt) RATHER THAN THE FULL SCAN -- and that was wrong too,
+# in the direction that matters most: it went silent on exactly the shape
+# cleat#2756 shipped. $added is empty the instant `--update` has been run,
+# and --update routinely lands in the SAME commit as the test itself
+# (cleat#2756's 632107e1: test + baseline entry, one commit; the ledger
+# line came two commits later, in d3e5203). At that commit scan() already
+# matches the committed baseline exactly, so $added sees nothing -- checked
+# by running the $added-only version directly against 632107e1 and getting
+# "OK". See scripts/skip-crosscheck-exempt.txt's own header for what
+# replaced it and why that file, not $added, is now the "already accounted
+# for" set.
+#
+# Under-classifying leaves today's gap uncaught, no worse than before this
+# guard existed. Over-classifying would fail an unrelated PR over a line
+# this guard misread -- the wrong direction for a guard that runs on every
+# PR touching no database at all.
+#
+# THE JOB TABLE IS HAND-MAINTAINED, the same way every existing ledger
+# line's own "why" text already hardcodes which DSN a job sets. Verified
+# against the workflow YAML on 2026-09-30, re-derive before trusting it
+# stale:
+#
+#   grep -n "CLEAT_TEST_\|go test " .github/workflows/engine-race.yml
+#   sed -n '/name: cluster/,/check-skip-budget.sh cluster /p' .github/workflows/ci.yml \
+#     | grep -n "CLEAT_TEST_\|go test "
+#   grep -n "CLEAT_TEST_\|go test " .github/workflows/multi-db-ci.yml
+#
+# Deliberately just these four. ci.yml's "Test Go (core)" leg ALSO runs
+# ./... (engine/ included) with the same postgres-only env, and is left out
+# -- nothing has hit it yet, and adding a job this guard cannot verify
+# against a real failure is the runtime-side mistake cleat#2759 documents,
+# arriving here instead. Add it the day core's budget does hit this.
+#
+# $1 is the FULL current scan (dir<TAB>fn<TAB>count lines) -- not $added.
+# See the comment above for why $added went silent on cleat#2756's shape.
+crosscheck_baseline_vs_ledger() {
+  local current="$1" ledger_tmp current_tmp
+  ledger_tmp="$(mktemp)"
+  current_tmp="$(mktemp)"
+  # RETURN, not EXIT: self_test() calls this once per case and the process
+  # is not exiting between them.
+  trap 'rm -f "$ledger_tmp" "$current_tmp"' RETURN
+  ledger_lines > "$ledger_tmp"
+  printf '%s\n' "$current" > "$current_tmp"
+
+  # $current is passed as a FILE ARGUMENT, not piped to stdin. `python3 -`
+  # already uses stdin to read the script text below (the heredoc), and a
+  # pipe into the same command's stdin is not additive with that -- the
+  # heredoc wins, `sys.stdin.read()` inside the script sees EOF immediately,
+  # and $current is silently discarded. Found by running this against a real
+  # known-positive (a pre-fix commit of #2746) and getting no output at all:
+  # `bash -x` showed python3 running and returning cleanly with an empty
+  # current_lines. Confirmed standalone: `printf 'hello\n' | python3 - foo
+  # <<'EOF' ... sys.stdin.read() ... EOF` reads "hello" as the SCRIPT (a
+  # NameError on the bare word), not as data -- the pipe's content becomes
+  # python's source, never reaches the running script's own stdin read.
+  python3 - "$ledger_tmp" "$current_tmp" "$CROSSCHECK_EXEMPT" <<'PYEOF'
+import glob
+import re
+import sys
+
+ledger_path = sys.argv[1]
+current_lines = open(sys.argv[2], encoding='utf-8').read().splitlines()
+exempt = set()
+with open(sys.argv[3], encoding='utf-8', errors='replace') as f:
+    for line in f:
+        line = line.rstrip('\n')
+        if not line or line.startswith('#'):
+            continue
+        parts = line.split('\t')
+        if len(parts) == 3:
+            exempt.add((parts[0], parts[1]))
+
+JOB_DIALECT = {
+    "cluster": "postgres",
+    "test-go/engine": "postgres",
+    "multi-db/mysql": "mysql",
+    "multi-db/mssql": "mssql",
+}
+
+DIALECT_MARKERS = {
+    "postgres": [r'testutil\.DialectPostgres\b', r'CLEAT_TEST_POSTGRES\b', r'CLEAT_TEST_DB\b'],
+    "mysql":    [r'testutil\.DialectMySQL\b', r'CLEAT_TEST_MYSQL\b'],
+    "mssql":    [r'testutil\.DialectMSSQL\b', r'CLEAT_TEST_MSSQL\b'],
+}
+
+
+def function_bodies(path):
+    """Yield (name, body) per top-level func, the same attribution rule as
+    this script's own scan(): receiver-qualified for a method (Type.Method),
+    plain otherwise. Deliberately re-implemented rather than shelling back
+    into the awk in scan() -- this needs the BODY TEXT, which that program
+    never retains, only a count."""
+    try:
+        text = open(path, encoding='utf-8', errors='replace').read()
+    except OSError:
+        return
+    lines = text.split('\n')
+    starts = []
+    for i, line in enumerate(lines):
+        if not re.match(r'^func[ \t]', line):
+            continue
+        m = re.match(r'^func[ \t]+\(([^)]*)\)[ \t]*([A-Za-z0-9_]+)', line)
+        if m:
+            recv_parts = m.group(1).split()
+            rtype = recv_parts[-1].lstrip('*') if recv_parts else ''
+            name = "%s.%s" % (rtype, m.group(2))
+        else:
+            m2 = re.match(r'^func[ \t]+([A-Za-z0-9_]+)', line)
+            name = m2.group(1) if m2 else None
+        if name:
+            starts.append((i, name))
+    for idx, (start, name) in enumerate(starts):
+        end = starts[idx + 1][0] if idx + 1 < len(starts) else len(lines)
+        yield name, '\n'.join(lines[start:end])
+
+
+bodies = {}
+for path in sorted(glob.glob('engine/*_test.go')):
+    for name, body in function_bodies(path):
+        # First definition wins. A real name collision is the baseline's own
+        # limitation too -- it is keyed on this same (dir, fn) pair -- and
+        # not something this guard can resolve any differently.
+        bodies.setdefault(name, body)
+
+ledger_by_job = {}
+for line in open(ledger_path, encoding='utf-8', errors='replace'):
+    line = line.rstrip('\n')
+    if not line or line.startswith('#'):
+        continue
+    parts = line.split('\t')
+    if len(parts) < 3:
+        continue
+    job, _count, pattern = parts[0], parts[1], parts[2]
+    ledger_by_job.setdefault(job, []).append(pattern)
+
+
+def covered(job, fn):
+    # grep -cE semantics, same as check-skip-budget.sh's own match: a
+    # SUBSTRING search, not a forced full-string anchor. Ledger lines in
+    # this tree are written both ways (^Foo$ and bare Foo) and the runtime
+    # checker does not care which -- this guard's notion of "covered" would
+    # be wrong if it disagreed.
+    for pattern in ledger_by_job.get(job, []):
+        try:
+            if re.search(pattern, fn):
+                return True
+        except re.error:
+            continue
+    return False
+
+
+violations = []
+for line in current_lines:
+    parts = line.split('\t')
+    if len(parts) != 3:
+        continue
+    d, fn, _count = parts
+    if d != 'engine':
+        continue
+    if (d, fn) in exempt:
+        continue  # already accounted for by the job's inherited allowance
+    body = bodies.get(fn)
+    if body is None:
+        continue  # cannot locate the source; do not guess
+    found = set()
+    for dialect, markers in DIALECT_MARKERS.items():
+        if any(re.search(m, body) for m in markers):
+            found.add(dialect)
+    if len(found) != 1:
+        continue  # not classified: zero or more than one dialect named
+    dialect = next(iter(found))
+    missing = sorted(job for job, want in JOB_DIALECT.items()
+                      if want != dialect and not covered(job, fn))
+    if missing:
+        violations.append((fn, dialect, missing))
+
+if violations:
+    print("ERROR: dialect-gated engine test(s) are in scripts/skip-baseline.txt")
+    print("but missing from the runtime skip ledger for the job(s) named:")
+    print()
+    for fn, dialect, missing in sorted(violations):
+        print("  %s  (gated on %s; missing ledger line for: %s)" %
+              (fn, dialect, ", ".join(missing)))
+    print()
+    print("Each missing job silently spends its __UNATTRIBUTED__ allowance")
+    print("instead of a line naming this test -- cleat#2741, #2746 and #2756")
+    print("all hit exactly this, hours after the static registration above")
+    print("looked complete. Add a scripts/skip-ledger.d/<name>.tsv line for")
+    print("each job named above; scripts/skip-ledger.d/reap-pins-a-fractional-")
+    print("reclaim-timeout.tsv is a template with the same shape.")
+    sys.exit(1)
+PYEOF
+}
+
 # self_test builds a fixture tree and asserts what scan() attributes a skip to.
 #
 # WHY THIS EXISTS AT ALL: until cleat#1740 this script had no self-test, and the
@@ -257,9 +512,9 @@ stale_entries() {
 # known input -- and a second copy of the program would be a second thing to
 # keep correct, which is the defect this fix is about in another costume.
 self_test() {
-  local tmp ok=0 out
+  local tmp xtmp ok=0 out
   tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
+  trap 'rm -rf "$tmp" "$xtmp"' RETURN
 
   mkdir -p "$tmp/pkg"
   cat > "$tmp/pkg/fixture_test.go" <<'FIXTURE'
@@ -345,6 +600,82 @@ FIXTURE
     ok=1
   fi
 
+  # cleat#2759: crosscheck_baseline_vs_ledger. LEDGER, LEDGER_D and
+  # CROSSCHECK_EXEMPT are all paths relative to CWD, so this runs inside its
+  # own fixture directory exactly like scan()'s fixture above, with a fixture
+  # engine/, skip-ledger.tsv/skip-ledger.d and skip-crosscheck-exempt.txt.
+  xtmp="$(mktemp -d)"
+  mkdir -p "$xtmp/engine" "$xtmp/scripts/skip-ledger.d"
+  cat > "$xtmp/engine/fixture_test.go" <<'XFIXTURE'
+package engine
+
+// The known-positive: single-dialect-gated, zero ledger coverage anywhere.
+func TestKnownPositiveMSSQLGated(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set")
+	}
+}
+
+// The negative control: identically shaped, but fully covered in the ledger.
+func TestCoveredMSSQLGated(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set")
+	}
+}
+
+// The exempt control: identically shaped and ledger-uncovered, but present
+// in skip-crosscheck-exempt.txt -- grandfathered, must not be reported.
+func TestExemptMSSQLGated(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set")
+	}
+}
+
+// Declined: no dialect marker at all.
+func TestUnclassifiedNoDialectMarker(t *testing.T) {
+	t.Skip("some other reason")
+}
+
+// Declined: two dialect markers, not exactly one.
+func TestUnclassifiedTwoDialects(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" || os.Getenv("CLEAT_TEST_MYSQL") == "" {
+		t.Skip("needs both")
+	}
+}
+XFIXTURE
+  : > "$xtmp/scripts/skip-ledger.tsv"
+  cat > "$xtmp/scripts/skip-ledger.d/fixture.tsv" <<'XLEDGER'
+cluster	1	TestCoveredMSSQLGated	fixture: covered on cluster
+multi-db/mysql	1	TestCoveredMSSQLGated	fixture: covered on multi-db/mysql
+test-go/engine	1	TestCoveredMSSQLGated	fixture: covered on test-go/engine
+XLEDGER
+  printf 'engine\tTestExemptMSSQLGated\t1\n' > "$xtmp/scripts/skip-crosscheck-exempt.txt"
+
+  local xcurrent xout xstatus
+  xcurrent="$(printf 'engine\tTestKnownPositiveMSSQLGated\t1\nengine\tTestCoveredMSSQLGated\t1\nengine\tTestExemptMSSQLGated\t1\nengine\tTestUnclassifiedNoDialectMarker\t1\nengine\tTestUnclassifiedTwoDialects\t1\n')"
+  xstatus=0
+  xout="$(cd "$xtmp" && crosscheck_baseline_vs_ledger "$xcurrent")" || xstatus=$?
+
+  if [ "$xstatus" -eq 0 ]; then
+    echo "SELF-TEST FAILED: crosscheck_baseline_vs_ledger did not flag the known-positive (uncovered on all three postgres/mysql jobs)" >&2
+    ok=1
+  elif ! grep -qF 'TestKnownPositiveMSSQLGated' <<< "$xout"; then
+    echo "SELF-TEST FAILED: crosscheck exited non-zero but did not name the known-positive" >&2
+    ok=1
+  fi
+  if grep -qF 'TestCoveredMSSQLGated' <<< "$xout"; then
+    echo "SELF-TEST FAILED: a fully ledger-covered test was reported as a violation" >&2
+    ok=1
+  fi
+  if grep -qF 'TestExemptMSSQLGated' <<< "$xout"; then
+    echo "SELF-TEST FAILED: an exempted (pre-existing) test was reported as a violation" >&2
+    ok=1
+  fi
+  if grep -qF 'TestUnclassified' <<< "$xout"; then
+    echo "SELF-TEST FAILED: an unclassified test (zero or multiple dialect markers) was reported" >&2
+    ok=1
+  fi
+
   if [ "$ok" -eq 0 ]; then
     echo "self-test passed"
   fi
@@ -422,6 +753,31 @@ while IFS= read -r line; do
   fi
 done <<<"$new"
 
+# cleat#2759: baseline registration alone does not mean the runtime budget
+# knows about this skip -- see crosscheck_baseline_vs_ledger's own comment.
+#
+# THE FULL SCAN, not $added: an existing skip site is already accounted for
+# in whichever job's __UNATTRIBUTED__ allowance was measured while it already
+# existed (scripts/skip-ledger.tsv's own comment: "inherited from the
+# single-number budget on 2026-09-04"), so it adds nothing to a job's runtime
+# skip count today -- but "already existed" means "was in skip-baseline.txt
+# before that measurement", which scripts/skip-crosscheck-exempt.txt records
+# and $added does not: $added is empty the moment --update has run, which
+# routinely happens in the SAME commit as the test (cleat#2756's 632107e1),
+# so an $added-only version of this check went silent on exactly that PR --
+# see crosscheck_baseline_vs_ledger's own header for the measurement. Running
+# the full scan with no exemption at all was the very first version of this
+# guard, and it reported roughly fifty pre-existing engine tests as
+# violations on an otherwise-clean develop; the exempt file is what excludes
+# those fifty while still seeing a same-commit cleat#2756-shaped addition.
+crosscheck_out=""
+crosscheck_status=0
+if [ -n "$current" ]; then
+  if ! crosscheck_out="$(crosscheck_baseline_vs_ledger "$current")"; then
+    crosscheck_status=1
+  fi
+fi
+
 status=0
 
 if [ -n "$added" ]; then
@@ -452,6 +808,11 @@ if [ -n "$stale" ]; then
   echo >&2
   echo "cleat#1746: a baseline regenerated from a base that predates a change" >&2
   echo "to this scanner merges CLEANLY over the newer one and reverts it." >&2
+  status=1
+fi
+
+if [ "$crosscheck_status" -ne 0 ]; then
+  printf '%s\n' "$crosscheck_out" >&2
   status=1
 fi
 
