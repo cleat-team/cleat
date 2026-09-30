@@ -129,7 +129,7 @@ func assertAllFieldsMatchExceptDB(t *testing.T, open, isolated *PostgresStore) {
 		ifv := reflect.NewAt(typ.Field(i).Type, unsafe.Pointer(iv.Field(i).UnsafeAddr())).Elem()
 		checked++
 		var mismatch bool
-		if ofv.Kind() == reflect.Ptr {
+		if ofv.Kind() == reflect.Pointer {
 			// IDENTITY, NOT reflect.DeepEqual (cleat-review's optional nit on
 			// #2741). DeepEqual on two non-nil pointers compares what they
 			// point TO, so a future bug constructing a second, equal-valued
@@ -149,7 +149,7 @@ func assertAllFieldsMatchExceptDB(t *testing.T, open, isolated *PostgresStore) {
 			// pointer value instead, which is what was actually compared;
 			// everything else keeps %#v, which is short for every other
 			// field on this struct.
-			if ofv.Kind() == reflect.Ptr {
+			if ofv.Kind() == reflect.Pointer {
 				t.Errorf("%s: OpenIsolatedStore got %p, OpenStore got %p, want the same pointer",
 					name, ifv.Interface(), ofv.Interface())
 			} else {
