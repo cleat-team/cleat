@@ -48,7 +48,12 @@ import (
 )
 
 // adminLoginStores returns two tenant-scoped stores over one cleat_admin
-// pool: the shape a multi-tenant SQL Server worker actually runs.
+// pool: AT THE TIME this was written (3.86-era), the shape a multi-tenant
+// SQL Server worker's dispatch loop ran under. #1926 retired that --
+// unconditional per-tenant rotation needs no cleat_admin grant at all -- so
+// today the pool this builds is the one cleatctl and cross-tenant test
+// teardown (engine/testutil/mssql_admin.go) still hold, not the dispatch
+// loop's own.
 //
 // Named for the connection rather than for schedules, because the mechanism is
 // table-independent -- 3.86's audit reaches every SQL Server statement that
@@ -56,9 +61,12 @@ import (
 // mssql_admin_login_tags_tenant_test.go is the second caller.
 //
 // Note what this does NOT do. It does not grant anything, weaken a policy or
-// reach past the store API. The connection is the one the product requires for
-// cross-tenant dispatch and the calls are the ones the HTTP handler makes
-// (cmd/cleat-worker/server.go:993-1005, through scopedStore).
+// reach past the store API. The connection is one that genuinely exists in a
+// deployment today (cleatctl, cross-tenant test teardown), and the calls
+// below are ordinary store methods (LoadWASM, ListVersions, ListWorkflowDefs)
+// that cmd/cleat-worker's own HTTP handlers reach through scopedStore --
+// grep -n "scopedStore(w, r)" cmd/cleat-worker/*.go for the current call
+// sites rather than trusting a line number here.
 func adminLoginStores(t *testing.T) (a, b *MSSQLStore) {
 	t.Helper()
 	backend := &MSSQLBackend{}

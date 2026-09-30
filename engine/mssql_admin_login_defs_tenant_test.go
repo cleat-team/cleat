@@ -7,10 +7,14 @@ package engine
 // migration 035 two tenants could not both hold a definition called
 // "order-processor", so `WHERE name = @p1 AND version = @p2` identified exactly
 // one row even on a connection with no tenant filtering. After 035 it does not.
-// On a dbo.cleat_admin login -- which a multi-tenant SQL Server deployment must
-// use, because GetDueSchedulesAcrossTenants and the cross-tenant claim require
-// it -- dbo.fn_tenant_filter is off, so that predicate now matches BOTH
-// tenants' rows and QueryRow takes whichever the engine hands back first.
+// On a dbo.cleat_admin login -- AT THE TIME this was written, the login a
+// multi-tenant SQL Server deployment's dispatch loop had to use, because
+// GetDueSchedulesAcrossTenants and the cross-tenant claim required it. #1926
+// retired both; the pool this test still opens over cleat_admin membership is
+// the one cleatctl and cross-tenant test teardown hold today, not the
+// dispatch loop's own (see adminLoginStores' doc comment) -- dbo.fn_tenant_filter
+// is off, so that predicate now matches BOTH tenants' rows and QueryRow takes
+// whichever the engine hands back first.
 //
 // Measured before the fix, with tenant A holding order-processor v1 as 0xAA and
 // tenant B holding its own v1 as 0xBB:
