@@ -12,11 +12,14 @@ import (
 )
 
 // PostgreSQL-only: admin.claim_workflows (migrations/postgres/023_cross_tenant_claim.sql)
-// does not exist on MySQL or SQL Server, and neither dialect implements
-// CrossTenantClaimer. These tests are written directly against *PostgresStore
-// rather than looped over registeredBackends, so a run without
-// CLEAT_TEST_MYSQL/CLEAT_TEST_MSSQL set doesn't pay a skip for dialects that
-// were never going to run this feature in the first place.
+// does not exist on MySQL or SQL Server. #1926 retired the CrossTenantClaimer
+// interface that once made this dialect-specific -- unconditional per-tenant
+// rotation needs no such interface at all -- but the function these fixtures
+// exercise is still Postgres-only, because the schema it reads is. These
+// tests are written directly against *PostgresStore rather than looped over
+// registeredBackends, so a run without CLEAT_TEST_MYSQL/CLEAT_TEST_MSSQL set
+// doesn't pay a skip for a dialect that was never going to run this SQL in
+// the first place.
 
 // xtcTenantA and xtcTenantB are two distinct tenants used throughout this
 // file. workflow_instances.tenant_id carries no foreign key into
@@ -60,9 +63,16 @@ const (
 // tenant_isolation_instances RLS policy to keep tenants apart. Calling it
 // through adminDB would "prove" tenant isolation without RLS ever being
 // evaluated -- a superuser bypasses it unconditionally -- so the contrast
-// this file draws between ClaimWorkflows and ClaimWorkflowsAcrossTenants
-// would be meaningless. See testutil.OpenPostgresRLSTestDB and the same
-// pattern in engine/integration_test.go's TestRLSTenantIsolation.
+// this file draws between an RLS-enforced connection and an RLS-bypassing one
+// would be meaningless. (This used to also contrast ClaimWorkflows against
+// ClaimWorkflowsAcrossTenants, a second Go path #1926 retired.) See
+// testutil.OpenPostgresRLSTestDB and the same pattern in
+// engine/integration_test.go's TestRLSTenantIsolation.
+//
+// This helper itself has no current caller in the tree
+// (`grep -rn crossTenantClaimDB --include="*.go" .` finds only this
+// definition) -- worth checking before assuming the contrast above is being
+// exercised anywhere today.
 //
 // admin.claim_workflows needs its own grant beyond what SetupPostgresRLSRole
 // gives the role: EXECUTE on the function itself, and USAGE on the admin
@@ -156,11 +166,14 @@ type seedWorkflowOpts struct {
 // It writes through raw SQL rather than through a store's StartNewRun
 // deliberately: that path only ever writes the calling store's own
 // tenant_id, and has no way to set error_code/error_op/trace_id/generation/
-// created_at on an otherwise-ready row -- all of which
-// TestClaimWorkflowsAcrossTenants_ColumnsMatchTheGoScan needs full,
-// independent control over so a column-list/scan mismatch shows up as a
-// wrong value rather than being masked by whatever StartNewRun happens to
-// write.
+// created_at on an otherwise-ready row -- all of which a column-list/scan
+// parity test for the retired cross-tenant claim path (#1926) needed full,
+// independent control over so a mismatch would show up as a wrong value
+// rather than being masked by whatever StartNewRun happens to
+// write. That test is gone; today's only caller
+// (a_tenant_list_needs_no_rls_exemption_test.go) sets just tenantID, so
+// errorCode/errorOp/traceID/generation currently go unexercised by anything
+// in the tree.
 func seedWorkflow(t *testing.T, adminDB *sql.DB, o seedWorkflowOpts) string {
 	t.Helper()
 	if o.tenantID == "" {

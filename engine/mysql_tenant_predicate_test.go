@@ -118,8 +118,6 @@ var mysqlTenantPredicateAllowlist = map[string]stmtExemption{
 const (
 	mysqlScopedByCandidateQuery = "scoped by construction: the ids come from a candidate query " +
 		"in the same function carrying AND tenant_id = ?"
-	mysqlDeliberatelyCrossTenant = "deliberately cross-tenant, and gated in Go -- returns " +
-		"ErrCrossTenantClaimUnsupported unless the store is the admin one (checked, not assumed)"
 	mysqlMustNotScope = "MUST NOT be scoped: it is how a request learns which tenant it is"
 )
 

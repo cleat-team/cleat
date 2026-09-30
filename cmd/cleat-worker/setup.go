@@ -6750,13 +6750,14 @@ func (w *Worker) dueSchedules() ([]engine.Schedule, error) {
 // -- see storeForTenant -- so the widened view lasts exactly as long as the
 // claim.
 //
-// A store that does not implement CrossTenantClaimer falls back rather than
-// failing. The flag says what the operator wants; the store says what the
-// dialect and the deployment's grants can actually do, and those can disagree
-// on a mixed fleet.
+// A worker that cannot rotate -- no store factory, or a store that cannot
+// enumerate tenants -- falls back rather than failing (errRotatingClaimUnavailable,
+// cmd/cleat-worker/rotating_claim.go). The flag says what the operator wants;
+// the store says what the dialect and the deployment's grants can actually
+// do, and those can disagree on a mixed fleet.
 func (w *Worker) claimGeneral(limit int) ([]*engine.WorkflowInstance, error) {
-	// Every claim path returns through here -- cross-tenant, the fallback after
-	// ErrCrossTenantClaimUnsupported, and the scoped claim -- so one deferred
+	// Every claim path returns through here -- rotating, the fallback after
+	// errRotatingClaimUnavailable, and the scoped claim -- so one deferred
 	// record covers all three. It covers the ERROR returns too, deliberately: a
 	// claim that is slow because the database is struggling is exactly the
 	// latency an operator wants to see, and excluding it would make the metric
