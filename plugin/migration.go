@@ -1019,14 +1019,18 @@ func grantSweepTables(ctx context.Context, exec func(ctx context.Context, query 
 //
 // PostgreSQL only. This USED to say "matching applyTenantScoping", and since
 // cleat#1552 that is no longer true: SQL Server gets a policy and no registry
-// row. MySQL gets neither, and needs neither.
+// row. MySQL gets neither, and needs neither -- MySQL is database-per-tenant
+// (MySQLStoreFactory.DropTenantDatabase drops the whole database), so no
+// per-table registry has anything to do there.
 //
 // THE REASON GIVEN HERE WAS WRONG, and it is corrected rather than quietly
 // replaced because it was written confidently. This comment said
 // admin.plugin_tables "does not exist" on SQL Server. It has existed since
-// migrations/mssql/001_schema.sql:117; what is true is narrower -- it carries
-// the pre-066 two-column shape, with no schema_name and no tenant_scoped, and
-// nothing on that dialect has ever written a row to it.
+// migrations/mssql/001_schema.sql (line drifts; grep for
+// "CREATE TABLE admin.plugin_tables" to re-find it); what is true is
+// narrower -- it carries the pre-066 two-column shape, with no schema_name
+// and no tenant_scoped, and nothing on that dialect has ever written a row
+// to it.
 //
 // THE GAP THIS COMMENT DESCRIBED IS CLOSED, and closed without a registry.
 // migrations/mssql/074 defines admin.drop_tenant there, and it finds
@@ -1037,6 +1041,21 @@ func grantSweepTables(ctx context.Context, exec func(ctx context.Context, query 
 // second thing to keep in step with a question the catalogue already answers,
 // and PostgreSQL needs one only because --schema can put its plugin tables in
 // a schema the procedure would otherwise have to guess. cleat#1635.
+//
+// AUDITED 2026-09-30 for cleat#2238, which asked whether an empty registry on
+// SQL Server makes any READER wrong (as opposed to this function's own
+// writer, already covered above). Every reader of admin.plugin_tables was
+// enumerated tree-wide (`grep -rn plugin_tables --include='*.go' --include='*.sql' .`):
+// admin.drop_tenant, admin.grant_plugin_to_tenant and
+// admin.revoke_plugin_from_tenant are PostgreSQL-only functions/procedures
+// with no MSSQL or MySQL equivalent, and no Go code calls the grant/revoke
+// pair outside engine/*_test.go today. So as of this audit, nothing on
+// SQL Server or MySQL reads the empty registry -- the emptiness is
+// consequence-free, not a live bug. Re-run that grep before trusting this:
+// the event that would turn this from documented-and-fine into a real defect
+// is a *future* non-Postgres reader being added without also teaching it
+// dialect != DialectPostgres means "ask the catalogue instead," the way
+// admin.drop_tenant already does.
 //
 // The schema is recorded alongside the name because --schema puts plugin
 // tables somewhere other than public while admin.plugin_tables stays in the

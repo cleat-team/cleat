@@ -582,7 +582,12 @@ type Migration struct {
 	//   - writes are refused on SQL Server by BLOCK predicates rather than by
 	//     the filter, which does not affect writes at all;
 	//   - dropping a tenant collects a table's rows on PostgreSQL only, via
-	//     admin.plugin_tables, which SQL Server does not have.
+	//     admin.plugin_tables -- SQL Server DOES have that table (it is
+	//     declared in every dialect's schema migration), it is simply never
+	//     populated or read there. See registerTenantScopedTables's own
+	//     comment (plugin/migration.go) for why: this exact "does not have
+	//     it" phrasing was already wrong once and corrected there (cleat#1635);
+	//     it survived here uncorrected until cleat#2238.
 	//
 	// THE REASON GIVEN HERE FOR SQL SERVER WAS WRONG until cleat#1552: "SQL
 	// Server binds a tenant to a whole connection pool
