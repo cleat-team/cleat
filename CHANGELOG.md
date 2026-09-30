@@ -469,7 +469,7 @@ and everything that changed in them is recorded here.
   `cleatctl set-deployment-secret`. A leftover `dsn` in `--plugin-config` otherwise logs a WARN at
   boot naming the replacement command; a deployment carrying a leftover `dsn` with no
   `scheduledbackup.dsn` set will now refuse to start on upgrade, where it previously started
-  fine and failed backups silently.
+  fine and used the DSN directly.
 
 - **`blobstore`'s S3 access key pair moves to deployment secrets, and its `minio-go` client
   now re-resolves credentials on a 60s TTL instead of holding a static pair for the client's
