@@ -43,11 +43,13 @@ $ cleat build -o ./out ./examples/order/
   Embedded metadata: place_order v1 (ABI v1)
 ```
 
-The output filename is derived from the entry point's own SOURCE FILE, not
-the entry point function's name -- `place_order.wasm` here assumes the
-`PlaceOrder` entry point lives in a file called `place_order.go`. A function
-named `PlaceOrder` living in, say, `order.go` produces `order.wasm` instead
-(cleat#2407). `--name` on `deploy` is independent of either.
+The output filename is derived from `cleat.yaml`'s own `name:` field when the
+workflow has one -- `place_order.wasm` here assumes a `cleat.yaml` with
+`name: place_order` next to the source (cleat#2692). With no `cleat.yaml`, or
+one with no usable `name:`, it falls back to the entry point's own SOURCE
+FILE instead: a `PlaceOrder` entry point living in, say, `order.go` then
+produces `order.wasm` (cleat#2407). `--name` on `deploy` is independent of
+either -- it need not match the artifact's filename at all.
 
 ## Step 2: Deploy the WASM binary
 

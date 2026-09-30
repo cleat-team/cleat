@@ -1,4 +1,4 @@
-name: my-fullstack-app
+name: {{printf "%q" .ProjectName}}
 language: go
 entry_points:
   - submit_order

@@ -282,10 +282,10 @@ BUILD_RUN="${BUILD_CMD//cleat /$CLEAT_BIN }"
 BUILD_RUN="${BUILD_RUN//-o \/tmp\/out/-o $OUT_DIR}"
 run_documented build "$BUILD_RUN"
 
-WASM="$OUT_DIR/agent.wasm"
+WASM="$OUT_DIR/ai-agent-platform.wasm"
 if [[ ! -f "$WASM" ]]; then
   echo "FAIL: the documented build did not produce $WASM." >&2
-  echo "The artifact is named for the entry point's SOURCE FILE (agent.go), not the directory." >&2
+  echo "The artifact is named for cleat.yaml's own 'name:' (cleat#2692), not the directory." >&2
   ls -la "$OUT_DIR" >&2
   exit 1
 fi

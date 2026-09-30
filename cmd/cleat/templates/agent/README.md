@@ -41,7 +41,7 @@ cleat build -o ./out .
 
 # Deploy to PostgreSQL
 cleat --db "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable" \
-  deploy --name agent ./out/workflow.wasm
+  deploy --name {{.ProjectName}} ./out/{{.ProjectName}}.wasm
 
 # Start the worker
 docker-compose up -d worker
@@ -50,7 +50,7 @@ docker-compose up -d worker
 ### 4. Start an agent
 
 ```bash
-curl -X POST http://localhost:8080/api/workflows/agent/start \
+curl -X POST http://localhost:8080/api/workflows/{{.ProjectName}}/start \
   -H "Content-Type: application/json" \
   -d '{
     "task": "What is the square root of 144 times 7?",

@@ -223,10 +223,10 @@ upload_and_start() {
     tail -25 /tmp/ih-ts-build-"$name".log >&2
     return 1
   fi
-  # Named for the entry point's SOURCE FILE, not the entry point itself --
-  # every tenant-steps package here is a single main.go, so this is always
-  # main.wasm whatever the entry point's own name.
-  local wasm="$build_dir/main.wasm"
+  # Named for cleat.yaml's own `name:` (cleat#2692), which for every
+  # tenant-steps package here is the same string as $dir -- the directory
+  # name and the workflow's declared identity were chosen to match.
+  local wasm="$build_dir/$dir.wasm"
   if [[ ! -f "$wasm" ]]; then
     echo "FAIL: building $name did not produce $wasm" >&2
     ls -la "$build_dir" >&2

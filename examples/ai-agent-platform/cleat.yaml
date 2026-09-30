@@ -3,10 +3,10 @@
 #
 # entry_points is snake_case while the Go function is RunAgent, because the
 # entry point is part of the ABI and C/WASM callers do not have Go's naming.
-# The built artifact is named for its SOURCE FILE, not the entry point --
-# agent.go, so agent.wasm. Getting entry_points out of step with the Go
-# function deploys cleanly and fails at START, after the run id has been
-# handed out.
+# The built artifact is named for THIS FIELD, `name:` above -- ai-agent-
+# platform.wasm (cleat#2692) -- not the entry point and not its source file
+# either. Getting entry_points out of step with the Go function deploys
+# cleanly and fails at START, after the run id has been handed out.
 name: ai-agent-platform
 language: go
 entry_points:

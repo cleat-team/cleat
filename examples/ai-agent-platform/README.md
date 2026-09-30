@@ -191,9 +191,10 @@ Until it lands: copy a template or this file, and expect to delete it.
 cleat build -o /tmp/out ./examples/ai-agent-platform/
 ```
 
-The artifact is named for the source file: `agent.wasm` (`agent.go`). `cleat.yaml`
-lists entry points in snake_case while the Go function is `RunAgent` — that
-pairing, not the filename, is part of the ABI.
+The artifact is named for `cleat.yaml`'s own `name:` field: `ai-agent-platform.wasm`
+(cleat#2692). `cleat.yaml` also lists entry points in snake_case while the Go
+function is `RunAgent` — that pairing, a separate thing from the filename, is
+part of the ABI.
 
 ## Run it
 
@@ -201,7 +202,7 @@ pairing, not the filename, is part of the ABI.
 docker compose up -d
 docker compose logs cleat-worker | grep -i 'Key:'
 cleat deploy --db "postgres://cleat:cleat@localhost:5432/cleat?sslmode=disable" \
-  --name ai-agent-platform /tmp/out/agent.wasm
+  --name ai-agent-platform /tmp/out/ai-agent-platform.wasm
 ```
 
 The stack includes `model-stub`, which stands in for your provider. It answers

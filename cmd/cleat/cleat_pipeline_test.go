@@ -268,6 +268,143 @@ func TestWasmOutputName(t *testing.T) {
 	}
 }
 
+// TestWasmOutputName_PrefersTheManifest is cleat#2692 (owner decision,
+// 2026-09-29): a cleat.yaml `name:` in the entry point's own source
+// directory outranks both older rules -- the entry point itself (#2048) and
+// the entry point's source file (#2407). The known-positive/known-negative
+// pair below is the test coordinator's review asked this PR to re-derive
+// rather than only re-point at a new field, because the OLD known-positive
+// (a synthetic AnalysisResult with no TargetPkg at all) panicked the moment
+// wasmOutputName started dereferencing TargetPkg.Dir -- caught here, not
+// guessed: see the nil-TargetPkg case below, which is the regression test
+// for that panic.
+func TestWasmOutputName_PrefersTheManifest(t *testing.T) {
+	t.Run("manifest present and valid: wins over the entry point's own file", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "cleat.yaml"),
+			[]byte("name: my-real-workflow\nlanguage: go\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		result := &analyzer.AnalysisResult{
+			TargetPkg:   &analyzer.Package{Dir: dir},
+			EntryPoints: []string{"pkg.PlaceOrder"},
+		}
+		if got := wasmOutputName(result); got != "my-real-workflow.wasm" {
+			t.Errorf("wasmOutputName() = %q, want %q (the manifest, not place_order.wasm)",
+				got, "my-real-workflow.wasm")
+		}
+	})
+
+	t.Run("no cleat.yaml: falls back to the #2407 rule, not #2048's", func(t *testing.T) {
+		dir := t.TempDir() // empty -- no cleat.yaml written
+		result := &analyzer.AnalysisResult{
+			TargetPkg:   &analyzer.Package{Dir: dir},
+			EntryPoints: []string{"pkg.PlaceOrder"},
+		}
+		// No real Funcs/lookupFile resolution here either (this result has no
+		// Funcs map), so this also exercises the SECOND fallback -- the bare
+		// entry-point name -- proving the chain falls all the way through
+		// rather than stopping silently at an empty manifest name.
+		if got := wasmOutputName(result); got != "place_order.wasm" {
+			t.Errorf("wasmOutputName() = %q, want %q", got, "place_order.wasm")
+		}
+	})
+
+	t.Run("cleat.yaml with an unsafe name: refused, falls back", func(t *testing.T) {
+		dir := t.TempDir()
+		// A name that could act as a path component must never reach
+		// filepath.Join(outDir, name+".wasm") in wasmOutputName's caller --
+		// this is the known-positive for workflowManifestNamePattern's own
+		// refusal, exercised through wasmOutputName rather than only
+		// against workflowManifestName directly, so a future caller that
+		// bypasses the pattern check cannot silently reintroduce the path.
+		if err := os.WriteFile(filepath.Join(dir, "cleat.yaml"),
+			[]byte("name: ../../etc/passwd\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		result := &analyzer.AnalysisResult{
+			TargetPkg:   &analyzer.Package{Dir: dir},
+			EntryPoints: []string{"pkg.PlaceOrder"},
+		}
+		if got := wasmOutputName(result); got != "place_order.wasm" {
+			t.Errorf("wasmOutputName() = %q, want %q (an unsafe manifest name must not be used)",
+				got, "place_order.wasm")
+		}
+	})
+
+	t.Run("nil TargetPkg: the synthesized-result case, must not panic", func(t *testing.T) {
+		// This is the regression test for the panic this test file's own
+		// falsification found: a caller handing wasmOutputName a synthesized
+		// AnalysisResult (TestWasmOutputName's whole table does exactly
+		// this) has no TargetPkg at all, and TargetPkg.Dir on a nil pointer
+		// is a crash, not an empty string.
+		result := &analyzer.AnalysisResult{
+			EntryPoints: []string{"pkg.PlaceOrder"},
+		}
+		if got := wasmOutputName(result); got != "place_order.wasm" {
+			t.Errorf("wasmOutputName() = %q, want %q", got, "place_order.wasm")
+		}
+	})
+}
+
+// TestWorkflowManifestName is workflowManifestName's own unit test, isolated
+// from wasmOutputName's fallback chain so each case pins one reason a
+// manifest name is or is not used.
+func TestWorkflowManifestName(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string // "" means no cleat.yaml is written at all
+		want    string
+	}{
+		{"valid hyphenated name", "name: order-lifecycle\n", "order-lifecycle"},
+		{"valid underscored name", "name: my_workflow\n", "my_workflow"},
+		{"quoted name", `name: "quoted-name"` + "\n", "quoted-name"},
+		{"no cleat.yaml at all", "", ""},
+		{"empty name field", "name: \"\"\n", ""},
+		{"no name field at all", "language: go\n", ""},
+		{"malformed YAML", "name: [unterminated\n", ""},
+		{"name with a path separator", "name: ../escape\n", ""},
+		{"name with an embedded slash", "name: a/b\n", ""},
+		{"name that is just dots", "name: ..\n", ""},
+		{"name with whitespace inside", "name: has space\n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tt.content != "" {
+				if err := os.WriteFile(filepath.Join(dir, "cleat.yaml"), []byte(tt.content), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := workflowManifestName(dir); got != tt.want {
+				t.Errorf("workflowManifestName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	// The known-positive for the whole chain: a name valid enough to pass
+	// MUST actually be usable as a real path component, not merely accepted
+	// by the regex in isolation -- this writes the file the pattern would
+	// approve and joins it into a real filesystem path, the same way
+	// wasmOutputName's caller does.
+	t.Run("known-positive: an accepted name is a safe, real filename", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "cleat.yaml"),
+			[]byte("name: a-real-name_123\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		name := workflowManifestName(dir)
+		if name != "a-real-name_123" {
+			t.Fatalf("workflowManifestName() = %q, want %q", name, "a-real-name_123")
+		}
+		outDir := t.TempDir()
+		target := filepath.Join(outDir, name+".wasm")
+		if err := os.WriteFile(target, []byte("fake wasm"), 0644); err != nil {
+			t.Fatalf("the accepted name %q is not usable as a real path component: %v", name, err)
+		}
+	})
+}
+
 // ---------------------------------------------------------------------------
 // formatDurableLeaves
 // ---------------------------------------------------------------------------
