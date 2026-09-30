@@ -127,7 +127,7 @@ Rules:
 ### HasRoutes — HTTP endpoints
 
 ```go
-func (p *Plugin) RegisterRoutes(mux *http.ServeMux) error {
+func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
     mux.HandleFunc("GET /my-plugin/things", p.handleList)
     mux.HandleFunc("PUT /my-plugin/things/{id}", p.handlePut)
     return nil
