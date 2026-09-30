@@ -159,6 +159,7 @@ if [ "${1:-}" = "--self-test" ]; then
     # confirms it still exercises #2079 before trusting what it reports:
     # the file must exist AND still trip the OLD grep this guard replaced.
     known_positive=".github/workflows/release-image-dryrun-arm64.yml"
+    known_positive_name=$(basename "$known_positive")
     if [ ! -e "$known_positive" ]; then
         echo "FAIL: self-test fixture $known_positive does not exist." >&2
         echo "      Renamed or removed -- this self-test proves nothing until" >&2
@@ -170,13 +171,13 @@ if [ "${1:-}" = "--self-test" ]; then
         echo "      exercises the defect this self-test exists to catch --" >&2
         echo "      find another file with a nested push: input, or add one." >&2
         self_test_fail=1
-    elif is_push_triggered "release-image-dryrun-arm64.yml"; then
-        echo "FAIL: release-image-dryrun-arm64.yml is reported push-triggered." >&2
+    elif is_push_triggered "$known_positive_name"; then
+        echo "FAIL: $known_positive_name is reported push-triggered." >&2
         echo "      It has 'push: false' on a build step and no 'on: push' -- the" >&2
         echo "      cleat#2079 defect this self-test exists to catch." >&2
         self_test_fail=1
     else
-        echo "ok  release-image-dryrun-arm64.yml is correctly NOT push-triggered"
+        echo "ok  $known_positive_name is correctly NOT push-triggered"
     fi
     # Negative control: genuinely push-triggered, and also has a `push:`
     # build-step input elsewhere in the file. A fix that stopped detecting
