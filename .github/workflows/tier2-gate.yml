@@ -128,8 +128,24 @@ permissions:
   contents: read
 
 jobs:
-  tier2:
-    name: Tier 2 Gate
+  # SPLIT INTO A WORKER JOB (this one) AND A SEPARATE AGGREGATOR (`tier2`,
+  # below) named `Tier 2 Gate` -- cleat#2847. Until this split, this single
+  # job WAS the required context `Tier 2 Gate`, so its "Upload the tier-2
+  # log" step could not be given `continue-on-error` the way tier1-gate.yml's
+  # equivalent step was in #2846: scripts/check-workflow-guards.py's
+  # `guard_no_continue_on_error` correctly refuses a non-fatal step inside a
+  # job whose own name IS a required context, and a mutation test confirmed
+  # it does (see #2847). Moving the actual gate into a job that is NOT itself
+  # the required context, with a thin aggregator carrying that name instead,
+  # gives the log upload the same non-fatal treatment tier1 has without
+  # asking the guard to make an exception for it.
+  #
+  # Unlike tier1-engine/tier1-rest, this job is not conditionally skipped for
+  # merge_group -- tier 2 is not report-only in the queue the way tier 1 is
+  # (cleat#2080), so the aggregator below only has one outcome to check:
+  # success.
+  tier2-run:
+    name: Tier 2 Gate -- run
     runs-on: ubuntu-latest
     # The gate ran 1567 tests in six patterns plus one module when this was written,
     # with -p 1, in well under two minutes of test time locally. 30 is generous; a gate
@@ -235,8 +251,17 @@ jobs:
       - name: Tier 2 gate
         run: scripts/tier2-gate.sh
 
+      # continue-on-error, for the same reason as tier1-gate.yml's identical
+      # steps (cleat#2834, #2846): this is debugging evidence, not the gate --
+      # the "Tier 2 gate" step's own exit status is what this job's result
+      # already is, and that result (not this upload) is what the `tier2`
+      # aggregator job below checks. Safe here specifically because this job
+      # is no longer itself the required context (see the comment above
+      # `tier2-run:`); the guard in scripts/check-workflow-guards.py would
+      # refuse this exact line if it appeared in a job named `Tier 2 Gate`.
       - name: Upload the tier-2 log
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: tier2-gate-${{ github.sha }}
@@ -244,3 +269,26 @@ jobs:
             tier2-gate.log
             tier2-gate.json
           retention-days: 30
+
+  # `always()` and an explicit result check, not a bare `needs:` -- CLAUDE.md
+  # records, under "a condition that never decides anything cannot be
+  # observed to be wrong", how costly it was to find out only after relying
+  # on it that a SKIPPED needs-job does not read as failure to branch
+  # protection. tier1-gate.yml's own aggregator (job `tier1`) states the same
+  # check for its three shards; this is the one-shard version of it.
+  tier2:
+    name: Tier 2 Gate
+    needs: [tier2-run]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate the gate result
+        env:
+          RUN: ${{ needs.tier2-run.result }}
+        run: |
+          echo "tier2-run: $RUN"
+          if [ "$RUN" != "success" ]; then
+            echo "::error::Tier 2 Gate: tier2-run did not succeed ($RUN)"
+            exit 1
+          fi
