@@ -1861,14 +1861,18 @@ type Worker struct {
 	// reason lastDBTrouble is seeded to now rather than to the zero value.
 	lastDBContactOK atomic.Int64
 
-	// consecutiveReapSkips counts reaper ticks in a row that skipped because
-	// reapingIsSafe() was false, reset to 0 by any tick that actually calls
-	// ReapStaleInstances (whether or not it reclaims anything). Purely for
-	// observability: reapOnce warns once this crosses
-	// reapSkipWarningThreshold, so a link that is chronically slow or
-	// unreliable -- which keeps the grace period from ever clearing, see
-	// reapingIsSafe's doc -- is visible as "the reaper is not running," not
-	// silent. cleat#2005 follow-up review, GAP3.
+	// consecutiveReapSkips counts reaper ticks in a row that failed to
+	// reclaim for a database reason -- either reapingIsSafe() was false, or
+	// the stall probe or the reclaim call itself errored out -- reset to 0
+	// only by a tick that completes with no error. See recordReapSkip,
+	// which is the sole place this is mutated. Purely for observability:
+	// reapOnce warns once this crosses reapSkipWarnThreshold, so a link
+	// that is chronically slow or unreliable -- which keeps the grace
+	// period from ever clearing, see reapingIsSafe's doc -- is visible as
+	// "the reaper is not running," not silent. cleat#2005 follow-up review,
+	// GAP3; widened to cover the error path in cleat#2193, which found the
+	// two call sites disagreeing about what counted (see recordReapSkip's
+	// doc for the mechanism).
 	consecutiveReapSkips atomic.Int64
 
 	// stallEpisodes tracks cleat#2006's suspected-database-stall suppression
@@ -4336,12 +4340,69 @@ func reclaimWindow(reclaimTimeout, heartbeat time.Duration) time.Duration {
 	return max(minimumReclaimAfter(heartbeat), 10*time.Second)
 }
 
-// reapSkipWarnThreshold is how many reaper ticks in a row reapOnce will skip
-// via its grace-period gate before escalating to a distinct, harder-to-miss
-// warning (see reapOnce). Three, not one: a single skip right after a real
-// stall is the gate doing exactly its job and is already logged at the
-// normal level: this is for the case where it never seems to clear.
+// reapSkipWarnThreshold is how many reaper ticks in a row reapOnce will fail
+// to reclaim -- via its grace-period gate, OR via the probe/reclaim call
+// itself erroring out -- before escalating to a distinct, harder-to-miss
+// warning (see reapOnce and recordReapSkip). Three, not one: a single skip
+// right after a real stall is the gate doing exactly its job and is already
+// logged at the normal level: this is for the case where it never seems to
+// clear.
 const reapSkipWarnThreshold = 3
+
+// recordReapSkip increments consecutiveReapSkips and, on the tick that
+// reaches reapSkipWarnThreshold, fires the "chronically skipped" alarm once
+// per streak. It is the ONLY place that increments the counter, and it is
+// called from both places reapOnce can end a tick without reclaiming
+// anything for database reasons: the grace-period gate (reapingIsSafe ==
+// false) and a probe or reclaim call that itself errors out.
+//
+// cleat#2193: those two call sites used to disagree about what counted.
+// Only the gate branch incremented; the error branch (lastErr != nil) did
+// not, and reapOnce reset the counter to 0 the moment reapingIsSafe()
+// returned true -- BEFORE the error branch could even run, since the gate
+// is checked first. A persistently failing stall probe calls recordDBTrouble
+// on every failure, which re-arms the gate for roughly one more tick (the
+// grace period is one to two tick intervals wide in practice) -- so the
+// sequence became error(reset to 0, untouched) -> gate-skip(1) ->
+// error(reset to 0 again, untouched) -> gate-skip(1) -> ... forever, never
+// reaching 3. The counter now advances on every tick that fails to
+// reclaim for a database reason, and resets to 0 only on a tick that
+// actually completes (reapOnce's own success path, after the reclaim loop
+// finishes with no error) -- so a probe that never recovers now trips the
+// alarm, whichever of the two branches keeps failing.
+func (w *Worker) recordReapSkip() int64 {
+	skips := w.consecutiveReapSkips.Add(1)
+	if skips == reapSkipWarnThreshold {
+		// A single skip, or a handful right after a real outage, is the
+		// gate (or a transient DB error) working as designed. A STREAK
+		// this long is a different thing worth an operator's attention:
+		// either the grace period keeps re-arming because the link is
+		// chronically slow or unreliable (cleat-review's GAP3), the
+		// stall-detection probe or the reclaim call itself is chronically
+		// failing (cleat#2193), or something is wrong with this worker's
+		// clock or database contact that never clears on its own -- either
+		// way, this worker's reaper is not reclaiming anyone's dead work
+		// right now, silently, and could stay that way indefinitely
+		// without this. Fires once per streak, at the threshold, rather
+		// than on every tick past it, so a genuinely long outage does not
+		// spam the log once a minute for its duration.
+		//
+		// WARN, not ERROR, and no escalation beyond the metric below: a
+		// genuine probe/reclaim failure already logs at ERROR (or WARN for
+		// a recognized connection error) on every tick it happens, via
+		// reapOnce's own lastErr branch -- this is a rollup on top of an
+		// already-loud per-tick signal, not the primary alert. It exists so
+		// a human or a dashboard notices the PATTERN (persistent, not
+		// occasional) rather than needing to count log lines; paging
+		// policy on cleat_background_loops_total{status="chronically_skipped"}
+		// is an operational decision for whoever owns alerting on this
+		// metric, not something to hardcode into the worker itself.
+		w.logger.WarnContext(w.ctx, "Reaper: skipped its last several ticks in a row -- this worker has not reclaimed a stale run in a while; check its database connectivity",
+			"worker_id", w.id, "consecutive_skips", skips)
+		w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "chronically_skipped")
+	}
+	return skips
+}
 
 func (w *Worker) reaperLoop() {
 	defer w.wg.Done()
@@ -4378,31 +4439,13 @@ func (w *Worker) reapOnce() {
 	// from "my own observation of every worker just went dark, briefly,
 	// including of myself".
 	if !w.reapingIsSafe() {
-		skips := w.consecutiveReapSkips.Add(1)
+		skips := w.recordReapSkip()
 		w.logger.WarnContext(w.ctx, "Reaper: skipping this tick -- recent database trouble on this worker, waiting out the recovery grace period before trusting a stale heartbeat",
 			"worker_id", w.id, "reclaim_after", w.reclaimAfter(), "consecutive_skips", skips)
-		if skips == reapSkipWarnThreshold {
-			// A single skip, or a handful right after a real outage, is the
-			// gate working as designed. A STREAK this long is a different
-			// thing worth an operator's attention: either the grace period
-			// keeps re-arming because the link is chronically slow or
-			// unreliable (cleat-review's GAP3), or something is wrong with
-			// this worker's clock or database contact that never clears on
-			// its own -- either way, this worker's reaper is not reclaiming
-			// anyone's dead work right now, silently, and could stay that
-			// way indefinitely without this. Fires once per streak, at the
-			// threshold, rather than on every tick past it, so a genuinely
-			// long outage does not spam the log once a minute for its
-			// duration.
-			w.logger.WarnContext(w.ctx, "Reaper: skipped its last several ticks in a row -- this worker has not reclaimed a stale run in a while; check its database connectivity",
-				"worker_id", w.id, "consecutive_skips", skips)
-			w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "chronically_skipped")
-		}
 		w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "skipped")
 		w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
 		return
 	}
-	w.consecutiveReapSkips.Store(0)
 
 	// Bounded for the same reason heartbeatAndFenceInFlight's call is: a
 	// call already in flight from before a stall began would otherwise
@@ -4479,15 +4522,17 @@ func (w *Worker) reapOnce() {
 	}
 	if lastErr != nil {
 		w.recordDBTrouble()
+		skips := w.recordReapSkip()
 		if isConnectionError(lastErr) {
-			w.logger.WarnContext(w.ctx, "Reaper: DB appears down", "worker_id", w.id)
+			w.logger.WarnContext(w.ctx, "Reaper: DB appears down", "worker_id", w.id, "consecutive_skips", skips)
 		} else {
-			w.logger.ErrorContext(w.ctx, "Reaper error", "worker_id", w.id, "error", lastErr)
+			w.logger.ErrorContext(w.ctx, "Reaper error", "worker_id", w.id, "error", lastErr, "consecutive_skips", skips)
 		}
 		w.Metrics.RecordBackgroundLoop(w.ctx, "reaper", "error")
 		w.Metrics.SetBackgroundLoopDuration(w.ctx, "reaper", time.Since(reaperStart).Seconds())
 		return
 	}
+	w.consecutiveReapSkips.Store(0)
 	w.recordDBContactOK()
 	if reaped > 0 {
 		w.logger.InfoContext(w.ctx, "Reaper: reclaimed stale instances", "worker_id", w.id, "count", reaped)
