@@ -349,15 +349,17 @@ cd packages/cleat-as && npm test
 > database services for local multi-backend development.
 
 > **Note:** `testutil.SuiteTestDB` gives a package's tests one database per
-> suite name (e.g. `cleat_test_cleat_worker`), created once and never reset --
-> unlike the tables `CleanupPostgresTestData` wipes per test, rows a test
-> leaves behind (a run that never got claimed, a workflow stuck waiting on a
-> key) persist across every later local run of `go test`, however many days
-> apart. A test that assumes it is looking at an otherwise-empty queue can see
-> this as a false failure (cleat#2214). If a database-backed test starts
-> failing locally in a way CI does not reproduce, checking for leftover state
-> in that suite's database is worth doing before assuming a real regression;
-> `DROP DATABASE cleat_test_<suite>` clears it.
+> suite name (e.g. `cleat_test_cleat_worker`), created once and never reset.
+> `CleanupPostgresTestData` deletes rows per test but is opt-in and has no
+> callers in `cmd/cleat-worker`, so a test in that package that does not call
+> it sees rows a previous run left behind (a run that never got claimed, a
+> workflow stuck waiting on a key) persist across every later local run of
+> `go test`, however many days apart. A test that assumes it is looking at an
+> otherwise-empty queue, or claims from the database with no scoping of its
+> own, can see this as a false failure (cleat#2214). If a database-backed test
+> starts failing locally in a way CI does not reproduce, checking for leftover
+> state in that suite's database is worth doing before assuming a real
+> regression; `DROP DATABASE cleat_test_<suite>` clears it.
 
 ## Proving a test can fail
 

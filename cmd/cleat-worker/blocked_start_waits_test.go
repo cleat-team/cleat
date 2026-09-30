@@ -50,6 +50,20 @@ func TestABlockedStartIsAcceptedAndWaits(t *testing.T) {
 		t.Fatalf("DeployWorkflowDef: %v", err)
 	}
 
+	// This run's own task queue, so ClaimWorkflows below sees only what this
+	// run itself starts -- never a runnable row an earlier local execution
+	// left behind in SuiteTestDB's shared, never-reset database (cleat#2214).
+	// DeployWorkflowDef does not take a task queue; a workflow instance's
+	// task_queue is copied from its def at insert time (see
+	// store_lifecycle.go's `COALESCE((SELECT task_queue FROM workflow_defs
+	// WHERE name = ... ), 'default')`), so retargeting the def here, before
+	// either start below, retargets both instances this test creates.
+	taskQueue := fmt.Sprintf("blocked-start-%d", time.Now().UnixNano())
+	if _, err := db.ExecContext(ctx,
+		`UPDATE workflow_defs SET task_queue = $1 WHERE name = $2`, taskQueue, defName); err != nil {
+		t.Fatalf("scope %s to its own task queue: %v", defName, err)
+	}
+
 	api := &apiServer{
 		store:       store,
 		worker:      newTestWorker(&mockStore{}),
@@ -104,35 +118,35 @@ func TestABlockedStartIsAcceptedAndWaits(t *testing.T) {
 	// meaning "accepted and run concurrently", which would be worse than the
 	// 409 it replaced.
 	//
-	// ClaimWorkflows(ctx, workerID, limit) claims across the WHOLE shared
-	// database -- there is no per-test scoping parameter -- and this suite's
-	// database is SuiteTestDB's, which persists across every local run with
-	// nothing resetting it (cleat#2214). So a single fixed-size claim can
-	// exhaust its limit on runnable rows OTHER local runs left behind and see
-	// neither of this test's own two: that reads as "0 claimed" and looks
-	// exactly like the concurrency-key fix being broken, when nothing is
-	// wrong. Drain in batches until both IDs are accounted for or the queue
-	// itself is empty, rather than trusting one call's limit to be enough. In
-	// CI, which always starts from a fresh database, this drains in one pass.
+	// ClaimWorkflows(ctx, workerID, limit) claims across the store's
+	// configured task queues, with no other per-call scoping -- and this
+	// suite's database is SuiteTestDB's, which persists across every local
+	// run with nothing resetting it (cleat#2214). Claiming through the
+	// unscoped `store` above, on its default "default" queue, can exhaust its
+	// limit on runnable rows OTHER local runs left behind and see neither of
+	// this test's own two: that reads as "0 claimed" and looks exactly like
+	// the concurrency-key fix being broken, when nothing is wrong. A store
+	// scoped to this run's own task queue (set above, before either start)
+	// sees only what this run created, so one call is enough -- nothing else
+	// can be on that queue.
+	scopedStore := engine.NewPostgresStore(db, taskQueue)
+	claimed, err := scopedStore.ClaimWorkflows(ctx, "worker-blocked-start", 10)
+	if err != nil {
+		t.Fatalf("ClaimWorkflows: %v", err)
+	}
 	seen := map[string]bool{}
-	const batch = 50
-	for i := 0; i < 200; i++ { // generous: observed local leftover volume is in the tens, not thousands
-		claimed, err := store.ClaimWorkflows(ctx, "worker-blocked-start", batch)
-		if err != nil {
-			t.Fatalf("ClaimWorkflows: %v", err)
+	for _, wf := range claimed {
+		if wf.ID != body1["id"] && wf.ID != body2["id"] {
+			t.Errorf("claimed workflow %q on this run's own task queue %q; it started neither "+
+				"of this test's two runs, which the scoping above should make impossible",
+				wf.ID, taskQueue)
+			continue
 		}
-		for _, wf := range claimed {
-			if wf.ID == body1["id"] || wf.ID == body2["id"] {
-				seen[wf.ID] = true
-			}
-		}
-		if len(claimed) < batch {
-			break // the queue is drained: nothing more to find
-		}
+		seen[wf.ID] = true
 	}
 	if got := len(seen); got != 1 {
-		t.Errorf("%d of the two runs sharing key %q were claimed (draining the local queue to find "+
-			"them), want exactly 1.\n\n"+
+		t.Errorf("%d of the two runs sharing key %q were claimed from this run's own task queue, "+
+			"want exactly 1.\n\n"+
 			"2 means the key is not excluding anything and accepting the second start made "+
 			"things worse than refusing it. 0 means neither can run at all.", got, key)
 	}
