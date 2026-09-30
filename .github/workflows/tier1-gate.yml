@@ -10,7 +10,11 @@
 # what we intend to hold ourselves to, not a claim that anything is checking."
 #
 # Deliberately strict, and the strictness is the point:
-#   - no continue-on-error. A tier-1 failure blocks.
+#   - no continue-on-error on the gate step itself. A tier-1 failure blocks.
+#     (cleat#2834: the "Upload the tier-1 log" steps do carry continue-on-error
+#     -- they run after the gate step and hold no test result of their own, so
+#     losing one to a transient artifact-upload failure must not fail this
+#     job. See the comment on those steps for the full reasoning.)
 #   - no known-failure list. Tier 1 has none by definition.
 #   - the gate refuses to run at all when a precondition is missing, rather
 #     than running and reporting a green that measured nothing. An unset DSN
@@ -542,8 +546,23 @@ jobs:
       # broke is not a debugging strategy. Guarded on merge_group too: the real
       # step above did not run, so tier-gate.log does not exist, and `always()`
       # alone would upload a missing-file failure on every queue run.
+      #
+      # continue-on-error, deliberately -- and this is a NARROWER exemption
+      # than the "no continue-on-error" line at the top of this file, not a
+      # contradiction of it. That principle is about the GATE (the step above,
+      # whose exit status this job's exit status already is): a test failure
+      # must never be swallowed. This step carries no test result at all --
+      # it is debugging evidence for a failure the gate step already reported
+      # on its own exit status. cleat#2834: a `Failed to CreateArtifact:
+      # Unable to make request: ETIMEDOUT` here failed this whole job (and so
+      # the required "Tier 1 Gate" push-run check on develop, the one net
+      # cleat#2150 says the merge queue does not provide) while the actual
+      # gate step above had already exited 0. Losing this one shard's log to
+      # a network hiccup is a real but strictly smaller cost than reporting a
+      # false failure on the authoritative develop gate.
       - name: Upload the tier-1 log
         if: always() && github.event_name != 'merge_group'
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: tier-gate-log-engine-${{ matrix.shard }}-${{ github.sha }}
@@ -720,8 +739,13 @@ jobs:
         if: github.event_name != 'merge_group'
         run: scripts/tier-gate.sh --shard 3/3
 
+      # continue-on-error, for the same reason as tier1-engine's identical
+      # step above (cleat#2834): this is debugging evidence, not the gate --
+      # the "Tier 1 gate -- rest shard 3/3" step's own exit status is what
+      # this job's result already is.
       - name: Upload the tier-1 log
         if: always() && github.event_name != 'merge_group'
+        continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
           name: tier-gate-log-rest-${{ github.sha }}
