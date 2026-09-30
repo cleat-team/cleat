@@ -19,9 +19,18 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/cleat-team/cleat/plugin"
 )
+
+// healthWindow is how long the plugin reports unhealthy after a scheduled
+// backup attempt found scheduledbackup.dsn unresolvable. Same value and same
+// reasoning as auditlog's (plugins/auditlog/queue.go): a lost or refused
+// backup attempt is a fact an operator has to see, not a reason for the host
+// to stop serving, so this decays rather than latching.
+const healthWindow = 5 * time.Minute
 
 func init() {
 	plugin.Register(plugin.PluginInfo{
@@ -54,6 +63,13 @@ type Plugin struct {
 	// than killed, see runDueBackups. It exists so tests can wait for a
 	// dispatched backup to actually finish without a fixed sleep.
 	bgBackups sync.WaitGroup
+
+	// lastDSNUnavailable is the UnixNano time of the most recent scheduled
+	// backup attempt that found scheduledbackup.dsn unresolvable (background.go's
+	// runDueBackups, not warnIfBackupDSNUnresolvable's CLI check -- Health is
+	// driven by an actual attempt failing, not by a query run for its own sake).
+	// 0 means no attempt has ever failed this way. See Health, below.
+	lastDSNUnavailable atomic.Int64
 }
 
 // Config controls backup storage and pg_dump output location.
@@ -220,3 +236,30 @@ func (p *Plugin) RequiredDeploymentSecrets(config []byte) ([]string, error) {
 	}
 	return nil, nil
 }
+
+// Health reports scheduledbackup as unhealthy for healthWindow after a
+// scheduled backup attempt most recently found scheduledbackup.dsn
+// unresolvable, and healthy otherwise (plugin.HasHealth). Driven by the
+// attempt path (background.go's runDueBackups, on the same failure that
+// writes backupErrDSNUnavailable to backup_history) rather than a query run
+// here for its own sake -- the same "attempt path, not a query" shape
+// cleat#2246 asks for, mirroring auditlog's lost-event health signal
+// (plugins/auditlog/queue.go).
+//
+// This is a signal for an operator watching worker health, not a gate:
+// RequiredDeploymentSecrets already refuses to boot when a leftover
+// --plugin-config dsn makes the secret mandatory, and backupDSN's own error
+// already fails the individual attempt -- neither of those needed Health to
+// exist. Health exists for the deployment that has never had that
+// precondition and is quietly failing every attempt anyway.
+func (p *Plugin) Health() error {
+	last := p.lastDSNUnavailable.Load()
+	if last == 0 || time.Since(time.Unix(0, last)) > healthWindow {
+		return nil
+	}
+	return fmt.Errorf("scheduledbackup: a scheduled backup attempt found scheduledbackup.dsn "+
+		"unresolvable %s ago -- see backup_history for the affected config(s)",
+		time.Since(time.Unix(0, last)).Round(time.Second))
+}
+
+var _ plugin.HasHealth = (*Plugin)(nil)
