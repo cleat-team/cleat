@@ -119,6 +119,18 @@ func rlsPostureOf(ctx context.Context, db *sql.DB, dialectName string) (rlsPostu
 // which is the property the alternative lacks: the same login reading
 // sys.sql_modules sees 0 rows, so a check built on metadata visibility cannot
 // tell "no policy" from "may not look".
+//
+// MEMBERSHIP IS NOT THE SAME QUESTION AS ADMISSION, and this function used to
+// conflate them (cleat#2760). migrations/mssql/optional/cross_tenant_claim.sql
+// is opt-in (cleat#1541): the shipped, default predicate does not reference
+// cleat_admin at all, so a member reads IS_ROLEMEMBER = 1 and the installed
+// policy still admits nobody through that route. admin.rls_predicate_form
+// records which predicate is actually installed -- 'plain' (the default) or
+// 'admin' (after the opt-in) -- and is the only way to tell the two apart from
+// an unprivileged connection. Reporting "exempt" from membership alone is
+// exactly the false-exempt reading testutil.MSSQLAdminDB's own doc comment
+// warns about for test teardown, arriving here as an operator-facing claim
+// instead.
 func mssqlPostureOf(ctx context.Context, db *sql.DB) (rlsPosture, []engine.RLSBypassReason, error) {
 	// NULL rather than 0/1 means the role does not exist or is not visible,
 	// which is not the same as "subject" and must not be reported as it.
@@ -135,10 +147,46 @@ func mssqlPostureOf(ctx context.Context, db *sql.DB) (rlsPosture, []engine.RLSBy
 			Detail: "dbo.cleat_admin does not exist, so migrations/mssql/001_schema.sql has not been applied and no tenant filter is installed",
 		}}, nil
 	}
-	if member.Int64 == 1 {
-		return rlsExempt, nil, nil
+	if member.Int64 == 0 {
+		// Not a member. Whether the predicate form is 'admin' or 'plain' makes
+		// no difference to a non-member -- neither form admits anyone else --
+		// so there is nothing the second query could change about this answer.
+		return rlsSubject, nil, nil
 	}
-	return rlsSubject, nil, nil
+
+	// A member. Whether that grants anything depends entirely on which
+	// predicate is installed, so it must be read rather than assumed.
+	var form string
+	if err := db.QueryRowContext(ctx,
+		`SELECT form FROM admin.rls_predicate_form`).Scan(&form); err != nil {
+		// A member of cleat_admin implies migrations/mssql/001_schema.sql has
+		// run, and that file creates admin.rls_predicate_form unconditionally
+		// alongside the role -- so this table being unreadable is an
+		// inconsistent database state, not an expected absence like the
+		// no-admin-role case above. Reporting exempt anyway, on the strength
+		// of membership alone, is the exact defect this function is being
+		// fixed for; failing loud instead is safe in both directions.
+		return rlsUnknown, nil, fmt.Errorf(
+			"check RLS: this login is a member of cleat_admin, but reading "+
+				"admin.rls_predicate_form failed, so whether that membership is admitted by "+
+				"the installed predicate cannot be determined: %w", err)
+	}
+	if form == "admin" {
+		return rlsExempt, []engine.RLSBypassReason{{
+			Kind:   "predicate-form",
+			Detail: "predicate form: admin -- migrations/mssql/optional/cross_tenant_claim.sql has been applied, so cleat_admin membership is admitted",
+		}}, nil
+	}
+	// A member, but the installed predicate does not consult cleat_admin at
+	// all (the default, 'plain', or any other value that is not 'admin').
+	// Membership grants nothing here: the login sees exactly one tenant, the
+	// same as any other non-exempt connection.
+	return rlsSubject, []engine.RLSBypassReason{{
+		Kind: "member-not-admitted",
+		Detail: fmt.Sprintf("this login is a member of dbo.cleat_admin, but the installed "+
+			"predicate form is %q, not \"admin\" -- membership grants nothing until "+
+			"migrations/mssql/optional/cross_tenant_claim.sql is applied", form),
+	}}, nil
 }
 
 // warnIfTenantScoped prints one line to stderr when --db points at a connection

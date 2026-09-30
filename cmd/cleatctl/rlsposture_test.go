@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -10,6 +11,117 @@ import (
 
 	"github.com/cleat-team/cleat/engine/testutil"
 )
+
+// openMSSQLMockDB returns a *sql.DB backed by the same positional mock driver
+// checkdb_test.go uses, so mssqlPostureOf's own query sequence can be driven
+// directly without a real SQL Server connection.
+func openMSSQLMockDB(script []checkDBResult) *sql.DB {
+	current := 0
+	connector := &checkDBMockConnector{script: script, current: &current}
+	return sql.OpenDB(connector)
+}
+
+// TestMSSQLPostureOfConsultsThePredicateForm falsifies cleat#2760:
+// mssqlPostureOf used to classify a login as exempt from IS_ROLEMEMBER alone,
+// so a member under the DEFAULT ('plain') predicate -- which does not
+// reference cleat_admin at all (cleat#1541) -- was misreported as exempt when
+// membership grants it nothing. Every case here also checks that the
+// SECOND query (the predicate-form read) is issued only when membership
+// actually makes it relevant -- a non-member script has only one scripted
+// result, so an extra query would fail the mock driver with "unexpected
+// query", not merely go unchecked.
+func TestMSSQLPostureOfConsultsThePredicateForm(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("member under the admin predicate is exempt", func(t *testing.T) {
+		db := openMSSQLMockDB([]checkDBResult{
+			makeQueryResult([]string{""}, []driver.Value{int64(1)}), // IS_ROLEMEMBER
+			makeQueryResult([]string{"form"}, []driver.Value{"admin"}),
+		})
+		defer db.Close()
+
+		posture, reasons, err := mssqlPostureOf(ctx, db)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if posture != rlsExempt {
+			t.Errorf("posture = %v, want rlsExempt", posture)
+		}
+		if len(reasons) == 0 || !strings.Contains(reasons[0].Detail, "admin") {
+			t.Errorf("reasons do not name the predicate form: %v", reasons)
+		}
+	})
+
+	t.Run("member under the plain predicate is NOT exempt -- cleat#2760's exact bug", func(t *testing.T) {
+		db := openMSSQLMockDB([]checkDBResult{
+			makeQueryResult([]string{""}, []driver.Value{int64(1)}), // IS_ROLEMEMBER
+			makeQueryResult([]string{"form"}, []driver.Value{"plain"}),
+		})
+		defer db.Close()
+
+		posture, reasons, err := mssqlPostureOf(ctx, db)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if posture != rlsSubject {
+			t.Errorf("posture = %v, want rlsSubject -- a member under the plain predicate "+
+				"is admitted nothing, and reporting rlsExempt here is cleat#2760 itself", posture)
+		}
+		if len(reasons) == 0 || !strings.Contains(reasons[0].Detail, "plain") {
+			t.Errorf("reasons do not explain why membership did not help: %v", reasons)
+		}
+	})
+
+	t.Run("non-member is subject without a second query", func(t *testing.T) {
+		db := openMSSQLMockDB([]checkDBResult{
+			makeQueryResult([]string{""}, []driver.Value{int64(0)}), // IS_ROLEMEMBER only
+		})
+		defer db.Close()
+
+		posture, _, err := mssqlPostureOf(ctx, db)
+		if err != nil {
+			t.Fatalf("unexpected error (a second, unscripted query would produce one): %v", err)
+		}
+		if posture != rlsSubject {
+			t.Errorf("posture = %v, want rlsSubject", posture)
+		}
+	})
+
+	t.Run("no admin role means unprotected, unchanged", func(t *testing.T) {
+		db := openMSSQLMockDB([]checkDBResult{
+			makeQueryResult([]string{""}, []driver.Value{nil}), // IS_ROLEMEMBER: NULL
+		})
+		defer db.Close()
+
+		posture, reasons, err := mssqlPostureOf(ctx, db)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if posture != rlsUnprotected {
+			t.Errorf("posture = %v, want rlsUnprotected", posture)
+		}
+		if len(reasons) == 0 || reasons[0].Kind != "no-admin-role" {
+			t.Errorf("reasons = %v, want a no-admin-role reason", reasons)
+		}
+	})
+
+	t.Run("a member whose predicate form cannot be read is UNKNOWN, not exempt", func(t *testing.T) {
+		db := openMSSQLMockDB([]checkDBResult{
+			makeQueryResult([]string{""}, []driver.Value{int64(1)}), // IS_ROLEMEMBER
+			makeQueryError(errors.New("invalid object name 'admin.rls_predicate_form'")),
+		})
+		defer db.Close()
+
+		posture, _, err := mssqlPostureOf(ctx, db)
+		if err == nil {
+			t.Fatal("expected an error when the predicate form cannot be read")
+		}
+		if posture != rlsUnknown {
+			t.Errorf("posture = %v, want rlsUnknown -- an unreadable predicate form must not "+
+				"default to exempt on the strength of membership alone", posture)
+		}
+	})
+}
 
 // TestRLSPostureOfClassifiesARealConnection is the part the stub cannot cover.
 //

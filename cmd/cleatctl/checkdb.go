@@ -140,12 +140,21 @@ func runCheckDB(ctx context.Context, db *sql.DB, d dialect, dsn string, args []s
 		// operator after a privilege that does not exist. cleat#1646.
 		if d.name == "mssql" {
 			fmt.Println("RLS: connection is exempt (member of dbo.cleat_admin) -- reads are cluster-wide")
+			// On SQL Server "exempt" depends on which predicate is installed,
+			// not membership alone (cleat#2760) -- state it, so the claim
+			// above cannot be read as stronger than it is.
+			for _, r := range reasons {
+				fmt.Printf("  - %s\n", r.Detail)
+			}
 		} else {
 			fmt.Println("RLS: connection is exempt (superuser or BYPASSRLS) -- reads are cluster-wide")
 		}
 	case posture == rlsSubject:
 		fmt.Fprintln(os.Stderr, "RLS: connection IS subject to row-level security -- reads below "+
 			"are scoped to one tenant, or fail")
+		for _, r := range reasons {
+			fmt.Fprintf(os.Stderr, "  - %s\n", r.Detail)
+		}
 		issues = append(issues, "--db is subject to row-level security: cleatctl needs a "+
 			"superuser or BYPASSRLS role, not the cleat_app role cleat-worker takes")
 	case posture == rlsUnprotected:
