@@ -80,6 +80,20 @@ func TestHealthDegradesWhenAScheduledBackupCannotResolveItsDSN(t *testing.T) {
 	if err := p.Health(); err == nil {
 		t.Fatalf("Health immediately after a later successful attempt: nil, want the decay window to not have elapsed yet")
 	}
+
+	// Assert the SUCCESS was actually recorded, not just that Health still
+	// errors -- "err != nil" alone is satisfied identically by the
+	// never-resolved latch branch, so it cannot tell "background.go recorded
+	// the success and we're still inside its decay window" from
+	// "background.go never called lastDSNResolved.Store at all". Confirmed:
+	// deleting that Store call from background.go leaves this whole test
+	// green without this check.
+	failedAt := p.lastDSNUnavailable.Load()
+	resolvedAt := p.lastDSNResolved.Load()
+	if resolvedAt <= failedAt {
+		t.Fatalf("lastDSNResolved (%d) is not after lastDSNUnavailable (%d) -- "+
+			"the successful attempt's resolution was not recorded", resolvedAt, failedAt)
+	}
 }
 
 // TestHealthStaysDegradedWithNoSuccessSinceTheFailure is cleat-review's R1 on
