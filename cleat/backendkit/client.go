@@ -157,8 +157,36 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 	return resp, nil
 }
 
+// UpstreamStatusError carries the HTTP status the Cleat worker actually
+// returned, recoverable with errors.As.
+//
+// cleat#2718: classifyError used to return a plain error built with
+// fmt.Errorf, which has no field a caller can read the status back out of.
+// Every example backend that maps a Client error to an HTTP response had no
+// way to ask "was this a 401?" and so mapped everything to 502 (bad gateway)
+// -- including a genuine 401, which sent an operator or a retry policy to the
+// wrong layer (the gateway looked broken; authentication had refused).
+//
+// classifyError attaches this to every non-2xx response, including the ones
+// that also carry a more specific sentinel like ErrIdempotencyKeyInputMismatch
+// -- Go's multi-%w wrapping (1.20+) lets errors.Is and errors.As both walk
+// past it, so a caller checking for a specific sentinel is unaffected and a
+// caller that only wants the status still gets it.
+type UpstreamStatusError struct {
+	// Status is the HTTP status code the worker returned.
+	Status int
+	// Body is the raw response body, truncated to 4096 bytes by doRequest.
+	Body []byte
+}
+
+func (e *UpstreamStatusError) Error() string {
+	return fmt.Sprintf("unexpected status %d: %s", e.Status, strings.TrimSpace(string(e.Body)))
+}
+
 // classifyError turns a refusal into a typed error where the server named one,
-// and keeps the old opaque form otherwise.
+// and keeps the old opaque form otherwise. Every path returns an error that
+// satisfies errors.As(err, &(*UpstreamStatusError)(nil)) -- see
+// UpstreamStatusError's own doc comment for why that matters.
 //
 // The server answers a refused idempotency key with a machine-readable `detail`
 // alongside the human `error`. Without this, both arrive as
@@ -168,7 +196,7 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 // Errors are WRAPPED, not replaced, so the message still carries the server's
 // own words and errors.Is still answers the question the caller asked.
 func classifyError(status int, body []byte) error {
-	generic := fmt.Errorf("unexpected status %d: %s", status, strings.TrimSpace(string(body)))
+	generic := &UpstreamStatusError{Status: status, Body: body}
 	if status != http.StatusConflict {
 		return generic
 	}
@@ -180,9 +208,9 @@ func classifyError(status int, body []byte) error {
 	}
 	switch detail.Detail {
 	case "idempotency_key_input_mismatch":
-		return fmt.Errorf("%w: %s", ErrIdempotencyKeyInputMismatch, strings.TrimSpace(string(body)))
+		return fmt.Errorf("%w: %w", ErrIdempotencyKeyInputMismatch, generic)
 	case "idempotency_key_definition_mismatch":
-		return fmt.Errorf("%w: %s", ErrIdempotencyKeyDefinitionMismatch, strings.TrimSpace(string(body)))
+		return fmt.Errorf("%w: %w", ErrIdempotencyKeyDefinitionMismatch, generic)
 	}
 	return generic
 }

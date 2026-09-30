@@ -190,7 +190,7 @@ func (s *server) startOrder(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		s.log.Error("start failed", "order", req.OrderID, "err", err)
-		backendkit.WriteError(w, http.StatusBadGateway, err.Error())
+		backendkit.WriteUpstreamError(w, err)
 		return
 	}
 
@@ -210,7 +210,7 @@ func (s *server) getOrder(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	detail, err := s.client.GetWorkflow(r.Context(), id)
 	if err != nil {
-		backendkit.WriteError(w, http.StatusBadGateway, err.Error())
+		backendkit.WriteUpstreamError(w, err)
 		return
 	}
 	state, err := s.client.GetWorkflowState(r.Context(), id)
@@ -234,7 +234,7 @@ func (s *server) listOrders(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	runs, err := s.client.ListWorkflows(r.Context(), status, 50)
 	if err != nil {
-		backendkit.WriteError(w, http.StatusBadGateway, err.Error())
+		backendkit.WriteUpstreamError(w, err)
 		return
 	}
 	backendkit.WriteJSON(w, http.StatusOK, map[string]any{"runs": runs})
@@ -258,7 +258,7 @@ func (s *server) approveOrder(w http.ResponseWriter, r *http.Request) {
 		payload = reason
 	}
 	if err := s.client.SignalWorkflow(r.Context(), id, name, payload); err != nil {
-		backendkit.WriteError(w, http.StatusBadGateway, err.Error())
+		backendkit.WriteUpstreamError(w, err)
 		return
 	}
 	backendkit.WriteJSON(w, http.StatusOK, map[string]any{"signal": name})
