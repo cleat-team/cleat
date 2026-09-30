@@ -320,22 +320,88 @@ func TestValidateTypeDefFieldReferencesUndefinedType(t *testing.T) {
 	}
 }
 
-// TestValidateTypeDefFieldSelfReference: a type may reference itself
-// (e.g. a linked-structure "next" field) -- validateTypeRef places no
-// restriction on this for the top-level case either, and cleat#2776 does
-// not ask for cycle detection, so this documents the allowance as
-// deliberate rather than leaving it to be discovered by accident.
-func TestValidateTypeDefFieldSelfReference(t *testing.T) {
-	td := TypeDef{
-		Type: "object",
-		Fields: map[string]FieldDef{
-			"value": {Type: "string"},
-			"next":  {Type: "Node", Optional: true},
+// TestValidateManifestRejectsSelfReferencingFieldType is cleat#2806's R1:
+// a self-referencing field (Node.next: Node) validates at the
+// validateTypeDef level -- "Node" is a real name in types -- but
+// internal/plugingen generates it as a Go struct field BY VALUE, and
+// go/types rejects that with "invalid recursive type: Node refers to
+// itself" (measured against the real generator while fixing this). This
+// used to be documented here as a deliberate allowance; it is a rejection
+// instead, at the ValidateManifest level, since validateTypeDef alone has
+// no way to see the cycle -- it only checks whether one name resolves.
+func TestValidateManifestRejectsSelfReferencingFieldType(t *testing.T) {
+	m := &Manifest{
+		Name: "linked", Version: "0.1.0", Description: "test", Author: "test",
+		Types: map[string]TypeDef{
+			"Node": {
+				Type: "object",
+				Fields: map[string]FieldDef{
+					"value": {Type: "string"},
+					"next":  {Type: "Node", Optional: true},
+				},
+			},
+		},
+		HostFunctions: map[string]HostFuncDef{
+			"push": {Description: "push", Input: TypeDef{Type: "Node"}, Output: TypeDef{Type: "Node"}},
 		},
 	}
-	types := map[string]TypeDef{"Node": td}
-	if err := validateTypeDef(td, types, "Node"); err != nil {
-		t.Errorf("expected no error for a self-referencing type, got: %v", err)
+	err := ValidateManifest(m)
+	if err == nil {
+		t.Fatal("expected an error for a self-referencing field type")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("expected the error to name a cycle, got: %v", err)
+	}
+}
+
+// TestValidateManifestRejectsIndirectTypeCycle is the A -> B -> A shape
+// cleat-review's #2806 review named but did not measure: no single type
+// references itself, but the chain does, and it has the identical
+// downstream consequence -- a Go struct that contains a struct that
+// contains itself, still "invalid recursive type", just one hop removed
+// from the field that names the cycle.
+func TestValidateManifestRejectsIndirectTypeCycle(t *testing.T) {
+	m := &Manifest{
+		Name: "mutual", Version: "0.1.0", Description: "test", Author: "test",
+		Types: map[string]TypeDef{
+			"A": {Type: "object", Fields: map[string]FieldDef{"b": {Type: "B"}}},
+			"B": {Type: "object", Fields: map[string]FieldDef{"a": {Type: "A"}}},
+		},
+		HostFunctions: map[string]HostFuncDef{
+			"f": {Description: "f", Input: TypeDef{Type: "A"}, Output: TypeDef{Type: "A"}},
+		},
+	}
+	err := ValidateManifest(m)
+	if err == nil {
+		t.Fatal("expected an error for an indirect A -> B -> A type cycle")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("expected the error to name a cycle, got: %v", err)
+	}
+}
+
+// TestValidateManifestAllowsAcyclicArrayAndMapReferences confirms the
+// cycle check does not over-reach: a type used as an array's item type or
+// a map's value type does not need to be complete "up front" the way a
+// direct field reference does -- Go generates a slice/map element, not an
+// embedded struct -- so an acyclic reference through those positions must
+// still validate.
+func TestValidateManifestAllowsAcyclicArrayAndMapReferences(t *testing.T) {
+	m := &Manifest{
+		Name: "collections", Version: "0.1.0", Description: "test", Author: "test",
+		Types: map[string]TypeDef{
+			"Item": {Type: "object", Fields: map[string]FieldDef{"name": {Type: "string"}}},
+			"Bag": {Type: "object", Fields: map[string]FieldDef{
+				"items": {Type: "array", Items: &FieldDef{Type: "Item"}},
+				"byKey": {Type: "map", KeyType: &FieldDef{Type: "string"}, ValueType: &FieldDef{Type: "Item"}},
+			}},
+		},
+		HostFunctions: map[string]HostFuncDef{
+			"f": {Description: "f", Input: TypeDef{Type: "Bag"}, Output: TypeDef{Type: "Bag"}},
+		},
+	}
+	if err := ValidateManifest(m); err != nil {
+		t.Errorf("expected no error for acyclic array/map references, got: %v", err)
 	}
 }
 

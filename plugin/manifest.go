@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"golang.org/x/mod/semver"
@@ -178,6 +179,18 @@ func ValidateManifest(m *Manifest) error {
 				errs = append(errs, err.Error())
 			}
 		}
+		// cleat#2806, R1: a field naming a defined type is only safe to
+		// generate as a Go struct member BY VALUE when the reference graph
+		// is acyclic. Measured live: Envelope{next: Envelope} validated
+		// under the field-type-reference fix above and then generated Go
+		// that fails with "invalid recursive type: Envelope refers to
+		// itself" -- the field-type relaxation is correct for the acyclic
+		// case (traced in the commit that added it) and wrong for this one,
+		// which validation alone cannot see without walking the graph. An
+		// indirect cycle (A -> B -> A) has the identical shape.
+		if err := validateNoTypeCycles(m.Types); err != nil {
+			errs = append(errs, err.Error())
+		}
 	}
 
 	if len(errs) > 0 {
@@ -240,6 +253,84 @@ func validateTypeDef(td TypeDef, types map[string]TypeDef, context string) error
 			continue
 		}
 		return fmt.Errorf("%s field %q: unsupported type %q (must be a simple type, object, enum, array, optional, map, or a defined type)", context, fieldName, fd.Type)
+	}
+	return nil
+}
+
+// fieldTypeRefs returns the names a type's fields directly reference into
+// types -- via a field's own type, an array's item type, or a map's value
+// type (a map's key type is always a simple/builtin type in FieldDef's
+// existing shape, never a reference) -- restricted to names that actually
+// resolve, since an unresolvable name is already reported by
+// validateTypeDef.
+func fieldTypeRefs(td TypeDef, types map[string]TypeDef) []string {
+	var refs []string
+	add := func(name string) {
+		if _, ok := types[name]; ok {
+			refs = append(refs, name)
+		}
+	}
+	for _, fd := range td.Fields {
+		add(fd.Type)
+		if fd.Items != nil {
+			add(fd.Items.Type)
+		}
+		if fd.ValueType != nil {
+			add(fd.ValueType.Type)
+		}
+	}
+	return refs
+}
+
+// validateNoTypeCycles rejects a reference cycle anywhere in the named-type
+// graph -- a direct self-reference (Envelope.next: Envelope) or an
+// indirect one (A -> B -> A) has the identical consequence downstream:
+// internal/plugingen generates a Go struct field of the named type BY
+// VALUE, and go/types rejects a struct that contains itself, directly or
+// through another struct, with "invalid recursive type" (cleat#2806, R1,
+// measured against the real generator). A cycle broken by "array"/"map"/
+// "optional" wrapping is not caught here on purpose: those generate a
+// slice, a map, or an omitted field respectively, none of which need the
+// complete type up front, so they are not the shape this function exists
+// to reject -- only a field naming another type DIRECTLY (or through
+// another such direct reference) is.
+func validateNoTypeCycles(types map[string]TypeDef) error {
+	names := make([]string, 0, len(types))
+	for name := range types {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	const (
+		unvisited = 0
+		visiting  = 1
+		done      = 2
+	)
+	state := make(map[string]int, len(types))
+	var path []string
+	var visit func(name string) error
+	visit = func(name string) error {
+		switch state[name] {
+		case done:
+			return nil
+		case visiting:
+			return fmt.Errorf("type reference cycle: %s -> %s", strings.Join(path, " -> "), name)
+		}
+		state[name] = visiting
+		path = append(path, name)
+		for _, ref := range fieldTypeRefs(types[name], types) {
+			if err := visit(ref); err != nil {
+				return err
+			}
+		}
+		path = path[:len(path)-1]
+		state[name] = done
+		return nil
+	}
+	for _, name := range names {
+		if err := visit(name); err != nil {
+			return err
+		}
 	}
 	return nil
 }
