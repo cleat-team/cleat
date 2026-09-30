@@ -11,9 +11,13 @@
 --
 -- WHEN YOU NEED THIS
 -- ------------------
--- Only if you run a worker with --claim-across-tenants. Without it the worker
--- claims work for its own tenant, which is the default and is what most
--- deployments want. cleat#1541.
+-- Only if you run a worker with --claim-across-tenants -- which DEFAULTS ON
+-- (cmd/cleat-worker/config.go), so most deployments already have it, not the
+-- other way around. cleat#1541 predates #1926, which retired the old
+-- BYPASSRLS-only claim mechanism this default used to gate; the per-tenant
+-- rotation that replaced it needs no grant to claim, so turning the flag on
+-- no longer implies applying this migration. See "WHAT IT COSTS" below for
+-- what still does.
 --
 -- WHAT IT COSTS, MEASURED
 -- -----------------------
