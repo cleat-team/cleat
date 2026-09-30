@@ -456,35 +456,74 @@ wait_for_status() {
   return 1
 }
 
-# worker_container_state reports docker compose's own view of cleat-worker's
-# state right now ("running", "exited", "restarting", ...), or "" if the
-# container does not exist at all. This is the ground truth `up -d`'s own
-# exit code does not provide (cleat#2777): `up -d` returned 0 while
-# cleat-worker sat Exited(137) from an earlier SIGKILL, never restarted --
-# compose can report success without the container ever coming up. `ps
-# --format json` emits one JSON object per line (verified against a real
-# container, both running and exited), not a JSON array.
+# worker_container_state prints docker compose's own view of cleat-worker's
+# state on stdout ("running", "exited", "restarting", ... or "absent" if no
+# container exists -- a real, determined state, not an error) and returns 0.
+# When it could NOT determine one -- `ps` itself failing (daemon
+# unreachable, a transient CLI error) or its output not parsing -- it
+# prints nothing on stdout, a diagnosis on stderr, and returns 1.
+#
+# This is the ground truth `up -d`'s own exit code does not provide
+# (cleat#2777): `up -d` returned 0 while cleat-worker sat Exited(137) from
+# an earlier SIGKILL, never restarted -- compose can report success
+# without the container ever coming up.
+#
+# The exit-status/stdout split above is cleat#2803's own review finding,
+# fixed here rather than left as a trap for the next reader: an earlier
+# version of this function used `2>/dev/null` and printed "" for every
+# failure, indistinguishable from a container that genuinely does not
+# exist. Since the in-loop caller below runs this roughly once a second for
+# up to 180s, a single transient `ps` hiccup got reported as "NOT RUNNING
+# ... never came up" -- #2777's own defect shape (a zero exit is not proof
+# of a positive) recurring one layer down (an empty read is not proof of a
+# negative). Callers must check the exit status, not just the string.
+#
+# `ps --format json` emits one JSON object per line on the Compose version
+# this was verified against; an older Compose emitting a single JSON array
+# is also accepted.
 worker_container_state() {
-  "${COMPOSE[@]}" ps -a --format json cleat-worker 2>/dev/null |
-    python3 -c 'import json,sys
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    try:
-        d = json.loads(line)
-    except Exception:
-        continue
-    if d.get("Service") == "cleat-worker":
-        print(d.get("State", ""))
-        break'
+  local out rc err
+  out="$("${COMPOSE[@]}" ps -a --format json cleat-worker 2>/tmp/ih-ps-state.err)"
+  rc=$?
+  err="$(tr '\n' ' ' </tmp/ih-ps-state.err 2>/dev/null)"
+  if (( rc != 0 )); then
+    echo "worker_container_state: docker compose ps exited $rc: $err" >&2
+    return 1
+  fi
+  local state
+  state="$(python3 -c '
+import json, sys
+data = sys.stdin.read()
+try:
+    rows = json.loads(data) if data.strip().startswith("[") \
+        else [json.loads(l) for l in data.splitlines() if l.strip()]
+except Exception:
+    sys.exit(1)
+for d in rows:
+    if isinstance(d, dict) and d.get("Service") == "cleat-worker":
+        print(d.get("State", "absent"))
+        sys.exit(0)
+print("absent")
+' <<<"$out")" || { echo "worker_container_state: could not parse docker compose ps output" >&2; return 1; }
+  echo "$state"
 }
 
+# wait_for_worker_state polls worker_container_state for up to $limit
+# seconds. It only succeeds on a DETERMINED match -- an unknown reading
+# (worker_container_state returning 1) is neither a match nor a mismatch,
+# so it is treated the same as "not yet the wanted state": keep polling,
+# never fail fast on it. A caller that needs to tell "genuinely not
+# running" apart from "could not tell" after this returns 1 must call
+# worker_container_state itself for the final determination (see the two
+# call sites below); this function's own job is only "did it reach $want".
 wait_for_worker_state() {
   local want="$1" limit="${2:-15}"
   local until=$((SECONDS + limit))
+  local state
   while (( SECONDS < until )); do
-    [[ "$(worker_container_state)" == "$want" ]] && return 0
+    if state="$(worker_container_state 2>/dev/null)" && [[ "$state" == "$want" ]]; then
+      return 0
+    fi
     sleep 1
   done
   return 1
@@ -663,9 +702,20 @@ else
   # transitions in well under that); a container that never reaches
   # "running" at all is not going to at 16s either.
   if ! wait_for_worker_state running 15; then
-    echo "FAIL: cleat-worker is NOT RUNNING after the restart." >&2
-    echo "This is not a slow start -- the container never came up. Current" >&2
-    echo "state: '$(worker_container_state)'." >&2
+    # A final determination, not a re-use of whatever wait_for_worker_state
+    # last saw: it can return 1 having only ever seen "unknown" (cleat#2803
+    # review), and that is a materially different report from "confirmed
+    # not running" -- the fix must not turn an undetermined read into a
+    # confident negative, which is the exact defect this fix exists for.
+    if final_state="$(worker_container_state 2>/tmp/ih-worker-state-diag.err)"; then
+      echo "FAIL: cleat-worker is NOT RUNNING after the restart." >&2
+      echo "This is not a slow start -- the container never came up. Current" >&2
+      echo "state: '$final_state'." >&2
+    else
+      echo "FAIL: could not determine cleat-worker's state after the restart:" >&2
+      echo "  $(cat /tmp/ih-worker-state-diag.err 2>/dev/null)" >&2
+      echo "This is NOT a confirmed 'not running' -- docker itself would not say." >&2
+    fi
     echo >&2
     echo "--- what the container actually is ---" >&2
     "${COMPOSE[@]}" ps -a >&2 2>&1 || true
@@ -697,8 +747,14 @@ else
   # the rest of the 180s budget to report the wrong cause.
   deadline=$((SECONDS + 180))
   until curl -fsS --max-time 5 "$API/healthz" >/dev/null 2>&1; do
-    state="$(worker_container_state)"
-    if [[ "$state" != "running" ]]; then
+    # An UNDETERMINED read (worker_container_state returning 1 -- `ps`
+    # itself failing, a transient docker CLI error) is not evidence of
+    # anything and must not fail this loop: cleat#2803's review measured
+    # exactly this happening about once a second across a 180s wait, and
+    # the earlier version blamed the worker for a docker hiccup. Only a
+    # DETERMINED non-running state below fails fast; an undetermined one
+    # falls through to the deadline check like any other retry.
+    if state="$(worker_container_state 2>/dev/null)" && [[ "$state" != "running" ]]; then
       echo "FAIL: cleat-worker stopped running while waiting for /healthz." >&2
       echo "This is NOT a 180s timeout -- the container exited during the wait." >&2
       echo "Current state: '$state'." >&2
@@ -710,10 +766,12 @@ else
       exit 1
     fi
     if (( SECONDS > deadline )); then
-      echo "FAIL: cleat-worker is running but did not answer /healthz within 180s." >&2
-      echo "(So this genuinely IS 'not ready yet' -- the container has been up" >&2
-      echo "the whole wait, confirmed above and just re-confirmed as '$state'." >&2
-      echo "'not running' would have failed fast, above, instead of reaching here.)" >&2
+      echo "FAIL: cleat-worker did not answer /healthz within 180s." >&2
+      echo "(Last determined state: '${state:-<undetermined>}'. 'not running' would" >&2
+      echo "have failed fast, above, instead of reaching here -- so either the" >&2
+      echo "container has genuinely been up the whole wait and is just slow, or" >&2
+      echo "docker itself was not answering right at this instant; either way this" >&2
+      echo "is 'not ready yet', not a confirmed 'not running'.)" >&2
       echo >&2
       echo "THE CRASH-RESUME ASSERTION WAS NOT EVALUATED, and that is not the same" >&2
       echo "as its having failed. It sits below this point, so this run says NOTHING" >&2
