@@ -2855,7 +2855,7 @@ jobs:
       # relationship between two fields, a template that helm itself refuses
       # to parse) is caught here and would not be caught there.
       - name: Setup Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
         with:
           version: latest
 
