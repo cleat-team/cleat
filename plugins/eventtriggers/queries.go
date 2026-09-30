@@ -84,15 +84,14 @@ VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 3), 1, $8)`,
 //
 // A THIRD writer of `processed` exists outside this package --
 // webhookingest's handleDeleteSource cancels a deleted source's pending
-// ingested_events rows by setting processed = true directly, to stop
-// await_webhook/awaitEvent's backstop scan from ever delivering one. It
-// does not set dispatch_processed, so as of this migration a cancelled
-// event CAN still be dispatched to a matching event_subscriptions row by
-// this query's own sweep -- a behaviour change from before this split,
-// when the shared `processed` column blocked both paths as a side effect.
-// Deliberately not addressed here: whether that dispatch should also be
-// blocked is a product decision about webhookingest's delete semantics,
-// not a consequence of this issue's fix. See cleat#2820.
+// ingested_events rows, to stop await_webhook/awaitEvent's backstop scan
+// from ever delivering one. Per cleat-review round 2 on cleat#2822, it also
+// sets dispatch_processed = true in the same statement, so a cancelled
+// event stays fully inert on both paths -- preserving what the shared
+// column did as a side effect before this split, rather than silently
+// answering cleat#2820's actual open product question ("should a deleted
+// source's events ever be dispatchable") by default. cleat#2820 stays open
+// for that decision; this is only about not changing behaviour by accident.
 var queryUnprocessedEvents = plugin.Query{
 	Default: `SELECT id, tenant_id, event_type, event_data, retry_count
 FROM ingested_events

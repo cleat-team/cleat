@@ -921,28 +921,89 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// dispatch_processed gets its OWN new index,
 			// idx_ingested_events_dispatch, same per-dialect partial/plain
 			// shape Version 1 established for the one this keeps.
+			//
+			// THE BACKFILL BELOW IS NOT OPTIONAL, and its absence was a real
+			// defect caught by cleat-review before this shipped (#2822 round
+			// 1), measured on PG16 with the real v1-v7 Postgres migrations
+			// applied to four seeded aged rows (completed, dead_letter,
+			// consumed, pending): develop's predicate selects 1 (pending);
+			// this migration's Up, run with no backfill, selected 4 --
+			// dispatch_processed defaults to false for every row that
+			// existed before the upgrade, and the dropped `status` predicate
+			// (see queryUnprocessedEvents's own comment on why it is
+			// redundant GOING FORWARD) was the only thing that had ever
+			// excluded them. Nothing deletes from ingested_events, so an
+			// upgrade with no backfill would re-dispatch a deployment's
+			// entire event history, restarting every workflow it ever
+			// triggered. Fresh-database tests cannot see this: every row in
+			// a fresh database gets dispatch_processed correctly from birth.
+			// The backfill preserves exactly what develop's own sweep would
+			// have selected -- a row is already dispatch-settled if the
+			// awaiter-claim path already consumed it (processed) or the
+			// dispatch path already reached a terminal, non-pending status.
+			// Rescuing rows the OLD flag starved (this issue's whole point,
+			// going forward) is deliberately not backdated here -- that is a
+			// data-migration decision for whoever wants historical recovery,
+			// not a side effect of adding the column.
 			Version: 8,
 			Up: `
 				ALTER TABLE ingested_events ADD COLUMN IF NOT EXISTS dispatch_processed BOOLEAN NOT NULL DEFAULT false;
+				UPDATE ingested_events SET dispatch_processed = true
+					WHERE processed OR (status IS NOT NULL AND status <> 'pending');
 				CREATE INDEX IF NOT EXISTS idx_ingested_events_dispatch ON ingested_events(dispatch_processed, received_at) WHERE NOT dispatch_processed;
 			`,
 			// Idempotency via information_schema, matching Version 6/7's own
 			// discipline: MySQL DDL is not transactional, so a migration that
-			// failed partway must be safe to re-run.
+			// failed partway must be safe to re-run. The backfill UPDATE
+			// needs no such guard -- it is naturally idempotent, re-setting
+			// an already-true row to true.
 			UpMySQL: `
 				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND column_name = 'dispatch_processed');
 				SET @ddl := IF(@col = 0, 'ALTER TABLE ingested_events ADD COLUMN dispatch_processed TINYINT(1) NOT NULL DEFAULT 0', 'DO 0');
 				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				UPDATE ingested_events SET dispatch_processed = 1
+					WHERE processed = 1 OR (status IS NOT NULL AND status <> 'pending');
 
 				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_dispatch');
 				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_ingested_events_dispatch ON ingested_events(dispatch_processed, received_at)', 'DO 0');
 				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
+				-- ingested_events is TenantScoped (Version 4), and SQL
+				-- Server's security policy applies to every principal
+				-- INCLUDING the login running this migration -- the same
+				-- exposure Version 6's own backfill documents at length
+				-- above. A plain UPDATE with no tenant_id predicate matches
+				-- NOTHING under a session with no 'tenant_id' and no
+				-- 'cross_tenant' key set: the filter predicate hides every
+				-- row first. Reproduced directly while fixing cleat-review's
+				-- round-1 GAP on cleat#2822 -- the backfill below silently
+				-- affected 0 rows without this bypass, which is worse than
+				-- an error: the migration reports success and the re-dispatch
+				-- hazard R1 exists to prevent survives on this dialect alone.
+				-- Same session-scoped key Version 6 uses, cleared the same way.
+				EXEC sp_set_session_context @key = N'cross_tenant', @value = N'event-triggers migration 8 backfill, cleat#2822';
+
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('ingested_events') AND name = 'dispatch_processed')
 				ALTER TABLE ingested_events ADD dispatch_processed BIT NOT NULL DEFAULT 0;
+
+				-- EXEC(...), not a plain statement: dispatch_processed may
+				-- have just been added by the conditional ALTER above, in
+				-- the SAME batch, on the runner (tests/plugin-harness) that
+				-- does not split on statement boundaries -- Version 6's own
+				-- comment on this exact hazard explains why a plain
+				-- reference compiles against the catalog as it stood before
+				-- the batch started and fails with "Invalid column name".
+				EXEC('UPDATE ingested_events SET dispatch_processed = 1 WHERE processed = 1 OR (status IS NOT NULL AND status <> ''pending'')');
+
 				IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_dispatch' AND object_id = OBJECT_ID('ingested_events'))
 				CREATE INDEX idx_ingested_events_dispatch ON ingested_events(dispatch_processed, received_at) WHERE dispatch_processed = 0;
+
+				-- Twin of the SET above: cleared unconditionally, matching
+				-- Version 6's own reasoning -- this session outlives this
+				-- migration and the bypass must not.
+				EXEC sp_set_session_context @key = N'cross_tenant', @value = NULL;
 			`,
 			// Reverses to the Version 7 shape -- idx_ingested_events_unprocessed
 			// was never touched by Up, so Down does not recreate it. This is for
