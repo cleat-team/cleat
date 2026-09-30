@@ -84,9 +84,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   FROM webhook_sources
   WHERE signal_workflow_id IS NOT NULL AND deleted_at IS NULL;
   ```
-  Skipping this step is not destructive and the upgrade still succeeds — a source with a bound
-  workflow simply stops receiving pushed signals afterward, with no error and no warning, because
-  the column carrying that binding is gone.
+  Skipping this step does not fail the upgrade, but it cannot be undone afterwards: bound sources
+  stop receiving signals with no error or warning, and because v10 drops the column, the SELECT
+  above no longer works — run it first.
 
 - **`await_webhook`'s `Keys` and a source's own `correlation_key_field` must now agree on whether
   a second correlation key exists at all, or the call errors instead of hanging forever.**
