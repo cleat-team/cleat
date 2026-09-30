@@ -572,7 +572,8 @@ func runBackupHistory(ctx context.Context, db *sql.DB, d dialect, args []string)
 		"ID", "CONFIG_ID", "FILENAME", "SIZE_BYTES", "STATUS", "STARTED_AT", "COMPLETED_AT", "ERROR")
 	n := 0
 	for rows.Next() {
-		var id, configID uuid.UUID
+		var id uuid.UUID
+		var configID uuid.NullUUID
 		var filename, status string
 		var sizeBytes sql.NullInt64
 		var startedAt time.Time
@@ -591,8 +592,23 @@ func runBackupHistory(ctx context.Context, db *sql.DB, d dialect, args []string)
 		if errMsg.Valid && errMsg.String != "" {
 			errStr = errMsg.String
 		}
+		// cleat#2292 item 6. backup_history.config_id has never been NOT
+		// NULL (plugins/scheduledbackup/migrations.go v1), and v5
+		// (cleat#2247) makes it a routine outcome rather than an edge case:
+		// deleting a backup_config row with `backup config-delete` sets
+		// ON DELETE SET NULL on every history row that pointed at it, by
+		// design, so the CLI's own audit trail keeps the row rather than
+		// losing it (see v5's doc comment for why -- v3 briefly had this as
+		// ON DELETE CASCADE instead, for a drop_tenant reason that stopped
+		// applying once v4 shipped). So this scans it as nullable like its
+		// sibling columns above, rather than the zero UUID a plain
+		// uuid.UUID scan would silently produce on a NULL.
+		configIDStr := "-"
+		if configID.Valid {
+			configIDStr = configID.UUID.String()
+		}
 		fmt.Printf("%-36s  %-36s  %-32s  %-10s  %-9s  %-25s  %-25s  %s\n",
-			id, configID, filename, size, status, startedAt.Format(time.RFC3339), formatNullTime(completedAt), errStr)
+			id, configIDStr, filename, size, status, startedAt.Format(time.RFC3339), formatNullTime(completedAt), errStr)
 		n++
 	}
 	if err := rows.Err(); err != nil {
