@@ -43,6 +43,17 @@
 # Related: the per-job runtime guard in scripts/check-skip-budget.sh checks how
 # many tests actually skipped when a job ran, which is the other half -- this
 # script cannot see that a test skipped because a service was unreachable.
+#
+# ALSO RUNS scripts/check-skip-ledger-engine-coverage.py (cleat#2158), a
+# third, separate check: a skip-ledger `cluster` line for an engine/ test
+# needs a matching `test-go/engine` line, because engine-race.yml is the
+# only job that checks that key and it runs 4-hourly, off the per-PR
+# trigger set (#2089) -- a missing line is otherwise invisible until that
+# scheduled run (cleat#2155). Delegated from here, rather than given its
+# own ci.yml Lint step, because this step is already wired in and the two
+# checks share the same "conditional-skip inventory" subject; see that
+# script's own module docstring for why it needs Python (regex-shaped
+# ledger fields) rather than another bash rewrite.
 
 set -uo pipefail
 
@@ -859,6 +870,10 @@ XEXEMPT
 case "${1:-}" in
   --self-test)
     self_test
+    st1=$?
+    python3 scripts/check-skip-ledger-engine-coverage.py --self-test
+    st2=$?
+    [ "$st1" -eq 0 ] && [ "$st2" -eq 0 ]
     exit $?
     ;;
   --update)
@@ -890,6 +905,12 @@ fi
 
 current="$(scan)"
 die_if_scan_failed "$current"
+
+# cleat#2158: an unrelated but adjacent check, run and reported here rather
+# than as its own ci.yml Lint step -- see the header comment above for why.
+# Its own exit status folds into $status below, alongside this script's.
+ledger_engine_status=0
+python3 scripts/check-skip-ledger-engine-coverage.py || ledger_engine_status=$?
 
 # Set membership, not `comm`. comm requires both inputs sorted in the same
 # collation it uses and silently emits garbage when they disagree -- which is
@@ -1018,3 +1039,8 @@ if [ -n "$shrunk" ]; then
 fi
 
 echo "OK: no new conditional skips ($(total_skips "$current") skip sites across $(printf '%s\n' "$current" | grep -c .) functions)."
+
+# cleat#2158's check ran earlier (before the skip-inventory logic above, so
+# its own error report -- already printed to stderr at that point -- is not
+# buried under this script's "OK"). Its failure still fails this script.
+exit "$ledger_engine_status"
