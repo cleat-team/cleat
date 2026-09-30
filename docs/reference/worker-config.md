@@ -1295,12 +1295,14 @@ It is a report, not a gate -- refusing to start would contradict the degradation
 above, and would turn a store that cannot rotate into an outage for the
 worker's own tenant, which was never affected.
 
-On PostgreSQL it also checks something no runtime error explains: whether the
-function's **owner still has `BYPASSRLS`**. Losing that attribute does fail --
-every call raises `cleat.tenant_id is not set` (P0001), because the policies are
-fail-closed -- but that message names neither the function nor the missing
-privilege, and there is no path from it to `ALTER ROLE cleat_dispatcher
-BYPASSRLS`. The startup line names it.
+**It does not check `BYPASSRLS`.** This paragraph used to describe a PostgreSQL
+check for a lost `BYPASSRLS` grant on `cleat_dispatcher` -- that check belonged
+to the widened `admin.claim_workflows` query #1926 retired, and went with it:
+`reportCrossTenantCapability` (`cmd/cleat-worker/setup.go`) calls only
+`rotatingClaimAvailability`, which asks nothing about role attributes. Confirm
+with `grep -rn CheckCrossTenantCapability --include='*.go' .` -- every
+non-test hit is a stale comment naming a function that is not defined in
+`engine/`.
 
 ---
 

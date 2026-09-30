@@ -6651,10 +6651,10 @@ func (w *Worker) storeFor(wf *engine.WorkflowInstance) (engine.WorkflowStore, fu
 // It is a report and not a gate. Refusing to start would contradict the
 // degradation the rest of this feature is built on, and would turn a revoked
 // GRANT into an outage for the worker's own tenant, which was never affected.
-// The one thing it does that no runtime path can is catch a lost BYPASSRLS on
-// PostgreSQL: that failure does not raise, it just returns fewer rows, so
-// without this check a silently single-tenant worker looks exactly like a
-// healthy one. See engine.PostgresStore.CheckCrossTenantCapability.
+//
+// It does not check BYPASSRLS. That belonged to the widened admin.claim_workflows
+// query #1926 retired, along with engine.PostgresStore.CheckCrossTenantCapability,
+// which this comment named until the function it pointed at stopped existing.
 func (w *Worker) reportCrossTenantCapability() {
 	if !w.claimAcrossTenants {
 		return
