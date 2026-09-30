@@ -348,6 +348,17 @@ cd packages/cleat-as && npm test
 > MySQL, and SQL Server configurations. The compose file defines all three
 > database services for local multi-backend development.
 
+> **Note:** `testutil.SuiteTestDB` gives a package's tests one database per
+> suite name (e.g. `cleat_test_cleat_worker`), created once and never reset --
+> unlike the tables `CleanupPostgresTestData` wipes per test, rows a test
+> leaves behind (a run that never got claimed, a workflow stuck waiting on a
+> key) persist across every later local run of `go test`, however many days
+> apart. A test that assumes it is looking at an otherwise-empty queue can see
+> this as a false failure (cleat#2214). If a database-backed test starts
+> failing locally in a way CI does not reproduce, checking for leftover state
+> in that suite's database is worth doing before assuming a real regression;
+> `DROP DATABASE cleat_test_<suite>` clears it.
+
 ## Proving a test can fail
 
 A passing test is evidence of nothing until you have seen it fail. Two specific
