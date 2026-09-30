@@ -11,35 +11,65 @@ import (
 	"github.com/cleat-team/cleat/plugins/llm/providers"
 )
 
-// manifestGoTypeCases pairs each host function's manifest-declared input/
-// output type name with the real Go type whose JSON shape a workflow
-// actually exchanges with it -- the struct json.Unmarshal reads a request
-// into, or json.Marshal writes a response out of. cleat#2656:
-// plugin.ValidateManifest checks a manifest's internal consistency only, and
-// nothing cross-references a HostFuncDef's declared TypeDef against the real
-// Go types it claims to describe. This test is that cross-reference, for the
-// one plugin in the tree that maintains a plugin.json at all.
+// expectedHostFunctionType is what plugin.json should say about one host
+// function this plugin registers: the manifest type NAME its input/output
+// should be declared as, and the real Go type whose JSON shape that name
+// should structurally match. cleat#2656.
 //
-// list_models is deliberately absent. Its response is assembled ad hoc from
-// map[string]any and a function-local anonymous struct (see listModels in
-// host_functions.go), not a named package-level Go type, so there is no
-// stable reflect.Type to point this test at. That is not a gap this test is
-// leaving open: list_models_output's own manifest fields ("models",
-// "providers") are both untyped generic "object"s with no nested Fields, so
-// the manifest itself declares nothing structural to check there either --
-// see the "object with no Fields is opaque by the manifest's own choice"
-// case in diffFieldDef below, which is the same rule applied consistently.
-var manifestGoTypeCases = []struct {
-	function     string
-	manifestType string
-	goType       reflect.Type
-}{
-	{"chat", "chat_input", reflect.TypeOf(chatRequest{})},
-	{"chat", "chat_output", reflect.TypeOf(providers.ChatOutput{})},
-	{"chat_stream", "chat_input", reflect.TypeOf(chatRequest{})},
-	{"chat_stream", "chat_output", reflect.TypeOf(providers.ChatOutput{})},
-	{"embed", "embed_input", reflect.TypeOf(embedRequest{})},
-	{"embed", "embed_output", reflect.TypeOf(providers.EmbedOutput{})},
+// inputGoType/outputGoType are nil for a function whose request or response
+// has no fixed, named, package-level Go type to reflect on -- list_models's
+// response is assembled from map[string]any and a function-local anonymous
+// struct (see listModels). That is recorded here, not left as an absence:
+// a nil entry still asserts the manifest type NAME is correct and still
+// requires the function to be present in this table at all, it just skips
+// the structural field-by-field comparison for that one side.
+type expectedHostFunctionType struct {
+	inputManifestType  string
+	inputGoType        reflect.Type
+	outputManifestType string
+	outputGoType       reflect.Type
+}
+
+var expectedHostFunctions = map[string]expectedHostFunctionType{
+	"chat": {
+		"chat_input", reflect.TypeOf(chatRequest{}),
+		"chat_output", reflect.TypeOf(providers.ChatOutput{}),
+	},
+	"chat_stream": {
+		"chat_input", reflect.TypeOf(chatRequest{}),
+		"chat_output", reflect.TypeOf(providers.ChatOutput{}),
+	},
+	"embed": {
+		"embed_input", reflect.TypeOf(embedRequest{}),
+		"embed_output", reflect.TypeOf(providers.EmbedOutput{}),
+	},
+	"list_models": {
+		"list_models_input", nil,
+		"list_models_output", nil,
+	},
+}
+
+// registeredNames captures the FuncOptions.Name strings a real
+// RegisterHostFunctions call registers, by implementing the same
+// FuncRegistry/StreamFuncRegistry interfaces the engine does. cleat#2656 R1
+// (cleat-review): the manifest/Go-struct comparison below is only as
+// complete as the set of functions it is told to check -- driving that set
+// from RegisterHostFunctions's own real call, rather than from a literal
+// list a person maintains by hand, means a function added to the plugin
+// without a matching entry here fails this test instead of silently
+// escaping every check in it.
+type registeredNames struct {
+	names map[string]bool
+}
+
+func (r *registeredNames) Register(opts plugin.FuncOptions, _ plugin.PluginFunc) error {
+	r.names[opts.Name] = true
+	return nil
+}
+
+func (r *registeredNames) RegisterStream(opts plugin.FuncOptions, _ plugin.PluginStreamFunc) error {
+	r.names[opts.Name] = true
+	return nil
 }
 
 func TestManifestTypesMatchGoStructs(t *testing.T) {
@@ -48,19 +78,71 @@ func TestManifestTypesMatchGoStructs(t *testing.T) {
 		t.Fatalf("load plugin.json: %v", err)
 	}
 
-	for _, c := range manifestGoTypeCases {
-		t.Run(c.function+"/"+c.manifestType, func(t *testing.T) {
-			td, ok := m.Types[c.manifestType]
+	reg := &registeredNames{names: map[string]bool{}}
+	if err := (&Plugin{}).RegisterHostFunctions(reg); err != nil {
+		t.Fatalf("RegisterHostFunctions: %v", err)
+	}
+
+	// Three sets that must all agree: what RegisterHostFunctions actually
+	// registers, what plugin.json declares, and what this test knows how to
+	// check. A mismatch in any direction is real: a function registered but
+	// undeclared reaches workflows with no manifest at all; a function
+	// declared but unregistered describes a call that would fail at runtime;
+	// a function registered and declared but absent from
+	// expectedHostFunctions is exactly the coverage gap cleat-review found --
+	// this test silently checking fewer functions than the plugin has.
+	for name := range reg.names {
+		if _, ok := m.HostFunctions[name]; !ok {
+			t.Errorf("RegisterHostFunctions registers %q, but plugin.json declares no such host function", name)
+		}
+		if _, ok := expectedHostFunctions[name]; !ok {
+			t.Errorf("RegisterHostFunctions registers %q, but expectedHostFunctions has no entry for it -- add one so this test actually checks it", name)
+		}
+	}
+	for name := range m.HostFunctions {
+		if !reg.names[name] {
+			t.Errorf("plugin.json declares host function %q, but RegisterHostFunctions never registers it", name)
+		}
+	}
+	for name := range expectedHostFunctions {
+		if !reg.names[name] {
+			t.Errorf("expectedHostFunctions has an entry for %q, but RegisterHostFunctions never registers it -- stale entry", name)
+		}
+	}
+
+	for name, exp := range expectedHostFunctions {
+		t.Run(name, func(t *testing.T) {
+			fn, ok := m.HostFunctions[name]
 			if !ok {
-				t.Fatalf("plugin.json declares no type %q", c.manifestType)
+				return // already reported above
 			}
-			diffs := compareStructFields(c.manifestType, td.Fields, c.goType, m.Types,
-				map[string]bool{c.manifestType: true})
-			if len(diffs) > 0 {
-				t.Errorf("plugin.json %q has drifted from %s (cleat#2656):\n  %s",
-					c.manifestType, c.goType, strings.Join(diffs, "\n  "))
+
+			if fn.Input.Type != exp.inputManifestType {
+				t.Errorf("host function %q declares input type %q, want %q", name, fn.Input.Type, exp.inputManifestType)
+			} else if exp.inputGoType != nil {
+				checkManifestType(t, exp.inputManifestType, exp.inputGoType, m)
+			}
+
+			if fn.Output.Type != exp.outputManifestType {
+				t.Errorf("host function %q declares output type %q, want %q", name, fn.Output.Type, exp.outputManifestType)
+			} else if exp.outputGoType != nil {
+				checkManifestType(t, exp.outputManifestType, exp.outputGoType, m)
 			}
 		})
+	}
+}
+
+func checkManifestType(t *testing.T, manifestType string, goType reflect.Type, m *plugin.Manifest) {
+	t.Helper()
+	td, ok := m.Types[manifestType]
+	if !ok {
+		t.Errorf("plugin.json declares no type %q", manifestType)
+		return
+	}
+	diffs := compareStructFields(manifestType, td.Fields, goType, m.Types, map[string]bool{manifestType: true})
+	if len(diffs) > 0 {
+		t.Errorf("plugin.json %q has drifted from %s (cleat#2656):\n  %s",
+			manifestType, goType, strings.Join(diffs, "\n  "))
 	}
 }
 
@@ -107,6 +189,17 @@ func structFieldsByJSONName(t reflect.Type) map[string]reflect.StructField {
 		out[name] = f
 	}
 	return out
+}
+
+// isDynamicGoType reports whether goType is a JSON shape with no fixed
+// structure of its own -- interface{} (any) or a map -- which is the only
+// case a manifest is entitled to describe as a bare, field-less "object" or
+// an items-less "array". cleat#2656 R2 (cleat-review): without this check,
+// a manifest could describe any concrete Go struct or slice as bare
+// "object"/"array" and this test would silently stop checking it.
+func isDynamicGoType(t reflect.Type) bool {
+	t = resolveFieldGoType(t)
+	return t.Kind() == reflect.Interface || t.Kind() == reflect.Map
 }
 
 // compareStructFields diffs an object-shaped manifest field set against a Go
@@ -157,7 +250,10 @@ func diffFieldDef(label string, fd plugin.FieldDef, goType reflect.Type, types m
 			return []string{fmt.Sprintf("%s: manifest declares array but Go type is %s", label, goType)}
 		}
 		if fd.Items == nil {
-			return nil
+			if isDynamicGoType(goType.Elem()) {
+				return nil
+			}
+			return []string{fmt.Sprintf("%s: manifest array has no items type, but Go element type %s has a fixed structure -- declare items or the drift underneath it is invisible", label, goType.Elem())}
 		}
 		return diffFieldDef(label+"[]", *fd.Items, goType.Elem(), types, visited)
 	case "map":
@@ -165,19 +261,18 @@ func diffFieldDef(label string, fd plugin.FieldDef, goType reflect.Type, types m
 			return []string{fmt.Sprintf("%s: manifest declares map but Go type is %s", label, goType)}
 		}
 		if fd.ValueType == nil {
-			return nil
+			if isDynamicGoType(goType.Elem()) {
+				return nil
+			}
+			return []string{fmt.Sprintf("%s: manifest map has no value type, but Go value type %s has a fixed structure -- declare value_type or the drift underneath it is invisible", label, goType.Elem())}
 		}
 		return diffFieldDef(label+"{}", *fd.ValueType, goType.Elem(), types, visited)
 	case "object":
-		// A Go field typed any/map[string]any (dynamic JSON) has no fixed
-		// shape to compare structurally, whatever the manifest says.
-		if goType.Kind() == reflect.Interface || goType.Kind() == reflect.Map {
+		if isDynamicGoType(goType) {
 			return nil
 		}
 		if len(fd.Fields) == 0 {
-			// The manifest itself declares this object opaque -- nothing to
-			// check, by the manifest's own choice, not this test's.
-			return nil
+			return []string{fmt.Sprintf("%s: manifest declares a bare object, but Go type %s has a fixed structure -- declare its fields or the drift underneath it is invisible", label, goType)}
 		}
 		return compareStructFields(label, fd.Fields, goType, types, visited)
 	case "enum":
@@ -185,6 +280,15 @@ func diffFieldDef(label string, fd plugin.FieldDef, goType reflect.Type, types m
 			return []string{fmt.Sprintf("%s: manifest declares enum but Go type is %s", label, goType)}
 		}
 		return nil
+	case "optional":
+		// plugin.ValidateManifest's validateTypeDef accepts "optional" as a
+		// field type, but no manifest in this tree uses it, and unlike
+		// "array"/"map" it carries no wrapped-type information (Items,
+		// ValueType) to recurse into -- a FieldDef already has a separate
+		// Optional bool for marking optionality. There is nothing here to
+		// structurally verify, so this reports rather than silently passing.
+		// cleat#2776.
+		return []string{fmt.Sprintf("%s: manifest declares field type \"optional\", which carries no further type information for this checker to verify against %s (see cleat#2776)", label, goType)}
 	case "string", "int64", "float64", "bool", "bytes", "timestamp", "uuid":
 		return diffScalar(label, fd.Type, goType)
 	default:
