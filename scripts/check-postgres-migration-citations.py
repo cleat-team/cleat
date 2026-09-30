@@ -81,13 +81,6 @@ ALLOWLIST = {
         "same as migration/runner.go -- a dated measurement, not a pointer.",
     ("tiers.yaml", "077_a_plugin_policy_can_use_its_index.sql"):
         "same as migration/runner.go -- a dated measurement, not a pointer.",
-    ("docs/reference/worker-config.md", "024_cross_tenant_schedules.sql"):
-        "was held by cleat#2755's open diff at the time cleat#2725 landed; "
-        "#2755 merged (touching this file) without fixing this citation, so "
-        "it is still genuinely dangling -- needs its own follow-up rather "
-        "than a hand-edit here, since worker-config.md's #1926-class staleness "
-        "is broader than this one line (see the migrations/postgres/024 table "
-        "row and the DeployMigration walkthrough it sits in).",
     ("tiers.yaml", "023_cross_tenant_claim.sql"):
         "deferred, not historical: this whole tier-2 entry describes "
         "--claim-across-tenants/--claim-strategy, retired by cleat#1926 -- a "

@@ -1155,11 +1155,12 @@ everything downstream of it -- event history, state, child workflows, schedules
 widened query required; the mechanism that replaced it requires none of it —
 not for the claim and not for the due-schedule read. It is kept because a
 deployment may still carry those grants, and because `admin.in_flight_workflow_ids`
-(the plugin sweep, migration 073) still uses the same `cleat_dispatcher` role.
+(`migrations/postgres/001_schema.sql`'s `ALTER FUNCTION ... OWNER TO
+cleat_dispatcher`, the plugin sweep) still uses the same `cleat_dispatcher` role.
 
 | dialect | what the deployment must do |
 |---------|-----------------------------|
-| PostgreSQL | Apply **both** `023_cross_tenant_claim.sql` and `024_cross_tenant_schedules.sql` as a superuser. 023 creates `cleat_dispatcher` (`NOLOGIN BYPASSRLS`) to own the claim function; 024 adds the due-schedule read to the same role. They are separate grants on purpose — with 023 alone, workflows execute but cron never fires, and the warning names the file you are missing. |
+| PostgreSQL | **Nothing, for either half.** A fresh deployment needs neither migration: rotation reads the tenant list from `admin.tenants` (which carries no row-level security) and then does the per-tenant work under each tenant's own RLS context, granting nothing special. A deployment that already applied `023_cross_tenant_claim.sql` (creating `cleat_dispatcher`, `NOLOGIN BYPASSRLS`) keeps it, because `admin.in_flight_workflow_ids` (`migrations/postgres/001_schema.sql`'s `ALTER FUNCTION ... OWNER TO cleat_dispatcher`, the plugin sweep) still uses that role -- but the role is no longer required for the claim or the due-schedule read, and `024_cross_tenant_schedules.sql` is not required at all. |
 | SQL Server | **Two steps since cleat#1541, and the first one is new.** (1) Apply `migrations/mssql/optional/cross_tenant_claim.sql`, which is deliberately *not* in the auto-applied set. (2) Add the worker's principal to the `cleat_admin` role -- created empty by `migrations/mssql/001_schema.sql` (this file was named `012_admin_role.sql` before the SQL Server migration compaction folded it into the baseline). One grant then covers both the claim and the schedule read, because `fn_tenant_filter` is bound to every table involved. **Step 2 alone does nothing**: the shipped predicate no longer mentions `IS_ROLEMEMBER`, so a member reads `IS_ROLEMEMBER = 1` and still sees zero rows. |
 | MySQL | **Not supported on the default topology.** `MySQLStoreFactory` gives each tenant its own physical database (`cleat_<tenant_id>`), so there is no predicate to drop -- the other tenants' rows are not filtered out, they are in another database. The worker warns once and claims its own tenant. A MySQL deployment pointed at a *single shared* database does work, since there isolation really is just a `tenant_id` predicate. |
 
@@ -1271,30 +1272,38 @@ and restores both the plain predicate and the marker the worker reads.
 you do not have to infer it from silence:
 
 ```
-INFO  cross-tenant workflow claim is available
-INFO  cross-tenant due-schedule read is available
+INFO  cross-tenant workflow claim is available by tenant rotation; no database grant is required
+INFO  cross-tenant due-schedule read is available by tenant rotation; no database grant is required
 ```
 
-or, on a deployment that applied 023 but not 024:
+or, if this worker cannot rotate at all (no per-tenant store factory, or a
+store that cannot enumerate tenants):
 
 ```
-INFO  cross-tenant workflow claim is available
-WARN  cross-tenant due-schedule read is NOT available; only this worker's own
-      tenant's cron will fire
-      reason=admin.get_due_schedules does not exist; apply
-             migrations/postgres/024_cross_tenant_schedules.sql
+WARN  claim-across-tenants is set but this worker cannot serve other tenants;
+      it will claim and fire cron for its own tenant only
+      reason=<why the store can't rotate>
 ```
+
+**There is no longer a state where one loop is available and the other is
+not.** #1926 replaced the two migration-gated widened queries (023's claim,
+024's schedule read) with one rotation mechanism that both loops share, so one
+`rotatingClaimAvailability` check now answers for both -- which is why the WARN
+names neither 023 nor 024 and points at nothing to apply. A deployment that
+never ran either migration is unaffected either way.
 
 It is a report, not a gate -- refusing to start would contradict the degradation
-above, and would turn a revoked `GRANT` into an outage for the worker's own
-tenant, which was never affected.
+above, and would turn a store that cannot rotate into an outage for the
+worker's own tenant, which was never affected.
 
-On PostgreSQL it also checks something no runtime error explains: whether the
-function's **owner still has `BYPASSRLS`**. Losing that attribute does fail --
-every call raises `cleat.tenant_id is not set` (P0001), because the policies are
-fail-closed -- but that message names neither the function nor the missing
-privilege, and there is no path from it to `ALTER ROLE cleat_dispatcher
-BYPASSRLS`. The startup line names it.
+**It does not check `BYPASSRLS`.** This paragraph used to describe a PostgreSQL
+check for a lost `BYPASSRLS` grant on `cleat_dispatcher` -- that check belonged
+to the widened `admin.claim_workflows` query #1926 retired, and went with it:
+`reportCrossTenantCapability` (`cmd/cleat-worker/setup.go`) calls only
+`rotatingClaimAvailability`, which asks nothing about role attributes. Confirm
+with `grep -rn CheckCrossTenantCapability --include='*.go' .` -- the only
+non-test hit is `setup.go`'s own comment recording that the function was
+retired with #1926; it is not defined anywhere in `engine/`.
 
 ---
 
