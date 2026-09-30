@@ -155,7 +155,7 @@ func TestHeartbeatLoop_ConnectionErrorPreservesInflight(t *testing.T) {
 	}
 	_, stillInflight := w.inflight.Load("wf-1")
 	if !stillInflight {
-		t.Error("expected wf-1 to remain in inflight on BatchHeartbeat connection error")
+		t.Error("expected wf-1 to remain in inflight on HeartbeatBatchFenced connection error")
 	}
 }
 
@@ -188,7 +188,7 @@ func TestHeartbeatLoop_NonConnectionErrorPreservesInflight(t *testing.T) {
 	}
 	_, stillInflight := w.inflight.Load("wf-1")
 	if !stillInflight {
-		t.Error("expected wf-1 to remain in inflight on BatchHeartbeat non-connection error")
+		t.Error("expected wf-1 to remain in inflight on HeartbeatBatchFenced non-connection error")
 	}
 }
 
