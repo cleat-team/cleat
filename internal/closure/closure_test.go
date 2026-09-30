@@ -2,6 +2,7 @@ package closure
 
 import (
 	"go/token"
+	"strings"
 	"testing"
 
 	"github.com/cleat-team/cleat/internal/analyzer"
@@ -239,6 +240,7 @@ func TestComputeErrorsDetectsDurableLeaves(t *testing.T) {
 		"github.com/cleat-team/cleat/testdata/errors.BadWithInterfaceDispatch": true,
 		"github.com/cleat-team/cleat/testdata/errors.BadWithFuncValue":         true,
 		"github.com/cleat-team/cleat/testdata/errors.BadWithFloatCondition":    true,
+		"github.com/cleat-team/cleat/testdata/errors.BadWithErrError":          true,
 	}
 
 	for name := range expectedLeaves {
@@ -338,6 +340,56 @@ func TestComputeErrorsDetectsInterfaceDispatch(t *testing.T) {
 		for _, e := range errs {
 			t.Logf("  %s: %s", e.Code, e.Message)
 		}
+	}
+}
+
+// TestComputeErrorsNamesTheCallForErrError falsifies cleat#2516: on
+// `h.DurableLog("operation failed: " + err.Error())`, the diagnostic used to
+// name only the line -- which also holds a valid h.DurableLog call -- and
+// suggest "use concrete types", which fits nobody's mental model of ordinary
+// error handling. The message must name the actual call and its interface
+// type, and a column must be present so an editor can point at err.Error()
+// specifically rather than the whole line.
+func TestComputeErrorsNamesTheCallForErrError(t *testing.T) {
+	fset := token.NewFileSet()
+	result, err := analyzer.LoadPackages("github.com/cleat-team/cleat/testdata/errors", fset)
+	if err != nil {
+		t.Fatalf("LoadPackages failed: %v", err)
+	}
+
+	cg, err := callgraph.Build(result)
+	if err != nil {
+		t.Fatalf("Build callgraph failed: %v", err)
+	}
+
+	cr := Compute(result, cg)
+
+	badName := "github.com/cleat-team/cleat/testdata/errors.BadWithErrError"
+	errs := cr.Errors[badName]
+
+	var e008 *ValidationError
+	for i := range errs {
+		if errs[i].Code == "E008" {
+			e008 = &errs[i]
+			break
+		}
+	}
+	if e008 == nil {
+		t.Fatalf("expected an E008 error for %s, got codes: %v", badName, errs)
+	}
+
+	if !strings.Contains(e008.Message, "err.Error()") {
+		t.Errorf("message does not name the call err.Error(): %q", e008.Message)
+	}
+	if !strings.Contains(e008.Message, "error") {
+		t.Errorf("message does not name the interface type: %q", e008.Message)
+	}
+	if e008.Column <= 0 {
+		t.Errorf("expected a positive column so the call can be pinpointed, got %d", e008.Column)
+	}
+	if strings.Contains(e008.Suggestion, "Use concrete types") {
+		t.Errorf("suggestion still gives the generic interface-variable advice, which fits nobody's "+
+			"error-handling code: %q", e008.Suggestion)
 	}
 }
 

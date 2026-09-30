@@ -212,6 +212,7 @@ type ValidationError struct {
 	Message    string
 	Suggestion string
 	Line       int
+	Column     int
 }
 
 // ValidationWarning represents a validation warning.
@@ -565,16 +566,35 @@ func checkInterfaceDispatch(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName 
 	if analyzer.ImplementsPluginCaller(tv.Type) {
 		return
 	}
-	line := 0
+	line, col := 0, 0
 	if fset != nil {
-		line = fset.Position(call.Pos()).Line
+		pos := fset.Position(call.Pos())
+		line, col = pos.Line, pos.Column
+	}
+	// Name the call, not just the line: the line reporting this error often
+	// holds a second, perfectly valid call too (cleat#2516 --
+	// h.DurableLog("..." + err.Error())), and a line-only diagnostic reads
+	// as a problem with whichever call the reader assumes it means.
+	callText := types.ExprString(call)
+	suggestion := "Use concrete types or refactor to avoid interface dispatch in cleat functions."
+	if tv.Type == types.Universe.Lookup("error").Type() {
+		// The interface a reader actually hits is essentially never a
+		// hand-declared one -- it is the built-in error interface, from
+		// ordinary error handling (err.Error() inside a log message or
+		// fmt.Sprintf). "Use concrete types" reads as advice about a
+		// variable they don't have, so name the real pattern and its fix.
+		suggestion = "err.Error() calls a method on the built-in error interface, which cannot be " +
+			"statically resolved. Log a static message and return the error instead of formatting " +
+			"it into the log line -- the engine records the returned error's text."
 	}
 	cr.Errors[funcName] = append(cr.Errors[funcName], ValidationError{
-		Code:       "E008",
-		FuncName:   funcName,
-		Message:    "calls through interfaces cannot be statically resolved, so the analyzer cannot verify the callee",
-		Suggestion: "Use concrete types or refactor to avoid interface dispatch in cleat functions.",
+		Code:     "E008",
+		FuncName: funcName,
+		Message: fmt.Sprintf("%s cannot be statically resolved: %s has interface type %s, so the analyzer cannot verify which implementation runs",
+			callText, xIdent.Name, tv.Type.String()),
+		Suggestion: suggestion,
 		Line:       line,
+		Column:     col,
 	})
 }
 
@@ -932,6 +952,7 @@ type Diagnostic struct {
 	Message    string
 	Suggestion string
 	Line       int
+	Column     int
 }
 
 // SortedErrors returns every validation error in a stable, total order.
@@ -948,6 +969,7 @@ func (cr *Result) SortedErrors() []Diagnostic {
 				Message:    e.Message,
 				Suggestion: e.Suggestion,
 				Line:       e.Line,
+				Column:     e.Column,
 			})
 		}
 	}

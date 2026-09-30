@@ -342,7 +342,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		if errCount > 0 {
 			fmt.Fprintln(os.Stderr)
 			for _, e := range cr.SortedErrors() {
-				fmt.Fprintf(os.Stderr, "  %s: %s:%d: %s\n", e.Code, analyzer.ShortName(e.FuncName), e.Line, e.Message)
+				fmt.Fprintf(os.Stderr, "  %s: %s: %s\n", e.Code, funcLoc(e.FuncName, e.Line, e.Column), e.Message)
 				if e.Suggestion != "" {
 					fmt.Fprintf(os.Stderr, "    → %s\n", e.Suggestion)
 				}
@@ -681,7 +681,11 @@ func runVet(pattern string, jsonOut bool, ciOut bool) int {
 			if f == "" {
 				f = "unknown"
 			}
-			fmt.Printf("::error file=%s,line=%d,title=%s::%s\n", f, e.Line, e.Code, e.Message)
+			if e.Column > 0 {
+				fmt.Printf("::error file=%s,line=%d,col=%d,title=%s::%s\n", f, e.Line, e.Column, e.Code, e.Message)
+			} else {
+				fmt.Printf("::error file=%s,line=%d,title=%s::%s\n", f, e.Line, e.Code, e.Message)
+			}
 			exitCode = 1
 		}
 		for _, w := range cr.SortedWarnings() {
@@ -725,7 +729,7 @@ func runVet(pattern string, jsonOut bool, ciOut bool) int {
 		exitCode = 1
 	}
 	for _, e := range cr.SortedErrors() {
-		fmt.Printf("  %s:%d: %s: %s\n", analyzer.ShortName(e.FuncName), e.Line, e.Code, e.Message)
+		fmt.Printf("  %s: %s: %s\n", funcLoc(e.FuncName, e.Line, e.Column), e.Code, e.Message)
 		if e.Suggestion != "" {
 			fmt.Printf("    → %s\n", e.Suggestion)
 		}
@@ -1355,7 +1359,7 @@ func vetJSONOutput(result *analyzer.AnalysisResult, cr *closure.Result, threadin
 			Code:       e.Code,
 			File:       lookupFile(result, e.FuncName),
 			Line:       e.Line,
-			Column:     0,
+			Column:     e.Column,
 			Message:    e.Message,
 			Suggestion: e.Suggestion,
 		})
@@ -1382,6 +1386,18 @@ func vetJSONOutput(result *analyzer.AnalysisResult, cr *closure.Result, threadin
 	}
 
 	return out
+}
+
+// funcLoc formats a diagnostic's location as "FuncName:Line:Column" when a
+// column is available, or "FuncName:Line" when it is not (col is 0 for
+// diagnostics -- most of them -- that never computed one). Most callers used
+// to hardcode the two-field form; that stopped being able to show the
+// column E008 (cleat#2516) started reporting.
+func funcLoc(funcName string, line, col int) string {
+	if col > 0 {
+		return fmt.Sprintf("%s:%d:%d", analyzer.ShortName(funcName), line, col)
+	}
+	return fmt.Sprintf("%s:%d", analyzer.ShortName(funcName), line)
 }
 
 // lookupFile returns the base filename for a function by its fully-qualified name.
