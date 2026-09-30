@@ -42,20 +42,26 @@ const workflowEventMethod = "workflow:record_event"
 // RegisterHostFunctions registers workflow-callable functions on the scoped
 // function registry. The plugin name is implicit -- "audit-log" -- so
 // "record_event" needs no further qualification (cleat#2534).
+//
+// plugin.RegisterTyped, not a raw scope.Register (cleat#2626/#2681): the
+// Req/Resp types below are exported so cmd/cleat-gen plugin-client can read
+// them off this real registration and generate
+// cleat/pluginclients/auditlog/client.go, the same way plugins/email and
+// plugins/webhookingest already do -- never a hand-maintained manifest.
 func (p *Plugin) RegisterHostFunctions(scope plugin.FuncRegistry) error {
 	if scope == nil {
 		return fmt.Errorf("audit-log: nil function registry")
 	}
-	return scope.Register(plugin.FuncOptions{Name: "record_event"}, p.recordEvent)
+	return plugin.RegisterTyped(scope, plugin.FuncOptions{Name: "record_event"}, p.recordEvent)
 }
 
-// recordEventInput is what a workflow supplies. EventType is the caller's own
+// RecordEventInput is what a workflow supplies. EventType is the caller's own
 // label for what happened ("tenant.suspended", "order.refunded") and is
 // stored in `path`, which is indexed and queryable the same way an HTTP
 // request's path is (docs/reference/audit-log.md). Details is the caller's
 // own JSON object, stored and hashed as `metadata` -- exactly the value
 // cleat#2589's fix made safe to hash non-trivial content in.
-type recordEventInput struct {
+type RecordEventInput struct {
 	EventType string          `json:"event_type"`
 	Details   json.RawMessage `json:"details,omitempty"`
 
@@ -66,7 +72,7 @@ type recordEventInput struct {
 	EventID string `json:"event_id,omitempty"`
 }
 
-type recordEventOutput struct {
+type RecordEventOutput struct {
 	Recorded bool `json:"recorded"`
 }
 
@@ -122,35 +128,31 @@ type recordEventOutput struct {
 // a workflow definition's own step renumbering is wanted. recordEventDeterministicID
 // turns (tenant, workflow, event_id) into the row's id the same way; EventID
 // takes priority over the default step-based key when both are available.
-func (p *Plugin) recordEvent(ctx context.Context, inputJSON string) (string, error) {
+func (p *Plugin) recordEvent(ctx context.Context, input RecordEventInput) (RecordEventOutput, error) {
 	if p.db == nil {
-		return "", fmt.Errorf("audit-log: record_event: no database")
+		return RecordEventOutput{}, fmt.Errorf("audit-log: record_event: no database")
 	}
 
 	cc := plugin.CallContextFromContext(ctx)
 	if cc == nil || cc.TenantID == "" {
-		return "", fmt.Errorf("audit-log: record_event: no tenant context")
+		return RecordEventOutput{}, fmt.Errorf("audit-log: record_event: no tenant context")
 	}
 	tenantID, err := uuid.Parse(cc.TenantID)
 	if err != nil {
-		return "", fmt.Errorf("audit-log: record_event: tenant %q is not a UUID: %w", cc.TenantID, err)
+		return RecordEventOutput{}, fmt.Errorf("audit-log: record_event: tenant %q is not a UUID: %w", cc.TenantID, err)
 	}
 
-	var input recordEventInput
-	if err := json.Unmarshal([]byte(inputJSON), &input); err != nil {
-		return "", fmt.Errorf("audit-log: record_event: invalid input: %w", err)
-	}
 	if input.EventType == "" {
-		return "", fmt.Errorf("audit-log: record_event: event_type is required")
+		return RecordEventOutput{}, fmt.Errorf("audit-log: record_event: event_type is required")
 	}
 
-	// json.Unmarshal into recordEventInput above already guarantees
-	// input.Details is syntactically valid JSON: a json.RawMessage field
-	// cannot decode to anything else, or the unmarshal above would already
-	// have failed with "invalid input". What it does NOT guarantee is that
-	// the value is a JSON OBJECT -- a bare string, number or array is
-	// syntactically valid JSON and would decode into Details unchanged. This
-	// row's `metadata` column has held only "{}" since the chain existed
+	// RegisterTyped's decodeStrict already guarantees input.Details is
+	// syntactically valid JSON: a json.RawMessage field cannot decode to
+	// anything else, or the decode would already have failed the call before
+	// this function ever ran. What it does NOT guarantee is that the value is
+	// a JSON OBJECT -- a bare string, number or array is syntactically valid
+	// JSON and would decode into Details unchanged. This row's `metadata`
+	// column has held only "{}" since the chain existed
 	// (docs/reference/audit-log.md), and a consumer reading it back is
 	// entitled to assume an object it can index into; refuse anything else
 	// here rather than let the first non-object caller define the column's
@@ -160,7 +162,7 @@ func (p *Plugin) recordEvent(ctx context.Context, inputJSON string) (string, err
 	if len(input.Details) > 0 && string(input.Details) != "null" {
 		var obj map[string]json.RawMessage
 		if err := json.Unmarshal(input.Details, &obj); err != nil {
-			return "", fmt.Errorf("audit-log: record_event: details must be a JSON object: %w", err)
+			return RecordEventOutput{}, fmt.Errorf("audit-log: record_event: details must be a JSON object: %w", err)
 		}
 		details = string(input.Details)
 	}
@@ -196,14 +198,12 @@ func (p *Plugin) recordEvent(ctx context.Context, inputJSON string) (string, err
 		// repeated on purpose -- is not a failure. See recordEvent's own
 		// doc comment.
 		if errors.Is(err, errAlreadyRecorded) {
-			out, _ := json.Marshal(recordEventOutput{Recorded: true})
-			return string(out), nil
+			return RecordEventOutput{Recorded: true}, nil
 		}
-		return "", fmt.Errorf("audit-log: record_event: %w", err)
+		return RecordEventOutput{}, fmt.Errorf("audit-log: record_event: %w", err)
 	}
 
-	out, _ := json.Marshal(recordEventOutput{Recorded: true})
-	return string(out), nil
+	return RecordEventOutput{Recorded: true}, nil
 }
 
 // recordEventDeterministicID turns one workflow-supplied EventID into the

@@ -57,21 +57,12 @@ func TestRecordEventAppendsToTheCallersTenantChain(t *testing.T) {
 		p := e.plugin()
 		tenant := uuid.New()
 
-		input, err := json.Marshal(recordEventInput{
+		out, err := p.recordEvent(recordEventCallCtx(tenant, "wf-123", 0), RecordEventInput{
 			EventType: "tenant.suspended",
 			Details:   json.RawMessage(`{"reason":"trial_expired"}`),
 		})
 		if err != nil {
-			t.Fatalf("marshal input: %v", err)
-		}
-
-		outJSON, err := p.recordEvent(recordEventCallCtx(tenant, "wf-123", 0), string(input))
-		if err != nil {
 			t.Fatalf("recordEvent: %v", err)
-		}
-		var out recordEventOutput
-		if err := json.Unmarshal([]byte(outJSON), &out); err != nil {
-			t.Fatalf("unmarshal output %q: %v", outJSON, err)
 		}
 		if !out.Recorded {
 			t.Fatalf("recordEvent output = %+v, want Recorded=true", out)
@@ -109,8 +100,8 @@ func TestRecordEventDefaultsDetailsToAnEmptyObject(t *testing.T) {
 		p := e.plugin()
 		tenant := uuid.New()
 
-		input, _ := json.Marshal(recordEventInput{EventType: "tenant.provisioned"})
-		if _, err := p.recordEvent(recordEventCallCtx(tenant, "wf-no-details", 0), string(input)); err != nil {
+		if _, err := p.recordEvent(recordEventCallCtx(tenant, "wf-no-details", 0),
+			RecordEventInput{EventType: "tenant.provisioned"}); err != nil {
 			t.Fatalf("recordEvent: %v", err)
 		}
 
@@ -138,8 +129,8 @@ func TestRecordEventTwoCallsChainCorrectly(t *testing.T) {
 		tenant := uuid.New()
 
 		for i, et := range []string{"tenant.provisioned", "tenant.plan_changed"} {
-			input, _ := json.Marshal(recordEventInput{EventType: et})
-			if _, err := p.recordEvent(recordEventCallCtx(tenant, "wf-two-calls", i), string(input)); err != nil {
+			if _, err := p.recordEvent(recordEventCallCtx(tenant, "wf-two-calls", i),
+				RecordEventInput{EventType: et}); err != nil {
 				t.Fatalf("recordEvent(%q, step=%d): %v", et, i, err)
 			}
 		}
@@ -165,15 +156,11 @@ func TestRecordEventWithoutAnEventIDIsIdempotentByStep(t *testing.T) {
 		tenant := uuid.New()
 		ctx := recordEventCallCtx(tenant, "wf-retry-same-step", 3)
 
-		input, _ := json.Marshal(recordEventInput{EventType: "tenant.provisioned"})
+		input := RecordEventInput{EventType: "tenant.provisioned"}
 		for i := 0; i < 2; i++ {
-			outJSON, err := p.recordEvent(ctx, string(input))
+			out, err := p.recordEvent(ctx, input)
 			if err != nil {
 				t.Fatalf("recordEvent call %d: %v", i+1, err)
-			}
-			var out recordEventOutput
-			if err := json.Unmarshal([]byte(outJSON), &out); err != nil {
-				t.Fatalf("unmarshal output %q: %v", outJSON, err)
 			}
 			if !out.Recorded {
 				t.Fatalf("recordEvent call %d output = %+v, want Recorded=true", i+1, out)
@@ -200,9 +187,9 @@ func TestRecordEventWithoutRunIDIsNotDeduped(t *testing.T) {
 		tenant := uuid.New()
 		ctx := recordEventCallCtxNoRunID(tenant, "wf-no-run-id")
 
-		input, _ := json.Marshal(recordEventInput{EventType: "tenant.provisioned"})
+		input := RecordEventInput{EventType: "tenant.provisioned"}
 		for i := 0; i < 2; i++ {
-			if _, err := p.recordEvent(ctx, string(input)); err != nil {
+			if _, err := p.recordEvent(ctx, input); err != nil {
 				t.Fatalf("recordEvent call %d: %v", i+1, err)
 			}
 		}
@@ -227,18 +214,11 @@ func TestRecordEventWithAnEventIDIsIdempotent(t *testing.T) {
 		tenant := uuid.New()
 		ctx := recordEventCallCtx(tenant, "wf-idempotent", 0)
 
-		input, _ := json.Marshal(recordEventInput{
-			EventType: "tenant.provisioned",
-			EventID:   "provision-once",
-		})
+		input := RecordEventInput{EventType: "tenant.provisioned", EventID: "provision-once"}
 		for i := 0; i < 2; i++ {
-			outJSON, err := p.recordEvent(ctx, string(input))
+			out, err := p.recordEvent(ctx, input)
 			if err != nil {
 				t.Fatalf("recordEvent call %d: %v", i+1, err)
-			}
-			var out recordEventOutput
-			if err := json.Unmarshal([]byte(outJSON), &out); err != nil {
-				t.Fatalf("unmarshal output %q: %v", outJSON, err)
 			}
 			if !out.Recorded {
 				t.Fatalf("recordEvent call %d output = %+v, want Recorded=true", i+1, out)
@@ -265,8 +245,7 @@ func TestRecordEventDifferentEventIDsAppendSeparately(t *testing.T) {
 		ctx := recordEventCallCtx(tenant, "wf-distinct-ids", 0)
 
 		for _, id := range []string{"step-1", "step-2"} {
-			input, _ := json.Marshal(recordEventInput{EventType: "tenant.provisioned", EventID: id})
-			if _, err := p.recordEvent(ctx, string(input)); err != nil {
+			if _, err := p.recordEvent(ctx, RecordEventInput{EventType: "tenant.provisioned", EventID: id}); err != nil {
 				t.Fatalf("recordEvent(event_id=%q): %v", id, err)
 			}
 		}
@@ -321,8 +300,7 @@ func unreachableDBPlugin(t *testing.T) *Plugin {
 
 func TestRecordEventRequiresATenantContext(t *testing.T) {
 	p := unreachableDBPlugin(t)
-	input, _ := json.Marshal(recordEventInput{EventType: "tenant.suspended"})
-	if _, err := p.recordEvent(context.Background(), string(input)); err == nil ||
+	if _, err := p.recordEvent(context.Background(), RecordEventInput{EventType: "tenant.suspended"}); err == nil ||
 		!strings.Contains(err.Error(), "no tenant context") {
 		t.Fatalf("recordEvent with no call context: err = %v, want a \"no tenant context\" error", err)
 	}
@@ -331,33 +309,69 @@ func TestRecordEventRequiresATenantContext(t *testing.T) {
 func TestRecordEventRequiresEventType(t *testing.T) {
 	p := unreachableDBPlugin(t)
 	ctx := recordEventCallCtx(uuid.New(), "wf-1", 0)
-	input, _ := json.Marshal(recordEventInput{})
-	if _, err := p.recordEvent(ctx, string(input)); err == nil ||
+	if _, err := p.recordEvent(ctx, RecordEventInput{}); err == nil ||
 		!strings.Contains(err.Error(), "event_type is required") {
 		t.Fatalf("recordEvent with no event_type: err = %v, want an \"event_type is required\" error", err)
 	}
 }
 
+// TestRecordEventRejectsMalformedInput exercises the real call site a
+// workflow reaches -- the registered PluginFunc, which does its own JSON
+// unmarshaling via plugin.RegisterTyped -- rather than p.recordEvent
+// directly. recordEvent itself (cleat#2626/#2681) no longer parses JSON;
+// that moved into RegisterTyped's wrapper, tested on its own merits in
+// plugin/typed_test.go. This proves record_event's own registration still
+// rejects malformed input end-to-end.
 func TestRecordEventRejectsMalformedInput(t *testing.T) {
 	p := unreachableDBPlugin(t)
+	reg := newFakeFuncRegistry()
+	if err := p.RegisterHostFunctions(reg); err != nil {
+		t.Fatalf("RegisterHostFunctions: %v", err)
+	}
 	ctx := recordEventCallCtx(uuid.New(), "wf-1", 0)
-	if _, err := p.recordEvent(ctx, `{not json`); err == nil ||
+	if _, err := reg.Get("record_event")(ctx, `{not json`); err == nil ||
 		!strings.Contains(err.Error(), "invalid input") {
 		t.Fatalf("recordEvent with malformed JSON: err = %v, want an \"invalid input\" error", err)
 	}
 }
 
+// TestRecordEventRejectsAnUnknownField is the case
+// TestRecordEventRejectsMalformedInput's `{not json` cannot show: that input
+// is not even syntactically valid JSON, and the OLD raw json.Unmarshal this
+// plugin used before cleat#2626/#2681 rejected it too -- so it exercises no
+// behaviour this conversion changed. What decodeStrict (plugin/typed.go)
+// actually buys, per RegisterTyped's own doc comment, is
+// DisallowUnknownFields: syntactically valid JSON carrying a field
+// RecordEventInput does not declare -- here "detial", a typo of "details" --
+// used to decode silently, dropping the unrecognized field, and now fails
+// the call instead. That silent-to-loud flip is the change; this test is the
+// one that would fail if RegisterTyped's decode ever regressed to plain
+// json.Unmarshal.
+func TestRecordEventRejectsAnUnknownField(t *testing.T) {
+	p := unreachableDBPlugin(t)
+	reg := newFakeFuncRegistry()
+	if err := p.RegisterHostFunctions(reg); err != nil {
+		t.Fatalf("RegisterHostFunctions: %v", err)
+	}
+	ctx := recordEventCallCtx(uuid.New(), "wf-1", 0)
+	if _, err := reg.Get("record_event")(ctx, `{"event_type":"x","detial":{}}`); err == nil ||
+		!strings.Contains(err.Error(), "invalid input") ||
+		!strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("recordEvent with an unrecognized field: err = %v, want an \"invalid input\" ... \"unknown field\" error", err)
+	}
+}
+
 // TestRecordEventRejectsNonObjectDetails covers the branch
-// TestRecordEventRejectsMalformedInput cannot reach: json.Unmarshal into
-// recordEventInput already refuses input that is not syntactically valid
-// JSON, so "details is not valid JSON" is unreachable -- what IS reachable,
-// because encoding/json accepts it as a well-formed json.RawMessage, is a
-// details value that parses but is not a JSON OBJECT.
+// TestRecordEventRejectsMalformedInput cannot reach: RegisterTyped's decode
+// already refuses input that is not syntactically valid JSON, so "details is
+// not valid JSON" is unreachable -- what IS reachable, because
+// encoding/json accepts it as a well-formed json.RawMessage, is a details
+// value that parses but is not a JSON OBJECT.
 func TestRecordEventRejectsNonObjectDetails(t *testing.T) {
 	p := unreachableDBPlugin(t)
 	ctx := recordEventCallCtx(uuid.New(), "wf-1", 0)
 	for _, details := range []string{`"a string"`, `42`, `[1,2,3]`, `true`} {
-		input := `{"event_type":"x","details":` + details + `}`
+		input := RecordEventInput{EventType: "x", Details: json.RawMessage(details)}
 		if _, err := p.recordEvent(ctx, input); err == nil || !strings.Contains(err.Error(), "must be a JSON object") {
 			t.Errorf("recordEvent with details=%s: err = %v, want a \"must be a JSON object\" error", details, err)
 		}
@@ -372,7 +386,7 @@ func TestRecordEventAcceptsNullDetails(t *testing.T) {
 		p := e.plugin()
 		tenant := uuid.New()
 		ctx := recordEventCallCtx(tenant, "wf-null-details", 0)
-		if _, err := p.recordEvent(ctx, `{"event_type":"x","details":null}`); err != nil {
+		if _, err := p.recordEvent(ctx, RecordEventInput{EventType: "x", Details: json.RawMessage(`null`)}); err != nil {
 			t.Fatalf("recordEvent with details=null: %v", err)
 		}
 		var metadata string
@@ -387,8 +401,7 @@ func TestRecordEventAcceptsNullDetails(t *testing.T) {
 func TestRecordEventRequiresADatabase(t *testing.T) {
 	p := &Plugin{logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	ctx := recordEventCallCtx(uuid.New(), "wf-1", 0)
-	input, _ := json.Marshal(recordEventInput{EventType: "tenant.suspended"})
-	if _, err := p.recordEvent(ctx, string(input)); err == nil ||
+	if _, err := p.recordEvent(ctx, RecordEventInput{EventType: "tenant.suspended"}); err == nil ||
 		!strings.Contains(err.Error(), "no database") {
 		t.Fatalf("recordEvent with p.db == nil: err = %v, want a \"no database\" error", err)
 	}
@@ -433,4 +446,8 @@ func (r *fakeFuncRegistry) Register(opts plugin.FuncOptions, fn plugin.PluginFun
 func (r *fakeFuncRegistry) Has(name string) bool {
 	_, ok := r.funcs[name]
 	return ok
+}
+
+func (r *fakeFuncRegistry) Get(name string) plugin.PluginFunc {
+	return r.funcs[name]
 }
