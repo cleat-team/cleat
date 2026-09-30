@@ -942,9 +942,12 @@ func (s *PostgresStore) GetDueSchedules(ctx context.Context) ([]Schedule, error)
 	}
 	defer rows.Close()
 
-	// Shared with GetDueSchedulesAcrossTenants, whose column list lives in
-	// migrations/postgres/024_cross_tenant_schedules.sql. One scan is the only
-	// thing keeping that function's RETURNS TABLE in step with this code.
+	// scanDueSchedules used to be shared with GetDueSchedulesAcrossTenants,
+	// which #1926 retired in favor of unconditional per-tenant rotation. It now
+	// has exactly one caller (verified with
+	// `grep -rn "scanDueSchedules(" --include="*.go" . | grep -v _test.go`),
+	// so nothing else depends on its column list matching a RETURNS TABLE
+	// elsewhere.
 	schedules, err := scanDueSchedules(rows)
 	if err != nil {
 		return nil, err

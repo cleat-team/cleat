@@ -1256,8 +1256,11 @@ rows over 200 tenants:
 | with the bypass | **no** | **Index Scan** | **5760** |
 
 So the cost lands on the statements that cannot name a tenant --
-`ClaimWorkflowsAcrossTenants` and `BatchHeartbeat`, which scan by design -- and
-on any future statement that forgets to. Applying the opt-in accepts that on
+`HeartbeatBatchFenced`, which scans by design because one worker legitimately
+holds instances across many tenants -- and on any future statement that
+forgets to. (Claiming itself no longer scans cross-tenant: #1926 replaced the
+old `ClaimWorkflowsAcrossTenants` with unconditional per-tenant rotation, each
+claim scoped to one tenant.) Applying the opt-in accepts the scan cost on
 every tenant-scoped table, which is why it is a deliberate act rather than the
 default.
 
