@@ -271,10 +271,20 @@ def integration_hub_role_mismatches(script_out, readme_text):
     if reason:
         return [], f"DBOS-isolated side: {reason}"
 
-    readme_rows = {m.group(1): (int(m.group(2)), int(m.group(3)))
-                   for m in WEDGE_ROLE_ROW_RE.finditer(readme_text)}
+    # A dict keyed by role name would let a second matching row (anywhere
+    # else in the README) silently overwrite the first rather than being
+    # noticed -- cleat-review on cleat#2749. Count occurrences instead of
+    # collapsing them, so more than one is UNMEASURED, not a silent pick.
+    readme_rows = {}
+    role_counts = {}
+    for m in WEDGE_ROLE_ROW_RE.finditer(readme_text):
+        role = m.group(1)
+        role_counts[role] = role_counts.get(role, 0) + 1
+        readme_rows[role] = (int(m.group(2)), int(m.group(3)))
     problems = []
     for i, role in enumerate(INTEGRATION_HUB_ROLE_NAMES):
+        if role_counts.get(role, 0) > 1:
+            return [], f"found {role_counts[role]} '| {role} | **N** | **N** |' rows in the README, expected exactly one"
         if role not in readme_rows:
             return [], f"found no '| {role} | **N** | **N** |' row in the README's role table"
         readme_cleat, readme_dbos = readme_rows[role]
@@ -563,6 +573,15 @@ def self_test():
             or not any("host runner" in p and "20" in p and "25" in p for p in problems):
         failures.append(f"  MISSED: compensating errors on two role rows (app total unaffected) "
                         f"were not reported: {problems}")
+
+    # Known negative -- cleat-review's nit on cleat#2749: a second row
+    # matching a role name elsewhere in the README must not silently win as
+    # "the" value for that role.
+    wedge_duplicate_role = SELF_TEST_WEDGE_README_MATCHED + "\n| tenant code | **999** | **999** |\n"
+    problems, status = check_pair("integration-hub", wedge_duplicate_role, wedge_matched_runner)
+    if status != "unmeasured":
+        failures.append(f"  MISSED: a duplicated wedge role row was not reported as unmeasured "
+                        f"(got status={status!r}): {problems}")
 
     # Known negative -- a role section renamed or removed (simulating
     # dbos-pair-loc.sh relabelling one of the three role groups on either
