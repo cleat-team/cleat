@@ -69,7 +69,7 @@ func TestARetiredSecretStopsResolvingAndSetSecretRevivesIt(t *testing.T) {
 					return
 				}
 				if n := deleteSecretRowForTestChecked(t, db, dialect, tenant, name); n == 0 {
-					t.Errorf("cleanup: expected to delete the row this test created, deleted 0 -- "+
+					t.Errorf("cleanup: expected to delete the row this test created, deleted 0 -- " +
 						"see deleteSecretRowForTestChecked's doc comment for the SQL Server RLS gap this guards")
 				}
 			})
