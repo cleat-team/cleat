@@ -143,11 +143,21 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 //
 // `AND tenant_id` in the candidate SELECT is the whole of that on SQL Server,
 // and it was missing (3.91). dbo.fn_tenant_filter is off for any dbo.cleat_admin
-// login (012_admin_role.sql), and requireCleatAdminMembership checks s.db -- the
-// SAME POOL this runs on -- so on any deployment where ClaimWorkflowsAcrossTenants
-// works at all, this ordinary claim was already returning every tenant's ready
-// work and the -claim-across-tenants flag was guarding a widening that had
-// already happened.
+// login (012_admin_role.sql), so nothing else on this connection would have
+// caught the omission -- this predicate is the only thing standing between a
+// dbo.cleat_admin pool and every tenant's ready work.
+//
+// #1926 retired the mechanism this comment used to contrast against: a
+// separate cross-tenant claim query (claimWorkflowsAcrossTenantsOnce), gated
+// by requireCleatAdminMembership, that ran the SAME pool this method runs on
+// without the tenant predicate. There is no such variant left to "simplify
+// into" by sharing SQL with -- every caller reaches this one function, and
+// every one of them scopes it to a single tenant. That includes
+// --claim-across-tenants: its per-tenant rotation
+// (cmd/cleat-worker/rotating_claim.go) opens a store scoped to one tenant at
+// a time via storeForTenant, so s.tenantID -- and therefore this predicate --
+// is different on each of the rotation's calls, not a fixed value from the
+// worker's own configuration.
 //
 // The other two dialects disagreed with this one, which is what settled it:
 // MySQL carries `AND tenant_id = ?` here explicitly, and PostgreSQL carries no
@@ -155,9 +165,6 @@ func (s *MSSQLStore) ClaimWorkflows(ctx context.Context, workerID string, limit 
 // genuinely subject to RLS (cross_tenant_claim_test.go tests exactly that, with
 // a non-owning role). SQL Server had neither, so it was the only dialect with
 // nothing enforcing it.
-//
-// Do not "simplify" this by sharing SQL with claimWorkflowsAcrossTenantsOnce.
-// The difference between them is this one predicate, and that is the point.
 func (s *MSSQLStore) claimWorkflowsOnce(ctx context.Context, workerID string, limit int) ([]*WorkflowInstance, error) {
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
