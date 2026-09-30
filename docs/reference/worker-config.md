@@ -1155,7 +1155,8 @@ everything downstream of it -- event history, state, child workflows, schedules
 widened query required; the mechanism that replaced it requires none of it —
 not for the claim and not for the due-schedule read. It is kept because a
 deployment may still carry those grants, and because `admin.in_flight_workflow_ids`
-(the plugin sweep, migration 073) still uses the same `cleat_dispatcher` role.
+(`migrations/postgres/001_schema.sql`'s `ALTER FUNCTION ... OWNER TO
+cleat_dispatcher`, the plugin sweep) still uses the same `cleat_dispatcher` role.
 
 | dialect | what the deployment must do |
 |---------|-----------------------------|
