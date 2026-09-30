@@ -405,6 +405,55 @@ func TestValidateManifestAllowsAcyclicArrayAndMapReferences(t *testing.T) {
 	}
 }
 
+// TestValidateManifestAllowsTreeViaArraySelfReference is cleat#2806 R2: a
+// type referencing itself as an array item (the ordinary shape of a tree,
+// "children": array of Node) is NOT a by-value cycle -- Go generates
+// []Node, which does not need the complete type up front, and it compiles
+// today on develop. An earlier version of the cycle check treated an
+// array's item type as an edge and rejected this, contradicting its own
+// doc comment ("not caught here on purpose") and regressing a shape
+// develop already accepted -- measured through the real pipeline
+// (ValidateManifest -> FromManifest -> GenerateGo -> assertGoCompiles in
+// internal/plugingen) before this test was written.
+func TestValidateManifestAllowsTreeViaArraySelfReference(t *testing.T) {
+	m := &Manifest{
+		Name: "tree", Version: "0.1.0", Description: "test", Author: "test",
+		Types: map[string]TypeDef{
+			"Node": {Type: "object", Fields: map[string]FieldDef{
+				"value":    {Type: "string"},
+				"children": {Type: "array", Items: &FieldDef{Type: "Node"}},
+			}},
+		},
+		HostFunctions: map[string]HostFuncDef{
+			"f": {Description: "f", Input: TypeDef{Type: "Node"}, Output: TypeDef{Type: "Node"}},
+		},
+	}
+	if err := ValidateManifest(m); err != nil {
+		t.Errorf("expected no error for a tree via an array of the same type, got: %v", err)
+	}
+}
+
+// TestValidateManifestAllowsMapOfSelfReference is the map-value mirror of
+// TestValidateManifestAllowsTreeViaArraySelfReference, same reasoning:
+// map[string]Node does not need the complete type up front either.
+func TestValidateManifestAllowsMapOfSelfReference(t *testing.T) {
+	m := &Manifest{
+		Name: "maptree", Version: "0.1.0", Description: "test", Author: "test",
+		Types: map[string]TypeDef{
+			"Node": {Type: "object", Fields: map[string]FieldDef{
+				"value": {Type: "string"},
+				"kids":  {Type: "map", KeyType: &FieldDef{Type: "string"}, ValueType: &FieldDef{Type: "Node"}},
+			}},
+		},
+		HostFunctions: map[string]HostFuncDef{
+			"f": {Description: "f", Input: TypeDef{Type: "Node"}, Output: TypeDef{Type: "Node"}},
+		},
+	}
+	if err := ValidateManifest(m); err != nil {
+		t.Errorf("expected no error for a map whose value type is the same type, got: %v", err)
+	}
+}
+
 // TestLoadAndValidateManifestWithFieldReferencingDefinedType is the
 // end-to-end case: a real manifest, through LoadManifest and
 // ValidateManifest, where one type's field is another type's name rather

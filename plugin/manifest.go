@@ -258,25 +258,29 @@ func validateTypeDef(td TypeDef, types map[string]TypeDef, context string) error
 }
 
 // fieldTypeRefs returns the names a type's fields directly reference into
-// types -- via a field's own type, an array's item type, or a map's value
-// type (a map's key type is always a simple/builtin type in FieldDef's
-// existing shape, never a reference) -- restricted to names that actually
-// resolve, since an unresolvable name is already reported by
+// types -- via a field's OWN type only -- restricted to names that
+// actually resolve, since an unresolvable name is already reported by
 // validateTypeDef.
+//
+// Deliberately does NOT walk into an array's item type or a map's value
+// type (cleat#2806 R2, a real regression measured and fixed, not a
+// preventive restriction): Node{children: array of Node} and
+// Node{kids: map[string]Node} both generate as []Node / map[string]Node,
+// neither of which needs the complete type up front the way a struct
+// field held by value does, and both compile today on develop. An
+// earlier version of this function added Items.Type and ValueType.Type
+// as edges, which rejected exactly that legal, common (a tree) shape --
+// contradicting validateNoTypeCycles' own doc comment, which already said
+// array/map wrapping was "not caught here on purpose" while the code did
+// the opposite. Verified through the real pipeline (ValidateManifest ->
+// FromManifest -> GenerateGo) that both the array-tree and map-tree
+// shapes validate and the generated Go compiles, and that a direct
+// self-reference (Node{next: Node}) is still rejected.
 func fieldTypeRefs(td TypeDef, types map[string]TypeDef) []string {
 	var refs []string
-	add := func(name string) {
-		if _, ok := types[name]; ok {
-			refs = append(refs, name)
-		}
-	}
 	for _, fd := range td.Fields {
-		add(fd.Type)
-		if fd.Items != nil {
-			add(fd.Items.Type)
-		}
-		if fd.ValueType != nil {
-			add(fd.ValueType.Type)
+		if _, ok := types[fd.Type]; ok {
+			refs = append(refs, fd.Type)
 		}
 	}
 	return refs
@@ -314,7 +318,20 @@ func validateNoTypeCycles(types map[string]TypeDef) error {
 		case done:
 			return nil
 		case visiting:
-			return fmt.Errorf("type reference cycle: %s -> %s", strings.Join(path, " -> "), name)
+			// path may hold ancestors OUTSIDE the cycle (an unrelated root
+			// C that happens to lead into a separate A -> B -> A loop
+			// without itself being part of it) -- trim to where name first
+			// appears, so the message names only the cycle, not the path
+			// that reached it.
+			start := 0
+			for i, p := range path {
+				if p == name {
+					start = i
+					break
+				}
+			}
+			cycle := append(append([]string{}, path[start:]...), name)
+			return fmt.Errorf("type reference cycle: %s", strings.Join(cycle, " -> "))
 		}
 		state[name] = visiting
 		path = append(path, name)
