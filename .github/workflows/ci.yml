@@ -439,6 +439,17 @@ jobs:
           scripts/check-no-raw-rebind.py --self-test
           scripts/check-no-raw-rebind.py
 
+      # MSSQLStore.WithTenant copies the struct but not the pool: the pool's
+      # connector still carries the ORIGINAL tenant's SESSION_CONTEXT, so a
+      # method querying s.db directly instead of through beginTxWithContext
+      # silently answers as the wrong tenant under a re-scoped store
+      # (cleat#2210). Structural rather than a one-time count, so a future
+      # method with this shape fails here too, not just the ones fixed today.
+      - name: MSSQL WithTenant plain-read guard
+        run: |
+          scripts/check-mssql-tenant-scoped-reads.py --self-test
+          scripts/check-mssql-tenant-scoped-reads.py
+
       # Three workstreams append sections to IMPROVEMENT-PLAN.md at once, each
       # picking the next free number against a develop that has already moved.
       # The collision exists only in the merge, and a duplicate heading renders
