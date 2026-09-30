@@ -128,9 +128,21 @@ func (w *Worker) databaseExplainsStaleLoop(db dbSnapshot, l staleLoop) bool {
 		return false
 	}
 	now := w.dbReach.now()
-	if !db.RecoveredAt.IsZero() && db.Reachable && now.Sub(db.RecoveredAt) < dbRecoveryGrace &&
-		!l.Since.Before(db.OutageStart.Add(-l.Interval)) {
-		return true
+	if !db.RecoveredAt.IsZero() && db.Reachable && now.Sub(db.RecoveredAt) < dbRecoveryGrace {
+		// db.OutageStart is anchored on lastSuccessStart (cleat#2284), which has no upper bound on how
+		// far back it reaches: with a raised --heartbeat, lastSuccessStart can sit long before the real
+		// outage, and every loop quiet since then would be excused for the outage's entire duration plus
+		// dbRecoveryGrace (cleat-review, cleat#2284 follow-up). Clamp it: the outage cannot actually have
+		// begun more than one heartbeat interval plus one call deadline before OutageFailingSince, because
+		// that bound is the longest a call in flight when the database died can take to report failure --
+		// the same lag the doc comment on db_reachability.go's outageStart field already names.
+		anchor := db.OutageStart
+		if earliest := db.OutageFailingSince.Add(-(w.heartbeatInterval + w.dbCallDeadline())); earliest.After(anchor) {
+			anchor = earliest
+		}
+		if !l.Since.Before(anchor.Add(-l.Interval)) {
+			return true
+		}
 	}
 	if db.LastSuccessStart.After(l.Since.Add(l.Interval)) {
 		return false
