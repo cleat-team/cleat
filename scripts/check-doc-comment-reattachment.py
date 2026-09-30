@@ -73,10 +73,10 @@ import re
 import subprocess
 import sys
 
-# Anchored at column 0: a top-level declaration. A method's receiver is skipped
-# so `func (s *Store) Foo` keys on Foo. Anchoring is what keeps this out of
-# strings and nested funcs without needing a Go parser -- the same "anchor to
-# where the artifact lives, not to what it is called" move CLAUDE.md prescribes.
+# Anchored at column 0: a top-level declaration. Anchoring is what keeps this
+# out of strings and nested funcs without needing a Go parser -- the same
+# "anchor to where the artifact lives, not to what it is called" move
+# CLAUDE.md prescribes.
 #
 # `var` AND `const` ARE HERE BECAUSE THEY WERE MISSING, and the guard's own
 # author walked into the gap. This read `func|type` until 2026-09-17, so a
@@ -95,11 +95,41 @@ import sys
 # So the whole of the difference is the defect. A name inside a grouped
 # `var (` / `const (` block is indented and still does not register, which is
 # the conservative direction: untracked, never misreported.
-DECL = re.compile(r'^(?:func\s+(?:\([^)]*\)\s*)?(\w+)|(?:type|var|const)\s+(\w+))\b')
+#
+# A METHOD'S RECEIVER TYPE IS ALSO CAPTURED, separately from the receiver
+# VARIABLE, because a bare method name is not unique in Go -- `Unwrap` is
+# implemented once per error type by design, and this repo has three separate
+# `ClaimWorkflows` for the same reason. Keying on the name alone means a
+# second, unrelated method with the same name overwrites the first's entry in
+# `documented()`'s map (Python dicts have one slot per key), so the ORIGINAL,
+# untouched declaration is reported as having lost its comment when in fact
+# the newcomer just collided with it. Found 2026-09-27 (cleat#2480) on
+# `engine/runtime.go`'s two `Unwrap` methods, one of the thirteen findings the
+# guard produced on the 0.3.0 release PR -- the only one that was not real.
+#
+# The receiver pattern accepts every shape the repo actually has: a named
+# receiver (`s *Store`), an unnamed one (`*fakeDriver`, `auth/fake_driver_test.go`),
+# and a generic one (`c *Container[T]`, `testdata/generics/generics.go`;
+# `pf *PluginFunc[Req, Resp]`, `cleat/plugin_caller.go`) -- verified present
+# with `grep -rn '^func ([a-zA-Z_][a-zA-Z0-9_]* \*[A-Za-z_][A-Za-z0-9_]*\['`
+# and `grep -rn '^func (\*[A-Za-z_]'` before assuming only the common form
+# needed handling.
+DECL = re.compile(
+    r'^func\s+(?:\(\s*(?:\w+\s+)?\*?(\w+)(?:\[[^\]]*\])?\s*\)\s*)?(\w+)\b'
+    r'|^(?:type|var|const)\s+(\w+)\b'
+)
 
 
 def documented(src):
-    """Map each top-level declaration name to whether a // block sits directly above it.
+    """Map each top-level declaration to whether a // block sits directly above it.
+
+    THE MAP KEY is the bare name for a function, type, var or const -- those
+    occupy one flat namespace in Go, so the compiler already refuses two of
+    them sharing a name and a bare-name key cannot collide by construction.
+    A METHOD's key is `(receiver_type, name)` instead, because a method's
+    namespace is scoped to its receiver and two methods sharing a name on
+    different receivers are not just legal, they are the normal way to
+    implement an interface method per type (cleat#2480).
 
     RAW STRING LITERALS ARE SKIPPED, because Go embeds SQL and generated Go in
     backticks and a `func ...` at column 0 inside one is not a declaration. The
@@ -121,11 +151,35 @@ def documented(src):
         if not in_raw and not is_comment:
             m = DECL.match(line)
             if m:
-                name = next(g for g in m.groups() if g)
-                out[name] = i > 0 and lines[i - 1].startswith('//')
+                recv, fname, other = m.groups()
+                if fname is not None:
+                    key = (recv, fname) if recv is not None else fname
+                else:
+                    key = other
+                out[key] = i > 0 and lines[i - 1].startswith('//')
         if not is_comment and line.count('`') % 2 == 1:
             in_raw = not in_raw
     return out
+
+
+def display_name(key):
+    """Render a documented() key back into something a reader recognises."""
+    if isinstance(key, tuple):
+        recv, name = key
+        return f'({recv}).{name}' if recv else name
+    return key
+
+
+def lost_docs(old_src, new_src):
+    """Keys documented in old_src that are undocumented (or renamed away) in new_src.
+
+    Factored out of findings() so the self-test can exercise the actual
+    comparison the guard makes without going through git at all -- the same
+    move CLAUDE.md asks for when a check's setup can obscure what is being
+    measured.
+    """
+    o, n = documented(old_src), documented(new_src)
+    return [key for key, had_doc in o.items() if had_doc and key in n and not n[key]]
 
 
 def _show(rev, path):
@@ -144,10 +198,8 @@ def findings(base, head):
         old, new = _show(base, f), _show(head, f)
         if old is None or new is None:
             continue  # added or deleted outright; nothing was detached
-        o, n = documented(old), documented(new)
-        for name, had_doc in o.items():
-            if had_doc and name in n and not n[name]:
-                out.append((f, name))
+        for key in lost_docs(old, new):
+            out.append((f, key))
     return out
 
 
@@ -249,11 +301,76 @@ def self_test():
         print('SELF-TEST FAILED: a correctly documented const/var reads as undocumented')
         ok = False
 
-    # A method's receiver must not become part of the name, or every method
-    # reads as a declaration nothing else refers to.
+    # A method is keyed on (receiver type, name), not on the bare name --
+    # that is the fix for cleat#2480, so this is the positive half of it.
     m = documented('package p\n\n// Foo does a thing.\nfunc (s *Store) Foo() {}\n')
-    if not m.get('Foo'):
-        print('SELF-TEST FAILED: a method with a receiver is not keyed on its own name')
+    if not m.get(('Store', 'Foo')):
+        print('SELF-TEST FAILED: a method with a receiver is not keyed on (receiver, name)')
+        ok = False
+
+    # Two receiver shapes the bare-name fix has to keep working: unnamed
+    # (auth/fake_driver_test.go) and generic (testdata/generics/generics.go,
+    # cleat/plugin_caller.go) -- verified present in the tree, not assumed.
+    unnamed = documented('package p\n\n// Open opens a connection.\nfunc (*fakeDriver) Open() {}\n')
+    if not unnamed.get(('fakeDriver', 'Open')):
+        print('SELF-TEST FAILED: an unnamed receiver is not keyed on its type')
+        ok = False
+
+    generic = documented(
+        'package p\n\n// Process runs the container.\nfunc (c *Container[T]) Process() {}\n')
+    if not generic.get(('Container', 'Process')):
+        print('SELF-TEST FAILED: a generic receiver is not keyed on its bare type name')
+        ok = False
+
+    # THE DECIDING TEST (cleat#2480): a second method sharing a NAME but not a
+    # RECEIVER must not read as the first one losing its doc comment. This is
+    # `engine/runtime.go`'s actual shape -- two `Unwrap` methods, one per error
+    # type -- reduced to the minimum that reproduces it. Revert the (receiver,
+    # name) keying and this must fail, because the bare-name map overwrites
+    # wasmTrapError's entry with GuestReturnedError's when the second is added.
+    collision_base = '''package p
+
+// Unwrap lets errors.Is/As see through wasmTrapError to its cause.
+func (e *wasmTrapError) Unwrap() error { return e.cause }
+'''
+    collision_head = '''package p
+
+// Unwrap lets errors.Is/As see through wasmTrapError to its cause.
+func (e *wasmTrapError) Unwrap() error { return e.cause }
+
+func (e *GuestReturnedError) Unwrap() error { return e.cause }
+'''
+    collided = lost_docs(collision_base, collision_head)
+    if collided:
+        print(f'SELF-TEST FAILED: a same-named method on a NEW receiver was read as an '
+              f'EXISTING receiver losing its doc comment: {[display_name(k) for k in collided]!r}')
+        ok = False
+
+    # And the fix must not overcorrect: a genuine loss on one receiver has to
+    # keep being reported even with a same-named sibling method sitting right
+    # beside it -- the known-positive CLAUDE.md requires for exactly this
+    # shape of fix, since "reports nothing" is what a broken widening would
+    # also do.
+    real_loss_base = '''package p
+
+// Unwrap lets errors.Is/As see through wasmTrapError to its cause.
+func (e *wasmTrapError) Unwrap() error { return e.cause }
+
+func (e *GuestReturnedError) Unwrap() error { return e.cause }
+'''
+    real_loss_head = '''package p
+
+func inserted() int { return 0 }
+
+func (e *wasmTrapError) Unwrap() error { return e.cause }
+
+func (e *GuestReturnedError) Unwrap() error { return e.cause }
+'''
+    real_loss = lost_docs(real_loss_base, real_loss_head)
+    if real_loss != [('wasmTrapError', 'Unwrap')]:
+        print(f'SELF-TEST FAILED: a genuine loss on one receiver, beside an untouched '
+              f'same-named method on another receiver, was not reported correctly: '
+              f'{[display_name(k) for k in real_loss]!r}')
         ok = False
 
     # A `func` inside a string or indented must not register as a declaration.
@@ -354,8 +471,8 @@ def main():
         print(f'ok: no declaration lost its doc comment between {base} and {head}')
         return 0
 
-    for f, name in hits:
-        print(f'{f}: `{name}` had a doc comment at {base} and has none at {head}.')
+    for f, key in hits:
+        print(f'{f}: `{display_name(key)}` had a doc comment at {base} and has none at {head}.')
     print()
     print('A declaration was very likely inserted between that comment and the declaration')
     print('it documents, so the comment now documents the newcomer. Go attaches doc comments')
