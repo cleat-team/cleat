@@ -1,6 +1,7 @@
 package backendkit
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -91,14 +92,24 @@ func TestWriteUpstreamError(t *testing.T) {
 		wantStatus int
 	}{
 		{
-			name:       "a 401 passes through unchanged",
-			err:        &UpstreamStatusError{Status: http.StatusUnauthorized, Body: []byte("nope")},
-			wantStatus: http.StatusUnauthorized,
-		},
-		{
 			name:       "a 404 passes through unchanged",
 			err:        &UpstreamStatusError{Status: http.StatusNotFound, Body: []byte("no such run")},
 			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:       "a 400 passes through unchanged",
+			err:        &UpstreamStatusError{Status: http.StatusBadRequest, Body: []byte("bad request")},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "a 422 passes through unchanged",
+			err:        &UpstreamStatusError{Status: http.StatusUnprocessableEntity, Body: []byte("nope")},
+			wantStatus: http.StatusUnprocessableEntity,
+		},
+		{
+			name:       "a 429 passes through unchanged",
+			err:        &UpstreamStatusError{Status: http.StatusTooManyRequests, Body: []byte("slow down")},
+			wantStatus: http.StatusTooManyRequests,
 		},
 		{
 			// THE CASE THIS FIX EXISTS FOR: before it, this was the ONLY
@@ -107,6 +118,23 @@ func TestWriteUpstreamError(t *testing.T) {
 			err: fmt.Errorf("%w: %w", ErrIdempotencyKeyInputMismatch,
 				&UpstreamStatusError{Status: http.StatusConflict, Body: []byte("{}")}),
 			wantStatus: http.StatusConflict,
+		},
+		{
+			// cleat-review, cleat#2810 R1: every example backend injects its OWN
+			// worker key server-side and strips whatever the browser sent
+			// (authTransport, order-lifecycle/backend/main.go:318-328 and the
+			// same shape in the other two backends) -- so a 401 or 403 from the
+			// worker is the BACKEND's credential failing, never the browser
+			// caller's, which sent none. Passing it through would tell an
+			// unauthenticated browser its credentials were rejected.
+			name:       "a 401 (the backend's own credential, not the caller's) maps to 502",
+			err:        &UpstreamStatusError{Status: http.StatusUnauthorized, Body: []byte("invalid or revoked API key")},
+			wantStatus: http.StatusBadGateway,
+		},
+		{
+			name:       "a 403 maps to 502, same reason as 401",
+			err:        &UpstreamStatusError{Status: http.StatusForbidden, Body: []byte("forbidden")},
+			wantStatus: http.StatusBadGateway,
 		},
 		{
 			name:       "a 5xx from the worker maps to 502, not passed through",
@@ -128,5 +156,34 @@ func TestWriteUpstreamError(t *testing.T) {
 				t.Errorf("status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
 			}
 		})
+	}
+}
+
+// THE CASE cleat-review MEASURED THROUGH THE REAL CLIENT, not just the typed
+// error: a genuine 401 HTTP response from a worker, through classifyError,
+// through WriteUpstreamError, must reach the caller as 502 -- not 401. The
+// table above pins the mapping decision in isolation; this pins the whole
+// pipeline cleat-review actually exercised.
+func TestWorkerUnauthorizedMapsTo502ThroughTheRealClient(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid or revoked API key"}`))
+	}))
+	defer srv.Close()
+
+	_, err := New(srv.URL).GetWorkflow(context.Background(), "run-1")
+	if err == nil {
+		t.Fatal("expected an error from a 401 response")
+	}
+
+	rec := httptest.NewRecorder()
+	WriteUpstreamError(rec, err)
+	if rec.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want %d (body: %s) -- a worker 401 is the backend's own "+
+			"credential, never the browser's", rec.Code, http.StatusBadGateway, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("401")) {
+		t.Errorf("body %q lost the real status -- an operator reading it should still see 401",
+			rec.Body.String())
 	}
 }
