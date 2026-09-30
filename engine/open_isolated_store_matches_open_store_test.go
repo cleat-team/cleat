@@ -128,15 +128,29 @@ func assertAllFieldsMatchExceptDB(t *testing.T, open, isolated *PostgresStore) {
 		ofv := reflect.NewAt(typ.Field(i).Type, unsafe.Pointer(ov.Field(i).UnsafeAddr())).Elem()
 		ifv := reflect.NewAt(typ.Field(i).Type, unsafe.Pointer(iv.Field(i).UnsafeAddr())).Elem()
 		checked++
-		if !reflect.DeepEqual(ofv.Interface(), ifv.Interface()) {
+		var mismatch bool
+		if ofv.Kind() == reflect.Ptr {
+			// IDENTITY, NOT reflect.DeepEqual (cleat-review's optional nit on
+			// #2741). DeepEqual on two non-nil pointers compares what they
+			// point TO, so a future bug constructing a second, equal-valued
+			// *PayloadEncryption or *prometheus.Metrics instead of reusing
+			// the factory's would pass silently -- exactly the class of gap
+			// this test exists to close. Both Open* methods are supposed to
+			// hand the store the SAME instance the factory holds, so
+			// pointer equality is the actual property under test.
+			mismatch = ofv.Pointer() != ifv.Pointer()
+		} else {
+			mismatch = !reflect.DeepEqual(ofv.Interface(), ifv.Interface())
+		}
+		if mismatch {
 			// A pointer field (encryption, logger, Metrics) prints its
 			// pointee's full contents under %#v -- Metrics alone runs to
-			// several kilobytes of OpenTelemetry instrument state. The
-			// pointer VALUE is what this test actually compares (identity,
-			// not contents), so print that instead; everything else keeps
-			// %#v, which is short for every other field on this struct.
+			// several kilobytes of OpenTelemetry instrument state. Print the
+			// pointer value instead, which is what was actually compared;
+			// everything else keeps %#v, which is short for every other
+			// field on this struct.
 			if ofv.Kind() == reflect.Ptr {
-				t.Errorf("%s: OpenIsolatedStore got %p, OpenStore got %p, want equal (same pointer)",
+				t.Errorf("%s: OpenIsolatedStore got %p, OpenStore got %p, want the same pointer",
 					name, ifv.Interface(), ofv.Interface())
 			} else {
 				t.Errorf("%s: OpenIsolatedStore got %#v, OpenStore got %#v, want equal",
