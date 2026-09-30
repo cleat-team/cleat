@@ -202,7 +202,12 @@ const rlsSubjectWarningMSSQL = "warning: --db points at a connection that row-le
 	"         against it removes nothing and reports success.\n" +
 	"\n" +
 	"         SQL Server has no superuser exemption: the filter applies to sysadmin,\n" +
-	"         db_owner and dbo alike. cleatctl needs a login that is a member of\n" +
-	"         dbo.cleat_admin (migrations/mssql/012_admin_role.sql), which sa is NOT\n" +
-	"         by default and cannot be granted -- dbo may not be added to a role.\n" +
+	"         db_owner and dbo alike. cleatctl needs TWO things, not one: (1) apply\n" +
+	"         migrations/mssql/optional/cross_tenant_claim.sql (not auto-applied), which\n" +
+	"         switches dbo.fn_tenant_filter to the form that admits dbo.cleat_admin\n" +
+	"         members -- the shipped predicate (migrations/mssql/003_procedures.sql) has\n" +
+	"         no such admission since cleat#1541, so membership alone grants nothing; and\n" +
+	"         (2) a login that is a member of dbo.cleat_admin (created empty by\n" +
+	"         migrations/mssql/001_schema.sql), which sa is NOT by default and cannot be\n" +
+	"         granted -- dbo may not be added to a role.\n" +
 	"\n"

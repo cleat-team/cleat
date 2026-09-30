@@ -6,8 +6,10 @@ package testutil
 // principal -- sysadmin, db_owner and dbo included -- so on a database built
 // from the shipped migrations a plain pool cannot see across tenants. Teardown
 // that issues DELETE on such a pool matches nothing, reports no error, and
-// leaves every row behind. Migration 012 introduces the cleat_admin role as the
-// exemption; this file provisions a member of it for the test harness.
+// leaves every row behind. migrations/mssql/001_schema.sql (née 012_admin_role.sql,
+// before the SQL Server compaction folded it into the baseline) introduces the
+// cleat_admin role as the exemption; this file provisions a member of it for
+// the test harness.
 //
 // The gate is "does this database have security policies", not "does the role
 // exist". On the hand-written schema there are no policies, so a plain
@@ -36,7 +38,10 @@ const (
 	// meaningful sense -- CLEAT_TEST_MSSQL already carries sa's password in
 	// the clear, and this only ever exists on a throwaway test instance. The
 	// shipped migration deliberately creates no login at all, leaving that to
-	// the deployment (migrations/mssql/012_admin_role.sql).
+	// the deployment (migrations/mssql/001_schema.sql creates the empty
+	// cleat_admin role; it was 012_admin_role.sql until the SQL Server
+	// compaction folded it into the baseline, and that filename no longer
+	// exists).
 	mssqlTestAdminLogin    = "cleat_test_admin"
 	mssqlTestAdminPassword = "CleatTestAdmin123!"
 )
@@ -320,8 +325,10 @@ func requireMSSQLAdminRole(t *testing.T, db *sql.DB) {
 	if n == 0 {
 		t.Fatalf("this database enforces row-level security but has no cleat_admin role, " +
 			"so nothing can read or delete across tenants.\n" +
-			"Apply migrations/mssql/012_admin_role.sql (IMPROVEMENT-PLAN 3.37), or drop and " +
-			"recreate the test database so the shipped migrations run from scratch.")
+			"The role is created empty by migrations/mssql/001_schema.sql (IMPROVEMENT-PLAN 3.37; " +
+			"this file was named 012_admin_role.sql before the SQL Server migration compaction " +
+			"folded it into the baseline). Drop and recreate the test database so the shipped " +
+			"migrations run from scratch.")
 	}
 }
 

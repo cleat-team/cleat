@@ -414,8 +414,11 @@ func TestMSSQLTenantScopedTablesAreQueriedWithATenantPredicate(t *testing.T) {
 				"join condition like `d.tenant_id = w.tenant_id` does, and correlates two "+
 				"tables while restricting neither to a caller. Only a comparison against "+
 				"@pN, ? or $N carries \"the tenant asking\". See tenantComparedToAParameter.\n\n"+
-				"dbo.fn_tenant_filter is OFF for any dbo.cleat_admin connection "+
-				"(012_admin_role.sql), which is what a multi-tenant deployment must use, so "+
+				"dbo.fn_tenant_filter is OFF for any dbo.cleat_admin connection, once "+
+				"migrations/mssql/optional/cross_tenant_claim.sql has switched it to that form "+
+				"(cleat_admin membership is granted today for cleatctl and cross-tenant test "+
+				"teardown, not for the worker's own dispatch loop -- see "+
+				"engine/testutil/mssql_admin.go), so on such a connection "+
 				"this predicate is the whole of the isolation. If it genuinely does not need "+
 				"one, add\n\n    %q: {\n        SQL:    %q,\n        Reason: <one of the constants at the top>,\n    },\n\n"+
 				"to tenantPredicateAllowlist WITH THE REASON THAT IS ACTUALLY TRUE. The key "+

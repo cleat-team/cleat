@@ -135,9 +135,11 @@ and syscall boundary but not the CPU/wall-clock one.
 > (8 tables: `workflow_defs`, `workflow_instances`, `event_history`,
 > `workflow_signals`, `workflow_schedules`, `workflow_tags`,
 > `workflow_routing`, `workflow_promises`) and
-> `migrations/mssql/012_admin_role.sql:110-121`, which binds
+> `migrations/mssql/003_procedures.sql:356-364`, which binds
 > `dbo.fn_tenant_filter` as a `FILTER PREDICATE` security policy on the same
-> seven multi-tenant tables. `tiers.yaml`'s D1 decision (2026-08-06) grants
+> seven multi-tenant tables (this was `012_admin_role.sql` until the SQL
+> Server migration compaction folded it into the baseline; that filename no
+> longer exists). `tiers.yaml`'s D1 decision (2026-08-06) grants
 > `multi_tenant: [postgres, mssql]`; MySQL has no row-level security feature
 > at all (`CREATE POLICY`/`CREATE SECURITY POLICY` is not available), so it
 > remains single-tenant only — see `docs/reference/multi-tenancy.md`.

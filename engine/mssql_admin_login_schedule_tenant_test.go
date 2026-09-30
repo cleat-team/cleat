@@ -6,16 +6,23 @@ package engine
 // two facts meet, and one tenant can delete, disable and reschedule another
 // tenant's cron schedules over the ordinary HTTP API.
 //
-// Why the login is a cleat_admin member rather than might be. A non-default
-// tenant's workflows only run if the dispatch loop can see across tenants:
-// that is what migrations 023 and 024 exist for, and on SQL Server the
-// exemption is IS_ROLEMEMBER(N'cleat_admin') = 1 inside dbo.fn_tenant_filter
-// itself (012_admin_role.sql). GetDueSchedulesAcrossTenants and
-// ClaimReadyAcrossTenants both call requireCleatAdminMembership and fail
-// loudly without it. So a working multi-tenant SQL Server deployment has
-// granted the role, and MSSQLStore.WithTenant returns a copy sharing s.db --
-// one pool, one login. Every tenant-scoped store the worker hands a request is
-// therefore unfiltered.
+// Why the login is a cleat_admin member rather than might be, AT THE TIME this
+// was written (IMPROVEMENT-PLAN 3.86-era). A non-default tenant's workflows
+// only ran if the dispatch loop could see across tenants: on PostgreSQL that
+// was migrations 023 and 024, and on SQL Server the exemption was
+// IS_ROLEMEMBER(N'cleat_admin') = 1 inside dbo.fn_tenant_filter itself, once
+// migrations/mssql/optional/cross_tenant_claim.sql had switched the predicate
+// to that form (the shipped predicate, migrations/mssql/003_procedures.sql,
+// has never admitted cleat_admin members -- that split is cleat#1541).
+// GetDueSchedulesAcrossTenants, ClaimReadyAcrossTenants and
+// requireCleatAdminMembership were all removed in #1926, which replaced that
+// widened claim with unconditional per-tenant rotation needing no grant at
+// all -- so a working multi-tenant SQL Server deployment no longer needs
+// cleat_admin membership for its OWN dispatch loop. What #1926 did not change:
+// cleatctl and cross-tenant test teardown (engine/testutil/mssql_admin.go)
+// still provision that membership, and MSSQLStore.WithTenant returns a copy
+// sharing s.db -- one pool, one login. Every tenant-scoped store built over
+// SUCH a pool is therefore unfiltered, which is what this test still proves.
 //
 // This is where SQL Server and PostgreSQL diverge, and it is worth naming
 // because the PostgreSQL side got it right. There the exemption is a separate

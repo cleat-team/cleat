@@ -501,20 +501,16 @@ var (
 	maxQuotaConcurrencyKeys = flag.Int("max-quota-concurrency-keys", 0, "Max concurrency keys per workflow (0 = unlimited). Deliberately unbounded: unlike --max-quota-events, exceeding this FAILS the workflow rather than rolling it over, so a default would break working deployments at whatever number was chosen, and nobody has usage data to choose from. cleat#1829.")
 	maxQuotaSchedules       = flag.Int("max-quota-schedules", 0, "Max cron schedules per tenant (0 = unlimited). Deliberately unbounded: unlike --max-quota-events, exceeding this FAILS the workflow rather than rolling it over, so a default would break working deployments at whatever number was chosen, and nobody has usage data to choose from. cleat#1829.")
 	claimAcrossTenants      = flag.Bool("claim-across-tenants", true, "Execute work for every tenant, not only this worker's own. "+
-		"DEFAULTS ON since the default mechanism stopped needing a database grant: --claim-strategy=rotate "+
-		"reads the tenant list from admin.tenants -- which carries no row-level security -- and then claims "+
-		"and reads due schedules under each tenant's OWN RLS context. Nothing is exempt from a policy and "+
-		"nothing has to be granted.\n"+
-		"It was off by default because the only mechanism was admin.claim_workflows, whose owner needs "+
-		"BYPASSRLS: a privilege only a superuser can grant, and one managed PostgreSQL cannot grant at all. "+
-		"Turning that on had to be a deliberate act. `rotate` asks nothing of the deployment, so leaving a "+
-		"non-default tenant's work unexecuted by default stopped being caution and became a surprise.\n"+
+		"DEFAULTS ON: the dispatch loop rotates through admin.tenants -- which carries no row-level "+
+		"security -- and then claims and reads due schedules under each tenant's OWN RLS context. "+
+		"Nothing is exempt from a policy and nothing has to be granted, on any dialect.\n"+
+		"It was off by default because the only mechanism used to be a widened admin.claim_workflows "+
+		"query, whose owner needed BYPASSRLS: a privilege only a superuser can grant, and one managed "+
+		"PostgreSQL cannot grant at all. Turning that on had to be a deliberate act. That mechanism, "+
+		"and the --claim-strategy flag that selected it, were retired in #1926 once the per-tenant "+
+		"rotation proved itself: rotation asks nothing of the deployment, so leaving a non-default "+
+		"tenant's work unexecuted by default stopped being caution and became a surprise.\n"+
 		"WITH ONE TENANT THIS COSTS ONE QUERY PER TICK -- the tenant list -- and nothing else changes.\n"+
-		"--claim-strategy=global still needs the grants: migrations/postgres/023_cross_tenant_claim.sql and "+
-		"024_cross_tenant_schedules.sql on PostgreSQL; on SQL Server, migrations/mssql/optional/"+
-		"cross_tenant_claim.sql (NOT auto-applied: its predicate costs the index seek on any query without "+
-		"its own tenant predicate, 5760 logical reads against 33, cleat#1491) and THEN dbo.cleat_admin "+
-		"membership per migrations/mssql/012_admin_role.sql. 012 alone is not enough since cleat#1541.\n"+
 		"Set false to run this worker against its own tenant only. A worker reports on both loops at startup "+
 		"which mechanism it actually has, so a half-completed setup says so rather than running silently "+
 		"single-tenant.")
