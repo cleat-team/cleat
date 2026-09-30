@@ -268,6 +268,42 @@ func TestWasmOutputName(t *testing.T) {
 	}
 }
 
+// TestWorkflowLogicalNameMatchesWasmOutputName is the regression test for
+// cleat#2842: wasmOutputName and workflowLogicalName were one function until
+// this issue, and the fix requires them to still agree on the STEM -- the
+// only allowed difference is the ".wasm" extension itself. Reusing
+// TestWasmOutputName's table rather than writing a new one is deliberate:
+// the fix is a refactor of that exact function, so the same cases that
+// pinned its behaviour before the split are what could have been changed by
+// it.
+func TestWorkflowLogicalNameMatchesWasmOutputName(t *testing.T) {
+	tests := []struct {
+		name   string
+		result *analyzer.AnalysisResult
+	}{
+		{name: "PlaceOrder entry", result: &analyzer.AnalysisResult{EntryPoints: []string{"pkg.PlaceOrder"}}},
+		{name: "CancelOrder entry", result: &analyzer.AnalysisResult{EntryPoints: []string{"pkg.CancelOrder"}}},
+		{name: "no entry points", result: &analyzer.AnalysisResult{}},
+		{name: "single-letter function", result: &analyzer.AnalysisResult{EntryPoints: []string{"pkg.F"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logical := workflowLogicalName(tt.result)
+			fileName := wasmOutputName(tt.result)
+			if want := logical + ".wasm"; fileName != want {
+				t.Errorf("wasmOutputName() = %q, workflowLogicalName()+\".wasm\" = %q -- "+
+					"the two must agree on everything but the extension", fileName, want)
+			}
+			if strings.HasSuffix(logical, ".wasm") {
+				t.Errorf("workflowLogicalName() = %q carries a \".wasm\" suffix -- "+
+					"this is cleat#2842's exact defect: this value is embedded verbatim "+
+					"as cleat.metadata's WorkflowName, a workflow's identity, not a filename",
+					logical)
+			}
+		})
+	}
+}
+
 // TestWasmOutputName_PrefersTheManifest is cleat#2692 (owner decision,
 // 2026-09-29): a cleat.yaml `name:` in the entry point's own source
 // directory outranks both older rules -- the entry point itself (#2048) and
@@ -720,6 +756,38 @@ func TestRunBuild_GoTarget(t *testing.T) {
 		}
 		if fi.Size() == 0 {
 			t.Errorf("wasm file %s is empty", wf)
+		}
+	}
+
+	// cleat#2842: the embedded cleat.metadata's WorkflowName must NOT carry
+	// the ".wasm" file suffix that names the ARTIFACT this loop just
+	// verified above -- WorkflowName is the workflow's identity, what
+	// `cleat deploy` registers a definition under, not a filename. This
+	// exercises the real runBuild path end to end (unlike
+	// TestWorkflowLogicalNameMatchesWasmOutputName, which pins
+	// workflowLogicalName in isolation): the defect this issue fixed was in
+	// the ONE LINE connecting that function's result to the metadata struct,
+	// which only a build that actually embeds and reads back metadata can
+	// catch going forward.
+	for _, wf := range wasmFiles {
+		wasmBytes, err := os.ReadFile(filepath.Join(outDir, wf))
+		if err != nil {
+			t.Fatalf("reading built wasm %s: %v", wf, err)
+		}
+		meta, err := wasm.ReadMetadata(wasmBytes)
+		if err != nil {
+			t.Fatalf("reading cleat.metadata from built %s: %v", wf, err)
+		}
+		if strings.HasSuffix(meta.WorkflowName, ".wasm") {
+			t.Errorf("built %s: cleat.metadata WorkflowName = %q, carries a \".wasm\" "+
+				"suffix -- cleat#2842's exact defect", wf, meta.WorkflowName)
+		}
+		// The positive half of the same assertion: it should equal the file
+		// name minus the extension, not merely lack the suffix by accident
+		// (e.g. by being empty).
+		if want := strings.TrimSuffix(wf, ".wasm"); meta.WorkflowName != want {
+			t.Errorf("built %s: cleat.metadata WorkflowName = %q, want %q",
+				wf, meta.WorkflowName, want)
 		}
 	}
 
