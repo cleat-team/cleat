@@ -316,36 +316,51 @@ func (s *MSSQLStore) setAllowedSignalCallersOnce(ctx context.Context, workflowID
 	return tx.Commit()
 }
 
-// ConsumeSignal removes one delivery by id.
+// ConsumeSignal removes one delivery by id and bumps signal_consumed_seq
+// (finalize wakes a segment that CONSUMED something and still has rows
+// waiting, because a segment that consumed once can consume again --
+// progress is what separates a burst worth draining from an unrelated
+// pending signal that would spin, cleat#953).
 //
-// No retry wrapper, and no transaction. The method this replaces read and
-// deleted in one step, so it needed both: a transaction to be atomic, and
-// withRollbackGuaranteedRetry to be safe to repeat. A DELETE of one known id
-// is atomic on its own, and repeating it is the documented no-op -- so a
-// retried DELETE cannot consume a second signal, which is the failure the old
-// retry commentary existed to rule out.
-
+// Both statements run in one transaction, retried only on an error SQL
+// Server guarantees rolled back (withRollbackGuaranteedRetry). cleat#2758:
+// this method used to run the DELETE and the UPDATE as two separate,
+// untransacted statements under mssqlRetry, reasoning that the DELETE alone
+// is atomic and idempotent so it needed neither. True in isolation, and
+// beside the point: mssqlRetry retries the WHOLE closure, including on
+// errors whose outcome is unknown (a dropped connection after the DELETE
+// committed but before the UPDATE ran), and a retry of that closure reruns
+// the now-harmless no-op DELETE alongside a second, real increment of
+// signal_consumed_seq -- one physical consumption counted twice. A
+// transaction removes the partial-progress state a retry could observe: if
+// anything fails, nothing commits, and a retried attempt starts from the row
+// still present and the counter unchanged.
 func (s *MSSQLStore) ConsumeSignal(ctx context.Context, workflowID string, id int64) error {
-	return mssqlRetry(ctx, "consume signal", mssqlTxRetries, mssqlTxRetryDelay, func() error {
-		// The consumed counter, bumped in the same statement batch as the delete.
-		//
-		// finalize wakes a segment that CONSUMED something and still has rows
-		// waiting, because a segment that consumed once can consume again --
-		// progress is what separates a burst worth draining from an unrelated
-		// pending signal that would spin (cleat#953). Bumped here rather than
-		// through a new store method, because ConsumeSignal already writes.
-		if _, err := s.db.ExecContext(ctx, `
-			DELETE FROM workflow_signals
-			WHERE id = @p1 AND workflow_id = @p2 AND tenant_id = @p3
-		`, id, workflowID, s.tenantID); err != nil {
-			return err
-		}
-		_, err := s.db.ExecContext(ctx, `
-			UPDATE workflow_instances SET signal_consumed_seq = signal_consumed_seq + 1
-			WHERE id = @p1 AND tenant_id = @p2
-		`, workflowID, s.tenantID)
-		return err
+	return withRollbackGuaranteedRetry(ctx, "consume signal", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		return s.consumeSignalOnce(ctx, workflowID, id)
 	})
+}
+
+func (s *MSSQLStore) consumeSignalOnce(ctx context.Context, workflowID string, id int64) error {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("consume signal: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM workflow_signals
+		WHERE id = @p1 AND workflow_id = @p2 AND tenant_id = @p3
+	`, id, workflowID, s.tenantID); err != nil {
+		return fmt.Errorf("consume signal: delete: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances SET signal_consumed_seq = signal_consumed_seq + 1
+		WHERE id = @p1 AND tenant_id = @p2
+	`, workflowID, s.tenantID); err != nil {
+		return fmt.Errorf("consume signal: bump consumed seq: %w", err)
+	}
+	return tx.Commit()
 }
 
 func (s *MSSQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {

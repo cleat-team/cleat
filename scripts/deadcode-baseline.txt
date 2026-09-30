@@ -38,6 +38,9 @@ engine	func Dialect.timestampDiffExpr
 engine	func Dialect.workflowInstanceColumnsExtra
 engine	func getUint32LE
 engine	func isExecutionLimit
+engine	func isMSSQLConnectionError
+engine	func isMSSQLRetryable
+engine	func isMSSQLTimeout
 engine	func mapMSSQLError
 engine	func putUint32LE
 engine	func redactMap
