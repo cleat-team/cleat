@@ -1481,7 +1481,7 @@ func TestGenerateDevMain_WithConcurrencyKey(t *testing.T) {
 
 func TestWriteYAML(t *testing.T) {
 	dir := t.TempDir()
-	writeYAML(dir, "test-project")
+	writeYAML(dir, "test-project", "hello")
 
 	yamlPath := filepath.Join(dir, "cleat.yaml")
 	data, err := os.ReadFile(yamlPath)
@@ -1494,6 +1494,9 @@ func TestWriteYAML(t *testing.T) {
 	}
 	if !strings.Contains(content, "go") {
 		t.Errorf("expected language 'go' in YAML, got %q", content)
+	}
+	if !strings.Contains(content, "hello") {
+		t.Errorf("expected entry point name in YAML, got %q", content)
 	}
 }
 

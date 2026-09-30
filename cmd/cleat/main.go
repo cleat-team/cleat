@@ -419,6 +419,10 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 	}
 
 	wasmFile := wasmOutputName(result)
+	entryPoints := exportedEntryPointNames(result)
+	if result.TargetPkg != nil {
+		checkEntryPointsAgainstManifest(result.TargetPkg.Dir, entryPoints)
+	}
 	buildCfg := &wasm.BuildConfig{
 		SrcDir:      result.TargetPkg.Dir,
 		OutDir:      outDir,
@@ -503,7 +507,7 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		PluginDeps:           derivePluginDeps(usage),
 		ChildVersions:        childVersions,
 		ChildBindingPolicy:   channel,
-		EntryPoints:          exportedEntryPointNames(result),
+		EntryPoints:          entryPoints,
 	}
 	wasmWithMeta, err := wasm.WriteMetadata(wasmBytes, meta)
 	if err != nil {
@@ -1523,11 +1527,11 @@ var workflowManifestNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // workflowManifestName reads cleat.yaml's `name:` field from the workflow's
 // own source directory, or "" if there is none, it cannot be read, it does
-// not parse, or its name is empty or not filename-safe. This is the ONLY
-// place `cleat build` reads cleat.yaml -- everywhere else in this tree it is
-// documentation for a human running `cleat deploy --name` by hand, never a
-// build input, which is why this file needed a YAML import it did not
-// already have.
+// not parse, or its name is empty or not filename-safe. Together with
+// workflowManifestEntryPoints below, these are the only places `cleat build`
+// reads cleat.yaml -- everywhere else in this tree it is documentation for a
+// human running `cleat deploy --name` by hand, never a build input, which is
+// why this file needed a YAML import it did not already have.
 func workflowManifestName(srcDir string) string {
 	data, err := os.ReadFile(filepath.Join(srcDir, "cleat.yaml"))
 	if err != nil {
@@ -1544,6 +1548,109 @@ func workflowManifestName(srcDir string) string {
 		return ""
 	}
 	return name
+}
+
+// workflowManifestEntryPoints reads cleat.yaml's `entry_points:` field from
+// the workflow's own source directory. present is false when there is no
+// cleat.yaml, it cannot be read, the file does not parse as YAML at all, or
+// the key is simply absent -- all cases workflowManifestName already treats
+// as "nothing to check". When present is true and malformed is nil, declared
+// is the list. When present is true and malformed is non-nil, the key exists
+// but is not a list of strings -- the caller must not treat that the same as
+// absent.
+//
+// cleat#2698: until this function existed, entry_points: was inert in two
+// incompatible shapes -- a list of strings in every hand-written example, a
+// list of {name, function} maps in the agent scaffold and its generator --
+// because nothing read either one, so nothing noticed they disagreed. The
+// schema is fixed to a list of strings: the entry point is part of the
+// workflow's ABI (see the comment every hand-written examples/*/cleat.yaml
+// carries), the same snake_case names wasm.ToSnakeCase gives each one
+// (exportedEntryPointNames above), not free-form documentation.
+//
+// cleat-review (cleat#2812 R1): the first version unmarshalled straight into
+// []string and returned nil on any error, which reads the OLD {name,
+// function} map shape -- exactly the manifest every pre-#2812 `cleat init
+// --template agent` project carries, with the wrong name (agent/AgentLoop
+// never matches what cleat build actually finds) -- as "absent" and skips it
+// silently. A scalar entry_points: value does the same. Decoding the key as
+// a yaml.Node first, rather than straight into []string, is what makes
+// "the key is absent" (Kind == 0, the zero value) distinguishable from "the
+// key is present but not a list of strings" (Kind != 0, Decode fails) --
+// gopkg.in/yaml.v3's Node has no other way to represent "never populated".
+func workflowManifestEntryPoints(srcDir string) (declared []string, present bool, malformed error) {
+	data, err := os.ReadFile(filepath.Join(srcDir, "cleat.yaml"))
+	if err != nil {
+		return nil, false, nil
+	}
+	var manifest struct {
+		EntryPoints yaml.Node `yaml:"entry_points"`
+	}
+	if err := yaml.Unmarshal(data, &manifest); err != nil {
+		return nil, false, nil
+	}
+	if manifest.EntryPoints.Kind == 0 {
+		return nil, false, nil
+	}
+	var list []string
+	if err := manifest.EntryPoints.Decode(&list); err != nil {
+		return nil, true, err
+	}
+	return list, true, nil
+}
+
+// checkEntryPointsAgainstManifest fails the build if cleat.yaml declares
+// entry_points that disagree with exported, the analyzer's own
+// exportedEntryPointNames -- the real WASM export names. cleat#2698 option
+// (b): a manifest assertion that is checked against the build, the same
+// design workflowManifestName's `name:` already gets, rather than a second
+// field to keep in sync by hand.
+//
+// An absent entry_points: is not an error -- the field is optional, and
+// this only checks it where present. A PRESENT one that is not a list of
+// strings -- the old {name, function} map shape, or a bare scalar -- fails
+// the build too (cleat-review, cleat#2812 R1): it is not documentation
+// nobody reads any more, and silently skipping it would be the exact
+// silent-wrong-manifest failure this whole feature exists to close, for the
+// one manifest shape (the pre-#2812 agent scaffold's) most likely to
+// disagree with the build. Compared as SETS, not sequences: cleat.yaml has
+// no reason to declare its entry points in the same order the analyzer's
+// own sort.Strings does, and a reordering is not the mismatch this exists
+// to catch.
+func checkEntryPointsAgainstManifest(srcDir string, exported []string) {
+	declared, present, malformed := workflowManifestEntryPoints(srcDir)
+	if !present {
+		return
+	}
+	if malformed != nil {
+		fmt.Fprintf(os.Stderr,
+			"Error: cleat.yaml's entry_points: is not a list of strings (%v).\n"+
+				"Write it as a list of the exported entry point names, e.g.:\n"+
+				"  entry_points:\n"+
+				"    - %s\n"+
+				"not the old { name, function } map form.\n",
+			malformed, strings.Join(exported, "\n    - "))
+		os.Exit(1)
+	}
+	if len(declared) == 0 {
+		return
+	}
+	got := append([]string(nil), exported...)
+	want := append([]string(nil), declared...)
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, ",") == strings.Join(want, ",") {
+		return
+	}
+	fmt.Fprintf(os.Stderr,
+		"Error: cleat.yaml's entry_points: (%s) does not match what cleat build "+
+			"actually found (%s).\n"+
+			"Update cleat.yaml, or the entry point's exported Go function, so they "+
+			"agree -- a caller starting a run by the manifest's stale name would "+
+			"otherwise fail at start time, after the run id has already been handed "+
+			"out, rather than here at build time.\n",
+		strings.Join(want, ", "), strings.Join(got, ", "))
+	os.Exit(1)
 }
 
 // derivePluginDeps infers plugin dependencies from the host functions used
