@@ -236,7 +236,7 @@ cleat deploy \
 Expected output includes a line like:
 
 ```
-  Workflow: hello v1 (ABI v1, min compatible: 1)
+  Workflow: my-workflow.wasm v1 (ABI v1, min compatible: 1)
 ```
 
 If you see `connection refused`, make sure Postgres is running (step 2). If
