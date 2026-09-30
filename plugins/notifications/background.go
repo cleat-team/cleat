@@ -433,12 +433,10 @@ func nowSQLExpr(d plugin.Dialect) string {
 // database's own now, advanced by the number of seconds bound at ph" -- the
 // same shape as engine's internal Dialect.intervalExpr
 // (engine/query_builder.go), reproduced here because a plugin cannot import
-// engine (see plugin.Secrets' own doc comment for why), using the exact
-// per-dialect interval syntax already proven in this repo's
-// queryUnprocessedWebhookEvents (plugins/webhookingest/background.go):
-// PostgreSQL's interval literal multiplied by a bound count, MySQL's
-// INTERVAL clause with the count unquoted and singular, and SQL Server's
-// DATEADD in place of an interval type it does not have.
+// engine (see plugin.Secrets' own doc comment for why): PostgreSQL's
+// interval literal multiplied by a bound count, MySQL's INTERVAL clause
+// with the count unquoted and singular, and SQL Server's DATEADD in place
+// of an interval type it does not have.
 func nowPlusSecondsSQLExpr(d plugin.Dialect, ph string) string {
 	switch d {
 	case plugin.DialectMySQL:
