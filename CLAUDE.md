@@ -947,17 +947,42 @@ telling them apart is what separated the two halves above: of 22 cancelled `Tier
 it is only final once the run is. The same run sampled twenty minutes apart gave `1` and then `3`
 here, and the `1` went into a table before this sentence was written.
 
-**"Should no longer happen" is true of `develop` and false of a PR, and the trigger is one you
-reach for constantly: EDITING THE PR BODY.** `ci.yml` fires on
-`types: [opened, synchronize, reopened, edited]`, and `edited` is the activity type a **title,
-body or base change** produces — it is there deliberately, because a retargeted PR would otherwise
-never trigger the workflow at all (see the comment above the line). PR runs share one concurrency
-group per ref and supersede, by design. So `gh pr edit --body-file` while checks are running
-cancels the in-flight run and starts a fresh one.
+**"Should no longer happen" is true of `develop`, and used to be false of a PR for the trigger you
+reach for constantly: EDITING THE PR BODY — SUPERSEDED 2026-09-30, read the next paragraph before
+this one.** `ci.yml` fires on `types: [opened, synchronize, reopened, edited]`, and `edited` is the
+activity type a **title, body or base change** produces — it is there deliberately, because a
+retargeted PR would otherwise never trigger the workflow at all (see the comment above the line).
 
-Measured 2026-09-10 on #1158, by doing it. A push at 17:57:59 created **9** runs; a body edit
-**thirteen seconds later** created **7** more against *the same SHA*, and the in-flight members of
-the first set were cancelled where they stood:
+**As of cleat#1688 (PR #1919, merged 2026-09-19), a title/body-only edit no longer cancels the run
+it follows.** The paragraph below this one — "PR runs share one concurrency group per ref and
+supersede, so a body edit cancels the in-flight run" — was true when measured on 2026-09-10 and
+stopped being true nine days later. `ci.yml`'s `concurrency.group` now reads:
+
+    group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && (github.event.action == 'edited' && !github.event.changes.base && github.run_id || github.ref) || github.sha }}
+
+An `edited` event whose base did **not** change gets `github.run_id` — unique per run, so it shares
+a group with nothing and cancels nothing. An `edited` that **did** change the base keeps the
+per-ref group, because that is a real re-evaluation of a different target and should still
+supersede — the case the trigger exists for. Re-derived directly on cleat#2783, 2026-09-30: a
+body-only edit while `Tier 1 Gate`/`Multi-DB CI`/`CI/CD Pipeline`/`Cross-Language E2E` were
+`in_progress` created a second run set, and **zero of the eleven runs in the first set were
+cancelled** —
+
+    gh run list --branch <branch> --json databaseId,createdAt,status,conclusion,name
+
+What survives is **cost, not breakage**: a body edit still starts a full run of every required
+context, because skipping them would need each one to keep reporting while skipped, and cleat's
+contexts have no aggregating gate in front of them to do that (`ci.yml`'s own comment, "WHY THE
+JOBS STILL RUN"). That residual cost is cleat#2767's subject, not a cancellation. The **practical
+rule below is now cheap, not necessary** — timing an edit around checks no longer prevents a
+destroyed run, because there is no longer a run it would destroy; it only avoids one extra no-op
+run appearing alongside the real ones in a `gh pr checks` watcher.
+
+The measurement below is kept, dated, as the reason the fix exists — not as current behavior.
+
+Measured 2026-09-10 on #1158, by doing it, BEFORE cleat#1688. A push at 17:57:59 created **9**
+runs; a body edit **thirteen seconds later** created **7** more against *the same SHA*, and the
+in-flight members of the first set were cancelled where they stood:
 
     gh run list --branch <branch> --limit 30 --json createdAt,conclusion,status \
       --jq 'group_by(.createdAt)[] | "\(.[0].createdAt) count=\(length)"'
@@ -983,29 +1008,38 @@ a log that says `ok`. The discriminator is the `jobs | length` line above plus t
     gh api repos/<owner>/<repo>/actions/jobs/<job-id> --jq '.conclusion'   # cancelled, not failure
     gh api repos/<owner>/<repo>/actions/jobs/<job-id> --jq '.steps[].conclusion' | sort -u
 
-All-`success` steps under a non-success job means the job was killed, not that it failed. The
-practical rule is cheaper than the diagnosis: **get the body right before pushing, and if you must
-edit it, do so before the checks start or after they settle.**
+All-`success` steps under a non-success job means the job was killed, not that it failed. This
+discriminator still matters for a **base-changing** edit, which still supersedes by design (see
+above) — but for a title/body-only edit, this whole failure mode is gone as of cleat#1688: there is
+no cancelled job to misread as a failure, because nothing gets cancelled. The practical rule that
+used to follow — "get the body right before pushing, and if you must edit it, do so before the
+checks start or after they settle" — is now **cheap, not necessary**, for the same reason: it
+avoids one extra no-op run appearing alongside the real ones, not a destroyed run, because there is
+no longer a run it would destroy.
 
-**That rule is about not destroying a run you need, and it does not extend to a MERGED PR.**
+**That "start a run" cost is not about destroying one, and never was about a MERGED PR either.**
 Measured 2026-09-27: two PRs merged at 15:05Z, bodies edited a minute later, and runs appeared at
 15:06:35Z and 15:06:38Z on both head branches. The attribution is established by the set rather
 than by the timing — every workflow that fired lists `edited` in its `types:` (`CI/CD Pipeline`,
 `Tier 1 Gate`, `Tier 2 Gate`, `Multi-DB CI`, `Cross-Language E2E`, `Plugin Harness Tests`,
 `TLA+`), and the three that did **not** fire (`Branch Naming Check`, `DCO Check`,
 `Stream Trailer Check`) are exactly the three without it. `closed` appears in **none** of them, so
-the trigger was the edit and not the merge.
+the trigger was the edit and not the merge. This part is unaffected by cleat#1688 either way: that
+fix stops a body edit cancelling an *in-flight run it shares a group with*, and a merged PR's edit
+starts a fresh run regardless, on both sides of the fix.
 
-So the cost depends on the phase, and deferring does not dodge it:
+So a run always starts; the question `#2767` is now tracking is only whether that run's cost was
+ever necessary. As of cleat#1688, the middle row below no longer destroys anything — corrected from
+this file's pre-2026-09-19 version, which read "a killed run — worse than waiting" there:
 
 | the PR is | the edit costs | so |
 |---|---|---|
 | open, before the run registers | nothing | the only genuinely free window |
-| open, run in flight | a killed run — worse than waiting | wait, then edit |
+| open, run in flight, base unchanged | one extra no-op run, no cancellation (cleat#1688) | fine either way; timing is cheap insurance, not a requirement |
+| open, run in flight, base changed | a superseded run — this case still supersedes by design | wait, then edit, if the in-flight run matters |
 | merged | a full suite on code nobody can act on | decide on the merits; do not defer to dodge it |
 
-There is no ordering that avoids the run once checks have started; the choice is only whether it is
-useful. Do not "fix" this by removing `edited`: it is load-bearing, because a PR retargeted onto a
+Do not "fix" any of this by removing `edited`: it is load-bearing, because a PR retargeted onto a
 filtered base branch would otherwise never trigger at all —
 `scripts/check-workflow-pr-triggers.sh` exists to enforce exactly that.
 
