@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -818,6 +819,115 @@ func TestPluginInitS3Backend(t *testing.T) {
 	}
 	if p.backend == nil {
 		t.Error("expected backend to be set")
+	}
+}
+
+// TestPluginInitBackendIsCaseInsensitive is cleat#2245's known-positive: on
+// develop, "S3" (capitalized, exactly how an operator would type it reading
+// the Config.Backend doc comment's own '"s3" or "memory"' prose) matched
+// neither switch case and fell through to the DEFAULT arm -- the memory
+// backend -- silently. Falsified by reverting the switch to a bare
+// `switch p.config.Backend` (the pre-fix comparison): this test's *s3Backend
+// type assertion fails and it goes red, because the plugin picks memory
+// instead.
+func TestPluginInitBackendIsCaseInsensitive(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		backend string
+		wantS3  bool
+	}{
+		{name: "capitalized S3", backend: "S3", wantS3: true},
+		{name: "lowercase s3, unchanged", backend: "s3", wantS3: true},
+		{name: "capitalized Memory", backend: "Memory", wantS3: false},
+		{name: "uppercase MEMORY", backend: "MEMORY", wantS3: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newFakeDBStore()
+			db := sql.OpenDB(&fakeConnector{store: store})
+			t.Cleanup(func() { db.Close() })
+
+			p := &Plugin{}
+			ctx := context.Background()
+			cfg := fmt.Sprintf(`{"backend":%q,"bucket":"test-bucket","region":"us-east-1","endpoint":"localhost:9000"}`, tc.backend)
+			env := &plugin.Environment{
+				DB:     &engine.SQLDBAdapter{DB: db},
+				Mux:    http.NewServeMux(),
+				Logger: slog.Default(),
+				Config: []byte(cfg),
+			}
+
+			if err := p.Init(ctx, env); err != nil {
+				t.Fatalf("Init with backend %q: %v", tc.backend, err)
+			}
+
+			_, gotS3 := p.backend.(*s3Backend)
+			if gotS3 != tc.wantS3 {
+				t.Errorf("backend %q: got s3=%v, want s3=%v (p.backend is %T)", tc.backend, gotS3, tc.wantS3, p.backend)
+			}
+
+			// The normalized form, not the raw input, is what the boot log
+			// and RequiredDeploymentSecrets' own `!= "s3"` check both read --
+			// this is the other half of the bug: even a config that DID
+			// select the right backend left p.config.Backend holding the
+			// operator's original casing, so the log line could print
+			// "backend=S3" while later logic compared against "s3" and
+			// disagreed with what was actually running.
+			wantNormalized := "memory"
+			if tc.wantS3 {
+				wantNormalized = "s3"
+			}
+			if p.config.Backend != wantNormalized {
+				t.Errorf("backend %q: p.config.Backend = %q, want normalized %q", tc.backend, p.config.Backend, wantNormalized)
+			}
+		})
+	}
+}
+
+// TestPluginInitRejectsUnknownBackend is the other half of cleat#2245: a
+// genuinely unrecognized backend value must refuse to boot, naming the valid
+// values, rather than silently falling back to memory the way the
+// capitalization bug did. Falsified by restoring the old `default:` arm
+// (silent memory fallback): this test's `err == nil` check then fails, and
+// its case-insensitive sibling above starts passing wrongly too (both
+// directions collapse onto the same default arm).
+//
+// The errors.Is assertion is load-bearing, not decoration (cleat-review's
+// #2824 R1): a plain error here would satisfy err == nil above while still
+// letting cmd/cleat-worker's classifyPluginInitError fall to its default
+// arm, pluginInitDisabledLoud -- the worker boots with blobstore merely
+// DISABLED rather than refusing to start. plugin.ErrFatalMisconfiguration is
+// what routes to pluginInitFatal (os.Exit(1)); see plugins/email/plugin.go
+// for the precedent this follows.
+func TestPluginInitRejectsUnknownBackend(t *testing.T) {
+	store := newFakeDBStore()
+	db := sql.OpenDB(&fakeConnector{store: store})
+	t.Cleanup(func() { db.Close() })
+
+	p := &Plugin{}
+	ctx := context.Background()
+	env := &plugin.Environment{
+		DB:     &engine.SQLDBAdapter{DB: db},
+		Mux:    http.NewServeMux(),
+		Logger: slog.Default(),
+		Config: []byte(`{"backend":"gcs"}`),
+	}
+
+	err := p.Init(ctx, env)
+	if err == nil {
+		t.Fatal("expected Init to refuse an unknown backend, got nil error")
+	}
+	if !errors.Is(err, plugin.ErrFatalMisconfiguration) {
+		t.Errorf("expected err to wrap plugin.ErrFatalMisconfiguration (so cmd/cleat-worker "+
+			"refuses to start rather than merely disabling blobstore), got: %v", err)
+	}
+	if !strings.Contains(err.Error(), `"gcs"`) {
+		t.Errorf("expected the error to name the rejected value %q, got: %v", "gcs", err)
+	}
+	if !strings.Contains(err.Error(), "s3") || !strings.Contains(err.Error(), "memory") {
+		t.Errorf("expected the error to name the valid values, got: %v", err)
+	}
+	if p.backend != nil {
+		t.Error("expected no backend to be set after a refused Init")
 	}
 }
 
