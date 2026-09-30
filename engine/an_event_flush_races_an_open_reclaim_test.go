@@ -258,6 +258,25 @@ func runReclaimRaceTest(t *testing.T, name string, store WorkflowStore) reclaimR
 			name, result.zombieErr, result.zombieRowLanded)
 	}
 
+	// THE ACTUAL REGRESSION GUARD (cleat-review, R1 on #2815): everything
+	// above this point only LOGS the race's outcome, so a reintroduced race
+	// -- FOR SHARE removed from insertEventSQL, say -- reports
+	// zombieRowLanded=true, zombieErr=nil, newOwnerWriteLanded=false, and the
+	// test still passes, because nothing before this line asserts any of the
+	// three. Measured directly: with FOR SHARE deleted, the zombie's write
+	// returns nil in ~6ms and the new owner's write is silently declined --
+	// coherent by the check above, PASS overall, and cleat#2244 could regress
+	// with this file staying green. A fence that lets a zombie through is a
+	// fence loss whether or not the write happens to be internally
+	// consistent about it.
+	if result.zombieRowLanded {
+		t.Errorf("%s: the zombie's write to step 0 LANDED while the reclaim "+
+			"was open -- the fence did not hold", name)
+	}
+	if !errors.Is(result.zombieErr, ErrFenceLost) {
+		t.Errorf("%s: zombie flushEvent returned %v, want ErrFenceLost", name, result.zombieErr)
+	}
+
 	// The legitimate new owner claims the reclaimed workflow and writes its
 	// OWN version of the SAME step. This is the check cleat-review's
 	// "matters" question turns on: does the new owner's write actually take
@@ -299,6 +318,11 @@ func runReclaimRaceTest(t *testing.T, name string, store WorkflowStore) reclaimR
 		t.Logf("%s: CONFIRMED IMPACT -- the zombie's write to step 0 landed first and "+
 			"the legitimate new owner's write to the SAME step was silently declined; "+
 			"step 0 permanently reads %q", name, result.newOwnerRowValue)
+	}
+	if !result.newOwnerWriteLanded {
+		t.Errorf("%s: the legitimate new owner's write to step 0 did NOT land "+
+			"(step 0 reads %q) -- see cleat#2244 for why this is the impact that matters",
+			name, result.newOwnerRowValue)
 	}
 
 	return result
