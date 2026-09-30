@@ -565,6 +565,15 @@ check_ledger_line() {
       echo "  More than declared: something new is skipping under a reason written" >&2
       echo "  for something else. Give it its own line." >&2
     fi
+    if [[ "$pattern" != *Test* ]]; then
+      echo >&2
+      echo "  This line's pattern has no \"Test\" in it, so this checker treats it as" >&2
+      echo "  BROAD -- it is checked against every skip no specific line already" >&2
+      echo "  claimed, rather than against one test by name. If a new test's own" >&2
+      echo "  named line didn't fix this, that line's pattern is missing \"Test\"" >&2
+      echo "  too (a typo, or a name that isn't a Go test identifier) and is being" >&2
+      echo "  treated as broad when it was meant to be specific." >&2
+    fi
     echo "  reason on file: $why" >&2
     fail=1
   fi
