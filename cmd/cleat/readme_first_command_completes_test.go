@@ -39,6 +39,19 @@
 // source instead. The version/release mismatch this leaves in the README
 // itself is real and is tracked separately (cleat#1779); it is not this
 // issue's subject.
+//
+// # What this does NOT cover (cleat#2469)
+//
+// This is README's BLOCK 1 -- the three-line "try it" snippet above the
+// `## Quick Start` heading -- and it is the ONLY guard in the tree that
+// touches either README's Quick Start (block 2, a 7-step Postgres/WASM/worker
+// walkthrough) or docs/tutorials/quick-start.md (the checkout-only scaffold
+// tutorial). Neither is exercised by this function or anything else: a PR
+// that breaks either one passes CI. cleat#2469 measured this and renamed the
+// function below to stop it reading as broader coverage than it is; the
+// gap itself needs its own guard, which this issue leaves as future work
+// because both paths need Postgres running (docker-compose.partner.yml) and
+// a background worker process, neither of which anything here sets up yet.
 package main
 
 import (
@@ -50,7 +63,11 @@ import (
 	"testing"
 )
 
-func TestREADMEsFirstCommandCompletes(t *testing.T) {
+// TestREADMEsTryItSnippetCompletes runs README's block 1 (the "try it"
+// snippet above `## Quick Start`) end to end. It does NOT cover Quick Start
+// itself or the tutorial -- see the file-level comment above for why, and
+// cleat#2469 for the gap this rename exists to stop hiding.
+func TestREADMEsTryItSnippetCompletes(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds a second cleat binary and clones the repo; skipped in short mode")
 	}
