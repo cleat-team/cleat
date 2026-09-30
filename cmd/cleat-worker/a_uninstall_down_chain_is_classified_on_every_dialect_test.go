@@ -100,9 +100,10 @@ func (o downOutcome) String() string {
 // plugins/scheduledbackup/a_v4_down_keeps_uninstall_working_test.go,
 // TestUninstallSchedulerBackupOnEveryDialect.
 //
-// cleat#2739: nothing FIXES the remaining 13 pairs below, only scheduledbackup and
-// notifications (cleat#2342) have ever been repaired, and that gap was open with no decision
-// recorded either way. The decision, checked against cleat#2059 before making it: these repairs
+// cleat#2739: nothing FIXES the remaining 13 pairs below. scheduledbackup's own repair and
+// cleat#2342's shared SQL Server fix (which cleared the MSSQL Downs of ten plugins plus
+// notifications and jobqueue) are the only repairs there have been, and that gap was open
+// with no decision recorded either way. The decision, checked against cleat#2059 first: these
 // are DEFERRED to cleat#2059's plugin-migration-collapse step, not left ambiguous and not
 // undertaken per-pair now. Collapsing every plugin's migrations to version 1 replaces the
 // multi-version Down chain each of these pairs is broken inside of, so a per-pair repair
