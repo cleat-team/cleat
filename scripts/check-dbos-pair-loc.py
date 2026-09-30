@@ -10,11 +10,9 @@ time it was wrong in the README. The counter existed; nothing checked it
 against what it counts.
 
 WHAT THIS DOES: for each pair scripts/dbos-pair-loc.sh knows about, run it,
-parse its cleat-side and DBOS-side `cloc` SUM lines, and compare them against
-the numbers the pair's own README quotes:
-
-  - the DBOS-side **total** row of its "Measured" table
-  - the cleat-side number in "Against cleat's side ... on the same date: **N**"
+parse its cleat-side and other-side (DBOS, or DBOS-isolated for the sandboxed
+pair) `cloc` totals, and compare them against the numbers the pair's own
+README quotes.
 
 Both numbers, not just one -- the README asserts a parity claim between two
 sides, and a check that only re-derives one of them could pass while the
@@ -28,15 +26,28 @@ the moment that PR renamed them, and the self-test still passed --
 because it is a fixture, not the real script's output, so it can drift
 independently and never notice. Only running the REAL check against the
 tree (this file's own `main()`, not `--self-test`) caught it, reporting
-UNMEASURED rather than a false pass. Extending PAIRS to a pair whose
-output shape differs further is tracked separately (cleat#2632) rather
-than attempted here.
+UNMEASURED rather than a false pass.
+
+cleat#2632: `order-lifecycle` (the control pair) prints one section per
+side -- "== cleat: app ==", "== DBOS: app ==" -- so its app total IS that
+one section's SUM. `integration-hub` (the wedge) is not that shape: each
+side's app total is the SUM of three separate role sections ("tenant
+code", "host runner", "unit tests"), printed alongside a CONTROL row, an
+e2e harness row and a platform row that are deliberately excluded from
+the total (see scripts/dbos-pair-loc.sh's own header comment for why).
+Registering it is therefore a second PARSER, not a second dict entry --
+SCRIPT_PARSERS and README_PARSERS below dispatch on the pair name, and a
+role section that is renamed, missing, or duplicated reports UNMEASURED
+via the same tri-state as everything else here, never a partial total.
 
 WHAT THIS DOES NOT DO: recompute cloc itself. scripts/dbos-pair-loc.sh is the
 one pinned invocation (CLAUDE.md's own rule -- two counters "the same way,
 slightly differently" produce numbers that look like a finding rather than a
 tool disagreement), so this script is a consumer of it, not a second
-implementation.
+implementation. That includes cloc's own SUM arithmetic: where cloc omits a
+section's "SUM:" line because the section is a single file (see
+section_code_sum below), this reads the one row cloc already printed rather
+than summing anything itself.
 
 EXIT STATUS, mirroring the script it wraps:
 
@@ -55,20 +66,123 @@ import sys
 # pair name (as scripts/dbos-pair-loc.sh takes it) -> its README
 PAIRS = {
     "order-lifecycle": "examples/order-lifecycle-dbos-port/README.md",
+    "integration-hub": "examples/integration-hub-dbos-port/README.md",
+}
+
+# pair name -> what the README calls the non-cleat side, for problem messages
+OTHER_SIDE_LABEL = {
+    "order-lifecycle": "DBOS",
+    "integration-hub": "DBOS-isolated",
 }
 
 SUM_RE = re.compile(r"^SUM:\s+\d+\s+\d+\s+\d+\s+(\d+)\s*$", re.MULTILINE)
 TOTAL_ROW_RE = re.compile(r"^\|\s*\*\*total\*\*\s*\|[^|]*\|\s*\*\*(\d+)\*\*\s*\|\s*$", re.MULTILINE)
 CLEAT_SIDE_RE = re.compile(r"Against cleat's side.*?on the same date:\s*\*\*(\d+)\*\*", re.DOTALL)
 
+# The wedge's role table: "| **app total** (tenant + host + unit tests) |
+# **130** | **200** |" -- cleat's figure then DBOS-isolated's, both bold
+# table cells rather than order-lifecycle's prose sentence.
+WEDGE_APP_TOTAL_RE = re.compile(
+    r"^\|\s*\*\*app total\*\*[^|]*\|\s*\*\*(\d+)\*\*\s*\|\s*\*\*(\d+)\*\*\s*\|\s*$",
+    re.MULTILINE,
+)
 
-def parse_script_output(text):
-    """Split scripts/dbos-pair-loc.sh's stdout into (cleat_sum, dbos_sum).
+# The three role rows above the app total: "| tenant code | **55** | **24** |".
+# cleat-review on cleat#2749: comparing only the app-total row lets
+# compensating errors on the two sides of a single role (e.g. tenant code
+# quoted 5 high, host runner quoted 5 low) pass, because their sum still
+# matches. Each role name appears in exactly one such row.
+WEDGE_ROLE_ROW_RE = re.compile(
+    r"^\|\s*(tenant code|host runner|unit tests)\s*\|\s*\*\*(\d+)\*\*\s*\|\s*\*\*(\d+)\*\*\s*\|\s*$",
+    re.MULTILINE,
+)
+INTEGRATION_HUB_ROLE_NAMES = ("tenant code", "host runner", "unit tests")
 
-    Returns (None, None, reason) on failure to parse -- UNMEASURED, not a
-    mismatch, because a parse failure says nothing about whether the numbers
-    agree.
+SECTION_HEADER_RE = re.compile(r"^==\s*(.+?)\s*==\s*$", re.MULTILINE)
+
+# A cloc language row: a name (letters, digits, and the handful of symbols
+# cloc's own language names use -- "C/C++ Header", "Bourne Shell") followed
+# by four whitespace-separated integers (files, blank, comment, code).
+# Deliberately not anchored to a known language list: the point is to read
+# whatever cloc printed, not to guess which languages it might use.
+LANG_ROW_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+#/ .]*?\s+\d+\s+\d+\s+\d+\s+(\d+)\s*$", re.MULTILINE)
+
+INTEGRATION_HUB_CLEAT_ROLE_PREFIXES = ("cleat: tenant code", "cleat: host runner", "cleat: unit tests")
+INTEGRATION_HUB_DBOS_ROLE_PREFIXES = (
+    "DBOS-isolated: tenant code", "DBOS-isolated: host runner", "DBOS-isolated: unit tests",
+)
+
+
+def split_sections(text):
+    """Split scripts/dbos-pair-loc.sh's stdout into {header label: body text},
+    in encounter order. A section runs from one '== label ==' line to the
+    next such line, or to the end of the output."""
+    headers = list(SECTION_HEADER_RE.finditer(text))
+    sections = {}
+    for i, m in enumerate(headers):
+        start = m.end()
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
+        sections[m.group(1)] = text[start:end]
+    return sections
+
+
+def section_code_sum(body):
+    """Return a cloc report section's total **code** column, or None if this
+    section's body has neither a 'SUM:' line nor exactly one language row.
+
+    cloc omits its own SUM line when a section is a single file -- observed
+    on scripts/dbos-pair-loc.sh integration-hub's single-file groups
+    (DBOS-isolated's host runner, DBOS-isolated's unit tests, and either
+    side's e2e harness): the language row already IS the total, so cloc
+    does not repeat it under a SUM label. Falling back to that lone row's
+    code column reads the number cloc already printed; it does not
+    recompute anything cloc did not already say.
     """
+    if "(no files -- 0 lines" in body:
+        return 0
+    m = SUM_RE.search(body)
+    if m:
+        return int(m.group(1))
+    rows = LANG_ROW_RE.findall(body)
+    if len(rows) == 1:
+        return int(rows[0])
+    return None
+
+
+def _role_section_values(sections, prefixes):
+    """Return ([value, ...], reason), one value per prefix in `prefixes`, in
+    order. reason is set, and the list None, unless every prefix matches
+    exactly one section whose body itself parses cleanly -- a renamed,
+    missing, or duplicated role section, or one cloc could not summarise, is
+    UNMEASURED rather than a partial result."""
+    values = []
+    for prefix in prefixes:
+        matches = [label for label in sections if label.startswith(prefix)]
+        if len(matches) != 1:
+            return None, f"expected exactly one section starting with {prefix!r}, found {len(matches)}"
+        value = section_code_sum(sections[matches[0]])
+        if value is None:
+            return None, f"could not read a code total from the {matches[0]!r} section"
+        values.append(value)
+    return values, None
+
+
+def _sum_role_sections(sections, prefixes):
+    """Sum section_code_sum() over exactly one section per prefix in
+    `prefixes`. Returns (total, reason); see _role_section_values, which
+    this wraps -- the per-role values themselves are integration_hub_role_
+    mismatches' job, not this one's."""
+    values, reason = _role_section_values(sections, prefixes)
+    if reason:
+        return None, reason
+    return sum(values), None
+
+
+def parse_order_lifecycle_script_output(text):
+    """Split scripts/dbos-pair-loc.sh order-lifecycle's stdout into
+    (cleat_total, dbos_total). Returns (None, None, reason) on failure to
+    parse -- UNMEASURED, not a mismatch, because a parse failure says
+    nothing about whether the numbers agree."""
     if "== cleat: app ==" not in text or "== DBOS: app ==" not in text:
         return None, None, "script output has neither '== cleat: app ==' nor '== DBOS: app ==' markers"
     cleat_part, _, dbos_part = text.partition("== DBOS: app ==")
@@ -81,10 +195,28 @@ def parse_script_output(text):
     return int(cleat_m.group(1)), int(dbos_m.group(1)), None
 
 
-def parse_readme(text):
-    """Return (dbos_total, cleat_side_total, reason). reason is set, and both
-    numbers None, when either could not be found -- UNMEASURED, not a silent
-    pass."""
+def parse_integration_hub_script_output(text):
+    """Split scripts/dbos-pair-loc.sh integration-hub's stdout into
+    (cleat_total, dbos_isolated_total), each the SUM of that side's three
+    role sections (tenant code, host runner, unit tests) -- the CONTROL,
+    e2e harness and platform sections are deliberately excluded, mirroring
+    the README's own 'app total' row."""
+    sections = split_sections(text)
+    if not sections:
+        return None, None, "no '== ... ==' section markers found in script output"
+    cleat_total, reason = _sum_role_sections(sections, INTEGRATION_HUB_CLEAT_ROLE_PREFIXES)
+    if reason:
+        return None, None, f"cleat side: {reason}"
+    dbos_total, reason = _sum_role_sections(sections, INTEGRATION_HUB_DBOS_ROLE_PREFIXES)
+    if reason:
+        return None, None, f"DBOS-isolated side: {reason}"
+    return cleat_total, dbos_total, None
+
+
+def parse_order_lifecycle_readme(text):
+    """Return (cleat_total, dbos_total, reason). reason is set, and both
+    numbers None, when either could not be found -- UNMEASURED, not a
+    silent pass."""
     total_m = TOTAL_ROW_RE.search(text)
     cleat_m = CLEAT_SIDE_RE.search(text)
     if not total_m and not cleat_m:
@@ -93,7 +225,88 @@ def parse_readme(text):
         return None, None, "found no '| **total** | ... | **N** |' row in the README's Measured table"
     if not cleat_m:
         return None, None, "found no 'Against cleat's side ... on the same date: **N**' sentence in the README"
-    return int(total_m.group(1)), int(cleat_m.group(1)), None
+    return int(cleat_m.group(1)), int(total_m.group(1)), None
+
+
+def parse_integration_hub_readme(text):
+    """Return (cleat_total, dbos_isolated_total, reason) from the wedge's
+    role table's '| **app total** ... | **N** | **N** |' row."""
+    m = WEDGE_APP_TOTAL_RE.search(text)
+    if not m:
+        return None, None, ("found no '| **app total** ... | **N** | **N** |' row "
+                             "(cleat, then DBOS-isolated) in the README")
+    return int(m.group(1)), int(m.group(2)), None
+
+
+SCRIPT_PARSERS = {
+    "order-lifecycle": parse_order_lifecycle_script_output,
+    "integration-hub": parse_integration_hub_script_output,
+}
+
+README_PARSERS = {
+    "order-lifecycle": parse_order_lifecycle_readme,
+    "integration-hub": parse_integration_hub_readme,
+}
+
+
+def integration_hub_role_mismatches(script_out, readme_text):
+    """Compare the wedge's three role rows (tenant code, host runner, unit
+    tests) individually, cleat and DBOS-isolated -- not just their sum (the
+    app-total row parse_integration_hub_readme/parse_integration_hub_script_
+    output already compare). cleat-review on cleat#2749: without this, a
+    role quoted high on one row and low on another by the same amount
+    passes, because the total each check already makes is unaffected.
+
+    Returns (problems, reason): reason is set, problems empty, only on an
+    interface break (a renamed/missing role section, or no role table in
+    the README) -- UNMEASURED, same convention as everywhere else here.
+    """
+    sections = split_sections(script_out)
+    if not sections:
+        return [], "no '== ... ==' section markers found in script output"
+    cleat_values, reason = _role_section_values(sections, INTEGRATION_HUB_CLEAT_ROLE_PREFIXES)
+    if reason:
+        return [], f"cleat side: {reason}"
+    dbos_values, reason = _role_section_values(sections, INTEGRATION_HUB_DBOS_ROLE_PREFIXES)
+    if reason:
+        return [], f"DBOS-isolated side: {reason}"
+
+    # A dict keyed by role name would let a second matching row (anywhere
+    # else in the README) silently overwrite the first rather than being
+    # noticed -- cleat-review on cleat#2749. Count occurrences instead of
+    # collapsing them, so more than one is UNMEASURED, not a silent pick.
+    readme_rows = {}
+    role_counts = {}
+    for m in WEDGE_ROLE_ROW_RE.finditer(readme_text):
+        role = m.group(1)
+        role_counts[role] = role_counts.get(role, 0) + 1
+        readme_rows[role] = (int(m.group(2)), int(m.group(3)))
+    problems = []
+    for i, role in enumerate(INTEGRATION_HUB_ROLE_NAMES):
+        if role_counts.get(role, 0) > 1:
+            return [], f"found {role_counts[role]} '| {role} | **N** | **N** |' rows in the README, expected exactly one"
+        if role not in readme_rows:
+            return [], f"found no '| {role} | **N** | **N** |' row in the README's role table"
+        readme_cleat, readme_dbos = readme_rows[role]
+        if readme_cleat != cleat_values[i]:
+            problems.append(
+                f"integration-hub: README's {role!r} row says cleat={readme_cleat}, "
+                f"scripts/dbos-pair-loc.sh says {cleat_values[i]}"
+            )
+        if readme_dbos != dbos_values[i]:
+            problems.append(
+                f"integration-hub: README's {role!r} row says DBOS-isolated={readme_dbos}, "
+                f"scripts/dbos-pair-loc.sh says {dbos_values[i]}"
+            )
+    return problems, None
+
+
+# pair name -> an extra check run beyond the total-vs-total comparison every
+# pair already gets. Absent for order-lifecycle, which has no per-role rows
+# to compare -- its whole README-side claim IS the one total.
+EXTRA_CHECKERS = {
+    "integration-hub": integration_hub_role_mismatches,
+}
 
 
 def check_pair(pair, readme_text, script_runner):
@@ -107,25 +320,34 @@ def check_pair(pair, readme_text, script_runner):
     if rc != 0:
         return [f"{pair}: scripts/dbos-pair-loc.sh exited {rc} unexpectedly:\n{err}"], "unmeasured"
 
-    cleat_sum, dbos_sum, reason = parse_script_output(out)
+    cleat_sum, other_sum, reason = SCRIPT_PARSERS[pair](out)
     if reason:
         return [f"{pair}: could not parse scripts/dbos-pair-loc.sh's output -- {reason}"], "unmeasured"
 
-    dbos_total, cleat_side_total, reason = parse_readme(readme_text)
+    cleat_readme, other_readme, reason = README_PARSERS[pair](readme_text)
     if reason:
         return [f"{pair}: could not parse {PAIRS[pair]} -- {reason}"], "unmeasured"
 
+    other_label = OTHER_SIDE_LABEL[pair]
     problems = []
-    if dbos_total != dbos_sum:
+    if cleat_readme != cleat_sum:
         problems.append(
-            f"{pair}: README's DBOS-side **total** row says {dbos_total}, "
-            f"scripts/dbos-pair-loc.sh says {dbos_sum}"
-        )
-    if cleat_side_total != cleat_sum:
-        problems.append(
-            f"{pair}: README's cleat-side figure says {cleat_side_total}, "
+            f"{pair}: README's cleat-side figure says {cleat_readme}, "
             f"scripts/dbos-pair-loc.sh says {cleat_sum}"
         )
+    if other_readme != other_sum:
+        problems.append(
+            f"{pair}: README's {other_label}-side figure says {other_readme}, "
+            f"scripts/dbos-pair-loc.sh says {other_sum}"
+        )
+
+    extra_checker = EXTRA_CHECKERS.get(pair)
+    if extra_checker:
+        extra_problems, reason = extra_checker(out, readme_text)
+        if reason:
+            return problems + [f"{pair}: could not check per-role rows -- {reason}"], "unmeasured"
+        problems.extend(extra_problems)
+
     return problems, ("mismatch" if problems else "ok")
 
 
@@ -136,8 +358,8 @@ def real_script_runner(pair):
 
 def interface_failures(pair, runner):
     """Run `runner(pair)` (same signature as a script_runner) and check
-    whether parse_script_output can find its markers in the result --
-    the INTERFACE question, never the numbers.
+    whether this pair's SCRIPT_PARSERS entry can find its markers in the
+    result -- the INTERFACE question, never the numbers.
 
     Returns (failures, unmeasured): `failures` is non-empty only when the
     runner produced output but this file's parser could not read it (a
@@ -158,7 +380,7 @@ def interface_failures(pair, runner):
         return [], [f"UNMEASURED calling scripts/dbos-pair-loc.sh {pair}: {err.strip()}"]
     if rc != 0:
         return [], [f"scripts/dbos-pair-loc.sh {pair} exited {rc} unexpectedly: {err.strip()}"]
-    _, _, reason = parse_script_output(out)
+    _, _, reason = SCRIPT_PARSERS[pair](out)
     if reason:
         return [
             f"INTERFACE BROKEN: scripts/dbos-pair-loc.sh {pair}'s real output no longer has "
@@ -193,6 +415,76 @@ SELF_TEST_README_MATCHED = """
 Against cleat's side, `cloc examples/order-lifecycle/{order.go,backend/main.go,order_test.go}`
 on the same date: **729**. Re-derive both with `scripts/dbos-pair-loc.sh`, not
 by re-quoting these numbers.
+"""
+
+# The wedge's shape, matching what scripts/dbos-pair-loc.sh integration-hub
+# actually prints: three role sections per side, and -- deliberately, to
+# exercise section_code_sum's single-file fallback the way the real script
+# does -- the DBOS-isolated side's host-runner and unit-tests sections carry
+# no 'SUM:' line, because each is exactly one file. If this fixture instead
+# hand-added a SUM line cloc would not really print, the fallback would ship
+# with no self-test coverage at all and rely solely on live cloc behaving
+# the way this file assumes.
+SELF_TEST_WEDGE_SCRIPT_OUT_MATCHED = """== CONTROL (excluded from the comparison total): bare DBOS.runStep, no sandbox ==
+Language                     files          blank        comment           code
+TypeScript                       2             18            115            104
+SUM:                             2             18            115            104
+
+== cleat: tenant code ==
+Language                     files          blank        comment           code
+Go                               3             11             73             55
+SUM:                             3             11             73             55
+
+== cleat: host runner (extracted from hub.go -- dispatch block + every other TenantStepName-related line) ==
+Language                     files          blank        comment           code
+Go                               5              0             23             25
+SUM:                             5              0             23             25
+
+== cleat: unit tests (extracted from hub_test.go) ==
+Language                     files          blank        comment           code
+Go                               2              8              2             50
+SUM:                             2              8              2             50
+
+== DBOS-isolated: tenant code (extracted template literals) ==
+Language                     files          blank        comment           code
+TypeScript                       3              0              0             24
+SUM:                             3              0              0             24
+
+== DBOS-isolated: host runner (isolated-workflow.ts minus tenant code) ==
+Language                     files          blank        comment           code
+TypeScript                       1             12             99             54
+
+== DBOS-isolated: unit tests ==
+Language                     files          blank        comment           code
+TypeScript                       1             14            137            122
+
+== E2E HARNESS, both sides -- shown, NOT summed into either app total (see header comment) ==
+== cleat: e2e harness (drives a real deployed worker over HTTP -- exercises runtime code intake) ==
+Language                     files          blank        comment           code
+Bourne Shell                     1             19            113            239
+
+== DBOS-isolated: e2e harness (npm install/build/test wrapper -- the assertions live in the unit test above; no runtime code intake to exercise) ==
+Language                     files          blank        comment           code
+Bourne Shell                     1             10             39             42
+
+== cleat: platform (own line -- never summed into the app total) ==
+Language                     files          blank        comment           code
+Go                               2             14            108            124
+SUM:                             2             14            108            124
+
+== DBOS-isolated: platform (own line -- never summed into the app total) ==
+(no files -- 0 lines, see header comment for why this is not a gap)
+"""
+
+SELF_TEST_WEDGE_README_MATCHED = """
+| role | cleat | DBOS-isolated |
+|---|---:|---:|
+| tenant code | **55** | **24** |
+| host runner | **25** | **54** |
+| unit tests | **50** | **122** |
+| **app total** (tenant + host + unit tests) | **130** | **200** |
+| platform (own line -- not summed above) | **124** | **0** |
+| e2e harness (own line -- not summed above, see below) | **239** | **42** |
 """
 
 
@@ -243,6 +535,65 @@ def self_test():
     if status != "unmeasured":
         failures.append(f"  MISSED: unparseable script output was not reported as unmeasured "
                         f"(got status={status!r}): {problems}")
+
+    # cleat#2632 -- the wedge shape: a matched fixture (which also exercises
+    # section_code_sum's single-file, no-'SUM:'-line fallback on the
+    # DBOS-isolated host-runner and unit-tests sections, the real shape
+    # cloc produces for them), then one drift on each side.
+    def wedge_matched_runner(pair):
+        return 0, SELF_TEST_WEDGE_SCRIPT_OUT_MATCHED, ""
+
+    problems, status = check_pair("integration-hub", SELF_TEST_WEDGE_README_MATCHED, wedge_matched_runner)
+    if problems or status != "ok":
+        failures.append(f"  FALSE POSITIVE on the wedge's matched fixture: {problems}")
+
+    wedge_stale_cleat = SELF_TEST_WEDGE_README_MATCHED.replace(
+        "| **app total** (tenant + host + unit tests) | **130** | **200** |",
+        "| **app total** (tenant + host + unit tests) | **124** | **200** |")
+    problems, status = check_pair("integration-hub", wedge_stale_cleat, wedge_matched_runner)
+    if status != "mismatch" or not any("124" in p and "130" in p for p in problems):
+        failures.append(f"  MISSED: a cleat-side drift in the wedge's app total was not reported: {problems}")
+
+    wedge_stale_dbos = SELF_TEST_WEDGE_README_MATCHED.replace(
+        "| **app total** (tenant + host + unit tests) | **130** | **200** |",
+        "| **app total** (tenant + host + unit tests) | **130** | **194** |")
+    problems, status = check_pair("integration-hub", wedge_stale_dbos, wedge_matched_runner)
+    if status != "mismatch" or not any("194" in p and "200" in p for p in problems):
+        failures.append(f"  MISSED: a DBOS-isolated-side drift in the wedge's app total was not reported: {problems}")
+
+    # Known negative -- cleat-review on cleat#2749: two role rows drift by
+    # equal and opposite amounts, so their SUM (the app-total row) still
+    # matches and the check above alone would pass. tenant code 55 -> 60,
+    # host runner 25 -> 20; app total stays 130.
+    wedge_compensating = SELF_TEST_WEDGE_README_MATCHED.replace(
+        "| tenant code | **55** | **24** |", "| tenant code | **60** | **24** |").replace(
+        "| host runner | **25** | **54** |", "| host runner | **20** | **54** |")
+    problems, status = check_pair("integration-hub", wedge_compensating, wedge_matched_runner)
+    if status != "mismatch" or not any("tenant code" in p and "60" in p and "55" in p for p in problems) \
+            or not any("host runner" in p and "20" in p and "25" in p for p in problems):
+        failures.append(f"  MISSED: compensating errors on two role rows (app total unaffected) "
+                        f"were not reported: {problems}")
+
+    # Known negative -- cleat-review's nit on cleat#2749: a second row
+    # matching a role name elsewhere in the README must not silently win as
+    # "the" value for that role.
+    wedge_duplicate_role = SELF_TEST_WEDGE_README_MATCHED + "\n| tenant code | **999** | **999** |\n"
+    problems, status = check_pair("integration-hub", wedge_duplicate_role, wedge_matched_runner)
+    if status != "unmeasured":
+        failures.append(f"  MISSED: a duplicated wedge role row was not reported as unmeasured "
+                        f"(got status={status!r}): {problems}")
+
+    # Known negative -- a role section renamed or removed (simulating
+    # dbos-pair-loc.sh relabelling one of the three role groups on either
+    # side) must be unmeasured, never a silently short total.
+    wedge_missing_role = SELF_TEST_WEDGE_SCRIPT_OUT_MATCHED.replace(
+        "== cleat: host runner (extracted from hub.go -- dispatch block + every other TenantStepName-related line) ==",
+        "== cleat: dispatcher (renamed) ==")
+    problems, status = check_pair("integration-hub", SELF_TEST_WEDGE_README_MATCHED,
+                                    lambda pair: (0, wedge_missing_role, ""))
+    if status != "unmeasured":
+        failures.append(f"  MISSED: a renamed/missing wedge role section was not reported as "
+                        f"unmeasured (got status={status!r}): {problems}")
 
     # cleat#2633 -- everything above tests the PARSER against fixtures this
     # file writes and controls, which is exactly how cleat#2621 went
