@@ -83,6 +83,10 @@ type embedRequest struct {
 	Input    []string `json:"input"`
 }
 
+type listModelsRequest struct {
+	Provider string `json:"provider"`
+}
+
 // normalizeOutput ensures consistent ChatOutput structure across all providers.
 func normalizeOutput(out *providers.ChatOutput) {
 	for i := range out.Choices {
@@ -300,9 +304,7 @@ func (p *Plugin) embed(ctx context.Context, inputJSON string) (string, error) {
 }
 
 func (p *Plugin) listModels(ctx context.Context, inputJSON string) (string, error) {
-	var req struct {
-		Provider string `json:"provider"`
-	}
+	var req listModelsRequest
 	if err := json.Unmarshal([]byte(inputJSON), &req); err != nil {
 		return "", fmt.Errorf("llm: invalid input: %w", err)
 	}
