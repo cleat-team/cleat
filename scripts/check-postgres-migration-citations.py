@@ -81,22 +81,13 @@ ALLOWLIST = {
         "same as migration/runner.go -- a dated measurement, not a pointer.",
     ("tiers.yaml", "077_a_plugin_policy_can_use_its_index.sql"):
         "same as migration/runner.go -- a dated measurement, not a pointer.",
-    ("migrations/mssql/optional/cross_tenant_claim.sql", "012_admin_role.sql"):
-        "cites 012_admin_role.sql, a stale MSSQL (not postgres) citation -- "
-        "cleat#2754's scope, not this guard's.",
     ("docs/reference/worker-config.md", "024_cross_tenant_schedules.sql"):
-        "held by cleat#2755's open diff at the time cleat#2725 landed; leave "
-        "for that PR to fix so the two don't conflict.",
-    ("cmd/cleat-worker/config.go", "023_cross_tenant_claim.sql"):
-        "deferred, not historical: cleat#2755 deletes this whole sentence "
-        "('--claim-strategy=global still needs the grants...') because the "
-        "flag was retired in cleat#1926. A filename-only fix here would be "
-        "correcting a claim #2755 removes outright -- left for #2755.",
-    ("engine/cross_tenant_fixtures_test.go", "023_cross_tenant_claim.sql"):
-        "deferred, not historical: cleat#2769 rewrites this exact comment, "
-        "including this citation, as part of the cleat#1926 cleanup ('neither "
-        "dialect implements CrossTenantClaimer' is itself false post-#1926) -- "
-        "left for #2769 so the two PRs don't both land in this file.",
+        "was held by cleat#2755's open diff at the time cleat#2725 landed; "
+        "#2755 merged (touching this file) without fixing this citation, so "
+        "it is still genuinely dangling -- needs its own follow-up rather "
+        "than a hand-edit here, since worker-config.md's #1926-class staleness "
+        "is broader than this one line (see the migrations/postgres/024 table "
+        "row and the DeployMigration walkthrough it sits in).",
     ("engine/db.go", "024_cross_tenant_schedules.sql"):
         "deferred, not historical: the comment also claims to be about "
         "GetDueSchedulesAcrossTenants, which cleat#1926 removed entirely (zero "
