@@ -53,6 +53,11 @@ BASELINE="scripts/skip-baseline.txt"
 LEDGER="scripts/skip-ledger.tsv"
 LEDGER_D="scripts/skip-ledger.d"
 CROSSCHECK_EXEMPT="scripts/skip-crosscheck-exempt.txt"
+# cleat#2761 R1: a ceiling, same spirit as skip-ledger.tsv's __UNATTRIBUTED__
+# line -- defense in depth alongside the staleness check below, in case that
+# check itself has a bug. Moves down as entries get real ledger lines; never
+# up. Re-derive with `grep -cE '^[^#]' scripts/skip-crosscheck-exempt.txt`.
+CROSSCHECK_EXEMPT_MAX=49
 
 # Emitted by scan() when it produced nothing, so callers can tell a failed scan
 # from a clean tree across the command-substitution boundary. Same guard, and
@@ -353,13 +358,14 @@ crosscheck_baseline_vs_ledger() {
   # <<'EOF' ... sys.stdin.read() ... EOF` reads "hello" as the SCRIPT (a
   # NameError on the bare word), not as data -- the pipe's content becomes
   # python's source, never reaches the running script's own stdin read.
-  python3 - "$ledger_tmp" "$current_tmp" "$CROSSCHECK_EXEMPT" <<'PYEOF'
+  python3 - "$ledger_tmp" "$current_tmp" "$CROSSCHECK_EXEMPT" "$CROSSCHECK_EXEMPT_MAX" <<'PYEOF'
 import glob
 import re
 import sys
 
 ledger_path = sys.argv[1]
 current_lines = open(sys.argv[2], encoding='utf-8').read().splitlines()
+exempt_max = int(sys.argv[4])
 exempt = set()
 with open(sys.argv[3], encoding='utf-8', errors='replace') as f:
     for line in f:
@@ -449,32 +455,87 @@ def covered(job, fn):
     return False
 
 
+# cleat#2761 R2: only a name go test itself can run gets classified. A
+# receiver-qualified method (MSSQLBackend.Setup) or a bare helper
+# (newASVetProject) can be dialect-gated and skip-counted too, but a
+# skip-ledger.d line has to name what go test -json ACTUALLY reports
+# skipping -- the calling Test/Benchmark/Fuzz function, not the helper it
+# calls. Naming the helper passes this static check and then fails
+# check-skip-budget.sh with "expects 1 skip(s) matching /<helper>/, got 0",
+# because runtime skip events are keyed on test names. Naming the ACTUAL
+# test instead passes runtime and fails back here, since the helper is what
+# is in skip-baseline.txt. There is no ledger line that satisfies both, so
+# a helper is declined rather than demanded an unsatisfiable remedy.
+# Measured against a fixture (newReviewMSSQLThing, single mssql gate,
+# called from TestReviewUsesTheHelper): cleat-review's #2761 GAP, R2.
+RUNNABLE = re.compile(r'^(Test|Benchmark|Fuzz)[A-Z0-9_]')
+
+
+def classify(d, fn):
+    """None if (d, fn) cannot be checked at all (wrong dir, a helper name,
+    the source is unlocatable, or zero/multiple dialect markers). Otherwise
+    (dialect, missing_jobs) -- missing_jobs is empty when fully covered."""
+    if d != 'engine':
+        return None
+    if not RUNNABLE.match(fn):
+        return None
+    body = bodies.get(fn)
+    if body is None:
+        return None
+    found = set()
+    for dialect, markers in DIALECT_MARKERS.items():
+        if any(re.search(m, body) for m in markers):
+            found.add(dialect)
+    if len(found) != 1:
+        return None
+    dialect = next(iter(found))
+    missing = sorted(job for job, want in JOB_DIALECT.items()
+                      if want != dialect and not covered(job, fn))
+    return (dialect, missing)
+
+
+current_keys = set()
 violations = []
 for line in current_lines:
     parts = line.split('\t')
     if len(parts) != 3:
         continue
     d, fn, _count = parts
-    if d != 'engine':
-        continue
+    current_keys.add((d, fn))
     if (d, fn) in exempt:
-        continue  # already accounted for by the job's inherited allowance
-    body = bodies.get(fn)
-    if body is None:
-        continue  # cannot locate the source; do not guess
-    found = set()
-    for dialect, markers in DIALECT_MARKERS.items():
-        if any(re.search(m, body) for m in markers):
-            found.add(dialect)
-    if len(found) != 1:
-        continue  # not classified: zero or more than one dialect named
-    dialect = next(iter(found))
-    missing = sorted(job for job, want in JOB_DIALECT.items()
-                      if want != dialect and not covered(job, fn))
+        continue  # checked for staleness below, not for a fresh violation
+    result = classify(d, fn)
+    if result is None:
+        continue
+    dialect, missing = result
     if missing:
         violations.append((fn, dialect, missing))
 
+# cleat#2761 R1: the exempt file is a ratchet in name only unless something
+# checks it. Measured: appending #2756's own test to it, or a line for a
+# test that does not exist, both left the guard at exit 0 -- the file was
+# 304 lines (all of skip-baseline.txt) with only 62 (then 49, after R2's
+# narrower classify()) actually suppressing anything. An exempt entry earns
+# its place by being live: still present, still classifiable, and still
+# genuinely uncovered. Anything else is dead weight that must be removed,
+# not silently tolerated.
+stale = []
+for d, fn in sorted(exempt):
+    if (d, fn) not in current_keys:
+        stale.append((d, fn, "no longer in skip-baseline.txt (test renamed or deleted)"))
+        continue
+    result = classify(d, fn)
+    if result is None:
+        stale.append((d, fn, "no longer classifiable (not engine, not a Test/Benchmark/Fuzz name, or zero/multiple dialect markers)"))
+        continue
+    _dialect, missing = result
+    if not missing:
+        stale.append((d, fn, "already fully covered by the runtime ledger"))
+
+problem = False
+
 if violations:
+    problem = True
     print("ERROR: dialect-gated engine test(s) are in scripts/skip-baseline.txt")
     print("but missing from the runtime skip ledger for the job(s) named:")
     print()
@@ -488,6 +549,31 @@ if violations:
     print("looked complete. Add a scripts/skip-ledger.d/<name>.tsv line for")
     print("each job named above; scripts/skip-ledger.d/reap-pins-a-fractional-")
     print("reclaim-timeout.tsv is a template with the same shape.")
+
+if stale:
+    problem = True
+    if violations:
+        print()
+    print("ERROR: scripts/skip-crosscheck-exempt.txt has entries that no")
+    print("longer need exempting:")
+    print()
+    for d, fn, why in stale:
+        print("  %s\t%s  (%s)" % (d, fn, why))
+    print()
+    print("Remove them. skip-crosscheck-exempt.txt is a ratchet and may only")
+    print("shrink -- an entry stays only while it is genuinely still")
+    print("uncovered by the runtime ledger (cleat#2761 R1).")
+
+if len(exempt) > exempt_max:
+    problem = True
+    if violations or stale:
+        print()
+    print("ERROR: scripts/skip-crosscheck-exempt.txt has %d entries, over its "
+          "ceiling of %d (CROSSCHECK_EXEMPT_MAX in this script)." %
+          (len(exempt), exempt_max))
+    print("The ceiling only moves down, as entries get real ledger lines.")
+
+if problem:
     sys.exit(1)
 PYEOF
 }
@@ -642,6 +728,16 @@ func TestUnclassifiedTwoDialects(t *testing.T) {
 		t.Skip("needs both")
 	}
 }
+
+// Declined: a helper, not itself a Test/Benchmark/Fuzz entry point
+// (cleat#2761 R2) -- dialect-gated and uncovered, same as the
+// known-positive, but a ledger line naming IT would not match any real
+// go test -json skip event.
+func newFixtureHelperMSSQLGated(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set")
+	}
+}
 XFIXTURE
   : > "$xtmp/scripts/skip-ledger.tsv"
   cat > "$xtmp/scripts/skip-ledger.d/fixture.tsv" <<'XLEDGER'
@@ -649,30 +745,72 @@ cluster	1	TestCoveredMSSQLGated	fixture: covered on cluster
 multi-db/mysql	1	TestCoveredMSSQLGated	fixture: covered on multi-db/mysql
 test-go/engine	1	TestCoveredMSSQLGated	fixture: covered on test-go/engine
 XLEDGER
-  printf 'engine\tTestExemptMSSQLGated\t1\n' > "$xtmp/scripts/skip-crosscheck-exempt.txt"
+  # Three exempt entries, one of each kind cleat#2761 R1 has to tell apart:
+  # TestExemptMSSQLGated is LIVE (still uncovered, stays); TestCoveredMSSQLGated
+  # is STALE because the ledger now covers it (same fixture line the earlier
+  # "not reported as a fresh violation" check above already exercises, so
+  # putting it in both is deliberate -- the two behaviours are not the same
+  # check); TestGoneAwayMSSQLGated is STALE because it is not in $xcurrent at
+  # all, i.e. no longer in skip-baseline.txt.
+  cat > "$xtmp/scripts/skip-crosscheck-exempt.txt" <<'XEXEMPT'
+engine	TestExemptMSSQLGated	1
+engine	TestCoveredMSSQLGated	1
+engine	TestGoneAwayMSSQLGated	1
+XEXEMPT
 
   local xcurrent xout xstatus
-  xcurrent="$(printf 'engine\tTestKnownPositiveMSSQLGated\t1\nengine\tTestCoveredMSSQLGated\t1\nengine\tTestExemptMSSQLGated\t1\nengine\tTestUnclassifiedNoDialectMarker\t1\nengine\tTestUnclassifiedTwoDialects\t1\n')"
+  xcurrent="$(printf 'engine\tTestKnownPositiveMSSQLGated\t1\nengine\tTestCoveredMSSQLGated\t1\nengine\tTestExemptMSSQLGated\t1\nengine\tTestUnclassifiedNoDialectMarker\t1\nengine\tTestUnclassifiedTwoDialects\t1\nengine\tnewFixtureHelperMSSQLGated\t1\n')"
   xstatus=0
   xout="$(cd "$xtmp" && crosscheck_baseline_vs_ledger "$xcurrent")" || xstatus=$?
 
   if [ "$xstatus" -eq 0 ]; then
-    echo "SELF-TEST FAILED: crosscheck_baseline_vs_ledger did not flag the known-positive (uncovered on all three postgres/mysql jobs)" >&2
-    ok=1
-  elif ! grep -qF 'TestKnownPositiveMSSQLGated' <<< "$xout"; then
-    echo "SELF-TEST FAILED: crosscheck exited non-zero but did not name the known-positive" >&2
+    echo "SELF-TEST FAILED: crosscheck_baseline_vs_ledger did not flag anything (expected the known-positive plus two stale exempt entries)" >&2
     ok=1
   fi
-  if grep -qF 'TestCoveredMSSQLGated' <<< "$xout"; then
-    echo "SELF-TEST FAILED: a fully ledger-covered test was reported as a violation" >&2
+  if ! grep -qF 'TestKnownPositiveMSSQLGated  (gated on' <<< "$xout"; then
+    echo "SELF-TEST FAILED: did not flag the known-positive as a fresh violation" >&2
     ok=1
   fi
-  if grep -qF 'TestExemptMSSQLGated' <<< "$xout"; then
-    echo "SELF-TEST FAILED: an exempted (pre-existing) test was reported as a violation" >&2
+  if grep -qF 'TestCoveredMSSQLGated  (gated on' <<< "$xout"; then
+    echo "SELF-TEST FAILED: a fully ledger-covered test was reported as a FRESH violation" >&2
+    ok=1
+  fi
+  if grep -qF 'TestExemptMSSQLGated  (gated on' <<< "$xout"; then
+    echo "SELF-TEST FAILED: an exempted (still live) test was reported as a violation" >&2
+    ok=1
+  fi
+  if grep -q 'TestExemptMSSQLGated.*(no longer\|TestExemptMSSQLGated.*(already fully' <<< "$xout"; then
+    echo "SELF-TEST FAILED: a still-needed exempt entry was reported stale (cleat#2761 R1)" >&2
+    ok=1
+  fi
+  if ! grep -qF 'TestCoveredMSSQLGated  (already fully covered by the runtime ledger)' <<< "$xout"; then
+    echo "SELF-TEST FAILED: an exempt entry the ledger now covers was not reported stale (cleat#2761 R1)" >&2
+    ok=1
+  fi
+  if ! grep -qF 'TestGoneAwayMSSQLGated  (no longer in skip-baseline.txt' <<< "$xout"; then
+    echo "SELF-TEST FAILED: an exempt entry for a deleted test was not reported stale (cleat#2761 R1)" >&2
     ok=1
   fi
   if grep -qF 'TestUnclassified' <<< "$xout"; then
     echo "SELF-TEST FAILED: an unclassified test (zero or multiple dialect markers) was reported" >&2
+    ok=1
+  fi
+  if grep -qF 'newFixtureHelperMSSQLGated' <<< "$xout"; then
+    echo "SELF-TEST FAILED: a helper (not Test/Benchmark/Fuzz-named) was demanded a ledger line (cleat#2761 R2)" >&2
+    ok=1
+  fi
+
+  # The ceiling, tested in isolation: one single live exempt entry, no
+  # staleness at all, but a ceiling of 0 -- must still fail (cleat#2761 R1).
+  printf 'engine\tTestExemptMSSQLGated\t1\n' > "$xtmp/scripts/skip-crosscheck-exempt.txt"
+  local xceil_out xceil_status
+  xceil_status=0
+  xceil_out="$(cd "$xtmp" && CROSSCHECK_EXEMPT_MAX=0 crosscheck_baseline_vs_ledger "$xcurrent")" || xceil_status=$?
+  if [ "$xceil_status" -eq 0 ]; then
+    echo "SELF-TEST FAILED: an exempt file over its ceiling did not fail" >&2
+    ok=1
+  elif ! grep -qF 'over its ceiling of 0' <<< "$xceil_out"; then
+    echo "SELF-TEST FAILED: exited non-zero but did not name the ceiling as the reason" >&2
     ok=1
   fi
 

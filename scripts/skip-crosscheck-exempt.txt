@@ -14,128 +14,30 @@
 # moment it enters skip-baseline.txt, not only in the narrow window before
 # --update has been run.
 #
-# So this crosscheck runs against the FULL current scan, not $added, and
+# So the crosscheck runs against the FULL current scan, not $added, and
 # uses this file -- not skip-baseline.txt -- to tell "already covered by a
 # job's inherited __UNATTRIBUTED__ allowance" from "new, needs its own
-# ledger line". It is a snapshot of skip-baseline.txt taken when cleat#2759
-# landed (2026-09-30), on the same reasoning as skip-ledger.tsv's own
-# __UNATTRIBUTED__ line: everything already in skip-baseline.txt at that
-# point was accounted for by the inherited allowance measured against real
-# CI logs; anything added to skip-baseline.txt after that point was not, and
-# must carry its own scripts/skip-ledger.d/*.tsv line naming it.
+# ledger line".
 #
-benchmarks	buildBenchWasm	2
-benchmarks	newBenchEngine	1
-cmd/cleat	TestARelativeOutputDirectoryIsNotMisplaced	2
-cmd/cleat	TestARelativePythonEntryResolvesWhereTheUserStands	4
-cmd/cleat	TestASBuildRefusesNondeterminism	2
-cmd/cleat	TestASTransform	2
-cmd/cleat	TestAnAgentPythonRequirementsTxtResolves	2
-cmd/cleat	TestAnAssemblyScriptDefaultMakesAParameterOptional	2
-cmd/cleat	TestAnUnreadablePathIsNotAFinding	2
-cmd/cleat	TestAssemblyScriptBuildRefusesAStaleManifest	3
-cmd/cleat	TestAssemblyScriptExampleEntryPointResolutionLive	3
-cmd/cleat	TestBuildRefusesAFlagAfterThePath	1
-cmd/cleat	TestBuildStillAcceptsTheDocumentedOrder	1
-cmd/cleat	TestDeployDryRunNeedsNoDatabaseAndExitsZero	1
-cmd/cleat	TestDeployUnderTheAppRoleSetsTenantContext	1
-cmd/cleat	TestDeployWithoutDatabaseFailsRatherThanSilentlyDoingNothing	1
-cmd/cleat	TestEveryDocumentedCleatInvocationClearsFlagParsing	1
-cmd/cleat	TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds	1
-cmd/cleat	TestEveryTemplateDocumentedCommandActuallyRuns	1
-cmd/cleat	TestFullstackTemplateProxyPassesItsOwnVetAndTests	1
-cmd/cleat	TestFullstackTemplateRunStartsAWorkflow	3
-cmd/cleat	TestJavaBuildRefusesAStaleManifest	3
-cmd/cleat	TestJavaBuildRefusesMultipleManifests	3
-cmd/cleat	TestJavaBuildRefusesNondeterminism	1
-cmd/cleat	TestJavaExampleEntryPointResolutionLive	3
-cmd/cleat	TestPythonBuildRefusesNondeterminism	3
-cmd/cleat	TestREADMEsFirstCommandCompletes	2
-cmd/cleat	TestRollbackClearRemovesThePin	1
-cmd/cleat	TestRollbackRefusesToDiscardALiveExperiment	1
-cmd/cleat	TestRollbackToAnUnknownVersionWritesNothing	1
-cmd/cleat	TestRollbackWritesAPinANewRunWillResolveTo	1
-cmd/cleat	TestRunBuild_PythonTarget_WasmRoundtrip	2
-cmd/cleat	TestRustBuildAcceptsProseNamingAForbiddenPattern	1
-cmd/cleat	TestRustBuildRefusesNondeterminism	1
-cmd/cleat	TestRustEntryPointsSurviveARenamedMacroImport	3
-cmd/cleat	TestRustExampleEntryPointResolutionLive	4
-cmd/cleat	TestRustVetAnchorsTheTargetSkipAtTheCrateRoot	1
-cmd/cleat	TestRustVetSkipsSourcesThatAreNotTheArtifact	1
-cmd/cleat	TestTheASRowsOfTheBindingTableAreAsserted	1
-cmd/cleat	TestTheGuardSeesAFlagAfterAPositional	1
-cmd/cleat	TestTheJavaScanActuallyUsesJavaCodeOnly	1
-cmd/cleat	TestTheJavaScanSkipsTestSources	1
-cmd/cleat	TestThePythonVetSaysWhetherItRan	3
-cmd/cleat	TestTheRollbackPinIsWhatVersionResolutionReads	1
-cmd/cleat	TestVetAS	2
-cmd/cleat	TestVetExitCode	1
-cmd/cleat	TestVetPython	3
-cmd/cleat	TestVetPythonAcceptsTheSingleFileForm	2
-cmd/cleat	compileASFixture	1
-cmd/cleat	findPipOnPathOrSkip	1
-cmd/cleat	newASVetProject	1
-cmd/cleat	runVetCmd	1
-cmd/cleat-bench	TestHelperProcess	1
-cmd/cleat-gen-plugin	TestHelperProcess	1
-cmd/cleat-worker	TestABlockedStartIsAcceptedAndWaits	1
-cmd/cleat-worker	TestABootedWorkerBindsLoginToTheHost	2
-cmd/cleat-worker	TestABootedWorkerDisablesAnExpiredOAuthMintedKey	2
-cmd/cleat-worker	TestABootedWorkerSuspendsAnExpiredTrial	2
-cmd/cleat-worker	TestABootedWorkerSweepsAnAbandonedLogin	2
-cmd/cleat-worker	TestAFencedExecutionMakesNoFurtherCallsAndASecondWorkerFinishesTheWorkflow	1
-cmd/cleat-worker	TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun	4
-cmd/cleat-worker	TestAnonymousOAuthLoginIsNotAborted401UnderRequireAuth	2
-cmd/cleat-worker	TestAuthMiddlewareRejectsInvalidKey	2
-cmd/cleat-worker	TestDeployOfANameAnotherTenantHoldsSucceedsOverHTTP	1
-cmd/cleat-worker	TestHeartbeatBatchFencedIsolatedFromASaturatedExecutionPool	2
-cmd/cleat-worker	TestMainRefusesToStartOnAStaleRouteSignature	2
-cmd/cleat-worker	TestMigrationIsADeployStepOnEveryDialect	2
-cmd/cleat-worker	TestReapOnceRecoveryTailAgainstARealDatabase	2
-cmd/cleat-worker	TestRequireHostMatchBootsAsTheAppRoleAndServesOnEveryDialect	2
-cmd/cleat-worker	TestSignalPluginWorkflowWithAuth_OnlyAnAllowedCallerCanSignal	1
-cmd/cleat-worker	TestSignalPluginWorkflow_MSSQLScopesToTheTargetsTenant	1
-cmd/cleat-worker	TestSignalPluginWorkflow_PostgresScopesToTheTargetsTenant	1
-cmd/cleat-worker	TestSignalPluginWorkflow_PostgresShardedStoreScopesToTheTargetsTenant	1
-cmd/cleat-worker	TestStartPluginWorkflow_MSSQLScopesTheWriteUnderTheDestinationTenantsSessionContext	1
-cmd/cleat-worker	TestStartPluginWorkflow_MySQLIsSingleTenantOnly	1
-cmd/cleat-worker	TestStartPluginWorkflow_PostgresScopesToTheDestinationTenant	1
-cmd/cleat-worker	TestStartPluginWorkflow_PostgresShardedStoreScopesToTheDestinationTenant	1
-cmd/cleat-worker	TestTenantIsolationOverHTTP_MSSQL	1
-cmd/cleat-worker	TestTenantIsolationOverHTTP_MySQL	1
-cmd/cleat-worker	TestTenantIsolationOverHTTP_Postgres	1
-cmd/cleat-worker	TestTheWorkerRunsADeferPhaseRatherThanReschedulingIt	1
-cmd/cleat-worker	TestUninstallDownChainIsClassifiedOnEveryDialect	2
-cmd/cleat-worker	TestUninstallPluginRefusesAnUnprovenPluginOnEveryDialect	2
-cmd/cleat-worker	TestWorkerMigratesFromOutsideTheRepo	2
-cmd/cleat-worker	newSignalAuthStore	1
-cmd/cleat-worker	requireShutdownTestDB	1
-cmd/cleatctl	TestAuditVerifyExitStatusesAreDistinct	1
-engine	MSSQLBackend.Setup	1
-engine	MSSQLBackend.SetupForTenant	1
-engine	MySQLBackend.Setup	1
-engine	MySQLBackend.SetupForTenant	1
+# EVERY LINE HERE IS ENFORCED LIVE, not just recorded once (cleat#2761 R1).
+# The first version of this file was a frozen copy of the entire
+# skip-baseline.txt -- 304 lines, all dirs -- and nothing checked that any
+# of them still belonged. Appending an entry for a test that does not exist,
+# or one already covered by a real ledger line, both left the guard at exit
+# 0. check-skips.sh now fails if any line here is not LIVE: still present in
+# skip-baseline.txt, still dir==engine, still a Test/Benchmark/Fuzz name
+# with exactly one dialect marker (see CROSSCHECK_EXEMPT_MAX's neighbour,
+# classify(), for what that excludes and why -- R2, helper-named entries),
+# and still missing a ledger line somewhere. An entry LEAVES this file the
+# moment it gets a real skip-ledger.d/*.tsv line; the guard reports it as
+# stale rather than letting it sit. Nothing should ever be ADDED here by
+# hand -- a new dialect-gated test belongs in skip-ledger.d/, never here.
+#
+# 49 lines, all engine, all Test-prefixed, all currently uncovered by the
+# runtime ledger. Re-derive with `grep -cE '^[^#]' scripts/skip-crosscheck-exempt.txt`,
+# which must match CROSSCHECK_EXEMPT_MAX in check-skips.sh.
 engine	TestAContendedMSSQLClaimNeverClaimsALockedRowThoughItMayNotSkipIt	1
-engine	TestADeferBodyCannotContinueAsNew	1
-engine	TestADeferBodyCannotRegisterAnotherDefer	1
-engine	TestAMissingDeferExportIsNotReportedAsAFailure	1
-engine	TestAPythonGuestGetsTheDurableClock	1
-engine	TestAPythonGuestsRandomnessIsReproducible	1
 engine	TestAnInvisibleRowIsNotAMissingRow	1
-engine	TestAssemblyScriptDeferSegmentRunsOnlyTheDefers	1
-engine	TestAssemblyScriptDefersDoNotRunOnSuspension	1
-engine	TestAssemblyScriptExportsTheDeferRunner	1
-engine	TestAssemblyScriptWorkflowDefersRun	1
-engine	TestAssemblyScriptWorkflowExecute	1
-engine	TestCascadeDelete	2
-engine	TestComponentShortStringResultsAreNotTruncated	1
-engine	TestDeliverSignalFKRaceIsDeterministicAcrossDialects	2
-engine	TestDeliverSignalToAnIDTheCallerCannotTouchWritesNothing	1
-engine	TestEngineExecute	1
-engine	TestEngineExecuteCancelOrder	1
-engine	TestEngineReplay	1
-engine	TestEngineReplayDivergence	2
-engine	TestEveryDialectAgreesWhichColumnsAWriterMustSupply	1
 engine	TestEveryMSSQLFilterPredicateHasAMatchingBlockPredicate	1
 engine	TestEveryShippedTenantPolicyExistsInTheBuiltDatabase	2
 engine	TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL	1
@@ -145,11 +47,6 @@ engine	TestIntegrationMultiStepSleep	1
 engine	TestIntegrationNewEventTypesPersistenceRoundTrip	1
 engine	TestIntegrationReplayDivergence	1
 engine	TestIntegrationSignalAndResume	1
-engine	TestIntegrationWorkflowMaxDuration	1
-engine	TestJavaDeferSegmentRunsOnlyTheDefers	1
-engine	TestJavaExportsTheDeferRunner	1
-engine	TestJavaOrdinarySegmentRunsTheBody	1
-engine	TestJavaWorkflowExecute	1
 engine	TestMSSQLBlockPredicatesRejectCrossTenantWrites	1
 engine	TestMSSQLClaimStep4LockTimeoutBoundsAGenuinelyLockedRow	1
 engine	TestMSSQLClaimStep4RecheckPreventsDoubleClaim	1
@@ -177,154 +74,14 @@ engine	TestMSSQLStore_StartNewRun_TenantID	1
 engine	TestMSSQLTenantIsolation_UnderRealSecurityPolicies	2
 engine	TestMSSQLTenantIsolation_WorkflowPromises_UnderRealSecurityPolicies	2
 engine	TestMSSQLTenantSettingsAreIsolatedByTheSecurityPolicy	2
-engine	TestMySQLReapStaleInstancesDoesNotGhostCommitUnderInterpolateParams	1
 engine	TestMySQLStoreConfigOptions	1
 engine	TestMySQLStoreFactory	1
 engine	TestMySQLTenantSettings	1
-engine	TestPluginMigrations_AllDialects	1
-engine	TestPythonAllHostCallsWorkflowCompiles	1
-engine	TestPythonComponentExecutionFence	1
-engine	TestPythonCronEndToEnd	1
-engine	TestPythonDeferSegmentRunsOnlyTheDefers	1
-engine	TestPythonOrdinarySegmentRunsTheBody	1
-engine	TestPythonWasmEndToEnd	1
 engine	TestRLSTenantIsolation	1
 engine	TestReapStaleInstancesPinsAFractionalReclaimTimeoutOnMSSQL	2
 engine	TestReapStaleInstancesPinsAFractionalReclaimTimeoutOnMySQL	2
-engine	TestRustAllHostCallsCompiles	2
-engine	TestRustDeferSegmentRunsOnlyTheDefers	1
-engine	TestRustWorkflowCancelOrder	1
-engine	TestRustWorkflowCompensation	1
-engine	TestRustWorkflowDefersRun	1
-engine	TestRustWorkflowExecute	1
-engine	TestRustWorkflowReplay	1
 engine	TestStaleSetShapeMSSQLAgainstARealDatabase	2
 engine	TestStaleSetShapeMySQLAgainstARealDatabase	2
-engine	TestTenantIsolationWithSeparateStores	1
-engine	TestTenantIsolation_ActiveInstanceCounts	1
-engine	TestTenantIsolation_ConcurrencyKeys	1
-engine	TestTenantIsolation_EventHistory	1
-engine	TestTenantIsolation_Promises	1
-engine	TestTenantIsolation_Reaper	1
-engine	TestTenantIsolation_Schedules	1
-engine	TestTenantIsolation_Signals	1
-engine	TestTheBackendLogsToTheConfiguredLogger	1
-engine	TestTheCompiledSizeEstimateStillHolds	1
 engine	TestTheContextFreeInsertItselfIsRefused	1
 engine	TestTheDeletionAuditNamesWhoRemovedTheRow	1
-engine	TestTheHostRunsDefersOfAKilledAssemblyScriptWorkflow	1
-engine	TestTheHostRunsDefersOfAKilledJavaWorkflow	1
-engine	TestTheMigrationSetAppliesWithoutASuperuser	1
 engine	TestTheRowDisappearanceVerdictIsNotConstant	1
-engine	TestTheRustTargetCompilesWithPanicAbort	1
-engine	TestTheWazeroPathRunsDefersOfATrappedWorkflow	1
-engine	TestUnauthenticatedQueryRejection	2
-engine	adminLoginStores	1
-engine	bootstrapScratchDB	1
-engine	buildAssemblyScriptWasm	1
-engine	buildFixtureWasm	1
-engine	buildJavaWasm	2
-engine	buildRustWasm	2
-engine	forEachBackend	1
-engine	mssqlDropTenantDB	2
-engine	mssqlTenantTestPool	2
-engine	mysqlDSNWithInterpolateParams	1
-engine	mysqlIntegrationStore	2
-engine	pythonDeferSegment	1
-engine	pythonDeterminismWasm	1
-engine	requireDialectDSN	1
-engine	setupMSSQLIntegrationTest	2
-engine	testHeartbeatReservedPoolSeesARealClaimedRunMSSQL	2
-engine	testHeartbeatReservedPoolSeesARealClaimedRunMySQL	2
-engine	testHeartbeatReservedPoolSeesARealClaimedRunPostgres	1
-engine	withWasmtimeBackend	1
-engine/testutil	MSSQLTestDB	1
-engine/testutil	MySQLTestDB	1
-engine/testutil	SuiteTestDB	2
-engine/testutil	TestDB	4
-engine/testutil	TestMSSQLAdminDBRefcountsOverlappingCallers	1
-engine/testutil	TestMSSQLAdminDBRestoresThePlainPredicateAfterUse	1
-internal/pgclusterlock	requireDSN	1
-internal/transform	TestUpdateCallSitesSkipsWhenHAlreadyFirstArg	1
-migration	TestConcurrentMigratorsAreSerialisedOnMySQLAndSQLServer	1
-migration	mssqlCredentials	2
-migration	mssqlDSNAs	1
-migration	mssqlDSNAsSA	1
-migration	newMSSQLScratchDB	1
-migration	newMySQLScratchDB	1
-migration	newScratchDB	1
-migration/catalogdiff	TestDiffCatchesADroppedForce	1
-migration/catalogdiff	TestDiffCatchesAPartitionedParentsDifference	1
-migration/catalogdiff	TestDiffCatchesAWrongRoutineBody	1
-migration/catalogdiff	TestNeitherScratchDatabaseContainsAPluginObject	1
-migration/catalogdiff	TestNeitherScratchDatabaseContainsAPluginObjectMSSQL	1
-migration/catalogdiff	TestNeitherScratchDatabaseContainsAPluginObjectMySQL	1
-migration/catalogdiff	TestSnapshotExcludesTheRunnersOwnBootstrapTable	1
-migration/catalogdiff	TestSnapshotIsIdenticalForTwoBuildsOfTheSameChain	1
-migration/catalogdiff	TestSnapshotIsIdenticalForTwoBuildsOfTheSameChainMSSQL	1
-migration/catalogdiff	TestSnapshotIsIdenticalForTwoBuildsOfTheSameChainMySQL	1
-migration/catalogdiff	mysqlScratchDB	1
-plugin	TestConcurrentPluginMigratorsAreSerialisedOnMySQLAndSQLServer	1
-plugin	TestDownloadWASMInvalidURL	1
-plugin	newPluginScratchDB	1
-plugins/auditlog	TestAnExportVerifiesOfflineWithTheReferenceImplementation	1
-plugins/auditlog	TestTheAuditInsertWorksOnMySQLsIDColumn	1
-plugins/auditlog	buildChainEnv	1
-plugins/blobstore	TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave	1
-plugins/blobstore	TestSweepStaleWorkflowRefsMSSQL_RealConcurrencyKeepsANewWorkflowsRef	1
-plugins/notifications	TestASendWebhookRacingAnOpenDeleteTransactionIsBlocked	3
-plugins/scheduledbackup	TestBackupHistoryConfigIdCascadeMigrationIsIdempotentOnMySQL	1
-plugins/scheduledbackup	TestNextRun_Feb29NonLeapYear	1
-plugins/scheduler	TestCronDSTTransition	1
-plugins/slacknotify	TestSendMessageCanonicalizesAnUppercaseCallContextTenant	1
-plugins/webhookingest	TestAnIngestRacingAnOpenDeleteTransactionIsBlocked	3
-tests/cluster	TestAddRemoveWorkers	1
-tests/cluster	TestClusterBasicWorkflowExecution	1
-tests/cluster	TestClusterSpreadWorkflows	1
-tests/cluster	TestClusterWorkersRegister	1
-tests/cluster	TestCrashMidWorkflowReplay	1
-tests/cluster	TestFullClusterRestart	2
-tests/cluster	TestKillPostgresAndRestart	3
-tests/cluster	TestKillWorkerMidExecution	1
-tests/cluster	TestNewWASMVersionUsesNewCode	1
-tests/cluster	TestReplayProducesSameHistory	1
-tests/cluster	TestScaleUpWorkers	1
-tests/cluster	replayStoreDB	3
-tests/cluster	requireDB	3
-tests/cluster	scaleStore	3
-tests/cluster	testStore	3
-tests/crash	mssqlTarget	1
-tests/crash	mysqlTarget	1
-tests/cross-language	buildRustWasm	1
-tests/cross-language	requireCargo	1
-tests/exhaustion	clusterDB	1
-tests/integrity	TestPendingIntentDetection	1
-tests/integrity	TestReplayDivergenceDetection	2
-tests/integrity	TestReplayHashConsistency	1
-tests/integrity	TestReplayStressBasic	1
-tests/integrity	TestReplayStressFuzzedEventOrder	1
-tests/integrity	TestReplayStressRandomCrashPoints	1
-tests/integrity	TestWalCorruption_PgSwitchWAL	1
-tests/integrity	buildStressWasm	2
-tests/integrity	newStressEngine	1
-tests/plugin-harness	TestASBindingContract	1
-tests/plugin-harness	TestBlobstore_S3	2
-tests/plugin-harness	TestHostCallsAS	1
-tests/plugin-harness	TestHostCallsJava	1
-tests/plugin-harness	TestHostCallsRust	1
-tests/plugin-harness	TestPluginCalls_MultiDB	1
-tests/plugin-harness	TestPluginCalls_Wasm_AS	1
-tests/plugin-harness	TestPluginCalls_Wasm_Go	1
-tests/plugin-harness	TestPluginCalls_Wasm_Java	1
-tests/plugin-harness	TestPluginCalls_Wasm_Python	1
-tests/plugin-harness	TestPluginCalls_Wasm_Rust	1
-tests/plugin-harness	TestReapplyingTheCoreMigrationsLeavesTheTenantPoliciesStanding	2
-tests/plugin-harness	buildASHostCallWasm	1
-tests/plugin-harness	buildASWorkflowWasm	1
-tests/plugin-harness	buildGoWorkflowWasm	2
-tests/plugin-harness	buildJavaHostCallWasm	1
-tests/plugin-harness	buildJavaWorkflowWasm	1
-tests/plugin-harness	buildPythonWorkflowWasm	3
-tests/plugin-harness	buildRustHostCallWasm	2
-tests/plugin-harness	buildRustWorkflowWasm	2
-tests/soak	TestSoakWorkflowMix	1
