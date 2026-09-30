@@ -49,6 +49,23 @@ func BadWithInterfaceDispatch(h cleat.HostCalls, reader io.Reader) error {
 	return err
 }
 
+// BadWithErrError calls err.Error() -- a method on the built-in error
+// interface -- inside a string concatenation on a line that also holds a
+// perfectly valid h.DurableLog call. cleat#2516's exact shape: ordinary
+// idiomatic error handling, not a hand-declared interface variable.
+func BadWithErrError(h cleat.HostCalls) error {
+	err := failingOp()
+	if err != nil {
+		h.DurableLog("operation failed: " + err.Error())
+		return err
+	}
+	return nil
+}
+
+func failingOp() error {
+	return nil
+}
+
 // BadWithFuncValue stores a function in a variable and calls it.
 func BadWithFuncValue(h cleat.HostCalls) {
 	fn := func() {
