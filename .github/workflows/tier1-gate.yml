@@ -108,15 +108,32 @@
 # deliberate, not an oversight: tier1-coverage used to be the one shard
 # EXEMPTED from report-only, on the reasoning that it is cheap (~40s), needs
 # no DB, and re-running it in the queue was free insurance that the shard
-# partition itself had not changed underneath the merge. Skipping it
-# entirely on merge_group gives that insurance up. What still catches a
-# broken partition: the PR's own `pull_request` run (this same job, same
-# script, unconditional there), and develop's own `push` run after merge.
-# What it no longer catches: a partition break introduced by a DIFFERENT
-# PR landing between this one's `pull_request` run and its place in the
-# queue -- the same class of gap the tradeoff below already accepts for
-# tier1-engine and tier1-rest's actual test content, now extended to the
-# partition check that used to be the one exception to it.
+# partition itself had not changed underneath the merge.
+#
+# "Free" was measured false before this change shipped, which is why the
+# insurance is being given up rather than kept alongside the other two
+# reductions. #2694's merge_group run (36631254824):
+#
+#   Tier 1 Shard Coverage   started +13.1 min into the run   duration 0.7 min
+#
+# It waited 13.1 minutes for a runner to do 0.7 minutes of work, in an
+# 83-minute run where ~79 minutes was jobs waiting on a runner, not jobs
+# running. The old reasoning priced the job's OWN execution time; the actual
+# cost is the runner ASSIGNMENT, which is the scarce and dominant term in
+# that whole pipeline. So this was never a 40-second insurance policy -- it
+# was a full queue slot on the critical path of every merge, which is the
+# single most expensive thing in the run.
+#
+# Skipping it entirely on merge_group gives that insurance up. What still
+# catches a broken partition: the PR's own `pull_request` run (this same
+# job, same script, unconditional there), and develop's own `push` run
+# after merge. What it no longer catches: a partition break introduced by a
+# DIFFERENT PR landing between this one's `pull_request` run and its place
+# in the queue -- the same class of gap the tradeoff below already accepts
+# for tier1-engine and tier1-rest's actual test content, now extended to
+# the partition check that used to be the one exception to it. This is a
+# real, if small, loss -- not sold here as strictly better than what it
+# replaces, only as worth the runner-assignment cost it stops paying.
 #
 # The tradeoff this accepts: a semantic conflict between two independently-
 # green PRs (each fine alone, broken together) is no longer caught IN the
