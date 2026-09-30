@@ -39,6 +39,20 @@ import (
 // tracked shape that is not itself the Fun of some CallExpr in the same
 // function -- an escape, in the sense that the ledger's tracking of it
 // escapes through the variable.
+//
+// TWO MORE FOUND IN REVIEW, BOTH "RIGHT WHERE APPLIED, WRONG ONE SCOPE OUT":
+//
+//   (R1) (G)'s walker only ever looked inside a FuncDecl's body. A tracked
+//        reference at PACKAGE scope -- `var reviewMark = plugin.ForTenant`
+//        outside any function -- was invisible, because nothing ever asked
+//        a GenDecl the same question. See packageScopeReferenceEscapes.
+//   (R2) Every scanner's bare-Ident branch (the unqualified spelling, for a
+//        call from within package plugin itself) matches on NAME ALONE,
+//        with no way to tell "the free function's own package" from "any
+//        other package that happens to declare or reference something
+//        spelled the same" -- a struct field, a composite-literal key,
+//        another package's own like-named function. See
+//        gateBareIdentOnPackage.
 
 // pluginImportName returns the alias this file's "github.com/cleat-team/
 // cleat/plugin" import is used under, and true if the file does not import
@@ -134,28 +148,102 @@ func trackedReferenceEscapes(fn *ast.FuncDecl, fset *token.FileSet, isTracked fu
 		}
 		return true
 	})
+	return scanTrackedReferences(fn.Body, fset, isTracked, callFuns)
+}
 
+// scanTrackedReferences is the traversal trackedReferenceEscapes and
+// packageScopeReferenceEscapes share: every tracked SelectorExpr/Ident
+// under root that is not a key of exclude, by line. exclude may be nil.
+func scanTrackedReferences(root ast.Node, fset *token.FileSet, isTracked func(ast.Expr) bool, exclude map[ast.Expr]bool) []int {
 	var lines []int
 	var visit func(n ast.Node) bool
 	visit = func(n ast.Node) bool {
 		sel, isSel := n.(*ast.SelectorExpr)
 		if isSel {
-			if isTracked(sel) && !callFuns[sel] {
+			if isTracked(sel) && !exclude[sel] {
 				lines = append(lines, fset.Position(sel.Pos()).Line)
 			}
 			ast.Inspect(sel.X, visit)
 			return false // never descend into .Sel independently
 		}
 		if id, isID := n.(*ast.Ident); isID {
-			if isTracked(id) && !callFuns[id] {
+			if isTracked(id) && !exclude[id] {
 				lines = append(lines, fset.Position(id.Pos()).Line)
 			}
 			return false // a leaf; nothing to descend into anyway
 		}
 		return true
 	}
-	ast.Inspect(fn.Body, visit)
+	ast.Inspect(root, visit)
 	return lines
+}
+
+// packageScopeReferenceEscapes is trackedReferenceEscapes's sibling for
+// declarations OUTSIDE any function -- `var reviewMark = plugin.ForTenant`
+// at package scope. cleat#2740 review, R1: the escape walker originally
+// ran only over each FuncDecl's body, so this exact shape one scope out
+// was invisible -- measured live in plugins/notifications: the same
+// assignment inside a func gave 1 escape, at package scope gave 0. A
+// GenDecl's ValueSpec.Values can never themselves be the Fun of a CallExpr
+// -- there is no enclosing call to exclude against -- so every tracked
+// reference found here is unconditionally an escape.
+func packageScopeReferenceEscapes(f *ast.File, fset *token.FileSet, isTracked func(ast.Expr) bool) []int {
+	var lines []int
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for _, val := range vs.Values {
+				lines = append(lines, scanTrackedReferences(val, fset, isTracked, nil)...)
+			}
+		}
+	}
+	return lines
+}
+
+// assertNoPackageScopeReferenceEscapes is packageScopeReferenceEscapes's
+// guard, called once per file (there is no enclosing function to report).
+func assertNoPackageScopeReferenceEscapes(t *testing.T, f *ast.File, fset *token.FileSet, rel string, isTracked func(ast.Expr) bool) {
+	t.Helper()
+	for _, line := range packageScopeReferenceEscapes(f, fset, isTracked) {
+		t.Errorf("%s:%d: a tracked function is referenced as a value at package scope, not called directly\n"+
+			"  Same defect as an in-function escape, one scope out: a ledger keyed on\n"+
+			"  CallExpr.Fun cannot follow a package-level var initialised to a tracked\n"+
+			"  function's value. Call it directly at the use site instead, or -- if the\n"+
+			"  indirection is genuinely needed -- this scanner family needs extending\n"+
+			"  before this line is safe to add.", rel, line)
+	}
+}
+
+// gateBareIdentOnPackage wraps a family matcher so its bare-Ident branch --
+// the unqualified-call-from-within-package-plugin spelling every one of
+// isAcrossAllTenants/isAllTenantIDs/isPluginForTenantCall has -- only fires
+// when the file actually being scanned has the package name "plugin".
+// cleat#2740 review, R2: without this, `case *ast.Ident: return e.Name ==
+// "ForTenant"` matches ANY identifier spelled "ForTenant" in ANY package --
+// a struct field name, a composite-literal key, or another package's own,
+// unrelated, identically-named function -- because go/ast cannot tell "the
+// bare form of a call to plugin's ForTenant" from "an identifier that
+// happens to be spelled the same" without knowing which package declared
+// it. Measured live: `_ = struct{ ForTenant int }{ForTenant: 1}` inside a
+// plugins/notifications function reported 2 escapes, from the field name
+// and the composite-literal key, neither of which touches plugin.ForTenant
+// at all. isSecretsForTenant has no Ident branch (every shape it looks for
+// is a selector on some value), so wrapping it here is a no-op -- included
+// for uniformity across the family rather than because it changes anything.
+func gateBareIdentOnPackage(isTracked func(ast.Expr) bool, inPluginPackage bool) func(ast.Expr) bool {
+	return func(fun ast.Expr) bool {
+		if _, isIdent := fun.(*ast.Ident); isIdent && !inPluginPackage {
+			return false
+		}
+		return isTracked(fun)
+	}
 }
 
 // assertNoTrackedReferenceEscapes is (G)'s guard, called from the same
@@ -259,6 +347,91 @@ func TestTrackedReferenceEscapesIgnoresADirectCall(t *testing.T) {
 	if len(lines) != 0 {
 		t.Fatalf("trackedReferenceEscapes reported %v for a direct call -- "+
 			"it would fail TestEveryPluginForTenantCallIsDeclared on every real call site in the tree", lines)
+	}
+}
+
+// TestPackageScopeReferenceEscapesCatchesAPackageLevelVar is R1's
+// known-positive: `var reviewMark = plugin.ForTenant` outside any function.
+func TestPackageScopeReferenceEscapesCatchesAPackageLevelVar(t *testing.T) {
+	root := repoRoot(t)
+	fset := token.NewFileSet()
+	rel := filepath.Join("plugin", "testdata", "escapedref", "package_scope_reference.go")
+	f, err := parser.ParseFile(fset, filepath.Join(root, rel), nil, 0)
+	if err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+
+	lines := packageScopeReferenceEscapes(f, fset, isPluginForTenantCall)
+	if len(lines) != 1 {
+		t.Fatalf("packageScopeReferenceEscapes found %d escape(s), want 1 -- it can no longer see "+
+			"`var reviewMark = plugin.ForTenant` at package scope", len(lines))
+	}
+}
+
+// TestPackageScopeReferenceEscapesIgnoresAFunctionScopedVar is the negative
+// control: the SAME shape, inside a function, is trackedReferenceEscapes's
+// job, not this one's -- confirms the two do not double-report.
+func TestPackageScopeReferenceEscapesIgnoresAFunctionScopedVar(t *testing.T) {
+	root := repoRoot(t)
+	fset := token.NewFileSet()
+	rel := filepath.Join("plugin", "testdata", "escapedref", "value_reference.go")
+	f, err := parser.ParseFile(fset, filepath.Join(root, rel), nil, 0)
+	if err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+
+	lines := packageScopeReferenceEscapes(f, fset, isPluginForTenantCall)
+	if len(lines) != 0 {
+		t.Fatalf("packageScopeReferenceEscapes reported %v for a function-scoped var -- "+
+			"it would double-report alongside trackedReferenceEscapes", lines)
+	}
+}
+
+// TestGateBareIdentOnPackageDeclinesAStructFieldNamedForTenant is R2's
+// known-positive: a struct field and a composite-literal key, both spelled
+// "ForTenant", in a package that is not "plugin" -- neither must be
+// reported once the bare arm is gated.
+func TestGateBareIdentOnPackageDeclinesAStructFieldNamedForTenant(t *testing.T) {
+	root := repoRoot(t)
+	rel := filepath.Join("plugin", "testdata", "escapedref", "struct_field_named_fortenant.go")
+	fn, fset := parseFuncDecl(t, root, rel, "buildsAStructThatHappensToShareAName")
+
+	ungated := trackedReferenceEscapes(fn, fset, isPluginForTenantCall)
+	if len(ungated) != 2 {
+		t.Fatalf("ungated isPluginForTenantCall found %d escape(s) in the fixture, want 2 (the field "+
+			"name and the composite-literal key) -- the fixture no longer demonstrates R2, or the "+
+			"traversal changed shape", len(ungated))
+	}
+
+	tracked := gateBareIdentOnPackage(isPluginForTenantCall, false) // package "fixture", not "plugin"
+	gated := trackedReferenceEscapes(fn, fset, tracked)
+	if len(gated) != 0 {
+		t.Fatalf("gateBareIdentOnPackage did not suppress %v -- a plugin naming a struct field, "+
+			"key or local function ForTenant would fail Lint over code that never touches "+
+			"plugin.ForTenant", gated)
+	}
+}
+
+// TestGateBareIdentOnPackageAcceptsTheBareFormInsidePackagePlugin is the
+// negative control for R2's gate itself: it must not suppress the
+// legitimate case, or it silently reopens (E). Reuses (E)'s own fixture,
+// which is "package plugin" for exactly this reason.
+func TestGateBareIdentOnPackageAcceptsTheBareFormInsidePackagePlugin(t *testing.T) {
+	root := repoRoot(t)
+	rel := filepath.Join("plugin", "testdata", "barecontext", "bare_unqualified_call.go")
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, filepath.Join(root, rel), nil, 0)
+	if err != nil {
+		t.Fatalf("parse fixture: %v", err)
+	}
+	if f.Name.Name != "plugin" {
+		t.Fatalf("fixture's own package is %q, want \"plugin\" -- the fixture no longer "+
+			"exercises the case this gate must accept", f.Name.Name)
+	}
+	tracked := gateBareIdentOnPackage(isPluginForTenantCall, true)
+	if !tracked(ast.Expr(&ast.Ident{Name: "ForTenant"})) {
+		t.Fatal("gateBareIdentOnPackage(isPluginForTenantCall, true) rejected a bare \"ForTenant\" " +
+			"Ident -- it would reopen (E), the unqualified-call-from-within-the-package case")
 	}
 }
 

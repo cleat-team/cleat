@@ -6,7 +6,13 @@
 // isPluginForTenantCall's `case *ast.Ident` arm (matching the unqualified
 // spelling) had no fixture and no live caller: deleting that arm failed
 // nothing, so a regression to it would have been silent.
-package fixture
+//
+// DELIBERATELY "package plugin", unlike every sibling fixture's "package
+// fixture" (cleat#2740 review, R2). gateBareIdentOnPackage only honours the
+// bare-Ident branch when the scanned file's own package is "plugin" -- the
+// whole point of this fixture is to be the one case where that condition
+// is true, so it has to actually say so.
+package plugin
 
 import "context"
 
