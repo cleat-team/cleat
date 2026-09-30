@@ -53,10 +53,17 @@ BASELINE="scripts/skip-baseline.txt"
 LEDGER="scripts/skip-ledger.tsv"
 LEDGER_D="scripts/skip-ledger.d"
 CROSSCHECK_EXEMPT="scripts/skip-crosscheck-exempt.txt"
-# cleat#2761 R1: a ceiling, same spirit as skip-ledger.tsv's __UNATTRIBUTED__
-# line -- defense in depth alongside the staleness check below, in case that
-# check itself has a bug. Moves down as entries get real ledger lines; never
-# up. Re-derive with `grep -cE '^[^#]' scripts/skip-crosscheck-exempt.txt`.
+# cleat#2761 R1: MUST EQUAL the exempt file's line count, not just bound it
+# from above. `>` alone has slack the moment the ratchet is actually used:
+# the stale check below forces a fixed entry OUT of the file, the count
+# drops below the ceiling, and the NEXT bad entry anyone adds has room to
+# hide under the slack that one legitimate removal just created (GAP R1b,
+# measured against 13f40334: fix one entry, remove it, 48 against a ceiling
+# of 49 -- rc=0 -- then a fresh uncovered entry hides in that same gap).
+# `!=` closes it: every removal must lower this constant in the same diff.
+# Also defense in depth alongside the staleness check itself, same spirit
+# as skip-ledger.tsv's __UNATTRIBUTED__ line, in case that check has a bug.
+# Re-derive with `grep -cE '^[^#]' scripts/skip-crosscheck-exempt.txt`.
 CROSSCHECK_EXEMPT_MAX=49
 
 # Emitted by scan() when it produced nothing, so callers can tell a failed scan
@@ -564,14 +571,29 @@ if stale:
     print("shrink -- an entry stays only while it is genuinely still")
     print("uncovered by the runtime ledger (cleat#2761 R1).")
 
-if len(exempt) > exempt_max:
+if len(exempt) != exempt_max:
     problem = True
     if violations or stale:
         print()
-    print("ERROR: scripts/skip-crosscheck-exempt.txt has %d entries, over its "
-          "ceiling of %d (CROSSCHECK_EXEMPT_MAX in this script)." %
-          (len(exempt), exempt_max))
-    print("The ceiling only moves down, as entries get real ledger lines.")
+    if len(exempt) > exempt_max:
+        print("ERROR: scripts/skip-crosscheck-exempt.txt has %d entries, over "
+              "its ceiling of %d (CROSSCHECK_EXEMPT_MAX in this script)." %
+              (len(exempt), exempt_max))
+        print("The ceiling only moves down, as entries get real ledger lines.")
+    else:
+        # cleat-review's #2761 GAP, R1b: `>` alone has slack the moment the
+        # ratchet is actually used. Remove the entry the stale check forces
+        # out, and the count drops below the ceiling with nothing else
+        # requiring the ceiling to follow -- so the NEXT bad entry, added by
+        # anyone, has room to hide under the stale allowance one removal
+        # created. `!=` closes it: every removal must travel with a
+        # CROSSCHECK_EXEMPT_MAX edit in the same diff, same discipline as
+        # skip-ledger.tsv's __UNATTRIBUTED__ line moving only when the
+        # number backing it actually changes.
+        print("ERROR: scripts/skip-crosscheck-exempt.txt has %d entries, below "
+              "its ceiling of %d (CROSSCHECK_EXEMPT_MAX in this script)." %
+              (len(exempt), exempt_max))
+        print("Lower CROSSCHECK_EXEMPT_MAX to %d in this same change." % len(exempt))
 
 if problem:
     sys.exit(1)
@@ -811,6 +833,20 @@ XEXEMPT
     ok=1
   elif ! grep -qF 'over its ceiling of 0' <<< "$xceil_out"; then
     echo "SELF-TEST FAILED: exited non-zero but did not name the ceiling as the reason" >&2
+    ok=1
+  fi
+
+  # cleat-review's #2761 GAP, R1b: `>` alone has slack the moment a
+  # legitimate removal (the stale check above) drops the count BELOW the
+  # ceiling -- one live entry against a ceiling of 5 must fail too, not
+  # just an over-full file, or the first real removal reopens R1.
+  xceil_status=0
+  xceil_out="$(cd "$xtmp" && CROSSCHECK_EXEMPT_MAX=5 crosscheck_baseline_vs_ledger "$xcurrent")" || xceil_status=$?
+  if [ "$xceil_status" -eq 0 ]; then
+    echo "SELF-TEST FAILED: an exempt file BELOW its ceiling did not fail (cleat#2761 R1b)" >&2
+    ok=1
+  elif ! grep -qF 'below its ceiling of 5' <<< "$xceil_out"; then
+    echo "SELF-TEST FAILED: exited non-zero but did not name the ceiling as the reason (cleat#2761 R1b)" >&2
     ok=1
   fi
 
