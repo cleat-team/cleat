@@ -210,7 +210,7 @@ GO
 -- real failure path is store.FailWorkflow (engine/mssql_lifecycle.go), a
 -- plain UPDATE that never calls this procedure at all. So the 'failed'
 -- branch below -- including its event_history DELETE -- has never run in
--- production. See finalize_workflow_status, migrations/postgres/003_procedures.sql,
+-- production. See migrations/postgres/101_the_finalize_procedure_stops_deleting_failed_history.sql
 -- for the full reasoning; this is the same change on SQL Server.
 --
 -- A dormant delete is the risk, not a current bug: removing it is removing a

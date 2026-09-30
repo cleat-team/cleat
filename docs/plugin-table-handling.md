@@ -304,7 +304,7 @@ done
 grep -rn "TenantScoped:" plugins/*/migrations.go
 
 # does drop_tenant touch any plugin table?
-sed -n '/FUNCTION admin.drop_tenant/,/^\$_\$;/p' \
+sed -n '/^CREATE OR REPLACE FUNCTION admin.drop_tenant/,/^\$_\$;/p' \
   migrations/postgres/001_schema.sql | grep "DELETE FROM"
 ```
 

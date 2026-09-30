@@ -905,7 +905,7 @@ tier2:
         tier 1 requires:
 
           postgres — works. admin.claim_workflows, a SECURITY DEFINER function owned by a
-            BYPASSRLS role (migrations/postgres/001_schema.sql). FORCE ROW
+            BYPASSRLS role (migrations/postgres/023_cross_tenant_claim.sql). FORCE ROW
             LEVEL SECURITY subjects even the table owner to RLS, so SECURITY DEFINER alone
             is not enough; the BYPASSRLS attribute is the exemption, and the migration
             sets it rather than leaving it to a deployment step. A missing BYPASSRLS
