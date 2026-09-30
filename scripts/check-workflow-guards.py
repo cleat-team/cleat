@@ -475,14 +475,25 @@ def is_safe_expression(body: str) -> bool:
     return body in SAFE_EXPRESSION_BODIES or bool(SAFE_RUNNER_PROPERTY.match(body))
 
 
-# (workflow path, job id, step index) -> reason a human has read the spliced
-# expression and judged it safe despite not being on the list above. Empty
-# today: neither privileged workflow in this repo needs one (see the guard's
-# own audit, cleat#2310's acceptance criteria). Add an entry only after
-# reading the specific expression, the same discipline as
+# (workflow path, job id, expression body) -> reason a human has read the
+# spliced expression and judged it safe despite not being on the list above.
+# Empty today: neither privileged workflow in this repo needs one (see the
+# guard's own audit, cleat#2310's acceptance criteria). Add an entry only
+# after reading the specific expression, the same discipline as
 # eventHistoryInsertSites in the encoder-routing guard this docstring
 # references -- a name and a reason next to the site, not a blanket waiver.
-EXPRESSION_ALLOWLIST: dict[tuple[str, str, int], str] = {}
+#
+# Keyed on the expression's own text, not on step INDEX (cleat#2797). A step
+# index is a position, and inserting, removing or reordering an unrelated
+# step in the same job shifts it -- so a grant recorded at index 2 would
+# silently start covering whatever expression a later, unrelated edit moved
+# into index 2, never having been read by anyone. The expression body is the
+# thing a human actually reads before granting an entry, so it is the key
+# that stays attached to the grant regardless of what else in the job
+# changes; two structurally identical steps in one job sharing the same
+# expression text also share the same judgment, which is correct rather than
+# a collision.
+EXPRESSION_ALLOWLIST: dict[tuple[str, str, str], str] = {}
 
 
 def workflow_triggers(doc: dict) -> set[str]:
@@ -543,7 +554,7 @@ def find_privileged_expression_violations(path: str, doc: dict) -> list[str]:
             body = match.group(1).strip()
             if is_safe_expression(body):
                 continue
-            reason = EXPRESSION_ALLOWLIST.get((path, job_id, index))
+            reason = EXPRESSION_ALLOWLIST.get((path, job_id, body))
             if reason is not None:
                 continue
             violations.append(
@@ -567,7 +578,7 @@ def find_privileged_expression_violations(path: str, doc: dict) -> list[str]:
                 f"see .github/workflows/tier1-push-failure-notifier.yml's "
                 f"'Quiet on green' step. If this specific splice has been "
                 f"read and judged safe, add "
-                f"({path!r}, {job_id!r}, {index}) to EXPRESSION_ALLOWLIST "
+                f"({path!r}, {job_id!r}, {body!r}) to EXPRESSION_ALLOWLIST "
                 f"with a reason."
             )
     return violations
@@ -981,6 +992,97 @@ def self_test() -> int:
         """,
         [],
     )
+
+    # KNOWN-POSITIVE/NEGATIVE pair for EXPRESSION_ALLOWLIST itself (cleat#2797):
+    # the grant must follow the expression's TEXT, not the step's POSITION.
+    # Two steps, two distinct untrusted splices, one workflow. A grant for
+    # step 0's exact expression must suppress only that one -- and must keep
+    # suppressing it after the two steps swap places, proving the key is not
+    # secretly the index a naive implementation would use instead.
+    ALLOWLIST_YAML = """
+        on:
+          workflow_run:
+            workflows: ["Tier 1 Gate"]
+            types: [completed]
+        jobs:
+          notify:
+            runs-on: ubuntu-latest
+            steps:
+              - run: echo "${{ github.event.workflow_run.head_branch }}"
+              - run: echo "${{ github.event.workflow_run.head_sha }}"
+        """
+    GRANTED_BODY = "github.event.workflow_run.head_branch"
+    UNGRANTED_VIOLATION = (
+        "workflow.yml: job 'notify' step 1 (run) splices "
+        "`${{ github.event.workflow_run.head_sha }}` directly into its run text"
+    )
+    EXPRESSION_ALLOWLIST[("workflow.yml", "notify", GRANTED_BODY)] = (
+        "cleat#2797 self-test fixture, not a real grant"
+    )
+    try:
+        check(
+            "EXPRESSION_ALLOWLIST grants by expression text: the granted "
+            "splice is suppressed, the other one is not",
+            ALLOWLIST_YAML,
+            [UNGRANTED_VIOLATION],
+        )
+
+        # Same two expressions, steps swapped -- the granted one is now at
+        # index 1, the ungranted one at index 0. An index-keyed allowlist
+        # would silently start granting the WRONG expression here; a
+        # text-keyed one keeps suppressing the same one it was actually
+        # granted for, at whichever position it now sits.
+        SWAPPED_YAML = """
+            on:
+              workflow_run:
+                workflows: ["Tier 1 Gate"]
+                types: [completed]
+            jobs:
+              notify:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: echo "${{ github.event.workflow_run.head_sha }}"
+                  - run: echo "${{ github.event.workflow_run.head_branch }}"
+            """
+        SWAPPED_UNGRANTED_VIOLATION = (
+            "workflow.yml: job 'notify' step 0 (run) splices "
+            "`${{ github.event.workflow_run.head_sha }}` directly into its run text"
+        )
+        check(
+            "EXPRESSION_ALLOWLIST survives the granted expression moving to "
+            "a different step index",
+            SWAPPED_YAML,
+            [SWAPPED_UNGRANTED_VIOLATION],
+        )
+
+        # The SAME expression text, spliced in a DIFFERENT job of the same
+        # workflow. A grant for job "notify" must not leak into job "other" --
+        # job_id is part of the key precisely so a body-only lookup (which
+        # would pass every case above just as well) cannot creep in unnoticed
+        # (cleat-review, N1 on this PR).
+        OTHER_JOB_YAML = """
+            on:
+              workflow_run:
+                workflows: ["Tier 1 Gate"]
+                types: [completed]
+            jobs:
+              other:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: echo "${{ github.event.workflow_run.head_branch }}"
+            """
+        OTHER_JOB_VIOLATION = (
+            "workflow.yml: job 'other' step 0 (run) splices "
+            "`${{ github.event.workflow_run.head_branch }}` directly into its run text"
+        )
+        check(
+            "EXPRESSION_ALLOWLIST does not leak a grant across job_id, "
+            "even for the identical expression text",
+            OTHER_JOB_YAML,
+            [OTHER_JOB_VIOLATION],
+        )
+    finally:
+        del EXPRESSION_ALLOWLIST[("workflow.yml", "notify", GRANTED_BODY)]
 
     # --- guard 7: the PyPI approval must land AFTER the build ---------------
     def check_publish(label: str, yaml_text: str, want_count: int, want_substrings: list[str]):
