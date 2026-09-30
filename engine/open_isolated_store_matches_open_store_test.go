@@ -4,8 +4,10 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"reflect"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/monitoring/prometheus"
@@ -25,11 +27,17 @@ import (
 // missing WithEncryption call takes.
 //
 // This configures every option OpenStore and OpenIsolatedStore both expose,
-// opens a store through each, and asserts the two agree on every field
-// OpenIsolatedStore's doc comment claims to match. db and dsn are
-// deliberately excluded from the comparison: OpenIsolatedStore opens a
-// SEPARATE pool by design (that is the entire feature), so those two must
-// differ.
+// opens a store through each, and asserts the two agree on EVERY field of
+// *PostgresStore except db (compared by reflection, not name-by-name).
+//
+// NOT NAME-BY-NAME ON PURPOSE. The first version of this test checked seven
+// named fields and missed the eighth (Metrics) -- cleat-review found that it
+// compared the struct's dead, never-written lowercase `metrics` field
+// instead of the exported `Metrics` field OpenStore and OpenIsolatedStore
+// actually set, so the assertion was nil == nil on every run and could not
+// fail no matter what OpenIsolatedStore did. A hand-picked field list has
+// the same blind spot the very next field OpenStore grows would fall into;
+// reflecting over the whole struct removes the list to maintain.
 func TestPostgresOpenIsolatedStoreMatchesOpenStore(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping a real database test in short mode")
@@ -92,29 +100,58 @@ func TestPostgresOpenIsolatedStoreMatchesOpenStore(t *testing.T) {
 			"if it did not")
 	}
 
-	if isolated.encryption != open.encryption {
-		t.Errorf("encryption: OpenIsolatedStore got %p, OpenStore got %p, want equal", isolated.encryption, open.encryption)
+	assertAllFieldsMatchExceptDB(t, open, isolated)
+}
+
+// assertAllFieldsMatchExceptDB compares every field of *PostgresStore between
+// open and isolated except db, failing on the first mismatch it finds per
+// field. db is read through the unexported field directly by the caller (see
+// the known-positive above) rather than here, since it is expected to
+// DIFFER -- the opposite of everything else this function checks.
+//
+// unsafe.Pointer is required because most of these fields are unexported:
+// reflect.Value.Interface() panics on a field obtained by plain field
+// access ("reflect: reflect.Value.Interface: cannot return value obtained
+// from unexported field or method"). reflect.NewAt bypasses that read-only
+// restriction the same way encoding/json's own field-walking code does.
+func assertAllFieldsMatchExceptDB(t *testing.T, open, isolated *PostgresStore) {
+	t.Helper()
+	ov := reflect.ValueOf(open).Elem()
+	iv := reflect.ValueOf(isolated).Elem()
+	typ := ov.Type()
+	checked := 0
+	for i := 0; i < typ.NumField(); i++ {
+		name := typ.Field(i).Name
+		if name == "db" {
+			continue
+		}
+		ofv := reflect.NewAt(typ.Field(i).Type, unsafe.Pointer(ov.Field(i).UnsafeAddr())).Elem()
+		ifv := reflect.NewAt(typ.Field(i).Type, unsafe.Pointer(iv.Field(i).UnsafeAddr())).Elem()
+		checked++
+		if !reflect.DeepEqual(ofv.Interface(), ifv.Interface()) {
+			// A pointer field (encryption, logger, Metrics) prints its
+			// pointee's full contents under %#v -- Metrics alone runs to
+			// several kilobytes of OpenTelemetry instrument state. The
+			// pointer VALUE is what this test actually compares (identity,
+			// not contents), so print that instead; everything else keeps
+			// %#v, which is short for every other field on this struct.
+			if ofv.Kind() == reflect.Ptr {
+				t.Errorf("%s: OpenIsolatedStore got %p, OpenStore got %p, want equal (same pointer)",
+					name, ifv.Interface(), ofv.Interface())
+			} else {
+				t.Errorf("%s: OpenIsolatedStore got %#v, OpenStore got %#v, want equal",
+					name, ifv.Interface(), ofv.Interface())
+			}
+		}
 	}
-	if isolated.encryptSensitivePayloads != open.encryptSensitivePayloads {
-		t.Errorf("encryptSensitivePayloads: OpenIsolatedStore got %v, OpenStore got %v",
-			isolated.encryptSensitivePayloads, open.encryptSensitivePayloads)
-	}
-	if isolated.idempotencyKeyTTL != open.idempotencyKeyTTL {
-		t.Errorf("idempotencyKeyTTL: OpenIsolatedStore got %v, OpenStore got %v",
-			isolated.idempotencyKeyTTL, open.idempotencyKeyTTL)
-	}
-	if isolated.notifyChannel != open.notifyChannel {
-		t.Errorf("notifyChannel: OpenIsolatedStore got %q, OpenStore got %q",
-			isolated.notifyChannel, open.notifyChannel)
-	}
-	if isolated.metrics != open.metrics {
-		t.Errorf("metrics: OpenIsolatedStore got %p, OpenStore got %p, want equal", isolated.metrics, open.metrics)
-	}
-	if isolated.syncCommitOff != open.syncCommitOff {
-		t.Errorf("syncCommitOff: OpenIsolatedStore got %v, OpenStore got %v",
-			isolated.syncCommitOff, open.syncCommitOff)
-	}
-	if isolated.logger != open.logger {
-		t.Errorf("logger: OpenIsolatedStore got %p, OpenStore got %p, want equal", isolated.logger, open.logger)
+	// The known-positive for THIS function: if PostgresStore ever grows a
+	// field and this loop somehow stops seeing it -- NumField returning 0 on
+	// a bad reflect.Value, say -- checked stays 0 or drops, and a test that
+	// silently checks nothing is worse than the named-field version it
+	// replaced.
+	if checked < 10 {
+		t.Fatalf("assertAllFieldsMatchExceptDB only checked %d fields; PostgresStore had "+
+			"considerably more than that when this test was written -- the reflection walk is "+
+			"broken and every check above passed by checking nothing", checked)
 	}
 }

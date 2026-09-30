@@ -54,7 +54,6 @@ type PostgresStore struct {
 	// read whose caller returns the failure as an error and reports it itself
 	// (readEventHistoryTx). The counter is unaffected. cleat#2311.
 	quietDecryptLogs bool
-	metrics          *prometheus.Metrics
 
 	// disableReadRedaction when true bypasses RedactOnRead on the read path.
 	// Set to true during replay to avoid the overhead of retroactive redaction.
