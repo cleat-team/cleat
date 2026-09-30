@@ -433,8 +433,11 @@ func TestGenerateGo_WithOptionalField(t *testing.T) {
 		t.Fatalf("GenerateGo returned error: %v", err)
 	}
 
-	if !strings.Contains(code, "Name string") {
-		t.Error("expected Name string field")
+	// Not "Name string" as one substring: gofmt (this generator's own
+	// post-processing step) column-aligns struct fields, so "Name" ends up
+	// padded to Nickname's width -- checked as two substrings instead.
+	if !strings.Contains(code, "type TestInput struct") || !strings.Contains(code, "Name") {
+		t.Error("expected a Name field on TestInput")
 	}
 	if !strings.Contains(code, "Nickname string") {
 		t.Error("expected Nickname string field")
