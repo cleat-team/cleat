@@ -1,0 +1,2 @@
+multi-db/mysql	1	^TestPostgresOpenIsolatedStoreMatchesOpenStore$	cleat#2200's PostgreSQL-only regression test (testutil.TestDB(t, DialectPostgres), no subtest split); this job sets only CLEAT_TEST_MYSQL, so it skips as a single whole test.
+multi-db/mssql	1	^TestPostgresOpenIsolatedStoreMatchesOpenStore$	Same test, same reasoning: this job sets only CLEAT_TEST_MSSQL, so the PostgreSQL-only test skips here too.
