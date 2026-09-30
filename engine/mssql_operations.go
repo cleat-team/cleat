@@ -10,6 +10,28 @@ import (
 	_ "github.com/microsoft/go-mssqldb"
 )
 
+// splitMillisecondOffset splits a millisecond offset into a whole-seconds
+// part and a sub-second millisecond remainder, so it can be applied to
+// SYSUTCDATETIME() via two DATEADD calls instead of one.
+//
+// cleat#2197: DATEADD's numeric argument is a SQL Server `int`, so a single
+// DATEADD(MILLISECOND, …) overflows past about 24.86 days (2^31 ms).
+// cleat#2194 moved ReapStaleInstances and StaleSetShape to millisecond
+// precision (needed for a fractional-second reclaim timeout, cleat#2189) and
+// reintroduced that ceiling -- before it, the equivalent seconds-only form
+// (see Dialect.intervalExpr in query_builder.go) only overflowed at about 68
+// years. Splitting into DATEADD(SECOND, …) plus a millisecond remainder
+// restores that ceiling, rather than adding a new one: --reclaim-timeout can
+// be any value up to ~68 years before this arithmetic overflows again.
+//
+// ms may be negative (both callers pass -timeout.Milliseconds(), to look
+// backward from now); Go's / and % truncate toward zero for int64, so
+// seconds*1000 + remainderMs reconstructs ms exactly for either sign, and
+// DATEADD accepts a negative offset in both calls.
+func splitMillisecondOffset(ms int64) (seconds, remainderMs int64) {
+	return ms / 1000, ms % 1000
+}
+
 func (s *MSSQLStore) ReapStaleInstances(ctx context.Context, timeout time.Duration, limit int) (int, error) {
 	var out int
 	err := withRollbackGuaranteedRetry(ctx, "reap stale instances", mssqlTxRetries, mssqlTxRetryDelay, func() error {
@@ -34,8 +56,12 @@ func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Du
 	// goes back to 'terminating', because its terminal outcome is already
 	// decided and calling it 'ready' would undo the distinction D6 created the
 	// status to make.
-	// TOP (@p3) inside the subquery, because SQL Server's UPDATE TOP takes no
+	// TOP (@p4) inside the subquery, because SQL Server's UPDATE TOP takes no
 	// ORDER BY and the order is the point -- see the interface doc.
+	//
+	// DATEADD(MILLISECOND, @p1, DATEADD(SECOND, @p2, ...)) rather than one
+	// DATEADD(MILLISECOND, ...): see splitMillisecondOffset (cleat#2197).
+	seconds, remainderMs := splitMillisecondOffset(-timeout.Milliseconds())
 	result, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET status = CASE WHEN pending_terminal_status IS NOT NULL
@@ -43,13 +69,13 @@ func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Du
 		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
 		    reclaim_count = reclaim_count + 1
 		WHERE id IN (
-		    SELECT TOP (@p3) id FROM workflow_instances
+		    SELECT TOP (@p4) id FROM workflow_instances
 		    WHERE status = 'running'
-		      AND heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME())
-		      AND tenant_id = @p2
+		      AND heartbeat_at < DATEADD(MILLISECOND, @p1, DATEADD(SECOND, @p2, SYSUTCDATETIME()))
+		      AND tenant_id = @p3
 		    ORDER BY heartbeat_at
 		)
-	`, -timeout.Milliseconds(), s.tenantID, reapLimitArg(limit))
+	`, remainderMs, seconds, s.tenantID, reapLimitArg(limit))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
 	}
@@ -85,21 +111,23 @@ func (s *MSSQLStore) StaleSetShape(ctx context.Context, timeout, missedBeatTimeo
 	var shape StaleSetShape
 	var oldest, newest sql.NullTime
 	var noRecentHeartbeat int
-	missedBeatMillis := -missedBeatTimeout.Milliseconds()
-	staleMillis := -timeout.Milliseconds()
+	// DATEADD(MILLISECOND, @pN, DATEADD(SECOND, @pM, ...)) rather than one
+	// DATEADD(MILLISECOND, ...): see splitMillisecondOffset (cleat#2197).
+	missedBeatSeconds, missedBeatRemainderMs := splitMillisecondOffset(-missedBeatTimeout.Milliseconds())
+	staleSeconds, staleRemainderMs := splitMillisecondOffset(-timeout.Milliseconds())
 	err = tx.QueryRowContext(ctx, `
 		SELECT
 		    COUNT(*),
-		    COUNT(CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME()) THEN 1 END),
-		    COUNT(DISTINCT CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME()) THEN assigned_to END),
-		    MIN(CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME()) THEN heartbeat_at END),
-		    MAX(CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME()) THEN heartbeat_at END),
-		    COUNT(CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p2, SYSUTCDATETIME()) THEN 1 END),
-		    CASE WHEN MAX(heartbeat_at) < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME()) THEN 1 ELSE 0 END,
+		    COUNT(CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p1, DATEADD(SECOND, @p2, SYSUTCDATETIME())) THEN 1 END),
+		    COUNT(DISTINCT CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p1, DATEADD(SECOND, @p2, SYSUTCDATETIME())) THEN assigned_to END),
+		    MIN(CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p1, DATEADD(SECOND, @p2, SYSUTCDATETIME())) THEN heartbeat_at END),
+		    MAX(CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p1, DATEADD(SECOND, @p2, SYSUTCDATETIME())) THEN heartbeat_at END),
+		    COUNT(CASE WHEN heartbeat_at < DATEADD(MILLISECOND, @p3, DATEADD(SECOND, @p4, SYSUTCDATETIME())) THEN 1 END),
+		    CASE WHEN MAX(heartbeat_at) < DATEADD(MILLISECOND, @p1, DATEADD(SECOND, @p2, SYSUTCDATETIME())) THEN 1 ELSE 0 END,
 		    COUNT(DISTINCT assigned_to)
 		FROM workflow_instances
-		WHERE status = 'running' AND tenant_id = @p3
-	`, missedBeatMillis, staleMillis, s.tenantID,
+		WHERE status = 'running' AND tenant_id = @p5
+	`, missedBeatRemainderMs, missedBeatSeconds, staleRemainderMs, staleSeconds, s.tenantID,
 	).Scan(&shape.Running, &shape.MissedBeat, &shape.MissedBeatDistinctAssignedTo,
 		&oldest, &newest, &shape.Stale, &noRecentHeartbeat, &shape.DistinctAssignedTo)
 	if err != nil {
