@@ -21,6 +21,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/eventtriggers"
 	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
@@ -57,8 +58,20 @@ func TestADeletedSourcesPendingEventIsCancelledNotDelivered(t *testing.T) {
 			testutil.SetupFullSchema(t, be.DB, be.Dialect)
 
 			p := &Plugin{dialect: dialect, logger: quiet}
+
+			// eventtriggers migrated and initialised too, cleat#2649:
+			// handleDeleteSource now cancels pending ingested_events rows in
+			// the same transaction as the soft-delete (routes.go), and
+			// awaitWebhook claims from it directly -- both error outright if
+			// that table does not exist. See
+			// an_auth_exempt_route_cannot_assume_a_tenant_test.go's identical
+			// pairing.
+			et := &eventtriggers.Plugin{}
+			if err := et.Init(ctx, &plugin.Environment{Dialect: dialect, Logger: quiet}); err != nil {
+				t.Fatalf("eventtriggers Init: %v", err)
+			}
 			if err := plugin.RunMigrations(ctx, be.DB, dialect, nil,
-				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
+				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}, {Plugin: et, Healthy: true}}); err != nil {
 				t.Fatalf("migrations: %v", err)
 			}
 

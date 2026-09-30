@@ -659,10 +659,26 @@ jobs:
       # to close, invisible to the one step that exists to close it. Widened
       # rather than renamed, because a second badly-matched pattern is the
       # same failure mode this step's own history already has one instance
-      # of. Re-derive what a pattern selects before trusting it:
-      #   go test ./plugins/eventtriggers/... -list '^Test(AwaitEvent|ClaimQuery|Version7)'
+      # of.
+      #
+      # cleat#2649: widened again, for TestClaimOrRegisterAwaiterSkippingBeforeCommitLosesCleat2654IsRealFinding
+      # -- MSSQL-only, no subtests, the same shape as
+      # TestAwaitEventMarshalFailureLeavesEventUnconsumed (which the
+      # original pattern already covered by prefix coincidence, not by
+      # deliberate inclusion), and exactly the "ran vs skipped, both print
+      # ok" ambiguity this step exists to close.
+      #
+      # cleat#2697 (cleat-review): widened again, and the PACKAGE SET too --
+      # for TestACorrelationKeyFieldMismatchIsRefused, in plugins/webhookingest,
+      # not plugins/eventtriggers. Adding a package changes what an unqualified
+      # pattern can match, so the pattern was re-checked against BOTH packages
+      # together, not just re-checked in isolation and assumed to still be
+      # scoped the same way. Re-derive what a pattern selects before trusting
+      # it, and re-derive it against the exact package list this step uses:
+      #   go test ./plugins/eventtriggers/... ./plugins/webhookingest/... -list \
+      #     '^Test(AwaitEvent|ClaimQuery|Version7|ClaimOrRegisterAwaiter|ACorrelationKeyFieldMismatch)'
       - name: Verify the oldest-first and lock claim tests ran (not skipped) per dialect
-        run: go test -count=1 -v -run '^Test(AwaitEvent|ClaimQuery|Version7)' ./plugins/eventtriggers/...
+        run: go test -count=1 -v -run '^Test(AwaitEvent|ClaimQuery|Version7|ClaimOrRegisterAwaiter|ACorrelationKeyFieldMismatch)' ./plugins/eventtriggers/... ./plugins/webhookingest/...
 
   # -------------------------------------------------------------------------
   # Crash shutdown scenarios on MySQL and SQL Server (cleat#2288)

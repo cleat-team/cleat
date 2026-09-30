@@ -39,10 +39,10 @@ func TestAKeyedPublishSignalsOnlyTheMatchingAwaiter(t *testing.T) {
 	p := &Plugin{db: adapter, logger: logger}
 
 	// Two runs, same tenant, same event type, different orders.
-	if err := p.registerAwaiter(context.Background(), tenantID.String(), "wf-A991", "payment.captured", "A-991", "", ""); err != nil {
+	if err := registerAwaiterCore(context.Background(), p.db, p.dialect, p.logger, tenantID.String(), "wf-A991", "payment.captured", "A-991", "", ""); err != nil {
 		t.Fatalf("registerAwaiter A-991: %v", err)
 	}
-	if err := p.registerAwaiter(context.Background(), tenantID.String(), "wf-B2", "payment.captured", "B-2", "", ""); err != nil {
+	if err := registerAwaiterCore(context.Background(), p.db, p.dialect, p.logger, tenantID.String(), "wf-B2", "payment.captured", "B-2", "", ""); err != nil {
 		t.Fatalf("registerAwaiter B-2: %v", err)
 	}
 
@@ -107,7 +107,7 @@ func TestAnUnkeyedPublishStillReachesAnUnkeyedAwaiter(t *testing.T) {
 	tenantID := uuid.New()
 
 	p := &Plugin{db: adapter, logger: logger}
-	if err := p.registerAwaiter(context.Background(), tenantID.String(), "wf-plain", "order.shipped", "", "", ""); err != nil {
+	if err := registerAwaiterCore(context.Background(), p.db, p.dialect, p.logger, tenantID.String(), "wf-plain", "order.shipped", "", "", ""); err != nil {
 		t.Fatalf("registerAwaiter: %v", err)
 	}
 

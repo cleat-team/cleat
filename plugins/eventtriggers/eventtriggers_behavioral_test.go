@@ -3523,7 +3523,7 @@ func TestRegisterAndUnregisterAwaiter(t *testing.T) {
 	}
 
 	// Register.
-	p.registerAwaiter(context.Background(), etTestTenantID.String(), "wf-123", "order.created", "", "", "")
+	registerAwaiterCore(context.Background(), p.db, p.dialect, p.logger, etTestTenantID.String(), "wf-123", "order.created", "", "", "")
 
 	store.mu.RLock()
 	n := len(store.awaiters)

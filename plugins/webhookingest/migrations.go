@@ -378,5 +378,82 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					ALTER TABLE webhook_sources DROP COLUMN deleted_at;
 				`,
 		},
+		{
+			// correlation_key_field: a tenant-declared, optional top-level
+			// JSON field name, extracted from an inbound payload at ingest
+			// time and carried as the P1 correlation key's second slot.
+			// cleat#2649, owner decision (relayed by coordinator): key1 is
+			// ALWAYS this source's own id (added automatically at ingest,
+			// no schema needed for it -- see handleIngestWebhook), so two
+			// sources declaring the same field name can never wake each
+			// other's awaiters; key2 is this field's extracted value; key3
+			// stays free. Empty string means "no extraction configured",
+			// the same empty-string-sentinel convention keySlots already
+			// uses for an unused slot -- never NULL.
+			//
+			// DEFAULT '' on every dialect, matching secret_configured's v7
+			// shape: a source created before this migration reads as
+			// "not configured" the instant the column exists, with no
+			// backfill needed -- there is no value to infer it from.
+			Version: 9,
+			Up:      `ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS correlation_key_field TEXT NOT NULL DEFAULT '';`,
+			// MySQL DDL is not transactional (see v8's UpMySQL comment for
+			// the identical crash-and-reboot hazard on a bare ADD COLUMN),
+			// so this is guarded through information_schema.columns and
+			// executed via PREPARE/EXECUTE the same way.
+			UpMySQL: `
+					SET @col := (
+						SELECT COUNT(*) FROM information_schema.columns
+						WHERE table_schema = DATABASE()
+						  AND table_name = 'webhook_sources'
+						  AND column_name = 'correlation_key_field'
+					);
+					SET @ddl := IF(@col = 0,
+						CONCAT('ALTER TABLE webhook_sources ADD COLUMN correlation_key_field VARCHAR(255) NOT NULL DEFAULT ', CHAR(39), CHAR(39)),
+						'DO 0');
+					PREPARE stmt FROM @ddl;
+					EXECUTE stmt;
+					DEALLOCATE PREPARE stmt;
+				`,
+			UpMSSQL: `
+					IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'correlation_key_field')
+					ALTER TABLE webhook_sources ADD correlation_key_field NVARCHAR(MAX) NOT NULL DEFAULT '';
+				`,
+			Down: `ALTER TABLE webhook_sources DROP COLUMN IF EXISTS correlation_key_field;`,
+			DownMySQL: `
+					ALTER TABLE webhook_sources DROP COLUMN correlation_key_field;
+				`,
+			// NOT NULL DEFAULT '' above backs the column with a
+			// system-named default constraint, and a bare DROP COLUMN
+			// refuses while it exists (Msg 5074 / 4922) -- the same
+			// obstacle v7's UpMSSQL hits dropping the old `secret` column,
+			// and the same fix: look the constraint up by (table, column)
+			// in sys.default_constraints and drop it by name first. cleat
+			// review found this the hard way (cleat#2649 GAP): the broken
+			// Down doesn't merely fail to drop the column, it fails at the
+			// FIRST step of the whole Down chain (migrations run in
+			// descending order), so RunDownMigrations never even reaches
+			// v4's Down -- which is what actually drops
+			// webhook_events.error_msg. Nothing gets reversed, and the
+			// recovery Up trivially matches a clean install, which reads as
+			// "recovered" when it is really "never touched." A missing
+			// column makes the DECLARE/SELECT below set @dfname to NULL
+			// rather than error, so the constraint-drop step needs no
+			// existence guard of its own; only the column DROP does -- see
+			// v7's identical comment for why NO BEGIN/END: plugin.splitStatements
+			// shreds this on every literal ';', so each statement has to be
+			// independently complete.
+			DownMSSQL: `
+					DECLARE @dfname sysname
+					SELECT @dfname = dc.name
+						FROM sys.default_constraints dc
+						JOIN sys.columns c ON c.object_id = dc.parent_object_id AND c.column_id = dc.parent_column_id
+						WHERE dc.parent_object_id = OBJECT_ID('webhook_sources') AND c.name = 'correlation_key_field'
+					IF @dfname IS NOT NULL EXEC('ALTER TABLE webhook_sources DROP CONSTRAINT [' + @dfname + ']');
+
+					IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'correlation_key_field')
+					ALTER TABLE webhook_sources DROP COLUMN correlation_key_field;
+				`,
+		},
 	}
 }

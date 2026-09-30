@@ -293,6 +293,22 @@ func TestUninstallDownChainIsClassifiedOnEveryDialect(t *testing.T) {
 								name, dialect, reversed, want)
 							return
 						}
+						// cleat-review's finding on cleat#2649's GAP: without this, a reader
+						// cannot tell "Down failed at its FIRST step, nothing was ever
+						// reversed" from "Down reversed all the way through the step that
+						// actually destroys something" -- both land here with downErr != nil,
+						// and they read identically below unless the actual reversed set is
+						// visible. That indistinguishability is exactly how a migration whose
+						// own Down is broken (fails immediately, before ever reaching the step
+						// that used to destroy webhook_events.error_msg) made webhook-ingest/mssql
+						// look recoverable: nothing was destroyed because nothing ran, and a
+						// trivially-clean recovery Up read as "recovered."
+						reversed := []int{}
+						if downRes != nil {
+							reversed = downRes.Reversed
+						}
+						t.Logf("%s/%s: RunDownMigrations failed after reversing %v: %v",
+							name, dialect, reversed, downErr)
 						recoverErr := plugin.RunMigrations(ctx, db, dialect, nil, single)
 						if want == outcomeRecoverable && recoverErr != nil {
 							t.Fatalf("%s/%s: marked recoverable, but the follow-up Up on "+

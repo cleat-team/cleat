@@ -114,7 +114,7 @@ at all, which is the gap the comparison is naming, not a feature.
 | **total** | | **274** |
 
 Against cleat's side, `cloc examples/order-lifecycle/{order.go,backend/main.go,order_test.go}`
-on the same date: **749**. Re-derive both with `scripts/dbos-pair-loc.sh`, not
+on the same date: **759**. Re-derive both with `scripts/dbos-pair-loc.sh`, not
 by re-quoting these numbers — they are a census of a file that will change.
 
 **Corrected 2026-09-28 (cleat#2622): `server.ts` grew from 57 to 70 lines after this table was
@@ -146,6 +146,13 @@ workflow, which is what makes SDK placement both the honest accounting and the w
 cleat#2626 and cleat#2658 for the full story.) See cleat#2626 for why the lever is still worth it
 independent of any of this: converting `notifyCustomer` turned a real, previously silent bug (a
 hand-written payload's `"body"` field, which `SendInput` never had) into a compile error.
+
+**Corrected 2026-09-29 (cleat#2649): 749 → 759.** `awaitPaymentConfirmation` moved from a single
+`AwaitWebhook.Call` attempt to a bounded loop that suspends on `h.AwaitSignals` and re-attempts the
+claim, closing a review-found gap (cleat-review, #2695/#2697): a wake from `AwaitSignals` is not
+proof of a claimable event, so the loop re-checks the CONDITION across a fixed attempt count rather
+than trusting the first signal. That is more `order.go` than the single call it replaced, net of the
+same PR's doc comments explaining why. `backend/main.go` and `order_test.go` are unchanged.
 
 ## The counter
 
