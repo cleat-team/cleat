@@ -48,9 +48,12 @@ import (
 // both report clean. Measured: with 002 replaced by a comment, the build passes
 // and the comparison passes, and only seedRows below catches it.
 //
-// baselineFiles are the three files the generator owns, named explicitly so the
-// build cannot pick up anything added after the baseline was cut.
-var baselineFiles = []string{"001_schema.sql", "002_defaults.sql", "003_procedures.sql"}
+// baselineFiles is migration.BaselineFiles, not a second copy of it
+// (cleat#2472): the three files the generator owns, named explicitly so the
+// build cannot pick up anything added after the baseline was cut. See
+// migration.BaselineFiles's doc comment for why this must not diverge from
+// engine/routine_definition_drift_test.go's copy of the same list.
+var baselineFiles = migration.BaselineFiles
 
 // seedRows are the rows 002_defaults.sql exists to insert. They are the whole
 // of what a fresh install gets: of the 30 user tables, only these three hold

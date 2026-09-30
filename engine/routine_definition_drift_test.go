@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/cleat-team/cleat/engine/testutil"
+	"github.com/cleat-team/cleat/migration"
 )
 
 // The database a test runs against must hold the LATEST definition of every
@@ -350,15 +351,14 @@ func databaseRoutineText(t *testing.T, db *sql.DB, dialect testutil.Dialect, qua
 	return text, strings.TrimSpace(text) != ""
 }
 
-// theBaseline is the frozen, generated baseline every dialect was compacted to
-// -- postgres in cleat#2059, MySQL in cleat#2433, SQL Server in cleat#2434.
-//
-// Named once, because docs/contributor/migrations.md names them once. The guard
-// below keys on the NAME rather than on a position or a count, and that choice
-// is the safe direction but not a free one: a dialect that gained a fourth
-// baseline file without this list moving would have that file read as
-// post-baseline, and duplicates inside it would go uncounted.
-var theBaseline = []string{"001_schema.sql", "002_defaults.sql", "003_procedures.sql"}
+// theBaseline is migration.BaselineFiles, not a second copy of it (cleat#2472).
+// scripts/gen-mssql-baseline/verify.go used to carry its own three-name list,
+// and nothing asserted the two agreed -- a dialect's baseline growing a fourth
+// file could update one consumer and leave the other silently checking a
+// population that no longer existed. See migration.BaselineFiles's doc comment
+// for the shared history and why the guard below keys on the NAME rather than
+// on a position or a count.
+var theBaseline = migration.BaselineFiles
 
 func TestTheDatabaseHasTheLatestDefinitionOfEveryRoutineTheMigrationsShip(t *testing.T) {
 	for _, d := range []struct {
