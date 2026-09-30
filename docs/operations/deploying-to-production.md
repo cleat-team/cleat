@@ -49,6 +49,31 @@ cleat --tenant "$STAGING_TENANT_ID" deploy --db "$CLEAT_DATABASE_URL" --name pla
 cleat-worker --db "$CLEAT_DATABASE_URL" --tenant-resolver=header:X-Tenant-ID
 ```
 
+**A deploy registers a definition for exactly the one tenant named above, not
+for every tenant.** `workflow_defs` is keyed `(tenant_id, name, version)` — there
+is no way to register a definition visible to every tenant, and that is not a
+limitation to work around: *"workflow defs are scoped to a tenant. there isn't
+a way to have a workflow accessible to all tenants. i don't think that's
+useful."* (cleat#2717). So **onboarding a new tenant includes a deploy step**
+for every workflow it needs to run — running `cleat deploy` once, for one
+tenant, does not make that workflow available to a tenant created afterward.
+
+The failure this produces if you forget is **late and quiet, in two different
+ways depending on how the run would have started**. A direct start surfaces it
+immediately but unhelpfully: creating the tenant succeeds, and nothing about
+it fails, so the gap is invisible until that tenant's first run 404s with
+"workflow definition not found" — by which point it is easy to mistake for an
+unrelated problem. A *scheduled* run is noisier in the log but no more visible
+in practice: the scheduler logs a WARN, `"Scheduler: definition not found"`,
+naming the schedule and the missing definition, and does not advance the
+schedule's due time — so it does not fire until the definition is deployed,
+and logs that same WARN on every scheduler tick until then. Nothing surfaces
+to an operator not reading worker logs at that level.
+
+An application that creates tenants at runtime (a signup flow, for example)
+needs to run the same `cleat deploy` its operator ran once, again, for each
+new tenant's id, before that tenant's first run.
+
 ### Worker concurrency
 
 Control how many workflow instances a worker processes simultaneously:
