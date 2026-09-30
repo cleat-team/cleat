@@ -26,9 +26,12 @@
 --   this one     NO                            Index Scan    5760
 --
 -- The disjunction is free for a query that supplies its own tenant and costs
--- the seek for one that relies on RLS to supply it. 40 of cleat's 58
--- tenant-scoped statements carry their own predicate; the ones that cannot are
--- ClaimWorkflowsAcrossTenants and BatchHeartbeat, which scan by design.
+-- the seek for one that relies on RLS to supply it. Most of cleat's
+-- tenant-scoped statements carry their own predicate; HeartbeatBatchFenced is
+-- the one that cannot and scans by design, because one worker legitimately
+-- holds instances across many tenants. (Claiming itself does not need this
+-- bypass: #1926 replaced the old cross-tenant claim query with per-tenant
+-- rotation, each claim scoped to its own tenant.)
 --
 -- APPLY IT WITH
 -- -------------
