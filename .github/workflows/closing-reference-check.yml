@@ -66,6 +66,15 @@ jobs:
       - if: github.event_name != 'merge_group'
         uses: actions/checkout@v7
 
+      # --self-test first, same reason as every guard in ci.yml: cleat#2800
+      # found this check flagging CORRECT prose ("Fix (#2003)"), and the
+      # self-test's fixture pins that exact case so the class can't regress
+      # to matching a bare `(` again without CI noticing before it reaches a
+      # real PR body.
+      - name: Closing reference check self-test
+        if: github.event_name != 'merge_group'
+        run: scripts/check-closing-references.sh --self-test
+
       - name: Check closing references
         if: github.event_name != 'merge_group'
         env:
