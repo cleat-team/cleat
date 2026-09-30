@@ -197,18 +197,29 @@ Analyzing package ...
 Found 1 functions, 1 entry point(s), ... in cleat closure.
 Generating WASM exports (1 entry point(s))... OK
 Compiling WASM module (go/wasip1)...
-Wrote workflow.wasm/hello.wasm ...
+Wrote workflow.wasm/my-workflow.wasm ...
 ```
 
-You should now see a `workflow.wasm` directory containing a `hello.wasm`
-file (the `-o` flag names an output *directory*, and the compiled binary
-inside it is named after the entry point -- see the note on this in the
-top-level [README](../../README.md#quick-start)):
+> Corrected 2026-09-30: this previously said `hello.wasm`. The `-o` flag
+> names an output *directory*, and the compiled binary inside it is named
+> after `cleat.yaml`'s `name:` field when the project has one -- every
+> `cleat init` scaffold does, set to the project name given in step 4 -- and
+> only falls back to the entry point's *source file* when there is no
+> manifest (see `wasmOutputName`, `cmd/cleat/main.go`; cleat#2692). README's
+> Quick Start builds `testdata/hello/` directly, which has no `cleat.yaml`,
+> so its artifact is `hello.wasm` under the fallback rule -- a different
+> fixture taking a different branch of the same rule, not a different rule.
+> Found and fixed building cleat#2802's CI guard, which runs this exact
+> scaffold-build-deploy sequence and caught the mismatch at the deploy step
+> (`no such file or directory` for the documented `hello.wasm`).
+
+You should now see a `workflow.wasm` directory containing a `my-workflow.wasm`
+file:
 
 ```bash
 ls -lh workflow.wasm/
 # Expected output (size will vary):
-# -rwxr-xr-x ... hello.wasm
+# -rwxr-xr-x ... my-workflow.wasm
 ```
 
 ## 6. Deploy the workflow
@@ -219,7 +230,7 @@ Register the compiled WASM binary with the cleat runtime:
 cleat deploy \
     --db "postgres://postgres:postgres@localhost:5432/cleat?sslmode=disable" \
     --name my-workflow \
-    workflow.wasm/hello.wasm
+    workflow.wasm/my-workflow.wasm
 ```
 
 Expected output includes a line like:
