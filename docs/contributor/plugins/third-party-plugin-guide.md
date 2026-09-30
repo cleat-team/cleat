@@ -144,13 +144,6 @@ type greetOutput struct {
     Message string `json:"message"`
 }
 
-// cleat_abi_version is the ABI version this plugin targets.
-//
-//export cleat_abi_version
-func cleat_abi_version() int32 {
-    return 1
-}
-
 // _start is the WASM entry point. It runs once when the module is instantiated.
 //
 //export _start
