@@ -166,8 +166,11 @@ func TestNextRun_Midnight(t *testing.T) {
 // leap day inside the window, which the original test never did and so
 // never exercised this cron pattern's matching logic at all.
 func TestNextRun_Feb29NeverMatchesWithinAOneYearWindowOfNonLeapDates(t *testing.T) {
-	// 2025-2027 are all non-leap years (2028 is next), so nextRun's one-year
-	// window starting anywhere in that span cannot reach any Feb 29 --
+	// 2025-2027 are all non-leap years (2028 is next). This specific start
+	// (NOT "anywhere in that span" -- a start on or after 2027-03-01 reaches
+	// into 2028 and DOES contain Feb 29, which is exactly
+	// TestNextRun_Feb29MatchesTheRealLeapDay's premise below) puts the whole
+	// one-year window inside 2025-2026, so it cannot reach any Feb 29 --
 	// deterministic by construction, not by running the code first.
 	from := time.Date(2025, 3, 1, 0, 0, 0, 0, time.UTC)
 	next := nextRun("0 0 29 2 *", from)
