@@ -276,6 +276,117 @@ func TestValidateTypeDefUnsupportedFieldType(t *testing.T) {
 	}
 }
 
+// TestValidateTypeDefFieldReferencesDefinedType is cleat#2776: a field's
+// type can now name another entry in types, the same allowance
+// validateTypeRef already gave a host function's top-level input/output.
+func TestValidateTypeDefFieldReferencesDefinedType(t *testing.T) {
+	types := map[string]TypeDef{
+		"BlobInfo": {
+			Type: "object",
+			Fields: map[string]FieldDef{
+				"key":  {Type: "string"},
+				"size": {Type: "int64"},
+			},
+		},
+	}
+	err := validateTypeDef(TypeDef{
+		Type: "object",
+		Fields: map[string]FieldDef{
+			"blob": {Type: "BlobInfo"},
+		},
+	}, types, "testType")
+	if err != nil {
+		t.Errorf("expected no error for a field referencing a defined type, got: %v", err)
+	}
+}
+
+// TestValidateTypeDefFieldReferencesUndefinedType confirms the fix is a
+// widening, not a removal: a name that resolves to nothing is still
+// rejected, whether or not it happens to collide with a builtin's spelling.
+func TestValidateTypeDefFieldReferencesUndefinedType(t *testing.T) {
+	types := map[string]TypeDef{
+		"BlobInfo": {Type: "object"},
+	}
+	err := validateTypeDef(TypeDef{
+		Fields: map[string]FieldDef{
+			"blob": {Type: "NotDefined"},
+		},
+	}, types, "testType")
+	if err == nil {
+		t.Fatal("expected error for a field referencing an undefined type name")
+	}
+	if !strings.Contains(err.Error(), "unsupported type") {
+		t.Errorf("expected 'unsupported type', got: %v", err)
+	}
+}
+
+// TestValidateTypeDefFieldSelfReference: a type may reference itself
+// (e.g. a linked-structure "next" field) -- validateTypeRef places no
+// restriction on this for the top-level case either, and cleat#2776 does
+// not ask for cycle detection, so this documents the allowance as
+// deliberate rather than leaving it to be discovered by accident.
+func TestValidateTypeDefFieldSelfReference(t *testing.T) {
+	td := TypeDef{
+		Type: "object",
+		Fields: map[string]FieldDef{
+			"value": {Type: "string"},
+			"next":  {Type: "Node", Optional: true},
+		},
+	}
+	types := map[string]TypeDef{"Node": td}
+	if err := validateTypeDef(td, types, "Node"); err != nil {
+		t.Errorf("expected no error for a self-referencing type, got: %v", err)
+	}
+}
+
+// TestLoadAndValidateManifestWithFieldReferencingDefinedType is the
+// end-to-end case: a real manifest, through LoadManifest and
+// ValidateManifest, where one type's field is another type's name rather
+// than an inlined copy of its shape.
+func TestLoadAndValidateManifestWithFieldReferencingDefinedType(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := filepath.Join(dir, "plugin.json")
+	content := `{
+		"name": "messaging",
+		"version": "0.1.0",
+		"description": "A plugin whose fields reference a shared shape",
+		"author": "cleat",
+		"types": {
+			"Attachment": {
+				"type": "object",
+				"fields": {
+					"filename": { "type": "string" },
+					"size": { "type": "int64" }
+				}
+			},
+			"Message": {
+				"type": "object",
+				"fields": {
+					"body": { "type": "string" },
+					"attachment": { "type": "Attachment" }
+				}
+			}
+		},
+		"host_functions": {
+			"send": {
+				"description": "Send a message",
+				"input": { "type": "Message" },
+				"output": { "type": "object", "fields": { "ok": { "type": "bool" } } }
+			}
+		}
+	}`
+	if err := os.WriteFile(manifestPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := LoadManifest(manifestPath)
+	if err != nil {
+		t.Fatalf("LoadManifest failed: %v", err)
+	}
+	if err := ValidateManifest(m); err != nil {
+		t.Fatalf("ValidateManifest failed: %v", err)
+	}
+}
+
 func TestValidateTypeDefEmptyFields(t *testing.T) {
 	err := validateTypeDef(TypeDef{}, nil, "emptyType")
 	if err != nil {

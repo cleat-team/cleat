@@ -210,6 +210,19 @@ func validateTypeRef(td TypeDef, types map[string]TypeDef, context string) error
 }
 
 // validateTypeDef validates a type definition, including its fields.
+//
+// A field's type may be a builtin (below) or the name of another entry in
+// types -- the same "simple type, inline object, or defined type" allowance
+// validateTypeRef already gives a host function's top-level input/output
+// (cleat#2776: the two validators disagreed about whether defined types are
+// a thing, and a field had no way to say "this is a Message" without
+// inlining the whole shape at every use site). internal/plugingen already
+// resolves a field's type name against the generated types when it is not
+// one of the builtins below (from_manifest.go's goType/pyType/rustType each
+// have a `default: return t // assume it's a named type` fallback, and
+// fieldDefToFieldIR's array/map cases already carry a named ItemsType/
+// ValueType through unresolved) -- this was a validation-only gap, not a
+// codegen one, so accepting it here has no downstream migration to do.
 func validateTypeDef(td TypeDef, types map[string]TypeDef, context string) error {
 	validFieldTypes := map[string]bool{
 		"string": true, "int64": true, "float64": true,
@@ -220,9 +233,13 @@ func validateTypeDef(td TypeDef, types map[string]TypeDef, context string) error
 		if fd.Type == "" {
 			return fmt.Errorf("%s field %q: type is required", context, fieldName)
 		}
-		if !validFieldTypes[fd.Type] {
-			return fmt.Errorf("%s field %q: unsupported type %q", context, fieldName, fd.Type)
+		if validFieldTypes[fd.Type] {
+			continue
 		}
+		if _, ok := types[fd.Type]; ok {
+			continue
+		}
+		return fmt.Errorf("%s field %q: unsupported type %q (must be a simple type, object, enum, array, optional, map, or a defined type)", context, fieldName, fd.Type)
 	}
 	return nil
 }
