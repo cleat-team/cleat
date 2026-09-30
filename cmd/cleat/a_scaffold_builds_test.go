@@ -61,22 +61,27 @@ func TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds(t *testing.T) {
 	// agent-python is deliberately absent: its documented first step is
 	// `pip install -r requirements.txt` and its checker needs Python >= 3.10,
 	// so building it here would test the environment, not the template.
-	for _, tc := range []struct {
-		template string
-		artifact string
-	}{
-		{"basic", "hello.wasm"},
-		{"agent", "agent_loop.wasm"},
-		{"workflow", "process.wasm"},
-		{"fullstack", "submit_order.wasm"},
-	} {
-		t.Run(tc.template, func(t *testing.T) {
+	//
+	// Every template now writes a cleat.yaml carrying the project's own
+	// actual name (cleat#2692) -- workflow and fullstack via
+	// writeScaffoldTemplate, basic and agent via writeYAML. writeYAML wrote
+	// `project:` until this same change, a key wasmOutputName never read,
+	// so every agent scaffold built to the same workflow.wasm regardless of
+	// what the user called it -- the identical collision cleat#2692 exists
+	// to prevent, reachable through the one scaffold the fix had not yet
+	// reached. So the wanted artifact is always the project's own name,
+	// computed below rather than pinned here as a fixed string: a fixed
+	// string would silently stop testing the rule the moment any
+	// scaffold's own source layout changed.
+	for _, template := range []string{"basic", "agent", "workflow", "fullstack"} {
+		t.Run(template, func(t *testing.T) {
 			root := t.TempDir()
-			name := "p_" + tc.template
+			name := "p_" + template
+			wantArtifact := name + ".wasm"
 
-			out, err := runCleatIn(t, root, "init", "--template", tc.template, name)
+			out, err := runCleatIn(t, root, "init", "--template", template, name)
 			if err != nil {
-				t.Fatalf("cleat init --template %s failed: %v\n%s", tc.template, err, out)
+				t.Fatalf("cleat init --template %s failed: %v\n%s", template, err, out)
 			}
 
 			proj := filepath.Join(root, name)
@@ -85,19 +90,19 @@ func TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds(t *testing.T) {
 			if err != nil {
 				t.Fatalf("a scaffolded %s project does not build.\n"+
 					"This is the first command its own README tells a new user to run.\n%v\n%s",
-					tc.template, err, out)
+					template, err, out)
 			}
 
 			// An exit code of 0 is not the claim -- an artifact is. `cleat
 			// build` has previously printed its analysis and emitted nothing.
-			art := filepath.Join(proj, "out", tc.artifact)
+			art := filepath.Join(proj, "out", wantArtifact)
 			if _, statErr := os.Stat(art); statErr != nil {
 				listing, _ := os.ReadDir(filepath.Join(proj, "out"))
 				var names []string
 				for _, e := range listing {
 					names = append(names, e.Name())
 				}
-				t.Errorf("build succeeded but %s was not emitted; out/ contains %v", tc.artifact, names)
+				t.Errorf("build succeeded but %s was not emitted; out/ contains %v", wantArtifact, names)
 			}
 		})
 	}

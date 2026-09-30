@@ -89,11 +89,12 @@ best-effort one.
 cleat build -o /tmp/out ./examples/order-lifecycle/
 ```
 
-The artifact is named for the entry point, not the directory:
-`place_order.wasm`. `cleat.yaml` lists entry points in snake_case
-(`place_order`) while the Go function is `PlaceOrder` — the entry point is part
-of the ABI. Getting the two out of step deploys cleanly and fails at *start*,
-after the run id has been handed out.
+The artifact is named for `cleat.yaml`'s own `name:` field, not the directory
+or the entry point: `order-lifecycle.wasm` (cleat#2692). Entry points are a
+separate thing — `cleat.yaml` lists them in snake_case (`place_order`) while
+the Go function is `PlaceOrder`, and that pairing is part of the ABI. Getting
+the two out of step deploys cleanly and fails at *start*, after the run id has
+been handed out.
 
 ## Run it against a real worker
 
@@ -111,7 +112,7 @@ docker compose --profile postgres up -d
 docker compose logs cleat-worker | grep -i 'Key:'
 
 # 2. Deploy the compiled workflow.
-cleat deploy --db "$CLEAT_DB_URL" --name order-lifecycle /tmp/out/place_order.wasm
+cleat deploy --db "$CLEAT_DB_URL" --name order-lifecycle /tmp/out/order-lifecycle.wasm
 ```
 
 ### The deploy step is the one command that differs by dialect
@@ -129,7 +130,7 @@ command with a different DSN:
 export CLEAT_DIALECT=mysql          # or: mssql
 go build -o /tmp/out/deploy-workflow ./cmd/deploy-workflow
 /tmp/out/deploy-workflow --driver "$CLEAT_DIALECT" --db "$CLEAT_DB_URL" \
-  order-lifecycle /tmp/out/place_order.wasm
+  order-lifecycle /tmp/out/order-lifecycle.wasm
 ```
 
 `--driver` takes the dialect rather than a literal, so this one command covers

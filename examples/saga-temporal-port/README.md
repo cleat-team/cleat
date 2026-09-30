@@ -20,8 +20,8 @@ cleat build -o /tmp/out ./examples/saga-temporal-port/
 ## Run
 
 ```bash
-cleat deploy --name saga-temporal-port /tmp/out/transfer_money.wasm
-cleat run --wasm /tmp/out/transfer_money.wasm --entry-point transfer_money \
+cleat deploy --name saga-temporal-port /tmp/out/workflow.wasm
+cleat run --wasm /tmp/out/workflow.wasm --entry-point transfer_money \
   --input '{"amount":100,"from_account":"account-a","to_account":"account-b","reference_id":"ref-001"}'
 ```
 

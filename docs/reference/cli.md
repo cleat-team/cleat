@@ -84,6 +84,11 @@ Example:
 
     cleat deploy --db "postgres://..." --name place_order ./out/place_order.wasm
 
+`./out/place_order.wasm` here assumes a `cleat.yaml` with `name: place_order`
+next to the source -- the build names the artifact after that field when
+there is one, falling back to the entry point's own source file when there
+is not (docs/how-to/deploy-workflows.md, cleat#2692, cleat#2407).
+
 ---
 
 ## dev

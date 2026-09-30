@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -35,6 +36,7 @@ import (
 	"github.com/cleat-team/cleat/internal/closure"
 	"github.com/cleat-team/cleat/internal/transform"
 	"github.com/cleat-team/cleat/wasm"
+	"gopkg.in/yaml.v3"
 )
 
 var dbConnStr string
@@ -1455,11 +1457,93 @@ func exportedEntryPointNames(result *analyzer.AnalysisResult) []string {
 	return names
 }
 
+// wasmOutputName names the artifact after the WORKFLOW -- cleat.yaml's own
+// `name:` field -- not the entry point (#2048/#2049's bug) and not the entry
+// point's source file either (owner decision, 2026-09-29, cleat#2692,
+// superseding the 2026-09-26 source-file decision, cleat#2407).
+//
+// The source-file rule broke the same way the entry-point rule did, one
+// level down: Go convention puts a package's entry file at main.go, so any
+// two workflows that are each a single main.go -- examples/integration-hub's
+// three tenant-steps packages are exactly this -- both resolved to
+// main.wasm, indistinguishable on disk. cleat.yaml already carries the one
+// name that has to be unique and meaningful regardless: "what `cleat deploy
+// --name` registers and what a caller names when it starts a run" (that
+// file's own header comment, in every example here). Naming the artifact
+// after it makes the built file, the deploy name and the start name one
+// string, which no source-derived rule can promise.
 func wasmOutputName(result *analyzer.AnalysisResult) string {
+	// result.TargetPkg is nil only for a synthesized AnalysisResult (a real
+	// one always has it set, loader.go:95) -- the same case
+	// workflowManifestName's own doc comment already calls out for
+	// lookupFile below. Treated as "no manifest" rather than dereferenced.
+	if result.TargetPkg != nil {
+		if name := workflowManifestName(result.TargetPkg.Dir); name != "" {
+			return name + ".wasm"
+		}
+	}
+	// No cleat.yaml, or one with no usable `name:` -- `cleat build` works on
+	// a bare package too (nothing above requires a manifest), and this is
+	// that fallback's own fallback. It stays at the #2407 rule -- the entry
+	// point's own source file -- rather than reverting to #2048's bug of
+	// naming after whichever entry point EntryPoints[0] happens to be
+	// (alphabetically first, per loader.go's sort.Strings): a package with no
+	// manifest but several entry points across several files is exactly the
+	// shape that bug was filed against, and the source-file rule still
+	// distinguishes them correctly. It only collides when the manifest that
+	// would have distinguished them is itself missing, which is the case
+	// this comment is naming rather than hiding.
 	if len(result.EntryPoints) == 0 {
 		return "output.wasm"
 	}
+	if file := lookupFile(result, result.EntryPoints[0]); file != "" {
+		stem := strings.TrimSuffix(file, filepath.Ext(file))
+		return wasm.ToSnakeCase(stem) + ".wasm"
+	}
+	// lookupFile returns "" only when the entry point's position information
+	// is unavailable (fd.Pkg, fd.Pkg.Fset, or the AST node's file are nil) --
+	// not reachable through the loader's normal path, which always resolves
+	// real source files, but a caller could in principle hand this a
+	// synthesized AnalysisResult with EntryPoints set and Funcs not. Falling
+	// back to the entry-point name rather than "output.wasm" keeps that case
+	// at the OLD behaviour instead of a name carrying no information at all.
 	return wasm.ToSnakeCase(analyzer.ShortName(result.EntryPoints[0])) + ".wasm"
+}
+
+// workflowManifestNamePattern is deliberately conservative: cleat.yaml is
+// ordinary source-tree content, not privileged input, but its `name:` value
+// flows straight into filepath.Join(outDir, name+".wasm") below in
+// wasmOutputName's caller. Every real manifest in this repo is
+// lowercase-and-hyphens (`order-lifecycle`, `ai-agent-platform`, ...); this
+// accepts underscores and digits too but refuses anything that could act as
+// a path component -- a "/", a "..", or an empty string after trimming --
+// falling back to wasmOutputName's own fallback rather than ever joining an
+// unvalidated string into a filesystem path.
+var workflowManifestNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
+// workflowManifestName reads cleat.yaml's `name:` field from the workflow's
+// own source directory, or "" if there is none, it cannot be read, it does
+// not parse, or its name is empty or not filename-safe. This is the ONLY
+// place `cleat build` reads cleat.yaml -- everywhere else in this tree it is
+// documentation for a human running `cleat deploy --name` by hand, never a
+// build input, which is why this file needed a YAML import it did not
+// already have.
+func workflowManifestName(srcDir string) string {
+	data, err := os.ReadFile(filepath.Join(srcDir, "cleat.yaml"))
+	if err != nil {
+		return ""
+	}
+	var manifest struct {
+		Name string `yaml:"name"`
+	}
+	if err := yaml.Unmarshal(data, &manifest); err != nil {
+		return ""
+	}
+	name := strings.TrimSpace(manifest.Name)
+	if !workflowManifestNamePattern.MatchString(name) {
+		return ""
+	}
+	return name
 }
 
 // derivePluginDeps infers plugin dependencies from the host functions used

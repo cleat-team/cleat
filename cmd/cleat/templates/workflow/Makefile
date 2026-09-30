@@ -7,7 +7,7 @@ test:
 	go test ./...
 
 deploy:
-	cleat deploy --name my-workflow ./out/process.wasm
+	cleat deploy --name {{.ProjectName}} ./out/{{.ProjectName}}.wasm
 
 clean:
 	rm -rf ./out

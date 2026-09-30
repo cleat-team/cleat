@@ -268,6 +268,143 @@ func TestWasmOutputName(t *testing.T) {
 	}
 }
 
+// TestWasmOutputName_PrefersTheManifest is cleat#2692 (owner decision,
+// 2026-09-29): a cleat.yaml `name:` in the entry point's own source
+// directory outranks both older rules -- the entry point itself (#2048) and
+// the entry point's source file (#2407). The known-positive/known-negative
+// pair below is the test coordinator's review asked this PR to re-derive
+// rather than only re-point at a new field, because the OLD known-positive
+// (a synthetic AnalysisResult with no TargetPkg at all) panicked the moment
+// wasmOutputName started dereferencing TargetPkg.Dir -- caught here, not
+// guessed: see the nil-TargetPkg case below, which is the regression test
+// for that panic.
+func TestWasmOutputName_PrefersTheManifest(t *testing.T) {
+	t.Run("manifest present and valid: wins over the entry point's own file", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "cleat.yaml"),
+			[]byte("name: my-real-workflow\nlanguage: go\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		result := &analyzer.AnalysisResult{
+			TargetPkg:   &analyzer.Package{Dir: dir},
+			EntryPoints: []string{"pkg.PlaceOrder"},
+		}
+		if got := wasmOutputName(result); got != "my-real-workflow.wasm" {
+			t.Errorf("wasmOutputName() = %q, want %q (the manifest, not place_order.wasm)",
+				got, "my-real-workflow.wasm")
+		}
+	})
+
+	t.Run("no cleat.yaml: falls back to the #2407 rule, not #2048's", func(t *testing.T) {
+		dir := t.TempDir() // empty -- no cleat.yaml written
+		result := &analyzer.AnalysisResult{
+			TargetPkg:   &analyzer.Package{Dir: dir},
+			EntryPoints: []string{"pkg.PlaceOrder"},
+		}
+		// No real Funcs/lookupFile resolution here either (this result has no
+		// Funcs map), so this also exercises the SECOND fallback -- the bare
+		// entry-point name -- proving the chain falls all the way through
+		// rather than stopping silently at an empty manifest name.
+		if got := wasmOutputName(result); got != "place_order.wasm" {
+			t.Errorf("wasmOutputName() = %q, want %q", got, "place_order.wasm")
+		}
+	})
+
+	t.Run("cleat.yaml with an unsafe name: refused, falls back", func(t *testing.T) {
+		dir := t.TempDir()
+		// A name that could act as a path component must never reach
+		// filepath.Join(outDir, name+".wasm") in wasmOutputName's caller --
+		// this is the known-positive for workflowManifestNamePattern's own
+		// refusal, exercised through wasmOutputName rather than only
+		// against workflowManifestName directly, so a future caller that
+		// bypasses the pattern check cannot silently reintroduce the path.
+		if err := os.WriteFile(filepath.Join(dir, "cleat.yaml"),
+			[]byte("name: ../../etc/passwd\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		result := &analyzer.AnalysisResult{
+			TargetPkg:   &analyzer.Package{Dir: dir},
+			EntryPoints: []string{"pkg.PlaceOrder"},
+		}
+		if got := wasmOutputName(result); got != "place_order.wasm" {
+			t.Errorf("wasmOutputName() = %q, want %q (an unsafe manifest name must not be used)",
+				got, "place_order.wasm")
+		}
+	})
+
+	t.Run("nil TargetPkg: the synthesized-result case, must not panic", func(t *testing.T) {
+		// This is the regression test for the panic this test file's own
+		// falsification found: a caller handing wasmOutputName a synthesized
+		// AnalysisResult (TestWasmOutputName's whole table does exactly
+		// this) has no TargetPkg at all, and TargetPkg.Dir on a nil pointer
+		// is a crash, not an empty string.
+		result := &analyzer.AnalysisResult{
+			EntryPoints: []string{"pkg.PlaceOrder"},
+		}
+		if got := wasmOutputName(result); got != "place_order.wasm" {
+			t.Errorf("wasmOutputName() = %q, want %q", got, "place_order.wasm")
+		}
+	})
+}
+
+// TestWorkflowManifestName is workflowManifestName's own unit test, isolated
+// from wasmOutputName's fallback chain so each case pins one reason a
+// manifest name is or is not used.
+func TestWorkflowManifestName(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string // "" means no cleat.yaml is written at all
+		want    string
+	}{
+		{"valid hyphenated name", "name: order-lifecycle\n", "order-lifecycle"},
+		{"valid underscored name", "name: my_workflow\n", "my_workflow"},
+		{"quoted name", `name: "quoted-name"` + "\n", "quoted-name"},
+		{"no cleat.yaml at all", "", ""},
+		{"empty name field", "name: \"\"\n", ""},
+		{"no name field at all", "language: go\n", ""},
+		{"malformed YAML", "name: [unterminated\n", ""},
+		{"name with a path separator", "name: ../escape\n", ""},
+		{"name with an embedded slash", "name: a/b\n", ""},
+		{"name that is just dots", "name: ..\n", ""},
+		{"name with whitespace inside", "name: has space\n", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tt.content != "" {
+				if err := os.WriteFile(filepath.Join(dir, "cleat.yaml"), []byte(tt.content), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := workflowManifestName(dir); got != tt.want {
+				t.Errorf("workflowManifestName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	// The known-positive for the whole chain: a name valid enough to pass
+	// MUST actually be usable as a real path component, not merely accepted
+	// by the regex in isolation -- this writes the file the pattern would
+	// approve and joins it into a real filesystem path, the same way
+	// wasmOutputName's caller does.
+	t.Run("known-positive: an accepted name is a safe, real filename", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "cleat.yaml"),
+			[]byte("name: a-real-name_123\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		name := workflowManifestName(dir)
+		if name != "a-real-name_123" {
+			t.Fatalf("workflowManifestName() = %q, want %q", name, "a-real-name_123")
+		}
+		outDir := t.TempDir()
+		target := filepath.Join(outDir, name+".wasm")
+		if err := os.WriteFile(target, []byte("fake wasm"), 0644); err != nil {
+			t.Fatalf("the accepted name %q is not usable as a real path component: %v", name, err)
+		}
+	})
+}
+
 // ---------------------------------------------------------------------------
 // formatDurableLeaves
 // ---------------------------------------------------------------------------
@@ -782,9 +919,50 @@ func TestWasmOutputName_FromRealAnalysis(t *testing.T) {
 	if !strings.HasSuffix(name, ".wasm") {
 		t.Errorf("expected .wasm suffix, got %q", name)
 	}
-	// The first registered entry point is PlaceOrder -> place_order
-	if !strings.Contains(name, "place_order") && !strings.Contains(name, "cancel_order") {
-		t.Errorf("expected name containing one of the entry points, got %q", name)
+	// cleat#2407: named after the SOURCE FILE, not the entry point. All three
+	// of testdata/basic's entry points (PlaceOrder, CancelOrder, LongRunning)
+	// are declared in order.go, so the artifact is order.wasm regardless of
+	// which one sorts first in result.EntryPoints -- this fixture no longer
+	// exercises that ordering at all, which is exactly the point: a reader
+	// who deploys order.wasm gets the file that actually defines whichever
+	// entry point they meant to run.
+	if want := "order.wasm"; name != want {
+		t.Errorf("wasmOutputName() = %q, want %q (order.go, where every entry point in this fixture is declared)",
+			name, want)
+	}
+}
+
+// TestWasmOutputName_CrossFileEntryPointsNameTheRightFile is the adversarial
+// case testdata/basic cannot exercise, because all of ITS entry points share
+// one file: two entry points in DIFFERENT files, where the alphabetically
+// -first one (Aardvark, sorted before Zookeeper -- sort.Strings in
+// internal/analyzer/loader.go) lives in the file that also sorts LAST by
+// filename (zebra.go, after mango.go).
+//
+// That second inversion is deliberate and is what the test is actually
+// about: without it, "resolves to the entry point's own file" and "resolves
+// to the alphabetically-first filename in the package" would agree, and a
+// wasmOutputName that quietly did the latter (e.g. by taking the first
+// result of a sorted filepath.Glob rather than the selected entry point's
+// own position) would pass this test for the wrong reason.
+func TestWasmOutputName_CrossFileEntryPointsNameTheRightFile(t *testing.T) {
+	pattern := filepath.Join(testdataDir(t), "wasmnamecrossfile")
+	result, _, _, _, _, _ := analyze(pattern)
+
+	if len(result.EntryPoints) != 2 {
+		t.Fatalf("fixture needs exactly 2 entry points, got %d: %v",
+			len(result.EntryPoints), result.EntryPoints)
+	}
+	if got := analyzer.ShortName(result.EntryPoints[0]); got != "Aardvark" {
+		t.Fatalf("UNMEASURED: EntryPoints[0] = %q, want %q -- the fixture or the sort "+
+			"changed, so this test is not exercising the case it claims to", got, "Aardvark")
+	}
+
+	if want := "zebra.wasm"; wasmOutputName(result) != want {
+		t.Errorf("wasmOutputName() = %q, want %q -- the selected entry point (Aardvark) "+
+			"is declared in zebra.go, not mango.go, so the artifact must be named for "+
+			"zebra.go regardless of which filename sorts first",
+			wasmOutputName(result), want)
 	}
 }
 

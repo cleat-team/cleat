@@ -42,7 +42,7 @@ type BuildConfig struct {
 	Outputs *OutputFiles
 
 	// WASMOutput is the filename for the compiled WASM binary
-	// (e.g., "place_order.wasm").
+	// (e.g., "order.wasm").
 	WASMOutput string
 
 	// Target is the compilation target. Only "go" (standard Go/wasip1) is

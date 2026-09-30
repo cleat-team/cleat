@@ -350,10 +350,10 @@ BUILD_RUN="${BUILD_CMD//cleat /$CLEAT_BIN }"
 BUILD_RUN="${BUILD_RUN//-o \/tmp\/out/-o $OUT_DIR}"
 run_documented build "$BUILD_RUN"
 
-WASM="$OUT_DIR/sync_customer.wasm"
+WASM="$OUT_DIR/integration-hub.wasm"
 if [[ ! -f "$WASM" ]]; then
   echo "FAIL: the documented build did not produce $WASM." >&2
-  echo "The artifact is named for the ENTRY POINT (sync_customer), not the directory." >&2
+  echo "The artifact is named for cleat.yaml's own 'name:' (cleat#2692), not the directory." >&2
   ls -la "$OUT_DIR" >&2
   exit 1
 fi
@@ -946,7 +946,7 @@ if ! "$CLEAT_BIN" build --target go -o "$TENANT_WASM_DIR" \
   tail -25 /tmp/ih-tenant-build.log >&2
   failures=$((failures + 1))
 else
-  TENANT_WASM="$TENANT_WASM_DIR/normalize_order.wasm"
+  TENANT_WASM="$TENANT_WASM_DIR/normalize-order.wasm"
   if [[ ! -f "$TENANT_WASM" ]]; then
     echo "FAIL: the tenant step build did not produce $TENANT_WASM" >&2
     ls -la "$TENANT_WASM_DIR" >&2

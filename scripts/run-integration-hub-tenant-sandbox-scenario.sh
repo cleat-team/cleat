@@ -213,7 +213,7 @@ failures=0
 # POST /api/definitions under the tenant's OWN key, starts it, and prints the
 # run id.
 upload_and_start() {
-  local dir="$1" name="$2" entry="$3" input_json="${4:-}"
+  local dir="$1" name="$2" input_json="${3:-}"
   [[ -z "$input_json" ]] && input_json='{}'
   local build_dir="$OUT_DIR/$name"
   mkdir -p "$build_dir"
@@ -223,7 +223,10 @@ upload_and_start() {
     tail -25 /tmp/ih-ts-build-"$name".log >&2
     return 1
   fi
-  local wasm="$build_dir/$entry.wasm"
+  # Named for cleat.yaml's own `name:` (cleat#2692), which for every
+  # tenant-steps package here is the same string as $dir -- the directory
+  # name and the workflow's declared identity were chosen to match.
+  local wasm="$build_dir/$dir.wasm"
   if [[ ! -f "$wasm" ]]; then
     echo "FAIL: building $name did not produce $wasm" >&2
     ls -la "$build_dir" >&2
@@ -269,7 +272,7 @@ except Exception: print("")')"
 # ---- the positive control: a legitimate tenant transform must succeed ----
 echo
 echo "==> positive control: a legitimate tenant step (normalize-order)"
-NORM_RUN="$(upload_and_start "normalize-order" "normalize-order" "normalize_order" \
+NORM_RUN="$(upload_and_start "normalize-order" "normalize-order" \
   '{"order_id":"ord-tenant-sandbox-1","vendor_name":"acme"}')"
 if [[ -z "$NORM_RUN" ]]; then
   echo "FAIL: the legitimate tenant step never started" >&2
@@ -288,7 +291,7 @@ fi
 # ---- the adversarial case: a malicious tenant step must be refused ----
 echo
 echo "==> the wedge holds: a malicious tenant step (malicious-read-host-file)"
-MAL_RUN="$(upload_and_start "malicious-read-host-file" "read-host-file" "read_host_file")"
+MAL_RUN="$(upload_and_start "malicious-read-host-file" "read-host-file")"
 if [[ -z "$MAL_RUN" ]]; then
   echo "FAIL: the malicious tenant step never started" >&2
   failures=$((failures + 1))
@@ -327,7 +330,7 @@ if ! "$CLEATCTL_BIN" -db "$OWNER_DB" set-tenant-setting "$TENANT_ID" --wasm-inst
   tail -25 /tmp/ih-ts-set-tenant-setting.log >&2
   failures=$((failures + 1))
 else
-  LOOP_RUN="$(upload_and_start "infinite-loop" "infinite-loop" "infinite_loop")"
+  LOOP_RUN="$(upload_and_start "infinite-loop" "infinite-loop")"
   if [[ -z "$LOOP_RUN" ]]; then
     echo "FAIL: the runaway tenant step never started" >&2
     failures=$((failures + 1))

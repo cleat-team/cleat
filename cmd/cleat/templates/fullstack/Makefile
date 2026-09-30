@@ -32,12 +32,12 @@ logs:
 # no-op'ing.
 deploy: build
 	cleat deploy --db "postgres://cleat:cleat@localhost:$(CLEAT_PG_PORT)/cleat?sslmode=disable" \
-	  --name my-fullstack-app ./out/submit_order.wasm
+	  --name {{.ProjectName}} ./out/{{.ProjectName}}.wasm
 
 # Start one run. Idempotency-Key makes a retry of THIS request return the
 # original run instead of creating a second one.
 run:
-	curl -fsS -X POST http://localhost:$(CLEAT_API_PORT)/api/workflows/my-fullstack-app/start \
+	curl -fsS -X POST http://localhost:$(CLEAT_API_PORT)/api/workflows/{{.ProjectName}}/start \
 	  -H "Authorization: Bearer $$CLEAT_API_KEY" \
 	  -H "Idempotency-Key: $$(uuidgen)" \
 	  -H "Content-Type: application/json" \
