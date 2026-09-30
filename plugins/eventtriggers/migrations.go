@@ -1037,6 +1037,27 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			DownMSSQL: `
 				IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'idx_ingested_events_dispatch' AND object_id = OBJECT_ID('ingested_events'))
 				DROP INDEX idx_ingested_events_dispatch ON ingested_events;
+
+				-- dispatch_processed carries a DEFAULT on this dialect (Up's
+				-- "BIT NOT NULL DEFAULT 0"), backed by an unnamed default
+				-- constraint -- the same obstacle every other MSSQL column
+				-- drop in this file hits, and the same fix: find it by
+				-- (table, column) in sys.default_constraints and drop it by
+				-- name first. Tier 1 Gate caught this uncaught: DROP COLUMN
+				-- failed with "The object 'DF__ingested___dispa__...' is
+				-- dependent on column 'dispatch_processed' (5074)", and
+				-- because RunDownMigrations had already dropped the index
+				-- and recorded nothing rolled back, the subsequent recovery
+				-- Up left the schema short one index versus a clean install
+				-- -- this pair was never actually safely recoverable.
+				DECLARE @ieDefaults NVARCHAR(MAX) = ''
+				SELECT @ieDefaults = @ieDefaults + 'ALTER TABLE ingested_events DROP CONSTRAINT [' + dc.name + ']' + CHAR(59) + ' '
+					FROM sys.default_constraints dc
+					JOIN sys.columns c ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
+					WHERE dc.parent_object_id = OBJECT_ID('ingested_events')
+					  AND c.name = 'dispatch_processed'
+				IF @ieDefaults <> '' EXEC(@ieDefaults);
+
 				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('ingested_events') AND name = 'dispatch_processed')
 				ALTER TABLE ingested_events DROP COLUMN dispatch_processed;
 			`,
