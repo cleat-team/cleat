@@ -456,6 +456,40 @@ wait_for_status() {
   return 1
 }
 
+# worker_container_state reports docker compose's own view of cleat-worker's
+# state right now ("running", "exited", "restarting", ...), or "" if the
+# container does not exist at all. This is the ground truth `up -d`'s own
+# exit code does not provide (cleat#2777): `up -d` returned 0 while
+# cleat-worker sat Exited(137) from an earlier SIGKILL, never restarted --
+# compose can report success without the container ever coming up. `ps
+# --format json` emits one JSON object per line (verified against a real
+# container, both running and exited), not a JSON array.
+worker_container_state() {
+  "${COMPOSE[@]}" ps -a --format json cleat-worker 2>/dev/null |
+    python3 -c 'import json,sys
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        d = json.loads(line)
+    except Exception:
+        continue
+    if d.get("Service") == "cleat-worker":
+        print(d.get("State", ""))
+        break'
+}
+
+wait_for_worker_state() {
+  local want="$1" limit="${2:-15}"
+  local until=$((SECONDS + limit))
+  while (( SECONDS < until )); do
+    [[ "$(worker_container_state)" == "$want" ]] && return 0
+    sleep 1
+  done
+  return 1
+}
+
 # web_status and wait_for_web_status read the APP's view of a run rather than the
 # worker's. They are separate from run_status on purpose: the backend is the
 # thing being exercised in the last section, so going around it to the worker to
@@ -615,8 +649,32 @@ else
   RESTART_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   if ! "${COMPOSE[@]}" up -d cleat-worker >/tmp/ih-restart.log 2>&1; then
     echo "FAIL: could not restart the worker" >&2
-    tail -20 /tmp/ih-restart.log >&2
+    cat /tmp/ih-restart.log >&2
     failures=$((failures + 1))
+  fi
+
+  # cleat#2777: `up -d`'s own exit code is NOT proof the container is
+  # running. Measured live: it returned 0 here while cleat-worker sat
+  # Exited(137) from the SIGKILL above, never restarted -- compose can
+  # report success while doing nothing. So ask docker directly rather than
+  # trusting the command that was supposed to act. 15s is generous for a
+  # container that is actually starting (no restart policy or healthcheck
+  # gates cleat-worker's own "running" state in this compose file, so it
+  # transitions in well under that); a container that never reaches
+  # "running" at all is not going to at 16s either.
+  if ! wait_for_worker_state running 15; then
+    echo "FAIL: cleat-worker is NOT RUNNING after the restart." >&2
+    echo "This is not a slow start -- the container never came up. Current" >&2
+    echo "state: '$(worker_container_state)'." >&2
+    echo >&2
+    echo "--- what the container actually is ---" >&2
+    "${COMPOSE[@]}" ps -a >&2 2>&1 || true
+    echo "--- docker compose up's own output (full, not a tail) ---" >&2
+    cat /tmp/ih-restart.log >&2 2>&1 || true
+    echo "--- the worker's log SINCE THE RESTART (not --tail, which the" >&2
+    echo "    pre-kill startup burst fills: that is what the old dump showed)" >&2
+    "${COMPOSE[@]}" logs --since "${RESTART_AT:-5m}" cleat-worker >&2 2>&1 || true
+    exit 1
   fi
 
   # THE WAIT IS GENEROUS AND THE FAILURE IS TERMINAL, and both halves are a fix
@@ -630,10 +688,32 @@ else
   # So: wait long enough that a merely-slow runner is not a failure, and STOP
   # when the worker is genuinely gone, because every assertion after this point
   # is a measurement of the worker rather than of the scenario.
+  #
+  # Past this point the container has already been confirmed running (above),
+  # so a plain healthz timeout here genuinely IS "not ready yet" -- migrations,
+  # warmup -- not "not running": cleat#2777's defect was reporting the two
+  # identically. If the container dies again during this wait, that is "not
+  # running" again, and gets its own fail-fast below rather than waiting out
+  # the rest of the 180s budget to report the wrong cause.
   deadline=$((SECONDS + 180))
   until curl -fsS --max-time 5 "$API/healthz" >/dev/null 2>&1; do
+    state="$(worker_container_state)"
+    if [[ "$state" != "running" ]]; then
+      echo "FAIL: cleat-worker stopped running while waiting for /healthz." >&2
+      echo "This is NOT a 180s timeout -- the container exited during the wait." >&2
+      echo "Current state: '$state'." >&2
+      echo >&2
+      echo "--- what the container actually is ---" >&2
+      "${COMPOSE[@]}" ps -a >&2 2>&1 || true
+      echo "--- the worker's log SINCE THE RESTART ---" >&2
+      "${COMPOSE[@]}" logs --since "${RESTART_AT:-5m}" cleat-worker >&2 2>&1 || true
+      exit 1
+    fi
     if (( SECONDS > deadline )); then
-      echo "FAIL: the worker did not come back within 180s." >&2
+      echo "FAIL: cleat-worker is running but did not answer /healthz within 180s." >&2
+      echo "(So this genuinely IS 'not ready yet' -- the container has been up" >&2
+      echo "the whole wait, confirmed above and just re-confirmed as '$state'." >&2
+      echo "'not running' would have failed fast, above, instead of reaching here.)" >&2
       echo >&2
       echo "THE CRASH-RESUME ASSERTION WAS NOT EVALUATED, and that is not the same" >&2
       echo "as its having failed. It sits below this point, so this run says NOTHING" >&2
@@ -649,7 +729,7 @@ else
       echo "--- what the container actually is ---" >&2
       "${COMPOSE[@]}" ps -a >&2 2>&1 || true
       echo "--- docker's own restart output ---" >&2
-      tail -20 /tmp/ih-restart.log >&2 2>&1 || true
+      cat /tmp/ih-restart.log >&2 2>&1 || true
       echo "--- the worker's log SINCE THE RESTART (not --tail, which the" >&2
       echo "    pre-kill startup burst fills: that is what the old dump showed)" >&2
       "${COMPOSE[@]}" logs --since "${RESTART_AT:-5m}" cleat-worker >&2 2>&1 || true
