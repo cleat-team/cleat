@@ -1892,8 +1892,44 @@ func (s *MSSQLStore) finishClaim(ctx context.Context, tx *sql.Tx, workerID strin
 // wrapRejectedResult returns anything it does not recognise unchanged, so the
 // blanket wrap costs nothing and cannot mislabel an unrelated failure.
 func (s *MSSQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
-	return wrapRejectedResult(
+	err := wrapRejectedResult(
 		s.finalizeWorkflowSegmentInner(ctx, runID, workerID, generation, newEvents,
 			finalStatus, result, errorCode, errorOp, queryState, nextWakeAt),
 		runID, result)
+	return wrapMSSQLFinalizeDBError(err, runID)
+}
+
+// wrapMSSQLFinalizeDBError is wrapPostgresFinalizeDBError's MSSQL
+// counterpart (cleat#2805) -- see that function's doc comment for the
+// shared reasoning (narrow scope, connection errors already intercepted
+// upstream, context cancellation treated as transient, default permanent).
+//
+// isMSSQLDeadlock and isMSSQLSnapshotError both guarantee a server-side
+// rollback (isMSSQLRollbackGuaranteed's own doc comment); isMSSQLLockTimeout
+// (SET LOCK_TIMEOUT's 1222) does not carry that guarantee but is still a
+// contention signal rather than a data problem, the same reasoning
+// isMSSQLRetryable used for it before #2792 deleted that function as
+// unreferenced. Deliberately NOT restoring isMSSQLConnectionError or
+// isMSSQLTimeout (258) here: cmd/cleat-worker's isConnectionError already
+// intercepts connection-level failures before recordTerminalFailure is ever
+// called, for all three dialects, so a second MSSQL-specific connection
+// check at this point would never fire -- see #2792's own commit message
+// for the measurement that found isMSSQLConnectionError had zero callers
+// even when it existed.
+func wrapMSSQLFinalizeDBError(err error, workflowID string) error {
+	if err == nil || errors.Is(err, ErrFenceLost) {
+		return err
+	}
+	var ce *CleatError
+	if errors.As(err, &ce) {
+		return err
+	}
+	code := ErrPermanent
+	switch {
+	case isMSSQLDeadlock(err) || isMSSQLSnapshotError(err) || isMSSQLLockTimeout(err):
+		code = ErrTransient
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
+		code = ErrTransient
+	}
+	return &CleatError{Code: code, Op: "finalize workflow", WorkflowID: workflowID, Err: err}
 }

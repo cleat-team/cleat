@@ -1445,10 +1445,42 @@ func (s *MySQLStore) finishClaim(ctx context.Context, tx *sql.Tx, workerID strin
 // wrapRejectedResult returns anything it does not recognise unchanged, so the
 // blanket wrap costs nothing and cannot mislabel an unrelated failure.
 func (s *MySQLStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
-	return wrapRejectedResult(
+	err := wrapRejectedResult(
 		s.finalizeWorkflowSegmentRetrying(ctx, runID, workerID, generation, newEvents,
 			finalStatus, result, errorCode, errorOp, queryState, nextWakeAt),
 		runID, result)
+	return wrapMySQLFinalizeDBError(err, runID)
+}
+
+// wrapMySQLFinalizeDBError is wrapPostgresFinalizeDBError's MySQL
+// counterpart (cleat#2805) -- see that function's doc comment for the
+// shared reasoning (narrow scope, connection errors already intercepted
+// upstream, context cancellation treated as transient, default permanent).
+//
+// isDeadlockError (1213) and isLockWaitTimeout (1205) are the same
+// classifiers finalizeWorkflowSegmentRetrying, above, already uses to RETRY
+// internally up to 8 times -- reaching this point on either code means
+// every retry also lost. That does not change the classification: the
+// server still guarantees each losing attempt's transaction was rolled
+// back, so the failure is still about contention, not data, and ErrTransient
+// still means "an operator/retry-policy may reasonably try this workflow
+// again", which remains true after 8 losses to the same kind of contention.
+func wrapMySQLFinalizeDBError(err error, workflowID string) error {
+	if err == nil || errors.Is(err, ErrFenceLost) {
+		return err
+	}
+	var ce *CleatError
+	if errors.As(err, &ce) {
+		return err
+	}
+	code := ErrPermanent
+	switch {
+	case isDeadlockError(err) || isLockWaitTimeout(err):
+		code = ErrTransient
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
+		code = ErrTransient
+	}
+	return &CleatError{Code: code, Op: "finalize workflow", WorkflowID: workflowID, Err: err}
 }
 
 // finalizeWorkflowSegmentRetrying retries finalizeWorkflowSegmentInner's whole

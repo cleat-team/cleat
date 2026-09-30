@@ -1831,8 +1831,54 @@ func looksLikeJSONObject(result string) bool {
 // wrapRejectedResult returns anything it does not recognise unchanged, so the
 // blanket wrap costs nothing and cannot mislabel an unrelated failure.
 func (s *PostgresStore) FinalizeWorkflowSegment(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
-	return wrapRejectedResult(
+	err := wrapRejectedResult(
 		s.finalizeWorkflowSegmentInner(ctx, runID, workerID, generation, newEvents,
 			finalStatus, result, errorCode, errorOp, queryState, nextWakeAt),
 		runID, result)
+	return wrapPostgresFinalizeDBError(err, runID)
+}
+
+// wrapPostgresFinalizeDBError classifies a database-originated finalize
+// failure into a *CleatError so cmd/cleat-worker's errors.As(err, &ce) can
+// derive error_code instead of leaving it ErrUnknown for every DB-originated
+// terminal failure on this dialect (cleat#2805).
+//
+// Narrow on purpose, and the narrowing is load-bearing, not laziness:
+//   - nil, ErrFenceLost, and an error wrapRejectedResult already classified
+//     (ErrResultRejected) pass through unchanged -- this classifies only
+//     what reaches it UNclassified.
+//   - a connection-level failure never reaches here at all:
+//     cmd/cleat-worker's isConnectionError (text-matched, dialect-agnostic)
+//     intercepts it first and releases the workflow for another worker,
+//     never calling recordTerminalFailure in the first place. So this
+//     function does not need its own connection check, and one here would
+//     be dead code by construction.
+//   - 40P01 (deadlock_detected) and 40001 (serialization_failure) are the
+//     two PostgreSQL SQLSTATEs where the server GUARANTEES the transaction
+//     was rolled back, so the failure describes contention, not a data
+//     problem -> ErrTransient. A context cancellation or deadline (worker
+//     shutdown mid-transaction, a caller's own timeout) is the same shape
+//     for the same reason: it says nothing about the data and a retry is
+//     sound -> ErrTransient too.
+//   - Everything else defaults to ErrPermanent, matching the deleted
+//     mapMSSQLError's own default arm (cleat#2792) and CleatError's own
+//     "non-retryable" semantics -- an unrecognized DB failure is safer
+//     reported as needing a human than silently retried.
+func wrapPostgresFinalizeDBError(err error, workflowID string) error {
+	if err == nil || errors.Is(err, ErrFenceLost) {
+		return err
+	}
+	var ce *CleatError
+	if errors.As(err, &ce) {
+		return err
+	}
+	code := ErrPermanent
+	var pqErr *pq.Error
+	switch {
+	case errors.As(err, &pqErr) && (pqErr.Code == "40P01" || pqErr.Code == "40001"):
+		code = ErrTransient
+	case errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled):
+		code = ErrTransient
+	}
+	return &CleatError{Code: code, Op: "finalize workflow", WorkflowID: workflowID, Err: err}
 }
