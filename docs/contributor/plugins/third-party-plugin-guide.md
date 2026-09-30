@@ -887,7 +887,10 @@ Get the full call context (tenant ID and workflow ID) as JSON. Returns
 > over the Go tree returns nothing, so a module exporting it is not checked
 > and a module omitting it is not rejected. The ABI version cleat actually
 > uses travels in the `cleat.metadata` custom section, injected at build time
-> (`wasm/metadata.go`, `cmd/cleat/main.go:452`) and stored in
+> (`wasm/metadata.go`; `cmd/cleat/main.go`'s `runBuild`, at the comment
+> `// Embed cleat.metadata custom section for deployment` --
+> `grep -n 'Embed cleat.metadata' cmd/cleat/main.go` finds it regardless of
+> line drift) and stored in
 > `workflow_defs.abi_version` -- not through a guest export. Corrected
 > 2026-09-07; the paragraph below described a handshake that never happens.
 
