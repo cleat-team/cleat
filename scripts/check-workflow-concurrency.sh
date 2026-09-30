@@ -150,7 +150,27 @@ if [ "${1:-}" = "--self-test" ]; then
     # Known-positive: has `push: false` on a docker/build-push-action step
     # and no `on: push` at all. The pre-cleat#2079 grep counted this file as
     # push-triggered; this must not.
-    if is_push_triggered "release-image-dryrun-arm64.yml"; then
+    #
+    # cleat-review on #2734: is_push_triggered returns false both for
+    # "genuinely not push-triggered" and for "this file no longer exists" or
+    # "this file no longer has the trap" -- renaming the fixture or dropping
+    # its `push: false` line made the assertion below pass vacuously, exit 0,
+    # silently. The fixture can drift exactly as a synthetic one could; this
+    # confirms it still exercises #2079 before trusting what it reports:
+    # the file must exist AND still trip the OLD grep this guard replaced.
+    known_positive=".github/workflows/release-image-dryrun-arm64.yml"
+    if [ ! -e "$known_positive" ]; then
+        echo "FAIL: self-test fixture $known_positive does not exist." >&2
+        echo "      Renamed or removed -- this self-test proves nothing until" >&2
+        echo "      it is repointed at a file with the same shape." >&2
+        self_test_fail=1
+    elif ! grep -qE '^\s*push:' "$known_positive"; then
+        echo "FAIL: self-test fixture $known_positive no longer trips the" >&2
+        echo "      pre-cleat#2079 grep ('^\s*push:'), so it no longer" >&2
+        echo "      exercises the defect this self-test exists to catch --" >&2
+        echo "      find another file with a nested push: input, or add one." >&2
+        self_test_fail=1
+    elif is_push_triggered "release-image-dryrun-arm64.yml"; then
         echo "FAIL: release-image-dryrun-arm64.yml is reported push-triggered." >&2
         echo "      It has 'push: false' on a build step and no 'on: push' -- the" >&2
         echo "      cleat#2079 defect this self-test exists to catch." >&2
