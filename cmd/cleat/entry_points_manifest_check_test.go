@@ -65,8 +65,58 @@ func TestBuildRefusesAnEntryPointsManifestMismatch(t *testing.T) {
 	}
 }
 
+// TestBuildRefusesTheOldMapShapedManifest is cleat-review's cleat#2812 R1
+// finding, turned into a known-positive: workflowManifestEntryPoints's first
+// version unmarshalled entry_points: straight into []string and returned nil
+// on any decode error, which reads the OLD {name, function} map shape --
+// exactly what every PRE-#2812 `cleat init --template agent` project's
+// cleat.yaml carries, with the wrong name (agent/AgentLoop, which never
+// matches what cleat build actually finds for scaffoldBasic's Hello) -- as
+// "absent" and skips it silently. This is the manifest MOST likely to be
+// wrong, and it is the one TestEveryGoTemplateScaffoldsIntoAProjectThatBuilds
+// cannot catch, because that test only ever sees a FRESHLY generated,
+// already-correct manifest -- it was never going to exercise a stale one
+// written before this PR existed.
+func TestBuildRefusesTheOldMapShapedManifest(t *testing.T) {
+	if testing.Short() || cleatBinary == "" {
+		t.Skip("needs the cleat binary, which TestMain does not build in short mode")
+	}
+
+	root := t.TempDir()
+	name := "p_oldshape"
+	out, err := runCleatIn(t, root, "init", "--template", "basic", name)
+	if err != nil {
+		t.Fatalf("cleat init --template basic failed: %v\n%s", err, out)
+	}
+	proj := filepath.Join(root, name)
+	resolveScaffoldAgainstThisCheckout(t, proj)
+
+	// A real pre-#2812 agent scaffold's cleat.yaml, transplanted onto
+	// scaffoldBasic's Hello entry point -- the map form always named
+	// agent/AgentLoop regardless of which scaffold called writeYAML, so this
+	// is exactly what a `basic` project generated before this PR would have
+	// carried.
+	yamlPath := filepath.Join(proj, "cleat.yaml")
+	oldShape := "name: \"p_oldshape\"\nlanguage: go\nentry_points:\n  - name: agent\n    function: AgentLoop\n"
+	if writeErr := os.WriteFile(yamlPath, []byte(oldShape), 0o644); writeErr != nil {
+		t.Fatalf("writing old-shape cleat.yaml: %v", writeErr)
+	}
+
+	out, buildErr := runCleatIn(t, proj, "build", "-o", "./out", ".")
+	if buildErr == nil {
+		t.Fatalf("build with an old {name, function}-shaped entry_points: must fail, but exited 0 -- "+
+			"it silently treated the malformed manifest as absent:\n%s", out)
+	}
+	if !strings.Contains(out, "is not a list of strings") {
+		t.Fatalf("build failed, but not with the expected malformed-manifest error, got:\n%s", out)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(proj, "out", "*.wasm")); len(matches) != 0 {
+		t.Errorf("build refused the manifest check but still wrote a .wasm output: %v", matches)
+	}
+}
+
 // TestBuildIgnoresAnAbsentEntryPointsManifest is the negative control for the
-// test above: entry_points: is optional, so a package with no cleat.yaml at
+// tests above: entry_points: is optional, so a package with no cleat.yaml at
 // all -- not a corrupted one, an absent one -- must build exactly as it did
 // before checkEntryPointsAgainstManifest existed.
 func TestBuildIgnoresAnAbsentEntryPointsManifest(t *testing.T) {

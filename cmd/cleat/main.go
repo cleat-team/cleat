@@ -1551,8 +1551,13 @@ func workflowManifestName(srcDir string) string {
 }
 
 // workflowManifestEntryPoints reads cleat.yaml's `entry_points:` field from
-// the workflow's own source directory as a list of strings, or nil if there
-// is none, it cannot be read, or it does not parse.
+// the workflow's own source directory. present is false when there is no
+// cleat.yaml, it cannot be read, the file does not parse as YAML at all, or
+// the key is simply absent -- all cases workflowManifestName already treats
+// as "nothing to check". When present is true and malformed is nil, declared
+// is the list. When present is true and malformed is non-nil, the key exists
+// but is not a list of strings -- the caller must not treat that the same as
+// absent.
 //
 // cleat#2698: until this function existed, entry_points: was inert in two
 // incompatible shapes -- a list of strings in every hand-written example, a
@@ -1562,18 +1567,36 @@ func workflowManifestName(srcDir string) string {
 // workflow's ABI (see the comment every hand-written examples/*/cleat.yaml
 // carries), the same snake_case names wasm.ToSnakeCase gives each one
 // (exportedEntryPointNames above), not free-form documentation.
-func workflowManifestEntryPoints(srcDir string) []string {
+//
+// cleat-review (cleat#2812 R1): the first version unmarshalled straight into
+// []string and returned nil on any error, which reads the OLD {name,
+// function} map shape -- exactly the manifest every pre-#2812 `cleat init
+// --template agent` project carries, with the wrong name (agent/AgentLoop
+// never matches what cleat build actually finds) -- as "absent" and skips it
+// silently. A scalar entry_points: value does the same. Decoding the key as
+// a yaml.Node first, rather than straight into []string, is what makes
+// "the key is absent" (Kind == 0, the zero value) distinguishable from "the
+// key is present but not a list of strings" (Kind != 0, Decode fails) --
+// gopkg.in/yaml.v3's Node has no other way to represent "never populated".
+func workflowManifestEntryPoints(srcDir string) (declared []string, present bool, malformed error) {
 	data, err := os.ReadFile(filepath.Join(srcDir, "cleat.yaml"))
 	if err != nil {
-		return nil
+		return nil, false, nil
 	}
 	var manifest struct {
-		EntryPoints []string `yaml:"entry_points"`
+		EntryPoints yaml.Node `yaml:"entry_points"`
 	}
 	if err := yaml.Unmarshal(data, &manifest); err != nil {
-		return nil
+		return nil, false, nil
 	}
-	return manifest.EntryPoints
+	if manifest.EntryPoints.Kind == 0 {
+		return nil, false, nil
+	}
+	var list []string
+	if err := manifest.EntryPoints.Decode(&list); err != nil {
+		return nil, true, err
+	}
+	return list, true, nil
 }
 
 // checkEntryPointsAgainstManifest fails the build if cleat.yaml declares
@@ -1583,13 +1606,32 @@ func workflowManifestEntryPoints(srcDir string) []string {
 // design workflowManifestName's `name:` already gets, rather than a second
 // field to keep in sync by hand.
 //
-// An absent or empty entry_points: is not an error -- the field is
-// optional, and this only checks it where present. Compared as SETS, not
-// sequences: cleat.yaml has no reason to declare its entry points in the
-// same order the analyzer's own sort.Strings does, and a reordering is not
-// the mismatch this exists to catch.
+// An absent entry_points: is not an error -- the field is optional, and
+// this only checks it where present. A PRESENT one that is not a list of
+// strings -- the old {name, function} map shape, or a bare scalar -- fails
+// the build too (cleat-review, cleat#2812 R1): it is not documentation
+// nobody reads any more, and silently skipping it would be the exact
+// silent-wrong-manifest failure this whole feature exists to close, for the
+// one manifest shape (the pre-#2812 agent scaffold's) most likely to
+// disagree with the build. Compared as SETS, not sequences: cleat.yaml has
+// no reason to declare its entry points in the same order the analyzer's
+// own sort.Strings does, and a reordering is not the mismatch this exists
+// to catch.
 func checkEntryPointsAgainstManifest(srcDir string, exported []string) {
-	declared := workflowManifestEntryPoints(srcDir)
+	declared, present, malformed := workflowManifestEntryPoints(srcDir)
+	if !present {
+		return
+	}
+	if malformed != nil {
+		fmt.Fprintf(os.Stderr,
+			"Error: cleat.yaml's entry_points: is not a list of strings (%v).\n"+
+				"Write it as a list of the exported entry point names, e.g.:\n"+
+				"  entry_points:\n"+
+				"    - %s\n"+
+				"not the old { name, function } map form.\n",
+			malformed, strings.Join(exported, "\n    - "))
+		os.Exit(1)
+	}
 	if len(declared) == 0 {
 		return
 	}
