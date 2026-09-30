@@ -54,7 +54,6 @@ type PostgresStore struct {
 	// read whose caller returns the failure as an error and reports it itself
 	// (readEventHistoryTx). The counter is unaffected. cleat#2311.
 	quietDecryptLogs bool
-	metrics          *prometheus.Metrics
 
 	// disableReadRedaction when true bypasses RedactOnRead on the read path.
 	// Set to true during replay to avoid the overhead of retroactive redaction.
@@ -2390,7 +2389,24 @@ func (f *PostgresStoreFactory) OpenIsolatedStore(ctx context.Context, tenantID s
 
 	store := NewPostgresStore(isolatedDB, taskQueues...)
 	store.tenantID = tenantID
+	// cleat#2200. Matching OpenStore's own options in the same order: nothing
+	// today calls this for a write (HeartbeatBatchFenced writes no payloads
+	// and sends no NOTIFY), but the doc comment above has called this
+	// "OpenStore's shape" since it was written, and a later caller that
+	// reused this exported, general-purpose factory method for writes would
+	// otherwise store plaintext payloads on a deployment running with
+	// --encrypt-sensitive-payloads, silently.
+	if f.encryption != nil && f.encryptSensitivePayloads {
+		store = store.WithEncryption(f.encryption, true)
+	}
+	store = store.WithIdempotencyKeyTTL(f.idempotencyKeyTTL)
 	store = store.WithLogger(f.logger)
+	if f.notifyChannel != "" {
+		store = store.WithNotifyChannel(f.notifyChannel)
+	}
+	if f.metrics != nil {
+		store.Metrics = f.metrics
+	}
 	store.syncCommitOff = f.syncCommitOff
 	return store, isolatedDB, nil
 }

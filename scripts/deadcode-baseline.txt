@@ -31,7 +31,6 @@ engine	const _dispatcherTimeout
 engine	const errSignalAuthRequired
 engine	const settledStatusList
 engine	field lastCancellationCheck
-engine	field metrics
 engine	func (*FaultInjector).applyLatencySleep
 engine	func (*ShardedStore).tryEachShard
 engine	func Dialect.batchLimit
