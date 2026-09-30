@@ -465,9 +465,20 @@ jobs:
   # What test-mysql and test-mssql add over the tier gates is different: they run
   # with only ONE dialect's DSN set, which is the configuration a single-backend
   # deployment actually has. This job sets all three, exactly as the gates do.
+  #
+  # RUNS ONLY ON merge_group, as of cleat#2852. Since it isn't required and
+  # both halves are already gated elsewhere on `pull_request`, running it on
+  # every PR only pays the runtime cost a second time. It still has to run on
+  # the queue ref: Tier 1 Gate is report-only in the merge queue, so this job
+  # is what actually enforces the ./engine/ half there. The cost: a PR whose
+  # Plugin Migrations would fail now finds out in the queue instead of on its
+  # own head, i.e. a group rebuild instead of a red PR -- the same trade this
+  # job's own asymmetry above already accepts for keeping test-mysql/
+  # test-mssql required instead of folding into the tier gates.
   # -------------------------------------------------------------------------
   test-plugin-migrations:
     name: Plugin Migrations
+    if: github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     services:
       postgres:
