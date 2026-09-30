@@ -133,41 +133,43 @@ func TestClaimQueryPlanExcludesProcessedRowsOnPostgres(t *testing.T) {
 	now := time.Now()
 	seedCtx := plugin.ForTenant(context.Background(), tenantID)
 
-	// A modest, fast history: 200 processed rows for the target key, older
-	// than the one unprocessed row a claim should find.
-	const n = 200
-	for i := 0; i < n; i++ {
-		if _, err := p.db.Exec(seedCtx, `INSERT INTO ingested_events (id, tenant_id, event_type, event_data, key1, received_at, processed, status) VALUES ($1,$2,$3,$4,$5,$6,true,'consumed')`,
-			uuid.New(), tenantID, "order.paid", "{}", "K-1", now.Add(-time.Duration(n-i)*time.Second)); err != nil {
-			t.Fatalf("seed processed row %d: %v", i, err)
-		}
+	// 20,000 processed rows for the target key, older than the one
+	// unprocessed row a claim should find -- the same order of magnitude
+	// this file's own Version-7 comment measured (20,000 rows, 2.5ms/193ms
+	// seq-scanned vs 0.46ms/5.5ms indexed) as the point at which the index
+	// is cheaper for a REAL reason, not merely because default,
+	// never-analyzed page-count estimates happen to favor it.
+	//
+	// This replaces a fixed count of 200, which cleat#2822 exposed as
+	// fragile rather than wrong: at ~200 rows this table is small enough
+	// that whether the planner prefers the index depends on whether
+	// ingested_events has ever been ANALYZEd in this run, and that is an
+	// accident of what else has run in the shared database beforehand, not
+	// a property of the index. develop passes today only because nothing
+	// upstream of this test analyzes the table; cleat#2822's v8 adds a
+	// backfill UPDATE that (plausibly, per CI's own numbers) does. 20,000
+	// rows removes the dependency in both directions: the index is
+	// genuinely cheaper at this size whether or not stats are fresh.
+	//
+	// One batched INSERT ... SELECT rather than 20,000 round trips, which
+	// at one row per exec would make this test slow enough that nobody
+	// would want it at this size. tenant_id, event_type and key1 are
+	// inlined as literals (test-generated values, not user input) so the
+	// statement needs one bound parameter (a row count) rather than
+	// 20,000 x N; id and received_at are computed per generated row.
+	const n = 20000
+	seedSQL := fmt.Sprintf(`
+		INSERT INTO ingested_events (id, tenant_id, event_type, event_data, key1, received_at, processed, status)
+		SELECT gen_random_uuid(), %s, 'order.paid', '{}', 'K-1',
+		       $1::timestamptz - ((%d - g) * interval '1 second'), true, 'consumed'
+		FROM generate_series(0, %d) AS g
+	`, "'"+tenantID.String()+"'::uuid", n, n-1)
+	if _, err := p.db.Exec(seedCtx, seedSQL, now); err != nil {
+		t.Fatalf("seed %d processed rows: %v", n, err)
 	}
 	if _, err := p.db.Exec(seedCtx, `INSERT INTO ingested_events (id, tenant_id, event_type, event_data, key1, received_at, processed, status) VALUES ($1,$2,$3,$4,$5,$6,false,'pending')`,
 		uuid.New(), tenantID, "order.paid", "{}", "K-1", now); err != nil {
 		t.Fatalf("seed unprocessed row: %v", err)
-	}
-
-	// TEMPORARY DIAGNOSTIC, cleat-review's request while investigating
-	// cleat#2822's Plugin Migrations failure (4/4 on this PR's heads, 0/5
-	// elsewhere, not reproduced locally by either of us) -- to be reverted
-	// before this PR merges, not a permanent change to this test.
-	{
-		statRow := db.QueryRow(`
-			SELECT c.reltuples, c.relpages, COALESCE(s.n_live_tup,0), COALESCE(s.n_dead_tup,0),
-			       s.last_autoanalyze, s.last_analyze
-			FROM pg_class c
-			LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
-			WHERE c.relname = 'ingested_events'
-		`)
-		var reltuples float64
-		var relpages, liveTup, deadTup int64
-		var lastAutoanalyze, lastAnalyze sql.NullTime
-		if err := statRow.Scan(&reltuples, &relpages, &liveTup, &deadTup, &lastAutoanalyze, &lastAnalyze); err != nil {
-			fmt.Printf("cleat#2822 DIAGNOSTIC: stat query scan failed: %v\n", err)
-		} else {
-			fmt.Printf("cleat#2822 DIAGNOSTIC: ingested_events reltuples=%v relpages=%v n_live_tup=%v n_dead_tup=%v last_autoanalyze=%v last_analyze=%v\n",
-				reltuples, relpages, liveTup, deadTup, lastAutoanalyze, lastAnalyze)
-		}
 	}
 
 	tx, err := p.db.Begin(seedCtx)
