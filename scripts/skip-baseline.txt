@@ -87,6 +87,9 @@ cmd/cleat-worker	TestWorkerMigratesFromOutsideTheRepo	2
 cmd/cleat-worker	newSignalAuthStore	1
 cmd/cleat-worker	requireShutdownTestDB	1
 cmd/cleatctl	TestAuditVerifyExitStatusesAreDistinct	1
+cmd/cleatctl	TestBackupConfigCreateWarnsWhenDSNSecretIsUnresolvable	1
+cmd/cleatctl	TestBackupConfigUpdateOnlyWarnsWhenEnabling	1
+cmd/cleatctl	TestBackupRunWarnsWhenDSNSecretIsUnresolvable	1
 engine	MSSQLBackend.Setup	1
 engine	MSSQLBackend.SetupForTenant	1
 engine	MySQLBackend.Setup	1
