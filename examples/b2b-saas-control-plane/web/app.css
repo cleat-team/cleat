@@ -1,0 +1,228 @@
+/* Served under `style-src 'self'`. No @import, no external font: the CSP the
+   backend sets is `default-src 'none'`, so anything fetched from elsewhere is
+   refused and the page would lose it silently.
+
+   Mirrors examples/order-lifecycle/web/app.css almost exactly -- the shared
+   class names (.card, .field-row, .failures, .status-line, .pill, .outcome,
+   details.raw, #state-list) are deliberate, not coincidental, so the two
+   pages read as one family. Additions below (.kv, select) are what this
+   scenario needs that order-lifecycle's page does not. */
+
+:root {
+  --bg: #f7f7f8;
+  --fg: #1a1a1a;
+  --muted: #5c5c66;
+  --card: #ffffff;
+  --line: #e2e2e6;
+  --accent: #2f6f4f;
+  --accent-fg: #ffffff;
+  --warn: #9a3412;
+  --warn-bg: #fff4ed;
+  --ok: #166534;
+  --ok-bg: #f0fdf4;
+  --fail: #991b1b;
+  --fail-bg: #fef2f2;
+  --radius: 10px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14161a;
+    --fg: #e8e8ea;
+    --muted: #9a9aa4;
+    --card: #1c1f24;
+    --line: #2b2f36;
+    --accent: #4a9d75;
+    --accent-fg: #0b0d10;
+    --warn: #fdba74;
+    --warn-bg: #2a1c12;
+    --ok: #86efac;
+    --ok-bg: #12241a;
+    --fail: #fca5a5;
+    --fail-bg: #2a1414;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 2rem 1rem 4rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.page-head, main, .page-foot {
+  max-width: 52rem;
+  margin: 0 auto 1.5rem;
+}
+
+h1 { font-size: 1.6rem; margin: 0 0 .5rem; }
+h2 { font-size: 1.15rem; margin: 0 0 .75rem; }
+
+.lede { margin: 0 0 .6rem; color: var(--muted); }
+.lede.note { border-left: 3px solid var(--line); padding-left: .75rem; }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  margin-bottom: 1.25rem;
+}
+
+/* ---- form ---- */
+
+.field-row { margin-bottom: 1rem; }
+
+.field-row > label {
+  display: block;
+  font-weight: 600;
+  font-size: .9rem;
+  margin-bottom: .3rem;
+}
+
+input[type="text"], input[type="email"], input[type="number"], select {
+  width: 100%;
+  padding: .5rem .6rem;
+  font: inherit;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+input:focus-visible, select:focus-visible, button:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.sub { display: block; color: var(--muted); font-size: .85rem; margin-top: .3rem; }
+
+.failures {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: .75rem 1rem 1rem;
+  margin: 1.25rem 0;
+}
+.failures legend { font-weight: 600; font-size: .9rem; padding: 0 .35rem; }
+
+.check { display: flex; gap: .6rem; align-items: flex-start; margin: .6rem 0; }
+.check input { margin-top: .25rem; flex: none; }
+.check .sub { margin-top: .1rem; }
+
+/* ---- buttons ---- */
+
+button {
+  font: inherit;
+  font-weight: 600;
+  padding: .55rem 1.1rem;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+button[type="submit"], button.primary {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+button.primary { margin-right: .5rem; }
+
+button.ghost {
+  background: transparent;
+  color: var(--fg);
+  border-color: var(--line);
+}
+
+button:disabled { opacity: .55; cursor: progress; }
+
+.form-error {
+  color: var(--fail);
+  background: var(--fail-bg);
+  border: 1px solid var(--fail);
+  border-radius: 7px;
+  padding: .5rem .7rem;
+  margin: .9rem 0 0;
+  font-size: .9rem;
+}
+
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+
+/* ---- key/value lists: the credential and lifecycle cards ---- */
+
+.kv {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: .4rem 1rem;
+  font-size: .9rem;
+}
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; word-break: break-word; }
+
+/* ---- status pills ---- */
+
+.status-line { display: flex; align-items: baseline; gap: .7rem; flex-wrap: wrap; margin-bottom: 1rem; }
+
+.pill {
+  display: inline-block;
+  padding: .2rem .6rem;
+  border-radius: 999px;
+  font-size: .85rem;
+  font-weight: 600;
+  background: var(--bg);
+  border: 1px solid var(--line);
+}
+.pill.ok   { color: var(--ok);   background: var(--ok-bg);   border-color: var(--ok); }
+.pill.fail { color: var(--fail); background: var(--fail-bg); border-color: var(--fail); }
+.pill.warn { color: var(--warn); background: var(--warn-bg); border-color: var(--warn); }
+
+/* ---- the provisioning outcome ---- */
+
+.outcome {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 1rem;
+  margin: .5rem 0 1rem;
+}
+.outcome.ok   { background: var(--ok-bg);   border-color: var(--ok); }
+.outcome.fail { background: var(--fail-bg); border-color: var(--fail); }
+.outcome.warn { background: var(--warn-bg); border-color: var(--warn); }
+
+.outcome h3 { margin: 0 0 .4rem; font-size: 1rem; }
+.outcome > p { margin: 0; color: var(--muted); font-size: .9rem; }
+
+.raw-error {
+  margin: .5rem 0 0;
+  padding: .6rem .7rem;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: .8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---- raw state ---- */
+
+details.raw { border-top: 1px solid var(--line); padding-top: .8rem; }
+details.raw summary { cursor: pointer; color: var(--muted); font-size: .9rem; }
+
+#state-list {
+  margin: .7rem 0 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: .25rem .9rem;
+  font-size: .85rem;
+}
+#state-list dt { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
+#state-list dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-word; }
+
+.page-foot { color: var(--muted); }
+
+@media (max-width: 480px) {
+  body { padding: 1rem .75rem 3rem; }
+  .card { padding: 1rem; }
+}

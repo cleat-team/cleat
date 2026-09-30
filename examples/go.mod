@@ -8,6 +8,7 @@ require (
 	github.com/cleat-team/cleat/cleat v0.0.0
 	github.com/cleat-team/cleat/cleat/backendkit v0.0.0-20260914142453-535d1c610746
 	github.com/cleat-team/cleat/examples/fooddash/clients v0.0.0
+	github.com/google/uuid v1.6.0
 )
 
 require (
@@ -25,7 +26,6 @@ require (
 	github.com/go-sql-driver/mysql v1.10.1 // indirect
 	github.com/golang-sql/civil v0.0.0-20220223132316-b832511892a9 // indirect
 	github.com/golang-sql/sqlexp v0.1.0 // indirect
-	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.30.0 // indirect
 	github.com/lib/pq v1.12.3 // indirect
 	github.com/microsoft/go-mssqldb v1.11.2 // indirect

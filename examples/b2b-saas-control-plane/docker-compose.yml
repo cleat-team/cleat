@@ -1,0 +1,105 @@
+# A database and a cleat worker -- the infrastructure this scenario runs on.
+#
+#   docker compose up -d
+#
+# PostgreSQL ONLY, and it is not an omission: this scenario's backend creates
+# a tenant via `cleat-worker --create-tenant`, and that flag refuses on MySQL
+# and SQL Server (auth.CreateTenant's own dialect gate -- see the README).
+# There is no other dialect arm to bring up here, unlike
+# examples/order-lifecycle/docker-compose.yml, which this file otherwise
+# mirrors closely; read the comments there for the parts that look fussy --
+# they were measured, not merely reasoned about.
+#
+# The backend (backend/main.go) is deliberately NOT a service here. It is
+# your application: this file stands up what it connects TO. Run it with
+# `go run ./backend` from the example directory; see the README.
+
+x-dsn:
+  migrate: &dsn_migrate "${CLEAT_MIGRATE_DB_URL:-postgres://cleat:cleat@postgres:5432/cleat?sslmode=disable}"
+  worker: &dsn_worker "${CLEAT_WORKER_DB_URL:-postgres://cleat_app:${CLEAT_APP_PASSWORD:-cleat-app-local-dev}@postgres:5432/cleat?sslmode=disable}"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: cleat
+      POSTGRES_PASSWORD: cleat
+      POSTGRES_DB: cleat
+    ports:
+      - "${CLEAT_PG_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cleat -d cleat"]
+      interval: 3s
+      timeout: 5s
+      retries: 10
+
+  # Schema migration as a one-shot step: a worker no longer migrates itself at
+  # every start (cleat#2117). Runs as the superuser, because DDL needs it and
+  # because the schema baseline creates the lesser role below -- cleat_app --
+  # before anything connects as it.
+  migrate:
+    image: ${CLEAT_WORKER_IMAGE:-ghcr.io/cleat-team/cleat-worker:latest}
+    command:
+      - "--migrate-only"
+      - "--db"
+      - *dsn_migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # The schema baseline creates cleat_app NOLOGIN and without a password, on
+  # purpose: a credential does not belong in a file that migrations replay.
+  # This one-shot step supplies one for local development, once the migration
+  # above has created the role to receive it. Every tenant-scoped table has
+  # row-level security FORCEd, and PostgreSQL never applies RLS to a
+  # superuser -- see the worker's command below.
+  app-role:
+    image: postgres:16
+    environment:
+      PGPASSWORD: cleat
+    command:
+      - psql
+      - -v
+      - ON_ERROR_STOP=1
+      - -h
+      - postgres
+      - -U
+      - cleat
+      - -d
+      - cleat
+      - -c
+      - "ALTER ROLE cleat_app LOGIN PASSWORD '${CLEAT_APP_PASSWORD:-cleat-app-local-dev}';"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: "no"
+
+  cleat-worker:
+    image: ${CLEAT_WORKER_IMAGE:-ghcr.io/cleat-team/cleat-worker:latest}
+    stop_grace_period: 60s
+    command:
+      # NOT the superuser the migration above used -- --require-auth (on by
+      # default) refuses to start over a connection exempt from RLS, which is
+      # what catches this if it regresses. See order-lifecycle's own
+      # docker-compose.yml comment for the full reasoning; it applies
+      # unchanged here.
+      - "--db"
+      - *dsn_worker
+      - "--migrate-db"
+      - *dsn_migrate
+      - "--api-addr=:8080"
+      - "--concurrency=4"
+    environment:
+      # email-notify (the welcome-email step) needs a secret-sealing key to
+      # start at all -- see order-lifecycle's own docker-compose.yml comment.
+      # Without one the worker still starts; email sends fail loud rather
+      # than at boot.
+      CLEAT_SECRET_MASTER_KEY: ${CLEAT_SECRET_MASTER_KEY:-kiFstWOvEcdUe9ELx0oCTNorrTniHsyhUwLESCzufzw=}
+    ports:
+      - "${CLEAT_API_PORT:-8080}:8080"
+    depends_on:
+      app-role:
+        condition: service_completed_successfully
+      migrate:
+        condition: service_completed_successfully
