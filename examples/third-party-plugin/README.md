@@ -160,7 +160,7 @@ Before publishing:
 
 ## See also
 
-- [Third-party plugin authoring guide](../../docs/third-party-plugin-guide.md)
+- [Third-party plugin authoring guide](../../docs/contributor/plugins/third-party-plugin-guide.md)
 - [Plugin manifest JSON schema](../../schemas/plugin-manifest.schema.json)
-- [Plugin security guide for operators](../../docs/plugin-security.md)
-- [Plugin migration guide](../../docs/plugin-migration-guide.md)
+- [Plugin security guide for operators](../../docs/contributor/plugins/plugin-security.md)
+- [Plugin migration guide](../../docs/contributor/plugins/plugin-migration-guide.md)
