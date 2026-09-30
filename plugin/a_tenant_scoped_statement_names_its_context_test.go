@@ -216,6 +216,12 @@ func scanBareContextSites(t *testing.T, root string, files []string, scoped map[
 // entire second copy of the repository, and would attribute a call site to a
 // scratch checkout. --others --exclude-standard so a site added in an untracked
 // file is still seen, since that is the change being reviewed.
+//
+// isGoToolIgnored (multibackend_tests_are_selected_by_ci_test.go, same
+// package) drops the other thing --others surfaces that --exclude-standard
+// does not: a package's own dot-prefixed scratch directory, such as
+// internal/plugingen's assertGoCompiles writes and deletes mid-test
+// (cleat#2811).
 func treeGoFiles(t *testing.T, root string) []string {
 	t.Helper()
 	out, err := exec.Command("git", "-C", root, "ls-files",
@@ -225,6 +231,9 @@ func treeGoFiles(t *testing.T, root string) []string {
 	}
 	var files []string
 	for _, rel := range strings.Fields(string(out)) {
+		if isGoToolIgnored(rel) {
+			continue
+		}
 		if strings.Contains(rel, "/testdata/") || strings.HasPrefix(rel, "testdata/") {
 			continue
 		}
