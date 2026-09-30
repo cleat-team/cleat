@@ -3,6 +3,7 @@ package blobstore
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -292,24 +293,124 @@ func (p *Plugin) sweepStaleWorkflowRefs(ctx, baseCtx context.Context) (int64, er
 // TestSweepStaleWorkflowRefsMSSQL_DeterministicInterleave sets it.
 var sweepStaleWorkflowRefsMSSQLTestHook func()
 
+// sqlErrorNumberer is go-mssqldb's mssql.Error, named structurally rather
+// than imported -- its own doc comment invites exactly this: "methods for
+// reading the contents of the struct, which allows calling programs to
+// check for specific error conditions without having to import this
+// package directly." errors.As matches on method set, not on the concrete
+// type, so this works against the real driver error without adding
+// go-mssqldb as an explicit dependency of this file.
+type sqlErrorNumberer interface {
+	SQLErrorNumber() int32
+}
+
+// mssqlErrDeadlockVictim is SQL Server's 1205, the deadlock-victim code --
+// restated from engine/mssql_errors.go's mssqlErrDeadlockVictim, which is
+// unexported and package-private to engine.
+const mssqlErrDeadlockVictim = 1205
+
+// isMSSQLDeadlock reports whether err is a SQL Server deadlock victim (1205,
+// "Rerun the transaction").
+//
+// THE NUMBER FIRST, cleat-review's finding on this function's first version
+// here: a message-only check is locale-dependent, and go-mssqldb surfaces
+// the server's error text as reported, which is not guaranteed to be
+// English -- a non-English login language would make every phrase below
+// miss, and this function would simply never retry a deadlock it cannot
+// read. That failure is SAFE (the caller gets a hard error instead of a
+// silent wrong answer) but it defeats this function's whole purpose
+// wherever it fires, so the number is checked first and the phrases are a
+// fallback for whatever a `sqlErrorNumberer` check cannot reach -- a
+// wrapped error the concrete type does not survive being As'd through, or
+// (fixture/test paths only) an error constructed as a plain string.
+//
+// The phrases are copied from engine/mssql_errors.go's own isMSSQLDeadlock
+// rather than re-derived, so this one recognizes exactly what it does.
+// Narrower than plugins/auditlog/verify.go's isTransientDBError on purpose:
+// that one also matches 1213 (MySQL) and PostgreSQL's 40001/40P01, because
+// VerifyChain runs on every dialect. Every caller of this one is MSSQL-only
+// by name (sweepStaleWorkflowRefsMSSQL, allInFlightWorkflowIDsMSSQL), so
+// there is no other dialect's error text to avoid colliding with.
+func isMSSQLDeadlock(err error) bool {
+	if err == nil {
+		return false
+	}
+	var n sqlErrorNumberer
+	if errors.As(err, &n) {
+		return n.SQLErrorNumber() == mssqlErrDeadlockVictim
+	}
+	m := strings.ToLower(err.Error())
+	for _, phrase := range []string{"deadlock victim", "was deadlocked", "deadlocked on lock"} {
+		if strings.Contains(m, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// mssqlDeadlockRetries and mssqlDeadlockRetryDelay reuse the budget
+// engine/mssql_retry.go's mssqlTxRetries measured for the identical failure
+// (SQL Server's lock manager picking a deadlock victim, 1205) under the
+// same kind of contention -- cleat#1885: 0 exhaustions in 160 rounds at this
+// budget, against ~1% at budget 2. This package cannot import that
+// unexported constant (plugins/ cannot reach engine/'s internals), so the
+// number is restated rather than shared, but it is the same number for the
+// same reason, not independently chosen.
+const (
+	mssqlDeadlockRetries    = 3
+	mssqlDeadlockRetryDelay = 20 * time.Millisecond
+)
+
+// withMSSQLDeadlockRetry retries fn while the error it returns is a deadlock
+// victim. Safe to wrap any single statement here with: SQL Server has
+// already rolled the losing statement back by the time the error returns
+// (that is what "victim" means), and every fn this wraps is naturally
+// idempotent on retry -- a SELECT re-reads the same (or a newer, still
+// correct) snapshot, and a DELETE ... WHERE workflow_id IN (...) removes
+// nothing extra on a row already gone.
+func withMSSQLDeadlockRetry(ctx context.Context, op string, fn func() error) error {
+	var lastErr error
+	for attempt := 0; attempt <= mssqlDeadlockRetries; attempt++ {
+		if attempt > 0 {
+			delay := mssqlDeadlockRetryDelay * (1 << (attempt - 1))
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("%s: context cancelled during retry: %w", op, ctx.Err())
+			case <-time.After(delay):
+			}
+		}
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isMSSQLDeadlock(err) {
+			return err
+		}
+	}
+	return fmt.Errorf("%s: exhausted %d retries: %w", op, mssqlDeadlockRetries, lastErr)
+}
+
 func (p *Plugin) sweepStaleWorkflowRefsMSSQL(ctx context.Context) (int64, error) {
-	rows, err := p.db.Query(ctx, `SELECT DISTINCT workflow_id FROM workflow_blob_refs`)
+	var candidates []string
+	err := withMSSQLDeadlockRetry(ctx, "blobstore: list referenced workflow ids", func() error {
+		candidates = candidates[:0]
+		rows, err := p.db.Query(ctx, `SELECT DISTINCT workflow_id FROM workflow_blob_refs`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var wfID string
+			if err := rows.Scan(&wfID); err != nil {
+				return fmt.Errorf("scan: %w", err)
+			}
+			candidates = append(candidates, wfID)
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return 0, fmt.Errorf("blobstore: list referenced workflow ids: %w", err)
-	}
-	var candidates []string
-	for rows.Next() {
-		var wfID string
-		if err := rows.Scan(&wfID); err != nil {
-			_ = rows.Close()
-			return 0, fmt.Errorf("blobstore: list referenced workflow ids: scan: %w", err)
-		}
-		candidates = append(candidates, wfID)
-	}
-	rerr := rows.Err()
-	_ = rows.Close()
-	if rerr != nil {
-		return 0, fmt.Errorf("blobstore: list referenced workflow ids: %w", rerr)
 	}
 
 	// Test-only: lets a deterministic test interleave a write in the exact
@@ -341,9 +442,14 @@ func (p *Plugin) sweepStaleWorkflowRefsMSSQL(ctx context.Context) (int64, error)
 			placeholders[i] = fmt.Sprintf("@p%d", i+1)
 			args[i] = id
 		}
-		n, err := p.db.Exec(ctx,
-			`DELETE FROM workflow_blob_refs WHERE workflow_id IN (`+strings.Join(placeholders, ", ")+`)`,
-			args...)
+		var n int64
+		err := withMSSQLDeadlockRetry(ctx, "blobstore: delete stale refs", func() error {
+			var execErr error
+			n, execErr = p.db.Exec(ctx,
+				`DELETE FROM workflow_blob_refs WHERE workflow_id IN (`+strings.Join(placeholders, ", ")+`)`,
+				args...)
+			return execErr
+		})
 		if err != nil {
 			return total, fmt.Errorf("blobstore: delete stale refs: %w", err)
 		}
@@ -381,22 +487,23 @@ func (p *Plugin) allInFlightWorkflowIDsMSSQL(ctx context.Context) (map[string]st
 			return nil, fmt.Errorf("tenant id %q is not a UUID: %w", tid, perr)
 		}
 		tctx := plugin.ForTenant(ctx, id)
-		rows, err := p.db.Query(tctx, `SELECT id FROM workflow_instances WHERE status IN ('ready', 'running')`)
+		err := withMSSQLDeadlockRetry(ctx, "blobstore: in-flight ids for tenant "+tid, func() error {
+			rows, err := p.db.Query(tctx, `SELECT id FROM workflow_instances WHERE status IN ('ready', 'running')`)
+			if err != nil {
+				return err
+			}
+			defer rows.Close()
+			for rows.Next() {
+				var wfID string
+				if err := rows.Scan(&wfID); err != nil {
+					return fmt.Errorf("scan: %w", err)
+				}
+				ids[wfID] = struct{}{}
+			}
+			return rows.Err()
+		})
 		if err != nil {
 			return nil, fmt.Errorf("in-flight ids for tenant %s: %w", tid, err)
-		}
-		for rows.Next() {
-			var wfID string
-			if err := rows.Scan(&wfID); err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("in-flight ids for tenant %s: scan: %w", tid, err)
-			}
-			ids[wfID] = struct{}{}
-		}
-		rerr := rows.Err()
-		_ = rows.Close()
-		if rerr != nil {
-			return nil, fmt.Errorf("in-flight ids for tenant %s: %w", tid, rerr)
 		}
 	}
 	return ids, nil
