@@ -110,17 +110,17 @@ var notYetPropagating = map[string]string{
 		"browser or IdP that called it and arrives on the INBOUND request -- not to any run, and " +
 		"there is no CallContext here. Joining it means parsing the incoming traceparent on the " +
 		"plugin mux the way cmd/cleat-worker does on its own routes: a third mechanism, not this " +
-		"issue's propagation.",
+		"issue's propagation. cleat#1611.",
 	"plugins/oauthprovider/oidc.go:getJSON": "OIDC discovery and JWKS fetches (cleat#1582), reached ONLY from handleLogin and " +
 		"handleCallback -- so this is the same debt as the entry above it, for the same reason, " +
-		"and it should be paid at the same time by the same mechanism. Checked rather than " +
-		"inherited: the only production site that sets a CallContext is execSession." +
+		"and it should be paid at the same time by the same mechanism (cleat#1611). Checked " +
+		"rather than inherited: the only production site that sets a CallContext is execSession." +
 		"pluginCallContext (engine/plugin_call_context.go:72), which is a workflow host-call " +
 		"path, so plugin.CallContextFromContext returns nil on every HTTP handler and there is " +
 		"no TraceID to propagate. Fixing the sibling fixes this without touching oidc.go.",
 	"plugins/oauthprovider/identity.go:githubVerifiedEmail": "GET /user/emails (cleat#2340), reached ONLY from handleCallback " +
 		"(routes.go:652) -- the same debt as the two entries above it, for the same reason, and it " +
-		"should be paid at the same time by the same mechanism. Checked rather than inherited, " +
+		"should be paid at the same time by the same mechanism (cleat#1611). Checked rather than inherited, " +
 		"because the judgement is the one worth re-deriving: this is a NEW site and the default " +
 		"should be to propagate, not to declare. It cannot. plugin.SetTraceparentFromContext " +
 		"would be a no-op here, not a fix -- the function's own doc says a nil CallContext is an " +
