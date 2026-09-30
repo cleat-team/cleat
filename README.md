@@ -98,13 +98,14 @@ docker compose -f docker-compose.partner.yml up -d postgres
 #    (github.com/cleat-team/cleat) does not contain package
 #    github.com/cleat-team/cleat/out" (cleat#2473).
 ./bin/cleat build -o /tmp/cleat-build ./testdata/hello/
-# Wrote /tmp/cleat-build/greet.wasm -- testdata/hello declares exactly one
-# entry point (Greet), which step 7 does not have to name: the worker reads
-# it from the WASM's own cleat.metadata when there is only one candidate.
+# Wrote /tmp/cleat-build/hello.wasm -- named after the source file (hello.go,
+# cleat#2407), not the entry point. testdata/hello declares exactly one entry
+# point (Greet), which step 7 does not have to name: the worker reads it from
+# the WASM's own cleat.metadata when there is only one candidate.
 
 # 4. Deploy to your database. The owner DSN is correct here.
 ./bin/cleat deploy --db "$CLEAT_OWNER_DSN" \
-    --name hello /tmp/cleat-build/greet.wasm
+    --name hello /tmp/cleat-build/hello.wasm
 
 # 5. Give the worker a connection it will accept. It REFUSES a superuser DSN,
 #    because PostgreSQL never applies row-level security to a superuser. The
