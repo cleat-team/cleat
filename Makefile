@@ -99,7 +99,19 @@ test-as:
 test-cluster: build-go cluster-up
 	@echo "Waiting for cluster to be ready..."
 	@sleep 10
-	go test -p 1 -count=1 -timeout=180s ./engine/...
+	# -timeout=900s, not 180s (cleat#2252). cluster-up's Postgres container
+	# listens on the standard 5432, which is also engine/testutil's DSN
+	# fallback when no CLEAT_TEST_* is set -- so this step is a real,
+	# Postgres-configured ./engine/... run, not a no-DSN one, and measured
+	# 452s (engine) on a dedicated, unloaded container 2026-09-30 (see
+	# CONTRIBUTING.md's "Test commands by category" for the full per-dialect
+	# table and the command that re-derives it). 900s is roughly 2x that.
+	#
+	# A run that hits this timeout leaves shared test-database state dirty,
+	# not just late -- see CONTRIBUTING.md's note on the same target for why,
+	# and drop/recreate the cluster (cluster-down/cluster-up) rather than
+	# trusting the next run's failures if it ever does.
+	go test -p 1 -count=1 -timeout=900s ./engine/...
 	$(MAKE) cluster-down
 
 # ---- plugin harness -------------------------------------------------------
