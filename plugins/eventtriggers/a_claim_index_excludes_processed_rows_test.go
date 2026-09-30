@@ -3,6 +3,7 @@ package eventtriggers
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -144,6 +145,29 @@ func TestClaimQueryPlanExcludesProcessedRowsOnPostgres(t *testing.T) {
 	if _, err := p.db.Exec(seedCtx, `INSERT INTO ingested_events (id, tenant_id, event_type, event_data, key1, received_at, processed, status) VALUES ($1,$2,$3,$4,$5,$6,false,'pending')`,
 		uuid.New(), tenantID, "order.paid", "{}", "K-1", now); err != nil {
 		t.Fatalf("seed unprocessed row: %v", err)
+	}
+
+	// TEMPORARY DIAGNOSTIC, cleat-review's request while investigating
+	// cleat#2822's Plugin Migrations failure (4/4 on this PR's heads, 0/5
+	// elsewhere, not reproduced locally by either of us) -- to be reverted
+	// before this PR merges, not a permanent change to this test.
+	{
+		statRow := db.QueryRow(`
+			SELECT c.reltuples, c.relpages, COALESCE(s.n_live_tup,0), COALESCE(s.n_dead_tup,0),
+			       s.last_autoanalyze, s.last_analyze
+			FROM pg_class c
+			LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+			WHERE c.relname = 'ingested_events'
+		`)
+		var reltuples float64
+		var relpages, liveTup, deadTup int64
+		var lastAutoanalyze, lastAnalyze sql.NullTime
+		if err := statRow.Scan(&reltuples, &relpages, &liveTup, &deadTup, &lastAutoanalyze, &lastAnalyze); err != nil {
+			fmt.Printf("cleat#2822 DIAGNOSTIC: stat query scan failed: %v\n", err)
+		} else {
+			fmt.Printf("cleat#2822 DIAGNOSTIC: ingested_events reltuples=%v relpages=%v n_live_tup=%v n_dead_tup=%v last_autoanalyze=%v last_analyze=%v\n",
+				reltuples, relpages, liveTup, deadTup, lastAutoanalyze, lastAnalyze)
+		}
 	}
 
 	tx, err := p.db.Begin(seedCtx)
