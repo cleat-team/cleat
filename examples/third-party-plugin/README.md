@@ -4,6 +4,15 @@ This directory contains a minimal, fully-documented example of a third-party
 cleat plugin. It demonstrates the complete plugin authoring workflow: writing
 the manifest, implementing host functions, building to WASM, and publishing.
 
+> **A WASM plugin installed by this workflow is not executed by any worker
+> today.** `cleat plugin install` deploys the manifest and binary to
+> `plugin_defs` and reports success, but `PluginLoader.LoadPlugin` has no
+> non-test callers and `cmd/cleat-worker` constructs no loader, so nothing
+> ever loads the module (IMPROVEMENT-PLAN 3.315). A workflow that calls one of
+> this plugin's host functions after a successful install will not reach it.
+> Everything below is still worth following to learn the authoring workflow;
+> just don't expect a deployed worker to run the result yet.
+
 ## What this plugin does
 
 The `example/hello-world` plugin provides two host functions:
