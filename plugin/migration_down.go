@@ -59,10 +59,15 @@ type DownResult struct {
 // each DDL statement regardless of an enclosing BEGIN/COMMIT: a multi-statement
 // Down that fails partway through a CREATE/DROP sequence there still leaves
 // whatever DDL already ran in place. The tracking row is not misleading in that
-// case -- it is only ever deleted in the SAME transaction as the Down SQL
-// before it, so a partial MySQL teardown is correctly left recorded as
+// case, but the transaction is not what saves it there -- an implicit commit
+// from the first DDL statement ends it. What saves it is ORDERING: the row is
+// only ever deleted AFTER every statement of the Down SQL before it has
+// already succeeded, so a partial MySQL teardown is correctly left recorded as
 // applied, not silently forgotten -- but "applied" then means "Down did not
-// finish", not "the schema matches a clean install". cleat#2850: until this
+// finish", not "the schema matches a clean install". cleat-review's own MySQL
+// probe (cleat#2850's review) confirms this directly: run with NO transaction
+// at all, it still leaves the tracking row applied, because the code never
+// reaches the delete until the Down SQL has returned success. cleat#2850: until this
 // paragraph and the transaction below existed, this comment claimed the
 // stronger guarantee on all three dialects while the Phase 2 loop wrapped
 // nothing in a transaction at all, so an interrupted Postgres or SQL Server
