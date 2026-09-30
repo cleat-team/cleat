@@ -160,7 +160,17 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 		p.config.Backend = "memory"
 		p.backend = newMemoryBackend(p.db, p.dialect)
 	default:
-		return fmt.Errorf("blobstore: unknown backend %q (valid values: \"s3\", \"memory\")", p.config.Backend)
+		// ErrFatalMisconfiguration, not a plain error (cleat-review's #2824
+		// R1): an unrecognized backend is exactly the "config actively
+		// contradicts itself" case that error exists for (plugin.go's own
+		// doc comment) -- without the wrap, classifyPluginInitError
+		// (cmd/cleat-worker/main.go) falls to its default arm and the
+		// worker boots with blobstore merely DISABLED, which is the same
+		// silent-wrong-answer shape cleat#2245 was filed to fix, one layer
+		// up: "gcs" would not lose data the way "S3" did, but it would boot
+		// a worker an operator believes has blobstore and does not.
+		return fmt.Errorf("blobstore: unknown backend %q (valid values: \"s3\", \"memory\"): %w",
+			p.config.Backend, plugin.ErrFatalMisconfiguration)
 	}
 
 	p.logger.Info("blobstore: initialized",

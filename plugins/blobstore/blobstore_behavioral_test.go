@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -889,6 +890,14 @@ func TestPluginInitBackendIsCaseInsensitive(t *testing.T) {
 // (silent memory fallback): this test's `err == nil` check then fails, and
 // its case-insensitive sibling above starts passing wrongly too (both
 // directions collapse onto the same default arm).
+//
+// The errors.Is assertion is load-bearing, not decoration (cleat-review's
+// #2824 R1): a plain error here would satisfy err == nil above while still
+// letting cmd/cleat-worker's classifyPluginInitError fall to its default
+// arm, pluginInitDisabledLoud -- the worker boots with blobstore merely
+// DISABLED rather than refusing to start. plugin.ErrFatalMisconfiguration is
+// what routes to pluginInitFatal (os.Exit(1)); see plugins/email/plugin.go
+// for the precedent this follows.
 func TestPluginInitRejectsUnknownBackend(t *testing.T) {
 	store := newFakeDBStore()
 	db := sql.OpenDB(&fakeConnector{store: store})
@@ -906,6 +915,10 @@ func TestPluginInitRejectsUnknownBackend(t *testing.T) {
 	err := p.Init(ctx, env)
 	if err == nil {
 		t.Fatal("expected Init to refuse an unknown backend, got nil error")
+	}
+	if !errors.Is(err, plugin.ErrFatalMisconfiguration) {
+		t.Errorf("expected err to wrap plugin.ErrFatalMisconfiguration (so cmd/cleat-worker "+
+			"refuses to start rather than merely disabling blobstore), got: %v", err)
 	}
 	if !strings.Contains(err.Error(), `"gcs"`) {
 		t.Errorf("expected the error to name the rejected value %q, got: %v", "gcs", err)
