@@ -64,15 +64,19 @@ func scanPerTenantLoopSites(t *testing.T, root string, files []string) []perTena
 		if err != nil {
 			t.Fatalf("parse %s: %v", rel, err)
 		}
+		assertDefaultPluginImportName(t, f, rel)
+		tracked := gateBareIdentOnPackage(isAllTenantIDs, f.Name.Name == "plugin")
+		assertNoPackageScopeReferenceEscapes(t, f, fset, rel, tracked)
 		for _, decl := range f.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok {
 				continue
 			}
 			name := funcName(fn)
+			assertNoTrackedReferenceEscapes(t, fn, fset, rel, name, tracked)
 			ast.Inspect(fn, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
-				if !ok || !isAllTenantIDs(call.Fun) {
+				if !ok || !tracked(call.Fun) {
 					return true
 				}
 				sites = append(sites, perTenantLoopSite{
