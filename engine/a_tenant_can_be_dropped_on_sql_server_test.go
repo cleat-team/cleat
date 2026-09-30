@@ -25,9 +25,10 @@ import (
 // superuser connection, where PostgreSQL's RLS is bypassed unconditionally, so
 // a policy that merely HIDES a row cannot make it pass. SQL Server has no
 // such principal: a security policy applies to sysadmin, db_owner and dbo
-// alike (measured in migrations/mssql/012_admin_role.sql, and again here --
-// see TestADeleteWithoutTheTenantKeyRemovesNothingOnSQLServer below, where
-// sa reads IS_SRVROLEMEMBER('sysadmin') = 1 and still sees nothing).
+// alike (the policy is bound in migrations/mssql/003_procedures.sql, and
+// measured again here -- see TestADeleteWithoutTheTenantKeyRemovesNothingOnSQLServer
+// below, where sa reads IS_SRVROLEMEMBER('sysadmin') = 1 and still sees
+// nothing).
 //
 // So every count here is taken on a connection with BOTH session keys set:
 // the counted tenant's own tenant_id, which is what dbo.fn_tenant_filter

@@ -914,10 +914,13 @@ tier2:
             fail-closed through assert_tenant_set() rather than COALESCE-ing to a
             default. An earlier version of this entry claimed the opposite; the startup
             check reports the attribute by name, since P0001 does not.
-          mssql — works. dbo.fn_tenant_filter already admits on
-            `IS_ROLEMEMBER(N'cleat_admin') = 1` (migrations/mssql/012_admin_role.sql), so
-            the exemption is in the predicate rather than in a role attribute. The role
-            ships with NO MEMBERS; granting it is a deployment decision.
+          mssql — works. dbo.fn_tenant_filter admits on
+            `IS_ROLEMEMBER(N'cleat_admin') = 1` once
+            migrations/mssql/optional/cross_tenant_claim.sql has switched the predicate to
+            that form (the shipped predicate, migrations/mssql/003_procedures.sql, has no
+            such admission since cleat#1541), so the exemption is in the predicate rather
+            than in a role attribute. The role (migrations/mssql/001_schema.sql) ships with
+            NO MEMBERS; granting it is a deployment decision.
           mysql — does NOT work, and cannot without a different mechanism. MySQLStoreFactory
             gives each tenant its own physical database (cleat_<tenant_id>), so there is no
             predicate to drop: the other tenants' rows are not filtered out, they are in

@@ -4579,6 +4579,17 @@ cross-tenant claim both call `requireCleatAdminMembership` and fail loudly witho
 a working multi-tenant deployment, **every tenant-scoped store the worker hands to a request is
 running unfiltered**, and the Go predicate is the whole of the isolation.
 
+> **Stale by 2026-09-19, in two ways — kept as history, not as current fact (cleat#2754).**
+> `012_admin_role.sql` was folded into `001_schema.sql`/`003_procedures.sql` by the SQL Server
+> migration compaction, and that filename no longer exists. Separately, `GetDueSchedulesAcrossTenants`,
+> the cross-tenant claim, and `requireCleatAdminMembership` were all removed in #1926, which
+> replaced the admin-role-based mechanism with unconditional per-tenant rotation needing no grant
+> at all — so fact 2 above ("a multi-tenant SQL Server deployment must grant that role") is no
+> longer true of the worker's own dispatch loop. `cleat_admin` membership is still granted today
+> for `cleatctl` and cross-tenant test teardown, and fact 1 (the predicate widens the whole
+> connection once that membership is opted into, per `cross_tenant_claim.sql`) is why the 31
+> per-statement fixes below remain necessary regardless.
+
 That is the same conclusion §3.11 reached for MySQL, arrived at from the opposite direction:
 MySQL has no policy to lean on, SQL Server has one that is switched off for exactly the
 deployments that need it most.
@@ -4978,7 +4989,7 @@ scopes the read:
 |---|---|---|
 | PostgreSQL | RLS — `LoadWASM` runs inside `beginTxWithRLS` | `grep -n "beginTxWithRLS" engine/store_deployment.go` |
 | MySQL | the SQL itself — `AND tenant_id = ?` against `s.tenantID` | `grep -n "func (s \*MySQLStore) LoadWASM" -A4 engine/mysql_ops.go` |
-| SQL Server | `FILTER PREDICATE dbo.fn_tenant_filter(tenant_id)` on `dbo.workflow_defs` | `grep -n "ON dbo.workflow_defs" migrations/mssql/001_schema.sql migrations/mssql/012_admin_role.sql` |
+| SQL Server | `FILTER PREDICATE dbo.fn_tenant_filter(tenant_id)` on `dbo.workflow_defs` | `grep -n "ON dbo.workflow_defs" migrations/mssql/001_schema.sql migrations/mssql/003_procedures.sql` (cited as `012_admin_role.sql` before the SQL Server migration compaction; that filename no longer exists — cleat#2754) |
 
 "On MySQL and SQL Server there is nothing underneath at all" was false on both counts.
 `GetWASMLength`'s own comment on the MySQL side says the opposite in as many words — *"MySQL has
@@ -6850,7 +6861,10 @@ and cannot inherit the privileged half at all, because the predicate is the only
 exemption can live there.
 
 **Fix:** `migrations/mssql/012_admin_role.sql` creates an empty `cleat_admin` database role and
-adds `OR IS_ROLEMEMBER(N'cleat_admin') = 1` to `fn_tenant_filter`.
+adds `OR IS_ROLEMEMBER(N'cleat_admin') = 1` to `fn_tenant_filter`. (That file no longer exists:
+the SQL Server migration compaction folded the role creation into `001_schema.sql`, and cleat#1541
+later moved the `OR IS_ROLEMEMBER` admission out of the shipped predicate entirely, into the
+opt-in `migrations/mssql/optional/cross_tenant_claim.sql` — see cleat#2754.)
 
 **Why role membership and not a sentinel session-context value.** A magic `tenant_id` would be
 assumable by anything that can call `sp_set_session_context` — which is the application itself,

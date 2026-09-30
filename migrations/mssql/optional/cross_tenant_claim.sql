@@ -56,7 +56,7 @@ IF @fn IS NULL
     THROW 50075, N'dbo.fn_tenant_filter does not exist; apply the numbered migrations first', 1;
 
 IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'cleat_admin' AND type = N'R')
-    THROW 50075, N'the dbo.cleat_admin role does not exist; migration 012_admin_role.sql has not been applied', 1;
+    THROW 50075, N'the dbo.cleat_admin role does not exist; apply the numbered migrations first (the role is created by 001_schema.sql)', 1;
 
 IF OBJECT_ID(N'admin.rls_predicate_form') IS NULL
     THROW 50075, N'admin.rls_predicate_form does not exist; migration 075 has not been applied, and without it nothing records which predicate is installed', 1;

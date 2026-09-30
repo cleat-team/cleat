@@ -98,8 +98,11 @@ func rlsPostureOf(ctx context.Context, db *sql.DB, dialectName string) (rlsPostu
 // THE QUESTION IS NOT THE SAME ONE. On PostgreSQL the check asks whether the
 // ROLE is exempt -- superuser or BYPASSRLS -- and those are properties of the
 // role that hold everywhere. SQL Server has no such thing: a security policy
-// applies to sysadmin, db_owner and dbo alike, which migrations/mssql/012 says
-// in its own comments and which is measured rather than inherited here.
+// applies to sysadmin, db_owner and dbo alike -- true of the compiled schema
+// (migrations/mssql/001_schema.sql, migrations/mssql/003_procedures.sql;
+// neither file's comments restate it since the SQL Server migration
+// compaction folded 012_admin_role.sql, which did, into them) -- and is
+// measured rather than inherited here.
 //
 // Measured against a migrated database, one login varied:
 //
@@ -125,11 +128,11 @@ func mssqlPostureOf(ctx context.Context, db *sql.DB) (rlsPosture, []engine.RLSBy
 		return rlsUnknown, nil, fmt.Errorf("check RLS: read cleat_admin membership: %w", err)
 	}
 	if !member.Valid {
-		// No such role: this database has not had migrations/mssql/012
+		// No such role: this database has not had migrations/mssql/001_schema.sql
 		// applied, so no policy is installed either and nothing is filtering.
 		return rlsUnprotected, []engine.RLSBypassReason{{
 			Kind:   "no-admin-role",
-			Detail: "dbo.cleat_admin does not exist, so migrations/mssql/012 has not been applied and no tenant filter is installed",
+			Detail: "dbo.cleat_admin does not exist, so migrations/mssql/001_schema.sql has not been applied and no tenant filter is installed",
 		}}, nil
 	}
 	if member.Int64 == 1 {
@@ -202,7 +205,12 @@ const rlsSubjectWarningMSSQL = "warning: --db points at a connection that row-le
 	"         against it removes nothing and reports success.\n" +
 	"\n" +
 	"         SQL Server has no superuser exemption: the filter applies to sysadmin,\n" +
-	"         db_owner and dbo alike. cleatctl needs a login that is a member of\n" +
-	"         dbo.cleat_admin (migrations/mssql/012_admin_role.sql), which sa is NOT\n" +
-	"         by default and cannot be granted -- dbo may not be added to a role.\n" +
+	"         db_owner and dbo alike. cleatctl needs TWO things, not one: (1) apply\n" +
+	"         migrations/mssql/optional/cross_tenant_claim.sql (not auto-applied), which\n" +
+	"         switches dbo.fn_tenant_filter to the form that admits dbo.cleat_admin\n" +
+	"         members -- the shipped predicate (migrations/mssql/003_procedures.sql) has\n" +
+	"         no such admission since cleat#1541, so membership alone grants nothing; and\n" +
+	"         (2) a login that is a member of dbo.cleat_admin (created empty by\n" +
+	"         migrations/mssql/001_schema.sql), which sa is NOT by default and cannot be\n" +
+	"         granted -- dbo may not be added to a role.\n" +
 	"\n"
