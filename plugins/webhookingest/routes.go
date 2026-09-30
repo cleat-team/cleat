@@ -82,19 +82,15 @@ type webhookSourceJSON struct {
 	SourceType          string    `json:"source_type"`
 	SecretConfigured    bool      `json:"secret_configured"`
 	Enabled             bool      `json:"enabled"`
-	SignalWorkflowID    string    `json:"signal_workflow_id,omitempty"`
-	SignalName          string    `json:"signal_name,omitempty"`
 	CorrelationKeyField string    `json:"correlation_key_field,omitempty"`
 	CreatedAt           time.Time `json:"created_at"`
 	UpdatedAt           time.Time `json:"updated_at"`
 }
 
 type createSourceRequest struct {
-	Name             string        `json:"name"`
-	SourceType       string        `json:"source_type"`
-	Secret           plugin.Secret `json:"secret,omitempty"`
-	SignalWorkflowID string        `json:"signal_workflow_id,omitempty"`
-	SignalName       string        `json:"signal_name,omitempty"`
+	Name       string        `json:"name"`
+	SourceType string        `json:"source_type"`
+	Secret     plugin.Secret `json:"secret,omitempty"`
 	// CorrelationKeyField names a top-level field in the inbound JSON
 	// payload whose value becomes this source's events' key2 (cleat#2649,
 	// P1). Optional: a source with no field declared publishes with only
@@ -147,16 +143,6 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	discoverCtx := plugin.AcrossAllTenants(r.Context(),
 		"webhook ingest: the source id identifies the tenant, so there is none to scope by")
 
-	// COALESCE(signal_workflow_id, ''): the column is nullable with no
-	// default (migrations.go v3) and handleCreateSource writes NULL for a
-	// source created with no signal_workflow_id, but this scans into a plain
-	// Go string -- an uncoalesced NULL fails every ingest on such a source
-	// with "converting NULL to string is unsupported". background.go's
-	// queryUnprocessedWebhookEvents already coalesced this column; these
-	// three SELECTs (here, handleGetSource, handleListSources) had not.
-	// Found running handleCreateSource+handleIngestWebhook against a real
-	// database for the first time (cleat#1992's dialect coverage) -- the
-	// in-memory fake driver has no NULL to fail to scan.
 	// deleted_at IS NULL: a deleted source reads as gone (404), the same as
 	// one that never existed, rather than as merely disabled (403) --
 	// cleat#2199. handleDeleteSource never removes the row, so without this
@@ -164,11 +150,11 @@ func (p *Plugin) handleIngestWebhook(w http.ResponseWriter, r *http.Request) {
 	// instead of behaving like the caller asked it to stop existing.
 	var source webhookSourceJSON
 	err = plugin.ScanRow(p.db.QueryRow(discoverCtx, plugin.Rebind(`
-		SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, correlation_key_field, created_at, updated_at
+		SELECT id, tenant_id, name, source_type, secret_configured, enabled, correlation_key_field, created_at, updated_at
 		FROM webhook_sources
 		WHERE id = $1 AND deleted_at IS NULL
 	`, p.dialect), sourceID), &source.ID, &source.TenantID, &source.Name, &source.SourceType,
-		&source.SecretConfigured, &source.Enabled, &source.SignalWorkflowID, &source.SignalName,
+		&source.SecretConfigured, &source.Enabled,
 		&source.CorrelationKeyField, &source.CreatedAt, &source.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "source not found")
@@ -461,7 +447,7 @@ func (p *Plugin) handleListSources(w http.ResponseWriter, r *http.Request) {
 	// and for GET /ingest/events, which is deliberately NOT filtered the
 	// same way -- see handleDeleteSource.
 	rows, err := p.db.Query(r.Context(), plugin.Rebind(`
-		SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, correlation_key_field, created_at, updated_at
+		SELECT id, tenant_id, name, source_type, secret_configured, enabled, correlation_key_field, created_at, updated_at
 		FROM webhook_sources
 		WHERE tenant_id = $1 AND deleted_at IS NULL
 		ORDER BY created_at DESC
@@ -477,7 +463,7 @@ func (p *Plugin) handleListSources(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var s webhookSourceJSON
 		if err := plugin.ScanRow(rows, &s.ID, &s.TenantID, &s.Name, &s.SourceType,
-			&s.SecretConfigured, &s.Enabled, &s.SignalWorkflowID, &s.SignalName,
+			&s.SecretConfigured, &s.Enabled,
 			&s.CorrelationKeyField, &s.CreatedAt, &s.UpdatedAt); err != nil {
 			p.logger.Error("webhook-ingest: scan source", "error", err)
 			continue
@@ -526,15 +512,6 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	const secretConfigured = true
 
-	var signalWorkflowID any
-	if req.SignalWorkflowID != "" {
-		signalWorkflowID = req.SignalWorkflowID
-	}
-	signalName := req.SignalName
-	if signalName == "" {
-		signalName = "webhook_received"
-	}
-
 	// The secret is written FIRST. If it fails, nothing else has happened --
 	// no orphaned source row. If the INSERT below fails after this succeeds,
 	// the secret is orphaned under a name no source row references; harmless
@@ -559,9 +536,9 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 	// coverage) -- the in-memory fake driver binds by Ordinal and cannot see
 	// this class of defect.
 	_, err := p.db.Exec(r.Context(), plugin.Rebind(`
-		INSERT INTO webhook_sources (tenant_id, id, name, source_type, secret_configured, enabled, created_at, updated_at, signal_workflow_id, signal_name, correlation_key_field)
-		VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8, $9, $10)
-	`, p.dialect), tid, id, req.Name, req.SourceType, secretConfigured, now, now, signalWorkflowID, signalName, req.CorrelationKeyField)
+		INSERT INTO webhook_sources (tenant_id, id, name, source_type, secret_configured, enabled, created_at, updated_at, correlation_key_field)
+		VALUES ($1, $2, $3, $4, $5, true, $6, $7, $8)
+	`, p.dialect), tid, id, req.Name, req.SourceType, secretConfigured, now, now, req.CorrelationKeyField)
 	if err != nil {
 		p.logger.Error("webhook-ingest: create source",
 			"error", err, "orphaned_secret_configured", secretConfigured)
@@ -580,8 +557,6 @@ func (p *Plugin) handleCreateSource(w http.ResponseWriter, r *http.Request) {
 		"name":                  req.Name,
 		"source_type":           req.SourceType,
 		"secret_configured":     secretConfigured,
-		"signal_workflow_id":    req.SignalWorkflowID,
-		"signal_name":           signalName,
 		"correlation_key_field": req.CorrelationKeyField,
 		"enabled":               true,
 		"endpoint_url":          endpointURL,
@@ -609,11 +584,11 @@ func (p *Plugin) handleGetSource(w http.ResponseWriter, r *http.Request) {
 	// deleted_at IS NULL -- see handleListSources.
 	var s webhookSourceJSON
 	err = plugin.ScanRow(p.db.QueryRow(r.Context(), plugin.Rebind(`
-		SELECT id, tenant_id, name, source_type, secret_configured, enabled, COALESCE(signal_workflow_id, ''), signal_name, correlation_key_field, created_at, updated_at
+		SELECT id, tenant_id, name, source_type, secret_configured, enabled, correlation_key_field, created_at, updated_at
 		FROM webhook_sources
 		WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
 	`, p.dialect), id, tid), &s.ID, &s.TenantID, &s.Name, &s.SourceType,
-		&s.SecretConfigured, &s.Enabled, &s.SignalWorkflowID, &s.SignalName,
+		&s.SecretConfigured, &s.Enabled,
 		&s.CorrelationKeyField, &s.CreatedAt, &s.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		p.writeError(w, 404, "source not found")
@@ -663,19 +638,19 @@ func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 	// idempotency contract, just one that no longer depends on the row
 	// having been physically removed.
 	//
-	// BOTH UPDATES BELOW SHARE ONE TRANSACTION. cleat-review on #2221: an
-	// event ingested before the delete, whose inline signal failed (the
-	// SignalWorkflow call in handleIngestWebhook), was left processed=false,
-	// status='pending' -- and nothing about the delete stopped the background
-	// retry sweep (background.go's processBatch) from later delivering it.
-	// Measured on all three dialects: a source with one such event, deleted,
-	// then swept, produced one new signal delivery for event_type
-	// 'completed' -- a forged event accepted during exactly the compromise
-	// window the delete is meant to shut off still reached the workflow.
-	// Doing this in the same transaction as the soft-delete means the two
-	// statements can never observably disagree: no reader can see the source
-	// marked deleted while a pending event for it is still eligible for
-	// retry, or the reverse.
+	// BOTH UPDATES BELOW SHARE ONE TRANSACTION. Originally cleat-review on
+	// #2221: an event ingested before the delete, whose inline signal failed
+	// (the SignalWorkflow call handleIngestWebhook made at the time), was
+	// left processed=false, status='pending' -- and nothing about the delete
+	// stopped the background retry sweep (background.go's processBatch,
+	// since removed -- cleat#2689) from later delivering it to the bound
+	// workflow. That specific mechanism is gone, but the reason for keeping
+	// both statements atomic is not just that one bug: doing this in the
+	// same transaction as the soft-delete means the two statements can never
+	// observably disagree -- no reader (GET /ingest/events, or the
+	// ingested_events cancellation just below) can see the source marked
+	// deleted while a pending event for it still reads as live, or the
+	// reverse.
 	tx, err := p.db.Begin(r.Context())
 	if err != nil {
 		p.logger.Error("webhook-ingest: begin delete source", "error", err)
@@ -700,13 +675,14 @@ func (p *Plugin) handleDeleteSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// processed = true, same as every other terminal status this table has
-	// ('completed', 'dead_letter') -- 'cancelled' joins them as a third.
-	// cleat-review took the open question below to the owner, who chose (A):
-	// a delete stops an event reaching an awaiting workflow too, not only the
-	// background PUSH retry. host_functions.go's awaitWebhook now filters on
-	// this the same way processBatch's query does, so this UPDATE closes off
-	// both delivery paths, not just the one this fix started from.
+	// processed = true / status = 'cancelled': this table's only two live
+	// values as of cleat#2689 (the legacy signal-push retry sweep that used
+	// to also produce 'completed'/'dead_letter' is retired). This UPDATE by
+	// itself does not stop awaitWebhook's claim -- that claims from
+	// eventtriggers' ingested_events, not from this table -- it exists so
+	// GET /ingest/events reports a deleted source's events as settled rather
+	// than forever 'pending'. The THIRD statement below is what actually
+	// closes off delivery through the claim path.
 	if _, err := tx.Exec(r.Context(), plugin.Rebind(`
 		UPDATE webhook_events
 		SET status = 'cancelled', processed = true, error_msg = 'source deleted'

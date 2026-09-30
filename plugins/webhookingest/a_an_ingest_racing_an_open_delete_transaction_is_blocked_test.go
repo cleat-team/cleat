@@ -39,7 +39,7 @@ import (
 // now-committed deleted_at. This test proves the BLOCK, not merely the
 // eventual answer -- it holds the delete open, starts the ingest
 // concurrently, waits long enough that an unblocked ingest would already
-// have finished and signalled, and only then commits the delete. A version
+// have finished, and only then commits the delete. A version
 // of this test that just ran both sequentially would pass whether or not the
 // ingest actually waited for anything.
 //
@@ -159,7 +159,7 @@ func mysqlReadCommittedTestDB(t *testing.T) *sql.DB {
 // runIngestRaceTest holds handleDeleteSource's soft-delete UPDATE open in its
 // own uncommitted transaction, starts a concurrent ingest against the same
 // source, and asserts it blocks until the delete commits and then refuses --
-// not a signalled, stored event.
+// 404, no stored event.
 func runIngestRaceTest(t *testing.T, dialect plugin.Dialect, db *sql.DB) {
 	t.Helper()
 	ctx := context.Background()
@@ -186,14 +186,9 @@ func runIngestRaceTest(t *testing.T, dialect plugin.Dialect, db *sql.DB) {
 	p.db = &engine.SQLDBAdapter{DB: db, Dialect: dialect}
 	p.secrets = engine.NewPluginSecrets(secretStore)
 
-	signalled := make(chan string, 1)
 	p.env = &plugin.Environment{
 		Dialect: dialect,
 		Logger:  quiet,
-		SignalWorkflow: func(_ context.Context, _, _, payload string) error {
-			signalled <- payload
-			return nil
-		},
 	}
 
 	tenantID := uuid.MustParse(engine.DefaultTenantUUID)
@@ -201,7 +196,7 @@ func runIngestRaceTest(t *testing.T, dialect plugin.Dialect, db *sql.DB) {
 
 	const rawSecret = "interleaving-secret"
 	createBody := `{"name":"interleaving","source_type":"github",` +
-		`"secret":"` + rawSecret + `","signal_workflow_id":"wf-interleaving"}`
+		`"secret":"` + rawSecret + `"}`
 	createReq := httptest.NewRequest("POST", "/ingest/sources",
 		strings.NewReader(createBody)).WithContext(tenantCtx)
 	createRec := httptest.NewRecorder()
@@ -260,8 +255,8 @@ func runIngestRaceTest(t *testing.T, dialect plugin.Dialect, db *sql.DB) {
 		ingestDone <- ingestResult{code: rec.Code, body: rec.Body.String()}
 	}()
 
-	// Long enough that an UNBLOCKED ingest would already have finished and
-	// signalled -- proving the block, not sampling a lucky ordering.
+	// Long enough that an UNBLOCKED ingest would already have finished --
+	// proving the block, not sampling a lucky ordering.
 	select {
 	case res := <-ingestDone:
 		deleteTx.Rollback()
@@ -283,12 +278,6 @@ func runIngestRaceTest(t *testing.T, dialect plugin.Dialect, db *sql.DB) {
 
 	if res.code != http.StatusNotFound {
 		t.Errorf("ingest racing an open delete: want 404, got %d: %s", res.code, res.body)
-	}
-
-	select {
-	case payload := <-signalled:
-		t.Errorf("a signal was delivered for an event ingested against a source mid-delete: %s", payload)
-	default:
 	}
 
 	var eventCount int

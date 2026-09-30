@@ -55,7 +55,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the payload shape it receives from the retry path is the raw `webhook_events.payload` column
   rather than the inline push's wrapped `{"source_id":...,"payload":...}` envelope. Whether this
   static-binding feature is kept at all, and what `webhook_events.processed` should mean now that
-  `await_webhook` no longer reads it, is tracked separately in cleat#2689.
+  `await_webhook` no longer reads it, is tracked separately in cleat#2689 — resolved below, retired
+  entirely.
+
+- **`signal_workflow_id`/`signal_name` are retired: the `webhook_sources` columns, the
+  `create_source`/API fields, and `background.go`'s retry/dead-letter sweep
+  (`processBatch`/`retryEvent`/`markRetryFailed`) are all removed.** cleat#2689, closing the
+  question the previous entry left open. The static, non-correlated 1:1 binding these implemented
+  cannot serve more than one concurrent workflow waiting on a shared source — exactly the
+  limitation cleat#2625/cleat#2649 built correlated `await_webhook` into existence to remove — so
+  once every source gets a correlated, per-order wait for free (cleat#2697), the binding had no
+  remaining case it served. `signal_workflow_id`/`signal_name` sent in a `POST /ingest/sources`
+  body are now silently ignored (unknown JSON fields), not rejected — there is no `RegisterTyped`
+  strictness on this path. `webhook_events.retry_count`/`last_retry_at` are dropped with them
+  (written only by the deleted sweep); `status`/`error_msg`/`processed` survive unchanged, still
+  written by `handleDeleteSource`'s cancellation. **Migration note:** Version 10
+  (`plugins/webhookingest/migrations.go`) drops the four columns outright, no backfill — 0.3.0
+  requires a fresh database, so no deployment has a value in them an upgrade needs to preserve.
 
 - **`await_webhook`'s `Keys` and a source's own `correlation_key_field` must now agree on whether
   a second correlation key exists at all, or the call errors instead of hanging forever.**
