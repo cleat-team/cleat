@@ -99,6 +99,22 @@ func (o downOutcome) String() string {
 // with its own end-to-end proving test -- the template is
 // plugins/scheduledbackup/a_v4_down_keeps_uninstall_working_test.go,
 // TestUninstallSchedulerBackupOnEveryDialect.
+//
+// cleat#2739: nothing FIXES the remaining 13 pairs below. scheduledbackup's own repair and
+// cleat#2342's shared SQL Server fix (which cleared the MSSQL Downs of ten plugins plus
+// notifications and jobqueue) are the only repairs there have been, and that gap was open
+// with no decision recorded either way. The decision, checked against cleat#2059 first: these
+// are DEFERRED to cleat#2059's plugin-migration-collapse step, not left ambiguous and not
+// undertaken per-pair now. Collapsing every plugin's migrations to version 1 replaces the
+// multi-version Down chain each of these pairs is broken inside of, so a per-pair repair
+// landed ahead of that collapse is work the collapse would then discard. Do not anchor this
+// deferral to a release number: cleat#2059 was written against "before 0.3.0", but v0.3.0
+// through v0.3.2 have since shipped with cleat#2059 still OPEN, so the collapse it describes
+// has already outlived one such anchor -- check cleat#2059's own state, not a version string,
+// before treating this deferral as expired. Impact stays bounded in the meantime:
+// --uninstall-plugin already refuses these pairs up front (see
+// TestUninstallPluginRefusesAnUnprovenPluginOnEveryDialect), so an operator cannot walk into
+// a broken Down.
 var knownBrokenPluginDown = map[string]map[plugin.Dialect]downOutcome{
 	// Broken on both MySQL and SQL Server.
 	"event-triggers": {plugin.DialectMySQL: outcomeRecoverable, plugin.DialectMSSQL: outcomeRecoverable},
