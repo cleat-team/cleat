@@ -1054,6 +1054,33 @@ def self_test() -> int:
             SWAPPED_YAML,
             [SWAPPED_UNGRANTED_VIOLATION],
         )
+
+        # The SAME expression text, spliced in a DIFFERENT job of the same
+        # workflow. A grant for job "notify" must not leak into job "other" --
+        # job_id is part of the key precisely so a body-only lookup (which
+        # would pass every case above just as well) cannot creep in unnoticed
+        # (cleat-review, N1 on this PR).
+        OTHER_JOB_YAML = """
+            on:
+              workflow_run:
+                workflows: ["Tier 1 Gate"]
+                types: [completed]
+            jobs:
+              other:
+                runs-on: ubuntu-latest
+                steps:
+                  - run: echo "${{ github.event.workflow_run.head_branch }}"
+            """
+        OTHER_JOB_VIOLATION = (
+            "workflow.yml: job 'other' step 0 (run) splices "
+            "`${{ github.event.workflow_run.head_branch }}` directly into its run text"
+        )
+        check(
+            "EXPRESSION_ALLOWLIST does not leak a grant across job_id, "
+            "even for the identical expression text",
+            OTHER_JOB_YAML,
+            [OTHER_JOB_VIOLATION],
+        )
     finally:
         del EXPRESSION_ALLOWLIST[("workflow.yml", "notify", GRANTED_BODY)]
 
