@@ -135,16 +135,23 @@ func TestNoPostgresStatementReachesAnRLSTableWithoutTheTenantSet(t *testing.T) {
 	byDesign, byDesignFoundNames := resolveByDesignMarkers(t, files)
 	var unexpected []string
 	for _, f := range found {
-		key := shortPos(f.pos)
-		if _, ok := remaining[key]; ok {
-			delete(remaining, key)
+		if _, ok := remaining[f.key]; ok {
+			delete(remaining, f.key)
 			continue
 		}
-		if _, ok := byDesign[key]; ok {
-			delete(byDesign, key)
+		// byDesign is keyed differently ON PURPOSE: resolveByDesignMarkers
+		// re-derives "basefile:line" from a "// rls-by-design: <name>"
+		// marker's position on every run, so it already tracks the
+		// statement across an unrelated edit above it -- the exact problem
+		// f.key solves for knownRLSFaults and knownUnreadableStatements.
+		// Matching it against f.key here would be comparing two keys built
+		// by different rules and would never hit.
+		posKey := shortPos(f.pos)
+		if _, ok := byDesign[posKey]; ok {
+			delete(byDesign, posKey)
 			continue
 		}
-		unexpected = append(unexpected, key+"  ->  "+f.table+"  ("+f.why+")")
+		unexpected = append(unexpected, f.key+"  ->  "+f.table+"  ("+f.why+")  (at "+posKey+")")
 	}
 	sort.Strings(unexpected)
 	if len(unexpected) > 0 {
@@ -246,6 +253,14 @@ type rlsFault struct{ pos, key, table, why string }
 // An empty map is not a reason to delete the mechanism. The next statement
 // written on s.db against an RLS table is the case it exists for, and it will
 // be reported rather than exempted.
+//
+// KEYED BY statementKey, NOT "file:line" (cleat#2200). terminal_run.go:132
+// above is a historical citation of the OLD keying, kept because it is what
+// actually happened; a NEW entry here must use statementKey's format --
+// "<Receiver>.<Func>: <printed call prefix>" -- the same fix applied to
+// knownUnreadableStatements and for the identical reason: a line number
+// drifts under an unrelated edit and cannot tell a moved statement from a
+// different one that happens to land where the moved one used to be.
 var knownRLSFaults = map[string]string{
 	// Empty again as of cleat#1677. The adaptive_flush.go:253 entry that stood
 	// here was written by cleat#1672 -- which found the fault, could not choose
@@ -369,7 +384,7 @@ func resolveByDesignMarkers(t *testing.T, files []string) (byPos map[string]stri
 // Keep the two labelled, so the second class is visibly zero rather than
 // buried among the first.
 //
-// KEYED BY unreadableStatementKey, NOT "file:line" (cleat#2200). The db.go
+// KEYED BY statementKey, NOT "file:line" (cleat#2200). The db.go
 // entry below used to be "db.go:2198", then #2192 moved it to "db.go:2211"
 // for a doc comment landing above it that had nothing to do with this
 // statement -- the guard caught the move only because the old key stopped
@@ -452,13 +467,17 @@ func receiverTypeName(fn *ast.FuncDecl) string {
 	return ""
 }
 
-// unreadableStatementKey identifies a statement this guard could not resolve
-// by where it is written, not by where it sits (cleat#2200). shortPos(pos) is
-// a line number, and #2192 had to move this exact map's db.go entry from
-// :2198 to :2211 for an unrelated doc-comment edit above it -- the guard
-// caught that move only because the old key stopped matching anything. A
-// DIFFERENT unreadable statement landing on :2211 later would have been
+// statementKey identifies a statement this guard has an opinion about --
+// readable or not -- by where it is WRITTEN, not by where it sits (cleat#2200).
+// shortPos(pos) is a line number, and #2192 had to move knownUnreadableStatements'
+// db.go entry from :2198 to :2211 for an unrelated doc-comment edit above it --
+// the guard caught that move only because the old key stopped matching
+// anything. A DIFFERENT statement landing on :2211 later would have been
 // exempted silently; nothing about a line number says which statement it is.
+// Used by both knownUnreadableStatements and knownRLSFaults, the two maps in
+// this file that name a statement by its source position rather than by a
+// marker comment (statementsWithoutATenantByDesign's markers already solve
+// this a different way -- see resolveByDesignMarkers).
 //
 // KEYED BY THE ENCLOSING FUNCTION, THEN A PREFIX OF THE CALL'S OWN PRINTED
 // SOURCE. The function qualifier separates identical-looking calls in
@@ -471,7 +490,7 @@ func receiverTypeName(fn *ast.FuncDecl) string {
 // key -- printer.Fprint reconstructs the call from the AST, and
 // strings.Fields collapses whatever whitespace that produces to single
 // spaces before truncating.
-func unreadableStatementKey(fn *ast.FuncDecl, call *ast.CallExpr, fset *token.FileSet) string {
+func statementKey(fn *ast.FuncDecl, call *ast.CallExpr, fset *token.FileSet) string {
 	qualifier := fn.Name.Name
 	if recv := receiverTypeName(fn); recv != "" {
 		qualifier = recv + "." + qualifier
@@ -610,7 +629,8 @@ func rlsFaultsInFunc(fn *ast.FuncDecl, fset *token.FileSet, rls map[string]bool,
 
 	note := func(call *ast.CallExpr, table, why string) {
 		faults = append(faults, rlsFault{
-			pos: fset.Position(call.Pos()).String(), table: table, why: why,
+			pos: fset.Position(call.Pos()).String(), key: statementKey(fn, call, fset),
+			table: table, why: why,
 		})
 	}
 
@@ -659,7 +679,7 @@ func rlsFaultsInFunc(fn *ast.FuncDecl, fset *token.FileSet, rls map[string]bool,
 			// nothing about.
 			unreadable = append(unreadable, rlsFault{
 				pos:   fset.Position(call.Pos()).String(),
-				key:   unreadableStatementKey(fn, call, fset),
+				key:   statementKey(fn, call, fset),
 				table: "?",
 				why:   "the query is not resolvable from the source, so this guard has no opinion about it",
 			})
