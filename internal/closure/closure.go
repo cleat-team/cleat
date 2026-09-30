@@ -539,19 +539,24 @@ func checkForbiddenCall(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName stri
 
 // checkInterfaceDispatch detects calls through interface dispatch (other
 // than HostCalls), which cannot be statically resolved.
+//
+// The receiver (sel.X) is looked up directly rather than requiring it to be
+// a bare *ast.Ident first: go/types.Info.Types is keyed by ast.Expr, not
+// just identifiers, so x.err.Error() (receiver is a *ast.SelectorExpr,
+// field access) and failingOp().Error() (receiver is a *ast.CallExpr) carry
+// exactly as much type information as a plain err.Error() does. Requiring
+// an Ident used to make both forms invisible to the analyzer -- no E008,
+// no diagnostic of any kind (cleat#2799), which is worse than misnaming the
+// problem: it is silent about it.
 func checkInterfaceDispatch(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName string, cr *Result, fset *token.FileSet) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
-	if !ok {
-		return
-	}
-	xIdent, ok := sel.X.(*ast.Ident)
 	if !ok {
 		return
 	}
 	if fd.Pkg == nil || fd.Pkg.Info == nil {
 		return
 	}
-	tv, ok := fd.Pkg.Info.Types[xIdent]
+	tv, ok := fd.Pkg.Info.Types[sel.X]
 	if !ok {
 		return
 	}
@@ -576,6 +581,7 @@ func checkInterfaceDispatch(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName 
 	// h.DurableLog("..." + err.Error())), and a line-only diagnostic reads
 	// as a problem with whichever call the reader assumes it means.
 	callText := types.ExprString(call)
+	receiverText := types.ExprString(sel.X)
 	suggestion := "Use concrete types or refactor to avoid interface dispatch in cleat functions."
 	if tv.Type == types.Universe.Lookup("error").Type() {
 		// The interface a reader actually hits is essentially never a
@@ -591,7 +597,7 @@ func checkInterfaceDispatch(call *ast.CallExpr, fd *analyzer.FuncDecl, funcName 
 		Code:     "E008",
 		FuncName: funcName,
 		Message: fmt.Sprintf("%s cannot be statically resolved: %s has interface type %s, so the analyzer cannot verify which implementation runs",
-			callText, xIdent.Name, tv.Type.String()),
+			callText, receiverText, tv.Type.String()),
 		Suggestion: suggestion,
 		Line:       line,
 		Column:     col,
