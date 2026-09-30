@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/cleat-team/cleat/plugin"
 )
@@ -136,15 +137,30 @@ func (p *Plugin) Init(ctx context.Context, env *plugin.Environment) error {
 	p.deploymentSecrets = env.DeploymentSecrets
 
 	// Set up the storage backend.
-	switch p.config.Backend {
+	//
+	// Case-insensitive, and anything other than the two known values FAILS
+	// rather than falling back (cleat#2245). "S3" -- capitalized, exactly as
+	// an operator following the doc comment's own '"s3" or "memory"' prose
+	// would type a proper noun -- used to match neither case and fall through
+	// to the memory backend silently: the boot log at the end of this
+	// function printed the raw config value, so it read "backend=S3" while
+	// every blob actually landed in process memory and was lost on restart.
+	// Normalize p.config.Backend to the matched case's canonical form (not
+	// just at the log line) so RequiredDeploymentSecrets' own case-sensitive
+	// `!= "s3"` check stays correct for every casing that reaches it.
+	switch strings.ToLower(p.config.Backend) {
 	case "s3":
+		p.config.Backend = "s3"
 		s3Backend, err := newS3Backend(ctx, p.config, p.deploymentSecrets)
 		if err != nil {
 			return fmt.Errorf("blobstore: s3 backend: %w", err)
 		}
 		p.backend = s3Backend
-	default:
+	case "memory":
+		p.config.Backend = "memory"
 		p.backend = newMemoryBackend(p.db, p.dialect)
+	default:
+		return fmt.Errorf("blobstore: unknown backend %q (valid values: \"s3\", \"memory\")", p.config.Backend)
 	}
 
 	p.logger.Info("blobstore: initialized",
