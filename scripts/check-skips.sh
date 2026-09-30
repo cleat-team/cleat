@@ -908,7 +908,12 @@ die_if_scan_failed "$current"
 
 # cleat#2158: an unrelated but adjacent check, run and reported here rather
 # than as its own ci.yml Lint step -- see the header comment above for why.
-# Its own exit status folds into $status below, alongside this script's.
+# Kept as its OWN variable, not folded into $status below: $status is
+# specific to the skip-inventory checks (added/grown/stale) and its final
+# block's remediation text is about THAT subject. This script's exit
+# status is the AND of both, applied at the very end via `exit
+# "$ledger_engine_status"` after $status's own block has had its chance to
+# exit early with its own message.
 ledger_engine_status=0
 python3 scripts/check-skip-ledger-engine-coverage.py || ledger_engine_status=$?
 

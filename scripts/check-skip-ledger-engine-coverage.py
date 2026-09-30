@@ -17,7 +17,20 @@ WHAT THIS CHECKS. Every `cluster`-keyed line in scripts/skip-ledger.tsv or
 scripts/skip-ledger.d/*.tsv whose test-name regex names a test declared
 under engine/ must have a `test-go/engine`-keyed line SOMEWHERE in the
 ledger (any file, not necessarily the same one) with the byte-identical
-regex, or a matching entry in scripts/skip-ledger.d/.engine-coverage-exempt.tsv.
+regex, or a matching entry in
+scripts/skip-ledger-engine-coverage-exempt.tsv.
+
+THE EXEMPTION FILE LIVES OUTSIDE skip-ledger.d/, DELIBERATELY.
+check-skip-budget.sh's own reader is `find "$LEDGER_D" -maxdepth 1 -name
+'*.tsv'`, which -- unlike Python's glob.glob(), which skips dotfiles --
+does not skip a leading dot. A first attempt at this put the exemption
+file at scripts/skip-ledger.d/.engine-coverage-exempt.tsv: three fields,
+not four, and check-skip-budget.sh (after #2753) rejects any ledger line
+with the wrong field count in every job, unconditionally. The first
+exemption anyone added would have turned every per-job skip budget red.
+Caught in review (cleat#2158 PR, not by this script's own self-test,
+which did not check the OTHER reader) -- see _self_test_budget_reader_
+below, added because of that gap.
 
 NOT SAME FILE. skip-ledger.d/README.md says a dialect-gated engine test
 "usually" needs both lines "in the one file" -- but five live pairs on
@@ -49,12 +62,16 @@ second. Verified against every cluster regex in the ledger today: 169 of
 that is not a regex at all and is skipped rather than flagged, matching
 how check-skip-budget.sh already treats that key.
 
-A regex this parser cannot extract candidates from is reported separately
-from a genuine missing-pair finding (a third outcome, not folded into
-either), because "I could not tell" and "I checked and it needs a pair"
-are different findings and conflating them would silently exempt whatever
-this parser cannot parse -- the same failure this repo's own instructions
-document as "a condition that never decides anything reads as done."
+A regex this parser cannot extract candidates from FAILS, same as a
+missing pair, unless it too has an exemption entry (by its raw regex
+text). The first version let an unparseable line pass with a NOTE and
+exit 0, on the reasoning that "I could not tell" should not be silently
+treated as "no pairing needed" -- but a NOTE on an otherwise-green Lint
+step IS silently treated that way, by every reader who checks the exit
+status and not the log. Caught in review with a probe regex naming a
+real, unpaired engine/ test in an unparseable shape: rc 0. There are 0
+unparseable lines in the ledger today, so this costs nothing now and
+closes the gap for whatever shape the next one takes.
 
 Usage:
   scripts/check-skip-ledger-engine-coverage.py              # fail on any gap
@@ -65,13 +82,17 @@ import glob
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LEDGER_D_SUFFIX = "scripts/skip-ledger.d"
 LEDGER_GLOB_SUFFIX = "scripts/skip-ledger.d/*.tsv"
 LEGACY_LEDGER_SUFFIX = "scripts/skip-ledger.tsv"
-EXEMPT_SUFFIX = "scripts/skip-ledger.d/.engine-coverage-exempt.tsv"
+# NOT inside skip-ledger.d/ -- see the module docstring's "THE EXEMPTION
+# FILE LIVES OUTSIDE skip-ledger.d/" section for why.
+EXEMPT_SUFFIX = "scripts/skip-ledger-engine-coverage-exempt.tsv"
 ENGINE_DIR = "engine"
 
 SENTINELS = {"__UNATTRIBUTED__"}
@@ -168,8 +189,13 @@ def read_exemptions(root):
 
 def check(root):
     """Returns (missing, unparseable, stale_exemptions) where:
-    missing         -- (file, regex) pairs needing a test-go/engine line
-    unparseable      -- (file, regex) whose shape this parser cannot read
+    missing         -- (file, regex) pairs needing a test-go/engine line,
+                        or an unparseable regex with no exemption (the two
+                        are both "this line needs attention and doesn't
+                        have it" -- see the module docstring for why an
+                        unparseable regex is no longer let through free)
+    unparseable      -- (file, regex) whose shape this parser cannot read,
+                        reported for visibility even when exempted
     stale_exemptions -- regexes exempted that no longer need it
     """
     cluster = []          # (file, regex)
@@ -191,6 +217,10 @@ def check(root):
         candidates = extract_candidates(regex)
         if candidates is None:
             unparseable.append((path, regex))
+            if regex in exempt:
+                needed_exemptions.add(regex)
+            else:
+                missing.append((path, regex))
             continue
         if not any(c in names for c in candidates):
             continue  # does not target an engine/ test; no pairing required
@@ -207,10 +237,14 @@ def check(root):
 
 
 def _print_report(missing, unparseable, stale_exemptions, root):
-    if missing:
+    unparseable_set = {(p, r) for p, r in unparseable}
+    missing_for_pair = [(p, r) for p, r in missing if (p, r) not in unparseable_set]
+    missing_for_shape = [(p, r) for p, r in missing if (p, r) in unparseable_set]
+
+    if missing_for_pair:
         print("ERROR: cluster line(s) for an engine/ test with no test-go/engine pair:", file=sys.stderr)
         print(file=sys.stderr)
-        for path, regex in missing:
+        for path, regex in missing_for_pair:
             print(f"  {os.path.relpath(path, root)}\t{regex}", file=sys.stderr)
         print(file=sys.stderr)
         print("engine-race.yml is the only job that checks the test-go/engine key, and", file=sys.stderr)
@@ -221,12 +255,25 @@ def _print_report(missing, unparseable, stale_exemptions, root):
         print("other skip-ledger.d fragment (see #2157 for the shape), or add an entry to", file=sys.stderr)
         print(f"{EXEMPT_SUFFIX} naming the regex and why no pairing is needed.", file=sys.stderr)
 
-    if unparseable:
+    if missing_for_shape:
         print(file=sys.stderr)
-        print("NOTE: cluster line(s) with a regex shape this guard cannot parse", file=sys.stderr)
-        print("(not a finding -- this guard could not determine whether they need a", file=sys.stderr)
-        print("test-go/engine pair, so check them by hand):", file=sys.stderr)
-        for path, regex in unparseable:
+        print("ERROR: cluster line(s) with a regex shape this guard cannot parse, and no", file=sys.stderr)
+        print("exemption -- this guard cannot tell whether they need a test-go/engine pair,", file=sys.stderr)
+        print("so it does not grant one by default:", file=sys.stderr)
+        for path, regex in missing_for_shape:
+            print(f"  {os.path.relpath(path, root)}\t{regex}", file=sys.stderr)
+        print(file=sys.stderr)
+        print("Either simplify the regex to a shape this guard recognises (a literal name,", file=sys.stderr)
+        print("or a shared-prefix alternation), or add an entry to", file=sys.stderr)
+        print(f"{EXEMPT_SUFFIX} naming the regex and why.", file=sys.stderr)
+
+    missing_for_shape_set = set(missing_for_shape)
+    unparseable_exempted = [(p, r) for p, r in unparseable if (p, r) not in missing_for_shape_set]
+    if unparseable_exempted:
+        print(file=sys.stderr)
+        print("NOTE: cluster line(s) with a regex shape this guard cannot parse, exempted", file=sys.stderr)
+        print("(not a finding -- listed for visibility):", file=sys.stderr)
+        for path, regex in unparseable_exempted:
             print(f"  {os.path.relpath(path, root)}\t{regex}", file=sys.stderr)
 
     if stale_exemptions:
@@ -236,6 +283,39 @@ def _print_report(missing, unparseable, stale_exemptions, root):
             print(f"  {regex}", file=sys.stderr)
         print("Either the pairing test-go/engine line now exists, or the cluster line", file=sys.stderr)
         print("no longer matches an engine/ test. Delete the stale exemption line.", file=sys.stderr)
+
+
+def _self_test_budget_reader_cannot_see_exemption_file(tmp):
+    """R1 from the #2158 PR review: check-skip-budget.sh's own reader is
+    `find "$LEDGER_D" -maxdepth 1 -name '*.tsv'`, and unlike Python's
+    glob.glob() (which skips dotfiles), `find` does not -- so a dotfile
+    living INSIDE skip-ledger.d/ is invisible to this script's own
+    collect_ledger_lines() but fully visible to check-skip-budget.sh,
+    which then rejects it for having 3 fields where a real ledger line
+    has 4. This runs the actual `find` command the budget script runs,
+    against the fixture, and asserts the exemption file is not in its
+    output -- not just that its path string looks different, which would
+    pass even if a future edit moved LEDGER_D itself without moving this
+    constant to match."""
+    ledger_d = os.path.join(tmp, LEDGER_D_SUFFIX)
+    exempt_path = os.path.join(tmp, EXEMPT_SUFFIX)
+    if not os.path.isfile(exempt_path):
+        print(f"SELF-TEST FAILED: fixture is missing {exempt_path}, cannot check reader-blindness", file=sys.stderr)
+        return False
+    result = subprocess.run(
+        ["find", ledger_d, "-maxdepth", "1", "-name", "*.tsv"],
+        capture_output=True, text=True, check=True,
+    )
+    found = set(result.stdout.split())
+    if os.path.realpath(exempt_path) in {os.path.realpath(p) for p in found}:
+        print(
+            f"SELF-TEST FAILED: check-skip-budget.sh's own `find` reader sees "
+            f"{exempt_path!r} -- it lives inside skip-ledger.d/ and will be read "
+            f"as a malformed ledger line",
+            file=sys.stderr,
+        )
+        return False
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -285,29 +365,50 @@ def _self_test():
                 "cluster\t2\t^TestAlreadyPaired/(mysql|mssql)$\tfixture, has a pair\n"
                 "cluster\t2\t^TestExempted/(mysql|mssql)$\tfixture, exempted\n"
                 "cluster\t2\t^TestNotAnEngineTest/(mysql|mssql)$\tfixture, not under engine/\n"
+                # Unparseable, real engine/ test, no exemption: must fail
+                # (this is R2 from the #2158 PR review -- the first version
+                # let this through with a NOTE and exit 0).
+                "cluster\t1\t^TestNeedsAPair(Weird(Nested))$\tfixture, unparseable, no exemption\n"
+                # Unparseable AND exempted: must NOT fail.
+                "cluster\t1\t^TestAlreadyPaired(Weird(Nested))$\tfixture, unparseable, exempted\n"
             )
         # The pair for TestAlreadyPaired lives in a DIFFERENT file, on
         # purpose -- this is the case the same-file reading of the README
         # would get wrong (see the module docstring).
         with open(os.path.join(tmp, "scripts", "skip-ledger.d", "b.tsv"), "w") as f:
             f.write("test-go/engine\t2\t^TestAlreadyPaired/(mysql|mssql)$\tfixture pair\n")
-        with open(os.path.join(tmp, "scripts", "skip-ledger.d", ".engine-coverage-exempt.tsv"), "w") as f:
-            f.write("hint\t^TestExempted/(mysql|mssql)$\tfixture reason\n")
+        # Outside skip-ledger.d/, per the module docstring's R1 fix. The
+        # FULL suffix, not just its basename under "scripts/" -- a
+        # mutation that nests EXEMPT_SUFFIX one level deeper must be
+        # caught by _self_test_budget_reader_cannot_see_exemption_file,
+        # not silently absorbed by writing the fixture to the wrong place.
+        os.makedirs(os.path.dirname(os.path.join(tmp, EXEMPT_SUFFIX)), exist_ok=True)
+        with open(os.path.join(tmp, EXEMPT_SUFFIX), "w") as f:
+            f.write(
+                "hint\t^TestExempted/(mysql|mssql)$\tfixture reason\n"
+                "hint\t^TestAlreadyPaired(Weird(Nested))$\tfixture, unparseable but fine\n"
+            )
 
         missing, unparseable, stale = check(tmp)
 
         missing_regexes = {r for _p, r in missing}
-        if missing_regexes != {"^TestNeedsAPair/(mysql|mssql)$"}:
-            print(f"SELF-TEST FAILED: missing = {missing_regexes!r}, want exactly TestNeedsAPair's line", file=sys.stderr)
+        want_missing = {
+            "^TestNeedsAPair/(mysql|mssql)$",
+            "^TestNeedsAPair(Weird(Nested))$",
+        }
+        if missing_regexes != want_missing:
+            print(f"SELF-TEST FAILED: missing = {missing_regexes!r}, want {want_missing!r}", file=sys.stderr)
             ok = False
-        if unparseable:
-            print(f"SELF-TEST FAILED: unexpected unparseable entries: {unparseable!r}", file=sys.stderr)
+        unparseable_regexes = {r for _p, r in unparseable}
+        want_unparseable = {"^TestNeedsAPair(Weird(Nested))$", "^TestAlreadyPaired(Weird(Nested))$"}
+        if unparseable_regexes != want_unparseable:
+            print(f"SELF-TEST FAILED: unparseable = {unparseable_regexes!r}, want {want_unparseable!r}", file=sys.stderr)
             ok = False
         if stale:
-            print(f"SELF-TEST FAILED: exemption for TestExempted reported stale when it is still needed: {stale!r}", file=sys.stderr)
+            print(f"SELF-TEST FAILED: an exemption still needed was reported stale: {stale!r}", file=sys.stderr)
             ok = False
 
-        # Now make the exemption stale: give TestExempted its pair too,
+        # Now make the TestExempted exemption stale: give it its pair too,
         # and confirm the exemption is reported as no longer needed.
         with open(os.path.join(tmp, "scripts", "skip-ledger.d", "b.tsv"), "a") as f:
             f.write("test-go/engine\t2\t^TestExempted/(mysql|mssql)$\tfixture pair, added\n")
@@ -317,6 +418,9 @@ def _self_test():
             ok = False
         if any(r == "^TestExempted/(mysql|mssql)$" for _p, r in missing2):
             print("SELF-TEST FAILED: TestExempted's now-paired line reported missing", file=sys.stderr)
+            ok = False
+
+        if not _self_test_budget_reader_cannot_see_exemption_file(tmp):
             ok = False
     finally:
         shutil.rmtree(tmp)
@@ -357,7 +461,7 @@ def main():
     print(
         f"OK: every cluster-job skip-ledger line for an engine/ test has a "
         f"test-go/engine pair or exemption ({len(unparseable)} line(s) of unrecognised "
-        f"shape, not flagged)."
+        f"shape, all exempted)."
     )
 
 
