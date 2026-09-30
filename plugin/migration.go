@@ -941,8 +941,10 @@ const mssqlPluginTenantFilter = "fn_plugin_tenant_filter"
 // the right one on a connection that has not said who it is.
 //
 // That is what made a hand-written tenant cleanup silently do nothing, and it
-// is why migrations/mssql/074's admin.drop_tenant sets the tenant key before
-// its first DELETE. cleat#1635, and
+// is why admin.drop_tenant (migrations/mssql/003_procedures.sql; the
+// rebaseline deleted the old 074 numbering, grep for
+// "CREATE PROCEDURE admin.drop_tenant" to re-find it) sets the tenant key
+// before its first DELETE. cleat#1635, and
 // TestADeleteWithoutTheTenantKeyRemovesNothingOnSQLServer pins the behaviour
 // so a change in it is visible. cleat#1552 carries the options that were measured and rejected,
 // including a CONVERT trip-wire whose message SQL Server redacts inside a
@@ -1033,8 +1035,10 @@ func grantSweepTables(ctx context.Context, exec func(ctx context.Context, query 
 // to it.
 //
 // THE GAP THIS COMMENT DESCRIBED IS CLOSED, and closed without a registry.
-// migrations/mssql/074 defines admin.drop_tenant there, and it finds
-// tenant-owned tables by asking sys.columns which ones carry a tenant_id
+// admin.drop_tenant (migrations/mssql/003_procedures.sql -- the rebaseline
+// deleted the old 074 numbering; mssql/ now holds only 001-003 plus
+// optional/) finds tenant-owned tables by asking sys.columns which ones
+// carry a tenant_id
 // column -- which reaches core tables and plugin tables in one query, because
 // on SQL Server both live in dbo (WithSchema is PostgreSQL-only). So there is
 // nothing for a SQL Server arm of this function to do: a registry would be a

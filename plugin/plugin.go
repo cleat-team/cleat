@@ -581,13 +581,18 @@ type Migration struct {
 	//     an inline table-valued function and cannot raise;
 	//   - writes are refused on SQL Server by BLOCK predicates rather than by
 	//     the filter, which does not affect writes at all;
-	//   - dropping a tenant collects a table's rows on PostgreSQL only, via
-	//     admin.plugin_tables -- SQL Server DOES have that table (it is
-	//     declared in every dialect's schema migration), it is simply never
-	//     populated or read there. See registerTenantScopedTables's own
-	//     comment (plugin/migration.go) for why: this exact "does not have
-	//     it" phrasing was already wrong once and corrected there (cleat#1635);
-	//     it survived here uncorrected until cleat#2238.
+	//   - dropping a tenant collects a table's rows on BOTH dialects, by
+	//     different mechanisms: on PostgreSQL via admin.plugin_tables
+	//     (populated from this field by registerTenantScopedTables); on SQL
+	//     Server by admin.drop_tenant scanning sys.columns directly for every
+	//     table carrying a tenant_id column, core or plugin, so this field
+	//     plays no part there and neither does the registry. SQL Server DOES
+	//     have admin.plugin_tables (it is declared in every dialect's schema
+	//     migration) -- it is simply never populated or read there. See
+	//     registerTenantScopedTables's own comment (plugin/migration.go) for
+	//     why: this exact "does not have it" phrasing was already wrong once
+	//     and corrected there (cleat#1635); it survived here uncorrected
+	//     until cleat#2238.
 	//
 	// THE REASON GIVEN HERE FOR SQL SERVER WAS WRONG until cleat#1552: "SQL
 	// Server binds a tenant to a whole connection pool
@@ -595,9 +600,12 @@ type Migration struct {
 	// Plugins never get that pool -- getPluginDB hands them the main or the
 	// plugin pool -- and a per-request tenant fits fine, via
 	// sp_set_session_context, which database/sql's connection recycle clears.
-	// engine/plugindb_tenant.go now sets it. What is still missing on SQL
-	// Server is the half this field controls: applyTenantScoping emits no
-	// CREATE SECURITY POLICY there.
+	// engine/plugindb_tenant.go now sets it. THIS PARAGRAPH USED TO END HERE
+	// saying applyTenantScoping "emits no CREATE SECURITY POLICY" on SQL
+	// Server -- that gap was closed by #1629 (2026-09-15), which is what
+	// applyTenantScopingMSSQL (plugin/migration.go) now does; stale until
+	// cleat#2238's sweep found it self-contradicting "POSTGRESQL AND SQL
+	// SERVER install a policy from this field" three paragraphs up.
 	//
 	// ONLY FOR TABLES WHOSE EVERY READER HAS A TENANT. A policy fails
 	// closed, so a plugin that also sweeps across tenants from a background
