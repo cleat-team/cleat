@@ -148,7 +148,6 @@ engine	TestMSSQLSessionContext_TenantPoolsStaySeparate	2
 engine	TestMSSQLStoreBasic	1
 engine	TestMSSQLStoreFactory	2
 engine	TestMSSQLStore_BeginTxWithContext_Failure	2
-engine	TestMSSQLStore_ConsumeSignalDeadlockRetryDoesNotDoubleIncrement	2
 engine	TestMSSQLStore_SetSessionContext_EmptyTenant	2
 engine	TestMSSQLStore_StartNewRun_TenantID	1
 engine	TestMSSQLStore_WithTenantRescopedStoreReadsTheNewTenantsData	2
@@ -211,6 +210,7 @@ engine	mysqlIntegrationStore	2
 engine	pythonDeferSegment	1
 engine	pythonDeterminismWasm	1
 engine	requireDialectDSN	1
+engine	runConsumeSignalUnknownOutcome	2
 engine	setupMSSQLIntegrationTest	2
 engine	testHeartbeatReservedPoolSeesARealClaimedRunMSSQL	2
 engine	testHeartbeatReservedPoolSeesARealClaimedRunMySQL	2

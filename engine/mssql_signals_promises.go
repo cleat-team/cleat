@@ -323,7 +323,7 @@ func (s *MSSQLStore) setAllowedSignalCallersOnce(ctx context.Context, workflowID
 // pending signal that would spin, cleat#953).
 //
 // Both statements run in one transaction, retried only on an error SQL
-// Server guarantees rolled back (withRollbackGuaranteedRetry). cleat#2210:
+// Server guarantees rolled back (withRollbackGuaranteedRetry). cleat#2758:
 // this method used to run the DELETE and the UPDATE as two separate,
 // untransacted statements under mssqlRetry, reasoning that the DELETE alone
 // is atomic and idempotent so it needed neither. True in isolation, and
