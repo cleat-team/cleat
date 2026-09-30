@@ -12,10 +12,21 @@
 // commit as this test: this section now builds/deploys/triggers testdata/hello's Greet instead of
 // testdata/basic's PlaceOrder. See README.md's own Quick Start comment block for the change note.
 //
+// EXTRACTED, NOT RETYPED (cleat-review, R2 on the first version of this test). The first version
+// hardcoded "./testdata/hello/", "greet.wasm", "hello" and the curl body as Go string literals --
+// which meant a PR that reverted README's step 3 back to testdata/basic would still pass, because
+// nothing here ever read README.md. That is #2788's own gap, reproduced by the guard meant to
+// close it. This version instead parses the actual Quick Start fenced block out of README.md --
+// same technique TestREADMEsTryItSnippetCompletes already uses for the "try it" snippet, extended
+// to a multi-step block -- and runs ITS build target, ITS deploy name and wasm, and ITS curl body.
+// A revert to testdata/basic changes what this test builds and deploys, not just what it compares
+// against, so it fails for the real reason (the catalog DurableCall) rather than a string mismatch.
+// Falsified accordingly: see the file-level note in cmd/cleat/quickstart_extraction_test.go.
+//
 // This test runs the documented commands, in the documented order, against the documented flags --
-// steps 1-7 of README.md's Quick Start block, reproduced literally except for three substitutions,
-// each forced by running inside a test process rather than a person's shell, and each already
-// established elsewhere in this package for the same reason:
+// steps 1-7 of README.md's Quick Start block, with three substitutions, each forced by running
+// inside a test process rather than a person's shell, and each already established elsewhere in
+// this package for the same reason:
 //
 //   - Postgres: `docker run postgres:16` (startSandboxPostgres, in
 //     fullstack_template_run_starts_a_workflow_test.go) instead of
@@ -67,6 +78,8 @@ func TestREADMEQuickStartReachesADoneWorkflow(t *testing.T) {
 		t.Fatalf("resolve repo root: %v", err)
 	}
 
+	qs := parseQuickStart(t, filepath.Join(repoRoot, "README.md"))
+
 	// Step 1: build ./bin/cleat and ./bin/cleat-worker. Reuses the binaries TestMain and
 	// buildWorkerBinaryOnce already build once for the whole package, rather than rebuilding into
 	// ./bin -- the README's ./bin path exists so a reader has one place both binaries land, which
@@ -80,18 +93,18 @@ func TestREADMEQuickStartReachesADoneWorkflow(t *testing.T) {
 		t.Fatalf("cleat-worker --migrate-only --db <owner>: %v\n%s", err, out)
 	}
 
-	// Step 3: compile testdata/hello to WASM (see file doc comment for why hello, not basic), into a
-	// directory outside this module (cleat#2473).
+	// Step 3: compile README's documented build target (cleat#2473: the -o directory must sit
+	// outside this module).
 	buildOut := t.TempDir()
-	if out, err := runCleatIn(t, repoRoot, "build", "-o", buildOut, "./testdata/hello/"); err != nil {
-		t.Fatalf("cleat build -o %s ./testdata/hello/: %v\n%s", buildOut, err, out)
+	if out, err := runCleatIn(t, repoRoot, "build", "-o", buildOut, qs.buildTarget); err != nil {
+		t.Fatalf("cleat build -o %s %s: %v\n%s", buildOut, qs.buildTarget, err, out)
 	}
-	wasmPath := filepath.Join(buildOut, "greet.wasm")
+	wasmPath := filepath.Join(buildOut, qs.wasmBasename)
 
-	// Step 4: deploy to the owner DSN.
+	// Step 4: deploy to the owner DSN, under README's documented workflow name.
 	if out, err := runCleatIn(t, repoRoot, "deploy", "--db", ownerDSN,
-		"--name", "hello", wasmPath); err != nil {
-		t.Fatalf("cleat deploy --db <owner> --name hello: %v\n%s", err, out)
+		"--name", qs.deployName, wasmPath); err != nil {
+		t.Fatalf("cleat deploy --db <owner> --name %s: %v\n%s", qs.deployName, err, out)
 	}
 
 	// Step 5: give the worker a role it will accept -- cleat_app exists (schema-created, NOLOGIN by
@@ -126,15 +139,10 @@ func TestREADMEQuickStartReachesADoneWorkflow(t *testing.T) {
 	})
 	waitForHealthz(t, base+"/healthz")
 
-	// Step 7: mint an API key for the default tenant and trigger the workflow.
-	//
-	// No "entry_point" in the body: testdata/hello declares exactly one (Greet), which
-	// determineEntryPoint (cmd/cleat-worker/setup.go) resolves from cleat.metadata without the
-	// caller naming it. That matters here because it CANNOT be named explicitly alongside a
-	// bare-string input -- plugin.MergeEntryPoint requires "input" to be a JSON object so
-	// "__entry_point" has a place to merge into, and Greet's only parameter is a single string,
-	// which binds the WHOLE input value as text (the build's own W003 warning). Naming
-	// entry_point here would need input to be an object it then is not.
+	// Step 7: mint an API key for the default tenant and trigger the workflow, with README's own
+	// documented start path and body. No "entry_point" in the body: the deployed WASM declares
+	// exactly one entry point, which determineEntryPoint (cmd/cleat-worker/setup.go) resolves from
+	// cleat.metadata without the caller naming it.
 	keyOut, err := exec.Command(workerBin, "--db", appDSN,
 		"--generate-api-key", "00000000-0000-0000-0000-000000000000").CombinedOutput()
 	if err != nil {
@@ -147,8 +155,8 @@ func TestREADMEQuickStartReachesADoneWorkflow(t *testing.T) {
 	apiKey := keyMatch[1]
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
-		base+"/api/workflows/hello/start",
-		strings.NewReader(`{"input":"Ada"}`))
+		base+"/api/workflows/"+qs.startName+"/start",
+		strings.NewReader(qs.startBody))
 	if err != nil {
 		t.Fatalf("build start request: %v", err)
 	}
