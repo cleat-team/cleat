@@ -1,14 +1,16 @@
 package engine
 
 // cleat#2758: ConsumeSignal used to run its DELETE and its signal_consumed_seq
-// UPDATE as two separate, untransacted statements under mssqlRetry, which
-// retries on any error in isMSSQLRetryable -- including an UNKNOWN-OUTCOME
-// error (isMSSQLConnectionError: a dropped connection, reported here as a
-// *net.OpError), whose outcome the caller cannot tell from a genuine failure.
-// The exposure: that error lands after the UPDATE already committed
-// server-side but before its acknowledgement reached the caller, and
-// mssqlRetry reruns the whole closure -- the now-harmless DELETE, and a
-// second, real increment.
+// UPDATE as two separate, untransacted statements under a now-deleted
+// mssqlRetry, which retried on any error a now-deleted isMSSQLRetryable
+// classified -- including an UNKNOWN-OUTCOME error (a dropped connection,
+// reported here as a *net.OpError), whose outcome the caller cannot tell from
+// a genuine failure. The exposure: that error lands after the UPDATE already
+// committed server-side but before its acknowledgement reached the caller,
+// and mssqlRetry reran the whole closure -- the now-harmless DELETE, and a
+// second, real increment. See mssql_retry.go's withRollbackGuaranteedRetry
+// doc comment for what replaced it, and cleat#2792 for the classifiers'
+// removal.
 //
 // This test reproduces that deterministically, with no timing dependence.
 // The one constructed element is the error value itself: a real

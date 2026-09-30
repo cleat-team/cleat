@@ -170,9 +170,6 @@ func TestMSSQLDeadlock_ClassifiedFromTheRealDriverError(t *testing.T) {
 	if !isMSSQLDeadlock(err) {
 		t.Errorf("isMSSQLDeadlock(real 1205) = false")
 	}
-	if !isMSSQLRetryable(err) {
-		t.Errorf("isMSSQLRetryable(real 1205) = false")
-	}
 	if !isMSSQLRollbackGuaranteed(err) {
 		t.Errorf("isMSSQLRollbackGuaranteed(real 1205) = false -- a deadlock victim's transaction "+
 			"is definitively rolled back by the server, which is what makes replaying it sound; "+

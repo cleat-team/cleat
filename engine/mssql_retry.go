@@ -17,8 +17,11 @@ import (
 // those can double-apply it, which for a workflow engine means a duplicated
 // side effect. (ConsumeSignal used exactly that wider gate, via a now-deleted
 // mssqlRetry, until cleat#2758 -- it was this function's only production
-// caller, and isMSSQLRetryable/isMSSQLTimeout/isMSSQLConnectionError lost
-// their last one along with it; see scripts/deadcode-baseline.txt.)
+// caller. isMSSQLRetryable, isMSSQLTimeout and isMSSQLConnectionError lost
+// their last caller along with it and were themselves deleted in cleat#2792,
+// after confirming the gap they would have covered -- classifying a
+// DB-originated error into a CleatError -- has no equivalent on any dialect,
+// so wiring MSSQL alone would have been premature.)
 //
 // isMSSQLRollbackGuaranteed is the narrower set: deadlock victim (1205) and
 // snapshot/update conflicts (3960, 41301-41325). The server has definitively
