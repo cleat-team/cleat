@@ -247,6 +247,40 @@ func TestMSSQLRetentionSweepConcurrentWriterLatencyStaysBounded(t *testing.T) {
 					"would run against less data than intended", seededEvents, want)
 			}
 
+			// WARM-UP, discarded: a handful of the same insert+append
+			// operations before any sample is recorded, so the baseline's
+			// own first few samples are not paying for connection-pool
+			// ramp-up or a cold query plan cache -- cost the sweep's own
+			// samples never pay, since by then the pool has already
+			// handled the whole baseline run.
+			const mssql2139WarmUpSamples = 10
+			for i := 0; i < mssql2139WarmUpSamples; i++ {
+				id := fmt.Sprintf("mssql-2139-warmup-%s-%d-%d", writerDef, i, time.Now().UnixNano())
+				if _, err := admin.ExecContext(ctx,
+					`INSERT INTO workflow_instances (id, def_name, def_version, status, tenant_id) VALUES (@p1, @p2, 1, 'running', @p3)`,
+					id, writerDef, tid); err != nil {
+					t.Fatalf("warm-up insert: %v", err)
+				}
+				if err := store.AppendEventHistory(ctx, id, EventRecord{
+					Step: 1, EventType: EventTypeCall, Service: "svc", Op: "op",
+					Request: "{}", Response: `{"ok":true}`,
+				}); err != nil {
+					t.Fatalf("warm-up append: %v", err)
+				}
+			}
+			// Cleaned up immediately: these rows must not count toward the
+			// writerRowsRemaining precondition below, which expects exactly
+			// 2*mssql2139WriterSamples (baseline+treatment, nothing else).
+			if _, err := admin.ExecContext(ctx,
+				`DELETE FROM event_history WHERE workflow_id IN (SELECT id FROM workflow_instances WHERE def_name = @p1)`,
+				writerDef); err != nil {
+				t.Fatalf("clean up warm-up event_history: %v", err)
+			}
+			if _, err := admin.ExecContext(ctx,
+				`DELETE FROM workflow_instances WHERE def_name = @p1`, writerDef); err != nil {
+				t.Fatalf("clean up warm-up workflow_instances: %v", err)
+			}
+
 			// BASELINE: writer alone against the already-seeded database,
 			// nothing else running yet. Warm, not cold -- see above.
 			baseline, _ := mssql2139WriterLatencies(t, ctx, admin, store, writerDef, tid)
