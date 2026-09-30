@@ -187,10 +187,16 @@ func (s *MSSQLStore) deliverSignalTx(ctx context.Context, tx *sql.Tx, workflowID
 // consuming it. ConsumeSignal removes it by id once the caller's
 // signal_received event is durable.
 func (s *MSSQLStore) PollSignal(ctx context.Context, workflowID, signalName string) (SignalDelivery, bool, error) {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return SignalDelivery{}, false, fmt.Errorf("poll signal: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var id int64
 	var payload string
 	var deliveredAt time.Time
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT TOP 1 id, payload, delivered_at FROM workflow_signals
 		WHERE workflow_id = @p1 AND signal_name = @p2 AND tenant_id = @p3
 		ORDER BY id
@@ -344,7 +350,13 @@ func (s *MSSQLStore) ConsumeSignal(ctx context.Context, workflowID string, id in
 
 func (s *MSSQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, priority int) (string, error) {
 	runID := uuid.New().String()
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return "", fmt.Errorf("start child workflow: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_instances (id, def_name, def_version, status, input, parent_workflow_id, parent_close_policy, task_queue, priority, tenant_id)
 		VALUES (@p1, @p2,
 		        CASE WHEN @p5 > 0 THEN @p5 ELSE (SELECT MAX(version) FROM workflow_defs WHERE name = @p2 AND disabled_at IS NULL AND tenant_id = @p8) END,
@@ -355,7 +367,7 @@ func (s *MSSQLStore) StartChildWorkflow(ctx context.Context, parentID, defName, 
 	if err != nil {
 		return "", fmt.Errorf("start child workflow: %w", err)
 	}
-	return runID, nil
+	return runID, tx.Commit()
 }
 
 func (s *MSSQLStore) StartChildWorkflowAtomic(ctx context.Context, childID, parentID, defName, inputJSON string, defVersion int, parentClosePolicy string, event EventRecord, priority int) (string, error) {
@@ -543,15 +555,29 @@ func (s *MSSQLStore) OriginalChildRunIDs(ctx context.Context, parentWorkflowID s
 }
 
 func (s *MSSQLStore) CreatePromise(ctx context.Context, workflowID, promiseName, promiseID string) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("create promise: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO workflow_promises (workflow_id, promise_name, promise_id, tenant_id)
 		VALUES (@p1, @p2, @p3, @p4)
-	`, workflowID, promiseName, promiseID, s.tenantID)
-	return err
+	`, workflowID, promiseName, promiseID, s.tenantID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *MSSQLStore) ResolvePromise(ctx context.Context, promiseID, result string) error {
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("resolve promise %s: begin: %w", promiseID, err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_promises
 		SET status = 'resolved', result = @p2, resolved_at = SYSUTCDATETIME()
 		WHERE promise_id = @p1 AND tenant_id = @p3
@@ -562,17 +588,23 @@ func (s *MSSQLStore) ResolvePromise(ctx context.Context, promiseID, result strin
 	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
 		return fmt.Errorf("resolve promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
-	_, _ = s.db.ExecContext(ctx, `
+	_, _ = tx.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = SYSUTCDATETIME()
 		WHERE id = (SELECT workflow_id FROM workflow_promises
 		            WHERE promise_id = @p1 AND tenant_id = @p2)
 		  AND status IN ('ready', 'suspended')
 	`, promiseID, s.tenantID)
-	return nil
+	return tx.Commit()
 }
 
 func (s *MSSQLStore) RejectPromise(ctx context.Context, promiseID, errMsg string) error {
-	res, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("reject promise %s: begin: %w", promiseID, err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `
 		UPDATE workflow_promises
 		SET status = 'rejected', error_msg = @p2, resolved_at = SYSUTCDATETIME()
 		WHERE promise_id = @p1 AND tenant_id = @p3
@@ -583,18 +615,24 @@ func (s *MSSQLStore) RejectPromise(ctx context.Context, promiseID, errMsg string
 	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
 		return fmt.Errorf("reject promise %s: %w", promiseID, ErrPromiseNotFound)
 	}
-	_, _ = s.db.ExecContext(ctx, `
+	_, _ = tx.ExecContext(ctx, `
 		UPDATE workflow_instances SET next_wake_at = SYSUTCDATETIME()
 		WHERE id = (SELECT workflow_id FROM workflow_promises
 		            WHERE promise_id = @p1 AND tenant_id = @p2)
 		  AND status IN ('ready', 'suspended')
 	`, promiseID, s.tenantID)
-	return nil
+	return tx.Commit()
 }
 
 func (s *MSSQLStore) GetPromise(ctx context.Context, workflowID, promiseID string) (string, string, string, error) {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return "", "", "", fmt.Errorf("get promise: begin: %w", err)
+	}
+	defer tx.Rollback()
+
 	var status, result, errMsg string
-	err := s.db.QueryRowContext(ctx, `
+	err = tx.QueryRowContext(ctx, `
 		SELECT ISNULL(status, 'pending'), ISNULL(result, ''), ISNULL(error_msg, '')
 		FROM workflow_promises
 		WHERE workflow_id = @p1 AND promise_id = @p2 AND tenant_id = @p3
@@ -609,7 +647,13 @@ func (s *MSSQLStore) GetPromise(ctx context.Context, workflowID, promiseID strin
 }
 
 func (s *MSSQLStore) ListPromises(ctx context.Context, workflowID string) ([]PromiseInfo, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list promises: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT promise_id, promise_name, status, ISNULL(result, ''), ISNULL(error_msg, ''), created_at, resolved_at
 		FROM workflow_promises
 		WHERE workflow_id = @p1 AND tenant_id = @p2
@@ -642,7 +686,13 @@ func (s *MSSQLStore) CreateUpdateRequest(ctx context.Context, workflowID, update
 		return err
 	}
 
-	_, err = s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("create update request: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO workflow_update_requests (workflow_id, request_id, update_name, payload, promise_id, status, tenant_id)
 		VALUES (@p1, @p2, @p3, @p4, @p5, 'pending', @p6)
 	`, workflowID, requestID, updateName, encodeJSONPayload(payload), promiseID, s.tenantID)
@@ -656,16 +706,24 @@ func (s *MSSQLStore) CreateUpdateRequest(ctx context.Context, workflowID, update
 	// and a suspended workflow reaches no dispatch point. Without this the
 	// request sits pending until something else happens to wake the workflow --
 	// which for a workflow waiting on a signal or a long sleep may be never.
-	_, err = s.db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_instances
 		SET next_wake_at = SYSUTCDATETIME()
 		WHERE id = @p1 AND tenant_id = @p2 AND status IN ('ready', 'suspended')
-	`, workflowID, s.tenantID)
-	return err
+	`, workflowID, s.tenantID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *MSSQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID string) ([]UpdateRequestInfo, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("get pending update requests: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
 		SELECT workflow_id, ISNULL(request_id, update_name), update_name, payload, ISNULL(promise_id, ''), status,
 		       ISNULL(result, ''), ISNULL(error_msg, ''), created_at
 		FROM workflow_update_requests
@@ -691,12 +749,20 @@ func (s *MSSQLStore) GetPendingUpdateRequests(ctx context.Context, workflowID st
 }
 
 func (s *MSSQLStore) CompleteUpdateRequest(ctx context.Context, workflowID, requestID, result, errMsg string) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return fmt.Errorf("complete update request: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
 		UPDATE workflow_update_requests
 		SET status = 'completed', result = @p3, error_msg = @p4, completed_at = SYSUTCDATETIME()
 		WHERE workflow_id = @p1 AND request_id = @p2 AND tenant_id = @p5 AND status = 'pending'
-	`, workflowID, requestID, jsonOrNull(result), errMsg, s.tenantID)
-	return err
+	`, workflowID, requestID, jsonOrNull(result), errMsg, s.tenantID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *MSSQLStore) AcquireConcurrencyKey(ctx context.Context, key, workflowID string, ttl time.Duration) (bool, error) {
@@ -872,7 +938,18 @@ func (s *MSSQLStore) GetChildCompletedAtMs(ctx context.Context, runID string) (i
 	// uses -- so on MSSQL this predicate is the whole of the isolation. The
 	// MySQL implementation already scopes the same query; matching it is
 	// cheaper than arguing the caller has done it.
-	err := s.db.QueryRowContext(ctx, `
+	//
+	// beginTxWithContext, not bare s.db -- cleat#2210: the explicit predicate
+	// above is not defence in depth on every deployment, only the
+	// cleat_admin one, so a single-tenant deployment still needs the correct
+	// SESSION_CONTEXT for this to return anything under a WithTenant copy.
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, false, fmt.Errorf("get child completed_at: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	err = tx.QueryRowContext(ctx, `
 		SELECT completed_at FROM workflow_instances WHERE id = @p1 AND tenant_id = @p2
 	`, runID, s.tenantID).Scan(&completedAt)
 	if errors.Is(err, sql.ErrNoRows) {
