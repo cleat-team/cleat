@@ -171,6 +171,14 @@ func TestEveryInlineStatementParsesOnPostgres(t *testing.T) {
 		// question with pg_roles and is checked by this test as before.
 		"SELECT IS_ROLEMEMBER('cleat_admin')": "SQL Server built-in: reached only on the mssql arm of rlsPostureOf, and there is no PostgreSQL equivalent to write instead (cleat#1646)",
 
+		// cleat#2760. admin.rls_predicate_form is a SQL Server table
+		// (migrations/mssql/001_schema.sql) recording which predicate form is
+		// installed -- 'plain' or 'admin'. Reached only from mssqlPostureOf,
+		// after IS_ROLEMEMBER('cleat_admin') above, so PostgreSQL never issues
+		// it; PostgreSQL's own exemption question (superuser or BYPASSRLS) has
+		// no analogous predicate-form table to consult in the first place.
+		"SELECT form FROM admin.rls_predicate_form": "SQL Server-only table, reached only on the mssql arm of mssqlPostureOf (cleat#2760); PostgreSQL's exemption check has no predicate-form table to read",
+
 		// cleat#1918. queue.go:100 is `case "update":` in runQueue's dispatch
 		// switch, naming the new `queue update` subcommand. The verb regex
 		// matches on content, not on syntactic position, so a bare case label
