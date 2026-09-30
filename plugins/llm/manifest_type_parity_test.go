@@ -152,7 +152,7 @@ func checkManifestType(t *testing.T, manifestType string, goType reflect.Type, m
 // a JSON-tagged struct field carries that a manifest FieldDef has no
 // opinion about.
 func resolveFieldGoType(t reflect.Type) reflect.Type {
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	return t
