@@ -147,6 +147,52 @@ func (s *execSession) writeOut(ctx context.Context, m api.Module, ptr uint32, va
 // clause is what actually loses that inference, forcing an explicit cast per
 // parameter. A bare WHERE EXISTS, with no FROM clause at all, does not have
 // that problem.
+// # FOR SHARE, because the fence is a read racing an open write (cleat#2244)
+//
+// A plain (non-locking) SELECT under PostgreSQL's default READ COMMITTED
+// does not wait for an in-flight, uncommitted UPDATE on the row it reads --
+// it simply returns the last COMMITTED version. ReapStaleInstances reclaims
+// a stale workflow with exactly such an UPDATE, inside its own
+// transaction (assigned_to = NULL, generation = generation + 1). So without
+// a locking read here, a zombie worker's flush, racing a reclaim that is
+// open but not yet committed, could see the PRE-reclaim (assigned_to,
+// generation), pass this fence, and durably write a step -- and because a
+// plain "call" event does not match the ON CONFLICT ... WHERE clause below
+// (that clause only reopens await_child/await_promise/await_all_children
+// rows with every outcome column still NULL), whichever writer's row for a
+// step lands FIRST wins PERMANENTLY: the legitimate new owner's later write
+// to the SAME step is then silently declined, replaying the zombie's stale
+// result forever.
+//
+// Measured, not assumed, the same way as cleat#2239's DeliverSignal/purge
+// race and cleat#2242's ingest/delete race: hold ReapStaleInstances' own
+// UPDATE open in an uncommitted transaction and race a zombie's flushEvent
+// against it. Before FOR SHARE, on PostgreSQL, the zombie's write landed in
+// ~7ms with the reclaim still open, and the new owner's follow-up write to
+// the same step was confirmed silently declined --
+// TestFlushEvent_RacingAnOpenReclaimTransaction/postgres. FOR SHARE turns
+// the EXISTS subquery into a locking read: against a row an open UPDATE
+// already holds, it BLOCKS until that transaction ends, then re-reads under
+// READ COMMITTED's per-statement snapshot rule and sees the now-committed
+// assigned_to/generation -- so the fence correctly reports ErrFenceLost
+// instead of racing past it.
+//
+// MySQL and SQL Server do not need the same fix here, and it was measured
+// rather than assumed why: PostgresStore is the only WorkflowStore that
+// does NOT implement perStepEventFlusher (flush_dialect.go), so it is the
+// only one whose flushEvent ever executes this statement at all --
+// MySQLStore and MSSQLStore take flushEvent's earlier
+// perStepEventFlusher branch, which checks the fence with a Heartbeat
+// call first. Heartbeat's own UPDATE (WHERE id = ? AND assigned_to = ? AND
+// generation = ?) targets the SAME ROW the reclaim's UPDATE holds, so it
+// contends for that row's lock the ordinary way any two writers do,
+// regardless of isolation level or RCSI -- confirmed by the same race
+// harness: both dialects BLOCK until the reclaim resolves, at every
+// isolation/RCSI configuration measured (mysql, mysql_read_committed,
+// mssql_rcsi_on, mssql_rcsi_off), and correctly report ErrFenceLost
+// afterward. A locking read is what a dialect using a non-locking read
+// needs; a dialect that already fences with a write never had the gap.
+//
 // $34 is created_at, bound rather than NOW().
 //
 // LoadEventHistory reconstructs EventRecord.TimestampMs FROM created_at -- it is
@@ -318,7 +364,7 @@ const insertEventSQL = `
 		$20, $21, $22, $23, $24, $25, $26, $27, $28, $29,
 		$30, $34, $31, $35
 	WHERE ($32 = '' OR EXISTS (
-		SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $32 AND generation = $33
+		SELECT 1 FROM workflow_instances WHERE id = $1 AND assigned_to = $32 AND generation = $33 FOR SHARE
 	))
 	ON CONFLICT (tenant_id, workflow_id, step) DO UPDATE SET response = EXCLUDED.response, error = EXCLUDED.error,
 		promise_result = EXCLUDED.promise_result, promise_error = EXCLUDED.promise_error,
@@ -552,10 +598,19 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 		if err != nil {
 			return fmt.Errorf("flush event (quota): %w", err)
 		}
-		if err := e.afterFencedInsert(ctx, res, workflowID, fenceWorkerID, fenceGeneration); err != nil {
-			return err
+		// Commit BEFORE afterFencedInsert, not after (cleat#2244): on a
+		// zero-rows result, afterFencedInsert calls Heartbeat, which UPDATEs
+		// this same row on a DIFFERENT connection (s.db, not tx). insertEventSQL's
+		// EXISTS subquery takes a FOR SHARE lock on that row for the
+		// lifetime of tx -- committing first releases it before Heartbeat
+		// asks for a conflicting lock on it, so the two can never deadlock
+		// against each other. Committing an INSERT that affected zero rows
+		// has no effect to lose; only the disambiguation after it needs the
+		// row free.
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("flush event (quota): commit: %w", err)
 		}
-		return tx.Commit()
+		return e.afterFencedInsert(ctx, res, workflowID, fenceWorkerID, fenceGeneration)
 	}
 
 	args := []any{workflowID, rec.Step, rec.EventType,
@@ -591,10 +646,13 @@ func (e *Engine) flushEvent(ctx context.Context, workflowID string, rec EventRec
 		if err != nil {
 			return fmt.Errorf("flush event: %w", err)
 		}
-		if err := e.afterFencedInsert(ctx, res, workflowID, fenceWorkerID, fenceGeneration); err != nil {
-			return err
+		// Commit BEFORE afterFencedInsert -- see the quota path above for why:
+		// same self-deadlock, same fix, one FOR SHARE lock and one Heartbeat
+		// UPDATE on a different connection either way.
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("flush event: commit: %w", err)
 		}
-		return tx.Commit()
+		return e.afterFencedInsert(ctx, res, workflowID, fenceWorkerID, fenceGeneration)
 	}
 
 	// Untenanted path: single INSERT auto-commits. No explicit BEGIN/COMMIT.
