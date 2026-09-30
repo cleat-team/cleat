@@ -88,7 +88,7 @@ func Hello(h cleat.HostCalls, input string) (string, error) {
 		os.Exit(1)
 	}
 
-	writeYAML(dir, projectName)
+	writeYAML(dir, projectName, "hello")
 	tidyScaffold(dir)
 	fmt.Printf("Created basic project in %s/\n", dir)
 }
@@ -142,7 +142,7 @@ func scaffoldAgent(projectName string) {
 		os.Exit(1)
 	}
 
-	writeYAML(dir, projectName)
+	writeYAML(dir, projectName, "agent_loop")
 	tidyScaffold(dir)
 	fmt.Printf("Created AI agent project in %s/\n", dir)
 }
@@ -321,8 +321,21 @@ func writeScaffoldTemplate(fsys fs.FS, srcPath, dir, destName, projectName strin
 // every agent scaffold's entry point lives in workflow.go, so every agent
 // project, whatever the user called it, built to the same workflow.wasm
 // (coordinator's review, cleat#2692).
-func writeYAML(dir, projectName string) {
-	yamlContent := fmt.Sprintf("name: %q\nlanguage: go\nentry_points:\n  - name: agent\n    function: AgentLoop\n", projectName)
+//
+// `entry_points: [<entryPoint>]`, a list of strings -- not the list of
+// {name, function} maps this used to write, always naming "agent"/
+// "AgentLoop" regardless of which scaffold called it. cleat#2698: that map
+// shape was the second of two incompatible entry_points: schemas in the
+// tree, and it was as inert as `project:` had been -- nothing ever
+// unmarshalled it, so scaffoldBasic writing "AgentLoop" over its actual
+// entry point ("Hello") went unnoticed the same way. cmd/cleat build now
+// checks entry_points: against the real WASM export name
+// (checkEntryPointsAgainstManifest, cmd/cleat/main.go), so a caller passes
+// the snake_case name that function actually produces
+// (wasm.ToSnakeCase("Hello") is "hello", wasm.ToSnakeCase("AgentLoop") is
+// "agent_loop") rather than this function guessing at it.
+func writeYAML(dir, projectName, entryPoint string) {
+	yamlContent := fmt.Sprintf("name: %q\nlanguage: go\nentry_points:\n  - %s\n", projectName, entryPoint)
 	_ = os.WriteFile(filepath.Join(dir, "cleat.yaml"), []byte(yamlContent), 0644)
 }
 
