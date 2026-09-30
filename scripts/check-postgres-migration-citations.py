@@ -88,12 +88,6 @@ ALLOWLIST = {
         "than a hand-edit here, since worker-config.md's #1926-class staleness "
         "is broader than this one line (see the migrations/postgres/024 table "
         "row and the DeployMigration walkthrough it sits in).",
-    ("engine/db.go", "024_cross_tenant_schedules.sql"):
-        "deferred, not historical: the comment also claims to be about "
-        "GetDueSchedulesAcrossTenants, which cleat#1926 removed entirely (zero "
-        "func definitions in the tree) -- a filename-only fix would leave a "
-        "dead-code claim standing. Tracked as cleat#2770 item 1, filed after "
-        "this PR's own review found the same gap.",
     ("tiers.yaml", "023_cross_tenant_claim.sql"):
         "deferred, not historical: this whole tier-2 entry describes "
         "--claim-across-tenants/--claim-strategy, retired by cleat#1926 -- a "
