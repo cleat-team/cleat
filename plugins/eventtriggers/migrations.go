@@ -54,8 +54,13 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					processed TINYINT(1) DEFAULT 0,
 					error_msg TEXT
 				);
-				CREATE INDEX idx_event_subscriptions_type ON event_subscriptions(tenant_id, event_type);
-				CREATE INDEX idx_ingested_events_unprocessed ON ingested_events(processed, received_at);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'event_subscriptions' AND index_name = 'idx_event_subscriptions_type');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_event_subscriptions_type ON event_subscriptions(tenant_id, event_type)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'ingested_events' AND index_name = 'idx_ingested_events_unprocessed');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_ingested_events_unprocessed ON ingested_events(processed, received_at)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'event_subscriptions')
@@ -141,7 +146,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					created_at TIMESTAMP(6) DEFAULT NOW(6),
 					PRIMARY KEY (workflow_id, event_type)
 				);
-				CREATE INDEX idx_event_awaiters_type ON event_awaiters(tenant_id, event_type);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'event_awaiters' AND index_name = 'idx_event_awaiters_type');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_event_awaiters_type ON event_awaiters(tenant_id, event_type)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'event_awaiters')

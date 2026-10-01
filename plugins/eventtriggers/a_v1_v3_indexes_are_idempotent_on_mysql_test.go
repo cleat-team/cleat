@@ -1,4 +1,4 @@
-package kafkaconnect
+package eventtriggers
 
 import (
 	"context"
@@ -10,25 +10,26 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
-// TestV2MigrationIsIdempotentOnMySQL is the regression test for cleat#2880:
-// migration v2 (kafka_config.event_type, and kafka_config's
-// idx_kafka_config_enabled index) had a bare `ALTER TABLE ... ADD COLUMN`
-// and a bare `CREATE INDEX` for its MySQL arm, not idempotent the way its
-// PostgreSQL (`IF NOT EXISTS`) and SQL Server (a sys.columns/sys.indexes
-// guard) arms already were. MySQL DDL is not transactional, so a crash
-// between either statement and plugin_migrations recording version 2 leaves
-// a worker that re-runs it on its next start and gets `ERROR 1060 (42S21):
-// Duplicate column name 'event_type'` or `ERROR 1061 (42000): Duplicate key
-// name 'idx_kafka_config_enabled'` -- fatal to boot, on every start
-// thereafter.
+// TestV1V3IndexesAreIdempotentOnMySQL is the regression test for cleat#2880:
+// migration v1's idx_event_subscriptions_type and idx_ingested_events_unprocessed
+// indexes, and v3's idx_event_awaiters_type index, each had a bare `CREATE
+// INDEX` for their MySQL arm, not idempotent the way their PostgreSQL (`IF
+// NOT EXISTS`) and SQL Server (a sys.indexes guard, v3 only) arms already
+// were. MySQL has no `CREATE INDEX IF NOT EXISTS`, and the `CREATE TABLE IF
+// NOT EXISTS` beside each v1 index is idempotent while the index creation
+// right after it is not -- so a crash between a successful apply and
+// plugin_migrations recording the version leaves a worker that re-runs it
+// on its next start (v1's case: its *very first* boot) and gets `ERROR 1061
+// (42000): Duplicate key name 'idx_event_subscriptions_type'` -- fatal to
+// boot, on every start thereafter.
 //
 // Mirrors plugins/webhookingest's TestWebhookSourcesDeletedAtMigrationIsIdempotentOnMySQL
 // (cleat#2221) exact shape: plugin.RunMigrations' version-tracking skip
-// cannot exercise this, since calling it twice just skips v2 the second
-// time -- the mechanism a crash defeats. This re-runs the migration's real
-// UpMySQL text, read from p.Migrations() rather than hand-copied, directly
-// after RunMigrations has already applied it once.
-func TestV2MigrationIsIdempotentOnMySQL(t *testing.T) {
+// cannot exercise this, since calling it twice just skips the version the
+// second time -- the mechanism a crash defeats. This re-runs each
+// migration's real UpMySQL text, read from p.Migrations() rather than
+// hand-copied, directly after RunMigrations has already applied it once.
+func TestV1V3IndexesAreIdempotentOnMySQL(t *testing.T) {
 	// cleat#2880 (same shape fixed in cleat#2249/#2883): testutil.NewPluginTestBackends
 	// only includes a MySQL backend when CLEAT_TEST_MYSQL is set -- PostgreSQL is the
 	// only one it attempts unconditionally. So when CLEAT_TEST_MYSQL is unset, the
@@ -56,40 +57,39 @@ func TestV2MigrationIsIdempotentOnMySQL(t *testing.T) {
 				t.Fatalf("migrations: %v", err)
 			}
 
-			var v2SQL string
+			upMySQL := map[int]string{}
 			for _, m := range p.Migrations() {
-				if m.Version == 2 {
-					v2SQL = m.UpMySQL
+				upMySQL[m.Version] = m.UpMySQL
+			}
+			for _, v := range []int{1, 3} {
+				if upMySQL[v] == "" {
+					t.Fatalf("migration v%d's UpMySQL is empty -- nothing to re-run", v)
 				}
 			}
-			if v2SQL == "" {
-				t.Fatal("migration v2's UpMySQL is empty -- nothing to re-run")
+
+			for _, v := range []int{1, 3} {
+				runStatements(t, ctx, be, upMySQL[v])
+				runStatements(t, ctx, be, upMySQL[v])
 			}
 
-			runStatements(t, ctx, be, v2SQL)
-			runStatements(t, ctx, be, v2SQL)
-
-			var gotCol int
-			if err := be.DB.QueryRowContext(ctx, `
-				SELECT COUNT(*) FROM information_schema.columns
-				WHERE table_schema = DATABASE() AND table_name = 'kafka_config' AND column_name = 'event_type'
-			`).Scan(&gotCol); err != nil {
-				t.Fatalf("count kafka_config.event_type columns: %v", err)
+			assertIndexExists := func(table, idx string) {
+				t.Helper()
+				var got int
+				if err := be.DB.QueryRowContext(ctx, `
+					SELECT COUNT(*) FROM information_schema.statistics
+					WHERE table_schema = DATABASE() AND table_name = ? AND index_name = ?
+				`, table, idx).Scan(&got); err != nil {
+					t.Fatalf("count %s on %s: %v", idx, table, err)
+				}
+				if got == 0 {
+					t.Errorf("%s on %s missing after two extra re-runs", idx, table)
+				}
 			}
-			if gotCol != 1 {
-				t.Errorf("kafka_config.event_type column count after two extra re-runs: got %d, want 1", gotCol)
-			}
-
-			var gotIdx int
-			if err := be.DB.QueryRowContext(ctx, `
-				SELECT COUNT(*) FROM information_schema.statistics
-				WHERE table_schema = DATABASE() AND table_name = 'kafka_config' AND index_name = 'idx_kafka_config_enabled'
-			`).Scan(&gotIdx); err != nil {
-				t.Fatalf("count idx_kafka_config_enabled: %v", err)
-			}
-			if gotIdx == 0 {
-				t.Errorf("idx_kafka_config_enabled missing after two extra re-runs")
-			}
+			// v1
+			assertIndexExists("event_subscriptions", "idx_event_subscriptions_type")
+			assertIndexExists("ingested_events", "idx_ingested_events_unprocessed")
+			// v3
+			assertIndexExists("event_awaiters", "idx_event_awaiters_type")
 		})
 	}
 }
@@ -97,7 +97,7 @@ func TestV2MigrationIsIdempotentOnMySQL(t *testing.T) {
 // runStatements executes sqlText one statement at a time, on one pinned
 // connection, mirroring plugin.RunMigrations' own execSQLStatements closely
 // enough to exercise the same hazard it would: MySQL user-defined session
-// variables (@col, @ddl) and a PREPAREd statement do not survive being sent
+// variables (@idx, @ddl) and a PREPAREd statement do not survive being sent
 // on different pooled connections. A naive split on ';' is safe for this
 // specific text -- checked by eye, and it is short and entirely this
 // package's own -- but is not a general-purpose SQL splitter.

@@ -31,8 +31,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					PRIMARY KEY (tenant_id, stream_id, sequence)
 				);
 
-				CREATE INDEX idx_event_stream_lookup
-					ON event_stream (tenant_id, stream_id, sequence);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'event_stream' AND index_name = 'idx_event_stream_lookup');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_event_stream_lookup ON event_stream (tenant_id, stream_id, sequence)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'event_stream')

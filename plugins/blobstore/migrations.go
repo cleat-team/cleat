@@ -54,8 +54,13 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					PRIMARY KEY (tenant_id, ` + "`key`" + `)
 				);
 
-				CREATE INDEX idx_blob_tenant_created ON blob_index(tenant_id, created_at DESC);
-				CREATE INDEX idx_blob_expires ON blob_index(expires_at);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'blob_index' AND index_name = 'idx_blob_tenant_created');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_blob_tenant_created ON blob_index(tenant_id, created_at DESC)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'blob_index' AND index_name = 'idx_blob_expires');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_blob_expires ON blob_index(expires_at)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'blob_content')

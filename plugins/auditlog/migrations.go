@@ -44,12 +44,17 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					metadata    JSON DEFAULT ('{}')
 				);
 
-				CREATE INDEX idx_audit_events_tenant_ts
-					ON audit_events (tenant_id, ` + "`" + `timestamp` + "`" + ` DESC);
-				CREATE INDEX idx_audit_events_tenant_path
-					ON audit_events (tenant_id, path);
-				CREATE INDEX idx_audit_events_tenant_method
-					ON audit_events (tenant_id, method);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'audit_events' AND index_name = 'idx_audit_events_tenant_ts');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_audit_events_tenant_ts ON audit_events (tenant_id, ` + "`" + `timestamp` + "`" + ` DESC)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'audit_events' AND index_name = 'idx_audit_events_tenant_path');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_audit_events_tenant_path ON audit_events (tenant_id, path)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'audit_events' AND index_name = 'idx_audit_events_tenant_method');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_audit_events_tenant_method ON audit_events (tenant_id, method)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'audit_events')
@@ -182,7 +187,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				SET @ddl := IF(@col = 0, 'ALTER TABLE audit_events ADD COLUMN row_hash CHAR(64) NULL', 'DO 0');
 				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
-				CREATE UNIQUE INDEX idx_audit_events_tenant_seq ON audit_events (tenant_id, seq);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'audit_events' AND index_name = 'idx_audit_events_tenant_seq');
+				SET @ddl := IF(@idx = 0, 'CREATE UNIQUE INDEX idx_audit_events_tenant_seq ON audit_events (tenant_id, seq)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 				CREATE TABLE IF NOT EXISTS audit_chain_heads (
 					tenant_id  CHAR(36) PRIMARY KEY,
