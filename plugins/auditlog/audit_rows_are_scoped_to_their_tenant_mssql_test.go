@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"os"
 	"testing"
 	"time"
 
@@ -47,6 +48,21 @@ import (
 // What this test owns is not truncating the table, cleaning up only its own
 // two tenants' rows, and using tenant ids no other test writes under.
 func TestAuditRowsAreScopedToTheirTenantOnMSSQL(t *testing.T) {
+	// cleat#2249: this loop's whole body lives behind the Dialect == MSSQL
+	// guard below, and testutil.NewPluginTestBackends only ever includes an
+	// MSSQL backend when CLEAT_TEST_MSSQL is set -- PostgreSQL is the only
+	// one it attempts unconditionally. So when CLEAT_TEST_MSSQL is unset,
+	// the returned slice has no MSSQL entry, every iteration's `continue`
+	// fires, and the function returns having asserted nothing -- a genuine
+	// PASS in ~0.02s, with no t.Skip anywhere to make that visible. Measured
+	// directly: with CLEAT_TEST_POSTGRES set and CLEAT_TEST_MSSQL unset,
+	// `go test -run TestAuditRowsAreScopedToTheirTenantOnMSSQL -v` printed
+	// `--- PASS (0.02s)` and nothing else. This explicit skip gives the
+	// skip-budget/skip-ledger guards -- which only see t.Skip -- something
+	// to see.
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping MSSQL tests")
+	}
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		if be.Dialect != testutil.DialectMSSQL {
 			continue
