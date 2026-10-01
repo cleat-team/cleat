@@ -24,6 +24,7 @@ var coreTables = []string{
 	"concurrency_keys",
 	"event_history",
 	"idempotency_keys",
+	"payload_encryption_ever_enabled",
 	"plugin_defs",
 	"deployment_secrets",
 	"queues",
