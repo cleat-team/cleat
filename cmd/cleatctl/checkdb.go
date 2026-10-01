@@ -243,6 +243,16 @@ func runCheckDB(ctx context.Context, db *sql.DB, d dialect, dsn string, args []s
 	var missingTables []string
 	var accessibleCount int
 	for _, table := range tables {
+		// postgresOnlyTables exist by design on only one dialect (cleat#2324:
+		// payload_encryption_ever_enabled has no MySQL/MSSQL migration at all,
+		// because encrypt-sensitive-payloads is PostgreSQL-only), so a MySQL or
+		// SQL Server deployment lacking one is healthy, not incomplete. Without
+		// this, check-db reports a false MISSING on every non-PostgreSQL
+		// deployment the moment such a table exists -- the same dialect-skip
+		// TestQualifiedTableMatchesEachDialectsMigrations already applies.
+		if d.name != "postgres" && postgresOnlyTables[table] {
+			continue
+		}
 		// Schema-qualified names are matched on BOTH parts. Matching on
 		// table_name alone -- which is what this did -- makes `admin.tenants`
 		// and a `tenants` in any other schema indistinguishable, so a table in

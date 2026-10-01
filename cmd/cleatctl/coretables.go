@@ -49,13 +49,19 @@ var coreTables = []string{
 // postgresOnlyTables is the subset of coreTables that exists ONLY in
 // migrations/postgres, by design rather than by omission.
 //
+// Two readers of coreTables need to agree on this, not just the test:
 // TestQualifiedTableMatchesEachDialectsMigrations (dialect_tables_test.go)
 // checks every coreTables entry against all three dialects' migrations, which
 // is right for a table every dialect is supposed to have and wrong for one
 // that genuinely does not exist on two of them -- that test's own doc comment
 // already distinguishes "the mapping is wrong" from "this dialect is
 // genuinely missing the table", and this set is how it tells the two apart
-// instead of reporting the second as the first.
+// instead of reporting the second as the first. runCheckDB (checkdb.go) loops
+// over the same slice to report operator-facing "TABLES: N accessible, M
+// missing" output, and without the same skip it reported a false MISSING on
+// every healthy non-PostgreSQL deployment the moment this entry existed --
+// found by running check-db against a real, freshly-migrated MySQL database
+// (cleat-review2, #2924 round 7).
 //
 // payload_encryption_ever_enabled (cleat#2324, migrations/postgres/008) is
 // the first entry: encrypt-sensitive-payloads is a PostgreSQL-only feature --
