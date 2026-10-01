@@ -325,7 +325,10 @@ func TestUninstallDownChainIsClassifiedOnEveryDialect(t *testing.T) {
 						// own Down is broken (fails immediately, before ever reaching the step
 						// that used to destroy webhook_events.error_msg) made webhook-ingest/mssql
 						// look recoverable: nothing was destroyed because nothing ran, and a
-						// trivially-clean recovery Up read as "recovered."
+						// trivially-clean recovery Up read as "recovered." (This predates
+						// cleat#2850 -- webhook-ingest/mssql is genuinely outcomeRecoverable now,
+						// for the unrelated reason that its real Down's partial damage no longer
+						// survives a failure, not because of the misread this comment describes.)
 						reversed := []int{}
 						if downRes != nil {
 							reversed = downRes.Reversed
