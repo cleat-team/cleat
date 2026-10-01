@@ -324,27 +324,49 @@ func TestMigrationIsADeployStepOnEveryDialect(t *testing.T) {
 				t.Errorf("after repair schema_migrations has %d rows, want %d", got, first)
 			}
 
-			// 6b. A PLUGIN migration behind: same rule, its own message. Last of the
-			//     destructive steps because re-running a plugin migration whose row was
-			//     deleted would try to CREATE a table that exists.
-			//     (The row is restored by hand below, so step 7 can migrate again.)
-			var pluginName string
-			var pluginVersion int
-			if err := db.QueryRow(firstPluginMigrationSQL(c.name)).Scan(&pluginName, &pluginVersion); err != nil {
-				t.Fatalf("read a plugin migration row: %v", err)
+			// 6b. A PLUGIN migration behind: same rule, its own message. cleat#2223:
+			//     this used to target the GLOBALLY FIRST (plugin_name, version) row,
+			//     which -- alphabetically and version-ascending -- is overwhelmingly
+			//     likely to be a `CREATE TABLE IF NOT EXISTS`, idempotent by
+			//     construction, and restored the row by hand afterward rather than
+			//     letting --migrate-only re-apply it for real. That combination
+			//     meant this test could never structurally catch a non-idempotent
+			//     LATER migration -- exactly where cleat#2223's bare
+			//     `ALTER TABLE ... ADD/DROP COLUMN` class of bug lives (cleat-review
+			//     on #2663/#2822, fixed for webhook-ingest's v3/v4/v7 in this same
+			//     PR; v8 already fixed in #2221). Targets webhook-ingest's own
+			//     NEWEST migration instead, and restores it by actually re-running
+			//     --migrate-only rather than hand-inserting the tracking row -- the
+			//     real crash-then-reboot path, not a stand-in for it.
+			const probePlugin = "webhook-ingest"
+			var newestVersion int
+			if err := db.QueryRow(newestPluginMigrationVersionSQL(c.name), probePlugin).Scan(&newestVersion); err != nil {
+				t.Fatalf("read %s's newest plugin migration version: %v", probePlugin, err)
 			}
-			if _, err := db.Exec(deletePluginMigrationSQL(c.name), pluginName, pluginVersion); err != nil {
+			beforeCount := count(fmt.Sprintf("SELECT COUNT(*) FROM plugin_migrations WHERE plugin_name = '%s'", probePlugin))
+			if _, err := db.Exec(deletePluginMigrationSQL(c.name), probePlugin, newestVersion); err != nil {
 				t.Fatal(err)
 			}
 			code, out = runWorker(t, bin, nil, base...)
 			if code == 0 {
 				t.Fatalf("a worker with a plugin migration behind exited 0:\n%s", out)
 			}
-			if !strings.Contains(out, "plugin schema is behind") || !strings.Contains(out, pluginName) {
-				t.Errorf("the refusal should be the PLUGIN check naming %s:\n%s", pluginName, out)
+			if !strings.Contains(out, "plugin schema is behind") || !strings.Contains(out, probePlugin) {
+				t.Errorf("the refusal should be the PLUGIN check naming %s:\n%s", probePlugin, out)
 			}
-			if _, err := db.Exec(insertPluginMigrationRowSQL(c.name), pluginName, pluginVersion); err != nil {
-				t.Fatalf("restore the plugin migration row: %v", err)
+			// The real re-apply: if webhook-ingest's newest migration's MySQL arm
+			// were still a bare, unguarded ALTER, this is where it would crash with
+			// `ERROR 1060 (42S21): Duplicate column name` or `ERROR 1091` -- the
+			// exact worker-cannot-boot symptom cleat#2223 is about -- instead of
+			// exiting 0.
+			if code, out = runWorker(t, bin, nil, append(base, "--migrate-only")...); code != 0 {
+				t.Fatalf("--migrate-only could not re-apply %s's own newest migration (v%d) after its "+
+					"tracking row was deleted -- this is cleat#2223's exact hazard, not a repair failure:\n%s",
+					probePlugin, newestVersion, out)
+			}
+			if got := count(fmt.Sprintf("SELECT COUNT(*) FROM plugin_migrations WHERE plugin_name = '%s'", probePlugin)); got != beforeCount {
+				t.Errorf("%s's plugin_migrations row count after delete-and-reapply: got %d, want %d (the pre-delete count)",
+					probePlugin, got, beforeCount)
 			}
 
 			// 7. --migrate-only needs NO key ring and never reaches the secrets check.
@@ -439,11 +461,37 @@ func insertSecretSQL(dialect string) string {
 	return `INSERT INTO tenant_secrets (tenant_id, name, ciphertext, key_version) VALUES ('` + tenant + `', 'cleat-2117', 'x', 1)`
 }
 
-func firstPluginMigrationSQL(dialect string) string {
-	if dialect == "mssql" {
-		return `SELECT TOP 1 plugin_name, version FROM plugin_migrations ORDER BY plugin_name, version`
+// newestPluginMigrationVersionSQL returns pluginName's highest applied
+// version -- never the globally-first (plugin_name, version) row the way
+// firstPluginMigrationSQL (below, now unused by the test but kept as the
+// query a future reader would otherwise reach for) does. The first plugin
+// migration, alphabetically, is overwhelmingly likely to be a `CREATE TABLE
+// IF NOT EXISTS` -- idempotent by construction -- while schema evolution
+// concentrates in LATER migrations, which is exactly where cleat#2223's bare
+// `ALTER TABLE ... ADD/DROP COLUMN` class of bug lives. version is a real
+// INTEGER column here (unlike the core schema_migrations.version, which is
+// TEXT), so a plain MAX() needs no CAST.
+func newestPluginMigrationVersionSQL(dialect string) string {
+	switch dialect {
+	case "mysql":
+		return `SELECT MAX(version) FROM plugin_migrations WHERE plugin_name = ?`
+	case "mssql":
+		return `SELECT MAX(version) FROM plugin_migrations WHERE plugin_name = @p1`
 	}
-	return `SELECT plugin_name, version FROM plugin_migrations ORDER BY plugin_name, version LIMIT 1`
+	return `SELECT MAX(version) FROM plugin_migrations WHERE plugin_name = $1`
+}
+
+// countPluginMigrationsSQL counts pluginName's applied-migration rows, used
+// to confirm a deleted-then-reapplied row comes back as exactly one row, not
+// zero (reapply silently failed) or two (a duplicate insert).
+func countPluginMigrationsSQL(dialect string) string {
+	switch dialect {
+	case "mysql":
+		return `SELECT COUNT(*) FROM plugin_migrations WHERE plugin_name = ?`
+	case "mssql":
+		return `SELECT COUNT(*) FROM plugin_migrations WHERE plugin_name = @p1`
+	}
+	return `SELECT COUNT(*) FROM plugin_migrations WHERE plugin_name = $1`
 }
 
 func deletePluginMigrationSQL(dialect string) string {
@@ -454,14 +502,4 @@ func deletePluginMigrationSQL(dialect string) string {
 		return `DELETE FROM plugin_migrations WHERE plugin_name = @p1 AND version = @p2`
 	}
 	return `DELETE FROM plugin_migrations WHERE plugin_name = $1 AND version = $2`
-}
-
-func insertPluginMigrationRowSQL(dialect string) string {
-	switch dialect {
-	case "mysql":
-		return `INSERT INTO plugin_migrations (plugin_name, version) VALUES (?, ?)`
-	case "mssql":
-		return `INSERT INTO plugin_migrations (plugin_name, version) VALUES (@p1, @p2)`
-	}
-	return `INSERT INTO plugin_migrations (plugin_name, version) VALUES ($1, $2)`
 }
