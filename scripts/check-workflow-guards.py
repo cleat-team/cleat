@@ -54,6 +54,28 @@ a session to find one instance of by hand:
      build`, i.e. code fetched from PyPI) and keeps the tag-vs-pyproject guard
      in a job with no environment, so it still refuses BEFORE the approval
      (cleat#2127's acceptance).
+  8. Every step in ci.yml's `lint` job carries the fail-fast-safe shape #2896
+     gave it (cleat#2895/#2902).  GitHub stops a job at its first failing step,
+     so this job -- which runs ~50 guards -- wraps each one's `run:` so an
+     internal failure is recorded into $LINT_FAILURES_FILE rather than failing
+     the STEP, with `if: always()` (or `always() && (...)`) so a step is only
+     ever skipped by its OWN condition, never by an earlier step's result. A
+     third party adding a new guard step and forgetting either half silently
+     reintroduces the exact cascade #2895 was filed to fix, for every guard
+     added after it -- and the job reads green unless the new step itself
+     happens to fail, which is precisely the failure mode #2896 shipped
+     without a test for (flagged by the coordinator while #2896 was in the
+     merge queue; #2909 landing a correctly-wrapped step three hours later is
+     the known-positive this guard is checked against). Checked: `actions/
+     checkout@*` is exempt from both; a `uses:`-only step (Setup Go/Python/
+     Rust -- nothing to wrap) needs `if: always()` only; "Aggregate guard
+     results" must exist, be the job's LAST step, carry `if: always()`, and is
+     the one step exempt from the wrapper (it IS the thing the wrapper
+     reports to); every other step needs `if: always()`-or-`always() &&`-form
+     AND its `run:` wrapped in `bash -e <<'DELIM' ... DELIM || echo "<name>"
+     >> "$LINT_FAILURES_FILE"`, where `<name>` must equal that step's own
+     `name:` verbatim -- a mismatched name would misattribute which guard
+     failed to the next reader.
 
 Design note, since it is the whole point of the exercise: this script FAILS on
 anything it cannot analyse rather than passing.  A matrix it cannot expand, an
@@ -62,7 +84,7 @@ guard that quietly skips the case it does not understand is the thing it was
 written to prevent.
 
 Usage:
-    scripts/check-workflow-guards.py                       # all seven guards
+    scripts/check-workflow-guards.py                       # all eight guards
     scripts/check-workflow-guards.py --verify-against-api  # needs an admin token
     scripts/check-workflow-guards.py --self-test            # known-positive/negative pairs
 """
@@ -741,6 +763,138 @@ def guard_publish_approval_order(errors: list[str]) -> None:
         errors.extend(find_publish_approval_order_violations(path, doc))
 
 
+# cleat#2895/#2902: the fail-fast-safe shape #2896 gave ci.yml's `lint` job.
+# The `|| echo ... >> "$LINT_FAILURES_FILE"` is bash syntax attached to the
+# OPENING heredoc line (`bash -e <<'DELIM' || echo ...`) -- it applies to
+# the whole `bash -e <<'DELIM' ... DELIM` compound command, not to the bare
+# closing delimiter line, which carries nothing after it.
+AGGREGATOR_STEP_NAME = "Aggregate guard results"
+CHECKOUT_USES_PREFIX = "actions/checkout@"
+HEREDOC_OPEN_AND_RECORD_RE = re.compile(
+    r"bash -e <<'([A-Za-z0-9_]+)'\s*\|\|\s*echo\s+\"([^\"]*)\"\s*>>\s*\"\$LINT_FAILURES_FILE\""
+)
+ALWAYS_IF_RE = re.compile(r"^\s*always\(\)\s*(&&.*)?$", re.S)
+
+
+def _lint_step_label(job_key: str, index: int, step: dict) -> str:
+    name = step.get("name")
+    return f"job '{job_key}' step {index} ({name!r})" if name else f"job '{job_key}' step {index} (unnamed)"
+
+
+def find_lint_step_wrapper_violations(path: str, doc: dict) -> list[str]:
+    """Every step in the `lint` job must carry the shape #2896 gave it:
+    `if: always()` (or `always() && (...)`) so a step is skipped only by its
+    OWN condition, and (except checkout, a bare `uses:` step, and the final
+    aggregator) a `run:` wrapped in `bash -e <<'DELIM' ... DELIM || echo
+    "<this step's own name>" >> "$LINT_FAILURES_FILE"`. Returns [] for any
+    workflow with no `lint` job -- this guard is specific to ci.yml, but
+    stays doc-driven rather than path-driven so a self-test fixture needs no
+    real filename.
+
+    Checked against a step by POSITION, not name, because the defect this
+    guards against is a NEW step someone adds without copying the shape --
+    keying on name would require predicting that step's name in advance.
+    """
+    jobs = doc.get("jobs")
+    if not isinstance(jobs, dict) or "lint" not in jobs:
+        return []
+    job = jobs["lint"]
+    steps = job.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return [f"{path}: job 'lint' has no steps -- cannot be the job #2896 built"]
+
+    violations: list[str] = []
+    last_index = len(steps) - 1
+    aggregator_seen_at: int | None = None
+
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict):
+            violations.append(f"{path}: job 'lint' step {i} is not a mapping -- cannot be checked")
+            continue
+        label = f"{path}: {_lint_step_label('lint', i, step)}"
+        name = step.get("name")
+        uses = step.get("uses")
+        run = step.get("run")
+
+        if i == 0 and isinstance(uses, str) and uses.startswith(CHECKOUT_USES_PREFIX):
+            continue  # the one step exempt from everything
+
+        if name == AGGREGATOR_STEP_NAME:
+            aggregator_seen_at = i
+            if i != last_index:
+                violations.append(
+                    f"{label}: '{AGGREGATOR_STEP_NAME}' must be the LAST step in the job -- "
+                    f"a step after it would never have its own failure folded into the "
+                    f"aggregate it reports"
+                )
+            iff = step.get("if")
+            if not isinstance(iff, str) or not ALWAYS_IF_RE.match(iff):
+                violations.append(
+                    f"{label}: '{AGGREGATOR_STEP_NAME}' needs `if: always()` like every "
+                    f"other step -- an earlier guard's failure must not skip it"
+                )
+            continue  # exempt from the wrapper requirement -- it IS the aggregator
+
+        iff = step.get("if")
+        if not isinstance(iff, str) or not ALWAYS_IF_RE.match(iff):
+            violations.append(
+                f"{label}: missing `if: always()` (or `always() && (...)`) -- an earlier "
+                f"guard step's failure would skip this one, reintroducing cleat#2895"
+            )
+
+        if run is None:
+            # A `uses:`-only step (Setup Go/Python/Rust): nothing to wrap.
+            if not isinstance(uses, str):
+                violations.append(f"{label}: has neither `run:` nor `uses:` -- cannot be checked")
+            continue
+
+        if not isinstance(run, str):
+            violations.append(f"{label}: `run:` is not a string -- cannot be checked")
+            continue
+
+        open_match = HEREDOC_OPEN_AND_RECORD_RE.search(run)
+        if not open_match:
+            violations.append(
+                f"{label}: `run:` does not open with "
+                f"`bash -e <<'DELIM' || echo \"<name>\" >> \"$LINT_FAILURES_FILE\"` -- this "
+                f"step's own failure would either fail the JOB directly or not be recorded "
+                f"at all, reintroducing cleat#2895 for every step after it"
+            )
+            continue
+
+        delim, echoed = open_match.group(1), open_match.group(2)
+        if not re.search(r"^\s*" + re.escape(delim) + r"\s*$", run, re.M):
+            violations.append(
+                f"{label}: opens the `{delim}` heredoc but there is no bare `{delim}` line "
+                f"closing it -- the heredoc is malformed and this step's content is not what "
+                f"it looks like"
+            )
+            continue
+
+        if echoed != name:
+            violations.append(
+                f"{label}: the wrapper records this failure under {echoed!r}, not this "
+                f"step's own name {name!r} -- a reader would be sent to the wrong guard"
+            )
+
+    if aggregator_seen_at is None:
+        violations.append(
+            f"{path}: job 'lint' has no '{AGGREGATOR_STEP_NAME}' step -- nothing in this job "
+            f"can ever fail it, so every guard above is decoration"
+        )
+
+    return violations
+
+
+def guard_lint_step_wrapper(errors: list[str]) -> None:
+    for path in workflow_files():
+        try:
+            doc = load(path)
+        except (Unexpandable, yaml.YAMLError):
+            continue  # already reported by collect_jobs
+        errors.extend(find_lint_step_wrapper_violations(path, doc))
+
+
 def self_test() -> int:
     """Known-positive/known-negative pairs for guard 6 -- see CLAUDE.md's
     known-positive discipline: a check that has never been shown capable of
@@ -1211,6 +1365,112 @@ def self_test() -> int:
         ["does not `needs:` anything"],
     )
 
+    # ---- guard 8: lint-step wrapper (cleat#2895/#2902) --------------------
+    # Built as a Python dict directly, not YAML text -- the thing under test
+    # is the shape of a `run:` STRING, which is identical whether it arrived
+    # via a block scalar or a quoted one-liner, and a dict skips a second
+    # layer of string-escaping bugs in the fixture itself.
+
+    def wrapped_step(name: str, content: str = "true") -> dict:
+        return {
+            "name": name,
+            "if": "always()",
+            "run": f"bash -e <<'LINT_GUARD_EOF' || echo \"{name}\" >> \"$LINT_FAILURES_FILE\"\n{content}\nLINT_GUARD_EOF\n",
+        }
+
+    checkout_step = {"uses": "actions/checkout@v7"}
+    setup_step = {"name": "Setup Go", "uses": "actions/setup-go@v7", "if": "always()"}
+    aggregator_step = {
+        "name": AGGREGATOR_STEP_NAME,
+        "if": "always()",
+        "run": 'if [ -s "$LINT_FAILURES_FILE" ]; then exit 1; fi\n',
+    }
+
+    def good_steps() -> list:
+        return [checkout_step, wrapped_step("Guard A"), setup_step, wrapped_step("Guard B"), aggregator_step]
+
+    def check_lint(label: str, steps: list, want) -> None:
+        nonlocal cases
+        cases += 1
+        got = find_lint_step_wrapper_violations("ci.yml", {"jobs": {"lint": {"steps": steps}}})
+        if want is None:
+            if got:
+                failures.append(f"{label}: expected no violations, got {got}")
+        elif not any(want in g for g in got):
+            failures.append(f"{label}: expected a violation containing {want!r}, got {got}")
+
+    # KNOWN-NEGATIVE: the correct shape -- checkout, a wrapped guard, a bare
+    # `uses:` setup step, another wrapped guard, the aggregator last. This is
+    # the shape #2896 shipped and #2909 landed a second instance of three
+    # hours later; both are this guard's real-world known-positives, checked
+    # separately by running the whole script clean against the real tree.
+    check_lint("correct shape", good_steps(), None)
+
+    # KNOWN-NEGATIVE: `always() && (...)` form, used by "Doc-comment
+    # reattachment guard" for its narrower pre-existing condition.
+    guarded = good_steps()
+    guarded[1]["if"] = "always() && (github.event_name == 'pull_request')"
+    check_lint("always() && (...) form accepted", guarded, None)
+
+    # KNOWN-POSITIVE: a run: step missing if: always() entirely -- the exact
+    # cascade #2895 was filed over.
+    missing_if = good_steps()
+    del missing_if[1]["if"]
+    check_lint("run: step missing if: always()", missing_if, "missing `if: always()`")
+
+    # KNOWN-POSITIVE: a bare `uses:` step (Setup Go/Python/Rust) missing
+    # if: always() -- the same requirement applies even with nothing to wrap.
+    setup_missing_if = good_steps()
+    del setup_missing_if[2]["if"]
+    check_lint("uses:-only step missing if: always()", setup_missing_if, "missing `if: always()`")
+
+    # KNOWN-POSITIVE: if: always() present, but the run: content was never
+    # wrapped at all -- a plain `run: echo hi`. This is the actual failure
+    # mode #2902 was filed for: a third party who remembers if: always() but
+    # not the wrapper.
+    unwrapped = good_steps()
+    unwrapped[1]["run"] = "echo hi\n"
+    check_lint("if: always() present but run: not wrapped", unwrapped, "does not open with")
+
+    # KNOWN-POSITIVE: wrapped, but the echoed name doesn't match the step's
+    # own `name:` -- a copy-paste from a neighboring step that would
+    # misattribute a failure to the wrong guard in the aggregator's report.
+    wrong_name = good_steps()
+    wrong_name[1]["run"] = wrapped_step("Guard A")["run"].replace('"Guard A"', '"Guard Z"')
+    check_lint("wrapper echoes the wrong step name", wrong_name, "records this failure under")
+
+    # KNOWN-POSITIVE: the heredoc opens (and the `|| echo ...` is present)
+    # but there is no bare closing delimiter line -- a malformed heredoc
+    # whose body silently swallows the rest of the step.
+    malformed = good_steps()
+    malformed[1]["run"] = (
+        'bash -e <<\'LINT_GUARD_EOF\' || echo "Guard A" >> "$LINT_FAILURES_FILE"\ntrue\n'
+    )
+    check_lint("heredoc opens but never closes", malformed, "no bare")
+
+    # KNOWN-POSITIVE: the aggregator step itself missing if: always().
+    agg_missing_if = good_steps()
+    del agg_missing_if[-1]["if"]
+    check_lint("aggregator missing if: always()", agg_missing_if, f"'{AGGREGATOR_STEP_NAME}' needs")
+
+    # KNOWN-POSITIVE: a step added AFTER the aggregator -- it would never
+    # have its own failure folded into what the aggregator already reported.
+    agg_not_last = good_steps()
+    agg_not_last.append(wrapped_step("Guard C"))
+    check_lint("aggregator is not the last step", agg_not_last, "must be the LAST step")
+
+    # KNOWN-POSITIVE: no aggregator step at all -- nothing in the job can
+    # ever fail it, so every `if: always()`-wrapped guard above is decoration.
+    agg_absent = good_steps()[:-1]
+    check_lint("no aggregator step at all", agg_absent, f"has no '{AGGREGATOR_STEP_NAME}' step")
+
+    # KNOWN-NEGATIVE: a workflow with no `lint` job at all is out of scope,
+    # not a violation -- this guard is specific to ci.yml's job by that name.
+    got_no_lint = find_lint_step_wrapper_violations("other.yml", {"jobs": {"build": {"steps": []}}})
+    cases += 1
+    if got_no_lint:
+        failures.append(f"no 'lint' job present: expected [], got {got_no_lint}")
+
     if failures:
         for f in failures:
             print(f"SELF-TEST FAILED: {f}")
@@ -1259,7 +1519,7 @@ def main() -> int:
     parser.add_argument(
         "--self-test",
         action="store_true",
-        help="run known-positive/known-negative cases for guards 6 and 7 against synthetic YAML, not the real tree",
+        help="run known-positive/known-negative cases for guards 6, 7 and 8 against synthetic YAML, not the real tree",
     )
     args = parser.parse_args()
 
@@ -1288,6 +1548,7 @@ def main() -> int:
     guard_mssql_services_have_memory_cap(errors)
     guard_no_untrusted_expressions_in_privileged_workflows(errors)
     guard_publish_approval_order(errors)
+    guard_lint_step_wrapper(errors)
 
     for error in errors:
         print(f"::error title=Workflow integrity::{error}")
