@@ -140,14 +140,41 @@ if rec.isPendingIntent() {
 ```
 
 **Before that report happens, an optional resolver gets a chance to make it a non-event.**
-`WithAmbiguityResolver` (an `EngineOption`) lets an embedder supply a lookup — keyed on the same
-per-step idempotency key the pattern in §5.1 uses — that checks the external service directly. If
-it answers, the outcome is recorded and replay carries on as though the call had returned
-normally: the crash lost the answer, not the effect, and the workflow never sees `[AMBIGUOUS]` at
-all. **`cleat-worker` does not configure one** — `grep -rn WithAmbiguityResolver
-cmd/cleat-worker/` finds nothing — so on the shipped worker binary every ambiguity reaches the
-report above; this is an extension point for an embedder, and as of this writing nothing in the
-tree, embedded or otherwise, calls it (cleat#1871).
+`WithAmbiguityResolver` (an `EngineOption`) lets a caller supply a lookup — keyed on the same
+per-step idempotency key the pattern in §5.1 uses — that checks the external service directly.
+Any embedder can call it directly (cleat#1871); `cleat-worker` registers one through a flag, so an
+operator configures it without writing code (cleat#1984).
+
+#### `--ambiguity-lookup`: the shipped worker's declarative resolver
+
+```
+--ambiguity-lookup payment.charge=payment.get_by_key   # comma-separated for more than one
+```
+
+For each `service.operation=service.lookup_operation` pair, the worker's resolver calls the
+**lookup operation on the same service**, under the **same idempotency key** the original attempt
+sent — the same route convention `DurableCall` itself uses
+(`POST {base-url}/call/{service}/{lookup_operation}`, `Idempotency-Key` header), because a lookup
+*is* another operation on the service, not a separate kind of request. Only an operation named
+here gets this treatment; every other ambiguity reaches the `[AMBIGUOUS]` report as before.
+
+**The lookup convention — the contract a service implements:**
+
+| Lookup response | Meaning | Engine action |
+|---|---|---|
+| `200` with a body | The call happened; the body is its response | The pending step completes with that response, and replay carries on as though the original call had returned it |
+| `404` | The service has no record — the call never arrived | The step completes as a **retryable failure** (the same classification an ordinary transient call failure gets), not `[AMBIGUOUS]`. Nothing was sent, so nothing needs reconciling; the workflow's own retry handling (or an explicit retry in its code) is what makes "the step re-executes" — the engine does not re-dispatch on its own |
+| Anything else — `5xx`, a malformed response, a transport error, a timeout | Cannot say | Falls back to today's `[AMBIGUOUS]` report, unchanged |
+
+**Validated at worker startup, not at the first ambiguity:** every operation named in
+`--ambiguity-lookup` must also be declared in `--write-ahead-intent-ops`. `AtLeastOnce` (the
+default call semantics) never leaves a pending intent row — only `WriteAheadIntent` does — so a
+lookup configured for an operation that is never write-ahead would be a mechanism with nothing to
+resolve, wired to nothing. The worker refuses to start rather than ship that silently.
+
+**Metrics:** `RecordAmbiguousCall` carries an `outcome` attribute of `resolved`, `not_sent` or
+`cannot_say`, per operation — the auto-settled-versus-still-ambiguous counts an operator needs to
+know whether the lookup is earning its keep.
 
 ---
 
@@ -166,6 +193,13 @@ When a workflow receives an `ErrAmbiguous` error, it means the call *may* have s
 1. Check the external service's state to determine whether the operation completed.
 2. If completed: proceed with the known outcome (e.g., look up the result from the external service).
 3. If not completed: retry the call.
+
+**This is the fallback, not the only path.** If the operation is named in the worker's
+`--ambiguity-lookup` flag (§3), the three steps above already happened before the workflow ever
+saw an error: a `200` lookup response completes the step with the service's answer, and a `404`
+completes it as an ordinary retryable failure your existing retry handling already covers.
+`ErrAmbiguous` reaches workflow code only for an operation that is not configured for lookup, or
+when the lookup itself could not say — the "anything else" row of the table in §3.
 
 ### 4.3 Not assume exactly-once
 

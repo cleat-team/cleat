@@ -425,7 +425,7 @@ func TestDurableCall_IntentSurvivesNoPerStepFlush(t *testing.T) {
 // fakeResolver records what it was asked and answers as configured.
 type fakeResolver struct {
 	response string
-	resolved bool
+	outcome  AmbiguityOutcome
 	err      error
 
 	calls int
@@ -433,11 +433,11 @@ type fakeResolver struct {
 	ops   []string
 }
 
-func (r *fakeResolver) ResolveCall(_ context.Context, service, operation, idempotencyKey string) (string, bool, error) {
+func (r *fakeResolver) ResolveCall(_ context.Context, service, operation, idempotencyKey string) (string, AmbiguityOutcome, error) {
 	r.calls++
 	r.keys = append(r.keys, idempotencyKey)
 	r.ops = append(r.ops, service+"."+operation)
-	return r.response, r.resolved, r.err
+	return r.response, r.outcome, r.err
 }
 
 // replaySessionFor builds a replay session over the workflow's stored history.
@@ -478,7 +478,7 @@ func TestResolveAmbiguity_CompletesTheStepAndPersistsIt(t *testing.T) {
 		wfID := newIntentWorkflow(t, ctx, store, "resolve-ok")
 		writePendingCall(t, ctx, store, wfID)
 
-		resolver := &fakeResolver{response: `{"charged":true,"via":"resolver"}`, resolved: true}
+		resolver := &fakeResolver{response: `{"charged":true,"via":"resolver"}`, outcome: AmbiguityResolved}
 		s, caller := replaySessionFor(t, ctx, store, wfID, WithAmbiguityResolver(resolver))
 
 		result := s.DurableCall(ctx, nil, intentService, intentOperation, `{"amount":100}`, 0, 0)
@@ -530,6 +530,70 @@ func TestResolveAmbiguity_CompletesTheStepAndPersistsIt(t *testing.T) {
 	})
 }
 
+// TestResolveAmbiguity_NotSentRecordsARetryableFailure is AmbiguityNotSent's
+// own proof: a resolver that confirms the call never reached the service
+// must not be treated as either a real answer (AmbiguityResolved, which a
+// workflow would read as a response nobody sent) or as "cannot say" (which
+// reports the same [AMBIGUOUS], non-retryable message every time rather than
+// letting the workflow's own retry handling take over). cleat#1984.
+func TestResolveAmbiguity_NotSentRecordsARetryableFailure(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, store WorkflowStore) {
+		ctx := context.Background()
+		wfID := newIntentWorkflow(t, ctx, store, "resolve-notsent")
+		writePendingCall(t, ctx, store, wfID)
+
+		resolver := &fakeResolver{outcome: AmbiguityNotSent}
+		s, caller := replaySessionFor(t, ctx, store, wfID, WithAmbiguityResolver(resolver))
+
+		result := s.DurableCall(ctx, nil, intentService, intentOperation, `{"amount":100}`, 0, 0)
+		if errCodeOf(result) == 0 {
+			t.Fatal("a not-sent outcome reported success, so the workflow would proceed on a response " +
+				"nobody sent")
+		}
+		if got := callErrorCodeOf(result); got != callFailureCode {
+			t.Errorf("callErrorCode = %d, want callFailureCode (%d) -- a confirmed not-sent call is "+
+				"retryable, the same classification as any other transient failure, not "+
+				"callErrorUnknown's non-retryable [AMBIGUOUS]", got, callFailureCode)
+		}
+		if caller.calls != 0 {
+			t.Errorf("the service was called %d times; resolving as not-sent must not itself repeat "+
+				"the call -- that is the WORKFLOW's retry to make, not the engine's", caller.calls)
+		}
+
+		// Persisted as a retryable failure, not merely returned: the next
+		// replay must reproduce the same classification without asking the
+		// resolver again.
+		after := stepRecord(t, ctx, store, wfID, 0)
+		if after.Pending {
+			t.Error("the row is still pending after resolution, so every later replay would ask again")
+		}
+		if after.Response != "" {
+			t.Errorf("stored response = %q, want empty -- there is no real outcome to record", after.Response)
+		}
+		if after.Err == "" {
+			t.Error("stored Err is empty, want the not-sent message")
+		}
+		if after.ErrNonRetryable {
+			t.Error("stored ErrNonRetryable = true, want false: recordedFailureCode must classify this " +
+				"as retryable on every future replay")
+		}
+		if err := store.VerifyWorkflowEvents(ctx, wfID); err != nil {
+			t.Errorf("VerifyWorkflowEvents after resolution: %v", err)
+		}
+
+		// A second replay reads the now-completed row and reproduces the same
+		// retryable classification without consulting the resolver again.
+		s2, _ := replaySessionFor(t, ctx, store, wfID, WithAmbiguityResolver(resolver))
+		r2 := s2.DurableCall(ctx, nil, intentService, intentOperation, `{"amount":100}`, 0, 0)
+		if got := callErrorCodeOf(r2); got != callFailureCode {
+			t.Errorf("second replay callErrorCode = %d, want callFailureCode (%d)", got, callFailureCode)
+		}
+		if resolver.calls != 1 {
+			t.Errorf("the resolver was asked %d times across two replays, want 1", resolver.calls)
+		}
+	})
+}
+
 // TestResolveAmbiguity_FallsBackWhenItCannotSay covers the three ways a
 // resolver declines. All three must leave the ambiguity exactly as it was --
 // reported, not resolved, and above all not repeated.
@@ -539,7 +603,7 @@ func TestResolveAmbiguity_FallsBackWhenItCannotSay(t *testing.T) {
 		resolver *fakeResolver
 	}{
 		{"no resolver configured", nil},
-		{"the resolver has no record", &fakeResolver{resolved: false}},
+		{"the resolver has no record", &fakeResolver{outcome: AmbiguityCannotSay}},
 		{"the resolver itself failed", &fakeResolver{err: errors.New("lookup service down")}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -597,7 +661,7 @@ func TestResolveAmbiguity_UnrecordableResolutionIsNotUsed(t *testing.T) {
 			t.Fatalf("CompleteCallIntent: %v", err)
 		}
 
-		resolver := &fakeResolver{response: `{"charged":true,"via":"resolver"}`, resolved: true}
+		resolver := &fakeResolver{response: `{"charged":true,"via":"resolver"}`, outcome: AmbiguityResolved}
 		caller := &intentTestCaller{store: store, workflowID: wfID}
 		s := &execSession{
 			engine: NewEngine(nil, caller, WithWorkflowStore(store), WithWorkflowID(wfID),

@@ -311,18 +311,33 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 			// the outcome is recorded and replay carries on as though the call
 			// had returned normally, which it did -- the crash lost the answer,
 			// not the effect. See IMPROVEMENT-PLAN 1.4 phase E.
-			if resp, resolved := s.resolveAmbiguity(ctx, rec); resolved {
+			switch resp, outcome := s.resolveAmbiguity(ctx, rec); outcome {
+			case AmbiguityResolved:
 				if s.engine.Metrics != nil {
 					s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "resolved"))
 				}
 				written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
 				return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
+			case AmbiguityNotSent:
+				// The service confirmed this call never arrived: a definite,
+				// retryable failure, not an ambiguity. Same packing as a fresh
+				// call failure (callFailureCode), so the guest sees an
+				// ordinary Retryable()==true error and its own retry handling
+				// takes it from there -- no engine-side re-dispatch needed.
+				if s.engine.Metrics != nil {
+					s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "not_sent"))
+				}
+				written, _ := s.writeResult(ctx, m, responsePtr, ambiguityNotSentMessage, responseMaxLen)
+				return packDurableCallResult(int(written), callFailureCode, 1)
 			}
 
 			// Record the condition structurally before writing the message.
 			// The message is for the workflow author; this is for the
 			// operator, who needs to find these with a query rather than a
 			// substring search. See IMPROVEMENT-PLAN 3.24.
+			if s.engine.Metrics != nil {
+				s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "cannot_say"))
+			}
 			s.recordAmbiguity(rec)
 
 			ambiguousErr := fmt.Sprintf(
