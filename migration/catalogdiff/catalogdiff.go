@@ -28,6 +28,15 @@ type Catalog struct {
 	Tables   map[string]*Table // key: schema-qualified table name, e.g. "public.workflow_instances"
 	Routines map[string]string // key: schema-qualified routine identity, value: normalized definition text
 	Grants   []string          // normalized, sorted grant lines
+
+	// Schemas and Roles are populated on SQL Server only, where migrations can
+	// create both as first-class objects (CREATE SCHEMA, CREATE ROLE) with no
+	// equivalent "which table owns this" home to attach them to the way a
+	// column or index attaches to a table. Empty on every other dialect -- not
+	// because the concept does not exist there, but because nothing in this
+	// package has yet needed it compared on Postgres or MySQL. cleat#2432.
+	Schemas []string // schema names, excluding SQL Server's own built-ins
+	Roles   []string // database role NAMES only -- membership is a deployment fact, not a schema fact
 }
 
 // Table is one table's structural shape.
@@ -271,6 +280,18 @@ func canonicalize(c *Catalog) []string {
 	sort.Strings(grants)
 	for _, g := range grants {
 		lines = append(lines, "GRANT "+oneLine(g))
+	}
+
+	schemas := append([]string(nil), c.Schemas...)
+	sort.Strings(schemas)
+	for _, s := range schemas {
+		lines = append(lines, "SCHEMA "+oneLine(s))
+	}
+
+	roles := append([]string(nil), c.Roles...)
+	sort.Strings(roles)
+	for _, r := range roles {
+		lines = append(lines, "ROLE "+oneLine(r))
 	}
 
 	sort.Strings(lines)
