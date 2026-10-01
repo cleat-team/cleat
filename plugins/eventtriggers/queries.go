@@ -1,6 +1,10 @@
 package eventtriggers
 
-import "github.com/cleat-team/cleat/plugin"
+import (
+	"fmt"
+
+	"github.com/cleat-team/cleat/plugin"
+)
 
 // Dialect-specific query variants for structurally different SQL.
 
@@ -176,6 +180,19 @@ OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY`,
 // columns are ” by the same DEFAULT ” every pre-existing row already
 // carries, so this is additive to the WHERE clause, not a behaviour change
 // for a caller that passes no keys.
+//
+// MSSQL ARM INTENTIONALLY ABSENT -- cleat#2821/#2866. claimOldestUnprocessedEventLocking
+// (claim.go) is the only caller of this struct's .For(dialect), and tryClaim
+// branches on dialect BEFORE calling it: claimOldestUnprocessedEventLocking
+// is reached only for Postgres/MySQL, never MSSQL (claimOldestUnprocessedEventMSSQL
+// handles that dialect via queryCandidateUnprocessedEventIDsMSSQL and
+// queryClaimEventByIDMSSQL instead). So Query.For's fallback-to-Default
+// behavior for a missing MSSQL field is never reached here, the same shape
+// blobstore's staleWorkflowRefs documents for its own absent MSSQL field.
+// Restoring an MSSQL arm here would put the cleat#2821 starvation query back
+// within reach of some future caller that does not branch this carefully --
+// see queryCandidateUnprocessedEventIDsMSSQL's own doc comment for why no
+// single SELECT can do this safely on MSSQL at all.
 var queryOldestUnprocessedEventForClaim = plugin.Query{
 	Default: `SELECT id, event_type, event_data, received_at
 FROM ingested_events
@@ -275,13 +292,79 @@ WHERE tenant_id = $1
 ORDER BY received_at
 LIMIT 1
 FOR UPDATE SKIP LOCKED`,
-	MSSQL: `SELECT TOP 1 id, event_type, event_data, received_at
-FROM ingested_events WITH (UPDLOCK, READPAST, ROWLOCK)
+	// No MSSQL arm any more -- cleat#2821/#2866. This had been
+	// `SELECT TOP 1 ... WITH (UPDLOCK, READPAST, ROWLOCK) ... ORDER BY received_at`,
+	// and it is the only one of the three dialects with no equivalent of
+	// Postgres/MySQL's "FOR UPDATE SKIP LOCKED locks only the row returned"
+	// guarantee: proving the single TOP(1) row under ORDER BY took a U lock
+	// on every candidate row examined while comparing, not only the one
+	// returned. Measured on cleat#2821: one transaction holding that lock on
+	// BOTH of a tenant's two matching rows (while returning only one)
+	// starved a concurrent claim's READPAST into finding zero rows for that
+	// tenant, even though one of the two rows had never been returned to
+	// anybody. See claimOldestUnprocessedEventMSSQL (claim.go) and the two
+	// queries below, which replace this arm.
+}
+
+// queryCandidateUnprocessedEventIDsMSSQL and queryClaimEventByIDMSSQL are
+// cleat#2821/#2866's replacement for queryOldestUnprocessedEventForClaim's
+// former MSSQL arm -- see the comment left in its place above for the
+// defect this avoids.
+//
+// The fix separates "pick a candidate" from "claim it". This query reads a
+// small, ordered candidate list with READPAST and NO UPDLOCK: it takes no
+// lock of its own, so it cannot exhibit the "lock every candidate examined"
+// defect -- that defect is specific to proving extremality (TOP/ORDER BY)
+// *under a lock a read ASKS FOR*, and this read asks for none.
+//
+// READPAST is still required, and its absence is a hang, not merely a
+// missed optimization -- measured directly: a first version of this query
+// carried no table hint at all, and under SQL Server's default READ
+// COMMITTED (not snapshot isolation), a plain scanning SELECT blocks on ANY
+// row it physically encounters that another transaction holds an exclusive
+// lock on, even if that row would not satisfy the WHERE clause -- the
+// engine must read the row's current committed value before it can decide
+// to exclude it. TestAwaitEventConcurrentClaimsSkipTheLockedRow holds
+// exactly such a transaction open (by design, to simulate a concurrent
+// claimer), and without READPAST here a concurrent candidate read against
+// the SAME tenant+type+keys blocked on it indefinitely -- the test timed
+// out at Go's default 10-minute limit rather than failing fast. READPAST
+// makes this read skip a row someone else is mid-claim on instead of
+// waiting for it, the same non-blocking property Postgres/MySQL's
+// FOR UPDATE SKIP LOCKED gives their single-query claim.
+//
+// claimOldestUnprocessedEventMSSQL then attempts queryClaimEventByIDMSSQL
+// against each candidate id in order, oldest first, until one succeeds.
+//
+// candidateBatchSizeMSSQL bounds how many oldest candidates are read before
+// giving up. It is a tuning knob, not a correctness bound: every candidate
+// here is read without a lock, so reading more of them costs a slightly
+// larger result set and nothing else. 10 covers any realistic number of
+// workflows concurrently awaiting the exact same (tenant, event type, keys)
+// tuple at once; raising it later, if a deployment ever needs to, is a
+// one-line change left as a follow-up rather than a speculative day-one
+// knob.
+const candidateBatchSizeMSSQL = 10
+
+var queryCandidateUnprocessedEventIDsMSSQL = fmt.Sprintf(`SELECT TOP (%d) id
+FROM ingested_events WITH (READPAST)
 WHERE tenant_id = $1
   AND event_type = $2
   AND key1 = $3
   AND key2 = $4
   AND key3 = $5
   AND processed = 0
-ORDER BY received_at`,
-}
+ORDER BY received_at`, candidateBatchSizeMSSQL)
+
+// queryClaimEventByIDMSSQL targets exactly one row by its primary key, so it
+// cannot need to prove anything about any other row to execute -- the
+// defect this whole replacement exists for has no equivalent here by
+// construction, not by measurement. READPAST means a candidate another
+// transaction is already mid-claim on is skipped (zero rows affected, seen
+// by the caller as sql.ErrNoRows) rather than blocked on, so
+// claimOldestUnprocessedEventMSSQL moves on to the next candidate instead of
+// waiting on it.
+var queryClaimEventByIDMSSQL = `UPDATE TOP (1) ingested_events WITH (READPAST, ROWLOCK)
+SET processed = 1, status = 'consumed'
+OUTPUT INSERTED.id, INSERTED.event_type, INSERTED.event_data, INSERTED.received_at
+WHERE id = $1 AND processed = 0`

@@ -256,6 +256,25 @@ func TestAwaitEventConcurrentClaimsSkipTheLockedRow(t *testing.T) {
 				if err != nil {
 					t.Fatalf("begin claim tx: %v", err)
 				}
+				// MSSQL goes through the real production path
+				// (claimOldestUnprocessedEventMSSQL, claim.go) rather than a
+				// single locked SELECT -- cleat#2821/#2866 replaced the
+				// latter because it does not lock only the row it returns on
+				// this dialect. Calling the unexported function directly
+				// (same package) keeps this test exercising the actual
+				// mechanism instead of a hand-rolled duplicate of it.
+				if dialect == plugin.DialectMSSQL {
+					claimed, err := claimOldestUnprocessedEventMSSQL(seedCtx, tx, tenantID.String(), "order.created", "", "", "")
+					if err != nil {
+						_ = tx.Rollback()
+						t.Fatalf("claim query: %v", err)
+					}
+					if claimed == nil {
+						_ = tx.Rollback()
+						t.Fatalf("claim query: no claimable row found")
+					}
+					return tx, claimed.EventID
+				}
 				var (
 					eventID    uuid.UUID
 					eventType  string
@@ -288,12 +307,135 @@ func TestAwaitEventConcurrentClaimsSkipTheLockedRow(t *testing.T) {
 			}
 			if gotB == gotA {
 				t.Errorf("second claim got the SAME row (%s) the first claim is still holding -- "+
-					"on %s, the claim query is not locking the row it selects "+
-					"(FOR UPDATE SKIP LOCKED / WITH (UPDLOCK, READPAST, ROWLOCK) is missing or ineffective)",
+					"on %s, the claim mechanism is not locking the row it selects",
 					gotB, tc.name)
 			}
 			if gotB != secondID {
 				t.Errorf("second claim got %s, want the next-oldest event %s", gotB, secondID)
+			}
+		})
+	}
+}
+
+// TestAwaitEventOldestClaimDoesNotStarveASecondOldestEventAtScale is
+// cleat#2821/#2866, and it is the test TestAwaitEventConcurrentClaimsSkipTheLockedRow
+// above cannot be -- cleat-review's finding on #2869: that test passes on
+// unfixed develop MSSQL, on a fresh database, because two rows belonging to
+// one tenant are too few to trigger the bug. #2821's own isolation needed a
+// realistic cross-tenant backlog OLDER than the claiming tenant's own rows
+// before the starvation reproduced; a near-empty table happens to dodge it,
+// which is exactly how Version 8's migration comment (migrations.go) first
+// mis-stated the existing index as a sufficient fix.
+//
+// Drives the real tryClaim (claim.go), not a hand-rolled query, holding A's
+// claim open through its beforeCommit hook -- a genuine second goroutine and
+// a genuine second transaction on a genuine second connection, not the
+// sequential same-goroutine simulation the test above uses. Runs on all
+// three dialects: Postgres and MySQL are not expected to ever have exhibited
+// this (FOR UPDATE SKIP LOCKED locks only the row it returns on both), and
+// this test is what would catch a regression there too.
+func TestAwaitEventOldestClaimDoesNotStarveASecondOldestEventAtScale(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		td   testutil.Dialect
+	}{
+		{"postgres", testutil.DialectPostgres},
+		{"mysql", testutil.DialectMySQL},
+		{"mssql", testutil.DialectMSSQL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testutil.TestDB(t, tc.td)
+			dialect := plugin.Dialect(string(tc.td))
+			quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+			p := &Plugin{dialect: dialect, logger: quiet}
+			if err := plugin.RunMigrations(context.Background(), db, dialect, nil,
+				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
+				t.Fatalf("apply migrations: %v", err)
+			}
+			p.db = &engine.SQLDBAdapter{DB: db, Dialect: dialect}
+
+			tenantID := uuid.New()
+			oldestID := uuid.New()
+			secondID := uuid.New()
+			now := time.Now()
+			seedCtx := plugin.ForTenant(context.Background(), tenantID)
+
+			// The cross-tenant backlog cleat#2821's own isolation needed --
+			// without it, this case does not distinguish fixed from unfixed
+			// code on any dialect.
+			const backlog = 200
+			for i := 0; i < backlog; i++ {
+				otherTenant := uuid.New()
+				otherCtx := plugin.ForTenant(context.Background(), otherTenant)
+				mustInsertIngestedEventAt(t, otherCtx, p, uuid.New(), otherTenant, "order.created",
+					now.Add(-5*time.Hour-time.Duration(i)*time.Second))
+			}
+
+			mustInsertIngestedEventAt(t, seedCtx, p, oldestID, tenantID, "order.created", now.Add(-2*time.Hour))
+			mustInsertIngestedEventAt(t, seedCtx, p, secondID, tenantID, "order.created", now.Add(-time.Hour))
+
+			// cleat-review's finding on #2869: SQL Server's plan cache carries
+			// this test's own isolation hazard. Run alone against a fresh
+			// database, the unfixed (pre-#2869) query plan starves B
+			// deterministically -- but run as part of the whole package, as
+			// CI does, a plan CACHED by an earlier test's identical query text
+			// (TestAwaitEventConcurrentClaimsSkipTheLockedRow, same statement,
+			// same shape) gets reused here and happens not to exhibit the
+			// starvation, so the unfixed code passed 2/2 run that way. A
+			// DATABASE-scoped clear (not server-wide, to avoid disturbing any
+			// other database sharing this instance) forces a fresh
+			// optimization for this test's own statement regardless of what
+			// ran before it in the same process. Postgres/MySQL have no
+			// equivalent concept here and need no such step.
+			if tc.td == testutil.DialectMSSQL {
+				if _, err := p.db.Exec(context.Background(),
+					`ALTER DATABASE SCOPED CONFIGURATION CLEAR PROCEDURE_CACHE`); err != nil {
+					t.Fatalf("clear MSSQL procedure cache: %v", err)
+				}
+			}
+
+			holding := make(chan struct{})
+			release := make(chan struct{})
+			type claimResult struct {
+				claimed *ClaimedEvent
+				err     error
+			}
+			doneA := make(chan claimResult, 1)
+
+			go func() {
+				claimed, err := tryClaim(seedCtx, p.db, dialect, tenantID.String(), "order.created", "", "", "",
+					func(c *ClaimedEvent) error {
+						close(holding)
+						<-release
+						return nil
+					})
+				doneA <- claimResult{claimed, err}
+			}()
+
+			<-holding // A has claimed and is holding its transaction open, uncommitted
+
+			claimedB, errB := tryClaim(seedCtx, p.db, dialect, tenantID.String(), "order.created", "", "", "", nil)
+
+			close(release)
+			resA := <-doneA
+
+			if resA.err != nil {
+				t.Fatalf("claim A: %v", resA.err)
+			}
+			if resA.claimed == nil || resA.claimed.EventID != oldestID {
+				t.Fatalf("claim A got %+v, want the oldest event %s", resA.claimed, oldestID)
+			}
+			if errB != nil {
+				t.Fatalf("claim B: %v", errB)
+			}
+			if claimedB == nil {
+				t.Fatalf("claim B found NOTHING while A's claim on the oldest row was still open -- "+
+					"on %s, a concurrent claim is starved by a lock on a DIFFERENT row it never "+
+					"needed (cleat#2821)", tc.name)
+			}
+			if claimedB.EventID != secondID {
+				t.Errorf("claim B got %s, want the second-oldest event %s", claimedB.EventID, secondID)
 			}
 		})
 	}

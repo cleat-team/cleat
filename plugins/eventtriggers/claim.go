@@ -137,12 +137,73 @@ func ClaimOrRegisterAwaiter(
 // matching unprocessed row in its own transaction, or report (nil, nil) if
 // none exists right now. Extracted so ClaimOrRegisterAwaiter can call it
 // twice -- see its own doc comment for why.
+//
+// The actual "find and lock" step is dialect-split as of cleat#2821/#2866:
+// Postgres and MySQL keep the original single-query shape
+// (claimOldestUnprocessedEventLocking), because FOR UPDATE SKIP LOCKED on
+// those two dialects locks only the row it returns. SQL Server's closest
+// equivalent does not have that guarantee -- see queryCandidateUnprocessedEventIDsMSSQL's
+// doc comment in queries.go for the measured mechanism -- so it gets its own
+// path (claimOldestUnprocessedEventMSSQL) rather than reusing one that is
+// provably unsafe on this dialect.
 func tryClaim(
 	ctx context.Context,
 	db plugin.PluginDB,
 	dialect plugin.Dialect,
 	tenantID, eventType, key1, key2, key3 string,
 	beforeCommit func(*ClaimedEvent) error,
+) (*ClaimedEvent, error) {
+	tx, err := db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("event-triggers: begin claim transaction: %w", err)
+	}
+	defer tx.Rollback() // no-op once Commit has succeeded
+
+	var claimed *ClaimedEvent
+	if dialect == plugin.DialectMSSQL {
+		claimed, err = claimOldestUnprocessedEventMSSQL(ctx, tx, tenantID, eventType, key1, key2, key3)
+	} else {
+		claimed, err = claimOldestUnprocessedEventLocking(ctx, tx, dialect, tenantID, eventType, key1, key2, key3)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if claimed == nil {
+		// Nothing was locked (or, on MSSQL, nothing was claimable), so there
+		// is nothing to release beyond the deferred Rollback -- but do it now
+		// rather than holding the transaction open any longer than the
+		// query that needed it.
+		_ = tx.Rollback()
+		return nil, nil
+	}
+
+	if beforeCommit != nil {
+		if err := beforeCommit(claimed); err != nil {
+			// Falls through to the deferred Rollback: the row stays
+			// unprocessed and the next claim can retry it, rather than
+			// reporting an error for an event that is durably consumed with
+			// no way to ever report it again (cleat#2654).
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("event-triggers: commit claim: %w", err)
+	}
+
+	return claimed, nil
+}
+
+// claimOldestUnprocessedEventLocking is the Postgres/MySQL claim path,
+// unchanged in behavior from before cleat#2821/#2866: a single query locks
+// and returns the oldest matching row (FOR UPDATE SKIP LOCKED locks only
+// that row on these two dialects), then a plain UPDATE by id marks it
+// consumed in the same transaction.
+func claimOldestUnprocessedEventLocking(
+	ctx context.Context,
+	tx plugin.PluginTx,
+	dialect plugin.Dialect,
+	tenantID, eventType, key1, key2, key3 string,
 ) (*ClaimedEvent, error) {
 	var (
 		eventID    uuid.UUID
@@ -151,21 +212,10 @@ func tryClaim(
 		receivedAt time.Time
 	)
 
-	tx, err := db.Begin(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("event-triggers: begin claim transaction: %w", err)
-	}
-	defer tx.Rollback() // no-op once Commit has succeeded
-
-	err = plugin.ScanRow(tx.QueryRow(ctx,
+	err := plugin.ScanRow(tx.QueryRow(ctx,
 		queryOldestUnprocessedEventForClaim.For(dialect),
 		tenantID, eventType, key1, key2, key3), &eventID, &gotType, &eventData, &receivedAt)
-
 	if errors.Is(err, sql.ErrNoRows) {
-		// Nothing was locked, so there is nothing to release beyond the
-		// deferred Rollback -- but do it now rather than holding the
-		// transaction open any longer than the query that needed it.
-		_ = tx.Rollback()
 		return nil, nil
 	}
 	if err != nil {
@@ -184,26 +234,85 @@ func tryClaim(
 		return nil, fmt.Errorf("event-triggers: mark event consumed: %w", err)
 	}
 
-	claimed := &ClaimedEvent{
+	return &ClaimedEvent{
 		EventID:    eventID,
 		EventType:  gotType,
 		EventData:  eventData,
 		ReceivedAt: receivedAt,
-	}
+	}, nil
+}
 
-	if beforeCommit != nil {
-		if err := beforeCommit(claimed); err != nil {
-			// Falls through to the deferred Rollback: the row stays
-			// unprocessed and the next claim can retry it, rather than
-			// reporting an error for an event that is durably consumed with
-			// no way to ever report it again (cleat#2654).
-			return nil, err
+// claimOldestUnprocessedEventMSSQL is cleat#2821/#2866's fix. It reads a
+// small, UNLOCKED, received_at-ordered candidate id list
+// (queryCandidateUnprocessedEventIDsMSSQL), then attempts to claim
+// candidates one at a time, oldest first, via an equality UPDATE on the
+// primary key (queryClaimEventByIDMSSQL). A point UPDATE on `id` cannot need
+// to prove anything about any other row to execute, so it cannot lock more
+// than the one row it targets -- seeing queries.go's doc comment on those
+// two queries for the mechanism this avoids and why the candidate read must
+// stay unlocked for that to hold.
+//
+// READPAST on the claim attempt means a candidate another transaction is
+// already mid-claim on is skipped (zero rows affected, reported here as
+// sql.ErrNoRows) rather than blocked, so this moves on to the next
+// candidate instead of waiting on it.
+func claimOldestUnprocessedEventMSSQL(
+	ctx context.Context,
+	tx plugin.PluginTx,
+	tenantID, eventType, key1, key2, key3 string,
+) (*ClaimedEvent, error) {
+	rows, err := tx.Query(ctx, queryCandidateUnprocessedEventIDsMSSQL, tenantID, eventType, key1, key2, key3)
+	if err != nil {
+		return nil, fmt.Errorf("event-triggers: query candidate events: %w", err)
+	}
+	var candidates []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		// plugin.ScanRow, not a bare rows.Scan -- cleat#1137. SQL Server
+		// returns UNIQUEIDENTIFIER in mixed-endian byte order; a raw Scan
+		// into *uuid.UUID accepts those bytes without error and yields a
+		// value that silently fails to match the SAME row when bound back
+		// into a later query's WHERE clause, which is exactly what the
+		// claim attempt below does with this id. Measured directly while
+		// building this function: a bare rows.Scan here made every claim
+		// attempt report sql.ErrNoRows against a row that demonstrably
+		// existed and was demonstrably unprocessed.
+		if err := plugin.ScanRow(rows, &id); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("event-triggers: scan candidate event: %w", err)
 		}
+		candidates = append(candidates, id)
 	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("event-triggers: commit claim: %w", err)
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("event-triggers: list candidate events: %w", err)
 	}
+	rows.Close()
 
-	return claimed, nil
+	for _, id := range candidates {
+		var (
+			eventID    uuid.UUID
+			gotType    string
+			eventData  []byte
+			receivedAt time.Time
+		)
+		err := plugin.ScanRow(tx.QueryRow(ctx, queryClaimEventByIDMSSQL, id),
+			&eventID, &gotType, &eventData, &receivedAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			// Already claimed, or locked by a concurrent claimer, between
+			// our unlocked read above and this attempt -- try the next
+			// oldest candidate rather than giving up.
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("event-triggers: claim event %s: %w", id, err)
+		}
+		return &ClaimedEvent{
+			EventID:    eventID,
+			EventType:  gotType,
+			EventData:  eventData,
+			ReceivedAt: receivedAt,
+		}, nil
+	}
+	return nil, nil
 }

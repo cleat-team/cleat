@@ -24,6 +24,7 @@ package eventtriggers
 import (
 	"testing"
 
+	"github.com/cleat-team/cleat/plugin"
 	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
@@ -31,10 +32,41 @@ func TestEveryQueryArmRunsOnItsOwnDialect(t *testing.T) {
 	plugintest.RunEveryArm(t, &Plugin{}, []plugintest.Arm{
 		{Name: "queryUnprocessedEvents", Q: queryUnprocessedEvents, WantCols: 5},
 		{
+			// Postgres/MySQL only, as of cleat#2821/#2866: this Query has
+			// no MSSQL arm any more (see the comment left in its place in
+			// queries.go), and a.Q.For(dialect) falls back to Default --
+			// Postgres's FOR UPDATE SKIP LOCKED/LIMIT syntax, invalid
+			// T-SQL -- for any dialect with no arm of its own. Without
+			// Dialects here, this would run Default against a real SQL
+			// Server and fail on syntax, not on anything this test means
+			// to check.
 			Name:     "queryOldestUnprocessedEventForClaim",
 			Q:        queryOldestUnprocessedEventForClaim,
 			Args:     []any{"00000000-0000-0000-0000-000000000001", "some.event", "", "", ""},
 			WantCols: 4,
+			Dialects: []plugin.Dialect{plugin.DialectPostgres, plugin.DialectMySQL},
+		},
+		{
+			// The MSSQL replacement for the arm above -- cleat#2821/#2866.
+			// Both are plain string literals, not a plugin.Query, so they
+			// are wrapped here rather than passed directly; WantCols checks
+			// the shape claim.go's Scan calls actually rely on.
+			Name:     "queryCandidateUnprocessedEventIDsMSSQL",
+			Q:        plugin.Query{MSSQL: queryCandidateUnprocessedEventIDsMSSQL},
+			Args:     []any{"00000000-0000-0000-0000-000000000001", "some.event", "", "", ""},
+			WantCols: 1,
+			Dialects: []plugin.Dialect{plugin.DialectMSSQL},
+		},
+		{
+			// A point UPDATE OUTPUT -- exercised with an id that matches no
+			// row, which is the common case (every real candidate already
+			// came from queryCandidateUnprocessedEventIDsMSSQL above and
+			// genuinely exists); the point here is that the STATEMENT is
+			// accepted, which an empty OUTPUT result set already proves.
+			Name:     "queryClaimEventByIDMSSQL",
+			Q:        plugin.Query{MSSQL: queryClaimEventByIDMSSQL},
+			Args:     []any{"00000000-0000-0000-0000-000000000001"},
+			Dialects: []plugin.Dialect{plugin.DialectMSSQL},
 		},
 	})
 }
