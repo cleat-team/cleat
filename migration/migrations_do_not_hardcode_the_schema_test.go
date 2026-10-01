@@ -63,6 +63,7 @@ func TestMigrationsDoNotHardcodeTheSchema(t *testing.T) {
 		`WHERE schemaname = 'public'`:                                "063: rewrites the pre-#1278 kv_store policy, and the databases that have one ran under the plugin search_path pin, so their kv_store is in public by construction",
 		`DROP POLICY kv_store_tenant_isolation ON public.kv_store;`:  "063: same",
 		`CREATE POLICY kv_store_tenant_isolation ON public.kv_store`: "063: same",
+		`CHECK (exposure IN ('public', 'auth', 'internal'));`:        "005 (cleat#1986): 'public' here is one of three exposure-class VALUES in a CHECK constraint, not the schema -- the bare-word regex cannot tell a string literal from a schema name",
 	}
 
 	var findings []string

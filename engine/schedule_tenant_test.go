@@ -115,8 +115,18 @@ func TestScheduleTenantID_IsTheStoresOwnNotTheCallers(t *testing.T) {
 // connects as `postgres`, and a superuser bypasses row security
 // unconditionally, FORCE included. GetDueSchedules had no predicate of its
 // own, so a deployment connecting as a superuser rather than as the cleat_app
-// role from migration 005 had a scheduler that fired every tenant's schedules.
-// The predicate makes that independent of which role connects.
+// role from migration `005_app_role.sql` had a scheduler that fired every
+// tenant's schedules. The predicate makes that independent of which role
+// connects.
+//
+// 005_app_role.sql is long retired -- 001_schema.sql's own header names it
+// among the files it absorbed -- and the bare "migration 005" this comment
+// used to cite is a NUMBER, not a file, so cleat#1986's unrelated
+// 005_workflow_defs_exposure_class.sql at that same number silently satisfied
+// scripts/check-postgres-migration-citations.py's is_real() check by
+// coincidence. Naming the retired filename keeps this citation correctly
+// dangling (and correctly baselined as historical) regardless of what a later
+// migration happens to be numbered.
 //
 // The consequence for this test is worth stating plainly: it now passes on
 // Postgres because of the SQL, not because of RLS. Whether RLS itself blocks
