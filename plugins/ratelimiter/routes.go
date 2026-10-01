@@ -10,7 +10,12 @@ import (
 	"github.com/cleat-team/cleat/plugin"
 )
 
-// upsertQuery provides dialect-specific upsert for rate limits.
+// upsertQuery provides dialect-specific upsert for rate limits. The MSSQL
+// variant's WITH (HOLDLOCK) (cleat#2904/#2915) closes the window where two
+// concurrent PUTs establishing a limit under the same new (tenant_id,
+// limit_key) -- plain HTTP request concurrency, handlePut has no
+// serialization of its own -- both evaluate WHEN NOT MATCHED true and one
+// takes a duplicate-key error instead of the UPDATE branch.
 var upsertQuery = plugin.Query{
 	Default: `
 		INSERT INTO rate_limits (tenant_id, limit_key, max_requests, window_seconds)
@@ -27,7 +32,7 @@ var upsertQuery = plugin.Query{
 		window_seconds = VALUES(window_seconds),
 		updated_at = now()`,
 	MSSQL: `
-		MERGE INTO rate_limits AS target
+		MERGE INTO rate_limits WITH (HOLDLOCK) AS target
 		USING (VALUES ($1, $2, $3, $4)) AS source (tenant_id, limit_key, max_requests, window_seconds)
 		ON target.tenant_id = source.tenant_id AND target.limit_key = source.limit_key
 		WHEN MATCHED THEN

@@ -367,6 +367,15 @@ func (s *MSSQLStore) RecordWorkflowMemorySample(ctx context.Context, defName str
 	})
 }
 
+// WITH (HOLDLOCK) on the target MERGE below (cleat#2904/#2915): this is
+// called once per in-flight instance of a given workflow DEFINITION, from
+// however many separate workers currently hold claims on separate instances
+// of it -- the opposite of a narrow race, this is the ordinary case for any
+// definition with more than one running instance. withRollbackGuaranteedRetry
+// (the caller, RecordWorkflowMemorySample) only retries deadlock-victim and
+// snapshot-conflict errors (isMSSQLRollbackGuaranteed, mssql_retry.go) --
+// NOT a duplicate-key violation, so a race here surfaces as an unretried,
+// user-visible error rather than self-healing.
 func (s *MSSQLStore) recordWorkflowMemorySampleOnce(ctx context.Context, defName string, sampleBytes int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -382,7 +391,7 @@ func (s *MSSQLStore) recordWorkflowMemorySampleOnce(ctx context.Context, defName
 	}
 
 	_, err = tx.ExecContext(ctx, `
-		MERGE workflow_memory_stats AS target
+		MERGE workflow_memory_stats WITH (HOLDLOCK) AS target
 		USING (SELECT @p1 AS def_name, @p2 AS mean_bytes, @p3 AS tenant_id) AS source
 		ON target.def_name = source.def_name AND target.tenant_id = @p3
 		WHEN MATCHED THEN UPDATE SET

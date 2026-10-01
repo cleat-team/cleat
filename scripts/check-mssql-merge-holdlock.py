@@ -81,12 +81,46 @@ EXEMPT = "exempt"
 DEFERRED = "deferred"
 
 ALLOWLIST = {
-    # Deliberately empty: reachability has not been assessed for any
-    # current candidate (cleat#2904's own filing), so nothing has been
-    # checked carefully enough to call EXEMPT. Every candidate is in
-    # mssql-merge-holdlock-deferred.tsv instead. An EXEMPT entry belongs
-    # here only once someone has actually traced a statement's call path
-    # and confirmed it cannot be raced by two writers on a fresh key.
+    # cleat#2904/#2915: migrations/mssql/002_defaults.sql's MERGE into
+    # admin.rls_predicate_form cannot be raced by two concurrent writers --
+    # verified, not assumed. MSSQL migrations serialize through a true
+    # cross-process application lock (migration/runner.go: sp_getapplock on
+    # `migrationsMSSQLLock`, held on a pinned session for the duration of the
+    # migration run, released in a defer on every exit), so no two migration
+    # runners can ever execute this statement against the same database
+    # concurrently. This is not a theoretical guarantee: migration/runner.go's
+    # own comment above `session()` records cleat#2117's measurement of four
+    # concurrent Runs against an empty database BEFORE this lock existed --
+    # SQL Server failed 3 of 4 (deadlock victim 1205, "already an object
+    # named" 2714) -- which is why the lock exists at all. The statement is
+    # also idempotent on its own terms (WHEN MATCHED re-sets the same literal
+    # 'plain' value), so even a sequential re-run is harmless -- the only
+    # question was concurrent execution, and that is what sp_getapplock rules
+    # out.
+    #
+    # cleat-review found a SECOND executor during #2915's review: test-only,
+    # not migration/runner.go. engine/testutil/mssql_admin.go's
+    # restoreMSSQLPlainPredicate re-execs 002_defaults.sql (plus
+    # 003_procedures.sql) through its own *sql.DB, entirely outside the
+    # migration runner and its sp_getapplock. It is still safe, for the same
+    # reason stated above rather than a new one: its only non-fail-safe call
+    # site (mssql_admin.go, in releaseMSSQLAdmin) runs it only after this
+    # process has taken EXCLUSIVE on the DISTINCT `cleat_testutil_mssql_admin`
+    # applock (cleat#2899) that guards admin.rls_predicate_form's test-time
+    # mutation, so it cannot overlap a concurrent restore either -- and the
+    # statement's own idempotence (above) covers the one documented fail-safe
+    # call site that runs without any lock held, which fires only when
+    # cleat#2899's own invariant ("the lock is always acquired before this
+    # pool is cached") has already failed.
+    ("migrations/mssql/002_defaults.sql", "admin.rls_predicate_form"): (
+        EXEMPT,
+        "Serialized by migration/runner.go's sp_getapplock (migrationsMSSQLLock) -- "
+        "no two migration runners can execute this statement against the same "
+        "database concurrently, so the race HOLDLOCK closes cannot occur here. "
+        "Also executed by engine/testutil/mssql_admin.go's "
+        "restoreMSSQLPlainPredicate, outside that lock -- see the comment above "
+        "for why that second executor does not reopen the race.",
+    ),
 }
 
 

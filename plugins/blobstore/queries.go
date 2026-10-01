@@ -3,6 +3,30 @@ package blobstore
 import "github.com/cleat-team/cleat/plugin"
 
 // Dialect-specific query variants for structurally different SQL.
+//
+// Every MSSQL MERGE below carries WITH (HOLDLOCK) on its target (cleat#2904/
+// #2915): SQL Server under READ COMMITTED can evaluate WHEN NOT MATCHED true
+// on two concurrent writers racing the same not-yet-existing key, and
+// HOLDLOCK is what closes that window. Reachability, checked per statement
+// rather than assumed:
+//   - upsertBlobContent / upsertBlobContentData are keyed on sha256, which is
+//     content-addressed -- two independent callers uploading identical bytes
+//     (the same config file, the same empty payload) compute the identical
+//     fresh key, and both are reachable from host_functions.go's blobPut
+//     AND routes.go's HTTP PUT, two callers with no serialization between
+//     them. memoryBackend.Put's own Backend interface doc comment requires
+//     "safe for concurrent use".
+//   - upsertBlobIndex / upsertBlobIndexWithTTL are keyed on (tenant_id,
+//     [key]), a tenant-chosen string -- ordinary multi-request concurrency
+//     (two HTTP PUTs, or a host-call racing an HTTP PUT) can target the
+//     identical fresh key within one tenant.
+//   - upsertBlobRef is keyed on (workflow_id, sha256). Different workflow
+//     instances never share a workflow_id, so the reachable race is
+//     narrower: a zombie worker (reaped and reclaimed mid-step, see
+//     engine/flush.go's "a zombie worker's flush, racing a reclaim") still
+//     executing blobPut for a workflow concurrently with the worker that
+//     reclaimed it -- the same hazard class engine/ already fences against
+//     for its own event history, which this plugin's host call is not.
 var upsertBlobContent = plugin.Query{
 	Default: `INSERT INTO blob_content (sha256, size, ref_count, storage_backend, s3_key)
 VALUES ($1, $2, 1, $3, $4)
@@ -12,7 +36,7 @@ SET ref_count = blob_content.ref_count + 1`,
 VALUES ($1, $2, 1, $3, $4)
 ON DUPLICATE KEY UPDATE
 ref_count = ref_count + 1`,
-	MSSQL: `MERGE blob_content AS target
+	MSSQL: `MERGE blob_content WITH (HOLDLOCK) AS target
 USING (VALUES ($1, $2, 1, $3, $4)) AS source (sha256, size, ref_count, storage_backend, s3_key)
 ON target.sha256 = source.sha256
 WHEN MATCHED THEN UPDATE SET ref_count = target.ref_count + 1
@@ -29,7 +53,7 @@ SET data = EXCLUDED.data`,
 VALUES ($1, $2, $3, 0, 'memory')
 ON DUPLICATE KEY UPDATE
 data = VALUES(data)`,
-	MSSQL: `MERGE blob_content AS target
+	MSSQL: `MERGE blob_content WITH (HOLDLOCK) AS target
 USING (VALUES ($1, $2, $3, 0, 'memory')) AS source (sha256, size, data, ref_count, storage_backend)
 ON target.sha256 = source.sha256
 WHEN MATCHED THEN UPDATE SET data = source.data
@@ -41,7 +65,7 @@ var upsertBlobRef = plugin.Query{
 	Default: `INSERT INTO workflow_blob_refs (workflow_id, sha256)
 VALUES ($1, $2) ON CONFLICT DO NOTHING`,
 	MySQL: `INSERT IGNORE INTO workflow_blob_refs (workflow_id, sha256) VALUES ($1, $2)`,
-	MSSQL: `MERGE workflow_blob_refs AS target
+	MSSQL: `MERGE workflow_blob_refs WITH (HOLDLOCK) AS target
 USING (VALUES ($1, $2)) AS source (workflow_id, sha256)
 ON target.workflow_id = source.workflow_id AND target.sha256 = source.sha256
 WHEN NOT MATCHED THEN INSERT (workflow_id, sha256) VALUES (source.workflow_id, source.sha256);`,
@@ -60,7 +84,7 @@ ON DUPLICATE KEY UPDATE
 sha256 = VALUES(sha256), size = VALUES(size),
 content_type = VALUES(content_type), tags = VALUES(tags),
 expires_at = NULL`,
-	MSSQL: `MERGE blob_index AS target
+	MSSQL: `MERGE blob_index WITH (HOLDLOCK) AS target
 USING (VALUES ($1, $2, $3, $4, $5, $6)) AS source ([key], tenant_id, sha256, size, content_type, tags)
 ON target.tenant_id = source.tenant_id AND target.[key] = source.[key]
 WHEN MATCHED THEN UPDATE SET
@@ -84,7 +108,7 @@ ON DUPLICATE KEY UPDATE
 sha256 = VALUES(sha256), size = VALUES(size),
 content_type = VALUES(content_type), tags = VALUES(tags),
 expires_at = VALUES(expires_at)`,
-	MSSQL: `MERGE blob_index AS target
+	MSSQL: `MERGE blob_index WITH (HOLDLOCK) AS target
 USING (VALUES ($1, $2, $3, $4, $5, $6, $7)) AS source ([key], tenant_id, sha256, size, content_type, tags, expires_at)
 ON target.tenant_id = source.tenant_id AND target.[key] = source.[key]
 WHEN MATCHED THEN UPDATE SET
