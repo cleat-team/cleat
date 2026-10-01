@@ -526,6 +526,21 @@ jobs:
           scripts/check-mssql-tenant-scoped-reads.py
           LINT_GUARD_EOF
 
+      # SQL Server's MERGE under READ COMMITTED can evaluate WHEN NOT
+      # MATCHED true on two concurrent writers racing the same not-yet-
+      # existing key; WITH (HOLDLOCK) is what closes the window
+      # (cleat#2903/#2904). Structural rather than a one-time count of
+      # today's candidates -- the review that found this family also found
+      # the first attempt at enumerating it (in the issue) undercounted by
+      # four, which is the argument for a guard over a fixed list.
+      - name: MSSQL MERGE HOLDLOCK guard
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "MSSQL MERGE HOLDLOCK guard" >> "$LINT_FAILURES_FILE"
+          scripts/check-mssql-merge-holdlock.py --self-test
+          scripts/check-mssql-merge-holdlock.py
+          LINT_GUARD_EOF
+
       # Three workstreams append sections to IMPROVEMENT-PLAN.md at once, each
       # picking the next free number against a develop that has already moved.
       # The collision exists only in the merge, and a duplicate heading renders
