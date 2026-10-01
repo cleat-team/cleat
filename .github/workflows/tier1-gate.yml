@@ -539,13 +539,21 @@ jobs:
       # stdout already names what it excluded, what it ran, and what failed.
       - name: Tier 1 gate -- engine shard ${{ matrix.shard }}/3
         if: github.event_name != 'merge_group'
+        env:
+          # A distinct local filename per shard, not just a distinct artifact
+          # NAME -- tier1-push-failure-notifier.yml downloads every shard's
+          # artifact with merge-multiple: true, which merges by the file's
+          # name INSIDE the artifact, not the artifact's own name. All shards
+          # writing "tier-gate.log" collided there, so only one shard's
+          # failures ever reached the notifier (cleat#2877).
+          TIER_GATE_LOG: tier-gate-engine-${{ matrix.shard }}.log
         run: scripts/tier-gate.sh --shard ${{ matrix.shard }}/3
 
       # The log on failure, because the gate deliberately keeps it rather than
       # deleting its evidence -- re-running the whole shard to find out what
       # broke is not a debugging strategy. Guarded on merge_group too: the real
-      # step above did not run, so tier-gate.log does not exist, and `always()`
-      # alone would upload a missing-file failure on every queue run.
+      # step above did not run, so tier-gate-engine-N.log does not exist, and
+      # `always()` alone would upload a missing-file failure on every queue run.
       #
       # continue-on-error, deliberately -- and this is a NARROWER exemption
       # than the "no continue-on-error" line at the top of this file, not a
@@ -566,7 +574,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: tier-gate-log-engine-${{ matrix.shard }}-${{ github.sha }}
-          path: tier-gate.log
+          path: tier-gate-engine-${{ matrix.shard }}.log
           retention-days: 30
 
   tier1-rest:
@@ -737,6 +745,11 @@ jobs:
 
       - name: Tier 1 gate -- rest shard 3/3
         if: github.event_name != 'merge_group'
+        env:
+          # See the engine shard's identical comment (cleat#2877): a distinct
+          # local filename per job, not just a distinct artifact name, is what
+          # survives tier1-push-failure-notifier.yml's merge-multiple download.
+          TIER_GATE_LOG: tier-gate-rest.log
         run: scripts/tier-gate.sh --shard 3/3
 
       # continue-on-error, for the same reason as tier1-engine's identical
@@ -749,7 +762,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: tier-gate-log-rest-${{ github.sha }}
-          path: tier-gate.log
+          path: tier-gate-rest.log
           retention-days: 30
 
   # The required status context. Named exactly "Tier 1 Gate" so
