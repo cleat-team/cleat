@@ -137,11 +137,16 @@ func (s *MSSQLStore) TraceWorkflow(ctx context.Context, workflowID, traceID stri
 // The dbo.tenants / dbo.tenant_api_keys pair is duplicate schema and should be
 // dropped in a migration -- not done here, because a DROP needs to know what
 // an existing deployment has put in them.
+//
+// Also mirrors auth.TenantStore.ResolveTenantFromAPIKey's expiry clause
+// (auth/tenant_store.go) -- cleat#2352 enforced expiry there but never
+// touched this store, so an expired key authenticated against any host that
+// wires an engine store directly instead of auth.TenantStore. cleat#2370.
 func (s *MSSQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
 	var tenantIDStr string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT CONVERT(NVARCHAR(36), tenant_id) FROM admin.tenant_api_keys
-		 WHERE key_hash = @p1 AND disabled_at IS NULL`, keyHash).Scan(&tenantIDStr)
+		 WHERE key_hash = @p1 AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > SYSUTCDATETIME())`, keyHash).Scan(&tenantIDStr)
 	if err != nil {
 		return uuid.Nil, err
 	}
