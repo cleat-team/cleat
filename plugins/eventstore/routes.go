@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"strings"
@@ -17,8 +18,11 @@ import (
 
 // isPKConflict returns true if the error is a primary key or unique
 // constraint violation. appendOnce's resync path uses this to recognise the
-// one case it needs to react to: a sequence number event_stream_head itself
-// never produced, claimed by a writer that bypasses it entirely.
+// one case it needs to react to within one transaction: a sequence number
+// event_stream_head itself never produced, claimed by a writer that
+// bypasses it entirely. handleAppend's outer retry loop also treats it as
+// retryable, for the case ONE resync cannot fix -- see
+// isRetryableAppendError.
 func isPKConflict(err error) bool {
 	if err == nil {
 		return false
@@ -30,6 +34,44 @@ func isPKConflict(err error) bool {
 		strings.Contains(s, "2627") || // MSSQL
 		strings.Contains(s, "1062") || // MySQL
 		strings.Contains(s, "23505") // PostgreSQL
+}
+
+// isRetryableAppendError reports whether appendOnce's failure is worth a
+// fresh attempt in a new transaction, from handleAppend's outer loop.
+//
+// Two cases, both measured by cleat-review on a mixed workload -- real
+// old-binary writers (develop's own read-MAX-then-insert, 32-attempt retry)
+// racing real new-code appenders against ONE stream, cleat#2268 round 2
+// (G4):
+//
+//   - isPKConflict, for a collision ONE resync inside appendOnce cannot
+//     clear: the resync reads MAX(sequence) and inserts at MAX+1, and if a
+//     DIFFERENT writer -- old or new -- claims that exact value in the gap
+//     between that read and that insert, the resync's own insert collides
+//     too. appendOnce does not loop on this itself (see its resync
+//     comment); a second attempt gets a fresh MAX read, which is enough in
+//     practice because the pattern that enables indefinite recollision
+//     would need a writer winning that same narrow gap every single time.
+//   - a deadlock or serialization failure, which carries no information
+//     about which side "deserves" to win and aborts the WHOLE transaction
+//     before resync logic even runs -- so there is nothing for appendOnce
+//     itself to react to; only a fresh attempt helps. Measured on the mixed
+//     workload: MySQL's upsertStreamHead step hit Error 1213 on every one
+//     of 10 concurrent new-code appends across three rounds, with zero
+//     retries before this fix (new-code-only load never triggers it, so
+//     cleat#2268 round 2's own concurrency test did not catch this).
+func isRetryableAppendError(err error) bool {
+	if isPKConflict(err) {
+		return true
+	}
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "1213") || // MySQL: deadlock found
+		strings.Contains(s, "40001") || // Postgres/MSSQL: serialization failure
+		strings.Contains(s, "40P01") || // Postgres: deadlock detected
+		strings.Contains(s, "1205") // MSSQL: transaction was deadlocked
 }
 
 func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
@@ -97,10 +139,42 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 	// shape that fix originally used with real serialization -- see
 	// upsertStreamHead's comment in queries.go for the mechanism. Two
 	// new-code transactions can never compute the same sequence for the same
-	// stream; appendOnce's one retry exists for a DIFFERENT writer entirely
-	// -- see its resync comment.
+	// stream; appendOnce's own one-shot resync exists for a DIFFERENT writer
+	// entirely -- see its resync comment.
+	//
+	// The loop below is for what ONE resync cannot clear: a mixed workload
+	// of old-binary and new-code writers hitting one stream at once
+	// (cleat-review + coordinator, cleat#2268 round 2, G4) produces both a
+	// second collision on the resync's own insert and outright
+	// deadlocks/serialization failures that abort the transaction before
+	// resync logic runs at all -- see isRetryableAppendError. New-code-only
+	// load never triggers either, so this never fires outside a rolling
+	// upgrade; the attempt count and backoff shape are the ones
+	// cleat#2260's own n=20 concurrent-append test tuned before cleat#2268
+	// replaced their original use (see git history for the measurement).
 	var sequence int64
-	err := p.appendOnce(r.Context(), tid, streamID, body, &sequence)
+	var err error
+	const maxAppendAttempts = 32
+	backoff := 5 * time.Millisecond
+	const maxBackoff = 100 * time.Millisecond
+	for attempt := 1; attempt <= maxAppendAttempts; attempt++ {
+		err = p.appendOnce(r.Context(), tid, streamID, body, &sequence)
+		if err == nil {
+			break
+		}
+		if !isRetryableAppendError(err) {
+			break
+		}
+		if attempt < maxAppendAttempts {
+			//nolint:gosec // G404: retry-backoff jitter, not a security context -- spreads concurrent losers apart so they don't retry in lockstep. No secret or token derives from it.
+			jitter := time.Duration(rand.Int64N(int64(backoff)))
+			time.Sleep(backoff/2 + jitter)
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
 	if err != nil {
 		p.logger.Error("eventstore: append", "stream", streamID, "error", err)
 		p.writeError(w, 500, "failed to append event")
@@ -138,17 +212,27 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 // and insertEvent's INSERT collides on the primary key an old worker
 // already committed (cleat-review + coordinator, cleat#2268 round 1).
 //
-// That collision is this function's ONLY retry trigger, detected by
-// isPKConflict, and the retry is bounded at one attempt: on collision, read
-// event_stream's actual MAX(sequence) for this stream (ground truth,
-// independent of what the head row believed), raise the head row to
-// MAX+1 via resyncStreamHead, and insert again at that value. The row lock
-// this transaction already holds on event_stream_head (taken above, by
-// upsertStreamHead) makes the raise race-free -- no other transaction can be
-// mid-upsert against the same stream while this one holds it. Once every
-// old-binary worker has exited, a stream stays resynced permanently: nothing
-// commits to event_stream a new-code transaction didn't account for in
-// event_stream_head's lock.
+// That collision is this function's ONLY in-transaction retry trigger,
+// detected by isPKConflict, and the retry is bounded at ONE attempt PER
+// CALL: on collision, read event_stream's actual MAX(sequence) for this
+// stream (ground truth, independent of what the head row believed), raise
+// the head row to MAX+1 via resyncStreamHead, and insert again at that
+// value. The row lock this transaction already holds on event_stream_head
+// (taken above, by upsertStreamHead) makes the raise race-free -- no other
+// transaction can be mid-upsert against the same stream while this one
+// holds it. Once every old-binary worker has exited, a stream stays
+// resynced permanently: nothing commits to event_stream a new-code
+// transaction didn't account for in event_stream_head's lock.
+//
+// One attempt is not enough for a BUSY mix of old and new writers, though:
+// a different writer can claim the resynced value in the gap between this
+// transaction's own MAX read and its insert, and a deadlock or
+// serialization failure can abort the transaction before any of this logic
+// runs at all. Neither is this function's job to retry -- it returns the
+// error, and handleAppend's outer loop (isRetryableAppendError) is what
+// gives a mixed workload enough attempts to make progress. See that loop's
+// comment for the measurement (cleat-review + coordinator, cleat#2268
+// round 2, G4).
 //
 // This does NOT fold the floor into upsertStreamHead's own statement --
 // round 1 did that, computing MAX(sequence) on every call, and deadlocked
