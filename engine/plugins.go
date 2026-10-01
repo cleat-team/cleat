@@ -251,7 +251,22 @@ func (psr *PluginStreamRegistry) UnhealthyError(pluginName string) error {
 // contain one somewhere inside a larger string. Same character class, so a
 // name this rejects is also a name ResolveSecretRefs would never have
 // resolved.
-var secretOnlyFieldRef = regexp.MustCompile(`^\$\{secret:[A-Za-z0-9_.-]{1,128}\}$`)
+//
+// MATCHED AGAINST THE RAW JSON BYTES (json.RawMessage), quotes included --
+// NOT against a json.Unmarshal'd Go string. cleat#2336: ResolveSecretRefs
+// (tenant_secrets.go) finds a reference by scanning the raw, undecoded JSON
+// text for the literal substring "${secret:", because that is the only text
+// it ever sees -- it runs before anything decodes the document. A value
+// written with JSON escaping that DECODES to a reference, e.g. the string
+// literal "${secret:name}", used to pass this check (which decoded
+// first, matched the decoded form) but could never be found by
+// ResolveSecretRefs's raw scan -- it reached the plugin call with the
+// placeholder text "${secret:name}" sitting in the field, unresolved and
+// indistinguishable from a successfully-resolved secret that happened to
+// contain that text. Matching the raw bytes makes this function reject
+// exactly the inputs the resolver could never have resolved, instead of
+// validating a promise the next stage cannot keep.
+var secretOnlyFieldRef = regexp.MustCompile(`^"\$\{secret:[A-Za-z0-9_.-]{1,128}\}"$`)
 
 // secretOnlyFieldRedactionMarker replaces a declared secret-only field's
 // value -- literal or reference alike -- wherever a call is refused and still
@@ -355,10 +370,11 @@ func checkSecretOnlyFields(secretOnlyFields []string, inputJSON string) string {
 				"key occurrence (%s); refusing the ambiguity rather than guessing which one a decoder would use",
 				declared, strings.Join(sorted, ", "))
 		}
-		var val string
-		if err := json.Unmarshal(rawValues[declared][0], &val); err != nil || !secretOnlyFieldRef.MatchString(val) {
+		if !secretOnlyFieldRef.Match(rawValues[declared][0]) {
 			return fmt.Sprintf("field %q is declared secret-only and must be exactly a "+
-				"${secret:NAME} reference; a literal value is refused", declared)
+				"${secret:NAME} reference, written with no JSON escaping inside it -- a literal "+
+				"value, a non-string value, or an escaped reference ResolveSecretRefs could never "+
+				"have found is refused", declared)
 		}
 	}
 	return ""
