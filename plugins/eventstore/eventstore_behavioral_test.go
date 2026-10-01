@@ -149,11 +149,12 @@ func (c *esConn) ExecContext(_ context.Context, query string, args []driver.Name
 }
 
 // execAppend handles insertEvent (queries.go): a plain INSERT with the
-// caller-computed sequence as an argument, not a RETURNING clause -- see
-// queries.go's comment on why handleAppend now reads the next sequence in
-// its own statement (queryMaxSeq below) rather than a subquery of this
-// INSERT. Returns a duplicate-key-shaped error if the (tenant, stream,
-// sequence) triple already exists, matching isPKConflict's substring check.
+// sequence appendOnce claimed from event_stream_head (queryUpsertStreamHead
+// below) as an argument, not a RETURNING clause. Still returns a
+// duplicate-key-shaped error if the (tenant, stream, sequence) triple
+// already exists, though cleat#2268 means nothing in production should hit
+// it anymore -- kept as a defensive simulation, not because any current
+// caller retries on it.
 func (c *esConn) execAppend(args []driver.NamedValue) (driver.Result, error) {
 	tidStr, err := esArgString(args, 1)
 	if err != nil {
@@ -236,10 +237,10 @@ func (c *esConn) QueryContext(_ context.Context, query string, args []driver.Nam
 
 	q := strings.ReplaceAll(query, "\n", " ")
 	switch {
-	case strings.Contains(q, "COALESCE(MAX(sequence)"):
+	case strings.Contains(q, "event_stream_head"):
 		c.db.mu.RLock()
 		defer c.db.mu.RUnlock()
-		return c.queryMaxSeq(args)
+		return c.queryUpsertStreamHead(args)
 	case strings.Contains(q, "event, created_at") && strings.Contains(q, "ORDER BY sequence ASC"):
 		c.db.mu.RLock()
 		defer c.db.mu.RUnlock()
@@ -249,11 +250,16 @@ func (c *esConn) QueryContext(_ context.Context, query string, args []driver.Nam
 	}
 }
 
-// queryMaxSeq handles nextSequenceForStream (queries.go): the separate
-// read-side statement appendOnce runs before its INSERT. Its 2-arg shape
-// (tenant, stream) is unchanged by cleat#2260 -- only the INSERT moved to
-// ExecContext's execAppend, above.
-func (c *esConn) queryMaxSeq(args []driver.NamedValue) (driver.Rows, error) {
+// queryUpsertStreamHead handles upsertStreamHead (queries.go): the fake
+// dialect is "" (zero value), which plugin.Query.For falls back to Default
+// for, so this always sees the Postgres-shaped
+// "INSERT ... ON CONFLICT ... RETURNING head_sequence" text, routed through
+// QueryContext rather than ExecContext because it returns a row. It needs no
+// separate table in this fake: computing the current max and adding one
+// reproduces the same external behavior as a real head-counter table
+// (cleat#2268) without modeling its own concurrency, which the real
+// dialect-backed tests (not this fake) exercise.
+func (c *esConn) queryUpsertStreamHead(args []driver.NamedValue) (driver.Rows, error) {
 	tidStr, err := esArgString(args, 1)
 	if err != nil {
 		return nil, err
@@ -275,8 +281,8 @@ func (c *esConn) queryMaxSeq(args []driver.NamedValue) (driver.Rows, error) {
 	}
 
 	return &esRows{
-		columns: []string{"coalesce"},
-		data:    [][]driver.Value{{maxSeq}},
+		columns: []string{"head_sequence"},
+		data:    [][]driver.Value{{maxSeq + 1}},
 	}, nil
 }
 

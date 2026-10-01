@@ -4,33 +4,14 @@ import "github.com/cleat-team/cleat/plugin"
 
 // Dialect-specific query variants for structurally different SQL.
 //
-// nextSequenceForStream and insertEvent replace a single combined
-// INSERT ... VALUES (..., (SELECT MAX(sequence)+1 FROM event_stream WHERE
-// ...), ...) statement (cleat#2260). That statement's subquery read the same
-// table the INSERT wrote to, which MySQL disallows outright:
-//
-//	Error 1093 (HY000): You can't specify target table 'event_stream'
-//	for update in FROM clause
-//
-// so handleAppend 500ed on every call on MySQL -- Postgres and SQL Server
-// have no such restriction, which is presumably why it shipped. Splitting
-// the read and the write into two statements, run inside one transaction,
-// sidesteps the restriction on every dialect. It is also why both queries
-// below need no per-dialect arm at all: a plain SELECT and a plain INSERT
-// are portable in a way a same-table subquery is not.
-//
-// This does NOT make the read-then-write atomic by itself -- two concurrent
-// appenders to the same stream can both read the same MAX(sequence) and
-// both attempt the same next value. What makes it safe is what already
-// existed: event_stream's PRIMARY KEY is (tenant_id, stream_id, sequence),
-// so the loser's INSERT fails with a duplicate-key error rather than
-// silently overwriting or corrupting anything, and handleAppend's existing
-// isPKConflict-and-retry loop (unchanged) re-reads the now-current MAX and
-// retries. This is the "unique key plus a retry" shape, not locking.
-var nextSequenceForStream = plugin.Query{
-	Default: `SELECT COALESCE(MAX(sequence), 0) FROM event_stream WHERE tenant_id = $1 AND stream_id = $2`,
-}
-
+// insertEvent used to pair with nextSequenceForStream, a read-MAX-then-insert
+// shape that needed handleAppend's own retry loop for safety under
+// concurrency (cleat#2260). cleat#2268 replaced that pair with
+// upsertStreamHead (and, on MySQL, selectStreamHead): a per-stream head
+// counter whose row lock serializes concurrent appenders to the SAME stream
+// instead of racing them. See upsertStreamHead's comment for the mechanism;
+// see appendOnce in routes.go for how the two queries below are still used
+// together.
 var insertEvent = plugin.Query{
 	// No CAST($3 AS JSON) on the MySQL value. It was there to satisfy the
 	// JSON column type, and migration v3 made the column LONGTEXT -- but the
@@ -49,6 +30,101 @@ var insertEvent = plugin.Query{
 	Default: `INSERT INTO event_stream (tenant_id, stream_id, sequence, event) VALUES ($1, $2, $3, $4::jsonb)`,
 	MySQL:   `INSERT INTO event_stream (tenant_id, stream_id, sequence, event) VALUES ($1, $2, $3, $4)`,
 	MSSQL:   `INSERT INTO event_stream (tenant_id, stream_id, sequence, event) VALUES ($1, $2, $3, $4)`,
+}
+
+// upsertStreamHead atomically creates or increments a stream's head-sequence
+// counter in event_stream_head (migration v4) and, where the dialect
+// supports it, returns the new value in the same statement. This replaces
+// nextSequenceForStream's read-MAX-then-insert-with-retry shape (cleat#2260)
+// with real serialization (cleat#2268): the row lock these statements take
+// -- on the one row for (tenant_id, stream_id) -- is held for the lifetime
+// of the enclosing transaction (appendOnce runs this and insertEvent inside
+// one tx), so a SECOND concurrent appender to the SAME stream BLOCKS on this
+// statement until the first transaction commits or rolls back, rather than
+// reading the same MAX(sequence) and racing a duplicate-key error on the
+// INSERT into event_stream. Appends to DIFFERENT streams touch different
+// rows and don't contend at all. Mirrors plugins/kvstore/queries.go's
+// upsertKV, which establishes the same per-dialect shape for a single-row
+// counter.
+//
+// This statement does NOT look at event_stream to floor its answer -- a
+// round 1 version did, reading MAX(sequence) on every call to self-heal
+// against a writer that bypasses this table entirely (see appendOnce's
+// resync comment for why that writer can exist). That subquery shares
+// event_stream's primary-key range with insertEvent's INSERT later in the
+// SAME transaction, and on MySQL/InnoDB that pairing deadlocks under
+// concurrency: two appenders to a brand-new stream each take a shared gap
+// lock on the stream's (empty) key range via the subquery, then each wants
+// an insert-intention lock on that same gap for insertEvent -- a classic
+// gap-lock cycle. Measured running TestConcurrentAppendsGetContiguousSequences
+// against MySQL: 19 of 20 concurrent appenders got Error 1213 "Deadlock
+// found when trying to get lock" with that subquery in place, where the
+// pre-round-2 and this version both get 20/20. The self-heal is now
+// appendOnce's job, triggered only by an actual collision -- see there.
+//
+// MSSQL's MERGE needs WITH (HOLDLOCK): without it, two concurrent MERGE
+// statements against the SAME not-yet-existing key can both evaluate "WHEN
+// NOT MATCHED" true under READ COMMITTED (neither sees the other's
+// uncommitted insert) and both attempt the INSERT branch, which is exactly
+// the duplicate-key race this migration exists to remove -- just moved from
+// event_stream onto event_stream_head. HOLDLOCK takes a serializable-range
+// lock that forces the second session to block instead. This is a
+// documented SQL Server MERGE hazard, not a cleat-specific one; see the
+// regression test for the concurrent-brand-new-stream case this guards
+// (plugins/kvstore's MERGE has no HOLDLOCK and is a latent instance of the
+// same hazard, out of scope here).
+var upsertStreamHead = plugin.Query{
+	Default: `INSERT INTO event_stream_head (tenant_id, stream_id, head_sequence)
+VALUES ($1, $2, 1)
+ON CONFLICT (tenant_id, stream_id) DO UPDATE
+SET head_sequence = event_stream_head.head_sequence + 1
+RETURNING head_sequence`,
+	MySQL: `INSERT INTO event_stream_head (tenant_id, stream_id, head_sequence)
+VALUES ($1, $2, 1)
+ON DUPLICATE KEY UPDATE
+head_sequence = head_sequence + 1`,
+	MSSQL: `MERGE event_stream_head WITH (HOLDLOCK) AS target
+USING (VALUES ($1, $2)) AS source (tenant_id, stream_id)
+ON target.tenant_id = source.tenant_id AND target.stream_id = source.stream_id
+WHEN MATCHED THEN UPDATE SET head_sequence = target.head_sequence + 1
+WHEN NOT MATCHED THEN INSERT (tenant_id, stream_id, head_sequence)
+VALUES (source.tenant_id, source.stream_id, 1)
+OUTPUT INSERTED.head_sequence;`,
+}
+
+// resyncStreamHead sets event_stream_head's row to an explicit floor value,
+// used only after appendOnce sees a primary-key collision on insertEvent --
+// the signal that a writer which doesn't know about event_stream_head
+// (cleat-review, cleat#2268 round 1: an old-binary worker still running
+// during a rolling upgrade) already claimed the sequence this transaction
+// proposed. The WHERE clause only ever raises the value: this runs inside
+// the same transaction and under the same row lock upsertStreamHead already
+// took, so there is nothing to race here, and the guard is defence in depth
+// against ever moving the counter backwards.
+var resyncStreamHead = plugin.Query{
+	Default: `UPDATE event_stream_head
+SET head_sequence = $3
+WHERE tenant_id = $1 AND stream_id = $2 AND head_sequence < $3`,
+}
+
+// selectMaxSequence reads the highest sequence a stream actually has in
+// event_stream, independent of what event_stream_head believes -- the
+// ground truth appendOnce's resync path floors the head to after a
+// collision. A plain SELECT, portable as-is; see resyncStreamHead for how
+// its result is used.
+var selectMaxSequence = plugin.Query{
+	Default: `SELECT COALESCE(MAX(sequence), 0) FROM event_stream WHERE tenant_id = $1 AND stream_id = $2`,
+}
+
+// selectStreamHead reads back the value upsertStreamHead just wrote, for
+// MySQL only -- ON DUPLICATE KEY UPDATE has no RETURNING equivalent. Safe to
+// read in the SAME transaction as the upsert: a transaction always sees its
+// own uncommitted writes regardless of isolation level, and the row lock
+// upsertStreamHead took blocks any OTHER transaction from changing the value
+// in between. No per-dialect arm: a plain SELECT is portable, and only the
+// MySQL caller uses it (see appendOnce).
+var selectStreamHead = plugin.Query{
+	Default: `SELECT head_sequence FROM event_stream_head WHERE tenant_id = $1 AND stream_id = $2`,
 }
 
 var deleteEventsOlderThan = plugin.Query{
