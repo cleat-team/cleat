@@ -108,8 +108,24 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			Version: 3,
 			Up: `ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS signal_workflow_id TEXT;
 	ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS signal_name TEXT NOT NULL DEFAULT 'webhook_received';`,
-			UpMySQL: `ALTER TABLE webhook_sources ADD COLUMN signal_workflow_id VARCHAR(255);
-	ALTER TABLE webhook_sources ADD COLUMN signal_name VARCHAR(255) NOT NULL DEFAULT 'webhook_received';`,
+			// Guarded through information_schema.columns and executed via
+			// PREPARE/EXECUTE, matching v8/v9/v10's identical reasoning:
+			// MySQL DDL is not transactional, so a crash between either ALTER
+			// and plugin_migrations recording version 3 leaves a worker that
+			// re-runs a bare ADD COLUMN on its next start and gets
+			// `ERROR 1060 (42S21): Duplicate column name` and never boots.
+			// cleat#2223.
+			UpMySQL: `
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_sources' AND column_name = 'signal_workflow_id');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE webhook_sources ADD COLUMN signal_workflow_id VARCHAR(255)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_sources' AND column_name = 'signal_name');
+				SET @ddl := IF(@col = 0,
+					CONCAT('ALTER TABLE webhook_sources ADD COLUMN signal_name VARCHAR(255) NOT NULL DEFAULT ', CHAR(39), 'webhook_received', CHAR(39)),
+					'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_sources') AND name = 'signal_workflow_id')
 				ALTER TABLE webhook_sources ADD signal_workflow_id NVARCHAR(MAX);
@@ -127,11 +143,31 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'pending';
 				ALTER TABLE webhook_events ADD COLUMN IF NOT EXISTS error_msg TEXT;
 			`,
+			// Guarded through information_schema.columns and executed via
+			// PREPARE/EXECUTE, matching v8/v9/v10's identical reasoning:
+			// MySQL DDL is not transactional, so a crash between any one of
+			// these ALTERs and plugin_migrations recording version 4 leaves
+			// a worker that re-runs a bare ADD COLUMN on its next start and
+			// gets `ERROR 1060 (42S21): Duplicate column name` and never
+			// boots. cleat#2223.
 			UpMySQL: `
-				ALTER TABLE webhook_events ADD COLUMN retry_count INT DEFAULT 0;
-				ALTER TABLE webhook_events ADD COLUMN last_retry_at TIMESTAMP(6);
-				ALTER TABLE webhook_events ADD COLUMN ` + "`status`" + ` VARCHAR(255) DEFAULT 'pending';
-				ALTER TABLE webhook_events ADD COLUMN error_msg TEXT;
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_events' AND column_name = 'retry_count');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE webhook_events ADD COLUMN retry_count INT DEFAULT 0', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_events' AND column_name = 'last_retry_at');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE webhook_events ADD COLUMN last_retry_at TIMESTAMP(6)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_events' AND column_name = 'status');
+				SET @ddl := IF(@col = 0,
+					CONCAT('ALTER TABLE webhook_events ADD COLUMN ', CHAR(96), 'status', CHAR(96), ' VARCHAR(255) DEFAULT ', CHAR(39), 'pending', CHAR(39)),
+					'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_events' AND column_name = 'error_msg');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE webhook_events ADD COLUMN error_msg TEXT', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('webhook_events') AND name = 'retry_count')
@@ -251,9 +287,22 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE webhook_sources ADD COLUMN IF NOT EXISTS secret_configured BOOLEAN NOT NULL DEFAULT false;
 				ALTER TABLE webhook_sources DROP COLUMN IF EXISTS secret;
 			`,
+			// Guarded through information_schema.columns and executed via
+			// PREPARE/EXECUTE, matching v8/v9/v10's identical reasoning:
+			// MySQL DDL is not transactional, so a crash between either
+			// statement and plugin_migrations recording version 7 leaves a
+			// worker that re-runs a bare ADD COLUMN or DROP COLUMN on its
+			// next start and gets `ERROR 1060` (duplicate column) or
+			// `ERROR 1091` (can't DROP; check that column exists) and never
+			// boots. cleat#2223.
 			UpMySQL: `
-				ALTER TABLE webhook_sources ADD COLUMN secret_configured TINYINT(1) NOT NULL DEFAULT 0;
-				ALTER TABLE webhook_sources DROP COLUMN secret;
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_sources' AND column_name = 'secret_configured');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE webhook_sources ADD COLUMN secret_configured TINYINT(1) NOT NULL DEFAULT 0', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_sources' AND column_name = 'secret');
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_sources DROP COLUMN secret', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			// v1's secret column carries DEFAULT '', which SQL Server backs
 			// with an unnamed default constraint. DROP COLUMN refuses while

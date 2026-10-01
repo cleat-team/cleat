@@ -273,6 +273,8 @@ plugins/scheduledbackup	TestBackupHistoryConfigIdCascadeMigrationIsIdempotentOnM
 plugins/scheduler	TestCronDSTTransition	1
 plugins/slacknotify	TestSendMessageCanonicalizesAnUppercaseCallContextTenant	1
 plugins/webhookingest	TestAnIngestRacingAnOpenDeleteTransactionIsBlocked	3
+plugins/webhookingest	TestV3V4V7MigrationsAreIdempotentOnMySQL	1
+plugins/webhookingest	freshMySQLDatabase	1
 tests/cluster	TestAddRemoveWorkers	1
 tests/cluster	TestClusterBasicWorkflowExecution	1
 tests/cluster	TestClusterSpreadWorkflows	1
