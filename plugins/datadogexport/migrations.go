@@ -139,7 +139,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE dd_config DROP COLUMN IF EXISTS api_key;
 			`,
 			UpMySQL: `
-				ALTER TABLE dd_config DROP COLUMN api_key;
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'dd_config' AND column_name = 'api_key');
+				SET @ddl := IF(@col > 0, 'ALTER TABLE dd_config DROP COLUMN api_key', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dd_config') AND name = 'api_key')

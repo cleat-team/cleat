@@ -170,10 +170,17 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE audit_events
 					MODIFY COLUMN ` + "`" + `timestamp` + "`" + ` DATETIME(6) NOT NULL DEFAULT (UTC_TIMESTAMP(6));
 
-				ALTER TABLE audit_events
-					ADD COLUMN seq BIGINT NULL,
-					ADD COLUMN prev_hash CHAR(64) NULL,
-					ADD COLUMN row_hash CHAR(64) NULL;
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'audit_events' AND column_name = 'seq');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE audit_events ADD COLUMN seq BIGINT NULL', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'audit_events' AND column_name = 'prev_hash');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE audit_events ADD COLUMN prev_hash CHAR(64) NULL', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'audit_events' AND column_name = 'row_hash');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE audit_events ADD COLUMN row_hash CHAR(64) NULL', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 				CREATE UNIQUE INDEX idx_audit_events_tenant_seq ON audit_events (tenant_id, seq);
 

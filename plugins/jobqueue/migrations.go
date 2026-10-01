@@ -69,9 +69,17 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			     ALTER TABLE task_queue ADD COLUMN IF NOT EXISTS input JSONB;
 			     ALTER TABLE task_queue ADD COLUMN IF NOT EXISTS run_id TEXT;`,
 			UpMySQL: `
-				ALTER TABLE task_queue ADD COLUMN def_name VARCHAR(255);
-				ALTER TABLE task_queue ADD COLUMN input JSON;
-				ALTER TABLE task_queue ADD COLUMN run_id VARCHAR(255);
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'task_queue' AND column_name = 'def_name');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE task_queue ADD COLUMN def_name VARCHAR(255)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'task_queue' AND column_name = 'input');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE task_queue ADD COLUMN input JSON', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'task_queue' AND column_name = 'run_id');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE task_queue ADD COLUMN run_id VARCHAR(255)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('task_queue') AND name = 'def_name')

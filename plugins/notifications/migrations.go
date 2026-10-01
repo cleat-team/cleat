@@ -253,8 +253,13 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE webhook_config DROP COLUMN IF EXISTS secret;
 			`,
 			UpMySQL: `
-				ALTER TABLE webhook_config ADD COLUMN secret_configured TINYINT(1) NOT NULL DEFAULT 0;
-				ALTER TABLE webhook_config DROP COLUMN secret;
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND column_name = 'secret_configured');
+				SET @ddl := IF(@col = 0, 'ALTER TABLE webhook_config ADD COLUMN secret_configured TINYINT(1) NOT NULL DEFAULT 0', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'webhook_config' AND column_name = 'secret');
+				SET @ddl := IF(@col > 0, 'ALTER TABLE webhook_config DROP COLUMN secret', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			// v1's secret column carries DEFAULT '', which SQL Server backs with
 			// an unnamed default constraint -- unlike pd_config.routing_key and
