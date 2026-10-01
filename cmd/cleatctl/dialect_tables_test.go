@@ -39,6 +39,9 @@ func TestQualifiedTableMatchesEachDialectsMigrations(t *testing.T) {
 			created := tablesCreatedByDialect(t, tc.dir, tc.floor)
 			var missing []string
 			for _, core := range coreTables {
+				if tc.d.name != "postgres" && postgresOnlyTables[core] {
+					continue
+				}
 				schema, name := tc.d.qualifiedTable(core)
 
 				if strings.HasPrefix(core, "admin.") && schema != tc.wantAdm {
