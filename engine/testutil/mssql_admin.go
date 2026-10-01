@@ -94,6 +94,15 @@ var (
 	// closing the Conn releases it immediately, confirmed by the next
 	// EXCLUSIVE attempt succeeding right after.
 	mssqlAdminLockConns = map[string]*sql.Conn{}
+	// mssqlAdminLockDBs holds the *sql.DB each baseDSN's mssqlAdminLockConns
+	// entry was drawn from. cleat#2899 (G3a): the lock connection is now
+	// opened BEFORE the admin pool exists (see MSSQLAdminDB), on a *sql.DB
+	// dedicated to the lock alone -- never the caller's own db, which the
+	// caller's own `defer teardown()` may close first (the same hazard
+	// restoreMSSQLPlainPredicate's doc comment already describes), and never
+	// the admin pool itself, since at acquisition time it has not been
+	// opened yet. Closed alongside lockConn in mssqlReleaseAdminDB.
+	mssqlAdminLockDBs = map[string]*sql.DB{}
 )
 
 // mssqlAdminLockResource is the sp_getapplock resource name MSSQLAdminDB and
@@ -193,6 +202,57 @@ func MSSQLAdminDB(t *testing.T, db *sql.DB) *sql.DB {
 	}
 
 	requireMSSQLAdminRole(t, db)
+
+	// cleat#2899 (G3a): acquire the cross-process SHARED lock BEFORE the
+	// opt-in write below, not after everything else as this used to. With
+	// the opt-in going first, there was a window -- provision/Open/Ping and
+	// the two verification queries wide -- between this process setting
+	// admin.rls_predicate_form='admin' and this process taking SHARED on
+	// mssqlAdminLockResource. A concurrent process's selfHealMSSQLAdminPredicate
+	// probes EXCLUSIVE(0) and sees nothing holding SHARED in that window, so
+	// it heals the predicate back to 'plain' out from under a setup that is
+	// still in progress -- measured with the window widened by a 3s sleep
+	// after the opt-in, 2/2: this function's own form=='admin' check below
+	// then fails with "installed predicate is \"plain\"" (cleat#1541's
+	// symptom, reached by a different route). Acquiring SHARED first closes
+	// it: a concurrent heal's EXCLUSIVE(0) attempt now blocks on US and skips
+	// healing (cleat-review, cleat#2899).
+	//
+	// On a connection dedicated to this lock's lifetime, not `db` -- the
+	// caller's own `defer teardown()` can close db before this function's
+	// later t.Cleanup runs (restoreMSSQLPlainPredicate's doc comment
+	// describes the identical hazard) -- and not the admin pool, which does
+	// not exist yet at this point in the function.
+	ctx := context.Background()
+	lockDB, err := sql.Open("sqlserver", baseDSN)
+	if err != nil {
+		t.Fatalf("open the dedicated applock connection: %v", err)
+	}
+	lockConn, err := lockDB.Conn(ctx)
+	if err != nil {
+		lockDB.Close()
+		t.Fatalf("open the dedicated applock connection: %v", err)
+	}
+	// Released on any early return below (a Fatalf from this point on calls
+	// runtime.Goexit, which still runs deferred functions) -- an orphaned
+	// SHARED hold would block every future selfHealMSSQLAdminPredicate probe
+	// on this server until the process exits, which is worse than the bug
+	// this lock exists to prevent.
+	lockEstablished := false
+	defer func() {
+		if lockEstablished {
+			return
+		}
+		mssqlReleaseApplock(t, ctx, lockConn)
+		lockConn.Close()
+		lockDB.Close()
+	}()
+	if code := mssqlTryApplock(t, ctx, lockConn, "Shared", 5000); code < 0 {
+		t.Fatalf("sp_getapplock(%q, Shared) returned %d -- a shared lock should never "+
+			"conflict with another shared holder, so this is a real failure (timeout, "+
+			"cancellation, or a parameter error), not contention", mssqlAdminLockResource, code)
+	}
+
 	// Since cleat#1541 the SHIPPED predicate does not mention IS_ROLEMEMBER, so
 	// membership on its own grants nothing and this whole path would hand back a
 	// pool that deletes silently -- the exact failure the comment below is
@@ -249,35 +309,43 @@ func MSSQLAdminDB(t *testing.T, db *sql.DB) *sql.DB {
 			mssqlTestAdminLogin, form)
 	}
 
-	// Pinned connection, held open (never Closed) for as long as the pool
-	// above is cached: this is the cross-process liveness signal cleat#2857
-	// adds. See mssqlAdminLockConns' doc comment for why it must be pinned
-	// rather than drawn fresh from the pool per call.
-	ctx := context.Background()
-	lockConn, err := pool.Conn(ctx)
-	if err != nil {
-		t.Fatalf("open the dedicated applock connection: %v", err)
-	}
-	if code := mssqlTryApplock(t, ctx, lockConn, "Shared", 5000); code < 0 {
-		t.Fatalf("sp_getapplock(%q, Shared) returned %d -- a shared lock should never "+
-			"conflict with another shared holder, so this is a real failure (timeout, "+
-			"cancellation, or a parameter error), not contention", mssqlAdminLockResource, code)
-	}
-
+	// lockConn/lockDB were already acquired above, before the opt-in --
+	// nothing left to do here but cache them alongside the pool they now
+	// cover, and mark the early-return release defer as no longer needed.
 	mssqlAdminPools[baseDSN] = pool
 	mssqlAdminLockConns[baseDSN] = lockConn
+	mssqlAdminLockDBs[baseDSN] = lockDB
 	mssqlAdminRefs[baseDSN]++
+	lockEstablished = true
 	t.Cleanup(func() { mssqlReleaseAdminDB(t, baseDSN) })
 	return pool
 }
 
 // mssqlReleaseAdminDB is the Cleanup counterpart of every MSSQLAdminDB call
 // that flipped or reused the admin predicate form. When the count for baseDSN
-// reaches zero, no live caller still needs 'admin', so it restores 'plain'
-// (migration 075 is idempotent -- see restoreMSSQLPlainPredicate) and evicts
-// the cached pool, so the next MSSQLAdminDB call re-provisions and
+// reaches zero, no live caller IN THIS PROCESS still needs 'admin' -- but
+// that is not the same as no live caller anywhere (cleat#2857), so this no
+// longer restores 'plain' unconditionally. It releases this process's own
+// SHARED hold, then probes EXCLUSIVE with no wait: granted means nothing
+// else anywhere still holds SHARED, so it is safe to restore (migration 075
+// is idempotent -- see restoreMSSQLPlainPredicate) and the cached pool is
+// evicted either way, so the next MSSQLAdminDB call re-provisions and
 // re-verifies rather than handing back a pool that now authenticates into a
 // predicate it never checked.
+//
+// cleat#2899 (G2): this used to restore unconditionally right after
+// releasing its own SHARED hold, which is the release-side mirror of G3's
+// ordering bug -- a different, still-live process's SHARED hold does not
+// prevent THIS process from clobbering the predicate out from under it.
+// Measured 3/3 plus a control: process B holds MSSQLAdminDB 8-10s, process A
+// (a 1s hold, started once B is confirmed live) releases and restores
+// 'plain' unconditionally; B, still live, then reads 'plain' instead of
+// 'admin'. The EXCLUSIVE(0) probe below is the same check
+// selfHealMSSQLAdminPredicate already does on the heal side, applied here on
+// the release side, and held THROUGH the restore for the same reason that
+// function now holds it through its own heal (G3b): releasing before
+// restoring would reopen the identical window for a MSSQLAdminDB caller
+// that acquires SHARED in the gap.
 //
 // Takes baseDSN only, not the caller's plain db -- see
 // restoreMSSQLPlainPredicate's own comment for why db cannot be used here:
@@ -304,16 +372,41 @@ func mssqlReleaseAdminDB(t *testing.T, baseDSN string) {
 	}
 	delete(mssqlAdminPools, baseDSN)
 
-	if lockConn, ok := mssqlAdminLockConns[baseDSN]; ok {
-		delete(mssqlAdminLockConns, baseDSN)
+	lockConn, hasLock := mssqlAdminLockConns[baseDSN]
+	lockDB := mssqlAdminLockDBs[baseDSN]
+	delete(mssqlAdminLockConns, baseDSN)
+	delete(mssqlAdminLockDBs, baseDSN)
+
+	if hasLock {
 		ctx := context.Background()
 		mssqlReleaseApplock(t, ctx, lockConn)
+
+		if code := mssqlTryApplock(t, ctx, lockConn, "Exclusive", 0); code < 0 {
+			t.Logf("releasing this process's own hold on %s, but another live caller "+
+				"(in this process or another sharing this database server) still needs "+
+				"'admin' (sp_getapplock EXCLUSIVE returned %d) -- leaving the predicate "+
+				"as-is rather than restoring 'plain' out from under it", mssqlAdminLockResource, code)
+		} else {
+			restoreMSSQLPlainPredicate(t, baseDSN)
+			mssqlReleaseApplock(t, ctx, lockConn)
+		}
+
 		if err := lockConn.Close(); err != nil {
 			t.Logf("closing the dedicated applock connection: %v", err)
 		}
+		if lockDB != nil {
+			if err := lockDB.Close(); err != nil {
+				t.Logf("closing the dedicated applock connection's pool: %v", err)
+			}
+		}
+	} else {
+		// Should not happen -- MSSQLAdminDB always acquires the lock before
+		// caching a pool as of cleat#2899 -- but fail safe rather than
+		// silently dropping the restore this branch existed for before
+		// cleat#2857 added the lock at all.
+		restoreMSSQLPlainPredicate(t, baseDSN)
 	}
 
-	restoreMSSQLPlainPredicate(t, baseDSN)
 	if err := pool.Close(); err != nil {
 		t.Logf("closing the administrative SQL Server pool: %v", err)
 	}

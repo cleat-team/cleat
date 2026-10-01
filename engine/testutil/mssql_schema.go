@@ -159,16 +159,19 @@ func selfHealMSSQLAdminPredicate(t *testing.T, db *sql.DB) {
 			mssqlAdminLockResource, code)
 		return
 	}
-	// Granted: nothing anywhere holds it SHARED. Release this probe's own
-	// EXCLUSIVE hold immediately -- it was only ever a liveness check, not a
-	// claim -- then heal.
-	mssqlReleaseApplock(t, ctx, probe)
-
+	// Granted: nothing anywhere holds it SHARED. Hold EXCLUSIVE THROUGH the
+	// restore, not just the check -- releasing before restoring (as this
+	// used to) reopens the identical window a concurrent MSSQLAdminDB caller
+	// could acquire SHARED into between the probe and the restore, setting
+	// 'admin' for a setup that is about to be reverted out from under it
+	// (cleat#2899 G3b; see MSSQLAdminDB's matching ordering fix, G3a, for
+	// the other half of this same race).
 	t.Logf("admin.rls_predicate_form was 'admin' with no MSSQLAdminDB caller live " +
 		"anywhere (the cross-process lock was free) -- an earlier `go test` process hit " +
 		"a timeout mid-use and skipped its Cleanup (cleat#2831); restoring 'plain' " +
 		"before this test continues")
 	restoreMSSQLPlainPredicate(t, baseDSN)
+	mssqlReleaseApplock(t, ctx, probe)
 }
 
 // requireMSSQLPoliciesIntact fails loudly, with a fix, when the migrations

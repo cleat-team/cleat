@@ -76,6 +76,21 @@ func TestZZCrossProcessSetupOnlyWorker(t *testing.T) {
 	SetupMSSQLFullSchema(t, db)
 }
 
+// buildTestutilTestBinary compiles this package's test binary once, shared
+// by every cross-process driver in this file -- each driver launches it
+// twice, under different -test.run selectors, as two real OS processes.
+func buildTestutilTestBinary(t *testing.T) string {
+	t.Helper()
+	root := repoRootForMSSQLTestutil(t)
+	binPath := t.TempDir() + "/testutil.test"
+	build := exec.Command("go", "test", "-c", "-o", binPath, "./engine/testutil")
+	build.Dir = root
+	if out, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("go test -c: %v\n%s", err, out)
+	}
+	return binPath
+}
+
 // TestMSSQLAdminSelfHealDoesNotClobberALiveCrossProcessCaller drives the two
 // workers above as real, separate OS processes against one SQL Server --
 // cleat-review's own method for cleat#2831's review, now in-tree rather than
@@ -89,58 +104,10 @@ func TestMSSQLAdminSelfHealDoesNotClobberALiveCrossProcessCaller(t *testing.T) {
 		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
 	}
 
-	root := repoRootForMSSQLTestutil(t)
-	binPath := t.TempDir() + "/testutil.test"
-	build := exec.Command("go", "test", "-c", "-o", binPath, "./engine/testutil")
-	build.Dir = root
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("go test -c: %v\n%s", err, out)
-	}
-
+	binPath := buildTestutilTestBinary(t)
 	env := append(os.Environ(), "CLEAT_TEST_MSSQL="+os.Getenv("CLEAT_TEST_MSSQL"))
 
-	// Process A: the holder. Its stdout is read live, not CombinedOutput'd
-	// after the fact, so this test can tell the moment it has acquired
-	// MSSQLAdminDB rather than guessing from a sleep -- the same "observe a
-	// marker, don't race a timer" discipline this repo's acceptance tests
-	// use for a real crash rather than a synthetic one.
-	procA := exec.Command(binPath, "-test.run", "^TestZZCrossProcessHoldAdminWorker$", "-test.v")
-	procA.Env = env
-	stdoutA, err := procA.StdoutPipe()
-	if err != nil {
-		t.Fatalf("StdoutPipe: %v", err)
-	}
-	procA.Stderr = os.Stderr
-	if err := procA.Start(); err != nil {
-		t.Fatalf("start process A: %v", err)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	markerSeen := make(chan error, 1)
-	go func() {
-		scanner := bufio.NewScanner(stdoutA)
-		for scanner.Scan() {
-			line := scanner.Text()
-			t.Logf("process A: %s", line)
-			if strings.Contains(line, crossProcessAdminHeldMarker) {
-				markerSeen <- nil
-				return
-			}
-		}
-		markerSeen <- fmt.Errorf("process A's stdout closed before the marker appeared: %w", scanner.Err())
-	}()
-
-	select {
-	case err := <-markerSeen:
-		if err != nil {
-			procA.Process.Kill()
-			t.Fatalf("waiting for process A to acquire MSSQLAdminDB: %v", err)
-		}
-	case <-ctx.Done():
-		procA.Process.Kill()
-		t.Fatal("process A never printed the admin-held marker within 30s")
-	}
+	procA := startAndWaitForMarkerProcess(t, binPath, env, "^TestZZCrossProcessHoldAdminWorker$", "A")
 
 	// Process B, while A is still live (it is mid-sleep for
 	// crossProcessHoldSeconds): ordinary schema setup -- the self-heal path
@@ -159,5 +126,127 @@ func TestMSSQLAdminSelfHealDoesNotClobberALiveCrossProcessCaller(t *testing.T) {
 	if err := procA.Wait(); err != nil {
 		t.Fatalf("process A (the live holder) failed -- cleat#2857's defect, or a regression "+
 			"of the sp_getapplock fix: %v", err)
+	}
+}
+
+// startAndWaitForMarkerProcess launches binPath under -test.run=runPattern,
+// waits for it to print crossProcessAdminHeldMarker on its own real stdout,
+// and returns the still-running *exec.Cmd for the caller to Wait() on once
+// the rest of the scenario has played out. label distinguishes this
+// process's log lines from any other concurrent one (e.g. "A" vs "B").
+//
+// Draining continues past the marker line rather than stopping there, so a
+// t.Fatalf this process prints AFTER the marker (its own assertion, usually
+// the whole point of the scenario) still reaches the log instead of being
+// lost on the pipe cleat-review found silent (cleat#2899).
+func startAndWaitForMarkerProcess(t *testing.T, binPath string, env []string, runPattern, label string) *exec.Cmd {
+	t.Helper()
+	proc := exec.Command(binPath, "-test.run", runPattern, "-test.v")
+	proc.Env = env
+	stdout, err := proc.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe (process %s): %v", label, err)
+	}
+	proc.Stderr = os.Stderr
+	if err := proc.Start(); err != nil {
+		t.Fatalf("start process %s: %v", label, err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	markerSeen := make(chan error, 1)
+	go func() {
+		seenMarker := false
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			line := scanner.Text()
+			t.Logf("process %s: %s", label, line)
+			if !seenMarker && strings.Contains(line, crossProcessAdminHeldMarker) {
+				seenMarker = true
+				markerSeen <- nil
+			}
+		}
+		if !seenMarker {
+			markerSeen <- fmt.Errorf("process %s's stdout closed before the marker appeared: %w", label, scanner.Err())
+		}
+	}()
+
+	select {
+	case err := <-markerSeen:
+		if err != nil {
+			proc.Process.Kill()
+			t.Fatalf("waiting for process %s to acquire MSSQLAdminDB: %v", label, err)
+		}
+	case <-ctx.Done():
+		proc.Process.Kill()
+		t.Fatalf("process %s never printed the admin-held marker within 30s", label)
+	}
+	return proc
+}
+
+// TestZZCrossProcessReleaseWorker is G2's actor: acquires MSSQLAdminDB and
+// returns immediately, letting its own t.Cleanup run the FULL release path
+// for real. A fresh process always starts with mssqlAdminRefs at zero, so
+// unlike two overlapping MSSQLAdminDB callers in ONE process -- see
+// TestMSSQLAdminDBRefcountsOverlappingCallers, where the refcount makes the
+// second caller's release a no-op decrement -- this process's single
+// Cleanup call is never short-circuited by a refcount above zero. That is
+// exactly what makes this process's release reach mssqlReleaseAdminDB's
+// restore-or-not decision, which is what cleat#2899's G2 is about.
+func TestZZCrossProcessReleaseWorker(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
+	}
+	db := MSSQLTestDB(t)
+	SetupMSSQLFullSchema(t, db)
+	_ = MSSQLAdminDB(t, db)
+	// Returning here runs this process's t.Cleanup stack, including
+	// mssqlReleaseAdminDB -- the real release path under test, not a
+	// simulation of it.
+}
+
+// TestMSSQLAdminDBReleaseDoesNotClobberALiveCrossProcessCaller is cleat#2899's
+// G2 regression test: releasing one process's own hold on 'admin' must not
+// restore 'plain' while a DIFFERENT, still-live process's MSSQLAdminDB call
+// needs it.
+//
+// Reuses TestZZCrossProcessHoldAdminWorker as the long-lived holder (process
+// A below) exactly as the self-heal driver above does -- its own internal
+// assertion, that admin.rls_predicate_form still reads 'admin' once its
+// crossProcessHoldSeconds sleep ends, is what actually catches a clobber
+// here, the same way it catches one from a bad heal in the sibling test.
+// Process B is the new, short-lived TestZZCrossProcessReleaseWorker: it
+// acquires and releases while A is still mid-sleep, and a pre-fix
+// mssqlReleaseAdminDB restores 'plain' unconditionally there, which A's
+// post-sleep read then catches.
+func TestMSSQLAdminDBReleaseDoesNotClobberALiveCrossProcessCaller(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds and runs a separate test binary twice; skipping in -short")
+	}
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
+	}
+
+	binPath := buildTestutilTestBinary(t)
+	env := append(os.Environ(), "CLEAT_TEST_MSSQL="+os.Getenv("CLEAT_TEST_MSSQL"))
+
+	procA := startAndWaitForMarkerProcess(t, binPath, env, "^TestZZCrossProcessHoldAdminWorker$", "A")
+
+	// Process B, while A is still live (mid-sleep for
+	// crossProcessHoldSeconds): acquire-then-release, the release path under
+	// test.
+	procB := exec.Command(binPath, "-test.run", "^TestZZCrossProcessReleaseWorker$", "-test.v")
+	procB.Env = env
+	outB, errB := procB.CombinedOutput()
+	t.Logf("process B output:\n%s", outB)
+	if errB != nil {
+		t.Fatalf("process B (acquire-then-release) failed: %v", errB)
+	}
+
+	// Now wait for A: its own internal assertion (the predicate was still
+	// 'admin' after B released) is what this test is actually about.
+	if err := procA.Wait(); err != nil {
+		t.Fatalf("process A (the live holder) failed -- cleat#2899's G2 defect, or a "+
+			"regression of the release-side sp_getapplock probe: %v", err)
 	}
 }
