@@ -1510,7 +1510,14 @@ func wrapMySQLFinalizeDBError(err error, workflowID string) error {
 // NO SLEEP BETWEEN ATTEMPTS, for the same reason as the start path: the
 // victim's lock is already released by the time this returns, so there is
 // nothing to wait for and a backoff would only add latency to the path a
-// worker is blocking on to report a workflow's outcome.
+// worker is blocking on to report a workflow's outcome. THAT ARGUMENT
+// ANSWERS ONE QUESTION ONLY -- "is there a lock left to wait out" -- and
+// the answer is no. It does not answer a SEPARATE question this call site
+// actually has: whether N lockstep losers, released together, re-collide
+// with EACH OTHER on an immediate retry. A sleep would likely reduce that
+// too (cleat-review, reviewing cleat#2033), but raising the budget alone
+// already measured clean (see below), so this file does not carry an
+// unneeded mechanism on the strength of a plausible argument for it.
 //
 // 16, NOT 8 -- MEASURED, cleat#2033. Unlike the start path, this call site's
 // contenders do not only shrink: with N finalizers racing the SAME fence,

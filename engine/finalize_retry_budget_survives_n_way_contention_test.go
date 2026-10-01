@@ -44,14 +44,19 @@ import (
 // rare even at the OLD bound (0.43% per racer-call) and a SMALL round count
 // at racers=8 would under-detect it for the same reason CLAUDE.md's own
 // "a regression test that catches its own defect only 40% of the time"
-// lesson warns about. At this test's racers/rounds, a round has roughly a
-// 4.6% chance of showing at least one exhaustion on the unfixed code
-// (measured: 46 of 1000 rounds), so 100 rounds detects a maxAttempts=8
-// regression with probability ~1-(0.954)^100 ≈ 99.2%; falsified by
-// reverting this function's maxAttempts to 8 and confirming failure before
-// trusting the fix (see the PR, not a comment here -- the constant is
-// restored by the time this merges and a stale "confirmed red" claim here
-// would be exactly the rotted-comment trap CLAUDE.md warns about).
+// lesson warns about. On the machine that measured this, a round had
+// roughly a 4.6% chance of showing at least one exhaustion on the unfixed
+// code (46 of 1000 rounds) -- BUT THAT RATE IS HOST-SPECIFIC, not a
+// property of the bug: cleat-review's own machine measured 2.6% per round
+// (1-6 bad rounds per 100, 9 of 10 runs catching it). 200 rounds gives
+// >99% detection even at the SLOWER host's rate (1-(0.974)^200 ≈ 99.8%,
+// against 1-(0.954)^200 ≈ 99.99% on the faster one), which is why the
+// round count below is 200 rather than the 100 that was enough on only
+// one of the two machines that have run this. Falsified by reverting this
+// function's maxAttempts to 8 and confirming failure before trusting the
+// fix (see the PR, not a comment here -- the constant is restored by the
+// time this merges and a stale "confirmed red" claim here would be
+// exactly the rotted-comment trap CLAUDE.md warns about).
 //
 // MYSQL ONLY, for the same reason as #1883's sibling test: Postgres's MVCC
 // does not gap-lock a range the way InnoDB does under REPEATABLE READ, and
@@ -59,7 +64,7 @@ import (
 func TestFinalizeRetryBudgetSurvivesNWayContention(t *testing.T) {
 	const (
 		racers = 12
-		rounds = 100
+		rounds = 200
 	)
 
 	backend := &MySQLBackend{}
