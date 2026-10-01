@@ -2318,6 +2318,26 @@ func (s *ShardedStore) ResolveCallIntent(ctx context.Context, workflowID string,
 	return st.ResolveCallIntent(ctx, workflowID, rec, payload, workerID, generation, later)
 }
 
+// ServerNow routes by workflow ID to the shard whose session produced the
+// CreatedAt being compared against -- see callIntentClock's doc comment
+// (store_intent.go) for why it must be the SAME session, not just any
+// shard's clock. Same shape as ResolveCallIntent above, and the same
+// consequence on a shard whose store does not implement this: it degrades
+// quietly to "cannot say" on execSession.replayUnderOriginalKey's retention
+// check rather than erroring the whole call.
+func (s *ShardedStore) ServerNow(ctx context.Context, workflowID string) (time.Time, error) {
+	shard := s.getShard(workflowID)
+	if shard == nil {
+		return time.Time{}, fmt.Errorf("server_now: no shard available -- check shard configuration in CLEAT_SHARD_CONFIG")
+	}
+	st, ok := shard.Store.(callIntentClock)
+	if !ok {
+		return time.Time{}, fmt.Errorf("server_now: shard %q store %T cannot report its clock",
+			shard.Config.Name, shard.Store)
+	}
+	return st.ServerNow(ctx, workflowID)
+}
+
 // ---------------------------------------------------------------------------
 // Per-tenant and per-run limit overrides
 // ---------------------------------------------------------------------------

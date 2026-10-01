@@ -474,22 +474,57 @@ func (s *execSession) replayUnderOriginalKey(ctx context.Context, rec EventRecor
 		return "", IdempotencyReplayCannotSay
 	}
 
+	// Scope the tenant, the same way callService does for the original
+	// dispatch (engine/idempotency.go) -- a replayer resolves secrets
+	// against this context (cleat#2911 G1), and a caller can answer "whose
+	// workflow is this" the same way it can for any other call.
+	ctx = s.tenantScopedContext(ctx)
+
 	// Retention bound (cleat#1984 item 3). rec.CreatedAt is the row's
 	// INSERT time -- set once, at WriteCallIntent, and never touched by
 	// CompleteCallIntent -- so for a still-pending row it is exactly the
 	// original dispatch time, with no new column needed: applyCreatedAt
 	// (store_events.go) already loads it for every dialect.
+	//
+	// Compared against the STORE's own clock, not this process's
+	// (cleat#2911 G2) -- see callIntentClock's doc comment (store_intent.go)
+	// for why a MySQL session whose time_zone is not UTC makes
+	// time.Since(rec.CreatedAt) silently wrong, and why asking the same
+	// store for its own "now" cancels the bias instead of correcting it. A
+	// store that cannot answer degrades to cannot-say rather than skipping
+	// the bound: an unmeasurable age must not be treated as a fresh one.
 	retention := s.engine.idempotencyKeyRetention
 	if retention <= 0 {
 		retention = DefaultIdempotencyKeyRetention
 	}
-	if !rec.CreatedAt.IsZero() {
-		if age := time.Since(rec.CreatedAt); age > retention {
-			s.engine.log().WarnContext(ctx, "idempotency-key replay skipped: retention window exceeded",
-				"workflow_id", s.workflowID, "step", rec.Step, "service", rec.Service, "operation", rec.Op,
-				"age", age, "retention", retention)
-			return "", IdempotencyReplayCannotSay
-		}
+	// A zero CreatedAt cannot be aged at all, and treating "unknown age" as
+	// "fresh" is the same fail-open mistake a missing clock would be below
+	// (cleat#2911 A1). Not reachable today -- every dialect's applyCreatedAt
+	// sets it unconditionally from a NOT NULL column -- but free to close,
+	// and a store implementation added later should not have to rediscover
+	// why this matters.
+	if rec.CreatedAt.IsZero() {
+		s.engine.log().WarnContext(ctx, "idempotency-key replay skipped: pending row has no CreatedAt, so the retention bound cannot be checked safely",
+			"workflow_id", s.workflowID, "step", rec.Step, "service", rec.Service, "operation", rec.Op)
+		return "", IdempotencyReplayCannotSay
+	}
+	clk, ok := s.engine.workflowStore.(callIntentClock)
+	if !ok {
+		s.engine.log().WarnContext(ctx, "idempotency-key replay skipped: store cannot report its own clock, so the retention bound cannot be checked safely",
+			"workflow_id", s.workflowID, "step", rec.Step, "service", rec.Service, "operation", rec.Op)
+		return "", IdempotencyReplayCannotSay
+	}
+	now, err := clk.ServerNow(ctx, s.workflowID)
+	if err != nil {
+		s.engine.log().WarnContext(ctx, "idempotency-key replay skipped: could not read the store's clock to check the retention bound",
+			"workflow_id", s.workflowID, "step", rec.Step, "service", rec.Service, "operation", rec.Op, "error", err)
+		return "", IdempotencyReplayCannotSay
+	}
+	if age := now.Sub(rec.CreatedAt); age > retention {
+		s.engine.log().WarnContext(ctx, "idempotency-key replay skipped: retention window exceeded",
+			"workflow_id", s.workflowID, "step", rec.Step, "service", rec.Service, "operation", rec.Op,
+			"age", age, "retention", retention)
+		return "", IdempotencyReplayCannotSay
 	}
 
 	key := DurableCallIdempotencyKey(s.workflowID, s.execRunID, rec.Step)

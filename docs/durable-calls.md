@@ -168,7 +168,7 @@ ordinary retryable/permanent classification an ordinary call failure gets:**
 |---|---|---|
 | `200` with a body | The service's key table answered — either the original attempt's recorded outcome, or (far less often) this retried request is itself what got executed | The pending step completes with that response, and replay carries on as though the original call had returned it |
 | `409` | A request under this exact key is still being processed — Stripe's documented meaning for a concurrent same-key request, and exactly the state a crashed-but-not-lost original leaves | **Retried**, under the same key, a bounded number of times with a fixed backoff. Not a failure: this is the mechanism catching the window where the original attempt has not finished yet. If every retry still reads `409`, the engine gives up and falls back to `[AMBIGUOUS]` |
-| Anything else — `5xx`, a malformed response, a transport error, a timeout | Cannot say | Falls back to `[AMBIGUOUS]`, unchanged |
+| Anything else — a `4xx` other than `409` (e.g. a cached `402`), `5xx`, a malformed response, a transport error, a timeout | Cannot say | Falls back to `[AMBIGUOUS]`, unchanged |
 
 **Why `409` does not mean the same thing here that it would on an ordinary call.** An operation
 *not* going through this replay path that returns `409` is, by default, classified the same as any

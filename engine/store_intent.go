@@ -48,6 +48,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"time"
 )
 
 // callIntentStore is implemented by the three shipped stores. It is unexported
@@ -562,6 +563,91 @@ var (
 	_ callIntentStore = (*PostgresStore)(nil)
 	_ callIntentStore = (*MySQLStore)(nil)
 	_ callIntentStore = (*MSSQLStore)(nil)
+)
+
+// ---------------------------------------------------------------------------
+// Clock
+// ---------------------------------------------------------------------------
+
+// callIntentClock lets a caller ask the store what time it is, rather than
+// asking the local process. cleat#2911 G2: engine/callintent.go's retention
+// bound for idempotency-key replay used to compare EventRecord.CreatedAt
+// (read back from the store) against time.Now() (this process's clock), and
+// on MySQL those two are not comparable in general.
+//
+// MySQL's TIMESTAMP columns are converted to and from the SESSION's
+// time_zone on the wire -- unlike PostgreSQL's timestamptz, whose wire
+// format always carries an explicit offset, and unlike MSSQL's
+// datetimeoffset, same. The Go driver (go-sql-driver/mysql, parseTime=true)
+// parses whatever string MySQL sends back using the DSN's loc parameter
+// (UTC unless overridden), with no idea what session time_zone produced it.
+// A deployment whose MySQL session time_zone is not UTC -- nothing in this
+// codebase pins it, see plugins/auditlog/chain_store.go's epochMicrosExpr
+// for the same hazard hit before -- gets a CreatedAt silently offset by
+// that session's UTC difference: measured 2h fast at CLEAT_TEST_MYSQL's
+// session time_zone='+02:00' (cleat-review, #2911 GAP).
+//
+// Separate from callIntentStore because the question here -- what time is
+// it -- is independent of which workflow or shard; ServerNow takes a
+// workflowID only so ShardedStore can route the question to the shard whose
+// session produced the CreatedAt being compared against (it must be the
+// SAME session default, or the two readings carry different, unrelated
+// biases and nothing cancels). A store that does not implement this
+// interface degrades to no retention check at all -- see
+// execSession.replayUnderOriginalKey, which treats that the same as every
+// other "cannot say" case on this path.
+//
+// WHY THIS FIXES THE BUG WITHOUT KNOWING THE SESSION'S ACTUAL OFFSET. Both
+// CreatedAt and ServerNow are read through the SAME *sql.DB pool, so if the
+// session's time_zone biases one by some constant b, it biases the other by
+// the same b: (trueNow + b) - (trueCreatedAt + b) = trueNow - trueCreatedAt.
+// The bias is not corrected -- it is arranged to cancel in the subtraction.
+// Using UTC_TIMESTAMP() here instead of NOW() would NOT work: UTC_TIMESTAMP()
+// carries no bias, so it would subtract an unbiased reading from a biased
+// one and reintroduce exactly the error this exists to remove.
+type callIntentClock interface {
+	// ServerNow reports the database server's own clock, as read through the
+	// same session defaults as EventRecord.CreatedAt for workflowID.
+	ServerNow(ctx context.Context, workflowID string) (time.Time, error)
+}
+
+// ServerNow implements callIntentClock. Postgres's timestamptz carries its
+// own offset on the wire regardless of session time_zone, so this has no bug
+// to cancel -- implemented for symmetry with the other two dialects, and so
+// replayUnderOriginalKey needs no per-dialect branch.
+func (s *PostgresStore) ServerNow(ctx context.Context, _ string) (time.Time, error) {
+	var now time.Time
+	if err := s.db.QueryRowContext(ctx, "SELECT NOW()").Scan(&now); err != nil {
+		return time.Time{}, fmt.Errorf("server now: %w", err)
+	}
+	return now, nil
+}
+
+// ServerNow implements callIntentClock. NOW(6), not UTC_TIMESTAMP(6) -- see
+// callIntentClock's doc comment for why the session-zone-biased function is
+// the correct one to pair with a session-zone-biased CreatedAt.
+func (s *MySQLStore) ServerNow(ctx context.Context, _ string) (time.Time, error) {
+	var now time.Time
+	if err := s.db.QueryRowContext(ctx, "SELECT NOW(6)").Scan(&now); err != nil {
+		return time.Time{}, fmt.Errorf("server now: %w", err)
+	}
+	return now, nil
+}
+
+// ServerNow implements callIntentClock. MSSQL's datetimeoffset carries its
+// own offset on the wire, so -- like Postgres -- this has no bug to cancel.
+func (s *MSSQLStore) ServerNow(ctx context.Context, _ string) (time.Time, error) {
+	var now time.Time
+	if err := s.db.QueryRowContext(ctx, "SELECT SYSUTCDATETIME()").Scan(&now); err != nil {
+		return time.Time{}, fmt.Errorf("server now: %w", err)
+	}
+	return now, nil
+}
+
+var (
+	_ callIntentClock = (*PostgresStore)(nil)
+	_ callIntentClock = (*MySQLStore)(nil)
+	_ callIntentClock = (*MSSQLStore)(nil)
 )
 
 // ---------------------------------------------------------------------------

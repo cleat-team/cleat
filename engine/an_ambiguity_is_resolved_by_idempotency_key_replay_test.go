@@ -8,9 +8,12 @@ package engine
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/cleat-team/cleat/internal/tenantctx"
 )
 
 // fakeKeyReplayer records what it was asked and answers as configured, with
@@ -25,13 +28,15 @@ type fakeKeyReplayer struct {
 	keys  []string
 	ops   []string
 	reqs  []string
+	ctxs  []context.Context // cleat#2911 G1: so a test can inspect what the replayer was given, e.g. tenantctx.From
 }
 
-func (r *fakeKeyReplayer) ReplayUnderOriginalKey(_ context.Context, service, operation, requestJSON, idempotencyKey string) (string, IdempotencyReplayOutcome, error) {
+func (r *fakeKeyReplayer) ReplayUnderOriginalKey(ctx context.Context, service, operation, requestJSON, idempotencyKey string) (string, IdempotencyReplayOutcome, error) {
 	r.calls++
 	r.keys = append(r.keys, idempotencyKey)
 	r.ops = append(r.ops, service+"."+operation)
 	r.reqs = append(r.reqs, requestJSON)
+	r.ctxs = append(r.ctxs, ctx)
 	if r.err != nil {
 		return "", IdempotencyReplayCannotSay, r.err
 	}
@@ -97,6 +102,43 @@ func TestResolveAmbiguityViaKeyReplay_CompletesTheStepAndPersistsIt(t *testing.T
 		}
 		if replayer.calls != 1 {
 			t.Errorf("the replayer was asked %d times across two replays, want 1", replayer.calls)
+		}
+	})
+}
+
+// TestResolveAmbiguityViaKeyReplay_ScopesTheReplayerContextToTheTenant is
+// cleat#2911 G1 (i): callService scopes the tenant onto ctx before the
+// ORIGINAL dispatch (engine/idempotency.go, cleat#1565 -- the egress
+// allowlist and secret resolution are both per tenant), and a replay must do
+// the same or the replayer's secret resolution and egress policy run
+// unscoped. Before the fix, replayUnderOriginalKey passed the bare ctx
+// straight through.
+func TestResolveAmbiguityViaKeyReplay_ScopesTheReplayerContextToTheTenant(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, store WorkflowStore) {
+		ctx := context.Background()
+		wfID := newIntentWorkflow(t, ctx, store, "keyreplay-tenant")
+		writePendingCall(t, ctx, store, wfID)
+
+		replayer := &fakeKeyReplayer{response: `{"charged":true}`, outcomes: []IdempotencyReplayOutcome{IdempotencyReplayResolved}}
+		ops := map[string]bool{intentService + "." + intentOperation: true}
+		s, _ := replaySessionFor(t, ctx, store, wfID,
+			WithIdempotencyKeyReplayer(replayer), WithIdempotencyKeyOps(ops))
+		s.tenantID = DefaultTenantUUID
+
+		if result := s.DurableCall(ctx, nil, intentService, intentOperation, `{"amount":100}`, 0, 0); errCodeOf(result) != 0 {
+			t.Fatalf("a resolved call still reported failure (code %d)", callErrorCodeOf(result))
+		}
+		if replayer.calls != 1 {
+			t.Fatalf("the replayer was asked %d times, want 1", replayer.calls)
+		}
+
+		gotTenant, ok := tenantctx.From(replayer.ctxs[0])
+		if !ok {
+			t.Fatal("the replayer's context carried no tenant -- callService scopes the tenant " +
+				"for the original dispatch, and a replay must do the same")
+		}
+		if gotTenant.String() != DefaultTenantUUID {
+			t.Errorf("tenant = %s, want %s", gotTenant, DefaultTenantUUID)
 		}
 	})
 }
@@ -193,6 +235,55 @@ func TestResolveAmbiguityViaKeyReplay_RetentionBoundSkipsAStaleRow(t *testing.T)
 		if replayer.calls != 0 {
 			t.Errorf("the replayer was consulted %d times; a row past its retention bound must not be "+
 				"replayed at all, not even once", replayer.calls)
+		}
+	})
+}
+
+// TestResolveAmbiguityViaKeyReplay_ZeroCreatedAtCannotSay is cleat#2911 A1:
+// an age that cannot be computed must not be treated as a fresh one. Not
+// reachable through the normal DurableCall path -- every dialect's
+// applyCreatedAt sets CreatedAt unconditionally from a NOT NULL column, so a
+// real pending row never has a zero value -- which is why this calls
+// replayUnderOriginalKey directly with a hand-built EventRecord rather than
+// going through forEachBackend/DurableCall: the thing under test is the
+// function's OWN fail-safe for an input no live store produces, not
+// something a real crash-and-replay can construct today.
+//
+// WithIdempotencyKeyRetention(math.MaxInt64) is not a realistic
+// configuration -- it is what makes this falsifiable at all. time.Time.Sub
+// SATURATES rather than overflowing, so now.Sub(zero CreatedAt) -- roughly
+// 2026 years, which does not fit in an int64 nanosecond count -- comes back
+// as exactly time.Duration(math.MaxInt64), not a garbage or negative value.
+// At any ordinary retention that age is still "> retention" and an age-based
+// fallback would reach the same CannotSay by accident; AT THE MAXIMUM
+// representable retention, age > retention is false (MaxInt64 > MaxInt64),
+// so only an explicit zero check -- not a fallback relying on the age
+// overflowing past whatever bound was configured -- can still refuse here.
+// A real store is used (via forEachBackend) rather than a bare *Engine so
+// that this gap could not be accidentally patched over by a missing-clock
+// branch reacting first, the same way a first version of this test was.
+func TestResolveAmbiguityViaKeyReplay_ZeroCreatedAtCannotSay(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, store WorkflowStore) {
+		ctx := context.Background()
+		wfID := newIntentWorkflow(t, ctx, store, "keyreplay-zero-created-at")
+
+		replayer := &fakeKeyReplayer{outcomes: []IdempotencyReplayOutcome{IdempotencyReplayResolved}, response: `{"charged":true}`}
+		ops := map[string]bool{intentService + "." + intentOperation: true}
+		s, _ := replaySessionFor(t, ctx, store, wfID,
+			WithIdempotencyKeyReplayer(replayer), WithIdempotencyKeyOps(ops),
+			WithIdempotencyKeyRetention(time.Duration(math.MaxInt64)))
+
+		rec := EventRecord{Step: 0, Service: intentService, Op: intentOperation, Request: `{"amount":100}`}
+		if !rec.CreatedAt.IsZero() {
+			t.Fatal("test setup: rec.CreatedAt is not the zero value this test means to exercise")
+		}
+
+		_, outcome := s.replayUnderOriginalKey(ctx, rec)
+		if outcome != IdempotencyReplayCannotSay {
+			t.Errorf("outcome = %v, want IdempotencyReplayCannotSay for an unmeasurable age", outcome)
+		}
+		if replayer.calls != 0 {
+			t.Errorf("the replayer was consulted %d times for a row whose age cannot be measured", replayer.calls)
 		}
 	})
 }

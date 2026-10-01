@@ -498,7 +498,7 @@ func (c *dbServiceCaller) ResolveCall(ctx context.Context, service, operation, i
 // |---|---|
 // | 200 | IdempotencyReplayResolved, response = body |
 // | 409 | IdempotencyReplayRetryLater -- a request under this key is still being processed (Stripe's documented meaning for a concurrent same-key request) |
-// | anything else, including a transport error or timeout | IdempotencyReplayCannotSay |
+// | anything else -- a 4xx other than 409 (e.g. a cached 402), 5xx, a transport error, or a timeout | IdempotencyReplayCannotSay |
 func (c *dbServiceCaller) ReplayUnderOriginalKey(ctx context.Context, service, operation, requestJSON, idempotencyKey string) (string, engine.IdempotencyReplayOutcome, error) {
 	if !c.idempotencyKeyOps[service+"."+operation] {
 		return "", engine.IdempotencyReplayCannotSay, nil
@@ -510,6 +510,19 @@ func (c *dbServiceCaller) ReplayUnderOriginalKey(ctx context.Context, service, o
 		// validation ran, same reasoning as ResolveCall's identical guard.
 		return "", engine.IdempotencyReplayCannotSay, fmt.Errorf("idempotency-key replay for %s.%s: no endpoint registered for service %q",
 			service, operation, service)
+	}
+
+	// requestJSON is the ORIGINAL request the workflow wrote, which may
+	// carry a ${secret:name} reference exactly like a first dispatch does
+	// (call()/resolveSecrets above). Unlike ResolveCall's lookup operation,
+	// which sends a fixed "{}" body and never touches this, a replay sends
+	// requestJSON itself, so it needs the same substitution or the service
+	// receives the literal, unresolved reference text (cleat#2911 G1). A
+	// resolution failure is CannotSay with nothing dispatched -- the same
+	// contract resolveSecrets's own doc comment states for call().
+	requestJSON, err := c.resolveSecrets(ctx, service, operation, requestJSON)
+	if err != nil {
+		return "", engine.IdempotencyReplayCannotSay, err
 	}
 
 	url := fmt.Sprintf("%s/call/%s/%s", baseURL, service, operation)
