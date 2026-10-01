@@ -11,16 +11,18 @@ import (
 )
 
 // TestV2V4V5MigrationsAreIdempotentOnMySQL is the regression test for
-// cleat#2880: v2 (oauth_sessions.state, code_verifier, token_hash), v4
-// (oauth_config.issuer, oauth_sessions.nonce) and v5 (dropping
-// oauth_config.client_secret) each had bare `ALTER TABLE ... ADD/DROP
-// COLUMN` statements for their MySQL arm, not idempotent the way their
-// PostgreSQL (`IF NOT EXISTS`/`IF EXISTS`) and SQL Server (a sys.columns
-// guard) arms already were. MySQL DDL is not transactional, so a crash
-// between one of those ALTERs and plugin_migrations recording the version
-// leaves a worker that re-runs it on its next start and gets `ERROR 1060`
-// (duplicate column) or `ERROR 1091` (no such column to drop) -- fatal to
-// boot, on every start thereafter.
+// cleat#2880: v2 (oauth_sessions.state, code_verifier, token_hash columns,
+// plus dropping idx_oauth_sessions_token and creating idx_oauth_sessions_state
+// / idx_oauth_sessions_token_hash), v4 (oauth_config.issuer, oauth_sessions.nonce)
+// and v5 (dropping oauth_config.client_secret) each had bare `ALTER TABLE
+// ... ADD/DROP COLUMN` / `CREATE INDEX` / `DROP INDEX` statements for their
+// MySQL arm, not idempotent the way their PostgreSQL (`IF NOT EXISTS`/`IF
+// EXISTS`) and SQL Server (a sys.columns/sys.indexes guard) arms already
+// were. MySQL DDL is not transactional, so a crash between any one of those
+// statements and plugin_migrations recording the version leaves a worker
+// that re-runs it on its next start and gets `ERROR 1060` (duplicate
+// column), `ERROR 1091` (no such column/index to drop), or `ERROR 1061`
+// (duplicate key name) -- fatal to boot, on every start thereafter.
 //
 // Mirrors plugins/webhookingest's TestWebhookSourcesDeletedAtMigrationIsIdempotentOnMySQL
 // (cleat#2221) exact shape: plugin.RunMigrations' version-tracking skip
@@ -66,17 +68,8 @@ func TestV2V4V5MigrationsAreIdempotentOnMySQL(t *testing.T) {
 				}
 			}
 
-			// v2's block also carries an unguarded DROP INDEX and two
-			// unguarded CREATE INDEX statements -- a real, separate hazard
-			// (cleat#2880's own "CREATE INDEX" list), scoped to a follow-up
-			// PR rather than this one. Re-running the FULL block text a
-			// second time would fail on the DROP INDEX ("check that column/key
-			// exists") or a CREATE INDEX ("Duplicate key name"), for a reason
-			// unrelated to the column guards this test exists to check -- so
-			// they are stripped here, not fixed, keeping this test scoped to
-			// exactly the hazard this PR addresses.
-			runStatements(t, ctx, be, withoutIndexDDL(upMySQL[2]))
-			runStatements(t, ctx, be, withoutIndexDDL(upMySQL[2]))
+			runStatements(t, ctx, be, upMySQL[2])
+			runStatements(t, ctx, be, upMySQL[2])
 
 			runStatements(t, ctx, be, upMySQL[4])
 			runStatements(t, ctx, be, upMySQL[4])
@@ -110,10 +103,26 @@ func TestV2V4V5MigrationsAreIdempotentOnMySQL(t *testing.T) {
 					t.Errorf("oauth_config.%s column count after two extra re-runs: got %d, want %d", column, got, want)
 				}
 			}
+			assertSessionsIdx := func(idx string, want bool) {
+				t.Helper()
+				var got int
+				if err := be.DB.QueryRowContext(ctx, `
+					SELECT COUNT(*) FROM information_schema.statistics
+					WHERE table_schema = DATABASE() AND table_name = 'oauth_sessions' AND index_name = ?
+				`, idx).Scan(&got); err != nil {
+					t.Fatalf("count oauth_sessions index %s: %v", idx, err)
+				}
+				if (got != 0) != want {
+					t.Errorf("oauth_sessions index %s after two extra re-runs: got count %d, want present=%v", idx, got, want)
+				}
+			}
 			// v2
 			assertSessionsCol("state", 1)
 			assertSessionsCol("code_verifier", 1)
 			assertSessionsCol("token_hash", 1)
+			assertSessionsIdx("idx_oauth_sessions_token", false)
+			assertSessionsIdx("idx_oauth_sessions_state", true)
+			assertSessionsIdx("idx_oauth_sessions_token_hash", true)
 			// v4
 			assertConfigCol("issuer", 1)
 			assertSessionsCol("nonce", 1)
@@ -147,27 +156,4 @@ func runStatements(t *testing.T, ctx context.Context, be testutil.PluginTestBack
 			t.Fatalf("exec %q: %v", stmt, err)
 		}
 	}
-}
-
-// withoutIndexDDL drops any CREATE [UNIQUE] INDEX or DROP INDEX statement
-// from sqlText, keeping everything else (including MODIFY COLUMN, which is
-// idempotent, and the guarded ADD/DROP COLUMN sequences this file tests) in
-// its original order. Index DDL in these migrations is not yet guarded --
-// that is cleat#2880's separate, later "CREATE INDEX" PR -- so re-running a
-// block containing it a second time fails for a reason unrelated to the
-// column guards under test here.
-func withoutIndexDDL(sqlText string) string {
-	var kept []string
-	for _, stmt := range strings.Split(sqlText, ";") {
-		trimmed := strings.TrimSpace(stmt)
-		if trimmed == "" {
-			continue
-		}
-		upper := strings.ToUpper(trimmed)
-		if strings.HasPrefix(upper, "CREATE INDEX") || strings.HasPrefix(upper, "CREATE UNIQUE INDEX") || strings.HasPrefix(upper, "DROP INDEX") {
-			continue
-		}
-		kept = append(kept, trimmed)
-	}
-	return strings.Join(kept, ";\n")
 }

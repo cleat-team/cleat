@@ -41,8 +41,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					updated_at    TIMESTAMP(6) NOT NULL DEFAULT NOW(6)
 				);
 
-				CREATE INDEX idx_schedules_tenant_enabled_next
-					ON schedules (tenant_id, enabled, next_run_at);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'schedules' AND index_name = 'idx_schedules_tenant_enabled_next');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_schedules_tenant_enabled_next ON schedules (tenant_id, enabled, next_run_at)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'schedules')
