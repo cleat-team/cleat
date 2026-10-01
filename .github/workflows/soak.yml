@@ -120,6 +120,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: soak-report-${{ github.sha }}
+          name: soak-report-${{ github.sha }}-${{ github.run_attempt }}
           path: soak-report.json
           retention-days: 30
