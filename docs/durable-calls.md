@@ -160,9 +160,11 @@ here gets this treatment; every other ambiguity reaches the `[AMBIGUOUS]` report
 
 cleat#2897 (decided, not yet implemented) will make same-key replay -- the engine re-issuing the
 step under the *original* key and letting the service's own key table resolve it -- the default
-path for a service that accepts an idempotency key, with no retry at all where no key exists. Once
-it lands, read this lookup as the exception: an opt-in alternative for a service that can answer
-"what happened to this key" but does not itself resolve a repeated key, not the recommended route.
+path for a service that accepts an idempotency key, with no retry at all where no key exists. That
+replaces the `404` row's "the engine does not re-dispatch on its own" below, for exactly that class
+of service. Once it lands, read this lookup as the exception: an opt-in alternative for a service
+that can answer "what happened to this key" but does not itself resolve a repeated key, not the
+recommended route.
 
 **The lookup convention — the contract a service implements:**
 
