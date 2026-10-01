@@ -2637,7 +2637,7 @@ jobs:
       - name: Upload benchmark artifact
         uses: actions/upload-artifact@v7
         with:
-          name: benchmark-results-${{ github.sha }}
+          name: benchmark-results-${{ github.sha }}-${{ github.run_attempt }}
           path: bench-output.txt
           retention-days: 90
 
@@ -3131,14 +3131,14 @@ jobs:
       - name: Upload Go coverage artifact
         uses: actions/upload-artifact@v7
         with:
-          name: go-coverage-${{ github.sha }}
+          name: go-coverage-${{ github.sha }}-${{ github.run_attempt }}
           path: coverage.out
           retention-days: 30
 
       - name: Upload Python coverage artifact
         uses: actions/upload-artifact@v7
         with:
-          name: python-coverage-${{ github.sha }}
+          name: python-coverage-${{ github.sha }}-${{ github.run_attempt }}
           path: python-sdk/tests/coverage
           retention-days: 30
 

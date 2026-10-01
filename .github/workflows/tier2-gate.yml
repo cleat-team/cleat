@@ -325,7 +325,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: tier2-gate-${{ github.sha }}
+          name: tier2-gate-${{ github.sha }}-${{ github.run_attempt }}
           path: |
             tier2-gate.log
             tier2-gate.json

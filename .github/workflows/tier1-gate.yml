@@ -573,7 +573,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: tier-gate-log-engine-${{ matrix.shard }}-${{ github.sha }}
+          name: tier-gate-log-engine-${{ matrix.shard }}-${{ github.sha }}-${{ github.run_attempt }}
           path: tier-gate-engine-${{ matrix.shard }}.log
           retention-days: 30
 
@@ -761,7 +761,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v7
         with:
-          name: tier-gate-log-rest-${{ github.sha }}
+          name: tier-gate-log-rest-${{ github.sha }}-${{ github.run_attempt }}
           path: tier-gate-rest.log
           retention-days: 30
 
