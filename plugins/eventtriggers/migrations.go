@@ -976,7 +976,7 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				-- cleat.assert_tenant_set() RAISES even against an empty table. The
 				-- UpMSSQL arm below already carries the SQL Server bypass
 				-- (sp_set_session_context, added fixing a round-1 review finding on
-				-- cleat#2822); this is its PostgreSQL counterpart, added fixing
+				-- cleat#2822) -- this is its PostgreSQL counterpart, added fixing
 				-- cleat#2828. Same sanctioned mechanism as Version 6: enter
 				-- cleat_sweep, which Version 4's applyTenantScoping already granted
 				-- access to this table, then RESET ROLE before the CREATE INDEX
