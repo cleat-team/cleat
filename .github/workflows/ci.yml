@@ -1904,6 +1904,30 @@ jobs:
   test-go:
     name: Test Go (${{ matrix.package.name }}) on ${{ matrix.go-version }}
     runs-on: ubuntu-latest
+    # cleat#2862: three jobs (two of them this matrix's commands/crash legs)
+    # hung with no timeout, each stopping dead mid-post-run-cleanup --
+    # runners losing connectivity, not a test hang -- and with no cap here
+    # they would have inherited GitHub's default of up to 360 minutes.
+    # 45 is ~2.8x the longest leg actually measured: commands at
+    # 13m23s-16m10s across three clean runs (gh run view --json jobs,
+    # startedAt/completedAt), the slowest of this matrix's twelve package
+    # groups by a wide margin (crash is next at ~14m20s; everything else
+    # tops out around 6m). cleat#2876.
+    #
+    # The caveat below on coverage/tier1-rest only roughly holds here, and
+    # it is worth saying precisely rather than claiming "comfortably
+    # safe" (cleat-review, #2876): `-timeout` is PER TEST BINARY, not per
+    # `go test` invocation -- each package gets its own fresh 30m (the
+    # explicit flag below, not Go's 10m default), counted from whenever
+    # THAT package's binary starts, which with multiple packages in one
+    # invocation (plugins runs them with -p 1) is not necessarily the
+    # invocation's own start. The three measured clean runs put every
+    # package's start within roughly the first 16 minutes, so a package
+    # that starts last and then hangs hits its own 30m ceiling at roughly
+    # t+30 <= ~46 -- at or slightly over this job's 45m, not safely under
+    # it. The margin here is small because the matrix's slowest leg is
+    # itself small, not because the mechanism differs from coverage's.
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
@@ -3043,6 +3067,29 @@ jobs:
     # rather than needing a third.
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # cleat#2862/cleat#2876: this was the third job stuck in the same hang,
+    # and it needs its OWN number rather than reusing test-go's 45 --
+    # measured directly (gh run view --json jobs on a clean run), "Run Go
+    # coverage check" alone takes ~22 minutes, so 45 would leave this job
+    # barely 2x headroom where test-go's slowest leg gets ~2.8x. 60 keeps
+    # the margin comparable (~2.7x) without inventing a third timeout value
+    # alongside tier1-gate.yml's.
+    #
+    # CAVEAT (cleat-review, #2876), restated in PER-PACKAGE terms --
+    # `-timeout` resets for each test binary, not once per `go test`
+    # invocation (`go help testflag`: "If a test binary runs longer than
+    # duration d, panic", counted from that binary's own start). `make
+    # coverage-go` runs `go test -p 1 -timeout 40m ./internal/...
+    # ./plugins/... ./cmd/... ./engine/... ./plugin/... ./wasm/... ./auth/...`
+    # sequentially, THEN the same shape again for the cleat module. ANY
+    # package in either call -- not just the first package of each -- gets
+    # its own fresh 40m from when it personally starts. A package that
+    # happens to start around job-elapsed minute 20 and then hangs is
+    # killed by this 60m job cap, not by Go's own timeout, with no
+    # goroutine dump. Flagged rather than resolved: changing the number,
+    # or restructuring these two sequential `go test` calls, is a call for
+    # whoever owns this job next.
+    timeout-minutes: 60
     # WHY THIS JOB HAS A DATABASE.
     #
     # The floors were calibrated on 2026-06-10 with backends configured -- the
