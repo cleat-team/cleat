@@ -205,6 +205,19 @@ type dbServiceCaller struct {
 	// case (executeWorkflow), so an unconfigured deployment pays nothing.
 	ambiguityLookup map[string]ambiguityLookupEntry
 
+	// idempotencyKeyOps is the set of "service.operation" keys declared
+	// --idempotency-key-ops, consulted by ReplayUnderOriginalKey. Disjoint
+	// from ambiguityLookup's keys by boot-time validation (see
+	// validateIdempotencyKeyOps). Nil or empty means this caller does not
+	// implement IdempotencyKeyReplayer usefully, and
+	// WithIdempotencyKeyReplayer is not wired at all in that case, same
+	// reasoning as ambiguityLookup above.
+	//
+	// The retention bound (--idempotency-key-retention) is NOT duplicated
+	// here: engine.execSession.replayUnderOriginalKey checks it BEFORE ever
+	// calling ReplayUnderOriginalKey, so this caller never needs to know it.
+	idempotencyKeyOps map[string]bool
+
 	// secrets resolves ${secret:name} in a request on the way OUT to the
 	// service, and the direction is the whole point.
 	//
@@ -456,6 +469,98 @@ func (c *dbServiceCaller) ResolveCall(ctx context.Context, service, operation, i
 		return "", engine.AmbiguityNotSent, nil
 	default:
 		return "", engine.AmbiguityCannotSay, nil
+	}
+}
+
+// ReplayUnderOriginalKey implements engine.IdempotencyKeyReplayer. cleat#2897,
+// decision (c) on cleat#1984.
+//
+// It answers only for an operation named in --idempotency-key-ops; everything
+// else returns IdempotencyReplayCannotSay, the same "not configured for this"
+// default ResolveCall uses above.
+//
+// SAME URL, SAME REQUEST, DIFFERENT KEY-BEARING HEADER VALUE -- unlike
+// ResolveCall, which asks a SEPARATE lookup operation. This re-issues
+// service.operation itself, exactly the route forwardToService uses for an
+// ordinary call, with the SAME idempotency key the original (now-ambiguous)
+// attempt sent. A service that honours the key returns the original outcome
+// from its own key table; that IS the mechanism, so there is no second
+// operation to name in configuration the way --ambiguity-lookup needs one.
+//
+// Reading the status directly, like ResolveCall, rather than through
+// forwardToService's classified error: the contract here is the status code
+// itself (see the table below), and forwardToService's serviceStatusError
+// would collapse 409 into "permanent" (see its own statusSaysPermanent,
+// which does not exempt 409) -- an ordinary call response and this one mean
+// different things by the same status.
+//
+// | status | outcome |
+// |---|---|
+// | 200 | IdempotencyReplayResolved, response = body |
+// | 409 | IdempotencyReplayRetryLater -- a request under this key is still being processed (Stripe's documented meaning for a concurrent same-key request) |
+// | anything else -- a 4xx other than 409 (e.g. a cached 402), 5xx, a transport error, or a timeout | IdempotencyReplayCannotSay |
+func (c *dbServiceCaller) ReplayUnderOriginalKey(ctx context.Context, service, operation, requestJSON, idempotencyKey string) (string, engine.IdempotencyReplayOutcome, error) {
+	if !c.idempotencyKeyOps[service+"."+operation] {
+		return "", engine.IdempotencyReplayCannotSay, nil
+	}
+	baseURL, ok := c.serviceEndpoints[service]
+	if !ok {
+		// Not reachable if --idempotency-key-ops and --service-endpoints are
+		// validated together at boot, but this method does not trust that
+		// validation ran, same reasoning as ResolveCall's identical guard.
+		return "", engine.IdempotencyReplayCannotSay, fmt.Errorf("idempotency-key replay for %s.%s: no endpoint registered for service %q",
+			service, operation, service)
+	}
+
+	// requestJSON is the ORIGINAL request the workflow wrote, which may
+	// carry a ${secret:name} reference exactly like a first dispatch does
+	// (call()/resolveSecrets above). Unlike ResolveCall's lookup operation,
+	// which sends a fixed "{}" body and never touches this, a replay sends
+	// requestJSON itself, so it needs the same substitution or the service
+	// receives the literal, unresolved reference text (cleat#2911 G1). A
+	// resolution failure is CannotSay with nothing dispatched -- the same
+	// contract resolveSecrets's own doc comment states for call().
+	requestJSON, err := c.resolveSecrets(ctx, service, operation, requestJSON)
+	if err != nil {
+		return "", engine.IdempotencyReplayCannotSay, err
+	}
+
+	url := fmt.Sprintf("%s/call/%s/%s", baseURL, service, operation)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(requestJSON))
+	if err != nil {
+		return "", engine.IdempotencyReplayCannotSay, fmt.Errorf("idempotency-key replay for %s.%s: create request: %w", service, operation, err)
+	}
+	plugin.SetTraceparent(req, c.traceID)
+	req.Header.Set("Content-Type", "application/json")
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
+	// Same per-call, egress-guarded client as forwardToService and
+	// ResolveCall -- see forwardToService's comment for why this is not
+	// pooled.
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{DialContext: c.serviceEgressGuard(ctx, baseURL).DialContext},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		// A transport failure answers nothing about the call's outcome --
+		// cannot say, not an error the caller must propagate. Same reasoning
+		// as ResolveCall's identical branch.
+		return "", engine.IdempotencyReplayCannotSay, fmt.Errorf("idempotency-key replay for %s.%s: %w", service, operation, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", engine.IdempotencyReplayCannotSay, fmt.Errorf("idempotency-key replay for %s.%s: read response: %w", service, operation, err)
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return string(body), engine.IdempotencyReplayResolved, nil
+	case http.StatusConflict:
+		return "", engine.IdempotencyReplayRetryLater, nil
+	default:
+		return "", engine.IdempotencyReplayCannotSay, nil
 	}
 }
 
@@ -1794,6 +1899,22 @@ type Worker struct {
 	// nothing (no resolver call on an ambiguity, same as before cleat#1984).
 	ambiguityLookup map[string]ambiguityLookupEntry
 
+	// idempotencyKeyOps is the set of "service.operation" keys declared
+	// --idempotency-key-ops, from cleat#2897. Passed to every dbServiceCaller
+	// this worker builds, which implements engine.IdempotencyKeyReplayer
+	// against it. Nil or empty means no replayer is registered at all -- see
+	// executeWorkflow's WithIdempotencyKeyReplayer wiring, conditional on
+	// this being non-empty, same shape as ambiguityLookup above.
+	idempotencyKeyOps map[string]bool
+
+	// idempotencyKeyRetention is --idempotency-key-retention, passed to
+	// engine.WithIdempotencyKeyRetention. Zero means
+	// engine.DefaultIdempotencyKeyRetention -- this field is never zero in
+	// practice because the flag default already sets it, but the engine
+	// option's own zero-means-default behaviour is what a test building a
+	// Worker directly, without going through flag parsing, falls back to.
+	idempotencyKeyRetention time.Duration
+
 	// egressAllow answers "which hosts may this tenant's workflows reach".
 	// Nil denies every guest-initiated fetch. cleat#1565.
 	egressAllow *engine.TenantEgressStore
@@ -3131,17 +3252,18 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// egressAllow is what makes http.fetch usable at all: without it the guard
 	// has no allowlist and refuses every destination. cleat#1565.
 	caller := &dbServiceCaller{
-		store:            execStore,
-		workerID:         w.id,
-		benchSvcURL:      *benchSvcURL,
-		serviceEndpoints: w.serviceEndpoints,
-		ambiguityLookup:  w.ambiguityLookup,
-		egressAllow:      w.egressAllow,
-		operatorEgress:   w.operatorEgress,
-		privateHosts:     w.privateHosts,
-		egress:           w.egress,
-		traceID:          traceID,
-		secrets:          w.secrets,
+		store:             execStore,
+		workerID:          w.id,
+		benchSvcURL:       *benchSvcURL,
+		serviceEndpoints:  w.serviceEndpoints,
+		ambiguityLookup:   w.ambiguityLookup,
+		idempotencyKeyOps: w.idempotencyKeyOps,
+		egressAllow:       w.egressAllow,
+		operatorEgress:    w.operatorEgress,
+		privateHosts:      w.privateHosts,
+		egress:            w.egress,
+		traceID:           traceID,
+		secrets:           w.secrets,
 	}
 	engineOpts := []engine.EngineOption{
 		engine.WithSignalStore(execStore.(engine.SignalStore)),
@@ -3365,6 +3487,18 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// existed.
 	if len(w.ambiguityLookup) > 0 {
 		engineOpts = append(engineOpts, engine.WithAmbiguityResolver(caller))
+	}
+	// Same conditional-registration shape, for cleat#2897's same-key replay.
+	// The two are mutually exclusive per operation (validateIdempotencyKeyOps
+	// at boot), so this and the resolver above never compete over one
+	// operation -- but both options can be set on one Engine at once, for two
+	// DIFFERENT operations each handled by its own mechanism.
+	if len(w.idempotencyKeyOps) > 0 {
+		engineOpts = append(engineOpts,
+			engine.WithIdempotencyKeyReplayer(caller),
+			engine.WithIdempotencyKeyOps(w.idempotencyKeyOps),
+			engine.WithIdempotencyKeyRetention(w.idempotencyKeyRetention),
+		)
 	}
 	// Set unconditionally, and note it is NOT enough on its own: this governs
 	// the direct flush path only. The batch path takes the same value from the

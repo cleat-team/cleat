@@ -1426,6 +1426,29 @@ func main() {
 		logger.Info("ambiguity lookups registered", "operations", strings.Join(keys, ","))
 	}
 
+	// cleat#2897, decision (c) on cleat#1984. Same boot-time reasoning as
+	// --ambiguity-lookup above, plus a second validation that the two
+	// mechanisms were not both configured for one operation (see
+	// validateIdempotencyKeyOps's doc comment for why that is refused rather
+	// than given a silent precedence).
+	idempotencyKeyOps, ikErr := parseIdempotencyKeyOps(*idempotencyKeyOpsFlag)
+	if ikErr != nil {
+		logger.Error("--idempotency-key-ops is not usable", "error", ikErr)
+		os.Exit(1)
+	}
+	if len(idempotencyKeyOps) > 0 {
+		if err := validateIdempotencyKeyOps(idempotencyKeyOps, ambiguityLookup, parseWriteAheadIntentOps(writeAheadIntentOps)); err != nil {
+			logger.Error("--idempotency-key-ops is not usable", "error", err)
+			os.Exit(1)
+		}
+		keys := make([]string, 0, len(idempotencyKeyOps))
+		for k := range idempotencyKeyOps {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		logger.Info("idempotency-key replay registered", "operations", strings.Join(keys, ","), "retention", idempotencyKeyRetention.String())
+	}
+
 	egressAllow := &engine.TenantEgressStore{DB: db, Dialect: engine.Dialect(*driver)}
 
 	// cleat#1565: egress needs BOTH the operator's permission and the
@@ -2171,6 +2194,8 @@ func main() {
 		privateHosts:                     pluginPrivateHosts,
 		serviceEndpoints:                 serviceEndpoints,
 		ambiguityLookup:                  ambiguityLookup,
+		idempotencyKeyOps:                idempotencyKeyOps,
+		idempotencyKeyRetention:          *idempotencyKeyRetention,
 		egressAllow:                      egressAllow,
 		secrets:                          secretStore,
 		operatorEgress:                   operatorEgress,

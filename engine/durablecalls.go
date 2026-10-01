@@ -306,6 +306,22 @@ func (s *execSession) replayCall(ctx context.Context, m api.Module, service, ope
 				s.engine.Metrics.RecordAmbiguousCall(ctx)
 			}
 
+			// cleat#2897, decision (c) on cleat#1984: for an operation declared
+			// to support idempotency-key replay, try that FIRST -- re-dispatch
+			// under the SAME key and let the service's own key table resolve
+			// it, which is the default path a declared service gets. Disjoint
+			// from ambiguityResolver's configured operations by construction
+			// (cleat-worker boot validation), so this never races the lookup
+			// path below for the same operation; it is either one or the
+			// other, decided by which flag named this service.operation.
+			if resp, ok := s.resolveAmbiguityViaKeyReplay(ctx, rec); ok {
+				if s.engine.Metrics != nil {
+					s.engine.Metrics.RecordAmbiguousCall(ctx, attribute.String("outcome", "key_replay_resolved"))
+				}
+				written, writtenEC := s.writeOut(ctx, m, responsePtr, resp, responseMaxLen)
+				return packDurableCallResult(int(written), truncClass(writtenEC), writtenEC)
+			}
+
 			// Ask, before giving up. A resolver that can look the operation up
 			// by its idempotency key turns most ambiguities into non-events:
 			// the outcome is recorded and replay carries on as though the call
