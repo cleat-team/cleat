@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/microsoft/go-mssqldb"
@@ -78,6 +79,114 @@ func (s *MSSQLStore) reapStaleInstancesOnce(ctx context.Context, timeout time.Du
 	`, remainderMs, seconds, s.tenantID, reapLimitArg(limit))
 	if err != nil {
 		return 0, fmt.Errorf("reap stale instances: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), tx.Commit()
+}
+
+// ListStaleHolders satisfies StaleHolderReaper. Same tenant scoping and
+// same status='running'/heartbeat_at predicate as ReapStaleInstances --
+// see that method's doc and StaleHolderReaper's doc for why the two are
+// allowed to race. Read-only, so no retry wrapper: unlike the UPDATE paths
+// in this file, a plain SELECT has nothing for withRollbackGuaranteedRetry
+// to protect against -- there is no write to roll back and replay.
+func (s *MSSQLStore) ListStaleHolders(ctx context.Context, timeout time.Duration, limit int) ([]StaleHold, error) {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list stale holders: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT TOP (@p3) id, generation, assigned_to FROM workflow_instances
+		WHERE status = 'running'
+		  AND heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME())
+		  AND tenant_id = @p2
+		ORDER BY heartbeat_at
+	`, -timeout.Milliseconds(), s.tenantID, reapLimitArg(limit))
+	if err != nil {
+		return nil, fmt.Errorf("list stale holders: %w", err)
+	}
+	defer rows.Close()
+
+	var holders []StaleHold
+	for rows.Next() {
+		var h StaleHold
+		var assignedTo sql.NullString
+		if err := rows.Scan(&h.Key.WorkflowID, &h.Key.Generation, &assignedTo); err != nil {
+			return nil, fmt.Errorf("list stale holders: scan: %w", err)
+		}
+		h.AssignedTo = assignedTo.String
+		holders = append(holders, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list stale holders: rows: %w", err)
+	}
+	return holders, tx.Commit()
+}
+
+// ReapStaleInstancesExcept satisfies StaleHolderReaper. Same retry wrapper
+// as ReapStaleInstances -- a write path, unlike ListStaleHolders above.
+func (s *MSSQLStore) ReapStaleInstancesExcept(ctx context.Context, timeout time.Duration, limit int, exclude []GenerationKey) (int, error) {
+	var out int
+	err := withRollbackGuaranteedRetry(ctx, "reap stale instances except", mssqlTxRetries, mssqlTxRetryDelay, func() error {
+		var err error
+		out, err = s.reapStaleInstancesExceptOnce(ctx, timeout, limit, exclude)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return out, nil
+}
+
+func (s *MSSQLStore) reapStaleInstancesExceptOnce(ctx context.Context, timeout time.Duration, limit int, exclude []GenerationKey) (int, error) {
+	tx, err := s.beginTxWithContext(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances except: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	// T-SQL has no row-value IN ((a,b),(c,d)) constructor (unlike MySQL and
+	// Postgres), so exclusion goes through a VALUES table constructor
+	// (supported since SQL Server 2008) and NOT EXISTS instead. Empty
+	// exclude renders no clause, same as the other two dialects -- a VALUES
+	// constructor with zero rows is not valid syntax, so this must not try
+	// to emit one.
+	excludeClause := ""
+	args := []any{-timeout.Milliseconds(), s.tenantID, reapLimitArg(limit)}
+	if len(exclude) > 0 {
+		rowsSQL := make([]string, len(exclude))
+		next := 4
+		for i, k := range exclude {
+			rowsSQL[i] = fmt.Sprintf("(@p%d, @p%d)", next, next+1)
+			args = append(args, k.WorkflowID, k.Generation)
+			next += 2
+		}
+		excludeClause = `
+		      AND NOT EXISTS (
+		          SELECT 1 FROM (VALUES ` + strings.Join(rowsSQL, ", ") + `) AS ex(id, generation)
+		          WHERE ex.id = workflow_instances.id AND ex.generation = workflow_instances.generation
+		      )`
+	}
+
+	result, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
+		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
+		    reclaim_count = reclaim_count + 1
+		WHERE id IN (
+		    SELECT TOP (@p3) id FROM workflow_instances
+		    WHERE status = 'running'
+		      AND heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME())
+		      AND tenant_id = @p2
+		      `+excludeClause+`
+		    ORDER BY heartbeat_at
+		)
+	`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances except: %w", err)
 	}
 	n, _ := result.RowsAffected()
 	return int(n), tx.Commit()

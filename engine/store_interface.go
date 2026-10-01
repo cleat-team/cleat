@@ -888,6 +888,58 @@ type DBStallDetector interface {
 	StaleSetShape(ctx context.Context, timeout, missedBeatTimeout time.Duration) (StaleSetShape, error)
 }
 
+// StaleHold identifies one row ReapStaleInstances would otherwise reclaim,
+// and who currently holds it -- cleat#2196's veto channel. A reaper asks the
+// named holder before reclaiming; a "yes, still making progress" answer adds
+// Key to the exclude list passed to ReapStaleInstancesExcept. This never
+// grants ownership and changes nothing about who may hold a claim --
+// generation fencing is unchanged, and the veto only gates WHEN a reclaim
+// attempt runs, never whether fencing would allow it.
+type StaleHold struct {
+	Key        GenerationKey
+	AssignedTo string
+}
+
+// StaleHolderReaper is implemented by a store that can list which rows a
+// coming ReapStaleInstances call would reclaim, and reclaim while excluding
+// a subset of them.
+//
+// Deliberately its own interface, same reasoning as DBStallDetector: most
+// test doubles have nothing behind them to answer this, and a caller checks
+// for it with a type assertion rather than every mock growing two more
+// methods. A store that does not implement this gets the unconditional
+// ReapStaleInstances it always had -- the veto channel is additive, never
+// required for correctness, because fencing is what actually prevents two
+// concurrent owners.
+type StaleHolderReaper interface {
+	// ListStaleHolders reports the SAME population ReapStaleInstances(ctx,
+	// timeout, limit) would reclaim if called right now, without reclaiming
+	// any of it: same status='running' filter, same heartbeat_at < timeout
+	// predicate, same ORDER BY heartbeat_at, same limit.
+	//
+	// This is a separate, non-transactional read, like StaleSetShape versus
+	// ReapStaleInstances -- the two can disagree by the time the real
+	// reclaim runs (a row goes stale after this call, or recovers before
+	// the reclaim call), and that is fine: generation fencing is the
+	// authority on whether a reclaim is valid, this list only decides who
+	// gets asked before one is attempted.
+	ListStaleHolders(ctx context.Context, timeout time.Duration, limit int) ([]StaleHold, error)
+
+	// ReapStaleInstancesExcept behaves exactly like ReapStaleInstances
+	// except it never reclaims a row whose (WorkflowID, Generation) matches
+	// a GenerationKey in exclude. exclude may be empty, in which case this
+	// must behave identically to ReapStaleInstances.
+	//
+	// Excluding a pair whose generation has already moved by the time this
+	// runs -- the row was reclaimed or re-fenced by something else in the
+	// meantime -- is a no-op, not an error: that specific (id, generation)
+	// is no longer part of the stale population this call would act on
+	// anyway, and the CURRENT generation at that id, if still stale, is
+	// correctly left eligible for reclaim since the veto only ever covered
+	// the generation it was asked about.
+	ReapStaleInstancesExcept(ctx context.Context, timeout time.Duration, limit int, exclude []GenerationKey) (int, error)
+}
+
 // MultiShard is implemented by a store that fans a single logical operation
 // out across independently-failing shards (ShardedStore). A caller that
 // wants a per-shard decision -- cleat#2006's stall detection, where one
