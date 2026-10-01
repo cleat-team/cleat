@@ -899,6 +899,16 @@ func main() {
 		shardDBs := make([]*sql.DB, len(configs))
 		shardPoolCount = len(configs)
 		shardFactories := make([]engine.StoreFactory, 0, len(configs))
+		// cleat#2195: one reserved heartbeat pool PER SHARD, built through
+		// that shard's own PostgresStoreFactory exactly as #2192's non-sharded
+		// arms build theirs -- see the construction loop below and the
+		// ShardedStore wrap-up after it.
+		var heartbeatStores []engine.WorkflowStore
+		var heartbeatClosers []func() error
+		if *heartbeatMaxConnections > 0 {
+			heartbeatStores = make([]engine.WorkflowStore, len(configs))
+			heartbeatClosers = make([]func() error, len(configs))
+		}
 		for i, cfg := range configs {
 			dsn := cfg.ConnStr
 			if cfg.Schema != "" && cfg.Schema != "public" && !strings.Contains(dsn, "search_path=") {
@@ -924,6 +934,14 @@ func main() {
 
 			shardDBs[i] = sdb
 			f := engine.NewPostgresStoreFactory(sdb, cfg.Schema)
+			// WithDSN is required by OpenIsolatedStore below (cleat#2195): it
+			// opens its own pool on this DSN rather than reusing sdb, and
+			// refuses without one rather than silently falling back to the
+			// shared execution pool, which would defeat the whole point of a
+			// reserved heartbeat pool. dsn, not cfg.ConnStr: it already has
+			// the schema's search_path appended above, matching what sdb
+			// itself connects with.
+			f.WithDSN(dsn)
 			f.WithLogger(logger)
 			if payloadEncryption != nil {
 				f.WithEncryption(payloadEncryption, *encryptSensitivePayloads)
@@ -937,6 +955,23 @@ func main() {
 			}
 			stores[i] = s
 			closers[i] = closer.Close
+
+			// Reserved heartbeat pool for THIS shard, same reasoning #2192 gives
+			// for the non-sharded arms: built through f (this shard's own
+			// factory), so it gets the same database, schema and connector
+			// settings as this shard's execution store -- never a bare
+			// sql.Open, which is exactly what sent #2192's first MySQL version
+			// at the wrong database.
+			if *heartbeatMaxConnections > 0 {
+				hs, hcloser, err := f.OpenIsolatedStore(ctx, defaultTenantID, *heartbeatMaxConnections, taskQueues...)
+				if err != nil {
+					sdb.Close()
+					logger.ErrorContext(context.Background(), "shard heartbeat pool open failed", "worker_id", workerID, "shard", cfg.Name, "error", err)
+					os.Exit(1)
+				}
+				heartbeatStores[i] = hs
+				heartbeatClosers[i] = hcloser.Close
+			}
 		}
 
 		shardedStore, err := engine.NewShardedStore(configs, stores, closers)
@@ -945,6 +980,23 @@ func main() {
 			os.Exit(1)
 		}
 		store = shardedStore
+
+		// Wrapped in a SECOND ShardedStore built from the SAME configs, in the
+		// SAME order, as the execution one above. getShard's routing
+		// (engine/sharded_store.go) is a pure function of the workflow ID and
+		// len(shards) -- same configs, same order, same shard count means
+		// identical routing, so a heartbeat for a workflow on shard N lands on
+		// shard N's own reserved pool rather than some other shard's.
+		if *heartbeatMaxConnections > 0 {
+			heartbeatShardedStore, err := engine.NewShardedStore(configs, heartbeatStores, heartbeatClosers)
+			if err != nil {
+				logger.ErrorContext(context.Background(), "failed to create sharded heartbeat store", "worker_id", workerID, "error", err)
+				os.Exit(1)
+			}
+			heartbeatStore = heartbeatShardedStore
+			defer heartbeatShardedStore.Close()
+			logger.InfoContext(context.Background(), "sharded heartbeat DB pools configured", "worker_id", workerID, "shards", len(configs), "max_connections_per_shard", *heartbeatMaxConnections)
+		}
 
 		// Span every shard, not just the first. This used to be `factory = f`
 		// under `if i == 0`, which was harmless while the factory was only used
@@ -974,12 +1026,11 @@ func main() {
 				logger.InfoContext(context.Background(), "plugin DB pool created", "worker_id", workerID, "max_connections", *maxPluginConnections)
 			}
 		}
-		// heartbeatStore is intentionally left nil here. cleat#2009's reserved
-		// heartbeat pool is not wired for the sharded path: HeartbeatBatchFenced
-		// would need to run per-shard, against each shard's own connection
-		// pool, and no shard-aware heartbeat routing exists yet. Every shard
-		// falls back to heartbeating through its own store, same as before
-		// this change -- a known scope limit, not a silent gap.
+		// heartbeatStore (above, inside the per-shard loop) is now wired for
+		// the sharded path too -- cleat#2195, closing the scope limit #2009's
+		// comment used to record here. With --heartbeat-max-connections=0 it
+		// stays nil and every shard falls back to heartbeating through its own
+		// execution store, same as before.
 		// Start idempotency key cleanup on each shard. Sharding is a
 		// PostgreSQL configuration -- shardDBs come from the postgres
 		// connection strings above -- so the driver is named explicitly rather
@@ -2066,11 +2117,16 @@ func main() {
 	if *migrateDBURL != "" {
 		budget.Migrate = migratePoolMaxConns
 	}
-	// --heartbeat-max-connections has no effect on a sharded deployment yet
-	// (see its flag doc), so counting it there would charge the budget for a
-	// pool that was never opened.
-	if *heartbeatMaxConnections > 0 && *shardsFile == "" {
-		budget.Heartbeat = *heartbeatMaxConnections
+	// cleat#2195: a sharded deployment now opens one reserved heartbeat pool
+	// PER SHARD, so the term is shardPoolCount * the per-shard ceiling here --
+	// the same shape as budget.Shards two lines up -- rather than the single
+	// pool the non-sharded arms open.
+	if *heartbeatMaxConnections > 0 {
+		if *shardsFile != "" {
+			budget.Heartbeat = shardPoolCount * *heartbeatMaxConnections
+		} else {
+			budget.Heartbeat = *heartbeatMaxConnections
+		}
 	}
 	// WHO ACTUALLY HAS A POOL PER TENANT, asked rather than assumed.
 	//
