@@ -14,6 +14,22 @@ type WorkflowDef struct {
 	PluginDeps map[string]string `json:"plugin_deps,omitempty"`
 	CreatedAt  time.Time         `json:"created_at"`
 
+	// EntryPointSchemas carries the JSON Schema internal/jsonschema computed
+	// at build time for this version's entry points, keyed by entry point
+	// name (cleat#1980). Nil for a version built before this existed, or
+	// whose source language has no emitter yet -- only Go does today.
+	//
+	// Unlike PluginDeps, the column backing this is nullable with no
+	// default: "no schema was computed" is a real state distinct from
+	// "computed, and it happens to be empty" (which cannot occur in
+	// practice -- a real Go entry point always has at least one field in its
+	// pair of schemas, even if that field is the unconstrained {}). The
+	// decode helper still normalizes a NULL or unreadable column to an empty,
+	// non-nil map on READ, matching decodePluginDeps -- the nil-vs-empty
+	// distinction matters at the point this is computed and stored, not to
+	// every caller that reads it back.
+	EntryPointSchemas map[string]EntryPointSchema `json:"entry_point_schemas,omitempty"`
+
 	// DisabledAt carries ADMISSION CONTROL, and only that. A disabled version
 	// cannot be started, cannot be routed to, cannot be pointed at by a tag,
 	// and is not chosen for a child workflow. NULL means live.
@@ -47,6 +63,16 @@ type WorkflowDef struct {
 	// endpoint-set cap would stay, silently mis-tuning the version it was not
 	// chosen for. See cleat#889.
 	MaxHistoryLength int `json:"max_history_length,omitempty"`
+}
+
+// EntryPointSchema is one entry point's build-time-computed JSON Schema
+// pair (cleat#1980). Engine stores and returns these as opaque JSON
+// documents -- it does not parse, validate, or reason about their shape;
+// internal/jsonschema is what computes them, and the eventual OpenAPI-serving
+// endpoint is what interprets them.
+type EntryPointSchema struct {
+	Params json.RawMessage `json:"params"`
+	Result json.RawMessage `json:"result"`
 }
 
 // RetiredAt returns a pointer for DisabledAt. Paired with GCEligible: true it

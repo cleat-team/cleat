@@ -90,6 +90,7 @@ CREATE TABLE workflow_defs (
     task_queue TEXT NOT NULL DEFAULT 'default',
     abi_version INTEGER NOT NULL DEFAULT 1,
     plugin_deps JSONB NOT NULL DEFAULT '{}',
+    entry_point_schemas JSONB,
     gc_eligible BOOLEAN NOT NULL DEFAULT false,
     disabled_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -113,6 +114,7 @@ that prose yet — not that the column does not exist.
 | `min_version` | INTEGER | Minimum compatible version for replay |
 | `max_history_length` | INTEGER | Max events before compaction triggers (0 = default) |
 | `dag_spec` | JSONB | DAG structure for visualization (optional) |
+| `entry_point_schemas` | JSONB | Per-entry-point JSON Schema (params, result), keyed by export name; NULL for a pre-cleat#1980 build or a language with no emitter yet |
 | `created_at` | TIMESTAMPTZ | Deployment timestamp |
 | `exposure` | TEXT | One of `public`, `auth` (default), `internal` -- cleat#1986. Enforced not just documented: a `CHECK` constraint refuses any other value. Nothing writes this yet except the migration's own backfill default; the declaration path (source annotation, deploy-manifest tighten) is a separate, later piece of cleat#1986. |
 

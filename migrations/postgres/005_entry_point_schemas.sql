@@ -1,0 +1,13 @@
+-- cleat#1980: typed invocation, part 1. `cleat build` now computes a JSON
+-- Schema pair (parameters, result) for each Go entry point and `cleatctl
+-- deploy workflow` persists it alongside the WASM bytes it already writes.
+--
+-- Nullable, no default -- unlike plugin_deps (NOT NULL DEFAULT '{}'), "no
+-- schema was computed" is a real, distinct state from "computed and empty":
+-- every version deployed before this column existed, and every version built
+-- by a language this package has no emitter for yet (only Go has one today),
+-- has nothing to put here. Modeled on dag_spec immediately above it in
+-- 001_schema.sql, the other nullable JSON column on this table, for the same
+-- reason: a column that most rows will never populate should not need a
+-- row-level exception from a NOT NULL constraint to stay empty.
+ALTER TABLE workflow_defs ADD COLUMN IF NOT EXISTS entry_point_schemas jsonb;

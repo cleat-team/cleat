@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"time"
@@ -110,14 +111,36 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 		}
 	}
 
+	// cleat#1980: `cleat build` writes a schema sidecar next to the WASM
+	// binary when it computed one -- wasm.Metadata itself is deliberately
+	// barred from carrying this (see wasm/metadata_carries_no_entry_point_parameter_list_test.go),
+	// so there is nowhere inside wasmBytes to read it back from. Its absence
+	// is not an error: an older build, or a build from a language
+	// internal/jsonschema has no emitter for yet, simply has none, and this
+	// deploy proceeds exactly as it did before cleat#1980.
+	//
+	// UNLIKE pluginDeps above, this is never carried forward from the
+	// previous version on a redeploy that doesn't supply one: a schema
+	// describes THIS wasm file's actual entry points, and copying the prior
+	// version's would describe a binary that is no longer what's being
+	// deployed.
+	var entryPointSchemas map[string]engine.EntryPointSchema
+	if schemaBytes, err := os.ReadFile(wasmPath + ".schema.json"); err == nil {
+		if err := json.Unmarshal(schemaBytes, &entryPointSchemas); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %s.schema.json is not valid JSON, deploying without entry point schemas: %v\n", wasmPath, err)
+			entryPointSchemas = nil
+		}
+	}
+
 	def := &engine.WorkflowDef{
-		Name:       name,
-		Version:    nextVersion,
-		WASMBytes:  wasmBytes,
-		ABIVersion: abiVersion,
-		MinVersion: minVersion,
-		PluginDeps: pluginDeps,
-		CreatedAt:  time.Now(),
+		Name:              name,
+		Version:           nextVersion,
+		WASMBytes:         wasmBytes,
+		ABIVersion:        abiVersion,
+		MinVersion:        minVersion,
+		PluginDeps:        pluginDeps,
+		EntryPointSchemas: entryPointSchemas,
+		CreatedAt:         time.Now(),
 	}
 
 	if err := store.DeployWorkflowDef(ctx, def); err != nil {

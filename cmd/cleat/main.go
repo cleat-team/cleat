@@ -532,6 +532,30 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		meta.WorkflowName, meta.WorkflowVersion, meta.ABIVersion)
 	keepTempDir = true
 
+	// cleat#1980: a sidecar next to the WASM binary, not another custom
+	// section -- wasm.Metadata is deliberately barred from carrying anything
+	// describing an entry point's parameters
+	// (wasm/metadata_carries_no_entry_point_parameter_list_test.go), because
+	// the host has nothing to validate a stored payload against and two
+	// CHANGELOG/issue references tell an operator so. A schema document is
+	// exactly that information, so it travels beside the binary instead:
+	// `cleatctl deploy workflow` reads it from the same path plus
+	// ".schema.json" if present, and treats its absence (an older build, or a
+	// language internal/jsonschema has no emitter for yet) the same as
+	// before this existed.
+	if schemas := buildEntryPointSchemas(result); len(schemas) > 0 {
+		schemaJSON, err := json.MarshalIndent(schemas, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error encoding entry point schemas: %v\n", err)
+			os.Exit(1)
+		}
+		if err := os.WriteFile(wasmPath+".schema.json", schemaJSON, 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Error writing entry point schemas: %v\n", err)
+			os.Exit(1)
+		}
+		logBuildProgress("  Wrote %s.schema.json\n", wasmPath)
+	}
+
 	if sizeReport {
 		printSizeReport(wasmPath, fi.Size(), result, usage, target)
 	}

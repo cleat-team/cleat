@@ -582,6 +582,7 @@ func TestPostgresStore_GetWorkflowDef_Success(t *testing.T) {
 				createdAt,             // created_at
 				nil,                   // disabled_at
 				false,                 // gc_eligible
+				nil,                   // entry_point_schemas
 			}},
 		},
 	}, nil)
@@ -621,6 +622,7 @@ func TestPostgresStore_GetWorkflowDef_NilPluginDeps(t *testing.T) {
 				createdAt,   // created_at
 				nil,         // disabled_at
 				false,       // gc_eligible
+				nil,         // entry_point_schemas
 			}},
 		},
 	}, nil)
@@ -847,8 +849,8 @@ func TestPostgresStore_ListWorkflowDefs_All(t *testing.T) {
 		{
 			match: "SELECT name, version, abi_version",
 			data: [][]driver.Value{
-				{"wf-a", int64(2), int64(1), int64(0), []byte(`{}`), createdAt, nil, false},
-				{"wf-a", int64(1), int64(1), int64(0), []byte(`{"p":"1.0"}`), createdAt, createdAt, true},
+				{"wf-a", int64(2), int64(1), int64(0), []byte(`{}`), createdAt, nil, false, nil},
+				{"wf-a", int64(1), int64(1), int64(0), []byte(`{"p":"1.0"}`), createdAt, createdAt, true, nil},
 			},
 		},
 	}, nil)
@@ -876,7 +878,7 @@ func TestPostgresStore_ListWorkflowDefs_ByName(t *testing.T) {
 		{
 			match: "SELECT name, version, abi_version",
 			data: [][]driver.Value{
-				{"wf-a", int64(1), int64(1), int64(0), []byte(`{}`), createdAt, nil, false},
+				{"wf-a", int64(1), int64(1), int64(0), []byte(`{}`), createdAt, nil, false, nil},
 			},
 		},
 	}, nil)
@@ -901,7 +903,7 @@ func TestPostgresStore_ListWorkflowDefs_NilPluginDeps(t *testing.T) {
 		{
 			match: "SELECT name, version, abi_version",
 			data: [][]driver.Value{
-				{"wf-a", int64(1), int64(1), int64(0), []byte(nil), createdAt, nil, false},
+				{"wf-a", int64(1), int64(1), int64(0), []byte(nil), createdAt, nil, false, nil},
 			},
 		},
 	}, nil)
