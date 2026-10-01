@@ -844,7 +844,7 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 		pluginDepsJSON = []byte("{}")
 	}
 
-	// entry_point_schemas is nullable with no default (migrations/mysql/004),
+	// entry_point_schemas is nullable with no default (migrations/mysql/005),
 	// unlike plugin_deps above -- see engine/store_deployment.go's identical
 	// comment on the Postgres path for why nil stays nil rather than folding
 	// into a placeholder value.

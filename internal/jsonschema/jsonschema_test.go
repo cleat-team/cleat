@@ -190,6 +190,36 @@ func F(x Order) {}
 	}
 }
 
+// TestAnonymousNonStructEmbedIsAnOrdinaryFieldNotDropped pins a real defect
+// found in review (cleat#1980): an anonymous embed whose type is NOT a
+// struct -- `type Money int; struct{ Money }` -- was silently vanishing
+// from the generated schema instead of either flattening (which makes no
+// sense for a scalar -- there is nothing to promote FROM) or appearing as
+// an ordinary property. Confirmed against a live json.Marshal first:
+// encoding/json keys it "Money", not absent and not flattened.
+func TestAnonymousNonStructEmbedIsAnOrdinaryFieldNotDropped(t *testing.T) {
+	src := `
+type Money int
+type Order struct {
+	Money
+	Name string ` + "`json:\"name\"`" + `
+}
+func F(x Order) {}
+`
+	got := schemaOf(t, src, "F")
+	props, _ := got["properties"].(Schema)
+	moneySchema, ok := props["Money"].(Schema)
+	if !ok {
+		t.Fatalf("got %#v, want a \"Money\" property -- encoding/json keys an anonymous non-struct embed by its own type name, it does not drop it", got)
+	}
+	if moneySchema["type"] != "integer" {
+		t.Errorf("Money schema = %#v, want {\"type\":\"integer\"} (Money's underlying type)", moneySchema)
+	}
+	if _, ok := props["name"]; !ok {
+		t.Errorf("got %#v, want the ordinary \"name\" field to still be present", got)
+	}
+}
+
 func TestEmbeddedStructWithTagIsNotFlattened(t *testing.T) {
 	src := `
 type Base struct {

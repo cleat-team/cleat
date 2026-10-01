@@ -210,7 +210,7 @@ func (s *PostgresStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef)
 		pluginDepsJSON = []byte("{}")
 	}
 
-	// entry_point_schemas is nullable with no default (migrations/postgres/005),
+	// entry_point_schemas is nullable with no default (migrations/postgres/006),
 	// unlike plugin_deps above: "no schema was computed" is a real state, and a
 	// nil []byte parameter binds to SQL NULL rather than the literal `null`
 	// json.Marshal(nil map) would produce -- so, unlike pluginDepsJSON, nothing

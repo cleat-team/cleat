@@ -191,17 +191,28 @@ func structSchema(s *types.Struct, visiting map[types.Type]bool) Schema {
 			continue
 		}
 		if inline {
-			// An anonymous embedded field with no explicit JSON name:
-			// encoding/json promotes its OWN fields into this struct's set
-			// of keys rather than nesting them under the field's type name.
-			// Flatten by merging its properties directly into this struct's,
-			// recursively -- an embedded field can itself embed another.
+			// An anonymous embedded field with no explicit JSON name.
+			// encoding/json promotes a STRUCT embed's own fields into this
+			// struct's set of keys rather than nesting them under the
+			// field's type name -- fromGoType already unwraps one pointer
+			// level, so this also covers an embedded *Base.
 			embedded := fromGoType(f.Type(), visiting)
 			if nested, ok := embedded["properties"].(Schema); ok {
 				for k, v := range nested {
 					properties[k] = v
 				}
+				continue
 			}
+			// A NON-struct anonymous embed (`type Money int; struct{
+			// Money }`) is not flattened -- there is nothing to promote a
+			// scalar/slice/map value's fields FROM. encoding/json instead
+			// treats it as an ordinary field keyed by its own unqualified
+			// type name, which is exactly what f.Name() already returns
+			// for an anonymous field (confirmed against a live
+			// json.Marshal: `{"Money":5,...}`, not an absent key). The
+			// first version of this function had no such branch and
+			// dropped the field from the schema entirely.
+			properties[f.Name()] = embedded
 			continue
 		}
 		properties[name] = fromGoType(f.Type(), visiting)

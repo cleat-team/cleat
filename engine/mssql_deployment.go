@@ -303,7 +303,7 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 		pluginDepsJSON = []byte("{}")
 	}
 
-	// entry_point_schemas is nullable with no default (migrations/mssql/004).
+	// entry_point_schemas is nullable with no default (migrations/mssql/005).
 	// A Go nil interface value binds to SQL NULL; a non-nil one must be a
 	// Go string, not []byte -- go-mssqldb binds []byte as VARBINARY, and the
 	// implicit conversion into this NVARCHAR(MAX) column reinterprets the
