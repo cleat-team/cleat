@@ -90,6 +90,63 @@ func TestEngineStoresRejectAnExpiredAPIKey(t *testing.T) {
 			}
 		})
 	}
+
+	// ShardedStore has no SQL of its own (ResolveTenantFromAPIKey just polls
+	// each shard's own store), so the fix above already covers it -- this
+	// subtest pins that reasoning rather than re-deriving it, the same way
+	// sharded_overclaim_db_test.go pins a fan-out property against real
+	// shards rather than mocks. Two shards on the SAME database, the pattern
+	// sharded_overclaim_db_test.go uses: what is exercised is the delegation,
+	// not cross-database routing, and ShardedStore is Postgres-only in
+	// production (every shard opened via PostgresStoreFactory).
+	t.Run("sharded", func(t *testing.T) {
+		db := testutil.TestDB(t, testutil.DialectPostgres)
+		ctx := context.Background()
+		tenantID := createQueueTestTenant(t, ctx, db, testutil.DialectPostgres, "expiry-sharded")
+
+		suffix := fmt.Sprintf("sharded-%d", time.Now().UnixNano())
+		expiredHash := sha256Of("expiry-test-expired-" + suffix)
+		liveHash := sha256Of("expiry-test-live-" + suffix)
+		now := time.Now()
+		seedExpiryTestAPIKey(t, ctx, db, testutil.DialectPostgres, tenantID, expiredHash,
+			sql.NullTime{Time: now.Add(-time.Hour), Valid: true})
+		seedExpiryTestAPIKey(t, ctx, db, testutil.DialectPostgres, tenantID, liveHash,
+			sql.NullTime{Time: now.Add(time.Hour), Valid: true})
+
+		const shardCount = 2
+		dsn := testutil.PostgresTestDSN()
+		stores := make([]WorkflowStore, shardCount)
+		configs := make([]ShardConfig, shardCount)
+		closers := make([]func() error, shardCount)
+		for i := 0; i < shardCount; i++ {
+			shardDB, err := sql.Open("postgres", dsn)
+			if err != nil {
+				t.Fatalf("open shard %d: %v", i, err)
+			}
+			if err := shardDB.PingContext(ctx); err != nil {
+				shardDB.Close()
+				t.Fatalf("ping shard %d: %v", i, err)
+			}
+			t.Cleanup(func() { shardDB.Close() })
+			stores[i] = NewPostgresStore(shardDB)
+			configs[i] = ShardConfig{Name: fmt.Sprintf("shard%d", i)}
+			closers[i] = func() error { return nil }
+		}
+		sharded, err := NewShardedStore(configs, stores, closers)
+		if err != nil {
+			t.Fatalf("NewShardedStore: %v", err)
+		}
+
+		if _, err := sharded.ResolveTenantFromAPIKey(ctx, expiredHash); err == nil {
+			t.Error("expired key: ShardedStore.ResolveTenantFromAPIKey returned no error, want one")
+		}
+		got, err := sharded.ResolveTenantFromAPIKey(ctx, liveHash)
+		if err != nil {
+			t.Errorf("future-expiry key: ShardedStore.ResolveTenantFromAPIKey: %v, want success", err)
+		} else if got.String() != tenantID {
+			t.Errorf("future-expiry key resolved tenant %s, want %s", got, tenantID)
+		}
+	})
 }
 
 // seedExpiryTestAPIKey inserts an API key directly against the dialect's own
