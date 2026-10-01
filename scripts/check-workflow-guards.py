@@ -73,11 +73,15 @@ import argparse
 import glob
 import itertools
 import json
+import os
 import re
 import subprocess
 import sys
 
 import yaml
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+from workflow_on import triggers_from_doc  # noqa: E402
 
 WORKFLOW_GLOB = (".github/workflows/*.yml", ".github/workflows/*.yaml")
 REQUIRED_CHECKS_FILE = ".github/required-checks.txt"
@@ -502,22 +506,17 @@ def workflow_triggers(doc: dict) -> set[str]:
 
     PyYAML's default (YAML 1.1) resolver reads the bare scalar `on` as the
     boolean True, not the string "on" -- confirmed against every real
-    workflow file in this repo, where the key is always spelled bare. So
-    `doc.get("on")` is None on every one of them, and this guard would pass
-    vacuously everywhere -- caught by this file's own self-test before it
-    ever ran against a real workflow (its first two cases both came back
-    empty). `doc.get(True)` is the same key PyYAML actually produced.
+    workflow file in this repo, where the key is always spelled bare. So a
+    naive `doc.get("on")` is None on every one of them, and this guard would
+    pass vacuously everywhere -- caught by this file's own self-test before
+    it ever ran against a real workflow (its first two cases both came back
+    empty). scripts/lib/workflow_on.py's triggers_from_doc() is where that
+    True-key handling actually lives (cleat#2737/cleat-review on #2893: this
+    function used to carry its own copy, predating #2737's filing and missed
+    by it -- a third instance of exactly the duplication that issue exists
+    to prevent).
     """
-    on = doc.get("on")
-    if on is None:
-        on = doc.get(True)
-    if isinstance(on, str):
-        return {on}
-    if isinstance(on, list):
-        return {str(item) for item in on}
-    if isinstance(on, dict):
-        return {str(key) for key in on}
-    return set()
+    return set(triggers_from_doc(doc))
 
 
 def privileged_scripts(doc: dict):
