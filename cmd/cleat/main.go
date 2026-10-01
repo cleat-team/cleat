@@ -500,7 +500,14 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		childVersions = resolveBuildChildVersions(usage.Children, channel, jsonOut)
 	}
 
-	workflowName := wasmOutputName(result)
+	// workflowLogicalName, not wasmOutputName: the metadata's WorkflowName is
+	// a workflow's identity (what `cleat deploy` registers a definition
+	// under), not a filename. Until cleat#2842 this called wasmOutputName,
+	// so every build embedded a name carrying ".wasm" -- deploy's own
+	// `--name`-less fallback trims a wasm path's suffix and so disagreed with
+	// the metadata it had just read, and `cleat deploy --dry-run` on a fresh
+	// `cleat init` project printed `Would deploy workflow "my-workflow.wasm"`.
+	workflowName := workflowLogicalName(result)
 	meta := &wasm.Metadata{
 		WorkflowName:         workflowName,
 		WorkflowVersion:      workflowVersion,
@@ -1119,14 +1126,7 @@ func runDeploy(args []string) {
 		fmt.Printf("  Continuing with flags-only configuration.\n")
 	}
 
-	name := *nameFlag
-	if name == "" {
-		if metaErr == nil && meta.WorkflowName != "unknown" {
-			name = meta.WorkflowName
-		} else {
-			name = strings.TrimSuffix(filepath.Base(wasmPath), ".wasm")
-		}
-	}
+	name := resolveDeployName(*nameFlag, meta, wasmPath)
 
 	connStr := *dbFlag
 	if connStr == "" {
@@ -1256,6 +1256,36 @@ func runDeploy(args []string) {
 			meta.WorkflowName, meta.WorkflowVersion,
 			meta.ABIVersion, meta.MinCompatibleVersion, meta.PluginDeps)
 	}
+}
+
+// resolveDeployName picks the name `cleat deploy` registers a definition
+// under: the --name flag, then the WASM metadata's declared name, then a
+// name derived from the wasm file's own filename. meta is nil exactly when
+// it could not be read (wasm.ReadMetadata's contract) -- checked here rather
+// than passing a separate ok bool, so a caller cannot pass true with a nil
+// meta and panic on the field access.
+//
+// Extracted for the same reason resolveDeployTenant below is: testable
+// without a database, and the fallback ORDER is what cleat#2842 got wrong.
+// Until that issue's build-side fix, meta.WorkflowName unconditionally
+// carried a ".wasm" suffix (the wasm output FILENAME, not the workflow's
+// declared identity), while the no-metadata fallback already trimmed
+// wasmPath's own suffix -- so `cleat deploy --dry-run` on a fresh
+// `cleat init` project printed `Would deploy workflow "my-workflow.wasm"`,
+// disagreeing with the fallback purely because metadata happened to be
+// present. TrimSuffix here, rather than a bare assignment, means this
+// branch is correct for both an already-fixed binary (where the suffix is
+// simply absent, so TrimSuffix is a no-op) and one built by a cleat from
+// before cleat#2842 (where the suffix is present and gets removed) -- a
+// rebuild is not required to deploy an old binary under its right name.
+func resolveDeployName(nameFlag string, meta *wasm.Metadata, wasmPath string) string {
+	if nameFlag != "" {
+		return nameFlag
+	}
+	if meta != nil && meta.WorkflowName != "unknown" {
+		return strings.TrimSuffix(meta.WorkflowName, ".wasm")
+	}
+	return strings.TrimSuffix(filepath.Base(wasmPath), ".wasm")
 }
 
 // resolveDeployTenant picks the tenant a deploy is written under: the --tenant
@@ -1451,8 +1481,9 @@ func shortEntryPoints(result *analyzer.AnalysisResult) []string {
 
 // exportedEntryPointNames returns the actual WASM export names generateExport
 // (wasm/exports.go) will give each entry point -- ToSnakeCase of the short Go
-// name, the same conversion wasmOutputName below already applies to the
-// first one. cleat#2066: this is what cmd/cleat-worker/setup.go's
+// name, the same conversion workflowLogicalName below already applies to the
+// first one (via wasmOutputName, in the fallback case with no manifest).
+// cleat#2066: this is what cmd/cleat-worker/setup.go's
 // determineEntryPoint needs in wasm.Metadata to resolve a start with no
 // explicit __entry_point, so it has to be the export name a caller can
 // actually invoke, not the Go source name nothing outside this build knows.
@@ -1464,29 +1495,41 @@ func exportedEntryPointNames(result *analyzer.AnalysisResult) []string {
 	return names
 }
 
-// wasmOutputName names the artifact after the WORKFLOW -- cleat.yaml's own
-// `name:` field -- not the entry point (#2048/#2049's bug) and not the entry
-// point's source file either (owner decision, 2026-09-29, cleat#2692,
-// superseding the 2026-09-26 source-file decision, cleat#2407).
+// workflowLogicalName returns the workflow's declared or derived name, with
+// no file extension -- the identity `cleat deploy` registers a definition
+// under and what a client later starts via /api/workflows/<name>/start.
+// wasmOutputName below is only this name plus ".wasm", for the build's
+// OUTPUT FILE.
 //
-// The source-file rule broke the same way the entry-point rule did, one
-// level down: Go convention puts a package's entry file at main.go, so any
-// two workflows that are each a single main.go -- examples/integration-hub's
-// three tenant-steps packages are exactly this -- both resolved to
-// main.wasm, indistinguishable on disk. cleat.yaml already carries the one
-// name that has to be unique and meaningful regardless: "what `cleat deploy
+// The two were one function until cleat#2842: cleat.metadata's WorkflowName
+// was assigned wasmOutputName's result directly, so it carried the ".wasm"
+// file suffix too -- a workflow's identity, not a filename. `cleat deploy`'s
+// own `--name`-less fallback trims a wasm path's suffix, so the two
+// disagreed depending only on whether metadata happened to be present.
+//
+// The naming RULE below -- what this function actually decides -- predates
+// that split and is unchanged by it: names the workflow after cleat.yaml's
+// own `name:` field, not the entry point (#2048/#2049's bug) and not the
+// entry point's source file either (owner decision, 2026-09-29, cleat#2692,
+// superseding the 2026-09-26 source-file decision, cleat#2407). The
+// source-file rule broke the same way the entry-point rule did, one level
+// down: Go convention puts a package's entry file at main.go, so any two
+// workflows that are each a single main.go -- examples/integration-hub's
+// three tenant-steps packages are exactly this -- both resolved to "main",
+// indistinguishable once deployed. cleat.yaml already carries the one name
+// that has to be unique and meaningful regardless: "what `cleat deploy
 // --name` registers and what a caller names when it starts a run" (that
-// file's own header comment, in every example here). Naming the artifact
+// file's own header comment, in every example here). Naming the workflow
 // after it makes the built file, the deploy name and the start name one
 // string, which no source-derived rule can promise.
-func wasmOutputName(result *analyzer.AnalysisResult) string {
+func workflowLogicalName(result *analyzer.AnalysisResult) string {
 	// result.TargetPkg is nil only for a synthesized AnalysisResult (a real
 	// one always has it set, loader.go:95) -- the same case
 	// workflowManifestName's own doc comment already calls out for
 	// lookupFile below. Treated as "no manifest" rather than dereferenced.
 	if result.TargetPkg != nil {
 		if name := workflowManifestName(result.TargetPkg.Dir); name != "" {
-			return name + ".wasm"
+			return name
 		}
 	}
 	// No cleat.yaml, or one with no usable `name:` -- `cleat build` works on
@@ -1501,20 +1544,29 @@ func wasmOutputName(result *analyzer.AnalysisResult) string {
 	// would have distinguished them is itself missing, which is the case
 	// this comment is naming rather than hiding.
 	if len(result.EntryPoints) == 0 {
-		return "output.wasm"
+		return "output"
 	}
 	if file := lookupFile(result, result.EntryPoints[0]); file != "" {
 		stem := strings.TrimSuffix(file, filepath.Ext(file))
-		return wasm.ToSnakeCase(stem) + ".wasm"
+		return wasm.ToSnakeCase(stem)
 	}
 	// lookupFile returns "" only when the entry point's position information
 	// is unavailable (fd.Pkg, fd.Pkg.Fset, or the AST node's file are nil) --
 	// not reachable through the loader's normal path, which always resolves
 	// real source files, but a caller could in principle hand this a
 	// synthesized AnalysisResult with EntryPoints set and Funcs not. Falling
-	// back to the entry-point name rather than "output.wasm" keeps that case
+	// back to the entry-point name rather than "output" keeps that case
 	// at the OLD behaviour instead of a name carrying no information at all.
-	return wasm.ToSnakeCase(analyzer.ShortName(result.EntryPoints[0])) + ".wasm"
+	return wasm.ToSnakeCase(analyzer.ShortName(result.EntryPoints[0]))
+}
+
+// wasmOutputName is workflowLogicalName plus the ".wasm" extension --
+// used for the build's OUTPUT FILE (joined into a filesystem path by this
+// function's caller), never for cleat.metadata's WorkflowName. See
+// workflowLogicalName's doc comment for why the two are no longer one
+// function.
+func wasmOutputName(result *analyzer.AnalysisResult) string {
+	return workflowLogicalName(result) + ".wasm"
 }
 
 // workflowManifestNamePattern is deliberately conservative: cleat.yaml is
