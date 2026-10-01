@@ -597,7 +597,7 @@ var (
 // execSession.replayUnderOriginalKey, which treats that the same as every
 // other "cannot say" case on this path.
 //
-// WHY THIS FIXES THE BUG WITHOUT KNOWING THE SESSION'S ACTUAL OFFSET. Both
+// WHY THIS CANCELS A FIXED SESSION OFFSET, AND ONLY A FIXED ONE. Both
 // CreatedAt and ServerNow are read through the SAME *sql.DB pool, so if the
 // session's time_zone biases one by some constant b, it biases the other by
 // the same b: (trueNow + b) - (trueCreatedAt + b) = trueNow - trueCreatedAt.
@@ -605,6 +605,15 @@ var (
 // Using UTC_TIMESTAMP() here instead of NOW() would NOT work: UTC_TIMESTAMP()
 // carries no bias, so it would subtract an unbiased reading from a biased
 // one and reintroduce exactly the error this exists to remove.
+//
+// IT DOES NOT CANCEL A DST TRANSITION THAT FALLS INSIDE THE WINDOW BEING
+// MEASURED, because b is only constant between two points that straddle no
+// such transition. A session in a DST-observing zone reads a 24-hour-old row
+// as roughly an hour younger right after the clocks fall back, so the
+// retention bound can overshoot by up to an hour, once a year, for a session
+// in such a zone (cleat#2911 N1). A deployment that cares about the bound to
+// that precision should pin its MySQL session to UTC, which has no DST to
+// transition through.
 type callIntentClock interface {
 	// ServerNow reports the database server's own clock, as read through the
 	// same session defaults as EventRecord.CreatedAt for workflowID.

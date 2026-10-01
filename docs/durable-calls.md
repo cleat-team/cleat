@@ -189,7 +189,21 @@ attempt a same-key resend. Past that window the pending call is not retried at a
 already forgotten risks the exact double-execution a `--ambiguity-lookup`-configured `404` has to
 guard against with a durability promise of its own (below). This needs no new column: the bound
 is read from the pending row's own `created_at`, set once at `WriteCallIntent` and never touched
-by `CompleteCallIntent`, so it is the original dispatch time on every dialect already.
+by `CompleteCallIntent`, so it is the original dispatch time.
+
+**Compared against the store's own clock, not this process's.** MySQL converts a `TIMESTAMP`
+column to and from the *session's* `time_zone` on the wire, and the Go driver parses whatever
+comes back assuming UTC — so on a session whose `time_zone` is not UTC, `created_at` read back
+into this process is silently offset by that session's difference from UTC. Comparing it against
+this process's own `time.Now()` would be wrong by that offset (measured: ~2 hours at
+`time_zone='+02:00'`). The engine instead asks the store itself what time it is
+(`callIntentClock.ServerNow`) and compares the two readings against each other: both pass through
+the same session default, so a *fixed* offset cancels in the subtraction without the engine ever
+needing to know or correct it. This does **not** cancel a DST transition that falls inside the
+window being measured — a session in a DST-observing zone can read a 24-hour-old row as roughly an
+hour younger right after the clocks fall back, so the bound can overshoot by up to an hour, once a
+year, for a session in such a zone. A deployment that cares about the bound to that precision
+should pin its MySQL session to UTC.
 
 **Validated at worker startup, same shape as `--ambiguity-lookup` below, plus one more check:**
 every operation named in `--idempotency-key-ops` must also be declared
