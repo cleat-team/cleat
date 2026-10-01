@@ -118,6 +118,14 @@ func TestOrdinarySliceIsArrayOrNull(t *testing.T) {
 // array keeps whatever it already held) rather than a reset -- confirmed
 // empirically, not assumed. Marking it nullable would claim a value the
 // type can never actually take.
+func TestFixedArrayIsNotNullable(t *testing.T) {
+	got := schemaOf(t, "func F(x [3]int) {}", "F")
+	want := Schema{"type": "array", "items": Schema{"type": "integer"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %#v, want %#v -- a fixed-size array must NOT be nullable", got, want)
+	}
+}
+
 // TestScalarStructAndFixedArrayRejectNullByOwnerDecision pins the owner's
 // ruling on cleat#2927: a plain int/string/bool/struct/fixed-array parameter
 // stays STRICT -- null is a 400 -- even though encoding/json's own binding
@@ -168,14 +176,6 @@ func TestScalarStructAndFixedArrayRejectNullByOwnerDecision(t *testing.T) {
 				t.Errorf("null was accepted against a %s schema %s -- the owner ruling says this must be a 400", tc.name, schemaJSON)
 			}
 		})
-	}
-}
-
-func TestFixedArrayIsNotNullable(t *testing.T) {
-	got := schemaOf(t, "func F(x [3]int) {}", "F")
-	want := Schema{"type": "array", "items": Schema{"type": "integer"}}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("got %#v, want %#v -- a fixed-size array must NOT be nullable", got, want)
 	}
 }
 
