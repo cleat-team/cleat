@@ -63,7 +63,11 @@ func TestAWorkerThatCannotDecryptAReplayReleasesTheRun(t *testing.T) {
 		{"checksums_off", []string{"--disable-checksum-verification"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db := ownerDB(t)
+			// cleat#2324: every worker this subtest starts is encrypted, so it
+			// shares payloadEncryptionDatabase rather than crashDatabase -- see
+			// harness_test.go's comment on why. Never crashDatabase: that marks
+			// it for every plain-worker test in the package.
+			db := ownerDBFor(t, payloadEncryptionDatabase)
 			defer db.Close()
 
 			suffix := uniqueSuffix()
@@ -80,7 +84,7 @@ func TestAWorkerThatCannotDecryptAReplayReleasesTheRun(t *testing.T) {
 			// Worker A seals Reserve under key A and is killed with Charge in
 			// flight, so the run's history holds one key-A event.
 			keyA := writeSealingKey(t)
-			first := startWorker(t, bin, taskQueue, svc.srv.URL,
+			first := startWorkerOn(t, payloadEncryptionDatabase, bin, taskQueue, svc.srv.URL,
 				"--encrypt-sensitive-payloads", "--encryption-key-file", keyA)
 			startWorkflow(t, db, wfID, "order-"+suffix, taskQueue)
 			svc.awaitHeldCall(t, first, startBudget)
@@ -101,7 +105,7 @@ func TestAWorkerThatCannotDecryptAReplayReleasesTheRun(t *testing.T) {
 				"--unservable-release-backoff", "2s",
 				"--api-addr", addr, "--require-auth=false", "--enable-admin-api",
 			}, tc.flags...)
-			wrong := startWorker(t, bin, taskQueue, svc.srv.URL, bFlags...)
+			wrong := startWorkerOn(t, payloadEncryptionDatabase, bin, taskQueue, svc.srv.URL, bFlags...)
 
 			awaitReleaseNotTerminal(t, db, wfID, wrong)
 
@@ -141,7 +145,7 @@ func TestAWorkerThatCannotDecryptAReplayReleasesTheRun(t *testing.T) {
 			}
 
 			// Worker C holds key A and finishes it.
-			right := startWorker(t, bin, taskQueue, svc.srv.URL,
+			right := startWorkerOn(t, payloadEncryptionDatabase, bin, taskQueue, svc.srv.URL,
 				"--encrypt-sensitive-payloads", "--encryption-key-file", keyA)
 			status, errMsg = awaitTerminal(t, db, wfID, completeBudget+30*time.Second)
 			if status != "done" && status != "completed" {
@@ -313,7 +317,12 @@ func requireAdminRefusals(t *testing.T, db *sql.DB, addr, id string, w *worker) 
 // refused them ("illegal base64 data") and released such a run forever, on every
 // worker, where develop read them fine.
 func TestEnablingEncryptionMidRunDoesNotStrandTheRun(t *testing.T) {
-	db := ownerDB(t)
+	// cleat#2324: this test's own first assertion is that a KEYLESS worker
+	// starts and writes plaintext, so it needs a database that has never seen
+	// --encrypt-sensitive-payloads before -- payloadEncryptionDatabase cannot
+	// promise that once any other test above has run. See harness_test.go's
+	// comment on payloadEncryptionMidRunDatabase.
+	db := ownerDBFor(t, payloadEncryptionMidRunDatabase)
 	defer db.Close()
 
 	suffix := uniqueSuffix()
@@ -327,7 +336,7 @@ func TestEnablingEncryptionMidRunDoesNotStrandTheRun(t *testing.T) {
 	defer releaseCharge()
 
 	// Worker A has no encryption at all: Reserve is durable in plaintext.
-	first := startWorker(t, bin, taskQueue, svc.srv.URL)
+	first := startWorkerOn(t, payloadEncryptionMidRunDatabase, bin, taskQueue, svc.srv.URL)
 	startWorkflow(t, db, wfID, "order-"+suffix, taskQueue)
 	svc.awaitHeldCall(t, first, startBudget)
 	if !eventTextContains(t, db, wfID, "order-"+suffix) {
@@ -337,7 +346,7 @@ func TestEnablingEncryptionMidRunDoesNotStrandTheRun(t *testing.T) {
 	releaseCharge()
 
 	// Worker C is the same deployment with encryption switched on.
-	second := startWorker(t, bin, taskQueue, svc.srv.URL,
+	second := startWorkerOn(t, payloadEncryptionMidRunDatabase, bin, taskQueue, svc.srv.URL,
 		"--encrypt-sensitive-payloads", "--encryption-key-file", writeSealingKey(t))
 	status, errMsg := awaitTerminal(t, db, wfID, completeBudget)
 	if status != "done" && status != "completed" {
