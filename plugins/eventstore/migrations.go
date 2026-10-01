@@ -174,6 +174,13 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// ON DUPLICATE KEY UPDATE rather than a bare INSERT: a bare one
 			// would die on the PRIMARY key the first retry, leaving the
 			// worker unable to boot (cleat-review, cleat#2268 round 1).
+			// VALUES(head_sequence) is deprecated as of MySQL 8.0.20 in
+			// favour of a row alias (coordinator, cleat#2268 round 2) --
+			// still kept here because the alias form only parses directly
+			// after a VALUES(...) list, not after an INSERT ... SELECT ...
+			// GROUP BY (measured: MySQL rejects "AS new_head" there with a
+			// syntax error). VALUES() still works on the pinned 8.4.11 and
+			// is not scheduled for removal.
 			Version: 4,
 			Up: `
 				CREATE TABLE IF NOT EXISTS event_stream_head (
