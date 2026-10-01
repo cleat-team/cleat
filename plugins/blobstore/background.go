@@ -109,6 +109,16 @@ func (p *Plugin) Run(ctx context.Context) error {
 // soft-deleted entries (deleted_at IS NOT NULL) and decrement ref_count
 // on the corresponding blob_content rows.
 //
+// Phase 2b: Reconcile ref_count against a direct count of blob_index rows,
+// for every blob_content row. cleat#2250: phase 2's decrement only sees
+// blob_index rows it is itself deleting. A row removed any other way --
+// today, admin.drop_tenant's hard delete of a dropped tenant's blob_index
+// rows -- is invisible to that join, so its content's ref_count never
+// reflects the loss: shared content stays over-counted for a surviving
+// tenant, and content unique to the dropped tenant can never reach
+// ref_count <= 0 and so is never collected by phase 3. This phase makes
+// ref_count self-healing against any such path rather than patching each one.
+//
 // Phase 3: Garbage-collect blob_content rows with ref_count <= 0, but only
 // if no in-flight workflow references the content via workflow_blob_refs.
 //
@@ -150,6 +160,13 @@ func (p *Plugin) cleanupExpired(ctx, baseCtx context.Context) (staleRefs, expire
 	expiredEntries = int(affected)
 	if affected > 0 {
 		p.logger.Info("blobstore: expired/deleted index entries cleaned", "count", affected)
+	}
+
+	// Phase 2b: reconcile ref_count against reality. Must run after the
+	// deletes above (so this sweep's own newly-expired rows are already gone
+	// and correctly excluded) and before phase 3 (which trusts ref_count).
+	if _, err := p.db.Exec(ctx, plugin.Rebind(reconcileRefCounts.For(p.dialect), p.dialect)); err != nil {
+		return staleRefs, expiredEntries, orphanedBlobs, fmt.Errorf("reconcile ref_count: %w", err)
 	}
 
 	// Phase 3: garbage-collect blob_content with no remaining references,
