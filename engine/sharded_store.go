@@ -77,6 +77,52 @@ func (s *ShardedStore) SetMetrics(m *prometheus.Metrics) {
 	}
 }
 
+// MarkPayloadEncryptionEnabled implements PayloadEncryptionState by marking
+// EVERY shard, not just one. A worker configured with a key ring can route
+// any workflow to any shard (routing is a hash of the workflow ID, see
+// getShard), so every shard this worker can reach must carry the marker --
+// not only whichever shard a particular workflow happens to hash to.
+func (s *ShardedStore) MarkPayloadEncryptionEnabled(ctx context.Context) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, sh := range s.shards {
+		pes, ok := sh.Store.(PayloadEncryptionState)
+		if !ok {
+			return fmt.Errorf("mark payload encryption enabled: shard %q store %T does not support it", sh.Config.Name, sh.Store)
+		}
+		if err := pes.MarkPayloadEncryptionEnabled(ctx); err != nil {
+			return fmt.Errorf("mark payload encryption enabled: shard %q: %w", sh.Config.Name, err)
+		}
+	}
+	return nil
+}
+
+// PayloadEncryptionEverEnabled implements PayloadEncryptionState by reporting
+// true if ANY shard was ever marked. A keyless worker can read from any
+// shard (ClaimWorkflow polls every one), so one sealed shard is enough to
+// refuse the whole worker -- this stops at the first shard that answers yes
+// rather than checking the rest.
+func (s *ShardedStore) PayloadEncryptionEverEnabled(ctx context.Context) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, sh := range s.shards {
+		pes, ok := sh.Store.(PayloadEncryptionState)
+		if !ok {
+			return false, fmt.Errorf("check payload encryption ever enabled: shard %q store %T does not support it", sh.Config.Name, sh.Store)
+		}
+		enabled, err := pes.PayloadEncryptionEverEnabled(ctx)
+		if err != nil {
+			return false, fmt.Errorf("check payload encryption ever enabled: shard %q: %w", sh.Config.Name, err)
+		}
+		if enabled {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+var _ PayloadEncryptionState = (*ShardedStore)(nil)
+
 // NewShardedStore creates a ShardedStore from pre-constructed WorkflowStore
 // instances (one per shard). Each store is already initialized and migrated.
 // The stores slice must be non-empty and have the same length as configs.

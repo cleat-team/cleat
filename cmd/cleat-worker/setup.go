@@ -1574,6 +1574,62 @@ func loadPayloadEncryption(currentKeyFile, previousKeyFile string) (*engine.Payl
 	return pe, nil
 }
 
+// checkPayloadEncryptionState is cleat#2324's startup guard.
+//
+// engine/encryption.go documents that a sealed column carries no envelope or
+// version prefix, by design -- so a worker with no key ring configured has no
+// way to recognise ciphertext by inspecting a row. Measured (cleat#2324) on a
+// real worker: a keyless worker reading a sealed run's history gets a
+// checksum mismatch by default, which fails the run -- misleadingly, since
+// the real cause is a missing key, but at least closed -- and
+// --disable-checksum-verification removes that net entirely, so the run ends
+// DONE on ciphertext.
+//
+// So this asks a different question, one that needs no inspection at all:
+// has any worker on THIS DATABASE ever had a key ring configured. store must
+// implement engine.PayloadEncryptionState for the question to be answerable
+// at all -- *engine.MySQLStore and *engine.MSSQLStore do not, because
+// --encrypt-sensitive-payloads already refuses every driver but postgres
+// (see the two driver checks in main.go), so neither can ever hold a sealed
+// row and this is a silent no-op for them, not a skipped check.
+//
+// Returns an error describing what went wrong or what was found, matching
+// checkPluginRouteSignatures' shape (plugin_stale_routes_check.go): a pure
+// decision the caller logs and turns into os.Exit(1), so the decision itself
+// can be unit tested without a process exiting out from under the test.
+//
+// Called once, in main.go, AFTER the migrate-or-verify block (the table this
+// checks is itself migration 007) and before a non-migrate-only worker does
+// anything else -- a --migrate-only job exits before reaching this point and
+// never needs to answer the question, and checking any earlier would refuse
+// a worker on a database that is merely not yet migrated, for the wrong
+// reason.
+func checkPayloadEncryptionState(ctx context.Context, store engine.WorkflowStore, payloadEncryption *engine.PayloadEncryption) error {
+	pes, ok := store.(engine.PayloadEncryptionState)
+	if !ok {
+		return nil
+	}
+	if payloadEncryption != nil {
+		// Marked at startup, not on first successful seal: a key present and
+		// never yet used is still an operator's declared intent to encrypt,
+		// and the failure direction this check should err toward is
+		// "refuses a deploy that turns out to be safe" rather than "misses
+		// the window before the first write".
+		if err := pes.MarkPayloadEncryptionEnabled(ctx); err != nil {
+			return fmt.Errorf("failed to record that payload encryption is enabled for this database: %w", err)
+		}
+		return nil
+	}
+	everEnabled, err := pes.PayloadEncryptionEverEnabled(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to check whether payload encryption was ever enabled on this database: %w", err)
+	}
+	if everEnabled {
+		return fmt.Errorf("this database has sensitive event payloads sealed under a key ring, but this worker was started without --encrypt-sensitive-payloads -- refusing to start: it cannot tell a sealed column from plaintext and would otherwise read ciphertext as data (cleat#2324)")
+	}
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Peer schemas parsing
 // ---------------------------------------------------------------------------
