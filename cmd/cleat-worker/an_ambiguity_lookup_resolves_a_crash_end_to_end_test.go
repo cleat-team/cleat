@@ -335,27 +335,42 @@ func testAmbiguityLookupEndToEnd(t *testing.T, caseName string, lookupStatus int
 				"resolveAmbiguity documents exactly this)")
 		}
 
-		// coordinator, cleat#1984 round 3: a sequential pair of duplicate
-		// requests proves nothing about the double-execution hazard, because
-		// the first has to finish before the second can even be observed to
-		// exist. The point of this subtest is that it does NOT: the retry
-		// above was dispatched and completed, and the workflow finished,
-		// while the ORIGINAL request was still sitting unanswered in the
-		// service's handler -- genuinely overlapping, not sequential. Only
-		// now is it unblocked, and the service -- which has no
-		// idempotency-key fencing of its own, exactly the gap
-		// docs/durable-calls.md's "404 answer is a PROMISE" paragraph is
-		// about -- serves it as an ordinary, successful, SEPARATE charge.
-		// That is the hazard made observable: not "two requests were sent"
-		// (which a sequential test could also show), but "two requests were
-		// in flight together and both succeeded".
+		// HAZARD ASSERTION, not a correctness assertion -- coordinator,
+		// cleat#1984 round 3. The double charge below IS the bug G2
+		// documents (engine/callintent.go's resolveAmbiguity,
+		// docs/durable-calls.md's "404 answer is a PROMISE"). This pins
+		// CURRENT behaviour so a change to it is visible, not an assertion
+		// that the behaviour is correct or intended.
+		//
+		// A sequential pair of duplicate requests would prove nothing here,
+		// because the first has to finish before the second can even be
+		// observed to exist. This does not: the retry above was dispatched
+		// and completed, and the workflow finished, while the ORIGINAL
+		// request was still sitting unanswered in the service's handler --
+		// genuinely overlapping, not sequential. Only now is it unblocked,
+		// and the service -- which has no idempotency-key fencing of its
+		// own -- serves it as an ordinary, successful, SEPARATE charge.
+		//
+		// What a failure here means depends on which of the owner's three
+		// options lands, and that is the point of a hazard assertion:
+		//   - today, and under option (a) (the lookup service makes 404
+		//     durable): this engine's behaviour does not change, so this
+		//     test keeps passing -- it is a statement about a service
+		//     without key fencing, which is exactly what this fixture is.
+		//   - under option (c) (the engine re-sends under the ORIGINAL
+		//     key instead of the guest retrying under a new one): the
+		//     second charge stops happening and this test FAILS. That
+		//     failure is the signal the behaviour changed, not a
+		//     regression to fix by restoring this assertion.
 		unblock()
 		select {
 		case code := <-chargeOrphanedServed:
 			if code != http.StatusOK {
-				t.Errorf("the orphaned original, once unblocked, got %d -- if this fixture's "+
-					"service refused it, something else changed; it was built with no "+
-					"idempotency-key fencing specifically so this would succeed", code)
+				t.Errorf("the orphaned original, once unblocked, got %d -- this is a HAZARD "+
+					"assertion pinning current (unfenced) behaviour, not a correctness claim; if "+
+					"it failed because the double-execution hazard was fixed (e.g. option (c), "+
+					"the engine re-sending under the original key), update this assertion rather "+
+					"than treat the failure as a regression", code)
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatal("the orphaned original never completed after being unblocked -- the overlap " +
