@@ -167,6 +167,7 @@ jobs:
         uses: actions/github-script@v9
         env:
           RUN_ID: ${{ steps.resolve.outputs.run_id }}
+          RUN_ATTEMPT: ${{ steps.resolve.outputs.run_attempt }}
           HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
           RUN_URL: ${{ steps.resolve.outputs.html_url }}
           DRY_RUN: ${{ steps.resolve.outputs.dry_run }}
@@ -176,9 +177,20 @@ jobs:
             const path = require('path');
 
             const runId = Number(process.env.RUN_ID);
+            const runAttempt = process.env.RUN_ATTEMPT;
             const sha = process.env.HEAD_SHA;
             const runUrl = process.env.RUN_URL;
             const dryRun = process.env.DRY_RUN === 'true';
+
+            // cleat#2906: run.html_url is IDENTICAL across attempts of the
+            // same run id -- verified live, the /attempts/1 and current
+            // endpoints return the same URL. Matching dedup on runUrl alone
+            // means a re-run's new failure (attempt 2, possibly a different
+            // test or a different reason) reads as "already reported" from
+            // attempt 1 and is silently dropped. reportKey folds the attempt
+            // in, so it is what both the body text and the dedup check key
+            // off -- two attempts of one run id can never collide.
+            const reportKey = `${runUrl} (attempt ${runAttempt})`;
 
             // Which jobs failed, straight from the API. This covers
             // tier1-coverage too, which has no DB and no log artifact of its
@@ -244,7 +256,7 @@ jobs:
 
             const title = '[tier1] develop push run is failing';
             const bodyLines = [
-              `Run: ${runUrl}`,
+              `Run: ${reportKey}`,
               `Commit: ${sha}`,
               '',
               `Failed jobs: ${failedJobs.map(j => j.name).join(', ') || '(none reported failure -- check the run directly)'}`,
@@ -282,23 +294,28 @@ jobs:
             const existing = openIssues.data.find(i => i.title === title);
 
             if (existing) {
-              // Dedupe per run: a retried `workflow_run` completion for a run
-              // already reported must not double-post. Checked against the
-              // run URL rather than the SHA, because a re-run of the SAME
-              // commit's Tier 1 Gate produces a new run id and a new URL for
-              // what is, from a reader's perspective, the same failure worth
-              // re-flagging -- but the SAME run completing twice (GitHub can
-              // redeliver a webhook) must not.
+              // Dedupe per (run, attempt): a retried `workflow_run`
+              // completion for a run+attempt already reported must not
+              // double-post. Checked against reportKey -- run URL plus
+              // attempt -- rather than the run URL alone, because
+              // run.html_url is IDENTICAL across attempts of the same run id
+              // (cleat#2906): a re-run that fails again (attempt 2, possibly
+              // on a different test or for a different reason) is a new,
+              // current failure worth reporting, and matching on the bare
+              // URL read it as the same report as attempt 1's. The SAME
+              // run+attempt completing twice (GitHub can redeliver a
+              // webhook) must still not double-post, which reportKey still
+              // catches since it is unchanged for that case.
               const comments = await github.rest.issues.listComments({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: existing.number,
                 per_page: 100,
               });
-              const alreadyReported = comments.data.some(c => c.body && c.body.includes(runUrl))
-                || (existing.body && existing.body.includes(runUrl));
+              const alreadyReported = comments.data.some(c => c.body && c.body.includes(reportKey))
+                || (existing.body && existing.body.includes(reportKey));
               if (alreadyReported) {
-                core.notice(`Run ${runUrl} already reported on #${existing.number}, skipping`);
+                core.notice(`Run ${reportKey} already reported on #${existing.number}, skipping`);
               } else {
                 await github.rest.issues.createComment({
                   owner: context.repo.owner,
