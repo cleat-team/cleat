@@ -403,6 +403,23 @@ func (s *execSession) resolveAmbiguity(ctx context.Context, rec EventRecord) (st
 		// replay path (recordedFailureCode) reproduce the same retryable
 		// classification as a fresh call failure on every future replay of
 		// this now-completed row.
+		//
+		// THE RETRY THIS ENABLES USES A DIFFERENT IDEMPOTENCY KEY THAN THE
+		// ORIGINAL ATTEMPT (coordinator + cleat-review, cleat#1984 round 1).
+		// `key` above is DurableCallIdempotencyKey(workflow, run, rec.Step)
+		// -- this STEP's key. The workflow's retry is a NEW DurableCall, a
+		// NEW step, and therefore a NEW key, by the exact construction
+		// durablecalls.go's own comment on retryStep relies on to make the
+		// engine's OWN internal attempt loop safe ("every attempt carries
+		// the same idempotency key... without this the key changes at
+		// exactly the moment a duplicate is most likely"). This path does
+		// not have that protection: it hands the retry decision to the
+		// GUEST, which cannot reuse rec.Step. So if the resolver's `404`
+		// answered "not sent" because the original request was merely SLOW
+		// rather than lost, a late arrival under the OLD key and the
+		// retry's request under the NEW key can both execute. See
+		// docs/durable-calls.md's "A 404 answer is a PROMISE" paragraph for
+		// the contract requirement this places on the lookup operation.
 		completed.Response = ""
 		completed.Err = ambiguityNotSentMessage
 		completed.ErrCode = ErrTransient.String()

@@ -9,9 +9,14 @@ import (
 	"github.com/cleat-team/cleat/engine"
 )
 
-// TestResolveCall_StatusCodeDecidesTheOutcome is the acceptance table from
-// cleat#1984, exercised against dbServiceCaller.ResolveCall directly: one
-// case per row.
+// TestResolveCall_StatusCodeDecidesTheOutcome exercises dbServiceCaller.
+// ResolveCall directly, one case per status code -- a unit test of the
+// status-code-to-outcome mapping, NOT the acceptance table cleat#1984 asks
+// for (coordinator, round 1): that table wants an end-to-end run through a
+// real workflow and worker, confirming e.g. "200: exactly one charge
+// recorded" and "404: the step re-executes once" rather than just that
+// ResolveCall returns the right AmbiguityOutcome in isolation. See
+// TestAmbiguityLookupEndToEnd_* for the acceptance-table coverage.
 func TestResolveCall_StatusCodeDecidesTheOutcome(t *testing.T) {
 	for _, tc := range []struct {
 		name         string

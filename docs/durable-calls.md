@@ -166,6 +166,25 @@ here gets this treatment; every other ambiguity reaches the `[AMBIGUOUS]` report
 | `404` | The service has no record — the call never arrived | The step completes as a **retryable failure** (the same classification an ordinary transient call failure gets), not `[AMBIGUOUS]`. Nothing was sent, so nothing needs reconciling; the workflow's own retry handling (or an explicit retry in its code) is what makes "the step re-executes" — the engine does not re-dispatch on its own |
 | Anything else — `5xx`, a malformed response, a transport error, a timeout | Cannot say | Falls back to today's `[AMBIGUOUS]` report, unchanged |
 
+**A `404` answer is a PROMISE, not just information, and a service that implements this lookup
+takes on an obligation because of it.** The retry the table above describes is a NEW step — the
+engine's per-step idempotency key (`DurableCallIdempotencyKey`, keyed on `(workflow, run,
+step)`) is different from the original attempt's, by construction, the same way any two distinct
+steps get different keys. So a service that only checks "have I seen this exact key before" does
+not catch the case this exists to prevent: the lookup answers `404` because the original request
+is merely *slow*, not because it never arrived; the retry's request (new key) is accepted and
+executed; the original request (old key) then arrives late and is *also* accepted, because its
+key has never been used — two charges.
+
+**The lookup operation must therefore make its `404` durable**, not just report current
+knowledge: the moment it answers "never arrived" for a given key, it must also commit to
+rejecting (or no-op'ing) any execution request that later arrives under that exact key, as
+reliably as it already guarantees idempotent execution for a REPEATED key (§5.1). A service that
+cannot make that guarantee must not answer `404` — it must answer as "cannot say" (anything other
+than `200` or `404`) instead, which is always safe and leaves the ambiguity exactly where it was.
+This is a correctness requirement on the lookup contract, not a suggestion: `--ambiguity-lookup`
+should only be pointed at an operation whose service can uphold it.
+
 **Validated at worker startup, not at the first ambiguity:** every operation named in
 `--ambiguity-lookup` must also be declared in `--write-ahead-intent-ops`. `AtLeastOnce` (the
 default call semantics) never leaves a pending intent row — only `WriteAheadIntent` does — so a

@@ -268,6 +268,32 @@ func TwoSequentialCalls(h cleat.HostCalls, input string) (string, error) {
 	return `{"status":"ok"}`, nil
 }
 
+// RetryOnceOnFailure is cleat#1984's acceptance fixture for the
+// AmbiguityNotSent retry hazard engine/callintent.go's resolveAmbiguity
+// documents (coordinator + cleat-review, cleat#1984 round 1): a guest's own
+// retry after a resolved "not sent" failure is a NEW DurableCall at a NEW
+// step, and therefore a NEW idempotency key -- unlike the engine's internal
+// MaxAttempts loop, which deliberately keeps the same step/key across
+// attempts (durablecalls.go's retryStep). No layer test below the guest can
+// show that retry happening, because it is the guest's own code that issues
+// it.
+//
+// This is the simplest guest code that does it: try once, and on any
+// failure try exactly once more. A test can then observe "the step
+// re-executes once" directly, as a second request reaching the service
+// under a different key, rather than inferring it from engine internals.
+func RetryOnceOnFailure(h cleat.HostCalls, input string) (string, error) {
+	resp, err := h.DurableCall("billing", "charge", `{"amount":100}`)
+	if err == nil {
+		return resp, nil
+	}
+	resp, err = h.DurableCall("billing", "charge", `{"amount":100}`)
+	if err != nil {
+		return "", err
+	}
+	return resp, nil
+}
+
 // RetryBacksOffOnHost is cleat#2020's fixture, not 3.88's -- it shares
 // DeferOnLongRetryPolicy's host-vs-SDK retry split (see that comment), but
 // on the HOST side of it deliberately: one attempt, then a 10s backoff short
