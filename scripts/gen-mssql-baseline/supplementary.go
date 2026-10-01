@@ -78,13 +78,23 @@ var supplementaryChecks = []check{
 	// this repo's CLAUDE.md warns a census-style check rots into. Trigger
 	// SETTINGS (is_disabled, QUOTED_IDENTIFIER/ANSI_NULLS) remain below, in
 	// "module settings", because catalogdiff does not compare those.
+	//
+	// is_disabled lives on sys.triggers, not on sys.objects or sys.sql_modules
+	// -- a LEFT JOIN, since every other object type in this check's IN-list
+	// (P/FN/IF/TF/V) has no row there at all. A disabled trigger is otherwise
+	// invisible to every check in this file and to catalogdiff: it is still
+	// present, still named correctly, and its body hash is unchanged, so
+	// nothing else here would catch `DISABLE TRIGGER` ever being run against
+	// a baseline (cleat#2432 review, G1).
 	{
-		"module settings (QUOTED_IDENTIFIER / ANSI_NULLS) and body hash",
+		"module settings (QUOTED_IDENTIFIER / ANSI_NULLS), trigger is_disabled, and body hash",
 		`SELECT s.name, o.name, o.type_desc, m.uses_quoted_identifier, m.uses_ansi_nulls,
+		        COALESCE(CONVERT(varchar(1), tr.is_disabled), ''),
 		        CONVERT(varchar(64), HASHBYTES('SHA2_256', CONVERT(varbinary(max), m.definition)), 2)
 		 FROM sys.objects o
 		 JOIN sys.schemas s ON s.schema_id = o.schema_id
 		 JOIN sys.sql_modules m ON m.object_id = o.object_id
+		 LEFT JOIN sys.triggers tr ON tr.object_id = o.object_id
 		 WHERE o.is_ms_shipped = 0 AND o.type IN ('P','FN','IF','TF','TR','V')`,
 	},
 	{
