@@ -258,14 +258,14 @@ func (psr *PluginStreamRegistry) UnhealthyError(pluginName string) error {
 // text for the literal substring "${secret:", because that is the only text
 // it ever sees -- it runs before anything decodes the document. A value
 // written with JSON escaping that DECODES to a reference, e.g. the string
-// literal "${secret:name}", used to pass this check (which decoded
-// first, matched the decoded form) but could never be found by
-// ResolveSecretRefs's raw scan -- it reached the plugin call with the
-// placeholder text "${secret:name}" sitting in the field, unresolved and
-// indistinguishable from a successfully-resolved secret that happened to
-// contain that text. Matching the raw bytes makes this function reject
-// exactly the inputs the resolver could never have resolved, instead of
-// validating a promise the next stage cannot keep.
+// literal "\u0024{secret:name}" (a \u0024 escape for the $),
+// used to pass this check (which decoded first, matched the decoded form)
+// but could never be found by ResolveSecretRefs's raw scan -- it reached
+// the plugin call with the placeholder text "${secret:name}" sitting in
+// the field, unresolved and indistinguishable from a successfully-resolved
+// secret that happened to contain that text. Matching the raw bytes makes
+// this function reject exactly the inputs the resolver could never have
+// resolved, instead of validating a promise the next stage cannot keep.
 var secretOnlyFieldRef = regexp.MustCompile(`^"\$\{secret:[A-Za-z0-9_.-]{1,128}\}"$`)
 
 // secretOnlyFieldRedactionMarker replaces a declared secret-only field's
