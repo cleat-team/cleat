@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand/v2"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,22 +34,6 @@ func (p *Plugin) writeJSON(w http.ResponseWriter, status int, v any) {
 
 func (p *Plugin) writeError(w http.ResponseWriter, status int, msg string) {
 	p.writeJSON(w, status, map[string]string{"error": msg})
-}
-
-// isPKConflict returns true if the error is a primary key or unique constraint
-// violation. These occur when two concurrent appends compute the same next
-// sequence number — a safe retry scenario.
-func isPKConflict(err error) bool {
-	if err == nil {
-		return false
-	}
-	s := err.Error()
-	return strings.Contains(s, "duplicate") ||
-		strings.Contains(s, "unique") ||
-		strings.Contains(s, "PRIMARY KEY") ||
-		strings.Contains(s, "2627") || // MSSQL
-		strings.Contains(s, "1062") || // MySQL
-		strings.Contains(s, "23505") // PostgreSQL
 }
 
 // ---- POST /events/{stream_id} ----
@@ -91,43 +73,16 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Insert event with auto-incrementing sequence. The next sequence is
-	// read in its own statement, not a subquery of the INSERT (cleat#2260 --
-	// see nextSequenceForStream's comment in queries.go for why). Retry loop
-	// handles PK conflicts from concurrent appends racing on the same
-	// read-then-write.
-	//
-	// maxAppendAttempts was 3 until cleat#2260's own concurrent-append test
-	// (n=20 appenders against one stream) exhausted it for real: every
-	// loser's retry reads the now-current MAX and can still collide with
-	// another concurrent loser, and a fixed 10/20ms backoff retries every
-	// loser in the same round in lockstep, which does not thin the herd.
-	// 32 attempts with jittered backoff (so losers spread out instead of
-	// re-colliding together) clears n=20 reliably; see that test for the
-	// measurement this is tuned against.
+	// Insert event with a sequence claimed from event_stream_head. cleat#2260
+	// split this into two statements because a same-table subquery INSERT
+	// fails outright on MySQL; cleat#2268 replaced the read-MAX-then-retry
+	// shape that fix originally used with real serialization -- see
+	// upsertStreamHead's comment in queries.go for the mechanism. One attempt
+	// is sufficient: the row lock upsertStreamHead takes makes two
+	// transactions computing the same sequence for the same stream
+	// structurally impossible, so there is no conflict left to retry on.
 	var sequence int64
-	var err error
-	const maxAppendAttempts = 32
-	backoff := 5 * time.Millisecond
-	const maxBackoff = 100 * time.Millisecond
-	for attempt := 1; attempt <= maxAppendAttempts; attempt++ {
-		err = p.appendOnce(r.Context(), tid, streamID, body, &sequence)
-		if err == nil {
-			break
-		}
-		if !isPKConflict(err) {
-			break
-		}
-		if attempt < maxAppendAttempts {
-			//nolint:gosec // G404: retry-backoff jitter, not a security context -- spreads concurrent losers apart so they don't retry in lockstep. No secret or token derives from it.
-			jitter := time.Duration(rand.Int64N(int64(backoff)))
-			time.Sleep(backoff/2 + jitter)
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-		}
-	}
+	err := p.appendOnce(r.Context(), tid, streamID, body, &sequence)
 	if err != nil {
 		p.logger.Error("eventstore: append", "stream", streamID, "error", err)
 		p.writeError(w, 500, "failed to append event")
@@ -146,24 +101,44 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// appendOnce runs one attempt of the read-next-sequence-then-insert pair in
-// a single transaction, writing the sequence it used into *sequence. A
-// caller retries on a duplicate-key error (isPKConflict); see the comment on
-// nextSequenceForStream in queries.go for why this is two statements and
-// why the retry, not a lock, is what makes it safe under concurrency.
+// appendOnce claims the next sequence for streamID from event_stream_head
+// and inserts the event, in a single transaction, writing the sequence it
+// used into *sequence. See upsertStreamHead's comment in queries.go for why
+// this needs no retry: the row lock it takes on event_stream_head is held
+// for this transaction's lifetime, so a second concurrent appender to the
+// SAME stream blocks on that statement rather than computing the same
+// sequence.
+//
+// MySQL has no RETURNING, so its branch does the upsert with Exec and reads
+// the result back with a plain SELECT in the same transaction -- see
+// selectStreamHead's comment for why that read is safe. Postgres and MSSQL
+// get the new value directly from the upsert statement.
 func (p *Plugin) appendOnce(ctx context.Context, tenantID uuid.UUID, streamID string, body []byte, sequence *int64) error {
 	tx, err := p.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}
 
-	var maxSeq int64
-	if err := tx.QueryRow(ctx, plugin.Rebind(nextSequenceForStream.For(p.dialect), p.dialect),
-		tenantID, streamID).Scan(&maxSeq); err != nil {
-		tx.Rollback()
-		return fmt.Errorf("read next sequence: %w", err)
+	var head int64
+	if p.dialect == plugin.DialectMySQL {
+		if _, err := tx.Exec(ctx, plugin.Rebind(upsertStreamHead.For(p.dialect), p.dialect),
+			tenantID, streamID); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("upsert stream head: %w", err)
+		}
+		if err := tx.QueryRow(ctx, plugin.Rebind(selectStreamHead.For(p.dialect), p.dialect),
+			tenantID, streamID).Scan(&head); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("read stream head: %w", err)
+		}
+	} else {
+		if err := tx.QueryRow(ctx, plugin.Rebind(upsertStreamHead.For(p.dialect), p.dialect),
+			tenantID, streamID).Scan(&head); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("upsert stream head: %w", err)
+		}
 	}
-	*sequence = maxSeq + 1
+	*sequence = head
 
 	if _, err := tx.Exec(ctx, plugin.Rebind(insertEvent.For(p.dialect), p.dialect),
 		tenantID, streamID, *sequence, string(body)); err != nil {
