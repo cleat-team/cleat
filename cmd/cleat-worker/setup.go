@@ -198,6 +198,13 @@ type dbServiceCaller struct {
 	// sits on the call path.
 	serviceEndpoints map[string]string
 
+	// ambiguityLookup maps "service.operation" to the lookup mapping
+	// configured for it, from --ambiguity-lookup. Nil or empty means this
+	// caller does not implement ResolveCall usefully -- see ResolveCall's own
+	// doc comment -- and WithAmbiguityResolver is not wired at all in that
+	// case (executeWorkflow), so an unconfigured deployment pays nothing.
+	ambiguityLookup map[string]ambiguityLookupEntry
+
 	// secrets resolves ${secret:name} in a request on the way OUT to the
 	// service, and the direction is the whole point.
 	//
@@ -372,6 +379,84 @@ func (c *dbServiceCaller) forwardToService(ctx context.Context, baseURL, service
 	}
 	slog.Debug("BENCH-SVC-CALL", "duration_ms", time.Since(t0).Milliseconds(), "body_bytes", len(body))
 	return string(body), nil
+}
+
+// ResolveCall implements engine.AmbiguityResolver. cleat#1984.
+//
+// It answers only for an operation named in --ambiguity-lookup; everything
+// else returns AmbiguityCannotSay, exactly as no resolver being configured at
+// all does, which is deliberate -- a resolver that answers about operations
+// nobody declared a lookup for would be guessing.
+//
+// The lookup operation is called the same way forwardToService calls an
+// ordinary operation -- same URL convention, same Idempotency-Key, same
+// egress-guarded per-call client -- because it IS one: a service that can
+// answer "what happened to idempotency key X" implements that as another
+// route on itself, under the SAME service a workflow's own call reached. This
+// is a sibling of forwardToService rather than a reuse of it because
+// forwardToService collapses every non-200 into one classified error, and the
+// contract here is the status code itself (see the table below), not a
+// retry/non-retry classification of it.
+//
+// | status | outcome |
+// |---|---|
+// | 200 | AmbiguityResolved, response = body |
+// | 404 | AmbiguityNotSent -- the service has no record; never arrived |
+// | anything else, including a transport error or timeout | AmbiguityCannotSay |
+func (c *dbServiceCaller) ResolveCall(ctx context.Context, service, operation, idempotencyKey string) (string, engine.AmbiguityOutcome, error) {
+	e, ok := c.ambiguityLookup[service+"."+operation]
+	if !ok {
+		return "", engine.AmbiguityCannotSay, nil
+	}
+	baseURL, ok := c.serviceEndpoints[service]
+	if !ok {
+		// Configured for a service this worker has no endpoint for at all --
+		// not reachable if --ambiguity-lookup and --service-endpoints are
+		// validated together at boot, but ResolveCall itself does not trust
+		// that validation ran (a future caller might construct this struct
+		// directly), so it degrades to "cannot say" rather than panicking on
+		// a nil baseURL.
+		return "", engine.AmbiguityCannotSay, fmt.Errorf("ambiguity lookup for %s.%s: no endpoint registered for service %q",
+			service, operation, service)
+	}
+
+	url := fmt.Sprintf("%s/call/%s/%s", baseURL, service, e.LookupOperation)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader("{}"))
+	if err != nil {
+		return "", engine.AmbiguityCannotSay, fmt.Errorf("ambiguity lookup for %s.%s: create request: %w", service, operation, err)
+	}
+	plugin.SetTraceparent(req, c.traceID)
+	req.Header.Set("Content-Type", "application/json")
+	if idempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", idempotencyKey)
+	}
+	// Same per-call, egress-guarded client as forwardToService -- see that
+	// method's comment for why this is not pooled.
+	client := &http.Client{
+		Timeout:   30 * time.Second,
+		Transport: &http.Transport{DialContext: c.serviceEgressGuard(ctx, baseURL).DialContext},
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		// A transport failure answers nothing about the call's outcome --
+		// cannot say, not an error the caller must propagate. See
+		// AmbiguityResolver.ResolveCall's own doc comment on why an error
+		// here is not fatal: it leaves the ambiguity exactly as it was.
+		return "", engine.AmbiguityCannotSay, fmt.Errorf("ambiguity lookup for %s.%s: %w", service, operation, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return "", engine.AmbiguityCannotSay, fmt.Errorf("ambiguity lookup for %s.%s: read response: %w", service, operation, err)
+	}
+	switch resp.StatusCode {
+	case http.StatusOK:
+		return string(body), engine.AmbiguityResolved, nil
+	case http.StatusNotFound:
+		return "", engine.AmbiguityNotSent, nil
+	default:
+		return "", engine.AmbiguityCannotSay, nil
+	}
 }
 
 // serviceStatusError turns a non-200 from a called service into a classified
@@ -1699,6 +1784,15 @@ type Worker struct {
 	// serviceEndpoints maps a service name to its base URL, from
 	// --service-endpoints. Passed to every dbServiceCaller this worker builds.
 	serviceEndpoints map[string]string
+
+	// ambiguityLookup maps "service.operation" to its configured lookup
+	// mapping, from --ambiguity-lookup. Passed to every dbServiceCaller this
+	// worker builds, which implements engine.AmbiguityResolver against it.
+	// Nil or empty means no resolver is registered at all -- see
+	// executeWorkflow's WithAmbiguityResolver wiring, which is conditional on
+	// this being non-empty, so a deployment that configures nothing pays
+	// nothing (no resolver call on an ambiguity, same as before cleat#1984).
+	ambiguityLookup map[string]ambiguityLookupEntry
 
 	// egressAllow answers "which hosts may this tenant's workflows reach".
 	// Nil denies every guest-initiated fetch. cleat#1565.
@@ -3041,6 +3135,7 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 		workerID:         w.id,
 		benchSvcURL:      *benchSvcURL,
 		serviceEndpoints: w.serviceEndpoints,
+		ambiguityLookup:  w.ambiguityLookup,
 		egressAllow:      w.egressAllow,
 		operatorEgress:   w.operatorEgress,
 		privateHosts:     w.privateHosts,
@@ -3258,6 +3353,18 @@ func (w *Worker) executeWorkflow(wf *engine.WorkflowInstance) {
 	// is about: durability code that is tested, believed and unreachable.
 	if ops := parseWriteAheadIntentOps(writeAheadIntentOps); len(ops) > 0 {
 		engineOpts = append(engineOpts, engine.WithWriteAheadIntentOps(ops...))
+	}
+	// cleat#1984: the shipped worker can settle most ambiguities itself,
+	// through a declared lookup, instead of leaving every one for an
+	// operator. Wired here, beside WithWriteAheadIntentOps, because the two
+	// are the same shape of "engine mechanism the worker turns on by flag"
+	// and the lookup is meaningless without write-ahead intent already
+	// recording the pending row it resolves. Conditional on len > 0 so a
+	// deployment that configures nothing registers no resolver at all and
+	// pays no extra lookup call on an ambiguity -- same cost as before this
+	// existed.
+	if len(w.ambiguityLookup) > 0 {
+		engineOpts = append(engineOpts, engine.WithAmbiguityResolver(caller))
 	}
 	// Set unconditionally, and note it is NOT enough on its own: this governs
 	// the direct flush path only. The batch path takes the same value from the

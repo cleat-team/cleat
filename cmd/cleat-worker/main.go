@@ -1404,6 +1404,28 @@ func main() {
 		logger.Info("service endpoints registered", "services", strings.Join(names, ","))
 	}
 
+	// cleat#1984. Parsed and validated at boot, same reasoning as
+	// --service-endpoints above: a malformed or wired-to-nothing lookup is a
+	// configuration mistake, and the moment to report one is startup, not the
+	// first ambiguity a crash produces, possibly days later.
+	ambiguityLookup, alErr := parseAmbiguityLookup(*ambiguityLookupFlag)
+	if alErr != nil {
+		logger.Error("--ambiguity-lookup is not usable", "error", alErr)
+		os.Exit(1)
+	}
+	if len(ambiguityLookup) > 0 {
+		if err := validateAmbiguityLookupOps(ambiguityLookup, parseWriteAheadIntentOps(writeAheadIntentOps)); err != nil {
+			logger.Error("--ambiguity-lookup is not usable", "error", err)
+			os.Exit(1)
+		}
+		keys := make([]string, 0, len(ambiguityLookup))
+		for k := range ambiguityLookup {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		logger.Info("ambiguity lookups registered", "operations", strings.Join(keys, ","))
+	}
+
 	egressAllow := &engine.TenantEgressStore{DB: db, Dialect: engine.Dialect(*driver)}
 
 	// cleat#1565: egress needs BOTH the operator's permission and the
@@ -2148,6 +2170,7 @@ func main() {
 		flushRetryWindow:                 *flushRetryWindow,
 		privateHosts:                     pluginPrivateHosts,
 		serviceEndpoints:                 serviceEndpoints,
+		ambiguityLookup:                  ambiguityLookup,
 		egressAllow:                      egressAllow,
 		secrets:                          secretStore,
 		operatorEgress:                   operatorEgress,
