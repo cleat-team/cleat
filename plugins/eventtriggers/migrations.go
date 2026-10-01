@@ -394,10 +394,31 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS key2 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
 				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS key3 VARCHAR(128) COLLATE "C" NOT NULL DEFAULT '';
 				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS registration_key CHAR(64) NOT NULL DEFAULT '';
+
+				-- event_awaiters is TenantScoped (Version 4): FORCE ROW LEVEL
+				-- SECURITY binds even the table owner, and this connection carries
+				-- no tenant -- cleat.assert_tenant_set() RAISES "cleat.tenant_id is
+				-- not set", even against an empty table, since the predicate is
+				-- STABLE and PostgreSQL can evaluate it before any row is examined.
+				-- The sanctioned bypass (engine/plugindb_tenant.go's
+				-- markCrossTenantOnTx): enter cleat_sweep, which Version 4's own
+				-- applyTenantScoping already granted a USING (true) policy plus
+				-- GRANT SELECT/INSERT/UPDATE/DELETE on this table. RESET ROLE
+				-- immediately after -- cleat_sweep is NOINHERIT and owns nothing,
+				-- so the ALTER TABLE statements below would 42501 under it.
+				-- cleat#2828.
+				SELECT set_config('cleat.cross_tenant', 'eventtriggers migration 6 backfill, cleat#2828', true);
+				SET LOCAL ROLE cleat_sweep;
 				UPDATE event_awaiters SET registration_key = encode(sha256(convert_to(workflow_id || ':' || event_type, 'UTF8')), 'hex') WHERE registration_key = '';
+				RESET ROLE;
 
 				ALTER TABLE event_awaiters ADD COLUMN IF NOT EXISTS id UUID DEFAULT gen_random_uuid();
+
+				SELECT set_config('cleat.cross_tenant', 'eventtriggers migration 6 backfill, cleat#2828', true);
+				SET LOCAL ROLE cleat_sweep;
 				UPDATE event_awaiters SET id = gen_random_uuid() WHERE id IS NULL;
+				RESET ROLE;
+
 				ALTER TABLE event_awaiters ALTER COLUMN id SET NOT NULL;
 				ALTER TABLE event_awaiters DROP CONSTRAINT IF EXISTS event_awaiters_pkey;
 				ALTER TABLE event_awaiters ADD CONSTRAINT event_awaiters_pkey PRIMARY KEY (id);
@@ -989,8 +1010,24 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			Version: 8,
 			Up: `
 				ALTER TABLE ingested_events ADD COLUMN IF NOT EXISTS dispatch_processed BOOLEAN NOT NULL DEFAULT false;
+
+				-- ingested_events is TenantScoped (Version 4) -- the same FORCE ROW
+				-- LEVEL SECURITY hazard Version 6's own backfill documents at
+				-- length above, hitting the same connection-carries-no-tenant gap:
+				-- cleat.assert_tenant_set() RAISES even against an empty table. The
+				-- UpMSSQL arm below already carries the SQL Server bypass
+				-- (sp_set_session_context, added fixing a round-1 review finding on
+				-- cleat#2822) -- this is its PostgreSQL counterpart, added fixing
+				-- cleat#2828. Same sanctioned mechanism as Version 6: enter
+				-- cleat_sweep, which Version 4's applyTenantScoping already granted
+				-- access to this table, then RESET ROLE before the CREATE INDEX
+				-- below, since cleat_sweep owns nothing and cannot CREATE INDEX.
+				SELECT set_config('cleat.cross_tenant', 'eventtriggers migration 8 backfill, cleat#2828', true);
+				SET LOCAL ROLE cleat_sweep;
 				UPDATE ingested_events SET dispatch_processed = true
 					WHERE processed OR (status IS NOT NULL AND status <> 'pending');
+				RESET ROLE;
+
 				CREATE INDEX IF NOT EXISTS idx_ingested_events_dispatch ON ingested_events(dispatch_processed, received_at) WHERE NOT dispatch_processed;
 			`,
 			// Idempotency via information_schema, matching Version 6/7's own
