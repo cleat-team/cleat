@@ -2,6 +2,10 @@ package eventtriggers
 
 import (
 	"context"
+	"database/sql"
+	"net/url"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -64,7 +68,28 @@ func TestV8BackfillPreservesTheOldSweepSelection(t *testing.T) {
 		{"mssql", testutil.DialectMSSQL},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			sqlDB := testutil.TestDB(t, tc.td)
+			var sqlDB *sql.DB
+			if tc.td == testutil.DialectMSSQL {
+				// testutil.TestDB(t, testutil.DialectMSSQL) hands back a
+				// connection to ONE physical database shared by every test in
+				// this package's whole `go test` invocation. plugin_migrations
+				// is keyed on (plugin_name, version), and v7OnlyPlugin's Info()
+				// returns the real Plugin's name via Go method promotion -- so
+				// this test's partial (v1-v7) migration state is indistinguishable
+				// from, and poisonable by, any other test in this package that
+				// applies the real plugin's full migrations against the same
+				// shared database (cleat#2871: another test in this package
+				// commits the real plugin's v1-v8 migrations first, so this
+				// test's "migrate to v7" step is a silent no-op against an
+				// already-v8 table, and the backfill this test exists to
+				// exercise never runs). MySQL and Postgres are not known to
+				// have this failure (postgres additionally supports a
+				// --schema/WithSchema isolation option this package's tests do
+				// not use), so only MSSQL gets a database of its own here.
+				sqlDB = freshMSSQLDatabase(t)
+			} else {
+				sqlDB = testutil.TestDB(t, tc.td)
+			}
 			dialect := plugin.Dialect(string(tc.td))
 			real := &Plugin{dialect: dialect}
 			db := &engine.SQLDBAdapter{DB: sqlDB, Dialect: dialect}
@@ -173,4 +198,68 @@ func seedPreV8Rows(t *testing.T, ctx context.Context, db *engine.SQLDBAdapter, t
 		seeded = append(seeded, seededPreV8Row{id: id, status: r.status})
 	}
 	return seeded
+}
+
+// freshMSSQLDatabase creates a uniquely-named MSSQL database on the same
+// server CLEAT_TEST_MSSQL points at, builds the package's full test schema
+// in it, and returns a *sql.DB connected to that database alone -- see the
+// comment at this function's one call site for why this test needs its own
+// database rather than the one testutil.TestDB shares across the package.
+func freshMSSQLDatabase(t *testing.T) *sql.DB {
+	t.Helper()
+	adminDSN := os.Getenv("CLEAT_TEST_MSSQL")
+	if adminDSN == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping MSSQL tests")
+	}
+	u, err := url.Parse(adminDSN)
+	if err != nil {
+		t.Fatalf("parse CLEAT_TEST_MSSQL: %v", err)
+	}
+
+	admin, err := sql.Open("sqlserver", adminDSN)
+	if err != nil {
+		t.Fatalf("open admin mssql connection: %v", err)
+	}
+	defer admin.Close()
+	if err := admin.Ping(); err != nil {
+		t.Fatalf("ping admin mssql connection: %v", err)
+	}
+
+	dbName := "cleat_test_" + strings.ReplaceAll(uuid.New().String(), "-", "")
+	if _, err := admin.Exec("CREATE DATABASE [" + dbName + "]"); err != nil {
+		t.Fatalf("create database %s: %v", dbName, err)
+	}
+	t.Cleanup(func() {
+		dropAdmin, err := sql.Open("sqlserver", adminDSN)
+		if err != nil {
+			t.Logf("cleanup: reopen admin connection to drop %s: %v", dbName, err)
+			return
+		}
+		defer dropAdmin.Close()
+		// Forcibly evicts this test's own connection pool against dbName, so
+		// DROP DATABASE does not fail with "database is in use" (MSSQL error
+		// 3702) when the *sql.DB below has not finished closing all of its
+		// pooled connections yet.
+		if _, err := dropAdmin.Exec("ALTER DATABASE [" + dbName + "] SET SINGLE_USER WITH ROLLBACK IMMEDIATE"); err != nil {
+			t.Logf("cleanup: set single_user on %s: %v", dbName, err)
+			return
+		}
+		if _, err := dropAdmin.Exec("DROP DATABASE [" + dbName + "]"); err != nil {
+			t.Logf("cleanup: drop database %s: %v", dbName, err)
+		}
+	})
+
+	q := u.Query()
+	q.Set("database", dbName)
+	u.RawQuery = q.Encode()
+	db, err := sql.Open("sqlserver", u.String())
+	if err != nil {
+		t.Fatalf("open fresh mssql database %s: %v", dbName, err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Ping(); err != nil {
+		t.Fatalf("ping fresh mssql database %s: %v", dbName, err)
+	}
+	testutil.SetupMinimalSchema(t, db, testutil.DialectMSSQL)
+	return db
 }
