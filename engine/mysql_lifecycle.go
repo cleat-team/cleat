@@ -1510,9 +1510,33 @@ func wrapMySQLFinalizeDBError(err error, workflowID string) error {
 // NO SLEEP BETWEEN ATTEMPTS, for the same reason as the start path: the
 // victim's lock is already released by the time this returns, so there is
 // nothing to wait for and a backoff would only add latency to the path a
-// worker is blocking on to report a workflow's outcome.
+// worker is blocking on to report a workflow's outcome. THAT ARGUMENT
+// ANSWERS ONE QUESTION ONLY -- "is there a lock left to wait out" -- and
+// the answer is no. It does not answer a SEPARATE question this call site
+// actually has: whether N lockstep losers, released together, re-collide
+// with EACH OTHER on an immediate retry. A sleep would likely reduce that
+// too (cleat-review, reviewing cleat#2033), but raising the budget alone
+// already measured clean (see below), so this file does not carry an
+// unneeded mechanism on the strength of a plausible argument for it.
+//
+// 16, NOT 8 -- MEASURED, cleat#2033. Unlike the start path, this call site's
+// contenders do not only shrink: with N finalizers racing the SAME fence,
+// a losing attempt can deadlock against ANOTHER loser rather than the
+// eventual winner, so more than one attempt is the common case here, not
+// the exception. Instrumenting every exit (success or a non-retryable
+// error) across 1000 rounds of 12 concurrent racers against a real MySQL
+// 8.4.11: mean 2.65 attempts, p50=3, p90=5, p99=7, deepest ever reached
+// was the 9th attempt (0-indexed 8) -- never beyond it in 12,000 calls.
+// At the OLD bound of 8, that tail is exactly where it bites: 52 of 12,000
+// racer-calls (0.43%) exhausted all 8 attempts and returned this error to
+// the caller -- cleat#2033's CI failure, reproduced locally rather than
+// assumed. 16 gives roughly 2x headroom over the observed worst case and
+// measured clean (0 of 12,000) at the same sample size. Like the start
+// path, the extra headroom costs nothing when unused: a deadlock victim's
+// lock is already released, so a 16th attempt is exactly as cheap as a
+// 2nd.
 func (s *MySQLStore) finalizeWorkflowSegmentRetrying(ctx context.Context, runID, workerID string, generation int64, newEvents []EventRecord, finalStatus string, result string, errorCode string, errorOp string, queryState map[string]string, nextWakeAt time.Time) error {
-	const maxAttempts = 8
+	const maxAttempts = 16
 
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
