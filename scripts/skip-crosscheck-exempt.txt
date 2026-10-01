@@ -33,36 +33,27 @@
 # stale rather than letting it sit. Nothing should ever be ADDED here by
 # hand -- a new dialect-gated test belongs in skip-ledger.d/, never here.
 #
-# 49 lines, all engine, all Test-prefixed, all currently uncovered by the
+# 23 lines, all engine, all Test-prefixed, all currently uncovered by the
 # runtime ledger. Re-derive with `grep -cE '^[^#]' scripts/skip-crosscheck-exempt.txt`,
 # which must match CROSSCHECK_EXEMPT_MAX in check-skips.sh.
+#
+# cleat#2705: 26 entries left this file in the same change that named every
+# test in multi-db/mysql's and multi-db/mssql's __UNATTRIBUTED__ remainders
+# (scripts/skip-ledger.d/multi-db-ci-initial-measurement.tsv). Each of the 26
+# is a dialect-gated engine test whose OTHER-dialect coverage used to come
+# from nothing nameable -- the two jobs' catch-all lines matched no real test
+# name -- and now comes from being named in one of those two alternations,
+# which check-skips.sh's classify()/covered() can see. Nothing about the 26
+# tests themselves changed.
 engine	TestAContendedMSSQLClaimNeverClaimsALockedRowThoughItMayNotSkipIt	1
-engine	TestAnInvisibleRowIsNotAMissingRow	1
-engine	TestEveryMSSQLFilterPredicateHasAMatchingBlockPredicate	1
-engine	TestEveryShippedTenantPolicyExistsInTheBuiltDatabase	2
 engine	TestFinalizeWorkflowStatus_SQLFenceGuard_MSSQL	1
 engine	TestFinalizeWorkflowStatus_SQLFenceGuard_MySQL	1
-engine	TestIntegrationFullPipeline	1
-engine	TestIntegrationMultiStepSleep	1
-engine	TestIntegrationNewEventTypesPersistenceRoundTrip	1
-engine	TestIntegrationReplayDivergence	1
-engine	TestIntegrationSignalAndResume	1
-engine	TestMSSQLBlockPredicatesRejectCrossTenantWrites	1
-engine	TestMSSQLClaimStep4LockTimeoutBoundsAGenuinelyLockedRow	1
-engine	TestMSSQLClaimStep4RecheckPreventsDoubleClaim	1
-engine	TestMSSQLClaimWorkflowsOnceResetsLockTimeoutBeforeEndingItsTransaction	1
 engine	TestMSSQLClaim_ReturnsTenantIDAsCanonicalUUIDText	1
 engine	TestMSSQLCreateSchedule_SurvivesTheShippedInputConstraint	1
 engine	TestMSSQLDeadlock_ClassifiedFromTheRealDriverError	2
-engine	TestMSSQLDeleteExpiredEventsSurvivesMoreThan2100Workflows	1
 engine	TestMSSQLFactoryClose	2
 engine	TestMSSQLIndexes_ReadyAndActiveExist	1
 engine	TestMSSQLIndexes_TenantReadyUsedByPlanner	2
-engine	TestMSSQLLockTimeoutDoesNotSurviveAPooledConnectionRecycle	1
-engine	TestMSSQLMarkSweptChunksAtTheParameterCapEvenWithoutTheRowBound	1
-engine	TestMSSQLRetentionDeletesEveryChildRow	1
-engine	TestMSSQLRetentionDeletesTheRowsTheWorkflowOwns	1
-engine	TestMSSQLRetentionSweepsCauseNoLockEscalation	1
 engine	TestMSSQLSchedules_TenantIDSurvivesTheRoundTripToStartNewRun	1
 engine	TestMSSQLSessionContext_SurvivesConnectionReuse	2
 engine	TestMSSQLSessionContext_TenantPoolsStaySeparate	2
@@ -77,11 +68,3 @@ engine	TestMSSQLTenantSettingsAreIsolatedByTheSecurityPolicy	2
 engine	TestMySQLStoreConfigOptions	1
 engine	TestMySQLStoreFactory	1
 engine	TestMySQLTenantSettings	1
-engine	TestRLSTenantIsolation	1
-engine	TestReapStaleInstancesPinsAFractionalReclaimTimeoutOnMSSQL	2
-engine	TestReapStaleInstancesPinsAFractionalReclaimTimeoutOnMySQL	2
-engine	TestStaleSetShapeMSSQLAgainstARealDatabase	2
-engine	TestStaleSetShapeMySQLAgainstARealDatabase	2
-engine	TestTheContextFreeInsertItselfIsRefused	1
-engine	TestTheDeletionAuditNamesWhoRemovedTheRow	1
-engine	TestTheRowDisappearanceVerdictIsNotConstant	1

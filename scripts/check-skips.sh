@@ -75,7 +75,7 @@ CROSSCHECK_EXEMPT="scripts/skip-crosscheck-exempt.txt"
 # Also defense in depth alongside the staleness check itself, same spirit
 # as skip-ledger.tsv's __UNATTRIBUTED__ line, in case that check has a bug.
 # Re-derive with `grep -cE '^[^#]' scripts/skip-crosscheck-exempt.txt`.
-CROSSCHECK_EXEMPT_MAX=49
+CROSSCHECK_EXEMPT_MAX=23
 
 # Emitted by scan() when it produced nothing, so callers can tell a failed scan
 # from a clean tree across the command-substitution boundary. Same guard, and
