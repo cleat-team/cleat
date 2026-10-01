@@ -1610,6 +1610,89 @@ func (s *PostgresStore) ReapStaleInstances(ctx context.Context, timeout time.Dur
 	return int(n), tx.Commit()
 }
 
+// ListStaleHolders satisfies StaleHolderReaper. Same RLS scoping and same
+// status='running'/heartbeat_at predicate as ReapStaleInstances, because it
+// has to report the same population -- see that method's doc and
+// StaleHolderReaper's doc for why the two are allowed to race.
+func (s *PostgresStore) ListStaleHolders(ctx context.Context, timeout time.Duration, limit int) ([]StaleHold, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list stale holders: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, generation, assigned_to FROM workflow_instances
+		WHERE status = 'running'
+		  AND heartbeat_at < now() - $1::interval
+		ORDER BY heartbeat_at
+		LIMIT $2
+	`, fmt.Sprintf("%d milliseconds", timeout.Milliseconds()), reapLimitArg(limit))
+	if err != nil {
+		return nil, fmt.Errorf("list stale holders: %w", err)
+	}
+	defer rows.Close()
+
+	var holders []StaleHold
+	for rows.Next() {
+		var h StaleHold
+		var assignedTo sql.NullString
+		if err := rows.Scan(&h.Key.WorkflowID, &h.Key.Generation, &assignedTo); err != nil {
+			return nil, fmt.Errorf("list stale holders: scan: %w", err)
+		}
+		h.AssignedTo = assignedTo.String
+		holders = append(holders, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list stale holders: rows: %w", err)
+	}
+	return holders, tx.Commit()
+}
+
+// ReapStaleInstancesExcept satisfies StaleHolderReaper. Identical to
+// ReapStaleInstances except for the NOT EXISTS clause, which is a no-op
+// against an empty exclude -- unnest of two empty arrays produces zero
+// rows, so NOT EXISTS is unconditionally true and every row ReapStaleInstances
+// would have reclaimed is still reclaimed.
+func (s *PostgresStore) ReapStaleInstancesExcept(ctx context.Context, timeout time.Duration, limit int, exclude []GenerationKey) (int, error) {
+	tx, err := s.beginTxWithRLS(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances except: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	excludeIDs := make([]string, len(exclude))
+	excludeGenerations := make([]int64, len(exclude))
+	for i, k := range exclude {
+		excludeIDs[i] = k.WorkflowID
+		excludeGenerations[i] = k.Generation
+	}
+
+	result, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
+		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
+		    reclaim_count = reclaim_count + 1
+		WHERE id IN (
+		    SELECT id FROM workflow_instances
+		    WHERE status = 'running'
+		      AND heartbeat_at < now() - $1::interval
+		      AND NOT EXISTS (
+		          SELECT 1 FROM unnest($3::text[], $4::bigint[]) AS ex(id, generation)
+		          WHERE ex.id = workflow_instances.id AND ex.generation = workflow_instances.generation
+		      )
+		    ORDER BY heartbeat_at
+		    LIMIT $2
+		)
+	`, fmt.Sprintf("%d milliseconds", timeout.Milliseconds()), reapLimitArg(limit), excludeIDs, excludeGenerations)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances except: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), tx.Commit()
+}
+
 // PingDB satisfies DBPinger: a bounded round trip with no workflow-specific
 // query, so a worker with nothing in flight still has a way to prove it can
 // reach the database. See DBPinger's doc comment for why this exists.

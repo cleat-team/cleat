@@ -115,3 +115,90 @@ func TestAReclaimWindowPast24DaysDoesNotOverflowOnMSSQL(t *testing.T) {
 		t.Errorf("seeded row's status = %q after reap, want ready", status)
 	}
 }
+
+// TestAReclaimWindowPast24DaysDoesNotOverflowOnMSSQLStaleHolderReaper is the
+// same regression as the test above, for cleat#2196's two new methods.
+// cleat-review2 found that ListStaleHolders and reapStaleInstancesExceptOnce
+// each copied the OLD single-DATEADD(MILLISECOND, ...) form rather than the
+// sibling reapStaleInstancesOnce's two-part split, at the time this file was
+// first written for #2196 -- reproduced live against a real MSSQL 2022
+// instance at a ~68-year offset ("Arithmetic overflow error converting
+// expression to data type int"), fixed by reusing splitMillisecondOffset in
+// both. R=30 days is enough to prove the regression without waiting for 68
+// years of wall-clock plausibility to matter.
+func TestAReclaimWindowPast24DaysDoesNotOverflowOnMSSQLStaleHolderReaper(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping MSSQL integration test")
+	}
+	if testing.Short() {
+		t.Skip("Skipping MSSQL integration test in short mode")
+	}
+	db := testutil.MSSQLTestDB(t)
+	testutil.SetupMSSQLFullSchema(t, db)
+	applyMSSQLProcedures(t, db)
+	testutil.CleanupMSSQLTestData(t, db)
+	defer db.Close()
+
+	ctx := context.Background()
+	store := NewMSSQLStore(db)
+	if err := store.DeployWorkflowDef(ctx, &WorkflowDef{
+		Name: "reclaim-window-overflow-holders-def", Version: 1, WASMBytes: []byte{0x00, 0x61, 0x73, 0x6d},
+		ABIVersion: 1, MinVersion: 1,
+	}); err != nil {
+		t.Fatalf("deploy def: %v", err)
+	}
+
+	admin := testutil.MSSQLAdminDB(t, db)
+
+	const r30Days = 30 * 24 * time.Hour
+
+	staleID := fmt.Sprintf("reclaim-overflow-holders-stale-%d", time.Now().UnixNano())
+	if _, err := admin.ExecContext(ctx, `
+		INSERT INTO workflow_instances (id, def_name, def_version, status, input,
+		                                assigned_to, heartbeat_at, tenant_id, generation)
+		VALUES (@p1, 'reclaim-window-overflow-holders-def', 1, 'running', '{}', 'reclaim-overflow-holders-worker',
+		        DATEADD(DAY, -31, SYSUTCDATETIME()), @p2, 1)`,
+		staleID, store.tenantID); err != nil {
+		t.Fatalf("seeding %s: %v", staleID, err)
+	}
+	t.Cleanup(func() {
+		admin.Exec(`DELETE FROM workflow_instances WHERE id = @p1`, staleID)
+	})
+
+	holders, err := store.ListStaleHolders(ctx, r30Days, 10)
+	if err != nil {
+		t.Fatalf("ListStaleHolders at R=30 days: %v\n\n"+
+			"cleat#2197: DATEADD(MILLISECOND, …) overflows past ~24.86 days "+
+			"(2^31 ms) unless split into whole seconds plus a millisecond "+
+			"remainder -- see splitMillisecondOffset.", err)
+	}
+	found := false
+	for _, h := range holders {
+		if h.Key.WorkflowID == staleID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("ListStaleHolders at R=30 days did not report %s; got %+v", staleID, holders)
+	}
+
+	n, err := store.ReapStaleInstancesExcept(ctx, r30Days, 10, nil)
+	if err != nil {
+		t.Fatalf("ReapStaleInstancesExcept at R=30 days: %v\n\n"+
+			"cleat#2197: DATEADD(MILLISECOND, …) overflows past ~24.86 days "+
+			"(2^31 ms) unless split into whole seconds plus a millisecond "+
+			"remainder -- see splitMillisecondOffset.", err)
+	}
+	if n != 1 {
+		t.Fatalf("ReapStaleInstancesExcept at R=30 days reclaimed %d rows, want 1 (the seeded 31-day-old row)", n)
+	}
+
+	var status string
+	if err := admin.QueryRowContext(ctx,
+		`SELECT status FROM workflow_instances WHERE id = @p1`, staleID).Scan(&status); err != nil {
+		t.Fatalf("reading status of %s: %v", staleID, err)
+	}
+	if status != "ready" {
+		t.Errorf("seeded row's status = %q after reap, want ready", status)
+	}
+}

@@ -1237,6 +1237,98 @@ func (s *MySQLStore) ReapStaleInstances(ctx context.Context, timeout time.Durati
 	return int(n), tx.Commit()
 }
 
+// ListStaleHolders satisfies StaleHolderReaper. Same tenant scoping and
+// same status='running'/heartbeat_at predicate as ReapStaleInstances --
+// see that method's doc and StaleHolderReaper's doc for why the two are
+// allowed to race.
+func (s *MySQLStore) ListStaleHolders(ctx context.Context, timeout time.Duration, limit int) ([]StaleHold, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("list stale holders: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, generation, assigned_to FROM workflow_instances
+		WHERE status = 'running'
+		  AND heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND
+		  AND tenant_id = ?
+		ORDER BY heartbeat_at
+		LIMIT ?
+	`, timeout.Microseconds(), s.tenantID, reapLimitArg(limit))
+	if err != nil {
+		return nil, fmt.Errorf("list stale holders: %w", err)
+	}
+	defer rows.Close()
+
+	var holders []StaleHold
+	for rows.Next() {
+		var h StaleHold
+		var assignedTo sql.NullString
+		if err := rows.Scan(&h.Key.WorkflowID, &h.Key.Generation, &assignedTo); err != nil {
+			return nil, fmt.Errorf("list stale holders: scan: %w", err)
+		}
+		h.AssignedTo = assignedTo.String
+		holders = append(holders, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list stale holders: rows: %w", err)
+	}
+	return holders, tx.Commit()
+}
+
+// ReapStaleInstancesExcept satisfies StaleHolderReaper. Identical to
+// ReapStaleInstances, with one added predicate excluding any (id,
+// generation) row-value pair named in exclude. MySQL's row subquery IN
+// (documented since 4.1, unlike its table-value-constructor VALUES syntax
+// which is 8.0.19+ only) is used rather than an array bind, because the
+// driver has no array parameter type to bind a Go slice to -- the
+// placeholder list is built to match len(exclude), and an empty exclude
+// renders no clause at all rather than an empty, always-false IN().
+func (s *MySQLStore) ReapStaleInstancesExcept(ctx context.Context, timeout time.Duration, limit int, exclude []GenerationKey) (int, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances except: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	excludeClause := ""
+	args := []any{timeout.Microseconds(), s.tenantID}
+	if len(exclude) > 0 {
+		pairs := make([]string, len(exclude))
+		for i, k := range exclude {
+			pairs[i] = "(?, ?)"
+			args = append(args, k.WorkflowID, k.Generation)
+		}
+		excludeClause = "AND (id, generation) NOT IN (" + strings.Join(pairs, ", ") + ")\n\t\t          "
+	}
+	args = append(args, reapLimitArg(limit))
+
+	result, err := tx.ExecContext(ctx, `
+		UPDATE workflow_instances
+		SET status = CASE WHEN pending_terminal_status IS NOT NULL
+		                  THEN 'terminating' ELSE 'ready' END,
+		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
+		    reclaim_count = reclaim_count + 1
+		WHERE id IN (
+		    SELECT id FROM (
+		        SELECT id FROM workflow_instances
+		        WHERE status = 'running'
+		          AND heartbeat_at < NOW(6) - INTERVAL ? MICROSECOND
+		          AND tenant_id = ?
+		          `+excludeClause+`
+		        ORDER BY heartbeat_at
+		        LIMIT ?
+		    ) t
+		)
+	`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("reap stale instances except: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return int(n), tx.Commit()
+}
+
 // PingDB satisfies DBPinger: a bounded round trip with no workflow-specific
 // query, so a worker with nothing in flight still has a way to prove it can
 // reach the database. See DBPinger's doc comment for why this exists.
