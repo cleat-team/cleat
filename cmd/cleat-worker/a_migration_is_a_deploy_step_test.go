@@ -343,7 +343,10 @@ func TestMigrationIsADeployStepOnEveryDialect(t *testing.T) {
 			if err := db.QueryRow(newestPluginMigrationVersionSQL(c.name), probePlugin).Scan(&newestVersion); err != nil {
 				t.Fatalf("read %s's newest plugin migration version: %v", probePlugin, err)
 			}
-			beforeCount := count(fmt.Sprintf("SELECT COUNT(*) FROM plugin_migrations WHERE plugin_name = '%s'", probePlugin))
+			var beforeCount int
+			if err := db.QueryRow(countPluginMigrationsSQL(c.name), probePlugin).Scan(&beforeCount); err != nil {
+				t.Fatalf("count %s's plugin_migrations rows before delete: %v", probePlugin, err)
+			}
 			if _, err := db.Exec(deletePluginMigrationSQL(c.name), probePlugin, newestVersion); err != nil {
 				t.Fatal(err)
 			}
@@ -364,9 +367,13 @@ func TestMigrationIsADeployStepOnEveryDialect(t *testing.T) {
 					"tracking row was deleted -- this is cleat#2223's exact hazard, not a repair failure:\n%s",
 					probePlugin, newestVersion, out)
 			}
-			if got := count(fmt.Sprintf("SELECT COUNT(*) FROM plugin_migrations WHERE plugin_name = '%s'", probePlugin)); got != beforeCount {
+			var afterCount int
+			if err := db.QueryRow(countPluginMigrationsSQL(c.name), probePlugin).Scan(&afterCount); err != nil {
+				t.Fatalf("count %s's plugin_migrations rows after reapply: %v", probePlugin, err)
+			}
+			if afterCount != beforeCount {
 				t.Errorf("%s's plugin_migrations row count after delete-and-reapply: got %d, want %d (the pre-delete count)",
-					probePlugin, got, beforeCount)
+					probePlugin, afterCount, beforeCount)
 			}
 
 			// 7. --migrate-only needs NO key ring and never reaches the secrets check.
@@ -462,9 +469,8 @@ func insertSecretSQL(dialect string) string {
 }
 
 // newestPluginMigrationVersionSQL returns pluginName's highest applied
-// version -- never the globally-first (plugin_name, version) row the way
-// firstPluginMigrationSQL (below, now unused by the test but kept as the
-// query a future reader would otherwise reach for) does. The first plugin
+// version -- never the globally-first (plugin_name, version) row, which is
+// what this test used before this PR. The first plugin
 // migration, alphabetically, is overwhelmingly likely to be a `CREATE TABLE
 // IF NOT EXISTS` -- idempotent by construction -- while schema evolution
 // concentrates in LATER migrations, which is exactly where cleat#2223's bare
