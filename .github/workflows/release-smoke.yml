@@ -153,12 +153,26 @@ jobs:
             exit 1
           fi
 
+      # cleat#2878/#2889: same mechanism as publish-pypi.yml's python-sdk-dist
+      # (see the comment there for the full reasoning) -- this carried no
+      # unique component at all, but a run_id+run_attempt suffix was the wrong
+      # fix: run_attempt broke "re-run failed jobs" for a single failing
+      # `python-versions` matrix leg below, which computes its OWN
+      # github.run_attempt and would ask for an artifact `wheel` (not re-run)
+      # never produced under that name (G1). `overwrite: true` fixes the
+      # actual hazard -- a re-run of THIS job -- without that assumption.
+      # run_id is kept (not dropped) despite adding no collision-avoidance of
+      # its own (G2: artifacts are already run-scoped) -- it's constant across
+      # every attempt and job of one run, so it causes no G1-style mismatch,
+      # and keeps this satisfying the owner's "appropriate suffixes" ruling on
+      # #2878 (G3) rather than reverting to the original bare name.
       - name: Upload the built wheel for the version matrix
         uses: actions/upload-artifact@v7
         with:
-          name: python-sdk-wheel
+          name: python-sdk-wheel-${{ github.run_id }}
           path: python-sdk/dist/*.whl
           if-no-files-found: error
+          overwrite: true
 
   python-versions:
     name: Built wheel on Python ${{ matrix.python-version }}
@@ -178,7 +192,7 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: python-sdk-wheel
+          name: python-sdk-wheel-${{ github.run_id }}
           path: dist/
 
       - name: Install the built wheel and read what it reports
