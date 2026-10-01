@@ -153,10 +153,14 @@ jobs:
             exit 1
           fi
 
+      # cleat#2878: same fix as publish-pypi.yml's python-sdk-dist, same reason --
+      # this carried no unique component at all (same-run-unsafe, not just
+      # re-run-unsafe). run_id for uniqueness across concurrent invocations,
+      # run_attempt for uniqueness across re-runs of one invocation.
       - name: Upload the built wheel for the version matrix
         uses: actions/upload-artifact@v7
         with:
-          name: python-sdk-wheel
+          name: python-sdk-wheel-${{ github.run_id }}-${{ github.run_attempt }}
           path: python-sdk/dist/*.whl
           if-no-files-found: error
 
@@ -178,7 +182,7 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: python-sdk-wheel
+          name: python-sdk-wheel-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist/
 
       - name: Install the built wheel and read what it reports

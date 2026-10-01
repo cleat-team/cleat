@@ -102,10 +102,17 @@ jobs:
       # The hand-off. `if-no-files-found: error` because an empty dist/ would
       # otherwise be indistinguishable from a build that produced nothing --
       # and the publish job would then upload an empty directory.
+      # cleat#2878: unlike the artifacts #2690/#2861/#2875 fixed, this carried NO
+      # unique component at all (not even github.sha or github.run_id), so it was
+      # same-run-unsafe, not just re-run-unsafe -- two concurrent invocations of
+      # this workflow (two different run_ids) could already collide, independent
+      # of any re-run. run_id makes it unique per invocation; run_attempt (the
+      # #2861/#2875 fix) makes it unique per re-run of the same invocation. Needs
+      # both, since it started with neither.
       - name: Upload the built distributions
         uses: actions/upload-artifact@v7
         with:
-          name: python-sdk-dist
+          name: python-sdk-dist-${{ github.run_id }}-${{ github.run_attempt }}
           path: python-sdk/dist/
           if-no-files-found: error
 
@@ -122,7 +129,7 @@ jobs:
       - name: Download the built distributions
         uses: actions/download-artifact@v8
         with:
-          name: python-sdk-dist
+          name: python-sdk-dist-${{ github.run_id }}-${{ github.run_attempt }}
           path: python-sdk/dist/
 
       - name: Publish to PyPI
