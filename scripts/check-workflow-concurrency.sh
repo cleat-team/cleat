@@ -59,7 +59,7 @@
 # other.
 #
 # Re-derive what this reads:
-#   python3 -c "import yaml,glob; [print(p) for p in sorted(glob.glob('.github/workflows/*.yml')) if 'push' in (yaml.safe_load(open(p)).get('on', yaml.safe_load(open(p)).get(True)) or {})]"
+#   PYTHONPATH=scripts/lib python3 -c "from workflow_on import load_triggers; import glob; [print(p) for p in sorted(glob.glob('.github/workflows/*.yml')) if 'push' in load_triggers(p)]"
 #   grep -l 'merge_group:' .github/workflows/*.yml
 #
 # NOT `grep -l 'push:' .github/workflows/*.yml` -- that is the cleat#2079
@@ -88,15 +88,22 @@ cd "$(dirname "$0")/.."
 # workflows are all the mapping form today (`git grep -c '^on: push$'
 # .github/workflows/` and `'^on: \[' .github/workflows/` -> 0, 0), but all
 # three are handled rather than assuming the one shape observed.
+#
+# The parse itself lives in scripts/lib/workflow_on.py, shared with
+# check-workflow-pr-triggers.sh (cleat#2737) -- this guard used to carry its
+# own copy of the same normalization, free to drift from the other one if
+# corrected in just one place.
 PUSH_FILES_OUT="$(python3 - "$(pwd)" <<'PY'
 import sys, os, glob
 
+sys.path.insert(0, os.path.join(sys.argv[1], "scripts", "lib"))
 try:
-    import yaml
-except ImportError:
-    print("ERROR: PyYAML is not installed, so this guard cannot parse any "
-          "workflow. Install it (pip install pyyaml) rather than skipping: a "
-          "check that cannot run must not report success.", file=sys.stderr)
+    from workflow_on import load_triggers
+except ImportError as e:
+    print(f"ERROR: could not import scripts/lib/workflow_on.py ({e}) -- "
+          "either PyYAML is not installed (pip install pyyaml) or the lib "
+          "path is wrong. A check that cannot run must not report success.",
+          file=sys.stderr)
     sys.exit(2)
 
 root = sys.argv[1]
@@ -108,19 +115,7 @@ if not paths:
     sys.exit(2)
 
 for p in paths:
-    with open(p) as fh:
-        doc = yaml.safe_load(fh) or {}
-    # `on` is parsed by YAML 1.1 as the boolean True. Accept both spellings
-    # rather than assuming which one this parser produced.
-    on = doc.get("on", doc.get(True))
-    if isinstance(on, dict):
-        triggers = on
-    elif isinstance(on, list):
-        triggers = {str(t): None for t in on}
-    elif on is not None:
-        triggers = {str(on): None}
-    else:
-        triggers = {}
+    triggers = load_triggers(p)
     if "push" in triggers:
         print(p)
 PY
