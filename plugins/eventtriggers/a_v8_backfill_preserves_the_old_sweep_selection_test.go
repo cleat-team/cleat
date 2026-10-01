@@ -13,6 +13,7 @@ import (
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
+	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // seededPreV8Row names one of the four rows seedPreV8Rows writes, so the
@@ -82,13 +83,31 @@ func TestV8BackfillPreservesTheOldSweepSelection(t *testing.T) {
 				// commits the real plugin's v1-v8 migrations first, so this
 				// test's "migrate to v7" step is a silent no-op against an
 				// already-v8 table, and the backfill this test exists to
-				// exercise never runs). MySQL and Postgres are not known to
-				// have this failure (postgres additionally supports a
-				// --schema/WithSchema isolation option this package's tests do
-				// not use), so only MSSQL gets a database of its own here.
+				// exercise never runs). MSSQL gets a fresh database of its own,
+				// since postgres additionally supports a --schema/WithSchema
+				// isolation option this package's tests do not use and MySQL
+				// has no equivalent at all -- see the defensive cleanup below
+				// for how those two dialects are protected instead.
 				sqlDB = freshMSSQLDatabase(t)
 			} else {
 				sqlDB = testutil.TestDB(t, tc.td)
+				// This said "MySQL and Postgres are not known to have this
+				// failure" until cleat#2880 (slice 1) added
+				// TestV1V3IndexesAreIdempotentOnMySQL to this same package,
+				// which also applies the real plugin's full migrations
+				// against this same shared MySQL TestDB -- and, running
+				// first alphabetically ("a_v1..." before "a_v8..."),
+				// reliably poisons this test's "migrate to v7" precondition
+				// to a silent no-op, exactly cleat#2871's MSSQL mechanism.
+				// Same remedy as this package's own
+				// TestALegacyAwaiterReplayLeavesAtMostTwoRowsAndUnregisterRemovesBoth:
+				// clean up BEFORE running anything, not only after, so this
+				// test does not depend on what ran before it in the same
+				// binary.
+				plugintest.CleanupPluginSchema(t, sqlDB, tc.td, "event-triggers",
+					[]string{"event_awaiters", "event_subscriptions", "ingested_events"})
+				defer plugintest.CleanupPluginSchema(t, sqlDB, tc.td, "event-triggers",
+					[]string{"event_awaiters", "event_subscriptions", "ingested_events"})
 			}
 			dialect := plugin.Dialect(string(tc.td))
 			real := &Plugin{dialect: dialect}
