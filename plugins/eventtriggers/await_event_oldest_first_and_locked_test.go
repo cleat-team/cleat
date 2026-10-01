@@ -256,6 +256,25 @@ func TestAwaitEventConcurrentClaimsSkipTheLockedRow(t *testing.T) {
 				if err != nil {
 					t.Fatalf("begin claim tx: %v", err)
 				}
+				// MSSQL goes through the real production path
+				// (claimOldestUnprocessedEventMSSQL, claim.go) rather than a
+				// single locked SELECT -- cleat#2821/#2866 replaced the
+				// latter because it does not lock only the row it returns on
+				// this dialect. Calling the unexported function directly
+				// (same package) keeps this test exercising the actual
+				// mechanism instead of a hand-rolled duplicate of it.
+				if dialect == plugin.DialectMSSQL {
+					claimed, err := claimOldestUnprocessedEventMSSQL(seedCtx, tx, tenantID.String(), "order.created", "", "", "")
+					if err != nil {
+						_ = tx.Rollback()
+						t.Fatalf("claim query: %v", err)
+					}
+					if claimed == nil {
+						_ = tx.Rollback()
+						t.Fatalf("claim query: no claimable row found")
+					}
+					return tx, claimed.EventID
+				}
 				var (
 					eventID    uuid.UUID
 					eventType  string
@@ -288,8 +307,7 @@ func TestAwaitEventConcurrentClaimsSkipTheLockedRow(t *testing.T) {
 			}
 			if gotB == gotA {
 				t.Errorf("second claim got the SAME row (%s) the first claim is still holding -- "+
-					"on %s, the claim query is not locking the row it selects "+
-					"(FOR UPDATE SKIP LOCKED / WITH (UPDLOCK, READPAST, ROWLOCK) is missing or ineffective)",
+					"on %s, the claim mechanism is not locking the row it selects",
 					gotB, tc.name)
 			}
 			if gotB != secondID {

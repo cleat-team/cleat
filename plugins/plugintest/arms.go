@@ -45,6 +45,32 @@ type Arm struct {
 	// UPDATE and DELETE, where Query would succeed but return no rows and
 	// prove less.
 	Exec bool
+
+	// Dialects, when non-empty, restricts this arm to the named dialects'
+	// backends -- every other configured backend skips it. Empty (the
+	// default, and every caller before cleat#2821/#2866) means every
+	// configured backend, matching this function's original behavior
+	// exactly. Added because a.Q.For(dialect) FALLS BACK to Default when a
+	// Query has no arm for that dialect, and Default is not always a valid
+	// statement on every dialect -- a Query that is deliberately arm-specific
+	// (e.g. one with Postgres/MySQL arms and no MSSQL equivalent at all,
+	// because the mechanism itself differs on that dialect) needs to say so
+	// rather than silently running Default's SQL against a server it was
+	// never written for.
+	Dialects []plugin.Dialect
+}
+
+// runsOn reports whether this arm should be exercised against dialect.
+func (a Arm) runsOn(dialect plugin.Dialect) bool {
+	if len(a.Dialects) == 0 {
+		return true
+	}
+	for _, d := range a.Dialects {
+		if d == dialect {
+			return true
+		}
+	}
+	return false
 }
 
 // RunEveryArm runs each Arm against every configured backend, using the arm for
@@ -78,6 +104,9 @@ func RunEveryArm(t *testing.T, p plugin.Plugin, arms []Arm) {
 			}
 
 			for _, a := range arms {
+				if !a.runsOn(dialect) {
+					continue
+				}
 				t.Run(a.Name, func(t *testing.T) {
 					// RebindArgs, not Rebind: this hands the rebound statement
 					// straight to a raw *sql.DB, bypassing plugin.PluginDB
