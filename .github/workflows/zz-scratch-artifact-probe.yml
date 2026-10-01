@@ -1,0 +1,28 @@
+name: zz-scratch-artifact-probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hello > report.json
+
+      - name: Upload (first, old-style name)
+        uses: actions/upload-artifact@v7
+        with:
+          name: zz-probe-report-${{ github.run_id }}
+          path: report.json
+
+      - name: Upload (second, SAME old-style name -- should 409)
+        uses: actions/upload-artifact@v7
+        with:
+          name: zz-probe-report-${{ github.run_id }}
+          path: report.json
+
+      - name: Upload (third, new-style name with run_attempt -- should succeed even though run_id is identical to the two above)
+        uses: actions/upload-artifact@v7
+        with:
+          name: zz-probe-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: report.json
