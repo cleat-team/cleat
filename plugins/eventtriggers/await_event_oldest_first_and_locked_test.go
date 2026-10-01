@@ -317,6 +317,110 @@ func TestAwaitEventConcurrentClaimsSkipTheLockedRow(t *testing.T) {
 	}
 }
 
+// TestAwaitEventOldestClaimDoesNotStarveASecondOldestEventAtScale is
+// cleat#2821/#2866, and it is the test TestAwaitEventConcurrentClaimsSkipTheLockedRow
+// above cannot be -- cleat-review's finding on #2869: that test passes on
+// unfixed develop MSSQL, on a fresh database, because two rows belonging to
+// one tenant are too few to trigger the bug. #2821's own isolation needed a
+// realistic cross-tenant backlog OLDER than the claiming tenant's own rows
+// before the starvation reproduced; a near-empty table happens to dodge it,
+// which is exactly how Version 8's migration comment (migrations.go) first
+// mis-stated the existing index as a sufficient fix.
+//
+// Drives the real tryClaim (claim.go), not a hand-rolled query, holding A's
+// claim open through its beforeCommit hook -- a genuine second goroutine and
+// a genuine second transaction on a genuine second connection, not the
+// sequential same-goroutine simulation the test above uses. Runs on all
+// three dialects: Postgres and MySQL are not expected to ever have exhibited
+// this (FOR UPDATE SKIP LOCKED locks only the row it returns on both), and
+// this test is what would catch a regression there too.
+func TestAwaitEventOldestClaimDoesNotStarveASecondOldestEventAtScale(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		td   testutil.Dialect
+	}{
+		{"postgres", testutil.DialectPostgres},
+		{"mysql", testutil.DialectMySQL},
+		{"mssql", testutil.DialectMSSQL},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := testutil.TestDB(t, tc.td)
+			dialect := plugin.Dialect(string(tc.td))
+			quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+			p := &Plugin{dialect: dialect, logger: quiet}
+			if err := plugin.RunMigrations(context.Background(), db, dialect, nil,
+				[]*plugin.LoadedPlugin{{Plugin: p, Healthy: true}}); err != nil {
+				t.Fatalf("apply migrations: %v", err)
+			}
+			p.db = &engine.SQLDBAdapter{DB: db, Dialect: dialect}
+
+			tenantID := uuid.New()
+			oldestID := uuid.New()
+			secondID := uuid.New()
+			now := time.Now()
+			seedCtx := plugin.ForTenant(context.Background(), tenantID)
+
+			// The cross-tenant backlog cleat#2821's own isolation needed --
+			// without it, this case does not distinguish fixed from unfixed
+			// code on any dialect.
+			const backlog = 200
+			for i := 0; i < backlog; i++ {
+				otherTenant := uuid.New()
+				otherCtx := plugin.ForTenant(context.Background(), otherTenant)
+				mustInsertIngestedEventAt(t, otherCtx, p, uuid.New(), otherTenant, "order.created",
+					now.Add(-5*time.Hour-time.Duration(i)*time.Second))
+			}
+
+			mustInsertIngestedEventAt(t, seedCtx, p, oldestID, tenantID, "order.created", now.Add(-2*time.Hour))
+			mustInsertIngestedEventAt(t, seedCtx, p, secondID, tenantID, "order.created", now.Add(-time.Hour))
+
+			holding := make(chan struct{})
+			release := make(chan struct{})
+			type claimResult struct {
+				claimed *ClaimedEvent
+				err     error
+			}
+			doneA := make(chan claimResult, 1)
+
+			go func() {
+				claimed, err := tryClaim(seedCtx, p.db, dialect, tenantID.String(), "order.created", "", "", "",
+					func(c *ClaimedEvent) error {
+						close(holding)
+						<-release
+						return nil
+					})
+				doneA <- claimResult{claimed, err}
+			}()
+
+			<-holding // A has claimed and is holding its transaction open, uncommitted
+
+			claimedB, errB := tryClaim(seedCtx, p.db, dialect, tenantID.String(), "order.created", "", "", "", nil)
+
+			close(release)
+			resA := <-doneA
+
+			if resA.err != nil {
+				t.Fatalf("claim A: %v", resA.err)
+			}
+			if resA.claimed == nil || resA.claimed.EventID != oldestID {
+				t.Fatalf("claim A got %+v, want the oldest event %s", resA.claimed, oldestID)
+			}
+			if errB != nil {
+				t.Fatalf("claim B: %v", errB)
+			}
+			if claimedB == nil {
+				t.Fatalf("claim B found NOTHING while A's claim on the oldest row was still open -- "+
+					"on %s, a concurrent claim is starved by a lock on a DIFFERENT row it never "+
+					"needed (cleat#2821)", tc.name)
+			}
+			if claimedB.EventID != secondID {
+				t.Errorf("claim B got %s, want the second-oldest event %s", claimedB.EventID, secondID)
+			}
+		})
+	}
+}
+
 // TestAwaitEventConcurrentClaimsOfDifferentEventTypesDoNotInterfereOnMySQL
 // settles a question cleat-review raised rather than assumed: InnoDB's
 // locking reads take next-key locks on the index records they SCAN under

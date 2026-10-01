@@ -918,6 +918,38 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// that same checkout (reproduces the failure) -- see cleat#2821,
 			// filed rather than chased further here because the mechanism
 			// inside SQL Server's optimizer is not this issue's question.
+			//
+			// SUPERSEDED 2026-09-30 (cleat#2821/#2866, PR #2869), in three
+			// parts -- a bare "superseded" invites re-deriving the wrong
+			// conclusion from each one separately, so all three are stated
+			// together:
+			//
+			// 1. The REASON above no longer holds. The paragraph describes
+			// the MSSQL arm of queryOldestUnprocessedEventForClaim, which no
+			// longer exists. That bug was real but narrower than first
+			// measured -- at realistic multi-tenant scale the starvation
+			// reproduced WITH this index present too (it only avoided the
+			// symptom in a near-empty table) -- and the fix was a
+			// query-shape change, not a bigger reliance on this index: the
+			// MSSQL claim path now reads an unlocked candidate list
+			// (READPAST, no UPDLOCK) and claims by primary key, which cannot
+			// exhibit either the optimizer-dependent behaviour this
+			// paragraph describes or the starvation it was worked around
+			// for.
+			//
+			// 2. The index is now DROPPABLE, but deliberately DEFERRED, per
+			// the owner (2026-09-30, relayed on PR #2869): "if we're not
+			// using that any more we can drop it, but wait to do that when
+			// we can combine it with some other migration" -- i.e. not as a
+			// standalone drop-only migration. cleat#2870 is the follow-up
+			// that keeps this from being forgotten the next time someone is
+			// in this file for an unrelated reason.
+			//
+			// 3. Until then it is still CORRECT to keep -- queryUnprocessedEvents
+			// and other `processed`/`received_at` readers still benefit
+			// from it even though the claim path no longer needs it by name
+			// or by the mechanism this paragraph describes.
+			//
 			// dispatch_processed gets its OWN new index,
 			// idx_ingested_events_dispatch, same per-dialect partial/plain
 			// shape Version 1 established for the one this keeps.
