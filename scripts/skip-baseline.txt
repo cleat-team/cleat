@@ -284,6 +284,7 @@ plugins/eventstore	TestMySQLV4BackfillSurvivesARerun	1
 plugins/eventstore	TestV1IndexIsIdempotentOnMySQL	1
 plugins/eventtriggers	TestV1V3IndexesAreIdempotentOnMySQL	1
 plugins/eventtriggers	freshMSSQLDatabase	1
+plugins/eventtriggers	freshMySQLDatabase	1
 plugins/jobqueue	TestV2MigrationIsIdempotentOnMySQL	1
 plugins/jobqueue	TestV5PayloadNotNullMigrationBackfillsExistingNulls	1
 plugins/kafkaconnect	TestV2MigrationIsIdempotentOnMySQL	1
