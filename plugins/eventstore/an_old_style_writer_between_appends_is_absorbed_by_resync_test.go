@@ -86,7 +86,17 @@ func TestOldStyleWriterBetweenAppendsIsAbsorbedByResync(t *testing.T) {
 				t.Helper()
 				// The exact statement an old binary used before cleat#2268 --
 				// straight into event_stream, event_stream_head untouched.
-				if _, err := p.db.Exec(tenantCtx, plugin.Rebind(insertEvent.For(dialect), dialect),
+				// No manual plugin.Rebind here: p.db (plugin.PluginDB, via
+				// engine.SQLDBAdapter) already calls plugin.RebindArgs
+				// internally on every Exec/Query/QueryRow -- the same route
+				// a_concurrent_appends_get_contiguous_sequences_test.go
+				// uses. "No raw plugin.Rebind guard" forbids the direct
+				// call in a _test.go file for exactly this reason: a raw
+				// handle needs it (plugins/plugintest.ExecRebound), a
+				// PluginDB/PluginTx handle already does it and a second
+				// call here would be redundant indirection, not a
+				// correctness difference (Rebind is idempotent).
+				if _, err := p.db.Exec(tenantCtx, insertEvent.For(dialect),
 					tenantID, streamID, sequence, `{"old":true}`); err != nil {
 					t.Fatalf("old-style write at sequence %d: %v", sequence, err)
 				}

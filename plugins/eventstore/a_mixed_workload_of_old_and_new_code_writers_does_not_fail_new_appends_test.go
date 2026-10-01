@@ -82,19 +82,27 @@ func TestMixedWorkloadOfOldAndNewCodeWritersDoesNotFailNewAppends(t *testing.T) 
 			// develop's pre-cleat#2268 appendOnce: read MAX(sequence), insert
 			// at MAX+1, no event_stream_head involvement -- the exact shape
 			// an old binary still runs during a rolling upgrade.
+			// No manual plugin.Rebind on any of tx's calls below: tx
+			// (plugin.PluginTx, via engine.SQLDBAdapter) already calls
+			// plugin.RebindArgs internally on every Exec/QueryRow -- same
+			// route a_concurrent_appends_get_contiguous_sequences_test.go
+			// uses on p.db. "No raw plugin.Rebind guard" forbids the
+			// direct call in a _test.go file for exactly this reason: a
+			// raw handle needs it (plugins/plugintest.ExecRebound), a
+			// PluginDB/PluginTx handle already does it.
 			oldOnce := func() error {
 				tx, err := p.db.Begin(tenantCtx)
 				if err != nil {
 					return err
 				}
 				var m int64
-				if err := tx.QueryRow(tenantCtx, plugin.Rebind(
+				if err := tx.QueryRow(tenantCtx,
 					`SELECT COALESCE(MAX(sequence), 0) FROM event_stream WHERE tenant_id = $1 AND stream_id = $2`,
-					dialect), tenantID, streamID).Scan(&m); err != nil {
+					tenantID, streamID).Scan(&m); err != nil {
 					tx.Rollback()
 					return err
 				}
-				if _, err := tx.Exec(tenantCtx, plugin.Rebind(insertEvent.For(dialect), dialect),
+				if _, err := tx.Exec(tenantCtx, insertEvent.For(dialect),
 					tenantID, streamID, m+1, `{"old":1}`); err != nil {
 					tx.Rollback()
 					return err
@@ -148,9 +156,9 @@ func TestMixedWorkloadOfOldAndNewCodeWritersDoesNotFailNewAppends(t *testing.T) 
 			}
 
 			var rowCount, maxSeq int64
-			if err := p.db.QueryRow(tenantCtx, plugin.Rebind(
+			if err := p.db.QueryRow(tenantCtx,
 				`SELECT COUNT(*), COALESCE(MAX(sequence), 0) FROM event_stream WHERE tenant_id = $1 AND stream_id = $2`,
-				dialect), tenantID, streamID).Scan(&rowCount, &maxSeq); err != nil {
+				tenantID, streamID).Scan(&rowCount, &maxSeq); err != nil {
 				t.Fatalf("read back on %s: %v", be.Name, err)
 			}
 
