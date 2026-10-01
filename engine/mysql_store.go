@@ -824,11 +824,16 @@ func (s *MySQLStore) ReleaseWorkflowConcurrencyKeys(ctx context.Context, workflo
 }
 
 // ResolveTenantFromAPIKey looks up a tenant UUID by API key hash.
+//
+// Mirrors auth.TenantStore.ResolveTenantFromAPIKey's expiry clause
+// (auth/tenant_store.go) -- cleat#2352 enforced expiry there but never
+// touched this store, so an expired key authenticated against any host that
+// wires an engine store directly instead of auth.TenantStore. cleat#2370.
 func (s *MySQLStore) ResolveTenantFromAPIKey(ctx context.Context, keyHash []byte) (uuid.UUID, error) {
 	var tenantID uuid.UUID
 	err := s.db.QueryRowContext(ctx,
 		`SELECT tenant_id FROM tenant_api_keys
-		 WHERE key_hash = ? AND disabled_at IS NULL`, keyHash).Scan(&tenantID)
+		 WHERE key_hash = ? AND disabled_at IS NULL AND (expires_at IS NULL OR expires_at > NOW(6))`, keyHash).Scan(&tenantID)
 	if err != nil {
 		return uuid.Nil, err
 	}

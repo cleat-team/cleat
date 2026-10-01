@@ -109,8 +109,10 @@ var mysqlTenantPredicateAllowlist = map[string]stmtExemption{
 		SQL:    "select id, def_name, def_version, status, input, coalesce(assigned_to, ''), ne",
 		Reason: mysqlScopedByCandidateQuery,
 	},
-	"mysql_store.go:ResolveTenantFromAPIKey#fec661be20f9": {
-		SQL:    "select tenant_id from tenant_api_keys where key_hash = ? and disabled_at is nul",
+	// Digest moved when cleat#2370 added the expiry clause -- same statement,
+	// same reason (mysqlMustNotScope), text only.
+	"mysql_store.go:ResolveTenantFromAPIKey#443dc681a32d": {
+		SQL:    "select tenant_id from tenant_api_keys where key_hash = ? and disabled_at is nu",
 		Reason: mysqlMustNotScope,
 	},
 }
