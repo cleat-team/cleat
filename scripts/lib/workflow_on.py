@@ -1,18 +1,20 @@
 """Parse a GitHub Actions workflow file's `on:` trigger block.
 
-cleat#2737: check-workflow-pr-triggers.sh and check-workflow-concurrency.sh
-each need to know what events trigger a workflow, and `on:` is nested
-mapping with two spellings for every list -- plus a YAML 1.1 quirk where a
-bare `on:` key parses as the boolean True rather than the string "on". Both
-guards had independently copied the same half-dozen lines to handle this;
-if the parsing was ever corrected, the fix could land in one and not the
-other with nothing to notice. This module is the one place it is read.
+cleat#2737/cleat-review on #2893: check-workflow-pr-triggers.sh,
+check-workflow-concurrency.sh and check-workflow-guards.py's
+workflow_triggers() each independently parsed a workflow's `on:` block --
+`on:` is nested mapping with two spellings for every list, plus a YAML 1.1
+quirk where a bare `on:` key parses as the boolean True rather than the
+string "on". Three copies of the same half-dozen lines, free to drift if
+the parsing was ever corrected in one and not the others. This module is
+the one place it is read.
 """
 import yaml
 
 
-def load_triggers(path):
-    """Return the `on:` block as {trigger_name: trigger_config_or_None}.
+def triggers_from_doc(doc):
+    """Return an already-parsed workflow document's `on:` block as
+    {trigger_name: trigger_config_or_None}.
 
     Normalizes all three shapes a workflow's `on:` can take:
       - a mapping     (`on: {push: {...}, pull_request: {...}}`)
@@ -22,8 +24,6 @@ def load_triggers(path):
     result is always a dict, so callers never need their own isinstance
     check before calling .get() on it.
     """
-    with open(path) as fh:
-        doc = yaml.safe_load(fh) or {}
     on = doc.get("on", doc.get(True))
     if isinstance(on, dict):
         return on
@@ -32,3 +32,14 @@ def load_triggers(path):
     if on is not None:
         return {str(on): None}
     return {}
+
+
+def load_triggers(path):
+    """Return a workflow FILE's `on:` block as {trigger_name: trigger_config_or_None}.
+
+    See triggers_from_doc() for the normalization. This is the entry point
+    for callers that have a path rather than an already-parsed document.
+    """
+    with open(path) as fh:
+        doc = yaml.safe_load(fh) or {}
+    return triggers_from_doc(doc)
