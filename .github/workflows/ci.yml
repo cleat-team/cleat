@@ -146,10 +146,13 @@ jobs:
     runs-on: ubuntu-latest
     # cleat#2895: every guard step's own failure is captured into this file
     # instead of failing the step (see "Aggregate guard results" at the end
-    # of this job) -- a job-run-scoped path under the runner's own temp dir,
-    # never reused across runs.
+    # of this job). A literal path, not an expression -- actionlint rejects
+    # the `runner` context in job-level env: ("context 'runner' is not
+    # allowed here"), it's only available at the step level. /tmp is fresh
+    # per job on a GitHub-hosted runner regardless, so a literal path carries
+    # no cross-run collision risk here.
     env:
-      LINT_FAILURES_FILE: ${{ runner.temp }}/lint-failures.txt
+      LINT_FAILURES_FILE: /tmp/lint-failures.txt
     steps:
       - uses: actions/checkout@v7
 
