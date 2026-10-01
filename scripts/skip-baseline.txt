@@ -67,6 +67,7 @@ cmd/cleat-worker	TestABootedWorkerSuspendsAnExpiredTrial	2
 cmd/cleat-worker	TestABootedWorkerSweepsAnAbandonedLogin	2
 cmd/cleat-worker	TestAFencedExecutionMakesNoFurtherCallsAndASecondWorkerFinishesTheWorkflow	1
 cmd/cleat-worker	TestARealPostgresDockerPauseDoesNotLetAnIdleWorkerReclaimALiveRun	4
+cmd/cleat-worker	TestAShardedWorkerBootsWithAPerShardHeartbeatPool	1
 cmd/cleat-worker	TestAmbiguityLookupEndToEnd_ResolvesACrashedCall	1
 cmd/cleat-worker	TestAnonymousOAuthLoginIsNotAborted401UnderRequireAuth	2
 cmd/cleat-worker	TestAuthMiddlewareRejectsInvalidKey	2
