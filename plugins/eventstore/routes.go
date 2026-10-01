@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,6 +14,23 @@ import (
 	"github.com/cleat-team/cleat/auth"
 	"github.com/cleat-team/cleat/plugin"
 )
+
+// isPKConflict returns true if the error is a primary key or unique
+// constraint violation. appendOnce's resync path uses this to recognise the
+// one case it needs to react to: a sequence number event_stream_head itself
+// never produced, claimed by a writer that bypasses it entirely.
+func isPKConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "duplicate") ||
+		strings.Contains(s, "unique") ||
+		strings.Contains(s, "PRIMARY KEY") ||
+		strings.Contains(s, "2627") || // MSSQL
+		strings.Contains(s, "1062") || // MySQL
+		strings.Contains(s, "23505") // PostgreSQL
+}
 
 func (p *Plugin) RegisterRoutes(mux plugin.Router) error {
 	if mux == nil {
@@ -77,10 +95,10 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 	// split this into two statements because a same-table subquery INSERT
 	// fails outright on MySQL; cleat#2268 replaced the read-MAX-then-retry
 	// shape that fix originally used with real serialization -- see
-	// upsertStreamHead's comment in queries.go for the mechanism. One attempt
-	// is sufficient: the row lock upsertStreamHead takes makes two
-	// transactions computing the same sequence for the same stream
-	// structurally impossible, so there is no conflict left to retry on.
+	// upsertStreamHead's comment in queries.go for the mechanism. Two
+	// new-code transactions can never compute the same sequence for the same
+	// stream; appendOnce's one retry exists for a DIFFERENT writer entirely
+	// -- see its resync comment.
 	var sequence int64
 	err := p.appendOnce(r.Context(), tid, streamID, body, &sequence)
 	if err != nil {
@@ -104,10 +122,41 @@ func (p *Plugin) handleAppend(w http.ResponseWriter, r *http.Request) {
 // appendOnce claims the next sequence for streamID from event_stream_head
 // and inserts the event, in a single transaction, writing the sequence it
 // used into *sequence. See upsertStreamHead's comment in queries.go for why
-// this needs no retry: the row lock it takes on event_stream_head is held
-// for this transaction's lifetime, so a second concurrent appender to the
-// SAME stream blocks on that statement rather than computing the same
-// sequence.
+// two NEW-code transactions can never collide here: the row lock it takes on
+// event_stream_head is held for this transaction's lifetime, so a second
+// concurrent appender to the SAME stream blocks on that statement rather
+// than computing the same sequence.
+//
+// RESYNC: A DIFFERENT writer can still collide with it. verifySchema
+// (cmd/cleat-worker/schema_verify.go) warns rather than refuses when the
+// schema is AHEAD of the binary, on purpose -- a rolling upgrade's deploy
+// step migrates the schema before every old-binary worker has stopped, and
+// refusing there would wedge the rollout on the workers it is replacing.
+// Until the last old-binary worker exits, it keeps computing
+// MAX(sequence)+1 and inserting directly into event_stream; it never writes
+// event_stream_head, so the head this transaction claims can be stale-LOW
+// and insertEvent's INSERT collides on the primary key an old worker
+// already committed (cleat-review + coordinator, cleat#2268 round 1).
+//
+// That collision is this function's ONLY retry trigger, detected by
+// isPKConflict, and the retry is bounded at one attempt: on collision, read
+// event_stream's actual MAX(sequence) for this stream (ground truth,
+// independent of what the head row believed), raise the head row to
+// MAX+1 via resyncStreamHead, and insert again at that value. The row lock
+// this transaction already holds on event_stream_head (taken above, by
+// upsertStreamHead) makes the raise race-free -- no other transaction can be
+// mid-upsert against the same stream while this one holds it. Once every
+// old-binary worker has exited, a stream stays resynced permanently: nothing
+// commits to event_stream a new-code transaction didn't account for in
+// event_stream_head's lock.
+//
+// This does NOT fold the floor into upsertStreamHead's own statement --
+// round 1 did that, computing MAX(sequence) on every call, and deadlocked
+// MySQL under concurrency (see upsertStreamHead's comment). Reading
+// event_stream only on an actual collision keeps the fast, lock-minimal
+// path lock-identical to pre-round-2 for the overwhelmingly common case
+// (no old-binary writer racing), and only pays the extra read when there is
+// something to reconcile.
 //
 // MySQL has no RETURNING, so its branch does the upsert with Exec and reads
 // the result back with a plain SELECT in the same transaction -- see
@@ -140,10 +189,59 @@ func (p *Plugin) appendOnce(ctx context.Context, tenantID uuid.UUID, streamID st
 	}
 	*sequence = head
 
+	// Postgres aborts the whole transaction on a statement error -- every
+	// later statement on the same tx fails closed with 25P02 ("current
+	// transaction is aborted") until a ROLLBACK, which would also discard
+	// the event_stream_head row lock this function depends on. A SAVEPOINT
+	// scopes that abort to just the optimistic insert, so the resync path
+	// below can keep using this transaction. MySQL and MSSQL don't poison
+	// the transaction on a duplicate-key error, so this is a no-op there --
+	// confirmed by this function's falsification: without it, only the
+	// postgres leg of TestOldStyleWriterBetweenAppendsIsAbsorbedByResync
+	// failed (25P02 on the resync read), mysql and mssql already passed.
+	usingSavepoint := p.dialect == plugin.DialectPostgres
+	if usingSavepoint {
+		if _, err := tx.Exec(ctx, "SAVEPOINT eventstore_append_attempt"); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("savepoint: %w", err)
+		}
+	}
+
 	if _, err := tx.Exec(ctx, plugin.Rebind(insertEvent.For(p.dialect), p.dialect),
 		tenantID, streamID, *sequence, string(body)); err != nil {
-		tx.Rollback()
-		return err
+		if !isPKConflict(err) {
+			tx.Rollback()
+			return err
+		}
+
+		if usingSavepoint {
+			if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT eventstore_append_attempt"); err != nil {
+				tx.Rollback()
+				return fmt.Errorf("resync: rollback to savepoint: %w", err)
+			}
+		}
+
+		// Resync: see this function's doc comment. A writer outside
+		// event_stream_head's lock already used *sequence.
+		var floor int64
+		if err := tx.QueryRow(ctx, plugin.Rebind(selectMaxSequence.For(p.dialect), p.dialect),
+			tenantID, streamID).Scan(&floor); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("resync: read max sequence: %w", err)
+		}
+		floor++
+		if _, err := tx.Exec(ctx, plugin.Rebind(resyncStreamHead.For(p.dialect), p.dialect),
+			tenantID, streamID, floor); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("resync: raise stream head: %w", err)
+		}
+		*sequence = floor
+
+		if _, err := tx.Exec(ctx, plugin.Rebind(insertEvent.For(p.dialect), p.dialect),
+			tenantID, streamID, *sequence, string(body)); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("resync: insert after resync: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {

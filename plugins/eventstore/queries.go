@@ -47,6 +47,21 @@ var insertEvent = plugin.Query{
 // upsertKV, which establishes the same per-dialect shape for a single-row
 // counter.
 //
+// This statement does NOT look at event_stream to floor its answer -- a
+// round 1 version did, reading MAX(sequence) on every call to self-heal
+// against a writer that bypasses this table entirely (see appendOnce's
+// resync comment for why that writer can exist). That subquery shares
+// event_stream's primary-key range with insertEvent's INSERT later in the
+// SAME transaction, and on MySQL/InnoDB that pairing deadlocks under
+// concurrency: two appenders to a brand-new stream each take a shared gap
+// lock on the stream's (empty) key range via the subquery, then each wants
+// an insert-intention lock on that same gap for insertEvent -- a classic
+// gap-lock cycle. Measured running TestConcurrentAppendsGetContiguousSequences
+// against MySQL: 19 of 20 concurrent appenders got Error 1213 "Deadlock
+// found when trying to get lock" with that subquery in place, where the
+// pre-round-2 and this version both get 20/20. The self-heal is now
+// appendOnce's job, triggered only by an actual collision -- see there.
+//
 // MSSQL's MERGE needs WITH (HOLDLOCK): without it, two concurrent MERGE
 // statements against the SAME not-yet-existing key can both evaluate "WHEN
 // NOT MATCHED" true under READ COMMITTED (neither sees the other's
@@ -75,6 +90,30 @@ WHEN MATCHED THEN UPDATE SET head_sequence = target.head_sequence + 1
 WHEN NOT MATCHED THEN INSERT (tenant_id, stream_id, head_sequence)
 VALUES (source.tenant_id, source.stream_id, 1)
 OUTPUT INSERTED.head_sequence;`,
+}
+
+// resyncStreamHead sets event_stream_head's row to an explicit floor value,
+// used only after appendOnce sees a primary-key collision on insertEvent --
+// the signal that a writer which doesn't know about event_stream_head
+// (cleat-review, cleat#2268 round 1: an old-binary worker still running
+// during a rolling upgrade) already claimed the sequence this transaction
+// proposed. The WHERE clause only ever raises the value: this runs inside
+// the same transaction and under the same row lock upsertStreamHead already
+// took, so there is nothing to race here, and the guard is defence in depth
+// against ever moving the counter backwards.
+var resyncStreamHead = plugin.Query{
+	Default: `UPDATE event_stream_head
+SET head_sequence = $3
+WHERE tenant_id = $1 AND stream_id = $2 AND head_sequence < $3`,
+}
+
+// selectMaxSequence reads the highest sequence a stream actually has in
+// event_stream, independent of what event_stream_head believes -- the
+// ground truth appendOnce's resync path floors the head to after a
+// collision. A plain SELECT, portable as-is; see resyncStreamHead for how
+// its result is used.
+var selectMaxSequence = plugin.Query{
+	Default: `SELECT COALESCE(MAX(sequence), 0) FROM event_stream WHERE tenant_id = $1 AND stream_id = $2`,
 }
 
 // selectStreamHead reads back the value upsertStreamHead just wrote, for

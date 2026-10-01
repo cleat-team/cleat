@@ -164,10 +164,16 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// backfill has nothing to seed for it; its head row is created on
 			// first append by the same UPSERT every append already uses.
 			//
-			// Runs inside the same transaction as the CREATE TABLE (RunMigrations
-			// wraps each version in one tx), so a failure here rolls back the
-			// table too and the version is retried cleanly, never partially
-			// applied.
+			// RunMigrations wraps each version in one tx, and on Postgres
+			// and SQL Server DDL is transactional, so a failure here rolls
+			// back the CREATE TABLE too and the version is retried cleanly,
+			// never partially applied. MySQL's CREATE TABLE commits
+			// implicitly -- a crash between it and the backfill below
+			// leaves the table present and empty, and a retry re-runs the
+			// backfill against it. That is why the MySQL backfill below is
+			// ON DUPLICATE KEY UPDATE rather than a bare INSERT: a bare one
+			// would die on the PRIMARY key the first retry, leaving the
+			// worker unable to boot (cleat-review, cleat#2268 round 1).
 			Version: 4,
 			Up: `
 				CREATE TABLE IF NOT EXISTS event_stream_head (
@@ -193,7 +199,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				INSERT INTO event_stream_head (tenant_id, stream_id, head_sequence)
 				SELECT tenant_id, stream_id, MAX(sequence)
 				FROM event_stream
-				GROUP BY tenant_id, stream_id;
+				GROUP BY tenant_id, stream_id
+				ON DUPLICATE KEY UPDATE
+					head_sequence = GREATEST(head_sequence, VALUES(head_sequence));
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'event_stream_head')
