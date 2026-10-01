@@ -95,6 +95,7 @@ CREATE TABLE workflow_defs (
     disabled_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     exposure TEXT NOT NULL DEFAULT 'auth' CHECK (exposure IN ('public', 'auth', 'internal')),
+    input_validation_disabled BOOLEAN NOT NULL DEFAULT false,
     PRIMARY KEY (tenant_id, name, version)
 );
 ```
@@ -117,6 +118,7 @@ that prose yet — not that the column does not exist.
 | `entry_point_schemas` | JSONB | Per-entry-point JSON Schema (params, result), keyed by export name; NULL for a pre-cleat#1980 build or a language with no emitter yet |
 | `created_at` | TIMESTAMPTZ | Deployment timestamp |
 | `exposure` | TEXT | One of `public`, `auth` (default), `internal` -- cleat#1986. Enforced not just documented: a `CHECK` constraint refuses any other value. Nothing writes this yet except the migration's own backfill default; the declaration path (source annotation, deploy-manifest tighten) is a separate, later piece of cleat#1986. |
+| `input_validation_disabled` | BOOLEAN | cleat#1981: opts this version out of start-input validation against `entry_point_schemas`, even when a schema exists. Set only at deploy time (`cleatctl deploy workflow --no-validate-input`); there is no per-request override. |
 
 **Indexes**:
 

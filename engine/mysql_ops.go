@@ -876,8 +876,8 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	// No ownership check: under (tenant_id, name, version) another tenant's
 	// definition of the same name is a different row. IMPROVEMENT-PLAN 3.77.
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, disabled_at, gc_eligible, tenant_id, max_history_length, entry_point_schemas)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO workflow_defs (name, version, wasm_bytes, abi_version, min_version, plugin_deps, disabled_at, gc_eligible, tenant_id, max_history_length, entry_point_schemas, input_validation_disabled)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON DUPLICATE KEY UPDATE
 			wasm_bytes = VALUES(wasm_bytes),
 			abi_version = VALUES(abi_version),
@@ -886,8 +886,9 @@ func (s *MySQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 			disabled_at = VALUES(disabled_at),
 			gc_eligible = VALUES(gc_eligible),
 			max_history_length = VALUES(max_history_length),
-			entry_point_schemas = VALUES(entry_point_schemas)
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.DisabledAt, def.GCEligible, s.tenantID, def.MaxHistoryLength, entryPointSchemasJSON)
+			entry_point_schemas = VALUES(entry_point_schemas),
+			input_validation_disabled = VALUES(input_validation_disabled)
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, pluginDepsJSON, def.DisabledAt, def.GCEligible, s.tenantID, def.MaxHistoryLength, entryPointSchemasJSON, def.InputValidationDisabled)
 	if err != nil {
 		return fmt.Errorf("DeployWorkflowDef: %w", err)
 	}
@@ -901,13 +902,13 @@ func (s *MySQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 	var err error
 	if name == "" {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled
 			FROM workflow_defs WHERE tenant_id = ?
 			ORDER BY name, version DESC
 		`, s.tenantID)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled
 			FROM workflow_defs WHERE name = ? AND tenant_id = ?
 			ORDER BY version DESC
 		`, name, s.tenantID)
@@ -924,7 +925,7 @@ func (s *MySQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 		var entryPointSchemasRaw []byte
 		var createdAt time.Time
 		if err := rows.Scan(&def.Name, &def.Version, &def.ABIVersion, &def.MinVersion,
-			&pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw); err != nil {
+			&pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw, &def.InputValidationDisabled); err != nil {
 			return nil, fmt.Errorf("ListWorkflowDefs: scan: %w", err)
 		}
 		def.CreatedAt = createdAt
@@ -948,10 +949,10 @@ func (s *MySQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 	var wasmBytes []byte
 	var createdAt time.Time
 	err := s.db.QueryRowContext(ctx, `
-		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas
+		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas, input_validation_disabled
 		FROM workflow_defs WHERE name = ? AND version = ? AND tenant_id = ?
 	`, name, version, s.tenantID).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
-		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw)
+		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw, &def.InputValidationDisabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

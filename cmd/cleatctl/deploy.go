@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"time"
@@ -49,13 +50,24 @@ Subcommands:
 // incrementing the latest deployed version. If an exact version already
 // exists with the same SHA256 hash, the deployment is skipped.
 func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB, args []string) {
-	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: cleatctl deploy workflow <name> <wasm-file>")
+	fs := flag.NewFlagSet("deploy workflow", flag.ContinueOnError)
+	// cleat#1981: the one escape hatch validate-input-at-start asks for, for
+	// a schema that turns out to be wrong in production. Per-definition only
+	// -- there is deliberately no per-request equivalent, so a caller cannot
+	// switch validation off for its own requests.
+	noValidateInput := fs.Bool("no-validate-input", false, "disable cleat#1981 start-input validation for this version, even if it carries a schema")
+	positional, err := parseFlagsAnywhere(fs, args)
+	if err != nil {
 		osExit(1)
 	}
 
-	name := args[0]
-	wasmPath := args[1]
+	if len(positional) < 2 {
+		fmt.Fprintln(os.Stderr, "usage: cleatctl deploy workflow <name> <wasm-file> [--no-validate-input]")
+		osExit(1)
+	}
+
+	name := positional[0]
+	wasmPath := positional[1]
 
 	// Read WASM binary.
 	wasmBytes, err := os.ReadFile(wasmPath)
@@ -133,14 +145,15 @@ func deployWorkflow(ctx context.Context, store engine.WorkflowStore, db *sql.DB,
 	}
 
 	def := &engine.WorkflowDef{
-		Name:              name,
-		Version:           nextVersion,
-		WASMBytes:         wasmBytes,
-		ABIVersion:        abiVersion,
-		MinVersion:        minVersion,
-		PluginDeps:        pluginDeps,
-		EntryPointSchemas: entryPointSchemas,
-		CreatedAt:         time.Now(),
+		Name:                    name,
+		Version:                 nextVersion,
+		WASMBytes:               wasmBytes,
+		ABIVersion:              abiVersion,
+		MinVersion:              minVersion,
+		PluginDeps:              pluginDeps,
+		EntryPointSchemas:       entryPointSchemas,
+		InputValidationDisabled: *noValidateInput,
+		CreatedAt:               time.Now(),
 	}
 
 	if err := store.DeployWorkflowDef(ctx, def); err != nil {
