@@ -1,6 +1,7 @@
 package jsonschema
 
 import (
+	"encoding/json"
 	"go/ast"
 	"go/importer"
 	"go/parser"
@@ -117,6 +118,59 @@ func TestOrdinarySliceIsArrayOrNull(t *testing.T) {
 // array keeps whatever it already held) rather than a reset -- confirmed
 // empirically, not assumed. Marking it nullable would claim a value the
 // type can never actually take.
+// TestScalarStructAndFixedArrayRejectNullByOwnerDecision pins the owner's
+// ruling on cleat#2927: a plain int/string/bool/struct/fixed-array parameter
+// stays STRICT -- null is a 400 -- even though encoding/json's own binding
+// treats null as a no-op for these kinds (the field keeps its zero value, no
+// error). That is a DELIBERATE divergence from "mirror the binding" for
+// exactly these kinds, decided because null-for-a-scalar is the same
+// "null looks like zero" ambiguity cleat#1065 already named for an ABSENT
+// parameter -- closing it for a PRESENT-but-null one is judged worth being
+// stricter than the binding, unlike pointer/slice/map (jsonschema.go's
+// nullable()), where null is a real, distinct value the binding can
+// genuinely produce.
+//
+// Without this test, nothing pins the ruling: TestValidateNullableTypeAcceptsNull
+// only asserts the nullable SIDE, so a later "make every kind nullable"
+// change (the option the owner declined) would fail no test here. Falsified
+// by wrapping each kind's schema in nullable() before writing this test --
+// every case went from a violation to nil, confirming the test would have
+// caught the declined change.
+func TestScalarStructAndFixedArrayRejectNullByOwnerDecision(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		src  string
+	}{
+		{"int", "func F(x int) {}"},
+		{"string", "func F(x string) {}"},
+		{"bool", "func F(x bool) {}"},
+		{"struct", "type S struct{ A int `json:\"a\"` }\nfunc F(x S) {}"},
+		{"fixed array", "func F(x [3]int) {}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := schemaOf(t, tc.src, "F")
+
+			// The schema itself must not be nullable -- "type" is a bare
+			// string, not the [T,"null"] list nullable() emits.
+			if _, isList := schema["type"].([]any); isList {
+				t.Fatalf("schema %#v declares a nullable type for %s -- the owner ruling keeps this kind strict", schema, tc.name)
+			}
+
+			schemaJSON, err := json.Marshal(schema)
+			if err != nil {
+				t.Fatalf("marshal schema: %v", err)
+			}
+			v, err := Validate(schemaJSON, json.RawMessage(`null`))
+			if err != nil {
+				t.Fatalf("Validate returned an error, not a violation: %v", err)
+			}
+			if v == nil {
+				t.Errorf("null was accepted against a %s schema %s -- the owner ruling says this must be a 400", tc.name, schemaJSON)
+			}
+		})
+	}
+}
+
 func TestFixedArrayIsNotNullable(t *testing.T) {
 	got := schemaOf(t, "func F(x [3]int) {}", "F")
 	want := Schema{"type": "array", "items": Schema{"type": "integer"}}

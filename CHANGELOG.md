@@ -106,6 +106,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   breaking change for those callers, surfaced immediately rather than as a silent hang — update
   every caller of that source to pass `Keys` in the same change that adds the field.
 
+- **`POST /api/workflows/{name}/start` now validates `input` against the definition's stored
+  entry-point schema by default, and a mismatch is a 400 where it previously started the run.**
+  cleat#1981, part 2 of cleat#1980's typed invocation: cleat#1980 computed a JSON Schema per entry
+  point at `cleat build` time and stored it on `workflow_defs.entry_point_schemas`, but nothing
+  validated against it until now. The 400 body names the failing field and the schema rule
+  (`required`/`type`), and no run is created for a rejected request.
+  - **A `null` value for a scalar, struct or fixed-array parameter is now a 400, where the Go
+    binding previously bound the zero value.** Owner decision on cleat#2927: `encoding/json`
+    treats `null` as a no-op for these kinds (the field keeps its zero value, no error), which is
+    the same "null looks like zero" ambiguity cleat#1065 named for absent parameters — the
+    validator now closes it for present-but-null ones too, deliberately **stricter than the
+    binding** rather than matching it. A live caller that was sending `null` to mean "use the zero
+    value" for one of these kinds now gets a 400 instead of silent success.
+  - `null` remains accepted for a pointer, slice or map parameter (`*T`, `[]T`, `map[K]V`) —
+    `encoding/json` resets these to `nil` on `null`, which is a real, distinct value these types
+    can hold, not merely the absence of one.
+  - **Definitions with no stored schema are unaffected and start untyped, as before** — this
+    includes every Python, Rust, Java and AssemblyScript build today (no non-Go entry-point schema
+    emitter exists yet) and any Go build from before cleat#1980.
+  - **Escape hatch:** `cleatctl deploy workflow <name> <wasm-file> --no-validate-input` disables
+    validation for that one deployed version, even if it carries a schema. Per-definition only, set
+    at deploy time — there is no per-request override, so a caller cannot switch validation off for
+    its own requests.
+
 ### Added
 
 - **`cleat/pluginclients` is new public SDK surface**: generated, typed callers for the bundled
