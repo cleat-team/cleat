@@ -60,6 +60,16 @@ func isPKConflict(err error) bool {
 //     of 10 concurrent new-code appends across three rounds, with zero
 //     retries before this fix (new-code-only load never triggers it, so
 //     cleat#2268 round 2's own concurrency test did not catch this).
+//
+// Substring matching on the error TEXT, same style as isPKConflict above,
+// rather than errors.As against each driver's own error type (cleat-review,
+// cleat#2268 round 2). The known cost: an unrelated error whose message
+// happens to contain "1205" or "1213" -- a stream id embedded in a
+// constraint-violation message, say -- gets retried for a few seconds
+// before surfacing as the same final error, not an incorrect one. A
+// driver-typed check would close that gap at the cost of importing
+// lib/pq, go-sql-driver/mysql and the mssql driver's error types directly
+// into this plugin for three string comparisons' worth of precision.
 func isRetryableAppendError(err error) bool {
 	if isPKConflict(err) {
 		return true
