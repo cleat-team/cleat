@@ -328,11 +328,6 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	// tenant's deploy of the same name into an overwrite of the first's WASM
 	// bytes. SQL Server's security policies filter on the tenant column, so an
 	// unset column is also an unfenced row. IMPROVEMENT-PLAN 3.12.
-	//
-	// UPDLOCK, HOLDLOCK is the SQL Server spelling of "lock the row, and the
-	// range it would occupy if it does not exist yet", which is what stops a
-	// concurrent deploy of the same new name from landing between the read and
-	// the MERGE.
 	tx, err := s.beginTxWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("deploy workflow def: begin: %w", err)
@@ -341,8 +336,19 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 
 	// No ownership check: under (tenant_id, name, version) another tenant's
 	// definition of the same name is a different row. IMPROVEMENT-PLAN 3.77.
+	//
+	// WITH (HOLDLOCK) on the target (cleat#2904/#2915): there is no separate
+	// locked read before this MERGE -- a prior version of this comment
+	// described one, but the function has never had one in the diff that
+	// introduced it (IMPROVEMENT-PLAN 3.12) -- so the lock has to be on the
+	// MERGE itself. Without it, two concurrent deploys of the same brand-new
+	// (tenant_id, name, version) can both evaluate WHEN NOT MATCHED true under
+	// READ COMMITTED, and one raises a duplicate-key error rather than taking
+	// the UPDATE branch. Reachable in the ordinary case: any two processes
+	// deploying a workflow definition under the same new name/version at once
+	// (a CI/CD pipeline retried or doubled, two operators promoting at once).
 	_, err = tx.ExecContext(ctx, `
-		MERGE workflow_defs AS target
+		MERGE workflow_defs WITH (HOLDLOCK) AS target
 		USING (VALUES (@p1, @p2)) AS source(name, version)
 		ON target.tenant_id = @p8 AND target.name = source.name AND target.version = source.version
 		WHEN MATCHED THEN UPDATE SET
@@ -583,6 +589,12 @@ func (s *MSSQLStore) getActiveInstanceCountsByVersionOnce(ctx context.Context) (
 // multi-tenant deployment must use -- that the filter is off and the match
 // succeeds. See the note above ClaimDueSchedule in mssql_schedules.go.
 //
+// WITH (HOLDLOCK) on the target (cleat#2904/#2915): two concurrent tag
+// assignments for the same new (tenant_id, workflow_name, tag) -- a deploy
+// pipeline retried, or two operators promoting at once -- can otherwise both
+// evaluate WHEN NOT MATCHED true and one takes a duplicate-key error instead
+// of the UPDATE branch.
+//
 // Shaped like DeployWorkflowDef's MERGE on purpose: the tenant is compared to
 // a BOUND PARAMETER (`target.tenant_id = @p4`) rather than to a projected
 // source column. The first version of this wrote
@@ -595,7 +607,7 @@ func (s *MSSQLStore) getActiveInstanceCountsByVersionOnce(ctx context.Context) (
 // guard that exists because two real bugs got past review.
 func (s *MSSQLStore) SetWorkflowTag(ctx context.Context, workflowName string, version int, tag string) error {
 	_, err := s.db.ExecContext(ctx, `
-		MERGE workflow_tags AS target
+		MERGE workflow_tags WITH (HOLDLOCK) AS target
 		USING (VALUES (@p1, @p2)) AS source(workflow_name, tag)
 		ON target.tenant_id = @p4
 		   AND target.workflow_name = source.workflow_name

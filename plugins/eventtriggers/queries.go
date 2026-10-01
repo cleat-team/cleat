@@ -22,6 +22,15 @@ import (
 // same row rather than accumulate a duplicate, while still letting two
 // awaits for the same (workflow, type) coexist when their key slots differ.
 // cleat#2625.
+//
+// The MSSQL variant's WITH (HOLDLOCK) (cleat#2904/#2915) is not about that
+// replay case -- the MATCHED branch already handles a sequential re-execution
+// fine. It is about two genuinely CONCURRENT executions of this host call for
+// the same workflow racing the same registration_key: a zombie worker (reaped
+// and reclaimed mid-step, see engine/flush.go's "a zombie worker's flush,
+// racing a reclaim") still in flight when the worker that reclaimed the
+// workflow runs the same step again. Without the hint, both can evaluate
+// WHEN NOT MATCHED true and one takes a duplicate-key error.
 var upsertAwaiter = plugin.Query{
 	Default: `INSERT INTO event_awaiters (id, workflow_id, tenant_id, event_type, key1, key2, key3, registration_key, created_at)
 VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, NOW())
@@ -31,7 +40,7 @@ ON CONFLICT (registration_key) DO UPDATE
 VALUES (UUID(), $1, $2, $3, $4, $5, $6, $7, NOW())
 ON DUPLICATE KEY UPDATE
 	created_at = NOW()`,
-	MSSQL: `MERGE event_awaiters AS target
+	MSSQL: `MERGE event_awaiters WITH (HOLDLOCK) AS target
 USING (VALUES ($1, $2, $3, $4, $5, $6, $7, SYSUTCDATETIME())) AS source (workflow_id, tenant_id, event_type, key1, key2, key3, registration_key, created_at)
 ON target.registration_key = source.registration_key
 WHEN MATCHED THEN UPDATE SET created_at = SYSUTCDATETIME()
@@ -39,13 +48,21 @@ WHEN NOT MATCHED THEN INSERT (id, workflow_id, tenant_id, event_type, key1, key2
 VALUES (NEWID(), source.workflow_id, source.tenant_id, source.event_type, source.key1, source.key2, source.key3, source.registration_key, source.created_at);`,
 }
 
+// insertEventIdempotent is PublishEvent's "duplicate processing of the same
+// event ID" guard -- callers are expected to retry a publish with the same
+// id (at-least-once producers), which makes two concurrent publishes of the
+// identical new id the ordinary case, not an edge case. WITH (HOLDLOCK) on
+// the MSSQL variant (cleat#2904/#2915) closes the window where both would
+// otherwise evaluate WHEN NOT MATCHED true and one takes a duplicate-key
+// error instead of the no-op ON CONFLICT DO NOTHING / INSERT IGNORE the
+// other two dialects already give it for free.
 var insertEventIdempotent = plugin.Query{
 	Default: `INSERT INTO ingested_events (id, tenant_id, event_type, event_data, key1, key2, key3, received_at, processed)
 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), false)
 ON CONFLICT (id) DO NOTHING`,
 	MySQL: `INSERT IGNORE INTO ingested_events (id, tenant_id, event_type, event_data, key1, key2, key3, received_at, processed)
 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), false)`,
-	MSSQL: `MERGE ingested_events AS target
+	MSSQL: `MERGE ingested_events WITH (HOLDLOCK) AS target
 USING (VALUES ($1, $2, $3, $4, $5, $6, $7, SYSUTCDATETIME(), 0)) AS source (id, tenant_id, event_type, event_data, key1, key2, key3, received_at, processed)
 ON target.id = source.id
 WHEN NOT MATCHED THEN INSERT (id, tenant_id, event_type, event_data, key1, key2, key3, received_at, processed)
