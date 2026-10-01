@@ -200,6 +200,16 @@ INNER JOIN (
 // A LEFT JOIN, not an inner one: a blob_content row with zero remaining
 // blob_index rows (every reference removed, by any mechanism) must reconcile
 // to 0, not be skipped because the join found nothing.
+//
+// KNOWN COST, ACCEPTED TRADEOFF: this scans every blob_index and blob_content
+// row on every sweep tick (cleanupInterval, default hourly), whether or not
+// anything needs reconciling -- the WHERE clause only limits which rows get
+// WRITTEN, and counting correctly requires reading every row regardless of an
+// index on sha256 (an index would make the scan cheaper per row, not change
+// its O(table size) nature, since the query needs a count across every row
+// rather than a lookup of a few keys). This is inherent to catching a
+// blob_index row removed with no event to key off, which is the point of
+// this phase. See cleat#2873 if this ever needs to be cheaper.
 var reconcileRefCounts = plugin.Query{
 	Default: `UPDATE blob_content bc
 SET ref_count = sub.cnt
