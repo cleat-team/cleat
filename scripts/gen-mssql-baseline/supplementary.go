@@ -11,14 +11,16 @@ import (
 // supplementary compares the classes catalogdiff cannot see.
 //
 // It is not a nicety. migration/catalogdiff/mssql.go compares a column's type
-// NAME but not its length, precision, scale or collation; it compares an
-// index's key columns but not its INCLUDE list, its filter or its sort order;
-// and it does not read sys.security_policies at all -- a gap its own header
-// explains with a claim that core migrations create no SECURITY POLICY objects,
-// which is false (there are 14). So a diff of A against B can be empty while
-// the baseline has lost all 56 predicates, every column width, and every
-// filtered index. That is the class of regression a baseline generator is most
-// likely to introduce and least likely to notice.
+// NAME but not its length, precision, scale or collation, and it compares an
+// index's key columns but not its INCLUDE list, its filter or its sort order.
+// So a diff of A against B can be empty while the baseline has lost every
+// column width and every filtered index. That is the class of regression a
+// baseline generator is most likely to introduce and least likely to notice.
+//
+// Security policies/predicates, schemas, database role existence and trigger
+// identity used to be gaps of exactly this shape -- they are compared in
+// catalogdiff itself now (cleat#2432) and are deliberately not repeated here;
+// see the comment on supplementaryChecks below.
 //
 // Each check returns a SET of rendered rows, sorted. Comparing sets rather than
 // counts is deliberate: a count answers "did this go up" and never "is anything
@@ -64,50 +66,35 @@ var supplementaryChecks = []check{
 		 WHERE i.name IS NOT NULL
 		   AND t.name NOT IN ('schema_migrations','plugin_migrations')`,
 	},
+	// Security policies/predicates, schemas, database roles (existence) and
+	// trigger NAME/BODY/schema moved to migration/catalogdiff/mssql.go itself
+	// -- cleat#2432. That file's own header comment used to name this script
+	// as the place those classes were compared and call moving them into
+	// catalogdiff "the better repair"; they are compared there now, with
+	// known-positive tests proving each one (see
+	// the_mssql_snapshot_sees_rls_schemas_roles_triggers_test.go), so keeping
+	// the identical queries here too would be the same fact checked in two
+	// places with no guard keeping them in sync -- exactly the duplication
+	// this repo's CLAUDE.md warns a census-style check rots into. Trigger
+	// SETTINGS (is_disabled, QUOTED_IDENTIFIER/ANSI_NULLS) remain below, in
+	// "module settings", because catalogdiff does not compare those.
+	//
+	// is_disabled lives on sys.triggers, not on sys.objects or sys.sql_modules
+	// -- a LEFT JOIN, since every other object type in this check's IN-list
+	// (P/FN/IF/TF/V) has no row there at all. A disabled trigger is otherwise
+	// invisible to every check in this file and to catalogdiff: it is still
+	// present, still named correctly, and its body hash is unchanged, so
+	// nothing else here would catch `DISABLE TRIGGER` ever being run against
+	// a baseline (cleat#2432 review, G1).
 	{
-		"security policies (existence, schema, enabled)",
-		// CASE WHEN, not `create_date IS NOT NULL`: T-SQL cannot alias a bare
-		// predicate, and the direct form is "Incorrect syntax near the keyword
-		// 'IS'".
-		`SELECT sp.schema_id, sp.name, sp.is_enabled,
-		        CASE WHEN sp.create_date IS NOT NULL THEN 1 ELSE 0 END
-		 FROM sys.security_policies sp`,
-	},
-	{
-		"security predicates (kind, operation, definition, target)",
-		`SELECT sp.name, p.predicate_type_desc, COALESCE(p.operation_desc, ''),
-		        p.predicate_definition,
-		        OBJECT_SCHEMA_NAME(p.target_object_id), OBJECT_NAME(p.target_object_id)
-		 FROM sys.security_policies sp
-		 JOIN sys.security_predicates p ON p.object_id = sp.object_id`,
-	},
-	{
-		"schemas",
-		`SELECT name, schema_id FROM sys.schemas WHERE schema_id < 16384`,
-	},
-	{
-		"database roles (EXISTENCE only -- membership is a deployment fact)",
-		`SELECT name, type_desc, is_fixed_role FROM sys.database_principals WHERE type = 'R'`,
-	},
-	{
-		"triggers and their settings",
-		// is_disabled is a column of sys.triggers, not of sys.objects --
-		// reading it off sys.objects is "Invalid column name 'is_disabled'".
-		`SELECT s.name, tr.name, tr.is_disabled, tr.is_instead_of_trigger,
-		        m.uses_quoted_identifier, m.uses_ansi_nulls
-		 FROM sys.triggers tr
-		 JOIN sys.objects o ON o.object_id = tr.object_id
-		 JOIN sys.schemas s ON s.schema_id = o.schema_id
-		 JOIN sys.sql_modules m ON m.object_id = o.object_id
-		 WHERE tr.is_ms_shipped = 0`,
-	},
-	{
-		"module settings (QUOTED_IDENTIFIER / ANSI_NULLS) and body hash",
+		"module settings (QUOTED_IDENTIFIER / ANSI_NULLS), trigger is_disabled, and body hash",
 		`SELECT s.name, o.name, o.type_desc, m.uses_quoted_identifier, m.uses_ansi_nulls,
+		        COALESCE(CONVERT(varchar(1), tr.is_disabled), ''),
 		        CONVERT(varchar(64), HASHBYTES('SHA2_256', CONVERT(varbinary(max), m.definition)), 2)
 		 FROM sys.objects o
 		 JOIN sys.schemas s ON s.schema_id = o.schema_id
 		 JOIN sys.sql_modules m ON m.object_id = o.object_id
+		 LEFT JOIN sys.triggers tr ON tr.object_id = o.object_id
 		 WHERE o.is_ms_shipped = 0 AND o.type IN ('P','FN','IF','TF','TR','V')`,
 	},
 	{

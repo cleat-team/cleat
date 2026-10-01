@@ -15,10 +15,17 @@
 #   * catalogdiff is CLEAN and the supplementary check catches it -- proves the
 #     supplementary check is not decoration. Every one of these classes is
 #     invisible to migration/catalogdiff/mssql.go by construction: it compares a
-#     column's type NAME but not its width, an index's key columns but not its
-#     filter, and it does not read sys.security_policies or
-#     sys.database_principals at all. A baseline could lose all 56 predicates and
-#     every column width and still report an empty diff.
+#     column's type NAME but not its width, and an index's key columns but not
+#     its filter. A baseline could lose every column width and every filtered
+#     index and still report an empty diff.
+#
+#     Security policies/predicates, schemas and database roles used to be in
+#     this second group too, until cleat#2432 moved them into catalogdiff
+#     itself -- they are now "catalogdiff catches it" cases (below), and the
+#     supplementary checks no longer read sys.security_policies or
+#     sys.database_principals at all. Trigger is_disabled stayed supplementary
+#     (catalogdiff compares a trigger's name/body/schema, not its settings),
+#     so disabling a trigger is still a "supplementary check catches it" case.
 #
 # Usage: scripts/mssql-baseline-known-positive.sh <A-dsn> <B-dsn>
 #
@@ -122,6 +129,15 @@ expect "drop a check constraint" CATCH pass \
     "ALTER TABLE dbo.workflow_update_requests DROP CONSTRAINT ck_workflow_update_requests_payload"
 expect "alter a routine body" CATCH CATCH \
     "EXEC('ALTER PROCEDURE dbo.finalize_workflow_status AS BEGIN SELECT 1 END')"
+# These two moved here from "classes ONLY the supplementary checks can see"
+# when cleat#2432 moved security policies and database roles into catalogdiff
+# itself. supp=pass is correct, not a gap, for the same reason "drop a check
+# constraint" above is: the supplementary checks deliberately don't duplicate
+# a class catalogdiff now reads.
+expect "DROP A SECURITY POLICY" CATCH pass \
+    "DROP SECURITY POLICY dbo.TenantFilter_Defs"
+expect "drop the cleat_admin role" CATCH pass \
+    "DROP ROLE cleat_admin"
 
 echo
 echo "== classes ONLY the supplementary checks can see =="
@@ -141,12 +157,14 @@ expect "change a filtered index's filter" clean CATCH \
     "SET QUOTED_IDENTIFIER ON;
      DROP INDEX idx_event_history_pending ON dbo.event_history;
      CREATE NONCLUSTERED INDEX idx_event_history_pending ON dbo.event_history ([workflow_id],[step]) WHERE [intent_at] IS NOT NULL AND [checksum] IS NOT NULL"
-expect "DROP A SECURITY POLICY" clean CATCH \
-    "DROP SECURITY POLICY dbo.TenantFilter_Defs"
-expect "drop the cleat_admin role" clean CATCH \
-    "DROP ROLE cleat_admin"
 expect "insert a seed row" clean CATCH \
     "INSERT INTO admin.orgs (org_id, name) VALUES ('11111111-1111-1111-1111-111111111111', N'intruder')"
+# Proves G1's fix: catalogdiff compares a trigger's name/body/schema, not its
+# settings, so a disabled trigger is invisible to -mode=diff by the same
+# construction as every other case in this section. Module settings'
+# is_disabled column (supplementary.go) is the only thing that catches it.
+expect "disable a trigger" clean CATCH \
+    "DISABLE TRIGGER admin.trg_tenants_org_id_immutable ON admin.tenants"
 
 echo
 echo "== restore B and confirm it is clean again =="
