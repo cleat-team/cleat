@@ -278,14 +278,23 @@ func TwoSequentialCalls(h cleat.HostCalls, input string) (string, error) {
 // show that retry happening, because it is the guest's own code that issues
 // it.
 //
-// This is the simplest guest code that does it: try once, and on any
-// failure try exactly once more. A test can then observe "the step
-// re-executes once" directly, as a second request reaching the service
-// under a different key, rather than inferring it from engine internals.
+// This is the simplest guest code that does it: try once, and on a
+// RETRYABLE failure try exactly once more. Retryable, not any error --
+// cleat-review measured that retrying unconditionally makes the "404"
+// acceptance-table row pass even when the lookup is broken (degraded to
+// CannotSay, or a lookup answering 500): an [AMBIGUOUS] (non-retryable)
+// failure got retried too, producing the same "2 charges, 2 keys, done"
+// shape as a correct not-sent resolution, which is also what an unsafe
+// guest would do -- retrying an outcome that is genuinely unknown, not
+// confirmed-safe-to-retry. A real workflow would not retry [AMBIGUOUS]
+// either, for the same reason.
 func RetryOnceOnFailure(h cleat.HostCalls, input string) (string, error) {
 	resp, err := h.DurableCall("billing", "charge", `{"amount":100}`)
 	if err == nil {
 		return resp, nil
+	}
+	if ce, ok := err.(*cleat.CallError); !ok || !ce.Retryable() {
+		return "", err
 	}
 	resp, err = h.DurableCall("billing", "charge", `{"amount":100}`)
 	if err != nil {

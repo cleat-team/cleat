@@ -45,13 +45,17 @@ import (
 // workerB's row ownership and interfere with it (and httptest.Server.Close
 // would hang forever waiting for it otherwise).
 //
-// Two rows of cleat#1984's table are covered. 500/unreachable ("cannot say")
-// is NOT re-proven here: engine/callintent_test.go's
-// TestResolveAmbiguity_FallsBackWhenItCannotSay and
-// TestResolveCall_StatusCodeDecidesTheOutcome's "500" case already cover it
-// at the layer where it is decided, and nothing about crossing the package
-// boundary changes that decision -- a resolver error or a cannot-say
-// outcome both short-circuit before anything worker-specific runs.
+// All three rows of cleat#1984's table are covered, including 500 ("cannot
+// say") -- added in round 2 after cleat-review and the coordinator
+// independently measured that without it, RetryOnceOnFailure's blind retry
+// (any error, not just a retryable one) made the 404 subtest pass even with
+// NotSent degraded to CannotSay or the lookup answering 500: both produced
+// the identical "two charges, two keys, done" shape as a correct not-sent
+// resolution, so the 404 subtest was not actually discriminating what it
+// claimed to. The fixture now retries only a Retryable() CallError, and the
+// 500 subtest pins that an [AMBIGUOUS] failure is NOT retried and the run
+// ends "failed" with exactly one charge -- the case that would have caught
+// the original gap.
 func TestAmbiguityLookupEndToEnd_ResolvesACrashedCall(t *testing.T) {
 	if os.Getenv("CLEAT_TEST_POSTGRES") == "" && os.Getenv("CLEAT_TEST_DB") == "" {
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping the database-backed ambiguity-lookup acceptance test")
@@ -63,6 +67,27 @@ func TestAmbiguityLookupEndToEnd_ResolvesACrashedCall(t *testing.T) {
 	t.Run("404: the lookup reports not-sent, the guest retries once", func(t *testing.T) {
 		testAmbiguityLookupEndToEnd(t, "not-sent", http.StatusNotFound, "")
 	})
+	t.Run("500: cannot say, falls back to [AMBIGUOUS], no retry", func(t *testing.T) {
+		testAmbiguityLookupEndToEnd(t, "cannot-say", http.StatusInternalServerError, "")
+	})
+}
+
+// resultOf returns the workflow's terminal Result, the way a caller of the
+// admin API would read it. Used only by the "resolved" case, to pin that a
+// 200 lookup response reaches the guest's own output -- not just that the
+// row completed without error, which a resolver that recorded the WRONG
+// response (cleat-review, round 2: completed.Response left empty) would
+// also satisfy.
+func resultOf(t *testing.T, ctx context.Context, store engine.WorkflowStore, wfID string) string {
+	t.Helper()
+	wf, err := store.GetWorkflowByID(ctx, wfID)
+	if err != nil {
+		t.Fatalf("GetWorkflowByID: %v", err)
+	}
+	if wf == nil {
+		t.Fatalf("workflow %s not found", wfID)
+	}
+	return wf.Result
 }
 
 // recordedCallsWithKeys is recordedCalls plus the Idempotency-Key each
@@ -240,8 +265,12 @@ func testAmbiguityLookupEndToEnd(t *testing.T, caseName string, lookupStatus int
 	workerB.inflight.Store(wfID, claimedB)
 	runExecuteWorkflow(workerB, claimedB)
 
-	if got := statusOf(t, ctx, store, wfID); got != "done" {
-		t.Fatalf("status after worker B's run = %q, want %q (logs:\n%s)", got, "done", logsB.String())
+	wantStatus := "done"
+	if caseName == "cannot-say" {
+		wantStatus = "failed"
+	}
+	if got := statusOf(t, ctx, store, wfID); got != wantStatus {
+		t.Fatalf("status after worker B's run = %q, want %q (logs:\n%s)", got, wantStatus, logsB.String())
 	}
 	if !calls.countOpAtLeast("billing/get_by_key", 1) {
 		t.Fatalf("the lookup operation was never called, so this test exercised no resolver at all (logs:\n%s)", logsB.String())
@@ -266,6 +295,14 @@ func testAmbiguityLookupEndToEnd(t *testing.T, caseName string, lookupStatus int
 			t.Errorf("billing/charge called %d times, want 1 -- a 200 settles the step from the "+
 				"lookup's own response, the guest must not see a failure to retry", n)
 		}
+		// cleat-review, round 2: a resolver that recorded the step as
+		// complete with an EMPTY response would also satisfy every
+		// assertion above. The guest's actual output has to carry the
+		// lookup's own answer through, not just an absence of error.
+		if got, want := resultOf(t, ctx, store, wfID), `{"charge_id":"ch_live"}`; got != want {
+			t.Errorf("workflow result = %q, want %q -- the lookup's response must reach the guest's "+
+				"own output, not merely let the step complete", got, want)
+		}
 	case "not-sent":
 		if n := calls.countOp("billing/charge"); n != 2 {
 			t.Errorf("billing/charge called %d times, want 2 -- the original (orphaned) attempt "+
@@ -275,6 +312,20 @@ func testAmbiguityLookupEndToEnd(t *testing.T, caseName string, lookupStatus int
 			t.Error("the guest's retry reused the original attempt's idempotency key -- it must " +
 				"not, because it is a new DurableCall at a new step (engine/callintent.go's " +
 				"resolveAmbiguity documents exactly this)")
+		}
+	case "cannot-say":
+		// cleat-review + coordinator, round 2: without this subtest and
+		// RetryOnceOnFailure's Retryable() check, a CannotSay outcome was
+		// retried exactly like a NotSent one -- two charges, two keys,
+		// "done" -- which is indistinguishable from the 404 case and is
+		// also precisely the unsafe-guest behaviour G2 documents: retrying
+		// an outcome the service never confirmed was safe to retry.
+		if n := calls.countOp("billing/get_by_key"); n != 1 {
+			t.Errorf("lookup called %d times, want 1", n)
+		}
+		if n := calls.countOp("billing/charge"); n != 1 {
+			t.Errorf("billing/charge called %d times, want 1 -- a non-retryable [AMBIGUOUS] "+
+				"failure must not be retried by this fixture's guest code", n)
 		}
 	}
 }
