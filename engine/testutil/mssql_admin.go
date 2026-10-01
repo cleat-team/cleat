@@ -20,6 +20,7 @@ package testutil
 // nothing.
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -62,8 +63,77 @@ var (
 	// restores 'plain' and evicts the cached pool, so the next caller
 	// re-establishes 'admin' from scratch rather than reusing a pool that
 	// authenticates fine but now grants nothing (cleat#1541's failure mode).
+	//
+	// PER-PROCESS ONLY -- see mssqlAdminLockConns below, cleat#2857, for the
+	// cross-process half this map cannot provide. Kept as a fast in-process
+	// short-circuit (no network round trip) ahead of the authoritative
+	// cross-process check; every holder counted here also holds the lock
+	// below, so this can only ever agree with it or be less informed, never
+	// contradict it.
 	mssqlAdminRefs = map[string]int{}
+	// mssqlAdminLockConns holds the dedicated, pinned *sql.Conn each baseDSN's
+	// FIRST MSSQLAdminDB caller used to acquire mssqlAdminLockResource in
+	// SHARED mode, for as long as the cached pool above lives. cleat#2857: the
+	// refcount above is per-process, so it cannot tell "no process anywhere
+	// still needs 'admin'" from "no process *in this one* does" -- a second
+	// `go test` process sharing the same server reads this process's empty
+	// refcount and heals the predicate out from under a still-live first
+	// process. The lock makes liveness a property of the SERVER, which every
+	// process sees the same way, rather than of any one process's memory.
+	//
+	// Pinned deliberately: database/sql may otherwise hand this physical
+	// connection to an unrelated query and give the lock-holder a different
+	// one for its next statement, silently dropping the SESSION-scoped lock.
+	// Holding the *sql.Conn without ever calling Close() keeps one specific
+	// session -- and therefore the lock on it -- alive for exactly the cached
+	// pool's lifetime; mssqlReleaseAdminDB's Close() is what lets it go.
+	// Verified empirically (not assumed from the docs) before relying on it:
+	// a held, unclosed *sql.Conn keeps a SHARED sp_getapplock blocking a
+	// separate connection's EXCLUSIVE attempt across an 8s idle gap and
+	// across a wholly separate *sql.DB pool (the cross-process stand-in);
+	// closing the Conn releases it immediately, confirmed by the next
+	// EXCLUSIVE attempt succeeding right after.
+	mssqlAdminLockConns = map[string]*sql.Conn{}
 )
+
+// mssqlAdminLockResource is the sp_getapplock resource name MSSQLAdminDB and
+// selfHealMSSQLAdminPredicate share. App locks are scoped to the connection's
+// current database by default, and every connection here is opened against
+// baseDSN's own `?database=` -- so a single fixed name is already scoped per
+// database; it does not need baseDSN folded into it.
+const mssqlAdminLockResource = "cleat_testutil_mssql_admin"
+
+// mssqlTryApplock runs sp_getapplock on conn and returns its return code:
+// 0 or 1 mean the lock was granted (immediately, or after waiting); any
+// negative value (-1 timeout, -2 cancelled, -3 deadlock victim, -999 a
+// parameter or other error) means it was not. Documented return codes, not
+// re-derived here: https://learn.microsoft.com/sql/relational-databases/system-stored-procedures/sp-getapplock-transact-sql
+func mssqlTryApplock(t *testing.T, ctx context.Context, conn *sql.Conn, mode string, timeoutMs int) int {
+	t.Helper()
+	var code int
+	if err := conn.QueryRowContext(ctx,
+		`DECLARE @r INT; EXEC @r = sp_getapplock @Resource=@p1, @LockMode=@p2, @LockOwner='Session', @LockTimeout=@p3; SELECT @r`,
+		mssqlAdminLockResource, mode, timeoutMs,
+	).Scan(&code); err != nil {
+		t.Fatalf("sp_getapplock(%s, timeout=%dms): %v", mode, timeoutMs, err)
+	}
+	return code
+}
+
+// mssqlReleaseApplock releases a lock acquired by mssqlTryApplock, on the
+// same connection. Best-effort: logged rather than fatal, because every
+// caller of this reaches it only when the connection may be on its way out
+// anyway (eviction) or the lock was only ever a probe (the heal's exclusive
+// check), and failing a test over a release that didn't matter would be the
+// wrong trade.
+func mssqlReleaseApplock(t *testing.T, ctx context.Context, conn *sql.Conn) {
+	t.Helper()
+	if _, err := conn.ExecContext(ctx,
+		`EXEC sp_releaseapplock @Resource=@p1, @LockOwner='Session'`, mssqlAdminLockResource,
+	); err != nil {
+		t.Logf("sp_releaseapplock: %v", err)
+	}
+}
 
 // mssqlHasCoreSecurityPolicies reports whether this database enforces RLS on
 // the CORE tables specifically -- a predicate bound to dbo.fn_tenant_filter,
@@ -179,7 +249,23 @@ func MSSQLAdminDB(t *testing.T, db *sql.DB) *sql.DB {
 			mssqlTestAdminLogin, form)
 	}
 
+	// Pinned connection, held open (never Closed) for as long as the pool
+	// above is cached: this is the cross-process liveness signal cleat#2857
+	// adds. See mssqlAdminLockConns' doc comment for why it must be pinned
+	// rather than drawn fresh from the pool per call.
+	ctx := context.Background()
+	lockConn, err := pool.Conn(ctx)
+	if err != nil {
+		t.Fatalf("open the dedicated applock connection: %v", err)
+	}
+	if code := mssqlTryApplock(t, ctx, lockConn, "Shared", 5000); code < 0 {
+		t.Fatalf("sp_getapplock(%q, Shared) returned %d -- a shared lock should never "+
+			"conflict with another shared holder, so this is a real failure (timeout, "+
+			"cancellation, or a parameter error), not contention", mssqlAdminLockResource, code)
+	}
+
 	mssqlAdminPools[baseDSN] = pool
+	mssqlAdminLockConns[baseDSN] = lockConn
 	mssqlAdminRefs[baseDSN]++
 	t.Cleanup(func() { mssqlReleaseAdminDB(t, baseDSN) })
 	return pool
@@ -217,6 +303,15 @@ func mssqlReleaseAdminDB(t *testing.T, baseDSN string) {
 		return
 	}
 	delete(mssqlAdminPools, baseDSN)
+
+	if lockConn, ok := mssqlAdminLockConns[baseDSN]; ok {
+		delete(mssqlAdminLockConns, baseDSN)
+		ctx := context.Background()
+		mssqlReleaseApplock(t, ctx, lockConn)
+		if err := lockConn.Close(); err != nil {
+			t.Logf("closing the dedicated applock connection: %v", err)
+		}
+	}
 
 	restoreMSSQLPlainPredicate(t, baseDSN)
 	if err := pool.Close(); err != nil {
