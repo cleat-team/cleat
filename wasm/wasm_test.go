@@ -317,21 +317,10 @@ func TestToSnakeCase(t *testing.T) {
 	}
 }
 
-// ---- capitalize ----
-
-func TestCapitalize(t *testing.T) {
-	tests := []struct{ in, want string }{
-		{"userID", "UserID"},
-		{"orderID", "OrderID"},
-		{"", ""},
-		{"a", "A"},
-	}
-	for _, tt := range tests {
-		if got := capitalize(tt.in); got != tt.want {
-			t.Errorf("capitalize(%q)=%q, want %q", tt.in, got, tt.want)
-		}
-	}
-}
+// capitalize moved to analyzer.capitalizeIdent (internal/analyzer's
+// EntryPointFields is now the single derivation of entry-point binding
+// shape -- see its doc comment); its tests moved with it, to
+// internal/analyzer/entrypoint_fields_test.go.
 
 // ---- needsFmt/needsManualJSON/needsUnsafe ----
 
