@@ -31,6 +31,35 @@ type Schema map[string]any
 // without risking being wrong rather than merely imprecise.
 func anySchema() Schema { return Schema{} }
 
+// nullable widens s's declared "type" into the two-element list [T, "null"]
+// (JSON Schema draft 2020-12 section 6.1.1 permits "type" to be an array), for a Go
+// kind whose zero/nil state genuinely cannot be told apart from "absent" by
+// encoding/json: a pointer, slice or map reaching a JSON null is reset to
+// nil, not refused (see this file's three call sites for the empirical
+// confirmation each one carries). validate.go's checkTypes is the reader
+// this is paired with -- without it, a bare string-type assertion on
+// schema["type"] silently treats a list as "no declared type" and skips
+// validation entirely, which is a worse bug than the one this fixes.
+//
+// A schema with no string "type" (anySchema, or one already widened by a
+// recursive call -- a **int's outer nullable() sees its inner call's
+// []any already) is returned unchanged: there is nothing to add to, and an
+// unconditional second wrap would silently no-op anyway once checkTypes
+// treats both forms as equivalent, so leaving it alone here is about
+// clarity, not correctness.
+func nullable(s Schema) Schema {
+	t, ok := s["type"].(string)
+	if !ok {
+		return s
+	}
+	out := make(Schema, len(s))
+	for k, v := range s {
+		out[k] = v
+	}
+	out["type"] = []any{t, "null"}
+	return out
+}
+
 // FromGoType converts t into the JSON Schema fragment describing what
 // encoding/json accepts when unmarshaling into a value of that type.
 //
@@ -53,14 +82,30 @@ func fromGoType(t types.Type, visiting map[types.Type]bool) Schema {
 		// its ENCLOSING struct's field, handled by the struct case below and
 		// by the top-level entry-point caller for parameters -- not by the
 		// pointee's own schema). What a present value must look like is
-		// exactly the pointee's schema.
-		return fromGoType(tt.Elem(), visiting)
+		// exactly the pointee's schema -- EXCEPT that a present value may
+		// also be the JSON literal null: encoding/json's Unmarshal sets a
+		// pointer to nil on null with no error (cleat#2927's own probe,
+		// re-verified empirically here: json.Unmarshal([]byte(`null`), &p)
+		// for *int leaves p nil, err==nil), so a schema that only describes
+		// the pointee rejects a payload the binding accepts. nullable() adds
+		// the "null" alternative the pointee's own schema cannot know it
+		// needs.
+		return nullable(fromGoType(tt.Elem(), visiting))
 
 	case *types.Basic:
 		return basicSchema(tt)
 
 	case *types.Slice:
-		return sliceOrArraySchema(tt.Elem(), visiting)
+		// Same reasoning as *types.Pointer above, for the same empirically-
+		// confirmed reason: encoding/json resets a slice (including []byte,
+		// handled inside sliceOrArraySchema) to nil on a JSON null, with no
+		// error. A *types.Array (fixed-size, e.g. [3]int) is deliberately
+		// NOT wrapped here -- Go arrays are value types with no nil state,
+		// and encoding/json's null handling for one is a documented no-op
+		// (the array keeps whatever it already held), the same as a plain
+		// scalar, so widening its schema would claim a value the type can
+		// never actually take.
+		return nullable(sliceOrArraySchema(tt.Elem(), visiting))
 
 	case *types.Array:
 		return sliceOrArraySchema(tt.Elem(), visiting)
@@ -76,10 +121,12 @@ func fromGoType(t types.Type, visiting map[types.Type]bool) Schema {
 		}
 		visiting[t] = true
 		defer delete(visiting, t)
-		return Schema{
+		// nullable(): a map, like a pointer or slice, is reset to nil on a
+		// JSON null with no error from encoding/json.
+		return nullable(Schema{
 			"type":                 "object",
 			"additionalProperties": fromGoType(tt.Elem(), visiting),
-		}
+		})
 
 	case *types.Named:
 		return namedSchema(tt, visiting)

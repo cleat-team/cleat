@@ -85,6 +85,29 @@ func TestValidateIntegerAcceptsWholeFloats(t *testing.T) {
 	}
 }
 
+// TestValidateIntegerCheckIsExactBeyondInt64Range is cleat#2927 A2: the
+// original check converted the instance to int64 before comparing
+// (`n != float64(int64(n))`), and a non-constant float64-to-int64
+// conversion is implementation-defined, not merely truncating, once the
+// value cannot be represented as an int64 (|n| >= 2^63) -- well within
+// range for a JSON number. math.Trunc(n) == n stays in float64 throughout
+// and is exact for every float64 value, including these.
+//
+// 2^64 is the measured regression case, not a guess: on this toolchain,
+// int64(18446744073709551616.0) saturates to math.MaxInt64, so the OLD
+// check (n != float64(int64(n))) reports a FALSE violation for a value
+// that is, in fact, a whole number -- confirmed by running the old
+// expression directly before writing this test. (No float64 at this
+// magnitude can be non-integral in the first place -- the gap between
+// adjacent representable doubles already exceeds 1 well before 2^63, so
+// there is no corresponding "non-integral beyond int64 range" case to test
+// against; every float64 this large is already whole.)
+func TestValidateIntegerCheckIsExactBeyondInt64Range(t *testing.T) {
+	if v := mustValidate(t, `{"type":"integer"}`, `18446744073709551616`); v != nil {
+		t.Errorf("a whole number beyond int64 range (2^64) was rejected: %v", v)
+	}
+}
+
 func TestValidateNestedObjectProperty(t *testing.T) {
 	schema := `{
 		"type":"object",
@@ -134,6 +157,71 @@ func TestValidateCorruptSchemaIsAnErrorNotAViolation(t *testing.T) {
 	}
 	if v != nil {
 		t.Errorf("a corrupt schema must not also report a violation: %+v", v)
+	}
+}
+
+// TestValidateNullableTypeAcceptsNull is cleat#2927 G1, reproducing the
+// review's own probe directly against Validate rather than against a real
+// HTTP start: a nullable schema (jsonschema.go's nullable(), the form
+// FromGoType now emits for *int/[]string/map) must accept the JSON literal
+// null, matching encoding/json's own documented behaviour for a pointer,
+// slice or map field (reset to nil, no error).
+func TestValidateNullableTypeAcceptsNull(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		schema string
+	}{
+		{"optional *int", `{"type":["integer","null"]}`},
+		{"required []string", `{"type":["array","null"],"items":{"type":"string"}}`},
+		{"required map", `{"type":["object","null"],"additionalProperties":{"type":"integer"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if v := mustValidate(t, tc.schema, `null`); v != nil {
+				t.Errorf("a nullable schema rejected null: %v", v)
+			}
+		})
+	}
+}
+
+// TestValidateNullableTypeStillRejectsOtherMismatches is the negative
+// control for the test above: widening a type to admit null must not widen
+// it to admit anything else -- a nullable integer schema still has to
+// refuse a string.
+func TestValidateNullableTypeStillRejectsOtherMismatches(t *testing.T) {
+	v := mustValidate(t, `{"type":["integer","null"]}`, `"not a number"`)
+	if v == nil {
+		t.Fatal("expected a violation for a string against a nullable-integer schema")
+	}
+	if v.Rule != "type" {
+		t.Errorf("got rule %q, want \"type\"", v.Rule)
+	}
+}
+
+// TestValidateRequiredFieldPresentAsNullIsNotMissing covers the exact shape
+// of cleat#2927's review probe end to end: a REQUIRED property (present as
+// a key, per EntryPointParamSchema's own required-list rule) whose VALUE is
+// the JSON literal null is PRESENT, not absent -- the "required" check
+// tests key presence, not non-nullness, and a nullable property schema must
+// then accept the null value rather than refusing it as a type mismatch.
+func TestValidateRequiredFieldPresentAsNullIsNotMissing(t *testing.T) {
+	schema := `{"type":"object","properties":{"s":{"type":["array","null"],"items":{"type":"string"}}},"required":["s"],"additionalProperties":true}`
+	if v := mustValidate(t, schema, `{"s":null}`); v != nil {
+		t.Errorf("a required-but-nullable field sent as null was rejected: %v", v)
+	}
+}
+
+// TestValidateListValuedTypeIsNotSilentlyUnvalidated is the regression this
+// file exists to prevent from recurring: before cleat#2927's fix,
+// validate() read schema["type"] with a single `.(string)` assertion, which
+// fails silently for a list and skips ALL validation for that field --
+// worse than the bug it was guarding against, because a mismatched type
+// that ISN'T null then passes too. Falsified by reverting schemaTypes to a
+// bare `.(string)` assertion: this test must fail when that regression is
+// present.
+func TestValidateListValuedTypeIsNotSilentlyUnvalidated(t *testing.T) {
+	v := mustValidate(t, `{"type":["integer","null"]}`, `"definitely not an integer or null"`)
+	if v == nil {
+		t.Fatal("a list-valued type silently accepted a value matching neither alternative")
 	}
 }
 

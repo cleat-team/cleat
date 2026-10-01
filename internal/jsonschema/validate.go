@@ -3,6 +3,8 @@ package jsonschema
 import (
 	"encoding/json"
 	"fmt"
+	"math"
+	"strings"
 )
 
 // ValidationError names one way an instance failed to satisfy a schema.
@@ -78,13 +80,24 @@ func validate(schema map[string]any, instance any, field string) (*ValidationErr
 		return nil, nil
 	}
 
-	wantType, _ := schema["type"].(string)
-	if wantType != "" {
-		if v := checkType(wantType, instance, field); v != nil {
+	types := schemaTypes(schema["type"])
+	if len(types) > 0 {
+		if v := checkTypes(types, instance, field); v != nil {
 			return v, nil
 		}
 	}
 
+	// An instance that validated against a nullable schema (jsonschema.go's
+	// nullable(), "type":[T,"null"]) by being null has no properties or
+	// items to check further -- the object/array cases below assert a type
+	// assertion that a null instance would simply fail defensively, but
+	// returning here says it plainly: null already satisfied checkTypes
+	// above, and nothing past this point applies to it.
+	if instance == nil {
+		return nil, nil
+	}
+
+	wantType := primaryType(types)
 	switch wantType {
 	case "object":
 		obj, ok := instance.(map[string]any)
@@ -154,6 +167,70 @@ func validate(schema map[string]any, instance any, field string) (*ValidationErr
 	return nil, nil
 }
 
+// schemaTypes reads a schema's "type" keyword in either form this package's
+// own emitter produces: a bare string (basicSchema and friends), or the
+// two-element list jsonschema.go's nullable() emits for a pointer, slice or
+// map. A schema["type"] that is neither (absent, or any other JSON value --
+// should not occur in a schema this package generated, but validate
+// defensively rather than panic on a corrupt stored one) returns nil, the
+// same as "no declared type": anySchema's own meaning.
+//
+// This is the fix for cleat#2927's G1: before this existed, validate() read
+// schema["type"] with a single `.(string)` type assertion, which SILENTLY
+// FAILS for a list -- not a parse error, just wantType == "", which skipped
+// both the type check AND the object/array structural checks below it.
+// That is a worse bug than the one it was meant to avoid: a nullable field
+// became completely unvalidated rather than merely over-strict.
+func schemaTypes(raw any) []string {
+	switch t := raw.(type) {
+	case string:
+		if t == "" {
+			return nil
+		}
+		return []string{t}
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, v := range t {
+			if s, ok := v.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// primaryType returns the first non-"null" entry of types, for deciding
+// which of validate()'s object/array structural checks applies to a
+// non-null instance. A schema this package emits never carries more than
+// one non-"null" entry (nullable() always pairs exactly one real type with
+// "null"), so "first" is unambiguous in practice.
+func primaryType(types []string) string {
+	for _, t := range types {
+		if t != "null" {
+			return t
+		}
+	}
+	return ""
+}
+
+// checkTypes reports a "type" violation unless instance matches at least
+// one member of wantTypes -- JSON Schema's own semantics for a "type" array
+// (draft 2020-12 section 6.1.1), the form nullable() produces.
+func checkTypes(wantTypes []string, instance any, field string) *ValidationError {
+	for _, t := range wantTypes {
+		if checkType(t, instance, field) == nil {
+			return nil
+		}
+	}
+	return &ValidationError{
+		Field:   field,
+		Rule:    "type",
+		Message: fmt.Sprintf("want %s, got %s", strings.Join(wantTypes, " or "), jsonTypeName(instance)),
+	}
+}
+
 // checkType reports a "type" violation, honouring the one place this
 // package's own emitter asks a string to carry MORE than JSON's own type
 // system distinguishes: contentEncoding:"base64" for a []byte field
@@ -176,6 +253,10 @@ func checkType(wantType string, instance any, field string) *ValidationError {
 		}
 	}
 	switch wantType {
+	case "null":
+		if instance != nil {
+			return fail(jsonTypeName(instance))
+		}
 	case "boolean":
 		if _, ok := instance.(bool); !ok {
 			return fail(jsonTypeName(instance))
@@ -189,7 +270,13 @@ func checkType(wantType string, instance any, field string) *ValidationError {
 		if !ok {
 			return fail(jsonTypeName(instance))
 		}
-		if n != float64(int64(n)) {
+		// math.Trunc(n) == n, not n != float64(int64(n)): the latter
+		// converts n to int64 first, and a non-constant float64-to-int64
+		// conversion is implementation-defined (not merely truncating) once
+		// n cannot be represented as an int64 -- |n| >= 2^63, well within
+		// range for a JSON number. Trunc stays in float64 throughout, so
+		// the comparison is exact for every float64 value (cleat#2927 A2).
+		if math.Trunc(n) != n {
 			return &ValidationError{
 				Field:   field,
 				Rule:    "type",

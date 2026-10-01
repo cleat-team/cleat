@@ -107,8 +107,13 @@ func TestMultiParamEntryPointRequiresEveryNonPointerField(t *testing.T) {
 
 	props, _ := got["properties"].(Schema)
 	cartSchema, _ := props["cart"].(Schema)
-	if cartSchema["type"] != "array" {
-		t.Errorf("cart schema = %#v, want type array (cart is []CartItem)", cartSchema)
+	// cleat#2927: a slice's schema is now nullable ([]any{"array","null"}),
+	// not the bare string "array" -- cart is REQUIRED (present as a key),
+	// but its VALUE may still legitimately be the JSON literal null, since
+	// encoding/json resets a slice to nil on null with no error.
+	wantType := []any{"array", "null"}
+	if gotType, ok := cartSchema["type"].([]any); !ok || !reflect.DeepEqual(gotType, wantType) {
+		t.Errorf("cart schema type = %#v, want %#v (cart is []CartItem)", cartSchema["type"], wantType)
 	}
 }
 
