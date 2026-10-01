@@ -115,6 +115,46 @@ def self_defined(path):
         return set()
 
 
+# Documents, other than the plan, that number their own sections and are
+# legitimately cited from code elsewhere. An EXPLICIT registry, not "every
+# tracked .md file": a blanket scan over every .md file was tried first and
+# reverted, because ABI.md numbers its OWN host-call ABI entries the same
+# shape (`#### 2.59 \`cleat_complete\``) and docs/reference/database-backends.md
+# has its own `### 7.4` -- both pure numeric coincidences with two of the
+# plan's own genuinely-dangling numbers (see ci.yml's comment on the same
+# check for the current list). Unioning every .md file's headings into
+# the resolved set made BOTH of those read as fixed, when neither citation had
+# anything to do with either file -- the measurement-error direction this
+# repo's own CLAUDE.md names explicitly: an error that flatters the number
+# survives because nobody has a reason to re-check a result that already
+# looks like success. A reference must name a SPECIFIC other document to be
+# exempted from the plan's namespace, not merely find one by accident.
+FOREIGN_DOCS = [
+    "docs/contributor/design/event-routing-design.md",
+]
+
+
+def foreign_defined():
+    """Section numbers owned by a document in FOREIGN_DOCS, cited from
+    somewhere other than that document itself.
+
+    self_defined() exempts a reference from event-routing-design.md's own
+    prose to event-routing-design.md's own §4.3 -- the citing file defines the
+    heading itself. It does nothing for plugins/eventtriggers/keys.go citing
+    that SAME §4.3 from outside the file that owns it, because self_defined()
+    only ever looks at the citing file. cleat#2867, found live: five
+    references from plugins/eventtriggers/*.go into event-routing-design.md's
+    own §3.1/§4.1/§4.3/§4.4/§6.5 read as dangling plan references for exactly
+    that reason -- the citing files obviously define no such headings
+    themselves, and plan_text() has never read event-routing-design.md, so
+    nothing anywhere resolves them.
+    """
+    owned = set()
+    for path in FOREIGN_DOCS:
+        owned |= self_defined(path)
+    return owned
+
+
 def references():
     """Every §N.M in the repo that plausibly names a PLAN section.
 
@@ -163,7 +203,7 @@ def references():
 
 def run(headings_only=False):
     text = plan_text()
-    have = defined(text, headings_only)
+    have = defined(text, headings_only) | foreign_defined()
     refs = references()
     dangling = {n: locs for n, locs in refs.items() if n not in have}
     return have, refs, dangling
