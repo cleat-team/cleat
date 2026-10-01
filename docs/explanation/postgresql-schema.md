@@ -93,6 +93,7 @@ CREATE TABLE workflow_defs (
     gc_eligible BOOLEAN NOT NULL DEFAULT false,
     disabled_at TIMESTAMPTZ,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    exposure TEXT NOT NULL DEFAULT 'auth' CHECK (exposure IN ('public', 'auth', 'internal')),
     PRIMARY KEY (tenant_id, name, version)
 );
 ```
@@ -113,6 +114,7 @@ that prose yet — not that the column does not exist.
 | `max_history_length` | INTEGER | Max events before compaction triggers (0 = default) |
 | `dag_spec` | JSONB | DAG structure for visualization (optional) |
 | `created_at` | TIMESTAMPTZ | Deployment timestamp |
+| `exposure` | TEXT | One of `public`, `auth` (default), `internal` -- cleat#1986. Enforced not just documented: a `CHECK` constraint refuses any other value. Nothing writes this yet except the migration's own backfill default; the declaration path (source annotation, deploy-manifest tighten) is a separate, later piece of cleat#1986. |
 
 **Indexes**:
 
