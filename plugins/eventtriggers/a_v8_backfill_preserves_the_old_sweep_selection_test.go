@@ -3,17 +3,19 @@ package eventtriggers
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"net/url"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 
 	"github.com/cleat-team/cleat/engine"
 	"github.com/cleat-team/cleat/engine/testutil"
 	"github.com/cleat-team/cleat/plugin"
-	"github.com/cleat-team/cleat/plugins/plugintest"
 )
 
 // seededPreV8Row names one of the four rows seedPreV8Rows writes, so the
@@ -70,7 +72,8 @@ func TestV8BackfillPreservesTheOldSweepSelection(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var sqlDB *sql.DB
-			if tc.td == testutil.DialectMSSQL {
+			switch tc.td {
+			case testutil.DialectMSSQL:
 				// testutil.TestDB(t, testutil.DialectMSSQL) hands back a
 				// connection to ONE physical database shared by every test in
 				// this package's whole `go test` invocation. plugin_migrations
@@ -83,31 +86,32 @@ func TestV8BackfillPreservesTheOldSweepSelection(t *testing.T) {
 				// commits the real plugin's v1-v8 migrations first, so this
 				// test's "migrate to v7" step is a silent no-op against an
 				// already-v8 table, and the backfill this test exists to
-				// exercise never runs). MSSQL gets a fresh database of its own,
-				// since postgres additionally supports a --schema/WithSchema
-				// isolation option this package's tests do not use and MySQL
-				// has no equivalent at all -- see the defensive cleanup below
-				// for how those two dialects are protected instead.
+				// exercise never runs). MSSQL gets a fresh database of its own.
 				sqlDB = freshMSSQLDatabase(t)
-			} else {
-				sqlDB = testutil.TestDB(t, tc.td)
+			case testutil.DialectMySQL:
 				// This said "MySQL and Postgres are not known to have this
 				// failure" until cleat#2880 (slice 1) added
 				// TestV1V3IndexesAreIdempotentOnMySQL to this same package,
 				// which also applies the real plugin's full migrations
-				// against this same shared MySQL TestDB -- and, running
-				// first alphabetically ("a_v1..." before "a_v8..."),
+				// against this same shared MySQL testutil.TestDB -- and,
+				// running first alphabetically ("a_v1..." before "a_v8..."),
 				// reliably poisons this test's "migrate to v7" precondition
 				// to a silent no-op, exactly cleat#2871's MSSQL mechanism.
-				// Same remedy as this package's own
-				// TestALegacyAwaiterReplayLeavesAtMostTwoRowsAndUnregisterRemovesBoth:
-				// clean up BEFORE running anything, not only after, so this
-				// test does not depend on what ran before it in the same
-				// binary.
-				plugintest.CleanupPluginSchema(t, sqlDB, tc.td, "event-triggers",
-					[]string{"event_awaiters", "event_subscriptions", "ingested_events"})
-				defer plugintest.CleanupPluginSchema(t, sqlDB, tc.td, "event-triggers",
-					[]string{"event_awaiters", "event_subscriptions", "ingested_events"})
+				// A first fix here used plugintest.CleanupPluginSchema (this
+				// package's TestALegacyAwaiterReplayLeavesAtMostTwoRowsAndUnregisterRemovesBoth's
+				// remedy for the same shape), but that is isolation by
+				// discipline: it depends on every OTHER full-migration test
+				// in the package remembering to clean up too, and this
+				// plugin's own TestRunDueBackupsDispatchesExactlyOnceAndAdvancesNextRunAt-shaped
+				// sibling tests elsewhere in this repo (scheduledbackup) do
+				// not. Matching MSSQL's own remedy -- a fresh database,
+				// isolation by construction -- is what
+				// plugins/webhookingest's TestV3V4V7MigrationsAreIdempotentOnMySQL
+				// (cleat#2223) already does for the identical reason, citing
+				// this same cleat#2871 precedent.
+				sqlDB = freshMySQLDatabase(t)
+			default:
+				sqlDB = testutil.TestDB(t, tc.td)
 			}
 			dialect := plugin.Dialect(string(tc.td))
 			real := &Plugin{dialect: dialect}
@@ -217,6 +221,63 @@ func seedPreV8Rows(t *testing.T, ctx context.Context, db *engine.SQLDBAdapter, t
 		seeded = append(seeded, seededPreV8Row{id: id, status: r.status})
 	}
 	return seeded
+}
+
+// freshMySQLDatabase creates a uniquely-named MySQL database on the same
+// server CLEAT_TEST_MYSQL points at, builds the package's full test schema
+// in it, and returns a *sql.DB connected to that database alone. Mirrors
+// plugins/webhookingest's identical helper (cleat#2223), which itself cites
+// plugin/a_concurrent_plugin_migrators_are_serialised_test.go's pattern
+// (cleat#2117) rather than introducing a new one -- see this function's one
+// call site for why this test needs its own database rather than the one
+// testutil.TestDB shares across the package.
+func freshMySQLDatabase(t *testing.T) *sql.DB {
+	t.Helper()
+	admin := os.Getenv("CLEAT_TEST_MYSQL")
+	if admin == "" {
+		t.Skip("CLEAT_TEST_MYSQL not set, skipping MySQL tests")
+	}
+	adb, err := sql.Open("mysql", admin)
+	if err != nil {
+		t.Fatalf("open admin mysql connection: %v", err)
+	}
+	if err := adb.Ping(); err != nil {
+		adb.Close()
+		t.Fatalf("ping admin mysql connection: %v", err)
+	}
+
+	cfg, err := mysql.ParseDSN(admin)
+	if err != nil {
+		adb.Close()
+		t.Fatalf("parse CLEAT_TEST_MYSQL: %v", err)
+	}
+
+	name := fmt.Sprintf("cleat_test_2880_%d", time.Now().UnixNano()%1_000_000_000)
+	if _, err := adb.Exec("CREATE DATABASE `" + name + "`"); err != nil {
+		adb.Close()
+		t.Fatalf("create database %s: %v", name, err)
+	}
+	// Registered before the drop below, so t.Cleanup's LIFO order runs the
+	// drop FIRST and closes adb LAST -- the reverse leaves the drop trying
+	// to Exec on an already-closed connection ("sql: database is closed").
+	t.Cleanup(func() { adb.Close() })
+	t.Cleanup(func() {
+		if _, err := adb.Exec("DROP DATABASE IF EXISTS `" + name + "`"); err != nil {
+			t.Logf("cleanup: drop database %s: %v", name, err)
+		}
+	})
+
+	cfg.DBName = name
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		t.Fatalf("open fresh mysql database %s: %v", name, err)
+	}
+	t.Cleanup(func() { db.Close() })
+	if err := db.Ping(); err != nil {
+		t.Fatalf("ping fresh mysql database %s: %v", name, err)
+	}
+	testutil.SetupMySQLFullSchema(t, db)
+	return db
 }
 
 // freshMSSQLDatabase creates a uniquely-named MSSQL database on the same
