@@ -160,6 +160,8 @@ jobs:
         if: always()
         run: |
           bash -e <<'LINT_GUARD_EOF' || echo "CI package-coverage guard" >> "$LINT_FAILURES_FILE"
+          echo "SCRATCH FALSIFICATION (cleat#2895): deliberately failing" >&2
+          exit 1
           scripts/check-ci-package-coverage.sh
           LINT_GUARD_EOF
 
