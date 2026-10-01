@@ -75,10 +75,13 @@ LIMIT_WORD = re.compile(r"\bLIMIT\b")
 QUERY_OPEN = re.compile(r"plugin\.Query\{")
 
 
-def find_query_struct_spans(src: str) -> list[tuple[int, int]]:
-    """(body_start, body_end) character offsets for every plugin.Query{...}
-    literal in `src`, found by counting brace depth rather than matching a
-    closing brace with a regex.
+def find_query_struct_spans(src: str) -> list[tuple[int, int, int]]:
+    """(struct_start, body_start, body_end) character offsets for every
+    plugin.Query{...} literal in `src`, found by counting brace depth rather
+    than matching a closing brace with a regex. struct_start is where
+    "plugin.Query{" itself begins -- the exemption check below walks
+    backward from it to find the comment block immediately preceding the
+    "var NAME = plugin.Query{" line.
 
     A regex closer anchored on "the next line that is just a closing brace"
     (this guard's first version) pairs a ONE-LINE plugin.Query{...} literal
@@ -107,7 +110,7 @@ def find_query_struct_spans(src: str) -> list[tuple[int, int]]:
                 depth -= 1
             i += 1
         if depth == 0:
-            spans.append((m.end(), i - 1))
+            spans.append((m.start(), m.end(), i - 1))
         # depth > 0 here means an unterminated literal (unbalanced source);
         # nothing to pair it with, so it is left uncovered rather than
         # guessed at -- any LIMIT in it still gets caught by the bare-LIMIT
@@ -119,6 +122,44 @@ def find_query_struct_spans(src: str) -> list[tuple[int, int]]:
 # it only when it genuinely cannot reach MSSQL, not when fixing it is
 # inconvenient.
 SINGLE_DIALECT_ALLOWLIST = {"pgvector"}
+
+# A plugin.Query{} struct can mark its own absent MSSQL arm as deliberate by
+# carrying this marker in the comment block immediately above its "var NAME
+# = plugin.Query{" line -- cleat#2821/#2866. blobstore's staleWorkflowRefs
+# established the underlying pattern first (a Go-level dialect branch before
+# the caller ever reaches Query.For, so Default is provably never reached on
+# MSSQL) without needing this marker, because it carries no LIMIT; this
+# guard has no way to see a Go-level branch in the CALLER, only the struct
+# itself, so a struct that DOES contain LIMIT and relies on the same pattern
+# has to say so where this guard can see it. A marker is deliberately
+# easier to add than to satisfy by accident -- it is prose, not syntax, so
+# a reviewer reads the claim it makes (that the caller branches around
+# Query.For for this dialect) rather than a guard inferring it.
+MSSQL_EXEMPT_MARKER = "MSSQL ARM INTENTIONALLY ABSENT"
+
+
+def has_exempt_marker(src: str, struct_start: int) -> bool:
+    """True if MSSQL_EXEMPT_MARKER appears in the contiguous "//" comment
+    block immediately above the line containing `struct_start` -- i.e. the
+    comment attached to this specific "var NAME = plugin.Query{" line, not
+    some other comment earlier in the file. Walks upward one line at a time
+    and stops at the first line that is not a "//" comment (a blank line
+    separating this struct from an unrelated comment block above it, or
+    code), so a marker on a DIFFERENT struct's comment never exempts this
+    one.
+    """
+    lines = src[:struct_start].split("\n")
+    # lines[-1] is the partial "var NAME = plugin.Query{" line up to
+    # struct_start; walk upward through FULL preceding lines.
+    i = len(lines) - 2
+    while i >= 0:
+        line = lines[i].strip()
+        if not line.startswith("//"):
+            break
+        if MSSQL_EXEMPT_MARKER in line:
+            return True
+        i -= 1
+    return False
 
 
 def find_bug_lines(path: str, src: str) -> list[str]:
@@ -142,11 +183,13 @@ def find_bug_lines(path: str, src: str) -> list[str]:
         return src.count("\n", 0, offset) + 1
 
     covered = []  # (start, end) character spans belonging to some Query{}
-    for body_start, body_end in find_query_struct_spans(src):
+    for struct_start, body_start, body_end in find_query_struct_spans(src):
         body = src[body_start:body_end]
         covered.append((body_start, body_end))
         has_mssql = re.search(r'MSSQL:\s*`[^`]+`', body) is not None
         if not has_mssql:
+            if has_exempt_marker(src, struct_start):
+                continue
             for lm in LIMIT_WORD.finditer(body):
                 bug_lines.add(line_of(body_start + lm.start()))
         else:
@@ -260,6 +303,51 @@ def self_test() -> int:
         ["plugins/widget/queries.go:3"],
     )
 
+    # KNOWN-POSITIVE -- cleat#2821/#2866: a struct missing its MSSQL arm is
+    # still flagged with NO marker present, even when the reason would be a
+    # good one if stated. The marker is required, not inferred.
+    check(
+        "no MSSQL arm, no exemption marker -- still flagged",
+        "plugins/widget/queries.go",
+        "// The caller branches on dialect before ever calling .For() on this.\n"
+        "var q = plugin.Query{\n"
+        "\tDefault: `SELECT * FROM widgets ORDER BY id LIMIT 10`,\n"
+        "}\n",
+        ["plugins/widget/queries.go:3"],
+    )
+
+    # KNOWN-NEGATIVE -- the exemption itself: the marker on the comment line
+    # immediately above the struct's own "var ... = plugin.Query{" silences
+    # it.
+    check(
+        "no MSSQL arm, exemption marker present -- not flagged",
+        "plugins/widget/queries.go",
+        "// MSSQL ARM INTENTIONALLY ABSENT: the caller dialect-branches before\n"
+        "// ever calling .For() on this struct; see claimOldestUnprocessedEventMSSQL.\n"
+        "var q = plugin.Query{\n"
+        "\tDefault: `SELECT * FROM widgets ORDER BY id LIMIT 10`,\n"
+        "}\n",
+        [],
+    )
+
+    # KNOWN-NEGATIVE: the marker has to be on THIS struct's own comment
+    # block, not merely present somewhere earlier in the file. A blank line
+    # breaks the contiguous block, so an unrelated struct right below an
+    # exempted one does NOT inherit the exemption.
+    check(
+        "a marker on an earlier, unrelated struct does not exempt this one",
+        "plugins/widget/queries.go",
+        "// MSSQL ARM INTENTIONALLY ABSENT: see other struct.\n"
+        "var other = plugin.Query{\n"
+        "\tDefault: `SELECT * FROM other_table ORDER BY id`,\n"
+        "}\n"
+        "\n"
+        "var q = plugin.Query{\n"
+        "\tDefault: `SELECT * FROM widgets ORDER BY id LIMIT 10`,\n"
+        "}\n",
+        ["plugins/widget/queries.go:7"],
+    )
+
     # KNOWN-POSITIVE, and the exact gap cleat-review found reviewing #2256
     # (cleat#2257): a ONE-LINE plugin.Query{} literal -- its own closing "}"
     # on the same line as its fields, no newline before it -- followed by an
@@ -352,7 +440,7 @@ def self_test() -> int:
         for f in failures:
             print(f"SELF-TEST FAIL: {f}", file=sys.stderr)
         return 1
-    print("self-test passed: 11 cases (four known-positive, five known-negative, "
+    print("self-test passed: 14 cases (six known-positive, six known-negative, "
           "one documented gap, one vacuity)")
     return 0
 

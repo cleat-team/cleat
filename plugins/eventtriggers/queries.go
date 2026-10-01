@@ -180,6 +180,19 @@ OFFSET 0 ROWS FETCH NEXT 100 ROWS ONLY`,
 // columns are ” by the same DEFAULT ” every pre-existing row already
 // carries, so this is additive to the WHERE clause, not a behaviour change
 // for a caller that passes no keys.
+//
+// MSSQL ARM INTENTIONALLY ABSENT -- cleat#2821/#2866. claimOldestUnprocessedEventLocking
+// (claim.go) is the only caller of this struct's .For(dialect), and tryClaim
+// branches on dialect BEFORE calling it: claimOldestUnprocessedEventLocking
+// is reached only for Postgres/MySQL, never MSSQL (claimOldestUnprocessedEventMSSQL
+// handles that dialect via queryCandidateUnprocessedEventIDsMSSQL and
+// queryClaimEventByIDMSSQL instead). So Query.For's fallback-to-Default
+// behavior for a missing MSSQL field is never reached here, the same shape
+// blobstore's staleWorkflowRefs documents for its own absent MSSQL field.
+// Restoring an MSSQL arm here would put the cleat#2821 starvation query back
+// within reach of some future caller that does not branch this carefully --
+// see queryCandidateUnprocessedEventIDsMSSQL's own doc comment for why no
+// single SELECT can do this safely on MSSQL at all.
 var queryOldestUnprocessedEventForClaim = plugin.Query{
 	Default: `SELECT id, event_type, event_data, received_at
 FROM ingested_events

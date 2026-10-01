@@ -375,6 +375,26 @@ func TestAwaitEventOldestClaimDoesNotStarveASecondOldestEventAtScale(t *testing.
 			mustInsertIngestedEventAt(t, seedCtx, p, oldestID, tenantID, "order.created", now.Add(-2*time.Hour))
 			mustInsertIngestedEventAt(t, seedCtx, p, secondID, tenantID, "order.created", now.Add(-time.Hour))
 
+			// cleat-review's finding on #2869: SQL Server's plan cache carries
+			// this test's own isolation hazard. Run alone against a fresh
+			// database, the unfixed (pre-#2869) query plan starves B
+			// deterministically -- but run as part of the whole package, as
+			// CI does, a plan CACHED by an earlier test's identical query text
+			// (TestAwaitEventConcurrentClaimsSkipTheLockedRow, same statement,
+			// same shape) gets reused here and happens not to exhibit the
+			// starvation, so the unfixed code passed 2/2 run that way. A
+			// DATABASE-scoped clear (not server-wide, to avoid disturbing any
+			// other database sharing this instance) forces a fresh
+			// optimization for this test's own statement regardless of what
+			// ran before it in the same process. Postgres/MySQL have no
+			// equivalent concept here and need no such step.
+			if tc.td == testutil.DialectMSSQL {
+				if _, err := p.db.Exec(context.Background(),
+					`ALTER DATABASE SCOPED CONFIGURATION CLEAR PROCEDURE_CACHE`); err != nil {
+					t.Fatalf("clear MSSQL procedure cache: %v", err)
+				}
+			}
+
 			holding := make(chan struct{})
 			release := make(chan struct{})
 			type claimResult struct {

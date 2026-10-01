@@ -945,10 +945,19 @@ func (p *Plugin) Migrations() []plugin.Migration {
 			// that keeps this from being forgotten the next time someone is
 			// in this file for an unrelated reason.
 			//
-			// 3. Until then it is still CORRECT to keep -- queryUnprocessedEvents
-			// and other `processed`/`received_at` readers still benefit
-			// from it even though the claim path no longer needs it by name
-			// or by the mechanism this paragraph describes.
+			// 3. Until then it is kept by the OWNER'S RULING, not because any
+			// current query needs it. Checked rather than assumed:
+			// queryUnprocessedEvents (this file's sibling query) reads
+			// dispatch_processed, served by its own idx_ingested_events_dispatch,
+			// not this index. The only remaining readers of bare `processed`
+			// are the claim queries (queryOldestUnprocessedEventForClaim,
+			// queryCandidateUnprocessedEventIDsMSSQL, queryClaimEventByIDMSSQL),
+			// and all three lead with tenant_id/event_type/key1/key2/key3,
+			// which idx_ingested_events_claim (Version 7) covers -- not this
+			// index. So nothing depends on idx_ingested_events_unprocessed
+			// for correctness OR performance today; it survives purely
+			// because cleat#2870 defers its removal to ride with a future
+			// migration, per the owner.
 			//
 			// dispatch_processed gets its OWN new index,
 			// idx_ingested_events_dispatch, same per-dialect partial/plain
