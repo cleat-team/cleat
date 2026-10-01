@@ -104,30 +104,34 @@ jobs:
       # and the publish job would then upload an empty directory.
       #
       # cleat#2878/#2889: this used to carry no unique component at all. The
-      # FIRST fix here (a run_id+run_attempt suffix, matching #2690/#2861/#2875)
-      # was wrong on both ends -- cleat-review (G2) caught that the premise was
-      # false: artifacts are scoped per RUN, so two different run_ids can never
-      # collide regardless of name; the only real hazard was the same one the
-      # other five had, a re-run of THIS job re-uploading under the same name
-      # (#2690's unmeasured 409). And the suffix fix itself was broken (G1):
-      # `publish` (below) computes its download name from its OWN
-      # github.run_attempt, which is 2 after "re-run failed jobs" even though
-      # `build` (this job) wasn't re-run and its artifact is still named "-1" --
-      # the exact recovery path a failed PyPI publish needs would 404.
+      # FIRST fix here (a run_id+run_attempt suffix, matching the seven
+      # workflow files #2690/#2861/#2875 already fixed) was wrong on both
+      # ends -- cleat-review (G2) caught that the premise was false: artifacts
+      # are scoped per RUN, so two different run_ids can never collide
+      # regardless of name; the only real hazard was the same one those seven
+      # had, a re-run of THIS job re-uploading under the same name (#2690's
+      # unmeasured 409). And the run_attempt half of that fix was itself
+      # broken (G1): `publish` (below) computes its download name from its
+      # OWN github.run_attempt, which is 2 after "re-run failed jobs" even
+      # though `build` (this job) wasn't re-run and its artifact is still
+      # named "-1" -- the exact recovery path a failed PyPI publish needs
+      # would 404.
       #
-      # `overwrite: true` fixes the actual hazard directly instead: a re-run of
-      # this job replaces the existing artifact rather than erroring, so the
-      # name can stay constant and `publish`'s download never has to guess
-      # which attempt produced it. This trades the suffix fix's unverified
-      # platform assumption (that a non-rerun job's outputs are readable by a
-      # partial re-run of its dependents -- unmeasurable here since this
-      # workflow never runs on a PR) for a documented, first-class
-      # upload-artifact option built for exactly this producer/consumer-across-
-      # jobs shape.
+      # `overwrite: true` fixes that hazard directly: a re-run of this job
+      # replaces the existing artifact rather than erroring, so `publish`'s
+      # download never has to guess which attempt produced it -- run_id alone
+      # is already constant across every attempt and every job of one run, so
+      # keeping it causes no G1-style mismatch. Dropping run_attempt but
+      # keeping run_id also keeps the owner's "appropriate suffixes" ruling on
+      # #2878 satisfied (cleat-review G3) -- overwrite alone, with no suffix
+      # at all, would not. This still rests on an unverified platform claim --
+      # that overwrite:true actually replaces rather than erroring -- same as
+      # the outputs:-wiring alternative's own unverified claim; neither
+      # workflow runs on a PR, so neither is exercised here.
       - name: Upload the built distributions
         uses: actions/upload-artifact@v7
         with:
-          name: python-sdk-dist
+          name: python-sdk-dist-${{ github.run_id }}
           path: python-sdk/dist/
           if-no-files-found: error
           overwrite: true
@@ -145,7 +149,7 @@ jobs:
       - name: Download the built distributions
         uses: actions/download-artifact@v8
         with:
-          name: python-sdk-dist
+          name: python-sdk-dist-${{ github.run_id }}
           path: python-sdk/dist/
 
       - name: Publish to PyPI
