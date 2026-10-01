@@ -179,8 +179,18 @@ type routineDefinition struct {
 // off the migrations rather than assumed:
 //
 //	postgres  $$ LANGUAGE plpgsql;   (migrations/postgres/004:146)
-//	mysql     END //                 (migrations/mysql/004:134)
-//	mssql     END;                   (migrations/mssql/004:153)
+//	mysql     END //                 (migrations/mysql/004_fix_finalize_workflow_status_fence.sql:134)
+//	mssql     END;                   (migrations/mssql/004_fix_finalize_workflow_status_fence.sql:153)
+//
+// Both of those were cleat#1986's own finding: 004_fix_finalize_workflow_status_fence.sql
+// is long retired (docs/contributor/migrations.md's "compaction" section), and the bare
+// "migrations/mysql/004" / "migrations/mssql/004" form this comment used to cite is a
+// NUMBER, not a file -- so cleat#1986's new, unrelated 004_workflow_defs_exposure_class.sql
+// at that same number silently satisfied scripts/check-postgres-migration-citations.py's
+// is_real() check by coincidence, with this comment still describing a file that does not
+// exist. Naming the retired filename explicitly is what keeps the citation correctly
+// dangling (and correctly baselined as historical) regardless of what a later migration
+// happens to be numbered.
 //
 // Scoping the body matters in both directions, and the first attempt got both
 // wrong.
