@@ -97,13 +97,19 @@ func (s *MSSQLStore) ListStaleHolders(ctx context.Context, timeout time.Duration
 	}
 	defer tx.Rollback()
 
+	// Two-part DATEADD, same reason as reapStaleInstancesOnce: see
+	// splitMillisecondOffset (cleat#2197). cleat-review2 caught this one as
+	// a single DATEADD(MILLISECOND, ...) here, which overflows SQL Server's
+	// `int` argument past ~24.86 days -- reproduced live against a real
+	// MSSQL 2022 instance at a ~68-year --reclaim-timeout.
+	seconds, remainderMs := splitMillisecondOffset(-timeout.Milliseconds())
 	rows, err := tx.QueryContext(ctx, `
-		SELECT TOP (@p3) id, generation, assigned_to FROM workflow_instances
+		SELECT TOP (@p4) id, generation, assigned_to FROM workflow_instances
 		WHERE status = 'running'
-		  AND heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME())
-		  AND tenant_id = @p2
+		  AND heartbeat_at < DATEADD(MILLISECOND, @p1, DATEADD(SECOND, @p2, SYSUTCDATETIME()))
+		  AND tenant_id = @p3
 		ORDER BY heartbeat_at
-	`, -timeout.Milliseconds(), s.tenantID, reapLimitArg(limit))
+	`, remainderMs, seconds, s.tenantID, reapLimitArg(limit))
 	if err != nil {
 		return nil, fmt.Errorf("list stale holders: %w", err)
 	}
@@ -153,11 +159,15 @@ func (s *MSSQLStore) reapStaleInstancesExceptOnce(ctx context.Context, timeout t
 	// exclude renders no clause, same as the other two dialects -- a VALUES
 	// constructor with zero rows is not valid syntax, so this must not try
 	// to emit one.
+	//
+	// Two-part DATEADD, same reason as reapStaleInstancesOnce and
+	// ListStaleHolders above: see splitMillisecondOffset (cleat#2197).
+	seconds, remainderMs := splitMillisecondOffset(-timeout.Milliseconds())
 	excludeClause := ""
-	args := []any{-timeout.Milliseconds(), s.tenantID, reapLimitArg(limit)}
+	args := []any{remainderMs, seconds, s.tenantID, reapLimitArg(limit)}
 	if len(exclude) > 0 {
 		rowsSQL := make([]string, len(exclude))
-		next := 4
+		next := 5
 		for i, k := range exclude {
 			rowsSQL[i] = fmt.Sprintf("(@p%d, @p%d)", next, next+1)
 			args = append(args, k.WorkflowID, k.Generation)
@@ -177,10 +187,10 @@ func (s *MSSQLStore) reapStaleInstancesExceptOnce(ctx context.Context, timeout t
 		    assigned_to = NULL, heartbeat_at = NULL, generation = generation + 1,
 		    reclaim_count = reclaim_count + 1
 		WHERE id IN (
-		    SELECT TOP (@p3) id FROM workflow_instances
+		    SELECT TOP (@p4) id FROM workflow_instances
 		    WHERE status = 'running'
-		      AND heartbeat_at < DATEADD(MILLISECOND, @p1, SYSUTCDATETIME())
-		      AND tenant_id = @p2
+		      AND heartbeat_at < DATEADD(MILLISECOND, @p1, DATEADD(SECOND, @p2, SYSUTCDATETIME()))
+		      AND tenant_id = @p3
 		      `+excludeClause+`
 		    ORDER BY heartbeat_at
 		)
