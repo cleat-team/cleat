@@ -28,12 +28,29 @@
 // the in-tree version of that probe, against the real kv_store table and
 // the real upsertKV query text, so a future edit to the query is covered
 // rather than a copy of it.
+//
+// PROBABILISTIC, AND ENVIRONMENT-DEPENDENT -- NOT the only guard against a
+// regression. cleat-review measured the SAME mutation (HOLDLOCK removed)
+// against SQL Server 2022 CU27 (x64 emulated, 10 CPUs, RCSI off) and got 0
+// of 800 duplicate-key errors across three runs, where this file's own
+// measurement on a different instance got 28 of 800 (20 rounds of 40). The
+// race window this test tries to hit is real (the standalone probe above
+// found it reliably, 80/1200), but how OFTEN two concurrent sessions land
+// in it depends on scheduling/timing details that differ by SQL Server
+// build, CPU count and emulation, so this test can read clean on the
+// UNFIXED query in some environments. It stays in the suite because it is
+// still evidence when it DOES fire, and because deleting it would discard
+// a real, reproduced-at-least-once measurement -- but
+// TestUpsertKVMSSQLMergeUsesHoldlock (queries_test.go), a static assertion
+// on the query text, is what actually guards against someone removing
+// WITH (HOLDLOCK) and nobody noticing.
 package kvstore
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -44,6 +61,9 @@ import (
 )
 
 func TestConcurrentMergesToABrandNewKeyRaceWithoutHoldlock(t *testing.T) {
+	if os.Getenv("CLEAT_TEST_MSSQL") == "" {
+		t.Skip("CLEAT_TEST_MSSQL not set, skipping SQL Server tests")
+	}
 	if testing.Short() {
 		t.Skip("holds many real connections open under a start barrier; skipping in -short")
 	}
