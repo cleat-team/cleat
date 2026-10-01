@@ -1904,6 +1904,16 @@ jobs:
   test-go:
     name: Test Go (${{ matrix.package.name }}) on ${{ matrix.go-version }}
     runs-on: ubuntu-latest
+    # cleat#2862: three jobs (two of them this matrix's commands/crash legs)
+    # hung with no timeout, each stopping dead mid-post-run-cleanup --
+    # runners losing connectivity, not a test hang -- and with no cap here
+    # they would have inherited GitHub's default of up to 360 minutes.
+    # 45 is 3x the longest leg actually measured: commands at 13m23s-16m10s
+    # across three clean runs (gh run view --json jobs, startedAt/
+    # completedAt), the slowest of this matrix's twelve package groups by a
+    # wide margin (crash is next at ~14m20s; everything else tops out
+    # around 6m). cleat#2876.
+    timeout-minutes: 45
     services:
       postgres:
         image: postgres:16.14@sha256:95206741a5b214807675e14165369d05b93a9cf692223b616d07cca227e74b0b
@@ -3043,6 +3053,14 @@ jobs:
     # rather than needing a third.
     if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # cleat#2862/cleat#2876: this was the third job stuck in the same hang,
+    # and it needs its OWN number rather than reusing test-go's 45 --
+    # measured directly (gh run view --json jobs on a clean run), "Run Go
+    # coverage check" alone takes ~22 minutes, so 45 would leave this job
+    # barely 2x headroom where test-go's slowest leg gets ~2.8x. 60 keeps
+    # the margin comparable (~2.7x) without inventing a third timeout value
+    # alongside tier1-gate.yml's.
+    timeout-minutes: 60
     # WHY THIS JOB HAS A DATABASE.
     #
     # The floors were calibrated on 2026-06-10 with backends configured -- the
