@@ -400,6 +400,30 @@ func TestRunDownMigrationsRollsBackAPartiallyFailedMultiStatementDownOnMSSQL(t *
 			TenantScoped: []string{"down_atomic_mssql_one", "down_atomic_mssql_two"},
 		},
 	)
+	// cleat-review's N3: this runs on the SHARED CLEAT_TEST_MSSQL database
+	// (testutil.TestDB, not a per-test scratch DB -- MSSQL has none here, see
+	// downTestDB's own doc comment, which is Postgres-only), and the Down
+	// under test is DESIGNED to fail, so nothing above ever cleans up
+	// down_atomic_mssql_one/_two, their security policies, or the tracking
+	// row. IF EXISTS and a direct DELETE rather than another RunDownMigrations
+	// call: the point is leaving the database as this test found it, not
+	// exercising the function under test a second time.
+	t.Cleanup(func() {
+		if err := unapplyTenantScoping(ctx, db.ExecContext, DialectMSSQL,
+			[]string{"down_atomic_mssql_one", "down_atomic_mssql_two"}); err != nil {
+			t.Logf("cleanup: unapply tenant scoping: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS down_atomic_mssql_one`); err != nil {
+			t.Logf("cleanup: drop down_atomic_mssql_one: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS down_atomic_mssql_two`); err != nil {
+			t.Logf("cleanup: drop down_atomic_mssql_two: %v", err)
+		}
+		if _, err := db.ExecContext(ctx,
+			deletePluginMigrationSQL(DialectMSSQL), "down-atomic-mssql", 1); err != nil {
+			t.Logf("cleanup: delete tracking row: %v", err)
+		}
+	})
 
 	if err := RunMigrations(ctx, db, DialectMSSQL, nil, []*LoadedPlugin{p}); err != nil {
 		t.Fatalf("apply: %v", err)
