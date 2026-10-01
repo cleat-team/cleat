@@ -586,10 +586,26 @@ jobs:
     # setup is ~1-1.5 minutes, not 15. Teardown (test end to job end) is
     # 1-3 seconds across all three samples -- not a growing share, so this
     # raise buys headroom for real test time rather than delaying a
-    # teardown problem that would recur at the new ceiling. It has already
-    # fired wrongly once: cleat#2861's shard was killed at ~55 minutes
-    # (unrelated job's own timeout), failing a required context on a diff
-    # that could not reach this shard.
+    # teardown problem that would recur at the new ceiling. It has fired
+    # wrongly before: a run has been cancelled by hitting this job's own
+    # 45m0s cap wall-clock on a healthy shard, failing a required context
+    # on a diff that could not reach it. (The specific incident cited here
+    # in an earlier draft, cleat#2861, turned out on checking to be a
+    # different issue entirely -- an artifact-upload collision -- not this
+    # job hitting its cap. Left unattributed to a specific issue rather
+    # than guessing a replacement.)
+    #
+    # CAVEAT (cleat-review, #2876): tier-gate.sh is the SAME shape as
+    # coverage's two-invocation hazard above -- `go test -p 1 -timeout
+    # ${GO_TEST_TIMEOUT:-30m}` runs once for $ACTIVE_PKGS, then AGAIN in a
+    # loop over each separate Go module (cleat/, etc.), each call getting
+    # its own fresh 30m. On a clean run the combined 32-37m is spread
+    # across these calls, so no single one gets anywhere near 30m -- but
+    # if an EARLIER call in the sequence already consumed, say, 35+
+    # minutes before a LATER one hangs, that later call's own 30m ceiling
+    # is counted from its own start and can land past this job's 60m,
+    # which then kills the runner first with no goroutine dump. Flagged
+    # rather than resolved, same as coverage's.
     timeout-minutes: 60
 
     services:

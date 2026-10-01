@@ -1908,11 +1908,21 @@ jobs:
     # hung with no timeout, each stopping dead mid-post-run-cleanup --
     # runners losing connectivity, not a test hang -- and with no cap here
     # they would have inherited GitHub's default of up to 360 minutes.
-    # 45 is 3x the longest leg actually measured: commands at 13m23s-16m10s
-    # across three clean runs (gh run view --json jobs, startedAt/
-    # completedAt), the slowest of this matrix's twelve package groups by a
-    # wide margin (crash is next at ~14m20s; everything else tops out
-    # around 6m). cleat#2876.
+    # 45 is ~2.8x the longest leg actually measured: commands at
+    # 13m23s-16m10s across three clean runs (gh run view --json jobs,
+    # startedAt/completedAt), the slowest of this matrix's twelve package
+    # groups by a wide margin (crash is next at ~14m20s; everything else
+    # tops out around 6m). cleat#2876.
+    #
+    # This job does not need the caveat the coverage job below carries:
+    # each package group here is ONE `go test -timeout 30m` invocation
+    # (the explicit 30m below, not Go's 10m default) -- so whatever a hang
+    # does to the packages inside it (plugins runs them with -p 1,
+    # sequentially; everything else lets go test parallelize), the whole
+    # invocation still has a single 30m ceiling, comfortably under this
+    # job's 45m. There is no sequence of separate invocations whose own
+    # timeouts could sum past the job cap, which is the shape that bites
+    # coverage and tier1-rest.
     timeout-minutes: 45
     services:
       postgres:
@@ -3060,6 +3070,20 @@ jobs:
     # barely 2x headroom where test-go's slowest leg gets ~2.8x. 60 keeps
     # the margin comparable (~2.7x) without inventing a third timeout value
     # alongside tier1-gate.yml's.
+    #
+    # CAVEAT (cleat-review, #2876): `make coverage-go` runs TWO SEPARATE
+    # `go test -p 1 -timeout 40m` invocations back to back (Makefile), not
+    # one. On a clean run the first finishes well inside its own 40m, but
+    # if it hangs instead, Go's own timeout -- which prints every
+    # goroutine, the useful failure -- fires at roughly job-elapsed
+    # setup(~1m) + 40m = ~41m, safely inside this 60m cap. If instead the
+    # SECOND invocation hangs, its own 40m is counted from whenever it
+    # starts, which on a clean run is itself already ~20m in -- so that
+    # 40m ceiling can land past this job's 60m, and this cap kills the
+    # runner first with no dump. Flagged rather than silently resolved:
+    # changing either number, or restructuring the two invocations, is a
+    # call for whoever owns this job next, not something this timeout
+    # addition should decide on its own.
     timeout-minutes: 60
     # WHY THIS JOB HAS A DATABASE.
     #
