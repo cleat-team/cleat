@@ -587,25 +587,28 @@ jobs:
     # 1-3 seconds across all three samples -- not a growing share, so this
     # raise buys headroom for real test time rather than delaying a
     # teardown problem that would recur at the new ceiling. It has fired
-    # wrongly before: a run has been cancelled by hitting this job's own
-    # 45m0s cap wall-clock on a healthy shard, failing a required context
-    # on a diff that could not reach it. (The specific incident cited here
-    # in an earlier draft, cleat#2861, turned out on checking to be a
-    # different issue entirely -- an artifact-upload collision -- not this
-    # job hitting its cap. Left unattributed to a specific issue rather
-    # than guessing a replacement.)
+    # wrongly before, exactly this way: PR #2861's Tier 1 Gate run
+    # (36799087322), job "Tier 1 Gate -- rest" (110169436550), ran
+    # 2026-10-01T01:05:39Z to cancelled 02:00:40Z (55m01s) with the
+    # annotation "The job has exceeded the maximum execution time of
+    # 45m0s" -- this job's own cap, on a PR whose test step alone ran
+    # ~54 min against this same job's usual 29-38m. Cause not established;
+    # cited for the mechanism (this cap firing on a diff that could not
+    # plausibly reach a 54-minute test run through it), not as a
+    # diagnosis of why that run was slow.
     #
-    # CAVEAT (cleat-review, #2876): tier-gate.sh is the SAME shape as
-    # coverage's two-invocation hazard above -- `go test -p 1 -timeout
-    # ${GO_TEST_TIMEOUT:-30m}` runs once for $ACTIVE_PKGS, then AGAIN in a
-    # loop over each separate Go module (cleat/, etc.), each call getting
-    # its own fresh 30m. On a clean run the combined 32-37m is spread
-    # across these calls, so no single one gets anywhere near 30m -- but
-    # if an EARLIER call in the sequence already consumed, say, 35+
-    # minutes before a LATER one hangs, that later call's own 30m ceiling
-    # is counted from its own start and can land past this job's 60m,
-    # which then kills the runner first with no goroutine dump. Flagged
-    # rather than resolved, same as coverage's.
+    # CAVEAT (cleat-review, #2876), restated in PER-PACKAGE terms --
+    # `-timeout` resets for each test binary, not once per `go test`
+    # invocation (`go help testflag`: counted from that binary's own
+    # start). tier-gate.sh runs `go test -p 1 -timeout
+    # ${GO_TEST_TIMEOUT:-30m}` once for $ACTIVE_PKGS, then AGAIN in a loop
+    # over each separate Go module (cleat/, etc.) -- and ANY package
+    # within either call, not just the first, gets its own fresh 30m from
+    # when it personally starts. On the three clean runs measured, a
+    # package starting after roughly minute 29 of elapsed test time and
+    # then hanging would be killed by this 60m job cap before its own 30m
+    # Go-level timeout could fire, with no goroutine dump. Flagged rather
+    # than resolved, same as coverage's.
     timeout-minutes: 60
 
     services:
