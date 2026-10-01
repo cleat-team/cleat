@@ -169,31 +169,55 @@ func (p *Plugin) handlePut(w http.ResponseWriter, r *http.Request) {
 	// No If-Match header: upsert (insert or overwrite unconditionally).
 	var newVersion int
 	var err error
+	var statusCode int
 	if p.dialect == plugin.DialectMySQL {
-		// MySQL: upsert without RETURNING, then select version
-		_, execErr := p.db.Exec(r.Context(), plugin.Rebind(upsertKV.For(p.dialect), p.dialect),
+		// MySQL: upsert without RETURNING, then select version. Whether
+		// THIS call created the row cannot be read back from a separate
+		// SELECT after the fact -- under concurrent writers to a brand-new
+		// key, other writers' UPDATEs can increment the version between
+		// this INSERT committing and this goroutine's own SELECT running,
+		// so a literal creator can observe version > 1 and every racer can
+		// observe a "stale" value, as cleat#2890's
+		// TestConcurrentPutsToABrandNewKeyDoNotRace/mysql demonstrated: 0 of
+		// 60 concurrent writers reported 201, though exactly one of them
+		// did insert the row.
+		//
+		// MySQL's own INSERT ... ON DUPLICATE KEY UPDATE reports this
+		// atomically via rows-affected, with no extra round trip and no
+		// race window: 1 for the literal INSERT, 2 for a DUPLICATE KEY
+		// UPDATE that changed a value (ours always does -- it increments
+		// version unconditionally), 0 only if CLIENT_FOUND_ROWS were set
+		// and the row were set to values identical to its current ones,
+		// which cleat enables nowhere (see engine/schedule_errors.go and
+		// engine/mysql_ops.go for the same rows-affected caveat elsewhere
+		// in this codebase). So rows == 1 is an unambiguous "this call
+		// created it".
+		rows, execErr := p.db.Exec(r.Context(), plugin.Rebind(upsertKV.For(p.dialect), p.dialect),
 			tid, key, plugin.JSONColumn{Raw: value})
 		if execErr != nil {
 			p.logger.Error("kvstore: put (upsert)", "key", key, "error", execErr)
 			p.writeError(w, 500, "failed to store value")
 			return
 		}
+		if rows == 1 {
+			statusCode = 201 // created
+		} else {
+			statusCode = 200 // updated
+		}
 		err = p.db.QueryRow(r.Context(), plugin.Rebind(`SELECT version FROM kv_store WHERE tenant_id = $1 AND `+plugin.QuoteIdent("key", p.dialect)+` = $2`, p.dialect), tid, key).Scan(&newVersion)
 	} else {
 		err = p.db.QueryRow(r.Context(), plugin.Rebind(upsertKV.For(p.dialect), p.dialect),
 			tid, key, plugin.JSONColumn{Raw: value}).Scan(&newVersion)
+		if newVersion == 1 {
+			statusCode = 201 // created
+		} else {
+			statusCode = 200 // updated
+		}
 	}
 	if err != nil {
 		p.logger.Error("kvstore: put (upsert)", "key", key, "error", err)
 		p.writeError(w, 500, "failed to store value")
 		return
-	}
-
-	var statusCode int
-	if newVersion == 1 {
-		statusCode = 201 // created
-	} else {
-		statusCode = 200 // updated
 	}
 
 	w.Header().Set("ETag", strconv.Itoa(newVersion))
