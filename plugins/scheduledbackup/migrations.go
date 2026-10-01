@@ -72,11 +72,13 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					created_at     TIMESTAMP(6) NOT NULL DEFAULT NOW(6)
 				);
 
-				CREATE INDEX idx_backup_config_tenant_enabled_next
-					ON backup_config (tenant_id, enabled, next_run_at);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'backup_config' AND index_name = 'idx_backup_config_tenant_enabled_next');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_backup_config_tenant_enabled_next ON backup_config (tenant_id, enabled, next_run_at)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
-				CREATE INDEX idx_backup_history_tenant_config
-					ON backup_history (tenant_id, config_id);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'backup_history' AND index_name = 'idx_backup_history_tenant_config');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_backup_history_tenant_config ON backup_history (tenant_id, config_id)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'backup_config')

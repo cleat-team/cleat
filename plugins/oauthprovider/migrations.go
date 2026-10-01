@@ -63,8 +63,13 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					created_at     TIMESTAMP(6) NOT NULL DEFAULT NOW(6)
 				);
 
-				CREATE INDEX idx_oauth_sessions_tenant_user ON oauth_sessions(tenant_id, user_email);
-				CREATE UNIQUE INDEX idx_oauth_sessions_token ON oauth_sessions(session_token);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'oauth_sessions' AND index_name = 'idx_oauth_sessions_tenant_user');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_oauth_sessions_tenant_user ON oauth_sessions(tenant_id, user_email)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'oauth_sessions' AND index_name = 'idx_oauth_sessions_token');
+				SET @ddl := IF(@idx = 0, 'CREATE UNIQUE INDEX idx_oauth_sessions_token ON oauth_sessions(session_token)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'oauth_config')
@@ -129,9 +134,18 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 				ALTER TABLE oauth_sessions MODIFY COLUMN session_token VARCHAR(255) NULL;
-				DROP INDEX idx_oauth_sessions_token ON oauth_sessions;
-				CREATE INDEX idx_oauth_sessions_state ON oauth_sessions(state);
-				CREATE INDEX idx_oauth_sessions_token_hash ON oauth_sessions(token_hash);
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'oauth_sessions' AND index_name = 'idx_oauth_sessions_token');
+				SET @ddl := IF(@idx > 0, 'DROP INDEX idx_oauth_sessions_token ON oauth_sessions', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'oauth_sessions' AND index_name = 'idx_oauth_sessions_state');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_oauth_sessions_state ON oauth_sessions(state)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'oauth_sessions' AND index_name = 'idx_oauth_sessions_token_hash');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_oauth_sessions_token_hash ON oauth_sessions(token_hash)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('oauth_sessions') AND name = 'state')

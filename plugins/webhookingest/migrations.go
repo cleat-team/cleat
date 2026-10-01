@@ -60,10 +60,21 @@ func (p *Plugin) Migrations() []plugin.Migration {
 					processed   TINYINT(1) NOT NULL DEFAULT 0
 				);
 
-				CREATE INDEX idx_webhook_sources_tenant ON webhook_sources(tenant_id);
-				CREATE INDEX idx_webhook_events_source ON webhook_events(source_id);
-				CREATE INDEX idx_webhook_events_tenant ON webhook_events(tenant_id);
-				CREATE INDEX idx_webhook_events_processed ON webhook_events(processed);
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'webhook_sources' AND index_name = 'idx_webhook_sources_tenant');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_webhook_sources_tenant ON webhook_sources(tenant_id)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'webhook_events' AND index_name = 'idx_webhook_events_source');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_webhook_events_source ON webhook_events(source_id)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'webhook_events' AND index_name = 'idx_webhook_events_tenant');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_webhook_events_tenant ON webhook_events(tenant_id)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+				SET @idx := (SELECT COUNT(*) FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'webhook_events' AND index_name = 'idx_webhook_events_processed');
+				SET @ddl := IF(@idx = 0, 'CREATE INDEX idx_webhook_events_processed ON webhook_events(processed)', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'webhook_sources')
