@@ -176,6 +176,55 @@ INNER JOIN (
 ) cnt ON bc.sha256 = cnt.sha256;`,
 }
 
+// reconcileRefCounts recomputes blob_content.ref_count from a direct count of
+// blob_index rows, for every blob_content row, unconditionally. cleat#2250:
+// deleteChunksReturning above only decrements ref_count for blob_index rows
+// it is ITSELF deleting (expired or soft-deleted) -- a blob_index row removed
+// any other way (admin.drop_tenant's hard DELETE FROM blob_index WHERE
+// tenant_id = $1, migrations/postgres/001_schema.sql and
+// migrations/mssql/003_procedures.sql) is invisible to that join, so its
+// content's ref_count never reflects the loss. A blob shared with a surviving
+// tenant stays over-counted forever; a blob unique to the dropped tenant can
+// never reach ref_count <= 0 and so is never collected by phase 3, leaking
+// both the blob_content row and its backend bytes (memory or S3).
+//
+// This recomputes from the live table rather than tracking every removal
+// path's effect incrementally, which is what made the bug possible in the
+// first place: ANY future code path that deletes a blob_index row without
+// going through this package's own SQL is invisible to an incremental
+// decrement by construction, but cannot be invisible to a count of what is
+// actually there. Run after phase 2's own deletes (so newly-expired rows are
+// already gone and correctly excluded) and before phase 3's collection (which
+// depends on ref_count being accurate).
+//
+// A LEFT JOIN, not an inner one: a blob_content row with zero remaining
+// blob_index rows (every reference removed, by any mechanism) must reconcile
+// to 0, not be skipped because the join found nothing.
+var reconcileRefCounts = plugin.Query{
+	Default: `UPDATE blob_content bc
+SET ref_count = sub.cnt
+FROM (
+	SELECT bc2.sha256, COUNT(bi.sha256) AS cnt
+	FROM blob_content bc2
+	LEFT JOIN blob_index bi ON bi.sha256 = bc2.sha256
+	GROUP BY bc2.sha256
+) sub
+WHERE bc.sha256 = sub.sha256 AND bc.ref_count <> sub.cnt`,
+	MySQL: `UPDATE blob_content bc
+LEFT JOIN (
+	SELECT sha256, COUNT(*) AS cnt FROM blob_index GROUP BY sha256
+) sub ON sub.sha256 = bc.sha256
+SET bc.ref_count = COALESCE(sub.cnt, 0)
+WHERE bc.ref_count <> COALESCE(sub.cnt, 0)`,
+	MSSQL: `UPDATE bc
+SET bc.ref_count = COALESCE(sub.cnt, 0)
+FROM blob_content bc
+LEFT JOIN (
+	SELECT sha256, COUNT(*) AS cnt FROM blob_index GROUP BY sha256
+) sub ON sub.sha256 = bc.sha256
+WHERE bc.ref_count <> COALESCE(sub.cnt, 0)`,
+}
+
 var deleteBlobIndexExpired = plugin.Query{
 	Default: `DELETE FROM blob_index
 WHERE (expires_at < now() OR deleted_at IS NOT NULL)`,
