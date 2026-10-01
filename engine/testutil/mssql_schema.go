@@ -60,6 +60,84 @@ func applyMSSQLSchemaFile(t *testing.T, db *sql.DB) {
 	t.Helper()
 	applyMigrations(t, db, DialectMSSQL)
 	requireMSSQLPoliciesIntact(t, db)
+	selfHealMSSQLAdminPredicate(t, db)
+}
+
+// selfHealMSSQLAdminPredicate resets admin.rls_predicate_form to 'plain' if
+// it is already 'admin' with no live MSSQLAdminDB caller in this process
+// accounting for it.
+//
+// cleat#2831: a `go test -timeout` panic skips every pending t.Cleanup, so an
+// interrupted run can leave the predicate on 'admin' indefinitely --
+// mssqlReleaseAdminDB, the only path back to 'plain', never runs.
+// applyMSSQLCrossTenantOptIn (MSSQLAdminDB's own opt-in step) sets the
+// predicate to 'admin' unconditionally regardless of what it finds there, so
+// MSSQLAdminDB's own correctness never actually depended on starting from a
+// clean baseline. What breaks is anything that reads the predicate BEFORE
+// the first MSSQLAdminDB call in a process -- confirmed live while measuring
+// cleat#2252: TestMSSQLAdminDBRestoresThePlainPredicateAfterUse's own
+// precondition check failed against an otherwise fresh database, on an
+// unrelated-looking symptom, because a prior process's timeout had left this
+// dirty. Running the heal on every schema setup -- the one call virtually
+// every MSSQL test makes before anything else -- fixes that leftover state
+// before any test gets a chance to observe it, mirroring
+// requireMSSQLPoliciesIntact immediately above for a different invariant.
+//
+// Guarded on mssqlAdminRefs[baseDSN] == 0: a live caller elsewhere in this
+// same process (an overlapping or parallel test) legitimately holds the
+// predicate at 'admin', and resetting here would pull it out from under that
+// caller -- the same hazard TestMSSQLAdminDBRefcountsOverlappingCallers
+// exists to catch on the Cleanup side. Held under mssqlAdminMu for the whole
+// check-then-restore, the same discipline MSSQLAdminDB itself uses, so a
+// concurrent MSSQLAdminDB call can't slip in between the refcount read and
+// the restore.
+//
+// mssqlAdminRefs is PER-PROCESS, not per-database, so this guard cannot
+// distinguish "no process anywhere still needs 'admin'" from "no process
+// *in this one* does" -- a second `go test` process against the same server
+// (no -p 1 locally, or two sessions pointed at one instance) holds the
+// predicate exactly as a genuinely-interrupted one left it, and this
+// function cannot tell which. Measured (cleat-review, cleat#2831 review):
+// process A holds MSSQLAdminDB for 25s; process B's schema setup 8s later
+// heals the predicate out from under A, which is still live. CI cannot
+// reach this -- every MSSQL job runs `go test -p 1` against its own
+// server -- but a local run with two processes on one instance can, and the
+// log below says so rather than naming only the timeout cause.
+func selfHealMSSQLAdminPredicate(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if !mssqlHasCoreSecurityPolicies(t, db) {
+		return // no policies means no admin bypass has ever been installed
+	}
+
+	baseDSN := os.Getenv("CLEAT_TEST_MSSQL")
+	if baseDSN == "" {
+		baseDSN = "sqlserver://sa:CleatTest123!@localhost:1433?database=cleat"
+	}
+
+	mssqlAdminMu.Lock()
+	defer mssqlAdminMu.Unlock()
+	if mssqlAdminRefs[baseDSN] > 0 {
+		return
+	}
+
+	var form string
+	if err := db.QueryRow(`SELECT form FROM admin.rls_predicate_form`).Scan(&form); err != nil {
+		// migrations/mssql/001_schema.sql creates this table unconditionally,
+		// and applyMigrations (in applyMSSQLSchemaFile, immediately before
+		// this call) has already run -- so a query error here is a real
+		// failure, not an environmental precondition to tolerate.
+		t.Fatalf("read admin.rls_predicate_form: %v", err)
+	}
+	if form != "admin" {
+		return
+	}
+
+	t.Logf("admin.rls_predicate_form was 'admin' with no MSSQLAdminDB caller live in this " +
+		"process -- either an earlier `go test` process hit a timeout mid-use and " +
+		"skipped its Cleanup (cleat#2831), or another process sharing this database " +
+		"server currently holds it live (this guard is per-process, not per-database); " +
+		"restoring 'plain' before this test continues")
+	restoreMSSQLPlainPredicate(t, baseDSN)
 }
 
 // requireMSSQLPoliciesIntact fails loudly, with a fix, when the migrations
