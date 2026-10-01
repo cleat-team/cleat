@@ -466,43 +466,12 @@ func writeRunDeferred(buf *bytes.Buffer, indent string) {
 
 func generateExport(buf *bytes.Buffer, fd *analyzer.FuncDecl, qual types.Qualifier, target string) {
 	exportName := ToSnakeCase(fd.Name)
-	sig := fd.Type
 
-	params := sig.Params()
-	type argField struct {
-		GoName  string
-		GoType  string
-		JSONTag string
-	}
-	var fields []argField
-
-	startIdx := 0
-	if params != nil && params.Len() > 0 {
-		if analyzer.IsHostCallsType(params.At(0).Type()) {
-			startIdx = 1
-		}
-		for i := startIdx; i < params.Len(); i++ {
-			p := params.At(i)
-			fields = append(fields, argField{
-				GoName:  capitalize(p.Name()),
-				GoType:  types.TypeString(p.Type(), qual),
-				JSONTag: p.Name(),
-			})
-		}
-	}
-
-	results := sig.Results()
-	var hasResultValue, hasErrorReturn bool
-	if results != nil {
-		for i := 0; i < results.Len(); i++ {
-			typeName := types.TypeString(results.At(i).Type(), qual)
-			if typeName == "error" {
-				hasErrorReturn = true
-			} else {
-				hasResultValue = true
-			}
-		}
-	}
+	// analyzer.EntryPointFields is the single derivation of "what does this
+	// entry point bind, and by what name" -- generateDispatch below calls the
+	// same function, so the two binding emitters cannot independently drift
+	// the way cleat#1057 did when this was two separate computations.
+	fields, hasResultValue, hasErrorReturn := analyzer.EntryPointFields(fd, qual)
 
 	fmt.Fprintf(buf, "//go:wasmexport %s\n", exportName)
 	fmt.Fprintf(buf, "func %s(argsPtr unsafe.Pointer, argsLen uint32, outPtr unsafe.Pointer, maxOutLen uint32) int64 {\n", exportName)
@@ -698,13 +667,6 @@ func ToSnakeCase(s string) string {
 	}
 	return b.String()
 }
-
-func capitalize(s string) string {
-	if s == "" {
-		return s
-	}
-	return strings.ToUpper(s[:1]) + s[1:]
-}
 func generateDispatch(buf *bytes.Buffer, result *analyzer.AnalysisResult, qual types.Qualifier) {
 	buf.WriteString(`
 // cleatDispatch routes an entry point call from the main() dispatcher.
@@ -725,44 +687,10 @@ func cleatDispatch(entryName string, argsJSON []byte) []byte {
 		if fd == nil || fd.Type == nil {
 			continue
 		}
-		sig := fd.Type
-		params := sig.Params()
-		var fields []struct {
-			GoName  string
-			GoType  string
-			JSONTag string
-		}
-		startIdx := 0
-		if params != nil && params.Len() > 0 {
-			if analyzer.IsHostCallsType(params.At(0).Type()) {
-				startIdx = 1
-			}
-			for i := startIdx; i < params.Len(); i++ {
-				p := params.At(i)
-				fields = append(fields, struct {
-					GoName  string
-					GoType  string
-					JSONTag string
-				}{
-					GoName:  capitalize(p.Name()),
-					GoType:  types.TypeString(p.Type(), qual),
-					JSONTag: p.Name(),
-				})
-			}
-		}
-
-		results := sig.Results()
-		var hasResultValue, hasErrorReturn bool
-		if results != nil {
-			for i := 0; i < results.Len(); i++ {
-				typeName := types.TypeString(results.At(i).Type(), qual)
-				if typeName == "error" {
-					hasErrorReturn = true
-				} else {
-					hasResultValue = true
-				}
-			}
-		}
+		// Same derivation generateExport uses above -- see
+		// analyzer.EntryPointFields's own doc comment for why this must not
+		// be a second, independent computation of the binding shape.
+		fields, hasResultValue, hasErrorReturn := analyzer.EntryPointFields(fd, qual)
 
 		snakeName := ToSnakeCase(fd.Name)
 		fmt.Fprintf(buf, "\tcase %q, %q:\n", fd.Name, snakeName)

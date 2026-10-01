@@ -302,6 +302,23 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 	if err != nil || len(pluginDepsJSON) == 0 || string(pluginDepsJSON) == "null" {
 		pluginDepsJSON = []byte("{}")
 	}
+
+	// entry_point_schemas is nullable with no default (migrations/mssql/005).
+	// A Go nil interface value binds to SQL NULL; a non-nil one must be a
+	// Go string, not []byte -- go-mssqldb binds []byte as VARBINARY, and the
+	// implicit conversion into this NVARCHAR(MAX) column reinterprets the
+	// UTF-8 bytes as UTF-16, mangling them exactly as decodePluginDeps'
+	// doc comment records happening to plugin_deps before that write path was
+	// fixed. Passing a string here instead of fixing it after the fact.
+	var entryPointSchemasParam any
+	if len(def.EntryPointSchemas) > 0 {
+		raw, err := json.Marshal(def.EntryPointSchemas)
+		if err != nil {
+			return fmt.Errorf("deploy workflow def: marshal entry point schemas: %w", err)
+		}
+		entryPointSchemasParam = string(raw)
+	}
+
 	// Refuse to deploy over a definition owned by another tenant, and record
 	// this tenant as the owner.
 	//
@@ -335,10 +352,11 @@ func (s *MSSQLStore) DeployWorkflowDef(ctx context.Context, def *WorkflowDef) er
 			plugin_deps = @p6,
 			disabled_at = @p7,
 			gc_eligible = @p10,
-			max_history_length = @p9
-		WHEN NOT MATCHED THEN INSERT (name, version, wasm_bytes, abi_version, min_version, plugin_deps, disabled_at, tenant_id, max_history_length, gc_eligible)
-		     VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10);
-	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, string(pluginDepsJSON), def.DisabledAt, s.tenantID, def.MaxHistoryLength, def.GCEligible)
+			max_history_length = @p9,
+			entry_point_schemas = @p11
+		WHEN NOT MATCHED THEN INSERT (name, version, wasm_bytes, abi_version, min_version, plugin_deps, disabled_at, tenant_id, max_history_length, gc_eligible, entry_point_schemas)
+		     VALUES (@p1, @p2, @p3, @p4, @p5, @p6, @p7, @p8, @p9, @p10, @p11);
+	`, def.Name, def.Version, def.WASMBytes, def.ABIVersion, def.MinVersion, string(pluginDepsJSON), def.DisabledAt, s.tenantID, def.MaxHistoryLength, def.GCEligible, entryPointSchemasParam)
 	if err != nil {
 		return fmt.Errorf("deploy workflow def: %w", err)
 	}
@@ -354,12 +372,12 @@ func (s *MSSQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 	var err error
 	if name == "" {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas
 			FROM workflow_defs WHERE tenant_id = @p1 ORDER BY name, version DESC
 		`, s.tenantID)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
+			SELECT name, version, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas
 			FROM workflow_defs WHERE name = @p1 AND tenant_id = @p2 ORDER BY version DESC
 		`, name, s.tenantID)
 	}
@@ -372,9 +390,10 @@ func (s *MSSQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 	for rows.Next() {
 		var def WorkflowDef
 		var pluginDepsRaw []byte
+		var entryPointSchemasRaw []byte
 		var createdAt time.Time
 		if err := rows.Scan(&def.Name, &def.Version, &def.ABIVersion, &def.MinVersion,
-			&pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible); err != nil {
+			&pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw); err != nil {
 			return nil, fmt.Errorf("scan workflow def: %w", err)
 		}
 		def.CreatedAt = createdAt
@@ -384,6 +403,7 @@ func (s *MSSQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 		if def.PluginDeps == nil {
 			def.PluginDeps = make(map[string]string)
 		}
+		def.EntryPointSchemas = decodeEntryPointSchemas(s.log(), entryPointSchemasRaw, def.Name, def.Version)
 		defs = append(defs, def)
 	}
 	return defs, rows.Err()
@@ -393,13 +413,14 @@ func (s *MSSQLStore) ListWorkflowDefs(ctx context.Context, name string) ([]Workf
 func (s *MSSQLStore) GetWorkflowDef(ctx context.Context, name string, version int) (*WorkflowDef, error) {
 	var def WorkflowDef
 	var pluginDepsRaw []byte
+	var entryPointSchemasRaw []byte
 	var wasmBytes []byte
 	var createdAt time.Time
 	err := s.db.QueryRowContext(ctx, `
-		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible
+		SELECT name, version, wasm_bytes, abi_version, min_version, plugin_deps, created_at, disabled_at, gc_eligible, entry_point_schemas
 		FROM workflow_defs WHERE name = @p1 AND version = @p2 AND tenant_id = @p3
 	`, name, version, s.tenantID).Scan(&def.Name, &def.Version, &wasmBytes, &def.ABIVersion,
-		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible)
+		&def.MinVersion, &pluginDepsRaw, &createdAt, &def.DisabledAt, &def.GCEligible, &entryPointSchemasRaw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -414,6 +435,7 @@ func (s *MSSQLStore) GetWorkflowDef(ctx context.Context, name string, version in
 	if def.PluginDeps == nil {
 		def.PluginDeps = make(map[string]string)
 	}
+	def.EntryPointSchemas = decodeEntryPointSchemas(s.log(), entryPointSchemasRaw, name, version)
 	return &def, nil
 }
 
