@@ -40,10 +40,12 @@ import (
 // second worker's reclaim would (same UPDATE as the fence test), then starts
 // a second worker to replay it. Worker A's dispatch goroutine is abandoned,
 // not cancelled -- a real crash does not get to finish its HTTP request
-// either -- and released only in cleanup, after the assertions that matter
-// have already run, so the leaked goroutine cannot complete behind
-// workerB's row ownership and interfere with it (and httptest.Server.Close
-// would hang forever waiting for it otherwise).
+// either. For the "resolved" and "cannot-say" cases it is released only in
+// cleanup, after the assertions that matter have already run, so the leaked
+// goroutine cannot complete behind workerB's row ownership and interfere
+// with it (and httptest.Server.Close would hang forever waiting for it
+// otherwise). The "not-sent" case releases it deliberately earlier -- see
+// below.
 //
 // All three rows of cleat#1984's table are covered, including 500 ("cannot
 // say") -- added in round 2 after cleat-review and the coordinator
@@ -56,6 +58,15 @@ import (
 // 500 subtest pins that an [AMBIGUOUS] failure is NOT retried and the run
 // ends "failed" with exactly one charge -- the case that would have caught
 // the original gap.
+//
+// Round 3 (coordinator): "sequential duplicates prove nothing, because the
+// first finishes before the second one looks." The "not-sent" case's final
+// assertion does not let that happen -- it unblocks the orphaned original
+// only after the retry has already completed the workflow, so the two
+// requests were genuinely in flight together, and confirms the service
+// served the late original as an ordinary successful charge. That is the
+// double-execution hazard docs/durable-calls.md documents, made observable
+// rather than asserted from a comment.
 func TestAmbiguityLookupEndToEnd_ResolvesACrashedCall(t *testing.T) {
 	if os.Getenv("CLEAT_TEST_POSTGRES") == "" && os.Getenv("CLEAT_TEST_DB") == "" {
 		t.Skip("CLEAT_TEST_POSTGRES not set, skipping the database-backed ambiguity-lookup acceptance test")
@@ -162,7 +173,9 @@ func testAmbiguityLookupEndToEnd(t *testing.T, caseName string, lookupStatus int
 	calls := &recordedCallsWithKeys{}
 	chargeHung := make(chan struct{})
 	unblockCharge := make(chan struct{})
-	var chargeHungOnce sync.Once
+	chargeOrphanedServed := make(chan int, 1)
+	var chargeHungOnce, unblockOnce sync.Once
+	unblock := func() { unblockOnce.Do(func() { close(unblockCharge) }) }
 
 	svc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		op := strings.TrimPrefix(r.URL.Path, "/call/")
@@ -178,14 +191,22 @@ func testAmbiguityLookupEndToEnd(t *testing.T, caseName string, lookupStatus int
 				// hand-written.
 				chargeHungOnce.Do(func() { close(chargeHung) })
 				<-unblockCharge
-				// By the time this is allowed to continue, the row has moved
-				// on to worker B (or completed). Respond so the handler
-				// returns and the leaked goroutine stops rather than
-				// completing a meaningful write; CompleteCallIntent's own
-				// worker/generation fencing is what actually protects
-				// workerB's row if this does race it.
+				// By the time this is allowed to continue, the row may have
+				// moved on to worker B (or completed) -- CompleteCallIntent's
+				// own worker/generation fencing is what protects workerB's
+				// row from this goroutine's engine-side write, if it races
+				// it. But nothing fences the SERVICE side: this fixture has
+				// no idempotency-key deduplication of its own, so from the
+				// service's point of view this is just another request, and
+				// it is served exactly like one. That is the point --
+				// chargeOrphanedServed lets the "not-sent" case observe it
+				// (coordinator, cleat#1984 round 3: "sequential duplicates
+				// prove nothing, because the first finishes before the
+				// second one looks" -- this is what makes the two
+				// overlap instead).
 				w.Header().Set("Content-Type", "application/json")
 				fmt.Fprint(w, `{"charge_id":"ch_orphaned"}`)
+				chargeOrphanedServed <- http.StatusOK
 				return
 			}
 			// The guest's own retry -- a fresh request, a fresh step, and (the
@@ -203,10 +224,10 @@ func testAmbiguityLookupEndToEnd(t *testing.T, caseName string, lookupStatus int
 		}
 	}))
 	defer svc.Close()
-	// Runs before svc.Close() (LIFO): unblocks the hung handler so Close does
-	// not wait forever for a request this test deliberately never lets
-	// finish on its own.
-	defer func() { close(unblockCharge) }()
+	// Runs before svc.Close() (LIFO): unblocks the hung handler, if the
+	// "not-sent" case below has not already done so, so Close does not wait
+	// forever for a request this test might otherwise never let finish.
+	defer unblock()
 
 	oldOps := *writeAheadIntentOps
 	*writeAheadIntentOps = "billing.charge"
@@ -312,6 +333,33 @@ func testAmbiguityLookupEndToEnd(t *testing.T, caseName string, lookupStatus int
 			t.Error("the guest's retry reused the original attempt's idempotency key -- it must " +
 				"not, because it is a new DurableCall at a new step (engine/callintent.go's " +
 				"resolveAmbiguity documents exactly this)")
+		}
+
+		// coordinator, cleat#1984 round 3: a sequential pair of duplicate
+		// requests proves nothing about the double-execution hazard, because
+		// the first has to finish before the second can even be observed to
+		// exist. The point of this subtest is that it does NOT: the retry
+		// above was dispatched and completed, and the workflow finished,
+		// while the ORIGINAL request was still sitting unanswered in the
+		// service's handler -- genuinely overlapping, not sequential. Only
+		// now is it unblocked, and the service -- which has no
+		// idempotency-key fencing of its own, exactly the gap
+		// docs/durable-calls.md's "404 answer is a PROMISE" paragraph is
+		// about -- serves it as an ordinary, successful, SEPARATE charge.
+		// That is the hazard made observable: not "two requests were sent"
+		// (which a sequential test could also show), but "two requests were
+		// in flight together and both succeeded".
+		unblock()
+		select {
+		case code := <-chargeOrphanedServed:
+			if code != http.StatusOK {
+				t.Errorf("the orphaned original, once unblocked, got %d -- if this fixture's "+
+					"service refused it, something else changed; it was built with no "+
+					"idempotency-key fencing specifically so this would succeed", code)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("the orphaned original never completed after being unblocked -- the overlap " +
+				"this subtest exists to demonstrate was not actually observed")
 		}
 	case "cannot-say":
 		// cleat-review + coordinator, round 2: without this subtest and
