@@ -144,11 +144,21 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    # cleat#2895: every guard step's own failure is captured into this file
+    # instead of failing the step (see "Aggregate guard results" at the end
+    # of this job) -- a job-run-scoped path under the runner's own temp dir,
+    # never reused across runs.
+    env:
+      LINT_FAILURES_FILE: ${{ runner.temp }}/lint-failures.txt
     steps:
       - uses: actions/checkout@v7
 
       - name: CI package-coverage guard
-        run: scripts/check-ci-package-coverage.sh
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "CI package-coverage guard" >> "$LINT_FAILURES_FILE"
+          scripts/check-ci-package-coverage.sh
+          LINT_GUARD_EOF
 
       # Two migrations sharing a version number are ONE row in
       # schema_migrations, because migration/runner.go takes the version from
@@ -161,6 +171,7 @@ jobs:
       #
       # Pure text, no Go needed, so it belongs here rather than in a test job.
       - name: Migration version-number guard
+        if: always()
         # --self-test FIRST, and it is not ceremony. On a clean tree with no
         # exemptions, "no new collisions" is the same output a check that does
         # nothing would print, so passing proves only that the guard did not
@@ -170,8 +181,10 @@ jobs:
         # only have claimed in a PR description, about a tree that no longer
         # exists.
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Migration version-number guard" >> "$LINT_FAILURES_FILE"
           python3 scripts/check_migration_numbers.py --self-test
           python3 scripts/check_migration_numbers.py
+          LINT_GUARD_EOF
 
       # Required-context guard. Distinct from the package-coverage guard above,
       # which checks the test-go matrix against the FILESYSTEM: this one checks
@@ -183,9 +196,12 @@ jobs:
       # `Test Go (...)` contexts. A guard that cannot see the state it looks
       # for prints a confident green.
       - name: Required-context guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Required-context guard" >> "$LINT_FAILURES_FILE"
           scripts/check-required-contexts.py --self-test
           scripts/check-required-contexts.py
+          LINT_GUARD_EOF
 
       # go.work's `go` directive must be >= every module it uses, and dependabot
       # raises those module directives while having no updater for go.work. So
@@ -200,9 +216,12 @@ jobs:
       # rather than 0, so a use block this script cannot read is reported
       # instead of being read as a clean workspace.
       - name: go.work floor guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "go.work floor guard" >> "$LINT_FAILURES_FILE"
           scripts/check-go-work-floor.sh --self-test
           scripts/check-go-work-floor.sh
+          LINT_GUARD_EOF
 
       # go.mod's `go` directive is the project's real Go minimum. Two
       # onboarding files restate it in prose instead of reading it --
@@ -211,9 +230,12 @@ jobs:
       # a minor version behind go.mod before anyone noticed (cleat#2070).
       # Neither drift breaks a build, so nothing else catches it.
       - name: Onboarding Go version guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Onboarding Go version guard" >> "$LINT_FAILURES_FILE"
           scripts/check-onboarding-go-version.sh --self-test
           scripts/check-onboarding-go-version.sh
+          LINT_GUARD_EOF
 
       # ONE source for the Go toolchain: go.mod's `toolchain` line (cleat#2216). CI floated on
       # `go-version: stable` (which resolved to 1.27.1 the day #2215's panic appeared) and one workflow sat
@@ -221,9 +243,12 @@ jobs:
       # reads go-version-file, and every `FROM golang:` is the exact toolchain. Exit 2 (UNMEASURED) is a
       # failure of the check and fails the job just the same.
       - name: Go toolchain pins guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Go toolchain pins guard" >> "$LINT_FAILURES_FILE"
           python3 scripts/check-go-toolchain-pins.py --self-test
           python3 scripts/check-go-toolchain-pins.py
+          LINT_GUARD_EOF
 
       # Secret scanning. Nothing in this repo looked for credentials until
       # 2026-09-05: gosec's G101 is not that tool (it fired 3 times here and was
@@ -239,7 +264,9 @@ jobs:
       # Pinned, like golangci-lint in lint-go, so a new upstream rule cannot turn
       # this red on a commit that changed nothing.
       - name: Secret scan (gitleaks)
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Secret scan (gitleaks)" >> "$LINT_FAILURES_FILE"
           set -euo pipefail
           go install github.com/zricethezav/gitleaks/v8@v8.30.1
           # Invoked by absolute path, not by name. `go install` writes to
@@ -293,6 +320,7 @@ jobs:
           fi
           "$gopath/bin/gitleaks" dir . \
             --config .gitleaks.toml --no-banner --exit-code 1
+          LINT_GUARD_EOF
 
       # A t.Skip is reported by `go test` as neither a pass nor a failure, and
       # so is read as a pass. That mechanism hid four separate defects found in
@@ -301,6 +329,7 @@ jobs:
       # crash-looping while the job reported success. The baseline records
       # every skip that exists today; a new one, or a growing one, fails here.
       - name: Conditional-skip guard
+        if: always()
         # --self-test FIRST, and it is not ceremony here -- it is the thing
         # whose absence let cleat#1740 live in the committed baseline. This
         # guard compares its own scan against a baseline generated from that
@@ -314,8 +343,10 @@ jobs:
         # both directions: a skip inside a method belongs to that method, and
         # no skip may be credited to the plain function above it.
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Conditional-skip guard" >> "$LINT_FAILURES_FILE"
           scripts/check-skips.sh --self-test
           scripts/check-skips.sh
+          LINT_GUARD_EOF
 
       # A test double that never reads the parameter its test is named after
       # cannot fail for the reason the test exists. That is not hypothetical:
@@ -330,6 +361,7 @@ jobs:
       # rather than the parameter, so it does not replace sabotaging the read
       # and running the suite. CONTRIBUTING.md carries that procedure.
       - name: Blind test-double guard
+        if: always()
         # --self-test FIRST, same as the guards below. Nothing asserted what
         # findblinddoubles.go attributes until cleat#1764: the baseline is
         # regenerated from its own scan, so a rule that silently stopped
@@ -338,8 +370,10 @@ jobs:
         # blind to the parameter its test is named for, and one that reads it --
         # and neither "reports everything" nor "reports nothing" survives it.
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Blind test-double guard" >> "$LINT_FAILURES_FILE"
           scripts/check-blind-doubles.sh --self-test
           scripts/check-blind-doubles.sh
+          LINT_GUARD_EOF
 
       # Added by WS-1 rather than WS-3, who own this file, because an unwired
       # guard is worse than none -- it reads as coverage nobody has. Said here
@@ -351,7 +385,11 @@ jobs:
       # and how the Python end-to-end test's coverage stayed one method wide
       # (3.205). The baseline can only shrink; a rise is reported, not failed.
       - name: SDK host-call coverage guard
-        run: scripts/sdk-host-call-coverage.py --check
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "SDK host-call coverage guard" >> "$LINT_FAILURES_FILE"
+          scripts/sdk-host-call-coverage.py --check
+          LINT_GUARD_EOF
 
       # The EXECUTED half, which is a different question and the one that
       # matters. The guard above is at 100% on all five SDKs and says only that
@@ -371,6 +409,7 @@ jobs:
       # Same file-ownership note as above: this is WS-3's file, and the guard
       # is unwired without the step.
       - name: SDK host-call EXECUTED coverage guard
+        if: always()
         # The negative control runs in CI, every time, deliberately.
         #
         # This step names a mode in a YAML file nobody re-reads. Until
@@ -381,15 +420,21 @@ jobs:
         # guard whose own invocation cannot be shown to fail is the thing this
         # step exists to prevent.
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "SDK host-call EXECUTED coverage guard" >> "$LINT_FAILURES_FILE"
           if scripts/sdk-host-call-coverage.py --a-mode-that-does-not-exist >/dev/null 2>&1; then
             echo "argument validation is broken: an unknown mode exited 0," >&2
             echo "so a typo in the line below would pass silently." >&2
             exit 1
           fi
           scripts/sdk-host-call-coverage.py --check-executed
+          LINT_GUARD_EOF
 
       - name: ABI doc/code consistency guard
-        run: scripts/check-doc-consistency.sh
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "ABI doc/code consistency guard" >> "$LINT_FAILURES_FILE"
+          scripts/check-doc-consistency.sh
+          LINT_GUARD_EOF
 
       # cleat#2725: the postgres schema rebaseline (cleat#2059, cleat#2416)
       # collapsed every numbered migration into four generated files. A
@@ -397,9 +442,12 @@ jobs:
       # this catches the next one, not just the 43 fixed in the PR that
       # added it.
       - name: Postgres migration citation guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Postgres migration citation guard" >> "$LINT_FAILURES_FILE"
           scripts/check-postgres-migration-citations.py --self-test
           scripts/check-postgres-migration-citations.py
+          LINT_GUARD_EOF
 
       # The Python SDK's own surface, which the guard above deliberately
       # excludes: an SDK states a different denominator from the engine's and
@@ -408,9 +456,12 @@ jobs:
       # correct tree "every number agrees" and "the extractor matched nothing"
       # print the same kind of success.
       - name: Python SDK surface guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Python SDK surface guard" >> "$LINT_FAILURES_FILE"
           scripts/check-python-sdk-surface.py --self-test
           scripts/check-python-sdk-surface.py
+          LINT_GUARD_EOF
 
       # Plugin tables share one flat, unqualified namespace, and CREATE TABLE
       # IF NOT EXISTS checks the NAME, not the shape -- so a second plugin
@@ -419,9 +470,12 @@ jobs:
       # --self-test first: on a clean tree "no collisions" and "the scan is
       # broken" print the same kind of success.
       - name: Plugin table namespace guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Plugin table namespace guard" >> "$LINT_FAILURES_FILE"
           scripts/check-plugin-table-namespace.py --self-test
           scripts/check-plugin-table-namespace.py
+          LINT_GUARD_EOF
 
       # SQL Server has no LIMIT clause; a query built with one 500s there
       # outright -- "Incorrect syntax near 'LIMIT'". #2191 and #2198 fixed
@@ -430,9 +484,12 @@ jobs:
       # first: on a clean tree "no unguarded LIMIT" and "the scan matched
       # nothing" print the same kind of success.
       - name: Plugin SQL LIMIT portability guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Plugin SQL LIMIT portability guard" >> "$LINT_FAILURES_FILE"
           scripts/check-plugin-sql-limit-portability.py --self-test
           scripts/check-plugin-sql-limit-portability.py
+          LINT_GUARD_EOF
 
       # plugin.Rebind is the identity for MySQL now (cleat#2259): the $N -> ?
       # rewrite happens only inside plugin.RebindArgs. A caller that hands
@@ -445,9 +502,12 @@ jobs:
       # with exactly that shape as the known-positive, so this guard cannot
       # repeat the mistake it exists to prevent.
       - name: No raw plugin.Rebind guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "No raw plugin.Rebind guard" >> "$LINT_FAILURES_FILE"
           scripts/check-no-raw-rebind.py --self-test
           scripts/check-no-raw-rebind.py
+          LINT_GUARD_EOF
 
       # MSSQLStore.WithTenant copies the struct but not the pool: the pool's
       # connector still carries the ORIGINAL tenant's SESSION_CONTEXT, so a
@@ -456,9 +516,12 @@ jobs:
       # (cleat#2210). Structural rather than a one-time count, so a future
       # method with this shape fails here too, not just the ones fixed today.
       - name: MSSQL WithTenant plain-read guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "MSSQL WithTenant plain-read guard" >> "$LINT_FAILURES_FILE"
           scripts/check-mssql-tenant-scoped-reads.py --self-test
           scripts/check-mssql-tenant-scoped-reads.py
+          LINT_GUARD_EOF
 
       # Three workstreams append sections to IMPROVEMENT-PLAN.md at once, each
       # picking the next free number against a develop that has already moved.
@@ -472,9 +535,12 @@ jobs:
       # block check is a classifier, and a classifier that returned "fine" for
       # every input would pass the real check silently forever.
       - name: Plan section-number guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Plan section-number guard" >> "$LINT_FAILURES_FILE"
           scripts/check-section-numbers.sh --self-test
           scripts/check-section-numbers.sh
+          LINT_GUARD_EOF
 
       # IMPROVEMENT-PLAN.md's status markers are read by hand, by the archiver,
       # and by the scan CLAUDE.md publishes. The scan was two clauses joined by
@@ -492,7 +558,11 @@ jobs:
       # is reverted rather than being rescued by the other, plus a check that the
       # copy of the scan published in CLAUDE.md still agrees with the script.
       - name: Plan status-marker guard
-        run: scripts/check-plan-markers.py --self-test
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Plan status-marker guard" >> "$LINT_FAILURES_FILE"
+          scripts/check-plan-markers.py --self-test
+          LINT_GUARD_EOF
 
       # A tracked package-lock.json's copy of a `file:`-linked local package
       # (version, peerDependencies) drifting from that package's own
@@ -507,9 +577,12 @@ jobs:
       # tree "nothing drifted" and "the scan matched nothing" print the same
       # kind of success.
       - name: Local package lockfile mirror guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Local package lockfile mirror guard" >> "$LINT_FAILURES_FILE"
           scripts/check-local-package-mirrors.py --self-test
           scripts/check-local-package-mirrors.py
+          LINT_GUARD_EOF
 
       # Plan cross-references, after cleat#1727 split the open sections into
       # IMPROVEMENT-PLAN.d/. R3 exists because breaking a §N.M is the failure
@@ -533,7 +606,11 @@ jobs:
       # rows. It drives a deliberately headings-only reading and FAILS if that
       # reading stops disagreeing, so a regression to one namespace cannot pass.
       - name: Plan cross-reference guard (self-test only, see above)
-        run: scripts/check-plan-references.py --self-test
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Plan cross-reference guard (self-test only, see above)" >> "$LINT_FAILURES_FILE"
+          scripts/check-plan-references.py --self-test
+          LINT_GUARD_EOF
 
 
       # Two migration files in one dialect must not share a version number.
@@ -548,9 +625,12 @@ jobs:
       # not work" are the same output, so this needs a KNOWN-POSITIVE rather
       # than only a negative control.
       - name: Migration version guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Migration version guard" >> "$LINT_FAILURES_FILE"
           scripts/check-migration-versions.sh --self-test
           scripts/check-migration-versions.sh
+          LINT_GUARD_EOF
 
       # Nothing refused a large tracked blob on SIZE. `.gitignore` gained
       # `bin/` on 2026-08-09 after 332MB of tracked build products; cleat#1838
@@ -562,9 +642,12 @@ jobs:
       # #1858), admits this repo's two deliberate 19.3MB fixtures and would
       # have refused the accident by more than 2x. cleat#1859.
       - name: Tracked blob size guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Tracked blob size guard" >> "$LINT_FAILURES_FILE"
           scripts/check-tracked-blob-size.sh --self-test
           scripts/check-tracked-blob-size.sh
+          LINT_GUARD_EOF
 
       # A declaration inserted between a doc comment and the declaration it
       # documents. Go attaches doc comments by ADJACENCY, so the whole block
@@ -589,8 +672,9 @@ jobs:
       # shallow (depth 1, the merge commit), so `origin/develop` does not exist
       # here and the guard would report UNMEASURED for every PR.
       - name: Doc-comment reattachment guard
-        if: github.event_name == 'pull_request'
+        if: always() && (github.event_name == 'pull_request')
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Doc-comment reattachment guard" >> "$LINT_FAILURES_FILE"
           # --self-test first, and it is the half that matters. On a tree where
           # nothing moved, "no declaration lost its doc comment" is the same
           # output a guard that did nothing would print, so the self-test is
@@ -604,6 +688,7 @@ jobs:
           git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }}
           python3 scripts/check-doc-comment-reattachment.py \
             ${{ github.event.pull_request.base.sha }} HEAD
+          LINT_GUARD_EOF
 
       # The readiness scorecard is the document that answers "is cleat ready",
       # and it was the only doc-vs-reality surface with no guard. Measured on
@@ -617,11 +702,14 @@ jobs:
       # and a link whose text and target disagree -- and to stay quiet on the
       # rows that are correct.
       - name: Readiness scorecard agrees with the tracker
+        if: always()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Readiness scorecard agrees with the tracker" >> "$LINT_FAILURES_FILE"
           python3 scripts/check-readiness-doc.py --self-test
           python3 scripts/check-readiness-doc.py
+          LINT_GUARD_EOF
 
       # cleat#2513: the four-playbook correction pass (#2050-#2053) corrected
       # each playbook's own body and never touched docs/playbooks/README.md,
@@ -636,9 +724,12 @@ jobs:
       # script's self_test() for the restore-and-diff falsification this was
       # verified with before being wired in here.
       - name: Playbook README interface and build claims
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Playbook README interface and build claims" >> "$LINT_FAILURES_FILE"
           scripts/check-playbook-claims.py --self-test
           scripts/check-playbook-claims.py
+          LINT_GUARD_EOF
 
       # The guard above can only ever run against a pre-merge base, so the
       # post-merge run on develop is the only place a merge-created collision
@@ -650,9 +741,12 @@ jobs:
       # change to the push-trigger detection is caught here rather than by a
       # workflow silently losing its concurrency coverage.
       - name: Workflow concurrency guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Workflow concurrency guard" >> "$LINT_FAILURES_FILE"
           scripts/check-workflow-concurrency.sh --self-test
           scripts/check-workflow-concurrency.sh
+          LINT_GUARD_EOF
 
       # The concurrency guard above keeps a run from being DISCARDED. This one
       # keeps a run from never being CREATED: a workflow that filters
@@ -661,9 +755,14 @@ jobs:
       # the unfiltered workflows' checks. Checks that never registered are not
       # pending, so no downstream count can see it.
       - name: Workflow PR-trigger guard
-        run: scripts/check-workflow-pr-triggers.sh
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Workflow PR-trigger guard" >> "$LINT_FAILURES_FILE"
+          scripts/check-workflow-pr-triggers.sh
+          LINT_GUARD_EOF
 
       - name: Setup Go
+        if: always()
         uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
@@ -671,7 +770,11 @@ jobs:
       # Must run after Setup Go (it shells out to `go mod tidy -diff`), unlike
       # the package-coverage guard above, which is pure bash.
       - name: Cross-module go.mod tidiness guard
-        run: scripts/check-go-mod-tidy.sh
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Cross-module go.mod tidiness guard" >> "$LINT_FAILURES_FILE"
+          scripts/check-go-mod-tidy.sh
+          LINT_GUARD_EOF
 
       # cleat#2626: examples/order-lifecycle/{webhookingestclient,emailclient}
       # are `cleat-gen plugin-client` output, committed rather than built at
@@ -685,9 +788,12 @@ jobs:
       # the known-positive that separates "no drift" from "this check
       # compares nothing".
       - name: Generated plugin-client freshness guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Generated plugin-client freshness guard" >> "$LINT_FAILURES_FILE"
           scripts/check-generated-plugin-clients.sh --self-test
           scripts/check-generated-plugin-clients.sh
+          LINT_GUARD_EOF
 
       # One contract for the non-workflow entities (cleat#1702): created_at,
       # updated_at, disabled_at, and none of the four older spellings of
@@ -707,9 +813,12 @@ jobs:
       # self-test builds a synthetic entity that breaks each clause separately
       # and requires a separate red for each.
       - name: Entity contract guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Entity contract guard" >> "$LINT_FAILURES_FILE"
           python3 scripts/check-entity-contract.py --self-test
           python3 scripts/check-entity-contract.py
+          LINT_GUARD_EOF
 
       # Catches code that is written, tested, passing, and wired to nothing --
       # which a test suite cannot catch, because the tests pass precisely
@@ -719,6 +828,7 @@ jobs:
       # "69" from 2026-08-30 and was 60 when checked on 2026-09-16:
       #   grep -c . scripts/deadcode-baseline.txt
       - name: Test-only code guard
+        if: always()
         # --self-test FIRST, same as the guards above, and for the reason this
         # step itself demonstrated: until cleat#1707 this guard printed
         #   ERROR: could not install honnef.co/go/tools/cmd/staticcheck@...
@@ -728,8 +838,10 @@ jobs:
         # exit status to tell them apart. The self-test asserts the second case
         # now fails.
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Test-only code guard" >> "$LINT_FAILURES_FILE"
           scripts/check-test-only-code.sh --self-test
           scripts/check-test-only-code.sh
+          LINT_GUARD_EOF
 
       # Sibling to the guard above: that one catches code called only from
       # tests (staticcheck U1000, -tests=false), but U1000 never reports
@@ -744,7 +856,11 @@ jobs:
       # production, ever spells. Baseline records the existing backlog (20
       # entries, all verified by hand -- see the commit that added it).
       - name: Dead-export code guard
-        run: scripts/check-dead-exports.sh
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Dead-export code guard" >> "$LINT_FAILURES_FILE"
+          scripts/check-dead-exports.sh
+          LINT_GUARD_EOF
 
       # cleat#2007. Two checks, and both are needed: `check` is syntax, and it passes a rule that can
       # never fire. `test rules` runs alerts_test.yml, which feeds synthetic series through the rules and
@@ -753,12 +869,15 @@ jobs:
       # explains is suppressed. Removing the suppression, or turning max() into min(), fails it (verified
       # by hand when it was written). The image is pinned: the rule language moves.
       - name: Alert rules (promtool check and unit tests)
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Alert rules (promtool check and unit tests)" >> "$LINT_FAILURES_FILE"
           set -euo pipefail
           p() { docker run --rm --entrypoint promtool -v "$PWD/monitoring/prometheus:/p:ro" prom/prometheus:v3.14.0 "$@"; }
           p check config /p/prometheus.yml
           p check rules /p/alerts.yml
           p test rules /p/alerts_test.yml
+          LINT_GUARD_EOF
 
       # Third sibling, and it closes the one shape the other two structurally
       # cannot see. U1000 skips EXPORTED identifiers -- correct for a library,
@@ -779,7 +898,11 @@ jobs:
       # into it. Baseline is 14 entries -- findings in cmd/'s OWN files only; the
       # whole-program set is ~400 and is the other two guards' ground.
       - name: Unreachable-from-main guard
-        run: scripts/check-unreachable-main.sh
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Unreachable-from-main guard" >> "$LINT_FAILURES_FILE"
+          scripts/check-unreachable-main.sh
+          LINT_GUARD_EOF
 
       # cleat#1412. The script has existed since #618 on 2026-09-03 and no
       # workflow had ever invoked it -- `git log -S 'check-hostfunc-budget'
@@ -798,9 +921,14 @@ jobs:
       #   clean                                      -> OK, 63 host functions, exit 0
       #   one raw linker.FuncWrap in wasmtime_wasi.go -> FAIL naming the line, exit 1
       - name: Host-function epoch-budget guard
-        run: scripts/check-hostfunc-budget.sh
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Host-function epoch-budget guard" >> "$LINT_FAILURES_FILE"
+          scripts/check-hostfunc-budget.sh
+          LINT_GUARD_EOF
 
       - name: Setup Python
+        if: always()
         uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -822,7 +950,9 @@ jobs:
       # behind it, so making a workflow parse is where the investigation
       # starts, not where it ends.)
       - name: Workflow files parse
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Workflow files parse" >> "$LINT_FAILURES_FILE"
           set -euo pipefail
           pip install --quiet pyyaml
           python3 - <<'PY'
@@ -846,6 +976,7 @@ jobs:
           print(f"checked {len(files)} workflow files, {len(bad)} broken")
           sys.exit(1 if bad else 0)
           PY
+          LINT_GUARD_EOF
 
       # Six structural guards over the workflows, each catching a CLASS that
       # has already cost a session to find one instance of by hand:
@@ -907,9 +1038,12 @@ jobs:
       # pyyaml comes from the "Workflow files parse" step above; this step must
       # stay after it.
       - name: Workflow integrity guards
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Workflow integrity guards" >> "$LINT_FAILURES_FILE"
           scripts/check-workflow-guards.py --self-test
           scripts/check-workflow-guards.py
+          LINT_GUARD_EOF
 
       # Dependabot coverage. Two directions, both silent without this: an entry
       # naming a directory that does not exist is skipped by Dependabot with no
@@ -929,9 +1063,12 @@ jobs:
       # run: doctored configs the guard must report. A guard that passes a good
       # tree has demonstrated nothing, because every broken version does that.
       - name: Dependabot coverage guard
+        if: always()
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Dependabot coverage guard" >> "$LINT_FAILURES_FILE"
           python3 scripts/check_dependabot_coverage.py --self-test
           python3 scripts/check_dependabot_coverage.py
+          LINT_GUARD_EOF
 
       # The skip-budget guard's own controls. It runs per test job against that
       # job's report; this runs its two KNOWN CASES -- a build failure must be
@@ -939,7 +1076,11 @@ jobs:
       # shortfall -- so that a change breaking either is caught here rather
       # than by a confusing message on someone else's PR (cleat#1388).
       - name: Skip budget guard self-test
-        run: scripts/check-skip-budget.sh --self-test
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Skip budget guard self-test" >> "$LINT_FAILURES_FILE"
+          scripts/check-skip-budget.sh --self-test
+          LINT_GUARD_EOF
 
       # Ruff, promoted back into this required job on 2026-08-08. It ran here
       # before under `continue-on-error: true`, which meant it could not fail a
@@ -958,12 +1099,21 @@ jobs:
       # above now fails this job if anyone adds one to a required job or any of
       # its steps.
       - name: Install ruff
-        run: pip install ruff==0.16.2
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Install ruff" >> "$LINT_FAILURES_FILE"
+          pip install ruff==0.16.2
+          LINT_GUARD_EOF
 
       - name: Ruff check
-        run: ruff check python-sdk/
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Ruff check" >> "$LINT_FAILURES_FILE"
+          ruff check python-sdk/
+          LINT_GUARD_EOF
 
       - name: Setup Rust
+        if: always()
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -981,9 +1131,11 @@ jobs:
       # Bump deliberately, reading the release notes for new checks, rather than
       # inheriting one from an image refresh.
       - name: Install lint tools
+        if: always()
         env:
           SHELLCHECK_VERSION: v0.11.0
         run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Install lint tools" >> "$LINT_FAILURES_FILE"
           set -euo pipefail
           # Downloaded to a file, not piped into tar, and --retry-all-errors is
           # not optional. Both halves matter; measured with curl 8.7.1 against a
@@ -1023,6 +1175,7 @@ jobs:
           tar -xJf /tmp/shellcheck.tar.xz -C /tmp
           sudo install "/tmp/shellcheck-${SHELLCHECK_VERSION}/shellcheck" /usr/local/bin/shellcheck
           shellcheck --version
+          LINT_GUARD_EOF
 
       # ShellCheck, promoted into this required job on 2026-08-08 -- the last
       # of the two linters that ran here under `continue-on-error: true`. Its 7
@@ -1036,6 +1189,7 @@ jobs:
       # dependency fails loudly, which is the good case; the bad case is the
       # one this file is otherwise about.
       - name: ShellCheck
+        if: always()
         # .githooks/* included since 2026-09-04: the pre-commit hook shipped in
         # #706 with a defect and nothing linted it. It sources
         # scripts/section-blocks.sh, which is an input here, so SC1091 resolves.
@@ -1056,7 +1210,10 @@ jobs:
         # descends into .claude/worktrees/, a second copy of the repo. Same
         # reason CLAUDE.md gives for preferring it in anything that reasons about
         # "the repo".
-        run: git ls-files '*.sh' '.githooks/*' | xargs shellcheck
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "ShellCheck" >> "$LINT_FAILURES_FILE"
+          git ls-files '*.sh' '.githooks/*' | xargs shellcheck
+          LINT_GUARD_EOF
 
       # CGO on. With CGO_ENABLED=0 this step analysed a build that is not the
       # one we ship: `//go:build cgo` takes eight files out of ./engine/,
@@ -1072,19 +1229,35 @@ jobs:
       # reported it. Vet is clean across ./... with CGO on, so this costs
       # nothing to switch on.
       - name: Go vet
-        run: CGO_ENABLED=1 go vet ./...
+        if: always()
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Go vet" >> "$LINT_FAILURES_FILE"
+          CGO_ENABLED=1 go vet ./...
+          LINT_GUARD_EOF
 
       - name: Clippy (cleat-macro)
+        if: always()
         working-directory: crates/cleat-macro
-        run: cargo clippy --all-targets -- -D warnings
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Clippy (cleat-macro)" >> "$LINT_FAILURES_FILE"
+          cargo clippy --all-targets -- -D warnings
+          LINT_GUARD_EOF
 
       - name: Clippy (cleat-sdk)
+        if: always()
         working-directory: crates/cleat-sdk
-        run: cargo clippy --all-targets -- -D warnings
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Clippy (cleat-sdk)" >> "$LINT_FAILURES_FILE"
+          cargo clippy --all-targets -- -D warnings
+          LINT_GUARD_EOF
 
       - name: Clippy (cleat-test)
+        if: always()
         working-directory: crates/cleat-test
-        run: cargo clippy --all-targets -- -D warnings
+        run: |
+          bash -e <<'LINT_GUARD_EOF' || echo "Clippy (cleat-test)" >> "$LINT_FAILURES_FILE"
+          cargo clippy --all-targets -- -D warnings
+          LINT_GUARD_EOF
 
   # -------------------------------------------------------------------------
   # The `Lint (advisory)` job stood here from 2026-08-07 to 2026-08-08.
@@ -1110,6 +1283,24 @@ jobs:
   # -------------------------------------------------------------------------
   # Lint Go (golangci-lint)
   # -------------------------------------------------------------------------
+
+      # cleat#2895: every guard step above is wrapped so an internal failure is
+      # recorded rather than failing the STEP -- GitHub stops a job at its first
+      # failing step, and this job runs ~50 of them, so a fail-fast guard hid every
+      # guard after it (measured on #2885 at e26df3c1: the Conditional-skip guard
+      # failed and 44 later steps, including the raw-plugin.Rebind guard, read
+      # status=completed conclusion=skipped -- never ran at all). This step is the
+      # only thing that can still fail the job, by design -- without it, every
+      # guard above could break and Lint would read green.
+      - name: Aggregate guard results
+        if: always()
+        run: |
+          if [ -s "$LINT_FAILURES_FILE" ]; then
+            echo "ERROR: the following guard(s) failed:" >&2
+            cat "$LINT_FAILURES_FILE" >&2
+            exit 1
+          fi
+          echo "OK: every guard step ran, and none failed."
   lint-go:
     runs-on: ubuntu-latest
     env:
