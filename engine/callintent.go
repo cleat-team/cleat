@@ -243,6 +243,50 @@ func (s *execSession) recordEventPersisted(rec EventRecord, checksum string) {
 // Resolution (IMPROVEMENT-PLAN 1.4 phase E)
 // ---------------------------------------------------------------------------
 
+// AmbiguityOutcome is what a resolver learned about a call whose outcome a
+// crash left unrecorded.
+//
+// THREE STATES, NOT A BOOL. An earlier version of AmbiguityResolver answered
+// with (response string, resolved bool), which can say "here is the
+// response" or "cannot say" but has no way to say "the call never reached
+// the service, it is safe to retry" -- a resolver that confirmed that had to
+// either lie (claim resolved=true with an empty response, which a workflow
+// would read as a real answer) or waste the information (report
+// resolved=false, identical to a resolver that found nothing at all).
+// cleat#1984.
+type AmbiguityOutcome int
+
+const (
+	// AmbiguityCannotSay is the zero value: the resolver has no answer. The
+	// engine reports the ambiguity to the workflow exactly as it does without
+	// a resolver. Also what a resolver error degrades to -- see ResolveCall's
+	// doc comment on err.
+	AmbiguityCannotSay AmbiguityOutcome = iota
+	// AmbiguityResolved means the call happened and response is its real
+	// outcome, to be recorded and handed to the workflow as though the
+	// original call had returned it.
+	AmbiguityResolved
+	// AmbiguityNotSent means the service has no record of the call: it never
+	// reached the service, so nothing to deduplicate against exists and
+	// retrying is safe. The engine records a retryable failure (the same
+	// classification -- and the same guest-visible CallError.Retryable()==true
+	// -- as an ordinary fresh call failure) rather than a response, and the
+	// workflow's own retry handling takes it from there. response is ignored
+	// for this outcome.
+	AmbiguityNotSent
+)
+
+func (o AmbiguityOutcome) String() string {
+	switch o {
+	case AmbiguityResolved:
+		return "resolved"
+	case AmbiguityNotSent:
+		return "not_sent"
+	default:
+		return "cannot_say"
+	}
+}
+
 // AmbiguityResolver answers the question a crash leaves open: did the call
 // actually happen, and what did it return?
 //
@@ -255,16 +299,16 @@ type AmbiguityResolver interface {
 	// ResolveCall reports the outcome of the operation identified by
 	// idempotencyKey, which is the key the original attempt sent.
 	//
-	// resolved=false means "cannot say" and is not an error: the service may
-	// have no record, or no way to look one up. The engine reports the
-	// ambiguity to the workflow, exactly as it does without a resolver.
+	// outcome=AmbiguityCannotSay is not an error: the service may have no
+	// record, or no way to look one up. The engine reports the ambiguity to
+	// the workflow, exactly as it does without a resolver.
 	//
 	// An error means the lookup itself failed. It is treated the same as
-	// "cannot say" -- an unreachable resolver must not turn a recoverable
-	// ambiguity into a different failure -- but it is logged, because a
-	// resolver that always errors is indistinguishable from one that never
-	// resolves anything.
-	ResolveCall(ctx context.Context, service, operation, idempotencyKey string) (response string, resolved bool, err error)
+	// AmbiguityCannotSay -- an unreachable resolver must not turn a
+	// recoverable ambiguity into a different failure -- but it is logged,
+	// because a resolver that always errors is indistinguishable from one
+	// that never resolves anything.
+	ResolveCall(ctx context.Context, service, operation, idempotencyKey string) (response string, outcome AmbiguityOutcome, err error)
 }
 
 // WithAmbiguityResolver sets the resolver consulted when replay finds a call
@@ -297,21 +341,29 @@ func WithAmbiguityResolver(r AmbiguityResolver) EngineOption {
 	return func(e *Engine) { e.ambiguityResolver = r }
 }
 
+// ambiguityNotSentMessage is the Err text recorded (and surfaced to the
+// guest) when a resolver confirms a call never reached the service. Not an
+// AMBIGUOUS message: this is a definite, retryable failure, same shape as any
+// other transient call error.
+const ambiguityNotSentMessage = "call outcome resolved: the service has no record of this call -- it never arrived, and retrying is safe"
+
 // resolveAmbiguity attempts to turn a pending intent row into a completed one.
 //
-// It returns the resolved response and true only when the resolver answered
-// AND the outcome was durably recorded. A resolution that could not be
-// persisted is deliberately not used: the workflow would proceed on it now and
-// the next replay would find the row still pending and ask again, which is the
+// It returns the response and AmbiguityResolved only when the resolver found
+// a real outcome AND it was durably recorded; AmbiguityNotSent only when the
+// resolver confirmed the call never arrived AND that was durably recorded;
+// AmbiguityCannotSay otherwise. A resolution that could not be persisted is
+// deliberately not used: the workflow would proceed on it now and the next
+// replay would find the row still pending and ask again, which is the
 // determinism divergence this whole stream exists to prevent.
-func (s *execSession) resolveAmbiguity(ctx context.Context, rec EventRecord) (string, bool) {
+func (s *execSession) resolveAmbiguity(ctx context.Context, rec EventRecord) (string, AmbiguityOutcome) {
 	r := s.engine.ambiguityResolver
 	if r == nil {
-		return "", false
+		return "", AmbiguityCannotSay
 	}
 
 	key := DurableCallIdempotencyKey(s.workflowID, s.execRunID, rec.Step)
-	resp, resolved, err := r.ResolveCall(ctx, rec.Service, rec.Op, key)
+	resp, outcome, err := r.ResolveCall(ctx, rec.Service, rec.Op, key)
 	if err != nil {
 		// Not fatal: an unreachable resolver leaves the ambiguity exactly as
 		// it was, which is the state this is trying to improve on and not a
@@ -320,25 +372,58 @@ func (s *execSession) resolveAmbiguity(ctx context.Context, rec EventRecord) (st
 		s.engine.log().WarnContext(ctx, "ambiguity resolver failed",
 			"workflow_id", s.workflowID, "step", rec.Step,
 			"service", rec.Service, "operation", rec.Op, "error", err)
-		return "", false
+		return "", AmbiguityCannotSay
 	}
-	if !resolved {
-		return "", false
+	if outcome != AmbiguityResolved && outcome != AmbiguityNotSent {
+		return "", AmbiguityCannotSay
 	}
 
 	store, ok := s.engine.workflowStore.(callIntentResolver)
 	if !ok {
 		s.engine.log().WarnContext(ctx, "ambiguity resolved but the store cannot record it; reporting ambiguity instead",
 			"workflow_id", s.workflowID, "step", rec.Step, "store", fmt.Sprintf("%T", s.engine.workflowStore))
-		return "", false
+		return "", AmbiguityCannotSay
 	}
 
 	completed := rec
-	completed.Response = resp
-	completed.Err = ""
 	completed.Pending = false
 	if completed.TimestampMs == 0 {
 		completed.TimestampMs = time.Now().UnixMilli()
+	}
+	switch outcome {
+	case AmbiguityResolved:
+		completed.Response = resp
+		completed.Err = ""
+		completed.ErrCode = ""
+		completed.ErrNonRetryable = false
+	case AmbiguityNotSent:
+		// Response stays empty: there is no real outcome to hand the
+		// workflow, only the engine's own classification of why this attempt
+		// failed. ErrNonRetryable=false is what makes durablecalls.go's
+		// replay path (recordedFailureCode) reproduce the same retryable
+		// classification as a fresh call failure on every future replay of
+		// this now-completed row.
+		//
+		// THE RETRY THIS ENABLES USES A DIFFERENT IDEMPOTENCY KEY THAN THE
+		// ORIGINAL ATTEMPT (coordinator + cleat-review, cleat#1984 round 1).
+		// `key` above is DurableCallIdempotencyKey(workflow, run, rec.Step)
+		// -- this STEP's key. The workflow's retry is a NEW DurableCall, a
+		// NEW step, and therefore a NEW key, by the exact construction
+		// durablecalls.go's own comment on retryStep relies on to make the
+		// engine's OWN internal attempt loop safe ("every attempt carries
+		// the same idempotency key... without this the key changes at
+		// exactly the moment a duplicate is most likely"). This path does
+		// not have that protection: it hands the retry decision to the
+		// GUEST, which cannot reuse rec.Step. So if the resolver's `404`
+		// answered "not sent" because the original request was merely SLOW
+		// rather than lost, a late arrival under the OLD key and the
+		// retry's request under the NEW key can both execute. See
+		// docs/durable-calls.md's "A 404 answer is a PROMISE" paragraph for
+		// the contract requirement this places on the lookup operation.
+		completed.Response = ""
+		completed.Err = ambiguityNotSentMessage
+		completed.ErrCode = ErrTransient.String()
+		completed.ErrNonRetryable = false
 	}
 	payload, _ := eventRecordToPayload(completed)
 
@@ -350,11 +435,11 @@ func (s *execSession) resolveAmbiguity(ctx context.Context, rec EventRecord) (st
 		s.engine.workerID, s.engine.generation, chainRepairsAfter(s.history, rec.Step)); err != nil {
 		s.engine.log().ErrorContext(ctx, "ambiguity was resolved but could not be recorded; reporting ambiguity instead",
 			"workflow_id", s.workflowID, "step", rec.Step, "error", err)
-		return "", false
+		return "", AmbiguityCannotSay
 	}
 
 	s.engine.log().InfoContext(ctx, "ambiguous call resolved",
 		"workflow_id", s.workflowID, "step", rec.Step,
-		"service", rec.Service, "operation", rec.Op)
-	return resp, true
+		"service", rec.Service, "operation", rec.Op, "outcome", outcome)
+	return completed.Response, outcome
 }

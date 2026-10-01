@@ -6,7 +6,6 @@ engine/adaptive_flush.go	func AdaptiveFlusher.GetRate
 engine/adaptive_flush.go	func AdaptiveFlusher.InBatchMode
 engine/app.go	func NewApp
 engine/callerrors.go	func GuestCallErrorCodes
-engine/callintent.go	func WithAmbiguityResolver
 engine/child_version.go	func ResolveChildVersion
 engine/cron.go	func NextCronTime
 engine/engine.go	func Engine.ExecuteCompiled
