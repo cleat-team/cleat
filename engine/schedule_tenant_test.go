@@ -121,12 +121,15 @@ func TestScheduleTenantID_IsTheStoresOwnNotTheCallers(t *testing.T) {
 //
 // 005_app_role.sql is long retired -- 001_schema.sql's own header names it
 // among the files it absorbed -- and the bare "migration 005" this comment
-// used to cite is a NUMBER, not a file, so cleat#1986's unrelated
-// 005_workflow_defs_exposure_class.sql at that same number silently satisfied
-// scripts/check-postgres-migration-citations.py's is_real() check by
-// coincidence. Naming the retired filename keeps this citation correctly
-// dangling (and correctly baselined as historical) regardless of what a later
-// migration happens to be numbered.
+// used to cite is a NUMBER, not a file, so an unrelated migration landing at
+// that same number silently satisfies scripts/check-postgres-migration-
+// citations.py's is_real() check by coincidence -- and it has now happened
+// TWICE at this exact number, independently: cleat#1986's
+// 005_workflow_defs_exposure_class.sql (before it was renumbered to 004 to
+// resolve a collision of its own) and cleat#1980's 005_entry_point_schemas.sql
+// (mysql/mssql dialects). Naming the retired filename keeps this citation
+// correctly dangling (and correctly baselined as historical) regardless of
+// what a later migration happens to be numbered.
 //
 // The consequence for this test is worth stating plainly: it now passes on
 // Postgres because of the SQL, not because of RLS. Whether RLS itself blocks

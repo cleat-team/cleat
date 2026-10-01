@@ -164,14 +164,11 @@ func namedSchema(n *types.Named, visiting map[types.Type]bool) Schema {
 	case *types.Struct:
 		return structSchema(under, visiting)
 	case *types.Basic:
-		if under.Kind() == types.Byte {
-			// A named []byte-ELEMENT type reaching here directly (rather
-			// than through sliceOrArraySchema) doesn't occur in practice --
-			// kept for completeness, falling through to the ordinary basic
-			// handling, which is correct for a named scalar (e.g. `type
-			// Status int`): encoding/json marshals it exactly as its
-			// underlying basic kind.
-		}
+		// A named []byte-ELEMENT type reaching here directly (rather than
+		// through sliceOrArraySchema) doesn't occur in practice. Falling
+		// through to the ordinary basic handling either way is correct for
+		// a named scalar (e.g. `type Status int`): encoding/json marshals
+		// it exactly as its underlying basic kind.
 		return basicSchema(under)
 	default:
 		return fromGoType(n.Underlying(), visiting)
