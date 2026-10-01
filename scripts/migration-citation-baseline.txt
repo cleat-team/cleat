@@ -60,9 +60,7 @@ docs/multi-database-feasibility.md	migration 009
 docs/operations/egress-policy.md	migrations/postgres/063
 docs/operations/upgrading.md	002_constraints.sql
 docs/operations/upgrading.md	008_rls_fail_closed.sql
-docs/operations/upgrading.md	migration 007
 docs/operations/upgrading.md	migration 077
-docs/operations/upgrading.md	migrations/postgres/007
 docs/operations/workflow-retention.md	033_completed_workflow_retention_indexes.sql
 docs/operations/workflow-retention.md	101_the_finalize_procedure_stops_deleting_failed_history.sql
 docs/plugin-table-handling.md	migration 063
