@@ -2,6 +2,7 @@ package pagerdutyalert
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -25,6 +26,16 @@ import (
 // UpMySQL text, read from p.Migrations() rather than hand-copied, directly
 // after RunMigrations has already applied it once.
 func TestV3MigrationIsIdempotentOnMySQL(t *testing.T) {
+	// cleat#2880 (same shape fixed in cleat#2249/#2883): testutil.NewPluginTestBackends
+	// only includes a MySQL backend when CLEAT_TEST_MYSQL is set -- PostgreSQL is the
+	// only one it attempts unconditionally. So when CLEAT_TEST_MYSQL is unset, the
+	// returned slice has no MySQL entry, this loop's `continue` fires on every
+	// iteration, the t.Run below is never reached, and the function returns having
+	// asserted nothing -- a genuine PASS with no subtests and no t.Skip anywhere to
+	// make that visible to the skip-budget/skip-ledger guards, which only see t.Skip.
+	if os.Getenv("CLEAT_TEST_MYSQL") == "" {
+		t.Skip("CLEAT_TEST_MYSQL not set, skipping MySQL tests")
+	}
 	for _, be := range testutil.NewPluginTestBackends(t) {
 		if be.Dialect != testutil.DialectMySQL {
 			continue
