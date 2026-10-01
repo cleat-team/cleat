@@ -86,7 +86,9 @@ func (p *Plugin) Migrations() []plugin.Migration {
 				ALTER TABLE pd_config DROP COLUMN IF EXISTS routing_key;
 			`,
 			UpMySQL: `
-				ALTER TABLE pd_config DROP COLUMN routing_key;
+				SET @col := (SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'pd_config' AND column_name = 'routing_key');
+				SET @ddl := IF(@col > 0, 'ALTER TABLE pd_config DROP COLUMN routing_key', 'DO 0');
+				PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 			`,
 			UpMSSQL: `
 				IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('pd_config') AND name = 'routing_key')
