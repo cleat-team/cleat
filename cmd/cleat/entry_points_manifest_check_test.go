@@ -115,6 +115,52 @@ func TestBuildRefusesTheOldMapShapedManifest(t *testing.T) {
 	}
 }
 
+// TestBuildRefusesACleatYAMLThatFailsToParseAsYAMLAtAll is cleat#2813:
+// workflowManifestName and workflowManifestEntryPoints each coalesce "no
+// cleat.yaml" and "a cleat.yaml that is not valid YAML at all" into the same
+// return value, so a manifest with a genuine syntax error used to build
+// successfully under the #2407 fallback name -- indistinguishable from a
+// project that never had a manifest, and the opposite of
+// TestBuildRefusesTheOldMapShapedManifest's already-loud failure for a
+// present-but-wrong-shape entry_points: key. checkManifestParses closes that
+// gap for the file as a whole.
+func TestBuildRefusesACleatYAMLThatFailsToParseAsYAMLAtAll(t *testing.T) {
+	if testing.Short() || cleatBinary == "" {
+		t.Skip("needs the cleat binary, which TestMain does not build in short mode")
+	}
+
+	root := t.TempDir()
+	name := "p_badyaml"
+	out, err := runCleatIn(t, root, "init", "--template", "basic", name)
+	if err != nil {
+		t.Fatalf("cleat init --template basic failed: %v\n%s", err, out)
+	}
+	proj := filepath.Join(root, name)
+	resolveScaffoldAgainstThisCheckout(t, proj)
+
+	// An unterminated flow sequence -- not a wrong-shape value for a known
+	// key (that is TestBuildRefusesTheOldMapShapedManifest's case), a file
+	// that does not parse as a YAML document at all. yaml.Unmarshal returns
+	// a top-level error for this input against any target type, including
+	// the yaml.Node probe checkManifestParses itself uses.
+	yamlPath := filepath.Join(proj, "cleat.yaml")
+	if writeErr := os.WriteFile(yamlPath, []byte("name: [unterminated\n"), 0o644); writeErr != nil {
+		t.Fatalf("writing malformed cleat.yaml: %v", writeErr)
+	}
+
+	out, buildErr := runCleatIn(t, proj, "build", "-o", "./out", ".")
+	if buildErr == nil {
+		t.Fatalf("build with a cleat.yaml that fails to parse as YAML at all must fail, but exited "+
+			"0 -- it silently treated the broken manifest as absent:\n%s", out)
+	}
+	if !strings.Contains(out, "is not valid YAML") {
+		t.Fatalf("build failed, but not with the expected invalid-YAML error, got:\n%s", out)
+	}
+	if matches, _ := filepath.Glob(filepath.Join(proj, "out", "*.wasm")); len(matches) != 0 {
+		t.Errorf("build refused the manifest check but still wrote a .wasm output: %v", matches)
+	}
+}
+
 // TestBuildIgnoresAnAbsentEntryPointsManifest is the negative control for the
 // tests above: entry_points: is optional, so a package with no cleat.yaml at
 // all -- not a corrupted one, an absent one -- must build exactly as it did

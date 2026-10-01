@@ -10,6 +10,7 @@ cmd/cleat	TestAnUnreadablePathIsNotAFinding	2
 cmd/cleat	TestAssemblyScriptBuildRefusesAStaleManifest	3
 cmd/cleat	TestAssemblyScriptExampleEntryPointResolutionLive	3
 cmd/cleat	TestBuildIgnoresAnAbsentEntryPointsManifest	1
+cmd/cleat	TestBuildRefusesACleatYAMLThatFailsToParseAsYAMLAtAll	1
 cmd/cleat	TestBuildRefusesAFlagAfterThePath	1
 cmd/cleat	TestBuildRefusesAnEntryPointsManifestMismatch	1
 cmd/cleat	TestBuildRefusesTheOldMapShapedManifest	1

@@ -418,6 +418,9 @@ func runBuild(pattern, outDir, target, runtime, channel string, jsonOut bool, di
 		goVersion = "1.26"
 	}
 
+	if result.TargetPkg != nil {
+		checkManifestParses(result.TargetPkg.Dir)
+	}
 	wasmFile := wasmOutputName(result)
 	entryPoints := exportedEntryPointNames(result)
 	if result.TargetPkg != nil {
@@ -1525,13 +1528,58 @@ func wasmOutputName(result *analyzer.AnalysisResult) string {
 // unvalidated string into a filesystem path.
 var workflowManifestNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
+// checkManifestParses fails the build if cleat.yaml exists but is not valid
+// YAML at all. Called once, before workflowManifestName and
+// workflowManifestEntryPoints below -- both of those coalesce "no cleat.yaml"
+// and "a cleat.yaml that fails to parse" into the same "nothing to use"
+// result, because a top-level yaml.Unmarshal error looks, to each of them,
+// like any other reason to fall back. That is the right behaviour for an
+// absent file (cleat build works on a bare package with no manifest at all)
+// and the wrong one for a present, broken one: a user who wrote a cleat.yaml
+// clearly intended a manifest, and silently ignoring it -- building
+// successfully under the #2407 fallback name instead -- is exactly the
+// silent-wrong-manifest failure checkEntryPointsAgainstManifest's own doc
+// comment already exists to close for the entry_points: key specifically.
+// cleat#2813: this closes the same hole for the file as a whole, including
+// for name:, which had no failure-mode check of its own at all.
+func checkManifestParses(srcDir string) {
+	data, err := os.ReadFile(filepath.Join(srcDir, "cleat.yaml"))
+	if err != nil {
+		// os.IsNotExist is the ONLY silent case -- no cleat.yaml is a
+		// supported, ordinary way to run `cleat build`. Anything else
+		// (permission denied, a directory named cleat.yaml, ...) is
+		// unexpected enough to surface rather than silently treat as
+		// "no manifest".
+		if os.IsNotExist(err) {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "Error: cleat.yaml could not be read: %v\n", err)
+		os.Exit(1)
+	}
+	var probe yaml.Node
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"Error: cleat.yaml is not valid YAML (%v).\n"+
+				"cleat build reads its name: and entry_points: fields; fix the syntax "+
+				"error, or remove the file if it is not meant to be a manifest yet -- "+
+				"cleat build works on a bare package with no cleat.yaml at all.\n",
+			err)
+		os.Exit(1)
+	}
+}
+
 // workflowManifestName reads cleat.yaml's `name:` field from the workflow's
-// own source directory, or "" if there is none, it cannot be read, it does
-// not parse, or its name is empty or not filename-safe. Together with
-// workflowManifestEntryPoints below, these are the only places `cleat build`
-// reads cleat.yaml -- everywhere else in this tree it is documentation for a
-// human running `cleat deploy --name` by hand, never a build input, which is
-// why this file needed a YAML import it did not already have.
+// own source directory, or "" if there is none, its name is empty, or not
+// filename-safe. checkManifestParses above has already exited the process if
+// cleat.yaml exists and fails to parse as YAML at all, so by the time this
+// runs a read or parse error here means the file was removed, or started
+// failing to parse, in the (very short) window between the two reads --
+// treated the same as "no manifest" rather than a race worth its own error
+// path. Together with workflowManifestEntryPoints below, these are the only
+// other places `cleat build` reads cleat.yaml -- everywhere else in this
+// tree it is documentation for a human running `cleat deploy --name` by
+// hand, never a build input, which is why this file needed a YAML import it
+// did not already have.
 func workflowManifestName(srcDir string) string {
 	data, err := os.ReadFile(filepath.Join(srcDir, "cleat.yaml"))
 	if err != nil {
@@ -1552,9 +1600,11 @@ func workflowManifestName(srcDir string) string {
 
 // workflowManifestEntryPoints reads cleat.yaml's `entry_points:` field from
 // the workflow's own source directory. present is false when there is no
-// cleat.yaml, it cannot be read, the file does not parse as YAML at all, or
-// the key is simply absent -- all cases workflowManifestName already treats
-// as "nothing to check". When present is true and malformed is nil, declared
+// cleat.yaml or the key is simply absent -- both cases workflowManifestName
+// already treats as "nothing to check". checkManifestParses above has
+// already exited the process if cleat.yaml exists and fails to parse as YAML
+// at all, so a read or parse error reaching this function means the file
+// changed underneath the two reads; see workflowManifestName's doc comment. When present is true and malformed is nil, declared
 // is the list. When present is true and malformed is non-nil, the key exists
 // but is not a list of strings -- the caller must not treat that the same as
 // absent.
