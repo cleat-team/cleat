@@ -1665,7 +1665,7 @@ func main() {
 	// configured, and refuse to proceed if this worker has no key ring --
 	// see checkPayloadEncryptionState's doc comment. Placed AFTER the
 	// migrate-or-verify block on purpose: payload_encryption_ever_enabled is
-	// itself a migration (007), so checking before the schema is confirmed
+	// itself a migration (008), so checking before the schema is confirmed
 	// current would refuse a worker on a legitimately-out-of-date database
 	// for the wrong reason, and a --migrate-only job -- which never reaches
 	// here -- has no key ring to be keyless about.

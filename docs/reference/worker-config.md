@@ -482,7 +482,7 @@ keyless worker cannot recognise ciphertext by inspecting a row; without this
 guard it would read a sealed column as plaintext, silently. The database
 remembers "payload encryption was enabled here" the first time any worker
 starts with `--encrypt-sensitive-payloads` and a key ring configured
-(`payload_encryption_ever_enabled`, migration 007), and every worker started
+(`payload_encryption_ever_enabled`, migration 008), and every worker started
 without one checks that marker before doing anything else.
 
 The marker is insert-only -- nothing in this release clears it. A deployment

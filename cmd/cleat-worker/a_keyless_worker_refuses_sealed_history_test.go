@@ -81,7 +81,7 @@ func TestMainRefusesToStartWithoutAKeyOnceEncryptionHasEverBeenEnabled(t *testin
 	ownerDSN := replaceDBName(t, admin, name)
 
 	// Migration is a deploy step (cleat#2117): apply the schema (including
-	// 007_payload_encryption_ever_enabled.sql) before any subprocess below.
+	// 008_payload_encryption_ever_enabled.sql) before any subprocess below.
 	if code, out := runBootSubprocess(t, []string{"--driver=postgres", "--db=" + ownerDSN, "--migrate-only"}, ""); code != 0 {
 		t.Fatalf("--migrate-only exited %d:\n%s", code, out)
 	}
