@@ -145,7 +145,65 @@ per-step idempotency key the pattern in §5.1 uses — that checks the external 
 Any embedder can call it directly (cleat#1871); `cleat-worker` registers one through a flag, so an
 operator configures it without writing code (cleat#1984).
 
-#### `--ambiguity-lookup`: the shipped worker's declarative resolver
+#### `--idempotency-key-ops`: same-key replay, the default path (cleat#2897)
+
+```
+--idempotency-key-ops payment.charge,shipping.dispatch   # comma-separated service.operation
+--idempotency-key-retention 24h                          # default; see below
+```
+
+**This is the recommended mechanism for a service that accepts an idempotency key and guarantees a
+repeated key returns the original outcome (§5.1) — the DEFAULT path, not the exception.** Where a
+crash leaves a `--write-ahead-intent-ops` call's outcome unrecorded, the worker re-dispatches the
+*same* call to the *same* operation under its *original* idempotency key, rather than asking a
+separate lookup operation (`--ambiguity-lookup`, below) or reporting `[AMBIGUOUS]`. The service's
+own key table is what resolves the ambiguity: it has already seen this exact key, from the
+original attempt, so there is nothing new to reconcile the way `--ambiguity-lookup`'s `404` case
+has to.
+
+**The response decides the outcome, read directly off the re-dispatch rather than through the
+ordinary retryable/permanent classification an ordinary call failure gets:**
+
+| Response to the replayed dispatch | Meaning | Engine action |
+|---|---|---|
+| `200` with a body | The service's key table answered — either the original attempt's recorded outcome, or (far less often) this retried request is itself what got executed | The pending step completes with that response, and replay carries on as though the original call had returned it |
+| `409` | A request under this exact key is still being processed — Stripe's documented meaning for a concurrent same-key request, and exactly the state a crashed-but-not-lost original leaves | **Retried**, under the same key, a bounded number of times with a fixed backoff. Not a failure: this is the mechanism catching the window where the original attempt has not finished yet. If every retry still reads `409`, the engine gives up and falls back to `[AMBIGUOUS]` |
+| Anything else — `5xx`, a malformed response, a transport error, a timeout | Cannot say | Falls back to `[AMBIGUOUS]`, unchanged |
+
+**Why `409` does not mean the same thing here that it would on an ordinary call.** An operation
+*not* going through this replay path that returns `409` is, by default, classified the same as any
+other 4xx — non-retryable. That classification is unchanged and correct for an ordinary call: an
+operator who wants `409` read differently for a specific operation does so through the service's
+own `RetryableFromService` declaration (see `serviceStatusError`). It is *only* inside this
+replay — re-dispatching a call already known to be ambiguous, under its own original key — that a
+`409` has one specific, known cause (a concurrent request under this key) rather than being one of
+many possible reasons a service might refuse a request.
+
+**The retention bound: a resend past a service's own key-retention window is a NEW call, not a
+dedupe candidate.** Idempotency keys are not retained forever — Stripe prunes at 24 hours and then
+treats a reused key as a fresh request; other providers differ (Adyen holds at least 7 days; check
+yours). `--idempotency-key-retention` (default: 24 hours, Stripe's bound, the shorter of the two
+surveyed when this was decided) bounds how long after the ORIGINAL dispatch the engine will still
+attempt a same-key resend. Past that window the pending call is not retried at all — not even once
+— and falls straight back to `[AMBIGUOUS]`, because resending under a key the service may have
+already forgotten risks the exact double-execution a `--ambiguity-lookup`-configured `404` has to
+guard against with a durability promise of its own (below). This needs no new column: the bound
+is read from the pending row's own `created_at`, set once at `WriteCallIntent` and never touched
+by `CompleteCallIntent`, so it is the original dispatch time on every dialect already.
+
+**Validated at worker startup, same shape as `--ambiguity-lookup` below, plus one more check:**
+every operation named in `--idempotency-key-ops` must also be declared
+`--write-ahead-intent-ops` (same reasoning — `AtLeastOnce` never leaves a pending row), and must
+**not** also appear in `--ambiguity-lookup`. The two are different capabilities a service either
+has or does not; declaring one operation under both would make `--ambiguity-lookup`'s
+configuration for it silently unreachable, since this mechanism is tried first, and the worker
+refuses to start on either violation rather than leave the precedence unstated.
+
+**Metrics:** `RecordAmbiguousCall`'s `outcome` attribute carries `key_replay_resolved` for a call
+this mechanism settled, alongside `resolved`, `not_sent` and `cannot_say` from the lookup path
+below and the plain `[AMBIGUOUS]` fallback.
+
+#### `--ambiguity-lookup`: the exception, for a service that cannot dedupe a repeated key itself
 
 ```
 --ambiguity-lookup payment.charge=payment.get_by_key   # comma-separated for more than one
@@ -158,13 +216,12 @@ sent — the same route convention `DurableCall` itself uses
 *is* another operation on the service, not a separate kind of request. Only an operation named
 here gets this treatment; every other ambiguity reaches the `[AMBIGUOUS]` report as before.
 
-cleat#2897 (decided, not yet implemented) will make same-key replay -- the engine re-issuing the
-step under the *original* key and letting the service's own key table resolve it -- the default
-path for a service that accepts an idempotency key, with no retry at all where no key exists. That
-replaces the `404` row's "the engine does not re-dispatch on its own" below, for exactly that class
-of service. Once it lands, read this lookup as the exception: an opt-in alternative for a service
-that can answer "what happened to this key" but does not itself resolve a repeated key, not the
-recommended route.
+**Read this as the exception, not the recommended route: an opt-in alternative for a service that
+can answer "what happened to this key" but does not itself resolve a repeated key.**
+`--idempotency-key-ops`, above, is the default path for a service that accepts an idempotency key
+and does — same-key replay catches the ambiguity before the lookup's own `404`-durability
+obligation (below) would even become relevant. The two mechanisms are mutually exclusive per
+operation (worker boot validation refuses an operation declared under both).
 
 **The lookup convention — the contract a service implements:**
 
@@ -222,11 +279,12 @@ When a workflow receives an `ErrAmbiguous` error, it means the call *may* have s
 3. If not completed: retry the call.
 
 **This is the fallback, not the only path.** If the operation is named in the worker's
-`--ambiguity-lookup` flag (§3), the three steps above already happened before the workflow ever
-saw an error: a `200` lookup response completes the step with the service's answer, and a `404`
-completes it as an ordinary retryable failure your existing retry handling already covers.
-`ErrAmbiguous` reaches workflow code only for an operation that is not configured for lookup, or
-when the lookup itself could not say — the "anything else" row of the table in §3.
+`--idempotency-key-ops` flag (§3) — the recommended configuration for a service that accepts an
+idempotency key — or its `--ambiguity-lookup` flag (the exception, for a service that can answer
+"what happened to this key" but cannot dedupe a repeated one itself), the three steps above
+already happened before the workflow ever saw an error. `ErrAmbiguous` reaches workflow code only
+for an operation configured for neither, or when the configured mechanism itself could not say —
+the "anything else" row of each table in §3.
 
 ### 4.3 Not assume exactly-once
 
