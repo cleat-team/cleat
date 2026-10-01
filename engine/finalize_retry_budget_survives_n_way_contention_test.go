@@ -139,7 +139,7 @@ func raceFinalizeSegmentsWideFanIn(t *testing.T, ctx context.Context, store Work
 		}
 		t.Errorf("round %d: an unretried-or-under-budgeted error reached the caller: %v", round, err)
 		if isDeadlockOrLockWait(err) {
-			t.Logf("  ^ this is cleat#2033: the retry budget was exhausted under " +
+			t.Logf("  ^ this is cleat#2033: the retry budget was exhausted under "+
 				"%d-way contention, not that retries never happened", racers)
 		}
 	}
