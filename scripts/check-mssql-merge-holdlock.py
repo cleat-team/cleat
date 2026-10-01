@@ -217,7 +217,29 @@ BACKTICK_RE = re.compile(r"`([^`]*)`", re.S)
 # can evaluate anyway).
 MERGE_START_RE = re.compile(r"(?i)(?<![A-Za-z0-9_])MERGE(?![A-Za-z0-9_])")
 WHEN_MATCHED_RE = re.compile(r"(?i)WHEN\s+(NOT\s+)?MATCHED")
-HOLDLOCK_RE = re.compile(r"(?i)\bHOLDLOCK\b")
+
+# cleat-review on #2909 (G1): `\bHOLDLOCK\b` anywhere in the statement is
+# two false negatives wide. (1) `-- HOLDLOCK deliberately omitted` inside
+# a SQL comment reads as present -- fixed by stripping SQL comments from
+# the literal before this runs (see strip_sql_comments below, now applied
+# inside find_go_declarations too, not just to whole .sql files). (2)
+# `USING (SELECT ... WITH (HOLDLOCK)) AS source` puts the hint on the
+# SOURCE subquery, not the TARGET -- a lock on a row you are only reading
+# FROM does not close the window two writers race on the target's
+# not-yet-existing key. Both existing correct statements
+# (engine/mssql_events.go, plugins/eventstore/queries.go) write
+# `MERGE <table> WITH (HOLDLOCK) AS target` -- the hint immediately after
+# the target name, before any alias or USING -- so anchoring there costs
+# nothing against real, already-correct code.
+TARGET_WITH_RE = re.compile(
+    r"(?i)\bMERGE\s+(?:INTO\s+)?[A-Za-z0-9_.\[\]]+\s+WITH\s*\(([^)]*)\)"
+)
+LOCK_HINT_RE = re.compile(r"(?i)\b(HOLDLOCK|SERIALIZABLE)\b")
+
+
+def _has_target_lock_hint(stmt):
+    m = TARGET_WITH_RE.search(stmt)
+    return bool(m and LOCK_HINT_RE.search(m.group(1)))
 
 # Top-level Go declarations: a `func` (any or no receiver) or a
 # `var NAME = ...` statement, up to (but not including) the next top-level
@@ -241,7 +263,7 @@ def _merge_statements_in_text(text):
             continue
         stmt_end = tail.find(";")
         stmt = tail if stmt_end == -1 else tail[:stmt_end + 1]
-        yield bool(HOLDLOCK_RE.search(stmt)), stmt.strip().splitlines()[0][:80]
+        yield _has_target_lock_hint(stmt), stmt.strip().splitlines()[0][:80]
 
 
 def find_go_declarations(text):
@@ -257,7 +279,11 @@ def find_go_declarations(text):
             continue
         merges = []
         for bm in BACKTICK_RE.finditer(body):
-            merges.extend(_merge_statements_in_text(bm.group(1)))
+            # The backtick literal's CONTENTS are SQL, not Go -- a `--`
+            # comment inside it (cleat-review's E5) is SQL comment syntax,
+            # invisible to strip_go_comments, which already ran over the
+            # surrounding Go source before this literal was ever isolated.
+            merges.extend(_merge_statements_in_text(strip_sql_comments(bm.group(1))))
         if merges:
             yield name, merges
 
@@ -392,8 +418,42 @@ def run_self_test():
                   f"allowlist-shape validator but wasn't")
             ok = False
 
+    # 8. cleat-review on #2909, E5: HOLDLOCK present only inside a SQL
+    # COMMENT, not the statement -- must still be flagged as missing it.
+    e5_src = (
+        "package x\n\nvar q5 = plugin.Query{\n"
+        "\tMSSQL: `MERGE zz AS t\n"
+        "-- HOLDLOCK deliberately omitted, see cleat#9999\n"
+        "USING (VALUES (1)) AS s (k) ON t.k = s.k\n"
+        "WHEN NOT MATCHED THEN INSERT (k) VALUES (s.k);`,\n"
+        "}\n"
+    )
+    found8 = dict(find_go_declarations(strip_go_comments(e5_src)))
+    if not found8.get("q5") or found8["q5"][0][0] is not False:
+        print("SELF-TEST FAILED (E5): HOLDLOCK mentioned only in a SQL comment "
+              "inside the statement was read as a real lock hint.")
+        ok = False
+
+    # 9. cleat-review on #2909, E7: HOLDLOCK present, but on the USING
+    # SOURCE subquery rather than the MERGE's target -- a lock on a row you
+    # only read FROM does not close the window two writers race on the
+    # target's not-yet-existing key, so this must still be flagged.
+    e7_src = (
+        "package x\n\nvar q7 = plugin.Query{\n"
+        "\tMSSQL: `MERGE zz2 AS t\n"
+        "USING (SELECT k FROM src WITH (HOLDLOCK)) AS s\n"
+        "ON t.k = s.k\n"
+        "WHEN NOT MATCHED THEN INSERT (k) VALUES (s.k);`,\n"
+        "}\n"
+    )
+    found9 = dict(find_go_declarations(strip_go_comments(e7_src)))
+    if not found9.get("q7") or found9["q7"][0][0] is not False:
+        print("SELF-TEST FAILED (E7): a HOLDLOCK hint on the USING source "
+              "(not the MERGE target) was read as satisfying the target lock.")
+        ok = False
+
     if ok:
-        print("self-test: OK (7/7)")
+        print("self-test: OK (9/9)")
     return ok
 
 
