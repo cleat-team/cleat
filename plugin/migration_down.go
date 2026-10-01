@@ -27,6 +27,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/cleat-team/cleat/internal/pinnedtx"
 )
 
 // DownResult reports what a reversal did.
@@ -51,6 +53,30 @@ type DownResult struct {
 // the same one: a Down that succeeds and a tracking row that survives would
 // make the migration un-re-appliable, and the reverse would make it run twice.
 // ON A PINNED SESSION, exactly as RunMigrations runs. cleat#1307/#1362.
+//
+// That guarantee is real on PostgreSQL and SQL Server, which both support
+// transactional DDL, and best-effort ORDERING ONLY on MySQL, which auto-commits
+// each DDL statement regardless of an enclosing BEGIN/COMMIT: a multi-statement
+// Down that fails partway through a CREATE/DROP sequence there still leaves
+// whatever DDL already ran in place. The tracking row is not misleading in that
+// case, but the transaction is not what saves it there -- an implicit commit
+// from the first DDL statement ends it. What saves it is ORDERING: the row is
+// only ever deleted AFTER every statement of the Down SQL before it has
+// already succeeded, so a partial MySQL teardown is correctly left recorded as
+// applied, not silently forgotten -- but "applied" then means "Down did not
+// finish", not "the schema matches a clean install". cleat-review's own MySQL
+// probe (cleat#2850's review) confirms this directly: run with NO transaction
+// at all, it still leaves the tracking row applied, because the code never
+// reaches the delete until the Down SQL has returned success. cleat#2850: until this
+// paragraph and the transaction below existed, this comment claimed the
+// stronger guarantee on all three dialects while the Phase 2 loop wrapped
+// nothing in a transaction at all, so an interrupted Postgres or SQL Server
+// reversal could ALSO leave a partial teardown -- the exact defect this
+// sentence was written to rule out. cleat#2822's Version 8 hit the MSSQL
+// instance of that gap directly (DownMSSQL dropped an index, then failed on a
+// DROP COLUMN blocked by an unnamed default constraint, leaving the index
+// dropped and the column not); that PR fixed the one migration, this one
+// closes the general case for the two dialects it can be closed for.
 //
 // The first version used db.QueryRowContext and db.BeginTx directly, on
 // whatever pool connection came back. That was wrong in a way local runs could
@@ -220,17 +246,49 @@ func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target 
 	// ---- Phase 2: execute ----
 	res := &DownResult{}
 	for _, m := range applied {
-		// Untrack a no-DDL migration without executing anything: there is no
-		// Down to run, and leaving the row would make it un-re-appliable.
+		// pinnedtx.Begin, not session.BeginTx(ctx, ...): on the pinned
+		// PostgreSQL connection a ctx that ends mid-reversal must not have
+		// database/sql close the connection from another goroutine while
+		// release() is still using it (cleat#2215) -- the same reason
+		// RunMigrations' own per-migration transaction uses it, just above in
+		// this package. Statements below still take ctx.
+		//
+		// One transaction per VERSION, not one for the whole loop: a later
+		// version's Down failing must not roll back an earlier version's
+		// already-committed reversal, which res.Reversed already promised the
+		// caller happened (the error message below reports it by name).
+		tx, err := pinnedtx.Begin(ctx, session, nil)
+		if err != nil {
+			return res, fmt.Errorf("plugin %s: reversing %d: begin: %w", name, m.Version, err)
+		}
+		// A safety net, not the mechanism: every path below rolls back or
+		// commits explicitly, and Rollback after Commit is a no-op
+		// (sql.ErrTxDone). See RunMigrations' identical comment for why this
+		// matters on a pinned connection specifically -- cleat#2215's review
+		// hung the plugin suite to its timeout with this omitted.
+		defer func() { _ = tx.Rollback() }()
+
+		// Untrack a no-DDL migration without executing any Down SQL: there is
+		// no Down to run, and leaving the row would make it un-re-appliable.
+		// Still transactional -- unregisterTenantScopedTables and
+		// unapplyTenantScoping are DML/DDL of their own (cleat#1277 kvstore
+		// v2 declares TenantScoped with no Up or Down at all), and the
+		// untrack must not survive if either fails partway.
 		if !declaresDDL(m) {
-			if _, err := session.ExecContext(ctx, deletePluginMigrationSQL(dialect), name, m.Version); err != nil {
+			if _, err := tx.ExecContext(ctx, deletePluginMigrationSQL(dialect), name, m.Version); err != nil {
+				_ = tx.Rollback()
 				return res, fmt.Errorf("plugin %s: untracking %d: %w", name, m.Version, err)
 			}
-			if err := unregisterTenantScopedTables(ctx, session.ExecContext, dialect, cfg.schema, name, m.TenantScoped); err != nil {
+			if err := unregisterTenantScopedTables(ctx, tx.ExecContext, dialect, cfg.schema, name, m.TenantScoped); err != nil {
+				_ = tx.Rollback()
 				return res, err
 			}
-			if err := unapplyTenantScoping(ctx, session.ExecContext, dialect, m.TenantScoped); err != nil {
+			if err := unapplyTenantScoping(ctx, tx.ExecContext, dialect, m.TenantScoped); err != nil {
+				_ = tx.Rollback()
 				return res, err
+			}
+			if err := tx.Commit(); err != nil {
+				return res, fmt.Errorf("plugin %s: untracking %d: commit: %w", name, m.Version, err)
 			}
 			res.Reversed = append(res.Reversed, m.Version)
 			// A no-DDL migration that declared TenantScoped tables still
@@ -241,13 +299,17 @@ func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target 
 			res.TenantScopedTables = append(res.TenantScopedTables, m.TenantScoped...)
 			continue
 		}
-		// Down and its untracking go through the SESSION, not a fresh
-		// transaction from the pool: a pool transaction would resolve
+		// Down and its untracking go through the TRANSACTION on the pinned
+		// SESSION, not the session directly: a pool transaction would resolve
 		// unqualified names against a different search_path and drop nothing,
-		// which is the bug this whole function had. RunMigrations applies each
-		// migration on the session for the same reason.
+		// which is the bug this whole function had, and no transaction at all
+		// is cleat#2850 -- a later statement in a multi-statement Down failing
+		// after an earlier one already ran leaves a partial teardown that
+		// PostgreSQL and SQL Server can otherwise roll back. It does not on
+		// MySQL, which auto-commits DDL per statement regardless of the
+		// wrapping transaction; see this function's doc comment.
 		//
-		// execSQLStatements, not a single session.ExecContext(ctx, downFor(...)):
+		// execSQLStatements, not a single tx.ExecContext(ctx, downFor(...)):
 		// RunMigrations' own Up path already splits a migration's SQL into
 		// individual statements before executing (the line above this one
 		// does exactly that for the migrations-table DDL), because MySQL's
@@ -264,18 +326,25 @@ func RunDownMigrations(ctx context.Context, db *sql.DB, dialect Dialect, target 
 		// time. cleat-review's own CI, not a local run, is what caught it:
 		// CI's CLEAT_TEST_MYSQL carries no multiStatements=true and a local
 		// DSN typed by hand easily does.
-		if err := unapplyTenantScoping(ctx, session.ExecContext, dialect, m.TenantScoped); err != nil {
+		if err := unapplyTenantScoping(ctx, tx.ExecContext, dialect, m.TenantScoped); err != nil {
+			_ = tx.Rollback()
 			return res, err
 		}
-		if err := execSQLStatements(ctx, session.ExecContext, downFor(m, dialect)); err != nil {
+		if err := execSQLStatements(ctx, tx.ExecContext, downFor(m, dialect)); err != nil {
+			_ = tx.Rollback()
 			return res, fmt.Errorf("plugin %s: reversing %d: %w\n\nVersions already reversed: %v",
 				name, m.Version, err, res.Reversed)
 		}
-		if _, err := session.ExecContext(ctx, deletePluginMigrationSQL(dialect), name, m.Version); err != nil {
+		if _, err := tx.ExecContext(ctx, deletePluginMigrationSQL(dialect), name, m.Version); err != nil {
+			_ = tx.Rollback()
 			return res, fmt.Errorf("plugin %s: untracking %d: %w", name, m.Version, err)
 		}
-		if err := unregisterTenantScopedTables(ctx, session.ExecContext, dialect, cfg.schema, name, m.TenantScoped); err != nil {
+		if err := unregisterTenantScopedTables(ctx, tx.ExecContext, dialect, cfg.schema, name, m.TenantScoped); err != nil {
+			_ = tx.Rollback()
 			return res, err
+		}
+		if err := tx.Commit(); err != nil {
+			return res, fmt.Errorf("plugin %s: reversing %d: commit: %w", name, m.Version, err)
 		}
 		res.Reversed = append(res.Reversed, m.Version)
 		res.TenantScopedTables = append(res.TenantScopedTables, m.TenantScoped...)

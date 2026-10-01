@@ -309,3 +309,163 @@ func TestRunDownMigrationsOnAnUnappliedPluginIsANoop(t *testing.T) {
 		t.Errorf("reported %v reversed for a plugin that was never applied", res.Reversed)
 	}
 }
+
+// TestRunDownMigrationsRollsBackAPartiallyFailedMultiStatementDown is
+// cleat#2850's regression test: the FIRST statement of a two-statement Down
+// succeeds, the second fails outright, and on a dialect that supports
+// transactional DDL (PostgreSQL, tested here) the first statement's effect
+// must not survive either. Before this fix, Phase 2 ran each statement via
+// execSQLStatements(ctx, session.ExecContext, ...) with no transaction at
+// all, so the first DROP committed immediately and stood on its own --
+// cleat#2822's Version 8 hit exactly this shape on MSSQL (an index dropped, a
+// column not).
+func TestRunDownMigrationsRollsBackAPartiallyFailedMultiStatementDown(t *testing.T) {
+	db := downTestDB(t, "cleat_down_"+t.Name()[len("TestRunDownMigrations"):])
+	defer db.Close()
+	ctx := context.Background()
+
+	p := loaded("down-atomic",
+		Migration{
+			Version: 1,
+			Up: `CREATE TABLE down_atomic_one (id INT, tenant_id UUID); ` +
+				`CREATE TABLE down_atomic_two (id INT, tenant_id UUID)`,
+			// The second statement fails outright (no such table), so a
+			// non-transactional Down leaves the first DROP committed and
+			// down_atomic_two standing -- this is cleat#2822's shape, minus
+			// the SQL Server default-constraint specifics.
+			Down: `DROP TABLE down_atomic_one; ` +
+				`DROP TABLE down_atomic_table_that_does_not_exist`,
+			TenantScoped: []string{"down_atomic_one", "down_atomic_two"},
+		},
+	)
+
+	if err := RunMigrations(ctx, db, DialectPostgres, nil, []*LoadedPlugin{p}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if !tableExists(t, db, "down_atomic_one") {
+		t.Fatal("PRECONDITION FAILED: down_atomic_one was not created, so the reversal " +
+			"below would report success against nothing")
+	}
+
+	if _, err := RunDownMigrations(ctx, db, DialectPostgres, p, []*LoadedPlugin{p}); err == nil {
+		t.Fatal("reversing a Down whose second statement fails must return an error")
+	}
+
+	// THE ATOMICITY PROPERTY. PostgreSQL supports transactional DDL, so
+	// wrapping the whole version's Down in one transaction means the first
+	// DROP must roll back with the second statement's failure -- an
+	// all-or-nothing reversal, not a partial teardown.
+	if !tableExists(t, db, "down_atomic_one") {
+		t.Error("down_atomic_one was dropped even though this version's Down failed overall -- " +
+			"a partial teardown, not the atomic reversal this function's doc comment promises " +
+			"on PostgreSQL (cleat#2850)")
+	}
+
+	// And the tracking row must still say "applied": untracking only happens
+	// after the whole transaction, including the Down SQL, commits. A Down
+	// that fails partway and gets untracked anyway could never be retried.
+	var tracked int
+	if err := db.QueryRow(`SELECT count(*) FROM plugin_migrations WHERE plugin_name = $1 AND version = 1`,
+		"down-atomic").Scan(&tracked); err != nil {
+		t.Fatalf("count tracking rows: %v", err)
+	}
+	if tracked != 1 {
+		t.Errorf("tracking row count for the failed version = %d, want 1 -- a failed Down "+
+			"must stay tracked as applied so it can be retried", tracked)
+	}
+}
+
+// TestRunDownMigrationsRollsBackAPartiallyFailedMultiStatementDownOnMSSQL is
+// the MSSQL arm of the PostgreSQL test above -- SQL Server is the dialect
+// cleat#2822's Version 8 actually hit (DownMSSQL dropped an index, then
+// failed on a DROP COLUMN blocked by an unnamed default constraint), and
+// SQL Server supports transactional DDL, so the same atomicity property
+// applies here and is worth its own permanent check rather than only
+// cleat-review's one-off scratch probe during this fix's review.
+func TestRunDownMigrationsRollsBackAPartiallyFailedMultiStatementDownOnMSSQL(t *testing.T) {
+	db := testutil.TestDB(t, testutil.DialectMSSQL)
+	ctx := context.Background()
+	testutil.SetupFullSchema(t, db, testutil.DialectMSSQL)
+
+	p := loaded("down-atomic-mssql",
+		Migration{
+			Version: 1,
+			UpMSSQL: `CREATE TABLE down_atomic_mssql_one (id INT, tenant_id UNIQUEIDENTIFIER); ` +
+				`CREATE TABLE down_atomic_mssql_two (id INT, tenant_id UNIQUEIDENTIFIER)`,
+			// The second statement fails outright (no such table), the same
+			// shape as the PostgreSQL test above and as cleat#2822's real
+			// index-then-column sequence.
+			DownMSSQL: `DROP TABLE down_atomic_mssql_one; ` +
+				`DROP TABLE down_atomic_mssql_table_that_does_not_exist`,
+			TenantScoped: []string{"down_atomic_mssql_one", "down_atomic_mssql_two"},
+		},
+	)
+	// cleat-review's N3: this runs on the SHARED CLEAT_TEST_MSSQL database
+	// (testutil.TestDB, not a per-test scratch DB -- MSSQL has none here, see
+	// downTestDB's own doc comment, which is Postgres-only), and the Down
+	// under test is DESIGNED to fail, so nothing above ever cleans up
+	// down_atomic_mssql_one/_two, their security policies, or the tracking
+	// row. IF EXISTS and a direct DELETE rather than another RunDownMigrations
+	// call: the point is leaving the database as this test found it, not
+	// exercising the function under test a second time.
+	t.Cleanup(func() {
+		if err := unapplyTenantScoping(ctx, db.ExecContext, DialectMSSQL,
+			[]string{"down_atomic_mssql_one", "down_atomic_mssql_two"}); err != nil {
+			t.Logf("cleanup: unapply tenant scoping: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS down_atomic_mssql_one`); err != nil {
+			t.Logf("cleanup: drop down_atomic_mssql_one: %v", err)
+		}
+		if _, err := db.ExecContext(ctx, `DROP TABLE IF EXISTS down_atomic_mssql_two`); err != nil {
+			t.Logf("cleanup: drop down_atomic_mssql_two: %v", err)
+		}
+		if _, err := db.ExecContext(ctx,
+			deletePluginMigrationSQL(DialectMSSQL), "down-atomic-mssql", 1); err != nil {
+			t.Logf("cleanup: delete tracking row: %v", err)
+		}
+	})
+
+	if err := RunMigrations(ctx, db, DialectMSSQL, nil, []*LoadedPlugin{p}); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	var precondition bool
+	if err := db.QueryRow(
+		`SELECT CASE WHEN OBJECT_ID('down_atomic_mssql_one', 'U') IS NOT NULL THEN 1 ELSE 0 END`,
+	).Scan(&precondition); err != nil {
+		t.Fatalf("check precondition table: %v", err)
+	}
+	if !precondition {
+		t.Fatal("PRECONDITION FAILED: down_atomic_mssql_one was not created, so the reversal " +
+			"below would report success against nothing")
+	}
+
+	if _, err := RunDownMigrations(ctx, db, DialectMSSQL, p, []*LoadedPlugin{p}); err == nil {
+		t.Fatal("reversing a Down whose second statement fails must return an error")
+	}
+
+	// THE ATOMICITY PROPERTY, on the dialect the discovered instance actually
+	// hit: SQL Server supports transactional DDL, so the first DROP must
+	// roll back with the second statement's failure.
+	var stillExists bool
+	if err := db.QueryRow(
+		`SELECT CASE WHEN OBJECT_ID('down_atomic_mssql_one', 'U') IS NOT NULL THEN 1 ELSE 0 END`,
+	).Scan(&stillExists); err != nil {
+		t.Fatalf("check table after failed reversal: %v", err)
+	}
+	if !stillExists {
+		t.Error("down_atomic_mssql_one was dropped even though this version's Down failed " +
+			"overall -- a partial teardown, not the atomic reversal this function's doc " +
+			"comment promises on SQL Server (cleat#2850, the dialect cleat#2822's Version 8 hit)")
+	}
+
+	var trackedApplied bool
+	if err := db.QueryRow(checkPluginMigrationSQL(DialectMSSQL), "down-atomic-mssql", 1).
+		Scan(&trackedApplied); err != nil {
+		t.Fatalf("check tracking row: %v", err)
+	}
+	if !trackedApplied {
+		t.Error("tracking row for the failed version is gone -- a failed Down must stay " +
+			"tracked as applied so it can be retried")
+	}
+}
