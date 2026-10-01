@@ -158,6 +158,12 @@ sent — the same route convention `DurableCall` itself uses
 *is* another operation on the service, not a separate kind of request. Only an operation named
 here gets this treatment; every other ambiguity reaches the `[AMBIGUOUS]` report as before.
 
+For a service that accepts an idempotency key, cleat#2897 makes same-key replay (the engine
+re-issuing the step under the *original* key and letting the service's own key table resolve it)
+the default path, with no retry at all where no key exists. This lookup is the **opt-in**
+alternative for a service that can answer "what happened to this key" but does not itself resolve
+a repeated key — read it as the exception, not the recommended route.
+
 **The lookup convention — the contract a service implements:**
 
 | Lookup response | Meaning | Engine action |
